@@ -83,15 +83,6 @@ impl EntryBuilder {
         self.declare(resource, interface::StorageRole::Output, elem_ty, size);
     }
 
-    pub fn declare_output_resource(
-        &mut self,
-        resource: ResourceId,
-        elem_ty: Type<TypeName>,
-        size: LogicalSize,
-    ) {
-        self.declare(resource, interface::StorageRole::Output, elem_ty, size);
-    }
-
     pub fn graph_mut(&mut self) -> &mut EGraph {
         &mut self.graph
     }
@@ -142,25 +133,14 @@ impl EntryBuilder {
     }
 
     pub fn emit_load(&mut self, place: NodeId, elem_ty: Type<TypeName>) -> NodeId {
-        use super::graph_ops::alloc_effect;
-        use super::types::{SideEffect, SideEffectKind};
-        use crate::ssa::types::InstKind;
-        let result = self.graph.alloc_side_effect_result(elem_ty);
-        let effects = (
-            alloc_effect(&mut self.next_effect),
-            alloc_effect(&mut self.next_effect),
-        );
-        self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-            semantic_id: None,
-            kind: SideEffectKind::Inst(InstKind::Load {
-                place: Default::default(),
-            }),
-            operand_nodes: smallvec![place],
-            result: Some(result),
-            effects: Some(effects),
-            span: Some(self.span),
-        });
-        result
+        graph_ops::emit_load(
+            &mut self.graph,
+            self.current_block,
+            place,
+            elem_ty,
+            &mut self.next_effect,
+            Some(self.span),
+        )
     }
 
     pub fn build(mut self) -> PlannedEntry {

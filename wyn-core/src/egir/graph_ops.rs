@@ -114,19 +114,14 @@ pub fn intern_resource_view(
     span: Option<Span>,
 ) -> NodeId {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let resource = super::program::SemanticResourceRef(resource);
-    let len = graph.intern_pure_with_span(PureOp::ResourceLen(resource), smallvec![], u32_ty, span);
-    let zero = intern_u32(graph, 0, span);
-    let view_ty = crate::types::view_array_of(
-        &view_ty,
-        Type::Constructed(TypeName::Resource(resource.0), vec![]),
-    );
-    graph.intern_pure_with_span(
-        PureOp::StorageView(PureViewSource::Storage(resource)),
-        smallvec![zero, len],
-        view_ty,
+    let len = graph.intern_pure_with_span(
+        PureOp::ResourceLen(super::program::SemanticResourceRef(resource)),
+        smallvec![],
+        u32_ty,
         span,
-    )
+    );
+    let zero = intern_u32(graph, 0, span);
+    intern_chunked_resource_view(graph, resource, zero, len, view_ty, span)
 }
 
 pub fn intern_chunked_resource_view(
@@ -147,17 +142,6 @@ pub fn intern_chunked_resource_view(
         view_ty,
         span,
     )
-}
-
-pub fn intern_chunked_semantic_view(
-    graph: &mut EGraph,
-    resource: super::program::SemanticResourceRef,
-    offset: NodeId,
-    len: NodeId,
-    view_ty: Type<TypeName>,
-    span: Option<Span>,
-) -> NodeId {
-    intern_chunked_resource_view(graph, resource.0, offset, len, view_ty, span)
 }
 
 /// A workgroup-shared array view: `StorageView(Workgroup{id, count})` with
@@ -491,7 +475,7 @@ pub fn clone_pure_subgraph<R: GraphResource>(
     root: NodeId,
 ) -> Result<NodeId, String> {
     let mut memo: LookupMap<NodeId, NodeId> = LookupMap::new();
-    clone_inner(src, dst, root, &mut memo)
+    clone_value_subgraph(src, dst, root, &mut memo, ConstantCopy::Intern, false)
 }
 
 /// Clone a pure subgraph of `src` into `dst`, but substitute the given `src`
@@ -506,35 +490,60 @@ pub fn clone_pure_subgraph_substituting<R: GraphResource>(
     subs: &[(NodeId, NodeId)],
 ) -> Result<NodeId, String> {
     let mut memo: LookupMap<NodeId, NodeId> = subs.iter().copied().collect();
-    clone_inner(src, dst, root, &mut memo)
+    clone_value_subgraph(src, dst, root, &mut memo, ConstantCopy::Intern, false)
 }
 
-fn clone_inner<R: GraphResource>(
+#[derive(Clone, Copy)]
+pub(crate) enum ConstantCopy {
+    Intern,
+    PreserveIdentity,
+}
+
+pub(crate) fn clone_value_subgraph<R: GraphResource>(
     src: &EGraph<R>,
     dst: &mut EGraph<R>,
     nid: NodeId,
     memo: &mut LookupMap<NodeId, NodeId>,
+    constants: ConstantCopy,
+    allow_unions: bool,
 ) -> Result<NodeId, String> {
     if let Some(&existing) = memo.get(&nid) {
         return Ok(existing);
     }
-    let ty = src.types[&nid].clone();
-    let new_nid = match &src.nodes[nid] {
-        ENode::Constant(c) => dst.intern_constant(*c, ty),
-        ENode::Pure { op, operands, .. } => {
-            let new_ops: SmallVec<[NodeId; 4]> = operands
-                .iter()
-                .map(|&op_nid| clone_inner(src, dst, op_nid, memo))
-                .collect::<Result<_, _>>()?;
-            dst.intern_pure(op.clone(), new_ops, ty)
-        }
-        other => {
-            return Err(format!(
-                "clone_pure_subgraph: non-pure node {:?}",
-                std::mem::discriminant(other)
-            ));
-        }
-    };
+    let ty = src
+        .types
+        .get(&nid)
+        .cloned()
+        .ok_or_else(|| format!("clone_value_subgraph: node {nid:?} has no type"))?;
+    let new_nid =
+        match src.nodes.get(nid).ok_or_else(|| format!("clone_value_subgraph: missing node {nid:?}"))? {
+            ENode::Constant(c) => match constants {
+                ConstantCopy::Intern => dst.intern_constant(*c, ty),
+                ConstantCopy::PreserveIdentity => {
+                    let target = dst.nodes.insert(ENode::Constant(*c));
+                    dst.types.insert(target, ty);
+                    target
+                }
+            },
+            ENode::Pure { op, operands, .. } => {
+                let new_ops: SmallVec<[NodeId; 4]> = operands
+                    .iter()
+                    .map(|&operand| clone_value_subgraph(src, dst, operand, memo, constants, allow_unions))
+                    .collect::<Result<_, _>>()?;
+                dst.intern_pure_with_span(op.clone(), new_ops, ty, src.node_spans.get(&nid).copied())
+            }
+            ENode::Union { left, right } if allow_unions => {
+                let left = clone_value_subgraph(src, dst, *left, memo, constants, allow_unions)?;
+                let right = clone_value_subgraph(src, dst, *right, memo, constants, allow_unions)?;
+                dst.add_union(left, right)
+            }
+            other => {
+                return Err(format!(
+                    "clone_pure_subgraph: non-pure node {:?}",
+                    std::mem::discriminant(other)
+                ));
+            }
+        };
     memo.insert(nid, new_nid);
     Ok(new_nid)
 }
@@ -544,7 +553,6 @@ fn clone_inner<R: GraphResource>(
 /// `old` node's definition is left intact (now unreferenced). Fusion uses this
 /// to rewire the results of a producer/sibling op onto the fused op's result.
 pub fn replace_all_references<R: GraphResource>(graph: &mut EGraph<R>, old: NodeId, new: NodeId) {
-    use super::types::SkeletonTerminator;
     if old == new {
         return;
     }
@@ -561,20 +569,6 @@ pub fn replace_all_references<R: GraphResource>(graph: &mut EGraph<R>, old: Node
                 soac.visit_capture_nodes_mut(swap);
             }
         }
-        match &mut block.term {
-            SkeletonTerminator::Return(value) => value.iter_mut().for_each(swap),
-            SkeletonTerminator::Branch { args, .. } => args.iter_mut().for_each(swap),
-            SkeletonTerminator::CondBranch {
-                cond,
-                then_args,
-                else_args,
-                ..
-            } => {
-                swap(cond);
-                then_args.iter_mut().for_each(swap);
-                else_args.iter_mut().for_each(swap);
-            }
-            SkeletonTerminator::Unreachable => {}
-        }
+        block.term.visit_nodes_mut(swap);
     }
 }

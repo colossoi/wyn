@@ -477,6 +477,21 @@ fn logical_size(
     }
 }
 
+fn literal_binding(args: &[Term], intrinsic: &str) -> Result<BindingRef, ConvertError> {
+    let parse = |term: &Term, part: &str| match &term.kind {
+        TermKind::IntLit(value) => value
+            .parse::<u32>()
+            .map_err(|_| ConvertError::GraphError(format!("{intrinsic}: {part} not a u32"))),
+        _ => Err(ConvertError::GraphError(format!(
+            "{intrinsic}: {part} must be int literal"
+        ))),
+    };
+    Ok(BindingRef::new(
+        parse(&args[0], "set")?,
+        parse(&args[1], "binding")?,
+    ))
+}
+
 fn entry_resource_declarations(
     inputs: &[EntryInput],
     outputs: &[EntryOutput],
@@ -484,37 +499,35 @@ fn entry_resource_declarations(
     resources: &std::cell::RefCell<ResourceRegistry>,
 ) -> Vec<SemanticResourceDecl> {
     let mut declarations = Vec::new();
+    let mut declare =
+        |binding: BindingRef, role: interface::StorageRole, elem_ty: Type<TypeName>, size: LogicalSize| {
+            let resource = resources.borrow_mut().declare_host(binding, elem_ty.clone(), size.clone());
+            if !declarations
+                .iter()
+                .any(|item: &SemanticResourceDecl| item.resource == SemanticResourceRef(resource))
+            {
+                declarations.push(SemanticResourceDecl {
+                    resource: SemanticResourceRef(resource),
+                    role,
+                    elem_ty,
+                    size,
+                });
+            }
+        };
     for declaration in abi_declarations {
         let size = logical_size(resources, declaration.length.as_ref());
-        let resource = resources.borrow_mut().declare_host(
+        declare(
             declaration.binding,
+            declaration.role.clone(),
             declaration.elem_ty.clone(),
-            size.clone(),
+            size,
         );
-        if !declarations
-            .iter()
-            .any(|item: &SemanticResourceDecl| item.resource == SemanticResourceRef(resource))
-        {
-            declarations.push(SemanticResourceDecl::from_abi(
-                declaration.clone(),
-                resource,
-                size,
-            ));
-        }
     }
     for input in inputs {
         if let Some(binding) = input.storage_binding {
             let size = logical_size(resources, input.length.as_ref());
             let elem_ty = input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone());
-            let resource = resources.borrow_mut().declare_host(binding, elem_ty.clone(), size.clone());
-            if !declarations.iter().any(|item| item.resource == SemanticResourceRef(resource)) {
-                declarations.push(SemanticResourceDecl {
-                    resource: SemanticResourceRef(resource),
-                    role: interface::StorageRole::Input,
-                    elem_ty,
-                    size,
-                });
-            }
+            declare(binding, interface::StorageRole::Input, elem_ty, size);
         }
         if let Some((binding, _, _, _)) = input.storage_image_binding {
             resources.borrow_mut().declare_host(binding, input.ty.clone(), LogicalSize::Unspecified);
@@ -526,15 +539,7 @@ fn entry_resource_declarations(
         };
         let size = logical_size(resources, output.length.as_ref());
         let elem_ty = output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone());
-        let resource = resources.borrow_mut().declare_host(binding, elem_ty.clone(), size.clone());
-        if !declarations.iter().any(|item| item.resource == SemanticResourceRef(resource)) {
-            declarations.push(SemanticResourceDecl {
-                resource: SemanticResourceRef(resource),
-                role: interface::StorageRole::Output,
-                elem_ty,
-                size,
-            });
-        }
+        declare(binding, interface::StorageRole::Output, elem_ty, size);
     }
     declarations
 }
@@ -993,14 +998,8 @@ impl<'a, 'b> Converter<'a, 'b> {
     ) -> Option<FuncBody> {
         let (graph, control_headers) = self.into_graph_parts();
         let (mut graph, _, block_map) = graph.try_map_resources::<BindingRef, ()>(|_| Err(())).ok()?;
-        let control_headers = control_headers
-            .into_iter()
-            .map(|(block, header)| {
-                let block = block_map[&block];
-                let header = header.remap(&|target| block_map[&target]);
-                (block, header)
-            })
-            .collect();
+        let control_headers =
+            super::program::remap_control_headers(&control_headers, |block| block_map[&block]);
         let aliases = super::skel_opt::run_one_body(&mut graph);
         let skel_domtree = super::elaborate::skeleton_domtree(&graph.skeleton);
         let identity_map: LookupMap<BlockId, BlockId> =
@@ -1133,20 +1132,14 @@ impl<'a, 'b> Converter<'a, 'b> {
                     arr_ty.array_variant().map(crate::types::is_array_variant_view).unwrap_or(false);
                 if is_view {
                     let place_nid = self.intern_pure(PureOp::ViewIndex, smallvec![base, idx], ty.clone());
-                    let result_nid = self.graph.alloc_side_effect_result(ty.clone());
-                    let effect_in = EffectToken(0);
-                    let effect_out = self.alloc_effect();
-                    self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                        semantic_id: None,
-                        kind: SideEffectKind::Inst(InstKind::Load {
-                            place: Default::default(),
-                        }),
-                        operand_nodes: smallvec![place_nid],
-                        result: Some(result_nid),
-                        effects: Some((effect_in, effect_out)),
-                        span: self.current_span,
-                    });
-                    Ok(result_nid)
+                    Ok(super::graph_ops::emit_load(
+                        &mut self.graph,
+                        self.current_block,
+                        place_nid,
+                        ty.clone(),
+                        &mut self.next_effect,
+                        self.current_span,
+                    ))
                 } else {
                     // NOTE: a runtime-sized Composite array reaching here is an
                     // un-lifted gather (its producer wasn't materialized to a
@@ -1361,15 +1354,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 } else if *id == known.storage_store && args.len() == 4 {
                     self.lower_storage_store(args)
                 } else if *id == known.storage_len && args.len() == 2 {
-                    let binding = args
-                        .iter()
-                        .map(|arg| match &arg.kind {
-                            TermKind::IntLit(value) => value.parse::<u32>().ok(),
-                            _ => None,
-                        })
-                        .collect::<Option<Vec<_>>>()
-                        .filter(|parts| parts.len() == 2)
-                        .map(|parts| BindingRef::new(parts[0], parts[1]));
+                    let binding = literal_binding(args, "storage_len").ok();
                     if let Some(resource) =
                         binding.map(|binding| self.resources.borrow_mut().host_id(binding))
                     {
@@ -1501,70 +1486,26 @@ impl<'a, 'b> Converter<'a, 'b> {
     // ========================================================================
 
     fn lower_storage_index(&mut self, args: &[Term], ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
-        let set = match &args[0].kind {
-            TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
-                ConvertError::GraphError("_w_intrinsic_storage_index: set not a u32".into())
-            })?,
-            _ => {
-                return Err(ConvertError::GraphError(
-                    "_w_intrinsic_storage_index: set must be int literal".into(),
-                ));
-            }
-        };
-        let binding = match &args[1].kind {
-            TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
-                ConvertError::GraphError("_w_intrinsic_storage_index: binding not a u32".into())
-            })?,
-            _ => {
-                return Err(ConvertError::GraphError(
-                    "_w_intrinsic_storage_index: binding must be int literal".into(),
-                ));
-            }
-        };
+        let binding = literal_binding(args, "_w_intrinsic_storage_index")?;
         let index_nid = self.convert_term(&args[2])?;
-        let view_nid = self.emit_storage_view(BindingRef::new(set, binding), ty.clone());
+        let view_nid = self.emit_storage_view(binding, ty.clone());
         let place_nid = self.intern_pure(PureOp::ViewIndex, smallvec![view_nid, index_nid], ty.clone());
-        let result_nid = self.graph.alloc_side_effect_result(ty.clone());
-        let effect_in = EffectToken(0);
-        let effect_out = self.alloc_effect();
-        self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-            semantic_id: None,
-            kind: SideEffectKind::Inst(InstKind::Load {
-                place: Default::default(),
-            }),
-            operand_nodes: smallvec![place_nid],
-            result: Some(result_nid),
-            effects: Some((effect_in, effect_out)),
-            span: self.current_span,
-        });
-        Ok(result_nid)
+        Ok(super::graph_ops::emit_load(
+            &mut self.graph,
+            self.current_block,
+            place_nid,
+            ty.clone(),
+            &mut self.next_effect,
+            self.current_span,
+        ))
     }
 
     fn lower_storage_store(&mut self, args: &[Term]) -> Result<NodeId, ConvertError> {
-        let set = match &args[0].kind {
-            TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
-                ConvertError::GraphError("_w_intrinsic_storage_store: set not a u32".into())
-            })?,
-            _ => {
-                return Err(ConvertError::GraphError(
-                    "_w_intrinsic_storage_store: set must be int literal".into(),
-                ));
-            }
-        };
-        let binding = match &args[1].kind {
-            TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
-                ConvertError::GraphError("_w_intrinsic_storage_store: binding not a u32".into())
-            })?,
-            _ => {
-                return Err(ConvertError::GraphError(
-                    "_w_intrinsic_storage_store: binding must be int literal".into(),
-                ));
-            }
-        };
+        let binding = literal_binding(args, "_w_intrinsic_storage_store")?;
         let index_nid = self.convert_term(&args[2])?;
         let value_nid = self.convert_term(&args[3])?;
         let value_ty = args[3].ty.clone();
-        let view_nid = self.emit_storage_view(BindingRef::new(set, binding), value_ty.clone());
+        let view_nid = self.emit_storage_view(binding, value_ty.clone());
         self.emit_storage_store(view_nid, index_nid, value_nid, value_ty);
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         Ok(self.intern_pure(PureOp::Unit, smallvec![], unit_ty))

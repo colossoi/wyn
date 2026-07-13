@@ -2,7 +2,7 @@ use polytype::Type;
 
 use crate::ast::TypeName;
 
-use super::program::PhysicalProgram;
+use super::program::{visit_type_names_mut, PhysicalEGraph, PhysicalProgram};
 use super::types::{EgirSoac, FilterState, SegOpKind, SegPlacement, SideEffectKind};
 
 pub fn check(program: &PhysicalProgram) -> Result<(), String> {
@@ -36,30 +36,18 @@ pub fn check(program: &PhysicalProgram) -> Result<(), String> {
 }
 
 fn physical_type(ty: &Type<TypeName>, owner: &str) -> Result<(), String> {
-    let Type::Constructed(name, arguments) = ty else {
-        return Ok(());
-    };
-    if matches!(name, TypeName::Resource(_)) {
+    let mut ty = ty.clone();
+    let mut semantic = false;
+    visit_type_names_mut(&mut ty, |name| semantic |= matches!(name, TypeName::Resource(_)));
+    if semantic {
         return Err(format!(
             "physical body `{owner}` retains a semantic resource type"
         ));
     }
-    if let TypeName::Sum(variants) = name {
-        for field in variants.iter().flat_map(|(_, fields)| fields) {
-            physical_type(field, owner)?;
-        }
-    }
-    for argument in arguments {
-        physical_type(argument, owner)?;
-    }
     Ok(())
 }
 
-fn graph(
-    graph: &super::types::EGraph<super::program::PhysicalResourceRef>,
-    owner: &str,
-    entry: bool,
-) -> Result<(), String> {
+fn graph(graph: &PhysicalEGraph, owner: &str, entry: bool) -> Result<(), String> {
     for ty in graph.types.values() {
         physical_type(ty, owner)?;
     }

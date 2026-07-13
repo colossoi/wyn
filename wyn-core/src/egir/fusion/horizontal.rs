@@ -174,7 +174,7 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
     output_slots.sort_unstable();
     output_slots.dedup();
 
-    let resources = merge_resources(&p.resources, &q.resources);
+    let resources = SegResourceAccess::merge(&p.resources, &q.resources);
 
     // Rebuild `[inputs, init_accs, output_views]`. init_accs are the operators'
     // neutrals; output views are the trailing operands of each original op.
@@ -348,26 +348,4 @@ fn reproject(
     let old_ty = graph.types[&old_result].clone();
     let rebuilt = graph.intern_pure(PureOp::Tuple(field_types.len()), fields, old_ty);
     graph_ops::replace_all_references(graph, old_result, rebuilt);
-}
-
-fn merge_resources(a: &[SegResourceAccess], b: &[SegResourceAccess]) -> Vec<SegResourceAccess> {
-    use crate::egir::types::SegResourceAccessKind;
-    let mut merged: std::collections::HashMap<
-        crate::egir::program::SemanticResourceRef,
-        SegResourceAccessKind,
-    > = std::collections::HashMap::new();
-    for resource in a.iter().chain(b) {
-        merged
-            .entry(resource.resource)
-            .and_modify(|access| {
-                if *access != resource.access {
-                    *access = SegResourceAccessKind::ReadWrite;
-                }
-            })
-            .or_insert(resource.access);
-    }
-    let mut out: Vec<_> =
-        merged.into_iter().map(|(resource, access)| SegResourceAccess { resource, access }).collect();
-    out.sort_by_key(|resource| resource.resource.0 .0);
-    out
 }

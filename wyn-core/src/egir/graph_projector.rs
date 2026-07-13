@@ -6,20 +6,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use smallvec::SmallVec;
-
 use crate::ssa::types::ControlHeader;
 use crate::LookupMap;
 
-use super::types::{EGraph, ENode, EffectToken, NodeId, SideEffect, SkeletonTerminator};
+use super::program::{OutputRoute, OutputWriter};
+use super::types::{
+    EGraph, ENode, EffectToken, NodeId, SideEffect, SideEffectIndex, SideEffectSite, SkeletonTerminator,
+};
 use crate::ssa::framework::BlockId;
-
-/// Stable location of a source side effect selected by a kernel recipe.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct EffectSite {
-    pub block: BlockId,
-    pub index: usize,
-}
 
 pub struct GraphProjection {
     pub graph: EGraph,
@@ -45,6 +39,55 @@ impl GraphProjection {
     pub fn remap_aliases(&self, aliases: &LookupMap<NodeId, NodeId>) -> LookupMap<NodeId, NodeId> {
         aliases.iter().filter_map(|(from, to)| Some((self.node(*from)?, self.node(*to)?))).collect()
     }
+
+    pub fn remap_output_routes(&self, routes: Vec<OutputRoute>) -> Result<Vec<OutputRoute>, String> {
+        remap_output_routes(
+            routes,
+            |node| self.node(node),
+            |block| self.block(block),
+            |effect| self.effect(effect),
+            false,
+            "graph projection",
+        )
+    }
+}
+
+pub(crate) fn remap_output_routes(
+    routes: Vec<OutputRoute>,
+    mut map_node: impl FnMut(NodeId) -> Option<NodeId>,
+    mut map_block: impl FnMut(BlockId) -> Option<BlockId>,
+    mut map_effect: impl FnMut(EffectToken) -> Option<EffectToken>,
+    require_writers: bool,
+    context: &str,
+) -> Result<Vec<OutputRoute>, String> {
+    routes
+        .into_iter()
+        .map(|mut route| {
+            route.source.block = map_block(route.source.block)
+                .ok_or_else(|| format!("{context} omitted output-route block"))?;
+            route.source.value = map_node(route.source.value)
+                .ok_or_else(|| format!("{context} omitted output-route value"))?;
+            route.writers = route
+                .writers
+                .into_iter()
+                .map(|writer| {
+                    let mapped = match writer {
+                        OutputWriter::Value(node) => map_node(node).map(OutputWriter::Value),
+                        OutputWriter::Effect(effect) => map_effect(effect).map(OutputWriter::Effect),
+                    };
+                    if require_writers && mapped.is_none() {
+                        Err(format!("{context} omitted output-route writer"))
+                    } else {
+                        Ok(mapped)
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()?
+                .into_iter()
+                .flatten()
+                .collect();
+            Ok(route)
+        })
+        .collect()
 }
 
 pub struct GraphProjector<'a> {
@@ -71,22 +114,22 @@ impl<'a> GraphProjector<'a> {
             .blocks
             .iter()
             .flat_map(|(block, body)| {
-                (0..body.side_effects.len()).map(move |index| EffectSite { block, index })
+                (0..body.side_effects.len()).map(move |index| SideEffectSite { block, index })
             })
             .collect();
         self.selected_with_values(selected, extra_values)
     }
 
-    pub fn selected(&self, roots: HashSet<EffectSite>) -> Result<GraphProjection, String> {
+    pub fn selected(&self, roots: HashSet<SideEffectSite>) -> Result<GraphProjection, String> {
         self.selected_with_values(roots, Vec::new())
     }
 
     pub fn selected_with_values(
         &self,
-        roots: HashSet<EffectSite>,
+        roots: HashSet<SideEffectSite>,
         extra_values: Vec<NodeId>,
     ) -> Result<GraphProjection, String> {
-        let producers = self.effect_producers();
+        let producers = self.source.side_effect_index();
         let mut selected = roots;
         let mut value_roots = self.terminator_values();
         value_roots.extend(extra_values);
@@ -137,20 +180,22 @@ impl<'a> GraphProjector<'a> {
             }
         }
 
-        let mut copier = ValueCopier {
-            source: self.source,
-            target: &mut graph,
-            nodes: &mut nodes,
-        };
         for value in projected_values {
-            copier.copy(value)?;
+            super::graph_ops::clone_value_subgraph(
+                self.source,
+                &mut graph,
+                value,
+                &mut nodes,
+                super::graph_ops::ConstantCopy::PreserveIdentity,
+                true,
+            )?;
         }
 
         let mut effects = HashSet::new();
         for (source_block, body) in &self.source.skeleton.blocks {
             let target_block = blocks[&source_block];
             for (index, effect) in body.side_effects.iter().enumerate() {
-                if !selected.contains(&EffectSite {
+                if !selected.contains(&SideEffectSite {
                     block: source_block,
                     index,
                 }) {
@@ -173,14 +218,8 @@ impl<'a> GraphProjector<'a> {
             let target_block = blocks[&source_block];
             graph.skeleton.blocks[target_block].term = remap_terminator(&body.term, &nodes, &blocks)?;
         }
-        let control_headers = self
-            .control_headers
-            .iter()
-            .map(|(block, header)| {
-                let target = blocks[block];
-                (target, header.remap(&|source| blocks[&source]))
-            })
-            .collect();
+        let control_headers =
+            super::program::remap_control_headers(self.control_headers, |block| blocks[&block]);
         graph.verify_hash_cons()?;
         Ok(GraphProjection {
             graph,
@@ -191,7 +230,7 @@ impl<'a> GraphProjector<'a> {
         })
     }
 
-    fn effect_at(&self, site: EffectSite) -> Result<&SideEffect, String> {
+    fn effect_at(&self, site: SideEffectSite) -> Result<&SideEffect, String> {
         self.source
             .skeleton
             .blocks
@@ -200,46 +239,15 @@ impl<'a> GraphProjector<'a> {
             .ok_or_else(|| format!("invalid graph-projection effect site {site:?}"))
     }
 
-    fn effect_producers(&self) -> HashMap<NodeId, EffectSite> {
-        self.source
-            .skeleton
-            .blocks
-            .iter()
-            .flat_map(|(block, body)| {
-                body.side_effects.iter().enumerate().filter_map(move |(index, effect)| {
-                    effect.result.map(|result| (result, EffectSite { block, index }))
-                })
-            })
-            .collect()
-    }
-
     fn terminator_values(&self) -> Vec<NodeId> {
-        self.source
-            .skeleton
-            .blocks
-            .iter()
-            .flat_map(|(_, block)| match &block.term {
-                SkeletonTerminator::Return(value) => value.iter().copied().collect(),
-                SkeletonTerminator::Branch { args, .. } => args.clone(),
-                SkeletonTerminator::CondBranch {
-                    cond,
-                    then_args,
-                    else_args,
-                    ..
-                } => std::iter::once(*cond)
-                    .chain(then_args.iter().copied())
-                    .chain(else_args.iter().copied())
-                    .collect(),
-                SkeletonTerminator::Unreachable => Vec::new(),
-            })
-            .collect()
+        self.source.skeleton.blocks.iter().flat_map(|(_, block)| block.term.referenced_nodes()).collect()
     }
 
     fn close_producers(
         &self,
-        selected: &mut HashSet<EffectSite>,
+        selected: &mut HashSet<SideEffectSite>,
         values: &mut Vec<NodeId>,
-        producers: &HashMap<NodeId, EffectSite>,
+        producers: &SideEffectIndex,
     ) -> Result<HashSet<NodeId>, String> {
         let mut seen = HashSet::new();
         while let Some(value) = values.pop() {
@@ -256,8 +264,7 @@ impl<'a> GraphProjector<'a> {
                 ENode::Union { left, right } => values.extend([*left, *right]),
                 ENode::SideEffectResult => {
                     let site = producers
-                        .get(&value)
-                        .copied()
+                        .site(value)
                         .ok_or_else(|| format!("side-effect result {value:?} has no producer"))?;
                     if selected.insert(site) {
                         values.extend(self.effect_at(site)?.referenced_nodes());
@@ -270,107 +277,18 @@ impl<'a> GraphProjector<'a> {
     }
 }
 
-struct ValueCopier<'a, 'b> {
-    source: &'a EGraph,
-    target: &'b mut EGraph,
-    nodes: &'b mut HashMap<NodeId, NodeId>,
-}
-
-impl ValueCopier<'_, '_> {
-    fn copy(&mut self, source_id: NodeId) -> Result<NodeId, String> {
-        if let Some(target) = self.nodes.get(&source_id) {
-            return Ok(*target);
-        }
-        let ty = self
-            .source
-            .types
-            .get(&source_id)
-            .cloned()
-            .ok_or_else(|| format!("graph projection node {source_id:?} has no type"))?;
-        let target = match self
-            .source
-            .nodes
-            .get(source_id)
-            .ok_or_else(|| format!("graph projection references missing node {source_id:?}"))?
-            .clone()
-        {
-            ENode::Pure { op, operands } => {
-                let operands = operands.into_iter().map(|operand| self.copy(operand)).collect::<Result<
-                    SmallVec<[NodeId; 4]>,
-                    _,
-                >>(
-                )?;
-                self.target.intern_pure_with_span(
-                    op,
-                    operands,
-                    ty,
-                    self.source.node_spans.get(&source_id).copied(),
-                )
-            }
-            ENode::Union { left, right } => {
-                let left = self.copy(left)?;
-                let right = self.copy(right)?;
-                self.target.add_union(left, right)
-            }
-            ENode::Constant(value) => {
-                // `EGraph::const_cache` is intentionally value-only. A graph
-                // projection must preserve source node types even when equal
-                // literal payloads occur at several integer widths, so copy
-                // constants by identity instead of consulting that cache.
-                let target = self.target.nodes.insert(ENode::Constant(value));
-                self.target.types.insert(target, ty);
-                target
-            }
-            ENode::SideEffectResult => {
-                return self.nodes.get(&source_id).copied().ok_or_else(|| {
-                    format!("graph projection omitted producer of side-effect result {source_id:?}")
-                })
-            }
-            ENode::FuncParam { .. } | ENode::BlockParam { .. } => {
-                return self.nodes.get(&source_id).copied().ok_or_else(|| {
-                    format!("graph projection failed to preallocate parameter {source_id:?}")
-                })
-            }
-        };
-        self.nodes.insert(source_id, target);
-        Ok(target)
-    }
-}
-
 fn remap_terminator(
     term: &SkeletonTerminator,
     nodes: &HashMap<NodeId, NodeId>,
     blocks: &HashMap<BlockId, BlockId>,
 ) -> Result<SkeletonTerminator, String> {
-    let node = |source: &NodeId| {
+    let node = |source: NodeId| {
         nodes
-            .get(source)
+            .get(&source)
             .copied()
             .ok_or_else(|| format!("graph projection omitted terminator value {source:?}"))
     };
-    Ok(match term {
-        SkeletonTerminator::Return(value) => {
-            SkeletonTerminator::Return(value.as_ref().map(node).transpose()?)
-        }
-        SkeletonTerminator::Branch { target, args } => SkeletonTerminator::Branch {
-            target: blocks[target],
-            args: args.iter().map(node).collect::<Result<_, _>>()?,
-        },
-        SkeletonTerminator::CondBranch {
-            cond,
-            then_target,
-            then_args,
-            else_target,
-            else_args,
-        } => SkeletonTerminator::CondBranch {
-            cond: node(cond)?,
-            then_target: blocks[then_target],
-            then_args: then_args.iter().map(node).collect::<Result<_, _>>()?,
-            else_target: blocks[else_target],
-            else_args: else_args.iter().map(node).collect::<Result<_, _>>()?,
-        },
-        SkeletonTerminator::Unreachable => SkeletonTerminator::Unreachable,
-    })
+    term.try_map(node, |target| Ok(blocks[&target]))
 }
 
 #[cfg(test)]

@@ -79,13 +79,7 @@ impl KernelPlan {
         {
             return Err("logical resource arena is not dense and unique".into());
         }
-        let host_bindings = resources
-            .iter()
-            .filter_map(|resource| match resource.origin {
-                ResourceOrigin::Host(binding) => Some(binding),
-                ResourceOrigin::Compiler(_) => None,
-            })
-            .collect::<Vec<_>>();
+        let host_bindings = resources.iter().filter_map(LogicalResource::host_binding).collect::<Vec<_>>();
         if host_bindings.iter().copied().collect::<HashSet<_>>().len() != host_bindings.len() {
             return Err("host resources contain a binding collision".into());
         }
@@ -222,24 +216,7 @@ fn validate_entry(entry: &PlannedEntry) -> Result<(), String> {
 }
 
 fn validate_acyclic(phases: &[&KernelPhase]) -> Result<(), String> {
-    let mut remaining =
-        phases.iter().map(|phase| (phase.id, phase.dependencies.len())).collect::<HashMap<_, _>>();
-    let mut ready =
-        remaining.iter().filter_map(|(&id, &count)| (count == 0).then_some(id)).collect::<Vec<_>>();
-    let mut visited = 0;
-    while let Some(done) = ready.pop() {
-        visited += 1;
-        for phase in phases {
-            if phase.dependencies.contains(&done) {
-                let count = remaining.get_mut(&phase.id).unwrap();
-                *count -= 1;
-                if *count == 0 {
-                    ready.push(phase.id);
-                }
-            }
-        }
-    }
-    if visited != phases.len() {
+    if super::topologically_order_phases(phases.iter().map(|phase| (*phase).clone()).collect()).is_err() {
         return Err("kernel dependency graph contains a cycle".into());
     }
     Ok(())
@@ -278,24 +255,15 @@ fn validate_resource_flows(plan: &KernelPlan, resources: &[LogicalResource]) -> 
             continue;
         };
         let writers = plan
-            .phases()
-            .filter(|phase| {
-                phase.flow_source == Some(flow.producer)
-                    && phase
-                        .resources
-                        .iter()
-                        .any(|item| item.resource == resource.id && item.access.writes())
-            })
+            .flow_resource_phases(flow.producer, resource.id, true)
             .map(|phase| phase.id)
             .collect::<HashSet<_>>();
         if writers.is_empty() {
             return Err(format!("resource {:?} has no producer", resource.id));
         }
         for consumer in &flow.consumers {
-            for reader in plan.phases().filter(|phase| phase.flow_source == Some(*consumer)) {
-                if reader.resources.iter().any(|item| item.resource == resource.id && item.access.reads())
-                    && !reader.dependencies.iter().any(|dependency| writers.contains(dependency))
-                {
+            for reader in plan.flow_resource_phases(*consumer, resource.id, false) {
+                if !reader.dependencies.iter().any(|dependency| writers.contains(dependency)) {
                     return Err(format!(
                         "kernel `{}` reads {:?} without a producer dependency",
                         reader.entry_point, resource.id

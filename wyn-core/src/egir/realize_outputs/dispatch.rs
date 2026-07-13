@@ -720,15 +720,10 @@ pub fn retarget_filter_output(
         let Type::Constructed(TypeName::Resource(input_resource), _) = region else {
             return None;
         };
-        let in_binding = resources.iter().find_map(|resource| {
-            if resource.id != *input_resource {
-                return None;
-            }
-            match resource.origin {
-                crate::egir::program::ResourceOrigin::Host(binding) => Some(binding),
-                crate::egir::program::ResourceOrigin::Compiler(_) => None,
-            }
-        })?;
+        let in_binding = resources
+            .get(input_resource.0 as usize)
+            .filter(|resource| resource.id == *input_resource)
+            .and_then(crate::egir::program::LogicalResource::host_binding)?;
         let src_elem_bytes = crate::ssa::layout::storage_elem_stride(&input_elem_ty)?;
         let elem_bytes = crate::ssa::layout::storage_elem_stride(&output_elem_ty)?;
         Some(BufferLen::LikeInput {

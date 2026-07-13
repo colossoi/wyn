@@ -235,21 +235,7 @@ fn producer_is_used_only_by(
                 return false;
             }
         }
-        let roots: Vec<NodeId> = match &block.term {
-            SkeletonTerminator::Return(value) => value.iter().copied().collect(),
-            SkeletonTerminator::Branch { args, .. } => args.clone(),
-            SkeletonTerminator::CondBranch {
-                cond,
-                then_args,
-                else_args,
-                ..
-            } => std::iter::once(*cond)
-                .chain(then_args.iter().copied())
-                .chain(else_args.iter().copied())
-                .collect(),
-            SkeletonTerminator::Unreachable => Vec::new(),
-        };
-        if roots.into_iter().any(|root| reaches(graph, root, producer_result)) {
+        if block.term.referenced_nodes().into_iter().any(|root| reaches(graph, root, producer_result)) {
             return false;
         }
     }
@@ -432,7 +418,7 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
         *input_array_types = new_array_types;
         *input_elem_types = new_elem_types;
         *map_input_indices = new_map_indices;
-        *resources = merge_resources(resources, &producer.resources);
+        *resources = SegResourceAccess::merge(resources, &producer.resources);
     }
     consumer.effects = fused_effects;
     block.side_effects.remove(candidate.producer);
@@ -675,24 +661,6 @@ fn fresh_region_name(inner: &SemanticProgram, base: &str) -> String {
         }
     }
     unreachable!()
-}
-
-fn merge_resources(a: &[SegResourceAccess], b: &[SegResourceAccess]) -> Vec<SegResourceAccess> {
-    let mut merged = std::collections::HashMap::new();
-    for resource in a.iter().chain(b) {
-        merged
-            .entry(resource.resource)
-            .and_modify(|access| {
-                if *access != resource.access {
-                    *access = SegResourceAccessKind::ReadWrite;
-                }
-            })
-            .or_insert(resource.access);
-    }
-    let mut resources: Vec<_> =
-        merged.into_iter().map(|(resource, access)| SegResourceAccess { resource, access }).collect();
-    resources.sort_by_key(|resource| resource.resource.0 .0);
-    resources
 }
 
 #[cfg(test)]

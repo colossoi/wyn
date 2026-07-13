@@ -16,23 +16,16 @@ use smallvec::{smallvec, SmallVec};
 use super::graph_ops::{
     alloc_effect, emit_alloca, emit_load, emit_place_index_store, emit_store, next_effect_token,
 };
-use super::program::{PhysicalProgram, PhysicalResourceRef, RegionInterner};
+use super::program::{
+    PhysicalEGraph as EGraph, PhysicalEgirSoac as EgirSoac, PhysicalFilterOutput,
+    PhysicalFilterWorkBuffers as FilterWorkBuffers, PhysicalProgram, PhysicalSegSpace as SegSpace,
+    PhysicalSideEffect as SideEffect, PhysicalSideEffectKind as SideEffectKind, RegionInterner,
+};
 use crate::ast::TypeName;
 use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
 use super::types::{ENode, NodeId, PureOp, SegOpKind, SkeletonTerminator, SoacDestination};
-
-type EGraph = super::types::EGraph<PhysicalResourceRef>;
-type EgirSoac = super::types::EgirSoac<PhysicalResourceRef>;
-type SideEffect = super::types::SideEffect<PhysicalResourceRef>;
-type SideEffectKind = super::types::SideEffectKind<PhysicalResourceRef>;
-type SegSpace = super::types::SegSpace<PhysicalResourceRef>;
-type FilterWorkBuffers = super::types::FilterWorkBuffers<PhysicalResourceRef>;
-
-fn physical_binding(resource: PhysicalResourceRef) -> crate::BindingRef {
-    resource
-}
 
 /// Run `run_one_body` on every function and entry point in the program.
 pub fn run(inner: &mut PhysicalProgram) {
@@ -596,15 +589,9 @@ fn expand_one(
                 result_node: result_nid,
             };
             match plan {
-                super::types::FilterPlan::Flags(work) => build_filter_flags(
-                    graph,
-                    control_headers,
-                    bid,
-                    idx,
-                    spec,
-                    physical_binding(work.flags),
-                    next_effect,
-                ),
+                super::types::FilterPlan::Flags(work) => {
+                    build_filter_flags(graph, control_headers, bid, idx, spec, work.flags, next_effect)
+                }
                 super::types::FilterPlan::Scan(work) => {
                     build_filter_scan(graph, control_headers, bid, idx, spec, work, next_effect)
                 }
@@ -1070,7 +1057,7 @@ struct FilterLoop {
     output_elem_ty: Type<TypeName>,
     /// `Size(N)` — the input's static capacity, reused as the output buffer's
     /// capacity (the upper bound on filtered count).
-    output: super::types::FilterOutput<PhysicalResourceRef>,
+    output: PhysicalFilterOutput,
     /// `Some(name)` folds a producer `map(f, …)` in: per element compute
     /// `v = f(elem, ...map_captures)` and keep/test `v` instead of `elem`.
     map_func: Option<String>,
@@ -1104,7 +1091,7 @@ fn build_filter_loop(
     next_effect: &mut u32,
 ) {
     let runtime_scratch = match &spec.output {
-        super::types::FilterOutput::Runtime { scratch, .. } => Some(physical_binding(*scratch)),
+        super::types::FilterOutput::Runtime { scratch, .. } => Some(*scratch),
         super::types::FilterOutput::Local { .. } => None,
     };
     if let Some(scratch) = runtime_scratch {
@@ -1722,8 +1709,8 @@ fn build_filter_scan(
             continue_block: body,
         },
     );
-    let flags = intern_storage_view(graph, physical_binding(work.flags), u32_ty.clone(), None);
-    let offsets = intern_storage_view(graph, physical_binding(work.offsets), u32_ty.clone(), None);
+    let flags = intern_storage_view(graph, work.flags, u32_ty.clone(), None);
+    let offsets = intern_storage_view(graph, work.offsets, u32_ty.clone(), None);
     let global_i = graph.intern_pure(
         PureOp::BinOp("+".into()),
         smallvec![chunk_start, i],
@@ -1749,7 +1736,7 @@ fn build_filter_scan(
     };
     let final_count = graph.add_block_param(after, 0, u32_ty.clone());
     graph.skeleton.blocks[after].params.push(final_count);
-    let block_sums = intern_storage_view(graph, physical_binding(work.block_sums), u32_ty.clone(), None);
+    let block_sums = intern_storage_view(graph, work.block_sums, u32_ty.clone(), None);
     emit_storage_store(
         graph,
         after,
@@ -1802,8 +1789,8 @@ fn build_filter_scatter(
         else_args: vec![],
     };
     control_headers.insert(bid, ControlHeader::Selection { merge: after });
-    let flags = intern_storage_view(graph, physical_binding(work.flags), u32_ty.clone(), None);
-    let offsets = intern_storage_view(graph, physical_binding(work.offsets), u32_ty.clone(), None);
+    let flags = intern_storage_view(graph, work.flags, u32_ty.clone(), None);
+    let offsets = intern_storage_view(graph, work.offsets, u32_ty.clone(), None);
     let flag_place = graph.intern_pure(PureOp::ViewIndex, smallvec![flags, gid], u32_ty.clone());
     let flag = emit_load(graph, in_range, flag_place, u32_ty.clone(), next_effect, None);
     let one = intern_u32(graph, 1, None);
@@ -1840,8 +1827,8 @@ fn build_filter_scatter(
         } => (scratch, length),
         _ => panic!("parallel filter scatter requires runtime entry output"),
     };
-    let out_binding = physical_binding(*out_binding);
-    let len_binding = physical_binding(*len_binding);
+    let out_binding = *out_binding;
+    let len_binding = *len_binding;
     let output = intern_storage_view(graph, out_binding, spec.output_elem_ty.clone(), None);
     emit_storage_store(
         graph,
@@ -2036,7 +2023,7 @@ fn build_runtime_filter_loop(
         ..
     } = &spec.output
     {
-        let len_view = intern_storage_view(graph, physical_binding(*len_br), u32_ty.clone(), None);
+        let len_view = intern_storage_view(graph, *len_br, u32_ty.clone(), None);
         let zero_idx = intern_u32(graph, 0, None);
         emit_storage_store(
             graph,

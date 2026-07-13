@@ -59,6 +59,35 @@ pub trait PipelineDescriptorPublish {
     fn relabel_input_storage_names(&mut self, names: &LookupMap<(u32, u32), String>);
 }
 
+fn storage_access_bindings(
+    entries: &[&EntryPublication],
+    include_outputs: bool,
+    input_matches: impl Fn(Option<crate::interface::StorageAccess>) -> bool,
+    declaration_matches: impl Fn(&crate::interface::StorageRole) -> bool,
+) -> LookupSet<(u32, u32)> {
+    let mut bindings = LookupSet::new();
+    for entry in entries {
+        if include_outputs {
+            bindings.extend(
+                entry
+                    .outputs
+                    .iter()
+                    .filter_map(|output| output.storage_binding)
+                    .map(|binding| (binding.set, binding.binding)),
+            );
+        }
+        bindings.extend(entry.inputs.iter().filter_map(|input| {
+            let binding = input.storage_binding?;
+            input_matches(input.storage_access).then_some((binding.set, binding.binding))
+        }));
+        bindings.extend(entry.storage_bindings.iter().filter_map(|declaration| {
+            declaration_matches(&declaration.role)
+                .then_some((declaration.binding.set, declaration.binding.binding))
+        }));
+    }
+    bindings
+}
+
 impl PipelineDescriptorPublish for PipelineDescriptor {
     fn publish_implicit_bindings(&mut self, entries: &[&EntryPublication]) -> Result<(), String> {
         // SPIR-V `NonWritable` is a module-level decoration on
@@ -71,58 +100,36 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
         // `Storage class Storage{LOAD} doesn't match shader Storage{LOAD
         // | STORE}`. Compute the set of module-writable bindings here
         // and promote `ReadOnly → ReadWrite` in a final post-pass below.
-        let written_bindings: LookupSet<(u32, u32)> = entries
-            .iter()
-            .flat_map(|e| e.outputs.iter().filter_map(|o| o.storage_binding))
-            .map(|br| (br.set, br.binding))
-            // A `#[storage(access=write/readwrite)]` input is written in place
-            // (e.g. a `scatter` destination), so its binding is module-writable
-            // too — the promotion below widens it (and any sibling read of the
-            // same slot) to `ReadWrite`.
-            .chain(entries.iter().flat_map(|e| {
-                e.inputs.iter().filter_map(|i| {
-                    let br = i.storage_binding?;
-                    match i.storage_access {
-                        Some(
-                            crate::interface::StorageAccess::WriteOnly
-                            | crate::interface::StorageAccess::ReadWrite,
-                        ) => Some((br.set, br.binding)),
-                        _ => None,
-                    }
-                })
-            }))
-            .chain(entries.iter().flat_map(|e| {
-                e.storage_bindings.iter().filter_map(|decl| {
-                    matches!(
-                        decl.role,
-                        crate::interface::StorageRole::Output | crate::interface::StorageRole::Intermediate
+        let written_bindings = storage_access_bindings(
+            entries,
+            true,
+            |access| {
+                matches!(
+                    access,
+                    Some(
+                        crate::interface::StorageAccess::WriteOnly
+                            | crate::interface::StorageAccess::ReadWrite
                     )
-                    .then_some((decl.binding.set, decl.binding.binding))
-                })
-            }))
-            .collect();
-        let read_bindings: LookupSet<(u32, u32)> = entries
-            .iter()
-            .flat_map(|entry| {
-                entry.inputs.iter().filter_map(|input| {
-                    let binding = input.storage_binding?;
-                    (!matches!(
-                        input.storage_access,
-                        Some(crate::interface::StorageAccess::WriteOnly)
-                    ))
-                    .then_some((binding.set, binding.binding))
-                })
-            })
-            .chain(entries.iter().flat_map(|entry| {
-                entry.storage_bindings.iter().filter_map(|declaration| {
-                    matches!(
-                        declaration.role,
-                        crate::interface::StorageRole::Input | crate::interface::StorageRole::Intermediate
-                    )
-                    .then_some((declaration.binding.set, declaration.binding.binding))
-                })
-            }))
-            .collect();
+                )
+            },
+            |role| {
+                matches!(
+                    role,
+                    crate::interface::StorageRole::Output | crate::interface::StorageRole::Intermediate
+                )
+            },
+        );
+        let read_bindings = storage_access_bindings(
+            entries,
+            false,
+            |access| !matches!(access, Some(crate::interface::StorageAccess::WriteOnly)),
+            |role| {
+                matches!(
+                    role,
+                    crate::interface::StorageRole::Input | crate::interface::StorageRole::Intermediate
+                )
+            },
+        );
 
         let mut layout = DescriptorLayout::from_pipeline(self)?;
 
@@ -344,9 +351,9 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                 } = b
                 {
                     let slot = (*set, *binding);
-                    if written_bindings.contains(&slot) && read_bindings.contains(&slot) {
-                        *access = Access::ReadWrite;
-                    } else if *access == Access::ReadOnly && written_bindings.contains(&slot) {
+                    if written_bindings.contains(&slot)
+                        && (*access == Access::ReadOnly || read_bindings.contains(&slot))
+                    {
                         *access = Access::ReadWrite;
                     }
                 }

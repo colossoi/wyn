@@ -4,13 +4,9 @@
 //! gated by the semantic dependency DAG so two ops are never fused or reordered
 //! across a conflicting resource or effect.
 
-use std::collections::HashMap;
-
 use super::program::SemanticProgram;
 use super::semantic_graph::SemanticGraph;
-use super::types::{
-    EGraph, EgirSoac, NodeId, SegResourceAccess, SegResourceAccessKind, SideEffectKind, SkeletonTerminator,
-};
+use super::types::{EGraph, EgirSoac, NodeId, SegResourceAccess, SegResourceAccessKind, SideEffectKind};
 
 pub fn run(inner: &mut SemanticProgram) {
     for entry in &mut inner.entry_points {
@@ -54,23 +50,7 @@ fn canonicalize_resource_accesses(graph: &mut EGraph) {
             let SideEffectKind::Soac(EgirSoac::Seg { resources, .. }) = &mut effect.kind else {
                 continue;
             };
-            let mut merged = HashMap::new();
-            for resource in resources.drain(..) {
-                merged
-                    .entry(resource.resource)
-                    .and_modify(|access| {
-                        if *access != resource.access {
-                            *access = SegResourceAccessKind::ReadWrite;
-                        }
-                    })
-                    .or_insert(resource.access);
-            }
-            let mut normalized: Vec<_> = merged
-                .into_iter()
-                .map(|(resource, access)| SegResourceAccess { resource, access })
-                .collect();
-            normalized.sort_by_key(|resource| resource.resource.0 .0);
-            *resources = normalized;
+            *resources = SegResourceAccess::merge(resources, &[]);
         }
     }
 }
@@ -99,21 +79,7 @@ pub(super) fn eliminate_dead_seg_ops_in_graph(graph: &mut EGraph) -> bool {
         for effect in &block.side_effects {
             roots.extend(effect.referenced_nodes());
         }
-        match &block.term {
-            SkeletonTerminator::Return(value) => roots.extend(value.iter().copied()),
-            SkeletonTerminator::Branch { args, .. } => roots.extend(args.iter().copied()),
-            SkeletonTerminator::CondBranch {
-                cond,
-                then_args,
-                else_args,
-                ..
-            } => {
-                roots.push(*cond);
-                roots.extend(then_args.iter().copied());
-                roots.extend(else_args.iter().copied());
-            }
-            SkeletonTerminator::Unreachable => {}
-        }
+        roots.extend(block.term.referenced_nodes());
     }
 
     let used = wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {

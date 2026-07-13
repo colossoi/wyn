@@ -20,17 +20,7 @@ pub fn schedule(
     let kernel_plan = if profile.schedule == SchedulePolicy::Parallel {
         parallelize::lower(&inner)
     } else {
-        let mut schedule = parallelize::schedule::KernelPlan::seed(
-            &inner.pipeline,
-            &inner.entry_points,
-            &inner.prepasses,
-            &inner.resources,
-            &inner.region_interner,
-        );
-        parallelize::attach_compiler_prepasses(&inner, &mut schedule);
-        schedule.select_sequential_recipes();
-        schedule.coalesce_resource_flows(&inner.resources);
-        schedule
+        parallelize::lower_sequential(&inner)
     };
     kernel_plan
         .check_explicit_dispatch_coverage(&inner.entry_points)

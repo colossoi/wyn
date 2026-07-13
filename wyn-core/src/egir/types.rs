@@ -259,6 +259,23 @@ pub struct SegResourceAccess<R = super::program::SemanticResourceRef> {
     pub access: SegResourceAccessKind,
 }
 
+impl<R: Copy + Ord> SegResourceAccess<R> {
+    pub fn merge(a: &[Self], b: &[Self]) -> Vec<Self> {
+        let mut merged = std::collections::BTreeMap::new();
+        for resource in a.iter().chain(b) {
+            merged
+                .entry(resource.resource)
+                .and_modify(|access| {
+                    if *access != resource.access {
+                        *access = SegResourceAccessKind::ReadWrite;
+                    }
+                })
+                .or_insert(resource.access);
+        }
+        merged.into_iter().map(|(resource, access)| Self { resource, access }).collect()
+    }
+}
+
 /// A reduce/scan operator of a `Seg` op: the (fused map+)step body, the bare
 /// combiner, and whether it commutes (lets the tree-reduce reorder operands).
 /// The neutral element is supplied as an `init_acc` operand, matching the
@@ -731,56 +748,6 @@ impl<R> EgirSoac<R> {
         }
     }
 
-    pub fn visit_resource_refs_mut(&mut self, mut visit: impl FnMut(&mut R)) {
-        let mut visit_space = |space: &mut SegSpace<R>| {
-            for extent in &mut space.dims {
-                if let SegExtent::ResourceLength { resource, .. } = extent {
-                    visit(resource);
-                }
-            }
-        };
-        match self {
-            EgirSoac::Seg { space, resources, .. } => {
-                visit_space(space);
-                for resource in resources {
-                    visit(&mut resource.resource);
-                }
-            }
-            EgirSoac::Filter { state, output, .. } => {
-                match state {
-                    FilterState::Semantic { space } => visit_space(space),
-                    FilterState::Scheduled { space, plan } => {
-                        visit_space(space);
-                        let work = match plan {
-                            FilterPlan::Serial => None,
-                            FilterPlan::Flags(work)
-                            | FilterPlan::Scan(work)
-                            | FilterPlan::Scatter(work) => Some(work),
-                        };
-                        if let Some(work) = work {
-                            visit(&mut work.flags);
-                            visit(&mut work.offsets);
-                            visit(&mut work.block_sums);
-                            visit(&mut work.block_offsets);
-                        }
-                    }
-                    FilterState::Raw => {}
-                }
-                if let FilterOutput::Runtime { scratch, length } = output {
-                    visit(scratch);
-                    if let RuntimeFilterLength::EntryOutput(resource) = length {
-                        visit(resource);
-                    }
-                }
-            }
-            EgirSoac::Hist {
-                execution: HistExecution::Segmented(space),
-                ..
-            } => visit_space(space),
-            EgirSoac::Screma { .. } | EgirSoac::Hist { .. } => {}
-        }
-    }
-
     /// Every `SegBody` this SOAC carries, in a stable order: map lanes first,
     /// then each accumulator's step and combine. Captures and the callee region
     /// live here, never inline in `SideEffect::operand_nodes`.
@@ -935,6 +902,10 @@ impl<R> EgirSoac<R> {
 }
 
 impl<R> SideEffect<R> {
+    pub fn required_semantic_id(&self) -> super::program::SemanticOpId {
+        self.semantic_id.expect("semantic operation id assigned after segmentation")
+    }
+
     /// Every graph node this side-effect references: its operands plus, for a
     /// SOAC, its bodies' captures. This is the authoritative use-set for
     /// liveness and reachability now that captures are not inlined into
@@ -976,6 +947,71 @@ pub enum SkeletonTerminator {
         else_args: Vec<NodeId>,
     },
     Unreachable,
+}
+
+impl SkeletonTerminator {
+    pub fn referenced_nodes(&self) -> SmallVec<[NodeId; 8]> {
+        match self {
+            Self::Return(value) => value.iter().copied().collect(),
+            Self::Branch { args, .. } => args.iter().copied().collect(),
+            Self::CondBranch {
+                cond,
+                then_args,
+                else_args,
+                ..
+            } => std::iter::once(*cond)
+                .chain(then_args.iter().copied())
+                .chain(else_args.iter().copied())
+                .collect(),
+            Self::Unreachable => SmallVec::new(),
+        }
+    }
+
+    pub fn visit_nodes_mut(&mut self, mut visit: impl FnMut(&mut NodeId)) {
+        match self {
+            Self::Return(value) => value.iter_mut().for_each(visit),
+            Self::Branch { args, .. } => args.iter_mut().for_each(visit),
+            Self::CondBranch {
+                cond,
+                then_args,
+                else_args,
+                ..
+            } => {
+                visit(cond);
+                then_args.iter_mut().for_each(&mut visit);
+                else_args.iter_mut().for_each(visit);
+            }
+            Self::Unreachable => {}
+        }
+    }
+
+    pub fn try_map<E>(
+        &self,
+        mut map_node: impl FnMut(NodeId) -> Result<NodeId, E>,
+        mut map_block: impl FnMut(BlockId) -> Result<BlockId, E>,
+    ) -> Result<Self, E> {
+        Ok(match self {
+            Self::Return(value) => Self::Return(value.map(&mut map_node).transpose()?),
+            Self::Branch { target, args } => Self::Branch {
+                target: map_block(*target)?,
+                args: args.iter().copied().map(map_node).collect::<Result<_, _>>()?,
+            },
+            Self::CondBranch {
+                cond,
+                then_target,
+                then_args,
+                else_target,
+                else_args,
+            } => Self::CondBranch {
+                cond: map_node(*cond)?,
+                then_target: map_block(*then_target)?,
+                then_args: then_args.iter().copied().map(&mut map_node).collect::<Result<_, _>>()?,
+                else_target: map_block(*else_target)?,
+                else_args: else_args.iter().copied().map(map_node).collect::<Result<_, _>>()?,
+            },
+            Self::Unreachable => Self::Unreachable,
+        })
+    }
 }
 
 /// A block in the skeleton CFG.
@@ -1022,7 +1058,7 @@ impl<R> Skeleton<R> {
 ///
 /// Side effects are still stored in ordered per-block vectors, so a site must
 /// not outlive an insertion/removal/reorder in those vectors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SideEffectSite {
     pub block: BlockId,
     pub index: usize,
@@ -1195,29 +1231,10 @@ impl<R: GraphResource> EGraph<R> {
                     })
                 })
                 .collect::<Result<Vec<_>, E>>()?;
-            let term = match block.term {
-                SkeletonTerminator::Return(value) => {
-                    SkeletonTerminator::Return(value.map(|node| node_map[&node]))
-                }
-                SkeletonTerminator::Branch { target, args } => SkeletonTerminator::Branch {
-                    target: block_map[&target],
-                    args: args.into_iter().map(|node| node_map[&node]).collect(),
-                },
-                SkeletonTerminator::CondBranch {
-                    cond,
-                    then_target,
-                    then_args,
-                    else_target,
-                    else_args,
-                } => SkeletonTerminator::CondBranch {
-                    cond: node_map[&cond],
-                    then_target: block_map[&then_target],
-                    then_args: then_args.into_iter().map(|node| node_map[&node]).collect(),
-                    else_target: block_map[&else_target],
-                    else_args: else_args.into_iter().map(|node| node_map[&node]).collect(),
-                },
-                SkeletonTerminator::Unreachable => SkeletonTerminator::Unreachable,
-            };
+            let term = block.term.try_map(
+                |node| Ok::<_, E>(node_map[&node]),
+                |target| Ok::<_, E>(block_map[&target]),
+            )?;
             blocks[block_map[&old_id]] = SkeletonBlock {
                 params: block.params.into_iter().map(|node| node_map[&node]).collect(),
                 side_effects,

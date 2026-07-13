@@ -72,7 +72,7 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
     let aliases = LookupMap::from([(produced, place), (unrelated, place)]);
 
     let projected = GraphProjector::new(&graph, &headers)
-        .selected(HashSet::from([EffectSite {
+        .selected(HashSet::from([SideEffectSite {
             block: body,
             index: 0,
         }]))

@@ -9,7 +9,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::egir::graph_ops;
 use crate::egir::program::{
     CompilerFlowEndpoint, CompilerResourceFlow, EntryPublication, InputSlotId, LogicalResource,
     MaterializationRequirement, OutputSlotId, PhysicalResourceTable, PlannedEntry, PlannedPublication,
@@ -18,8 +17,8 @@ use crate::egir::program::{
 };
 use crate::egir::types::RegionId;
 use crate::egir::types::{
-    EgirSoac, FilterOutput, FilterPlan, FilterState, RuntimeFilterLength, SegExtent, SegPlacement,
-    SegResourceAccessKind, SideEffectKind,
+    EgirSoac, FilterOutput, FilterPlan, FilterState, RuntimeFilterLength, SegExtent, SegResourceAccessKind,
+    SideEffectKind,
 };
 use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
@@ -336,6 +335,20 @@ pub struct KernelPhase {
     pub dependencies: Vec<KernelId>,
 }
 
+impl KernelPhase {
+    fn refresh_phase_facts(&mut self) {
+        let entry = Arc::clone(&self.recipe.entry);
+        self.entry_point.clone_from(&entry.name);
+        self.workgroup_size = execution_workgroup(&entry.execution_model);
+        if let DomainSelection::Inferred(baseline) = &self.domain_selection {
+            self.domain = inferred_body_domain(&entry, baseline.clone());
+        }
+        self.resources = planned_resources(&entry);
+        self.abi.inputs = (0..entry.inputs.len()).map(InputSlotId).collect();
+        self.abi.output_routes = output_projection(&entry.output_routes);
+    }
+}
+
 /// Graph-free plan summary retained after physical EGIR has lowered to SSA.
 #[derive(Clone, Debug)]
 pub struct PublishedKernelPlan {
@@ -511,11 +524,7 @@ impl KernelPlan {
     }
 
     pub fn contains_entry(&self, entry_point: &str) -> bool {
-        self.pipelines
-            .iter()
-            .any(|pipeline| pipeline.phases.iter().any(|phase| phase.entry_point == entry_point))
-            || self.graphics_passthroughs.iter().any(|phase| phase.entry_point == entry_point)
-            || self.unpublished.iter().any(|phase| phase.entry_point == entry_point)
+        self.phases().any(|phase| phase.entry_point == entry_point)
     }
 
     pub fn contains_flow_source(&self, source: CompilerFlowEndpoint) -> bool {
@@ -526,6 +535,21 @@ impl KernelPlan {
         self.phases()
             .find(|phase| phase.flow_source == Some(source))
             .map(|phase| phase.entry_point.as_str())
+    }
+
+    pub(super) fn flow_resource_phases(
+        &self,
+        source: CompilerFlowEndpoint,
+        resource: ResourceId,
+        writes: bool,
+    ) -> impl Iterator<Item = &KernelPhase> {
+        self.phases().filter(move |phase| {
+            phase.flow_source == Some(source)
+                && phase.resources.iter().any(|item| {
+                    item.resource == resource
+                        && if writes { item.access.writes() } else { item.access.reads() }
+                })
+        })
     }
 
     pub fn into_validated(
@@ -546,13 +570,7 @@ impl KernelPlan {
         resources: &[LogicalResource],
         region_interner: &RegionInterner,
     ) -> Self {
-        let host_resources = resources
-            .iter()
-            .filter_map(|resource| match resource.origin {
-                ResourceOrigin::Host(binding) => Some((binding, resource.id)),
-                ResourceOrigin::Compiler(_) => None,
-            })
-            .collect::<HashMap<_, _>>();
+        let host_resources = crate::egir::program::host_resource_map(resources);
         let semantic_abi = entries
             .iter()
             .enumerate()
@@ -843,20 +861,16 @@ impl KernelPlan {
                 KernelKind::ReducePhase1 | KernelKind::ScanPhase1 => KernelKind::SerialCompute,
                 kind => kind,
             };
-            phase.workgroup_size = execution_workgroup(&entry.execution_model);
-            if let DomainSelection::Inferred(baseline) = &phase.domain_selection {
-                phase.domain = inferred_body_domain(&entry, baseline.clone());
-            }
-            phase.resources = planned_resources(&entry);
+            phase.recipe = KernelRecipe {
+                kind,
+                entry: Arc::new(entry),
+            };
+            phase.refresh_phase_facts();
             if kind == KernelKind::MultiConsumerMaterialization {
                 let domain = KernelDomain::Fixed { x: 1, y: 1, z: 1 };
                 phase.domain = domain.clone();
                 phase.domain_selection = DomainSelection::Explicit(domain);
             }
-            phase.recipe = KernelRecipe {
-                kind,
-                entry: Arc::new(entry),
-            };
         }
     }
 
@@ -876,14 +890,8 @@ impl KernelPlan {
         let (list, index) =
             self.locate(&body.name).unwrap_or_else(|| panic!("no planned kernel named `{}`", body.name));
         let phase = &mut self.list_mut(list)[index];
-        phase.workgroup_size = execution_workgroup(&body.execution_model);
-        if let DomainSelection::Inferred(baseline) = &phase.domain_selection {
-            phase.domain = inferred_body_domain(&body, baseline.clone());
-        }
-        phase.resources = planned_resources(&body);
-        phase.abi.inputs = (0..body.inputs.len()).map(InputSlotId).collect();
-        phase.abi.output_routes = output_projection(&body.output_routes);
         phase.recipe = KernelRecipe::close(kind, body);
+        phase.refresh_phase_facts();
     }
 
     pub fn check_explicit_dispatch_coverage(&self, entries: &[SemanticEntry]) -> Result<(), String> {
@@ -932,14 +940,7 @@ impl KernelPlan {
     fn complete_resource_flows(&mut self, flows: &[(ResourceId, CompilerResourceFlow)]) {
         for (resource, flow) in flows {
             let mut writers = self
-                .phases()
-                .filter(|phase| {
-                    phase.flow_source == Some(flow.producer)
-                        && phase
-                            .resources
-                            .iter()
-                            .any(|item| item.resource == *resource && item.access.writes())
-                })
+                .flow_resource_phases(flow.producer, *resource, true)
                 .map(|phase| phase.id)
                 .collect::<Vec<_>>();
             if writers.is_empty() {
@@ -959,14 +960,7 @@ impl KernelPlan {
             }
             for consumer in &flow.consumers {
                 let mut readers = self
-                    .phases()
-                    .filter(|phase| {
-                        phase.flow_source == Some(*consumer)
-                            && phase
-                                .resources
-                                .iter()
-                                .any(|item| item.resource == *resource && item.access.reads())
-                    })
+                    .flow_resource_phases(*consumer, *resource, false)
                     .map(|phase| phase.id)
                     .collect::<Vec<_>>();
                 if readers.is_empty() {
@@ -1009,17 +1003,17 @@ impl KernelPlan {
                 owner.insert(phase.id, pipeline);
             }
         }
-        let mut parents = (0..self.pipelines.len()).collect::<Vec<_>>();
+        let mut union = super::UnionFind::new(self.pipelines.len());
         for (pipeline, planned) in self.pipelines.iter().enumerate() {
             for dependency in planned.phases.iter().flat_map(|phase| &phase.dependencies) {
                 if let Some(&other) = owner.get(dependency) {
-                    union_components(&mut parents, pipeline, other);
+                    union.union(pipeline, other);
                 }
             }
         }
         let mut components = BTreeMap::<usize, Vec<usize>>::new();
         for pipeline in 0..self.pipelines.len() {
-            let root = find_component(&mut parents, pipeline);
+            let root = union.find(pipeline);
             components.entry(root).or_default().push(pipeline);
         }
         let mut slots = std::mem::take(&mut self.pipelines).into_iter().map(Some).collect::<Vec<_>>();
@@ -1032,7 +1026,8 @@ impl KernelPlan {
                 merged.phases.append(&mut pipeline.phases);
                 merged.order = merged.order.min(pipeline.order);
             }
-            merged.phases = topologically_order_phases(merged.phases);
+            merged.phases = topologically_order_phases(merged.phases)
+                .unwrap_or_else(|stable_remainder| stable_remainder);
             self.pipelines.push(merged);
         }
         self.pipelines.sort_by_key(|pipeline| pipeline.order);
@@ -1065,30 +1060,26 @@ fn phase_from_body(
     kind: KernelKind,
 ) -> Result<KernelPhase, String> {
     let domain = match &selection {
-        DomainSelection::Inferred(baseline) => inferred_body_domain(&body, baseline.clone()),
-        DomainSelection::Explicit(domain) => domain.clone(),
+        DomainSelection::Inferred(baseline) | DomainSelection::Explicit(baseline) => baseline.clone(),
     };
-    let entry_point = body.name.clone();
-    let inputs = (0..body.inputs.len()).map(InputSlotId).collect();
-    let output_routes = output_projection(&body.output_routes);
-    let workgroup_size = execution_workgroup(&body.execution_model);
-    let resources = planned_resources(&body);
-    Ok(KernelPhase {
+    let mut phase = KernelPhase {
         id,
         flow_source,
-        entry_point,
+        entry_point: body.name.clone(),
         recipe: KernelRecipe::close(kind, body),
         abi: EntryAbiProjection {
             source_entry,
-            inputs,
-            output_routes,
+            inputs: Vec::new(),
+            output_routes: Vec::new(),
         },
-        workgroup_size,
+        workgroup_size: (1, 1, 1),
         domain,
         domain_selection: selection,
-        resources,
+        resources: Vec::new(),
         dependencies: Vec::new(),
-    })
+    };
+    phase.refresh_phase_facts();
+    Ok(phase)
 }
 
 fn phase_from_prepass(
@@ -1162,32 +1153,25 @@ fn source_kind(entry: &SemanticEntry) -> KernelKind {
     if !matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
         return KernelKind::GraphicsPassthrough;
     }
-    for (_, block) in &entry.graph.skeleton.blocks {
-        for effect in &block.side_effects {
-            match &effect.kind {
-                SideEffectKind::Soac(EgirSoac::Seg {
-                    kind: crate::egir::types::SegOpKind::SegRed { .. },
-                    placement: SegPlacement::Kernel,
+    match super::kernel_effect(&entry.graph).map(|(_, _, effect)| &effect.kind) {
+        Some(SideEffectKind::Soac(EgirSoac::Seg {
+            kind: crate::egir::types::SegOpKind::SegRed { .. },
+            ..
+        })) => KernelKind::ReducePhase1,
+        Some(SideEffectKind::Soac(EgirSoac::Seg {
+            kind: crate::egir::types::SegOpKind::SegScan { .. },
+            ..
+        })) => KernelKind::ScanPhase1,
+        Some(SideEffectKind::Soac(EgirSoac::Filter {
+            state:
+                FilterState::Scheduled {
+                    plan: FilterPlan::Scatter(_),
                     ..
-                }) => return KernelKind::ReducePhase1,
-                SideEffectKind::Soac(EgirSoac::Seg {
-                    kind: crate::egir::types::SegOpKind::SegScan { .. },
-                    placement: SegPlacement::Kernel,
-                    ..
-                }) => return KernelKind::ScanPhase1,
-                SideEffectKind::Soac(EgirSoac::Filter {
-                    state:
-                        FilterState::Scheduled {
-                            plan: FilterPlan::Scatter(_),
-                            ..
-                        },
-                    ..
-                }) => return KernelKind::FilterScatter,
-                _ => {}
-            }
-        }
+                },
+            ..
+        })) => KernelKind::FilterScatter,
+        _ => KernelKind::SerialCompute,
     }
-    KernelKind::SerialCompute
 }
 
 fn inferred_body_domain(body: &PlannedEntry, baseline: KernelDomain) -> KernelDomain {
@@ -1269,27 +1253,18 @@ fn materialization_domain(requirement: &MaterializationRequirement) -> Option<Ke
 }
 
 fn segmented_domain_graph(graph: &crate::egir::types::EGraph) -> Option<KernelDomain> {
-    for (_, block) in &graph.skeleton.blocks {
-        for side_effect in &block.side_effects {
-            match &side_effect.kind {
-                SideEffectKind::Soac(EgirSoac::Seg {
+    match &super::kernel_effect(graph)?.2.kind {
+        SideEffectKind::Soac(EgirSoac::Seg { space, .. })
+        | SideEffectKind::Soac(EgirSoac::Filter {
+            state:
+                FilterState::Scheduled {
                     space,
-                    placement: SegPlacement::Kernel,
-                    ..
-                }) => return domain_from_space(space),
-                SideEffectKind::Soac(EgirSoac::Filter {
-                    state:
-                        FilterState::Scheduled {
-                            space,
-                            plan: FilterPlan::Flags(_) | FilterPlan::Scatter(_),
-                        },
-                    ..
-                }) => return domain_from_space(space),
-                _ => {}
-            }
-        }
+                    plan: FilterPlan::Flags(_) | FilterPlan::Scatter(_),
+                },
+            ..
+        }) => domain_from_space(space),
+        _ => None,
     }
-    None
 }
 
 pub(crate) fn domain_from_space(space: &crate::egir::types::SegSpace) -> Option<KernelDomain> {
@@ -1325,67 +1300,56 @@ fn segmented_graph_resources(
     graph: &crate::egir::types::EGraph,
     declarations: &[SemanticResourceDecl],
 ) -> Option<Vec<ScheduledResource>> {
-    for (_, block) in &graph.skeleton.blocks {
-        for side_effect in &block.side_effects {
-            if let SideEffectKind::Soac(EgirSoac::Filter {
-                state: FilterState::Scheduled { plan, .. },
-                output,
-                ..
-            }) = &side_effect.kind
-            {
-                let mut resources = graph_resources(graph, declarations);
-                let mut push = |reference: SemanticResourceRef, access: ResourceAccess| {
-                    merge_scheduled_resource(&mut resources, reference.0, access);
-                };
-                match plan {
-                    FilterPlan::Flags(work) => {
-                        push(work.flags, ResourceAccess::Write);
-                    }
-                    FilterPlan::Scan(work) => {
-                        push(work.flags, ResourceAccess::Read);
-                        push(work.offsets, ResourceAccess::Write);
-                        push(work.block_sums, ResourceAccess::Write);
-                    }
-                    FilterPlan::Scatter(work) => {
-                        push(work.flags, ResourceAccess::Read);
-                        push(work.offsets, ResourceAccess::Read);
-                        push(work.block_offsets, ResourceAccess::Read);
-                        if let FilterOutput::Runtime { scratch, length } = output {
-                            if let RuntimeFilterLength::EntryOutput(binding) = length {
-                                push(*binding, ResourceAccess::Read);
-                            }
-                            push(*scratch, ResourceAccess::Write);
-                        }
-                    }
-                    FilterPlan::Serial => continue,
-                }
-                resources.sort_by_key(|resource| resource.resource);
-                return Some(resources);
+    let side_effect = super::kernel_effect(graph)?.2;
+    if let SideEffectKind::Soac(EgirSoac::Filter {
+        state: FilterState::Scheduled { plan, .. },
+        output,
+        ..
+    }) = &side_effect.kind
+    {
+        let mut resources = graph_resources(graph, declarations);
+        let mut push = |reference: SemanticResourceRef, access: ResourceAccess| {
+            merge_scheduled_resource(&mut resources, reference.0, access);
+        };
+        match plan {
+            FilterPlan::Flags(work) => push(work.flags, ResourceAccess::Write),
+            FilterPlan::Scan(work) => {
+                push(work.flags, ResourceAccess::Read);
+                push(work.offsets, ResourceAccess::Write);
+                push(work.block_sums, ResourceAccess::Write);
             }
-            let SideEffectKind::Soac(EgirSoac::Seg {
-                placement: SegPlacement::Kernel,
-                resources,
-                ..
-            }) = &side_effect.kind
-            else {
-                continue;
-            };
-            return Some(
-                resources
-                    .iter()
-                    .map(|resource| ScheduledResource {
-                        resource: resource.resource.0,
-                        access: match resource.access {
-                            SegResourceAccessKind::Read => ResourceAccess::Read,
-                            SegResourceAccessKind::Write => ResourceAccess::Write,
-                            SegResourceAccessKind::ReadWrite => ResourceAccess::ReadWrite,
-                        },
-                    })
-                    .collect(),
-            );
+            FilterPlan::Scatter(work) => {
+                push(work.flags, ResourceAccess::Read);
+                push(work.offsets, ResourceAccess::Read);
+                push(work.block_offsets, ResourceAccess::Read);
+                if let FilterOutput::Runtime { scratch, length } = output {
+                    if let RuntimeFilterLength::EntryOutput(binding) = length {
+                        push(*binding, ResourceAccess::Read);
+                    }
+                    push(*scratch, ResourceAccess::Write);
+                }
+            }
+            FilterPlan::Serial => return None,
         }
+        resources.sort_by_key(|resource| resource.resource);
+        return Some(resources);
     }
-    None
+    let SideEffectKind::Soac(EgirSoac::Seg { resources, .. }) = &side_effect.kind else {
+        return None;
+    };
+    Some(
+        resources
+            .iter()
+            .map(|resource| ScheduledResource {
+                resource: resource.resource.0,
+                access: match resource.access {
+                    SegResourceAccessKind::Read => ResourceAccess::Read,
+                    SegResourceAccessKind::Write => ResourceAccess::Write,
+                    SegResourceAccessKind::ReadWrite => ResourceAccess::ReadWrite,
+                },
+            })
+            .collect(),
+    )
 }
 
 fn graph_resources(
@@ -1408,19 +1372,14 @@ fn graph_resources(
 
     // A storage view reachable from an effect operand is conservatively a
     // read. Output/intermediate metadata above upgrades it when it is written.
-    for (_, block) in &graph.skeleton.blocks {
-        for side_effect in &block.side_effects {
-            wyn_graph::for_each_reachable(
-                side_effect.referenced_nodes(),
-                wyn_graph::WalkOrder::DepthFirst,
-                |node, out| out.extend(graph.nodes[node].children()),
-                |node| {
-                    if let Some(resource) = graph_ops::extract_storage_view_source(graph, node) {
-                        insert(resource, ResourceAccess::Read);
-                    }
-                },
-            );
-        }
+    for access in graph
+        .skeleton
+        .blocks
+        .values()
+        .flat_map(|block| &block.side_effects)
+        .flat_map(|effect| crate::egir::semantic_graph::read_resources(graph, effect))
+    {
+        insert(access.resource, ResourceAccess::Read);
     }
 
     let mut resources: Vec<_> =
@@ -1451,22 +1410,9 @@ fn binding_ref(binding: &crate::pipeline_descriptor::Binding) -> Option<BindingR
     }
 }
 
-fn find_component(parents: &mut [usize], index: usize) -> usize {
-    if parents[index] != index {
-        parents[index] = find_component(parents, parents[index]);
-    }
-    parents[index]
-}
-
-fn union_components(parents: &mut [usize], left: usize, right: usize) {
-    let left = find_component(parents, left);
-    let right = find_component(parents, right);
-    if left != right {
-        parents[right] = left;
-    }
-}
-
-fn topologically_order_phases(phases: Vec<KernelPhase>) -> Vec<KernelPhase> {
+pub(super) fn topologically_order_phases(
+    phases: Vec<KernelPhase>,
+) -> Result<Vec<KernelPhase>, Vec<KernelPhase>> {
     let phase_ids = phases.iter().map(|phase| phase.id).collect::<HashSet<_>>();
     let mut remaining = phases.into_iter().map(Some).collect::<Vec<_>>();
     let mut emitted = HashSet::new();
@@ -1484,13 +1430,13 @@ fn topologically_order_phases(phases: Vec<KernelPhase>) -> Vec<KernelPhase> {
             // Preserve stable order for the remainder. Validation reports the
             // actual cycle or unresolved dependency with kernel identities.
             ordered.extend(remaining.into_iter().flatten());
-            return ordered;
+            return Err(ordered);
         };
         let phase = remaining[index].take().expect("ready phase exists");
         emitted.insert(phase.id);
         ordered.push(phase);
     }
-    ordered
+    Ok(ordered)
 }
 
 fn merge_bindings(target: &mut Vec<Binding>, source: Vec<Binding>) {

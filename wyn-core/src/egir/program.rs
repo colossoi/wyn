@@ -124,26 +124,14 @@ pub struct SemanticDependency {
     pub kind: SemanticDependencyKind,
 }
 
-/// Callable body arena entry used by semantic SegOps.
+/// Callable body arena entry used by SegOps.
 #[derive(Clone)]
-pub struct SemanticRegion {
+pub struct Region<R = SemanticResourceRef> {
     pub name: String,
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
-    pub graph: EGraph,
+    pub graph: EGraph<R>,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
-}
-
-impl SemanticRegion {
-    pub fn from_function(function: &SemanticFunc) -> Self {
-        Self {
-            name: function.name.clone(),
-            params: function.params.clone(),
-            return_ty: function.return_ty.clone(),
-            graph: function.graph.clone(),
-            control_headers: function.control_headers.clone(),
-        }
-    }
 }
 
 pub use crate::ResourceId;
@@ -192,6 +180,16 @@ pub enum LogicalSize {
 pub struct SemanticResourceRef(pub ResourceId);
 
 pub type PhysicalResourceRef = crate::BindingRef;
+pub type SemanticRegion = Region<SemanticResourceRef>;
+pub type PhysicalRegion = Region<PhysicalResourceRef>;
+pub type PhysicalEGraph = EGraph<PhysicalResourceRef>;
+pub type PhysicalEgirSoac = super::types::EgirSoac<PhysicalResourceRef>;
+pub type PhysicalSideEffect = super::types::SideEffect<PhysicalResourceRef>;
+pub type PhysicalSideEffectKind = super::types::SideEffectKind<PhysicalResourceRef>;
+pub type PhysicalSegSpace = super::types::SegSpace<PhysicalResourceRef>;
+pub type PhysicalFilterWorkBuffers = super::types::FilterWorkBuffers<PhysicalResourceRef>;
+pub type PhysicalFilterOutput = super::types::FilterOutput<PhysicalResourceRef>;
+pub type PhysicalPureOp = super::types::PureOp<PhysicalResourceRef>;
 
 /// Entry-local use of a logical resource. Unlike `StorageBindingDecl`, this is
 /// target independent after allocation and cannot assign a descriptor binding
@@ -202,21 +200,6 @@ pub struct SemanticResourceDecl {
     pub role: interface::StorageRole,
     pub elem_ty: Type<TypeName>,
     pub size: LogicalSize,
-}
-
-impl SemanticResourceDecl {
-    pub(crate) fn from_abi(
-        declaration: interface::StorageBindingDecl,
-        resource: ResourceId,
-        size: LogicalSize,
-    ) -> Self {
-        Self {
-            resource: SemanticResourceRef(resource),
-            role: declaration.role,
-            elem_ty: declaration.elem_ty,
-            size,
-        }
-    }
 }
 
 /// Why a compiler-introduced resource exists. The kind fixes its physical
@@ -317,6 +300,19 @@ pub struct LogicalResource {
     pub size: LogicalSize,
 }
 
+impl LogicalResource {
+    pub fn host_binding(&self) -> Option<crate::BindingRef> {
+        match self.origin {
+            ResourceOrigin::Host(binding) => Some(binding),
+            ResourceOrigin::Compiler(_) => None,
+        }
+    }
+}
+
+pub(crate) fn host_resource_map(resources: &[LogicalResource]) -> HashMap<crate::BindingRef, ResourceId> {
+    resources.iter().filter_map(|resource| Some((resource.host_binding()?, resource.id))).collect()
+}
+
 /// Complete the authoritative logical-resource manifest at the allocation
 /// boundary. Host resources and TLC-originated compiler resources already
 /// have stable identities; this pass classifies compiler ownership, adds the
@@ -352,18 +348,7 @@ pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), 
     for resource in &inner.resources {
         check_size(&resource.size)?;
     }
-    let declarations = inner
-        .entry_points
-        .iter()
-        .map(|entry| entry.resource_declarations.as_slice())
-        .chain(inner.prepasses.iter().map(|prepass| prepass.entry.resource_declarations.as_slice()))
-        .chain(
-            inner
-                .materializations
-                .iter()
-                .map(|requirement| requirement.entry.resource_declarations.as_slice()),
-        );
-    for declaration in declarations.flatten() {
+    for declaration in inner.entries_with_endpoints().flat_map(|(_, entry)| &entry.resource_declarations) {
         if !ids.contains(&declaration.resource.0) {
             return Err(format!(
                 "entry references missing resource {:?}",
@@ -452,35 +437,8 @@ fn extract_prepass_requirements(inner: &mut SemanticProgram) {
 fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
     let mut producers: HashMap<ResourceId, Vec<CompilerFlowEndpoint>> = HashMap::new();
     let mut consumers: HashMap<ResourceId, Vec<CompilerFlowEndpoint>> = HashMap::new();
-    for (index, entry) in inner.entry_points.iter().enumerate() {
-        let entry_id = SemanticEntryId(index as u32);
+    for (endpoint, entry) in inner.entries_with_endpoints() {
         for declaration in &entry.resource_declarations {
-            let resource = declaration.resource.0;
-            match declaration.role {
-                interface::StorageRole::Output => {
-                    producers.entry(resource).or_default().push(CompilerFlowEndpoint::Entry(entry_id))
-                }
-                interface::StorageRole::Input => {
-                    consumers.entry(resource).or_default().push(CompilerFlowEndpoint::Entry(entry_id))
-                }
-                interface::StorageRole::Intermediate => {}
-            }
-        }
-    }
-    for prepass in &inner.prepasses {
-        let endpoint = CompilerFlowEndpoint::Prepass(prepass.id);
-        for declaration in &prepass.entry.resource_declarations {
-            let resource = declaration.resource.0;
-            match declaration.role {
-                interface::StorageRole::Output => producers.entry(resource).or_default().push(endpoint),
-                interface::StorageRole::Input => consumers.entry(resource).or_default().push(endpoint),
-                interface::StorageRole::Intermediate => {}
-            }
-        }
-    }
-    for requirement in &inner.materializations {
-        let endpoint = CompilerFlowEndpoint::Materialization(requirement.id);
-        for declaration in &requirement.entry.resource_declarations {
             let resource = declaration.resource.0;
             match declaration.role {
                 interface::StorageRole::Output => producers.entry(resource).or_default().push(endpoint),
@@ -649,19 +607,7 @@ fn normalize_converted_graph_types(
     graph: &mut EGraph,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
 ) {
-    for (_, block) in graph.skeleton.blocks.iter_mut() {
-        for effect in &mut block.side_effects {
-            if let super::types::SideEffectKind::Soac(soac) = &mut effect.kind {
-                soac.visit_types_mut(|ty| normalize_type_resources(ty, by_binding));
-            }
-        }
-    }
-    let nodes = graph.types.keys().copied().collect::<Vec<_>>();
-    for node in nodes {
-        let mut ty = graph.types[&node].clone();
-        normalize_type_resources(&mut ty, by_binding);
-        graph.retype_node(node, ty);
-    }
+    rewrite_graph_types(graph, |ty| normalize_type_resources(ty, by_binding));
 }
 
 fn normalize_structural_resources(
@@ -671,47 +617,8 @@ fn normalize_structural_resources(
     for resource in &mut inner.resources {
         normalize_type_resources(&mut resource.elem_ty, by_binding);
     }
-    for entry in &mut inner.entry_points {
-        for input in &mut entry.inputs {
-            normalize_type_resources(&mut input.ty, by_binding);
-        }
-        for output in &mut entry.outputs {
-            normalize_type_resources(&mut output.ty, by_binding);
-        }
-        for (ty, _) in &mut entry.params {
-            normalize_type_resources(ty, by_binding);
-        }
-        normalize_type_resources(&mut entry.return_ty, by_binding);
-        for declaration in &mut entry.resource_declarations {
-            normalize_type_resources(&mut declaration.elem_ty, by_binding);
-        }
-    }
-    for requirement in &mut inner.materializations {
-        for input in &mut requirement.entry.inputs {
-            normalize_type_resources(&mut input.ty, by_binding);
-        }
-        for (ty, _) in &mut requirement.entry.params {
-            normalize_type_resources(ty, by_binding);
-        }
-        normalize_type_resources(&mut requirement.entry.return_ty, by_binding);
-        for declaration in &mut requirement.entry.resource_declarations {
-            normalize_type_resources(&mut declaration.elem_ty, by_binding);
-        }
-    }
-    for prepass in &mut inner.prepasses {
-        for input in &mut prepass.entry.inputs {
-            normalize_type_resources(&mut input.ty, by_binding);
-        }
-        for output in &mut prepass.entry.outputs {
-            normalize_type_resources(&mut output.ty, by_binding);
-        }
-        for (ty, _) in &mut prepass.entry.params {
-            normalize_type_resources(ty, by_binding);
-        }
-        normalize_type_resources(&mut prepass.entry.return_ty, by_binding);
-        for declaration in &mut prepass.entry.resource_declarations {
-            normalize_type_resources(&mut declaration.elem_ty, by_binding);
-        }
+    for (_, entry) in inner.entries_with_endpoints_mut() {
+        entry.visit_types_mut(|ty| normalize_type_resources(ty, by_binding));
     }
     for function in &mut inner.functions {
         for (ty, _) in &mut function.params {
@@ -728,23 +635,48 @@ fn normalize_structural_resources(
 }
 
 fn normalize_type_resources(ty: &mut Type<TypeName>, by_binding: &HashMap<crate::BindingRef, ResourceId>) {
-    let Type::Constructed(name, arguments) = ty else {
-        return;
-    };
-    if let TypeName::Buffer(binding) = *name {
-        *name = TypeName::Resource(
-            *by_binding.get(&binding).expect("buffer type resource must be in manifest"),
-        );
+    visit_type_names_mut(ty, |name| {
+        if let TypeName::Buffer(binding) = *name {
+            *name = TypeName::Resource(
+                *by_binding.get(&binding).expect("buffer type resource must be in manifest"),
+            );
+        }
+    });
+}
+
+pub(crate) fn visit_type_names_mut(ty: &mut Type<TypeName>, mut visit: impl FnMut(&mut TypeName)) {
+    fn recurse(ty: &mut Type<TypeName>, visit: &mut impl FnMut(&mut TypeName)) {
+        let Type::Constructed(name, arguments) = ty else {
+            return;
+        };
+        visit(name);
+        if let TypeName::Sum(variants) = name {
+            for field in variants.iter_mut().flat_map(|(_, fields)| fields) {
+                recurse(field, visit);
+            }
+        }
+        for argument in arguments {
+            recurse(argument, visit);
+        }
     }
-    if let TypeName::Sum(variants) = name {
-        for (_, fields) in variants {
-            for field in fields {
-                normalize_type_resources(field, by_binding);
+    recurse(ty, &mut visit);
+}
+
+fn rewrite_graph_types<R: super::types::GraphResource>(
+    graph: &mut EGraph<R>,
+    mut rewrite: impl FnMut(&mut Type<TypeName>),
+) {
+    for block in graph.skeleton.blocks.values_mut() {
+        for effect in &mut block.side_effects {
+            if let super::types::SideEffectKind::Soac(soac) = &mut effect.kind {
+                soac.visit_types_mut(&mut rewrite);
             }
         }
     }
-    for argument in arguments {
-        normalize_type_resources(argument, by_binding);
+    for node in graph.types.keys().copied().collect::<Vec<_>>() {
+        let mut ty = graph.types[&node].clone();
+        rewrite(&mut ty);
+        graph.retype_node(node, ty);
     }
 }
 
@@ -788,41 +720,18 @@ pub(crate) fn physicalize_graph_resources(
             continue;
         }
     }
-    for (_, block) in graph.skeleton.blocks.iter_mut() {
-        for effect in &mut block.side_effects {
-            if let super::types::SideEffectKind::Soac(soac) = &mut effect.kind {
-                soac.visit_types_mut(|ty| physicalize_type_resources(ty, bindings));
-            }
-        }
-    }
-    let nodes = graph.types.keys().copied().collect::<Vec<_>>();
-    for node in nodes {
-        let mut ty = graph.types[&node].clone();
-        physicalize_type_resources(&mut ty, bindings);
-        graph.retype_node(node, ty);
-    }
+    rewrite_graph_types(&mut graph, |ty| physicalize_type_resources(ty, bindings));
     Ok((graph, node_map, block_map))
 }
 
 pub(crate) fn physicalize_type_resources(ty: &mut Type<TypeName>, bindings: &PhysicalResourceTable) {
-    let Type::Constructed(name, arguments) = ty else {
-        return;
-    };
-    if let TypeName::Resource(resource) = *name {
-        *name = TypeName::Buffer(
-            bindings.binding(resource).expect("semantic type resource must have a physical binding"),
-        );
-    }
-    if let TypeName::Sum(variants) = name {
-        for (_, fields) in variants {
-            for field in fields {
-                physicalize_type_resources(field, bindings);
-            }
+    visit_type_names_mut(ty, |name| {
+        if let TypeName::Resource(resource) = *name {
+            *name = TypeName::Buffer(
+                bindings.binding(resource).expect("semantic type resource must have a physical binding"),
+            );
         }
-    }
-    for argument in arguments {
-        physicalize_type_resources(argument, bindings);
-    }
+    });
 }
 
 fn allocate_filter_work_resources(inner: &mut SemanticProgram) {
@@ -885,13 +794,7 @@ fn allocate_filter_work_resources(inner: &mut SemanticProgram) {
         }
     }
     for (compiler, size) in pending {
-        let id = ResourceId(inner.resources.len() as u32);
-        inner.resources.push(LogicalResource {
-            id,
-            origin: ResourceOrigin::Compiler(compiler),
-            elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
-            size,
-        });
+        inner.alloc_compiler_resource(compiler, Type::Constructed(TypeName::UInt(32), vec![]), size);
     }
 }
 
@@ -1023,28 +926,28 @@ pub fn buffer_len(
 }
 
 #[derive(Clone, Debug)]
-pub struct SemanticFunc {
+pub struct Func<R = SemanticResourceRef> {
     pub name: String,
     pub span: Span,
     pub linkage_name: Option<String>,
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
-    pub graph: EGraph,
+    pub graph: EGraph<R>,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
     pub aliases: LookupMap<NodeId, NodeId>,
 }
 
-impl SemanticFunc {
+impl<R> Func<R> {
     pub fn new(
         name: String,
         span: Span,
         linkage_name: Option<String>,
         params: Vec<(Type<TypeName>, String)>,
         return_ty: Type<TypeName>,
-        graph: EGraph,
+        graph: EGraph<R>,
         control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
-        SemanticFunc {
+        Self {
             name,
             span,
             linkage_name,
@@ -1057,33 +960,11 @@ impl SemanticFunc {
     }
 }
 
-/// Callable after the semantic-to-physical resource boundary. Its graph can
-/// carry backend bindings only; constructing it requires consuming an
-/// `SemanticFunc` through physicalization.
-#[derive(Clone, Debug)]
-pub struct PhysicalFunc {
-    pub name: String,
-    pub span: Span,
-    pub linkage_name: Option<String>,
-    pub params: Vec<(Type<TypeName>, String)>,
-    pub return_ty: Type<TypeName>,
-    pub graph: EGraph<PhysicalResourceRef>,
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
-    pub aliases: LookupMap<NodeId, NodeId>,
-}
+pub type SemanticFunc = Func<SemanticResourceRef>;
+pub type PhysicalFunc = Func<PhysicalResourceRef>;
 
-/// Callable-region projection owned by a physical program.
-#[derive(Clone)]
-pub struct PhysicalRegion {
-    pub name: String,
-    pub params: Vec<(Type<TypeName>, String)>,
-    pub return_ty: Type<TypeName>,
-    pub graph: EGraph<PhysicalResourceRef>,
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
-}
-
-impl PhysicalRegion {
-    pub fn from_function(function: &PhysicalFunc) -> Self {
+impl<R: super::types::GraphResource> Region<R> {
+    pub fn from_function(function: &Func<R>) -> Self {
         Self {
             name: function.name.clone(),
             params: function.params.clone(),
@@ -1176,6 +1057,22 @@ pub struct PrepassRequirement {
 }
 
 impl SemanticEntry {
+    fn visit_types_mut(&mut self, mut visit: impl FnMut(&mut Type<TypeName>)) {
+        for input in &mut self.inputs {
+            visit(&mut input.ty);
+        }
+        for output in &mut self.outputs {
+            visit(&mut output.ty);
+        }
+        for (ty, _) in &mut self.params {
+            visit(ty);
+        }
+        visit(&mut self.return_ty);
+        for declaration in &mut self.resource_declarations {
+            visit(&mut declaration.elem_ty);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_resources(
         name: String,
@@ -1264,45 +1161,49 @@ impl PlannedEntry {
     pub fn project(entry: &SemanticEntry) -> Result<Self, String> {
         let projection = super::graph_projector::GraphProjector::new(&entry.graph, &entry.control_headers)
             .all_with_values(entry.output_routes.iter().map(|route| route.source.value).collect())?;
-        let output_routes = entry
-            .output_routes
-            .iter()
-            .map(|route| {
-                Ok(OutputRoute {
-                    source: SlotSource {
-                        block: projection
-                            .block(route.source.block)
-                            .ok_or_else(|| "planned route block was not projected".to_string())?,
-                        value: projection
-                            .node(route.source.value)
-                            .ok_or_else(|| "planned route value was not projected".to_string())?,
-                    },
-                    slot: route.slot,
-                    writers: route
-                        .writers
-                        .iter()
-                        .filter_map(|writer| match writer {
-                            OutputWriter::Value(value) => projection.node(*value).map(OutputWriter::Value),
-                            OutputWriter::Effect(effect) => {
-                                projection.effect(*effect).map(OutputWriter::Effect)
-                            }
-                        })
-                        .collect(),
-                })
-            })
-            .collect::<Result<_, String>>()?;
+        Self::from_projection(
+            projection,
+            entry.name.clone(),
+            entry.span,
+            entry.execution_model.clone(),
+            entry.inputs.clone(),
+            entry.outputs.clone(),
+            entry.resource_declarations.clone(),
+            entry.params.clone(),
+            entry.return_ty.clone(),
+            &entry.aliases,
+            entry.output_routes.clone(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_projection(
+        projection: super::graph_projector::GraphProjection,
+        name: String,
+        span: Span,
+        execution_model: ExecutionModel,
+        inputs: Vec<EntryInput>,
+        outputs: Vec<EntryOutput>,
+        resource_declarations: Vec<SemanticResourceDecl>,
+        params: Vec<(Type<TypeName>, String)>,
+        return_ty: Type<TypeName>,
+        aliases: &LookupMap<NodeId, NodeId>,
+        output_routes: Vec<OutputRoute>,
+    ) -> Result<Self, String> {
+        let aliases = projection.remap_aliases(aliases);
+        let output_routes = projection.remap_output_routes(output_routes)?;
         Ok(Self {
-            name: entry.name.clone(),
-            span: entry.span,
-            execution_model: entry.execution_model.clone(),
-            inputs: entry.inputs.clone(),
-            outputs: entry.outputs.clone(),
-            resource_declarations: entry.resource_declarations.clone(),
-            params: entry.params.clone(),
-            return_ty: entry.return_ty.clone(),
-            aliases: projection.remap_aliases(&entry.aliases),
+            name,
+            span,
+            execution_model,
+            inputs,
+            outputs,
+            resource_declarations,
+            params,
+            return_ty,
             graph: projection.graph,
             control_headers: projection.control_headers,
+            aliases,
             output_routes,
         })
     }
@@ -1404,13 +1305,7 @@ impl PhysicalResourceTable {
     pub fn allocate(resources: &[LogicalResource], ids: &mut crate::IdSource<u32>) -> Self {
         let mut ordered = resources.iter().collect::<Vec<_>>();
         ordered.sort_by_key(|resource| resource.id.0);
-        let mut used = resources
-            .iter()
-            .filter_map(|resource| match resource.origin {
-                ResourceOrigin::Host(binding) => Some(binding),
-                ResourceOrigin::Compiler(_) => None,
-            })
-            .collect::<std::collections::HashSet<_>>();
+        let mut used = host_resource_map(resources).into_keys().collect::<std::collections::HashSet<_>>();
         let mut bindings = Vec::with_capacity(ordered.len());
         let mut compiler_owned = Vec::with_capacity(ordered.len());
         for resource in ordered {
@@ -1496,18 +1391,11 @@ pub struct PhysicalProgram {
     pub physical_resources: PhysicalResourceTable,
 }
 
-fn physicalize_control_headers(
-    headers: LookupMap<BlockId, ControlHeader>,
-    block_map: &LookupMap<BlockId, BlockId>,
+pub(crate) fn remap_control_headers(
+    headers: &LookupMap<BlockId, ControlHeader>,
+    map: impl Fn(BlockId) -> BlockId + Copy,
 ) -> LookupMap<BlockId, ControlHeader> {
-    headers
-        .into_iter()
-        .map(|(block, header)| {
-            let block = block_map[&block];
-            let header = header.remap(&|target| block_map[&target]);
-            (block, header)
-        })
-        .collect()
+    headers.iter().map(|(block, header)| (map(*block), header.remap(&map))).collect()
 }
 
 fn physicalize_function(
@@ -1538,7 +1426,7 @@ fn physicalize_function(
         params,
         return_ty,
         graph,
-        control_headers: physicalize_control_headers(control_headers, &block_map),
+        control_headers: remap_control_headers(&control_headers, |block| block_map[&block]),
         aliases: aliases.into_iter().map(|(from, to)| (node_map[&from], node_map[&to])).collect(),
     })
 }
@@ -1564,7 +1452,7 @@ fn physicalize_region(
         params,
         return_ty,
         graph,
-        control_headers: physicalize_control_headers(control_headers, &block_map),
+        control_headers: remap_control_headers(&control_headers, |block| block_map[&block]),
     })
 }
 
@@ -1605,35 +1493,14 @@ fn physicalize_entry(
             })
         })
         .collect::<Result<_, String>>()?;
-    let output_routes = entry
-        .output_routes
-        .iter()
-        .map(|route| {
-            Ok(OutputRoute {
-                source: SlotSource {
-                    block: *blocks
-                        .get(&route.source.block)
-                        .ok_or_else(|| "planned output block was not physicalized".to_string())?,
-                    value: *nodes
-                        .get(&route.source.value)
-                        .ok_or_else(|| "planned output value was not physicalized".to_string())?,
-                },
-                slot: route.slot,
-                writers: route
-                    .writers
-                    .iter()
-                    .map(|writer| match writer {
-                        OutputWriter::Value(value) => nodes
-                            .get(value)
-                            .copied()
-                            .map(OutputWriter::Value)
-                            .ok_or_else(|| "planned output writer was not physicalized".to_string()),
-                        OutputWriter::Effect(effect) => Ok(OutputWriter::Effect(*effect)),
-                    })
-                    .collect::<Result<_, String>>()?,
-            })
-        })
-        .collect::<Result<_, String>>()?;
+    let output_routes = super::graph_projector::remap_output_routes(
+        entry.output_routes.clone(),
+        |node| nodes.get(&node).copied(),
+        |block| blocks.get(&block).copied(),
+        Some,
+        true,
+        "physicalization",
+    )?;
     Ok(PhysicalEntry {
         name: entry.name.clone(),
         span: entry.span,
@@ -1644,7 +1511,7 @@ fn physicalize_entry(
         params,
         return_ty,
         graph,
-        control_headers: physicalize_control_headers(entry.control_headers.clone(), &blocks),
+        control_headers: remap_control_headers(&entry.control_headers, |block| blocks[&block]),
         aliases: entry.aliases.iter().map(|(from, to)| (nodes[from], nodes[to])).collect(),
         output_routes,
     })
@@ -1717,6 +1584,62 @@ fn record_region(
 }
 
 impl SemanticProgram {
+    pub(crate) fn alloc_compiler_resource(
+        &mut self,
+        compiler: CompilerResource,
+        elem_ty: Type<TypeName>,
+        size: LogicalSize,
+    ) -> ResourceId {
+        let id = ResourceId(self.resources.len() as u32);
+        self.resources.push(LogicalResource {
+            id,
+            origin: ResourceOrigin::Compiler(compiler),
+            elem_ty,
+            size,
+        });
+        id
+    }
+
+    pub(crate) fn entries_with_endpoints(
+        &self,
+    ) -> impl Iterator<Item = (CompilerFlowEndpoint, &SemanticEntry)> {
+        self.entry_points
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (CompilerFlowEndpoint::Entry(SemanticEntryId(index as u32)), entry))
+            .chain(
+                self.prepasses
+                    .iter()
+                    .map(|prepass| (CompilerFlowEndpoint::Prepass(prepass.id), &prepass.entry)),
+            )
+            .chain(self.materializations.iter().map(|requirement| {
+                (
+                    CompilerFlowEndpoint::Materialization(requirement.id),
+                    &requirement.entry,
+                )
+            }))
+    }
+
+    fn entries_with_endpoints_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (CompilerFlowEndpoint, &mut SemanticEntry)> {
+        self.entry_points
+            .iter_mut()
+            .enumerate()
+            .map(|(index, entry)| (CompilerFlowEndpoint::Entry(SemanticEntryId(index as u32)), entry))
+            .chain(
+                self.prepasses
+                    .iter_mut()
+                    .map(|prepass| (CompilerFlowEndpoint::Prepass(prepass.id), &mut prepass.entry)),
+            )
+            .chain(self.materializations.iter_mut().map(|requirement| {
+                (
+                    CompilerFlowEndpoint::Materialization(requirement.id),
+                    &mut requirement.entry,
+                )
+            }))
+    }
+
     pub fn new(
         functions: Vec<SemanticFunc>,
         externs: Vec<Function>,

@@ -94,7 +94,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
                     EgirSoac::Screma { .. } => Vec::new(),
                 };
                 records.push(Record {
-                    id: effect.semantic_id.expect("semantic operation id assigned after segmentation"),
+                    id: effect.required_semantic_id(),
                     result,
                     effect,
                     resources,
@@ -190,7 +190,7 @@ pub(crate) fn read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResource
             access: SegResourceAccessKind::Read,
         })
         .collect();
-    result.sort_by_key(|resource| resource.resource.0 .0);
+    result.sort_by_key(|resource| resource.resource);
     result
 }
 

@@ -34,7 +34,9 @@ use ExecutionModel as _;
 
 use super::from_tlc::ConvertError;
 use super::graph_ops;
-use super::program::{OutputRoute, OutputSlotId, OutputWriter, SemanticEntry, SemanticProgram, SlotSource};
+use super::program::{
+    host_resource_map, OutputRoute, OutputSlotId, OutputWriter, SemanticEntry, SemanticProgram, SlotSource,
+};
 use super::types::{NodeId, SkeletonTerminator};
 use crate::ResourceId;
 use std::collections::HashMap;
@@ -46,14 +48,7 @@ pub mod verify;
 /// Realize every entry's outputs into side-effect stores. After this
 /// pass, `verify::check` confirms the invariant.
 pub fn run(inner: &mut SemanticProgram) -> Result<(), ConvertError> {
-    let by_binding = inner
-        .resources
-        .iter()
-        .filter_map(|resource| match resource.origin {
-            super::program::ResourceOrigin::Host(binding) => Some((binding, resource.id)),
-            super::program::ResourceOrigin::Compiler(_) => None,
-        })
-        .collect::<HashMap<_, _>>();
+    let by_binding = host_resource_map(&inner.resources);
     let resources = &mut inner.resources;
     for entry in inner.entry_points.iter_mut() {
         realize_entry(entry, &by_binding, resources)?;
@@ -196,17 +191,7 @@ fn synthesize_compute_routes(entry: &mut SemanticEntry) {
         ..
     } = entry;
 
-    let mut return_loc: Option<(BlockId, NodeId)> = None;
-    for (bid, block) in &graph.skeleton.blocks {
-        if let SkeletonTerminator::Return(Some(r)) = block.term {
-            assert!(
-                return_loc.is_none(),
-                "realize_outputs: entry body has more than one Return(Some(..)) terminator"
-            );
-            return_loc = Some((bid, r));
-        }
-    }
-    let Some((return_block, result)) = return_loc else {
+    let Some((return_block, result)) = unique_value_return(graph) else {
         return;
     };
     let sources = output_sources(graph, result, outputs);
@@ -231,17 +216,7 @@ fn realize_graphics_returns(entry: &mut SemanticEntry) -> Result<(), ConvertErro
         output_routes,
         ..
     } = entry;
-    let mut return_loc = None;
-    for (bid, block) in &graph.skeleton.blocks {
-        if let SkeletonTerminator::Return(Some(result)) = block.term {
-            assert!(
-                return_loc.is_none(),
-                "realize_outputs: entry body has more than one Return(Some(..)) terminator"
-            );
-            return_loc = Some((bid, result));
-        }
-    }
-    let Some((return_block, result)) = return_loc else {
+    let Some((return_block, result)) = unique_value_return(graph) else {
         return Ok(());
     };
     let mut next_effect = graph_ops::next_effect_token(graph);
@@ -269,6 +244,21 @@ fn realize_graphics_returns(entry: &mut SemanticEntry) -> Result<(), ConvertErro
 
     graph.skeleton.blocks[return_block].term = SkeletonTerminator::Return(None);
     Ok(())
+}
+
+fn unique_value_return(graph: &super::types::EGraph) -> Option<(BlockId, NodeId)> {
+    let mut returns = graph.skeleton.blocks.iter().filter_map(|(block, body)| {
+        let SkeletonTerminator::Return(Some(value)) = body.term else {
+            return None;
+        };
+        Some((block, value))
+    });
+    let result = returns.next();
+    assert!(
+        returns.next().is_none(),
+        "realize_outputs: entry body has more than one Return(Some(..)) terminator"
+    );
+    result
 }
 
 fn source_value_writers(

@@ -13,12 +13,12 @@ use polytype::Type;
 use super::graph_ops;
 use super::program::{
     CompilerResource, CompilerResourceKind, LogicalSize, MaterializationId, MaterializationRequirement,
-    MaterializationSubstitution, ResourceId, ResourceOrigin, SemanticDependencyKind, SemanticOpId,
-    SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
+    MaterializationSubstitution, ResourceId, SemanticDependencyKind, SemanticOpId, SemanticProgram,
+    SemanticResourceDecl, SemanticResourceRef,
 };
 use super::types::{
     EGraph, EgirSoac, NodeId, PureOp, SegExtent, SegOpKind, SegPlacement, SegResourceAccess,
-    SegResourceAccessKind, SideEffectKind, SoacDestination,
+    SegResourceAccessKind, SideEffectKind, SideEffectSite, SoacDestination,
 };
 use crate::ast::TypeName;
 use crate::interface::StorageRole;
@@ -71,7 +71,7 @@ fn verify_no_unallocated_multi_consumer_maps(inner: &SemanticProgram) {
                 let Some(_) = effect.result else {
                     continue;
                 };
-                let id = effect.semantic_id.expect("semantic operation id assigned after segmentation");
+                let id = effect.required_semantic_id();
                 if consumers.get(&id).map_or(0, HashSet::len) < 2 {
                     continue;
                 }
@@ -119,7 +119,7 @@ fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
                 let Some(result) = effect.result else {
                     continue;
                 };
-                let id = effect.semantic_id.expect("semantic operation id assigned after segmentation");
+                let id = effect.required_semantic_id();
                 if consumers.get(&id).map_or(0, HashSet::len) < 2 {
                     continue;
                 }
@@ -197,9 +197,6 @@ fn materialize_candidate(inner: &mut SemanticProgram, candidate: Candidate) {
     else {
         unreachable!();
     };
-    let first_resource = inner.resources.len() as u32;
-    let output_resources =
-        (0..map_bodies.len()).map(|slot| ResourceId(first_resource + slot as u32)).collect::<Vec<_>>();
     let mut sizes = Vec::with_capacity(map_bodies.len());
     for elem_ty in map_output_elem_types {
         sizes.push(size_for_space(space, elem_ty));
@@ -214,7 +211,7 @@ fn materialize_candidate(inner: &mut SemanticProgram, candidate: Candidate) {
         .cloned()
         .collect();
     let projection = super::graph_projector::GraphProjector::new(&entry.graph, &entry.control_headers)
-        .selected(HashSet::from([super::graph_projector::EffectSite {
+        .selected(HashSet::from([SideEffectSite {
             block: block_id,
             index: effect_index,
         }]))
@@ -246,6 +243,22 @@ fn materialize_candidate(inner: &mut SemanticProgram, candidate: Candidate) {
         substitutions: Vec::new(),
     };
     let producer_owner = candidate.id;
+    let output_resources = map_output_elem_types
+        .iter()
+        .zip(&sizes)
+        .enumerate()
+        .map(|(slot, (elem_ty, size))| {
+            inner.alloc_compiler_resource(
+                CompilerResource::new(
+                    CompilerResourceKind::MultiConsumerArray,
+                    Some(producer_owner),
+                    slot,
+                ),
+                elem_ty.clone(),
+                size.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
     let producer_graph = &mut producer.entry.graph;
     let mut output_views = Vec::new();
     for ((&resource, elem_ty), size) in output_resources.iter().zip(map_output_elem_types).zip(&sizes) {
@@ -282,7 +295,7 @@ fn materialize_candidate(inner: &mut SemanticProgram, candidate: Candidate) {
                 access: SegResourceAccessKind::Write,
             });
         }
-        resources.sort_by_key(|access| access.resource.0 .0);
+        resources.sort_by_key(|access| access.resource);
     }
 
     // Rewire the source entry to read the shared storage views and remove the
@@ -349,21 +362,6 @@ fn materialize_candidate(inner: &mut SemanticProgram, candidate: Candidate) {
     entry.graph.skeleton.blocks[block_id].side_effects.remove(effect_index);
     super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph);
 
-    for (slot, ((&resource, elem_ty), size)) in
-        output_resources.iter().zip(map_output_elem_types).zip(&sizes).enumerate()
-    {
-        debug_assert_eq!(resource.0 as usize, inner.resources.len());
-        inner.resources.push(super::program::LogicalResource {
-            id: resource,
-            origin: ResourceOrigin::Compiler(CompilerResource::new(
-                CompilerResourceKind::MultiConsumerArray,
-                Some(producer_owner),
-                slot,
-            )),
-            elem_ty: elem_ty.clone(),
-            size: size.clone(),
-        });
-    }
     inner.materializations.push(producer);
 }
 
