@@ -1,7 +1,7 @@
 //! Post-realization invariant check.
 //!
 //! After `realize_outputs::run`, the following must hold for every
-//! `EgirEntry`:
+//! `SemanticEntry`:
 //!
 //!   * Every declared output has at least one explicit route, and every route
 //!     names at least one realized writer.
@@ -32,13 +32,13 @@ use polytype::Type;
 use crate::ast::TypeName;
 
 use super::super::from_tlc::ConvertError;
-use super::super::program::{EgirEntry, EgirInner};
+use super::super::program::{SemanticEntry, SemanticProgram};
 use super::super::types::{ENode, NodeId, SkeletonTerminator};
 
 /// Verify the post-realization invariant for every entry. Returns
 /// `ConvertError::Internal` on the first violation, naming the entry
 /// and offending NodeId.
-pub fn check(inner: &EgirInner) -> Result<(), ConvertError> {
+pub fn check(inner: &SemanticProgram) -> Result<(), ConvertError> {
     for entry in &inner.entry_points {
         check_routes(entry)?;
         check_entry(&entry.name, &entry.graph)?;
@@ -46,7 +46,7 @@ pub fn check(inner: &EgirInner) -> Result<(), ConvertError> {
     Ok(())
 }
 
-fn check_routes(entry: &EgirEntry) -> Result<(), ConvertError> {
+fn check_routes(entry: &SemanticEntry) -> Result<(), ConvertError> {
     for route in &entry.output_routes {
         if route.slot.0 >= entry.outputs.len() {
             return Err(ConvertError::Internal(format!(

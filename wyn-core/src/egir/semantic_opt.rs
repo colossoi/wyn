@@ -6,13 +6,13 @@
 
 use std::collections::HashMap;
 
-use super::program::EgirInner;
+use super::program::SemanticProgram;
 use super::semantic_graph::SemanticGraph;
 use super::types::{
     EGraph, EgirSoac, NodeId, SegResourceAccess, SegResourceAccessKind, SideEffectKind, SkeletonTerminator,
 };
 
-pub fn run(inner: &mut EgirInner) {
+pub fn run(inner: &mut SemanticProgram) {
     for entry in &mut inner.entry_points {
         canonicalize_resource_accesses(&mut entry.graph);
     }
@@ -77,7 +77,7 @@ fn canonicalize_resource_accesses(graph: &mut EGraph) {
 /// result is unused. Generalizes the former lane-local-only elimination; the
 /// outer fixpoint re-runs it so producer chains collapse. Returns whether any
 /// graph changed.
-fn eliminate_dead_seg_ops(inner: &mut EgirInner) -> bool {
+fn eliminate_dead_seg_ops(inner: &mut SemanticProgram) -> bool {
     let mut changed = false;
     for entry in &mut inner.entry_points {
         changed |= eliminate_dead_seg_ops_in_graph(&mut entry.graph);

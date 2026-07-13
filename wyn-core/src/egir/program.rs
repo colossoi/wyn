@@ -3,9 +3,9 @@
 //! These are plain (non-generic) structs. State tracking happens at the
 //! public API boundary via the semantic `EgirRaw` / `EgirSegmented` /
 //! `EgirOptimized` / `EgirAllocated` newtypes in `crate::lib`, each
-//! of which wraps an `EgirInner`.
+//! of which wraps an `SemanticProgram`.
 //!
-//! `EgirInner` carries, for each function and entry point, a per-body
+//! `SemanticProgram` carries, for each function and entry point, a per-body
 //! `EGraph` + control-headers + alias map, plus program-level metadata
 //! (constants, uniforms, storage decls, pipeline descriptor, extern stubs).
 
@@ -23,7 +23,7 @@ use crate::types::TypeExt;
 
 use std::collections::HashMap;
 
-use super::parallelize::schedule::KernelSchedule;
+use super::parallelize::schedule::{KernelPlan, ValidatedKernelPlan};
 use super::types::{EGraph, EffectToken, NodeId, RegionId};
 
 #[cfg(test)]
@@ -114,8 +114,17 @@ impl EgirRegion {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ResourceId(pub u32);
+pub use crate::ResourceId;
+
+/// Stable identity of an entry while the program is still semantic EGIR.
+/// Textual entry names are publication metadata and are deliberately not used
+/// to connect plans back to their source entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SemanticEntryId(pub u32);
+
+/// Stable identity of an entry input position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct InputSlotId(pub usize);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogicalSize {
@@ -217,7 +226,7 @@ pub struct LogicalResource {
 /// contributes owner-tagged scratch `Compiler` resources. Terminal lowering
 /// resolves them directly from the manifest instead of storing phase-local
 /// resource ids on semantic Seg operations.
-pub fn plan_logical_resources(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
+pub fn plan_logical_resources(inner: &mut SemanticProgram, binding_ids: &mut crate::IdSource<u32>) {
     super::multi_consumer::run(inner, binding_ids);
     let mut filter_work = allocate_filter_work_resources(inner, binding_ids);
     let scalar_handoffs = scalar_handoff_resources(inner);
@@ -238,13 +247,117 @@ pub fn plan_logical_resources(inner: &mut EgirInner, binding_ids: &mut crate::Id
     let mut scratch = super::parallelize::enumerate_seg_scratch(inner, binding_ids, resources.len() as u32);
     resources.append(&mut scratch);
     inner.resources = resources;
+    normalize_semantic_resource_references(inner);
     if cfg!(debug_assertions) {
         verify_manifest_covers_storage(inner);
     }
 }
 
+/// Replace descriptor-shaped storage identities in semantic graphs with their
+/// target-independent `ResourceId`. Entry ABI declarations retain host
+/// bindings; executable graph values do not.
+fn normalize_semantic_resource_references(inner: &mut SemanticProgram) {
+    let by_binding = inner
+        .resources
+        .iter()
+        .map(|resource| (resource.legacy_binding, resource.id))
+        .collect::<HashMap<_, _>>();
+    for entry in &mut inner.entry_points {
+        normalize_graph_resources(&mut entry.graph, &by_binding);
+    }
+    for function in &mut inner.functions {
+        normalize_graph_resources(&mut function.graph, &by_binding);
+    }
+    for region in inner.regions.values_mut() {
+        normalize_graph_resources(&mut region.graph, &by_binding);
+    }
+}
+
+fn normalize_graph_resources(graph: &mut EGraph, by_binding: &HashMap<crate::BindingRef, ResourceId>) {
+    let pure_nodes = graph.nodes.keys().collect::<Vec<_>>();
+    for node in pure_nodes {
+        graph.update_pure_node(node, |op, _| {
+            if let super::types::PureOp::StorageView(crate::op::PureViewSource::Storage(binding)) = op {
+                if let Some(resource) = by_binding.get(binding) {
+                    *op = super::types::PureOp::StorageView(crate::op::PureViewSource::Resource(*resource));
+                }
+            }
+        });
+    }
+    for (_, block) in graph.skeleton.blocks.iter_mut() {
+        for effect in &mut block.side_effects {
+            if let super::types::SideEffectKind::Inst(crate::ssa::types::InstKind::Op { tag, .. }) =
+                &mut effect.kind
+            {
+                if let crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(binding)) = tag {
+                    if let Some(resource) = by_binding.get(binding) {
+                        *tag =
+                            crate::op::OpTag::StorageView(crate::op::PureViewSource::Resource(*resource));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Resolve semantic resource references immediately after validation and
+/// before any physical graph transformation or backend pass runs.
+pub fn physicalize_resource_references(inner: &mut SemanticProgram) -> Result<(), String> {
+    let bindings = PhysicalResourceTable::from_resources(&inner.resources);
+    for entry in &mut inner.entry_points {
+        physicalize_graph_resources(&mut entry.graph, &bindings)?;
+    }
+    for function in &mut inner.functions {
+        physicalize_graph_resources(&mut function.graph, &bindings)?;
+    }
+    for region in inner.regions.values_mut() {
+        physicalize_graph_resources(&mut region.graph, &bindings)?;
+    }
+    Ok(())
+}
+
+fn physicalize_graph_resources(graph: &mut EGraph, bindings: &PhysicalResourceTable) -> Result<(), String> {
+    let pure_nodes = graph.nodes.keys().collect::<Vec<_>>();
+    let mut missing = None;
+    for node in pure_nodes {
+        graph.update_pure_node(node, |op, _| {
+            if let super::types::PureOp::StorageView(crate::op::PureViewSource::Resource(resource)) = op {
+                if let Some(binding) = bindings.binding(*resource) {
+                    *op = super::types::PureOp::StorageView(crate::op::PureViewSource::Storage(binding));
+                } else {
+                    missing = Some(*resource);
+                }
+            }
+        });
+    }
+    for (_, block) in graph.skeleton.blocks.iter_mut() {
+        for effect in &mut block.side_effects {
+            if let super::types::SideEffectKind::Inst(crate::ssa::types::InstKind::Op { tag, .. }) =
+                &mut effect.kind
+            {
+                if let crate::op::OpTag::StorageView(crate::op::PureViewSource::Resource(resource)) = tag {
+                    let Some(binding) = bindings.binding(*resource) else {
+                        return Err(format!(
+                            "semantic resource {:?} has no physical binding",
+                            resource
+                        ));
+                    };
+                    *tag = crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(binding));
+                }
+            }
+        }
+    }
+    if let Some(resource) = missing {
+        return Err(format!(
+            "semantic resource {:?} has no physical binding",
+            resource
+        ));
+    }
+    Ok(())
+}
+
 fn allocate_filter_work_resources(
-    inner: &mut EgirInner,
+    inner: &mut SemanticProgram,
     binding_ids: &mut crate::IdSource<u32>,
 ) -> Vec<LogicalResource> {
     use super::types::{EgirSoac, FilterOutput, FilterState, FilterWorkBuffers, SegExtent, SideEffectKind};
@@ -353,7 +466,7 @@ fn allocate_filter_work_resources(
     resources
 }
 
-fn attach_materialization_resources(_inner: &mut EgirInner, _resources: &[LogicalResource]) {
+fn attach_materialization_resources(_inner: &mut SemanticProgram, _resources: &[LogicalResource]) {
     // Resource ownership lives in the manifest; Seg operations no longer
     // mirror resource ids in a phase-dependent scratch field.
 }
@@ -362,7 +475,7 @@ fn attach_materialization_resources(_inner: &mut EgirInner, _resources: &[Logica
 /// and physical declarations.  Unlike `plan_logical_resources`, this never
 /// allocates a binding or rewrites an owning SegOp; it preserves the precise
 /// compiler origin assigned at the allocation boundary.
-pub fn refresh_logical_resources(inner: &mut EgirInner) {
+pub fn refresh_logical_resources(inner: &mut SemanticProgram) {
     let previous: HashMap<_, _> =
         inner.resources.drain(..).map(|resource| (resource.legacy_binding, resource)).collect();
     let filter_kinds = filter_resource_kinds(inner);
@@ -402,7 +515,7 @@ pub fn refresh_logical_resources(inner: &mut EgirInner) {
 /// physical ABI, but are compiler-owned logical resources rather than host
 /// inputs. Record that ownership at the allocation boundary so schedule and
 /// descriptor publication do not have to infer it again.
-fn scalar_handoff_resources(inner: &EgirInner) -> HashMap<crate::BindingRef, CompilerResource> {
+fn scalar_handoff_resources(inner: &SemanticProgram) -> HashMap<crate::BindingRef, CompilerResource> {
     let consumer_inputs: std::collections::HashSet<_> = inner
         .entry_points
         .iter()
@@ -442,7 +555,7 @@ fn scalar_handoff_resources(inner: &EgirInner) -> HashMap<crate::BindingRef, Com
 
 /// Runtime `filter` bindings, classified so the mirror gives them a precise
 /// `CompilerResourceKind` rather than generic `Staging`.
-fn filter_resource_kinds(inner: &EgirInner) -> HashMap<crate::BindingRef, CompilerResource> {
+fn filter_resource_kinds(inner: &SemanticProgram) -> HashMap<crate::BindingRef, CompilerResource> {
     let mut kinds = HashMap::new();
     for entry in &inner.entry_points {
         for (_, block) in &entry.graph.skeleton.blocks {
@@ -522,7 +635,7 @@ fn filter_resource_kinds(inner: &EgirInner) -> HashMap<crate::BindingRef, Compil
 /// resources (deduped by binding). `Intermediate`-role declarations become
 /// `Compiler` resources; a filter length cell is tagged precisely.
 fn mirror_storage_resources(
-    inner: &EgirInner,
+    inner: &SemanticProgram,
     filter_kinds: &HashMap<crate::BindingRef, CompilerResource>,
 ) -> Vec<LogicalResource> {
     let mut resources: LookupMap<crate::BindingRef, LogicalResource> = LookupMap::new();
@@ -584,7 +697,7 @@ fn mirror_storage_resources(
 /// Debug invariant: every physical storage binding the program declares is
 /// covered by a logical resource. Catches a scratch site that escaped the
 /// manifest before it can silently corrupt the descriptor.
-fn verify_manifest_covers_storage(inner: &EgirInner) {
+fn verify_manifest_covers_storage(inner: &SemanticProgram) {
     let covered: std::collections::HashSet<crate::BindingRef> =
         inner.resources.iter().map(|resource| resource.legacy_binding).collect();
     for entry in &inner.entry_points {
@@ -750,8 +863,7 @@ pub struct OutputRoute {
     pub writers: Vec<OutputWriter>,
 }
 
-#[derive(Clone)]
-pub struct EgirEntry {
+pub struct SemanticEntry {
     /// Source/compiler provenance. Generated names are not semantic tags.
     pub origin: interface::EntryOrigin,
     pub name: String,
@@ -772,7 +884,7 @@ pub struct EgirEntry {
     pub output_routes: Vec<OutputRoute>,
 }
 
-impl EgirEntry {
+impl SemanticEntry {
     pub fn new(
         origin: interface::EntryOrigin,
         name: String,
@@ -786,7 +898,7 @@ impl EgirEntry {
         graph: EGraph,
         control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
-        EgirEntry {
+        SemanticEntry {
             origin,
             name,
             span,
@@ -804,16 +916,75 @@ impl EgirEntry {
     }
 }
 
+/// A complete entry after a validated kernel recipe has been physicalized.
+/// This is intentionally a distinct type from `SemanticEntry`: downstream
+/// codegen passes cannot receive an entry that is still legal to reschedule.
+pub struct PhysicalEntry {
+    pub origin: interface::EntryOrigin,
+    pub name: String,
+    pub span: Span,
+    pub execution_model: ExecutionModel,
+    pub inputs: Vec<EntryInput>,
+    pub outputs: Vec<EntryOutput>,
+    pub storage_bindings: Vec<interface::StorageBindingDecl>,
+    pub params: Vec<(Type<TypeName>, String)>,
+    pub return_ty: Type<TypeName>,
+    pub graph: EGraph,
+    pub control_headers: LookupMap<BlockId, ControlHeader>,
+    pub aliases: LookupMap<NodeId, NodeId>,
+    pub output_routes: Vec<OutputRoute>,
+}
+
+impl From<SemanticEntry> for PhysicalEntry {
+    fn from(entry: SemanticEntry) -> Self {
+        Self {
+            origin: entry.origin,
+            name: entry.name,
+            span: entry.span,
+            execution_model: entry.execution_model,
+            inputs: entry.inputs,
+            outputs: entry.outputs,
+            storage_bindings: entry.storage_bindings,
+            params: entry.params,
+            return_ty: entry.return_ty,
+            graph: entry.graph,
+            control_headers: entry.control_headers,
+            aliases: entry.aliases,
+            output_routes: entry.output_routes,
+        }
+    }
+}
+
+/// Deterministic allocation of logical resources to backend bindings.
+#[derive(Clone, Debug, Default)]
+pub struct PhysicalResourceTable {
+    bindings: Vec<crate::BindingRef>,
+}
+
+impl PhysicalResourceTable {
+    pub fn from_resources(resources: &[LogicalResource]) -> Self {
+        let mut ordered = resources.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|resource| resource.id.0);
+        Self {
+            bindings: ordered.into_iter().map(|resource| resource.legacy_binding).collect(),
+        }
+    }
+
+    pub fn binding(&self, resource: ResourceId) -> Option<crate::BindingRef> {
+        self.bindings.get(resource.0 as usize).copied()
+    }
+}
+
 /// Whole-program EGIR container. Wrapped by the semantic `EgirRaw` /
 /// `EgirSegmented` / `EgirOptimized` / `EgirAllocated` newtypes at
 /// the public-API layer (see `crate::lib`).
-pub struct EgirInner {
+pub struct SemanticProgram {
     pub functions: Vec<EgirFunc>,
     /// Extern function stubs. These don't have a body that flows through EGIR;
     /// they're already `Function` records with a 1-block Unreachable body and
     /// pass straight through.
     pub externs: Vec<Function>,
-    pub entry_points: Vec<EgirEntry>,
+    pub entry_points: Vec<SemanticEntry>,
     pub constants: Vec<Constant>,
     pub pipeline: PipelineDescriptor,
     /// Source names retained until the descriptor is published atomically at
@@ -837,7 +1008,44 @@ pub struct EgirInner {
     /// Concrete compute schedule produced after segmented-operation lowering.
     /// It remains attached to EGIR so later passes and descriptor publication
     /// consume the same phase/resource graph instead of rediscovering it.
-    pub kernel_schedule: KernelSchedule,
+    pub kernel_plan: KernelPlan,
+}
+
+/// EGIR after the plan has validated and every physical entry has been
+/// constructed. Only this type is accepted by expansion and SSA elaboration.
+pub struct PhysicalProgram {
+    pub functions: Vec<EgirFunc>,
+    pub externs: Vec<Function>,
+    pub entry_points: Vec<PhysicalEntry>,
+    pub constants: Vec<Constant>,
+    pub pipeline: PipelineDescriptor,
+    pub input_names: LookupMap<(u32, u32), String>,
+    pub regions: LookupMap<RegionId, EgirRegion>,
+    pub region_interner: RegionInterner,
+    pub resources: Vec<LogicalResource>,
+    pub semantic_dependencies: Vec<SemanticDependency>,
+    pub plan: ValidatedKernelPlan,
+    pub physical_resources: PhysicalResourceTable,
+}
+
+impl PhysicalProgram {
+    pub fn from_validated(program: SemanticProgram, plan: ValidatedKernelPlan) -> Self {
+        let physical_resources = PhysicalResourceTable::from_resources(&program.resources);
+        Self {
+            functions: program.functions,
+            externs: program.externs,
+            entry_points: program.entry_points.into_iter().map(PhysicalEntry::from).collect(),
+            constants: program.constants,
+            pipeline: program.pipeline,
+            input_names: program.input_names,
+            regions: program.regions,
+            region_interner: program.region_interner,
+            resources: program.resources,
+            semantic_dependencies: program.semantic_dependencies,
+            plan,
+            physical_resources,
+        }
+    }
 }
 
 /// Give `function` its region index and record its body under it. The index is
@@ -853,11 +1061,11 @@ fn record_region(
     id
 }
 
-impl EgirInner {
+impl SemanticProgram {
     pub fn new(
         functions: Vec<EgirFunc>,
         externs: Vec<Function>,
-        entry_points: Vec<EgirEntry>,
+        entry_points: Vec<SemanticEntry>,
         constants: Vec<Constant>,
         pipeline: PipelineDescriptor,
         mut region_interner: RegionInterner,
@@ -869,7 +1077,7 @@ impl EgirInner {
         for function in &functions {
             record_region(&mut region_interner, &mut regions, function);
         }
-        EgirInner {
+        SemanticProgram {
             functions,
             externs,
             entry_points,
@@ -881,7 +1089,7 @@ impl EgirInner {
             resources: Vec::new(),
             resource_hints: LookupMap::new(),
             semantic_dependencies: Vec::new(),
-            kernel_schedule: KernelSchedule::default(),
+            kernel_plan: KernelPlan::default(),
         }
     }
 

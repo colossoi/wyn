@@ -299,6 +299,7 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
                     PureViewSource::Storage(br) => {
                         format!("storage({}, {})", br.set, br.binding)
                     }
+                    PureViewSource::Resource(resource) => format!("resource({})", resource.0),
                     PureViewSource::Inherited => format_ref(&operands[2]),
                     PureViewSource::Workgroup { id, count } => {
                         format!("workgroup({id}, {count})")

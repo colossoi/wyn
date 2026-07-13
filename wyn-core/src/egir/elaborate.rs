@@ -23,7 +23,7 @@ use smallvec::SmallVec;
 
 use super::extract;
 use super::loop_analysis::LoopAnalysis;
-use super::program::EgirInner;
+use super::program::PhysicalProgram;
 use super::scoped_map::ScopedMap;
 use super::types::*;
 
@@ -31,7 +31,7 @@ use super::types::*;
 /// elaborated to a `FuncBody`, externs pass through, and the result is
 /// assembled into a single `ssa::types::Program`. The pipeline
 /// descriptor passes through unchanged.
-pub fn run_program(inner: EgirInner) -> (Program, PipelineDescriptor) {
+pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
     let functions: Vec<Function> = inner
         .functions
         .into_iter()

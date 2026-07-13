@@ -360,7 +360,7 @@ fn runtime_filter_lowers_to_flag_scan_scatter_pipeline() {
 entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
 "#;
     let converted = crate::compile_thru_ssa(r4).expect("runtime filter reaches SSA");
-    let phases: Vec<_> = converted.kernel_schedule.phases().collect();
+    let phases: Vec<_> = converted.kernel_plan.phases().collect();
     assert_eq!(phases.len(), 5);
     assert_eq!(phases[0].entry_point, "r_filter_flags");
     assert_eq!(phases[1].entry_point, "r_filter_scan");
@@ -616,7 +616,7 @@ entry e() [4]i32 =
         1,
         "the surviving producer owns one shared logical buffer"
     );
-    let shared_binding = shared[0].legacy_binding;
+    let shared_resource = shared[0].id;
     let lowered =
         allocated.lower_to_ssa(crate::LoweringProfile::PORTABLE).expect("shared materialization lowers");
     let mir = crate::ssa::print::format_program(&lowered.ssa);
@@ -625,18 +625,18 @@ entry e() [4]i32 =
         0,
         "consumers read the shared storage prepass rather than copying a composite per consumer"
     );
-    let stages: Vec<_> = lowered.kernel_schedule.phases().map(|phase| phase.entry_point.as_str()).collect();
+    let stages: Vec<_> = lowered.kernel_plan.phases().map(|phase| phase.entry_point.as_str()).collect();
     assert_eq!(stages, ["e_materialize_shared", "e"]);
-    let phases: Vec<_> = lowered.kernel_schedule.phases().collect();
+    let phases: Vec<_> = lowered.kernel_plan.phases().collect();
     assert!(phases[0].resources.iter().any(|resource| {
-        resource.binding == shared_binding
+        resource.resource == shared_resource
             && resource.access == crate::egir::parallelize::schedule::ResourceAccess::Write
     }));
     assert!(phases[1]
         .resources
         .iter()
-        .any(|resource| resource.binding == shared_binding && resource.access.reads()));
-    assert!(phases[1].dependencies.contains(&0));
+        .any(|resource| resource.resource == shared_resource && resource.access.reads()));
+    assert!(phases[1].dependencies.contains(&phases[0].id));
     let second = crate::compile_thru_tlc(reduce_then_map)
         .expect("repeat TLC")
         .infer_input_slice_bounds()
@@ -666,7 +666,7 @@ entry e() [4]i32 =
             crate::SchedulePolicy::SingleStage,
         ))
         .expect("single-stage shared materialization");
-    let single_phases: Vec<_> = single.kernel_schedule.phases().collect();
+    let single_phases: Vec<_> = single.kernel_plan.phases().collect();
     assert_eq!(
         single_phases.len(),
         2,
@@ -729,7 +729,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         }
     }
     let first = allocated.lower_to_ssa(crate::LoweringProfile::PORTABLE).expect("terminal lowering");
-    let phases: Vec<_> = first.kernel_schedule.phases().collect();
+    let phases: Vec<_> = first.kernel_plan.phases().collect();
     assert!(phases.len() >= 2, "parallel reduction owns at least two phases");
     assert!(phases.iter().skip(1).any(|phase| !phase.dependencies.is_empty()));
     assert!(phases.iter().all(|phase| !phase.resources.is_empty()));
@@ -757,7 +757,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
             crate::SchedulePolicy::SingleStage,
         ))
         .expect("single-stage terminal lowering");
-    assert_eq!(lowered.kernel_schedule.phases().count(), 1);
+    assert_eq!(lowered.kernel_plan.phases().count(), 1);
     assert!(!lowered.ssa.entry_points.iter().any(|entry| entry.name.contains("phase2")));
 }
 
@@ -778,21 +778,21 @@ fn terminal_scan_helpers_are_complete_region_arena_members() {
         "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
     )
     .expect("TLC");
-    let mut allocated = tlc.infer_input_slice_bounds().to_egraph().expect("semantic EGIR");
-    crate::egir::target_lowering::schedule(
-        &mut allocated.inner,
-        &mut allocated.binding_ids,
+    let allocated = tlc.infer_input_slice_bounds().to_egraph().expect("semantic EGIR");
+    let mut binding_ids = allocated.binding_ids;
+    let physical = crate::egir::target_lowering::schedule(
+        allocated.inner,
+        &mut binding_ids,
         crate::LoweringProfile::PORTABLE,
     )
     .expect("terminal schedule");
-    let helper = allocated
-        .inner
+    let helper = physical
         .functions
         .iter()
         .find(|function| function.name.ends_with("_scan_op_swap"))
         .expect("scan swap helper");
-    let region = allocated.inner.region_interner.get(&helper.name).expect("helper region id");
-    assert!(allocated.inner.regions.contains_key(&region));
+    let region = physical.region_interner.get(&helper.name).expect("helper region id");
+    assert!(physical.regions.contains_key(&region));
 }
 
 /// Assert that a compute `reduce`-over-`map`-of-range `src` parallelizes and
@@ -9155,7 +9155,7 @@ entry cull(xs: []u32,
 "#;
     let converted = crate::compile_thru_ssa(src).expect("image-reading filter reaches SSA");
     let scan = converted
-        .kernel_schedule
+        .kernel_plan
         .phases()
         .find(|phase| phase.entry_point == "cull_filter_scan")
         .expect("scan phase scheduled");

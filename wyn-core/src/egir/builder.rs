@@ -1,4 +1,4 @@
-//! Programmatic `EgirEntry` synthesis API used by the EGIR-side
+//! Programmatic `SemanticEntry` synthesis API used by the EGIR-side
 //! parallelization phases that synthesize extra compute entries (phase
 //! 2 / phase 3 of the Screma transform).
 
@@ -13,11 +13,11 @@ use crate::ssa::types::{ConstantValue, ControlHeader, ExecutionModel};
 use crate::{interface, BindingRef};
 
 use super::graph_ops;
-use super::program::EgirEntry;
+use super::program::SemanticEntry;
 use super::types::{EGraph, EgirSoac, NodeId, SkeletonTerminator, SoacDestination};
 use crate::ssa::types::{EntryInput, EntryOutput};
 
-/// Build a synthesized `EgirEntry` programmatically. Mirrors the
+/// Build a synthesized `SemanticEntry` programmatically. Mirrors the
 /// primitive operations `from_tlc::Converter` exposes, but holds no
 /// TLC-side state.
 pub struct EntryBuilder {
@@ -292,10 +292,10 @@ impl EntryBuilder {
     }
 
     /// Finalize: set the entry block's terminator to `Return(None)` and
-    /// hand back an `EgirEntry`.
-    pub fn build(mut self) -> EgirEntry {
+    /// hand back an `SemanticEntry`.
+    pub fn build(mut self) -> SemanticEntry {
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Return(None);
-        EgirEntry::new(
+        SemanticEntry::new(
             self.origin,
             self.name,
             self.span,

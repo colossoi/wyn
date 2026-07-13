@@ -102,6 +102,9 @@ pub enum OpTag {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PureViewSource {
     Storage(BindingRef),
+    /// Target-independent storage identity used only by semantic EGIR. The
+    /// physicalizer must rewrite this to `Storage` before SSA/backend lowering.
+    Resource(crate::ResourceId),
     Inherited,
     /// Workgroup-shared array, `id`-th in the entry, of `count` elements.
     /// Unlike Storage there is no descriptor binding — the backend declares

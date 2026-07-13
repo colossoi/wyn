@@ -12,14 +12,14 @@ mod resource_erasure_tests;
 
 use crate::ast::TypeName;
 use crate::egir::from_tlc::ConvertError;
-use crate::egir::program::{EgirFunc, EgirInner};
+use crate::egir::program::{EgirFunc, PhysicalProgram};
 use crate::egir::types::{EGraph, ENode, PureOp, SideEffectKind, SkeletonTerminator};
 use crate::ssa::types::{InstKind, ValueRef};
 use crate::{LookupMap, LookupSet};
 use polytype::Type;
 use smallvec::SmallVec;
 
-pub fn run(inner: &mut EgirInner) -> Result<(), ConvertError> {
+pub fn run(inner: &mut PhysicalProgram) -> Result<(), ConvertError> {
     let erasures: LookupMap<String, Vec<bool>> = inner
         .functions
         .iter()

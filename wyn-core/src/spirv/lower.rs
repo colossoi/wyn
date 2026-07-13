@@ -497,6 +497,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                                 )
                             }
                         }
+                        crate::op::PureViewSource::Resource(resource) => bail_spirv_at!(
+                            self.blame_span(),
+                            "semantic resource {:?} reached SPIR-V lowering before physicalization",
+                            resource
+                        ),
                         crate::op::PureViewSource::Inherited => {
                             let parent =
                                 operands[2].as_ssa().expect("StorageView Inherited parent must be SSA");

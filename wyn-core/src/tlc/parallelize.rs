@@ -610,7 +610,7 @@ fn analyze_soac(
             // The EGIR-side reduce migration rediscovers concrete input
             // shapes from the entry body, just like Map. Accept whatever
             // `input` is; non-StorageBuffer cases get `Opaque` provenance
-            // and the EGIR pass walks the actual EgirEntry's StorageView
+            // and the EGIR pass walks the actual SemanticEntry's StorageView
             // node for set/binding extraction.
             SoacOp::Reduce {
                 op: op.clone(),
@@ -977,7 +977,7 @@ pub fn run(
         };
         let name = crate::symbol_name_or_bug(&program.symbols, def.name).to_string();
         // The entry's `previous`-view ping-pong pairs (recorded by
-        // `resolve_resources`) seed the pipeline here; `KernelSchedule`
+        // `resolve_resources`) seed the pipeline here; `KernelPlan`
         // carries them through scheduling into the published descriptor.
         let feedback: Vec<crate::pipeline_descriptor::FeedbackPair> = decl
             .feedback

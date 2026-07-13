@@ -12,8 +12,8 @@ use polytype::Type;
 
 use super::graph_ops;
 use super::program::{
-    buffer_len, CompilerResource, CompilerResourceKind, EgirInner, LogicalSize, SemanticDependencyKind,
-    SemanticOpId,
+    buffer_len, CompilerResource, CompilerResourceKind, LogicalSize, SemanticDependencyKind, SemanticOpId,
+    SemanticProgram,
 };
 use super::types::{
     EGraph, EgirSoac, NodeId, PureOp, SegExtent, SegOpKind, SegPlacement, SegResourceAccess,
@@ -37,7 +37,7 @@ struct InputReplacement {
     binding: BindingRef,
 }
 
-pub fn run(inner: &mut EgirInner, binding_ids: &mut IdSource<u32>) {
+pub fn run(inner: &mut SemanticProgram, binding_ids: &mut IdSource<u32>) {
     loop {
         super::semantic_graph::rebuild_dependencies(inner);
         let Some(candidate) = find_candidate(inner) else {
@@ -56,7 +56,7 @@ pub fn run(inner: &mut EgirInner, binding_ids: &mut IdSource<u32>) {
 /// shared logical resource.  Keep that promise executable: otherwise a newly
 /// introduced source shape can silently regress to one materialization per
 /// consumer.
-fn verify_no_unallocated_multi_consumer_maps(inner: &EgirInner) {
+fn verify_no_unallocated_multi_consumer_maps(inner: &SemanticProgram) {
     let mut consumers: HashMap<SemanticOpId, HashSet<SemanticOpId>> = HashMap::new();
     for dependency in &inner.semantic_dependencies {
         if dependency.kind == SemanticDependencyKind::Value {
@@ -105,7 +105,7 @@ fn verify_no_unallocated_multi_consumer_maps(inner: &EgirInner) {
     }
 }
 
-fn find_candidate(inner: &EgirInner) -> Option<Candidate> {
+fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
     let mut consumers: HashMap<SemanticOpId, HashSet<SemanticOpId>> = HashMap::new();
     for dependency in &inner.semantic_dependencies {
         if dependency.kind == SemanticDependencyKind::Value {
@@ -183,7 +183,11 @@ fn dependencies_are_cloneable(
     })
 }
 
-fn materialize_candidate(inner: &mut EgirInner, binding_ids: &mut IdSource<u32>, candidate: Candidate) {
+fn materialize_candidate(
+    inner: &mut SemanticProgram,
+    binding_ids: &mut IdSource<u32>,
+    candidate: Candidate,
+) {
     let entry = &inner.entry_points[candidate.entry];
     let producer_index = entry.graph.side_effect_index();
     let producer_site = producer_index.site(candidate.result).expect("multi-consumer producer disappeared");
@@ -211,15 +215,28 @@ fn materialize_candidate(inner: &mut EgirInner, binding_ids: &mut IdSource<u32>,
         sizes.push(size_for_space(space, elem_ty));
     }
 
-    let mut producer = entry.clone();
-    producer.origin = crate::interface::EntryOrigin::MultiConsumerMaterialization;
-    producer.name = fresh_entry_name(inner, &format!("{}_materialize_shared", entry.name));
-    producer.outputs.clear();
-    producer.output_routes.clear();
-    producer.return_ty = Type::Constructed(TypeName::Unit, vec![]);
-    producer.storage_bindings.retain(|declaration| {
-        declaration.role == StorageRole::Input || dependency_bindings.contains(&declaration.binding)
-    });
+    let producer_storage = entry
+        .storage_bindings
+        .iter()
+        .filter(|declaration| {
+            declaration.role == StorageRole::Input || dependency_bindings.contains(&declaration.binding)
+        })
+        .cloned()
+        .collect();
+    let mut producer = super::program::SemanticEntry::new(
+        crate::interface::EntryOrigin::MultiConsumerMaterialization,
+        fresh_entry_name(inner, &format!("{}_materialize_shared", entry.name)),
+        entry.span,
+        entry.execution_model.clone(),
+        entry.inputs.clone(),
+        Vec::new(),
+        producer_storage,
+        entry.params.clone(),
+        Type::Constructed(TypeName::Unit, vec![]),
+        entry.graph.clone(),
+        entry.control_headers.clone(),
+    );
+    producer.aliases = entry.aliases.clone();
     let producer_owner = SemanticOpId {
         scope: producer.name.clone(),
         result: candidate.result,
@@ -522,7 +539,7 @@ fn replace_space_nodes(space: &mut super::types::SegSpace, replacements: &[Input
     }
 }
 
-fn all_bindings(inner: &EgirInner) -> HashSet<BindingRef> {
+fn all_bindings(inner: &SemanticProgram) -> HashSet<BindingRef> {
     inner
         .entry_points
         .iter()
@@ -568,7 +585,7 @@ fn size_for_space(space: &super::types::SegSpace, elem_ty: &Type<TypeName>) -> L
     }
 }
 
-fn fresh_entry_name(inner: &EgirInner, base: &str) -> String {
+fn fresh_entry_name(inner: &SemanticProgram, base: &str) -> String {
     if inner.entry_points.iter().all(|entry| entry.name != base) {
         return base.to_string();
     }

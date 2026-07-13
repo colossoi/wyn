@@ -554,7 +554,7 @@ fn texture_and_sampler_params_surface_bindings() {
     );
 }
 
-/// Graphics entries must NOT derive `EgirEntry.return_ty` from
+/// Graphics entries must NOT derive `SemanticEntry.return_ty` from
 /// `def.ty`'s arrow-return position — that's the post-`normalize_outputs`
 /// shortcut for compute entries, and graphics entries don't go through
 /// `normalize_outputs`. The prior contract used `inner_body.ty`, which
@@ -609,7 +609,8 @@ entry vertex_main(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: 
         &mut binding_ids,
     )
     .expect("from_tlc::run on graphics entry must succeed");
-    let entry = egir.entry_points.iter().find(|e| e.name == "vertex_main").expect("vertex_main EgirEntry");
+    let entry =
+        egir.entry_points.iter().find(|e| e.name == "vertex_main").expect("vertex_main SemanticEntry");
 
     assert_eq!(
         entry.outputs.len(),

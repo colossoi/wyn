@@ -21,8 +21,8 @@ use crate::BindingRef;
 
 use super::graph_ops;
 use super::program::{
-    CompilerResource, CompilerResourceKind, EgirEntry, EgirFunc, EgirInner, EgirRegion, LogicalResource,
-    OutputWriter, RegionInterner, ResourceId, ResourceOrigin, SemanticOpId,
+    CompilerResource, CompilerResourceKind, EgirFunc, EgirRegion, LogicalResource, OutputWriter,
+    RegionInterner, ResourceId, ResourceOrigin, SemanticEntry, SemanticOpId, SemanticProgram,
 };
 use super::types::{
     EGraph, ENode, EgirSoac, FilterOutput, FilterPlan, FilterState, HistExecution, NodeId, PureOp,
@@ -43,7 +43,7 @@ pub(crate) const FILTER_SCAN_GROUPS: u32 = 4;
 
 /// Reify every reachable Screma as a semantic segmented op.
 /// This pass performs no scheduling and allocates no bindings.
-pub fn reify(inner: &mut EgirInner) {
+pub fn reify(inner: &mut SemanticProgram) {
     for entry in inner.entry_points.iter_mut() {
         reify_tail_soac(entry);
     }
@@ -124,19 +124,19 @@ fn reify_function_screma(function: &mut EgirFunc, block_id: BlockId, index: usiz
 /// Pointwise `SegMap`s remain for `soac_expand`; `SegRed`s become a chunked
 /// phase 1 plus a synthesized tree reduction; `SegScan`s become chunk scans,
 /// an exclusive scan of block sums, and offset-application phases.
-pub fn lower(inner: &mut EgirInner) {
-    use schedule::{KernelDomain, KernelSchedule};
+pub fn lower(inner: &mut SemanticProgram) {
+    use schedule::{KernelDomain, KernelPlan};
 
     // Borrow the region interner independently of the other `inner` fields so
     // synthesized phase kernels can intern their helper regions while the entry
     // points are mutated in place. Restored before returning.
     let mut regions = std::mem::take(&mut inner.region_interner);
-    let mut schedule = KernelSchedule::seed(&inner.pipeline, &inner.entry_points);
+    let mut schedule = KernelPlan::seed(&inner.pipeline, &inner.entry_points, &inner.resources);
     attach_materialization_prepasses(inner, &mut schedule);
     let (filter_phases, mut new_functions, mut new_regions) =
         lower_runtime_filters(inner, &mut schedule, &mut regions);
     inner.entry_points.extend(filter_phases);
-    let mut new_entries: Vec<EgirEntry> = Vec::new();
+    let mut new_entries: Vec<SemanticEntry> = Vec::new();
     // Snapshot ResourceId → physical binding (the manifest was built at
     // `allocate()`); the reduce/scan lowerings resolve their reserved scratch
     // through this instead of drawing fresh bindings.
@@ -154,8 +154,20 @@ pub fn lower(inner: &mut EgirInner) {
         match kind {
             SegOpKind::SegMap => {}
             SegOpKind::SegRed { .. } => {
-                let original = entry.clone();
-                if let Some(phases) = lower_reduce_entry(entry, &mut regions, &allocated_resources) {
+                let mut candidate = project_entry(
+                    entry,
+                    entry.origin,
+                    entry.name.clone(),
+                    entry.execution_model.clone(),
+                    entry.outputs.clone(),
+                    entry.output_routes.clone(),
+                    entry.storage_bindings.clone(),
+                    entry.return_ty.clone(),
+                );
+                if let Some(phases) = lower_reduce_entry(&mut candidate, &mut regions, &allocated_resources)
+                {
+                    *entry = candidate;
+                    schedule.update_kernel_from_entry(entry);
                     let mut predecessor = entry.name.clone();
                     for ph in &phases {
                         schedule.add_phase_after(
@@ -167,15 +179,25 @@ pub fn lower(inner: &mut EgirInner) {
                     }
                     new_entries.extend(phases);
                 } else {
-                    *entry = original;
                     restore_serial_seg(entry);
                 }
             }
             SegOpKind::SegScan { .. } => {
-                let original = entry.clone();
+                let mut candidate = project_entry(
+                    entry,
+                    entry.origin,
+                    entry.name.clone(),
+                    entry.execution_model.clone(),
+                    entry.outputs.clone(),
+                    entry.output_routes.clone(),
+                    entry.storage_bindings.clone(),
+                    entry.return_ty.clone(),
+                );
                 if let Some((phases, swap_wrapper)) =
-                    lower_scan_entry(entry, &mut regions, &allocated_resources)
+                    lower_scan_entry(&mut candidate, &mut regions, &allocated_resources)
                 {
+                    *entry = candidate;
+                    schedule.update_kernel_from_entry(entry);
                     let mut predecessor = entry.name.clone();
                     let phase1_domain =
                         schedule.domain_of(&entry.name).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
@@ -198,7 +220,6 @@ pub fn lower(inner: &mut EgirInner) {
                     new_regions.push((region, EgirRegion::from_function(&swap_wrapper)));
                     new_functions.push(swap_wrapper);
                 } else {
-                    *entry = original;
                     restore_serial_seg(entry);
                 }
             }
@@ -209,6 +230,7 @@ pub fn lower(inner: &mut EgirInner) {
                 restore_serial_seg(entry);
             }
         }
+        schedule.update_kernel_from_entry(entry);
     }
     inner.entry_points.extend(new_entries);
     inner.functions.extend(new_functions);
@@ -219,32 +241,44 @@ pub fn lower(inner: &mut EgirInner) {
     // Each distinct iteration space is its own kernel (Futhark: one SegOp per
     // SegSpace). An entry holding several pointwise SegMaps over different
     // domains is split into one entry — and one pipeline stage — per domain.
-    let EgirInner { entry_points, .. } = inner;
-    let mut split_clones: Vec<EgirEntry> = Vec::new();
+    let SemanticProgram { entry_points, .. } = inner;
+    let mut split_clones: Vec<SemanticEntry> = Vec::new();
     for entry in entry_points.iter_mut() {
         let parent = entry.name.clone();
-        let clones = split_multidomain_seg_maps(entry);
-        for clone in &clones {
+        let Some(split) = split_multidomain_seg_maps(entry) else {
+            continue;
+        };
+        if !split.entries.is_empty() {
+            schedule.update_kernel_from_entry(entry);
+        }
+        schedule.set_output_projection(
+            &parent,
+            split.primary_slots.iter().copied().map(super::program::OutputSlotId).collect(),
+        );
+        for projected in &split.entries {
             schedule.add_sibling(
                 &parent,
-                clone,
+                &projected.entry,
                 schedule::DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
             );
+            schedule.set_output_projection(
+                &projected.entry.name,
+                projected.semantic_slots.iter().copied().map(super::program::OutputSlotId).collect(),
+            );
         }
-        split_clones.extend(clones);
+        split_clones.extend(split.entries.into_iter().map(|projected| projected.entry));
     }
     entry_points.extend(split_clones);
-    schedule.reconcile_entries(entry_points);
     schedule.coalesce_compiler_dependencies(entry_points);
-    inner.kernel_schedule = schedule;
+    inner.kernel_plan = schedule;
     inner.region_interner = regions;
 }
 
 fn lower_runtime_filters(
-    inner: &mut EgirInner,
-    schedule: &mut schedule::KernelSchedule,
+    inner: &mut SemanticProgram,
+    schedule: &mut schedule::KernelPlan,
     regions: &mut RegionInterner,
-) -> (Vec<EgirEntry>, Vec<EgirFunc>, Vec<(RegionId, EgirRegion)>) {
+) -> (Vec<SemanticEntry>, Vec<EgirFunc>, Vec<(RegionId, EgirRegion)>) {
     use crate::interface::{StorageBindingDecl, StorageRole};
     use schedule::KernelDomain;
     let mut phases = Vec::new();
@@ -312,43 +346,48 @@ fn lower_runtime_filters(
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let storage_len = |binding| resource_lengths.get(&binding).cloned().flatten();
 
-        let mut flags = entry.clone();
-        flags.origin = crate::interface::EntryOrigin::RuntimeFilter;
-        flags.name = format!("{}_filter_flags", entry.name);
-        flags.outputs.clear();
-        flags.output_routes.clear();
-        flags.return_ty = Type::Constructed(TypeName::Unit, vec![]);
-        flags.storage_bindings.clear();
-        flags.storage_bindings.push(StorageBindingDecl {
-            binding: work.flags,
-            role: StorageRole::Output,
-            elem_ty: u32_ty.clone(),
-            length: storage_len(work.flags),
-        });
+        let mut flags = project_entry(
+            entry,
+            crate::interface::EntryOrigin::RuntimeFilter,
+            format!("{}_filter_flags", entry.name),
+            entry.execution_model.clone(),
+            Vec::new(),
+            Vec::new(),
+            vec![StorageBindingDecl {
+                binding: work.flags,
+                role: StorageRole::Output,
+                elem_ty: u32_ty.clone(),
+                length: storage_len(work.flags),
+            }],
+            Type::Constructed(TypeName::Unit, vec![]),
+        );
         set_filter_plan(&mut flags, FilterPlan::Flags(work));
 
-        let mut scan = entry.clone();
-        scan.origin = crate::interface::EntryOrigin::RuntimeFilter;
-        scan.name = format!("{}_filter_scan", entry.name);
-        scan.execution_model = crate::ssa::types::ExecutionModel::Compute {
-            local_size: (REDUCE_PHASE1_WIDTH, 1, 1),
-        };
-        scan.outputs.clear();
-        scan.output_routes.clear();
-        scan.return_ty = Type::Constructed(TypeName::Unit, vec![]);
-        scan.storage_bindings.clear();
-        for (binding, role) in [
+        let scan_storage = [
             (work.flags, StorageRole::Input),
             (work.offsets, StorageRole::Output),
             (work.block_sums, StorageRole::Output),
-        ] {
-            scan.storage_bindings.push(StorageBindingDecl {
-                binding,
-                role,
-                elem_ty: u32_ty.clone(),
-                length: storage_len(binding),
-            });
-        }
+        ]
+        .into_iter()
+        .map(|(binding, role)| StorageBindingDecl {
+            binding,
+            role,
+            elem_ty: u32_ty.clone(),
+            length: storage_len(binding),
+        })
+        .collect();
+        let mut scan = project_entry(
+            entry,
+            crate::interface::EntryOrigin::RuntimeFilter,
+            format!("{}_filter_scan", entry.name),
+            crate::ssa::types::ExecutionModel::Compute {
+                local_size: (REDUCE_PHASE1_WIDTH, 1, 1),
+            },
+            Vec::new(),
+            Vec::new(),
+            scan_storage,
+            Type::Constructed(TypeName::Unit, vec![]),
+        );
         let zero = graph_ops::intern_u32(&mut scan.graph, 0, None);
         set_filter_plan(&mut scan, FilterPlan::Scan(work));
 
@@ -403,6 +442,7 @@ fn lower_runtime_filters(
             length: storage_len(work.block_offsets),
         });
         set_filter_plan(entry, FilterPlan::Scatter(work));
+        schedule.update_kernel_from_entry(entry);
         schedule.add_phase_before(
             &entry.name,
             &flags,
@@ -435,7 +475,7 @@ fn lower_runtime_filters(
     (phases, functions, region_defs)
 }
 
-fn set_filter_plan(entry: &mut EgirEntry, plan: FilterPlan) {
+fn set_filter_plan(entry: &mut SemanticEntry, plan: FilterPlan) {
     for (_, block) in entry.graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
             if let SideEffectKind::Soac(EgirSoac::Filter { state, .. }) = &mut effect.kind {
@@ -448,6 +488,35 @@ fn set_filter_plan(entry: &mut EgirEntry, plan: FilterPlan) {
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_entry(
+    source: &SemanticEntry,
+    origin: crate::interface::EntryOrigin,
+    name: String,
+    execution_model: crate::ssa::types::ExecutionModel,
+    outputs: Vec<crate::ssa::types::EntryOutput>,
+    output_routes: Vec<super::program::OutputRoute>,
+    storage_bindings: Vec<crate::interface::StorageBindingDecl>,
+    return_ty: Type<TypeName>,
+) -> SemanticEntry {
+    let mut projected = SemanticEntry::new(
+        origin,
+        name,
+        source.span,
+        execution_model,
+        source.inputs.clone(),
+        outputs,
+        storage_bindings,
+        source.params.clone(),
+        return_ty,
+        source.graph.clone(),
+        source.control_headers.clone(),
+    );
+    projected.aliases = source.aliases.clone();
+    projected.output_routes = output_routes;
+    projected
 }
 
 fn filter_work_buffers(
@@ -502,7 +571,10 @@ fn owned_resource_bindings(
 /// source pipeline. Used by single-stage lowering after SegOps have been
 /// restored to serial Scremas; the parallel lowering performs the equivalent
 /// attachment before selecting reduce/scan phases.
-pub(crate) fn attach_materialization_prepasses(inner: &EgirInner, schedule: &mut schedule::KernelSchedule) {
+pub(crate) fn attach_materialization_prepasses(
+    inner: &SemanticProgram,
+    schedule: &mut schedule::KernelPlan,
+) {
     use schedule::KernelDomain;
     // Insert one ready producer at a time. Repeating is important when a
     // materialized producer itself depends on another compiler prepass: once
@@ -543,7 +615,7 @@ pub(crate) fn attach_materialization_prepasses(inner: &EgirInner, schedule: &mut
 /// established by output realization. A pointwise map writes one slot; a fused
 /// equal-domain multi-lane map writes several (one per lane). Empty means the
 /// effect has no declared output ownership.
-fn side_effect_output_slots(entry: &EgirEntry, se: &SideEffect) -> Vec<usize> {
+fn side_effect_output_slots(entry: &SemanticEntry, se: &SideEffect) -> Vec<usize> {
     if let SideEffectKind::Soac(EgirSoac::Seg { output_slots, .. }) = &se.kind {
         return output_slots.clone();
     }
@@ -611,7 +683,7 @@ fn is_write_effectful(se: &SideEffect) -> bool {
 /// `outputs` to that group's slots. Dropped kernels are no longer emitted; their
 /// now-dead pure nodes are pruned downstream.
 fn restrict_to_group(
-    entry: &mut EgirEntry,
+    entry: &mut SemanticEntry,
     keep_group: usize,
     keep_slots: &[usize],
     group_of: &LookupMap<(BlockId, usize), usize>,
@@ -645,7 +717,7 @@ fn restrict_to_group(
 /// fixpoint so a chain of producers (a map feeding a map feeding a dropped
 /// scatter) collapses fully; write-effects and producers still feeding a kept
 /// effect or an output are retained.
-fn prune_dead_side_effects(entry: &mut EgirEntry) {
+fn prune_dead_side_effects(entry: &mut SemanticEntry) {
     loop {
         // Live = every node reachable from a side-effect operand or a terminator.
         let mut roots: Vec<NodeId> = Vec::new();
@@ -699,10 +771,20 @@ fn prune_dead_side_effects(entry: &mut EgirEntry) {
 /// keeps the entry's name, the rest become `{name}_dispatch_{slot}`. Only fires
 /// when at least two groups contain a parallel `SegMap`, so a single map
 /// alongside fixed slots stays one sharding kernel. Returns the new clones.
-fn split_multidomain_seg_maps(entry: &mut EgirEntry) -> Vec<EgirEntry> {
+struct SplitEntry {
+    entry: SemanticEntry,
+    semantic_slots: Vec<usize>,
+}
+
+struct EntrySplit {
+    primary_slots: Vec<usize>,
+    entries: Vec<SplitEntry>,
+}
+
+fn split_multidomain_seg_maps(entry: &mut SemanticEntry) -> Option<EntrySplit> {
     let n_out = entry.outputs.len();
     if n_out <= 1 {
-        return Vec::new();
+        return None;
     }
 
     // Union-find over output slots: union the slots co-written by any single
@@ -755,7 +837,7 @@ fn split_multidomain_seg_maps(entry: &mut EgirEntry) -> Vec<EgirEntry> {
         }
     }
     if parallel_groups.len() < 2 {
-        return Vec::new();
+        return None;
     }
 
     // Order groups by their lowest slot; the first keeps the entry's name.
@@ -786,22 +868,35 @@ fn split_multidomain_seg_maps(entry: &mut EgirEntry) -> Vec<EgirEntry> {
     let base_name = entry.name.clone();
     let mut clones = Vec::new();
     for (root, slots) in &groups[1..] {
-        let mut clone = entry.clone();
-        clone.origin = crate::interface::EntryOrigin::OutputDomainSplit;
-        clone.name = format!("{base_name}_dispatch_{}", slots[0]);
-        restrict_to_group(&mut clone, *root, slots, &group_of);
-        prune_dead_side_effects(&mut clone);
-        clones.push(clone);
+        let mut projected = project_entry(
+            entry,
+            crate::interface::EntryOrigin::OutputDomainSplit,
+            format!("{base_name}_dispatch_{}", slots[0]),
+            entry.execution_model.clone(),
+            entry.outputs.clone(),
+            entry.output_routes.clone(),
+            entry.storage_bindings.clone(),
+            entry.return_ty.clone(),
+        );
+        restrict_to_group(&mut projected, *root, slots, &group_of);
+        prune_dead_side_effects(&mut projected);
+        clones.push(SplitEntry {
+            entry: projected,
+            semantic_slots: slots.clone(),
+        });
     }
 
     // The original retains the group owning the lowest slot under its own name.
     let (root0, slots0) = &groups[0];
     restrict_to_group(entry, *root0, slots0, &group_of);
     prune_dead_side_effects(entry);
-    clones
+    Some(EntrySplit {
+        primary_slots: slots0.clone(),
+        entries: clones,
+    })
 }
 
-fn reify_tail_soac(entry: &mut EgirEntry) {
+fn reify_tail_soac(entry: &mut SemanticEntry) {
     // A multi-output entry returning a tuple of sibling maps over distinct
     // domains carries one Screma side-effect per output (TLC fusion already
     // merged equal-domain siblings into a single multi-lane Screma). Reify each
@@ -883,7 +978,7 @@ fn reify_tail_soac(entry: &mut EgirEntry) {
     reify_entry_filter_spaces(entry);
 }
 
-fn reify_entry_filter_spaces(entry: &mut EgirEntry) {
+fn reify_entry_filter_spaces(entry: &mut SemanticEntry) {
     let locations: Vec<(BlockId, usize)> = entry
         .graph
         .skeleton
@@ -964,7 +1059,7 @@ fn reify_function_filter_spaces(function: &mut EgirFunc) {
 /// result is not consumed by any SOAC (it routes to an entry output via the
 /// terminator or an output `Store`) is an output root and may reify into its
 /// own kernel.
-fn soac_consumed_nodes(entry: &EgirEntry) -> std::collections::HashSet<NodeId> {
+fn soac_consumed_nodes(entry: &SemanticEntry) -> std::collections::HashSet<NodeId> {
     let mut roots: Vec<NodeId> = Vec::new();
     for (_, block) in &entry.graph.skeleton.blocks {
         for se in &block.side_effects {
@@ -980,7 +1075,7 @@ fn soac_consumed_nodes(entry: &EgirEntry) -> std::collections::HashSet<NodeId> {
     })
 }
 
-fn reify_one_screma(entry: &mut EgirEntry, block_id: BlockId, idx: usize, placement: SegPlacement) {
+fn reify_one_screma(entry: &mut SemanticEntry, block_id: BlockId, idx: usize, placement: SegPlacement) {
     let se = entry.graph.skeleton.blocks[block_id].side_effects[idx].clone();
     let SideEffectKind::Soac(EgirSoac::Screma {
         map_bodies,
@@ -1081,7 +1176,7 @@ fn reify_seg_kind(accumulators: &[ScremaOperator], neutrals: &[NodeId], input_co
 }
 
 fn semantic_space(
-    entry: &EgirEntry,
+    entry: &SemanticEntry,
     se: &SideEffect,
     input_array_types: &[Type<TypeName>],
     input_elem_types: &[Type<TypeName>],
@@ -1151,7 +1246,7 @@ fn semantic_space_for_graph(
     }
 }
 
-fn extent_from_node(entry: &EgirEntry, node: NodeId) -> SegExtent {
+fn extent_from_node(entry: &SemanticEntry, node: NodeId) -> SegExtent {
     match &entry.graph.nodes[node] {
         ENode::Pure {
             op: PureOp::Int(value) | PureOp::Uint(value),
@@ -1173,7 +1268,7 @@ fn extent_from_node(entry: &EgirEntry, node: NodeId) -> SegExtent {
 /// The reads reachable from `se`'s operands, upgraded where `output_slots`
 /// routes a written buffer through the same binding.
 fn semantic_resources(
-    entry: &EgirEntry,
+    entry: &SemanticEntry,
     se: &SideEffect,
     output_slots: &[usize],
 ) -> Vec<SegResourceAccess> {
@@ -1197,7 +1292,7 @@ fn semantic_resources(
     result
 }
 
-fn reify_parallel_scatter(entry: &mut EgirEntry) {
+fn reify_parallel_scatter(entry: &mut SemanticEntry) {
     let location = entry.graph.skeleton.blocks.iter().find_map(|(block_id, block)| {
         block
             .side_effects
@@ -1779,7 +1874,7 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
         Type<TypeName>,
         Option<crate::pipeline_descriptor::BufferLen>,
     )],
-) -> Result<EgirEntry, String> {
+) -> Result<SemanticEntry, String> {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(
         crate::interface::EntryOrigin::ReducePhase2,
@@ -1809,7 +1904,7 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
     Ok(b.build())
 }
 
-fn find_pending_seg(entry: &EgirEntry) -> Option<(BlockId, usize)> {
+fn find_pending_seg(entry: &SemanticEntry) -> Option<(BlockId, usize)> {
     for (bid, block) in &entry.graph.skeleton.blocks {
         for (i, se) in block.side_effects.iter().enumerate() {
             if matches!(&se.kind, SideEffectKind::Soac(EgirSoac::Seg { .. })) {
@@ -1820,7 +1915,7 @@ fn find_pending_seg(entry: &EgirEntry) -> Option<(BlockId, usize)> {
     None
 }
 
-fn find_pending_kernel_seg(entry: &EgirEntry) -> Option<(BlockId, usize)> {
+fn find_pending_kernel_seg(entry: &SemanticEntry) -> Option<(BlockId, usize)> {
     for (bid, block) in &entry.graph.skeleton.blocks {
         for (i, se) in block.side_effects.iter().enumerate() {
             if matches!(
@@ -1837,14 +1932,14 @@ fn find_pending_kernel_seg(entry: &EgirEntry) -> Option<(BlockId, usize)> {
     None
 }
 
-fn restore_serial_seg(entry: &mut EgirEntry) {
+fn restore_serial_seg(entry: &mut SemanticEntry) {
     let Some((block_id, idx)) = find_pending_kernel_seg(entry) else {
         return;
     };
     restore_serial_seg_at(entry, block_id, idx);
 }
 
-fn restore_serial_seg_at(entry: &mut EgirEntry, block_id: BlockId, idx: usize) {
+fn restore_serial_seg_at(entry: &mut SemanticEntry, block_id: BlockId, idx: usize) {
     restore_serial_seg_in_graph(&mut entry.graph, block_id, idx);
 }
 
@@ -1894,7 +1989,7 @@ fn restore_serial_seg_in_graph(graph: &mut EGraph, block_id: BlockId, idx: usize
 /// Convert every semantic SegOp back to its local serial SOAC form. This is
 /// used only by the terminal single-stage lowering policy; segmentation itself
 /// is target-independent and therefore still happens in single-stage builds.
-pub fn restore_all_serial(inner: &mut EgirInner) {
+pub fn restore_all_serial(inner: &mut SemanticProgram) {
     for entry in &mut inner.entry_points {
         while let Some((block_id, idx)) = find_pending_seg(entry) {
             restore_serial_seg_at(entry, block_id, idx);
@@ -1916,7 +2011,7 @@ pub fn restore_all_serial(inner: &mut EgirInner) {
     }
 }
 
-pub(crate) fn finalize_scheduled_states(inner: &mut EgirInner) {
+pub(crate) fn finalize_scheduled_states(inner: &mut SemanticProgram) {
     let finish_graph = |graph: &mut EGraph| {
         for (_, block) in graph.skeleton.blocks.iter_mut() {
             for effect in &mut block.side_effects {
@@ -1947,7 +2042,7 @@ pub(crate) fn finalize_scheduled_states(inner: &mut EgirInner) {
     }
 }
 
-fn restore_lane_local(inner: &mut EgirInner) {
+fn restore_lane_local(inner: &mut SemanticProgram) {
     for entry in &mut inner.entry_points {
         loop {
             let location = entry.graph.skeleton.blocks.iter().find_map(|(block_id, block)| {
@@ -2077,9 +2172,9 @@ fn seg_scratch_specs(
 /// Reserve a logical resource for every parallel SegRed/SegScan's scratch,
 /// drawing fresh bindings and recording each `ResourceId` on the owning Seg op.
 /// `first_id` is the next free `ResourceId` after the host resources. Terminal
-/// lowering later resolves these to the same bindings via `EgirInner::binding_of`.
+/// lowering later resolves these to the same bindings via `SemanticProgram::binding_of`.
 pub fn enumerate_seg_scratch(
-    inner: &mut EgirInner,
+    inner: &mut SemanticProgram,
     binding_ids: &mut crate::IdSource<u32>,
     first_id: u32,
 ) -> Vec<LogicalResource> {
@@ -2140,10 +2235,10 @@ pub fn enumerate_seg_scratch(
 }
 
 fn lower_reduce_entry(
-    entry: &mut EgirEntry,
+    entry: &mut SemanticEntry,
     regions: &mut RegionInterner,
     resources: &[LogicalResource],
-) -> Option<Vec<EgirEntry>> {
+) -> Option<Vec<SemanticEntry>> {
     let total_threads = REDUCE_PHASE1_WIDTH;
 
     // 2. Locate the semantic SegRed and pull its metadata.
@@ -2443,10 +2538,10 @@ fn lower_reduce_entry(
 /// phase-2 and phase-3 entries plus the swap-wrapper function, or `None` for an
 /// unsupported shape (captures, multiple inputs/accumulators).
 fn lower_scan_entry(
-    entry: &mut EgirEntry,
+    entry: &mut SemanticEntry,
     regions: &mut RegionInterner,
     resources: &[LogicalResource],
-) -> Option<(Vec<EgirEntry>, EgirFunc)> {
+) -> Option<(Vec<SemanticEntry>, EgirFunc)> {
     let total_threads = REDUCE_PHASE1_WIDTH;
 
     let (block_id, idx) = find_pending_kernel_seg(entry)?;
@@ -2723,7 +2818,7 @@ pub fn synthesize_phase2_scan(
     block_sums_binding: BindingRef,
     block_offsets_binding: BindingRef,
     len_out: Option<BindingRef>,
-) -> Result<EgirEntry, String> {
+) -> Result<SemanticEntry, String> {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(
         crate::interface::EntryOrigin::ScanPhase2,
@@ -2902,7 +2997,7 @@ pub fn synthesize_phase3_scan(
     output_binding: BindingRef,
     block_offsets_binding: BindingRef,
     total_threads: u32,
-) -> EgirEntry {
+) -> SemanticEntry {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(
         crate::interface::EntryOrigin::ScanPhase3,

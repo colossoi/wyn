@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use super::space::seg_space_fusable;
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
-use crate::egir::program::{EgirInner, SemanticOpId};
+use crate::egir::program::{SemanticOpId, SemanticProgram};
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::types::{
     reify_seg_kind_operators, EGraph, EgirSoac, NodeId, PureOp, SegBody, SegOpKind, SegPlacement,
@@ -22,7 +22,7 @@ use crate::ssa::framework::BlockId;
 
 /// Find one legal sibling pair anywhere in the program and fuse it. Returns
 /// whether a fusion happened.
-pub fn fuse_sibling_seg_ops(inner: &mut EgirInner, oracle: &SemanticGraph) -> bool {
+pub fn fuse_sibling_seg_ops(inner: &mut SemanticProgram, oracle: &SemanticGraph) -> bool {
     for idx in 0..inner.entry_points.len() {
         let scope = inner.entry_points[idx].name.clone();
         if fuse_in_graph(&mut inner.entry_points[idx].graph, &scope, oracle) {

@@ -12,7 +12,7 @@ use smallvec::smallvec;
 
 use super::space::seg_space_fusable;
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{EgirFunc, EgirInner, SemanticOpId};
+use crate::egir::program::{EgirFunc, SemanticOpId, SemanticProgram};
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::types::{
     EGraph, ENode, EgirSoac, NodeId, PureOp, SegBinOp, SegBody, SegOpKind, SegResourceAccess,
@@ -37,7 +37,7 @@ struct Candidate {
     producer_output: usize,
 }
 
-pub fn fuse_producer_into_consumer(inner: &mut EgirInner, oracle: &SemanticGraph) -> bool {
+pub fn fuse_producer_into_consumer(inner: &mut SemanticProgram, oracle: &SemanticGraph) -> bool {
     let candidate = find_candidate(inner, oracle);
     let Some(candidate) = candidate else {
         return false;
@@ -46,7 +46,7 @@ pub fn fuse_producer_into_consumer(inner: &mut EgirInner, oracle: &SemanticGraph
     true
 }
 
-fn find_candidate(inner: &EgirInner, oracle: &SemanticGraph) -> Option<Candidate> {
+fn find_candidate(inner: &SemanticProgram, oracle: &SemanticGraph) -> Option<Candidate> {
     for (index, entry) in inner.entry_points.iter().enumerate() {
         if let Some(candidate) = find_in_graph(&entry.graph, &entry.name, FusionSite::Entry(index), oracle)
         {
@@ -270,7 +270,7 @@ struct ProducerParts {
     resources: Vec<SegResourceAccess>,
 }
 
-fn apply_fusion(inner: &mut EgirInner, candidate: Candidate) {
+fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
     let (graph, span, scope) = graph_and_span(inner, candidate.site);
     let outer_types = graph.types.clone();
     let producer_effect = graph.skeleton.blocks[candidate.block].side_effects[candidate.producer].clone();
@@ -441,7 +441,7 @@ fn apply_fusion(inner: &mut EgirInner, candidate: Candidate) {
     block.side_effects.remove(candidate.producer);
 }
 
-fn graph_and_span(inner: &EgirInner, site: FusionSite) -> (&EGraph, Span, String) {
+fn graph_and_span(inner: &SemanticProgram, site: FusionSite) -> (&EGraph, Span, String) {
     match site {
         FusionSite::Entry(index) => {
             let entry = &inner.entry_points[index];
@@ -454,7 +454,7 @@ fn graph_and_span(inner: &EgirInner, site: FusionSite) -> (&EGraph, Span, String
     }
 }
 
-fn graph_mut(inner: &mut EgirInner, site: FusionSite) -> &mut EGraph {
+fn graph_mut(inner: &mut SemanticProgram, site: FusionSite) -> &mut EGraph {
     match site {
         FusionSite::Entry(index) => &mut inner.entry_points[index].graph,
         FusionSite::Function(index) => &mut inner.functions[index].graph,
@@ -472,7 +472,7 @@ fn new_kind_operators_mut(kind: &mut SegOpKind) -> &mut [SegBinOp] {
 
 #[allow(clippy::too_many_arguments)]
 fn compose_map_region(
-    inner: &mut EgirInner,
+    inner: &mut SemanticProgram,
     scope: &str,
     span: Span,
     lane: usize,
@@ -564,7 +564,7 @@ fn compose_map_region(
 
 #[allow(clippy::too_many_arguments)]
 fn compose_step_region(
-    inner: &mut EgirInner,
+    inner: &mut SemanticProgram,
     scope: &str,
     span: Span,
     operator_index: usize,
@@ -667,7 +667,7 @@ fn capture_types<'a>(
         .collect()
 }
 
-fn fresh_region_name(inner: &EgirInner, base: &str) -> String {
+fn fresh_region_name(inner: &SemanticProgram, base: &str) -> String {
     if inner.region_interner.get(base).is_none() {
         return base.to_string();
     }
@@ -701,7 +701,7 @@ fn merge_resources(a: &[SegResourceAccess], b: &[SegResourceAccess]) -> Vec<SegR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::egir::program::{EgirEntry, RegionInterner};
+    use crate::egir::program::{RegionInterner, SemanticEntry};
     use crate::egir::semantic_exec::{RegionExecutor, Value};
     use crate::egir::types::{EffectToken, SegExtent, SegLevel, SegPlacement, SideEffect};
     use crate::ssa::types::ExecutionModel;
@@ -821,7 +821,7 @@ mod tests {
             array.clone(),
         );
         graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(output));
-        let entry = EgirEntry::new(
+        let entry = SemanticEntry::new(
             crate::interface::EntryOrigin::Source,
             "entry".into(),
             Span::new(0, 0, 0, 0),
@@ -836,7 +836,7 @@ mod tests {
             graph,
             LookupMap::new(),
         );
-        let mut inner = EgirInner::new(
+        let mut inner = SemanticProgram::new(
             vec![producer_fn, consumer_fn],
             vec![],
             vec![entry],

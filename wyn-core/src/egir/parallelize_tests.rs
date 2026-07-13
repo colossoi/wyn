@@ -50,7 +50,7 @@ fn output_ownership_comes_from_explicit_route_writer() {
         effects: Some((EffectToken(8), writer)),
         span: None,
     });
-    let mut entry = EgirEntry::new(
+    let mut entry = SemanticEntry::new(
         crate::interface::EntryOrigin::Source,
         "route_test".into(),
         Span::dummy(),

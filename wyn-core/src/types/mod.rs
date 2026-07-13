@@ -1381,7 +1381,7 @@ pub fn array_size(ty: &Type) -> Option<&Type> {
 /// by `lift_gathers` to recover the entry's declared output type after
 /// `normalize_outputs` makes `def.body.ty == Unit`, and by
 /// `egir::from_tlc` to wire each entry param's type into the
-/// `EgirEntry`.
+/// `SemanticEntry`.
 pub fn extract_function_signature(ty: &Type) -> (Vec<Type>, Type) {
     let mut params = Vec::new();
     let mut current = ty.clone();

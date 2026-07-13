@@ -34,7 +34,7 @@ use ExecutionModel as _;
 
 use super::from_tlc::ConvertError;
 use super::graph_ops;
-use super::program::{EgirEntry, EgirInner, OutputRoute, OutputSlotId, OutputWriter, SlotSource};
+use super::program::{OutputRoute, OutputSlotId, OutputWriter, SemanticEntry, SemanticProgram, SlotSource};
 use super::types::{NodeId, SkeletonTerminator};
 
 pub mod dispatch;
@@ -43,7 +43,7 @@ pub mod verify;
 
 /// Realize every entry's outputs into side-effect stores. After this
 /// pass, `verify::check` confirms the invariant.
-pub fn run(inner: &mut EgirInner) -> Result<(), ConvertError> {
+pub fn run(inner: &mut SemanticProgram) -> Result<(), ConvertError> {
     for entry in inner.entry_points.iter_mut() {
         realize_entry(entry)?;
     }
@@ -57,7 +57,7 @@ pub fn run(inner: &mut EgirInner) -> Result<(), ConvertError> {
     Ok(())
 }
 
-fn realize_entry(entry: &mut EgirEntry) -> Result<(), ConvertError> {
+fn realize_entry(entry: &mut SemanticEntry) -> Result<(), ConvertError> {
     if entry.outputs.is_empty() {
         return Ok(());
     }
@@ -79,8 +79,8 @@ fn realize_entry(entry: &mut EgirEntry) -> Result<(), ConvertError> {
 /// declared output's `SlotSource`s independently lower to a DPS write
 /// into the shared `OutputView`. Multi-source slots (`If`-forks etc.)
 /// share one view; runtime CFG picks which source's write fires.
-fn realize_compute_slots(entry: &mut EgirEntry) -> Result<(), ConvertError> {
-    let EgirEntry {
+fn realize_compute_slots(entry: &mut SemanticEntry) -> Result<(), ConvertError> {
+    let SemanticEntry {
         graph,
         outputs,
         aliases,
@@ -155,9 +155,9 @@ fn realize_compute_slots(entry: &mut EgirEntry) -> Result<(), ConvertError> {
 ///     prepasses from `lift_gathers`, phase intermediates from
 ///     `parallelize`, etc.) — outputs are storage-buffer-bound; the
 ///     SOAC at the tail may need retargeting via `compute_slot_source`.
-fn realize_legacy_return(entry: &mut EgirEntry) -> Result<(), ConvertError> {
+fn realize_legacy_return(entry: &mut SemanticEntry) -> Result<(), ConvertError> {
     let is_compute = matches!(entry.execution_model, ExecutionModel::Compute { .. });
-    let EgirEntry {
+    let SemanticEntry {
         graph,
         outputs,
         aliases,

@@ -17,13 +17,13 @@
 //!
 //! Why an extension trait: `PipelineDescriptor` lives in the
 //! `wyn-pipeline-descriptor` crate (shared with host runtimes), so
-//! it can't grow `EgirEntry`-aware methods directly. Rust's orphan
+//! it can't grow `SemanticEntry`-aware methods directly. Rust's orphan
 //! rule blocks a regular `impl` block here too. A trait owned by
 //! `wyn-core` is the standard workaround.
 
 use crate::{BindingRef, LookupMap, LookupSet};
 
-use crate::egir::program::EgirEntry;
+use crate::egir::program::SemanticEntry;
 use crate::pipeline_descriptor::{
     Access, BackingRef, Binding, BufferUsage, FragmentOutput, Pipeline, PipelineDescriptor,
     SamplerBindingType, TextureSampleType, TextureViewDimension, VertexAttribute,
@@ -37,12 +37,12 @@ pub trait PipelineDescriptorPublish {
     /// `EntryInput`s, `EntryOutput`s, and `storage_bindings` (gather
     /// intermediates). Bindings already present (e.g. those a
     /// `MultiCompute` parallelization path pre-populated) are skipped.
-    fn publish_implicit_bindings(&mut self, entries: &[EgirEntry]) -> Result<(), String>;
+    fn publish_implicit_bindings(&mut self, entries: &[SemanticEntry]) -> Result<(), String>;
 
     /// Populate `vertex_inputs` and `fragment_outputs` on graphics
     /// pipelines from a vertex entry's `#[vertex_slot(n)]` inputs and a
     /// fragment entry's `#[target(name)]` outputs.
-    fn publish_graphics_io(&mut self, entries: &[EgirEntry]);
+    fn publish_graphics_io(&mut self, entries: &[SemanticEntry]);
 
     /// Workgroup size the parallelizer chose for the compute entry
     /// `entry_name`, or `(64, 1, 1)` when the entry isn't in the
@@ -60,7 +60,7 @@ pub trait PipelineDescriptorPublish {
 }
 
 impl PipelineDescriptorPublish for PipelineDescriptor {
-    fn publish_implicit_bindings(&mut self, entries: &[EgirEntry]) -> Result<(), String> {
+    fn publish_implicit_bindings(&mut self, entries: &[SemanticEntry]) -> Result<(), String> {
         // SPIR-V `NonWritable` is a module-level decoration on
         // `OpVariable`, not per-entry-point. The SPIR-V backend (see
         // `spirv/mod.rs` `written_bindings`) only emits `NonWritable`
@@ -331,7 +331,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
         Ok(())
     }
 
-    fn publish_graphics_io(&mut self, entries: &[EgirEntry]) {
+    fn publish_graphics_io(&mut self, entries: &[SemanticEntry]) {
         for entry in entries {
             match entry.execution_model {
                 ExecutionModel::Vertex => publish_vertex_inputs(self, entry),
@@ -492,7 +492,7 @@ fn binding_shape(binding: &Binding) -> Option<DescriptorShape> {
 /// the input's type. The type checker guarantees every such input has a
 /// valid vertex format, so `vertex_format` returning `None` here is a
 /// compiler bug.
-fn publish_vertex_inputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry) {
+fn publish_vertex_inputs(pipeline: &mut PipelineDescriptor, entry: &SemanticEntry) {
     let vertex_inputs = match pipeline.pipelines.iter_mut().find(|p| match p {
         Pipeline::Graphics(gp) => gp.stages.iter().any(|s| s.entry_point == entry.name),
         _ => false,
@@ -521,7 +521,7 @@ fn publish_vertex_inputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry) {
 /// fragment entry from its `#[target(name)]` outputs. Each targeted output
 /// becomes a `FragmentOutput` naming the render-target resource, with the
 /// color-attachment slot taken from the output's position in the return tuple.
-fn publish_fragment_outputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry) {
+fn publish_fragment_outputs(pipeline: &mut PipelineDescriptor, entry: &SemanticEntry) {
     let fragment_outputs = match pipeline.pipelines.iter_mut().find(|p| match p {
         Pipeline::Graphics(gp) => gp.stages.iter().any(|s| s.entry_point == entry.name),
         _ => false,

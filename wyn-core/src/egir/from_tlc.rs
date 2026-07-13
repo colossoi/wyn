@@ -28,7 +28,7 @@ use crate::{interface, BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
-use super::program::{EgirEntry, EgirFunc, EgirInner};
+use super::program::{EgirFunc, SemanticEntry, SemanticProgram};
 use super::publish::PipelineDescriptorPublish;
 use super::types::*;
 use crate::pipeline_descriptor::{BufferLen, PipelineDescriptor};
@@ -138,13 +138,13 @@ pub fn run(
     pipeline: PipelineDescriptor,
     input_slice_bounds: &crate::tlc::input_slice_bounds::ProgramBounds,
     binding_ids: &mut crate::IdSource<u32>,
-) -> Result<EgirInner, ConvertError> {
+) -> Result<SemanticProgram, ConvertError> {
     let top_level: LookupMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
 
     let constants_by_name = program.value_defs_by_name();
 
-    // Region interner shared by every converter, then handed to `EgirInner` so
+    // Region interner shared by every converter, then handed to `SemanticProgram` so
     // the function arena keys agree with the SegBody indices built here.
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
 
@@ -187,7 +187,7 @@ pub fn run(
     // Phase 2: convert functions and entry points into raw EGIR records.
     let mut functions: Vec<EgirFunc> = Vec::new();
     let mut externs: Vec<Function> = Vec::new();
-    let mut entry_points: Vec<EgirEntry> = Vec::new();
+    let mut entry_points: Vec<SemanticEntry> = Vec::new();
 
     for def in &program.defs {
         match &def.meta {
@@ -242,7 +242,7 @@ pub fn run(
 
     // Converters are done borrowing the interner; reclaim it for the arena.
     drop(ctx);
-    Ok(EgirInner::new(
+    Ok(SemanticProgram::new(
         functions,
         externs,
         entry_points,
@@ -306,7 +306,7 @@ fn convert_function<'a>(
     converter.set_return(Some(result));
 
     // A runtime `filter` compacts into a reserved scratch storage buffer, which
-    // only an `EgirEntry` can host (it owns a descriptor set + a binding
+    // only an `SemanticEntry` can host (it owns a descriptor set + a binding
     // namespace seeded above its params/outputs). An `EgirFunc` has neither, so
     // a scratch binding accumulated during a function body's conversion has
     // nowhere to be declared or sized — emitting it would silently mis-number
@@ -360,7 +360,7 @@ fn convert_entry_point(
     forced_output_binding: Option<BindingRef>,
     input_slice_bounds_for_entry: Option<&LookupMap<SymbolId, BufferLen>>,
     binding_ids: &mut crate::IdSource<u32>,
-) -> Result<EgirEntry, ConvertError> {
+) -> Result<SemanticEntry, ConvertError> {
     use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration, PushConstantSlot};
 
     let symbols = ctx.symbols;
@@ -572,7 +572,7 @@ fn convert_entry_point(
     // Slot-collected entries (post-`normalize_outputs`) have their
     // writes recorded as per-slot `SlotSource`s rather than flowing
     // through a single Return value. `egir::realize_outputs` reads
-    // those sources directly off `EgirEntry.output_routes` and
+    // those sources directly off `SemanticEntry.output_routes` and
     // retargets each one. The body terminates with `Return(None)` —
     // there's no value to merge through the CFG.
     let was_slot_collected = !converter.slot_sources_accum.is_empty();
@@ -613,7 +613,7 @@ fn convert_entry_point(
     storage_bindings.extend(std::mem::take(&mut converter.extra_storage_bindings));
     let (graph, control_headers) = converter.into_graph_parts();
     let output_count = outputs.len();
-    let mut entry = EgirEntry::new(
+    let mut entry = SemanticEntry::new(
         entry.origin,
         def_name.to_string(),
         def.body.span,
@@ -680,7 +680,7 @@ struct Converter<'a, 'b> {
     /// from `OutputSlotStore` terms during entry-body conversion. Indexed
     /// by slot index. Populated by `convert_slot_store` (the
     /// `OutputSlotStore` arm of `convert_term_kind` delegates here);
-    /// consumed by `convert_entry_point` to populate `EgirEntry.output_routes`
+    /// consumed by `convert_entry_point` to populate `SemanticEntry.output_routes`
     /// and decide whether the body terminates with `Return(None)` (when
     /// all outputs were written via slot stores) or a value (legacy
     /// non-normalized entries).
@@ -698,7 +698,7 @@ struct Converter<'a, 'b> {
     binding_ids: &'b mut crate::IdSource<u32>,
     /// Compiler-introduced storage-binding declarations accumulated during
     /// body conversion (runtime `filter` scratch buffers). Merged into the
-    /// `EgirEntry.storage_bindings` at construction, where `publish.rs`
+    /// `SemanticEntry.storage_bindings` at construction, where `publish.rs`
     /// surfaces them to the host descriptor as `Intermediate`s.
     extra_storage_bindings: Vec<crate::interface::StorageBindingDecl>,
     /// Program-wide region interner, shared across every converter so SegBody
@@ -790,7 +790,7 @@ impl<'a, 'b> Converter<'a, 'b> {
 
     /// Extract the built EGraph + control_headers, leaving the rest of the
     /// Converter state behind. Used by the top-level `convert_program`
-    /// phase to feed a ready-to-chain `EgirFunc` / `EgirEntry`.
+    /// phase to feed a ready-to-chain `EgirFunc` / `SemanticEntry`.
     fn into_graph_parts(self) -> (EGraph, LookupMap<BlockId, ControlHeader>) {
         (self.graph, self.control_headers)
     }
@@ -803,7 +803,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     ///   * the inline tests in `mod tests` below.
     ///
     /// Production (non-test) function and entry-point conversion goes
-    /// through `run`, which returns an `EgirInner` the caller wraps via
+    /// through `run`, which returns an `SemanticProgram` the caller wraps via
     /// `EgirRaw` to compose the pipeline explicitly.
     fn elaborate_to_funcbody(
         self,
@@ -2549,7 +2549,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         //
         // The scratch buffer must live in a descriptor set the host sees and a
         // binding namespace seeded above the entry's params/outputs. Only an
-        // `EgirEntry` provides both; an `EgirFunc` has no `storage_bindings`
+        // `SemanticEntry` provides both; an `EgirFunc` has no `storage_bindings`
         // interface and an unseeded cursor. A runtime `filter` reaching here in
         // a standalone function (one monomorphize/inlining didn't fold into its
         // caller) is caught at `convert_function` — see the guard there.

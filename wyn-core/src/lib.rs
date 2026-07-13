@@ -49,7 +49,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 
 use egir::from_tlc::ConvertError;
-use egir::program::EgirInner;
+use egir::program::SemanticProgram;
 
 use ast::{NodeCounter, NodeId};
 use error::Result;
@@ -169,6 +169,12 @@ impl std::fmt::Display for BindingRef {
         write!(f, "set={},binding={}", self.set, self.binding)
     }
 }
+
+/// Target-independent identity of a semantic storage resource. Unlike
+/// `BindingRef`, compiler-created resources receive this identity before any
+/// descriptor set or binding is allocated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ResourceId(pub u32);
 
 /// Look up `sym`'s source name in `symbols`, or panic with a uniform
 /// "internal compiler bug" message. Use this when downstream code
@@ -1308,7 +1314,7 @@ impl TlcInputSliceBoundsInferred {
 // =============================================================================
 // EGIR typestate chain
 //
-// Four newtypes over a shared `EgirInner` (defined in `egir::program`).
+// Four newtypes over a shared `SemanticProgram` (defined in `egir::program`).
 // Transitions consume `self` and re-wrap the inner into the next newtype.
 // Pass modules in `egir::*` are called per-body from inside the transitions
 // and are unaware of the newtype wrapping.
@@ -1352,33 +1358,41 @@ impl LoweringProfile {
 }
 
 /// Raw EGIR program, directly produced by TLC → EGIR conversion.
-pub struct EgirRaw(EgirInner);
+pub struct EgirRaw(SemanticProgram);
 
 /// EGIR after entry-output realization. Every declared output has its
 /// writes materialised as side effects against the bound storage view
 /// (compute) or `OutputSlot` place (graphics). The body's `Return`
 /// terminator carries no value. See `egir::realize_outputs`.
-pub struct EgirOutputsRealized(EgirInner);
+pub struct EgirOutputsRealized(SemanticProgram);
 
 /// EGIR after all reachable SOACs have been reified as semantic
 /// `SegMap`, `SegRed`, or `SegScan` operations. No dispatch schedule or scratch
 /// storage has been chosen yet.
-pub struct EgirSegmented(EgirInner);
+pub struct EgirSegmented(SemanticProgram);
 
 /// Semantic EGIR after graph-level optimization. SegOps remain intact.
-pub struct EgirOptimized(EgirInner);
+pub struct EgirOptimized(SemanticProgram);
 
 /// Semantic EGIR after logical resource planning. Physical scratch bindings,
 /// phase kernels, and descriptor publication are intentionally deferred until
 /// `lower_to_ssa` receives a target profile.
 pub struct EgirAllocated {
-    inner: EgirInner,
+    inner: SemanticProgram,
     binding_ids: IdSource<u32>,
+}
+
+/// A validated kernel plan together with the freshly constructed physical
+/// EGIR program that implements it. Construction is private to
+/// `EgirAllocated::plan`, so callers cannot bypass plan validation.
+pub struct EgirPlanned {
+    physical: egir::program::PhysicalProgram,
+    profile: LoweringProfile,
 }
 
 impl EgirRaw {
     /// Realize every entry's outputs into side-effect writes. For
-    /// compute entries: walk `EgirEntry.output_routes` and emit a DPS
+    /// compute entries: walk `SemanticEntry.output_routes` and emit a DPS
     /// write per route against the slot's `OutputView` (Map/Scan
     /// retarget, fixed-aggregate element stores, scalar `Store` at
     /// index 0). For graphics entries: classify the body's
@@ -1453,24 +1467,38 @@ impl EgirAllocated {
         &self.inner.semantic_dependencies
     }
 
+    /// Select and validate a target-specific kernel plan, then construct the
+    /// physical EGIR entries described by that plan.
+    pub fn plan(self, profile: LoweringProfile) -> std::result::Result<EgirPlanned, ConvertError> {
+        let mut binding_ids = self.binding_ids;
+        let physical = egir::target_lowering::schedule(self.inner, &mut binding_ids, profile)?;
+        Ok(EgirPlanned { physical, profile })
+    }
+
     /// Target-aware terminal lowering. This is the only production boundary
     /// allowed to destroy semantic SegRed/SegScan operations.
-    pub fn lower_to_ssa(
-        mut self,
-        profile: LoweringProfile,
-    ) -> std::result::Result<SsaConverted, ConvertError> {
-        egir::target_lowering::schedule(&mut self.inner, &mut self.binding_ids, profile)?;
-        let schedule = self.inner.kernel_schedule.clone();
-        egir::soac_expand::run(&mut self.inner);
-        egir::materialize::run(&mut self.inner);
-        egir::skel_opt::run(&mut self.inner);
-        egir::resource_erasure::run(&mut self.inner)?;
-        let (ssa, pipeline) = egir::elaborate::run_program(self.inner);
+    pub fn lower_to_ssa(self, profile: LoweringProfile) -> std::result::Result<SsaConverted, ConvertError> {
+        self.plan(profile)?.lower_to_ssa()
+    }
+}
+
+impl EgirPlanned {
+    pub fn kernel_plan(&self) -> &egir::parallelize::schedule::ValidatedKernelPlan {
+        &self.physical.plan
+    }
+
+    pub fn lower_to_ssa(mut self) -> std::result::Result<SsaConverted, ConvertError> {
+        let plan = self.physical.plan.published_plan();
+        egir::soac_expand::run(&mut self.physical);
+        egir::materialize::run(&mut self.physical);
+        egir::skel_opt::run(&mut self.physical);
+        egir::resource_erasure::run(&mut self.physical)?;
+        let (ssa, pipeline) = egir::elaborate::run_program(self.physical);
         Ok(SsaConverted {
             ssa,
             pipeline,
-            profile,
-            kernel_schedule: schedule,
+            profile: self.profile,
+            kernel_plan: plan,
         })
     }
 }
@@ -1480,7 +1508,7 @@ pub struct SsaConverted {
     pub ssa: ssa::types::Program,
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
     pub profile: LoweringProfile,
-    pub kernel_schedule: egir::parallelize::schedule::KernelSchedule,
+    pub kernel_plan: egir::parallelize::schedule::KernelPlan,
 }
 
 impl SsaConverted {

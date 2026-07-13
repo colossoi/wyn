@@ -24,8 +24,8 @@ fn empty_func(name: &str) -> EgirFunc {
     )
 }
 
-fn empty_entry(name: &str) -> EgirEntry {
-    EgirEntry::new(
+fn empty_entry(name: &str) -> SemanticEntry {
+    SemanticEntry::new(
         crate::interface::EntryOrigin::Source,
         name.to_string(),
         Span::dummy(),
@@ -70,7 +70,7 @@ fn scalar_handoff_classification_uses_entry_origin_not_name() {
     consumer.storage_bindings.push(input(typed_binding));
     consumer.storage_bindings.push(input(misleading_binding));
 
-    let inner = EgirInner::new(
+    let inner = SemanticProgram::new(
         vec![],
         vec![],
         vec![typed, misleading, consumer],
@@ -107,7 +107,7 @@ fn interner_assigns_dense_indices_and_deduplicates_names() {
 }
 
 /// Correctness risk #1 — index agreement. A `SegBody` built during TLC→EGIR
-/// conversion interns its callee *before* `EgirInner::new` walks the function
+/// conversion interns its callee *before* `SemanticProgram::new` walks the function
 /// list, and the callee may appear later in that list than other functions.
 /// The arena entry for the callee must still land on the index the `SegBody`
 /// already holds.
@@ -118,7 +118,7 @@ fn segbody_index_resolves_to_its_arena_function() {
     let mut interner = RegionInterner::default();
     let op_id: RegionId = interner.intern("op");
 
-    let inner = EgirInner::new(
+    let inner = SemanticProgram::new(
         vec![empty_func("main"), empty_func("op")],
         vec![],
         vec![],
@@ -135,7 +135,7 @@ fn segbody_index_resolves_to_its_arena_function() {
     );
     assert_eq!(inner.region_name(op_id), "op");
     assert_eq!(inner.regions.get(&op_id).unwrap().name, "op");
-    // `main` was assigned its index by `EgirInner::new`, after `op`.
+    // `main` was assigned its index by `SemanticProgram::new`, after `op`.
     let main_id = inner.region_interner.get("main").expect("main interned");
     assert_ne!(main_id, op_id);
     assert_eq!(inner.region_name(main_id), "main");
@@ -147,7 +147,7 @@ fn segbody_index_resolves_to_its_arena_function() {
 /// `define_region`, and the body lands under it.
 #[test]
 fn define_region_records_the_body_under_the_reserved_index() {
-    let mut inner = EgirInner::new(
+    let mut inner = SemanticProgram::new(
         vec![empty_func("main")],
         vec![],
         vec![],

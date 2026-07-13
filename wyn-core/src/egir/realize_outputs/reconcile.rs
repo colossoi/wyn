@@ -25,7 +25,7 @@
 use polytype::Type;
 
 use super::super::from_tlc::ConvertError;
-use super::super::program::{EgirFunc, EgirInner, EgirRegion};
+use super::super::program::{EgirFunc, EgirRegion, SemanticProgram};
 use super::super::types::{EGraph, ENode, NodeId, PureOp, RegionId, SideEffectKind};
 use crate::ast::TypeName;
 use crate::LookupMap;
@@ -39,8 +39,8 @@ struct Retype {
     arg_ty: Type<TypeName>,
 }
 
-pub fn run(inner: &mut EgirInner) -> Result<(), ConvertError> {
-    let EgirInner {
+pub fn run(inner: &mut SemanticProgram) -> Result<(), ConvertError> {
+    let SemanticProgram {
         entry_points,
         regions,
         functions,

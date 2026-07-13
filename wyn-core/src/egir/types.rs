@@ -30,7 +30,7 @@ new_key_type! {
 pub struct NodeId;
 }
 
-/// Opaque handle into the program-level region arena (`EgirInner::regions`).
+/// Opaque handle into the program-level region arena (`SemanticProgram::regions`).
 ///
 /// Region *identity* is a checked arena index, never a re-derived string. A
 /// region still lowers to a named SSA function — that name is the call ABI and

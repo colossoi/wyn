@@ -11,19 +11,19 @@
 use std::collections::{HashMap, HashSet};
 
 use super::graph_ops;
-use super::program::{EgirInner, SemanticDependency, SemanticDependencyKind, SemanticOpId};
+use super::program::{SemanticDependency, SemanticDependencyKind, SemanticOpId, SemanticProgram};
 use super::types::{
     EGraph, EgirSoac, SegOpKind, SegResourceAccess, SegResourceAccessKind, SideEffect, SideEffectKind,
 };
 
 /// Rebuild the semantic dependency DAG stored on `inner`.
-pub(crate) fn rebuild_dependencies(inner: &mut EgirInner) {
+pub(crate) fn rebuild_dependencies(inner: &mut SemanticProgram) {
     inner.semantic_dependencies = dependencies(inner);
 }
 
 /// Build semantic value/effect/resource dependencies for every semantic SOAC in
 /// the program.
-pub(crate) fn dependencies(inner: &EgirInner) -> Vec<SemanticDependency> {
+pub(crate) fn dependencies(inner: &SemanticProgram) -> Vec<SemanticDependency> {
     let mut dependencies = Vec::new();
     for entry in &inner.entry_points {
         collect_graph_dependencies(&entry.name, &entry.graph, &mut dependencies);
@@ -194,7 +194,7 @@ pub(crate) fn read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResource
 }
 
 /// Validate the semantic boundary before any target-aware scheduling occurs.
-pub(crate) fn verify(inner: &EgirInner) -> Result<(), String> {
+pub(crate) fn verify(inner: &SemanticProgram) -> Result<(), String> {
     let verify_effect = |scope: &str, effect: &SideEffect| -> Result<(), String> {
         if matches!(effect.kind, SideEffectKind::Soac(EgirSoac::Screma { .. })) {
             return Err(format!("{scope}: raw Screma survived semantic segmentation"));
@@ -294,7 +294,7 @@ pub(crate) fn verify(inner: &EgirInner) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn summary(inner: &EgirInner) -> String {
+pub(crate) fn summary(inner: &SemanticProgram) -> String {
     let mut output = String::new();
     let mut print_graph = |scope: &str, graph: &EGraph| {
         for (_, block) in &graph.skeleton.blocks {

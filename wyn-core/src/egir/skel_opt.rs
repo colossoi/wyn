@@ -28,12 +28,12 @@ use crate::{LookupMap, LookupSet};
 
 use crate::ssa::types::ConstantValue;
 
-use super::program::EgirInner;
+use super::program::PhysicalProgram;
 use super::types::{EGraph, ENode, NodeId, PureOp, SkeletonTerminator};
 
 /// Run skeleton rewrites on every function and entry point in the program,
 /// extending each body's alias map with the freshly stripped block params.
-pub fn run(inner: &mut EgirInner) {
+pub fn run(inner: &mut PhysicalProgram) {
     for f in &mut inner.functions {
         let new_aliases = run_one_body(&mut f.graph);
         f.aliases.extend(new_aliases);

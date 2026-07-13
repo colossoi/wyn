@@ -128,7 +128,7 @@ Each notes how it's enforced; when you move a pass, check it here.
 | **EgirSegmented** | `egir::parallelize::reify` | Every reachable Screma becomes a semantic SegMap/SegRed/SegScan with authoritative SegSpace, typed bodies, explicit captures, output routing, effects, placement, and dependencies. No phases are selected here |
 | **EgirOptimized** | `egir::semantic_opt`, `egir::fusion` | Conflict-aware same-space sibling fusion, single-consumer producer/consumer region composition, and dead-SegOp elimination; SegOps remain semantic |
 | **EgirAllocated** | `egir::program`, `egir::multi_consumer` | Owns the authoritative host/compiler resource manifest. Scalar handoffs, reduce/scan/filter scratch, and shared multi-consumer array materializations have `ResourceId`s; physical publication still waits for terminal lowering |
-| **SsaConverted** | `egir::target_lowering` | `lower_to_ssa(LoweringProfile)` transactionally chooses algorithms, scratch, bindings, domains, KernelSchedule, and the final descriptor, then expands SegOps to SSA. `egir::resource_erasure` then drops compile-time-only resource handles (buffer-monomorphized storage-image params/operands) so no opaque image is threaded as an SSA value |
+| **SsaConverted** | `egir::target_lowering` | `lower_to_ssa(LoweringProfile)` transactionally chooses algorithms, scratch, bindings, domains, KernelPlan, and the final descriptor, then expands SegOps to SSA. `egir::resource_erasure` then drops compile-time-only resource handles (buffer-monomorphized storage-image params/operands) so no opaque image is threaded as an SSA value |
 
 ### SSA (codegen only)
 | Stage | Source | Description |

@@ -30,11 +30,11 @@ use crate::ast::TypeName;
 use crate::ssa::types::ConstantValue;
 use crate::types::TypeExt;
 
-use super::program::EgirInner;
+use super::program::PhysicalProgram;
 use super::types::{EGraph, ENode, NodeId, PureOp};
 
 /// Run `run_one_body` on every function and entry point in the program.
-pub(crate) fn run(inner: &mut EgirInner) {
+pub(crate) fn run(inner: &mut PhysicalProgram) {
     for f in &mut inner.functions {
         run_one_body(&mut f.graph);
     }

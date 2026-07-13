@@ -16,7 +16,7 @@ use smallvec::{smallvec, SmallVec};
 use super::graph_ops::{
     alloc_effect, emit_alloca, emit_load, emit_place_index_store, emit_store, next_effect_token,
 };
-use super::program::{EgirInner, RegionInterner};
+use super::program::{PhysicalProgram, RegionInterner};
 use crate::ast::TypeName;
 use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
@@ -27,10 +27,10 @@ use super::types::{
 };
 
 /// Run `run_one_body` on every function and entry point in the program.
-pub fn run(inner: &mut EgirInner) {
+pub fn run(inner: &mut PhysicalProgram) {
     // Borrow the region interner disjointly from the bodies being expanded; it
     // is read-only here (recovering the SSA `Call` name for each region).
-    let EgirInner {
+    let PhysicalProgram {
         functions,
         entry_points,
         region_interner,

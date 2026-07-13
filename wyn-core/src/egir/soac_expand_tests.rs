@@ -24,15 +24,16 @@ use polytype::Type;
 /// introspect node structure.
 fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
     let tlc = crate::compile_thru_tlc(input).expect("compile_thru_tlc");
-    let mut allocated = tlc.infer_input_slice_bounds().to_egraph().expect("to_egraph");
-    crate::egir::target_lowering::schedule(
-        &mut allocated.inner,
-        &mut allocated.binding_ids,
+    let allocated = tlc.infer_input_slice_bounds().to_egraph().expect("to_egraph");
+    let mut binding_ids = allocated.binding_ids;
+    let mut physical = crate::egir::target_lowering::schedule(
+        allocated.inner,
+        &mut binding_ids,
         crate::LoweringProfile::PORTABLE,
     )
     .expect("terminal schedule");
-    crate::egir::soac_expand::run(&mut allocated.inner);
-    let inner = &allocated.inner;
+    crate::egir::soac_expand::run(&mut physical);
+    let inner = &physical;
     assert_eq!(
         inner.entry_points.len(),
         1,
