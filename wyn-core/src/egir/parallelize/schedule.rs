@@ -10,7 +10,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::egir::graph_ops;
 use crate::egir::program::{
-    InputSlotId, LogicalResource, OutputSlotId, PhysicalResourceTable, SemanticEntry, SemanticEntryId,
+    EntryPublication, InputSlotId, LogicalResource, OutputSlotId, PhysicalResourceTable, SemanticEntry,
+    SemanticEntryId,
 };
 use crate::egir::types::{
     EgirSoac, FilterOutput, FilterPlan, FilterState, RuntimeFilterLength, SegExtent, SegPlacement,
@@ -30,6 +31,8 @@ pub struct KernelPlan {
     resource_ids: HashMap<BindingRef, ResourceId>,
     semantic_entries: HashMap<String, SemanticEntryId>,
     semantic_abi: HashMap<SemanticEntryId, SemanticAbi>,
+    publications: HashMap<String, EntryPublication>,
+    publication_order: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +62,13 @@ impl ValidatedKernelPlan {
     pub fn published_plan(&self) -> KernelPlan {
         self.0.clone()
     }
+
+    /// Entry ABI records in deterministic descriptor-publication order. The
+    /// validated plan, rather than physical graphs, is the sole authority for
+    /// backend-visible entry metadata.
+    pub fn publications(&self) -> Vec<&EntryPublication> {
+        self.0.publications_in_order()
+    }
 }
 
 /// Stable identity of a physical kernel in a plan. Dependencies use this id
@@ -69,7 +79,7 @@ pub struct KernelId(pub u32);
 /// The only supported ways to construct a physical entry. Keeping this enum
 /// closed prevents new lowering sites from falling back to arbitrary
 /// clone-and-patch entry mutation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum KernelRecipe {
     GraphicsPassthrough,
     SerialCompute,
@@ -94,7 +104,13 @@ pub enum KernelRecipe {
 pub struct EntryAbiProjection {
     pub source_entry: Option<SemanticEntryId>,
     pub inputs: Vec<InputSlotId>,
-    pub outputs: Vec<OutputSlotId>,
+    pub output_routes: Vec<OutputRouteProjection>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputRouteProjection {
+    pub semantic_slot: OutputSlotId,
+    pub physical_slot: OutputSlotId,
 }
 
 /// Ordered phases that share one host binding table.
@@ -201,11 +217,13 @@ impl KernelPlan {
 
     fn validate_program(
         &self,
-        _entries: &[SemanticEntry],
+        entries: &[SemanticEntry],
         resources: &[LogicalResource],
         descriptor: &PipelineDescriptor,
     ) -> Result<(), String> {
         let resource_ids = resources.iter().map(|resource| resource.id).collect::<HashSet<_>>();
+        let physical_entries =
+            entries.iter().map(|entry| (entry.name.as_str(), entry)).collect::<HashMap<_, _>>();
         let mut planned_names = HashSet::new();
         let mut projected_outputs: HashMap<SemanticEntryId, HashSet<OutputSlotId>> = HashMap::new();
         for phase in self.phases() {
@@ -233,11 +251,25 @@ impl KernelPlan {
                     phase.entry_point
                 ));
             }
-            for &slot in &phase.abi.outputs {
+            let physical_output_count = physical_entries
+                .get(phase.entry_point.as_str())
+                .map(|entry| entry.outputs.len())
+                .unwrap_or(0);
+            let mut physical_slots = HashSet::new();
+            for route in &phase.abi.output_routes {
+                let slot = route.semantic_slot;
                 if slot.0 >= abi.output_count {
                     return Err(format!(
                         "kernel `{}` projects output {} from semantic entry `{}` with only {} outputs",
                         phase.entry_point, slot.0, abi.name, abi.output_count
+                    ));
+                }
+                if route.physical_slot.0 >= physical_output_count
+                    || !physical_slots.insert(route.physical_slot)
+                {
+                    return Err(format!(
+                        "kernel `{}` has an invalid physical output-route projection",
+                        phase.entry_point
                     ));
                 }
                 projected_outputs.entry(source).or_default().insert(slot);
@@ -257,6 +289,38 @@ impl KernelPlan {
                 if !planned_names.contains(stage) && matches!(pipeline, Pipeline::Compute(_)) {
                     return Err(format!("source compute stage `{stage}` has no planned kernel"));
                 }
+            }
+        }
+
+        let mut recipes_by_source: HashMap<SemanticEntryId, HashSet<KernelRecipe>> = HashMap::new();
+        for phase in self.phases() {
+            if let Some(source) = phase.abi.source_entry {
+                recipes_by_source.entry(source).or_default().insert(phase.recipe.clone());
+            }
+        }
+        for (source, recipes) in &recipes_by_source {
+            let require = |recipe: KernelRecipe, context: &str| {
+                if recipes.contains(&recipe) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "semantic entry {:?} has an incomplete {context} kernel family",
+                        source
+                    ))
+                }
+            };
+            if recipes.contains(&KernelRecipe::FilterFlags) {
+                require(KernelRecipe::FilterScan, "filter")?;
+                require(KernelRecipe::ScanBlock, "filter")?;
+                require(KernelRecipe::ScanApplyOffsets, "filter")?;
+                require(KernelRecipe::FilterScatter, "filter")?;
+            }
+            if recipes.contains(&KernelRecipe::ReducePhase1) {
+                require(KernelRecipe::ReduceCombine, "reduce")?;
+            }
+            if recipes.contains(&KernelRecipe::ScanPhase1) {
+                require(KernelRecipe::ScanBlock, "scan")?;
+                require(KernelRecipe::ScanApplyOffsets, "scan")?;
             }
         }
 
@@ -287,7 +351,7 @@ impl KernelPlan {
     ) -> Self {
         let resource_ids = resources
             .iter()
-            .map(|resource| (resource.legacy_binding, resource.id))
+            .map(|resource| (resource.semantic_binding, resource.id))
             .collect::<HashMap<_, _>>();
         let semantic_entries = entries
             .iter()
@@ -309,6 +373,11 @@ impl KernelPlan {
                 )
             })
             .collect::<HashMap<_, _>>();
+        let publications = entries
+            .iter()
+            .map(|entry| (entry.name.clone(), entry.publication()))
+            .collect::<HashMap<_, _>>();
+        let publication_order = entries.iter().map(|entry| entry.name.clone()).collect();
         let by_name: HashMap<&str, (SemanticEntryId, &SemanticEntry)> = entries
             .iter()
             .enumerate()
@@ -339,7 +408,7 @@ impl KernelPlan {
                             abi: EntryAbiProjection {
                                 source_entry: None,
                                 inputs: Vec::new(),
-                                outputs: Vec::new(),
+                                output_routes: Vec::new(),
                             },
                             workgroup_size: stage.workgroup_size,
                             domain: domain_from_dispatch(&stage.dispatch_size),
@@ -361,13 +430,81 @@ impl KernelPlan {
             resource_ids,
             semantic_entries,
             semantic_abi,
+            publications,
+            publication_order,
         }
+    }
+
+    fn record_publication(&mut self, entry: &SemanticEntry) {
+        if !self.publications.contains_key(&entry.name) {
+            self.publication_order.push(entry.name.clone());
+            self.publications.insert(entry.name.clone(), entry.publication());
+            return;
+        }
+        // A source phase may relinquish a host output to a generated combine
+        // kernel. Descriptor publication still needs the original host ABI,
+        // while compiler declarations added by the physical phase must also
+        // be visible. Preserve the seed ABI and monotonically merge generated
+        // resource declarations; stage reads/writes remain plan-owned.
+        let publication = self.publications.get_mut(&entry.name).expect("checked above");
+        for input in &entry.inputs {
+            if !publication.inputs.iter().any(|existing| {
+                existing.storage_binding == input.storage_binding
+                    && existing.uniform_binding == input.uniform_binding
+                    && existing.texture_binding == input.texture_binding
+                    && existing.sampler_binding == input.sampler_binding
+                    && existing.storage_image_binding == input.storage_image_binding
+                    && existing.name == input.name
+            }) {
+                publication.inputs.push(input.clone());
+            }
+        }
+        for output in &entry.outputs {
+            if output.storage_binding.is_none() && output.target.is_none() {
+                continue;
+            }
+            if !publication.outputs.iter().any(|existing| {
+                existing.storage_binding == output.storage_binding && existing.target == output.target
+            }) {
+                publication.outputs.push(output.clone());
+            }
+        }
+        for declaration in &entry.storage_bindings {
+            if !publication.storage_bindings.iter().any(|existing| {
+                existing.binding == declaration.binding && existing.role == declaration.role
+            }) {
+                publication.storage_bindings.push(declaration.clone());
+            }
+        }
+    }
+
+    fn publications_in_order(&self) -> Vec<&EntryPublication> {
+        let mut ordered = Vec::with_capacity(self.publications.len());
+        let mut seen = HashSet::new();
+        for pipeline in &self.pipelines {
+            for phase in &pipeline.phases {
+                if seen.insert(phase.entry_point.as_str()) {
+                    if let Some(publication) = self.publications.get(&phase.entry_point) {
+                        ordered.push(publication);
+                    }
+                }
+            }
+        }
+        for name in &self.publication_order {
+            if seen.insert(name.as_str()) {
+                if let Some(publication) = self.publications.get(name) {
+                    ordered.push(publication);
+                }
+            }
+        }
+        ordered
     }
 
     /// Add a generated phase after the current last phase of `parent`'s
     /// pipeline.  Dependencies are explicit even though host publication
     /// currently emits phases in topological order.
     pub fn add_phase_after(&mut self, parent: &str, entry: &SemanticEntry, domain: DomainSelection) {
+        self.record_publication(entry);
         let pipeline = self
             .pipelines
             .iter_mut()
@@ -395,6 +532,7 @@ impl KernelPlan {
     /// make the consumer depend on it. Existing dependency indices are shifted
     /// transactionally with the insertion.
     pub fn add_phase_before(&mut self, consumer: &str, entry: &SemanticEntry, domain: DomainSelection) {
+        self.record_publication(entry);
         let pipeline = self
             .pipelines
             .iter_mut()
@@ -429,6 +567,7 @@ impl KernelPlan {
     /// used for distinct output domains: source order is retained by the
     /// published phase list, but no data dependency is fabricated.
     pub fn add_sibling(&mut self, parent: &str, entry: &SemanticEntry, domain: DomainSelection) {
+        self.record_publication(entry);
         let pipeline = self
             .pipelines
             .iter_mut()
@@ -462,13 +601,21 @@ impl KernelPlan {
             .flat_map(|pipeline| &mut pipeline.phases)
             .find(|phase| phase.entry_point == entry_point)
             .unwrap_or_else(|| panic!("no planned kernel named `{entry_point}`"));
-        phase.abi.outputs = outputs;
+        phase.abi.output_routes = outputs
+            .into_iter()
+            .enumerate()
+            .map(|(physical, semantic_slot)| OutputRouteProjection {
+                semantic_slot,
+                physical_slot: OutputSlotId(physical),
+            })
+            .collect();
     }
 
     /// Commit the facts for one kernel at the same boundary that commits its
     /// physical recipe. This is deliberately per-entry: a later global
     /// reconciliation pass would make the entry list authoritative again.
     pub fn update_kernel_from_entry(&mut self, entry: &SemanticEntry) {
+        self.record_publication(entry);
         for pipeline in &mut self.pipelines {
             for phase in &mut pipeline.phases {
                 if phase.entry_point != entry.name {
@@ -499,7 +646,7 @@ impl KernelPlan {
                 };
                 phase.recipe = recipe_from_entry(entry);
                 phase.abi.inputs = (0..entry.inputs.len()).map(InputSlotId).collect();
-                phase.abi.outputs = entry.output_routes.iter().map(|route| route.slot).collect();
+                phase.abi.output_routes = entry_output_projection(entry);
                 return;
             }
         }
@@ -816,7 +963,7 @@ fn phase_from_entry(
         abi: EntryAbiProjection {
             source_entry,
             inputs: (0..entry.inputs.len()).map(InputSlotId).collect(),
-            outputs: entry.output_routes.iter().map(|route| route.slot).collect(),
+            output_routes: entry_output_projection(entry),
         },
         workgroup_size: entry_workgroup(entry),
         domain,
@@ -825,6 +972,20 @@ fn phase_from_entry(
             .unwrap_or_else(|| entry_resources(entry, resource_ids)),
         dependencies: Vec::new(),
     }
+}
+
+fn entry_output_projection(entry: &SemanticEntry) -> Vec<OutputRouteProjection> {
+    let mut slots = entry.output_routes.iter().map(|route| route.slot).collect::<Vec<_>>();
+    slots.sort_unstable();
+    slots.dedup();
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(physical, semantic_slot)| OutputRouteProjection {
+            semantic_slot,
+            physical_slot: OutputSlotId(physical),
+        })
+        .collect()
 }
 
 fn recipe_from_entry(entry: &SemanticEntry) -> KernelRecipe {

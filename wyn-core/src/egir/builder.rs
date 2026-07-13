@@ -13,7 +13,7 @@ use crate::ssa::types::{ConstantValue, ControlHeader, ExecutionModel};
 use crate::{interface, BindingRef};
 
 use super::graph_ops;
-use super::program::SemanticEntry;
+use super::program::{PhysicalEntry, SemanticEntry};
 use super::types::{EGraph, EgirSoac, NodeId, SkeletonTerminator, SoacDestination};
 use crate::ssa::types::{EntryInput, EntryOutput};
 
@@ -34,6 +34,49 @@ pub struct EntryBuilder {
     params: Vec<(Type<TypeName>, String)>,
     return_ty: Type<TypeName>,
     next_effect: u32,
+}
+
+/// Commit builder for a fully planned physical entry. It consumes a complete
+/// semantic entry rather than exposing a partially initialized physical
+/// record, and is the only constructor used at the physical-program boundary.
+pub struct PhysicalEntryBuilder {
+    entry: SemanticEntry,
+}
+
+impl PhysicalEntryBuilder {
+    pub fn from_planned_entry(entry: SemanticEntry) -> Self {
+        Self { entry }
+    }
+
+    pub fn build(self) -> Result<PhysicalEntry, String> {
+        let entry = self.entry;
+        if entry.name.is_empty() {
+            return Err("physical entry has no publication name".into());
+        }
+        for route in &entry.output_routes {
+            if route.slot.0 >= entry.outputs.len() {
+                return Err(format!(
+                    "physical entry `{}` routes invalid output slot {}",
+                    entry.name, route.slot.0
+                ));
+            }
+        }
+        Ok(PhysicalEntry {
+            origin: entry.origin,
+            name: entry.name,
+            span: entry.span,
+            execution_model: entry.execution_model,
+            inputs: entry.inputs,
+            outputs: entry.outputs,
+            storage_bindings: entry.storage_bindings,
+            params: entry.params,
+            return_ty: entry.return_ty,
+            graph: entry.graph,
+            control_headers: entry.control_headers,
+            aliases: entry.aliases,
+            output_routes: entry.output_routes,
+        })
+    }
 }
 
 impl EntryBuilder {

@@ -37,18 +37,23 @@ struct InputReplacement {
     binding: BindingRef,
 }
 
-pub fn run(inner: &mut SemanticProgram, binding_ids: &mut IdSource<u32>) {
+pub fn run(
+    inner: &mut SemanticProgram,
+    binding_ids: &mut IdSource<u32>,
+) -> HashMap<BindingRef, CompilerResource> {
+    let mut compiler_origins = HashMap::new();
     loop {
         super::semantic_graph::rebuild_dependencies(inner);
         let Some(candidate) = find_candidate(inner) else {
             break;
         };
-        materialize_candidate(inner, binding_ids, candidate);
+        materialize_candidate(inner, binding_ids, candidate, &mut compiler_origins);
     }
     super::semantic_graph::rebuild_dependencies(inner);
     if cfg!(debug_assertions) {
         verify_no_unallocated_multi_consumer_maps(inner);
     }
+    compiler_origins
 }
 
 /// The allocation boundary promises that a pure internal SegMap is either
@@ -187,6 +192,7 @@ fn materialize_candidate(
     inner: &mut SemanticProgram,
     binding_ids: &mut IdSource<u32>,
     candidate: Candidate,
+    compiler_origins: &mut HashMap<BindingRef, CompilerResource>,
 ) {
     let entry = &inner.entry_points[candidate.entry];
     let producer_index = entry.graph.side_effect_index();
@@ -354,7 +360,7 @@ fn materialize_candidate(
     super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph);
 
     for (slot, &binding) in bindings.iter().enumerate() {
-        inner.resource_hints.insert(
+        compiler_origins.insert(
             binding,
             CompilerResource::new(
                 CompilerResourceKind::MultiConsumerArray,

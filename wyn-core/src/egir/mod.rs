@@ -35,6 +35,7 @@ pub(crate) mod semantic_graph;
 pub(crate) mod semantic_opt;
 pub(crate) mod target_lowering;
 pub mod verify_no_abstract;
+pub(crate) mod verify_physical;
 
 #[cfg(test)]
 pub(crate) mod semantic_exec;

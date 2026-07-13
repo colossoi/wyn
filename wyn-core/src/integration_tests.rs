@@ -298,7 +298,7 @@ fn logical_manifest_covers_scan_and_filter_scratch() {
                     CompilerResourceKind::ScanBlockSums | CompilerResourceKind::ScanBlockOffsets
                 ) =>
             {
-                Some(resource.legacy_binding)
+                Some(resource.semantic_binding)
             }
             _ => None,
         })

@@ -7,8 +7,7 @@
 use super::from_tlc::ConvertError;
 use super::parallelize;
 use super::program::{
-    physicalize_resource_references, refresh_logical_resources, PhysicalProgram, PhysicalResourceTable,
-    SemanticProgram,
+    physicalize_resource_references, PhysicalProgram, PhysicalResourceTable, SemanticProgram,
 };
 use super::publish::PipelineDescriptorPublish;
 use crate::{IdSource, LoweringProfile, SchedulePolicy};
@@ -19,17 +18,7 @@ pub fn schedule(
     profile: LoweringProfile,
 ) -> Result<PhysicalProgram, ConvertError> {
     physicalize_resource_references(&mut inner).map_err(ConvertError::Internal)?;
-    // Source ABI publication is private to terminal lowering. It seeds stable
-    // names/output declarations but is not observable unless the complete
-    // schedule validates and the returned program is committed.
     let unpublished_descriptor = inner.pipeline.clone();
-    let mut source_descriptor = unpublished_descriptor.clone();
-    source_descriptor
-        .publish_implicit_bindings(&inner.entry_points)
-        .map_err(ConvertError::DescriptorLayout)?;
-    source_descriptor.publish_graphics_io(&inner.entry_points);
-    source_descriptor.relabel_input_storage_names(&inner.input_names);
-    inner.pipeline = source_descriptor;
 
     if profile.schedule == SchedulePolicy::Parallel {
         parallelize::lower(&mut inner);
@@ -42,11 +31,7 @@ pub fn schedule(
         inner.kernel_plan = schedule;
     }
     parallelize::finalize_scheduled_states(&mut inner);
-    // Re-mirror after lowering (split clones / phase entries added new host and
-    // intermediate storage); the parallel SegRed/SegScan ops are gone, so no
-    // further scratch is drawn here.
     let _ = binding_ids;
-    refresh_logical_resources(&mut inner);
 
     inner
         .kernel_plan
@@ -61,12 +46,15 @@ pub fn schedule(
 
     let mut descriptor = unpublished_descriptor;
     validated.install_phase_shells(&mut descriptor).map_err(ConvertError::Internal)?;
-    descriptor.publish_implicit_bindings(&inner.entry_points).map_err(ConvertError::DescriptorLayout)?;
-    descriptor.publish_graphics_io(&inner.entry_points);
+    let publications = validated.publications();
+    descriptor.publish_implicit_bindings(&publications).map_err(ConvertError::DescriptorLayout)?;
+    descriptor.publish_graphics_io(&publications);
     let physical_resources = PhysicalResourceTable::from_resources(&inner.resources);
     validated.publish(&mut descriptor, &physical_resources).map_err(ConvertError::Internal)?;
     descriptor.relabel_input_storage_names(&inner.input_names);
     descriptor.rebuild_frame_graph();
     inner.pipeline = descriptor;
-    Ok(PhysicalProgram::from_validated(inner, validated))
+    let physical = PhysicalProgram::from_validated(inner, validated).map_err(ConvertError::Internal)?;
+    super::verify_physical::check(&physical).map_err(ConvertError::Internal)?;
+    Ok(physical)
 }

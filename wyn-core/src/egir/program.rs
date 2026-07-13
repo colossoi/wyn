@@ -215,7 +215,7 @@ pub struct LogicalResource {
     pub origin: ResourceOrigin,
     /// Transitional identity used by storage-view types until terminal
     /// lowering rewrites compiler resources to their allocated binding.
-    pub legacy_binding: crate::BindingRef,
+    pub semantic_binding: crate::BindingRef,
     pub elem_ty: Type<TypeName>,
     pub size: LogicalSize,
 }
@@ -227,14 +227,14 @@ pub struct LogicalResource {
 /// resolves them directly from the manifest instead of storing phase-local
 /// resource ids on semantic Seg operations.
 pub fn plan_logical_resources(inner: &mut SemanticProgram, binding_ids: &mut crate::IdSource<u32>) {
-    super::multi_consumer::run(inner, binding_ids);
-    let mut filter_work = allocate_filter_work_resources(inner, binding_ids);
+    let mut compiler_origins = super::multi_consumer::run(inner, binding_ids);
     let scalar_handoffs = scalar_handoff_resources(inner);
-    inner.resource_hints.extend(scalar_handoffs);
+    compiler_origins.extend(scalar_handoffs);
     let filter_kinds = filter_resource_kinds(inner);
-    inner.resource_hints.extend(filter_kinds);
-    let mut host = mirror_storage_resources(inner, &inner.resource_hints);
-    host.sort_by_key(|resource| (resource.legacy_binding.set, resource.legacy_binding.binding));
+    compiler_origins.extend(filter_kinds);
+    let mut filter_work = allocate_filter_work_resources(inner, binding_ids, &mut compiler_origins);
+    let mut host = mirror_storage_resources(inner, &compiler_origins);
+    host.sort_by_key(|resource| (resource.semantic_binding.set, resource.semantic_binding.binding));
     for (index, resource) in host.iter_mut().enumerate() {
         resource.id = ResourceId(index as u32);
     }
@@ -260,7 +260,7 @@ fn normalize_semantic_resource_references(inner: &mut SemanticProgram) {
     let by_binding = inner
         .resources
         .iter()
-        .map(|resource| (resource.legacy_binding, resource.id))
+        .map(|resource| (resource.semantic_binding, resource.id))
         .collect::<HashMap<_, _>>();
     for entry in &mut inner.entry_points {
         normalize_graph_resources(&mut entry.graph, &by_binding);
@@ -359,6 +359,7 @@ fn physicalize_graph_resources(graph: &mut EGraph, bindings: &PhysicalResourceTa
 fn allocate_filter_work_resources(
     inner: &mut SemanticProgram,
     binding_ids: &mut crate::IdSource<u32>,
+    compiler_origins: &mut HashMap<crate::BindingRef, CompilerResource>,
 ) -> Vec<LogicalResource> {
     use super::types::{EgirSoac, FilterOutput, FilterState, FilterWorkBuffers, SegExtent, SideEffectKind};
     let mut used: std::collections::HashSet<_> = inner
@@ -451,11 +452,11 @@ fn allocate_filter_work_resources(
                 .enumerate()
                 {
                     let compiler = CompilerResource::new(kind, owner.clone(), slot);
-                    inner.resource_hints.insert(binding, compiler.clone());
+                    compiler_origins.insert(binding, compiler.clone());
                     resources.push(LogicalResource {
                         id: ResourceId(0),
                         origin: ResourceOrigin::Compiler(compiler),
-                        legacy_binding: binding,
+                        semantic_binding: binding,
                         elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
                         size,
                     });
@@ -469,46 +470,6 @@ fn allocate_filter_work_resources(
 fn attach_materialization_resources(_inner: &mut SemanticProgram, _resources: &[LogicalResource]) {
     // Resource ownership lives in the manifest; Seg operations no longer
     // mirror resource ids in a phase-dependent scratch field.
-}
-
-/// Refresh the manifest after terminal lowering has introduced phase entries
-/// and physical declarations.  Unlike `plan_logical_resources`, this never
-/// allocates a binding or rewrites an owning SegOp; it preserves the precise
-/// compiler origin assigned at the allocation boundary.
-pub fn refresh_logical_resources(inner: &mut SemanticProgram) {
-    let previous: HashMap<_, _> =
-        inner.resources.drain(..).map(|resource| (resource.legacy_binding, resource)).collect();
-    let filter_kinds = filter_resource_kinds(inner);
-    let scalar_handoffs = scalar_handoff_resources(inner);
-    inner.resource_hints.extend(scalar_handoffs);
-    inner.resource_hints.extend(filter_kinds);
-    let mut refreshed = mirror_storage_resources(inner, &inner.resource_hints);
-    for resource in &mut refreshed {
-        if let Some(old) = previous.get(&resource.legacy_binding) {
-            if matches!(old.origin, ResourceOrigin::Compiler(_)) {
-                resource.origin = old.origin.clone();
-                resource.elem_ty = old.elem_ty.clone();
-                resource.size = old.size.clone();
-            }
-        }
-    }
-    // A compiler resource may not be repeated on every synthesized phase, but
-    // remains part of the program-level manifest.
-    for (binding, resource) in previous {
-        if matches!(resource.origin, ResourceOrigin::Compiler(_))
-            && !refreshed.iter().any(|candidate| candidate.legacy_binding == binding)
-        {
-            refreshed.push(resource);
-        }
-    }
-    refreshed.sort_by_key(|resource| (resource.legacy_binding.set, resource.legacy_binding.binding));
-    for (index, resource) in refreshed.iter_mut().enumerate() {
-        resource.id = ResourceId(index as u32);
-    }
-    inner.resources = refreshed;
-    if cfg!(debug_assertions) {
-        verify_manifest_covers_storage(inner);
-    }
 }
 
 /// Bindings introduced by TLC scalar-prepass hoisting already have a stable
@@ -647,7 +608,7 @@ fn mirror_storage_resources(
                 .cloned()
                 .map(ResourceOrigin::Compiler)
                 .unwrap_or(ResourceOrigin::Host(binding)),
-            legacy_binding: binding,
+            semantic_binding: binding,
             elem_ty,
             size,
         };
@@ -685,7 +646,7 @@ fn mirror_storage_resources(
             resources.entry(declaration.binding).or_insert(LogicalResource {
                 id: ResourceId(0),
                 origin,
-                legacy_binding: declaration.binding,
+                semantic_binding: declaration.binding,
                 elem_ty: declaration.elem_ty.clone(),
                 size: logical_size(declaration.length.as_ref()),
             });
@@ -699,7 +660,7 @@ fn mirror_storage_resources(
 /// manifest before it can silently corrupt the descriptor.
 fn verify_manifest_covers_storage(inner: &SemanticProgram) {
     let covered: std::collections::HashSet<crate::BindingRef> =
-        inner.resources.iter().map(|resource| resource.legacy_binding).collect();
+        inner.resources.iter().map(|resource| resource.semantic_binding).collect();
     for entry in &inner.entry_points {
         for declaration in &entry.storage_bindings {
             debug_assert!(
@@ -712,7 +673,7 @@ fn verify_manifest_covers_storage(inner: &SemanticProgram) {
                 let resource = inner
                     .resources
                     .iter()
-                    .find(|resource| resource.legacy_binding == declaration.binding)
+                    .find(|resource| resource.semantic_binding == declaration.binding)
                     .expect("coverage checked above");
                 debug_assert!(
                     matches!(resource.origin, ResourceOrigin::Compiler(_)),
@@ -725,7 +686,7 @@ fn verify_manifest_covers_storage(inner: &SemanticProgram) {
     let unique = inner
         .resources
         .iter()
-        .map(|resource| resource.legacy_binding)
+        .map(|resource| resource.semantic_binding)
         .collect::<std::collections::HashSet<_>>();
     debug_assert_eq!(
         unique.len(),
@@ -734,7 +695,7 @@ fn verify_manifest_covers_storage(inner: &SemanticProgram) {
         inner
             .resources
             .iter()
-            .map(|resource| (resource.legacy_binding, &resource.origin))
+            .map(|resource| (resource.semantic_binding, &resource.origin))
             .collect::<Vec<_>>()
     );
 }
@@ -914,6 +875,27 @@ impl SemanticEntry {
             output_routes: Vec::new(),
         }
     }
+
+    pub fn publication(&self) -> EntryPublication {
+        EntryPublication {
+            name: self.name.clone(),
+            execution_model: self.execution_model.clone(),
+            inputs: self.inputs.clone(),
+            outputs: self.outputs.clone(),
+            storage_bindings: self.storage_bindings.clone(),
+        }
+    }
+}
+
+/// The exact entry ABI consumed by descriptor publication. It deliberately
+/// contains no graph, routes, or mutable lowering state.
+#[derive(Clone, Debug)]
+pub struct EntryPublication {
+    pub name: String,
+    pub execution_model: ExecutionModel,
+    pub inputs: Vec<EntryInput>,
+    pub outputs: Vec<EntryOutput>,
+    pub storage_bindings: Vec<interface::StorageBindingDecl>,
 }
 
 /// A complete entry after a validated kernel recipe has been physicalized.
@@ -935,26 +917,6 @@ pub struct PhysicalEntry {
     pub output_routes: Vec<OutputRoute>,
 }
 
-impl From<SemanticEntry> for PhysicalEntry {
-    fn from(entry: SemanticEntry) -> Self {
-        Self {
-            origin: entry.origin,
-            name: entry.name,
-            span: entry.span,
-            execution_model: entry.execution_model,
-            inputs: entry.inputs,
-            outputs: entry.outputs,
-            storage_bindings: entry.storage_bindings,
-            params: entry.params,
-            return_ty: entry.return_ty,
-            graph: entry.graph,
-            control_headers: entry.control_headers,
-            aliases: entry.aliases,
-            output_routes: entry.output_routes,
-        }
-    }
-}
-
 /// Deterministic allocation of logical resources to backend bindings.
 #[derive(Clone, Debug, Default)]
 pub struct PhysicalResourceTable {
@@ -966,7 +928,7 @@ impl PhysicalResourceTable {
         let mut ordered = resources.iter().collect::<Vec<_>>();
         ordered.sort_by_key(|resource| resource.id.0);
         Self {
-            bindings: ordered.into_iter().map(|resource| resource.legacy_binding).collect(),
+            bindings: ordered.into_iter().map(|resource| resource.semantic_binding).collect(),
         }
     }
 
@@ -999,9 +961,6 @@ pub struct SemanticProgram {
     /// Logical host and compiler resources. Compiler resources receive a
     /// physical binding only during target-aware lowering.
     pub resources: Vec<LogicalResource>,
-    /// Precise compiler ownership for physical declarations that exist before
-    /// the numbered logical-resource table is rebuilt.
-    pub resource_hints: LookupMap<crate::BindingRef, CompilerResource>,
     /// Whole-program semantic dependency DAG. Edges come from values, effect
     /// tokens, and conflicting logical resource accesses.
     pub semantic_dependencies: Vec<SemanticDependency>,
@@ -1029,12 +988,17 @@ pub struct PhysicalProgram {
 }
 
 impl PhysicalProgram {
-    pub fn from_validated(program: SemanticProgram, plan: ValidatedKernelPlan) -> Self {
+    pub fn from_validated(program: SemanticProgram, plan: ValidatedKernelPlan) -> Result<Self, String> {
         let physical_resources = PhysicalResourceTable::from_resources(&program.resources);
-        Self {
+        let entry_points = program
+            .entry_points
+            .into_iter()
+            .map(|entry| super::builder::PhysicalEntryBuilder::from_planned_entry(entry).build())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
             functions: program.functions,
             externs: program.externs,
-            entry_points: program.entry_points.into_iter().map(PhysicalEntry::from).collect(),
+            entry_points,
             constants: program.constants,
             pipeline: program.pipeline,
             input_names: program.input_names,
@@ -1044,7 +1008,7 @@ impl PhysicalProgram {
             semantic_dependencies: program.semantic_dependencies,
             plan,
             physical_resources,
-        }
+        })
     }
 }
 
@@ -1087,7 +1051,6 @@ impl SemanticProgram {
             regions,
             region_interner,
             resources: Vec::new(),
-            resource_hints: LookupMap::new(),
             semantic_dependencies: Vec::new(),
             kernel_plan: KernelPlan::default(),
         }
@@ -1130,8 +1093,8 @@ impl SemanticProgram {
     /// Physical binding currently backing a logical resource. Resources are
     /// stored in `ResourceId` order, so this is a direct index. Until terminal
     /// lowering rewrites compiler resources to allocated bindings, this returns
-    /// the `legacy_binding`.
+    /// the `semantic_binding`.
     pub fn binding_of(&self, id: ResourceId) -> crate::BindingRef {
-        self.resources[id.0 as usize].legacy_binding
+        self.resources[id.0 as usize].semantic_binding
     }
 }

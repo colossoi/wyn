@@ -289,7 +289,7 @@ fn lower_runtime_filters(
         .iter()
         .map(|resource| {
             (
-                resource.legacy_binding,
+                resource.semantic_binding,
                 super::program::buffer_len(&resource.size),
             )
         })
@@ -532,7 +532,7 @@ fn filter_work_buffers(
             let ResourceOrigin::Compiler(compiler) = &resource.origin else {
                 return None;
             };
-            (compiler.kind == kind && owner_matches(compiler)).then_some(resource.legacy_binding)
+            (compiler.kind == kind && owner_matches(compiler)).then_some(resource.semantic_binding)
         })
     };
     Some(super::types::FilterWorkBuffers {
@@ -560,7 +560,7 @@ fn owned_resource_bindings(
                     .owner
                     .as_ref()
                     .is_some_and(|owner| owner.scope == scope && owner.result == result))
-            .then_some((compiler.slot, resource.legacy_binding))
+            .then_some((compiler.slot, resource.semantic_binding))
         })
         .collect();
     bindings.sort_by_key(|(slot, _)| *slot);
@@ -2224,7 +2224,7 @@ pub fn enumerate_seg_scratch(
                 resources.push(LogicalResource {
                     id,
                     origin: ResourceOrigin::Compiler(CompilerResource::new(kind, owner.clone(), slot)),
-                    legacy_binding: binding,
+                    semantic_binding: binding,
                     elem_ty,
                     size,
                 });
