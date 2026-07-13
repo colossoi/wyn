@@ -687,7 +687,7 @@ pub fn retarget_filter_output(
                 // Compact straight into the output resource; reuse the
                 // scratch resource as the paired length cell.
                 *filter_output = super::super::types::FilterOutput::Runtime {
-                    scratch: crate::egir::program::SemanticResourceRef::Resource(output_resource),
+                    scratch: crate::egir::program::GraphResourceRef::Resource(output_resource),
                     length: super::super::types::RuntimeFilterLength::EntryOutput(scratch),
                 };
                 retargeted = Some((

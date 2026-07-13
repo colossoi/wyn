@@ -6,7 +6,7 @@ use polytype::Type;
 
 use crate::ast::TypeName;
 
-use super::program::{PhysicalProgram, SemanticResourceRef};
+use super::program::{GraphResourceRef, PhysicalProgram};
 use super::types::{ENode, EgirSoac, FilterState, SegOpKind, SideEffectKind};
 
 pub fn check(program: &PhysicalProgram) -> Result<(), String> {
@@ -144,7 +144,7 @@ fn verify_physical_graph(
                     let mut soac = soac.clone();
                     let mut error = None;
                     soac.visit_resource_refs_mut(|reference| {
-                        if let SemanticResourceRef::Resource(resource) = *reference {
+                        if let GraphResourceRef::Resource(resource) = *reference {
                             error.get_or_insert_with(|| {
                                 format!(
                                     "physical body `{owner}` still contains semantic resource {resource:?}"

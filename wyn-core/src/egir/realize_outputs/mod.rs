@@ -76,17 +76,25 @@ fn realize_entry(
     if entry.outputs.is_empty() {
         return Ok(());
     }
-    if !entry.output_routes.is_empty() {
-        // DPS path: slot-collected entries (post-`normalize_outputs`).
-        realize_compute_slots(entry, by_binding, resources)
+    if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
+        if entry.output_routes.is_empty() {
+            synthesize_compute_routes(entry);
+        }
+        realize_compute_slots(entry, by_binding, resources)?;
+        clear_compute_returns(entry);
+        Ok(())
     } else {
-        // Return-value classifier: graphics entries, plus compute
-        // entries synthesised after `normalize_outputs` (gather
-        // prepass entries created by `lift_gathers`, phase
-        // intermediates from `parallelize`, etc.). These return a
-        // value through `Return(Some(_))` and get classified the
-        // old way.
-        realize_legacy_return(entry, by_binding)
+        realize_graphics_returns(entry)
+    }
+}
+
+/// Compute entry points publish exclusively through their output routes. Once
+/// those writers exist, no value may remain on an entry terminator.
+fn clear_compute_returns(entry: &mut SemanticEntry) {
+    for (_, block) in &mut entry.graph.skeleton.blocks {
+        if matches!(block.term, SkeletonTerminator::Return(Some(_))) {
+            block.term = SkeletonTerminator::Return(None);
+        }
     }
 }
 
@@ -170,27 +178,20 @@ fn realize_compute_slots(
     Ok(())
 }
 
-/// Return-value classifier path. The body terminates in
-/// `Return(Some(value))`; classify `value` (possibly a `Tuple` for
-/// multi-location / multi-output entries) and emit one store per
-/// declared output.
+/// Convert a generated compute return into explicit output routes before
+/// materializing its writers.
 ///
-/// Used by:
+///
 ///   * Graphics entries (vertex / fragment) — outputs are scalar /
 ///     vector / matrix written to `OutputSlot { index }` places.
 ///   * Compute entries synthesised after `normalize_outputs` (gather
 ///     prepasses from `lift_gathers`, phase intermediates from
 ///     `parallelize`, etc.) — outputs are storage-buffer-bound; the
 ///     SOAC at the tail may need retargeting via `compute_slot_source`.
-fn realize_legacy_return(
-    entry: &mut SemanticEntry,
-    by_binding: &HashMap<crate::BindingRef, ResourceId>,
-) -> Result<(), ConvertError> {
-    let is_compute = matches!(entry.execution_model, ExecutionModel::Compute { .. });
+fn synthesize_compute_routes(entry: &mut SemanticEntry) {
     let SemanticEntry {
         graph,
         outputs,
-        aliases,
         output_routes,
         ..
     } = entry;
@@ -205,66 +206,65 @@ fn realize_legacy_return(
             return_loc = Some((bid, r));
         }
     }
-    let (return_block, result) = match return_loc {
-        Some(x) => x,
-        None => return Ok(()),
+    let Some((return_block, result)) = return_loc else {
+        return;
     };
+    let sources = output_sources(graph, result, outputs);
+    for (slot, source) in sources.into_iter().enumerate() {
+        output_routes.push(OutputRoute {
+            source: SlotSource {
+                block: return_block,
+                value: source,
+            },
+            slot: OutputSlotId(slot),
+            writers: Vec::new(),
+        });
+    }
+}
 
+/// Graphics entries retain return values because their ABI is location-based
+/// IO, not storage output routes.
+fn realize_graphics_returns(entry: &mut SemanticEntry) -> Result<(), ConvertError> {
+    let SemanticEntry {
+        graph,
+        outputs,
+        output_routes,
+        ..
+    } = entry;
+    let mut return_loc = None;
+    for (bid, block) in &graph.skeleton.blocks {
+        if let SkeletonTerminator::Return(Some(result)) = block.term {
+            assert!(
+                return_loc.is_none(),
+                "realize_outputs: entry body has more than one Return(Some(..)) terminator"
+            );
+            return_loc = Some((bid, result));
+        }
+    }
+    let Some((return_block, result)) = return_loc else {
+        return Ok(());
+    };
     let mut next_effect = graph_ops::next_effect_token(graph);
     let effect_index = graph.side_effect_index();
-
-    let sources = output_sources(graph, result, outputs);
-
-    for (slot_index, output) in outputs.iter().enumerate() {
-        let source = sources[slot_index];
-        if is_compute {
-            let binding = output.storage_binding.expect("BUG: compute output without storage binding");
-            let resource = *by_binding.get(&binding).expect("compute output must have a semantic resource");
-            // Single-source slot for legacy compute. Sibling-Index
-            // rewrites are still valid (they're against the single
-            // result NodeId).
-            let mut writers = source_value_writers(graph, &effect_index, source);
-            writers.extend(dispatch::compute_slot_source(
-                graph,
-                &effect_index,
-                aliases,
-                &mut next_effect,
-                return_block,
-                source,
-                slot_index,
-                &output.ty,
-                resource,
-                /* multi_source */ false,
-            )?);
-            dedup_output_writers(&mut writers);
-            output_routes.push(OutputRoute {
-                source: SlotSource {
-                    block: return_block,
-                    value: source,
-                },
-                slot: OutputSlotId(slot_index),
-                writers,
-            });
-        } else {
-            let mut writers = source_value_writers(graph, &effect_index, source);
-            writers.push(dispatch::graphics_slot_source(
-                graph,
-                return_block,
-                &mut next_effect,
-                source,
-                slot_index,
-                &output.ty,
-            ));
-            dedup_output_writers(&mut writers);
-            output_routes.push(OutputRoute {
-                source: SlotSource {
-                    block: return_block,
-                    value: source,
-                },
-                slot: OutputSlotId(slot_index),
-                writers,
-            });
-        }
+    for (slot, (output, source)) in outputs.iter().zip(output_sources(graph, result, outputs)).enumerate() {
+        let mut writers = source_value_writers(graph, &effect_index, source);
+        writers.push(dispatch::graphics_slot_source(
+            graph,
+            return_block,
+            &mut next_effect,
+            source,
+            slot,
+            &output.ty,
+        ));
+        dedup_output_writers(&mut writers);
+        output_routes.push(OutputRoute {
+            source: SlotSource {
+                block: return_block,
+                value: source,
+            },
+            slot: OutputSlotId(slot),
+            writers,
+        });
     }
 
     graph.skeleton.blocks[return_block].term = SkeletonTerminator::Return(None);

@@ -692,8 +692,8 @@ fn merge_resources(a: &[SegResourceAccess], b: &[SegResourceAccess]) -> Vec<SegR
     let mut resources: Vec<_> =
         merged.into_iter().map(|(resource, access)| SegResourceAccess { resource, access }).collect();
     resources.sort_by_key(|resource| match resource.resource {
-        crate::egir::program::SemanticResourceRef::Binding(binding) => (0, binding.set, binding.binding),
-        crate::egir::program::SemanticResourceRef::Resource(id) => (1, id.0, 0),
+        crate::egir::program::GraphResourceRef::Binding(binding) => (0, binding.set, binding.binding),
+        crate::egir::program::GraphResourceRef::Resource(id) => (1, id.0, 0),
     });
     resources
 }

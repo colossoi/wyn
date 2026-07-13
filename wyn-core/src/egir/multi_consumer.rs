@@ -12,9 +12,9 @@ use polytype::Type;
 
 use super::graph_ops;
 use super::program::{
-    CompilerResource, CompilerResourceKind, LogicalSize, MaterializationId, MaterializationRequirement,
-    MaterializationSubstitution, ResourceId, ResourceOrigin, SemanticDependencyKind, SemanticOpId,
-    SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
+    CompilerResource, CompilerResourceKind, GraphResourceRef, LogicalSize, MaterializationId,
+    MaterializationRequirement, MaterializationSubstitution, ResourceId, ResourceOrigin,
+    SemanticDependencyKind, SemanticOpId, SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::types::{
     EGraph, EgirSoac, NodeId, PureOp, SegExtent, SegOpKind, SegPlacement, SegResourceAccess,
@@ -248,13 +248,13 @@ fn materialize_candidate(inner: &mut SemanticProgram, candidate: Candidate) {
         let view = graph_ops::intern_resource_view(producer_graph, resource, elem_ty.clone(), None);
         output_views.push(view);
         producer.resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef::Resource(resource),
+            resource: SemanticResourceRef(resource),
             role: StorageRole::Output,
             elem_ty: elem_ty.clone(),
             size: size.clone(),
         });
         producer.substitutions.push(MaterializationSubstitution {
-            resource: SemanticResourceRef::Resource(resource),
+            resource: SemanticResourceRef(resource),
             consumers: Vec::new(),
         });
     }
@@ -274,7 +274,7 @@ fn materialize_candidate(inner: &mut SemanticProgram, candidate: Candidate) {
         producer_effect.operand_nodes.extend(output_views.iter().copied());
         for &resource in &output_resources {
             resources.push(SegResourceAccess {
-                resource: SemanticResourceRef::Resource(resource),
+                resource: GraphResourceRef::Resource(resource),
                 access: SegResourceAccessKind::Write,
             });
         }
@@ -315,7 +315,7 @@ fn materialize_candidate(inner: &mut SemanticProgram, candidate: Candidate) {
             resource,
         });
         entry.resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef::Resource(resource),
+            resource: SemanticResourceRef(resource),
             role: StorageRole::Input,
             elem_ty: elem_ty.clone(),
             size: sizes[lane].clone(),
@@ -422,8 +422,8 @@ fn dependency_resources(
                 }
             },
             |node| {
-                if let Some(resource) = graph_ops::extract_storage_view_source(graph, node)
-                    .and_then(SemanticResourceRef::resource)
+                if let Some(resource) =
+                    graph_ops::extract_storage_view_source(graph, node).and_then(GraphResourceRef::resource)
                 {
                     dependencies.insert(resource);
                 }
@@ -474,7 +474,7 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                                 .any(|access| access.resource.resource() == Some(replacement.resource))
                             {
                                 resources.push(SegResourceAccess {
-                                    resource: SemanticResourceRef::Resource(replacement.resource),
+                                    resource: GraphResourceRef::Resource(replacement.resource),
                                     access: SegResourceAccessKind::Read,
                                 });
                             }
@@ -535,7 +535,7 @@ fn replace_space_nodes(space: &mut super::types::SegSpace, replacements: &[Input
         if let Some(replacement) = replacements.iter().find(|replacement| *node == replacement.project) {
             *node = replacement.view;
             if let SegExtent::ResourceLength { resource, .. } = extent {
-                *resource = SemanticResourceRef::Resource(replacement.resource);
+                *resource = GraphResourceRef::Resource(replacement.resource);
             }
         }
     }

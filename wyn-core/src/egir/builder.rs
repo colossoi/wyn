@@ -185,7 +185,7 @@ impl EntryBuilder {
         size: super::program::LogicalSize,
     ) {
         self.resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef::Resource(resource),
+            resource: SemanticResourceRef(resource),
             role: interface::StorageRole::Intermediate,
             elem_ty,
             size,
@@ -199,7 +199,7 @@ impl EntryBuilder {
         size: super::program::LogicalSize,
     ) {
         self.resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef::Resource(resource),
+            resource: SemanticResourceRef(resource),
             role: interface::StorageRole::Intermediate,
             elem_ty,
             size,
@@ -217,7 +217,7 @@ impl EntryBuilder {
         size: super::program::LogicalSize,
     ) {
         self.resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef::Resource(resource),
+            resource: SemanticResourceRef(resource),
             role: interface::StorageRole::Output,
             elem_ty,
             size,
@@ -231,7 +231,7 @@ impl EntryBuilder {
         size: super::program::LogicalSize,
     ) {
         self.resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef::Resource(resource),
+            resource: SemanticResourceRef(resource),
             role: interface::StorageRole::Output,
             elem_ty,
             size,

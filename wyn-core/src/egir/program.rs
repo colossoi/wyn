@@ -187,28 +187,39 @@ pub enum LogicalSize {
     Unspecified,
 }
 
-/// Storage identity shared by semantic and physical graph nodes. Exposed
-/// semantic programs contain only `Resource`; `Binding` is introduced only
-/// while constructing the closed physical program after plan validation.
+/// Storage identity carried by the shared graph representation while it moves
+/// through the physicalization boundary. Semantic programs may construct only
+/// `Resource`; `Binding` is introduced only by physicalization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SemanticResourceRef {
+pub enum GraphResourceRef {
     Binding(crate::BindingRef),
     Resource(ResourceId),
 }
 
-impl SemanticResourceRef {
+impl GraphResourceRef {
     pub fn resource(self) -> Option<ResourceId> {
         match self {
-            SemanticResourceRef::Binding(_) => None,
-            SemanticResourceRef::Resource(resource) => Some(resource),
+            GraphResourceRef::Binding(_) => None,
+            GraphResourceRef::Resource(resource) => Some(resource),
         }
     }
 
     pub fn binding(self) -> Option<crate::BindingRef> {
         match self {
-            SemanticResourceRef::Binding(binding) => Some(binding),
-            SemanticResourceRef::Resource(_) => None,
+            GraphResourceRef::Binding(binding) => Some(binding),
+            GraphResourceRef::Resource(_) => None,
         }
+    }
+}
+
+/// A semantic storage identity. Unlike the graph transport enum above, this
+/// type cannot represent a backend binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SemanticResourceRef(pub ResourceId);
+
+impl SemanticResourceRef {
+    pub fn resource(self) -> Option<ResourceId> {
+        Some(self.0)
     }
 }
 
@@ -230,7 +241,7 @@ impl SemanticResourceDecl {
         size: LogicalSize,
     ) -> Self {
         Self {
-            resource: SemanticResourceRef::Resource(resource),
+            resource: SemanticResourceRef(resource),
             role: declaration.role,
             elem_ty: declaration.elem_ty,
             size,
@@ -789,9 +800,9 @@ pub(crate) fn physicalize_graph_resources(
             if let super::types::SideEffectKind::Soac(soac) = &mut effect.kind {
                 let mut error = None;
                 soac.visit_resource_refs_mut(|reference| {
-                    if let SemanticResourceRef::Resource(resource) = *reference {
+                    if let GraphResourceRef::Resource(resource) = *reference {
                         if let Some(binding) = bindings.binding(resource) {
-                            *reference = SemanticResourceRef::Binding(binding);
+                            *reference = GraphResourceRef::Binding(binding);
                         } else {
                             error = Some(resource);
                         }
@@ -1108,12 +1119,7 @@ pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), 
             verify_allocated_type(&declaration.elem_ty, &covered)?;
         }
         for substitution in &requirement.substitutions {
-            let resource = substitution.resource.resource().ok_or_else(|| {
-                format!(
-                    "allocated materialization `{}` contains a pending substitution binding",
-                    requirement.name
-                )
-            })?;
+            let resource = substitution.resource.0;
             if !covered.contains(&resource) {
                 return Err(format!(
                     "materialization `{}` substitutes missing resource {:?}",
@@ -1372,17 +1378,17 @@ fn verify_allocated_graph(
                     let mut soac = soac.clone();
                     let mut error = None;
                     soac.visit_resource_refs_mut(|reference| match *reference {
-                        SemanticResourceRef::Binding(binding) => {
+                        GraphResourceRef::Binding(binding) => {
                             error.get_or_insert_with(|| {
                                 format!("{owner} SOAC still contains storage binding {binding:?}")
                             });
                         }
-                        SemanticResourceRef::Resource(resource) if !covered.contains(&resource) => {
+                        GraphResourceRef::Resource(resource) if !covered.contains(&resource) => {
                             error.get_or_insert_with(|| {
                                 format!("{owner} SOAC references missing resource {resource:?}")
                             });
                         }
-                        SemanticResourceRef::Resource(_) => {}
+                        GraphResourceRef::Resource(_) => {}
                     });
                     soac.visit_types_mut(|ty| {
                         if error.is_none() {

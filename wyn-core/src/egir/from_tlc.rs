@@ -30,8 +30,8 @@ use smallvec::{smallvec, SmallVec};
 use std::collections::HashMap;
 
 use super::program::{
-    CompilerResource, CompilerResourceKind, EgirFunc, LogicalResource, LogicalSize, ResourceOrigin,
-    SemanticEntry, SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
+    CompilerResource, CompilerResourceKind, EgirFunc, GraphResourceRef, LogicalResource, LogicalSize,
+    ResourceOrigin, SemanticEntry, SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::publish::PipelineDescriptorPublish;
 use super::types::*;
@@ -493,7 +493,7 @@ fn entry_resource_declarations(
         );
         if !declarations
             .iter()
-            .any(|item: &SemanticResourceDecl| item.resource == SemanticResourceRef::Resource(resource))
+            .any(|item: &SemanticResourceDecl| item.resource == SemanticResourceRef(resource))
         {
             declarations.push(SemanticResourceDecl::from_abi(
                 declaration.clone(),
@@ -507,9 +507,9 @@ fn entry_resource_declarations(
             let size = logical_size(resources, input.length.as_ref());
             let elem_ty = input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone());
             let resource = resources.borrow_mut().declare_host(binding, elem_ty.clone(), size.clone());
-            if !declarations.iter().any(|item| item.resource == SemanticResourceRef::Resource(resource)) {
+            if !declarations.iter().any(|item| item.resource == SemanticResourceRef(resource)) {
                 declarations.push(SemanticResourceDecl {
-                    resource: SemanticResourceRef::Resource(resource),
+                    resource: SemanticResourceRef(resource),
                     role: interface::StorageRole::Input,
                     elem_ty,
                     size,
@@ -527,9 +527,9 @@ fn entry_resource_declarations(
         let size = logical_size(resources, output.length.as_ref());
         let elem_ty = output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone());
         let resource = resources.borrow_mut().declare_host(binding, elem_ty.clone(), size.clone());
-        if !declarations.iter().any(|item| item.resource == SemanticResourceRef::Resource(resource)) {
+        if !declarations.iter().any(|item| item.resource == SemanticResourceRef(resource)) {
             declarations.push(SemanticResourceDecl {
-                resource: SemanticResourceRef::Resource(resource),
+                resource: SemanticResourceRef(resource),
                 role: interface::StorageRole::Output,
                 elem_ty,
                 size,
@@ -2792,7 +2792,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             scratch_size.clone(),
         );
         self.extra_resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef::Resource(scratch_out),
+            resource: SemanticResourceRef(scratch_out),
             role: crate::interface::StorageRole::Output,
             elem_ty: output_elem_ty.clone(),
             size: scratch_size,
@@ -2810,7 +2810,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 input_array_type: arr_ty,
                 input_elem_type: elem_ty,
                 output: super::types::FilterOutput::Runtime {
-                    scratch: SemanticResourceRef::Resource(scratch_out),
+                    scratch: GraphResourceRef::Resource(scratch_out),
                     length: super::types::RuntimeFilterLength::ViewOnly,
                 },
                 // Set by `realize_outputs` only when this filter is a compute

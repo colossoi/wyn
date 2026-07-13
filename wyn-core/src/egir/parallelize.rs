@@ -22,8 +22,8 @@ use crate::types::TypeExt;
 
 use super::graph_ops;
 use super::program::{
-    CompilerResource, CompilerResourceKind, EgirFunc, LogicalResource, OutputWriter, ResourceId,
-    ResourceOrigin, SemanticEntry, SemanticOpId, SemanticProgram, SemanticResourceDecl,
+    CompilerResource, CompilerResourceKind, EgirFunc, GraphResourceRef, LogicalResource, OutputWriter,
+    ResourceId, ResourceOrigin, SemanticEntry, SemanticOpId, SemanticProgram, SemanticResourceDecl,
     SemanticResourceRef,
 };
 use super::types::{
@@ -350,12 +350,12 @@ fn lower_runtime_filters(inner: &SemanticProgram, schedule: &mut schedule::Kerne
         let domain =
             schedule::domain_from_space(&space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-        let declaration = |reference: SemanticResourceRef, role| {
+        let declaration = |reference: GraphResourceRef, role| {
             let resource =
                 reference.resource().expect("filter planning received a pending resource binding");
             let logical = &logical_resources[resource.0 as usize];
             SemanticResourceDecl {
-                resource: reference,
+                resource: SemanticResourceRef(resource),
                 role,
                 elem_ty: u32_ty.clone(),
                 size: logical.size.clone(),
@@ -626,7 +626,7 @@ fn filter_work_buffers(
                 return None;
             };
             (compiler.kind == kind && owner_matches(compiler))
-                .then_some(SemanticResourceRef::Resource(resource.id))
+                .then_some(GraphResourceRef::Resource(resource.id))
         })
     };
     Some(super::types::FilterWorkBuffers {
@@ -637,7 +637,7 @@ fn filter_work_buffers(
     })
 }
 
-fn required_resource(reference: SemanticResourceRef) -> ResourceId {
+fn required_resource(reference: GraphResourceRef) -> ResourceId {
     reference.resource().expect("target planning received a pending resource binding")
 }
 
@@ -1353,7 +1353,7 @@ fn semantic_resources(
     by_binding: &std::collections::HashMap<crate::BindingRef, ResourceId>,
 ) -> Vec<SegResourceAccess> {
     use std::collections::HashMap;
-    let mut accesses: HashMap<SemanticResourceRef, SegResourceAccessKind> =
+    let mut accesses: HashMap<GraphResourceRef, SegResourceAccessKind> =
         super::semantic_graph::read_resources(&entry.graph, se)
             .into_iter()
             .map(|resource| (resource.resource, resource.access))
@@ -1369,7 +1369,7 @@ fn semantic_resources(
         });
         if let Some(resource) = resource {
             accesses
-                .entry(SemanticResourceRef::Resource(resource))
+                .entry(GraphResourceRef::Resource(resource))
                 .and_modify(|access| *access = SegResourceAccessKind::ReadWrite)
                 .or_insert(SegResourceAccessKind::Write);
         }
@@ -1377,8 +1377,8 @@ fn semantic_resources(
     let mut result: Vec<_> =
         accesses.into_iter().map(|(resource, access)| SegResourceAccess { resource, access }).collect();
     result.sort_by_key(|resource| match resource.resource {
-        SemanticResourceRef::Binding(binding) => (0, binding.set, binding.binding),
-        SemanticResourceRef::Resource(id) => (1, id.0, 0),
+        GraphResourceRef::Binding(binding) => (0, binding.set, binding.binding),
+        GraphResourceRef::Resource(id) => (1, id.0, 0),
     });
     result
 }
@@ -1919,10 +1919,10 @@ fn cast_u32_to_index(
     }
 }
 
-fn emit_semantic_resource_len(graph: &mut super::types::EGraph, resource: SemanticResourceRef) -> NodeId {
+fn emit_semantic_resource_len(graph: &mut super::types::EGraph, resource: GraphResourceRef) -> NodeId {
     match resource {
-        SemanticResourceRef::Resource(resource) => emit_resource_len(graph, resource),
-        SemanticResourceRef::Binding(binding) => {
+        GraphResourceRef::Resource(resource) => emit_resource_len(graph, resource),
+        GraphResourceRef::Binding(binding) => {
             let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
             let set_nid = graph_ops::intern_u32(graph, binding.set, None);
             let binding_nid = graph_ops::intern_u32(graph, binding.binding, None);
@@ -2164,7 +2164,7 @@ fn project_root_index(graph: &super::types::EGraph, value: NodeId, root: NodeId)
     }
 }
 
-fn storage_resource_under(graph: &super::types::EGraph, root: NodeId) -> Option<SemanticResourceRef> {
+fn storage_resource_under(graph: &super::types::EGraph, root: NodeId) -> Option<GraphResourceRef> {
     wyn_graph::find_map_reachable(
         [root],
         wyn_graph::WalkOrder::DepthFirst,
@@ -2437,7 +2437,7 @@ fn lower_reduce_entry(
             }
             acc_stores[acc_i].push((place, value));
             if let Some(resource) =
-                storage_resource_under(&entry.graph, place).and_then(SemanticResourceRef::resource)
+                storage_resource_under(&entry.graph, place).and_then(GraphResourceRef::resource)
             {
                 if !acc_output_decls[acc_i].iter().any(|(candidate, _, _)| *candidate == resource) {
                     let logical = resources.get(resource.0 as usize)?;
@@ -2514,7 +2514,7 @@ fn lower_reduce_entry(
             }
         }
         entry.resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef::Resource(partial_resources[acc_i]),
+            resource: SemanticResourceRef(partial_resources[acc_i]),
             role: crate::interface::StorageRole::Intermediate,
             elem_ty: elem_tys[acc_i].clone(),
             size: resources[partial_resources[acc_i].0 as usize].size.clone(),
@@ -2785,7 +2785,7 @@ fn lower_scan_entry(
     // see a consistent interface.
     for resource in [block_sums_resource, block_offsets_resource] {
         entry.resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef::Resource(resource),
+            resource: SemanticResourceRef(resource),
             role: crate::interface::StorageRole::Intermediate,
             elem_ty: elem_ty.clone(),
             size: resources[resource.0 as usize].size.clone(),

@@ -1,5 +1,5 @@
 use super::*;
-use crate::egir::program::SemanticResourceRef;
+use crate::egir::program::GraphResourceRef;
 use crate::egir::types::{NodeId, SegExtent, SegLevel, SegSpace};
 use crate::BindingRef;
 use slotmap::SlotMap;
@@ -33,7 +33,7 @@ fn resource_length_compares_by_binding_and_stride_ignoring_node() {
     let (a, b) = two_nodes();
     let mk = |node: NodeId, set: u32, binding: u32, elem_bytes: u32| SegExtent::ResourceLength {
         node,
-        resource: SemanticResourceRef::Binding(BindingRef::new(set, binding)),
+        resource: GraphResourceRef::Binding(BindingRef::new(set, binding)),
         elem_bytes,
     };
     assert!(seg_extent_fusable(&mk(a, 0, 1, 4), &mk(b, 0, 1, 4)));

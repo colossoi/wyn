@@ -69,27 +69,20 @@ fn allocated_program(reference: SemanticResourceRef, size: LogicalSize) -> Seman
 
 #[test]
 fn allocated_resource_verifier_accepts_resource_only_program() {
-    let program = allocated_program(
-        SemanticResourceRef::Resource(ResourceId(0)),
-        LogicalSize::Unspecified,
-    );
+    let program = allocated_program(SemanticResourceRef(ResourceId(0)), LogicalSize::Unspecified);
     verify_allocated_resources(&program).expect("resource-normalized program");
 }
 
 #[test]
-fn allocated_resource_verifier_rejects_pending_binding() {
-    let program = allocated_program(
-        SemanticResourceRef::Binding(crate::BindingRef::new(0, 7)),
-        LogicalSize::Unspecified,
-    );
-    let error = verify_allocated_resources(&program).expect_err("pending binding must be rejected");
-    assert!(error.contains("pending binding"), "{error}");
+fn semantic_resource_ref_has_no_binding_constructor() {
+    let reference = SemanticResourceRef(ResourceId(0));
+    assert_eq!(reference.resource(), Some(ResourceId(0)));
 }
 
 #[test]
 fn allocated_resource_verifier_rejects_missing_size_source() {
     let program = allocated_program(
-        SemanticResourceRef::Resource(ResourceId(0)),
+        SemanticResourceRef(ResourceId(0)),
         LogicalSize::LikeResource {
             resource: ResourceId(1),
             elem_bytes: 4,
@@ -105,7 +98,7 @@ fn scalar_handoff_classification_uses_typed_prepass_role_not_name() {
     let typed_binding = crate::BindingRef::new(0, 10);
     let misleading_binding = crate::BindingRef::new(0, 11);
     let declaration = |resource, role| SemanticResourceDecl {
-        resource: SemanticResourceRef::Resource(resource),
+        resource: SemanticResourceRef(resource),
         role,
         elem_ty: unit_ty(),
         size: LogicalSize::Unspecified,

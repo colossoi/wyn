@@ -205,7 +205,7 @@ pub enum SegExtent {
     },
     ResourceLength {
         node: NodeId,
-        resource: super::program::SemanticResourceRef,
+        resource: super::program::GraphResourceRef,
         elem_bytes: u32,
     },
     /// A concrete EGIR value whose provenance is not host-dispatchable. Such
@@ -255,7 +255,7 @@ pub enum HistUpdatePolicy {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SegResourceAccess {
-    pub resource: super::program::SemanticResourceRef,
+    pub resource: super::program::GraphResourceRef,
     pub access: SegResourceAccessKind,
 }
 
@@ -306,10 +306,10 @@ pub enum SegOpKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FilterWorkBuffers {
-    pub flags: super::program::SemanticResourceRef,
-    pub offsets: super::program::SemanticResourceRef,
-    pub block_sums: super::program::SemanticResourceRef,
-    pub block_offsets: super::program::SemanticResourceRef,
+    pub flags: super::program::GraphResourceRef,
+    pub offsets: super::program::GraphResourceRef,
+    pub block_sums: super::program::GraphResourceRef,
+    pub block_offsets: super::program::GraphResourceRef,
 }
 
 #[derive(Clone, Debug)]
@@ -321,7 +321,7 @@ pub enum FilterOutput {
         destination: SoacDestination,
     },
     Runtime {
-        scratch: super::program::SemanticResourceRef,
+        scratch: super::program::GraphResourceRef,
         length: RuntimeFilterLength,
     },
 }
@@ -330,7 +330,7 @@ pub enum FilterOutput {
 /// Where a runtime filter's surviving count is observable.
 pub enum RuntimeFilterLength {
     ViewOnly,
-    EntryOutput(super::program::SemanticResourceRef),
+    EntryOutput(super::program::GraphResourceRef),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -544,7 +544,7 @@ impl EgirSoac {
 
     pub fn visit_resource_refs_mut(
         &mut self,
-        mut visit: impl FnMut(&mut super::program::SemanticResourceRef),
+        mut visit: impl FnMut(&mut super::program::GraphResourceRef),
     ) {
         let mut visit_space = |space: &mut SegSpace| {
             for extent in &mut space.dims {

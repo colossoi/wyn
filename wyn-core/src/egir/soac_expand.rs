@@ -26,7 +26,7 @@ use super::types::{
     SoacDestination,
 };
 
-fn physical_binding(resource: super::program::SemanticResourceRef) -> crate::BindingRef {
+fn physical_binding(resource: super::program::GraphResourceRef) -> crate::BindingRef {
     resource.binding().expect("logical resource reached SOAC expansion before physicalization")
 }
 

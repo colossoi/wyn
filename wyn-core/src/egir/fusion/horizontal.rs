@@ -353,7 +353,7 @@ fn reproject(
 fn merge_resources(a: &[SegResourceAccess], b: &[SegResourceAccess]) -> Vec<SegResourceAccess> {
     use crate::egir::types::SegResourceAccessKind;
     let mut merged: std::collections::HashMap<
-        crate::egir::program::SemanticResourceRef,
+        crate::egir::program::GraphResourceRef,
         SegResourceAccessKind,
     > = std::collections::HashMap::new();
     for resource in a.iter().chain(b) {
@@ -369,8 +369,8 @@ fn merge_resources(a: &[SegResourceAccess], b: &[SegResourceAccess]) -> Vec<SegR
     let mut out: Vec<_> =
         merged.into_iter().map(|(resource, access)| SegResourceAccess { resource, access }).collect();
     out.sort_by_key(|resource| match resource.resource {
-        crate::egir::program::SemanticResourceRef::Binding(binding) => (0, binding.set, binding.binding),
-        crate::egir::program::SemanticResourceRef::Resource(id) => (1, id.0, 0),
+        crate::egir::program::GraphResourceRef::Binding(binding) => (0, binding.set, binding.binding),
+        crate::egir::program::GraphResourceRef::Resource(id) => (1, id.0, 0),
     });
     out
 }

@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use crate::egir::graph_ops;
 use crate::egir::program::{
-    CompilerFlowEndpoint, CompilerResourceFlow, EgirFunc, EntryPublication, InputSlotId, LogicalResource,
-    MaterializationRequirement, OutputSlotId, PhysicalResourceTable, PlannedEntryPublication,
-    PlannedKernelBody, PrepassKind, PrepassRequirement, RegionInterner, ResourceOrigin, SemanticEntry,
-    SemanticEntryId, SemanticResourceDecl, SemanticResourceRef,
+    CompilerFlowEndpoint, CompilerResourceFlow, EgirFunc, EntryPublication, GraphResourceRef, InputSlotId,
+    LogicalResource, MaterializationRequirement, OutputSlotId, PhysicalResourceTable,
+    PlannedEntryPublication, PlannedKernelBody, PrepassKind, PrepassRequirement, RegionInterner,
+    ResourceOrigin, SemanticEntry, SemanticEntryId, SemanticResourceDecl,
 };
 use crate::egir::types::RegionId;
 use crate::egir::types::{
@@ -1761,7 +1761,7 @@ fn segmented_graph_resources(
             }) = &side_effect.kind
             {
                 let mut resources = graph_resources(graph, declarations);
-                let mut push = |reference: SemanticResourceRef, access: ResourceAccess| {
+                let mut push = |reference: GraphResourceRef, access: ResourceAccess| {
                     let resource =
                         reference.resource().expect("planner received a pending filter resource binding");
                     merge_scheduled_resource(&mut resources, resource, access);
@@ -1979,7 +1979,7 @@ fn graph_resources(
     declarations: &[crate::egir::program::SemanticResourceDecl],
 ) -> Vec<ScheduledResource> {
     let mut accesses: HashMap<ResourceId, ResourceAccess> = HashMap::new();
-    let mut insert = |reference: SemanticResourceRef, access: ResourceAccess| {
+    let mut insert = |reference: GraphResourceRef, access: ResourceAccess| {
         let resource = reference.resource().expect("planner received a pending entry resource binding");
         accesses.entry(resource).and_modify(|old| *old = old.merge(access)).or_insert(access);
     };
@@ -1990,7 +1990,7 @@ fn graph_resources(
             crate::interface::StorageRole::Output => ResourceAccess::Write,
             crate::interface::StorageRole::Intermediate => ResourceAccess::ReadWrite,
         };
-        insert(declaration.resource, access);
+        insert(GraphResourceRef::Resource(declaration.resource.0), access);
     }
 
     // A storage view reachable from an effect operand is conservatively a

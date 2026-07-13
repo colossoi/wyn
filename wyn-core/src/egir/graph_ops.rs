@@ -141,17 +141,17 @@ pub fn intern_chunked_resource_view(
 
 pub fn intern_chunked_semantic_view(
     graph: &mut EGraph,
-    resource: super::program::SemanticResourceRef,
+    resource: super::program::GraphResourceRef,
     offset: NodeId,
     len: NodeId,
     view_ty: Type<TypeName>,
     span: Option<Span>,
 ) -> NodeId {
     match resource {
-        super::program::SemanticResourceRef::Binding(binding) => {
+        super::program::GraphResourceRef::Binding(binding) => {
             intern_chunked_storage_view(graph, binding, offset, len, view_ty, span)
         }
-        super::program::SemanticResourceRef::Resource(resource) => {
+        super::program::GraphResourceRef::Resource(resource) => {
             intern_chunked_resource_view(graph, resource, offset, len, view_ty, span)
         }
     }
@@ -436,16 +436,16 @@ pub fn emit_pending_soac(
 pub fn extract_storage_view_source(
     graph: &EGraph,
     view_nid: NodeId,
-) -> Option<super::program::SemanticResourceRef> {
+) -> Option<super::program::GraphResourceRef> {
     match &graph.nodes[view_nid] {
         ENode::Pure {
             op: PureOp::StorageView(PureViewSource::Storage(br)),
             ..
-        } => Some(super::program::SemanticResourceRef::Binding(*br)),
+        } => Some(super::program::GraphResourceRef::Binding(*br)),
         ENode::Pure {
             op: PureOp::StorageView(PureViewSource::Resource(resource)),
             ..
-        } => Some(super::program::SemanticResourceRef::Resource(*resource)),
+        } => Some(super::program::GraphResourceRef::Resource(*resource)),
         _ => None,
     }
 }
