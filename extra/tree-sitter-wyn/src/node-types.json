@@ -4371,8 +4371,23 @@
             "named": true
           }
         ]
+      },
+      "params": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "lambda_params",
+            "named": true
+          }
+        ]
       }
-    },
+    }
+  },
+  {
+    "type": "lambda_params",
+    "named": true,
+    "fields": {},
     "children": {
       "multiple": true,
       "required": false,

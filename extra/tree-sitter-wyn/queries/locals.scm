@@ -80,9 +80,8 @@
   pattern: (identifier) @local.definition)
 
 (lambda_expression
-  "|"
-  (identifier) @local.definition
-  "|")
+  params: (lambda_params
+    (identifier) @local.definition))
 
 (case_clause
   pattern: (identifier) @local.definition)
