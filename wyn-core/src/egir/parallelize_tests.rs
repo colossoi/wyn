@@ -52,7 +52,6 @@ fn output_ownership_comes_from_explicit_route_writer() {
         span: None,
     });
     let mut entry = SemanticEntry::new(
-        crate::interface::EntryOrigin::Source,
         "route_test".into(),
         Span::dummy(),
         ExecutionModel::Compute {

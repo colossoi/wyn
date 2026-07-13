@@ -26,7 +26,6 @@ fn empty_func(name: &str) -> EgirFunc {
 
 fn empty_entry(name: &str) -> SemanticEntry {
     SemanticEntry::new(
-        crate::interface::EntryOrigin::Source,
         name.to_string(),
         Span::dummy(),
         ExecutionModel::Compute {
@@ -102,7 +101,7 @@ fn allocated_resource_verifier_rejects_missing_size_source() {
 }
 
 #[test]
-fn scalar_handoff_classification_uses_entry_origin_not_name() {
+fn scalar_handoff_classification_uses_typed_prepass_role_not_name() {
     let typed_binding = crate::BindingRef::new(0, 10);
     let misleading_binding = crate::BindingRef::new(0, 11);
     let output = |binding| crate::interface::StorageBindingDecl {
@@ -119,7 +118,6 @@ fn scalar_handoff_classification_uses_entry_origin_not_name() {
     };
 
     let mut typed = empty_entry("renamed_without_magic_marker");
-    typed.origin = crate::interface::EntryOrigin::ScalarPrepass;
     typed.resource_declarations.push(SemanticResourceDecl::pending(output(typed_binding)));
 
     let mut misleading = empty_entry("user_prepass_name");
@@ -129,7 +127,7 @@ fn scalar_handoff_classification_uses_entry_origin_not_name() {
     consumer.resource_declarations.push(SemanticResourceDecl::pending(input(typed_binding)));
     consumer.resource_declarations.push(SemanticResourceDecl::pending(input(misleading_binding)));
 
-    let inner = SemanticProgram::new(
+    let mut inner = SemanticProgram::new(
         vec![],
         vec![],
         vec![typed, misleading, consumer],
@@ -137,6 +135,7 @@ fn scalar_handoff_classification_uses_entry_origin_not_name() {
         PipelineDescriptor::default(),
         RegionInterner::default(),
     );
+    inner.prepass_roles.insert("renamed_without_magic_marker".into(), PrepassKind::Scalar);
     let resources = scalar_handoff_resources(&inner);
 
     assert_eq!(

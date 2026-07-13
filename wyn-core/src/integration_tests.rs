@@ -1398,15 +1398,18 @@ entry add_sum(xs: []i32) []i32 =
             _ => None,
         })
         .expect("scalar handoff has an explicit resource flow");
-    let crate::egir::program::CompilerFlowEndpoint::Entry(producer_id) = flow.producer else {
-        panic!("scalar prepass producer must be a semantic entry")
+    let crate::egir::program::CompilerFlowEndpoint::Prepass(producer_id) = flow.producer else {
+        panic!("scalar prepass producer must be a typed prepass requirement")
     };
-    let producer = &allocated.inner.entry_points[producer_id.0 as usize];
-    assert!(producer.name.starts_with("add_sum_prepass_"));
+    let producer = &allocated.inner.prepasses[producer_id.0 as usize];
+    assert!(producer.body.name.starts_with("add_sum_prepass_"));
     assert_eq!(flow.consumers.len(), 1);
     assert_eq!(
         allocated.inner.entry_points[match flow.consumers[0] {
             crate::egir::program::CompilerFlowEndpoint::Entry(id) => id.0 as usize,
+            crate::egir::program::CompilerFlowEndpoint::Prepass(_) => {
+                panic!("scalar prepass consumer must be a semantic entry")
+            }
             crate::egir::program::CompilerFlowEndpoint::Materialization(_) => {
                 panic!("scalar prepass consumer must be a semantic entry")
             }

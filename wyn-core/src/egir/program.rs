@@ -161,6 +161,15 @@ pub struct SemanticEntryId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MaterializationId(pub u32);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PrepassId(pub u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PrepassKind {
+    Scalar,
+    Gather,
+}
+
 /// Stable identity of an entry input position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InputSlotId(pub usize);
@@ -300,6 +309,7 @@ pub struct CompilerResourceFlow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CompilerFlowEndpoint {
     Entry(SemanticEntryId),
+    Prepass(PrepassId),
     Materialization(MaterializationId),
 }
 
@@ -357,6 +367,7 @@ pub fn plan_logical_resources(inner: &mut SemanticProgram, binding_ids: &mut cra
     let by_binding =
         pending.iter().map(|(binding, resource)| (*binding, resource.id)).collect::<HashMap<_, _>>();
     inner.resources = pending.into_iter().map(|(_, resource)| resource).collect();
+    extract_prepass_requirements(inner);
     normalize_semantic_resource_references(inner, &by_binding);
     record_compiler_resource_flows(inner);
     if cfg!(debug_assertions) {
@@ -367,7 +378,7 @@ pub fn plan_logical_resources(inner: &mut SemanticProgram, binding_ids: &mut cra
 fn gather_prepass_resources(inner: &SemanticProgram) -> HashMap<crate::BindingRef, CompilerResource> {
     let mut resources = HashMap::new();
     for entry in &inner.entry_points {
-        if entry.origin != interface::EntryOrigin::GatherPrepass {
+        if inner.prepass_roles.get(&entry.name) != Some(&PrepassKind::Gather) {
             continue;
         }
         for (slot, declaration) in entry.resource_declarations.iter().enumerate() {
@@ -383,6 +394,30 @@ fn gather_prepass_resources(inner: &SemanticProgram) -> HashMap<crate::BindingRe
         }
     }
     resources
+}
+
+fn extract_prepass_requirements(inner: &mut SemanticProgram) {
+    let mut source_entries = Vec::with_capacity(inner.entry_points.len());
+    let mut prepasses = Vec::with_capacity(inner.prepass_roles.len());
+    for entry in inner.entry_points.drain(..) {
+        let Some(kind) = inner.prepass_roles.remove(&entry.name) else {
+            source_entries.push(entry);
+            continue;
+        };
+        let body = PlannedKernelBody::from_semantic(&entry)
+            .expect("optimized prepass graph must be projectable into a typed requirement");
+        prepasses.push(PrepassRequirement {
+            id: PrepassId(prepasses.len() as u32),
+            kind,
+            body,
+        });
+    }
+    assert!(
+        inner.prepass_roles.is_empty(),
+        "prepass classification references a missing entry"
+    );
+    inner.entry_points = source_entries;
+    inner.prepasses = prepasses;
 }
 
 fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
@@ -401,6 +436,19 @@ fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
                 interface::StorageRole::Input => {
                     consumers.entry(resource).or_default().push(CompilerFlowEndpoint::Entry(entry_id))
                 }
+                interface::StorageRole::Intermediate => {}
+            }
+        }
+    }
+    for prepass in &inner.prepasses {
+        let endpoint = CompilerFlowEndpoint::Prepass(prepass.id);
+        for declaration in &prepass.body.resource_declarations {
+            let Some(resource) = declaration.resource.resource() else {
+                continue;
+            };
+            match declaration.role {
+                interface::StorageRole::Output => producers.entry(resource).or_default().push(endpoint),
+                interface::StorageRole::Input => consumers.entry(resource).or_default().push(endpoint),
                 interface::StorageRole::Intermediate => {}
             }
         }
@@ -555,6 +603,10 @@ fn normalize_semantic_resource_references(
             true
         });
     }
+    for prepass in &mut inner.prepasses {
+        normalize_planned_body_resources(&mut prepass.body, &compiler_resources, by_binding);
+        normalize_graph_resources(&mut prepass.body.graph, by_binding);
+    }
     for requirement in &mut inner.materializations {
         for declaration in &mut requirement.resource_declarations {
             if let SemanticResourceRef::Binding(binding) = declaration.resource {
@@ -585,6 +637,86 @@ fn normalize_semantic_resource_references(
         normalize_graph_resources(&mut region.graph, by_binding);
     }
     normalize_structural_resources(inner, by_binding);
+}
+
+fn normalize_planned_body_resources(
+    body: &mut PlannedKernelBody,
+    compiler_resources: &std::collections::HashSet<ResourceId>,
+    by_binding: &HashMap<crate::BindingRef, ResourceId>,
+) {
+    for input in &body.inputs {
+        let Some(binding) = input.storage_binding else {
+            continue;
+        };
+        let resource = *by_binding.get(&binding).expect("prepass input must be in manifest");
+        if !body
+            .resource_declarations
+            .iter()
+            .any(|declaration| resolves_to_resource(declaration.resource, resource, by_binding))
+        {
+            body.resource_declarations.push(SemanticResourceDecl {
+                resource: SemanticResourceRef::Resource(resource),
+                role: interface::StorageRole::Input,
+                elem_ty: input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone()),
+                size: pending_logical_size(input.length.as_ref()),
+            });
+        }
+    }
+    for output in &body.outputs {
+        let Some(binding) = output.storage_binding else {
+            continue;
+        };
+        let resource = *by_binding.get(&binding).expect("prepass output must be in manifest");
+        if !body
+            .resource_declarations
+            .iter()
+            .any(|declaration| resolves_to_resource(declaration.resource, resource, by_binding))
+        {
+            body.resource_declarations.push(SemanticResourceDecl {
+                resource: SemanticResourceRef::Resource(resource),
+                role: interface::StorageRole::Output,
+                elem_ty: output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone()),
+                size: pending_logical_size(output.length.as_ref()),
+            });
+        }
+    }
+    for declaration in &mut body.resource_declarations {
+        if let SemanticResourceRef::Binding(binding) = declaration.resource {
+            declaration.resource = SemanticResourceRef::Resource(
+                *by_binding.get(&binding).expect("prepass declaration must be in manifest"),
+            );
+        }
+        normalize_logical_size(&mut declaration.size, by_binding);
+    }
+    for input in &mut body.inputs {
+        if input
+            .storage_binding
+            .and_then(|binding| by_binding.get(&binding))
+            .is_some_and(|resource| compiler_resources.contains(resource))
+        {
+            input.storage_binding = None;
+        }
+    }
+    let mut output_slots = vec![None; body.outputs.len()];
+    let mut host_outputs = Vec::with_capacity(body.outputs.len());
+    for (slot, output) in std::mem::take(&mut body.outputs).into_iter().enumerate() {
+        let compiler_output = output
+            .storage_binding
+            .and_then(|binding| by_binding.get(&binding))
+            .is_some_and(|resource| compiler_resources.contains(resource));
+        if !compiler_output {
+            output_slots[slot] = Some(host_outputs.len());
+            host_outputs.push(output);
+        }
+    }
+    body.outputs = host_outputs;
+    body.output_routes.retain_mut(|route| {
+        let Some(slot) = output_slots.get(route.slot.0).copied().flatten() else {
+            return false;
+        };
+        route.slot = OutputSlotId(slot);
+        true
+    });
 }
 
 fn resolves_to_resource(
@@ -706,6 +838,21 @@ fn normalize_structural_resources(
         }
         normalize_type_resources(&mut requirement.return_ty, by_binding);
         for declaration in &mut requirement.resource_declarations {
+            normalize_type_resources(&mut declaration.elem_ty, by_binding);
+        }
+    }
+    for prepass in &mut inner.prepasses {
+        for input in &mut prepass.body.inputs {
+            normalize_type_resources(&mut input.ty, by_binding);
+        }
+        for output in &mut prepass.body.outputs {
+            normalize_type_resources(&mut output.ty, by_binding);
+        }
+        for (ty, _) in &mut prepass.body.params {
+            normalize_type_resources(ty, by_binding);
+        }
+        normalize_type_resources(&mut prepass.body.return_ty, by_binding);
+        for declaration in &mut prepass.body.resource_declarations {
             normalize_type_resources(&mut declaration.elem_ty, by_binding);
         }
     }
@@ -1061,7 +1208,7 @@ fn scalar_handoff_resources(inner: &SemanticProgram) -> HashMap<crate::BindingRe
         .collect();
     let mut resources = HashMap::new();
     for entry in &inner.entry_points {
-        if entry.origin != interface::EntryOrigin::ScalarPrepass {
+        if inner.prepass_roles.get(&entry.name) != Some(&PrepassKind::Scalar) {
             continue;
         }
         let owner = entry
@@ -1198,7 +1345,7 @@ fn mirror_storage_resources(
                         output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone()),
                         pending_logical_size(output.length.as_ref()),
                     );
-                    if entry.origin == interface::EntryOrigin::Source
+                    if !inner.prepass_roles.contains_key(&entry.name)
                         || !filter_kinds.contains_key(&binding)
                     {
                         logical.origin = ResourceOrigin::Host(binding);
@@ -1304,6 +1451,15 @@ pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), 
             verify_allocated_type(ty, &covered)?;
         }
         verify_allocated_graph(&entry.graph, &covered, &format!("entry `{}`", entry.name))?;
+    }
+    for (index, prepass) in inner.prepasses.iter().enumerate() {
+        if prepass.id != PrepassId(index as u32) {
+            return Err(format!(
+                "prepass arena is not dense: position {index} contains {:?}",
+                prepass.id
+            ));
+        }
+        verify_allocated_planned_body(&prepass.body, &covered, "prepass")?;
     }
     for (index, requirement) in inner.materializations.iter().enumerate() {
         if requirement.id != MaterializationId(index as u32) {
@@ -1444,6 +1600,17 @@ fn flow_endpoint<'a>(
             .get(id.0 as usize)
             .map(|entry| (entry.name.as_str(), entry.resource_declarations.as_slice()))
             .ok_or_else(|| format!("resource {:?} has an invalid entry endpoint {:?}", resource, id)),
+        CompilerFlowEndpoint::Prepass(id) => inner
+            .prepasses
+            .get(id.0 as usize)
+            .filter(|prepass| prepass.id == id)
+            .map(|prepass| {
+                (
+                    prepass.body.name.as_str(),
+                    prepass.body.resource_declarations.as_slice(),
+                )
+            })
+            .ok_or_else(|| format!("resource {:?} has an invalid prepass endpoint {:?}", resource, id)),
         CompilerFlowEndpoint::Materialization(id) => inner
             .materializations
             .get(id.0 as usize)
@@ -1461,6 +1628,38 @@ fn flow_endpoint<'a>(
                 )
             }),
     }
+}
+
+fn verify_allocated_planned_body(
+    body: &PlannedKernelBody,
+    covered: &std::collections::HashSet<ResourceId>,
+    kind: &str,
+) -> Result<(), String> {
+    for declaration in &body.resource_declarations {
+        let resource = declaration
+            .resource
+            .resource()
+            .ok_or_else(|| format!("allocated {kind} `{}` contains a pending binding", body.name))?;
+        if !covered.contains(&resource) {
+            return Err(format!(
+                "{kind} `{}` references missing resource {:?}",
+                body.name, resource
+            ));
+        }
+        verify_allocated_size(&declaration.size, covered)?;
+        verify_allocated_type(&declaration.elem_ty, covered)?;
+    }
+    verify_allocated_type(&body.return_ty, covered)?;
+    for input in &body.inputs {
+        verify_allocated_type(&input.ty, covered)?;
+    }
+    for output in &body.outputs {
+        verify_allocated_type(&output.ty, covered)?;
+    }
+    for (ty, _) in &body.params {
+        verify_allocated_type(ty, covered)?;
+    }
+    verify_allocated_graph(&body.graph, covered, &format!("{kind} `{}`", body.name))
 }
 
 fn verify_allocated_size(
@@ -1723,8 +1922,6 @@ pub struct OutputRoute {
 }
 
 pub struct SemanticEntry {
-    /// Source/compiler provenance. Generated names are not semantic tags.
-    pub origin: interface::EntryOrigin,
     pub name: String,
     pub span: Span,
     pub execution_model: ExecutionModel,
@@ -1823,9 +2020,18 @@ impl PlannedKernelBody {
     }
 }
 
+/// TLC-originated scalar or gather producer removed from the semantic entry
+/// arena at allocation. Its graph remains target-independent until the
+/// planner selects and commits a kernel recipe.
+#[derive(Clone, Debug)]
+pub struct PrepassRequirement {
+    pub id: PrepassId,
+    pub kind: PrepassKind,
+    pub body: PlannedKernelBody,
+}
+
 impl SemanticEntry {
     pub fn new(
-        origin: interface::EntryOrigin,
         name: String,
         span: Span,
         execution_model: ExecutionModel,
@@ -1838,7 +2044,6 @@ impl SemanticEntry {
         control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
         Self::new_with_resources(
-            origin,
             name,
             span,
             execution_model,
@@ -1854,7 +2059,6 @@ impl SemanticEntry {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_resources(
-        origin: interface::EntryOrigin,
         name: String,
         span: Span,
         execution_model: ExecutionModel,
@@ -1867,7 +2071,6 @@ impl SemanticEntry {
         control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
         SemanticEntry {
-            origin,
             name,
             span,
             execution_model,
@@ -2086,6 +2289,10 @@ pub struct SemanticProgram {
     /// pass straight through.
     pub externs: Vec<Function>,
     pub entry_points: Vec<SemanticEntry>,
+    /// TLC classification retained only until allocation extracts typed
+    /// prepass requirements from the semantic entry arena.
+    pub prepass_roles: LookupMap<String, PrepassKind>,
+    pub prepasses: Vec<PrepassRequirement>,
     /// Shared-producer requirements discovered during logical allocation.
     /// These are planned and physicalized directly; they never join the
     /// semantic entry arena.
@@ -2190,6 +2397,8 @@ impl SemanticProgram {
             functions,
             externs,
             entry_points,
+            prepass_roles: LookupMap::new(),
+            prepasses: Vec::new(),
             materializations: Vec::new(),
             constants,
             pipeline,

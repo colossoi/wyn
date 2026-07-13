@@ -188,6 +188,7 @@ pub fn run(
     let mut functions: Vec<EgirFunc> = Vec::new();
     let mut externs: Vec<Function> = Vec::new();
     let mut entry_points: Vec<SemanticEntry> = Vec::new();
+    let mut prepass_roles = LookupMap::new();
 
     for def in &program.defs {
         match &def.meta {
@@ -235,6 +236,15 @@ pub fn run(
                     entry_input_bounds,
                     binding_ids,
                 )?;
+                match entry.origin {
+                    interface::EntryOrigin::Source => {}
+                    interface::EntryOrigin::ScalarPrepass => {
+                        prepass_roles.insert(ep.name.clone(), super::program::PrepassKind::Scalar);
+                    }
+                    interface::EntryOrigin::GatherPrepass => {
+                        prepass_roles.insert(ep.name.clone(), super::program::PrepassKind::Gather);
+                    }
+                }
                 entry_points.push(ep);
             }
         }
@@ -242,14 +252,16 @@ pub fn run(
 
     // Converters are done borrowing the interner; reclaim it for the arena.
     drop(ctx);
-    Ok(SemanticProgram::new(
+    let mut semantic = SemanticProgram::new(
         functions,
         externs,
         entry_points,
         constants,
         pipeline,
         region_interner.into_inner(),
-    ))
+    );
+    semantic.prepass_roles = prepass_roles;
+    Ok(semantic)
 }
 
 enum ConvertedFunc {
@@ -614,7 +626,6 @@ fn convert_entry_point(
     let (graph, control_headers) = converter.into_graph_parts();
     let output_count = outputs.len();
     let mut entry = SemanticEntry::new(
-        entry.origin,
         def_name.to_string(),
         def.body.span,
         execution_model,

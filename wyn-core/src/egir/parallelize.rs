@@ -139,7 +139,12 @@ pub fn lower(inner: &mut SemanticProgram) {
     // synthesized phase kernels can intern their helper regions while the entry
     // points are mutated in place. Restored before returning.
     let mut regions = std::mem::take(&mut inner.region_interner);
-    let mut schedule = KernelPlan::seed(&inner.pipeline, &inner.entry_points, &inner.resources);
+    let mut schedule = KernelPlan::seed(
+        &inner.pipeline,
+        &inner.entry_points,
+        &inner.prepasses,
+        &inner.resources,
+    );
     attach_compiler_prepasses(inner, &mut schedule);
     let (mut new_functions, mut new_regions) = lower_runtime_filters(inner, &mut schedule, &mut regions);
     // Snapshot ResourceId → physical binding (the manifest was built at
@@ -147,104 +152,26 @@ pub fn lower(inner: &mut SemanticProgram) {
     // through this instead of drawing fresh bindings.
     let allocated_resources = inner.resources.clone();
     for entry in &inner.entry_points {
-        let Some(kind) = find_pending_kernel_seg(entry).map(|(bid, idx)| {
-            let se = &entry.graph.skeleton.blocks[bid].side_effects[idx];
-            let SideEffectKind::Soac(EgirSoac::Seg { kind, .. }) = &se.kind else {
-                unreachable!()
-            };
-            kind.clone()
-        }) else {
-            continue;
-        };
-        match kind {
-            SegOpKind::SegMap => {
-                let body = super::program::PlannedKernelBody::from_semantic(entry)
-                    .expect("segmented semantic entry projection");
-                schedule.commit_kernel(&body, schedule::KernelRecipe::SerialCompute);
-            }
-            SegOpKind::SegRed { .. } => {
-                let mut candidate = project_kernel_body(
-                    entry,
-                    entry.name.clone(),
-                    entry.execution_model.clone(),
-                    entry.outputs.clone(),
-                    entry.output_routes.clone(),
-                    entry.resource_declarations.clone(),
-                    entry.return_ty.clone(),
-                );
-                if let Some(phases) = lower_reduce_entry(&mut candidate, &mut regions, &allocated_resources)
-                {
-                    schedule.commit_kernel(&candidate, schedule::KernelRecipe::ReducePhase1);
-                    let mut predecessor = candidate.name.clone();
-                    for ph in &phases {
-                        schedule.add_phase_after(
-                            &predecessor,
-                            ph,
-                            schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                            schedule::KernelRecipe::ReduceCombine,
-                        );
-                        predecessor = ph.name.clone();
-                    }
-                } else {
-                    restore_serial_seg_body(&mut candidate);
-                    schedule.commit_kernel(&candidate, schedule::KernelRecipe::SerialCompute);
-                }
-            }
-            SegOpKind::SegScan { .. } => {
-                let mut candidate = project_kernel_body(
-                    entry,
-                    entry.name.clone(),
-                    entry.execution_model.clone(),
-                    entry.outputs.clone(),
-                    entry.output_routes.clone(),
-                    entry.resource_declarations.clone(),
-                    entry.return_ty.clone(),
-                );
-                if let Some((phases, swap_wrapper)) =
-                    lower_scan_entry(&mut candidate, &mut regions, &allocated_resources)
-                {
-                    schedule.commit_kernel(&candidate, schedule::KernelRecipe::ScanPhase1);
-                    let mut predecessor = candidate.name.clone();
-                    let phase1_domain = schedule
-                        .domain_of(&candidate.name)
-                        .unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
-                    for (phase_index, ph) in phases.iter().enumerate() {
-                        let domain = if phase_index == 0 {
-                            KernelDomain::Fixed { x: 1, y: 1, z: 1 }
-                        } else {
-                            phase1_domain.clone()
-                        };
-                        schedule.add_phase_after(
-                            &predecessor,
-                            ph,
-                            schedule::DomainSelection::Explicit(domain),
-                            if phase_index == 0 {
-                                schedule::KernelRecipe::ScanBlock
-                            } else {
-                                schedule::KernelRecipe::ScanApplyOffsets
-                            },
-                        );
-                        predecessor = ph.name.clone();
-                    }
-                    let region =
-                        regions.get(&swap_wrapper.name).expect("synthesized scan wrapper was interned");
-                    new_regions.push((region, EgirRegion::from_function(&swap_wrapper)));
-                    new_functions.push(swap_wrapper);
-                } else {
-                    restore_serial_seg_body(&mut candidate);
-                    schedule.commit_kernel(&candidate, schedule::KernelRecipe::SerialCompute);
-                }
-            }
-            SegOpKind::SegComposite { .. } => {
-                // The semantic form survives to this target boundary. The
-                // initial portable scheduler preserves legacy behavior by
-                // lowering a mixed accumulator region locally.
-                let mut body = super::program::PlannedKernelBody::from_semantic(entry)
-                    .expect("composite semantic entry projection");
-                restore_serial_seg_body(&mut body);
-                schedule.commit_kernel(&body, schedule::KernelRecipe::SerialCompute);
-            }
-        }
+        let body = super::program::PlannedKernelBody::from_semantic(entry)
+            .expect("segmented semantic entry projection");
+        plan_segmented_kernel_body(
+            body,
+            &mut schedule,
+            &mut regions,
+            &allocated_resources,
+            &mut new_functions,
+            &mut new_regions,
+        );
+    }
+    for prepass in &inner.prepasses {
+        plan_segmented_kernel_body(
+            prepass.body.clone(),
+            &mut schedule,
+            &mut regions,
+            &allocated_resources,
+            &mut new_functions,
+            &mut new_regions,
+        );
     }
     inner.functions.extend(new_functions);
     inner.regions.extend(new_regions);
@@ -280,9 +207,110 @@ pub fn lower(inner: &mut SemanticProgram) {
             );
         }
     }
+    for prepass in &inner.prepasses {
+        let parent = prepass.body.name.clone();
+        let Some(body) = schedule.planned_body(&parent).cloned() else {
+            continue;
+        };
+        let Some(split) = split_multidomain_seg_maps(&body) else {
+            continue;
+        };
+        schedule.commit_kernel(&split.primary, schedule::KernelRecipe::OutputDomainProjection);
+        schedule.set_output_projection(
+            &parent,
+            split.primary_slots.iter().copied().map(super::program::OutputSlotId).collect(),
+        );
+        for projected in &split.entries {
+            schedule.add_sibling(
+                &parent,
+                &projected.entry,
+                schedule::DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                schedule::KernelRecipe::OutputDomainProjection,
+            );
+            schedule.set_output_projection(
+                &projected.entry.name,
+                projected.semantic_slots.iter().copied().map(super::program::OutputSlotId).collect(),
+            );
+        }
+    }
     schedule.coalesce_resource_flows(&inner.resources);
     inner.kernel_plan = schedule;
     inner.region_interner = regions;
+}
+
+fn plan_segmented_kernel_body(
+    mut body: super::program::PlannedKernelBody,
+    schedule: &mut schedule::KernelPlan,
+    regions: &mut RegionInterner,
+    resources: &[LogicalResource],
+    new_functions: &mut Vec<EgirFunc>,
+    new_regions: &mut Vec<(RegionId, EgirRegion)>,
+) {
+    use schedule::KernelDomain;
+    let Some((block, index)) = find_pending_kernel_seg_graph(&body.graph) else {
+        return;
+    };
+    let SideEffectKind::Soac(EgirSoac::Seg { kind, .. }) =
+        &body.graph.skeleton.blocks[block].side_effects[index].kind
+    else {
+        unreachable!()
+    };
+    match kind.clone() {
+        SegOpKind::SegMap => schedule.commit_kernel(&body, schedule::KernelRecipe::SerialCompute),
+        SegOpKind::SegRed { .. } => {
+            if let Some(phases) = lower_reduce_entry(&mut body, regions, resources) {
+                schedule.commit_kernel(&body, schedule::KernelRecipe::ReducePhase1);
+                let mut predecessor = body.name.clone();
+                for phase in &phases {
+                    schedule.add_phase_after(
+                        &predecessor,
+                        phase,
+                        schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                        schedule::KernelRecipe::ReduceCombine,
+                    );
+                    predecessor = phase.name.clone();
+                }
+            } else {
+                restore_serial_seg_body(&mut body);
+                schedule.commit_kernel(&body, schedule::KernelRecipe::SerialCompute);
+            }
+        }
+        SegOpKind::SegScan { .. } => {
+            if let Some((phases, swap_wrapper)) = lower_scan_entry(&mut body, regions, resources) {
+                schedule.commit_kernel(&body, schedule::KernelRecipe::ScanPhase1);
+                let mut predecessor = body.name.clone();
+                let phase1_domain =
+                    schedule.domain_of(&body.name).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+                for (phase_index, phase) in phases.iter().enumerate() {
+                    schedule.add_phase_after(
+                        &predecessor,
+                        phase,
+                        schedule::DomainSelection::Explicit(if phase_index == 0 {
+                            KernelDomain::Fixed { x: 1, y: 1, z: 1 }
+                        } else {
+                            phase1_domain.clone()
+                        }),
+                        if phase_index == 0 {
+                            schedule::KernelRecipe::ScanBlock
+                        } else {
+                            schedule::KernelRecipe::ScanApplyOffsets
+                        },
+                    );
+                    predecessor = phase.name.clone();
+                }
+                let region = regions.get(&swap_wrapper.name).expect("scan wrapper was interned");
+                new_regions.push((region, EgirRegion::from_function(&swap_wrapper)));
+                new_functions.push(swap_wrapper);
+            } else {
+                restore_serial_seg_body(&mut body);
+                schedule.commit_kernel(&body, schedule::KernelRecipe::SerialCompute);
+            }
+        }
+        SegOpKind::SegComposite { .. } => {
+            restore_serial_seg_body(&mut body);
+            schedule.commit_kernel(&body, schedule::KernelRecipe::SerialCompute);
+        }
+    }
 }
 
 fn lower_runtime_filters(
@@ -673,7 +701,6 @@ fn owned_resource_ids(
 /// restored to serial Scremas; the parallel lowering performs the equivalent
 /// attachment before selecting reduce/scan phases.
 pub(crate) fn attach_compiler_prepasses(inner: &SemanticProgram, schedule: &mut schedule::KernelPlan) {
-    use schedule::KernelDomain;
     let mut prepasses = BTreeMap::new();
     for resource in &inner.resources {
         let ResourceOrigin::Compiler(compiler) = &resource.origin else {
@@ -714,27 +741,16 @@ pub(crate) fn attach_compiler_prepasses(inner: &SemanticProgram, schedule: &mut 
             .entry_point_for_flow_source(consumer_id)
             .expect("scheduled flow consumer has no entry point")
             .to_string();
-        if let super::program::CompilerFlowEndpoint::Materialization(id) = producer_id {
-            let requirement = inner
-                .materializations
-                .get(id.0 as usize)
-                .filter(|requirement| requirement.id == id)
-                .expect("materialization flow references a missing requirement");
-            schedule.add_materialization_before(&consumer, requirement);
-            continue;
-        }
-        let super::program::CompilerFlowEndpoint::Entry(producer_id) = producer_id else {
-            unreachable!()
+        let super::program::CompilerFlowEndpoint::Materialization(id) = producer_id else {
+            panic!("typed entry/prepass producer was omitted while seeding the kernel plan")
         };
-        let producer = &inner.entry_points[producer_id.0 as usize];
-        let domain =
-            schedule::segmented_domain(producer).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
-        schedule.add_semantic_prepass_before(
-            &consumer,
-            producer,
-            schedule::DomainSelection::Explicit(domain),
-            recipe,
-        );
+        let requirement = inner
+            .materializations
+            .get(id.0 as usize)
+            .filter(|requirement| requirement.id == id)
+            .expect("materialization flow references a missing requirement");
+        debug_assert_eq!(recipe, schedule::KernelRecipe::MultiConsumerMaterialization);
+        schedule.add_materialization_before(&consumer, requirement);
     }
 }
 
@@ -1992,21 +2008,6 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
     Ok(b.build())
 }
 
-fn find_pending_seg(entry: &SemanticEntry) -> Option<(BlockId, usize)> {
-    for (bid, block) in &entry.graph.skeleton.blocks {
-        for (i, se) in block.side_effects.iter().enumerate() {
-            if matches!(&se.kind, SideEffectKind::Soac(EgirSoac::Seg { .. })) {
-                return Some((bid, i));
-            }
-        }
-    }
-    None
-}
-
-fn find_pending_kernel_seg(entry: &SemanticEntry) -> Option<(BlockId, usize)> {
-    find_pending_kernel_seg_graph(&entry.graph)
-}
-
 fn find_pending_kernel_seg_graph(graph: &EGraph) -> Option<(BlockId, usize)> {
     for (bid, block) in &graph.skeleton.blocks {
         for (i, se) in block.side_effects.iter().enumerate() {
@@ -2028,10 +2029,6 @@ fn restore_serial_seg_body(entry: &mut super::program::PlannedKernelBody) {
     let Some((block_id, idx)) = find_pending_kernel_seg_graph(&entry.graph) else {
         return;
     };
-    restore_serial_seg_in_graph(&mut entry.graph, block_id, idx);
-}
-
-fn restore_serial_seg_at(entry: &mut SemanticEntry, block_id: BlockId, idx: usize) {
     restore_serial_seg_in_graph(&mut entry.graph, block_id, idx);
 }
 
@@ -2083,37 +2080,31 @@ fn restore_serial_seg_in_graph(graph: &mut EGraph, block_id: BlockId, idx: usize
 /// is target-independent and therefore still happens in single-stage builds.
 pub fn restore_all_serial(inner: &mut SemanticProgram) {
     for entry in &mut inner.entry_points {
-        while let Some((block_id, idx)) = find_pending_seg(entry) {
-            restore_serial_seg_at(entry, block_id, idx);
-        }
+        restore_all_serial_in_graph(&mut entry.graph);
     }
     for function in &mut inner.functions {
-        loop {
-            let location = function.graph.skeleton.blocks.iter().find_map(|(block_id, block)| {
-                block.side_effects.iter().enumerate().find_map(|(index, effect)| {
-                    matches!(effect.kind, SideEffectKind::Soac(EgirSoac::Seg { .. }))
-                        .then_some((block_id, index))
-                })
-            });
-            let Some((block_id, index)) = location else {
-                break;
-            };
-            restore_serial_seg_in_graph(&mut function.graph, block_id, index);
-        }
+        restore_all_serial_in_graph(&mut function.graph);
+    }
+    for prepass in &mut inner.prepasses {
+        restore_all_serial_in_graph(&mut prepass.body.graph);
     }
     for requirement in &mut inner.materializations {
-        loop {
-            let location = requirement.graph.skeleton.blocks.iter().find_map(|(block_id, block)| {
-                block.side_effects.iter().enumerate().find_map(|(index, effect)| {
-                    matches!(effect.kind, SideEffectKind::Soac(EgirSoac::Seg { .. }))
-                        .then_some((block_id, index))
-                })
-            });
-            let Some((block_id, index)) = location else {
-                break;
-            };
-            restore_serial_seg_in_graph(&mut requirement.graph, block_id, index);
-        }
+        restore_all_serial_in_graph(&mut requirement.graph);
+    }
+}
+
+fn restore_all_serial_in_graph(graph: &mut EGraph) {
+    loop {
+        let location = graph.skeleton.blocks.iter().find_map(|(block_id, block)| {
+            block.side_effects.iter().enumerate().find_map(|(index, effect)| {
+                matches!(effect.kind, SideEffectKind::Soac(EgirSoac::Seg { .. }))
+                    .then_some((block_id, index))
+            })
+        });
+        let Some((block_id, index)) = location else {
+            break;
+        };
+        restore_serial_seg_in_graph(graph, block_id, index);
     }
 }
 
@@ -2146,6 +2137,9 @@ pub(crate) fn finalize_scheduled_states(inner: &mut SemanticProgram) {
     for entry in &mut inner.entry_points {
         finish_graph(&mut entry.graph);
     }
+    for prepass in &mut inner.prepasses {
+        finish_graph(&mut prepass.body.graph);
+    }
     for requirement in &mut inner.materializations {
         finish_graph(&mut requirement.graph);
     }
@@ -2158,6 +2152,9 @@ fn restore_lane_local(inner: &mut SemanticProgram) {
     }
     for function in &mut inner.functions {
         restore_lane_local_in_graph(&mut function.graph);
+    }
+    for prepass in &mut inner.prepasses {
+        restore_lane_local_in_graph(&mut prepass.body.graph);
     }
     for requirement in &mut inner.materializations {
         restore_lane_local_in_graph(&mut requirement.graph);
