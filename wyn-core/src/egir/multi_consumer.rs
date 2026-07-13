@@ -17,7 +17,7 @@ use super::program::{
 };
 use super::types::{
     EGraph, EgirSoac, NodeId, PureOp, SegExtent, SegOpKind, SegPlacement, SegResourceAccess,
-    SegResourceAccessKind, SideEffectKind, SkeletonTerminator, SoacDestination,
+    SegResourceAccessKind, SideEffectKind, SoacDestination,
 };
 use crate::ast::TypeName;
 use crate::interface::{StorageBindingDecl, StorageRole};
@@ -27,6 +27,7 @@ use crate::{BindingRef, IdSource};
 struct Candidate {
     entry: usize,
     result: NodeId,
+    id: SemanticOpId,
 }
 
 struct InputReplacement {
@@ -72,13 +73,10 @@ fn verify_no_unallocated_multi_consumer_maps(inner: &SemanticProgram) {
     for entry in &inner.entry_points {
         for (block_id, block) in &entry.graph.skeleton.blocks {
             for (effect_index, effect) in block.side_effects.iter().enumerate() {
-                let Some(result) = effect.result else {
+                let Some(_) = effect.result else {
                     continue;
                 };
-                let id = SemanticOpId {
-                    scope: entry.name.clone(),
-                    result,
-                };
+                let id = effect.semantic_id.expect("semantic operation id assigned after segmentation");
                 if consumers.get(&id).map_or(0, HashSet::len) < 2 {
                     continue;
                 }
@@ -126,10 +124,7 @@ fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
                 let Some(result) = effect.result else {
                     continue;
                 };
-                let id = SemanticOpId {
-                    scope: entry.name.clone(),
-                    result,
-                };
+                let id = effect.semantic_id.expect("semantic operation id assigned after segmentation");
                 if consumers.get(&id).map_or(0, HashSet::len) < 2 {
                     continue;
                 }
@@ -157,6 +152,7 @@ fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
                     return Some(Candidate {
                         entry: entry_index,
                         result,
+                        id,
                     });
                 }
             }
@@ -229,6 +225,15 @@ fn materialize_candidate(
         })
         .cloned()
         .collect();
+    let projection = super::graph_projector::GraphProjector::new(&entry.graph, &entry.control_headers)
+        .selected(HashSet::from([super::graph_projector::EffectSite {
+            block: block_id,
+            index: effect_index,
+        }]))
+        .expect("multi-consumer producer projection must be valid");
+    let projected_result =
+        projection.node(candidate.result).expect("multi-consumer producer result must be projected");
+    let producer_aliases = projection.remap_aliases(&entry.aliases);
     let mut producer = super::program::SemanticEntry::new(
         crate::interface::EntryOrigin::MultiConsumerMaterialization,
         fresh_entry_name(inner, &format!("{}_materialize_shared", entry.name)),
@@ -239,14 +244,11 @@ fn materialize_candidate(
         producer_storage,
         entry.params.clone(),
         Type::Constructed(TypeName::Unit, vec![]),
-        entry.graph.clone(),
-        entry.control_headers.clone(),
+        projection.graph,
+        projection.control_headers,
     );
-    producer.aliases = entry.aliases.clone();
-    let producer_owner = SemanticOpId {
-        scope: producer.name.clone(),
-        result: candidate.result,
-    };
+    producer.aliases = producer_aliases;
+    let producer_owner = candidate.id;
     let producer_graph = &mut producer.graph;
     let mut output_views = Vec::new();
     for ((&binding, elem_ty), size) in bindings.iter().zip(map_output_elem_types).zip(&sizes) {
@@ -259,23 +261,10 @@ fn materialize_candidate(
             length: buffer_len(size),
         });
     }
-    for (producer_block_id, block) in producer_graph.skeleton.blocks.iter_mut() {
-        if producer_block_id == block_id {
-            let mut index = 0usize;
-            block.side_effects.retain(|_| {
-                let retain = producer_dependencies.contains(&index);
-                index += 1;
-                retain
-            });
-        } else {
-            block.side_effects.clear();
-        }
-        block.term = SkeletonTerminator::Return(None);
-    }
     let retained_index = producer_graph.side_effect_index();
     let producer_effect = retained_index
-        .effect_mut(producer_graph, candidate.result)
-        .expect("producer clone retained its SegMap");
+        .effect_mut(producer_graph, projected_result)
+        .expect("producer projection retained its SegMap");
     if let SideEffectKind::Soac(EgirSoac::Seg {
         placement,
         map_destinations,

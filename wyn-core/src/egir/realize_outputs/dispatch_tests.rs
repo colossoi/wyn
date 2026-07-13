@@ -121,6 +121,7 @@ fn rewrite_sibling_index_consumers_rejects_screma_noninput_operand() {
     let result_nid =
         graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(1), vec![arr_ty.clone()]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        semantic_id: None,
         kind: SideEffectKind::Soac(EgirSoac::Screma {
             map_bodies: vec![SegBody {
                 region: RegionId::from_index(0),
@@ -181,6 +182,7 @@ fn rewrite_sibling_index_consumers_rejects_scatter_dest_position() {
     let dummy_input = graph.alloc_side_effect_result(arr_ty.clone());
     let result_nid = graph.alloc_side_effect_result(Type::Constructed(TypeName::Bool, vec![]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        semantic_id: None,
         kind: SideEffectKind::Soac(EgirSoac::Hist {
             body: crate::egir::types::SegBody {
                 region: crate::egir::types::RegionId::from_index(0),
@@ -244,6 +246,7 @@ fn rewrite_sibling_index_consumers_rejects_scatter_capture_position() {
     let dummy_input = graph.alloc_side_effect_result(arr_ty.clone());
     let result_nid = graph.alloc_side_effect_result(Type::Constructed(TypeName::Bool, vec![]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        semantic_id: None,
         kind: SideEffectKind::Soac(EgirSoac::Hist {
             body: crate::egir::types::SegBody {
                 region: crate::egir::types::RegionId::from_index(0),
@@ -306,6 +309,7 @@ fn rewrite_sibling_index_consumers_rejects_screma_init_acc_position() {
     let result_nid =
         graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(1), vec![elem.clone()]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        semantic_id: None,
         kind: SideEffectKind::Soac(EgirSoac::Screma {
             map_bodies: vec![],
             accumulators: vec![ScremaOperator {

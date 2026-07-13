@@ -1415,6 +1415,7 @@ impl EgirOutputsRealized {
     pub fn segment(self) -> EgirSegmented {
         let EgirOutputsRealized(mut inner) = self;
         egir::parallelize::reify(&mut inner);
+        egir::program::assign_semantic_op_ids(&mut inner);
         if cfg!(debug_assertions) {
             egir::semantic_graph::verify(&inner).expect("invalid semantic EGIR");
         }

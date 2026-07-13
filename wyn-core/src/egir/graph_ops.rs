@@ -184,6 +184,7 @@ pub fn emit_store(
     let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
     let effect_out = alloc_effect(next_effect);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        semantic_id: None,
         kind: SideEffectKind::Inst(InstKind::Store {
             place: Default::default(),
             value: ValueRef::Ssa(Default::default()),
@@ -204,6 +205,7 @@ pub fn emit_workgroup_barrier(graph: &mut EGraph, block: BlockId, next_effect: &
     let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
     let effect_out = alloc_effect(next_effect);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        semantic_id: None,
         kind: SideEffectKind::Inst(InstKind::ControlBarrier),
         operand_nodes: smallvec![],
         result: None,
@@ -244,6 +246,7 @@ pub fn emit_load(
     let effect_out = alloc_effect(next_effect);
     let result = graph.alloc_side_effect_result(elem_ty);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        semantic_id: None,
         kind: SideEffectKind::Inst(InstKind::Load {
             place: Default::default(),
         }),
@@ -271,6 +274,7 @@ pub fn emit_alloca(
     let effect_out = alloc_effect(next_effect);
     let place_nid = graph.alloc_side_effect_result(elem_ty.clone());
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        semantic_id: None,
         kind: SideEffectKind::Inst(InstKind::Alloca {
             elem_ty,
             // Real PlaceId is allocated by `elaborate`; the placeholder here
@@ -358,6 +362,7 @@ pub fn emit_pending_soac(
     let effect_in = EffectToken(0);
     let effect_out = alloc_effect(next_effect);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        semantic_id: None,
         kind: SideEffectKind::Soac(soac),
         operand_nodes: operands,
         result: Some(result_nid),

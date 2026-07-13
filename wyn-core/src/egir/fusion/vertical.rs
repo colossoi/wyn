@@ -12,7 +12,7 @@ use smallvec::smallvec;
 
 use super::space::seg_space_fusable;
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{EgirFunc, SemanticOpId, SemanticProgram};
+use crate::egir::program::{EgirFunc, SemanticProgram};
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::types::{
     EGraph, ENode, EgirSoac, NodeId, PureOp, SegBinOp, SegBody, SegOpKind, SegResourceAccess,
@@ -68,7 +68,7 @@ fn find_candidate(inner: &SemanticProgram, oracle: &SemanticGraph) -> Option<Can
 
 fn find_in_graph(
     graph: &EGraph,
-    scope: &str,
+    _scope: &str,
     site: FusionSite,
     oracle: &SemanticGraph,
 ) -> Option<Candidate> {
@@ -98,9 +98,8 @@ fn find_in_graph(
             let Some(producer_result) = producer.result else {
                 continue;
             };
-            let producer_id = SemanticOpId {
-                scope: scope.to_string(),
-                result: producer_result,
+            let Some(producer_id) = producer.semantic_id else {
+                continue;
             };
             if oracle.value_consumer_count(&producer_id) != 1 {
                 continue;
@@ -123,12 +122,11 @@ fn find_in_graph(
                 {
                     continue;
                 }
-                let Some(consumer_result) = consumer.result else {
+                let Some(_) = consumer.result else {
                     continue;
                 };
-                let consumer_id = SemanticOpId {
-                    scope: scope.to_string(),
-                    result: consumer_result,
+                let Some(consumer_id) = consumer.semantic_id else {
+                    continue;
                 };
                 if oracle.conflicts(&producer_id, &consumer_id)
                     && !matches!((producer.effects, consumer.effects),
@@ -152,10 +150,9 @@ fn find_in_graph(
                 if !((producer_index + 1)..consumer_index).all(|index| {
                     let effect = &block.side_effects[index];
                     match (&effect.kind, effect.result) {
-                        (SideEffectKind::Soac(EgirSoac::Seg { .. }), Some(result)) => {
-                            let intervening = SemanticOpId {
-                                scope: scope.to_string(),
-                                result,
+                        (SideEffectKind::Soac(EgirSoac::Seg { .. }), Some(_)) => {
+                            let Some(intervening) = effect.semantic_id else {
+                                return false;
                             };
                             !oracle.conflicts(&producer_id, &intervening)
                         }
@@ -748,6 +745,7 @@ mod tests {
         let consumer_capture = graph.intern_pure(PureOp::Int("2".into()), smallvec![], int.clone());
         let producer_result = graph.alloc_side_effect_result(tuple.clone());
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
+            semantic_id: None,
             kind: SideEffectKind::Soac(EgirSoac::Seg {
                 space: SegSpace {
                     level: SegLevel::Thread,
@@ -789,6 +787,7 @@ mod tests {
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(unrelated);
         let consumer_result = graph.alloc_side_effect_result(tuple.clone());
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
+            semantic_id: None,
             kind: SideEffectKind::Soac(EgirSoac::Seg {
                 space: SegSpace {
                     level: SegLevel::Thread,

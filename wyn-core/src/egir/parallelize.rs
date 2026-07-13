@@ -248,6 +248,7 @@ pub fn lower(inner: &mut SemanticProgram) {
         let Some(split) = split_multidomain_seg_maps(entry) else {
             continue;
         };
+        *entry = split.primary;
         if !split.entries.is_empty() {
             schedule.update_kernel_from_entry(entry);
         }
@@ -329,8 +330,8 @@ fn lower_runtime_filters(
                                 ..
                             },
                         ..
-                    }) => effect.result.and_then(|result| {
-                        filter_work_buffers(&entry.name, result, &inner.resources)
+                    }) => effect.semantic_id.and_then(|id| {
+                        filter_work_buffers(id, &inner.resources)
                             .map(|work| (space.clone(), work, *len_out))
                     }),
                     _ => None,
@@ -501,6 +502,84 @@ fn project_entry(
     storage_bindings: Vec<crate::interface::StorageBindingDecl>,
     return_ty: Type<TypeName>,
 ) -> SemanticEntry {
+    let projection = super::graph_projector::GraphProjector::new(&source.graph, &source.control_headers)
+        .all()
+        .expect("complete entry projection must be internally valid");
+    finish_entry_projection(
+        source,
+        projection,
+        origin,
+        name,
+        execution_model,
+        outputs,
+        output_routes,
+        storage_bindings,
+        return_ty,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_entry_effects(
+    source: &SemanticEntry,
+    selected: std::collections::HashSet<super::graph_projector::EffectSite>,
+    origin: crate::interface::EntryOrigin,
+    name: String,
+    execution_model: crate::ssa::types::ExecutionModel,
+    outputs: Vec<crate::ssa::types::EntryOutput>,
+    output_routes: Vec<super::program::OutputRoute>,
+    storage_bindings: Vec<crate::interface::StorageBindingDecl>,
+    return_ty: Type<TypeName>,
+) -> SemanticEntry {
+    let route_values = output_routes.iter().map(|route| route.source.value).collect();
+    let projection = super::graph_projector::GraphProjector::new(&source.graph, &source.control_headers)
+        .selected_with_values(selected, route_values)
+        .expect("selected entry projection must be internally valid");
+    finish_entry_projection(
+        source,
+        projection,
+        origin,
+        name,
+        execution_model,
+        outputs,
+        output_routes,
+        storage_bindings,
+        return_ty,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_entry_projection(
+    source: &SemanticEntry,
+    projection: super::graph_projector::GraphProjection,
+    origin: crate::interface::EntryOrigin,
+    name: String,
+    execution_model: crate::ssa::types::ExecutionModel,
+    outputs: Vec<crate::ssa::types::EntryOutput>,
+    output_routes: Vec<super::program::OutputRoute>,
+    storage_bindings: Vec<crate::interface::StorageBindingDecl>,
+    return_ty: Type<TypeName>,
+) -> SemanticEntry {
+    let remap_route = |mut route: super::program::OutputRoute| {
+        route.source.block =
+            projection.block(route.source.block).expect("output route block must be projected");
+        route.source.value =
+            projection.node(route.source.value).expect("output route value must be projected");
+        route.writers = route
+            .writers
+            .into_iter()
+            .filter_map(|writer| match writer {
+                super::program::OutputWriter::Value(node) => {
+                    projection.node(node).map(super::program::OutputWriter::Value)
+                }
+                super::program::OutputWriter::Effect(effect) => {
+                    projection.effect(effect).map(super::program::OutputWriter::Effect)
+                }
+            })
+            .collect();
+        route
+    };
+    let aliases = projection.remap_aliases(&source.aliases);
+    let output_routes = output_routes.into_iter().map(remap_route).collect();
     let mut projected = SemanticEntry::new(
         origin,
         name,
@@ -511,22 +590,19 @@ fn project_entry(
         storage_bindings,
         source.params.clone(),
         return_ty,
-        source.graph.clone(),
-        source.control_headers.clone(),
+        projection.graph,
+        projection.control_headers,
     );
-    projected.aliases = source.aliases.clone();
+    projected.aliases = aliases;
     projected.output_routes = output_routes;
     projected
 }
 
 fn filter_work_buffers(
-    scope: &str,
-    result: NodeId,
+    owner: SemanticOpId,
     resources: &[LogicalResource],
 ) -> Option<super::types::FilterWorkBuffers> {
-    let owner_matches = |compiler: &CompilerResource| {
-        compiler.owner.as_ref().is_some_and(|owner| owner.scope == scope && owner.result == result)
-    };
+    let owner_matches = |compiler: &CompilerResource| compiler.owner == Some(owner);
     let binding = |kind| {
         resources.iter().find_map(|resource| {
             let ResourceOrigin::Compiler(compiler) = &resource.origin else {
@@ -545,8 +621,7 @@ fn filter_work_buffers(
 
 fn owned_resource_bindings(
     resources: &[LogicalResource],
-    scope: &str,
-    result: NodeId,
+    owner: SemanticOpId,
     kind: CompilerResourceKind,
 ) -> Vec<BindingRef> {
     let mut bindings: Vec<_> = resources
@@ -555,12 +630,8 @@ fn owned_resource_bindings(
             let ResourceOrigin::Compiler(compiler) = &resource.origin else {
                 return None;
             };
-            (compiler.kind == kind
-                && compiler
-                    .owner
-                    .as_ref()
-                    .is_some_and(|owner| owner.scope == scope && owner.result == result))
-            .then_some((compiler.slot, resource.semantic_binding))
+            (compiler.kind == kind && compiler.owner == Some(owner))
+                .then_some((compiler.slot, resource.semantic_binding))
         })
         .collect();
     bindings.sort_by_key(|(slot, _)| *slot);
@@ -678,90 +749,12 @@ fn is_write_effectful(se: &SideEffect) -> bool {
     }
 }
 
-/// Restrict `entry` to one domain group: keep the side-effects whose group is
-/// `keep_group` (plus the shared ones, group `None`), drop the rest, and narrow
-/// `outputs` to that group's slots. Dropped kernels are no longer emitted; their
-/// now-dead pure nodes are pruned downstream.
-fn restrict_to_group(
-    entry: &mut SemanticEntry,
-    keep_group: usize,
-    keep_slots: &[usize],
-    group_of: &LookupMap<(BlockId, usize), usize>,
-) {
-    for (bid, block) in entry.graph.skeleton.blocks.iter_mut() {
-        let mut drops: Vec<usize> = block
-            .side_effects
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| matches!(group_of.get(&(bid, *i)), Some(g) if *g != keep_group))
-            .map(|(i, _)| i)
-            .collect();
-        drops.sort_unstable_by(|a, b| b.cmp(a));
-        for i in drops {
-            block.side_effects.remove(i);
-        }
-    }
-    entry.outputs = keep_slots.iter().map(|&s| entry.outputs[s].clone()).collect();
-    entry.output_routes.retain_mut(|route| {
-        let Some(new_slot) = keep_slots.iter().position(|&old_slot| old_slot == route.slot.0) else {
-            return false;
-        };
-        route.slot = super::program::OutputSlotId(new_slot);
-        true
-    });
-}
-
-/// Remove pure producer side-effects left dead by a split. A side-effect is
-/// dead when it isn't `is_write_effectful` and its result is read by nothing
+/// Output-domain splitting is construction-only: every group gets a fresh
+/// graph projection containing its selected effects and producer closure.
 /// that remains — no other side-effect's operands, no terminator. Iterated to a
 /// fixpoint so a chain of producers (a map feeding a map feeding a dropped
 /// scatter) collapses fully; write-effects and producers still feeding a kept
 /// effect or an output are retained.
-fn prune_dead_side_effects(entry: &mut SemanticEntry) {
-    loop {
-        // Live = every node reachable from a side-effect operand or a terminator.
-        let mut roots: Vec<NodeId> = Vec::new();
-        for (_, block) in &entry.graph.skeleton.blocks {
-            for se in &block.side_effects {
-                roots.extend(se.referenced_nodes());
-            }
-            match &block.term {
-                SkeletonTerminator::Return(Some(v)) => roots.push(*v),
-                SkeletonTerminator::Branch { args, .. } => roots.extend(args.iter().copied()),
-                SkeletonTerminator::CondBranch {
-                    cond,
-                    then_args,
-                    else_args,
-                    ..
-                } => {
-                    roots.push(*cond);
-                    roots.extend(then_args.iter().copied());
-                    roots.extend(else_args.iter().copied());
-                }
-                _ => {}
-            }
-        }
-        let live = wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |n, out| {
-            if let Some(node) = entry.graph.nodes.get(n) {
-                out.extend(node.children());
-            }
-        });
-
-        let dead = entry.graph.skeleton.blocks.iter().find_map(|(bid, block)| {
-            block.side_effects.iter().enumerate().find_map(|(i, se)| {
-                let result = se.result?;
-                (!is_write_effectful(se) && !live.contains(&result)).then_some((bid, i))
-            })
-        });
-        match dead {
-            Some((bid, i)) => {
-                entry.graph.skeleton.blocks[bid].side_effects.remove(i);
-            }
-            None => break,
-        }
-    }
-}
-
 /// Split a multi-output entry into one kernel per iteration domain — Futhark's
 /// one-SegOp-per-SegSpace structure. Side-effects are grouped by the set of
 /// output slots they write (a fused equal-domain multi-lane map is one group
@@ -777,11 +770,12 @@ struct SplitEntry {
 }
 
 struct EntrySplit {
+    primary: SemanticEntry,
     primary_slots: Vec<usize>,
     entries: Vec<SplitEntry>,
 }
 
-fn split_multidomain_seg_maps(entry: &mut SemanticEntry) -> Option<EntrySplit> {
+fn split_multidomain_seg_maps(entry: &SemanticEntry) -> Option<EntrySplit> {
     let n_out = entry.outputs.len();
     if n_out <= 1 {
         return None;
@@ -866,20 +860,46 @@ fn split_multidomain_seg_maps(entry: &mut SemanticEntry) -> Option<EntrySplit> {
     }
 
     let base_name = entry.name.clone();
-    let mut clones = Vec::new();
-    for (root, slots) in &groups[1..] {
-        let mut projected = project_entry(
+    let project_group = |root: usize, slots: &[usize], name: String, origin| {
+        let selected = group_of
+            .iter()
+            .filter_map(|(&(block, index), &group)| {
+                (group == root).then_some(super::graph_projector::EffectSite { block, index })
+            })
+            .collect();
+        let outputs = slots.iter().map(|&slot| entry.outputs[slot].clone()).collect();
+        let mut routes = entry
+            .output_routes
+            .iter()
+            .filter(|route| slots.contains(&route.slot.0))
+            .cloned()
+            .collect::<Vec<_>>();
+        for route in &mut routes {
+            route.slot = super::program::OutputSlotId(
+                slots.iter().position(|&slot| slot == route.slot.0).expect("selected route slot"),
+            );
+        }
+        project_entry_effects(
             entry,
-            crate::interface::EntryOrigin::OutputDomainSplit,
-            format!("{base_name}_dispatch_{}", slots[0]),
+            selected,
+            origin,
+            name,
             entry.execution_model.clone(),
-            entry.outputs.clone(),
-            entry.output_routes.clone(),
+            outputs,
+            routes,
             entry.storage_bindings.clone(),
             entry.return_ty.clone(),
+        )
+    };
+
+    let mut clones = Vec::new();
+    for (root, slots) in &groups[1..] {
+        let projected = project_group(
+            *root,
+            slots,
+            format!("{base_name}_dispatch_{}", slots[0]),
+            crate::interface::EntryOrigin::OutputDomainSplit,
         );
-        restrict_to_group(&mut projected, *root, slots, &group_of);
-        prune_dead_side_effects(&mut projected);
         clones.push(SplitEntry {
             entry: projected,
             semantic_slots: slots.clone(),
@@ -888,9 +908,9 @@ fn split_multidomain_seg_maps(entry: &mut SemanticEntry) -> Option<EntrySplit> {
 
     // The original retains the group owning the lowest slot under its own name.
     let (root0, slots0) = &groups[0];
-    restrict_to_group(entry, *root0, slots0, &group_of);
-    prune_dead_side_effects(entry);
+    let primary = project_group(*root0, slots0, entry.name.clone(), entry.origin);
     Some(EntrySplit {
+        primary,
         primary_slots: slots0.clone(),
         entries: clones,
     })
@@ -2204,12 +2224,7 @@ pub fn enumerate_seg_scratch(
             }
         }
         for (block_id, se_idx, specs) in plans {
-            let owner = entry.graph.skeleton.blocks[block_id].side_effects[se_idx].result.map(|result| {
-                SemanticOpId {
-                    scope: entry.name.clone(),
-                    result,
-                }
-            });
+            let owner = entry.graph.skeleton.blocks[block_id].side_effects[se_idx].semantic_id;
             for (slot, (elem_ty, kind)) in specs.into_iter().enumerate() {
                 let binding = loop {
                     let candidate =
@@ -2330,13 +2345,8 @@ fn lower_reduce_entry(
     let n_accs = elem_tys.len();
     // Partial buffers were reserved as owner-tagged logical resources at the
     // allocation boundary; resolve them from the manifest.
-    let result = entry.graph.skeleton.blocks[block_id].side_effects[idx].result?;
-    let partial_bindings = owned_resource_bindings(
-        resources,
-        &entry.name,
-        result,
-        CompilerResourceKind::ReducePartial,
-    );
+    let owner = entry.graph.skeleton.blocks[block_id].side_effects[idx].semantic_id?;
+    let partial_bindings = owned_resource_bindings(resources, owner, CompilerResourceKind::ReducePartial);
     if partial_bindings.len() != n_accs {
         return None;
     }
@@ -2622,19 +2632,9 @@ fn lower_scan_entry(
 
     // Block scratch was reserved as `[ScanBlockSums, ScanBlockOffsets]` logical
     // resources at the allocation boundary; resolve them to their bindings.
-    let result = entry.graph.skeleton.blocks[block_id].side_effects[idx].result?;
-    let sums = owned_resource_bindings(
-        resources,
-        &entry.name,
-        result,
-        CompilerResourceKind::ScanBlockSums,
-    );
-    let offsets = owned_resource_bindings(
-        resources,
-        &entry.name,
-        result,
-        CompilerResourceKind::ScanBlockOffsets,
-    );
+    let owner = entry.graph.skeleton.blocks[block_id].side_effects[idx].semantic_id?;
+    let sums = owned_resource_bindings(resources, owner, CompilerResourceKind::ScanBlockSums);
+    let offsets = owned_resource_bindings(resources, owner, CompilerResourceKind::ScanBlockOffsets);
     let (block_sums_binding, block_offsets_binding) = (*sums.first()?, *offsets.first()?);
 
     // Chunk the input and the scan output view; swap them into the operand list.

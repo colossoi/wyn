@@ -506,10 +506,7 @@ fn multi_consumer_producer_survival_is_characterized() {
                         SideEffectKind::Soac(EgirSoac::Seg {
                             kind: SegOpKind::SegMap,
                             ..
-                        }) => effect.result.map(|result| crate::egir::program::SemanticOpId {
-                            scope: entry.name.clone(),
-                            result,
-                        }),
+                        }) => effect.semantic_id,
                         _ => None,
                     })
                 })
@@ -2503,14 +2500,12 @@ entry r(a: []u32, b: []u32, #[storage(set=2, binding=0, access=write)] fb: *[]u3
 #[test]
 fn multidomain_maps_split_into_per_domain_stages() {
     use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
-    let lowered = crate::compile_thru_spirv(
-        r#"
+    let source = r#"
 #[compute]
 entry two(a: []f32, b: []f32) ([]f32, []f32) =
     (map(|x: f32| x + 1.0, a), map(|x: f32| x + 2.0, b))
-"#,
-    )
-    .expect("two compiles");
+"#;
+    let lowered = crate::compile_thru_spirv(source).expect("two compiles");
 
     let computes: Vec<_> = lowered
         .pipeline

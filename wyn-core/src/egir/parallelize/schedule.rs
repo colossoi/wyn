@@ -1010,7 +1010,12 @@ fn source_recipe(entry: &SemanticEntry) -> KernelRecipe {
     }
     for (_, block) in &entry.graph.skeleton.blocks {
         for effect in &block.side_effects {
-            if let SideEffectKind::Soac(EgirSoac::Seg { kind, .. }) = &effect.kind {
+            if let SideEffectKind::Soac(EgirSoac::Seg {
+                kind,
+                placement: SegPlacement::Kernel,
+                ..
+            }) = &effect.kind
+            {
                 return match kind {
                     crate::egir::types::SegOpKind::SegRed { .. } => KernelRecipe::ReducePhase1,
                     crate::egir::types::SegOpKind::SegScan { .. } => KernelRecipe::ScanPhase1,

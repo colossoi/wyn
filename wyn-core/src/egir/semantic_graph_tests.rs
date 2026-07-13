@@ -1,12 +1,6 @@
 use super::*;
-use crate::egir::types::NodeId;
-use slotmap::SlotMap;
-
-fn op(scope: &str, result: NodeId) -> SemanticOpId {
-    SemanticOpId {
-        scope: scope.into(),
-        result,
-    }
+fn op(id: u32) -> SemanticOpId {
+    SemanticOpId(id)
 }
 
 fn dep(
@@ -23,11 +17,9 @@ fn dep(
 
 #[test]
 fn oracle_distinguishes_conflict_flow_and_value_edges() {
-    let mut sm: SlotMap<NodeId, ()> = SlotMap::with_key();
-    let (r1, r2, r3) = (sm.insert(()), sm.insert(()), sm.insert(()));
-    let a = op("e", r1);
-    let b = op("e", r2);
-    let c = op("e", r3);
+    let a = op(0);
+    let b = op(1);
+    let c = op(2);
 
     // a --Resource--> b, b --Effect--> c, a --Value--> c
     let deps = vec![
@@ -64,10 +56,8 @@ fn oracle_distinguishes_conflict_flow_and_value_edges() {
 
 #[test]
 fn unknown_ops_have_no_edges() {
-    let mut sm: SlotMap<NodeId, ()> = SlotMap::with_key();
-    let (r1, r2) = (sm.insert(()), sm.insert(()));
-    let a = op("e", r1);
-    let lonely = op("e", r2);
+    let a = op(0);
+    let lonely = op(1);
     let g = SemanticGraph::new(&[dep(&a, &a, SemanticDependencyKind::Value)]);
     assert!(!g.conflicts(&lonely, &a));
     assert!(!g.reachable_between(&lonely, &a));

@@ -949,6 +949,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     let effect_in = EffectToken(0);
                     let effect_out = self.alloc_effect();
                     self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+                        semantic_id: None,
                         kind: SideEffectKind::Inst(InstKind::Load {
                             place: Default::default(),
                         }),
@@ -1227,6 +1228,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         let effect_in = EffectToken(0);
                         let effect_out = self.alloc_effect();
                         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+                            semantic_id: None,
                             kind: SideEffectKind::Inst(InstKind::Op {
                                 tag: crate::op::OpTag::Call(name.to_string()),
                                 operands: arg_vrefs,
@@ -1253,6 +1255,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     let effect_in = EffectToken(0);
                     let effect_out = self.alloc_effect();
                     self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+                        semantic_id: None,
                         kind: SideEffectKind::Inst(InstKind::Op {
                             tag: crate::op::OpTag::Call(name.to_string()),
                             operands: arg_vrefs,
@@ -1306,6 +1309,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let effect_in = EffectToken(0);
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+            semantic_id: None,
             kind: SideEffectKind::Inst(InstKind::Load {
                 place: Default::default(),
             }),
@@ -1367,6 +1371,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let effect_in = EffectToken(0);
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+            semantic_id: None,
             kind: SideEffectKind::Inst(InstKind::Op {
                 tag: crate::op::OpTag::StorageImageStore(binding),
                 operands: arg_vrefs,
@@ -2672,6 +2677,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 let effect_in = EffectToken(0);
                 let effect_out = self.alloc_effect();
                 self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+                    semantic_id: None,
                     kind: SideEffectKind::Inst(InstKind::Op {
                         tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(*binding)),
                         operands: vec![

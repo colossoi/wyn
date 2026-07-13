@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use super::space::seg_space_fusable;
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
-use crate::egir::program::{SemanticOpId, SemanticProgram};
+use crate::egir::program::SemanticProgram;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::types::{
     reify_seg_kind_operators, EGraph, EgirSoac, NodeId, PureOp, SegBody, SegOpKind, SegPlacement,
@@ -68,7 +68,7 @@ fn sibling_fusable(
     block_id: BlockId,
     i: usize,
     j: usize,
-    scope: &str,
+    _scope: &str,
     oracle: &SemanticGraph,
 ) -> bool {
     let block = &graph.skeleton.blocks[block_id];
@@ -78,7 +78,7 @@ fn sibling_fusable(
             placement: pl_i,
             ..
         }),
-        Some(res_i),
+        Some(_),
     ) = (&block.side_effects[i].kind, block.side_effects[i].result)
     else {
         return false;
@@ -89,7 +89,7 @@ fn sibling_fusable(
             placement: pl_j,
             ..
         }),
-        Some(res_j),
+        Some(_),
     ) = (&block.side_effects[j].kind, block.side_effects[j].result)
     else {
         return false;
@@ -97,13 +97,11 @@ fn sibling_fusable(
     if pl_i != pl_j || !seg_space_fusable(sp_i, sp_j) {
         return false;
     }
-    let op_i = SemanticOpId {
-        scope: scope.to_string(),
-        result: res_i,
+    let Some(op_i) = block.side_effects[i].semantic_id else {
+        return false;
     };
-    let op_j = SemanticOpId {
-        scope: scope.to_string(),
-        result: res_j,
+    let Some(op_j) = block.side_effects[j].semantic_id else {
+        return false;
     };
     // A value edge either way makes them a producer/consumer chain (fused at the
     // TLC level), never fusable siblings.
@@ -119,10 +117,9 @@ fn sibling_fusable(
     ((i + 1)..j).all(|k| {
         let effect = &block.side_effects[k];
         match (&effect.kind, effect.result) {
-            (SideEffectKind::Soac(EgirSoac::Seg { .. }), Some(result)) => {
-                let op_k = SemanticOpId {
-                    scope: scope.to_string(),
-                    result,
+            (SideEffectKind::Soac(EgirSoac::Seg { .. }), Some(_)) => {
+                let Some(op_k) = effect.semantic_id else {
+                    return false;
                 };
                 !oracle.conflicts(&op_k, &op_i) && !oracle.conflicts(&op_k, &op_j)
             }

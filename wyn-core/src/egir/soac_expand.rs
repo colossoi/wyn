@@ -465,6 +465,7 @@ fn expand_one(
                             let eff_in = alloc_effect(next_effect);
                             let eff_out = alloc_effect(next_effect);
                             graph.skeleton.blocks[body_bid].side_effects.push(SideEffect {
+                                semantic_id: None,
                                 kind: SideEffectKind::Inst(InstKind::Store {
                                     place: Default::default(),
                                     value: ValueRef::Ssa(Default::default()),
@@ -515,6 +516,7 @@ fn expand_one(
                                 let eff_in = alloc_effect(next_effect);
                                 let eff_out = alloc_effect(next_effect);
                                 graph.skeleton.blocks[body_bid].side_effects.push(SideEffect {
+                                    semantic_id: None,
                                     kind: SideEffectKind::Inst(InstKind::Store {
                                         place: Default::default(),
                                         value: ValueRef::Ssa(Default::default()),
@@ -983,6 +985,7 @@ fn build_parallel_maps(
         let eff_in = alloc_effect(next_effect);
         let eff_out = alloc_effect(next_effect);
         graph.skeleton.blocks[body].side_effects.push(SideEffect {
+            semantic_id: None,
             kind: SideEffectKind::Inst(InstKind::Store {
                 place: Default::default(),
                 value: ValueRef::Ssa(Default::default()),
@@ -2290,6 +2293,7 @@ fn emit_read_element(
         let eff_in = alloc_effect(next_effect);
         let eff_out = alloc_effect(next_effect);
         graph.skeleton.blocks[body].side_effects.push(SideEffect {
+            semantic_id: None,
             kind: SideEffectKind::Inst(InstKind::Load {
                 place: Default::default(),
             }),

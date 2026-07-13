@@ -166,6 +166,7 @@ mod tests {
         let result = graph.alloc_side_effect_result(tuple);
         let _dead_project = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![result], int.clone());
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
+            semantic_id: None,
             kind: SideEffectKind::Soac(EgirSoac::Seg {
                 space: SegSpace {
                     level: SegLevel::Thread,

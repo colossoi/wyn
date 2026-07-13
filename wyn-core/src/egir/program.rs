@@ -72,10 +72,43 @@ impl RegionInterner {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SemanticOpId {
-    pub scope: String,
-    pub result: NodeId,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SemanticOpId(pub u32);
+
+/// Assign stable operation identities once, immediately after segmentation.
+/// Graph projection copies these ids unchanged, so resource ownership and
+/// dependency edges never depend on arena-local `NodeId`s.
+pub fn assign_semantic_op_ids(inner: &mut SemanticProgram) {
+    let mut next = inner
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter())
+        .flat_map(|(_, block)| block.side_effects.iter())
+        .chain(
+            inner
+                .functions
+                .iter()
+                .flat_map(|function| function.graph.skeleton.blocks.iter())
+                .flat_map(|(_, block)| block.side_effects.iter()),
+        )
+        .filter_map(|effect| effect.semantic_id.map(|id| id.0))
+        .max()
+        .map_or(0, |id| id + 1);
+    let graphs = inner
+        .entry_points
+        .iter_mut()
+        .map(|entry| &mut entry.graph)
+        .chain(inner.functions.iter_mut().map(|function| &mut function.graph));
+    for graph in graphs {
+        for (_, block) in graph.skeleton.blocks.iter_mut() {
+            for effect in &mut block.side_effects {
+                if effect.semantic_id.is_none() {
+                    effect.semantic_id = Some(SemanticOpId(next));
+                    next += 1;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -422,10 +455,7 @@ fn allocate_filter_work_resources(
                         as u64
                         * 4,
                 );
-                let owner = effect.result.map(|result| SemanticOpId {
-                    scope: entry.name.clone(),
-                    result,
-                });
+                let owner = effect.semantic_id;
                 for (slot, (binding, kind, size)) in [
                     (
                         buffers.flags,
@@ -491,14 +521,12 @@ fn scalar_handoff_resources(inner: &SemanticProgram) -> HashMap<crate::BindingRe
         if entry.origin != interface::EntryOrigin::ScalarPrepass {
             continue;
         }
-        let owner = entry.graph.skeleton.blocks.iter().find_map(|(_, block)| {
-            block.side_effects.iter().find_map(|effect| {
-                effect.result.map(|result| SemanticOpId {
-                    scope: entry.name.clone(),
-                    result,
-                })
-            })
-        });
+        let owner = entry
+            .graph
+            .skeleton
+            .blocks
+            .iter()
+            .find_map(|(_, block)| block.side_effects.iter().find_map(|effect| effect.semantic_id));
         for declaration in &entry.storage_bindings {
             if declaration.role == interface::StorageRole::Output
                 && declaration.length.is_none()
@@ -527,10 +555,7 @@ fn filter_resource_kinds(inner: &SemanticProgram) -> HashMap<crate::BindingRef, 
                     ..
                 }) = &effect.kind
                 {
-                    let owner = effect.result.map(|result| SemanticOpId {
-                        scope: entry.name.clone(),
-                        result,
-                    });
+                    let owner = effect.semantic_id;
                     if let super::types::FilterOutput::Runtime { scratch, length } = output {
                         kinds.insert(
                             *scratch,

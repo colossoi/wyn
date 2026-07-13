@@ -132,6 +132,9 @@ impl ENode {
 /// A side-effectful instruction anchored in the skeleton CFG.
 #[derive(Clone, Debug)]
 pub struct SideEffect {
+    /// Stable semantic identity assigned after segmentation and preserved by
+    /// every projection. Synthesized physical-only effects use `None`.
+    pub semantic_id: Option<super::program::SemanticOpId>,
     /// What this side-effect is. Either an SSA `InstKind` that survives into
     /// the final `FuncBody`, or an intermediate `EgirSoac` that must be
     /// rewritten by `soac_expand` before `elaborate` runs.
@@ -554,6 +557,82 @@ impl EgirSoac {
             EgirSoac::Hist { body, .. } => visit_body(body),
         }
     }
+
+    /// Every graph value stored outside `SideEffect::operand_nodes`.
+    /// Segmented domains and operator neutrals/shapes are first-class value
+    /// edges just like callable-body captures; graph projection and liveness
+    /// must never rediscover them variant by variant.
+    pub fn metadata_nodes(&self) -> Vec<NodeId> {
+        let mut nodes = self.capture_nodes().collect::<Vec<_>>();
+        let mut add_space = |space: &SegSpace| {
+            nodes.extend(space.dims.iter().filter_map(|extent| match extent {
+                SegExtent::PushConstant { node, .. }
+                | SegExtent::ResourceLength { node, .. }
+                | SegExtent::Value(node) => Some(*node),
+                SegExtent::Fixed(_) => None,
+            }));
+        };
+        match self {
+            EgirSoac::Seg { space, kind, .. } => {
+                add_space(space);
+                for operator in kind.operators() {
+                    nodes.push(operator.neutral);
+                    nodes.extend(operator.shape.iter().copied());
+                }
+            }
+            EgirSoac::Filter { state, .. } => match state {
+                FilterState::Semantic { space } | FilterState::Scheduled { space, .. } => add_space(space),
+                FilterState::Raw => {}
+            },
+            EgirSoac::Hist {
+                execution: HistExecution::Segmented(space),
+                ..
+            } => add_space(space),
+            EgirSoac::Screma { .. } | EgirSoac::Hist { .. } => {}
+        }
+        nodes
+    }
+
+    pub fn visit_metadata_nodes_mut(&mut self, mut visit: impl FnMut(&mut NodeId)) {
+        self.visit_capture_nodes_mut(&mut visit);
+        let mut visit_space = |space: &mut SegSpace| {
+            for extent in &mut space.dims {
+                match extent {
+                    SegExtent::PushConstant { node, .. }
+                    | SegExtent::ResourceLength { node, .. }
+                    | SegExtent::Value(node) => visit(node),
+                    SegExtent::Fixed(_) => {}
+                }
+            }
+        };
+        match self {
+            EgirSoac::Seg { space, kind, .. } => {
+                visit_space(space);
+                for operator in match kind {
+                    SegOpKind::SegMap => &mut [][..],
+                    SegOpKind::SegRed { operators }
+                    | SegOpKind::SegScan { operators }
+                    | SegOpKind::SegComposite { operators } => operators.as_mut_slice(),
+                } {
+                    visit(&mut operator.neutral);
+                    for node in &mut operator.shape {
+                        visit(node);
+                    }
+                }
+            }
+            EgirSoac::Filter { state, .. } => match state {
+                FilterState::Semantic { space } | FilterState::Scheduled { space, .. } => {
+                    visit_space(space)
+                }
+                FilterState::Raw => {}
+            },
+            EgirSoac::Hist {
+                execution: HistExecution::Segmented(space),
+                ..
+            } => visit_space(space),
+            EgirSoac::Screma { .. } | EgirSoac::Hist { .. } => {}
+        }
+    }
 }
 
 impl SideEffect {
@@ -562,11 +641,11 @@ impl SideEffect {
     /// liveness and reachability now that captures are not inlined into
     /// `operand_nodes`.
     pub fn referenced_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
-        let captures = match &self.kind {
-            SideEffectKind::Soac(soac) => Some(soac.capture_nodes()),
-            SideEffectKind::Inst(_) => None,
+        let metadata = match &self.kind {
+            SideEffectKind::Soac(soac) => soac.metadata_nodes(),
+            SideEffectKind::Inst(_) => Vec::new(),
         };
-        self.operand_nodes.iter().copied().chain(captures.into_iter().flatten())
+        self.operand_nodes.iter().copied().chain(metadata)
     }
 
     /// Mutate every value edge, including explicit captures. Rewriters must
@@ -577,7 +656,7 @@ impl SideEffect {
             visit(operand);
         }
         if let SideEffectKind::Soac(soac) = &mut self.kind {
-            soac.visit_capture_nodes_mut(visit);
+            soac.visit_metadata_nodes_mut(visit);
         }
     }
 }

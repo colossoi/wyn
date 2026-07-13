@@ -291,6 +291,7 @@ impl EntryBuilder {
         let eff_in = alloc_effect(&mut self.next_effect);
         let eff_out = alloc_effect(&mut self.next_effect);
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+            semantic_id: None,
             kind: SideEffectKind::Inst(InstKind::Load {
                 place: Default::default(),
             }),

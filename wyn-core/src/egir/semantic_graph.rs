@@ -13,11 +13,13 @@ use std::collections::{HashMap, HashSet};
 use super::graph_ops;
 use super::program::{SemanticDependency, SemanticDependencyKind, SemanticOpId, SemanticProgram};
 use super::types::{
-    EGraph, EgirSoac, SegOpKind, SegResourceAccess, SegResourceAccessKind, SideEffect, SideEffectKind,
+    EGraph, EgirSoac, NodeId, SegOpKind, SegResourceAccess, SegResourceAccessKind, SideEffect,
+    SideEffectKind,
 };
 
 /// Rebuild the semantic dependency DAG stored on `inner`.
 pub(crate) fn rebuild_dependencies(inner: &mut SemanticProgram) {
+    super::program::assign_semantic_op_ids(inner);
     inner.semantic_dependencies = dependencies(inner);
 }
 
@@ -36,9 +38,10 @@ pub(crate) fn dependencies(inner: &SemanticProgram) -> Vec<SemanticDependency> {
 
 /// Every edge runs between two ops of `graph`, so duplicates can only arise
 /// within one scope and `seen` need not outlive this call.
-fn collect_graph_dependencies(scope: &str, graph: &EGraph, output: &mut Vec<SemanticDependency>) {
+fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<SemanticDependency>) {
     struct Record<'a> {
         id: SemanticOpId,
+        result: NodeId,
         effect: &'a SideEffect,
         resources: Vec<SegResourceAccess>,
     }
@@ -91,10 +94,8 @@ fn collect_graph_dependencies(scope: &str, graph: &EGraph, output: &mut Vec<Sema
                     EgirSoac::Screma { .. } => Vec::new(),
                 };
                 records.push(Record {
-                    id: SemanticOpId {
-                        scope: scope.to_string(),
-                        result,
-                    },
+                    id: effect.semantic_id.expect("semantic operation id assigned after segmentation"),
+                    result,
                     effect,
                     resources,
                 });
@@ -112,7 +113,7 @@ fn collect_graph_dependencies(scope: &str, graph: &EGraph, output: &mut Vec<Sema
             },
         );
         for producer in &records[..consumer_index] {
-            if reachable.contains(&producer.id.result) {
+            if reachable.contains(&producer.result) {
                 push_dependency(
                     output,
                     &mut seen,
