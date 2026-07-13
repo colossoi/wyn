@@ -399,7 +399,14 @@ impl KernelPlan {
                     by_name
                         .get(stage.entry_point.as_str())
                         .map(|(source, entry)| {
-                            phase_from_entry(id, Some(*source), entry, selection.clone(), &resource_ids)
+                            phase_from_entry(
+                                id,
+                                Some(*source),
+                                entry,
+                                selection.clone(),
+                                &resource_ids,
+                                analyze_source_recipe(entry),
+                            )
                         })
                         .unwrap_or_else(|| KernelPhase {
                             id,
@@ -503,7 +510,13 @@ impl KernelPlan {
     /// Add a generated phase after the current last phase of `parent`'s
     /// pipeline.  Dependencies are explicit even though host publication
     /// currently emits phases in topological order.
-    pub fn add_phase_after(&mut self, parent: &str, entry: &SemanticEntry, domain: DomainSelection) {
+    pub fn add_phase_after(
+        &mut self,
+        parent: &str,
+        entry: &SemanticEntry,
+        domain: DomainSelection,
+        recipe: KernelRecipe,
+    ) {
         self.record_publication(entry);
         let pipeline = self
             .pipelines
@@ -523,7 +536,7 @@ impl KernelPlan {
             .or(pipeline.phases[parent_index].abi.source_entry);
         let id = KernelId(self.next_kernel_id);
         self.next_kernel_id += 1;
-        let mut phase = phase_from_entry(id, source_entry, entry, domain, &self.resource_ids);
+        let mut phase = phase_from_entry(id, source_entry, entry, domain, &self.resource_ids, recipe);
         phase.dependencies = vec![parent_id];
         pipeline.phases.push(phase);
     }
@@ -531,7 +544,13 @@ impl KernelPlan {
     /// Insert a compiler-generated producer immediately before `consumer` and
     /// make the consumer depend on it. Existing dependency indices are shifted
     /// transactionally with the insertion.
-    pub fn add_phase_before(&mut self, consumer: &str, entry: &SemanticEntry, domain: DomainSelection) {
+    pub fn add_phase_before(
+        &mut self,
+        consumer: &str,
+        entry: &SemanticEntry,
+        domain: DomainSelection,
+        recipe: KernelRecipe,
+    ) {
         self.record_publication(entry);
         let pipeline = self
             .pipelines
@@ -553,7 +572,7 @@ impl KernelPlan {
             .or(pipeline.phases[consumer_index].abi.source_entry);
         let id = KernelId(self.next_kernel_id);
         self.next_kernel_id += 1;
-        let mut producer = phase_from_entry(id, consumer_source, entry, domain, &self.resource_ids);
+        let mut producer = phase_from_entry(id, consumer_source, entry, domain, &self.resource_ids, recipe);
         producer.dependencies = inherited_dependencies;
         pipeline.phases.insert(consumer_index, producer);
         let consumer_phase = &mut pipeline.phases[consumer_index + 1];
@@ -566,7 +585,13 @@ impl KernelPlan {
     /// Add an independent sibling kernel to the same host pipeline. This is
     /// used for distinct output domains: source order is retained by the
     /// published phase list, but no data dependency is fabricated.
-    pub fn add_sibling(&mut self, parent: &str, entry: &SemanticEntry, domain: DomainSelection) {
+    pub fn add_sibling(
+        &mut self,
+        parent: &str,
+        entry: &SemanticEntry,
+        domain: DomainSelection,
+        recipe: KernelRecipe,
+    ) {
         self.record_publication(entry);
         let pipeline = self
             .pipelines
@@ -582,7 +607,7 @@ impl KernelPlan {
         });
         let id = KernelId(self.next_kernel_id);
         self.next_kernel_id += 1;
-        let phase = phase_from_entry(id, source_entry, entry, domain, &self.resource_ids);
+        let phase = phase_from_entry(id, source_entry, entry, domain, &self.resource_ids, recipe);
         pipeline.phases.push(phase);
     }
 
@@ -614,7 +639,7 @@ impl KernelPlan {
     /// Commit the facts for one kernel at the same boundary that commits its
     /// physical recipe. This is deliberately per-entry: a later global
     /// reconciliation pass would make the entry list authoritative again.
-    pub fn update_kernel_from_entry(&mut self, entry: &SemanticEntry) {
+    pub fn commit_kernel(&mut self, entry: &SemanticEntry, recipe: KernelRecipe) {
         self.record_publication(entry);
         for pipeline in &mut self.pipelines {
             for phase in &mut pipeline.phases {
@@ -644,7 +669,7 @@ impl KernelPlan {
                 } else {
                     entry_resources(entry, &self.resource_ids)
                 };
-                phase.recipe = recipe_from_entry(entry);
+                phase.recipe = recipe;
                 phase.abi.inputs = (0..entry.inputs.len()).map(InputSlotId).collect();
                 phase.abi.output_routes = entry_output_projection(entry);
                 return;
@@ -951,6 +976,7 @@ fn phase_from_entry(
     entry: &SemanticEntry,
     selection: DomainSelection,
     resource_ids: &HashMap<BindingRef, ResourceId>,
+    recipe: KernelRecipe,
 ) -> KernelPhase {
     let domain = match &selection {
         DomainSelection::Inferred(fallback) => inferred_domain(entry, fallback.clone()),
@@ -959,7 +985,7 @@ fn phase_from_entry(
     KernelPhase {
         id,
         entry_point: entry.name.clone(),
-        recipe: recipe_from_entry(entry),
+        recipe,
         abi: EntryAbiProjection {
             source_entry,
             inputs: (0..entry.inputs.len()).map(InputSlotId).collect(),
@@ -988,7 +1014,7 @@ fn entry_output_projection(entry: &SemanticEntry) -> Vec<OutputRouteProjection> 
         .collect()
 }
 
-fn recipe_from_entry(entry: &SemanticEntry) -> KernelRecipe {
+fn analyze_source_recipe(entry: &SemanticEntry) -> KernelRecipe {
     use crate::interface::EntryOrigin;
 
     match entry.origin {

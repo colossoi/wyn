@@ -152,7 +152,7 @@ pub fn lower(inner: &mut SemanticProgram) {
             continue;
         };
         match kind {
-            SegOpKind::SegMap => {}
+            SegOpKind::SegMap => schedule.commit_kernel(entry, schedule::KernelRecipe::SerialCompute),
             SegOpKind::SegRed { .. } => {
                 let mut candidate = project_entry(
                     entry,
@@ -167,19 +167,21 @@ pub fn lower(inner: &mut SemanticProgram) {
                 if let Some(phases) = lower_reduce_entry(&mut candidate, &mut regions, &allocated_resources)
                 {
                     *entry = candidate;
-                    schedule.update_kernel_from_entry(entry);
+                    schedule.commit_kernel(entry, schedule::KernelRecipe::ReducePhase1);
                     let mut predecessor = entry.name.clone();
                     for ph in &phases {
                         schedule.add_phase_after(
                             &predecessor,
                             ph,
                             schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                            schedule::KernelRecipe::ReduceCombine,
                         );
                         predecessor = ph.name.clone();
                     }
                     new_entries.extend(phases);
                 } else {
                     restore_serial_seg(entry);
+                    schedule.commit_kernel(entry, schedule::KernelRecipe::SerialCompute);
                 }
             }
             SegOpKind::SegScan { .. } => {
@@ -197,7 +199,7 @@ pub fn lower(inner: &mut SemanticProgram) {
                     lower_scan_entry(&mut candidate, &mut regions, &allocated_resources)
                 {
                     *entry = candidate;
-                    schedule.update_kernel_from_entry(entry);
+                    schedule.commit_kernel(entry, schedule::KernelRecipe::ScanPhase1);
                     let mut predecessor = entry.name.clone();
                     let phase1_domain =
                         schedule.domain_of(&entry.name).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
@@ -211,6 +213,11 @@ pub fn lower(inner: &mut SemanticProgram) {
                             &predecessor,
                             ph,
                             schedule::DomainSelection::Explicit(domain),
+                            if phase_index == 0 {
+                                schedule::KernelRecipe::ScanBlock
+                            } else {
+                                schedule::KernelRecipe::ScanApplyOffsets
+                            },
                         );
                         predecessor = ph.name.clone();
                     }
@@ -221,6 +228,7 @@ pub fn lower(inner: &mut SemanticProgram) {
                     new_functions.push(swap_wrapper);
                 } else {
                     restore_serial_seg(entry);
+                    schedule.commit_kernel(entry, schedule::KernelRecipe::SerialCompute);
                 }
             }
             SegOpKind::SegComposite { .. } => {
@@ -228,9 +236,9 @@ pub fn lower(inner: &mut SemanticProgram) {
                 // initial portable scheduler preserves legacy behavior by
                 // lowering a mixed accumulator region locally.
                 restore_serial_seg(entry);
+                schedule.commit_kernel(entry, schedule::KernelRecipe::SerialCompute);
             }
         }
-        schedule.update_kernel_from_entry(entry);
     }
     inner.entry_points.extend(new_entries);
     inner.functions.extend(new_functions);
@@ -250,7 +258,7 @@ pub fn lower(inner: &mut SemanticProgram) {
         };
         *entry = split.primary;
         if !split.entries.is_empty() {
-            schedule.update_kernel_from_entry(entry);
+            schedule.commit_kernel(entry, schedule::KernelRecipe::OutputDomainProjection);
         }
         schedule.set_output_projection(
             &parent,
@@ -261,6 +269,7 @@ pub fn lower(inner: &mut SemanticProgram) {
                 &parent,
                 &projected.entry,
                 schedule::DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                schedule::KernelRecipe::OutputDomainProjection,
             );
             schedule.set_output_projection(
                 &projected.entry.name,
@@ -443,11 +452,12 @@ fn lower_runtime_filters(
             length: storage_len(work.block_offsets),
         });
         set_filter_plan(entry, FilterPlan::Scatter(work));
-        schedule.update_kernel_from_entry(entry);
+        schedule.commit_kernel(entry, schedule::KernelRecipe::FilterScatter);
         schedule.add_phase_before(
             &entry.name,
             &flags,
             schedule::DomainSelection::Explicit(domain.clone()),
+            schedule::KernelRecipe::FilterFlags,
         );
         // The scan runs a fixed worker grid so each worker scans a large
         // chunk and `block_sums` stays `FILTER_SCAN_GROUPS * width`-sized,
@@ -461,13 +471,20 @@ fn lower_runtime_filters(
                 y: 1,
                 z: 1,
             }),
+            schedule::KernelRecipe::FilterScan,
         );
         schedule.add_phase_before(
             &entry.name,
             &phase2,
             schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+            schedule::KernelRecipe::ScanBlock,
         );
-        schedule.add_phase_before(&entry.name, &phase3, schedule::DomainSelection::Explicit(domain));
+        schedule.add_phase_before(
+            &entry.name,
+            &phase3,
+            schedule::DomainSelection::Explicit(domain),
+            schedule::KernelRecipe::ScanApplyOffsets,
+        );
         phases.push(flags);
         phases.push(scan);
         phases.push(phase2);
@@ -678,7 +695,20 @@ pub(crate) fn attach_materialization_prepasses(
         let producer = &inner.entry_points[producer_index];
         let domain =
             schedule::segmented_domain(producer).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
-        schedule.add_phase_before(&consumer, producer, schedule::DomainSelection::Explicit(domain));
+        let recipe = match producer.origin {
+            crate::interface::EntryOrigin::ScalarPrepass => schedule::KernelRecipe::ScalarPrepass,
+            crate::interface::EntryOrigin::GatherPrepass => schedule::KernelRecipe::GatherPrepass,
+            crate::interface::EntryOrigin::MultiConsumerMaterialization => {
+                schedule::KernelRecipe::MultiConsumerMaterialization
+            }
+            _ => schedule::KernelRecipe::SerialCompute,
+        };
+        schedule.add_phase_before(
+            &consumer,
+            producer,
+            schedule::DomainSelection::Explicit(domain),
+            recipe,
+        );
     }
 }
 
