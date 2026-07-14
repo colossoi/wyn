@@ -8,7 +8,6 @@
 
 use crate::ssa::types::Program;
 use crate::tlc::extract_lambda_params;
-use crate::tlc::TermKind;
 use crate::tlc::VarRef;
 use crate::Compiler;
 use crate::SymbolTable;
@@ -23,25 +22,472 @@ fn should_fail_type_check(input: &str) -> bool {
     crate::compile_thru_frontend(input).is_err()
 }
 
-/// Helper to compile up through TLC fusion (stops before defunctionalization).
+/// Helper to compile through semantic EGIR optimization and allocation.
 /// Off-milestone stop — drives the typestate API directly so the same
 /// `module_manager` covers both `type_check` and `to_tlc`.
-fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
-    crate::test_pipeline::compile_to_tlc_program(input)
+fn compile_to_semantic_egir(input: &str) -> crate::EgirAllocated {
+    let raw = crate::compile_thru_tlc(input)
+        .expect("compile through TLC")
+        .infer_input_slice_bounds()
+        .to_egraph()
+        .expect("convert to raw semantic EGIR");
+    raw.realize_outputs().expect("realize semantic EGIR outputs").segment().optimize().allocate()
+}
+
+fn lower_semantic_egir(
+    allocated: crate::EgirAllocated,
+    profile: crate::LoweringProfile,
+) -> crate::SsaConverted {
+    allocated
+        .plan(profile)
+        .expect("plan semantic EGIR")
+        .lower_to_ssa()
+        .expect("lower planned EGIR to SSA")
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SemanticSoacStats {
+    filters: usize,
+    hists: usize,
+    seg_maps: usize,
+    seg_reds: usize,
+    seg_scans: usize,
+    seg_composites: usize,
+    map_bodies: usize,
+    reduce_operators: usize,
+    scan_operators: usize,
+}
+
+fn semantic_soac_stats(allocated: &crate::EgirAllocated) -> SemanticSoacStats {
+    use crate::egir::types::{EGraph, EgirSoac, SegOpKind, SideEffectKind};
+
+    fn visit(graph: &EGraph, stats: &mut SemanticSoacStats) {
+        for effect in graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects) {
+            let SideEffectKind::Soac(soac) = &effect.kind else {
+                continue;
+            };
+            match soac {
+                EgirSoac::Filter { .. } => stats.filters += 1,
+                EgirSoac::Hist { .. } => stats.hists += 1,
+                EgirSoac::Seg { kind, map_bodies, .. } => {
+                    stats.map_bodies += map_bodies.len();
+                    match kind {
+                        SegOpKind::SegMap => stats.seg_maps += 1,
+                        SegOpKind::SegRed { operators } => {
+                            stats.seg_reds += 1;
+                            stats.reduce_operators += operators.len();
+                        }
+                        SegOpKind::SegScan { operators } => {
+                            stats.seg_scans += 1;
+                            stats.scan_operators += operators.len();
+                        }
+                        SegOpKind::SegComposite { operators } => {
+                            stats.seg_composites += 1;
+                            stats.reduce_operators += operators
+                                .iter()
+                                .filter(|operator| {
+                                    operator.kind == crate::egir::types::ScremaAccumulator::Reduce
+                                })
+                                .count();
+                            stats.scan_operators += operators
+                                .iter()
+                                .filter(|operator| {
+                                    operator.kind == crate::egir::types::ScremaAccumulator::Scan
+                                })
+                                .count();
+                        }
+                    }
+                }
+                EgirSoac::Screma { .. } => {
+                    panic!("unsegmented SOAC survived semantic optimization")
+                }
+            }
+        }
+    }
+
+    let mut stats = SemanticSoacStats::default();
+    for function in &allocated.inner.functions {
+        visit(&function.graph, &mut stats);
+    }
+    for entry in &allocated.inner.entry_points {
+        visit(&entry.graph, &mut stats);
+    }
+    stats
+}
+
+// These semantic-EGIR tests are the behavioral successors to the deleted
+// `tlc/fusion_tests.rs` suite. They assert the optimized operation graph rather
+// than TLC syntax, so the checks survive representation changes while still
+// pinning fusion legality, input routing, and escape behavior.
+
+#[test]
+fn egir_vertical_fusion_collapses_three_map_chain() {
+    let source = r#"
+#[compute]
+entry chain(xs: []i32) []i32 =
+  let a = map(|x: i32| x + 1, xs) in
+  let b = map(|x: i32| x * 2, a) in
+  map(|x: i32| x - 3, b)
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(stats.seg_maps, 1, "three vertically fused maps become one SegMap");
+    assert_eq!(
+        stats.map_bodies, 1,
+        "composition must not leave parallel map lanes"
+    );
+}
+
+#[test]
+fn egir_vertical_fusion_preserves_multi_input_producer_sources() {
+    use crate::egir::types::{EgirSoac, SegOpKind, SegResourceAccessKind, SideEffectKind};
+
+    let allocated = compile_to_semantic_egir(
+        r#"
+#[compute]
+entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
+  let pairs = zip(xs, ys) in
+  let sums = map(|p: (i32, i32)| p.0 + p.1, pairs) in
+  map(|x: i32| x * 2, sums)
+"#,
+    );
+    let maps: Vec<_> = allocated
+        .inner
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+        .filter_map(|effect| match &effect.kind {
+            SideEffectKind::Soac(EgirSoac::Seg {
+                kind: SegOpKind::SegMap,
+                input_array_types,
+                resources,
+                ..
+            }) => Some((
+                input_array_types.len(),
+                resources.iter().filter(|resource| resource.access == SegResourceAccessKind::Read).count(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(maps.len(), 1, "the two maps should compose into one SegMap");
+    assert_eq!(
+        maps[0].1, 2,
+        "both zip source resources must reach the composed region"
+    );
+}
+
+#[test]
+fn egir_vertical_fusion_composes_one_slot_of_multi_input_consumer() {
+    use crate::egir::types::{EgirSoac, SegOpKind, SideEffectKind};
+
+    let allocated = compile_to_semantic_egir(
+        r#"
+#[compute]
+entry mixed() [4]i32 =
+  let produced = map(|x: i32| x + 1, [1, 2, 3, 4]) in
+  map(|p: (i32, i32)| p.0 + p.1, zip(produced, [10, 20, 30, 40]))
+"#,
+    );
+    let maps: Vec<_> = allocated
+        .inner
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+        .filter_map(|effect| match &effect.kind {
+            SideEffectKind::Soac(EgirSoac::Seg {
+                kind: SegOpKind::SegMap,
+                input_array_types,
+                map_input_indices,
+                ..
+            }) => Some((input_array_types.len(), map_input_indices.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(maps.len(), 1, "the producer should compose into the zip consumer");
+    assert_eq!(maps[0].1.len(), 1, "the fused consumer keeps one output lane");
+}
+
+#[test]
+fn egir_horizontal_fusion_deduplicates_shared_multi_input_vector() {
+    use crate::egir::types::{EgirSoac, SegOpKind, SideEffectKind};
+
+    let allocated = compile_to_semantic_egir(
+        r#"
+#[compute]
+entry siblings<[n]>(xs: [n]i32, ys: [n]i32) ([n]i32, [n]i32) =
+  let pairs = zip(xs, ys) in
+  let sums = map(|p: (i32, i32)| p.0 + p.1, pairs) in
+  let diffs = map(|p: (i32, i32)| p.0 - p.1, pairs) in
+  (sums, diffs)
+"#,
+    );
+    let fused = allocated
+        .inner
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+        .find_map(|effect| match &effect.kind {
+            SideEffectKind::Soac(EgirSoac::Seg {
+                kind: SegOpKind::SegMap,
+                input_array_types,
+                map_input_indices,
+                map_bodies,
+                ..
+            }) if map_bodies.len() == 2 => Some((input_array_types.len(), map_input_indices.clone())),
+            _ => None,
+        })
+        .expect("one two-lane SegMap");
+    assert_eq!(fused.0, 1, "the shared zipped input must not be duplicated");
+    assert_eq!(fused.1, vec![vec![0], vec![0]]);
+}
+
+#[test]
+fn egir_vertical_fusion_keeps_producer_that_also_escapes() {
+    let source = r#"
+#[compute]
+entry both(xs: []i32) ([]i32, []i32) =
+  let produced = map(|x: i32| x + 1, xs) in
+  let consumed = map(|x: i32| x * 2, produced) in
+  (produced, consumed)
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_maps, 2,
+        "an observable producer cannot be folded into its consumer"
+    );
+}
+
+#[test]
+fn egir_indexed_fusion_scalarizes_one_static_demand() {
+    let source = r#"
+#[compute]
+entry one() [1]i32 =
+  let produced = map(|x: i32| x + 1, 0i32 ..< 8) in
+  [produced[3]]
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_maps, 0,
+        "one static demand should remove the array producer"
+    );
+    compile_to_spirv(source).expect("scalarized static demand should lower");
+}
+
+#[test]
+fn egir_indexed_fusion_rewrites_direct_output_route() {
+    let source = r#"
+#[compute]
+entry one() i32 =
+  let produced = map(|x: i32| x + 1, 0i32 ..< 8) in
+  produced[3]
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_maps, 0,
+        "a direct scalar output should not keep the array producer"
+    );
+    compile_to_spirv(source).expect("scalarized direct output should lower");
+}
+
+#[test]
+fn egir_indexed_fusion_keeps_producer_with_two_demands() {
+    let source = r#"
+#[compute]
+entry two() [1]i32 =
+  let produced = map(|x: i32| x + 1, 0i32 ..< 8) in
+  [produced[2] + produced[3]]
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_maps, 1,
+        "multiple demands must share one materialized producer"
+    );
+    compile_to_spirv(source).expect("shared static demands should lower");
+}
+
+#[test]
+fn egir_indexed_fusion_keeps_producer_that_is_also_returned() {
+    let source = r#"
+#[compute]
+entry both() ([8]i32, [1]i32) =
+  let produced = map(|x: i32| x + 1, 0i32 ..< 8) in
+  (produced, [produced[3]])
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_maps, 1,
+        "a directly returned producer must remain materialized"
+    );
+    compile_to_spirv(source).expect("returned producer with a static demand should lower");
+}
+
+#[test]
+fn egir_filter_length_only_becomes_count_reduction() {
+    let source = r#"
+#[compute]
+entry count(xs: []i32) i32 =
+  let kept = filter(|x: i32| x > 0, xs) in
+  length(kept)
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(stats.filters, 0);
+    assert_eq!(stats.seg_reds, 1);
+    assert_eq!(
+        stats.reduce_operators, 1,
+        "length-only fusion needs one count operator"
+    );
+}
+
+#[test]
+fn egir_filter_fusion_reuses_count_for_multiple_reductions() {
+    use crate::egir::types::{EgirSoac, SegOpKind, SideEffectKind};
+
+    let source = r#"
+#[compute]
+entry stats(xs: []i32) [4]i32 =
+  let kept = filter(|x: i32| x > 0, xs) in
+  let n1 = length(kept) in
+  let total = reduce(|a: i32, x: i32| a + x, 0, kept) in
+  let n2 = length(kept) in
+  let maximum = reduce(|a: i32, x: i32| if a > x then a else x, -2147483648, kept) in
+  [n1, total, n2, maximum]
+"#;
+    let allocated = compile_to_semantic_egir(source);
+    let stats = semantic_soac_stats(&allocated);
+    assert_eq!(stats.filters, 0, "the non-escaping filter should disappear");
+    assert_eq!(
+        stats.seg_reds, 1,
+        "the reductions and count should share one SegRed"
+    );
+    assert_eq!(stats.reduce_operators, 3, "two reductions plus one shared count");
+
+    let operators = allocated
+        .inner
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+        .find_map(|effect| match &effect.kind {
+            SideEffectKind::Soac(EgirSoac::Seg {
+                kind: SegOpKind::SegRed { operators },
+                ..
+            }) if operators.len() == 3 => Some(operators),
+            _ => None,
+        })
+        .expect("three-operator filtered SegRed");
+    let step_names: Vec<_> = operators
+        .iter()
+        .map(|operator| allocated.inner.regions[&operator.step.region].name.as_str())
+        .collect();
+    assert!(step_names[0].contains("filter_reduce"));
+    assert!(step_names[1].contains("filter_reduce"));
+    assert!(
+        step_names[2].contains("filter_count"),
+        "count field stays last: {step_names:?}"
+    );
+
+    compile_to_spirv(source).expect("multi-consumer filtered reduction should lower");
+}
+
+#[test]
+fn egir_filter_fusion_is_blocked_when_filtered_array_escapes() {
+    let source = r#"
+#[compute]
+entry both(xs: []i32) ?k. ([k]i32, i32) =
+  let kept = filter(|x: i32| x > 0, xs) in
+  (kept, length(kept))
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.filters, 1,
+        "the returned filtered array still needs compaction"
+    );
+    assert_eq!(
+        stats.seg_reds, 0,
+        "its length cannot be detached into a masked reduction"
+    );
+}
+
+#[test]
+fn egir_map_filter_envelope_fuses_producer_into_escaping_filter() {
+    use crate::egir::types::{EgirSoac, SideEffectKind};
+
+    let source = r#"
+#[compute]
+entry pick(xs: []i32) ?k. [k]i32 =
+  let shifted = map(|x: i32| x + 1, xs) in
+  filter(|x: i32| x > 0, shifted)
+"#;
+    let allocated = compile_to_semantic_egir(source);
+    let stats = semantic_soac_stats(&allocated);
+    assert_eq!(stats.seg_maps, 0, "the producer map should not materialize");
+    assert_eq!(stats.filters, 1, "the escaping filter remains the envelope");
+    let has_map_body = allocated
+        .inner
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+        .any(|effect| {
+            matches!(
+                effect.kind,
+                SideEffectKind::Soac(EgirSoac::Filter {
+                    map_body: Some(_),
+                    ..
+                })
+            )
+        });
+    assert!(
+        has_map_body,
+        "the filter must carry the producer's callable region"
+    );
+}
+
+#[test]
+fn egir_map_scatter_envelope_fuses_and_deduplicates_both_producers() {
+    use crate::egir::types::{EgirSoac, SideEffectKind};
+
+    let source = r#"
+#[compute]
+entry write(xs: []i32, #[storage(set=2, binding=0, access=write)] dest: *[]i32) () =
+  let indices = map(|x: i32| x, xs) in
+  let values = map(|x: i32| x * 2, xs) in
+  let _ = scatter(dest, indices, values) in
+  ()
+"#;
+    let allocated = compile_to_semantic_egir(source);
+    let stats = semantic_soac_stats(&allocated);
+    assert_eq!(
+        stats.seg_maps, 0,
+        "both map producers should compose into scatter"
+    );
+    assert_eq!(stats.hists, 1);
+    let input_count = allocated
+        .inner
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+        .find_map(|effect| match &effect.kind {
+            SideEffectKind::Soac(EgirSoac::Hist {
+                input_array_types, ..
+            }) => Some(input_array_types.len()),
+            _ => None,
+        })
+        .expect("fused SegHist");
+    assert_eq!(
+        input_count, 1,
+        "both scatter channels share the same source array"
+    );
+    compile_to_spirv(source).expect("map-map-scatter envelope should lower");
 }
 
 #[test]
 fn semantic_segops_survive_optimization_and_logical_allocation() {
     use crate::egir::types::{EgirSoac, SegExtent, SegOpKind, SideEffectKind};
 
-    let tlc = crate::compile_thru_tlc(
+    let allocated = compile_to_semantic_egir(
         r#"
 #[compute]
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#,
-    )
-    .expect("TLC");
-    let allocated = tlc.infer_input_slice_bounds().to_egraph().expect("semantic EGIR allocation");
+    );
     crate::egir::semantic_graph::verify(&allocated.inner).expect("complete semantic EGIR");
     let seg = allocated
         .inner
@@ -96,7 +542,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 fn same_space_reductions_fuse_into_one_multi_accumulator_op() {
     use crate::egir::types::{EgirSoac, SegOpKind, SideEffectKind};
 
-    let tlc = crate::compile_thru_tlc(
+    let allocated = compile_to_semantic_egir(
         r#"
 def N: i32 = 256
 #[compute]
@@ -104,9 +550,7 @@ entry e() [4]f32 =
     let xs = map(|i: i32| f32.i32(i), 0i32 ..< N) in
     [f32.sum(xs), f32.product(xs), f32.minimum(xs), f32.maximum(xs)]
 "#,
-    )
-    .expect("TLC");
-    let allocated = tlc.infer_input_slice_bounds().to_egraph().expect("semantic EGIR allocation");
+    );
     let operator_counts: Vec<usize> = allocated
         .inner
         .entry_points
@@ -180,7 +624,7 @@ entry e() [4]f32 =
 #[test]
 fn horizontal_fusion_does_not_cross_an_intervening_effect_token() {
     use crate::egir::types::{EgirSoac, SegOpKind, SideEffectKind};
-    let allocated = crate::compile_thru_tlc(
+    let allocated = compile_to_semantic_egir(
         r#"
 #[compute]
 entry e() [3]i32 =
@@ -192,11 +636,7 @@ entry e() [3]i32 =
       reduce(|a: i32, b: i32| if a > b then a else b, -2147483648, xs)
     ]
 "#,
-    )
-    .expect("TLC")
-    .infer_input_slice_bounds()
-    .to_egraph()
-    .expect("semantic EGIR");
+    );
     let operator_counts: Vec<_> = allocated
         .inner
         .entry_points
@@ -218,7 +658,7 @@ entry e() [3]i32 =
 }
 
 #[test]
-fn fused_accumulators_preserve_distinct_input_columns() {
+fn fused_accumulators_preserve_distinct_composed_steps_on_shared_input() {
     use crate::egir::types::{EgirSoac, SegOpKind, SideEffectKind};
     let source = r#"
 #[compute]
@@ -228,11 +668,7 @@ entry e() [2]i32 =
   [reduce(|a: i32, b: i32| a + b, 0, xs),
    reduce(|a: i32, b: i32| a + b, 0, ys)]
 "#;
-    let allocated = crate::compile_thru_tlc(source)
-        .expect("TLC")
-        .infer_input_slice_bounds()
-        .to_egraph()
-        .expect("semantic EGIR");
+    let allocated = compile_to_semantic_egir(source);
     let operators = allocated
         .inner
         .entry_points
@@ -246,15 +682,15 @@ entry e() [2]i32 =
             _ => None,
         })
         .expect("two-accumulator SegRed");
+    assert_eq!(operators[0].input_indices, vec![0]);
+    assert_eq!(operators[1].input_indices, vec![0]);
     assert_ne!(
-        operators[0].input_indices, operators[1].input_indices,
-        "each accumulator keeps its own source column"
+        operators[0].step.region, operators[1].step.region,
+        "deduplicated inputs may share a column, but composed map bodies must remain distinct"
     );
-    allocated
-        .lower_to_ssa(crate::LoweringProfile::PORTABLE)
-        .expect("distinct routed inputs lower to SSA")
+    lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE)
         .lower()
-        .expect("distinct routed inputs lower to SPIR-V");
+        .expect("distinct composed steps lower to SPIR-V");
     let base: Vec<i32> = (0..8).collect();
     let xs = crate::egir::semantic_exec::map(&base, |value| value + 1);
     let ys = crate::egir::semantic_exec::map(&base, |value| value * 2);
@@ -271,13 +707,9 @@ entry e() [2]i32 =
 fn logical_manifest_covers_scan_and_filter_scratch() {
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
 
-    let scan = crate::compile_thru_tlc(
+    let scan = compile_to_semantic_egir(
         "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
-    )
-    .expect("scan TLC")
-    .infer_input_slice_bounds()
-    .to_egraph()
-    .expect("scan allocation");
+    );
     let scan_kinds: std::collections::HashSet<_> = scan
         .logical_resources()
         .iter()
@@ -305,13 +737,9 @@ fn logical_manifest_covers_scan_and_filter_scratch() {
         .collect();
     assert_eq!(scan_resources.len(), 2);
 
-    let filter = crate::compile_thru_tlc(
+    let filter = compile_to_semantic_egir(
         "#[compute] entry evens(xs: []i32) []i32 = filter(|x: i32| x % 2 == 0, xs)",
-    )
-    .expect("filter TLC")
-    .infer_input_slice_bounds()
-    .to_egraph()
-    .expect("filter allocation");
+    );
     let filter_kinds: std::collections::HashSet<_> = filter
         .logical_resources()
         .iter()
@@ -335,18 +763,14 @@ fn logical_manifest_covers_scan_and_filter_scratch() {
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterScanBlockSums));
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterScanBlockOffsets));
 
-    let scalar_handoff = crate::compile_thru_tlc(
+    let scalar_handoff = compile_to_semantic_egir(
         r#"
 #[compute]
 entry add_sum(xs: []i32) []i32 =
   let total = reduce(|a: i32, b: i32| a + b, 0, xs) in
   map(|x: i32| x + total, xs)
 "#,
-    )
-    .expect("scalar handoff TLC")
-    .infer_input_slice_bounds()
-    .to_egraph()
-    .expect("scalar handoff allocation");
+    );
     assert!(scalar_handoff.logical_resources().iter().any(|resource| {
         matches!(
             &resource.origin,
@@ -484,8 +908,8 @@ entry r(bidx: []u32) ?k. [k]vec4f32 =
 /// semantic layer and which survive as a genuine multi-consumer producer (a
 /// SegMap result with >=2 value consumers in the semantic dependency DAG).
 ///
-/// Most shapes are subsumed upstream: same-domain sibling consumers fuse (TLC
-/// `fuse_maps` + EGIR horizontal fusion), and point reads / nested captures are
+/// Most shapes are subsumed upstream: same-domain sibling consumers fuse in
+/// semantic EGIR, and point reads / nested captures are
 /// materialized. `reduce_then_map` — an array consumed by a reduce *and* by a
 /// later map that depends on the reduce's scalar result — cannot fuse (a true
 /// producer→consumer dependency forces the map after the reduce). Phase M
@@ -499,11 +923,7 @@ fn multi_consumer_producer_survival_is_characterized() {
     use std::collections::HashMap;
 
     fn multi_consumer_producers(src: &str) -> usize {
-        let tlc = crate::compile_thru_tlc(src).expect("multi-consumer program should reach TLC");
-        let allocated = tlc
-            .infer_input_slice_bounds()
-            .to_egraph()
-            .expect("multi-consumer program should reach semantic EGIR");
+        let allocated = compile_to_semantic_egir(src);
         let seg_maps: std::collections::HashSet<_> = allocated
             .inner
             .entry_points
@@ -599,11 +1019,7 @@ entry e() [4]i32 =
         "multi-consumer subsumption boundary moved — Phase M scope changed"
     );
 
-    let allocated = crate::compile_thru_tlc(reduce_then_map)
-        .expect("TLC")
-        .infer_input_slice_bounds()
-        .to_egraph()
-        .expect("allocated EGIR");
+    let allocated = compile_to_semantic_egir(reduce_then_map);
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
     let shared: Vec<_> = allocated
         .logical_resources()
@@ -657,8 +1073,7 @@ entry e() [4]i32 =
         )
     }));
     assert_eq!(allocated.inner.entry_points[consumer.0 as usize].name, "e");
-    let lowered =
-        allocated.lower_to_ssa(crate::LoweringProfile::PORTABLE).expect("shared materialization lowers");
+    let lowered = lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE);
     let mir = crate::ssa::print::format_program(&lowered.ssa);
     assert_eq!(
         mir.matches("materialize ").count(),
@@ -681,13 +1096,10 @@ entry e() [4]i32 =
         .iter()
         .any(|resource| resource.resource == shared_resource && resource.access.reads()));
     assert!(phases.last().unwrap().dependencies.contains(&phases[0].id));
-    let second = crate::compile_thru_tlc(reduce_then_map)
-        .expect("repeat TLC")
-        .infer_input_slice_bounds()
-        .to_egraph()
-        .expect("repeat allocation")
-        .lower_to_ssa(crate::LoweringProfile::PORTABLE)
-        .expect("repeat lowering");
+    let second = lower_semantic_egir(
+        compile_to_semantic_egir(reduce_then_map),
+        crate::LoweringProfile::PORTABLE,
+    );
     assert_eq!(
         serde_json::to_string(&lowered.pipeline).unwrap(),
         serde_json::to_string(&second.pipeline).unwrap(),
@@ -700,16 +1112,10 @@ entry e() [4]i32 =
         [37, 38, 39, 40, 41, 42, 43, 44]
     );
 
-    let single = crate::compile_thru_tlc(reduce_then_map)
-        .expect("single-stage TLC")
-        .infer_input_slice_bounds()
-        .to_egraph()
-        .expect("single-stage allocation")
-        .lower_to_ssa(crate::LoweringProfile::new(
-            crate::CodegenTarget::Portable,
-            crate::SchedulePolicy::SingleStage,
-        ))
-        .expect("single-stage shared materialization");
+    let single = lower_semantic_egir(
+        compile_to_semantic_egir(reduce_then_map),
+        crate::LoweringProfile::new(crate::CodegenTarget::Portable, crate::SchedulePolicy::SingleStage),
+    );
     let single_phases: Vec<_> = single.kernel_plan.phases().collect();
     assert_eq!(
         single_phases.len(),
@@ -721,18 +1127,12 @@ entry e() [4]i32 =
         crate::egir::parallelize::schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 }
     ));
 
-    let wgsl = crate::compile_thru_tlc(reduce_then_map)
-        .expect("WGSL TLC")
-        .infer_input_slice_bounds()
-        .to_egraph()
-        .expect("WGSL allocation")
-        .lower_to_ssa(crate::LoweringProfile::new(
-            crate::CodegenTarget::Wgsl,
-            crate::SchedulePolicy::Parallel,
-        ))
-        .expect("WGSL-targeted semantic lowering")
-        .lower_wgsl()
-        .expect("shared materialization lowers to WGSL");
+    let wgsl = lower_semantic_egir(
+        compile_to_semantic_egir(reduce_then_map),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    )
+    .lower_wgsl()
+    .expect("shared materialization lowers to WGSL");
     assert!(wgsl.contains("e_materialize_shared"));
 }
 
@@ -759,11 +1159,7 @@ fn terminal_schedule_and_descriptor_are_atomic_and_deterministic() {
 #[compute]
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#;
-    let allocated = crate::compile_thru_tlc(source)
-        .expect("TLC")
-        .infer_input_slice_bounds()
-        .to_egraph()
-        .expect("semantic allocation");
+    let allocated = compile_to_semantic_egir(source);
     for pipeline in &allocated.inner.pipeline.pipelines {
         if let crate::pipeline_descriptor::Pipeline::Compute(compute) = pipeline {
             assert!(
@@ -772,7 +1168,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
             );
         }
     }
-    let first = allocated.lower_to_ssa(crate::LoweringProfile::PORTABLE).expect("terminal lowering");
+    let first = lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE);
     let phases: Vec<_> = first.kernel_plan.phases().collect();
     assert!(phases.len() >= 2, "parallel reduction owns at least two phases");
     assert!(phases.iter().skip(1).any(|phase| !phase.dependencies.is_empty()));
@@ -792,15 +1188,12 @@ fn single_stage_is_a_terminal_schedule_policy() {
 #[compute]
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#;
-    let tlc = crate::compile_thru_tlc(source).expect("TLC");
-    let allocated = tlc.infer_input_slice_bounds().to_egraph().expect("semantic allocation");
+    let allocated = compile_to_semantic_egir(source);
     assert!(allocated.semantic_ir().contains("SegRed"));
-    let lowered = allocated
-        .lower_to_ssa(crate::LoweringProfile::new(
-            crate::CodegenTarget::Portable,
-            crate::SchedulePolicy::SingleStage,
-        ))
-        .expect("single-stage terminal lowering");
+    let lowered = lower_semantic_egir(
+        allocated,
+        crate::LoweringProfile::new(crate::CodegenTarget::Portable, crate::SchedulePolicy::SingleStage),
+    );
     assert_eq!(lowered.kernel_plan.phases().count(), 1);
     assert!(!lowered.ssa.entry_points.iter().any(|entry| entry.name.contains("phase2")));
 }
@@ -818,11 +1211,9 @@ fn target_profiles_are_selected_before_ssa_lowering() {
 
 #[test]
 fn terminal_scan_helpers_are_complete_region_arena_members() {
-    let tlc = crate::compile_thru_tlc(
+    let allocated = compile_to_semantic_egir(
         "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
-    )
-    .expect("TLC");
-    let allocated = tlc.infer_input_slice_bounds().to_egraph().expect("semantic EGIR");
+    );
     assert!(
         !allocated.inner.functions.iter().any(|function| function.name.ends_with("_scan_op_swap")),
         "planner-generated scan helper leaked into semantic EGIR"
@@ -1401,18 +1792,14 @@ entry add_sum(xs: []i32) []i32 =
 fn scalar_prepass_flow_is_explicit_in_resource_manifest() {
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
 
-    let allocated = crate::compile_thru_tlc(
+    let allocated = compile_to_semantic_egir(
         r#"
 #[compute]
 entry add_sum(xs: []i32) []i32 =
   let total = reduce(|a: i32, b: i32| a + b, 0, xs) in
   map(|x: i32| x + total, xs)
 "#,
-    )
-    .expect("scalar prepass TLC")
-    .infer_input_slice_bounds()
-    .to_egraph()
-    .expect("scalar prepass allocation");
+    );
     let flow = allocated
         .logical_resources()
         .iter()
@@ -1587,25 +1974,6 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                 walk(ne, bound, symbols, stage, def_name);
                 walk_array_expr(input, bound, symbols, stage, def_name);
                 walk_lambda(&op.lam, bound, symbols, stage, def_name);
-            }
-            SoacOp::Screma {
-                lanes,
-                accumulators,
-                inputs,
-            } => {
-                for acc in accumulators {
-                    walk(&acc.ne, bound, symbols, stage, def_name);
-                }
-                for i in inputs {
-                    walk_array_expr(i, bound, symbols, stage, def_name);
-                }
-                for lane in lanes {
-                    walk_lambda(&lane.lam.lam, bound, symbols, stage, def_name);
-                }
-                for acc in accumulators {
-                    walk_lambda(&acc.step_lam.lam, bound, symbols, stage, def_name);
-                    walk_lambda(&acc.reduce_op.lam, bound, symbols, stage, def_name);
-                }
             }
             SoacOp::Filter { pred, input, .. } => {
                 walk_array_expr(input, bound, symbols, stage, def_name);
@@ -1791,8 +2159,9 @@ entry frag(c: vec4f32) #[target(screen)] vec4f32 =
 entry frag(c: vec4f32) #[target(screen)] vec4f32 =
     let xs = [1, 2, 3, 4, 5, 6, 7, 8] in
     let r = map(|x: i32| x + 1, xs) in
-    -- `xs` aliased past the map → map must allocate a fresh buffer
-    @[f32.i32(r[0]), f32.i32(xs[0]), 0.0, 0.0]
+    let j = i32.f32(c.x) % 8 in
+    -- A dynamic read keeps `xs` live past the map.
+    @[f32.i32(r[j]), f32.i32(xs[j]), 0.0, 0.0]
 "#,
     );
     assert!(
@@ -1843,7 +2212,8 @@ entry frag(c: vec4f32) #[target(screen)] vec4f32 =
 entry frag(c: vec4f32) #[target(screen)] vec4f32 =
     let xs = [1, 2, 3, 4, 5, 6, 7, 8] in
     let r = scan(|acc: i32, x: i32| acc + x, 0, xs) in
-    @[f32.i32(r[0]), f32.i32(xs[0]), 0.0, 0.0]
+    let j = i32.f32(c.x) % 8 in
+    @[f32.i32(r[j]), f32.i32(xs[j]), 0.0, 0.0]
 "#,
     );
     assert!(
@@ -2108,7 +2478,7 @@ entry frag(c: vec4f32) #[target(screen)] vec4f32 =
 }
 
 #[test]
-fn test_map_reduce_fusion_end_to_end() {
+fn test_graphics_map_reduce_end_to_end() {
     let source = r#"
 def globalArr: [4]f32 = [10.0, 20.0, 30.0, 40.0]
 
@@ -2125,82 +2495,7 @@ entry fragment_main() #[target(screen)] vec4f32 =
   @[closest, 0.0, 0.0, 1.0]
 "#;
 
-    let tlc = compile_to_fused_tlc(source);
-
-    // After fusion, check that myMap's body is no longer a standalone map
-    // or that some def contains a fused reduce
-    let _my_map_has_map = tlc.defs.iter().any(|def| {
-        let name = tlc.symbols.get(def.name).cloned().unwrap_or_default();
-        if name != "myMap" {
-            return false;
-        }
-        let (_, body) = extract_lambda_params(&def.body);
-        has_soac_kind(&body, "Map")
-    });
-
-    let _any_has_reduce = tlc.defs.iter().any(|def| {
-        let (_, body) = extract_lambda_params(&def.body);
-        has_soac_kind(&body, "Reduce")
-    });
-
-    // Check fragment_main: does it contain a fused Reduce?
-    let fragment_main = tlc
-        .defs
-        .iter()
-        .find(|def| tlc.symbols.get(def.name).map(|s| s.as_str()) == Some("fragment_main"))
-        .expect("fragment_main not found");
-
-    let (_, frag_body) = extract_lambda_params(&fragment_main.body);
-    // A fused `map → reduce` lowers to a single-accumulator `Screma`.
-    let frag_has_screma = has_soac_kind(&frag_body, "Screma");
-    let frag_has_reduce = has_soac_kind(&frag_body, "Reduce");
-    let frag_has_map = has_soac_kind(&frag_body, "Map");
-
-    eprintln!("fragment_main has Screma: {}", frag_has_screma);
-    eprintln!("fragment_main has Reduce: {}", frag_has_reduce);
-    eprintln!("fragment_main has Map: {}", frag_has_map);
-    eprintln!(
-        "fragment_main body: {:?}",
-        std::mem::discriminant(&frag_body.kind)
-    );
-
-    // Print the Let chain structure
-    fn print_term(term: &crate::tlc::Term, syms: &SymbolTable, depth: usize) {
-        let indent = "  ".repeat(depth);
-        match &term.kind {
-            TermKind::Let { name, rhs, body, .. } => {
-                let n = syms.get(*name).cloned().unwrap_or_else(|| format!("{:?}", name));
-                eprintln!("{indent}let {n} = ...");
-                print_term(rhs, syms, depth + 1);
-                print_term(body, syms, depth);
-            }
-            TermKind::Soac(soac) => {
-                eprintln!("{indent}SOAC {:?}", std::mem::discriminant(soac));
-            }
-            TermKind::App { func, args } => {
-                eprintln!("{indent}App:");
-                print_term(func, syms, depth + 1);
-                for a in args {
-                    print_term(a, syms, depth + 1);
-                }
-            }
-            TermKind::Var(VarRef::Symbol(s)) => {
-                let n = syms.get(*s).cloned().unwrap_or_else(|| format!("{:?}", s));
-                eprintln!("{indent}Var({n})");
-            }
-            other => {
-                eprintln!("{indent}{:?}", std::mem::discriminant(other));
-            }
-        }
-    }
-    print_term(&frag_body, &tlc.symbols, 0);
-
-    // The fusion should have replaced the let chain with a fused SOAC
-    // or at minimum the fragment_main should contain a Reduce
-    assert!(
-        frag_has_screma || frag_has_reduce,
-        "Expected fragment_main to contain a fused Screma or Reduce after interprocedural fusion"
-    );
+    compile_to_spirv(source).expect("fragment map+reduce should lower to SPIR-V");
 }
 
 fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
@@ -2208,7 +2503,6 @@ fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
     match &term.kind {
         TermKind::Soac(SoacOp::Map { .. }) if kind == "Map" => true,
         TermKind::Soac(SoacOp::Reduce { .. }) if kind == "Reduce" => true,
-        TermKind::Soac(SoacOp::Screma { .. }) if kind == "Screma" => true,
         TermKind::Soac(SoacOp::Filter { .. }) if kind == "Filter" => true,
         TermKind::Let { rhs, body, .. } => has_soac_kind(rhs, kind) || has_soac_kind(body, kind),
         TermKind::Lambda(lam) => has_soac_kind(&lam.body, kind),
@@ -2242,18 +2536,12 @@ entry gen(xs: []i32) ([]i32, [1]i32) =
   (c, [d])
 "#;
 
-    let tlc = compile_to_fused_tlc(source);
-    let gen = tlc
-        .defs
-        .iter()
-        .find(|def| tlc.symbols.get(def.name).map(|s| s.as_str()) == Some("gen"))
-        .expect("gen not found");
-
-    let (_, body) = extract_lambda_params(&gen.body);
-    assert!(
-        has_soac_kind(&body, "Screma"),
-        "expected shared map producer feeding map+reduce to fuse to Screma"
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_reds, 1,
+        "map producer and map+reduce consumers should fuse"
     );
+    assert_eq!(stats.seg_maps, 0, "the shared producer should not materialize");
 
     compile_to_spirv(source).expect("Screma-fused map+reduce should lower to SPIR-V");
 }
@@ -2269,18 +2557,12 @@ entry gen(xs: []i32) ([]i32, []i32) =
   (c, d)
 "#;
 
-    let tlc = compile_to_fused_tlc(source);
-    let gen = tlc
-        .defs
-        .iter()
-        .find(|def| tlc.symbols.get(def.name).map(|s| s.as_str()) == Some("gen"))
-        .expect("gen not found");
-
-    let (_, body) = extract_lambda_params(&gen.body);
-    assert!(
-        has_soac_kind(&body, "Screma"),
-        "expected shared map producer feeding map+scan to fuse to Screma"
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_scans, 1,
+        "map producer and map+scan consumers should fuse"
     );
+    assert_eq!(stats.seg_maps, 0, "the shared producer should not materialize");
 
     compile_to_spirv(source).expect("Screma-fused map+scan should lower to SPIR-V");
 }
@@ -2298,37 +2580,14 @@ entry gen(xs: []i32) ([]i32, []i32, [1]i32, []i32) =
   (c, e, [d], f)
 "#;
 
-    let tlc = compile_to_fused_tlc(source);
-    let gen = tlc
-        .defs
-        .iter()
-        .find(|def| tlc.symbols.get(def.name).map(|s| s.as_str()) == Some("gen"))
-        .expect("gen not found");
-
-    let (_, body) = extract_lambda_params(&gen.body);
-    assert!(
-        has_soac_kind(&body, "Screma"),
-        "expected shared map producer feeding multiple maps/reduce/scan to fuse to Screma"
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(stats.seg_reds, 1, "map and reduce consumers should co-schedule");
+    assert_eq!(
+        stats.seg_scans, 1,
+        "the scan remains an explicit semantic schedule"
     );
-    fn screma_shape(term: &crate::tlc::Term) -> Option<(usize, usize, usize, usize)> {
-        use crate::tlc::{ScremaAccumulator, SoacOp, TermKind};
-        match &term.kind {
-            TermKind::Soac(SoacOp::Screma {
-                lanes, accumulators, ..
-            }) => Some((
-                lanes.len(),
-                accumulators.len(),
-                accumulators.iter().filter(|acc| acc.kind == ScremaAccumulator::Reduce).count(),
-                accumulators.iter().filter(|acc| acc.kind == ScremaAccumulator::Scan).count(),
-            )),
-            TermKind::Let { rhs, body, .. } => screma_shape(rhs).or_else(|| screma_shape(body)),
-            TermKind::Lambda(lam) => screma_shape(&lam.body),
-            TermKind::Tuple(parts) | TermKind::VecLit(parts) => parts.iter().find_map(screma_shape),
-            TermKind::TupleProj { tuple, .. } => screma_shape(tuple),
-            _ => None,
-        }
-    }
-    assert_eq!(screma_shape(&body), Some((2, 2, 1, 1)));
+    assert_eq!(stats.reduce_operators, 1);
+    assert_eq!(stats.scan_operators, 1);
 
     compile_to_spirv(source).expect("multi-output Screma should lower to SPIR-V");
 }
@@ -2465,18 +2724,12 @@ entry two(ids: []u32, params: []f32) ([]f32, []f32) =
   (lo, hi)
 "#;
 
-    let wgsl = crate::compile_thru_tlc(source)
-        .expect("TLC")
-        .infer_input_slice_bounds()
-        .to_egraph()
-        .expect("EGIR")
-        .lower_to_ssa(crate::LoweringProfile::new(
-            crate::CodegenTarget::Wgsl,
-            crate::SchedulePolicy::Parallel,
-        ))
-        .expect("SSA")
-        .lower_wgsl()
-        .expect("WGSL lowering");
+    let wgsl = lower_semantic_egir(
+        compile_to_semantic_egir(source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    )
+    .lower_wgsl()
+    .expect("WGSL lowering");
 
     assert!(
         wgsl.contains("1000.0"),
@@ -3645,8 +3898,8 @@ fn compile_to_ssa_with_modules(input: &str) -> Program {
 // =========================================================================
 
 /// Returning a runtime-sized `[]f32` from a helper and reading one *constant*
-/// slot. `g` inlines to `map(|i| f32.i32(i), 0..<256)`, and `static_index_fusion`
-/// rewrites `map(f, src)[3]` → `let i = src[3] in f32.i32(i)` — a virtual-array
+/// slot. `g` inlines to `map(|i| f32.i32(i), 0..<256)`, and EGIR indexed-demand
+/// scalarization rewrites `map(f, src)[3]` to a virtual-array
 /// access, materializing nothing rather than a whole runtime-sized buffer.
 #[test]
 fn returning_runtime_sized_array_from_fn_lowers() {
@@ -5054,17 +5307,9 @@ entry pair(xs: []f32) ([]f32, []f32) =
   let b = map(|x: f32| x + 1.0, xs) in
   (a, b)
 "#;
-    let fused = compile_to_fused_tlc(src);
-    let pair = fused
-        .defs
-        .iter()
-        .find(|def| fused.symbols.get(def.name).map(|s| s.as_str()) == Some("pair"))
-        .expect("pair not found");
-    let (_, body) = extract_lambda_params(&pair.body);
-    assert!(
-        has_soac_kind(&body, "Screma"),
-        "sibling maps should fuse to pointwise Screma before parallelization"
-    );
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(src));
+    assert_eq!(stats.seg_maps, 1, "equal-domain sibling maps should co-schedule");
+    assert_eq!(stats.map_bodies, 2, "both pointwise bodies must share the SegMap");
 
     let program = compile_to_ssa(src);
     let thread_id_builtin = catalog().known().thread_id;
@@ -5415,21 +5660,16 @@ entry filt_stats(xs: []i32) (i32, i32) =
   (length(kept), reduce(|a: i32, b: i32| a + b, 0i32, kept))
 ";
 
-    let tlc = compile_to_fused_tlc(source);
-    let entry = tlc
-        .defs
-        .iter()
-        .find(|def| tlc.symbols.get(def.name).map(|s| s.as_str()) == Some("filt_stats"))
-        .expect("filt_stats not found");
-    let (_, body) = extract_lambda_params(&entry.body);
-    assert!(
-        has_soac_kind(&body, "Screma"),
-        "filter feeding scalar consumers should fuse to a Screma"
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.filters, 0,
+        "scalar consumers should eliminate filter materialization"
     );
-    assert!(
-        !has_soac_kind(&body, "Filter"),
-        "scalar filter consumers should not materialize the filtered array"
+    assert_eq!(
+        stats.seg_reds, 1,
+        "length and reduce should share a masked SegRed"
     );
+    assert_eq!(stats.reduce_operators, 2, "count and sum both remain observable");
 
     compile_to_spirv(source).expect("runtime filter feeding length+reduce scalar outputs must compile");
 }
@@ -5555,9 +5795,9 @@ entry filt_reduce(xs: []i32) i32 =
     );
 }
 
-/// The masked fused-reduce fusion must fire even when `filter` and `reduce` live in
-/// **different functions** — TLC fusion sees through the `evens` call via
-/// function summaries (no inlining needed at fusion time).
+/// The masked reduction fusion must fire even when `filter` and `reduce` were
+/// written in different functions; force-inlining exposes the semantic edge
+/// before EGIR optimization.
 #[test]
 fn filter_into_reduce_fuses_across_functions() {
     let lowered = crate::compile_thru_spirv(
@@ -5573,7 +5813,7 @@ entry filt_reduce(xs: []i32) i32 =
     .expect("cross-function filter→reduce compiles");
     assert!(
         is_two_phase_compute(&lowered.pipeline, "filt_reduce"),
-        "cross-function reduce(evens(xs)) must fuse to filtered Screma via function summaries",
+        "cross-function reduce(evens(xs)) must fuse after helper inlining",
     );
 }
 
@@ -5620,7 +5860,7 @@ entry pick(xs: []u32) ?k. [k]u32 =
 }
 
 /// A capturing producer map folded into a filter: `map(|x| x + bound, xs)`
-/// captures the runtime value `bound`, so the fused filter's `map_lam` carries a
+/// captures the runtime value `bound`, so the fused EGIR filter body carries a
 /// capture. That capture must survive closure conversion's free-variable
 /// analysis, ownership/liveness (it is read inside the fused map), and the filter
 /// lowering (where it becomes an extra operand of the per-element map call,
@@ -5728,8 +5968,7 @@ entry both2(xs: []u32) ?k. ?j. ([k]u32, [j]u32) =
 /// `Reduction` semantics this stalled at three separate loops.
 #[test]
 fn map_filter_map_reduce_collapses_to_one_screma() {
-    let tlc = compile_to_fused_tlc(
-        "\
+    let source = "\
 #[compute]
 entry e(#[storage(set=2, binding=0, access=read)] xs: []f32,
         #[storage(set=2, binding=1, access=write)] out: *[]f32) []f32 =
@@ -5740,43 +5979,18 @@ entry e(#[storage(set=2, binding=0, access=read)] xs: []f32,
         let ws = map(|z: f32| z * 2.0, zs) in
         reduce(|a: f32, b: f32| a + b, 0.0, ws),
       p)
-",
-    );
-    use crate::tlc::SoacOp;
-    fn count_soac(term: &crate::tlc::Term, pred: &dyn Fn(&SoacOp) -> bool) -> usize {
-        let mut n = if let TermKind::Soac(s) = &term.kind { usize::from(pred(s)) } else { 0 };
-        term.for_each_child(&mut |c| n += count_soac(c, pred));
-        n
-    }
-    // Count across the whole reachable program, not just entry `e`'s body:
-    // defunctionalize (now after fusion) lifts the outer map's operator lambda
-    // — which carries the fused Screma — into a separate top-level def, so the
-    // Screma no longer lives inside `e.body`. A real fusion regression would
-    // leave a surviving Filter/Reduce somewhere in the reachable set, so the
-    // program-wide filter/reduce counts still catch it.
-    let count_all = |pred: &dyn Fn(&SoacOp) -> bool| -> usize {
-        tlc.defs.iter().map(|d| count_soac(&d.body, pred)).sum()
-    };
-    let filters = count_all(&|s| matches!(s, SoacOp::Filter { .. }));
-    let reduces = count_all(&|s| matches!(s, SoacOp::Reduce { .. }));
-    let scremas = count_all(&|s| matches!(s, SoacOp::Screma { .. }));
-    assert_eq!(
-        filters, 0,
-        "the filter must fold into the reducing Screma, not survive as a Filter SOAC"
-    );
-    assert_eq!(reduces, 0, "the reduce must fold into the Screma");
-    assert_eq!(
-        scremas, 1,
-        "the fused map→filter→map→reduce should collapse to a single Screma"
-    );
+";
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(stats.filters, 0, "the filter must fold into the masked SegRed");
+    assert_eq!(stats.seg_reds, 1, "the nested chain should contain one SegRed");
+    compile_to_spirv(source).expect("map→filter→map→reduce should lower to SPIR-V");
 }
 
 /// Cross-function auto-parallelization: a `scan` factored into a helper that
 /// `inline_small` will NOT fold (its operator has control flow, so the
-/// size/control-flow gate skips it) still parallelizes — `materialize_entry_soacs`
-/// exposes it at the entry boundary so `parallelize` produces the same
-/// multi-phase pipeline as the in-entry form. (`inline_small` skipping the
-/// helper is what makes this exercise the new pass specifically.)
+/// size/control-flow gate skips it) still parallelizes: force-inlining SOAC
+/// helpers exposes it before semantic conversion, and EGIR produces the same
+/// multi-phase pipeline as the in-entry form.
 #[test]
 fn cross_function_scan_parallelizes() {
     let lowered = crate::compile_thru_spirv(
@@ -8399,18 +8613,12 @@ entry r(#[storage_image(set=1, binding=0, format=r32float, access=write_only)] i
     let lowered = crate::compile_thru_spirv(source).expect("linear image update compiles");
     assert_no_runtime_storage_image_handles(&lowered.spirv);
 
-    let wgsl = crate::compile_thru_tlc(source)
-        .expect("WGSL TLC")
-        .infer_input_slice_bounds()
-        .to_egraph()
-        .expect("WGSL EGIR")
-        .lower_to_ssa(crate::LoweringProfile::new(
-            crate::CodegenTarget::Wgsl,
-            crate::SchedulePolicy::Parallel,
-        ))
-        .expect("WGSL SSA")
-        .lower_wgsl()
-        .expect("WGSL lowering");
+    let wgsl = lower_semantic_egir(
+        compile_to_semantic_egir(source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    )
+    .lower_wgsl()
+    .expect("WGSL lowering");
     assert!(
         wgsl.contains("textureStore("),
         "linear image update did not lower to textureStore:\n{wgsl}"
@@ -8485,18 +8693,12 @@ entry r(#[storage_image(set=1, binding=0, format=r32float, access=write_only)] i
     let lowered = crate::compile_thru_spirv(source).expect("linear image-update loop compiles");
     assert_no_runtime_storage_image_handles(&lowered.spirv);
 
-    let wgsl = crate::compile_thru_tlc(source)
-        .expect("WGSL TLC")
-        .infer_input_slice_bounds()
-        .to_egraph()
-        .expect("WGSL EGIR")
-        .lower_to_ssa(crate::LoweringProfile::new(
-            crate::CodegenTarget::Wgsl,
-            crate::SchedulePolicy::Parallel,
-        ))
-        .expect("WGSL SSA")
-        .lower_wgsl()
-        .expect("WGSL lowering");
+    let wgsl = lower_semantic_egir(
+        compile_to_semantic_egir(source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    )
+    .lower_wgsl()
+    .expect("WGSL lowering");
     assert!(
         wgsl.contains("textureStore("),
         "linear image-update loop did not lower to textureStore:\n{wgsl}"

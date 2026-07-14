@@ -605,25 +605,26 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
     let tlc_rep_specialized = tlc_mono.rep_specialize();
     let tlc_inlined = tlc_rep_specialized.inline_small();
     let tlc_force_inlined = tlc_inlined.force_inline_soac_helpers();
-    let tlc_canon = tlc_force_inlined.canonicalize_producers();
-    let tlc_fused = tlc_canon.fuse_maps();
-    let tlc_exposed = tlc_fused.expose_entry_producer_helpers();
-    let tlc_static_fused = tlc_exposed.fuse_static_indices();
-    let tlc_runtime_floated = tlc_static_fused.float_runtime_index_nested_producers();
+    let tlc_inlined_soa = tlc_force_inlined.renormalize_inlined_soa();
+    let tlc_conditional_producers = tlc_inlined_soa.canonicalize_conditional_producers();
+    let tlc_soac_anf = tlc_conditional_producers.normalize_soacs_to_anf();
+    let tlc_runtime_floated = tlc_soac_anf.float_runtime_index_nested_producers();
     let tlc_defunc = tlc_runtime_floated.defunctionalize();
     let tlc_folded = tlc_defunc.fold_generated_lambdas();
     let tlc_with_ownership = match tlc_folded.apply_ownership() {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err_msg(format!("apply_ownership: {:?}", e)),
     };
-    let allocated = match tlc_with_ownership.filter_reachable().infer_input_slice_bounds().to_egraph() {
+    let raw = match tlc_with_ownership.filter_reachable().infer_input_slice_bounds().to_egraph() {
         Ok(s) => s,
         Err(e) => return CompileResultWgsl::err_msg(format!("SSA conversion error: {:?}", e)),
     };
-    let ssa = match allocated.lower_to_ssa(LoweringProfile::new(
-        CodegenTarget::Wgsl,
-        SchedulePolicy::Parallel,
-    )) {
+    let profile = LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel);
+    let ssa = match raw
+        .realize_outputs()
+        .and_then(|realized| realized.segment().optimize().allocate().plan(profile))
+        .and_then(wyn_core::EgirPlanned::lower_to_ssa)
+    {
         Ok(s) => s,
         Err(e) => return CompileResultWgsl::err_msg(format!("SSA lowering error: {:?}", e)),
     };

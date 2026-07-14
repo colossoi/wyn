@@ -2,15 +2,14 @@
 //!
 //! A pure `SegMap` whose result has exactly one semantic consumer is folded
 //! into that consumer by composing callable regions.  The producer and
-//! consumer must be adjacent in one block; this deliberately conservative
-//! rule makes effect-token splicing explicit and prevents moving reads across
-//! an intervening effect.  Multi-consumer producers are left to logical
-//! allocation.
+//! consumer must be in the same block, and every intervening operation must be
+//! conflict-free according to the semantic dependency graph. This keeps
+//! effect-token splicing explicit while permitting independent bindings.
+//! Multi-consumer producers are left to logical allocation.
 
 use polytype::Type;
 use smallvec::smallvec;
 
-use super::space::seg_space_fusable;
 use crate::ast::{Span, TypeName};
 use crate::egir::program::{SemanticFunc, SemanticProgram};
 use crate::egir::semantic_graph::SemanticGraph;
@@ -22,7 +21,7 @@ use crate::ssa::framework::BlockId;
 use crate::LookupMap;
 
 #[derive(Clone, Copy)]
-enum FusionSite {
+pub(super) enum FusionSite {
     Entry(usize),
     Function(usize),
 }
@@ -78,7 +77,6 @@ fn find_in_graph(
             let SideEffectKind::Soac(EgirSoac::Seg {
                 kind: SegOpKind::SegMap,
                 placement: producer_placement,
-                space: producer_space,
                 map_destinations,
                 output_slots,
                 resources,
@@ -90,7 +88,9 @@ fn find_in_graph(
             };
             if map_bodies.is_empty()
                 || !output_slots.is_empty()
-                || !map_destinations.iter().all(|destination| *destination == SoacDestination::Fresh)
+                || !map_destinations.iter().all(|destination| {
+                    matches!(destination, SoacDestination::Fresh | SoacDestination::UniqueInput)
+                })
                 || resources.iter().any(|resource| resource.access != SegResourceAccessKind::Read)
             {
                 continue;
@@ -108,8 +108,6 @@ fn find_in_graph(
             for consumer_index in (producer_index + 1)..block.side_effects.len() {
                 let consumer = &block.side_effects[consumer_index];
                 let SideEffectKind::Soac(EgirSoac::Seg {
-                    placement: consumer_placement,
-                    space: consumer_space,
                     input_array_types,
                     resources: consumer_resources,
                     ..
@@ -117,9 +115,7 @@ fn find_in_graph(
                 else {
                     continue;
                 };
-                if producer_placement != consumer_placement
-                    || !seg_space_fusable(producer_space, consumer_space)
-                {
+                if *producer_placement != crate::egir::types::SegPlacement::LaneLocal {
                     continue;
                 }
                 let Some(_) = consumer.result else {
@@ -203,7 +199,7 @@ fn find_in_graph(
     None
 }
 
-fn projection_of(graph: &EGraph, node: NodeId, root: NodeId) -> Option<usize> {
+pub(super) fn projection_of(graph: &EGraph, node: NodeId, root: NodeId) -> Option<usize> {
     match &graph.nodes[node] {
         ENode::Pure {
             op: PureOp::Project { index },
@@ -213,13 +209,13 @@ fn projection_of(graph: &EGraph, node: NodeId, root: NodeId) -> Option<usize> {
     }
 }
 
-fn reaches(graph: &EGraph, start: NodeId, target: NodeId) -> bool {
+pub(super) fn reaches(graph: &EGraph, start: NodeId, target: NodeId) -> bool {
     wyn_graph::reaches_ordered(start, target, wyn_graph::WalkOrder::DepthFirst, |node, out| {
         out.extend(graph.nodes[node].children());
     })
 }
 
-fn producer_is_used_only_by(
+pub(super) fn producer_is_used_only_by(
     graph: &EGraph,
     producer_block: BlockId,
     producer_index: usize,
@@ -290,6 +286,8 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
         input_array_types,
         input_elem_types,
         map_input_indices,
+        map_destinations,
+        acc_destinations,
         ..
     }) = &consumer_effect.kind
     else {
@@ -310,6 +308,7 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
 
     let mut new_map_indices = Vec::with_capacity(map_input_indices.len());
     let mut new_map_bodies = Vec::with_capacity(map_bodies.len());
+    let mut new_map_destinations = map_destinations.clone();
     let mut synthesized = Vec::new();
     for (lane, (body, indices)) in map_bodies.iter().zip(map_input_indices).enumerate() {
         let mut rebased = Vec::new();
@@ -336,6 +335,11 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
             );
             new_map_bodies.push(new_body);
             synthesized.push(function);
+            if new_map_destinations[lane] == SoacDestination::UniqueInput
+                && indices.first().is_some_and(|index| candidate.consumer_inputs.contains(index))
+            {
+                new_map_destinations[lane] = SoacDestination::Fresh;
+            }
         } else {
             new_map_bodies.push(body.clone());
         }
@@ -343,6 +347,7 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
     }
 
     let mut new_kind = kind.clone();
+    let mut new_acc_destinations = acc_destinations.clone();
     for (operator_index, operator) in new_kind_operators_mut(&mut new_kind).iter_mut().enumerate() {
         let old_indices = operator.input_indices.clone();
         let mut rebased = Vec::new();
@@ -369,6 +374,11 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
             );
             operator.step = step;
             synthesized.push(function);
+            if new_acc_destinations[operator_index] == SoacDestination::UniqueInput
+                && old_indices.first().is_some_and(|index| candidate.consumer_inputs.contains(index))
+            {
+                new_acc_destinations[operator_index] = SoacDestination::Fresh;
+            }
         }
         operator.input_indices = rebased;
     }
@@ -408,6 +418,8 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
         input_array_types,
         input_elem_types,
         map_input_indices,
+        map_destinations,
+        acc_destinations,
         resources,
         ..
     }) = &mut consumer.kind
@@ -418,13 +430,15 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
         *input_array_types = new_array_types;
         *input_elem_types = new_elem_types;
         *map_input_indices = new_map_indices;
+        *map_destinations = new_map_destinations;
+        *acc_destinations = new_acc_destinations;
         *resources = SegResourceAccess::merge(resources, &producer.resources);
     }
     consumer.effects = fused_effects;
     block.side_effects.remove(candidate.producer);
 }
 
-fn graph_and_span(inner: &SemanticProgram, site: FusionSite) -> (&EGraph, Span, String) {
+pub(super) fn graph_and_span(inner: &SemanticProgram, site: FusionSite) -> (&EGraph, Span, String) {
     match site {
         FusionSite::Entry(index) => {
             let entry = &inner.entry_points[index];
@@ -437,7 +451,7 @@ fn graph_and_span(inner: &SemanticProgram, site: FusionSite) -> (&EGraph, Span, 
     }
 }
 
-fn graph_mut(inner: &mut SemanticProgram, site: FusionSite) -> &mut EGraph {
+pub(super) fn graph_mut(inner: &mut SemanticProgram, site: FusionSite) -> &mut EGraph {
     match site {
         FusionSite::Entry(index) => &mut inner.entry_points[index].graph,
         FusionSite::Function(index) => &mut inner.functions[index].graph,
@@ -641,7 +655,7 @@ fn rebase_after_removals(index: usize, removed: &[usize]) -> usize {
     index - removed.iter().filter(|&&removed_index| removed_index < index).count()
 }
 
-fn capture_types<'a>(
+pub(super) fn capture_types<'a>(
     types: &LookupMap<NodeId, Type<TypeName>>,
     captures: impl Iterator<Item = &'a NodeId>,
 ) -> Vec<Type<TypeName>> {
@@ -650,7 +664,7 @@ fn capture_types<'a>(
         .collect()
 }
 
-fn fresh_region_name(inner: &SemanticProgram, base: &str) -> String {
+pub(super) fn fresh_region_name(inner: &SemanticProgram, base: &str) -> String {
     if inner.region_interner.get(base).is_none() {
         return base.to_string();
     }

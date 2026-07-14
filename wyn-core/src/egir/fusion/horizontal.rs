@@ -14,12 +14,12 @@ use crate::ast::TypeName;
 use crate::egir::graph_ops;
 use crate::egir::program::SemanticProgram;
 use crate::egir::semantic_graph::SemanticGraph;
+use crate::egir::types::ScremaAccumulator;
 use crate::egir::types::{
     reify_seg_kind_operators, EGraph, EgirSoac, NodeId, PureOp, SegBody, SegOpKind, SegPlacement,
     SegResourceAccess, SideEffectKind, SoacDestination,
 };
 use crate::ssa::framework::BlockId;
-use crate::tlc::ScremaAccumulator;
 
 /// Find one legal sibling pair anywhere in the program and fuse it. Returns
 /// whether a fusion happened.
@@ -136,8 +136,8 @@ fn sibling_fusable(
     let Some(op_j) = block.side_effects[j].semantic_id else {
         return false;
     };
-    // A value edge either way makes them a producer/consumer chain (fused at the
-    // TLC level), never fusable siblings.
+    // A value edge either way makes them a producer/consumer chain (handled by
+    // vertical EGIR fusion), never fusable siblings.
     if oracle.reachable_between(&op_i, &op_j) || oracle.reachable_between(&op_j, &op_i) {
         return false;
     }
@@ -171,17 +171,28 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
     let q = extract_seg(graph, block_id, j);
 
     let base = p.input_array_types.len();
-    let mut input_array_types = p.input_array_types.clone();
-    input_array_types.extend(q.input_array_types.iter().cloned());
-    let mut input_elem_types = p.input_elem_types.clone();
-    input_elem_types.extend(q.input_elem_types.iter().cloned());
+    let mut raw_inputs = p.inputs.clone();
+    raw_inputs.extend(q.inputs.iter().copied());
+    let mut raw_array_types = p.input_array_types.clone();
+    raw_array_types.extend(q.input_array_types.iter().cloned());
+    let mut raw_elem_types = p.input_elem_types.clone();
+    raw_elem_types.extend(q.input_elem_types.iter().cloned());
+    let (inputs, input_array_types, input_elem_types, input_remap) =
+        super::deduplicate_array_inputs(raw_inputs, raw_array_types, raw_elem_types);
 
     let mut map_bodies = p.map_bodies.clone();
     map_bodies.extend(q.map_bodies.iter().cloned());
     // Q's map funcs now read inputs shifted right by P's input count.
-    let mut map_input_indices = p.map_input_indices.clone();
-    map_input_indices
-        .extend(q.map_input_indices.iter().map(|lane| lane.iter().map(|&k| k + base).collect()));
+    let mut map_input_indices: Vec<Vec<usize>> = p
+        .map_input_indices
+        .iter()
+        .map(|lane| lane.iter().map(|&input| input_remap[input]).collect())
+        .collect();
+    map_input_indices.extend(
+        q.map_input_indices
+            .iter()
+            .map(|lane| lane.iter().map(|&input| input_remap[base + input]).collect()),
+    );
 
     let mut map_output_elem_types = p.map_output_elem_types.clone();
     map_output_elem_types.extend(q.map_output_elem_types.iter().cloned());
@@ -191,9 +202,14 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
     acc_destinations.extend(q.acc_destinations.iter().cloned());
 
     let mut operators = p.kind.operators().to_vec();
+    for operator in &mut operators {
+        for input in &mut operator.input_indices {
+            *input = input_remap[*input];
+        }
+    }
     operators.extend(q.kind.operators().iter().cloned().map(|mut operator| {
         for input in &mut operator.input_indices {
-            *input += base;
+            *input = input_remap[base + *input];
         }
         operator
     }));
@@ -212,8 +228,7 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
     // Rebuild `[inputs, init_accs, output_views]`. init_accs are the operators'
     // neutrals; output views are the trailing operands of each original op.
     let mut operands: SmallVec<[NodeId; 4]> = SmallVec::new();
-    operands.extend(p.inputs.iter().copied());
-    operands.extend(q.inputs.iter().copied());
+    operands.extend(inputs);
     operands.extend(p.init_accs.iter().copied());
     operands.extend(q.init_accs.iter().copied());
     operands.extend(p.output_views.iter().copied());

@@ -1,8 +1,8 @@
 use super::run;
 use crate::ast::{Span, TypeName};
 use crate::tlc::{
-    ArrayExpr, Def, DefMeta, Lambda, Place, Program, Shape, SoacBody, SoacDestination, SoacOp, Term,
-    TermIdSource, TermKind, VarRef,
+    ArrayExpr, Def, DefMeta, Lambda, Place, Program, SoacBody, SoacDestination, SoacOp, Term, TermIdSource,
+    TermKind, VarRef,
 };
 use polytype::Type;
 
@@ -219,9 +219,8 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
     );
     let scatter = term(
         TermKind::Soac(SoacOp::Scatter {
-            dest: Place::LocalArray {
+            dest: Place {
                 id: fb,
-                shape: Shape(vec![]),
                 elem_ty: f32_ty(),
             },
             lam: SoacBody {

@@ -2082,37 +2082,19 @@ impl<'a, 'b> Converter<'a, 'b> {
                 lam,
                 inputs,
                 destination,
-            } => self.convert_soac_map(lam, inputs, *destination, ty),
+            } => self.convert_soac_map(lam, inputs, (*destination).into(), ty),
             SoacOp::Reduce { op, ne, input, .. } => self.convert_soac_reduce(op, ne, input, ty),
-            SoacOp::Screma {
-                lanes,
-                accumulators,
-                inputs,
-            } => {
-                // Discriminate single-output vs multi-output by SHAPE, not by the
-                // result type: a single-output Screma's sole output may itself be
-                // a tuple value, so `Tuple(_)` in `ty` does NOT imply a
-                // multi-output Screma. A single-output Screma's `ty` is that
-                // output directly; egir re-wraps it to `Tuple(1)+Project`.
-                if crate::tlc::is_single_output_screma(lanes, accumulators) {
-                    self.convert_soac_screma_single(lanes, accumulators, inputs, ty)
-                } else {
-                    self.convert_soac_screma(lanes, accumulators, inputs, ty)
-                }
-            }
             SoacOp::Scan {
                 op,
-                reduce_op,
                 ne,
                 input,
                 destination,
-            } => self.convert_soac_scan(op, reduce_op, ne, input, *destination, ty),
+            } => self.convert_soac_scan(op, ne, input, (*destination).into(), ty),
             SoacOp::Filter {
-                map_lam,
                 pred,
                 input,
                 destination,
-            } => self.convert_soac_filter(map_lam.as_ref(), pred, input, *destination, ty),
+            } => self.convert_soac_filter(pred, input, (*destination).into(), ty),
             SoacOp::Scatter { dest, lam, inputs } => self.convert_soac_scatter(dest, lam, inputs, ty),
             // TODO(reduce_by_index): parallel path needs atomic-op emission
             // (atomicAdd/atomicMin/etc.) in spirv/wgsl backends — not yet wired.
@@ -2242,14 +2224,8 @@ impl<'a, 'b> Converter<'a, 'b> {
         inputs: &[ArrayExpr],
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        let (dest_sym, dest_elem_ty) = match dest {
-            crate::tlc::Place::LocalArray { id, elem_ty, .. } => (*id, elem_ty.clone()),
-            _ => {
-                return Err(ConvertError::Unsupported(
-                    "scatter destination must be a storage-buffer param".into(),
-                ));
-            }
-        };
+        let dest_sym = dest.id;
+        let dest_elem_ty = dest.elem_ty.clone();
         let dest_view = *self.locals.get(&dest_sym).ok_or_else(|| {
             ConvertError::GraphError(
                 "scatter destination is not a bound #[storage] view (must be a storage param)".into(),
@@ -2326,7 +2302,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             EgirSoac::Screma {
                 map_bodies: vec![],
                 accumulators: vec![super::types::ScremaOperator {
-                    kind: crate::tlc::ScremaAccumulator::Reduce,
+                    kind: ScremaAccumulator::Reduce,
                     step: SegBody {
                         region: self.region(op_name.clone()),
                         captures: capture_nids,
@@ -2350,167 +2326,19 @@ impl<'a, 'b> Converter<'a, 'b> {
         Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], result_ty))
     }
 
-    /// Lower a single-output `Screma` (one map lane xor one accumulator) whose
-    /// TLC `result_ty` is that output directly (no tuple wrapper). Builds the
-    /// general `Tuple(1)` Screma via `convert_soac_screma`, then projects field
-    /// 0 to recover the bare output — scalar for a single `Reduce`, an array for
-    /// a single `Scan` or map lane. (The genuine multi-output path is
-    /// `convert_soac_screma` directly.)
-    fn convert_soac_screma_single(
-        &mut self,
-        lanes: &[crate::tlc::ScremaLane],
-        accumulators: &[crate::tlc::ScremaAccumulatorSpec],
-        inputs: &[ArrayExpr],
-        result_ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
-        debug_assert_eq!(lanes.len() + accumulators.len(), 1, "single-output Screma");
-        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
-        let screma_nid = self.convert_soac_screma(lanes, accumulators, inputs, tuple_ty)?;
-        Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], result_ty))
-    }
-
-    fn convert_soac_screma(
-        &mut self,
-        lanes: &[crate::tlc::ScremaLane],
-        accumulators: &[crate::tlc::ScremaAccumulatorSpec],
-        inputs: &[ArrayExpr],
-        result_ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
-        let result_fields = match &result_ty {
-            Type::Constructed(TypeName::Tuple(_), fields)
-                if fields.len() == lanes.len() + accumulators.len() =>
-            {
-                fields.clone()
-            }
-            other => {
-                return Err(ConvertError::GraphError(format!(
-                    "screma result must be a tuple with {} mapped and {} accumulator fields, got {other:?}",
-                    lanes.len(),
-                    accumulators.len()
-                )));
-            }
-        };
-
-        let map_funcs: Vec<String> =
-            lanes.iter().map(|lane| self.lambda_fn_name(&lane.lam.lam)).collect::<Result<_, _>>()?;
-        let map_capture_nids: Vec<Vec<NodeId>> = lanes
-            .iter()
-            .map(|lane| {
-                lane.lam
-                    .captures
-                    .iter()
-                    .map(|(_, _, t)| self.convert_term(t))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .collect::<Result<_, _>>()?;
-
-        let mut pending_accs = Vec::with_capacity(accumulators.len());
-        let mut acc_init_nids = Vec::with_capacity(accumulators.len());
-        for acc in accumulators {
-            let step_func = self.lambda_fn_name(&acc.step_lam.lam)?;
-            let reduce_op_func = self.lambda_fn_name(&acc.reduce_op.lam)?;
-            let step_caps: Vec<NodeId> = acc
-                .step_lam
-                .captures
-                .iter()
-                .map(|(_, _, t)| self.convert_term(t))
-                .collect::<Result<_, _>>()?;
-            let reduce_op_caps: Vec<NodeId> = acc
-                .reduce_op
-                .captures
-                .iter()
-                .map(|(_, _, t)| self.convert_term(t))
-                .collect::<Result<_, _>>()?;
-            let init_nid = self.convert_term(&acc.ne)?;
-            pending_accs.push(super::types::ScremaOperator {
-                kind: acc.kind,
-                step: SegBody {
-                    region: self.region(step_func),
-                    captures: step_caps,
-                },
-                combine: SegBody {
-                    region: self.region(reduce_op_func),
-                    captures: reduce_op_caps,
-                },
-                input_indices: vec![],
-            });
-            acc_init_nids.push(init_nid);
-        }
-
-        let input_nids: Vec<NodeId> =
-            inputs.iter().map(|ae| self.convert_array_expr_value(ae)).collect::<Result<_, _>>()?;
-        let input_arr_types: Vec<Type<TypeName>> =
-            inputs.iter().zip(input_nids.iter()).map(|(ae, nid)| self.value_array_type(*nid, ae)).collect();
-        let input_elem_types: Vec<Type<TypeName>> = input_arr_types
-            .iter()
-            .zip(inputs.iter())
-            .map(|(ty, ae)| self.value_elem_type(ty, ae))
-            .collect();
-
-        let mut map_output_elem_types = Vec::with_capacity(lanes.len());
-        for map_idx in 0..lanes.len() {
-            let map_array_ty = result_fields[map_idx].clone();
-            let elem_ty = if map_array_ty.is_array() {
-                map_array_ty.elem_type().expect("Array has elem").clone()
-            } else if super::soac_expand::as_soa_tuple(&map_array_ty).is_some() {
-                super::soac_expand::soa_element_type(&map_array_ty)
-            } else {
-                return Err(ConvertError::GraphError(format!(
-                    "screma mapped result must be an array or SoA tuple, got {map_array_ty:?}"
-                )));
-            };
-            map_output_elem_types.push(elem_ty);
-        }
-
-        // Captures live on each `SegBody`; the operand list is positional
-        // data flow only: `[inputs.., init_accs.., output_views..]`. Output
-        // views are appended later by output realization / chunking.
-        let mut operands: SmallVec<[NodeId; 4]> = SmallVec::new();
-        operands.extend(input_nids.iter().copied());
-        operands.extend(acc_init_nids.iter().copied());
-
-        Ok(self.emit_soac(
-            EgirSoac::Screma {
-                map_bodies: map_funcs
-                    .into_iter()
-                    .zip(map_capture_nids.iter())
-                    .map(|(name, captures)| SegBody {
-                        region: self.region(name),
-                        captures: captures.clone(),
-                    })
-                    .collect(),
-                accumulators: pending_accs,
-                input_array_types: input_arr_types,
-                input_elem_types,
-                map_output_elem_types,
-                map_input_indices: lanes.iter().map(|lane| lane.input_indices.clone()).collect(),
-                map_destinations: vec![SoacDestination::Fresh; lanes.len()],
-                acc_destinations: vec![SoacDestination::Fresh; accumulators.len()],
-            },
-            operands,
-            result_ty,
-        ))
-    }
-
     fn convert_soac_scan(
         &mut self,
         op: &SoacBody,
-        reduce_op: &SoacBody,
         ne: &Term,
         input: &ArrayExpr,
         destination: SoacDestination,
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
         let op_name = self.lambda_fn_name(&op.lam)?;
-        let reduce_name = self.lambda_fn_name(&reduce_op.lam)?;
         let capture_nids: Vec<NodeId> =
             op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let arr_nid = self.convert_array_expr_value(input)?;
         let arr_ty = self.value_array_type(arr_nid, input);
-        // Input element type can differ from the accumulator type when
-        // fusion has folded a `map` producer into the scan combiner
-        // (`scan(op, ne, map(g, xs))` ⇒ step takes `(acc: Acc, x: T)`
-        // with `T != Acc`).
         let input_elem_ty = self.value_elem_type(&arr_ty, input);
         let init_nid = self.convert_term(ne)?;
 
@@ -2541,13 +2369,13 @@ impl<'a, 'b> Converter<'a, 'b> {
             EgirSoac::Screma {
                 map_bodies: vec![],
                 accumulators: vec![super::types::ScremaOperator {
-                    kind: crate::tlc::ScremaAccumulator::Scan,
+                    kind: ScremaAccumulator::Scan,
                     step: SegBody {
-                        region: self.region(op_name),
+                        region: self.region(op_name.clone()),
                         captures: capture_nids,
                     },
                     combine: SegBody {
-                        region: self.region(reduce_name),
+                        region: self.region(op_name),
                         captures: vec![],
                     },
                     input_indices: vec![0],
@@ -2567,7 +2395,6 @@ impl<'a, 'b> Converter<'a, 'b> {
 
     fn convert_soac_filter(
         &mut self,
-        map_lam: Option<&SoacBody>,
         pred: &SoacBody,
         input: &ArrayExpr,
         destination: SoacDestination,
@@ -2580,25 +2407,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let arr_ty = self.array_expr_type(input);
         let arr_nid = self.convert_array_expr_value(input)?;
 
-        // A fused producer map (`filter(p, map(f, xs))`): the loop applies `f` to
-        // each input element before the predicate and keeps `f(x)`. The output
-        // element type is `f`'s return type; the input element type stays the
-        // array's. The fused map's captures live on its `SegBody`.
-        let (map_body, output_elem_ty): (Option<SegBody>, Type<TypeName>) = match map_lam {
-            Some(f) => {
-                let name = self.lambda_fn_name(&f.lam)?;
-                let caps: Vec<NodeId> =
-                    f.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
-                (
-                    Some(SegBody {
-                        region: self.region(name),
-                        captures: caps,
-                    }),
-                    f.lam.ret_ty.clone(),
-                )
-            }
-            None => (None, elem_ty.clone()),
-        };
+        let output_elem_ty = elem_ty.clone();
         let pred_body = SegBody {
             region: self.region(pred_name),
             captures: capture_nids,
@@ -2631,7 +2440,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             return Ok(self.emit_soac(
                 EgirSoac::Filter {
                     state: super::types::FilterState::Raw,
-                    map_body,
+                    map_body: None,
                     output_elem_type: output_elem_ty,
                     pred_body,
                     input_array_type: arr_ty,
@@ -2655,13 +2464,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         // `filter` reaching here in a standalone function still has no entry
         // interface that can own the requirement, so `convert_function`
         // rejects that broken inlining state below.
-        let input_binding = crate::types::array_view_buffer(&arr_ty).ok_or_else(|| {
-            ConvertError::GraphError(
-                "filter: runtime-sized input has no concrete buffer — its size is \
-                 not statically known and it is not backed by a storage buffer"
-                    .into(),
-            )
-        })?;
+        let input_binding = crate::types::array_view_buffer(&arr_ty);
         let input_elem_bytes = crate::ssa::layout::storage_elem_stride(&elem_ty).ok_or_else(|| {
             ConvertError::GraphError("filter: element type has no static byte size".into())
         })?;
@@ -2672,12 +2475,16 @@ impl<'a, 'b> Converter<'a, 'b> {
             crate::ssa::layout::storage_elem_stride(&output_elem_ty).ok_or_else(|| {
                 ConvertError::GraphError("filter: output element type has no static byte size".into())
             })?;
-        let input_resource = self.resources.borrow_mut().host_id(input_binding);
-        let scratch_size = LogicalSize::LikeResource {
-            resource: input_resource,
-            elem_bytes: output_elem_bytes,
-            src_elem_bytes: input_elem_bytes,
-        };
+        // A runtime map producer may still be a Composite here. Reserve the
+        // filter resource identity now, but let semantic EGIR resolve its size
+        // after producer fusion exposes the actual input resource/domain.
+        let scratch_size = input_binding
+            .map(|binding| LogicalSize::LikeResource {
+                resource: self.resources.borrow_mut().host_id(binding),
+                elem_bytes: output_elem_bytes,
+                src_elem_bytes: input_elem_bytes,
+            })
+            .unwrap_or(LogicalSize::Unspecified);
         let scratch_out = self.resources.borrow_mut().allocate_compiler(
             CompilerResource::new(CompilerResourceKind::FilterScratch, None, 0),
             output_elem_ty.clone(),
@@ -2696,7 +2503,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         Ok(self.emit_soac(
             EgirSoac::Filter {
                 state: super::types::FilterState::Raw,
-                map_body,
+                map_body: None,
                 output_elem_type: output_elem_ty,
                 pred_body,
                 input_array_type: arr_ty,

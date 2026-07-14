@@ -162,9 +162,9 @@ pub enum SideEffectKind<R = super::program::SemanticResourceRef> {
     Soac(EgirSoac<R>),
 }
 
-/// Where an array-producing SOAC's per-iteration result is written.
-/// Defined in `crate::tlc` and re-exported here so EGIR consumers see
-/// the same type that TLC's `SoacOp::{Map, Scan, Filter}` carry.
+/// Where an array-producing SOAC's per-iteration result is written. TLC only
+/// supplies the logical `Fresh`/`UniqueInput` ownership fact; the physical
+/// `InputBuffer`/`OutputView` choices exist exclusively in EGIR.
 ///
 /// Operand layouts in `EgirSoac` are variant-dependent and follow
 /// each destination:
@@ -176,7 +176,28 @@ pub enum SideEffectKind<R = super::program::SemanticResourceRef> {
 ///   acc_step_captures..., acc_reduce_op_captures..., output_views...]`
 /// - `InputBuffer`: operand layout matches `Fresh`; the difference is
 ///   that the result aliases `inputs[0]` instead of a fresh allocation.
-pub use crate::tlc::{ScremaAccumulator, SoacDestination};
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoacDestination {
+    Fresh,
+    UniqueInput,
+    InputBuffer,
+    OutputView,
+}
+
+impl From<crate::tlc::SoacDestination> for SoacDestination {
+    fn from(destination: crate::tlc::SoacDestination) -> Self {
+        match destination {
+            crate::tlc::SoacDestination::Fresh => Self::Fresh,
+            crate::tlc::SoacDestination::UniqueInput => Self::UniqueInput,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScremaAccumulator {
+    Reduce,
+    Scan,
+}
 
 #[derive(Clone, Debug)]
 pub struct ScremaOperator {

@@ -1,5 +1,5 @@
 use super::super::SoacOp;
-use super::{analyze, build, eligible_consuming_soacs, Origin, OwnershipModel, VarRef};
+use super::{analyze, build, eligible_unique_input_soacs, Origin, OwnershipModel, VarRef};
 use crate::builtins::catalog;
 use crate::tlc::{Program, SoacDestination, Term, TermKind};
 use crate::{Compiler, SymbolTable};
@@ -1281,7 +1281,7 @@ def f(a: *[3][4]i32) [3][4]i32 = map(|row| row, a)
 "#,
     );
     let model = analyze(&program);
-    let eligible = eligible_consuming_soacs(&program, &model);
+    let eligible = eligible_unique_input_soacs(&program, &model);
     assert_eq!(
         eligible.len(),
         1,
@@ -1302,7 +1302,7 @@ def f(a: [3][4]i32) [3][4]i32 = map(|row| row, a)
 "#,
     );
     let model = analyze(&program);
-    let eligible = eligible_consuming_soacs(&program, &model);
+    let eligible = eligible_unique_input_soacs(&program, &model);
     assert!(
         eligible.is_empty(),
         "non-unique input should not be eligible; got {:?}",
@@ -1311,7 +1311,7 @@ def f(a: [3][4]i32) [3][4]i32 = map(|row| row, a)
 }
 
 #[test]
-fn not_eligible_when_input_used_after() {
+fn uniqueness_candidate_does_not_encode_liveness() {
     // `*[N]T` input but a borrowing function reads `a` after the
     // map, so the input is live after the SOAC's term.
     let program = compile_to_tlc(
@@ -1323,11 +1323,11 @@ def f(a: *[3][4]i32) i32 =
 "#,
     );
     let model = analyze(&program);
-    let eligible = eligible_consuming_soacs(&program, &model);
-    assert!(
-        eligible.is_empty(),
-        "input still alive after map should not be eligible; got {:?}",
-        eligible,
+    let eligible = eligible_unique_input_soacs(&program, &model);
+    assert_eq!(
+        eligible.len(),
+        1,
+        "TLC should preserve uniqueness and defer liveness to EGIR"
     );
 }
 
@@ -1342,7 +1342,7 @@ def f(a: *[8]i32) [8]bool = map(|x: i32| x > 0, a)
 "#,
     );
     let model = analyze(&program);
-    let eligible = eligible_consuming_soacs(&program, &model);
+    let eligible = eligible_unique_input_soacs(&program, &model);
     assert!(
         eligible.is_empty(),
         "element-type-changing map should not be eligible; got {:?}",
@@ -1362,7 +1362,7 @@ def f(a: *[8]i32) [8]i32 =
 "#,
     );
     let model = analyze(&program);
-    let eligible = eligible_consuming_soacs(&program, &model);
+    let eligible = eligible_unique_input_soacs(&program, &model);
     assert!(
         eligible.is_empty(),
         "map with capture-read of input should not be eligible; got {:?}",
@@ -1371,7 +1371,7 @@ def f(a: *[8]i32) [8]i32 =
 }
 
 #[test]
-fn not_eligible_when_soac_is_entry_output() {
+fn non_unique_entry_input_is_not_a_reuse_candidate() {
     // Compute entry whose result is a Map and is bound to a
     // storage output. The output-side rewrite handles this; an
     // input-side rewrite would clobber the runtime output buffer.
@@ -1383,11 +1383,10 @@ entry double(arr: []i32) []i32 = map(|x: i32| x + 1, arr)
 "#,
     );
     let model = analyze(&program);
-    let eligible = eligible_consuming_soacs(&program, &model);
+    let eligible = eligible_unique_input_soacs(&program, &model);
     assert!(
         eligible.is_empty(),
-        "entry-output Map should not be eligible (output-side rewrite handles it); got {:?}",
-        eligible,
+        "a borrowed compute input is not uniquely reusable"
     );
 }
 
@@ -1435,8 +1434,8 @@ def f(a: *[3][4]i32) [3][4]i32 = map(|row| row, a)
     );
     assert_eq!(
         map_destination(&program, "f"),
-        Some(SoacDestination::InputBuffer),
-        "eligible Map should have destination = InputBuffer after apply_ownership",
+        Some(SoacDestination::UniqueInput),
+        "eligible Map should carry a uniqueness candidate after apply_ownership",
     );
 }
 
@@ -1480,8 +1479,8 @@ def f(a: *[8]i32) [8]i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
     );
     assert_eq!(
         scan_destination(&program, "f"),
-        Some(SoacDestination::InputBuffer),
-        "eligible Scan should have destination = InputBuffer after apply_ownership",
+        Some(SoacDestination::UniqueInput),
+        "eligible Scan should carry a uniqueness candidate after apply_ownership",
     );
 }
 
@@ -1525,8 +1524,8 @@ def f(a: *[8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
     );
     assert_eq!(
         filter_destination(&program, "f"),
-        Some(SoacDestination::InputBuffer),
-        "eligible Filter should have destination = InputBuffer after apply_ownership",
+        Some(SoacDestination::UniqueInput),
+        "eligible Filter should carry a uniqueness candidate after apply_ownership",
     );
 }
 

@@ -11,12 +11,15 @@
 //!    with fixed-point iteration over loops and SOAC bodies. Records
 //!    per-term `live_out`.
 //!
-//! 3. **Use** — two consumers read the populated model:
+//! 3. **Use** — three consumers read the populated model:
 //!    - use-after-move checking: an owner in `kills[T] ∩ live_out[T]`
 //!      is consumed at `T` while a successor still needs it.
 //!    - in-place promotion: at each `_w_intrinsic_array_with` call,
 //!      promote to `_w_intrinsic_array_with_inplace` when the source's
 //!      owner is mutable and absent from `live_out`.
+//!    - SOAC uniqueness annotation: mark pointwise-safe SOAC inputs whose
+//!      owners are unique. EGIR separately decides physical reuse from the
+//!      post-fusion semantic graph and its liveness.
 
 use super::VarRef;
 use crate::builtins::catalog;
@@ -502,7 +505,7 @@ impl<'p> Builder<'p> {
             // `[]T` view read by a compute entry is immutable, mirroring a
             // non-consuming function param; an unsoundly-mutable
             // `Origin::Entry` here would let ownership rewrite non-tail
-            // SOACs to InputBuffer destinations that clobber the caller.
+            // SOACs as unique-input candidates that could later clobber the caller.
             let consuming = param_diets.get(index).map(Diet::is_consuming).unwrap_or(false);
             let origin = if is_entry && consuming {
                 Origin::Entry
@@ -720,9 +723,9 @@ impl<'p> Builder<'p> {
     }
 
     /// SOACs: each input array contributes uses; element params
-    /// inherit mutability from their matched input (Map/Screma), or
+    /// inherit mutability from their matched input (Map), or
     /// from the single input (Reduce/Scan/Filter/ReduceByIndex).
-    /// Accumulator params (Reduce/Scan/Screma) are the body's
+    /// Accumulator params (Reduce/Scan) are the body's
     /// per-iteration output — Fresh.
     ///
     /// Each per-iteration owner introduced here is also recorded
@@ -758,24 +761,8 @@ impl<'p> Builder<'p> {
                 self.bind_reducer_params(&op.lam, input, soac_id);
                 self.visit_soac_body(op);
             }
-            SoacOp::Filter {
-                map_lam, pred, input, ..
-            } => {
+            SoacOp::Filter { pred, input, .. } => {
                 self.visit_array_expr(input);
-                // A fused producer map reads the input element and may capture or
-                // consume outer values; bind its element param and track its body
-                // so those dependencies are visible to liveness / move checking.
-                if let Some(map_lam) = map_lam {
-                    if let Some((sym, ty)) = map_lam.lam.params.first() {
-                        if !types::is_copy(ty) {
-                            let origin = self.element_origin_from_input(input);
-                            let owner = self.fresh_owner(origin);
-                            self.bind(*sym, owner);
-                            self.record_per_call_def(soac_id, owner);
-                        }
-                    }
-                    self.visit_soac_body(map_lam);
-                }
                 if let Some((sym, ty)) = pred.lam.params.first() {
                     if !types::is_copy(ty) {
                         let origin = self.element_origin_from_input(input);
@@ -804,59 +791,6 @@ impl<'p> Builder<'p> {
                 self.visit_array_expr(values);
                 self.bind_reducer_params(&op.lam, values, soac_id);
                 self.visit_soac_body(op);
-            }
-            SoacOp::Screma {
-                lanes,
-                accumulators,
-                inputs,
-            } => {
-                for acc in accumulators {
-                    self.visit_term(&acc.ne);
-                }
-                for ae in inputs {
-                    self.visit_array_expr(ae);
-                }
-                for lane in lanes {
-                    for ((sym, ty), input) in lane.lam.lam.params.iter().zip(inputs.iter()) {
-                        if !types::is_copy(ty) {
-                            let origin = self.element_origin_from_input(input);
-                            let owner = self.fresh_owner(origin);
-                            self.bind(*sym, owner);
-                            self.record_per_call_def(soac_id, owner);
-                        }
-                    }
-                }
-                for acc in accumulators {
-                    if let Some(((acc_sym, acc_ty), elem_params)) = acc.step_lam.lam.params.split_first() {
-                        if !types::is_copy(acc_ty) {
-                            let owner = self.fresh_owner(Origin::Fresh);
-                            self.bind(*acc_sym, owner);
-                            self.record_per_call_def(soac_id, owner);
-                        }
-                        for ((sym, ty), input) in elem_params.iter().zip(inputs.iter()) {
-                            if !types::is_copy(ty) {
-                                let origin = self.element_origin_from_input(input);
-                                let owner = self.fresh_owner(origin);
-                                self.bind(*sym, owner);
-                                self.record_per_call_def(soac_id, owner);
-                            }
-                        }
-                    }
-                    for (sym, ty) in &acc.reduce_op.lam.params {
-                        if !types::is_copy(ty) {
-                            let owner = self.fresh_owner(Origin::Fresh);
-                            self.bind(*sym, owner);
-                            self.record_per_call_def(soac_id, owner);
-                        }
-                    }
-                }
-                for lane in lanes {
-                    self.visit_soac_body(&lane.lam);
-                }
-                for acc in accumulators {
-                    self.visit_soac_body(&acc.step_lam);
-                    self.visit_soac_body(&acc.reduce_op);
-                }
             }
         }
     }
@@ -1169,15 +1103,14 @@ impl<'p> Builder<'p> {
     }
 
     /// Whether `term`'s outermost value is a freshly allocated store:
-    /// array/range literals, the fresh-array SOACs, an array-typed
-    /// Screma result, and the functional `array_with` builtin. The
+    /// array/range literals, the fresh-array SOACs, and the functional
+    /// `array_with` builtin. The
     /// single allocator list shared by leaf materialization and
     /// `is_definitely_alias_free`.
-    fn allocates_fresh_outer(&self, term: &Term, ty: &Type<TypeName>) -> bool {
+    fn allocates_fresh_outer(&self, term: &Term, _ty: &Type<TypeName>) -> bool {
         match &term.kind {
             TermKind::ArrayExpr(ArrayExpr::Literal(_) | ArrayExpr::Range { .. }) => true,
             TermKind::Soac(SoacOp::Map { .. } | SoacOp::Scan { .. } | SoacOp::Filter { .. }) => true,
-            TermKind::Soac(SoacOp::Screma { .. }) => ty.is_array(),
             TermKind::App { func, .. } => {
                 var_term_builtin_id(func, &self.program.symbols) == Some(catalog().known().array_with)
             }
@@ -1216,13 +1149,6 @@ impl<'p> Builder<'p> {
         match op {
             SoacOp::Map { .. } | SoacOp::Filter { .. } | SoacOp::Scan { .. } => LookupSet::new(),
             SoacOp::Scatter { inputs, .. } => self.aliases_of_array_exprs(inputs),
-            SoacOp::Screma { accumulators, .. } => {
-                let mut aliases = LookupSet::new();
-                for acc in accumulators {
-                    aliases.extend(self.alias_targets(&acc.ne));
-                }
-                aliases
-            }
             SoacOp::Reduce { ne, input, .. } => {
                 let mut aliases = self.alias_targets(ne);
                 aliases.extend(self.array_expr_aliases(input));
@@ -1281,9 +1207,6 @@ impl<'p> Builder<'p> {
             // argument-derived alias set can see.
             TermKind::App { func, .. } => self.callee_return_diet(func).is_consuming(),
             TermKind::Let { body, .. } => self.is_definitely_alias_free(body),
-            // A non-array Screma result is the accumulator; its aliases
-            // are the `ne` aliases, which the empty-alias guard covered.
-            TermKind::Soac(SoacOp::Screma { .. }) => true,
             TermKind::Coerce { inner, .. } => self.is_definitely_alias_free(inner),
             _ => false,
         }
@@ -1549,18 +1472,9 @@ impl<'m> Liveness<'m> {
                 let after_input = self.analyze_array_expr(input, after_op);
                 self.analyze(ne, after_input)
             }
-            SoacOp::Filter {
-                map_lam, pred, input, ..
-            } => {
-                // Backward dataflow: input → map_lam → pred. A fused map's
-                // captures are live before the filter, so thread its envelope
-                // between the predicate and the input.
+            SoacOp::Filter { pred, input, .. } => {
                 let after_pred = self.soac_envelope_fixed_point(pred, &per_call_defs, live_after);
-                let after_map = match map_lam {
-                    Some(ml) => self.soac_envelope_fixed_point(ml, &per_call_defs, after_pred),
-                    None => after_pred,
-                };
-                self.analyze_array_expr(input, after_map)
+                self.analyze_array_expr(input, after_pred)
             }
             SoacOp::Scatter { lam, inputs, .. } => {
                 let mut live = self.soac_envelope_fixed_point(lam, &per_call_defs, live_after);
@@ -1580,27 +1494,6 @@ impl<'m> Liveness<'m> {
                 let after_values = self.analyze_array_expr(values, after_op);
                 let after_indices = self.analyze_array_expr(indices, after_values);
                 self.analyze(ne, after_indices)
-            }
-            SoacOp::Screma {
-                lanes,
-                accumulators,
-                inputs,
-            } => {
-                let mut live = live_after;
-                for lane in lanes {
-                    live = self.soac_envelope_fixed_point(&lane.lam, &per_call_defs, live);
-                }
-                for acc in accumulators {
-                    live = self.soac_envelope_fixed_point(&acc.step_lam, &per_call_defs, live);
-                    live = self.soac_envelope_fixed_point(&acc.reduce_op, &per_call_defs, live);
-                }
-                for ae in inputs.iter().rev() {
-                    live = self.analyze_array_expr(ae, live);
-                }
-                for acc in accumulators.iter().rev() {
-                    live = self.analyze(&acc.ne, live);
-                }
-                live
             }
         }
     }
@@ -1730,20 +1623,20 @@ pub fn apply_ownership(program: &mut Program) -> crate::error::Result<()> {
     if let Some(err) = check_linear_image_results(program, &model) {
         return Err(err);
     }
-    let consuming_soacs: LookupSet<TermId> =
-        eligible_consuming_soacs(program, &model).into_iter().collect();
+    let unique_input_soacs: LookupSet<TermId> =
+        eligible_unique_input_soacs(program, &model).into_iter().collect();
 
     // Promotion of `array_with` → `array_with_inplace` is keyed by the
     // catalog (BuiltinId for the in-place form is looked up at the
     // rewrite site), not by symbol-table identity. We always run the
-    // rewriter — even with no consuming SOACs, an `array_with` whose
+    // rewriter — even with no unique-input SOACs, an `array_with` whose
     // source is a unique single-use binding is still promotable.
 
     let defs_in = std::mem::take(&mut program.defs);
     let mut rewriter = Rewriter {
         model: &model,
         program,
-        consuming_soacs: &consuming_soacs,
+        unique_input_soacs: &unique_input_soacs,
     };
     let new_defs: Vec<Def> = defs_in
         .into_iter()
@@ -2108,11 +2001,9 @@ fn check_linear_image_results_in_soac(
                 .or_else(|| check_linear_image_results_in_array_expr(input, program, model))
                 .or_else(|| check_body(op))
         }
-        SoacOp::Filter {
-            map_lam, pred, input, ..
-        } => check_linear_image_results_in_array_expr(input, program, model)
-            .or_else(|| map_lam.as_ref().and_then(|m| check_body(m)))
-            .or_else(|| check_body(pred)),
+        SoacOp::Filter { pred, input, .. } => {
+            check_linear_image_results_in_array_expr(input, program, model).or_else(|| check_body(pred))
+        }
         SoacOp::Scatter { lam, inputs, .. } => {
             for input in inputs {
                 if let Some(err) = check_linear_image_results_in_array_expr(input, program, model) {
@@ -2131,39 +2022,6 @@ fn check_linear_image_results_in_soac(
             .or_else(|| check_linear_image_results_in_array_expr(indices, program, model))
             .or_else(|| check_linear_image_results_in_array_expr(values, program, model))
             .or_else(|| check_body(op)),
-        SoacOp::Screma {
-            lanes,
-            accumulators,
-            inputs,
-        } => {
-            for input in inputs {
-                if let Some(err) = check_linear_image_results_in_array_expr(input, program, model) {
-                    return Some(err);
-                }
-            }
-            for lane in lanes {
-                if let Some(err) = check_body(&lane.lam) {
-                    return Some(err);
-                }
-            }
-            for acc in accumulators {
-                if let Some(err) = check_linear_image_results_in_term(
-                    &acc.ne,
-                    program,
-                    model,
-                    LinearImageUseContext::Discarded,
-                ) {
-                    return Some(err);
-                }
-                if let Some(err) = check_body(&acc.step_lam) {
-                    return Some(err);
-                }
-                if let Some(err) = check_body(&acc.reduce_op) {
-                    return Some(err);
-                }
-            }
-            None
-        }
     }
 }
 
@@ -2285,7 +2143,7 @@ fn term_returns_owner_on_all_paths(
 struct Rewriter<'m> {
     model: &'m OwnershipModel,
     program: &'m Program,
-    consuming_soacs: &'m LookupSet<TermId>,
+    unique_input_soacs: &'m LookupSet<TermId>,
 }
 
 impl<'m> Rewriter<'m> {
@@ -2324,12 +2182,12 @@ impl<'m> Rewriter<'m> {
         // mutation on the SOAC node itself.
         let id = term.id;
         let mut rewritten = term.map_children(&mut |child| self.rewrite(child));
-        if self.consuming_soacs.contains(&id) {
+        if self.unique_input_soacs.contains(&id) {
             match &mut rewritten.kind {
                 TermKind::Soac(SoacOp::Map { destination, .. })
                 | TermKind::Soac(SoacOp::Scan { destination, .. })
                 | TermKind::Soac(SoacOp::Filter { destination, .. }) => {
-                    *destination = SoacDestination::InputBuffer;
+                    *destination = SoacDestination::UniqueInput;
                 }
                 _ => {}
             }
@@ -2359,92 +2217,43 @@ impl<'m> Rewriter<'m> {
 }
 
 // =============================================================================
-// Consuming-SOAC eligibility (input-side DPS)
+// SOAC unique-input eligibility
 // =============================================================================
 
-/// Return the term ids of `Map` SOACs that are eligible for input-side
-/// destination-passing — i.e. the Map could mutate its input buffer in
-/// place rather than allocating a fresh output.
+/// Return SOAC term ids whose primary input has a unique owner and whose
+/// pointwise body would permit input-side reuse.
+///
+/// This records an ownership fact, not a physical reuse decision. EGIR may
+/// fuse or reroute the operation before residency planning, and only then
+/// resolves the candidate using the final liveness graph.
 ///
 /// A Map qualifies only when *all* of:
 ///
-/// 1. The input is a single `ArrayExpr::Ref(Var(sym))` whose owner is
-///    mutable and absent from `live_out` at the SOAC's term.
+/// 1. The input is a single buffered `ArrayExpr::Var` whose owner has a
+///    unique, mutable source-level origin.
 /// 2. The lambda body's return type matches the lambda's element-param
 ///    type (pointwise: same shape in, same shape out).
 /// 3. The body does not read the input owner outside of the element
 ///    parameter — no captured stencil reads. `map(|x| x + a[i-1], a)`
 ///    is rejected because in-place mutation at index `i` would change
 ///    later iterations' reads.
-/// 4. The Map is not in tail position of an `EntryPoint` def with
-///    compute outputs. The output-side rewrite handles those, and
-///    in-place input mutation would clobber the runtime contract on
-///    the output buffer. Sound under-approximation; the overlap case
-///    is a separate rewrite.
-///
 /// Pure analysis. Does not mutate the program. The caller decides
 /// whether to act on the result.
-pub fn eligible_consuming_soacs(program: &Program, model: &OwnershipModel) -> Vec<TermId> {
-    let entry_output_soacs = collect_entry_output_soac_ids(program);
+pub fn eligible_unique_input_soacs(program: &Program, model: &OwnershipModel) -> Vec<TermId> {
     let mut out = Vec::new();
     for def in &program.defs {
-        walk_for_eligible_soacs(&def.body, model, program, &entry_output_soacs, &mut out);
+        walk_for_unique_input_soacs(&def.body, model, &mut out);
     }
     out
 }
 
-fn collect_entry_output_soac_ids(program: &Program) -> LookupSet<TermId> {
-    let mut out = LookupSet::new();
-    for def in &program.defs {
-        let entry = match &def.meta {
-            DefMeta::EntryPoint(e) => e,
-            _ => continue,
-        };
-        // Compute entries with bound storage outputs are the targets
-        // of the output-side rewrite. Drill through the def body to
-        // any tail-position SOAC and collect its term id.
-        if entry.entry_type.is_compute() && !entry.outputs.is_empty() {
-            let body = match &def.body.kind {
-                TermKind::Lambda(lam) => &*lam.body,
-                _ => &def.body,
-            };
-            collect_tail_soac_ids(body, &mut out);
-        }
-    }
-    out
-}
-
-fn collect_tail_soac_ids(term: &Term, out: &mut LookupSet<TermId>) {
-    match &term.kind {
-        TermKind::Soac(_) => {
-            out.insert(term.id);
-        }
-        TermKind::Let { body, .. } => collect_tail_soac_ids(body, out),
-        TermKind::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            collect_tail_soac_ids(then_branch, out);
-            collect_tail_soac_ids(else_branch, out);
-        }
-        _ => {}
-    }
-}
-
-fn walk_for_eligible_soacs(
-    term: &Term,
-    model: &OwnershipModel,
-    program: &Program,
-    entry_output_soacs: &LookupSet<TermId>,
-    out: &mut Vec<TermId>,
-) {
+fn walk_for_unique_input_soacs(term: &Term, model: &OwnershipModel, out: &mut Vec<TermId>) {
     match &term.kind {
         TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
             // Multi-input map isn't eligible (the body reads parallel
             // streams; the consume rewrite would only own one of them).
-            if inputs.len() == 1 && !entry_output_soacs.contains(&term.id) {
-                if let Some(input_sym) = input_is_dead_unique_var(term.id, &inputs[0], model) {
+            if inputs.len() == 1 {
+                if let Some(input_sym) = unique_input_var(&inputs[0], model) {
                     if map_body_ok(&lam.lam) && !body_references_sym(&lam.lam.body, input_sym) {
                         out.push(term.id);
                     }
@@ -2452,49 +2261,29 @@ fn walk_for_eligible_soacs(
             }
         }
         TermKind::Soac(SoacOp::Scan { op, input, .. }) => {
-            // No tail-of-compute-entry exclusion. The Screma scan path
-            // in egir::parallelize knows how to consume an `InputBuffer`
-            // destination: phase 1 and phase 3 route their writes back
-            // to the input binding, and the pipeline descriptor skips
-            // the auto-output slot.
-            if let Some(input_sym) = input_is_dead_unique_var(term.id, input, model) {
+            if let Some(input_sym) = unique_input_var(input, model) {
                 if scan_body_ok(&op.lam) && !body_references_sym(&op.lam.body, input_sym) {
                     out.push(term.id);
                 }
             }
         }
-        TermKind::Soac(SoacOp::Filter {
-            map_lam, pred, input, ..
-        }) => {
-            // A fused producer map can change the element type (so `f(x)` no
-            // longer fits the input slot) and may read the input array at other
-            // indices, so reusing the input buffer in place is only sound for a
-            // plain filter.
-            if map_lam.is_none() && !entry_output_soacs.contains(&term.id) {
-                if let Some(input_sym) = input_is_dead_unique_var(term.id, input, model) {
-                    if filter_body_ok(&pred.lam) && !body_references_sym(&pred.lam.body, input_sym) {
-                        out.push(term.id);
-                    }
+        TermKind::Soac(SoacOp::Filter { pred, input, .. }) => {
+            if let Some(input_sym) = unique_input_var(input, model) {
+                if filter_body_ok(&pred.lam) && !body_references_sym(&pred.lam.body, input_sym) {
+                    out.push(term.id);
                 }
             }
         }
         _ => {}
     }
-    term.for_each_child(&mut |child| {
-        walk_for_eligible_soacs(child, model, program, entry_output_soacs, out)
-    });
+    term.for_each_child(&mut |child| walk_for_unique_input_soacs(child, model, out));
 }
 
-/// Shared input-side eligibility check: returns the input's
-/// SymbolId if the SOAC's input is a single `Var` reference whose
-/// owner is mutable and absent from `live_out`. Each caller applies
-/// the entry-output exclusion separately where applicable and the
-/// SOAC-specific body-shape and pointwise checks.
-fn input_is_dead_unique_var(
-    soac_id: TermId,
-    input: &ArrayExpr,
-    model: &OwnershipModel,
-) -> Option<SymbolId> {
+/// Shared ownership-side eligibility check: return the input symbol when the
+/// SOAC sees one buffered variable with a unique mutable owner. Callers add
+/// SOAC-specific body-shape and pointwise-safety checks. Liveness is
+/// deliberately absent here because EGIR owns the physical reuse decision.
+fn unique_input_var(input: &ArrayExpr, model: &OwnershipModel) -> Option<SymbolId> {
     let input_sym = match input {
         ArrayExpr::Var(VarRef::Symbol(s), ty) => {
             // In-place consumption writes the result over the input's buffer.
@@ -2513,11 +2302,10 @@ fn input_is_dead_unique_var(
     };
     let owner = model.owner_of(input_sym)?;
     let origin = model.origin(owner)?;
-    if !origin.is_mutable() {
-        return None;
-    }
-    let live_out = model.live_out.get(&soac_id)?;
-    if live_out.contains(&owner) {
+    // Only an externally-backed unique array has a stable ownership identity
+    // at this source boundary. EGIR may fuse or materialize the SOAC later, so
+    // TLC records only `UniqueInput` and does not commit to `InputBuffer`.
+    if !matches!(origin, Origin::Fresh | Origin::UniqueParam | Origin::Entry) {
         return None;
     }
     Some(input_sym)

@@ -360,24 +360,12 @@ fn subst_soac(soac: &mut SoacOp, s: &BufferSubst) {
             subst_term(ne, s);
             subst_array_expr(input, s);
         }
-        SoacOp::Scan {
-            op,
-            reduce_op,
-            ne,
-            input,
-            ..
-        } => {
+        SoacOp::Scan { op, ne, input, .. } => {
             subst_soac_body(op, s);
-            subst_soac_body(reduce_op, s);
             subst_term(ne, s);
             subst_array_expr(input, s);
         }
-        SoacOp::Filter {
-            map_lam, pred, input, ..
-        } => {
-            if let Some(map_lam) = map_lam {
-                subst_soac_body(map_lam, s);
-            }
+        SoacOp::Filter { pred, input, .. } => {
             subst_soac_body(pred, s);
             subst_array_expr(input, s);
         }
@@ -398,21 +386,6 @@ fn subst_soac(soac: &mut SoacOp, s: &BufferSubst) {
             subst_term(ne, s);
             subst_array_expr(indices, s);
             subst_array_expr(values, s);
-        }
-        SoacOp::Screma {
-            lanes,
-            accumulators,
-            inputs,
-        } => {
-            for lane in lanes {
-                subst_soac_body(&mut lane.lam, s);
-            }
-            for acc in accumulators {
-                subst_soac_body(&mut acc.step_lam, s);
-                subst_soac_body(&mut acc.reduce_op, s);
-                subst_term(&mut acc.ne, s);
-            }
-            inputs.iter_mut().for_each(|ae| subst_array_expr(ae, s));
         }
     }
 }

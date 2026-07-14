@@ -2,8 +2,8 @@ use super::*;
 use crate::ast::Span;
 use crate::egir::program::{OutputRoute, OutputSlotId, SlotSource};
 use crate::egir::types::EffectToken;
+use crate::egir::types::ScremaAccumulator;
 use crate::ssa::types::ExecutionModel;
-use crate::tlc::ScremaAccumulator;
 
 /// Region indices used by the operator fixtures below: step is region 0,
 /// combine is region 1. Opaque indices stand in for the named regions a

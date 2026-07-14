@@ -246,76 +246,21 @@ fn float_soac(
                 },
             )
         }
-        SoacOp::Screma {
-            lanes,
-            accumulators,
-            inputs,
-        } => {
-            let mut floats = Vec::new();
-            let lanes = lanes
-                .into_iter()
-                .map(|lane| {
-                    let (mut body_floats, lam) = float_soac_body(lane.lam, blocked, ids, symbols);
-                    floats.append(&mut body_floats);
-                    super::ScremaLane {
-                        lam,
-                        input_indices: lane.input_indices,
-                    }
-                })
-                .collect();
-            let accumulators = accumulators
-                .into_iter()
-                .map(|acc| {
-                    let (mut step_floats, step_lam) = float_soac_body(acc.step_lam, blocked, ids, symbols);
-                    let (mut op_floats, reduce_op) = float_soac_body(acc.reduce_op, blocked, ids, symbols);
-                    let (mut ne_floats, ne) = float_term(*acc.ne, blocked, ids, symbols, true);
-                    floats.append(&mut step_floats);
-                    floats.append(&mut op_floats);
-                    floats.append(&mut ne_floats);
-                    super::ScremaAccumulatorSpec {
-                        kind: acc.kind,
-                        step_lam,
-                        reduce_op,
-                        ne: Box::new(ne),
-                    }
-                })
-                .collect();
-            let inputs = inputs
-                .into_iter()
-                .map(|input| {
-                    let (mut input_floats, input) = float_array_expr(input, blocked, ids, symbols);
-                    floats.append(&mut input_floats);
-                    input
-                })
-                .collect();
-            (
-                floats,
-                SoacOp::Screma {
-                    lanes,
-                    accumulators,
-                    inputs,
-                },
-            )
-        }
         SoacOp::Scan {
             op,
-            reduce_op,
             ne,
             input,
             destination,
         } => {
             let (mut floats, op) = float_soac_body(op, blocked, ids, symbols);
-            let (mut reduce_floats, reduce_op) = float_soac_body(reduce_op, blocked, ids, symbols);
             let (mut ne_floats, ne) = float_term(*ne, blocked, ids, symbols, true);
             let (mut input_floats, input) = float_array_expr(input, blocked, ids, symbols);
-            floats.append(&mut reduce_floats);
             floats.append(&mut ne_floats);
             floats.append(&mut input_floats);
             (
                 floats,
                 SoacOp::Scan {
                     op,
-                    reduce_op,
                     ne: Box::new(ne),
                     input,
                     destination,
@@ -323,26 +268,16 @@ fn float_soac(
             )
         }
         SoacOp::Filter {
-            map_lam,
             pred,
             input,
             destination,
         } => {
-            let (mut floats, map_lam) = match map_lam {
-                Some(ml) => {
-                    let (f, ml) = float_soac_body(ml, blocked, ids, symbols);
-                    (f, Some(ml))
-                }
-                None => (Vec::new(), None),
-            };
-            let (mut pred_floats, pred) = float_soac_body(pred, blocked, ids, symbols);
-            floats.append(&mut pred_floats);
+            let (mut floats, pred) = float_soac_body(pred, blocked, ids, symbols);
             let (mut input_floats, input) = float_array_expr(input, blocked, ids, symbols);
             floats.append(&mut input_floats);
             (
                 floats,
                 SoacOp::Filter {
-                    map_lam,
                     pred,
                     input,
                     destination,

@@ -21,15 +21,20 @@ fn compile_via_egir(src: &str) -> Program {
 
     let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc.tlc);
     let mut binding_ids = crate::IdSource::<u32>::new();
-    crate::EgirRaw(run(&tlc.tlc, &bounds, &mut binding_ids).expect("egir::from_tlc conversion failed"))
-        .realize_outputs()
-        .expect("egir::realize_outputs failed")
-        .segment()
-        .optimize()
-        .allocate(&binding_ids)
-        .lower_to_ssa(crate::LoweringProfile::PORTABLE)
-        .expect("semantic EGIR lowering failed")
-        .ssa
+    crate::EgirRaw {
+        inner: run(&tlc.tlc, &bounds, &mut binding_ids).expect("egir::from_tlc conversion failed"),
+        binding_ids,
+    }
+    .realize_outputs()
+    .expect("egir::realize_outputs failed")
+    .segment()
+    .optimize()
+    .allocate()
+    .plan(crate::LoweringProfile::PORTABLE)
+    .expect("semantic EGIR planning failed")
+    .lower_to_ssa()
+    .expect("semantic EGIR lowering failed")
+    .ssa
 }
 
 use crate::ast::Span;

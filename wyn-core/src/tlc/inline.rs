@@ -9,7 +9,7 @@ use super::{
     collect_var_refs, extract_lambda_params, term_size, Def, DefMeta, Program, Term, TermIdSource, TermKind,
 };
 use crate::ast::{Span, TypeName};
-use crate::LookupMap;
+use crate::{LookupMap, LookupSet};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
@@ -31,11 +31,53 @@ const INLINE_SIZE_THRESHOLD: usize = 30;
 pub fn run_force_soac_helpers(program: &mut Program, term_ids: &mut TermIdSource) {
     force_inline_soac_helpers_to_fixpoint(program, term_ids);
     debug_assert!(
-        super::fusion::verify_soac_helpers_inlined(program).is_ok(),
+        verify_soac_helpers_inlined(program).is_ok(),
         "force-inline left a SOAC helper behind a call boundary; \
-         fusion would need an interprocedural path: {:?}",
-        super::fusion::verify_soac_helpers_inlined(program).err(),
+         semantic EGIR would need an interprocedural path: {:?}",
+        verify_soac_helpers_inlined(program).err(),
     );
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CalledSoacHelper {
+    caller: SymbolId,
+    callee: SymbolId,
+}
+
+/// EGIR fusion is deliberately intraprocedural. Keep source-level inlining as
+/// the one boundary operation that exposes every SOAC-bearing helper before
+/// conversion, then let EGIR own all producer/consumer decisions.
+fn verify_soac_helpers_inlined(program: &Program) -> Result<(), Vec<CalledSoacHelper>> {
+    let soac_bearing: LookupSet<SymbolId> =
+        program.defs.iter().filter(|def| contains_soac(&def.body)).map(|def| def.name).collect();
+    let mut violations = Vec::new();
+    for def in &program.defs {
+        collect_called_soac_helpers(&def.body, def.name, &soac_bearing, &mut violations);
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations)
+    }
+}
+
+fn collect_called_soac_helpers(
+    term: &Term,
+    caller: SymbolId,
+    soac_bearing: &LookupSet<SymbolId>,
+    out: &mut Vec<CalledSoacHelper>,
+) {
+    if let TermKind::App { func, .. } = &term.kind {
+        if let TermKind::Var(VarRef::Symbol(callee)) = &func.kind {
+            if soac_bearing.contains(callee) {
+                out.push(CalledSoacHelper {
+                    caller,
+                    callee: *callee,
+                });
+            }
+        }
+    }
+    term.for_each_child(&mut |child| collect_called_soac_helpers(child, caller, soac_bearing, out));
 }
 
 fn force_inline_soac_helpers_to_fixpoint(program: &mut Program, term_ids: &mut TermIdSource) {
@@ -74,7 +116,7 @@ fn build_soac_helper_candidates(program: &Program) -> LookupMap<SymbolId, Inline
             continue;
         }
         // Any helper containing a SOAC is a candidate, control flow or not, so
-        // no SOAC is reachable behind a call (`fusion::verify_soac_helpers_inlined`).
+        // no SOAC is reachable behind a call (`verify_soac_helpers_inlined`).
         if !contains_soac(&body) {
             continue;
         }
@@ -129,13 +171,8 @@ fn term_contains_free_type_variable(term: &Term) -> bool {
     found
 }
 
-/// True if `term` contains anything fusion's classifier treats as a use of an
-/// array: a `Soac` node, *or* a call to the `length` builtin. Helpers that
-/// hide either behind a non-inlined call boundary block multi-consumer
-/// fusion the same way, so force-inline catches both.
-///
-/// Shared with `fusion::verify_soac_helpers_inlined`, which uses the exact
-/// same predicate to assert force-inline left no such helper behind a call.
+/// True if `term` contains a SOAC or a `length` call. Both must be visible in
+/// the caller so EGIR can build complete producer/use edges without summaries.
 pub(super) fn contains_soac(term: &Term) -> bool {
     if matches!(&term.kind, TermKind::Soac(_)) {
         return true;

@@ -306,6 +306,8 @@ pub(crate) fn summary(inner: &SemanticProgram) -> String {
                         placement,
                         kind,
                         map_bodies,
+                        map_destinations,
+                        acc_destinations,
                         output_slots,
                         resources,
                         ..
@@ -313,7 +315,7 @@ pub(crate) fn summary(inner: &SemanticProgram) -> String {
                         use std::fmt::Write;
                         let _ = writeln!(
                             output,
-                            "{scope}: {kind:?} {placement:?} space={space:?} maps={map_bodies:?} outputs={output_slots:?} resources={resources:?}"
+                            "{scope}: {kind:?} {placement:?} space={space:?} maps={map_bodies:?} map_destinations={map_destinations:?} acc_destinations={acc_destinations:?} outputs={output_slots:?} resources={resources:?}"
                         );
                     }
                     SideEffectKind::Soac(EgirSoac::Filter {

@@ -29,10 +29,9 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
         .rep_specialize()
         .inline_small()
         .force_inline_soac_helpers()
-        .canonicalize_producers()
-        .fuse_maps()
-        .expose_entry_producer_helpers()
-        .fuse_static_indices()
+        .renormalize_inlined_soa()
+        .canonicalize_conditional_producers()
+        .normalize_soacs_to_anf()
         .float_runtime_index_nested_producers()
         .defunctionalize()
         .fold_generated_lambdas()
@@ -42,11 +41,18 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
         .infer_input_slice_bounds()
         .to_egraph()
         .expect("to_egraph failed")
-        .lower_to_ssa(wyn_core::LoweringProfile::new(
+        .realize_outputs()
+        .expect("realize_outputs failed")
+        .segment()
+        .optimize()
+        .allocate()
+        .plan(wyn_core::LoweringProfile::new(
             wyn_core::CodegenTarget::Wgsl,
             wyn_core::SchedulePolicy::Parallel,
         ))
-        .expect("semantic EGIR lowering failed");
+        .expect("semantic EGIR planning failed")
+        .lower_to_ssa()
+        .expect("planned EGIR lowering failed");
     ssa.ssa
 }
 

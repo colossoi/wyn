@@ -25,8 +25,8 @@ use super::super::from_tlc::ConvertError;
 use super::super::graph_ops;
 use super::super::program::OutputWriter;
 use super::super::types::{
-    EGraph, ENode, EgirSoac, NodeId, PureOp, SideEffectIndex, SideEffectKind, SkeletonTerminator,
-    SoacDestination,
+    EGraph, ENode, EgirSoac, NodeId, PureOp, ScremaAccumulator, SideEffectIndex, SideEffectKind,
+    SkeletonTerminator, SoacDestination,
 };
 
 /// The set of Pure nodes reachable from an entry's live outputs — the operand
@@ -256,7 +256,7 @@ pub(crate) fn result_soac_is_consuming_scan(
                     if field_idx >= n_maps {
                         let acc_idx = field_idx - n_maps;
                         if acc_idx < accumulators.len()
-                            && matches!(accumulators[acc_idx].kind, crate::tlc::ScremaAccumulator::Scan)
+                            && matches!(accumulators[acc_idx].kind, ScremaAccumulator::Scan)
                             && acc_destinations.get(acc_idx) == Some(&SoacDestination::InputBuffer)
                         {
                             return true;
@@ -292,7 +292,10 @@ pub(crate) fn result_soac_is_array_projection(
     match &se.kind {
         SideEffectKind::Soac(EgirSoac::Screma { map_destinations, .. })
             if field_idx < map_destinations.len()
-                && map_destinations[field_idx] == SoacDestination::Fresh =>
+                && matches!(
+                    map_destinations[field_idx],
+                    SoacDestination::Fresh | SoacDestination::UniqueInput
+                ) =>
         {
             Some((*screma_result, field_idx))
         }
@@ -304,8 +307,11 @@ pub(crate) fn result_soac_is_array_projection(
         }) if field_idx >= map_destinations.len() && {
             let acc_idx = field_idx - map_destinations.len();
             acc_idx < accumulators.len()
-                && accumulators[acc_idx].kind == crate::tlc::ScremaAccumulator::Scan
-                && acc_destinations[acc_idx] == SoacDestination::Fresh
+                && accumulators[acc_idx].kind == ScremaAccumulator::Scan
+                && matches!(
+                    acc_destinations[acc_idx],
+                    SoacDestination::Fresh | SoacDestination::UniqueInput
+                )
         } =>
         {
             Some((*screma_result, field_idx))
@@ -388,9 +394,7 @@ pub(crate) fn retarget_array_projection(
             map_views[field_idx] = Some(output_view);
         } else {
             let acc_idx = field_idx - map_destinations.len();
-            if acc_idx < accumulators.len()
-                && accumulators[acc_idx].kind == crate::tlc::ScremaAccumulator::Scan
-            {
+            if acc_idx < accumulators.len() && accumulators[acc_idx].kind == ScremaAccumulator::Scan {
                 acc_destinations[acc_idx] = SoacDestination::OutputView;
                 acc_views[acc_idx] = Some(output_view);
             } else {

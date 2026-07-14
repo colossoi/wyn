@@ -310,6 +310,7 @@ pub(crate) fn host_resource_map(resources: &[LogicalResource]) -> HashMap<crate:
 pub fn plan_logical_resources(inner: &mut SemanticProgram) {
     classify_existing_compiler_resources(inner);
     super::residency::run(inner);
+    resolve_filter_scratch_sizes(inner);
     allocate_filter_work_resources(inner);
     let mut scratch = super::parallelize::enumerate_seg_scratch(inner, inner.resources.len() as u32);
     inner.resources.append(&mut scratch);
@@ -317,6 +318,90 @@ pub fn plan_logical_resources(inner: &mut SemanticProgram) {
     record_compiler_resource_flows(inner);
     if cfg!(debug_assertions) {
         verify_allocated_resources(inner).expect("invalid allocated semantic resources");
+    }
+}
+
+/// Resolve filter compaction capacity from the post-fusion semantic domain.
+/// TLC conversion may reserve the scratch identity before a map producer has
+/// exposed its backing resource; allocation is the first boundary where the
+/// final filter input and execution space are both authoritative.
+fn resolve_filter_scratch_sizes(inner: &mut SemanticProgram) {
+    use super::types::{EgirSoac, FilterOutput, FilterState, SegExtent, SideEffectKind};
+
+    let mut resolved = Vec::new();
+    for entry in &inner.entry_points {
+        for (_, block) in &entry.graph.skeleton.blocks {
+            for effect in &block.side_effects {
+                let SideEffectKind::Soac(EgirSoac::Filter {
+                    state: FilterState::Semantic { space },
+                    output_elem_type,
+                    output: FilterOutput::Runtime { scratch, .. },
+                    ..
+                }) = &effect.kind
+                else {
+                    continue;
+                };
+                let elem_bytes = crate::ssa::layout::storage_elem_stride(output_elem_type).unwrap_or(1);
+                let size = match space.dims.as_slice() {
+                    [SegExtent::Fixed(count)] => LogicalSize::FixedBytes(*count as u64 * elem_bytes as u64),
+                    [SegExtent::ResourceLength {
+                        resource,
+                        elem_bytes: src_elem_bytes,
+                        ..
+                    }] => LogicalSize::LikeResource {
+                        resource: resource.0,
+                        elem_bytes,
+                        src_elem_bytes: *src_elem_bytes,
+                    },
+                    _ => LogicalSize::SameAsDispatch { elem_bytes },
+                };
+                let output_len = match &size {
+                    LogicalSize::FixedBytes(bytes) => {
+                        Some(crate::pipeline_descriptor::BufferLen::Fixed { bytes: *bytes })
+                    }
+                    LogicalSize::LikeResource {
+                        resource,
+                        elem_bytes,
+                        src_elem_bytes,
+                    } => inner
+                        .resources
+                        .get(resource.0 as usize)
+                        .and_then(LogicalResource::host_binding)
+                        .map(|binding| crate::pipeline_descriptor::BufferLen::LikeInput {
+                            set: binding.set,
+                            binding: binding.binding,
+                            elem_bytes: *elem_bytes,
+                            src_elem_bytes: *src_elem_bytes,
+                        }),
+                    LogicalSize::SameAsDispatch { elem_bytes } => {
+                        Some(crate::pipeline_descriptor::BufferLen::SameAsDispatch {
+                            elem_bytes: *elem_bytes,
+                        })
+                    }
+                    LogicalSize::Unspecified => None,
+                };
+                resolved.push((scratch.0, size, output_len));
+            }
+        }
+    }
+    for (resource, size, output_len) in resolved {
+        if let Some(logical) = inner.resources.get_mut(resource.0 as usize) {
+            logical.size = size.clone();
+        }
+        for entry in &mut inner.entry_points {
+            if let Some(declaration) = entry
+                .resource_declarations
+                .iter_mut()
+                .find(|declaration| declaration.resource.0 == resource)
+            {
+                declaration.size = size.clone();
+            }
+            for (slot, output_resource) in entry.resource_abi.outputs.iter().enumerate() {
+                if *output_resource == Some(resource) {
+                    entry.outputs[slot].length = output_len.clone();
+                }
+            }
+        }
     }
 }
 
@@ -1243,8 +1328,8 @@ impl PhysicalResourceTable {
 }
 
 /// Whole-program EGIR container. Wrapped by the semantic `EgirRaw` /
-/// `EgirSegmented` / `EgirOptimized` / `EgirAllocated` newtypes at
-/// the public-API layer (see `crate::lib`).
+/// `EgirOutputsRealized` / `EgirSegmented` / `EgirOptimized` /
+/// `EgirAllocated` newtypes at the public-API layer (see `crate::lib`).
 pub struct SemanticProgram {
     pub functions: Vec<SemanticFunc>,
     /// Extern function stubs. These don't have a body that flows through EGIR;

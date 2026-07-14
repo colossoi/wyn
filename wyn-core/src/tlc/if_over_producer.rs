@@ -18,6 +18,8 @@ use crate::SymbolId;
 use crate::SymbolTable;
 use polytype::Type;
 
+use super::subst::substitute_sym;
+
 pub fn run(program: &mut Program, term_ids: &mut TermIdSource) {
     for idx in 0..program.defs.len() {
         let body = program.defs[idx].body.clone();
@@ -160,7 +162,7 @@ fn try_compose_prefix_map(
             slot += 1;
             continue;
         }
-        branch.lam.lam = super::fusion::compose_map_into_envelope(
+        branch.lam.lam = compose_map_into_branch(
             producer_lam.lam.clone(),
             branch.lam.lam.clone(),
             slot,
@@ -169,7 +171,7 @@ fn try_compose_prefix_map(
             term_ids,
         );
         branch.inputs.splice(slot..=slot, producer_inputs.iter().cloned());
-        let deduped = super::fusion::dedup_envelope_inputs(
+        let deduped = dedup_branch_inputs(
             branch.lam.lam.clone(),
             std::mem::take(&mut branch.inputs),
             term_ids,
@@ -180,6 +182,71 @@ fn try_compose_prefix_map(
         slot = 0;
     }
     composed
+}
+
+/// Branch canonicalization sometimes exposes a pointwise prefix immediately
+/// before the branch's final map. Compose that prefix locally so the enclosing
+/// array-valued `if` can still become one map. General producer/consumer fusion
+/// is deliberately EGIR-owned; this helper exists only inside that control-flow
+/// normalization.
+fn compose_map_into_branch(
+    producer: Lambda,
+    envelope: Lambda,
+    slot: usize,
+    span: Span,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Lambda {
+    let fresh_sym = symbols.alloc("_branch_value".to_string());
+    let slot_param = envelope.params[slot].0;
+    let slot_ty = envelope.params[slot].1.clone();
+    let body = substitute_sym(*envelope.body, slot_param, fresh_sym, term_ids);
+    let mut params = envelope.params;
+    params.splice(slot..=slot, producer.params);
+    Lambda {
+        params,
+        body: Box::new(Term {
+            id: term_ids.next_id(),
+            ty: envelope.ret_ty.clone(),
+            span,
+            kind: TermKind::Let {
+                name: fresh_sym,
+                name_ty: slot_ty,
+                rhs: producer.body,
+                body: Box::new(body),
+            },
+        }),
+        ret_ty: envelope.ret_ty,
+    }
+}
+
+fn dedup_branch_inputs(
+    lam: Lambda,
+    inputs: Vec<ArrayExpr>,
+    term_ids: &mut TermIdSource,
+) -> (Lambda, Vec<ArrayExpr>) {
+    let mut kept_inputs: Vec<ArrayExpr> = Vec::new();
+    let mut kept_params: Vec<(SymbolId, Type<TypeName>)> = Vec::new();
+    let mut body = *lam.body;
+    for (input, param) in inputs.into_iter().zip(lam.params) {
+        if let Some(symbol) = input.as_named_ref() {
+            if let Some(position) = kept_inputs.iter().position(|kept| kept.as_named_ref() == Some(symbol))
+            {
+                body = substitute_sym(body, param.0, kept_params[position].0, term_ids);
+                continue;
+            }
+        }
+        kept_inputs.push(input);
+        kept_params.push(param);
+    }
+    (
+        Lambda {
+            params: kept_params,
+            body: Box::new(body),
+            ret_ty: lam.ret_ty,
+        },
+        kept_inputs,
+    )
 }
 
 fn can_fuse_if_maps(
@@ -573,13 +640,5 @@ fn collect_symbol_refs_in_soac_places(term: &Term, out: &mut LookupSet<SymbolId>
 }
 
 fn collect_symbol_refs_place(place: &super::Place, out: &mut LookupSet<SymbolId>) {
-    match place {
-        super::Place::BufferSlice { base, offset, .. } => {
-            collect_symbol_refs(base, out);
-            collect_symbol_refs(offset, out);
-        }
-        super::Place::LocalArray { id, .. } => {
-            out.insert(*id);
-        }
-    }
+    out.insert(place.id);
 }

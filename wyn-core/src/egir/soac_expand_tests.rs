@@ -26,7 +26,15 @@ fn compile_to_expanded_egraph(
     input: &str,
 ) -> crate::egir::types::EGraph<crate::egir::program::PhysicalResourceRef> {
     let tlc = crate::compile_thru_tlc(input).expect("compile_thru_tlc");
-    let allocated = tlc.infer_input_slice_bounds().to_egraph().expect("to_egraph");
+    let allocated = tlc
+        .infer_input_slice_bounds()
+        .to_egraph()
+        .expect("to_egraph")
+        .realize_outputs()
+        .expect("realize_outputs")
+        .segment()
+        .optimize()
+        .allocate();
     let mut binding_ids = allocated.binding_ids;
     let mut physical = crate::egir::target_lowering::schedule(
         allocated.inner,

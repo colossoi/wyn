@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::ast::{Span, TypeName};
-use crate::tlc::{Def, DefMeta, Lambda, Place, Program, Shape, SoacBody, SoacOp, Term, TermId, TermKind};
+use crate::tlc::{Def, DefMeta, Lambda, Place, Program, SoacBody, SoacOp, Term, TermId, TermKind};
 use crate::SymbolTable;
 use polytype::Type;
 use std::collections::HashMap;
@@ -167,9 +167,8 @@ fn unlifted_scatter_envelope_fails_verifier() {
     let dest = program.symbols.alloc("dest".to_string());
     let scatter = term(
         TermKind::Soac(SoacOp::Scatter {
-            dest: Place::LocalArray {
+            dest: Place {
                 id: dest,
-                shape: Shape(vec![]),
                 elem_ty: unit_ty(),
             },
             lam: SoacBody {
@@ -209,9 +208,8 @@ fn scatter_envelope_params_count_as_bound_symbols() {
         ty: unit_ty(),
         span: span(),
         kind: TermKind::Soac(SoacOp::Scatter {
-            dest: Place::LocalArray {
+            dest: Place {
                 id: dest,
-                shape: Shape(vec![]),
                 elem_ty: unit_ty(),
             },
             lam: SoacBody {

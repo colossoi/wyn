@@ -637,34 +637,28 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
             }
             SoacOp::Scan {
                 op,
-                reduce_op,
                 ne,
                 input,
                 destination,
             } => {
                 let new_op = self.transform_soac_body(op);
-                let new_reduce_op = self.transform_soac_body(reduce_op);
                 let new_ne = self.transform_term(ne);
                 let new_input = self.transform_array_expr(input);
                 SoacOp::Scan {
                     op: new_op,
-                    reduce_op: new_reduce_op,
                     ne: Box::new(new_ne),
                     input: new_input,
                     destination: *destination,
                 }
             }
             SoacOp::Filter {
-                map_lam,
                 pred,
                 input,
                 destination,
             } => {
-                let new_map_lam = map_lam.as_ref().map(|ml| self.transform_soac_body(ml));
                 let new_pred = self.transform_soac_body(pred);
                 let new_input = self.transform_array_expr(input);
                 SoacOp::Filter {
-                    map_lam: new_map_lam,
                     pred: new_pred,
                     input: new_input,
                     destination: *destination,
@@ -701,54 +695,13 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
                     values: new_values,
                 }
             }
-            SoacOp::Screma {
-                lanes,
-                accumulators,
-                inputs,
-            } => {
-                let new_inputs: Vec<ArrayExpr> =
-                    inputs.iter().map(|ae| self.transform_array_expr(ae)).collect();
-                SoacOp::Screma {
-                    lanes: lanes
-                        .iter()
-                        .map(|lane| super::ScremaLane {
-                            lam: self.transform_soac_body(&lane.lam),
-                            input_indices: lane.input_indices.clone(),
-                        })
-                        .collect(),
-                    accumulators: accumulators
-                        .iter()
-                        .map(|acc| super::ScremaAccumulatorSpec {
-                            kind: acc.kind,
-                            step_lam: self.transform_soac_body(&acc.step_lam),
-                            reduce_op: self.transform_soac_body(&acc.reduce_op),
-                            ne: Box::new(self.transform_term(&acc.ne)),
-                        })
-                        .collect(),
-                    inputs: new_inputs,
-                }
-            }
         }
     }
 
     fn transform_place(&mut self, place: &Place) -> Place {
-        match place {
-            Place::BufferSlice {
-                base,
-                offset,
-                shape,
-                elem_ty,
-            } => Place::BufferSlice {
-                base: Box::new(self.transform_term(base)),
-                offset: Box::new(self.transform_term(offset)),
-                shape: shape.clone(),
-                elem_ty: soa_type(elem_ty),
-            },
-            Place::LocalArray { id, shape, elem_ty } => Place::LocalArray {
-                id: *id,
-                shape: shape.clone(),
-                elem_ty: soa_type(elem_ty),
-            },
+        Place {
+            id: place.id,
+            elem_ty: soa_type(&place.elem_ty),
         }
     }
 

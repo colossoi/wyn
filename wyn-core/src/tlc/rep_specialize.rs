@@ -222,24 +222,12 @@ impl<'a, 'ids> RepSpecializer<'a, 'ids> {
                 self.rewrite_term(ne);
                 self.rewrite_array_expr(input);
             }
-            SoacOp::Scan {
-                op,
-                reduce_op,
-                ne,
-                input,
-                ..
-            } => {
+            SoacOp::Scan { op, ne, input, .. } => {
                 self.rewrite_soac_body(op);
-                self.rewrite_soac_body(reduce_op);
                 self.rewrite_term(ne);
                 self.rewrite_array_expr(input);
             }
-            SoacOp::Filter {
-                map_lam, pred, input, ..
-            } => {
-                if let Some(ml) = map_lam {
-                    self.rewrite_soac_body(ml);
-                }
+            SoacOp::Filter { pred, input, .. } => {
                 self.rewrite_soac_body(pred);
                 self.rewrite_array_expr(input);
             }
@@ -260,23 +248,6 @@ impl<'a, 'ids> RepSpecializer<'a, 'ids> {
                 self.rewrite_term(ne);
                 self.rewrite_array_expr(indices);
                 self.rewrite_array_expr(values);
-            }
-            SoacOp::Screma {
-                lanes,
-                accumulators,
-                inputs,
-            } => {
-                for lane in lanes {
-                    self.rewrite_soac_body(&mut lane.lam);
-                }
-                for acc in accumulators {
-                    self.rewrite_soac_body(&mut acc.step_lam);
-                    self.rewrite_soac_body(&mut acc.reduce_op);
-                    self.rewrite_term(&mut acc.ne);
-                }
-                for ae in inputs {
-                    self.rewrite_array_expr(ae);
-                }
             }
         }
     }

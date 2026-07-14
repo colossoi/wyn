@@ -620,24 +620,20 @@ impl<'a, 'ids> Monomorphizer<'a, 'ids> {
             },
             SoacOp::Scan {
                 op,
-                reduce_op,
                 ne,
                 input,
                 destination,
             } => SoacOp::Scan {
                 op: self.process_soac_body(op),
-                reduce_op: self.process_soac_body(reduce_op),
                 ne: Box::new(self.process_term(ne)),
                 input: self.process_array_expr(input),
                 destination: *destination,
             },
             SoacOp::Filter {
-                map_lam,
                 pred,
                 input,
                 destination,
             } => SoacOp::Filter {
-                map_lam: map_lam.as_ref().map(|ml| self.process_soac_body(ml)),
                 pred: self.process_soac_body(pred),
                 input: self.process_array_expr(input),
                 destination: *destination,
@@ -659,29 +655,6 @@ impl<'a, 'ids> Monomorphizer<'a, 'ids> {
                 ne: Box::new(self.process_term(ne)),
                 indices: self.process_array_expr(indices),
                 values: self.process_array_expr(values),
-            },
-            SoacOp::Screma {
-                lanes,
-                accumulators,
-                inputs,
-            } => SoacOp::Screma {
-                lanes: lanes
-                    .iter()
-                    .map(|lane| super::ScremaLane {
-                        lam: self.process_soac_body(&lane.lam),
-                        input_indices: lane.input_indices.clone(),
-                    })
-                    .collect(),
-                accumulators: accumulators
-                    .iter()
-                    .map(|acc| super::ScremaAccumulatorSpec {
-                        kind: acc.kind,
-                        step_lam: self.process_soac_body(&acc.step_lam),
-                        reduce_op: self.process_soac_body(&acc.reduce_op),
-                        ne: Box::new(self.process_term(&acc.ne)),
-                    })
-                    .collect(),
-                inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
             },
         }
     }
@@ -998,24 +971,20 @@ impl<'a, 'ids> Monomorphizer<'a, 'ids> {
             },
             SoacOp::Scan {
                 op,
-                reduce_op,
                 ne,
                 input,
                 destination,
             } => SoacOp::Scan {
                 op: self.apply_subst_soac_body(op, subst),
-                reduce_op: self.apply_subst_soac_body(reduce_op, subst),
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 input: self.apply_subst_array_expr(input, subst),
                 destination: *destination,
             },
             SoacOp::Filter {
-                map_lam,
                 pred,
                 input,
                 destination,
             } => SoacOp::Filter {
-                map_lam: map_lam.as_ref().map(|ml| self.apply_subst_soac_body(ml, subst)),
                 pred: self.apply_subst_soac_body(pred, subst),
                 input: self.apply_subst_array_expr(input, subst),
                 destination: *destination,
@@ -1037,29 +1006,6 @@ impl<'a, 'ids> Monomorphizer<'a, 'ids> {
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 indices: self.apply_subst_array_expr(indices, subst),
                 values: self.apply_subst_array_expr(values, subst),
-            },
-            SoacOp::Screma {
-                lanes,
-                accumulators,
-                inputs,
-            } => SoacOp::Screma {
-                lanes: lanes
-                    .iter()
-                    .map(|lane| super::ScremaLane {
-                        lam: self.apply_subst_soac_body(&lane.lam, subst),
-                        input_indices: lane.input_indices.clone(),
-                    })
-                    .collect(),
-                accumulators: accumulators
-                    .iter()
-                    .map(|acc| super::ScremaAccumulatorSpec {
-                        kind: acc.kind,
-                        step_lam: self.apply_subst_soac_body(&acc.step_lam, subst),
-                        reduce_op: self.apply_subst_soac_body(&acc.reduce_op, subst),
-                        ne: Box::new(self.apply_subst_term(&acc.ne, subst)),
-                    })
-                    .collect(),
-                inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
             },
         }
     }

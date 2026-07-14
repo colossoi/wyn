@@ -1,26 +1,21 @@
 //! Typed Lambda Calculus (TLC) representation.
 //!
-//! A minimal typed lambda calculus IR for SOAC fusion analysis.
+//! A minimal typed lambda calculus IR for source-level specialization.
 //! Lambdas remain as values (not yet defunctionalized).
 
 pub mod anf;
-pub mod array_semantics;
 pub mod closure_calls_lower;
 pub mod closure_convert;
 pub mod defaults;
-pub mod fusion;
 pub mod hof_specialize;
 pub mod if_over_producer;
 pub mod inline;
 pub mod input_slice_bounds;
-pub mod materialize_entry_soacs;
 pub mod monomorphize;
-pub mod normalize;
 pub mod ownership;
 pub mod partial_eval;
 pub mod patterns;
 pub mod pin_entry_buffers;
-pub mod producer_graph;
 pub mod rep_specialize;
 #[cfg(test)]
 #[path = "rep_specialize_tests.rs"]
@@ -28,8 +23,8 @@ mod rep_specialize_tests;
 pub mod run;
 pub mod runtime_index_producers;
 pub mod soa;
+pub mod soac_anf;
 pub mod specialize;
-pub mod static_index_fusion;
 pub mod subst;
 
 use crate::ast::{self, NodeId, Span, TypeName};
@@ -78,165 +73,6 @@ pub(crate) fn extract_lambda_params_ref(term: &Term) -> (&Term, Vec<(SymbolId, T
     (current, params)
 }
 
-/// Map each interned symbol whose name matches a top-level def to that def's
-/// symbol, yielding a `Var-symbol → def-symbol` lookup. Symbols that don't name
-/// a def are absent, so a hit means "this `Var` refers to a callable def."
-pub(crate) fn build_sym_to_def(
-    symbols: &SymbolTable,
-    def_syms: &LookupMap<String, SymbolId>,
-) -> LookupMap<SymbolId, SymbolId> {
-    let mut sym_to_def: LookupMap<SymbolId, SymbolId> = LookupMap::new();
-    for (sym, name) in symbols.iter() {
-        if let Some(&def_sym) = def_syms.get(name) {
-            sym_to_def.insert(*sym, def_sym);
-        }
-    }
-    sym_to_def
-}
-
-/// One binding of a flattened `let` chain: `let name: name_ty = rhs in …`.
-#[derive(Clone)]
-pub(crate) struct LetBinding {
-    pub(crate) name: SymbolId,
-    pub(crate) name_ty: Type<TypeName>,
-    pub(crate) rhs: Term,
-    pub(crate) span: Span,
-}
-
-/// A `let` chain peeled into its flat list of bindings plus the inner non-`let`
-/// tail. Manipulating a chain as a first-class value — insert / remove / replace
-/// a binding by index, rewrite the tail — keeps passes from re-deriving the
-/// nesting and the index bookkeeping by hand. Rebuild with [`LetChain::into_term`].
-#[derive(Clone)]
-pub(crate) struct LetChain {
-    bindings: Vec<LetBinding>,
-    tail: Term,
-}
-
-impl LetChain {
-    pub(crate) fn from_term(mut term: Term) -> Self {
-        let mut bindings = Vec::new();
-        loop {
-            match term.kind {
-                TermKind::Let {
-                    name,
-                    name_ty,
-                    rhs,
-                    body,
-                } => {
-                    bindings.push(LetBinding {
-                        name,
-                        name_ty,
-                        rhs: *rhs,
-                        span: term.span,
-                    });
-                    term = *body;
-                }
-                _ => return LetChain { bindings, tail: term },
-            }
-        }
-    }
-
-    /// Decompose into the raw bindings + tail.
-    #[cfg(test)]
-    pub(crate) fn into_parts(self) -> (Vec<LetBinding>, Term) {
-        (self.bindings, self.tail)
-    }
-
-    /// Re-nest the chain into a single `Term`, minting a fresh id per `Let` node.
-    pub(crate) fn into_term(self, term_ids: &mut TermIdSource) -> Term {
-        let mut body = self.tail;
-        for binding in self.bindings.into_iter().rev() {
-            let ty = body.ty.clone();
-            body = Term {
-                id: term_ids.next_id(),
-                ty,
-                span: binding.span,
-                kind: TermKind::Let {
-                    name: binding.name,
-                    name_ty: binding.name_ty,
-                    rhs: Box::new(binding.rhs),
-                    body: Box::new(body),
-                },
-            };
-        }
-        body
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.bindings.is_empty()
-    }
-
-    pub(crate) fn bindings(&self) -> &[LetBinding] {
-        &self.bindings
-    }
-
-    pub(crate) fn tail(&self) -> &Term {
-        &self.tail
-    }
-
-    pub(crate) fn binding(&self, index: usize) -> Option<&LetBinding> {
-        self.bindings.get(index)
-    }
-
-    pub(crate) fn insert_binding(&mut self, index: usize, binding: LetBinding) {
-        self.bindings.insert(index.min(self.bindings.len()), binding);
-    }
-
-    /// Insert using coordinates from the original chain, after bindings named
-    /// in `removed_original_indices` have already been removed.
-    pub(crate) fn insert_binding_at_original_index(
-        &mut self,
-        original_index: usize,
-        removed_original_indices: &[usize],
-        binding: LetBinding,
-    ) {
-        let removed_before = removed_original_indices.iter().filter(|&&idx| idx < original_index).count();
-        self.insert_binding(original_index.saturating_sub(removed_before), binding);
-    }
-
-    pub(crate) fn remove_binding(&mut self, index: usize) -> LetBinding {
-        self.bindings.remove(index)
-    }
-
-    pub(crate) fn remove_bindings(&mut self, indices: &[usize]) {
-        let mut sorted = indices.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-        for index in sorted.into_iter().rev() {
-            self.remove_binding(index);
-        }
-    }
-
-    pub(crate) fn replace_binding(&mut self, index: usize, binding: LetBinding) {
-        self.bindings[index] = binding;
-    }
-
-    pub(crate) fn replace_binding_rhs(&mut self, index: usize, rhs: Term) {
-        self.bindings[index].rhs = rhs;
-    }
-
-    pub(crate) fn rewrite_binding_rhs<F>(&mut self, index: usize, f: F)
-    where
-        F: FnOnce(Term) -> Term,
-    {
-        let rhs = self.bindings[index].rhs.clone();
-        self.replace_binding_rhs(index, f(rhs));
-    }
-
-    pub(crate) fn replace_tail(&mut self, tail: Term) {
-        self.tail = tail;
-    }
-
-    pub(crate) fn rewrite_tail<F>(&mut self, f: F)
-    where
-        F: FnOnce(Term) -> Term,
-    {
-        let tail = self.tail.clone();
-        self.replace_tail(f(tail));
-    }
-}
-
 /// Count the number of nodes in a term tree.
 /// Used as a size heuristic for inlining decisions.
 pub fn term_size(term: &Term) -> usize {
@@ -253,31 +89,13 @@ pub fn collect_var_refs(term: &Term) -> Vec<SymbolId> {
     refs
 }
 
-/// True if `term` references any symbol in `syms` via a `Var` leaf. A
-/// short-circuiting walk — cheaper than `collect_var_refs(..).iter().any(..)`
-/// when the answer is usually found early or the set is small.
-pub(crate) fn mentions_any(term: &Term, syms: &[SymbolId]) -> bool {
-    match &term.kind {
-        TermKind::Var(VarRef::Symbol(sym)) => syms.contains(sym),
-        _ => {
-            let mut found = false;
-            term.for_each_child(&mut |child| {
-                if !found && mentions_any(child, syms) {
-                    found = true;
-                }
-            });
-            found
-        }
-    }
-}
-
 fn collect_var_refs_inner(term: &Term, refs: &mut Vec<SymbolId>) {
     // Var leaf: the only TermKind that directly contributes a ref.
     if let TermKind::Var(VarRef::Symbol(sym)) = &term.kind {
         refs.push(*sym);
     }
 
-    // Place::LocalArray also contributes a non-Term SymbolId ref.
+    // A destination Place also contributes a non-Term SymbolId ref.
     // for_each_child doesn't expose Place internals, so handle here.
     collect_place_ids_in_soacs(term, refs);
 
@@ -285,7 +103,7 @@ fn collect_var_refs_inner(term: &Term, refs: &mut Vec<SymbolId>) {
     term.for_each_child(&mut |child| collect_var_refs_inner(child, refs));
 }
 
-/// Collect SymbolIds from Place::LocalArray inside Scatter/ReduceByIndex SOACs.
+/// Collect destination SymbolIds inside Scatter/ReduceByIndex SOACs.
 /// These are non-Term refs that for_each_child can't reach.
 fn collect_place_ids_in_soacs(term: &Term, refs: &mut Vec<SymbolId>) {
     if let TermKind::Soac(soac) = &term.kind {
@@ -293,8 +111,8 @@ fn collect_place_ids_in_soacs(term: &Term, refs: &mut Vec<SymbolId>) {
             SoacOp::Scatter { dest, .. } | SoacOp::ReduceByIndex { dest, .. } => Some(dest),
             _ => None,
         };
-        if let Some(Place::LocalArray { id, .. }) = place {
-            refs.push(*id);
+        if let Some(place) = place {
+            refs.push(place.id);
         }
     }
 }
@@ -513,58 +331,6 @@ pub struct SoacBody {
     pub captures: Vec<(SymbolId, Type<TypeName>, Term)>,
 }
 
-/// Build `ScremaLane`s where every lane reads every input — the common case for
-/// all constructors except the equal-domain fuser, which gives each lane its
-/// own input subset.
-pub fn screma_lanes_all_inputs(lams: Vec<SoacBody>, n_inputs: usize) -> Vec<ScremaLane> {
-    lams.into_iter()
-        .map(|lam| ScremaLane {
-            lam,
-            input_indices: (0..n_inputs).collect(),
-        })
-        .collect()
-}
-
-/// Whether a `Screma` with these `lanes`/`accumulators` is a fused
-/// `map → reduce`: no map outputs and exactly one `Reduce` accumulator.
-///
-/// Such a Screma is **scalar-output** — its sole result is the reduce value,
-/// which may itself be a tuple — so it is TLC-typed as that result directly
-/// (no `Tuple(num_outputs)` wrapper) and needs no `TupleProj`. Always
-/// discriminate single-output-reduce from a genuine multi-output Screma by
-/// THIS shape, never by whether the result type happens to be a `Tuple`.
-pub fn is_scalar_reduce_screma(lanes: &[ScremaLane], accumulators: &[ScremaAccumulatorSpec]) -> bool {
-    lanes.is_empty() && accumulators.len() == 1 && matches!(accumulators[0].kind, ScremaAccumulator::Reduce)
-}
-
-/// Whether a `Screma` has exactly one output — one map lane xor one
-/// accumulator. Its sole result is that output directly, so (like the scalar
-/// reducing Screma) it is TLC-typed as the output itself with no
-/// `Tuple(num_outputs)` wrapper and no `TupleProj`; egir re-wraps to
-/// `Tuple(1) + Project` at lowering. A single `Reduce` is scalar-valued; a
-/// single `Scan` or map lane is array-valued. Discriminate by THIS shape, never
-/// by whether the result type happens to be a `Tuple`.
-pub fn is_single_output_screma(lanes: &[ScremaLane], accumulators: &[ScremaAccumulatorSpec]) -> bool {
-    lanes.len() + accumulators.len() == 1
-}
-
-/// A symbolic dimension expression.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Dim {
-    Const(i64),
-    Var(DimVarId),
-    Add(Box<Dim>, Box<Dim>),
-    Sub(Box<Dim>, Box<Dim>),
-}
-
-/// A dimension variable identifier.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct DimVarId(pub u32);
-
-/// A shape is a list of dimensions.
-#[derive(Clone, Debug)]
-pub struct Shape(pub Vec<Dim>);
-
 /// An array-producing expression.
 //
 // One variant is phase-scoped — it is only valid in part of the
@@ -603,10 +369,8 @@ pub enum ArrayExpr {
 
 impl ArrayExpr {
     /// `Var(Symbol(sym), _)` → `Some(sym)`. The canonical "named SOAC input"
-    /// shape — used by `producer_graph::wire_edges` and
-    /// `parallelize::classify_input` to recognize an array input that's
-    /// just a bare name (an entry parameter, an intermediate, a
-    /// let-bound result of a prior SOAC).
+    /// shape used by ownership and TLC→EGIR conversion to recognize an entry
+    /// parameter, intermediate, or let-bound result of a prior SOAC.
     pub fn as_named_ref(&self) -> Option<SymbolId> {
         if let ArrayExpr::Var(VarRef::Symbol(sym), _) = self {
             return Some(*sym);
@@ -657,58 +421,22 @@ impl ArrayExpr {
     }
 }
 
-/// Where an array-producing SOAC's per-iteration result is written.
-/// Used by `Map`, `Scan`, and `Filter`. At TLC only `Fresh` and
-/// `InputBuffer` are produced — the ownership pass switches `Fresh` to
-/// `InputBuffer` for inputs that are mutable, dead-after, and pointwise.
-/// `OutputView` is set EGIR-side by `realize_outputs` when a retargetable
-/// SOAC streams directly into a bound compute-shader output view.
+/// TLC ownership annotation for an array-producing SOAC. This deliberately
+/// cannot name a physical buffer: EGIR resolves the uniqueness candidate from
+/// post-fusion liveness and output routing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoacDestination {
-    /// Allocate a fresh output buffer, accumulate via the loop's
-    /// carried value, return the buffer.
+    /// No unique input was proved.
     Fresh,
-    /// Mutate the primary input buffer in place at each index, return
-    /// the input buffer as the result. The result aliases `inputs[0]`
-    /// instead of a fresh allocation.
-    InputBuffer,
-    /// Write to a separately-bound output view (compute-shader ABI).
-    /// EGIR-only; TLC never produces this variant.
-    OutputView,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScremaAccumulator {
-    Reduce,
-    Scan,
-}
-
-#[derive(Debug, Clone)]
-pub struct ScremaAccumulatorSpec {
-    pub kind: ScremaAccumulator,
-    pub step_lam: SoacBody,
-    pub reduce_op: SoacBody,
-    pub ne: Box<Term>,
-}
-
-/// One elementwise output lane of a `SoacOp::Screma`. Bundling the lambda with
-/// the inputs it reads makes a lane's two halves travel together — the old
-/// parallel `map_lams` / `map_input_indices` vecs could desync in length and
-/// silently mis-route a lane's inputs; that state is now unrepresentable.
-#[derive(Debug, Clone)]
-pub struct ScremaLane {
-    /// Elementwise function `(x1, ..., xn) -> y`.
-    pub lam: SoacBody,
-    /// Positions into the Screma's `inputs` whose elements feed `lam`, in
-    /// order, as the leading args to its function. The common case (read every
-    /// input) is `(0..inputs.len())`; the equal-domain fuser gives each lane its
-    /// own input subset.
-    pub input_indices: Vec<usize>,
+    /// TLC proved the primary input uniquely owned and safe for pointwise
+    /// overwrite. This is not a physical destination: EGIR must still prove
+    /// the input dead after the final fused operation.
+    UniqueInput,
 }
 
 /// A second-order array combinator (SOAC) operation.
 ///
-/// `Reduce`, `Screma`, `Scan`, and `ReduceByIndex` parallelize freely on
+/// `Reduce`, `Scan`, and `ReduceByIndex` parallelize freely on
 /// the assumption that their reducer is associative (Futhark convention:
 /// the caller asserts associativity by using the SOAC). The compiler
 /// never verifies this — float reductions are reordered just like int
@@ -719,9 +447,8 @@ pub enum SoacOp {
         lam: SoacBody,
         /// Parallel inputs. `inputs.len() == lam.lam.params.len()`.
         inputs: Vec<ArrayExpr>,
-        /// Picked by the ownership pass: `InputBuffer` when the map's
-        /// primary input is mutable, dead-after, pointwise, and not
-        /// bound to a compute-shader output; `Fresh` otherwise.
+        /// Logical uniqueness fact from TLC ownership; EGIR decides whether
+        /// the candidate becomes an in-place write.
         destination: SoacDestination,
     },
     Reduce {
@@ -729,58 +456,29 @@ pub enum SoacOp {
         ne: Box<Term>,
         input: ArrayExpr,
     },
-    /// Multi-result map+accumulator SOAC: one loop over `inputs` writes zero
-    /// or more mapped array results and threads zero or more accumulator
-    /// results. Result order is all mapped outputs, then accumulator outputs.
-    Screma {
-        /// Elementwise output lanes, each pairing its function with the inputs
-        /// it reads (see `ScremaLane`).
-        lanes: Vec<ScremaLane>,
-        /// Per-element accumulator outputs.
-        accumulators: Vec<ScremaAccumulatorSpec>,
-        inputs: Vec<ArrayExpr>,
-    },
     Scan {
-        /// Element-combine: `(acc, x) -> acc'`. For a plain scan this is the
-        /// pure associative combiner; for a `map`-fused scan it is
-        /// `(acc, raw) -> acc ⊕ f(raw)`, folding the producer `f` into the
-        /// per-element step. Used by the parallel scan's phase 1 / phase 3
-        /// (combine the running accumulator with an input element).
+        /// Pure associative combiner `(acc, x) -> acc'`.
         op: SoacBody,
-        /// Pure associative combiner `(a, a) -> a` on the value type, for the
-        /// parallel scan's phase 2 (combine two already-scanned block sums).
-        /// Equals `op` for a plain scan; for a fused scan it is the original
-        /// scan combiner without the producer `f`. Mirrors a `Screma` Reduce
-        /// accumulator's `reduce_op` — a parallel scan needs both the
-        /// elementwise step and a pure combiner, since phase 2 combines
-        /// transformed values, not raw inputs.
-        reduce_op: SoacBody,
         ne: Box<Term>,
         input: ArrayExpr,
-        /// Picked by the ownership pass: `InputBuffer` when the scan's
-        /// input is mutable and dead-after; `Fresh` otherwise.
+        /// TLC may mark a pointwise-safe uniquely owned input as
+        /// `UniqueInput`; EGIR resolves post-fusion liveness and routing into
+        /// the physical destination.
         destination: SoacDestination,
     },
     Filter {
-        /// Optional fused elementwise producer. `None` is a plain filter: the
-        /// surviving input element is kept and `pred` tests it. `Some(f)` folds a
-        /// `map(f, …)` producer in: per element `x` the filter computes `v = f(x)`
-        /// once, tests `pred(v)`, and keeps `v` — no materialized intermediate
-        /// array. The filter's output element type is then `f`'s return type, not
-        /// the input element type.
-        map_lam: Option<SoacBody>,
         pred: SoacBody,
         input: ArrayExpr,
-        /// Picked by the ownership pass: `InputBuffer` when the filter's
-        /// input is mutable and dead-after (the result `View` aliases
-        /// it); `Fresh` otherwise.
+        /// TLC may mark a pointwise-safe uniquely owned input as
+        /// `UniqueInput`; EGIR resolves post-fusion liveness and routing into
+        /// the physical destination.
         destination: SoacDestination,
     },
     /// Indexed writes into `dest`: over the parallel `inputs`, `lam` yields an
     /// `(index, value)` pair per element, written as `dest[index] = value`.
     /// Plain `scatter(dest, is, vs)` carries the identity envelope
-    /// `lam = λ(i, v) → (i, v)` with `inputs = [is, vs]`; map→scatter fusion
-    /// composes a producer's lambda into `lam` and splices its inputs in.
+    /// `lam = λ(i, v) → (i, v)` with `inputs = [is, vs]`. EGIR receives that
+    /// callable ABI and owns any later producer composition.
     Scatter {
         dest: Place,
         lam: SoacBody,
@@ -801,18 +499,9 @@ pub enum SoacOp {
 
 /// Destination-passing for scatter / reduce_by_index.
 #[derive(Debug, Clone)]
-pub enum Place {
-    BufferSlice {
-        base: Box<Term>,
-        offset: Box<Term>,
-        shape: Shape,
-        elem_ty: Type<TypeName>,
-    },
-    LocalArray {
-        id: SymbolId,
-        shape: Shape,
-        elem_ty: Type<TypeName>,
-    },
+pub struct Place {
+    pub id: SymbolId,
+    pub elem_ty: Type<TypeName>,
 }
 
 // =============================================================================
@@ -1049,26 +738,6 @@ impl Term {
         Term { kind, ..self }
     }
 
-    /// Construct a `Var(sym)` term with the given id.
-    pub(crate) fn var(sym: SymbolId, ty: Type<TypeName>, span: Span, id: TermId) -> Term {
-        Term {
-            id,
-            ty,
-            span,
-            kind: TermKind::Var(VarRef::Symbol(sym)),
-        }
-    }
-
-    /// Construct an integer-literal term with the given id.
-    pub(crate) fn int_lit(value: impl Into<String>, ty: Type<TypeName>, span: Span, id: TermId) -> Term {
-        Term {
-            id,
-            ty,
-            span,
-            kind: TermKind::IntLit(value.into()),
-        }
-    }
-
     /// Visit every immediate `Term` child by reference. This is the by-ref
     /// counterpart to `map_children` — use it for analysis passes that
     /// inspect without transforming.
@@ -1252,64 +921,32 @@ where
             f(ne);
             visit_array_expr_children(input, f);
         }
-        SoacOp::Scan {
-            op,
-            reduce_op,
-            ne,
-            input,
-            ..
-        } => {
+        SoacOp::Scan { op, ne, input, .. } => {
             visit_soac_body_children(op, f);
-            visit_soac_body_children(reduce_op, f);
             f(ne);
             visit_array_expr_children(input, f);
         }
-        SoacOp::Filter {
-            map_lam, pred, input, ..
-        } => {
-            if let Some(map_lam) = map_lam {
-                visit_soac_body_children(map_lam, f);
-            }
+        SoacOp::Filter { pred, input, .. } => {
             visit_soac_body_children(pred, f);
             visit_array_expr_children(input, f);
         }
-        SoacOp::Scatter { dest, lam, inputs } => {
-            visit_place_children(dest, f);
+        SoacOp::Scatter { lam, inputs, .. } => {
             visit_soac_body_children(lam, f);
             for input in inputs {
                 visit_array_expr_children(input, f);
             }
         }
         SoacOp::ReduceByIndex {
-            dest,
             op,
             ne,
             indices,
             values,
             ..
         } => {
-            visit_place_children(dest, f);
             visit_soac_body_children(op, f);
             f(ne);
             visit_array_expr_children(indices, f);
             visit_array_expr_children(values, f);
-        }
-        SoacOp::Screma {
-            lanes,
-            accumulators,
-            inputs,
-        } => {
-            for lane in lanes {
-                visit_soac_body_children(&lane.lam, f);
-            }
-            for acc in accumulators {
-                visit_soac_body_children(&acc.step_lam, f);
-                visit_soac_body_children(&acc.reduce_op, f);
-                f(&acc.ne);
-            }
-            for ae in inputs {
-                visit_array_expr_children(ae, f);
-            }
         }
     }
 }
@@ -1353,19 +990,6 @@ where
     }
 }
 
-fn visit_place_children<F>(place: &Place, f: &mut F)
-where
-    F: FnMut(&Term),
-{
-    match place {
-        Place::BufferSlice { base, offset, .. } => {
-            f(base);
-            f(offset);
-        }
-        Place::LocalArray { .. } => {}
-    }
-}
-
 fn visit_lambda_children_mut<F>(lam: &mut Lambda, f: &mut F)
 where
     F: FnMut(&mut Term),
@@ -1399,64 +1023,32 @@ where
             f(ne);
             visit_array_expr_children_mut(input, f);
         }
-        SoacOp::Scan {
-            op,
-            reduce_op,
-            ne,
-            input,
-            ..
-        } => {
+        SoacOp::Scan { op, ne, input, .. } => {
             visit_soac_body_children_mut(op, f);
-            visit_soac_body_children_mut(reduce_op, f);
             f(ne);
             visit_array_expr_children_mut(input, f);
         }
-        SoacOp::Filter {
-            map_lam, pred, input, ..
-        } => {
-            if let Some(map_lam) = map_lam {
-                visit_soac_body_children_mut(map_lam, f);
-            }
+        SoacOp::Filter { pred, input, .. } => {
             visit_soac_body_children_mut(pred, f);
             visit_array_expr_children_mut(input, f);
         }
-        SoacOp::Scatter { dest, lam, inputs } => {
-            visit_place_children_mut(dest, f);
+        SoacOp::Scatter { lam, inputs, .. } => {
             visit_soac_body_children_mut(lam, f);
             for input in inputs {
                 visit_array_expr_children_mut(input, f);
             }
         }
         SoacOp::ReduceByIndex {
-            dest,
             op,
             ne,
             indices,
             values,
             ..
         } => {
-            visit_place_children_mut(dest, f);
             visit_soac_body_children_mut(op, f);
             f(ne);
             visit_array_expr_children_mut(indices, f);
             visit_array_expr_children_mut(values, f);
-        }
-        SoacOp::Screma {
-            lanes,
-            accumulators,
-            inputs,
-        } => {
-            for lane in lanes {
-                visit_soac_body_children_mut(&mut lane.lam, f);
-            }
-            for acc in accumulators {
-                visit_soac_body_children_mut(&mut acc.step_lam, f);
-                visit_soac_body_children_mut(&mut acc.reduce_op, f);
-                f(&mut acc.ne);
-            }
-            for ae in inputs {
-                visit_array_expr_children_mut(ae, f);
-            }
         }
     }
 }
@@ -1505,19 +1097,6 @@ where
     }
 }
 
-fn visit_place_children_mut<F>(place: &mut Place, f: &mut F)
-where
-    F: FnMut(&mut Term),
-{
-    match place {
-        Place::BufferSlice { base, offset, .. } => {
-            f(base);
-            f(offset);
-        }
-        Place::LocalArray { .. } => {}
-    }
-}
-
 fn map_lambda_children<F>(lam: Lambda, f: &mut F) -> Lambda
 where
     F: FnMut(Term) -> Term,
@@ -1559,30 +1138,26 @@ where
         },
         SoacOp::Scan {
             op,
-            reduce_op,
             ne,
             input,
             destination,
         } => SoacOp::Scan {
             op: map_soac_body_children(op, f),
-            reduce_op: map_soac_body_children(reduce_op, f),
             ne: Box::new(f(*ne)),
             input: map_array_expr_children(input, f),
             destination,
         },
         SoacOp::Filter {
-            map_lam,
             pred,
             input,
             destination,
         } => SoacOp::Filter {
-            map_lam: map_lam.map(|ml| map_soac_body_children(ml, f)),
             pred: map_soac_body_children(pred, f),
             input: map_array_expr_children(input, f),
             destination,
         },
         SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
-            dest: map_place_children(dest, f),
+            dest,
             lam: map_soac_body_children(lam, f),
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
         },
@@ -1593,34 +1168,11 @@ where
             indices,
             values,
         } => SoacOp::ReduceByIndex {
-            dest: map_place_children(dest, f),
+            dest,
             op: map_soac_body_children(op, f),
             ne: Box::new(f(*ne)),
             indices: map_array_expr_children(indices, f),
             values: map_array_expr_children(values, f),
-        },
-        SoacOp::Screma {
-            lanes,
-            accumulators,
-            inputs,
-        } => SoacOp::Screma {
-            lanes: lanes
-                .into_iter()
-                .map(|lane| ScremaLane {
-                    lam: map_soac_body_children(lane.lam, f),
-                    input_indices: lane.input_indices,
-                })
-                .collect(),
-            accumulators: accumulators
-                .into_iter()
-                .map(|acc| ScremaAccumulatorSpec {
-                    kind: acc.kind,
-                    step_lam: map_soac_body_children(acc.step_lam, f),
-                    reduce_op: map_soac_body_children(acc.reduce_op, f),
-                    ne: Box::new(f(*acc.ne)),
-                })
-                .collect(),
-            inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
         },
     }
 }
@@ -1719,26 +1271,6 @@ where
         LoopKind::While { cond } => LoopKind::While {
             cond: Box::new(f(*cond)),
         },
-    }
-}
-
-fn map_place_children<F>(place: Place, f: &mut F) -> Place
-where
-    F: FnMut(Term) -> Term,
-{
-    match place {
-        Place::BufferSlice {
-            base,
-            offset,
-            shape,
-            elem_ty,
-        } => Place::BufferSlice {
-            base: Box::new(f(*base)),
-            offset: Box::new(f(*offset)),
-            shape,
-            elem_ty,
-        },
-        Place::LocalArray { .. } => place,
     }
 }
 
@@ -2948,9 +2480,6 @@ impl<'a> Transformer<'a> {
             ty,
             span,
             TermKind::Soac(SoacOp::Scan {
-                // A source-level scan has no fused producer, so the pure
-                // combiner and the element-combine are the same lambda.
-                reduce_op: op.clone(),
                 op,
                 ne: Box::new(ne_term),
                 input,
@@ -2975,7 +2504,6 @@ impl<'a> Transformer<'a> {
             ty,
             span,
             TermKind::Soac(SoacOp::Filter {
-                map_lam: None,
                 pred,
                 input,
                 // Initial construction; apply_ownership may flip later.
@@ -3017,7 +2545,7 @@ impl<'a> Transformer<'a> {
 
         // Build a Place from dest_term
         let dest_elem_ty = self.get_array_element_type(&dest_term.ty);
-        let dest = Place::LocalArray {
+        let dest = Place {
             id: match &dest_term.kind {
                 TermKind::Var(VarRef::Symbol(sym)) => *sym,
                 _ => {
@@ -3026,7 +2554,6 @@ impl<'a> Transformer<'a> {
                     fresh
                 }
             },
-            shape: Shape(vec![]),
             elem_ty: dest_elem_ty,
         };
 
@@ -3050,7 +2577,7 @@ impl<'a> Transformer<'a> {
     /// `scatter(dest, indices, values)` → `SoacOp::Scatter`. Writes
     /// `values[i]` into `dest[indices[i]]` for each `i`; out-of-bounds indices
     /// are ignored (Futhark semantics). The `dest` must be a Var (a `#[storage]`
-    /// buffer param in the rasterizer use case) — its `Place::LocalArray`
+    /// buffer param in the rasterizer use case) — its `Place`
     /// carries the symbol the EGIR conversion resolves to the dest's view.
     fn transform_soac_scatter(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
         assert!(args.len() >= 3, "scatter requires 3 arguments");
@@ -3061,12 +2588,11 @@ impl<'a> Transformer<'a> {
         let dest_elem_ty = self.get_array_element_type(&dest_term.ty);
         let idx_elem_ty = self.get_array_element_type(&indices_term.ty);
         let val_elem_ty = self.get_array_element_type(&values_term.ty);
-        let dest = Place::LocalArray {
+        let dest = Place {
             id: match &dest_term.kind {
                 TermKind::Var(VarRef::Symbol(sym)) => *sym,
                 _ => self.define("_w_scatter_dest"),
             },
-            shape: Shape(vec![]),
             elem_ty: dest_elem_ty,
         };
 

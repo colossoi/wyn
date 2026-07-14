@@ -311,38 +311,38 @@ fn compile_file(
     let tlc_force_inlined = time("force_inline_soac_helpers", verbose, || {
         tlc_inlined.force_inline_soac_helpers()
     });
-    let tlc_canon = time("canonicalize_producers", verbose, || {
-        tlc_force_inlined.canonicalize_producers()
+    let tlc_inlined_soa = time("renormalize_inlined_soa", verbose, || {
+        tlc_force_inlined.renormalize_inlined_soa()
     });
-    let tlc_fused = time("fuse_maps", verbose, || tlc_canon.fuse_maps());
-
-    // Keep source producer relationships explicit through the last TLC
-    // simplifications; EGIR decides whether they require residency.
-    let tlc_exposed = time("expose_entry_producer_helpers", verbose, || {
-        tlc_fused.expose_entry_producer_helpers()
+    let tlc_conditional_producers = time("canonicalize_conditional_producers", verbose, || {
+        tlc_inlined_soa.canonicalize_conditional_producers()
     });
-    let tlc_static_fused = time("static_index_fusion", verbose, || {
-        tlc_exposed.fuse_static_indices()
+    let tlc_soac_anf = time("normalize_soacs_to_anf", verbose, || {
+        tlc_conditional_producers.normalize_soacs_to_anf()
     });
     let tlc_runtime_floated = time("expose_runtime_index_producers", verbose, || {
-        tlc_static_fused.float_runtime_index_nested_producers()
+        tlc_soac_anf.float_runtime_index_nested_producers()
     });
     let tlc_defunc = time("defunctionalize", verbose, || {
         tlc_runtime_floated.defunctionalize()
     });
     let tlc_folded = time("inline", verbose, || tlc_defunc.fold_generated_lambdas());
 
-    // Ownership/liveness remains a TLC responsibility. EGIR derives output
-    // routes and physical entry structure after semantic conversion.
+    // TLC establishes uniqueness candidates. EGIR owns post-fusion liveness,
+    // output routes, resources, and physical entry structure.
     let tlc_owned = time("apply_ownership", verbose, || tlc_folded.apply_ownership())?;
     // Eliminate dead TLC defs
     let tlc_reachable = time("tlc_filter_reachable", verbose, || tlc_owned.filter_reachable());
 
-    // Build the raw EGIR program, then chain the passes.
+    // Build raw EGIR, then cross each semantic and physical typestate boundary.
     let tlc_with_bounds = time("infer_input_slice_bounds", verbose, || {
         tlc_reachable.infer_input_slice_bounds()
     });
-    let allocated = time("to_egraph", verbose, || tlc_with_bounds.to_egraph())?;
+    let raw = time("to_egraph", verbose, || tlc_with_bounds.to_egraph())?;
+    let outputs_realized = time("egir_realize_outputs", verbose, || raw.realize_outputs())?;
+    let segmented = time("egir_segment", verbose, || outputs_realized.segment());
+    let optimized = time("egir_optimize", verbose, || segmented.optimize());
+    let allocated = time("egir_allocate", verbose, || optimized.allocate());
     let profile = LoweringProfile::new(
         match target {
             Target::Spirv => CodegenTarget::Spirv,
@@ -350,7 +350,8 @@ fn compile_file(
         },
         if single_stage { SchedulePolicy::SingleStage } else { SchedulePolicy::Parallel },
     );
-    let ssa = time("egir_lower_to_ssa", verbose, || allocated.lower_to_ssa(profile))?;
+    let planned = time("egir_plan", verbose, || allocated.plan(profile))?;
+    let ssa = time("egir_lower_to_ssa", verbose, || planned.lower_to_ssa())?;
 
     // Dump MIR if requested
     if let Some(ref path) = output_mir {

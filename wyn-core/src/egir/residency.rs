@@ -17,12 +17,13 @@ use super::program::{
     SemanticOpId, SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::types::{
-    EGraph, ENode, EgirSoac, NodeId, PureOp, SegExtent, SegOpKind, SegPlacement, SegResourceAccess,
-    SegResourceAccessKind, SideEffectKind, SideEffectSite, SoacDestination,
+    EGraph, ENode, EgirSoac, FilterOutput, NodeId, PureOp, SegExtent, SegOpKind, SegPlacement,
+    SegResourceAccess, SegResourceAccessKind, SideEffectKind, SideEffectSite, SoacDestination,
 };
 use crate::ast::TypeName;
 use crate::interface::StorageRole;
 use crate::ssa::types::ExecutionModel;
+use crate::types::TypeExt;
 
 #[derive(Clone)]
 struct Candidate {
@@ -48,6 +49,7 @@ struct InputReplacement {
 }
 
 pub fn run(inner: &mut SemanticProgram) {
+    select_in_place_destinations(inner);
     loop {
         super::semantic_graph::rebuild_dependencies(inner);
         let Some(candidate) = find_candidate(inner) else {
@@ -63,6 +65,280 @@ pub fn run(inner: &mut SemanticProgram) {
         super::realize_outputs::verify::check(inner)
             .expect("runtime-sized Composite survived EGIR residency planning");
     }
+}
+
+/// Resolve TLC's uniqueness-only candidates from the final semantic use graph.
+/// Output realization and fusion have already run, so `InputBuffer` here is a
+/// physical choice rather than a source-level prediction.
+fn select_in_place_destinations(inner: &mut SemanticProgram) {
+    for entry in &mut inner.entry_points {
+        select_in_place_in_graph(&mut entry.graph);
+    }
+    for function in &mut inner.functions {
+        select_in_place_in_graph(&mut function.graph);
+    }
+}
+
+fn select_in_place_in_graph(graph: &mut EGraph) {
+    // Multi-block liveness needs block-parameter substitution. Stay sound and
+    // conservative until that representation is needed by a reuse candidate.
+    if graph.skeleton.blocks.len() != 1 {
+        clear_unique_input_candidates(graph);
+        return;
+    }
+    let block_id = graph.skeleton.entry;
+    let effect_count = graph.skeleton.blocks[block_id].side_effects.len();
+    for effect_index in 0..effect_count {
+        let (operands, map_inputs, operator_inputs, map_destinations, acc_destinations, filter_candidate) = {
+            let effect = &graph.skeleton.blocks[block_id].side_effects[effect_index];
+            match &effect.kind {
+                SideEffectKind::Soac(EgirSoac::Seg {
+                    kind,
+                    map_input_indices,
+                    map_destinations,
+                    acc_destinations,
+                    ..
+                }) => (
+                    effect.operand_nodes.to_vec(),
+                    map_input_indices.clone(),
+                    kind.operators()
+                        .iter()
+                        .map(|operator| operator.input_indices.clone())
+                        .collect::<Vec<_>>(),
+                    map_destinations.clone(),
+                    acc_destinations.clone(),
+                    false,
+                ),
+                SideEffectKind::Soac(EgirSoac::Filter {
+                    output: FilterOutput::Local { destination, .. },
+                    ..
+                }) => (
+                    effect.operand_nodes.to_vec(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    *destination == SoacDestination::UniqueInput,
+                ),
+                _ => continue,
+            }
+        };
+
+        let mut input_use_counts = HashMap::<usize, usize>::new();
+        for &input in map_inputs.iter().flatten().chain(operator_inputs.iter().flatten()) {
+            *input_use_counts.entry(input).or_default() += 1;
+        }
+        let mut claimed = HashSet::<usize>::new();
+        let resolve = |input: usize, claimed: &mut HashSet<usize>| {
+            input_use_counts.get(&input) == Some(&1)
+                && claimed.insert(input)
+                && operands.get(input).is_some_and(|&node| {
+                    reusable_input_type(&graph.types[&node])
+                        && input_is_dead_after(graph, block_id, effect_index, node)
+                })
+        };
+
+        let new_maps: Vec<_> = map_destinations
+            .iter()
+            .enumerate()
+            .map(|(lane, destination)| {
+                if *destination != SoacDestination::UniqueInput {
+                    return *destination;
+                }
+                map_inputs
+                    .get(lane)
+                    .and_then(|inputs| inputs.first())
+                    .copied()
+                    .filter(|&input| resolve(input, &mut claimed))
+                    .map_or(SoacDestination::Fresh, |_| SoacDestination::InputBuffer)
+            })
+            .collect();
+        let new_accs: Vec<_> = acc_destinations
+            .iter()
+            .enumerate()
+            .map(|(operator, destination)| {
+                if *destination != SoacDestination::UniqueInput {
+                    return *destination;
+                }
+                operator_inputs
+                    .get(operator)
+                    .and_then(|inputs| inputs.first())
+                    .copied()
+                    .filter(|&input| resolve(input, &mut claimed))
+                    .map_or(SoacDestination::Fresh, |_| SoacDestination::InputBuffer)
+            })
+            .collect();
+
+        let filter_destination = filter_candidate.then(|| {
+            if reusable_input_type(&graph.types[&operands[0]])
+                && input_is_dead_after(graph, block_id, effect_index, operands[0])
+            {
+                SoacDestination::InputBuffer
+            } else {
+                SoacDestination::Fresh
+            }
+        });
+        let effect = &mut graph.skeleton.blocks[block_id].side_effects[effect_index];
+        match &mut effect.kind {
+            SideEffectKind::Soac(EgirSoac::Seg {
+                map_destinations,
+                acc_destinations,
+                ..
+            }) => {
+                *map_destinations = new_maps;
+                *acc_destinations = new_accs;
+            }
+            SideEffectKind::Soac(EgirSoac::Filter {
+                output: FilterOutput::Local { destination, .. },
+                ..
+            }) => {
+                if let Some(resolved) = filter_destination {
+                    *destination = resolved;
+                }
+            }
+            _ => {}
+        }
+        retype_input_buffer_results(graph, block_id, effect_index);
+    }
+}
+
+fn retype_input_buffer_results(
+    graph: &mut EGraph,
+    block: crate::ssa::framework::BlockId,
+    effect_index: usize,
+) {
+    let effect = &graph.skeleton.blocks[block].side_effects[effect_index];
+    let Some(result) = effect.result else {
+        return;
+    };
+    let projections: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter_map(|(node, definition)| match definition {
+            ENode::Pure {
+                op: PureOp::Project { index },
+                operands,
+            } if operands.as_slice() == [result] => Some((node, *index as usize)),
+            _ => None,
+        })
+        .collect();
+    let (result_types, changed) = {
+        let SideEffectKind::Soac(EgirSoac::Seg {
+            kind,
+            input_array_types,
+            map_input_indices,
+            map_destinations,
+            acc_destinations,
+            result_types,
+            ..
+        }) = &effect.kind
+        else {
+            return;
+        };
+        let mut retyped = result_types.clone();
+        // Output realization may already have changed a projected field to a
+        // storage view. Preserve those later EGIR decisions while changing
+        // only fields whose uniqueness candidate became a physical reuse.
+        for (projection, field) in &projections {
+            retyped[*field] = graph.types[projection].clone();
+        }
+        let mut changed = false;
+        for (lane, destination) in map_destinations.iter().enumerate() {
+            if *destination == SoacDestination::InputBuffer {
+                if let Some(input) = map_input_indices.get(lane).and_then(|inputs| inputs.first()) {
+                    retyped[lane] = input_array_types[*input].clone();
+                    changed = true;
+                }
+            }
+        }
+        for (operator, destination) in acc_destinations.iter().enumerate() {
+            if *destination == SoacDestination::InputBuffer {
+                if let Some(input) =
+                    kind.operators().get(operator).and_then(|operator| operator.input_indices.first())
+                {
+                    retyped[map_destinations.len() + operator] = input_array_types[*input].clone();
+                    changed = true;
+                }
+            }
+        }
+        (retyped, changed)
+    };
+    if !changed {
+        return;
+    }
+    if let SideEffectKind::Soac(EgirSoac::Seg {
+        result_types: stored, ..
+    }) = &mut graph.skeleton.blocks[block].side_effects[effect_index].kind
+    {
+        *stored = result_types.clone();
+    }
+    graph.retype_node(
+        result,
+        Type::Constructed(TypeName::Tuple(result_types.len()), result_types.clone()),
+    );
+    for (projection, field) in projections {
+        if let Some(ty) = result_types.get(field) {
+            graph.retype_node(projection, ty.clone());
+        }
+    }
+}
+
+fn clear_unique_input_candidates(graph: &mut EGraph) {
+    for (_, block) in graph.skeleton.blocks.iter_mut() {
+        for effect in &mut block.side_effects {
+            match &mut effect.kind {
+                SideEffectKind::Soac(EgirSoac::Seg {
+                    map_destinations,
+                    acc_destinations,
+                    ..
+                }) => {
+                    for destination in map_destinations.iter_mut().chain(acc_destinations) {
+                        if *destination == SoacDestination::UniqueInput {
+                            *destination = SoacDestination::Fresh;
+                        }
+                    }
+                }
+                SideEffectKind::Soac(EgirSoac::Filter {
+                    output: FilterOutput::Local { destination, .. },
+                    ..
+                }) if *destination == SoacDestination::UniqueInput => {
+                    *destination = SoacDestination::Fresh;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn input_is_dead_after(
+    graph: &EGraph,
+    block: crate::ssa::framework::BlockId,
+    index: usize,
+    input: NodeId,
+) -> bool {
+    let body = &graph.skeleton.blocks[block];
+    body.side_effects[index + 1..]
+        .iter()
+        .flat_map(|effect| effect.referenced_nodes())
+        .chain(body.term.referenced_nodes())
+        .all(|root| !node_reaches(graph, root, input))
+}
+
+fn node_reaches(graph: &EGraph, root: NodeId, target: NodeId) -> bool {
+    wyn_graph::reaches_ordered(root, target, wyn_graph::WalkOrder::DepthFirst, |node, out| {
+        out.extend(graph.nodes[node].children());
+    })
+}
+
+fn reusable_input_type(ty: &Type<TypeName>) -> bool {
+    match ty.array_variant() {
+        Some(Type::Constructed(TypeName::ArrayVariantVirtual, _)) => return false,
+        Some(Type::Constructed(TypeName::ArrayVariantView, _)) => return true,
+        _ => {}
+    }
+    let runtime_sized =
+        ty.array_size().is_some_and(|size| !matches!(size, Type::Constructed(TypeName::Size(_), _)));
+    !runtime_sized || crate::types::array_view_buffer(ty).is_some()
 }
 
 /// The allocation boundary promises that a pure internal SegMap is either

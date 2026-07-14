@@ -1,8 +1,9 @@
 //! Target-independent optimization of semantic EGIR: resource-access
-//! canonicalization, dead-SegOp elimination, and graph-rewriting fusion
-//! (same-space horizontal, single-consumer producer/consumer). Every rewrite is
-//! gated by the semantic dependency DAG so two ops are never fused or reordered
-//! across a conflicting resource or effect.
+//! canonicalization, dead-SegOp elimination, indexed-demand scalarization, and
+//! graph-rewriting fusion (same-space horizontal, producer/consumer, envelope,
+//! and filter consumers). Every rewrite is gated by the semantic dependency DAG
+//! so two ops are never fused or reordered across a conflicting resource or
+//! effect.
 
 use super::program::SemanticProgram;
 use super::semantic_graph::SemanticGraph;
@@ -26,10 +27,19 @@ pub fn run(inner: &mut SemanticProgram) {
 
         let mut changed = eliminate_dead_seg_ops(inner);
         if !changed {
-            changed = super::fusion::horizontal::fuse_sibling_seg_ops(inner, &oracle);
+            changed = super::fusion::indexed::scalarize_indexed_segmap(inner);
         }
         if !changed {
             changed = super::fusion::vertical::fuse_producer_into_consumer(inner, &oracle);
+        }
+        if !changed {
+            changed = super::fusion::envelope::fuse_producer_into_envelope(inner, &oracle);
+        }
+        if !changed {
+            changed = super::fusion::filter::fuse_filter_consumers(inner, &oracle);
+        }
+        if !changed {
+            changed = super::fusion::horizontal::fuse_sibling_seg_ops(inner, &oracle);
         }
         if !changed {
             break;

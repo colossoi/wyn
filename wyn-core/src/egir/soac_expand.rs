@@ -25,7 +25,9 @@ use crate::ast::TypeName;
 use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
-use super::types::{ENode, NodeId, PureOp, SegOpKind, SkeletonTerminator, SoacDestination};
+use super::types::{
+    ENode, NodeId, PureOp, ScremaAccumulator, SegOpKind, SkeletonTerminator, SoacDestination,
+};
 
 /// Run `run_one_body` on every function and entry point in the program.
 pub fn run(inner: &mut PhysicalProgram) {
@@ -237,6 +239,9 @@ fn expand_one(
             let mut map_input_buffer_inits = Vec::with_capacity(n_maps);
             for (map_idx, dest) in map_destinations.iter().enumerate() {
                 match dest {
+                    SoacDestination::UniqueInput => {
+                        panic!("unresolved UniqueInput destination reached physical expansion")
+                    }
                     SoacDestination::Fresh => {
                         map_output_views.push(None);
                         map_input_buffer_inits.push(None);
@@ -266,6 +271,9 @@ fn expand_one(
             let mut acc_input_buffer_inits = Vec::with_capacity(n_accs);
             for dest in &acc_destinations {
                 match dest {
+                    SoacDestination::UniqueInput => {
+                        panic!("unresolved UniqueInput destination reached physical expansion")
+                    }
                     SoacDestination::Fresh => {
                         acc_output_views.push(None);
                         acc_input_buffer_inits.push(None);
@@ -295,8 +303,8 @@ fn expand_one(
                 .iter()
                 .zip(acc_result_tys.iter())
                 .map(|(acc, result_ty)| match acc.kind {
-                    crate::tlc::ScremaAccumulator::Reduce => result_ty.clone(),
-                    crate::tlc::ScremaAccumulator::Scan => {
+                    ScremaAccumulator::Reduce => result_ty.clone(),
+                    ScremaAccumulator::Scan => {
                         if result_ty.is_array() {
                             result_ty.elem_type().expect("Array has elem").clone()
                         } else if as_soa_tuple(result_ty).is_some() {
@@ -371,7 +379,7 @@ fn expand_one(
             let mut acc_scan_carried_tys: Vec<Option<Type<TypeName>>> = Vec::with_capacity(n_accs);
             for acc_idx in 0..n_accs {
                 match acc_specs[acc_idx].kind {
-                    crate::tlc::ScremaAccumulator::Reduce => {
+                    ScremaAccumulator::Reduce => {
                         acc_scan_carried_indices.push(None);
                         acc_current_carried_indices.push(carried.len());
                         result_indices.push(carried.len());
@@ -379,7 +387,7 @@ fn expand_one(
                         acc_scan_carried_tys.push(None);
                         carried.push((acc_elem_tys[acc_idx].clone(), init_acc_nids[acc_idx]));
                     }
-                    crate::tlc::ScremaAccumulator::Scan => {
+                    ScremaAccumulator::Scan => {
                         let init_scan_out = if let Some(view_nid) = acc_output_views[acc_idx] {
                             view_nid
                         } else if let Some(input_nid) = acc_input_buffer_inits[acc_idx] {

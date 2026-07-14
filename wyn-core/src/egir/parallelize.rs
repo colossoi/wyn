@@ -27,9 +27,9 @@ use super::program::{
 };
 use super::types::{
     EGraph, ENode, EgirSoac, FilterOutput, FilterPlan, FilterState, HistExecution, NodeId, PureOp,
-    RegionId, RuntimeFilterLength, ScremaOperator, SegBinOp, SegBody, SegExtent, SegLevel, SegOpKind,
-    SegPlacement, SegResourceAccess, SegResourceAccessKind, SegSpace, SideEffect, SideEffectKind,
-    SideEffectSite, SkeletonTerminator, SoacDestination,
+    RegionId, RuntimeFilterLength, ScremaAccumulator, ScremaOperator, SegBinOp, SegBody, SegExtent,
+    SegLevel, SegOpKind, SegPlacement, SegResourceAccess, SegResourceAccessKind, SegSpace, SideEffect,
+    SideEffectKind, SideEffectSite, SkeletonTerminator, SoacDestination,
 };
 
 /// Per-workgroup width of a synthesized phase-2 tree reduce.
@@ -880,14 +880,12 @@ fn split_multidomain_seg_maps(entry: &super::program::PlannedEntry) -> Option<En
 }
 
 fn reify_tail_soac(entry: &mut SemanticEntry) {
-    // A multi-output entry returning a tuple of sibling maps over distinct
-    // domains carries one Screma side-effect per output (TLC fusion already
-    // merged equal-domain siblings into a single multi-lane Screma). Reify each
-    // output-rooted one — it becomes its own SegOp, matching Futhark's
-    // one-SegOp-per-SegSpace structure; the schedule pass then splits distinct
-    // spaces into separate kernels. Intermediate Scremas (a map feeding a
-    // downstream scatter/filter/map) are left serial so `soac_expand` keeps
-    // them wired into that consumer's pipeline.
+    // A multi-output entry returning sibling maps may carry one Screma
+    // side-effect per output. Reify each output-rooted one; semantic EGIR then
+    // fuses equal-domain siblings, while scheduling splits distinct spaces into
+    // separate kernels. Intermediate Scremas (a map feeding a downstream
+    // scatter/filter/map) are left serial so `soac_expand` keeps them wired
+    // into that consumer's pipeline.
     let soac_consumed = soac_consumed_nodes(entry);
     let consumed = &soac_consumed;
     let kernel_scope = matches!(
@@ -1149,9 +1147,9 @@ fn reify_seg_kind(accumulators: &[ScremaOperator], neutrals: &[NodeId], input_co
         .collect();
     if operators.is_empty() {
         SegOpKind::SegMap
-    } else if operators.iter().all(|op| matches!(op.kind, crate::tlc::ScremaAccumulator::Reduce)) {
+    } else if operators.iter().all(|op| matches!(op.kind, ScremaAccumulator::Reduce)) {
         SegOpKind::SegRed { operators }
-    } else if operators.iter().all(|op| matches!(op.kind, crate::tlc::ScremaAccumulator::Scan)) {
+    } else if operators.iter().all(|op| matches!(op.kind, ScremaAccumulator::Scan)) {
         SegOpKind::SegScan { operators }
     } else {
         SegOpKind::SegComposite { operators }
@@ -2708,7 +2706,7 @@ fn emit_scan_entry(
             EgirSoac::Screma {
                 map_bodies: vec![],
                 accumulators: vec![ScremaOperator {
-                    kind: crate::tlc::ScremaAccumulator::Reduce,
+                    kind: ScremaAccumulator::Reduce,
                     step: SegBody {
                         region: schedule.intern_callable(&op_func),
                         captures: step_capture_nodes,

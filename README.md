@@ -56,8 +56,9 @@ passes:
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **Parsed** | `parser` | Tokenization and parsing into AST |
-| **Desugared** | `desugar` | Range/slice expressions desugared; SOAC names rewritten to intrinsics |
-| **Resolved** | `name_resolution` | Name resolution and module imports |
+| **Parsed** *(optional self-transition)* | `resolve_imports` | The CLI recursively resolves file imports before module elaboration; in-memory/wasm compilation skips this filesystem-only step |
+| **Parsed** *(self-transition)* | `module_manager::elaborate_modules` | Elaborate inline modules and remove their declarations from the source AST |
+| **Resolved** | `name_resolution`, `resolve_resources` | Resolve names, qualified module members, and resources |
 | **AstConstFoldedEarly** | `ast_const_fold` | Compile-time integer constant folding |
 | **TypeChecked** | `types::checker` | Hindley-Milner type inference and checking, plus one-directional `*T → T` weakening at coercion sites (return position, let ascription) |
 
@@ -66,74 +67,90 @@ passes:
 |-------|--------|-------------|
 | **TlcTransformed** | `tlc` (`TypeChecked::to_tlc`) | AST converted to minimal typed lambda calculus |
 | **TlcBuffersPinned** | `tlc::pin_entry_buffers` | Each storage entry-param's concrete `Buffer(set, binding)` is substituted into its type, so a view's buffer is a statically-known type property that flows by unification. A distinct typestate, so the rest of the pipeline can't run without it (see View Buffer Provenance below) |
+| **TlcOwnershipValidated** | `tlc::ownership::check` | Validate source-level consumption and reject use-after-move before simplification or inlining can erase the call boundary carrying the `*T` contract |
 | **TlcPartialEvaled** | `tlc::partial_eval` | Constant folding and algebraic simplifications |
 | **TlcSoaNormalized** | `tlc::soa` | SoA transform (`[n](A,B)` → `([n]A, [n]B)`) + Map+Zip flattening + standalone Zip elimination |
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized — including over a view's **buffer**, so a function called on two buffers yields two monomorphs (this subsumes the former `buffer_specialize` pass) |
 | **TlcRepSpecialized** | `tlc::rep_specialize` | Phase 2 of array-variant-abstract: at call edges, clone any user-defined callee whose `Abstract`-typed param receives a producer-known concrete variant (Bounded / View from filter), and rewrite the call to invoke the clone. Runs before force-inline so SOAC helpers are representation-concrete when it inlines them |
 | **TlcSmallInlined** | `tlc::inline` | Inline small user functions and constants |
-| **TlcSoacHelpersInlined** | `tlc::inline::run_force_soac_helpers` | Force-inline every user function whose body (recursively) contains a SOAC (or `length`), regardless of control flow, so no SOAC is reachable behind a call and fusion is purely intraprocedural. Checked by `fusion::verify_soac_helpers_inlined` |
-| **TlcProducerCanonicalized** | `tlc::soa`, `tlc::if_over_producer` | Re-run SoA normalization (inlining may have exposed new tuple/zip/map structure), then `if-over-producer` lifting, so fusion sees clean top-of-let-chain SOAC producers |
-| **TlcFused** | `tlc::fusion`, `tlc::if_over_producer` | Intraprocedural SOAC fusion (horizontal map, map+reduce/scan, filter+length — "merge compatible nodes, union outputs"), then `if-over-producer` lifting and reachable-DCE. No cross-function summary path: every producer/consumer edge is within one def (force-inline guarantees it). Runs on **inline** SOAC operators (pre-defunctionalize) so `compose_*` can fold operator bodies directly |
-| **TlcEntryProducersExposed** | `tlc::materialize_entry_soacs` | Inlines producer-helper calls into the entry's top-level let-chain so the next two passes can see the SOAC producer + its indexed uses in the same scope. Refuses to descend into per-element lambdas — exposing a per-element scan as an entry producer would wreck cost semantics |
-| **TlcStaticIndexFused** | `tlc::static_index_fusion` | `map(f, src)[k]` (constant `k`) collapses to `f(src[k])`. A producer demanded only at a known slot becomes a scalar element computation rather than a runtime-sized buffer materialization |
+| **TlcSoacHelpersInlined** | `tlc::inline::run_force_soac_helpers` | Force-inline every user function whose body recursively contains a SOAC (or `length`), so TLC-to-EGIR conversion exposes producer/consumer edges without cross-call summaries |
+| **TlcInlinedSoaNormalized** | `tlc::soa` | Re-run SoA normalization after inlining exposes tuple/zip/map structure |
+| **TlcConditionalProducersCanonicalized** | `tlc::if_over_producer` | Turn eligible array-valued conditionals into pointwise producers without choosing fusion, routes, or storage |
+| **TlcSoacsAnfNormalized** | `tlc::soac_anf` | Lift nested SOAC expressions onto flat let chains so TLC-to-EGIR conversion records every semantic producer/consumer edge explicitly |
 | **TlcRuntimeIndexProducersFloated** | `tlc::runtime_index_producers` | `map(\i. (map(f, xs))[i], is)` floats the inner producer out into a let-binding so it looks like an ordinary gather (`let p = map(f, xs) in map(\i. p[i], is)`) for the residency pass to rewrite |
-| **TlcGathersLifted** | `tlc::lift_gathers` | Plans and executes gather residency (the `plan_execute_gather_residency` transition): materializes randomly-indexed computed arrays into storage buffers by splitting the producer into its own pre-pass compute entry, then rewrites the consumer's indexed reads to load from that buffer |
-| **TlcScalarPrepassesHoisted** | `tlc::parallelize` | Hoists a compute entry's scalar pre-pass computations (e.g. a reduction whose result a later phase consumes) into their own pre-pass compute entry, so the value is resident at dispatch. Skipped under `--single-stage` (the `disable` flag). Runs in the residency cluster, before defunctionalize, while producers are still recognizable as `Soac(Map/Scan)` |
-| **TlcDefunctionalized** | `tlc::closure_convert` → `tlc::hof_specialize` → `tlc::closure_calls_lower` | Three sequential passes: lambdas lifted to top-level defs, higher-order functions specialized away, captures threaded into call sites — including the SOAC operators fusion composed earlier. Verifier-checked invariants guard each phase boundary (see Defunctionalization below) |
+| **TlcDefunctionalized** | `tlc::closure_convert` → `tlc::hof_specialize` → `tlc::closure_calls_lower` | Three sequential passes: lambdas lifted to top-level defs, higher-order functions specialized away, and captures threaded into call sites. Verifier-checked invariants guard each phase boundary (see Defunctionalization below) |
 | **TlcGeneratedLambdasFolded** | `tlc::inline` | Fold compiler-generated lambda defs back at call sites + DCE |
-| **TlcOwnershipApplied** | `tlc::ownership` | Backward ownership-liveness analysis. Reports use-after-move; rewrites array-update operations into in-place forms when the source is mutable and dead after the call. Runs before output normalization so its liveness walk never sees `OutputSlotStore` |
-| **TlcOutputsNormalized** | `tlc::normalize_outputs` | Rewrites each compute entry's tail into a chain of explicit per-slot output writes. Single-output and multi-output entries share one structural shape; the entry's `def.ty` is kept in sync with its rewritten body |
-| **TlcParallelized** | `tlc::parallelize` | Remaining source-level equal-domain map fusion plus empty host pipeline shells. No strategy or recognition facts are emitted; EGIR derives placement and scheduling from semantic operations |
+| **TlcOwnershipApplied** | `tlc::ownership` | Reports source-level use-after-move, promotes safe array updates, and attaches uniqueness-only `UniqueInput` candidates. EGIR owns post-fusion liveness and physical reuse |
 | **TlcReachable** | `tlc::inline` | Dead definition elimination |
+| **TlcInputSliceBoundsInferred** | `tlc::input_slice_bounds` | Infer minimum input buffer lengths before semantic EGIR conversion |
 
 #### Pass-ordering dependency assertions
 
 The table above is one valid topological sort of the constraints below
-(`optimize_for_test` in `wyn-core/src/lib.rs` and the CLI pipeline in
+(`optimize_tlc_for_test` in `wyn-core/src/lib.rs` and the CLI pipeline in
 `wyn/src/main.rs` must stay in sync with it). `A ≺ B` means A runs before B.
 Each notes how it's enforced; when you move a pass, check it here.
 
-- **`monomorphize` ≺ `defunctionalize`** — fusion must run post-mono
-  (intraprocedural) *and* pre-defunc (so it composes **inline** SOAC operators,
-  not function references), so mono runs first. Mono handles the still-higher-
-  order program; defunc removes function-typed params and lifts the fused
-  operators to refs afterward. *Enforced by:* convention.
+- **`validate_ownership` ≺ `partial_eval`** — source-level consumption must be
+  checked while the call boundary carrying the `*T` contract still exists.
+  *Enforced by:* `partial_eval` is defined only on `TlcOwnershipValidated`.
+- **`monomorphize` ≺ `defunctionalize`** — monomorphization specializes the
+  still-higher-order program; defunctionalization then removes function-typed
+  parameters and gives EGIR concrete callable references and captures.
+  *Enforced by:* the TLC typestate chain.
 - **`defunctionalize` ≺ `fold_generated_lambdas`** — fold inlines the
-  `_w_lambda_*` defs that defunc generates. *Enforced by:* convention.
+  `_w_lambda_*` defs that defunc generates. *Enforced by:* the TLC typestate
+  chain.
 - **`monomorphize` ≺ `force_inline_soac_helpers`** — force-inline's free-type-var
   guard skips any helper still carrying an unresolved element-type `Variable`, so
-  helpers must be concrete first. *Enforced by:* indirectly via the validator
-  below.
+  helpers must be concrete first. *Enforced by:* the TLC typestate chain.
 - **`rep_specialize` ≺ `force_inline_soac_helpers`** — makes `filter`-result
   helpers representation-concrete (`Abstract` → `Bounded`/`View`) so the guard
-  admits them. *Enforced by:* convention.
-- **`force_inline_soac_helpers` ≺ `fuse_maps`** — every SOAC helper inlined so
-  fusion sees only intra-def producer/consumer edges (no summary path).
-  *Enforced by:* `fusion::verify_soac_helpers_inlined` — `debug_assert!` at the
-  end of `run_force_soac_helpers` and at the top of `fusion::run`.
-- **`apply_ownership` ≺ `normalize_outputs`** — ownership's liveness analysis has
-  no case for `OutputSlotStore`, which `normalize_outputs` introduces. *Enforced
-  by:* `unreachable!` in `ownership.rs`'s `analyze`.
-- **residency cluster (`expose_entry_producer_helpers` … `hoist_scalar_prepasses`)
-  ≺ `defunctionalize`** — the gather/static-index/scalar-prepass passes match on
-  `Soac(Map/Scan)` producers, which only survive while operators are still
-  function values; defunctionalize lifts them to refs and must run after. *Enforced
-  by:* convention (see the comment in `compile_file`).
+  admits them. *Enforced by:* the TLC typestate chain.
+- **`force_inline_soac_helpers` ≺ `soac_anf`** — every SOAC helper is inlined so
+  EGIR receives explicit intra-def producer/consumer edges rather than needing
+  cross-call summaries. *Enforced by:* the TLC typestate chain.
+- **`soac_anf` ≺ `float_runtime_index_nested_producers` ≺ `defunctionalize`
+  ≺ `to_egraph`** — nested producers become explicit let-bound demand edges
+  before callables are lowered to the reference/capture ABI consumed by EGIR.
+  *Enforced by:* the TLC typestate chain.
+- **`apply_ownership` ≺ `to_egraph`** — TLC records source-level uniqueness but
+  does not decide physical reuse. EGIR resolves `UniqueInput` only after output
+  realization and semantic optimization. *Enforced by:* the TLC/EGIR typestate
+  chain and a physical-expansion assertion rejecting unresolved candidates.
 
 ### EGIR (Acyclic E-Graph IR)
 | Stage | Module | Description |
 |-------|--------|-------------|
-| **EgirRaw** | `egir::from_tlc` | TLC → EGraph; intrinsic calls become pure nodes (with explicit arms for effectful ones). Per-slot output writes are bridged back into a tail tuple so the next stage can retarget per slot |
+| **EgirRaw** | `egir::from_tlc` | TLC → semantic EGraph; intrinsic calls become pure nodes (with explicit arms for effectful ones), callable bodies become regions, and each entry records stable per-slot `OutputRoute`s. No scheduling or physical resource choice occurs here |
 | **EgirOutputsRealized** | `egir::realize_outputs` | Per-slot output realization: each declared output's writes are materialized as side effects against the bound storage view (compute) or `OutputSlot` place (graphics); the body's `Return` carries no value. The post-pass verifier checks no runtime-sized Composite array is reachable from any entry output |
-| **EgirSegmented** | `egir::parallelize::reify` | Every reachable Screma becomes a semantic SegMap/SegRed/SegScan with authoritative SegSpace, typed bodies, explicit captures, output routing, effects, placement, and dependencies. No phases are selected here |
-| **EgirOptimized** | `egir::semantic_opt`, `egir::fusion` | Conflict-aware same-space sibling fusion, single-consumer producer/consumer region composition, and dead-SegOp elimination; SegOps remain semantic |
-| **EgirAllocated** | `egir::program`, `egir::multi_consumer` | Owns the authoritative host/compiler resource manifest. Scalar handoffs, reduce/scan/filter scratch, and shared multi-consumer array materializations have `ResourceId`s; physical publication still waits for terminal lowering |
-| **SsaConverted** | `egir::target_lowering` | `lower_to_ssa(LoweringProfile)` transactionally chooses algorithms, scratch, bindings, domains, KernelPlan, and the final descriptor, then expands SegOps to SSA. `egir::resource_erasure` then drops compile-time-only resource handles (buffer-monomorphized storage-image params/operands) so no opaque image is threaded as an SSA value |
+| **EgirSegmented** | `egir::parallelize::reify` | Every reachable raw map/reduce/scan Screma becomes a semantic SegMap/SegRed/SegScan with authoritative `SegSpace`, typed bodies, explicit captures, output routing, effects, placement, and dependencies. No phases are selected here |
+| **EgirOptimized** | `egir::semantic_opt`, `egir::fusion` | Conflict-aware sibling and producer/consumer fusion, filter/envelope fusion, indexed-demand scalarization, and dead-SegOp elimination; SegOps remain semantic |
+| **EgirAllocated** | `egir::program`, `egir::residency` | Resolve uniqueness candidates from post-fusion liveness and build the logical resource manifest for scalar handoffs, gather/shared arrays, outputs, and reduce/scan/filter scratch. Physical bindings and entry splitting remain deferred |
+| **EgirPlanned** | `egir::target_lowering` | Given a `LoweringProfile`, choose algorithms and dispatches, split physical entries, allocate physical bindings, validate the `KernelPlan`, and publish the final descriptor as one transaction |
+| **SsaConverted** | `egir::soac_expand` → `egir::materialize` → `egir::skel_opt` → `egir::resource_erasure` → `egir::elaborate` | Expand only the validated physical plan, materialize and simplify its graph, erase compile-time resource handles, and elaborate the result to SSA |
+
+The EGIR order is also load-bearing:
+
+- **`realize_outputs` ≺ `segment`** — output routes must become authoritative
+  writes before raw SOACs are wrapped as segmented operations.
+- **`segment` ≺ `optimize`** — fusion legality depends on explicit domains,
+  semantic operation IDs, effects, and dependency edges.
+- **`optimize` ≺ `allocate`** — residency and uniqueness resolution use the
+  final fused graph's liveness and demands.
+- **`allocate` ≺ `plan`** — target scheduling consumes the complete logical
+  resource and scratch manifest; only then may it choose bindings, dispatches,
+  and physical entries.
+- **`plan` ≺ `lower_to_ssa`** — SOAC expansion accepts only the validated
+  physical program built from the kernel plan.
+
+Every dependency above is enforced by the top-level typestate chain; each
+typestate exposes only its single next pass.
 
 ### SSA (codegen only)
 | Stage | Source | Description |
 |-------|--------|-------------|
-| **SsaConverted** | `EgirAllocated::lower_to_ssa` | Target-aware terminal EGIR lowering produces SSA, schedule, and descriptor together |
+| **SsaConverted** | `EgirPlanned::lower_to_ssa` | Lowering the validated physical program produces SSA while retaining its published schedule and descriptor |
 | **Lowered** | `spirv` / `wgsl` | SSA to SPIR-V or WGSL |
 
 SSA is intentionally minimal: all mid-end machinery (effect tokens,
@@ -151,9 +168,9 @@ Key properties:
 ### SOAC Parallelization Boundary
 
 Parallel semantics live in EGIR. TLC performs source-level normalization and
-fusion but emits no per-entry strategy record. EGIR reifies every reachable
-SOAC, retains it through semantic optimization and logical allocation, and
-destroys it only at the target-aware lower-to-SSA boundary. That terminal
+uniqueness reasoning but emits no per-entry strategy record. EGIR reifies every
+reachable SOAC, retains it through semantic optimization and logical
+allocation, and destroys it only at the target-aware lower-to-SSA boundary. That terminal
 operation produces SSA kernels, the dependency/resource schedule, and the
 descriptor as one result. Its initial portable scheduler implements:
 
@@ -176,13 +193,12 @@ descriptor as one result. Its initial portable scheduler implements:
 
 ### SOAC Implementation Status
 
-The seven SOAC variants (`SoacOp` in `tlc/mod.rs`) at varying stages of
-the pipeline. "Serial" = correct sequential lowering through
-`soac_expand`. "Consuming-input DPS" = the ownership pass marks a
-unique-and-dead input and the SOAC rewrites to write back in place
-instead of allocating a fresh output buffer. "Parallel" = EGIR-side
-parallelization fires on a compute-entry tail SOAC matching the
-strategy's shape.
+TLC has six `SoacOp` variants; the table also lists Redomap, which is a fused
+semantic EGIR form rather than a TLC constructor. "Serial" = correct sequential
+lowering through `soac_expand`. "Consuming-input DPS" = TLC records a uniqueness
+candidate and EGIR residency verifies post-fusion death before choosing in-place
+reuse instead of a fresh output buffer. "Parallel" = EGIR-side parallelization
+fires on a compute-entry SOAC matching the strategy's shape.
 
 | SOAC               | Surface syntax                          | Serial | Consuming-input DPS | Parallel  |
 |--------------------|-----------------------------------------|--------|---------------------|-----------|
@@ -190,25 +206,24 @@ strategy's shape.
 | `Reduce`           | `reduce op ne xs`                       | ✓      | n/a (scalar result) | ✓ (chunked + combine) |
 | `Redomap`          | `reduce op ne (map f xs)` (fused)       | ✓      | n/a (scalar result) | ✓ (chunked + combine) |
 | `Scan`             | `scan op ne xs`                         | ✓      | ✓                   | ✓ (3-phase Blelloch-style) |
-| `Filter`           | `filter pred xs`                        | ✓ (static **and** runtime-sized) | ✓      | partial — `reduce(filter)` fuses to a parallel redomap; standalone `filter` is serial (see below) |
+| `Filter`           | `filter pred xs`                        | ✓ (static **and** runtime-sized) | ✓      | ✓ for escaping entry outputs (flags + scan + scatter); non-escaping consumers fuse semantically |
 | `Scatter`          | `scatter(dest, indices, values)`        | ✓ (sequential per-lane indexed store; envelope `(xs..) -> (index, value)` lets the fusion engine fuse map producers into the scatter) | ✓ (writes in place into the bound storage view) | ✗ |
 | `ReduceByIndex`    | histogram-style indexed reduction       | ✗ EGIR `convert_soac` rejects with `Unsupported` | n/a | ✗ (atomics not yet implemented) |
 
 Notes:
-- `Scan` consuming-input DPS is wired through Path B
-  (`egir::parallelize::transform_scan_entry` reroutes phase 1 + phase 3
-  writes back to the input binding when destination is `InputBuffer`).
-  A view's backing buffer flows through loop block params and
-  `array_with_inplace` as part of its **type** (the `Buffer(set, binding)`
-  in its type's buffer slot), so `ViewIndex` recovers the storage buffer
-  from `array_view_buffer(value_type)` — see View Buffer Provenance below.
+- TLC ownership emits only `UniqueInput`. After fusion,
+  `egir::residency::select_in_place_destinations` promotes it to `InputBuffer`
+  only when the final semantic graph proves the compatible input dead;
+  otherwise it becomes `Fresh` (or output routing has already selected an
+  `OutputView`). `soac_expand` turns an accepted in-place destination into
+  `array_with_inplace` operations.
 - Phase 3 of parallel scan applies `op(off, elem)`, not `op(elem, off)`:
   `egir::parallelize` synthesizes a swap-args wrapper EgirFunc
   `\(a, b) -> op(b, a)` alongside the phase entries, and phase 3's Map
   routes through the wrapper. Correct for non-commutative associative
   combiners (string concat, matmul).
 
-#### `Filter` — runtime-sized inputs and the parallelization gap
+#### `Filter` — runtime-sized inputs and parallel lowering
 
 `filter` is shape-changing: it returns the existential `?k. [k]T`, opened
 to a runtime length `k ≤ n` at the consumer. Two lowerings, by input size:
@@ -221,9 +236,9 @@ to a runtime length `k ≤ n` at the consumer. Two lowerings, by input size:
   yields a runtime-length **view** over it (`StorageView(scratch)[0, count]`).
   The surviving count is the view's `len` *operand* — a value, not a
   type-level size — so `length` and `reduce` consume it like any view. The
-  scratch binding is reserved EGIR-locally (the converter's binding cursor +
-  `extra_storage_bindings`, surfaced by `egir::publish`, like a `lift_gathers`
-  gather buffer). A runtime `filter` reached in a *standalone* function (one
+  scratch binding is represented in EGIR's logical resource manifest and
+  published by terminal scheduling alongside gather/shared-array resources.
+  A runtime `filter` reached in a *standalone* function (one
   inlining didn't fold into a compute entry) errors — only an entry owns a
   descriptor set to host the scratch buffer; `from_tlc::convert_function`
   guards this.
@@ -232,24 +247,17 @@ to a runtime length `k ≤ n` at the consumer. Two lowerings, by input size:
   the surviving count to a **paired `u32` length cell** (`Fixed{4}`,
   repurposed from the scratch binding) the host reads back alongside the data.
 
-**Parallelization status.** `reduce(op, ne, filter(p, xs))` fuses in
-`tlc::fusion` into a **masked redomap** `redomap(op∘mask, op, ne, xs)` with
-`mask = λx. if p(x) then x else ne` (valid because `ne` is `op`'s neutral
-element), so it parallelizes as an ordinary two-phase redomap — no compacted
-intermediate. This fires across function boundaries via `array_semantics`
-function summaries (`reduce(+, 0, evens(xs))` where `def evens = filter(…)`).
+**Parallelization status.** Semantic EGIR folds non-escaping filters into
+masked reduction steps; `length` becomes one shared count reduction, so no
+compacted intermediate is required. SOAC helpers are force-inlined before EGIR
+conversion, making the same rewrite available when source code factors the
+filter and consumer into different functions.
 
-**GAP:** a *standalone* parallel `filter` (returning the compacted array —
-`filter→output`/`filter→length` at an entry tail) is **not implemented**; it
-runs through the serial scratch-view loop above. The parallel algorithm is
-map (predicate → flags) → parallel scan (flags → offsets) → scatter
-(`if flags[i] { out[offsets[i]-1] = xs[i] }`) → len (`offsets[n-1]`). Two
-pieces are missing: a target-lowering `SegFilter` schedule reusing the
-  parallel scan for the offsets prefix-sum,
-and a guarded parallel **scatter** kernel — `EntryBuilder` only emits
-straight-line SOAC phase bodies, so the conditional store needs hand-built CFG
-(the existing ordered `SegHist`/scatter lowering is serial). Until then,
-`reduce(filter)` is the only parallel filter path.
+An escaping `SegFilter` uses the parallel map → flag scan → scatter algorithm
+(`if flags[i] { out[offsets[i]-1] = xs[i] }`) and publishes the final count
+through the paired length cell. Ordered general-purpose `SegHist`/scatter
+lowering remains serial; the filter scheduler owns its guarded compaction
+scatter as part of the specialized filter phase model.
 
 #### Remaining-work ordering
 
@@ -266,12 +274,6 @@ is independent.
   `tlc::mod::transform_soac_reduce_by_index`; `scatter` is parsed as an
   ordinary function call (no dedicated `SoacOp` surface form — the
   envelope lambda is what marks it as a SOAC).
-- **Parallel `Filter` → parallel `Scan` + a scatter kernel.** The scan
-  prerequisite (prefix-sum over the predicate mask → write offsets) is in
-  place, but the `SegFilter` schedule and the guarded scatter
-  kernel are not built (see "`Filter` — runtime-sized inputs" above). Today
-  `reduce(filter)` parallelizes via the masked-redomap fusion; standalone
-  `filter` is serial.
 - **Parallel `ReduceByIndex` → atomic intrinsics.** The catalog has
   no `atomicAdd`/`atomicMin`/etc. today; adding them is a
   prerequisite for parallel histograms. Serial ReduceByIndex doesn't
@@ -356,7 +358,7 @@ don't pattern-match on args indices directly.
 |---|---|---|---|---|
 | `Bool`, `Float(n)`, `UInt(n)`, `Int(n)` | — | — | — | Nullary scalars |
 | `Unit` | — | — | — | The `()` value |
-| `SideEffect` | — | — | — | "No return value, side effects only"; renders as `!()`. Used by post-`normalize_outputs` compute entry bodies and imperative builtin signatures |
+| `SideEffect` | — | — | — | "No return value, side effects only"; renders as `!()`. Used by effect-only computations and imperative builtin signatures |
 | `Arrow` | param | return | — | Curry by chaining (`a → b → c` = `Arrow(a, Arrow(b, c))`) |
 | `Tuple(n)` | t₁ | t₂ | … | n elements; arity in the variant tag |
 | `Vec` | elem | `Size(n)` | — | n-component vector |
@@ -415,7 +417,7 @@ cargo build --release
 cargo test
 ```
 
-1153 tests currently pass (9 ignored for pending features). All SPIR-V testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`); the WGSL subset also validates (`bash scripts/validate_testfiles.sh --wgsl` — a handful skip because they depend on linked SPIR-V helpers).
+Use `cargo test --workspace` for the full Rust suite. All SPIR-V testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`); the WGSL subset also validates (`bash scripts/validate_testfiles.sh --wgsl` — a handful skip because they depend on linked SPIR-V helpers).
 
 ## Language Overview
 

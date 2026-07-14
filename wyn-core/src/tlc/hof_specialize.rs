@@ -347,24 +347,20 @@ pub(super) fn apply_type_subst_to_soac(
         },
         SoacOp::Scan {
             op,
-            reduce_op,
             ne,
             input,
             destination,
         } => SoacOp::Scan {
             op: apply_type_subst_to_soac_body(op, subst, term_ids),
-            reduce_op: apply_type_subst_to_soac_body(reduce_op, subst, term_ids),
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
             destination: *destination,
         },
         SoacOp::Filter {
-            map_lam,
             pred,
             input,
             destination,
         } => SoacOp::Filter {
-            map_lam: map_lam.as_ref().map(|ml| apply_type_subst_to_soac_body(ml, subst, term_ids)),
             pred: apply_type_subst_to_soac_body(pred, subst, term_ids),
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
             destination: *destination,
@@ -386,29 +382,6 @@ pub(super) fn apply_type_subst_to_soac(
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
             indices: apply_type_subst_to_array_expr(indices, subst, term_ids),
             values: apply_type_subst_to_array_expr(values, subst, term_ids),
-        },
-        SoacOp::Screma {
-            lanes,
-            accumulators,
-            inputs,
-        } => SoacOp::Screma {
-            lanes: lanes
-                .iter()
-                .map(|lane| super::ScremaLane {
-                    lam: apply_type_subst_to_soac_body(&lane.lam, subst, term_ids),
-                    input_indices: lane.input_indices.clone(),
-                })
-                .collect(),
-            accumulators: accumulators
-                .iter()
-                .map(|acc| super::ScremaAccumulatorSpec {
-                    kind: acc.kind,
-                    step_lam: apply_type_subst_to_soac_body(&acc.step_lam, subst, term_ids),
-                    reduce_op: apply_type_subst_to_soac_body(&acc.reduce_op, subst, term_ids),
-                    ne: Box::new(apply_type_subst_to_term(&acc.ne, subst, term_ids)),
-                })
-                .collect(),
-            inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
         },
     }
 }
@@ -437,25 +410,11 @@ pub(super) fn apply_type_subst_to_array_expr(
 pub(super) fn apply_type_subst_to_place(
     place: &Place,
     subst: &TypeSubst,
-    term_ids: &mut TermIdSource,
+    _term_ids: &mut TermIdSource,
 ) -> Place {
-    match place {
-        Place::BufferSlice {
-            base,
-            offset,
-            shape,
-            elem_ty,
-        } => Place::BufferSlice {
-            base: Box::new(apply_type_subst_to_term(base, subst, term_ids)),
-            offset: Box::new(apply_type_subst_to_term(offset, subst, term_ids)),
-            shape: shape.clone(),
-            elem_ty: apply_type_subst(elem_ty, subst),
-        },
-        Place::LocalArray { id, shape, elem_ty } => Place::LocalArray {
-            id: *id,
-            shape: shape.clone(),
-            elem_ty: apply_type_subst(elem_ty, subst),
-        },
+    Place {
+        id: place.id,
+        elem_ty: apply_type_subst(&place.elem_ty, subst),
     }
 }
 
@@ -781,24 +740,20 @@ fn substitute_var_soac(
         },
         SoacOp::Scan {
             op,
-            reduce_op,
             ne,
             input,
             destination,
         } => SoacOp::Scan {
             op: substitute_var_soac_body(op, old_sym, new_sym, term_ids),
-            reduce_op: substitute_var_soac_body(reduce_op, old_sym, new_sym, term_ids),
             ne: Box::new(substitute_var(ne, old_sym, new_sym, term_ids)),
             input: substitute_var_array_expr(input, old_sym, new_sym, term_ids),
             destination: *destination,
         },
         SoacOp::Filter {
-            map_lam,
             pred,
             input,
             destination,
         } => SoacOp::Filter {
-            map_lam: map_lam.as_ref().map(|ml| substitute_var_soac_body(ml, old_sym, new_sym, term_ids)),
             pred: substitute_var_soac_body(pred, old_sym, new_sym, term_ids),
             input: substitute_var_array_expr(input, old_sym, new_sym, term_ids),
             destination: *destination,
@@ -823,32 +778,6 @@ fn substitute_var_soac(
             ne: Box::new(substitute_var(ne, old_sym, new_sym, term_ids)),
             indices: substitute_var_array_expr(indices, old_sym, new_sym, term_ids),
             values: substitute_var_array_expr(values, old_sym, new_sym, term_ids),
-        },
-        SoacOp::Screma {
-            lanes,
-            accumulators,
-            inputs,
-        } => SoacOp::Screma {
-            lanes: lanes
-                .iter()
-                .map(|lane| super::ScremaLane {
-                    lam: substitute_var_soac_body(&lane.lam, old_sym, new_sym, term_ids),
-                    input_indices: lane.input_indices.clone(),
-                })
-                .collect(),
-            accumulators: accumulators
-                .iter()
-                .map(|acc| super::ScremaAccumulatorSpec {
-                    kind: acc.kind,
-                    step_lam: substitute_var_soac_body(&acc.step_lam, old_sym, new_sym, term_ids),
-                    reduce_op: substitute_var_soac_body(&acc.reduce_op, old_sym, new_sym, term_ids),
-                    ne: Box::new(substitute_var(&acc.ne, old_sym, new_sym, term_ids)),
-                })
-                .collect(),
-            inputs: inputs
-                .iter()
-                .map(|ae| substitute_var_array_expr(ae, old_sym, new_sym, term_ids))
-                .collect(),
         },
     }
 }
@@ -1146,29 +1075,10 @@ impl<'a, 'ids> HofSpecializer<'a, 'ids> {
         match soac {
             SoacOp::Map { lam, .. } => self.cascade_specialize_soac_body(lam),
             SoacOp::Reduce { op, .. } => self.cascade_specialize_soac_body(op),
-            SoacOp::Scan { op, reduce_op, .. } => {
-                self.cascade_specialize_soac_body(op);
-                self.cascade_specialize_soac_body(reduce_op);
-            }
-            SoacOp::Filter { map_lam, pred, .. } => {
-                if let Some(ml) = map_lam {
-                    self.cascade_specialize_soac_body(ml);
-                }
-                self.cascade_specialize_soac_body(pred);
-            }
+            SoacOp::Scan { op, .. } => self.cascade_specialize_soac_body(op),
+            SoacOp::Filter { pred, .. } => self.cascade_specialize_soac_body(pred),
             SoacOp::Scatter { lam, .. } => self.cascade_specialize_soac_body(lam),
             SoacOp::ReduceByIndex { op, .. } => self.cascade_specialize_soac_body(op),
-            SoacOp::Screma {
-                lanes, accumulators, ..
-            } => {
-                for lane in lanes {
-                    self.cascade_specialize_soac_body(&mut lane.lam);
-                }
-                for acc in accumulators {
-                    self.cascade_specialize_soac_body(&mut acc.step_lam);
-                    self.cascade_specialize_soac_body(&mut acc.reduce_op);
-                }
-            }
         }
     }
 

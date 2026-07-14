@@ -400,7 +400,6 @@ impl<'a, 'ids> CallLowerer<'a, 'ids> {
             },
             SoacOp::Scan {
                 op,
-                reduce_op,
                 ne,
                 input,
                 destination,
@@ -413,32 +412,15 @@ impl<'a, 'ids> CallLowerer<'a, 'ids> {
                         .map(|(s, ty, t)| (s, ty, self.lower_term(t)))
                         .collect(),
                 },
-                reduce_op: super::SoacBody {
-                    lam: reduce_op.lam,
-                    captures: reduce_op
-                        .captures
-                        .into_iter()
-                        .map(|(s, ty, t)| (s, ty, self.lower_term(t)))
-                        .collect(),
-                },
                 ne: Box::new(self.lower_term(*ne)),
                 input: self.lower_array_expr(input),
                 destination,
             },
             SoacOp::Filter {
-                map_lam,
                 pred,
                 input,
                 destination,
             } => SoacOp::Filter {
-                map_lam: map_lam.map(|ml| super::SoacBody {
-                    lam: ml.lam,
-                    captures: ml
-                        .captures
-                        .into_iter()
-                        .map(|(s, ty, t)| (s, ty, self.lower_term(t)))
-                        .collect(),
-                }),
                 pred: super::SoacBody {
                     lam: pred.lam,
                     captures: pred
@@ -482,41 +464,6 @@ impl<'a, 'ids> CallLowerer<'a, 'ids> {
                 indices: self.lower_array_expr(indices),
                 values: self.lower_array_expr(values),
             },
-            SoacOp::Screma {
-                lanes,
-                accumulators,
-                inputs,
-            } => {
-                fn lower_body(this: &mut CallLowerer<'_, '_>, body: super::SoacBody) -> super::SoacBody {
-                    super::SoacBody {
-                        lam: body.lam,
-                        captures: body
-                            .captures
-                            .into_iter()
-                            .map(|(s, ty, t)| (s, ty, this.lower_term(t)))
-                            .collect(),
-                    }
-                }
-                SoacOp::Screma {
-                    lanes: lanes
-                        .into_iter()
-                        .map(|lane| super::ScremaLane {
-                            lam: lower_body(self, lane.lam),
-                            input_indices: lane.input_indices,
-                        })
-                        .collect(),
-                    accumulators: accumulators
-                        .into_iter()
-                        .map(|acc| super::ScremaAccumulatorSpec {
-                            kind: acc.kind,
-                            step_lam: lower_body(self, acc.step_lam),
-                            reduce_op: lower_body(self, acc.reduce_op),
-                            ne: Box::new(self.lower_term(*acc.ne)),
-                        })
-                        .collect(),
-                    inputs: inputs.into_iter().map(|ae| self.lower_array_expr(ae)).collect(),
-                }
-            }
         }
     }
 
