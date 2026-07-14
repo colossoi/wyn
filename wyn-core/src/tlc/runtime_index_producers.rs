@@ -116,21 +116,6 @@ fn float_term(
                 )
             }
         }
-        TermKind::OutputSlotStore { slot_index, value } => {
-            let (floats, value) = float_term(*value, blocked, ids, symbols, true);
-            (
-                vec![],
-                Term {
-                    id,
-                    ty,
-                    span,
-                    kind: TermKind::OutputSlotStore {
-                        slot_index,
-                        value: Box::new(wrap_lets(floats, value, ids)),
-                    },
-                },
-            )
-        }
         TermKind::Soac(soac) => {
             let (floats, soac) = float_soac(soac, blocked, ids, symbols);
             let soac_term = Term {
@@ -492,20 +477,6 @@ fn float_array_expr(
                     len: Box::new(len),
                     step,
                 },
-            )
-        }
-        ArrayExpr::StorageView(sv) => {
-            let (mut floats, offset) = float_term(*sv.offset, blocked, ids, symbols, true);
-            let (mut len_floats, len) = float_term(*sv.len, blocked, ids, symbols, true);
-            floats.append(&mut len_floats);
-            (
-                floats,
-                ArrayExpr::StorageView(super::StorageView {
-                    binding: sv.binding,
-                    offset: Box::new(offset),
-                    len: Box::new(len),
-                    elem_ty: sv.elem_ty,
-                }),
             )
         }
     }

@@ -125,7 +125,6 @@ fn discriminant_name(kind: &TermKind) -> &'static str {
         TermKind::VecLit(_) => "VecLit",
         TermKind::UnitLit => "UnitLit",
         TermKind::Coerce { .. } => "Coerce",
-        TermKind::OutputSlotStore { .. } => "OutputSlotStore",
     }
 }
 
@@ -364,15 +363,6 @@ impl<'a, 'ids> CallLowerer<'a, 'ids> {
                 span,
                 kind: TermKind::VecLit(parts.into_iter().map(|p| self.lower_term(p)).collect()),
             },
-            TermKind::OutputSlotStore { slot_index, value } => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::OutputSlotStore {
-                    slot_index,
-                    value: Box::new(self.lower_term(*value)),
-                },
-            },
         }
     }
 
@@ -545,12 +535,6 @@ impl<'a, 'ids> CallLowerer<'a, 'ids> {
                 len: Box::new(self.lower_term(*len)),
                 step: step.map(|s| Box::new(self.lower_term(*s))),
             },
-            ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(super::StorageView {
-                binding: sv.binding,
-                offset: Box::new(self.lower_term(*sv.offset)),
-                len: Box::new(self.lower_term(*sv.len)),
-                elem_ty: sv.elem_ty,
-            }),
         }
     }
 }

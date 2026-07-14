@@ -93,9 +93,6 @@ pub enum ArraySemantics {
     },
 
     /// Storage buffer reference (external memory).
-    StorageBuffer {
-        binding: crate::BindingRef,
-    },
 
     /// Opaque — can't classify this operation.
     Opaque,
@@ -152,10 +149,7 @@ impl ArraySemantics {
             ArraySemantics::Filter { input, .. } => vec![input],
             ArraySemantics::ScatterOp { inputs, .. } => inputs.iter().collect(),
             ArraySemantics::IndexedReduction { indices, values, .. } => vec![indices, values],
-            ArraySemantics::Literal(_)
-            | ArraySemantics::Range { .. }
-            | ArraySemantics::StorageBuffer { .. }
-            | ArraySemantics::Opaque => vec![],
+            ArraySemantics::Literal(_) | ArraySemantics::Range { .. } | ArraySemantics::Opaque => vec![],
         }
     }
 }
@@ -483,9 +477,6 @@ pub fn classify_array_expr(ae: &ArrayExpr) -> ArraySemantics {
             start: start.clone(),
             len: len.clone(),
         },
-        ArrayExpr::StorageView(crate::tlc::StorageView { binding: br, .. }) => {
-            ArraySemantics::StorageBuffer { binding: *br }
-        }
     }
 }
 

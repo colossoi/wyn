@@ -221,10 +221,8 @@ pub enum TypeName {
     /// (the empty tuple, `()`); `SideEffect` is the absence of a return
     /// value. It types functions whose only meaningful output is
     /// observable through side effects — imperative builtins like
-    /// storage-image updates / `storage_store`, and compute entries post-
-    /// `normalize_outputs` whose body produces nothing but a chain of
-    /// `OutputSlotStore` writes. Lowering treats this as `void` in the
-    /// SPIR-V / WGSL backends.
+    /// storage-image updates / `storage_store`. Lowering treats this as `void`
+    /// in the SPIR-V / WGSL backends.
     SideEffect,
     /// Tuple type with arity (size). Field types stored in Type::Constructed args.
     Tuple(usize),
@@ -1383,11 +1381,8 @@ pub fn array_size(ty: &Type) -> Option<&Type> {
 /// Walk an arrow chain `P1 -> P2 -> ... -> Pn -> R` and return
 /// `(vec![P1, P2, ..., Pn], R)`. For a non-arrow `ty`, returns
 /// `(vec![], ty.clone())`. This is the single canonical helper for
-/// peeling an entry def's signature into params + declared return — used
-/// by `lift_gathers` to recover the entry's declared output type after
-/// `normalize_outputs` makes `def.body.ty == Unit`, and by
-/// `egir::from_tlc` to wire each entry param's type into the
-/// `SemanticEntry`.
+/// peeling an entry def's signature into params plus its declared return,
+/// including when EGIR wires entry parameters and output routes.
 pub fn extract_function_signature(ty: &Type) -> (Vec<Type>, Type) {
     let mut params = Vec::new();
     let mut current = ty.clone();

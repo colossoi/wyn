@@ -157,20 +157,14 @@ pub fn lower(inner: &SemanticProgram) -> schedule::KernelPlan {
     let mut schedule = KernelPlan::seed(
         &inner.pipeline,
         &inner.entry_points,
-        &inner.prepasses,
         &inner.resources,
         &inner.region_interner,
     );
-    attach_compiler_prepasses(inner, &mut schedule);
+    attach_materializations(inner, &mut schedule);
     lower_runtime_filters(inner, &mut schedule);
     for entry in &inner.entry_points {
         let body =
             super::program::PlannedEntry::project(entry).expect("segmented semantic entry projection");
-        plan_segmented_kernel_body(body, &mut schedule, &inner.resources);
-    }
-    for prepass in &inner.prepasses {
-        let body =
-            super::program::PlannedEntry::project(&prepass.entry).expect("segmented prepass projection");
         plan_segmented_kernel_body(body, &mut schedule, &inner.resources);
     }
     schedule.coalesce_resource_flows(&inner.resources);
@@ -181,11 +175,10 @@ pub fn lower_sequential(inner: &SemanticProgram) -> schedule::KernelPlan {
     let mut plan = schedule::KernelPlan::seed(
         &inner.pipeline,
         &inner.entry_points,
-        &inner.prepasses,
         &inner.resources,
         &inner.region_interner,
     );
-    attach_compiler_prepasses(inner, &mut plan);
+    attach_materializations(inner, &mut plan);
     plan.select_sequential_recipes();
     plan.coalesce_resource_flows(&inner.resources);
     plan
@@ -599,8 +592,8 @@ fn owned_resource_ids(
 
 /// Attach allocation-created materialization entries to their consumer's
 /// source pipeline before target recipes are selected.
-pub(crate) fn attach_compiler_prepasses(inner: &SemanticProgram, schedule: &mut schedule::KernelPlan) {
-    let mut prepasses = BTreeMap::new();
+pub(crate) fn attach_materializations(inner: &SemanticProgram, schedule: &mut schedule::KernelPlan) {
+    let mut materializations = BTreeMap::new();
     for resource in &inner.resources {
         let ResourceOrigin::Compiler(compiler) = &resource.origin else {
             continue;
@@ -614,7 +607,7 @@ pub(crate) fn attach_compiler_prepasses(inner: &SemanticProgram, schedule: &mut 
             | CompilerResourceKind::MultiConsumerArray => {}
             _ => continue,
         }
-        let consumers = prepasses.entry(flow.producer).or_insert_with(Vec::new);
+        let consumers = materializations.entry(flow.producer).or_insert_with(Vec::new);
         consumers.extend(flow.consumers.iter().copied());
         consumers.sort_unstable();
         consumers.dedup();
@@ -622,15 +615,17 @@ pub(crate) fn attach_compiler_prepasses(inner: &SemanticProgram, schedule: &mut 
 
     // Insert one ready producer at a time. Repeating is important for chained
     // materializations: scheduling a consumer can make its producer ready.
-    while let Some((producer_id, consumer_id)) = prepasses.iter().find_map(|(producer, consumers)| {
-        if schedule.contains_flow_source(*producer) {
-            return None;
-        }
-        consumers
-            .iter()
-            .find(|consumer| schedule.contains_flow_source(**consumer))
-            .map(|consumer| (*producer, *consumer))
-    }) {
+    while let Some((producer_id, consumer_id)) =
+        materializations.iter().find_map(|(producer, consumers)| {
+            if schedule.contains_flow_source(*producer) {
+                return None;
+            }
+            consumers
+                .iter()
+                .find(|consumer| schedule.contains_flow_source(**consumer))
+                .map(|consumer| (*producer, *consumer))
+        })
+    {
         let consumer = schedule
             .entry_point_for_flow_source(consumer_id)
             .expect("scheduled flow consumer has no entry point")
@@ -644,6 +639,19 @@ pub(crate) fn attach_compiler_prepasses(inner: &SemanticProgram, schedule: &mut 
             .filter(|requirement| requirement.id == id)
             .expect("materialization flow references a missing requirement");
         schedule.add_materialization_before(&consumer, requirement);
+        let body = super::program::PlannedEntry::project(&requirement.entry)
+            .expect("materialization entry projection");
+        if kernel_effect(&body.graph).is_some_and(|(block, index, _)| {
+            matches!(
+                body.graph.skeleton.blocks[block].side_effects[index].kind,
+                SideEffectKind::Soac(EgirSoac::Seg {
+                    kind: SegOpKind::SegRed { .. } | SegOpKind::SegScan { .. },
+                    ..
+                })
+            )
+        }) {
+            plan_segmented_kernel_body(body, schedule, &inner.resources);
+        }
     }
 }
 
@@ -1435,7 +1443,7 @@ fn chunk_view_like(
 /// grid-stride the `T` partials into shared memory, then reduce in-shared with
 /// a log-`W` tree. Kept modest so `W * sizeof(elem)` stays within the
 /// workgroup shared-memory budget (256 × a 36-byte tuple ≈ 9 KB). The phase2
-/// `ComputeStage` in `tlc::parallelize` must dispatch this same width.
+/// The published compute stage must dispatch this same width.
 
 #[allow(clippy::too_many_arguments)]
 fn build_tree_reduce_phase2(
@@ -2124,7 +2132,7 @@ fn seg_scratch_specs(graph: &EGraph, se: &SideEffect) -> Option<SegScratchSpec> 
 pub fn enumerate_seg_scratch(inner: &SemanticProgram, first_id: u32) -> Vec<LogicalResource> {
     let mut resources = Vec::new();
     let mut next = first_id;
-    for entry in &inner.entry_points {
+    for (_, entry) in inner.entries_with_endpoints() {
         // Collect scratch needs before drawing (immutable graph read), then
         // apply the assignment (mutable) — avoids aliasing graph.types.
         let mut plans: Vec<(BlockId, usize, Vec<(Type<TypeName>, CompilerResourceKind)>)> = Vec::new();
@@ -2226,7 +2234,9 @@ fn analyze_reduce_entry(
             else {
                 continue;
             };
-            let Some(root) = project_root_index(&entry.graph, value, result) else {
+            let Some(root) = project_root_index(&entry.graph, value, result)
+                .or_else(|| (value == result && n_maps + n_accs == 1).then_some(0))
+            else {
                 continue;
             };
             let accumulator = root as usize;

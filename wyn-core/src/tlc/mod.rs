@@ -13,13 +13,10 @@ pub mod hof_specialize;
 pub mod if_over_producer;
 pub mod inline;
 pub mod input_slice_bounds;
-pub mod lift_gathers;
 pub mod materialize_entry_soacs;
 pub mod monomorphize;
 pub mod normalize;
-pub mod normalize_outputs;
 pub mod ownership;
-pub mod parallelize;
 pub mod partial_eval;
 pub mod patterns;
 pub mod pin_entry_buffers;
@@ -40,7 +37,7 @@ use crate::builtins::{by_id, catalog, BuiltinId};
 use crate::error::CompilerError;
 use crate::name_resolution::{NameResolution, ResolvedValueRef, SoacKind};
 use crate::types::TypeExt;
-use crate::{interface, BindingRef, LookupMap, SymbolId, SymbolTable, TypeTable};
+use crate::{interface, LookupMap, SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
 
 // =============================================================================
@@ -372,94 +369,6 @@ pub fn var_term_builtin_id(term: &Term, _symbols: &SymbolTable) -> Option<Builti
     }
 }
 
-/// Emit `_w_intrinsic_storage_index(binding.set, binding.binding, index)`
-/// returning `elem_ty`. The single recognized shape for an indexed load
-/// against a `BindingRef` — used by `buffer_specialize` (entry-param &
-/// view-param indexing) and `lift_gathers` (intermediate-buffer gather).
-/// Caller is responsible for any u32 cast on `index`.
-pub(crate) fn storage_index_call(
-    binding: crate::BindingRef,
-    index: Term,
-    elem_ty: Type<TypeName>,
-    span: ast::Span,
-    ids: &mut TermIdSource,
-) -> Term {
-    let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
-    let set_lit = Term {
-        id: ids.next_id(),
-        ty: u32_ty.clone(),
-        span,
-        kind: TermKind::IntLit(binding.set.to_string()),
-    };
-    let bind_lit = Term {
-        id: ids.next_id(),
-        ty: u32_ty,
-        span,
-        kind: TermKind::IntLit(binding.binding.to_string()),
-    };
-    let func = Term {
-        id: ids.next_id(),
-        // Builtin function type stays polymorphic at this layer; downstream
-        // lowering reads the App's return type, not the func term's type.
-        ty: Type::Variable(0),
-        span,
-        kind: TermKind::Var(VarRef::Builtin {
-            id: crate::builtins::catalog().known().storage_index,
-            overload_idx: 0,
-        }),
-    };
-    Term {
-        id: ids.next_id(),
-        ty: elem_ty,
-        span,
-        kind: TermKind::App {
-            func: Box::new(func),
-            args: vec![set_lit, bind_lit, index],
-        },
-    }
-}
-
-/// Emit `_w_intrinsic_storage_len(binding.set, binding.binding)` returning
-/// `u32`. Caller wraps in `i32.u32` cast if the consumer expects `i32`
-/// (user-facing `length(view)` returns `i32`).
-pub(crate) fn storage_len_call(
-    binding: crate::BindingRef,
-    span: ast::Span,
-    ids: &mut TermIdSource,
-) -> Term {
-    let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
-    let set_lit = Term {
-        id: ids.next_id(),
-        ty: u32_ty.clone(),
-        span,
-        kind: TermKind::IntLit(binding.set.to_string()),
-    };
-    let bind_lit = Term {
-        id: ids.next_id(),
-        ty: u32_ty.clone(),
-        span,
-        kind: TermKind::IntLit(binding.binding.to_string()),
-    };
-    let func = Term {
-        id: ids.next_id(),
-        ty: Type::Variable(0),
-        span,
-        kind: TermKind::Var(VarRef::Builtin {
-            id: crate::builtins::catalog().known().storage_len,
-            overload_idx: 0,
-        }),
-    };
-    Term {
-        id: ids.next_id(),
-        ty: u32_ty,
-        span,
-        kind: TermKind::App {
-            func: Box::new(func),
-            args: vec![set_lit, bind_lit],
-        },
-    }
-}
-
 /// The kind of term.
 #[derive(Debug, Clone)]
 pub enum TermKind {
@@ -560,26 +469,6 @@ pub enum TermKind {
 
     /// Vector literal: `@[x, y, z, w]`.
     VecLit(Vec<Term>),
-
-    /// Write a Term value to a compute entry's `slot_index`-th output
-    /// destination. Introduced by `tlc::normalize_outputs` to make slot
-    /// writes explicit in the entry body, replacing the prior
-    /// "entry-tail expression is the return value" convention.
-    ///
-    /// `slot_index` identifies which `EntryDecl.outputs[i]` this store
-    /// targets — the actual `BindingRef` is allocated at EGIR
-    /// conversion. The slot's runtime type is `value.ty` (kept current
-    /// by every walker that recurses through `value`); EGIR consumers
-    /// read from there.
-    ///
-    /// `OutputSlotStore` is `SideEffect`-typed (no return value, only
-    /// the bound-buffer write). The entry body becomes a chain of these
-    /// via `let _ = <store> in <next>` capped with a `SideEffect`
-    /// terminator; `def.ty == def.body.ty` post-normalisation.
-    OutputSlotStore {
-        slot_index: usize,
-        value: Box<Term>,
-    },
 }
 
 /// The kind of loop (mirrors MIR::LoopKind).
@@ -678,7 +567,7 @@ pub struct Shape(pub Vec<Dim>);
 
 /// An array-producing expression.
 //
-// Two variants are phase-scoped — they're only valid in part of the
+// One variant is phase-scoped — it is only valid in part of the
 // pipeline, with the boundaries enforced at runtime via `unreachable!`
 // in passes that can't see them:
 //
@@ -686,13 +575,6 @@ pub struct Shape(pub Vec<Dim>);
 //   `transform_soac_map`, and anything escaping as a standalone term is
 //   rewritten to `_w_tuple(...)` by `tlc::soa`. Post-SoA passes don't
 //   meaningfully encounter it.
-//
-// * `StorageBuffer` is introduced by `tlc::lift_gathers` (pre-defunc,
-//   materializing a gather producer's result into a storage buffer that
-//   downstream SOACs and `storage_index` reads share) and by
-//   `tlc::buffer_specialize` (post-mono, rewriting view-array entry params
-//   into `(offset, len)` pairs feeding a storage buffer). Other passes in
-//   between just pass it through.
 //
 // A future refactor could narrow these via per-phase enum splits
 // (`PreSoaArrayExpr` / `PostSoaArrayExpr`, etc.) so the invariants are
@@ -717,23 +599,6 @@ pub enum ArrayExpr {
         len: Box<Term>,
         step: Option<Box<Term>>,
     },
-    /// Storage buffer reference. Represents elements from a storage buffer
-    /// at `binding`, starting at `offset` for `len` elements. Introduced by
-    /// `lift_gathers` (pre-defunc, for gather materialization) or
-    /// `buffer_specialize` (post-mono, for view-array SOAC inputs).
-    StorageView(StorageView),
-}
-
-/// A TLC-level view into a runtime-sized storage buffer: the binding it
-/// reads from plus the offset / length / element-type triple that gives
-/// the view its identity. Used by both `ArrayExpr::StorageView` and the
-/// file-private `ViewInfo` in `buffer_specialize.rs`.
-#[derive(Debug, Clone)]
-pub struct StorageView {
-    pub binding: BindingRef,
-    pub offset: Box<Term>,
-    pub len: Box<Term>,
-    pub elem_ty: Type<TypeName>,
 }
 
 impl ArrayExpr {
@@ -752,12 +617,11 @@ impl ArrayExpr {
     /// The array type of this input atom. `Var` carries its type verbatim
     /// (consumers that need the bare type strip uniqueness themselves);
     /// `Literal` is a composite array sized to its element count; `Range` a
-    /// virtual array; `StorageView` a view array tagged with its binding's
-    /// region; `Zip` a virtual array of the tuple of its children's element
+    /// virtual array; `Zip` a virtual array of the tuple of its children's element
     /// types. Inverse of the per-variant `array_expr_type` recomputation that
     /// EGIR lowering and the representation passes each used to carry.
     pub fn array_type(&self) -> Type<TypeName> {
-        use crate::types::{buffer_tag, make_array1, no_buffer};
+        use crate::types::{make_array1, no_buffer};
         let virtual_array = |elem: Type<TypeName>| {
             make_array1(
                 elem,
@@ -778,12 +642,6 @@ impl ArrayExpr {
                 no_buffer(),
             ),
             ArrayExpr::Range { start, .. } => virtual_array(start.ty.clone()),
-            ArrayExpr::StorageView(sv) => make_array1(
-                sv.elem_ty.clone(),
-                Type::Constructed(TypeName::ArrayVariantView, vec![]),
-                Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                buffer_tag(sv.binding),
-            ),
             ArrayExpr::Zip(children) => {
                 let elems: Vec<Type<TypeName>> = children
                     .iter()
@@ -1186,11 +1044,6 @@ impl Term {
             },
 
             TermKind::VecLit(parts) => TermKind::VecLit(parts.into_iter().map(&mut *f).collect()),
-
-            TermKind::OutputSlotStore { slot_index, value } => TermKind::OutputSlotStore {
-                slot_index,
-                value: Box::new(f(*value)),
-            },
         };
 
         Term { kind, ..self }
@@ -1287,7 +1140,6 @@ impl Term {
                 f(array);
                 f(index);
             }
-            TermKind::OutputSlotStore { value, .. } => f(value),
         }
     }
 
@@ -1363,7 +1215,6 @@ impl Term {
                 f(array);
                 f(index);
             }
-            TermKind::OutputSlotStore { value, .. } => f(value),
         }
     }
 }
@@ -1487,10 +1338,6 @@ where
             if let Some(s) = step {
                 f(s);
             }
-        }
-        ArrayExpr::StorageView(sv) => {
-            f(&sv.offset);
-            f(&sv.len);
         }
     }
 }
@@ -1643,10 +1490,6 @@ where
             if let Some(s) = step {
                 f(s);
             }
-        }
-        ArrayExpr::StorageView(sv) => {
-            f(&mut sv.offset);
-            f(&mut sv.len);
         }
     }
 }
@@ -1855,17 +1698,6 @@ where
             len: Box::new(f(*len)),
             step: step.map(|s| Box::new(f(*s))),
         },
-        ArrayExpr::StorageView(StorageView {
-            binding,
-            offset,
-            len,
-            elem_ty,
-        }) => ArrayExpr::StorageView(StorageView {
-            binding,
-            offset: Box::new(f(*offset)),
-            len: Box::new(f(*len)),
-            elem_ty,
-        }),
     }
 }
 
@@ -3015,7 +2847,7 @@ impl<'a> Transformer<'a> {
         binds.append(&mut peeled);
         match core.kind {
             TermKind::Var(vr) => ArrayExpr::Var(vr, core.ty),
-            // An array expression (Range / Literal / StorageView / Zip) is
+            // An array expression (Range / Literal / Zip) is
             // itself an atomic SOAC input; consume it directly rather than
             // let-binding a name to it.
             TermKind::ArrayExpr(ae) => ae,

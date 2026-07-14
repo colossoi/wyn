@@ -622,8 +622,14 @@ entry e() [4]i32 =
         "the surviving producer owns one shared logical buffer"
     );
     let shared_resource = shared[0].id;
+    let shared_requirements = allocated
+        .inner
+        .materializations
+        .iter()
+        .filter(|requirement| requirement.kind == crate::egir::program::MaterializationKind::SharedArray)
+        .collect::<Vec<_>>();
     assert_eq!(
-        allocated.inner.materializations.len(),
+        shared_requirements.len(),
         1,
         "shared producer is represented by one typed requirement"
     );
@@ -631,16 +637,25 @@ entry e() [4]i32 =
         allocated.inner.entry_points.iter().all(|entry| entry.name != "e_materialize_shared"),
         "materialization must not be synthesized into the semantic entry arena"
     );
-    let requirement = &allocated.inner.materializations[0];
+    let requirement = shared_requirements[0];
     assert_eq!(requirement.entry.name, "e_materialize_shared");
     assert_eq!(requirement.substitutions.len(), 1);
     assert_eq!(requirement.substitutions[0].resource.0, shared_resource);
-    assert_eq!(requirement.substitutions[0].consumers.len(), 1);
-    let crate::egir::program::CompilerFlowEndpoint::Entry(consumer) =
-        requirement.substitutions[0].consumers[0]
-    else {
-        panic!("materialization consumer should be the source semantic entry")
-    };
+    assert_eq!(requirement.substitutions[0].consumers.len(), 2);
+    let consumer = requirement.substitutions[0]
+        .consumers
+        .iter()
+        .find_map(|consumer| match consumer {
+            crate::egir::program::CompilerFlowEndpoint::Entry(id) => Some(*id),
+            crate::egir::program::CompilerFlowEndpoint::Materialization(_) => None,
+        })
+        .expect("shared array remains an input of the source entry");
+    assert!(requirement.substitutions[0].consumers.iter().any(|consumer| {
+        matches!(
+            consumer,
+            crate::egir::program::CompilerFlowEndpoint::Materialization(_)
+        )
+    }));
     assert_eq!(allocated.inner.entry_points[consumer.0 as usize].name, "e");
     let lowered =
         allocated.lower_to_ssa(crate::LoweringProfile::PORTABLE).expect("shared materialization lowers");
@@ -651,17 +666,21 @@ entry e() [4]i32 =
         "consumers read the shared storage prepass rather than copying a composite per consumer"
     );
     let stages: Vec<_> = lowered.kernel_plan.phases().map(|phase| phase.entry_point.as_str()).collect();
-    assert_eq!(stages, ["e_materialize_shared", "e"]);
+    assert_eq!(stages.first(), Some(&"e_materialize_shared"));
+    assert_eq!(stages.last(), Some(&"e"));
+    assert!(stages.iter().any(|stage| stage.contains("prepass_scalar")));
     let phases: Vec<_> = lowered.kernel_plan.phases().collect();
     assert!(phases[0].resources.iter().any(|resource| {
         resource.resource == shared_resource
             && resource.access == crate::egir::parallelize::schedule::ResourceAccess::Write
     }));
-    assert!(phases[1]
+    assert!(phases
+        .last()
+        .unwrap()
         .resources
         .iter()
         .any(|resource| resource.resource == shared_resource && resource.access.reads()));
-    assert!(phases[1].dependencies.contains(&phases[0].id));
+    assert!(phases.last().unwrap().dependencies.contains(&phases[0].id));
     let second = crate::compile_thru_tlc(reduce_then_map)
         .expect("repeat TLC")
         .infer_input_slice_bounds()
@@ -694,8 +713,8 @@ entry e() [4]i32 =
     let single_phases: Vec<_> = single.kernel_plan.phases().collect();
     assert_eq!(
         single_phases.len(),
-        2,
-        "required materialization plus source entry"
+        4,
+        "shared array, two scalar-reduction phases, and source entry"
     );
     assert!(matches!(
         single_phases[0].domain,
@@ -1404,20 +1423,17 @@ entry add_sum(xs: []i32) []i32 =
             _ => None,
         })
         .expect("scalar handoff has an explicit resource flow");
-    let crate::egir::program::CompilerFlowEndpoint::Prepass(producer_id) = flow.producer else {
-        panic!("scalar prepass producer must be a typed prepass requirement")
+    let crate::egir::program::CompilerFlowEndpoint::Materialization(producer_id) = flow.producer else {
+        panic!("scalar producer must be a typed materialization requirement")
     };
-    let producer = &allocated.inner.prepasses[producer_id.0 as usize];
-    assert!(producer.entry.name.starts_with("add_sum_prepass_"));
+    let producer = &allocated.inner.materializations[producer_id.0 as usize];
+    assert!(producer.entry.name.contains("prepass_scalar"));
     assert_eq!(flow.consumers.len(), 1);
     assert_eq!(
         allocated.inner.entry_points[match flow.consumers[0] {
             crate::egir::program::CompilerFlowEndpoint::Entry(id) => id.0 as usize,
-            crate::egir::program::CompilerFlowEndpoint::Prepass(_) => {
-                panic!("scalar prepass consumer must be a semantic entry")
-            }
             crate::egir::program::CompilerFlowEndpoint::Materialization(_) => {
-                panic!("scalar prepass consumer must be a semantic entry")
+                panic!("scalar materialization consumer must be a semantic entry")
             }
         }]
         .name,
@@ -1531,7 +1547,6 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                 walk(array, bound, symbols, stage, def_name);
                 walk(index, bound, symbols, stage, def_name);
             }
-            TermKind::OutputSlotStore { value, .. } => walk(value, bound, symbols, stage, def_name),
         }
     }
 
@@ -1646,10 +1661,6 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                 if let Some(s) = step {
                     walk(s, bound, symbols, stage, def_name);
                 }
-            }
-            ArrayExpr::StorageView(crate::tlc::StorageView { offset, len, .. }) => {
-                walk(offset, bound, symbols, stage, def_name);
-                walk(len, bound, symbols, stage, def_name);
             }
         }
     }
@@ -3649,11 +3660,9 @@ entry e() [1]f32 = [g(256)[3]]
 
 /// The runtime counterpart of the static fusion above: a *runtime* index into a
 /// nested runtime-sized producer (`g(256)[j]`). With no fused form (fusion is
-/// literal-index only), `lift_gathers`'s post-materialize pass floats the nested
-/// producer to an entry-level `let` (inlining its internal `let n = 256` so the
-/// map is self-contained) and materializes it to a gather buffer; the runtime
-/// index then reads the buffer. Distinct from the static case, which never
-/// materializes.
+/// literal-index only), TLC exposes the nested producer at entry scope and EGIR
+/// residency planning materializes it to a gather buffer. The runtime index
+/// then reads the buffer. Distinct from the static case, which never materializes.
 #[test]
 fn runtime_index_into_nested_producer_lowers() {
     let source = r#"
@@ -3923,8 +3932,8 @@ entry t() i32 =
 
 /// Minimal repro for the same `elaborate_subtree` place-cache bug. The
 /// runtime parameter `n` keeps the `if` branch live (`partial_eval` can't
-/// fold it), so both arms emit `OutputSlotStore` against the same output
-/// slot's `view_index`. Pre-fix this panicked at SPIR-V emission with
+/// fold it), so both arms route to the same output slot's `view_index`.
+/// Pre-fix this panicked at SPIR-V emission with
 /// "place … has no pointer".
 #[test]
 fn branch_with_let_terminal_into_output_slot_lowers() {
@@ -5111,8 +5120,8 @@ fn compute_storage_buffers(
 
 /// Gathering a *computed* array (a `map` result) at a runtime index used to
 /// panic in SPIR-V emission ("Composite variant unsized arrays not
-/// supported"). `lift_gathers` splits the producer `map` into its own
-/// `gen_gather_0` compute stage writing a storage buffer, and rewrites the
+/// supported"). EGIR residency planning splits the producer `map` into its own
+/// materialization stage writing a storage buffer, and rewrites the
 /// consumer's `counts[i]` into a load from that buffer. This pins the
 /// end-to-end wiring: both stages agree on the gather buffer's binding, it's a
 /// compiler-managed Intermediate (not host I/O), it doesn't collide with the
@@ -5266,16 +5275,9 @@ entry gen(bh: []vec4f32) []i32 =
 // Multi-consumer gather regression
 // ---------------------------------------------------------------------------
 //
-// `lift_gathers` handles a computed array `counts = map(...)` consumed by a
-// single downstream SOAC/gather. Whenever `counts` has *two or more* downstream
-// consumers (e.g. a `reduce` plus a `scan`, or a `scan` plus a direct
-// `counts[i % N]` gather in the same lambda), the lift currently leaves the
-// in-register Composite array in place and the SPIR-V backend panics at
-// `spirv/mod.rs:374` ("Composite variant unsized arrays not supported"). The
-// single-consumer controls below pin the working baseline; the
-// `#[ignore]`-marked tests capture the multi-consumer bug — run with
-// `cargo test -- --ignored` to verify the panic and remove the `#[ignore]`
-// once the lift threads the same intermediate buffer to every consumer.
+// EGIR residency planning handles a computed array `counts = map(...)` shared
+// by one or more downstream SOAC/gather consumers. The controls below pin both
+// single-consumer and shared-resource cases.
 
 /// Control: a single `scan` consumer of a computed `counts` map lifts cleanly.
 #[test]
@@ -5662,9 +5664,9 @@ entry cmptest(idx: []u32) ?k. [k]vec4f32 =
 
 /// An entry returning *both* a filtered array and a value derived from its
 /// `length`, with the existential over the WHOLE tuple: `?k. ([k]u32, [1]u32)`.
-/// The `?k.` packs over the tuple — `normalize_outputs` must see through the
-/// existential wrapper and count the tuple's two outputs, not treat the whole
-/// `?k.(…)` as a single output. (Form A.)
+/// The `?k.` packs over the tuple — EGIR route construction must see through
+/// the existential wrapper and count the tuple's two outputs, not treat the
+/// whole `?k.(…)` as a single output. (Form A.)
 #[test]
 fn filter_array_and_length_existential_over_tuple_compiles() {
     compile_parallel(
@@ -5949,8 +5951,8 @@ entry gen(xs: []i32) []i32 =
 }
 
 /// When `counts` is consumed by **both** a `reduce` and a `scan` (and a
-/// downstream gather then reads the scan result), `lift_gathers` materializes
-/// `counts` into one shared gather buffer that both downstream SOACs read from.
+/// downstream gather then reads the scan result), EGIR materializes `counts`
+/// into one shared buffer that both downstream SOACs read from.
 #[test]
 fn multi_consumer_scan_plus_reduce_lifts() {
     compile_to_spirv(
@@ -5971,8 +5973,8 @@ entry gen(xs: []i32) []i32 =
 /// the `counts[i % 8]` reference inside the outer map's lambda body is *not*
 /// a SOAC edge. With the use-count fix in `producer_graph` counting every
 /// `Var(counts)` reference (not just SOAC edges), fusion sees `counts` as
-/// multi-use and declines to fuse + drop the let, so `lift_gathers` handles
-/// it as a normal multi-consumer let-bound producer.
+/// multi-use and declines to fuse + drop the let, so EGIR residency planning
+/// handles it as a shared producer.
 #[test]
 fn multi_consumer_scan_plus_gather_lifts() {
     compile_to_spirv(
@@ -5989,16 +5991,9 @@ entry gen(xs: []i32) []i32 =
 
 /// Bisected min-repro: a fused scan whose op-lambda calls a user helper
 /// function (`box_count`) and whose result is randomly indexed
-/// (`offsets[nb - 1]`). Prior to the fix, `lift_gathers::free_symbol_vars`
-/// passed empty `known_defs` to `collect_free_vars`, so the top-level def
-/// reference to `box_count` appeared as a "free var" — failing the
-/// entry-param predicate and declining the lift. The scan then stayed in
-/// `gen`'s body where `parallelize::make_scan_plan` fell back to the serial
-/// pipeline, and EGIR's `is_handleable_soac` rejected the resulting
-/// `Scan { destination: Fresh, input: View }` combination → unexpanded
-/// `EgirSoac` panic at `egir/elaborate.rs:314`. With the fix, top-level
-/// defs are filtered out of the predicate, the scan lifts into a gather
-/// pre-pass, and the rest of the pipeline handles it normally.
+/// (`offsets[nb - 1]`). This pins that top-level helper references are not
+/// mistaken for materialization captures and the scan can be scheduled as a
+/// gather-producing materialization.
 #[test]
 fn fused_scan_helper_call_then_indexed_read_compiles() {
     compile_to_spirv(
@@ -6105,14 +6100,8 @@ entry gen(xs: []i32) ([]i32, []i32) =
 
 /// Under `--single-stage` mode, a vec4-emitting map that gathers from a
 /// derived (map/scan-produced) array must still produce well-formed
-/// SPIR-V. The bug was: `lift_gathers` flagged the producer's gather
-/// buffer via an Output-role `StorageBindingDecl` on the prepass entry,
-/// but `from_tlc::convert` only consulted the parallelize `plans` for
-/// `forced_output_binding`. With `parallelize_soacs(disable=true)`
-/// `plans` is empty, so `build_entry_outputs` auto-allocated the
-/// prepass's output at the next free binding — colliding with the
-/// consumer's vec4 output and emitting an `int` store into a `vec4`
-/// buffer. spirv-val flagged the OpAccessChain type mismatch.
+/// SPIR-V. The materialization resource and consumer output must remain
+/// distinct even when target scheduling selects serial recipes.
 #[test]
 fn single_stage_vec4_map_gather_from_derived_array_repro() {
     let spirv = compile_to_spirv_single_stage(
@@ -6127,7 +6116,7 @@ entry gen(xs: []i32) []vec4f32 =
     assert_spirv_storage_access_chain_pointee_types_match(&spirv);
 }
 
-/// The descriptor for a compiler-allocated `lift_gathers` intermediate
+/// The descriptor for a compiler-allocated residency intermediate
 /// must agree with the SPIR-V module's per-binding writability. SPIR-V's
 /// `NonWritable` decoration is module-level, so when a sibling entry in
 /// the same module writes the gather buffer, the consumer pipeline's
@@ -6207,7 +6196,7 @@ entry gen(xs: []i32) ([]i32, [1]i32) =
     }
     assert!(
         violations.is_empty(),
-        "descriptor↔shader access mismatch on lift_gathers intermediates:\n  {}",
+        "descriptor↔shader access mismatch on residency intermediates:\n  {}",
         violations.join("\n  ")
     );
 }
@@ -6753,8 +6742,8 @@ fn multidim_view_inner_fixed_carries_subarray_elem_bytes() {
 /// `If`-over-two-retargetable-maps with a runtime-sized output:
 /// previously rejected by `realize_outputs::lower_slot` because the
 /// merge-block param wasn't a Map/Scan node. After the DPS migration,
-/// each branch's `OutputSlotStore` records its own `SlotSource` at
-/// its block; `realize_outputs` retargets both Maps into the same
+/// TLC-to-EGIR conversion records each branch's `SlotSource` at its block;
+/// `realize_outputs` retargets both Maps into the same
 /// output view. Runtime CFG ensures only one fires per execution
 /// path.
 #[test]
@@ -6811,8 +6800,7 @@ fn compute_if_over_two_maps_becomes_parallel_pointwise_map() {
     "#;
 
     // Inspect at the pre-defunctionalize stage: `if_over_producer` normalizes
-    // here, and later passes obscure it (`normalize_outputs` wraps the result
-    // in an OutputSlotStore, `defunctionalize` lifts the Map operator to a ref).
+    // here, before defunctionalization lifts the Map operator to a ref.
     let fused = crate::test_pipeline::compile_thru_expose_producers(src);
     let tick = fused
         .defs
@@ -6853,7 +6841,7 @@ fn compute_if_over_range_and_let_wrapped_slice_map_parallelizes() {
     "#;
 
     // Pre-defunctionalize: see `if_over_producer`'s normalized Map before
-    // `normalize_outputs`/`defunctionalize` obscure it.
+    // defunctionalization obscures it.
     let fused = crate::test_pipeline::compile_thru_expose_producers(src);
     let tick = fused
         .defs
@@ -6975,9 +6963,8 @@ fn compute_if_over_two_maps_compiles_fixed_size_same_source() {
 }
 
 /// Multi-output entry whose Tuple components each contain an `If`.
-/// `normalize_outputs` decomposes the Tuple into per-slot
-/// `OutputSlotStore`s; each then enters the `If`-fork recursion in
-/// `convert_slot_store`. Both slots end up multi-source, each
+/// TLC-to-EGIR conversion decomposes the tuple into per-slot routes and follows
+/// each `If` fork. Both slots end up multi-source, each
 /// retargeting into its own `OutputView`.
 #[test]
 fn compute_multi_output_tuple_of_ifs_compiles() {
@@ -7495,13 +7482,8 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
 
 /// Regression: an entry returning a tuple where the second output is a
 /// fixed-size literal that *indexes into a scan result* used to silently
-/// drop the second output's binding from the descriptor JSON. Root
-/// cause: `lift_gathers::lift_entry` read `out_count` off `def.ty`'s
-/// return slot, but `normalize_outputs` rewrites that to `SideEffect`
-/// (the body's tail is an `OutputSlotStore` chain). The old
-/// `storage_output_count(SideEffect)` undercounted, so the gather
-/// intermediate landed on the binding slot the second output expected.
-/// Fix reads `decl.outputs.len()` directly.
+/// drop the second output's binding from the descriptor JSON. EGIR must derive
+/// both output routes before allocating the scan materialization resource.
 #[test]
 fn entry_tuple_output_with_scan_indexed_literal_keeps_both_bindings() {
     use crate::pipeline_descriptor::{BufferUsage, Pipeline};
@@ -8915,10 +8897,7 @@ entry step(dom: []u32) ([]vec2f32, []vec4f32) =
 
 /// A `map` output (`occ`) that is BOTH fed to another map (`occ[j%4]`) AND
 /// returned. `occ` must be materialized to storage rather than left an
-/// in-register runtime-sized Composite array. Currently panics in SPIR-V
-/// lowering ("Composite variant unsized arrays not supported"); goes green
-/// when the `lift_gathers` output-position materialization lands. (PR7 repro
-/// pr7_3c — the #2 showstopper.)
+/// in-register runtime-sized Composite array. (PR7 repro pr7_3c.)
 #[test]
 fn map_output_fed_and_returned_compiles() {
     crate::compile_thru_spirv(
@@ -8935,7 +8914,7 @@ entry frame(occ_dom: []u32, sett_dom: []u32) ([]u32, []u32) =
 
 /// Control for pr7_3c: the same producer→consumer dataflow, but only the
 /// dependent array (`setts`) is returned — `occ` is consumed solely via
-/// dynamic index, so `lift_gathers` materializes it and this compiles today.
+/// dynamic index, so EGIR residency planning materializes it.
 /// Bounds the pr7_3c trigger to the returned-AND-fed shape. (PR7 repro pr7_3b.)
 #[test]
 fn map_output_fed_but_only_dependent_returned_compiles() {

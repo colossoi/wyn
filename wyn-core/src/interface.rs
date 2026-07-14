@@ -292,10 +292,6 @@ impl EntryParamBinding {
 /// Entry point declaration (vertex/fragment/compute shader).
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryDecl {
-    /// Whether this entry came from source or was synthesized for a specific
-    /// compiler phase.  Generated names remain presentation-only; downstream
-    /// passes must use this field for behavior.
-    pub origin: EntryOrigin,
     pub entry_type: Attribute, // Attribute::Vertex, Attribute::Fragment, or Attribute::Compute
     /// Optional source-authored compute launch grid. `None` means the compiler
     /// infers the domain from SOACs, storage images, or the default serial shell.
@@ -306,13 +302,9 @@ pub struct EntryDecl {
     pub type_params: Vec<String>,  // Regular type parameters: <T, U>
     pub params: Vec<Pattern>,      // Input parameters as patterns
     pub outputs: Vec<EntryOutput>, // Output fields with optional attributes
-    /// Compiler-introduced storage bindings (e.g. parallelize's partials/result
-    /// intermediates). Parsers leave this empty; later passes fill it in so
-    /// downstream stages have one source of truth for the entry interface.
-    pub storage_bindings: Vec<StorageBindingDecl>,
     /// Auto-allocated bindings for this entry's view-typed params,
     /// computed once and consulted by every pass that cares (buffer
-    /// specialization, parallelize sizing, EGIR conversion). Empty
+    /// specialization and EGIR conversion). Empty
     /// for non-compute entries and for entries before the populate
     /// pass has run.
     /// Per-body-param auto-storage binding. Same length as the lambda
@@ -329,19 +321,6 @@ pub struct EntryDecl {
     pub body: Expression,
     pub param_diets: Vec<crate::types::Diet>,
     pub return_diet: crate::types::Diet,
-}
-
-/// Provenance and semantic role of an entry point.
-///
-/// Source entries retain `Source`; TLC-originated producer entries carry the
-/// only remaining semantic provenance. Target-generated phases live solely in
-/// the kernel plan and therefore cannot acquire an `EntryOrigin`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum EntryOrigin {
-    #[default]
-    Source,
-    ScalarPrepass,
-    GatherPrepass,
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 use super::*;
 use crate::egir::builder::EntryBuilder;
-use crate::egir::program::PrepassId;
+use crate::egir::program::MaterializationId;
 
 fn body(name: &str) -> PlannedEntry {
     EntryBuilder::new_compute(name.to_string(), (1, 1, 1)).build()
@@ -31,7 +31,7 @@ fn every_kernel_kind_closes_over_a_complete_planned_entry() {
         KernelKind::GraphicsPassthrough,
         KernelKind::SerialCompute,
         KernelKind::OutputDomainProjection,
-        KernelKind::MultiConsumerMaterialization,
+        KernelKind::SharedArrayMaterialization,
         KernelKind::ScalarPrepass,
         KernelKind::GatherPrepass,
         KernelKind::FilterFlags,
@@ -71,7 +71,7 @@ fn validator_rejects_duplicate_names_and_dependency_cycles() {
 #[test]
 fn validator_rejects_incomplete_phase_families() {
     let mut head = phase(0, "reduce", KernelKind::ReducePhase1);
-    head.flow_source = Some(CompilerFlowEndpoint::Prepass(PrepassId(0)));
+    head.flow_source = Some(CompilerFlowEndpoint::Materialization(MaterializationId(0)));
     let error = plan(vec![head]).validate_program(&[], &[], &PipelineDescriptor::default()).unwrap_err();
     assert!(error.contains("incomplete phase family"));
 }

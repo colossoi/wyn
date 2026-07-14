@@ -2,9 +2,9 @@
 //!
 //! Asserts the TLC invariant that **every array a SOAC consumes is named, never
 //! an inline producer**: a SOAC's array inputs are *atoms* (`Var`,
-//! `StorageView`, `Range`, `Literal`, `Zip` of atoms), and no `Index` array
+//! `Range`, `Literal`, `Zip` of atoms), and no `Index` array
 //! operand or `App` argument is a bare inline SOAC. Producers live only in
-//! binding positions — a `let` rhs, a def/lambda tail, an `OutputSlotStore`
+//! binding positions — a `let` rhs or a def/lambda tail
 //! value.
 //!
 //! This is a `debug_assert`-only invariant: in a correct compiler it never
@@ -53,7 +53,7 @@ fn walk(term: &Term) -> Result<(), &'static str> {
         _ => {}
     }
 
-    // A producer in a binding position (let rhs, tail, OutputSlotStore value) is
+    // A producer in a binding position (let rhs or tail) is
     // fine; the checks above only fire on non-binding positions, so recursing
     // never double-flags a legal producer.
     let mut result = Ok(());

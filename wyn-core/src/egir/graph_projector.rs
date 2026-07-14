@@ -124,27 +124,56 @@ impl<'a> GraphProjector<'a> {
         self.selected_with_values(roots, Vec::new())
     }
 
+    /// Project a straight-line entry recipe without retaining the source
+    /// entry's output/control-flow tail. Materialization requirements use this
+    /// form for producers that execute before the source entry branches.
+    pub fn selected_entry_recipe(&self, roots: HashSet<SideEffectSite>) -> Result<GraphProjection, String> {
+        self.project(roots, Vec::new(), false)
+    }
+
     pub fn selected_with_values(
         &self,
         roots: HashSet<SideEffectSite>,
         extra_values: Vec<NodeId>,
     ) -> Result<GraphProjection, String> {
+        self.project(roots, extra_values, true)
+    }
+
+    fn project(
+        &self,
+        roots: HashSet<SideEffectSite>,
+        extra_values: Vec<NodeId>,
+        preserve_control_flow: bool,
+    ) -> Result<GraphProjection, String> {
         let producers = self.source.side_effect_index();
         let mut selected = roots;
-        let mut value_roots = self.terminator_values();
+        let mut value_roots = if preserve_control_flow { self.terminator_values() } else { Vec::new() };
         value_roots.extend(extra_values);
         for site in selected.clone() {
             let effect = self.effect_at(site)?;
             value_roots.extend(effect.referenced_nodes());
         }
         let projected_values = self.close_producers(&mut selected, &mut value_roots, &producers)?;
+        if !preserve_control_flow {
+            if selected.iter().any(|site| site.block != self.source.skeleton.entry) {
+                return Err("entry recipe depends on an effect outside the entry block".into());
+            }
+            if projected_values
+                .iter()
+                .any(|node| matches!(self.source.nodes[*node], ENode::BlockParam { .. }))
+            {
+                return Err("entry recipe depends on a control-flow block parameter".into());
+            }
+        }
 
         let mut graph = EGraph::new();
         let mut blocks = HashMap::new();
         blocks.insert(self.source.skeleton.entry, graph.skeleton.entry);
-        for (source_block, _) in &self.source.skeleton.blocks {
-            if source_block != self.source.skeleton.entry {
-                blocks.insert(source_block, graph.skeleton.create_block());
+        if preserve_control_flow {
+            for (source_block, _) in &self.source.skeleton.blocks {
+                if source_block != self.source.skeleton.entry {
+                    blocks.insert(source_block, graph.skeleton.create_block());
+                }
             }
         }
 
@@ -159,7 +188,7 @@ impl<'a> GraphProjector<'a> {
                     let target = graph.add_func_param(*index, self.source.types[&source_id].clone());
                     nodes.insert(source_id, target);
                 }
-                ENode::BlockParam { block, index } => {
+                ENode::BlockParam { block, index } if preserve_control_flow => {
                     let target_block = blocks[block];
                     let target =
                         graph.add_block_param(target_block, *index, self.source.types[&source_id].clone());
@@ -193,7 +222,9 @@ impl<'a> GraphProjector<'a> {
 
         let mut effects = HashSet::new();
         for (source_block, body) in &self.source.skeleton.blocks {
-            let target_block = blocks[&source_block];
+            let Some(&target_block) = blocks.get(&source_block) else {
+                continue;
+            };
             for (index, effect) in body.side_effects.iter().enumerate() {
                 if !selected.contains(&SideEffectSite {
                     block: source_block,
@@ -214,12 +245,19 @@ impl<'a> GraphProjector<'a> {
             }
         }
 
-        for (source_block, body) in &self.source.skeleton.blocks {
-            let target_block = blocks[&source_block];
-            graph.skeleton.blocks[target_block].term = remap_terminator(&body.term, &nodes, &blocks)?;
+        if preserve_control_flow {
+            for (source_block, body) in &self.source.skeleton.blocks {
+                let target_block = blocks[&source_block];
+                graph.skeleton.blocks[target_block].term = remap_terminator(&body.term, &nodes, &blocks)?;
+            }
+        } else {
+            graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(None);
         }
-        let control_headers =
-            super::program::remap_control_headers(self.control_headers, |block| blocks[&block]);
+        let control_headers = if preserve_control_flow {
+            super::program::remap_control_headers(self.control_headers, |block| blocks[&block])
+        } else {
+            LookupMap::new()
+        };
         graph.verify_hash_cons()?;
         Ok(GraphProjection {
             graph,

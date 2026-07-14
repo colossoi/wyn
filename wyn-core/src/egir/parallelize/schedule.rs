@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use crate::egir::program::{
     CompilerFlowEndpoint, CompilerResourceFlow, EntryPublication, InputSlotId, LogicalResource,
-    MaterializationRequirement, OutputSlotId, PhysicalResourceTable, PlannedEntry, PlannedPublication,
-    PrepassKind, PrepassRequirement, RegionInterner, ResourceOrigin, SemanticEntry, SemanticEntryId,
-    SemanticFunc, SemanticResourceDecl, SemanticResourceRef,
+    MaterializationKind, MaterializationRequirement, OutputSlotId, PhysicalResourceTable, PlannedEntry,
+    PlannedPublication, RegionInterner, ResourceOrigin, SemanticEntry, SemanticEntryId, SemanticFunc,
+    SemanticResourceDecl, SemanticResourceRef,
 };
 use crate::egir::types::RegionId;
 use crate::egir::types::{
@@ -243,7 +243,7 @@ pub enum KernelKind {
     GraphicsPassthrough,
     SerialCompute,
     OutputDomainProjection,
-    MultiConsumerMaterialization,
+    SharedArrayMaterialization,
     ScalarPrepass,
     GatherPrepass,
     FilterFlags,
@@ -566,7 +566,6 @@ impl KernelPlan {
     pub fn seed(
         descriptor: &PipelineDescriptor,
         entries: &[SemanticEntry],
-        prepasses: &[PrepassRequirement],
         resources: &[LogicalResource],
         region_interner: &RegionInterner,
     ) -> Self {
@@ -587,19 +586,11 @@ impl KernelPlan {
             })
             .collect::<HashMap<_, _>>();
         let mut unresolved_stages = Vec::new();
-        let source_publications = entries
-            .iter()
-            .chain(prepasses.iter().map(|prepass| &prepass.entry))
-            .map(PlannedPublication::from_semantic)
-            .collect();
+        let source_publications = entries.iter().map(PlannedPublication::from_semantic).collect();
         let by_name = entries
             .iter()
             .enumerate()
             .map(|(index, entry)| (entry.name.as_str(), (SemanticEntryId(index as u32), entry)))
-            .collect::<HashMap<_, _>>();
-        let prepass_by_name = prepasses
-            .iter()
-            .map(|prepass| (prepass.entry.name.as_str(), prepass))
             .collect::<HashMap<_, _>>();
         let mut next_kernel_id = 0;
         let mut pipelines = Vec::new();
@@ -614,8 +605,6 @@ impl KernelPlan {
                 let selection = domain_selection_from_stage(stage, &host_resources);
                 let phase = if let Some((source, entry)) = by_name.get(stage.entry_point.as_str()) {
                     phase_from_entry(id, Some(*source), entry, selection, source_kind(entry))
-                } else if let Some(prepass) = prepass_by_name.get(stage.entry_point.as_str()) {
-                    phase_from_prepass(id, prepass, selection)
                 } else {
                     Err(format!(
                         "descriptor stage `{}` has no semantic entry",
@@ -682,21 +671,6 @@ impl KernelPlan {
                 graphics_passthrough_phase(id, SemanticEntryId(index as u32), entry)
             };
             match result {
-                Ok(phase) => unpublished.push(phase),
-                Err(error) => unresolved_stages.push(error),
-            }
-        }
-        for prepass in prepasses {
-            if published_names.contains(prepass.entry.name.as_str()) {
-                continue;
-            }
-            let id = KernelId(next_kernel_id);
-            next_kernel_id += 1;
-            match phase_from_prepass(
-                id,
-                prepass,
-                DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-            ) {
                 Ok(phase) => unpublished.push(phase),
                 Err(error) => unresolved_stages.push(error),
             }
@@ -818,8 +792,13 @@ impl KernelPlan {
     }
 
     pub fn add_materialization_before(&mut self, consumer: &str, requirement: &MaterializationRequirement) {
-        let (list_id, index) =
-            self.locate(consumer).unwrap_or_else(|| panic!("no planned kernel named `{consumer}`"));
+        let Some((list_id, index)) = self.locate(consumer) else {
+            let id = self.allocate_kernel_id();
+            let phase = phase_from_materialization(id, requirement, Vec::new())
+                .expect("materialization must project");
+            self.unpublished.push(phase);
+            return;
+        };
         let dependencies = self.list(list_id)[index].dependencies.clone();
         let id = self.allocate_kernel_id();
         let phase = phase_from_materialization(id, requirement, dependencies)
@@ -866,7 +845,12 @@ impl KernelPlan {
                 entry: Arc::new(entry),
             };
             phase.refresh_phase_facts();
-            if kind == KernelKind::MultiConsumerMaterialization {
+            if matches!(
+                kind,
+                KernelKind::SharedArrayMaterialization
+                    | KernelKind::GatherPrepass
+                    | KernelKind::ScalarPrepass
+            ) {
                 let domain = KernelDomain::Fixed { x: 1, y: 1, z: 1 };
                 phase.domain = domain.clone();
                 phase.domain_selection = DomainSelection::Explicit(domain);
@@ -1082,25 +1066,6 @@ fn phase_from_body(
     Ok(phase)
 }
 
-fn phase_from_prepass(
-    id: KernelId,
-    prepass: &PrepassRequirement,
-    selection: DomainSelection,
-) -> Result<KernelPhase, String> {
-    let kind = match prepass.kind {
-        PrepassKind::Scalar => KernelKind::ScalarPrepass,
-        PrepassKind::Gather => KernelKind::GatherPrepass,
-    };
-    phase_from_body(
-        id,
-        Some(CompilerFlowEndpoint::Prepass(prepass.id)),
-        None,
-        PlannedEntry::project(&prepass.entry)?,
-        selection,
-        kind,
-    )
-}
-
 fn phase_from_materialization(
     id: KernelId,
     requirement: &MaterializationRequirement,
@@ -1113,7 +1078,11 @@ fn phase_from_materialization(
         None,
         PlannedEntry::project(&requirement.entry)?,
         DomainSelection::Explicit(domain),
-        KernelKind::MultiConsumerMaterialization,
+        match requirement.kind {
+            MaterializationKind::SharedArray => KernelKind::SharedArrayMaterialization,
+            MaterializationKind::Gather => KernelKind::GatherPrepass,
+            MaterializationKind::Scalar => KernelKind::ScalarPrepass,
+        },
     )?;
     phase.dependencies = dependencies;
     Ok(phase)

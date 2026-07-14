@@ -35,7 +35,7 @@ use super::program::{
 };
 use super::publish::PipelineDescriptorPublish;
 use super::types::*;
-use crate::pipeline_descriptor::{BufferLen, PipelineDescriptor};
+use crate::pipeline_descriptor::BufferLen;
 
 // ============================================================================
 // Descriptor-set convention
@@ -226,10 +226,11 @@ impl ResourceRegistry {
 /// elaborate`).
 pub fn run(
     program: &TlcProgram,
-    pipeline: PipelineDescriptor,
     input_slice_bounds: &crate::tlc::input_slice_bounds::ProgramBounds,
     binding_ids: &mut crate::IdSource<u32>,
 ) -> Result<SemanticProgram, ConvertError> {
+    let seed = super::pipeline_seed::run(program);
+    let pipeline = seed.pipeline;
     let top_level: LookupMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
 
@@ -281,7 +282,6 @@ pub fn run(
     let mut functions: Vec<SemanticFunc> = Vec::new();
     let mut externs: Vec<Function> = Vec::new();
     let mut entry_points: Vec<SemanticEntry> = Vec::new();
-    let mut prepass_roles = LookupMap::new();
 
     for def in &program.defs {
         match &def.meta {
@@ -297,26 +297,6 @@ pub fn run(
             }
             DefMeta::EntryPoint(entry) => {
                 let workgroup = pipeline.workgroup_size_of(&entry.name);
-                // If TLC parallelize reserved a specific output binding
-                // for this entry, honor it; otherwise auto-allocate.
-                // Map and Scan results are single `EntryOutput` buffers whose
-                // binding `build_entry_outputs` may pin (gather pre-passes do).
-                // Reduce / reducing Screma manage their result inside the
-                // two-phase plan, so `forced_output` reports `None` for them.
-                //
-                // Fallback for `--single-stage` / `parallelize_soacs(disable=
-                // true)`: no plan exists, but `lift_gathers` still records its
-                // intended gather binding as an Output-role
-                // `StorageBindingDecl` carrying a `length` (the gather-prepass
-                // marker shape). Use that as the forced output so the prepass
-                // map writes the gather buffer instead of having its result
-                // auto-allocated onto a colliding binding.
-                let forced_output_binding = entry
-                    .storage_bindings
-                    .iter()
-                    .find(|binding| binding.role == interface::StorageRole::Output)
-                    .map(|binding| binding.binding)
-                    .or_else(|| gather_prepass_forced_output(entry));
                 let entry_name = symbol_name(symbols, def.name).unwrap_or("");
                 let entry_input_bounds = input_slice_bounds.get(entry_name);
                 let ep = convert_entry_point(
@@ -325,19 +305,9 @@ pub fn run(
                     &ctx,
                     &pure_constant_names,
                     workgroup,
-                    forced_output_binding,
                     entry_input_bounds,
                     binding_ids,
                 )?;
-                match entry.origin {
-                    interface::EntryOrigin::Source => {}
-                    interface::EntryOrigin::ScalarPrepass => {
-                        prepass_roles.insert(ep.name.clone(), super::program::PrepassKind::Scalar);
-                    }
-                    interface::EntryOrigin::GatherPrepass => {
-                        prepass_roles.insert(ep.name.clone(), super::program::PrepassKind::Gather);
-                    }
-                }
                 entry_points.push(ep);
             }
         }
@@ -353,7 +323,7 @@ pub fn run(
         pipeline,
         region_interner.into_inner(),
     );
-    semantic.prepass_roles = prepass_roles;
+    semantic.input_names = seed.input_names;
     let (by_binding, resources) = resource_registry.into_inner().finish()?;
     super::program::finalize_converted_resources(&mut semantic, resources, &by_binding);
     Ok(semantic)
@@ -440,20 +410,7 @@ fn convert_function<'a>(
     )))
 }
 
-/// When `parallelize_soacs` is disabled, `lift_gathers`-emitted prepass
-/// entries are the only producers carrying a forced-binding intent —
-/// recorded as an Output-role `StorageBindingDecl` with `length: Some(_)`
-/// (the gather-buffer marker). Recover that binding so
-/// `build_entry_outputs` pins the prepass's map output to it instead of
-/// auto-allocating onto a colliding slot.
-fn gather_prepass_forced_output(entry: &interface::EntryDecl) -> Option<BindingRef> {
-    entry
-        .storage_bindings
-        .iter()
-        .find(|d| matches!(d.role, interface::StorageRole::Output) && d.length.is_some())
-        .map(|d| d.binding)
-}
-
+/// Translate descriptor sizing metadata into stable logical-resource sizes.
 fn logical_size(
     resources: &std::cell::RefCell<ResourceRegistry>,
     length: Option<&BufferLen>,
@@ -495,7 +452,6 @@ fn literal_binding(args: &[Term], intrinsic: &str) -> Result<BindingRef, Convert
 fn entry_resource_declarations(
     inputs: &[EntryInput],
     outputs: &[EntryOutput],
-    abi_declarations: &[interface::StorageBindingDecl],
     resources: &std::cell::RefCell<ResourceRegistry>,
 ) -> Vec<SemanticResourceDecl> {
     let mut declarations = Vec::new();
@@ -514,15 +470,6 @@ fn entry_resource_declarations(
                 });
             }
         };
-    for declaration in abi_declarations {
-        let size = logical_size(resources, declaration.length.as_ref());
-        declare(
-            declaration.binding,
-            declaration.role.clone(),
-            declaration.elem_ty.clone(),
-            size,
-        );
-    }
     for input in inputs {
         if let Some(binding) = input.storage_binding {
             let size = logical_size(resources, input.length.as_ref());
@@ -551,7 +498,6 @@ fn convert_entry_point(
     ctx: &GlobalContext,
     pure_constants: &LookupSet<String>,
     workgroup: (u32, u32, u32),
-    forced_output_binding: Option<BindingRef>,
     input_slice_bounds_for_entry: Option<&LookupMap<SymbolId, BufferLen>>,
     binding_ids: &mut crate::IdSource<u32>,
 ) -> Result<SemanticEntry, ConvertError> {
@@ -562,17 +508,9 @@ fn convert_entry_point(
     let (inner_body, params) = crate::tlc::extract_lambda_params_ref(&def.body);
     let is_compute = matches!(entry.entry_type, interface::Attribute::Compute);
 
-    // After `normalize_outputs`, `def.ty == def.body.ty` (the body
-    // ends in `SideEffect` for normalized compute entries, in its
-    // tail's type for graphics). Reading `inner_body.ty` is the right
-    // source either way.
+    // The converted body carries the specialized return representation; use it
+    // rather than the parse-time entry declaration.
     let ret_type = inner_body.ty.clone();
-    // For normalized compute entries, the body's `OutputSlotStore.value`
-    // terms carry the post-`monomorphize`/`buffer_specialize` per-slot
-    // types — pre-walk the body to harvest them so
-    // `build_entry_outputs` can use them in preference to the parse-
-    // time `entry.outputs[i].ty`.
-    let slot_value_tys = collect_output_slot_value_tys(inner_body);
     let param_info: Vec<(Type<TypeName>, String)> = params
         .iter()
         .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))
@@ -741,15 +679,6 @@ fn convert_entry_point(
         _ => panic!("Invalid entry type attribute: {:?}", entry.entry_type),
     };
 
-    let outputs = build_entry_outputs(
-        entry,
-        &ret_type,
-        &slot_value_tys,
-        &inputs,
-        is_compute,
-        converter.binding_ids,
-        forced_output_binding,
-    )?;
     let is_unit_return = matches!(
         ret_type,
         Type::Constructed(TypeName::Unit | TypeName::SideEffect, _)
@@ -761,48 +690,40 @@ fn convert_entry_point(
     // separate, uniform pass — `egir::realize_outputs`, run right after
     // this conversion. Here we just leave the body terminating in its
     // single tail value (or `None` for a unit entry).
-    let result_nid = converter.convert_term(inner_body)?;
-
-    // Slot-collected entries (post-`normalize_outputs`) have their
-    // writes recorded as per-slot `SlotSource`s rather than flowing
-    // through a single Return value. `egir::realize_outputs` reads
-    // those sources directly off `SemanticEntry.output_routes` and
-    // retargets each one. The body terminates with `Return(None)` —
-    // there's no value to merge through the CFG.
-    let was_slot_collected = !converter.slot_sources_accum.is_empty();
-    if was_slot_collected {
-        converter.set_return(None);
-    } else if is_unit_return {
-        converter.set_return(None);
+    let output_arity = entry_output_arity(entry, &ret_type);
+    let result_nid = if is_compute && output_arity != 0 {
+        converter.convert_compute_outputs(inner_body, output_arity)?
     } else {
-        converter.set_return(Some(result_nid));
-    }
+        Some(converter.convert_term(inner_body)?)
+    };
 
-    // `ret_type` is used by downstream code to type the entry's
-    // function signature. Post-`normalize_outputs` the body's TLC
-    // return type is `SideEffect`; reconstruct from `entry.outputs`
-    // so the signature matches the declared output shape.
-    let ret_type =
-        if was_slot_collected && entry.outputs.iter().any(|output| is_storage_image_ty(&output.ty)) {
-            Type::Constructed(TypeName::Unit, vec![])
-        } else if was_slot_collected {
-            if entry.outputs.len() == 1 {
-                // Unwrap a `?k. [k]T` filter output to its runtime array, matching
-                // the `EntryOutput.ty` `build_entry_outputs` produced.
-                unwrap_existential_array(&entry.outputs[0].ty)
-            } else {
-                let component_tys: Vec<_> = entry.outputs.iter().map(|o| o.ty.clone()).collect();
-                Type::Constructed(TypeName::Tuple(component_tys.len()), component_tys)
-            }
-        } else if is_storage_image_ty(&ret_type) {
-            Type::Constructed(TypeName::Unit, vec![])
-        } else {
-            ret_type
-        };
+    let slot_value_tys = converter
+        .output_sources
+        .iter()
+        .map(|sources| sources.first().map(|source| converter.graph.types[&source.value].clone()))
+        .collect::<Vec<_>>();
+    let outputs = build_entry_outputs(
+        entry,
+        &ret_type,
+        &slot_value_tys,
+        &inputs,
+        is_compute,
+        converter.binding_ids,
+    )?;
 
-    let slot_sources = std::mem::take(&mut converter.slot_sources_accum);
-    let mut resource_declarations =
-        entry_resource_declarations(&inputs, &outputs, &entry.storage_bindings, ctx.resources);
+    // `convert_compute_outputs` records per-slot sources while preserving the
+    // original control flow. Output realization later assigns concrete writers.
+    converter.set_return(if is_unit_return { None } else { result_nid });
+
+    // Compute entries publish through routes, not function return values.
+    let ret_type = if is_compute || is_storage_image_ty(&ret_type) {
+        Type::Constructed(TypeName::Unit, vec![])
+    } else {
+        ret_type
+    };
+
+    let slot_sources = std::mem::take(&mut converter.output_sources);
+    let mut resource_declarations = entry_resource_declarations(&inputs, &outputs, ctx.resources);
     resource_declarations.extend(std::mem::take(&mut converter.extra_resource_declarations));
     let (graph, control_headers) = converter.into_graph_parts();
     let output_count = outputs.len();
@@ -838,6 +759,24 @@ fn is_storage_image_ty(ty: &Type<TypeName>) -> bool {
     matches!(ty, Type::Constructed(TypeName::StorageTexture, _))
 }
 
+fn strip_existentials(mut ty: &Type<TypeName>) -> &Type<TypeName> {
+    while let Type::Constructed(TypeName::Existential(_), args) = ty {
+        let Some(inner) = args.first() else {
+            break;
+        };
+        ty = inner;
+    }
+    ty
+}
+
+fn entry_output_arity(entry: &interface::EntryDecl, ret_type: &Type<TypeName>) -> usize {
+    match strip_existentials(ret_type) {
+        Type::Constructed(TypeName::Unit | TypeName::SideEffect | TypeName::StorageTexture, _) => 0,
+        Type::Constructed(TypeName::Tuple(_), fields) => fields.len(),
+        _ => usize::from(!entry.outputs.is_empty()),
+    }
+}
+
 // ============================================================================
 // Converter
 // ============================================================================
@@ -868,20 +807,13 @@ struct Converter<'a, 'b> {
     /// the originating source. Pushed/popped in `convert_term`; `None`
     /// only outside any term conversion (e.g. entry-point glue).
     current_span: Option<Span>,
-    /// Per-slot list of `SlotSource { block, value }` records collected
-    /// from `OutputSlotStore` terms during entry-body conversion. Indexed
-    /// by slot index. Populated by `convert_slot_store` (the
-    /// `OutputSlotStore` arm of `convert_term_kind` delegates here);
-    /// consumed by `convert_entry_point` to populate `SemanticEntry.output_routes`
-    /// and decide whether the body terminates with `Return(None)` (when
-    /// all outputs were written via slot stores) or a value (legacy
-    /// non-normalized entries).
+    /// Per-slot `SlotSource { block, value }` records derived directly from a
+    /// compute entry's original tail and consumed by `convert_entry_point` to
+    /// populate `SemanticEntry.output_routes`.
     ///
     /// A slot with one source has `vec![one]`; a slot written from both
-    /// arms of an `If` (where both branches independently store to the
-    /// same slot) has two. Empty for unit-returning entries that never
-    /// went through `normalize_outputs`.
-    slot_sources_accum: Vec<Vec<crate::egir::program::SlotSource>>,
+    /// arms of an `If` has two. Unit-returning entries leave it empty.
+    output_sources: Vec<Vec<crate::egir::program::SlotSource>>,
     /// Module-wide id factory for host-visible auto-storage binding numbers.
     /// Compiler resources never draw from this namespace.
     binding_ids: &'b mut crate::IdSource<u32>,
@@ -918,7 +850,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             control_headers: LookupMap::new(),
             next_effect: 1,
             current_span: None,
-            slot_sources_accum: Vec::new(),
+            output_sources: Vec::new(),
             binding_ids,
             extra_resource_declarations: Vec::new(),
             region_interner,
@@ -1141,13 +1073,8 @@ impl<'a, 'b> Converter<'a, 'b> {
                         self.current_span,
                     ))
                 } else {
-                    // NOTE: a runtime-sized Composite array reaching here is an
-                    // un-lifted gather (its producer wasn't materialized to a
-                    // storage buffer — e.g. a producer behind a helper call:
-                    // cross-function gather-lifting is unimplemented). It can't be
-                    // lowered as a value and currently panics in the SPIR-V
-                    // backend (`polytype_to_spirv`, the unsized-Composite arm).
-                    // See the ignored `cross_function_gather_errors_cleanly` test.
+                    // Keep the semantic index explicit. EGIR residency planning
+                    // decides whether its producer needs a storage handoff.
                     Ok(self.intern_pure(PureOp::Index, smallvec![base, idx], ty))
                 }
             }
@@ -1165,35 +1092,21 @@ impl<'a, 'b> Converter<'a, 'b> {
             TermKind::BinOp(_) | TermKind::UnOp(_) => {
                 panic!("ICE: bare operator in to_egir (should be inside App)")
             }
-            // `OutputSlotStore { slot_index, value, .. }`: delegate
-            // to `convert_slot_store`, which recurses through `If` and
-            // records one `SlotSource` per producing leaf. Returning a
-            // unit constant keeps the surrounding `Let` chain's `body`
-            // well-typed.
-            TermKind::OutputSlotStore {
-                slot_index, value, ..
-            } => {
-                self.convert_slot_store(*slot_index, value)?;
-                let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-                Ok(self.intern_pure(PureOp::Unit, smallvec![], unit_ty))
-            }
         }
     }
 
     // ========================================================================
-    // Output slot stores (DPS write at the producing site)
+    // Compute output-route collection
     // ========================================================================
 
-    /// Convert one `OutputSlotStore(slot_index, value)`, recursing through
-    /// `If` (and `Let` wrapping it) so each producing leaf records its
-    /// own `SlotSource` at the block in which it fires.
+    /// Convert one logical output value, recursing through `If` and wrapping
+    /// `Let`s so each producing leaf records its own `SlotSource`.
     ///
     /// `If`-shaped values fork at the EGIR level: the current block ends
-    /// with `CondBranch`, each arm recursively converts the same slot
-    /// store against its branch, and both arms terminate with
+    /// with `CondBranch`, each arm recursively converts the same route
+    /// against its branch, and both arms terminate with
     /// `Branch(merge)` carrying no result args. There's nothing to
-    /// merge — each branch's slot write went to the same binding, the
-    /// runtime CFG picks which one fires.
+    /// merge; output realization later gives both routes the same destination.
     ///
     /// `Let { x = rhs, body }` wrapping an output value (e.g. `let n =
     /// length(xs) in if c then map_using_n else map_using_n`) binds
@@ -1203,7 +1116,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// Non-control-flow values are converted normally; a single
     /// `SlotSource { block: self.current_block, value: <converted> }`
     /// is pushed to `slot_sources_accum[slot_index]`.
-    fn convert_slot_store(&mut self, slot_index: usize, value: &Term) -> Result<(), ConvertError> {
+    fn convert_output_source(&mut self, slot_index: usize, value: &Term) -> Result<(), ConvertError> {
         use crate::ssa::types::ControlHeader;
         match &value.kind {
             TermKind::Let {
@@ -1218,7 +1131,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 // binding survives the branch fork in `body`.
                 let rhs_nid = self.convert_term(rhs)?;
                 self.locals.insert(*name, rhs_nid);
-                self.convert_slot_store(slot_index, body)
+                self.convert_output_source(slot_index, body)
             }
             TermKind::If {
                 cond,
@@ -1244,14 +1157,14 @@ impl<'a, 'b> Converter<'a, 'b> {
                 };
 
                 self.current_block = then_block;
-                self.convert_slot_store(slot_index, then_branch)?;
+                self.convert_output_source(slot_index, then_branch)?;
                 self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
                     target: merge_block,
                     args: vec![],
                 };
 
                 self.current_block = else_block;
-                self.convert_slot_store(slot_index, else_branch)?;
+                self.convert_output_source(slot_index, else_branch)?;
                 self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
                     target: merge_block,
                     args: vec![],
@@ -1262,15 +1175,40 @@ impl<'a, 'b> Converter<'a, 'b> {
             }
             _ => {
                 let value_nid = self.convert_term(value)?;
-                while self.slot_sources_accum.len() <= slot_index {
-                    self.slot_sources_accum.push(Vec::new());
+                while self.output_sources.len() <= slot_index {
+                    self.output_sources.push(Vec::new());
                 }
-                self.slot_sources_accum[slot_index].push(crate::egir::program::SlotSource {
+                self.output_sources[slot_index].push(crate::egir::program::SlotSource {
                     block: self.current_block,
                     value: value_nid,
                 });
                 Ok(())
             }
+        }
+    }
+
+    fn convert_compute_outputs(
+        &mut self,
+        term: &Term,
+        output_count: usize,
+    ) -> Result<Option<NodeId>, ConvertError> {
+        match &term.kind {
+            TermKind::Let { name, rhs, body, .. } => {
+                let rhs_nid = self.convert_term(rhs)?;
+                self.locals.insert(*name, rhs_nid);
+                self.convert_compute_outputs(body, output_count)
+            }
+            TermKind::Tuple(values) if values.len() == output_count => {
+                for (slot, value) in values.iter().enumerate() {
+                    self.convert_output_source(slot, value)?;
+                }
+                Ok(None)
+            }
+            _ if output_count == 1 => {
+                self.convert_output_source(0, term)?;
+                Ok(None)
+            }
+            _ => self.convert_term(term).map(Some),
         }
     }
 
@@ -2819,49 +2757,6 @@ impl<'a, 'b> Converter<'a, 'b> {
                 };
                 Ok(self.intern_pure(PureOp::ArrayRange { has_step }, operands, ty))
             }
-            ArrayExpr::StorageView(crate::tlc::StorageView {
-                binding,
-                offset,
-                len,
-                elem_ty,
-            }) => {
-                let resource = self.resources.borrow_mut().declare_host(
-                    *binding,
-                    elem_ty.clone(),
-                    LogicalSize::Unspecified,
-                );
-                let offset_nid = self.convert_term(offset)?;
-                let len_nid = self.convert_term(len)?;
-                let array_ty = Type::Constructed(
-                    TypeName::Array,
-                    vec![
-                        elem_ty.clone(),
-                        Type::Constructed(TypeName::ArrayVariantView, vec![]),
-                        Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                        Type::Constructed(TypeName::Resource(resource), vec![]),
-                    ],
-                );
-                let result_nid = self.graph.alloc_side_effect_result(array_ty);
-                let effect_in = EffectToken(0);
-                let effect_out = self.alloc_effect();
-                self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                    semantic_id: None,
-                    kind: SideEffectKind::Inst(InstKind::Op {
-                        tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(
-                            SemanticResourceRef(resource),
-                        )),
-                        operands: vec![
-                            ValueRef::Ssa(Default::default()),
-                            ValueRef::Ssa(Default::default()),
-                        ],
-                    }),
-                    operand_nodes: smallvec![offset_nid, len_nid],
-                    result: Some(result_nid),
-                    effects: Some((effect_in, effect_out)),
-                    span: self.current_span,
-                });
-                Ok(result_nid)
-            }
         }
     }
 
@@ -2902,7 +2797,6 @@ impl<'a, 'b> Converter<'a, 'b> {
                 terms.first().map(|t| t.ty.clone()).unwrap_or(Type::Constructed(TypeName::Unit, vec![]))
             }
             ArrayExpr::Range { start, .. } => start.ty.clone(),
-            ArrayExpr::StorageView(crate::tlc::StorageView { elem_ty, .. }) => elem_ty.clone(),
         }
     }
 
@@ -3002,58 +2896,6 @@ fn target_of(attr: Option<&interface::Attribute>) -> Option<String> {
     }
 }
 
-/// Build entry outputs from an AST `EntryDecl`.
-/// For compute shaders, non-unit outputs get sequential storage bindings starting at `binding_start`.
-/// Walk a (post-normalize_outputs) entry body and collect each
-/// `OutputSlotStore { slot_index, value, .. }`'s `value.ty` into a
-/// dense `Vec<Option<Type>>` indexed by slot. Returns empty if the
-/// body contains no `OutputSlotStore` (graphics entries; the
-/// multi-output non-Tuple fallthrough that `normalize_outputs` leaves
-/// unrewritten). `build_entry_outputs` reads from this in preference
-/// to the parse-time `entry.outputs[i].ty`, since the body's term
-/// types are current with `monomorphize` / `buffer_specialize`.
-fn collect_output_slot_value_tys(body: &crate::tlc::Term) -> Vec<Option<Type<TypeName>>> {
-    use crate::tlc::TermKind;
-    let mut out: Vec<(usize, Type<TypeName>)> = Vec::new();
-    let mut cur = body;
-    loop {
-        match &cur.kind {
-            TermKind::Let { rhs, body, .. } => {
-                if let TermKind::OutputSlotStore {
-                    slot_index, value, ..
-                } = &rhs.kind
-                {
-                    out.push((*slot_index, value.ty.clone()));
-                }
-                cur = body;
-            }
-            _ => break,
-        }
-    }
-    if out.is_empty() {
-        return Vec::new();
-    }
-    let max = out.iter().map(|(i, _)| *i).max().unwrap();
-    let mut dense: Vec<Option<Type<TypeName>>> = vec![None; max + 1];
-    for (i, ty) in out {
-        dense[i] = Some(ty);
-    }
-    dense
-}
-
-/// Unwrap an existential array return `?k. [k]T` to its inner array type
-/// `[k]T`. A runtime `filter`'s entry output is declared existential, but the
-/// host-visible buffer is a plain runtime `[]T`; the backend lays out a storage
-/// buffer from the element type alone, so the inner array (size variable and
-/// all) is what `create_storage_buffer` needs. Non-existential types pass
-/// through unchanged.
-fn unwrap_existential_array(ty: &Type<TypeName>) -> Type<TypeName> {
-    match ty {
-        Type::Constructed(TypeName::Existential(_), args) if !args.is_empty() => args[0].clone(),
-        _ => ty.clone(),
-    }
-}
-
 /// Shape-preserving result type for a non-in-place `map`/`scan`.
 ///
 /// When the TLC `result_ty` carries an unresolved existential `Skolem` size —
@@ -3093,10 +2935,10 @@ fn build_entry_outputs(
     inputs: &[EntryInput],
     is_compute: bool,
     binding_ids: &mut crate::IdSource<u32>,
-    forced_output_binding: Option<BindingRef>,
 ) -> Result<Vec<EntryOutput>, ConvertError> {
     use EntryOutput;
-    let mut forced_remaining = forced_output_binding;
+    let logical_ret_type = strip_existentials(ret_type);
+    let output_arity = entry_output_arity(entry, ret_type);
     // Pick a `BufferLen` policy for the output binding, in order:
     //
     //   1. Output type carries a compile-time-known `Size(n)` literal
@@ -3104,9 +2946,8 @@ fn build_entry_outputs(
     //   2. Output's size variable matches one of the entry's storage
     //      inputs (the type checker has unified them) → `LikeInput`
     //      tracking that input.
-    //   3. The parallelize plan said the entry is dispatch-sized
-    //      (a single Map/Scan SOAC at the tail, or a forced gather
-    //      prepass) → `SameAsDispatch { elem_bytes }`.
+    //   3. A runtime array output route is sized from the finalized semantic
+    //      dispatch domain → `SameAsDispatch { elem_bytes }`.
     //   4. None — the host falls back to its default sizing or, if it
     //      tried to allocate this buffer, surfaces a clean error.
     //
@@ -3167,31 +3008,15 @@ fn build_entry_outputs(
         };
     let mut storage_binding_for = |ty: &Type<TypeName>, is_compute: bool| -> Option<BindingRef> {
         if is_compute && !matches!(ty, Type::Constructed(TypeName::Unit, _)) {
-            // Honor the planned binding for the first storage output if
-            // present; subsequent outputs (tuple-return entries) keep
-            // auto-allocating.
-            if let Some(b) = forced_remaining.take() {
-                return Some(b);
-            }
             Some(BindingRef::new(AUTO_STORAGE_SET, binding_ids.next_id()))
         } else {
             None
         }
     };
 
-    // Normalized compute entries type their return position as
-    // `SideEffect` (the body produces no value; it writes via
-    // `OutputSlotStore`). The decoration is on `entry.outputs[i]`; the
-    // per-slot ty must come from `slot_value_tys[i]` (the body's
-    // `OutputSlotStore.value.ty` post-monomorphize/buffer_specialize),
-    // not from `entry.outputs[i].ty` (which is parse-time-frozen and
-    // can still carry unresolved Array-variant type variables).
-    // Source declared no return type (`entry foo(...) () = …`). For
-    // both Unit (compute entries whose tail is a side-effectful builtin
-    // like storage-image `with` — `normalize_outputs` leaves the body Unit-
-    // typed when `n_outputs == 0`) and SideEffect (a normalised
-    // `OutputSlotStore` chain that bottomed out empty), there's no
-    // logical output slot to emit. Returning a synthetic Unit-typed
+    // Prefer the converted route value's representation-specialized type to
+    // the parse-time output declaration. A source entry with no return value
+    // has no logical output slot. Returning a synthetic Unit-typed
     // `EntryOutput` here would surface to the SPIR-V backend as an
     // `Output<void>` variable in the entry's interface — malformed and
     // rejected by naga / the Vulkan validation layer.
@@ -3208,44 +3033,10 @@ fn build_entry_outputs(
         return Ok(vec![]);
     }
 
-    if matches!(ret_type, Type::Constructed(TypeName::SideEffect, _)) {
-        let slot_count = slot_value_tys.len().max(entry.outputs.len());
-        return (0..slot_count)
-            .map(|i| {
-                let output = entry.outputs.get(i);
-                let raw = slot_value_tys
-                    .get(i)
-                    .and_then(|t| t.as_ref())
-                    .or_else(|| output.map(|output| &output.ty))
-                    .ok_or_else(|| {
-                        ConvertError::Internal(format!(
-                            "normalized output slot {i} has neither a value type nor a declaration"
-                        ))
-                    })?;
-                // Canonicalize for storage layout: strip `Unique<_>` and
-                // unwrap any top-level `Existential` (e.g. a runtime
-                // `filter` output declared `?k. [k]T`) so
-                // `create_storage_buffer` sees the concrete runtime
-                // array. See `types::canonical_storage_buffer_ty`.
-                let ty = crate::types::canonical_storage_buffer_ty(raw);
-                let storage_binding = storage_binding_for(&ty, is_compute);
-                let length = length_for(storage_binding, &ty)?;
-                Ok(EntryOutput {
-                    ty,
-                    decoration: output
-                        .and_then(|output| output.attribute.as_ref())
-                        .and_then(convert_to_io_decoration),
-                    target: target_of(output.and_then(|output| output.attribute.as_ref())),
-                    storage_binding,
-                    length,
-                })
-            })
-            .collect();
-    }
-
-    if entry.outputs.iter().all(|o| o.attribute.is_none()) && entry.outputs.len() == 1 {
+    if entry.outputs.iter().all(|o| o.attribute.is_none()) && output_arity == 1 {
         if !matches!(ret_type, Type::Constructed(TypeName::Unit, _)) {
-            let ty = crate::types::canonical_storage_buffer_ty(ret_type);
+            let source_ty = slot_value_tys.first().and_then(Option::as_ref).unwrap_or(ret_type);
+            let ty = crate::types::canonical_storage_buffer_ty(source_ty);
             let storage_binding = storage_binding_for(&ty, is_compute);
             let length = length_for(storage_binding, &ty)?;
             Ok(vec![EntryOutput {
@@ -3258,26 +3049,28 @@ fn build_entry_outputs(
         } else {
             Ok(vec![])
         }
-    } else if let Type::Constructed(TypeName::Tuple(_), component_types) = ret_type {
-        entry
-            .outputs
+    } else if let Type::Constructed(TypeName::Tuple(_), component_types) = logical_ret_type {
+        component_types
             .iter()
-            .zip(component_types.iter())
-            .map(|(output, ty)| {
+            .enumerate()
+            .map(|(slot, ty)| {
+                let ty = slot_value_tys.get(slot).and_then(Option::as_ref).unwrap_or(ty);
                 let ty = crate::types::canonical_storage_buffer_ty(ty);
                 let storage_binding = storage_binding_for(&ty, is_compute);
                 let length = length_for(storage_binding, &ty)?;
+                let attribute = entry.outputs.get(slot).and_then(|output| output.attribute.as_ref());
                 Ok(EntryOutput {
                     ty,
-                    decoration: output.attribute.as_ref().and_then(convert_to_io_decoration),
-                    target: target_of(output.attribute.as_ref()),
+                    decoration: attribute.and_then(convert_to_io_decoration),
+                    target: target_of(attribute),
                     storage_binding,
                     length,
                 })
             })
             .collect()
     } else {
-        let ty = crate::types::canonical_storage_buffer_ty(ret_type);
+        let source_ty = slot_value_tys.first().and_then(Option::as_ref).unwrap_or(ret_type);
+        let ty = crate::types::canonical_storage_buffer_ty(source_ty);
         let storage_binding = storage_binding_for(&ty, is_compute);
         let length = length_for(storage_binding, &ty)?;
         let first_attr = entry.outputs.first().and_then(|o| o.attribute.as_ref());

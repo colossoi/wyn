@@ -18,10 +18,10 @@
 //! wrapped in `let`s). A producer reached through a `Var` — i.e. let-bound and
 //! potentially read more than once — is deliberately left alone; fusing it would
 //! duplicate the producer per index, so multi-consumer and runtime-indexed cases
-//! belong to the gather/materialization path instead.
+//! belong to EGIR residency planning instead.
 //!
-//! Runs post-materialize (from `parallelize::run`), where an inlined helper's
-//! producer is a directly-nested `Soac(Map)` under the `Index`.
+//! Runs after entry producer exposure, where an inlined helper's producer is a
+//! directly-nested `Soac(Map)` under the `Index`.
 
 use super::{ArrayExpr, Lambda, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind};
 use crate::ast::TypeName;
@@ -114,9 +114,8 @@ fn try_fuse(
 /// The element of `input` at `[index]` — `Index(t, index)`, where `t` is the
 /// input atom reconstructed as a `Term`. A `Var` becomes the named array; a
 /// `Range`/`Literal` becomes its `ArrayExpr` term so the resulting `(0..<n)[k]`
-/// / `[a,b,c][k]` is handed to the runtime-index / gather path downstream. `Zip`
-/// and `StorageView` aren't fused here; returning `None` leaves the `Index` in
-/// place.
+/// / `[a,b,c][k]` is handed to EGIR residency planning downstream. `Zip` isn't
+/// fused here; returning `None` leaves the `Index` in place.
 fn index_elem(
     input: &ArrayExpr,
     elem_ty: Type<TypeName>,
@@ -131,7 +130,7 @@ fn index_elem(
             span: index.span,
             kind: TermKind::ArrayExpr(input.clone()),
         },
-        ArrayExpr::Zip(_) | ArrayExpr::StorageView(_) => return None,
+        ArrayExpr::Zip(_) => return None,
     };
     Some(Term {
         id: ids.next_id(),

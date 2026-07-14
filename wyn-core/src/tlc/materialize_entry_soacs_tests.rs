@@ -1,16 +1,14 @@
 //! Pass-level tests for `materialize_entry_soacs` — does it inline the *right*
 //! producer calls into entries, and leave per-element-nested ones alone?
 //!
-//! We run the pass on a program compiled to the pre-defunctionalize stage
-//! (`lift_gathers`): there the producer calls are still present (no inlining
-//! yet) and SOAC operator lambdas are still inline (so the only `Var`-callee
-//! `App`s are user helper calls). Buffer concreteness — which the pass needs at
-//! its real post-monomorphize position — is exercised by the end-to-end tests,
-//! not here; this fixes the *materialization decision*.
+//! We run the pass on the canonical TLC test pipeline, where SOAC operator
+//! lambdas are still available and producer calls retain the shapes needed to
+//! exercise the entry-exposure decision. Buffer concreteness is exercised by
+//! the end-to-end tests, not here.
 
 use crate::tlc::{DefMeta, Program, Term, TermKind, VarRef};
 
-/// Compile `src` to the `lift_gathers` stage and run the pass on it.
+/// Compile `src` through the canonical TLC test pipeline.
 fn materialize(src: &str) -> Program {
     crate::test_pipeline::compile_to_tlc_program(src)
 }
@@ -50,9 +48,6 @@ fn top_level_soac(term: &Term) -> bool {
         TermKind::Lambda(lam) => top_level_soac(&lam.body),
         TermKind::Let { rhs, body, .. } => {
             matches!(rhs.kind, TermKind::Soac(_)) || top_level_soac(rhs) || top_level_soac(body)
-        }
-        TermKind::OutputSlotStore { value, .. } => {
-            matches!(value.kind, TermKind::Soac(_)) || top_level_soac(value)
         }
         TermKind::Soac(_) => true,
         _ => false,

@@ -9,7 +9,7 @@
 //!      declarations that the developer never wrote — both routed
 //!      user attributes (`#[storage]`, `#[uniform]`, `#[texture]`,
 //!      `#[sampler]`, push constants) and compiler intermediates
-//!      (`lift_gathers` gather buffers, parallelize phase IO).
+//!      (residency handoffs and segmented phase I/O).
 //!
 //!   2. `publish_graphics_io` — thread a vertex entry's `#[vertex_slot(n)]`
 //!      inputs and a fragment entry's `#[target(name)]` outputs into the

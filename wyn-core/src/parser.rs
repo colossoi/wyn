@@ -540,7 +540,6 @@ impl<'a> Parser<'a> {
         let body = self.parse_expression()?;
 
         Ok(Declaration::Entry(EntryDecl {
-            origin: crate::interface::EntryOrigin::Source,
             entry_type,
             compute_dispatch,
             name,
@@ -549,7 +548,6 @@ impl<'a> Parser<'a> {
             type_params,
             params,
             outputs,
-            storage_bindings: Vec::new(),
             param_bindings: Vec::new(),
             feedback: Vec::new(),
             body,

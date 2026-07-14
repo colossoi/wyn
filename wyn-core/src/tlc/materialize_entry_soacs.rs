@@ -2,9 +2,9 @@
 //!
 //! This pass does NOT parallelize or lift anything itself. It makes SOACs that
 //! a user factored into a helper *visible at the entry boundary*, so the
-//! downstream passes that already do that work (`lift_gathers`, `parallelize`)
-//! can see them. Those passes only recognize a SOAC that physically sits in the
-//! entry's own body; a `def stencil(xs) = scan(..)` called as
+//! downstream source fusion and EGIR residency planning can see them. Those
+//! passes recognize a SOAC that physically sits in the entry's own body; a
+//! `def stencil(xs) = scan(..)` called as
 //! `entry e(xs) = stencil(xs)` hides the `scan` behind a call. Here we inline
 //! such producer calls into the entry so the SOAC is present.
 //!
@@ -14,7 +14,7 @@
 //!
 //! LOAD-BEARING INVARIANT: the walk visits only the entry's outer `Lambda`
 //! chain, its top-level `Let` chain, and value containers that are still in the
-//! entry tail (`OutputSlotStore`, `Index`, array literals, etc.). It MUST NOT
+//! entry tail (`Index`, array literals, etc.). It MUST NOT
 //! descend into a SOAC operand lambda (or any non-entry lambda). A SOAC helper
 //! called *per element* (`map(|x| helper_scan(x), xs)`) lives inside such a
 //! lambda; exposing it there would turn a per-element helper into an entry
@@ -33,8 +33,7 @@ use super::build_sym_to_def;
 use super::inline::build_inline_lets;
 use super::subst::substitute_sym;
 use super::{
-    extract_lambda_params, ArrayExpr, DefMeta, Lambda, Program, StorageView, Term, TermIdSource, TermKind,
-    VarRef,
+    extract_lambda_params, ArrayExpr, DefMeta, Lambda, Program, Term, TermIdSource, TermKind, VarRef,
 };
 
 #[cfg(test)]
@@ -127,7 +126,7 @@ fn expose(
         }
         // Top-level let chain: walk both the bound value and the body. `expose`
         // on the rhs inlines it when it's a producer call, descends an
-        // `OutputSlotStore`, or leaves a non-producer value (incl. a SOAC, whose
+        // an output container, or leaves a non-producer value (including a SOAC, whose
         // operand lambdas it never enters) untouched.
         TermKind::Let {
             name,
@@ -149,18 +148,6 @@ fn expose(
                 },
             }
         }
-        // `normalize_outputs` (which runs before this pass) wraps the entry's
-        // output value in `OutputSlotStore(slot, value)`. The producer call /
-        // SOAC lives in `value`, so descend into it.
-        TermKind::OutputSlotStore { slot_index, value } => Term {
-            id,
-            ty,
-            span,
-            kind: TermKind::OutputSlotStore {
-                slot_index,
-                value: Box::new(expose(*value, producers, sym_to_def, ids, depth)),
-            },
-        },
         TermKind::Index { array, index } => Term {
             id,
             ty,
@@ -290,12 +277,6 @@ fn expose_array_expr(
             len: Box::new(expose(*len, producers, sym_to_def, ids, depth)),
             step: step.map(|s| Box::new(expose(*s, producers, sym_to_def, ids, depth))),
         },
-        ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(StorageView {
-            binding: sv.binding,
-            offset: Box::new(expose(*sv.offset, producers, sym_to_def, ids, depth)),
-            len: Box::new(expose(*sv.len, producers, sym_to_def, ids, depth)),
-            elem_ty: sv.elem_ty,
-        }),
     }
 }
 
@@ -340,7 +321,7 @@ fn inline_if_producer(
 /// body (beta-reduction, so the SOAC stays a directly-bound value the
 /// downstream passes recognize), and bind any non-`Var` argument with a `let`.
 /// A param-binding `let` around the SOAC would hide it from
-/// `fusion`/`lift_gathers`/`analyze_entry`, which match on a directly-bound SOAC.
+/// source fusion and EGIR conversion, which match on a directly-bound SOAC.
 fn inline_call(
     params: &[(SymbolId, Type<TypeName>)],
     args: &[Term],

@@ -282,7 +282,6 @@ fn subst_term(t: &mut Term, s: &BufferSubst) {
             subst_term(array, s);
             subst_term(index, s);
         }
-        TermKind::OutputSlotStore { value, .. } => subst_term(value, s),
         TermKind::Lambda(lam) => subst_lambda(lam, s),
         TermKind::App { func, args } => {
             subst_term(func, s);
@@ -429,11 +428,6 @@ fn subst_array_expr(ae: &mut ArrayExpr, s: &BufferSubst) {
             if let Some(step) = step {
                 subst_term(step, s);
             }
-        }
-        ArrayExpr::StorageView(sv) => {
-            subst_term(&mut sv.offset, s);
-            subst_term(&mut sv.len, s);
-            sv.elem_ty = apply_subst(&sv.elem_ty, s);
         }
     }
 }

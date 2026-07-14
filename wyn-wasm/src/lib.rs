@@ -253,9 +253,6 @@ fn format_error(e: &CompilerError) -> String {
         CompilerError::IoError(err) => format!("IO error: {}", err),
         CompilerError::SpirvBuilderError(msg) => format!("SPIR-V builder error: {}", msg),
         CompilerError::TypeHole(msg) => format!("Type hole: {}", msg),
-        CompilerError::NormalizeOutputsError(msg, _) => {
-            format!("Output normalisation error: {}", msg)
-        }
     }
 }
 
@@ -613,23 +610,13 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
     let tlc_exposed = tlc_fused.expose_entry_producer_helpers();
     let tlc_static_fused = tlc_exposed.fuse_static_indices();
     let tlc_runtime_floated = tlc_static_fused.float_runtime_index_nested_producers();
-    let tlc_gathered = tlc_runtime_floated.plan_execute_gather_residency();
-    let tlc_scalar_hoisted = tlc_gathered.hoist_scalar_prepasses(false);
-    let tlc_defunc = tlc_scalar_hoisted.defunctionalize();
+    let tlc_defunc = tlc_runtime_floated.defunctionalize();
     let tlc_folded = tlc_defunc.fold_generated_lambdas();
     let tlc_with_ownership = match tlc_folded.apply_ownership() {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err_msg(format!("apply_ownership: {:?}", e)),
     };
-    let tlc_outputs_normalized = match tlc_with_ownership.normalize_outputs() {
-        Ok(t) => t,
-        Err(e) => return CompileResultWgsl::err_msg(format!("normalize_outputs: {:?}", e)),
-    };
-    let tlc_parallelized = match tlc_outputs_normalized.parallelize_soacs(false) {
-        Ok(t) => t,
-        Err(e) => return CompileResultWgsl::err_msg(format!("parallelize_soacs: {:?}", e)),
-    };
-    let allocated = match tlc_parallelized.filter_reachable().infer_input_slice_bounds().to_egraph() {
+    let allocated = match tlc_with_ownership.filter_reachable().infer_input_slice_bounds().to_egraph() {
         Ok(s) => s,
         Err(e) => return CompileResultWgsl::err_msg(format!("SSA conversion error: {:?}", e)),
     };

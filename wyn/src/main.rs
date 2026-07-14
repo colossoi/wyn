@@ -316,42 +316,27 @@ fn compile_file(
     });
     let tlc_fused = time("fuse_maps", verbose, || tlc_canon.fuse_maps());
 
-    // Residency cluster runs before defunctionalize, while producers are still
-    // recognizable as `Soac(Map/Scan)`.
+    // Keep source producer relationships explicit through the last TLC
+    // simplifications; EGIR decides whether they require residency.
     let tlc_exposed = time("expose_entry_producer_helpers", verbose, || {
         tlc_fused.expose_entry_producer_helpers()
     });
     let tlc_static_fused = time("static_index_fusion", verbose, || {
         tlc_exposed.fuse_static_indices()
     });
-    let tlc_runtime_floated = time("float_runtime_index_nested_producers", verbose, || {
+    let tlc_runtime_floated = time("expose_runtime_index_producers", verbose, || {
         tlc_static_fused.float_runtime_index_nested_producers()
     });
-    let tlc_gathered = time("gather_residency", verbose, || {
-        tlc_runtime_floated.plan_execute_gather_residency()
-    });
-    let tlc_scalar_hoisted = time("hoist_scalar_prepasses", verbose, || {
-        tlc_gathered.hoist_scalar_prepasses(single_stage)
-    });
     let tlc_defunc = time("defunctionalize", verbose, || {
-        tlc_scalar_hoisted.defunctionalize()
+        tlc_runtime_floated.defunctionalize()
     });
     let tlc_folded = time("inline", verbose, || tlc_defunc.fold_generated_lambdas());
 
-    // Ownership/liveness before output normalization, so the liveness walk runs
-    // on the pre-slot-store form; then normalize compute-entry tails into
-    // explicit per-slot `OutputSlotStore` chains.
+    // Ownership/liveness remains a TLC responsibility. EGIR derives output
+    // routes and physical entry structure after semantic conversion.
     let tlc_owned = time("apply_ownership", verbose, || tlc_folded.apply_ownership())?;
-    let tlc_normed_outputs = time("normalize_outputs", verbose, || tlc_owned.normalize_outputs())?;
-
-    let tlc_parallel = time("tlc_parallelize", verbose, || {
-        tlc_normed_outputs.parallelize_soacs(single_stage)
-    })?;
-
     // Eliminate dead TLC defs
-    let tlc_reachable = time("tlc_filter_reachable", verbose, || {
-        tlc_parallel.filter_reachable()
-    });
+    let tlc_reachable = time("tlc_filter_reachable", verbose, || tlc_owned.filter_reachable());
 
     // Build the raw EGIR program, then chain the passes.
     let tlc_with_bounds = time("infer_input_slice_bounds", verbose, || {

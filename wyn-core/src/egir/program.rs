@@ -148,15 +148,6 @@ pub struct SemanticEntryId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MaterializationId(pub u32);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct PrepassId(pub u32);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PrepassKind {
-    Scalar,
-    Gather,
-}
-
 /// Stable identity of an entry input position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InputSlotId(pub usize);
@@ -257,7 +248,7 @@ pub struct CompilerResource {
     pub slot: usize,
     /// Explicit producer/consumer relationship established at allocation.
     /// Target planning consumes this edge directly instead of rediscovering
-    /// prepasses from entry provenance or storage roles.
+    /// physical requirements from explicit semantic materialization records.
     pub flow: Option<CompilerResourceFlow>,
 }
 
@@ -270,7 +261,6 @@ pub struct CompilerResourceFlow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CompilerFlowEndpoint {
     Entry(SemanticEntryId),
-    Prepass(PrepassId),
     Materialization(MaterializationId),
 }
 
@@ -314,17 +304,15 @@ pub(crate) fn host_resource_map(resources: &[LogicalResource]) -> HashMap<crate:
 }
 
 /// Complete the authoritative logical-resource manifest at the allocation
-/// boundary. Host resources and TLC-originated compiler resources already
-/// have stable identities; this pass classifies compiler ownership, adds the
-/// scratch required by segmented operations, extracts typed prepasses, and
+/// boundary. Host resources already have stable identities; this pass adds
+/// semantic residency requirements and segmented-operation scratch, then
 /// records explicit producer/consumer flows.
 pub fn plan_logical_resources(inner: &mut SemanticProgram) {
     classify_existing_compiler_resources(inner);
-    super::multi_consumer::run(inner);
+    super::residency::run(inner);
     allocate_filter_work_resources(inner);
     let mut scratch = super::parallelize::enumerate_seg_scratch(inner, inner.resources.len() as u32);
     inner.resources.append(&mut scratch);
-    extract_prepass_requirements(inner);
     strip_compiler_abi(inner);
     record_compiler_resource_flows(inner);
     if cfg!(debug_assertions) {
@@ -360,25 +348,6 @@ pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), 
     Ok(())
 }
 
-fn gather_prepass_resources(inner: &SemanticProgram) -> HashMap<ResourceId, CompilerResource> {
-    let mut resources = HashMap::new();
-    for entry in &inner.entry_points {
-        if inner.prepass_roles.get(&entry.name) != Some(&PrepassKind::Gather) {
-            continue;
-        }
-        for (slot, declaration) in entry.resource_declarations.iter().enumerate() {
-            if declaration.role != interface::StorageRole::Output {
-                continue;
-            }
-            resources.insert(
-                declaration.resource.0,
-                CompilerResource::new(CompilerResourceKind::GatherHandoff, None, slot),
-            );
-        }
-    }
-    resources
-}
-
 fn classify_existing_compiler_resources(inner: &mut SemanticProgram) {
     let mut classifications = HashMap::new();
     for entry in &inner.entry_points {
@@ -391,12 +360,9 @@ fn classify_existing_compiler_resources(inner: &mut SemanticProgram) {
             }
         }
     }
-    classifications.extend(gather_prepass_resources(inner));
-    classifications.extend(scalar_handoff_resources(inner));
     let source_outputs = inner
         .entry_points
         .iter()
-        .filter(|entry| !inner.prepass_roles.contains_key(&entry.name))
         .flat_map(|entry| entry.resource_abi.outputs.iter().flatten().copied())
         .collect::<std::collections::HashSet<_>>();
     classifications.extend(
@@ -410,28 +376,6 @@ fn classify_existing_compiler_resources(inner: &mut SemanticProgram) {
             .expect("compiler classification references a missing resource");
         logical.origin = ResourceOrigin::Compiler(compiler);
     }
-}
-
-fn extract_prepass_requirements(inner: &mut SemanticProgram) {
-    let mut source_entries = Vec::with_capacity(inner.entry_points.len());
-    let mut prepasses = Vec::with_capacity(inner.prepass_roles.len());
-    for entry in inner.entry_points.drain(..) {
-        let Some(kind) = inner.prepass_roles.remove(&entry.name) else {
-            source_entries.push(entry);
-            continue;
-        };
-        prepasses.push(PrepassRequirement {
-            id: PrepassId(prepasses.len() as u32),
-            kind,
-            entry,
-        });
-    }
-    assert!(
-        inner.prepass_roles.is_empty(),
-        "prepass classification references a missing entry"
-    );
-    inner.entry_points = source_entries;
-    inner.prepasses = prepasses;
 }
 
 fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
@@ -586,12 +530,12 @@ fn strip_compiler_abi(inner: &mut SemanticProgram) {
             &mut entry.output_routes,
         );
     }
-    for prepass in &mut inner.prepasses {
+    for requirement in &mut inner.materializations {
         strip(
-            &mut prepass.entry.inputs,
-            &mut prepass.entry.outputs,
-            &mut prepass.entry.resource_abi,
-            &mut prepass.entry.output_routes,
+            &mut requirement.entry.inputs,
+            &mut requirement.entry.outputs,
+            &mut requirement.entry.resource_abi,
+            &mut requirement.entry.output_routes,
         );
     }
 }
@@ -798,44 +742,6 @@ fn allocate_filter_work_resources(inner: &mut SemanticProgram) {
     }
 }
 
-/// Classify the scalar resources owned by TLC-originated prepass requirements.
-fn scalar_handoff_resources(inner: &SemanticProgram) -> HashMap<ResourceId, CompilerResource> {
-    let consumer_inputs: std::collections::HashSet<_> = inner
-        .entry_points
-        .iter()
-        .flat_map(|entry| {
-            entry.resource_declarations.iter().filter_map(|declaration| {
-                (declaration.role == interface::StorageRole::Input).then_some(declaration.resource.0)
-            })
-        })
-        .collect();
-    let mut resources = HashMap::new();
-    for entry in &inner.entry_points {
-        if inner.prepass_roles.get(&entry.name) != Some(&PrepassKind::Scalar) {
-            continue;
-        }
-        let owner = entry
-            .graph
-            .skeleton
-            .blocks
-            .iter()
-            .find_map(|(_, block)| block.side_effects.iter().find_map(|effect| effect.semantic_id));
-        for declaration in &entry.resource_declarations {
-            if declaration.role == interface::StorageRole::Output
-                && matches!(declaration.size, LogicalSize::Unspecified)
-                && consumer_inputs.contains(&declaration.resource.0)
-            {
-                let resource = declaration.resource.0;
-                resources.insert(
-                    resource,
-                    CompilerResource::new(CompilerResourceKind::ScalarHandoff, owner.clone(), 0),
-                );
-            }
-        }
-    }
-    resources
-}
-
 /// Runtime `filter` bindings, classified so the mirror gives them a precise
 /// `CompilerResourceKind` rather than generic `Staging`.
 fn filter_resource_kinds(inner: &SemanticProgram) -> HashMap<ResourceId, CompilerResource> {
@@ -1007,8 +913,8 @@ pub enum OutputWriter {
     Effect(EffectToken),
 }
 
-/// Declared output ownership carried from `OutputSlotStore` conversion through
-/// physicalization. `source.value` is the user-level value, `slot` is the
+/// Declared output ownership derived during TLC-to-EGIR conversion and carried
+/// through physicalization. `source.value` is the user-level value, `slot` is the
 /// declared output it fulfils, and `writers` are populated by output
 /// realization. The slot's `EntryOutput::storage_binding` then identifies the
 /// host resource until logical-resource allocation assigns a `ResourceId`.
@@ -1045,15 +951,6 @@ pub struct SemanticEntry {
 pub struct EntryResourceAbi {
     pub inputs: Vec<Option<ResourceId>>,
     pub outputs: Vec<Option<ResourceId>>,
-}
-
-/// TLC-originated scalar or gather producer removed from the semantic entry
-/// arena at allocation. Its graph remains target-independent until the
-/// planner selects and commits a kernel recipe.
-pub struct PrepassRequirement {
-    pub id: PrepassId,
-    pub kind: PrepassKind,
-    pub entry: SemanticEntry,
 }
 
 impl SemanticEntry {
@@ -1254,8 +1151,16 @@ fn publish_entry(
 
 /// A semantic shared-value requirement. Nesting the single semantic entry
 /// representation avoids maintaining another entry-shaped record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterializationKind {
+    SharedArray,
+    Gather,
+    Scalar,
+}
+
 pub struct MaterializationRequirement {
     pub id: MaterializationId,
+    pub kind: MaterializationKind,
     pub producer: SemanticOpId,
     pub entry: SemanticEntry,
     pub substitutions: Vec<MaterializationSubstitution>,
@@ -1347,11 +1252,7 @@ pub struct SemanticProgram {
     /// pass straight through.
     pub externs: Vec<Function>,
     pub entry_points: Vec<SemanticEntry>,
-    /// TLC classification retained only until allocation extracts typed
-    /// prepass requirements from the semantic entry arena.
-    pub prepass_roles: LookupMap<String, PrepassKind>,
-    pub prepasses: Vec<PrepassRequirement>,
-    /// Shared-producer requirements discovered during logical allocation.
+    /// Residency requirements discovered during logical allocation.
     /// These are planned and physicalized directly; they never join the
     /// semantic entry arena.
     pub materializations: Vec<MaterializationRequirement>,
@@ -1607,11 +1508,6 @@ impl SemanticProgram {
             .iter()
             .enumerate()
             .map(|(index, entry)| (CompilerFlowEndpoint::Entry(SemanticEntryId(index as u32)), entry))
-            .chain(
-                self.prepasses
-                    .iter()
-                    .map(|prepass| (CompilerFlowEndpoint::Prepass(prepass.id), &prepass.entry)),
-            )
             .chain(self.materializations.iter().map(|requirement| {
                 (
                     CompilerFlowEndpoint::Materialization(requirement.id),
@@ -1627,11 +1523,6 @@ impl SemanticProgram {
             .iter_mut()
             .enumerate()
             .map(|(index, entry)| (CompilerFlowEndpoint::Entry(SemanticEntryId(index as u32)), entry))
-            .chain(
-                self.prepasses
-                    .iter_mut()
-                    .map(|prepass| (CompilerFlowEndpoint::Prepass(prepass.id), &mut prepass.entry)),
-            )
             .chain(self.materializations.iter_mut().map(|requirement| {
                 (
                     CompilerFlowEndpoint::Materialization(requirement.id),
@@ -1659,8 +1550,6 @@ impl SemanticProgram {
             functions,
             externs,
             entry_points,
-            prepass_roles: LookupMap::new(),
-            prepasses: Vec::new(),
             materializations: Vec::new(),
             constants,
             pipeline,

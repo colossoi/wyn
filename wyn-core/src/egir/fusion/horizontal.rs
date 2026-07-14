@@ -19,6 +19,7 @@ use crate::egir::types::{
     SegResourceAccess, SideEffectKind, SoacDestination,
 };
 use crate::ssa::framework::BlockId;
+use crate::tlc::ScremaAccumulator;
 
 /// Find one legal sibling pair anywhere in the program and fuse it. Returns
 /// whether a fusion happened.
@@ -72,14 +73,18 @@ fn sibling_fusable(
     oracle: &SemanticGraph,
 ) -> bool {
     let block = &graph.skeleton.blocks[block_id];
+    let effect_i = &block.side_effects[i];
+    let effect_j = &block.side_effects[j];
     let (
         SideEffectKind::Soac(EgirSoac::Seg {
             space: sp_i,
             placement: pl_i,
+            kind: kind_i,
+            input_array_types: inputs_i,
             ..
         }),
         Some(_),
-    ) = (&block.side_effects[i].kind, block.side_effects[i].result)
+    ) = (&effect_i.kind, effect_i.result)
     else {
         return false;
     };
@@ -87,14 +92,42 @@ fn sibling_fusable(
         SideEffectKind::Soac(EgirSoac::Seg {
             space: sp_j,
             placement: pl_j,
+            kind: kind_j,
+            input_array_types: inputs_j,
             ..
         }),
         Some(_),
-    ) = (&block.side_effects[j].kind, block.side_effects[j].result)
+    ) = (&effect_j.kind, effect_j.result)
     else {
         return false;
     };
-    if pl_i != pl_j || !seg_space_fusable(sp_i, sp_j) {
+    // A shared input value or a shared symbolic size is also a proof of equal
+    // dynamic extent, even when the two length expressions were not hash-consed.
+    // Independently-authored `[]T` parameters receive distinct skolems during
+    // type checking, while `[n]` parameters intentionally share one.
+    let shared_input = effect_i
+        .operand_nodes
+        .first()
+        .zip(effect_j.operand_nodes.first())
+        .is_some_and(|(left, right)| left == right);
+    let shared_size = inputs_i
+        .first()
+        .and_then(crate::types::array_size)
+        .zip(inputs_j.first().and_then(crate::types::array_size))
+        .is_some_and(|(left, right)| left == right);
+    let symbolic_domain_matches = shared_input || shared_size;
+    if pl_i != pl_j || (!seg_space_fusable(sp_i, sp_j) && !symbolic_domain_matches) {
+        return false;
+    }
+    let operators = kind_i.operators().iter().chain(kind_j.operators());
+    let (mut has_reduce, mut has_scan) = (false, false);
+    for operator in operators {
+        has_reduce |= operator.kind == ScremaAccumulator::Reduce;
+        has_scan |= operator.kind == ScremaAccumulator::Scan;
+    }
+    if has_reduce && has_scan {
+        // The target scheduler has separate reduction and scan phase models.
+        // Keep mixed siblings independent until a joint physical recipe exists.
         return false;
     }
     let Some(op_i) = block.side_effects[i].semantic_id else {

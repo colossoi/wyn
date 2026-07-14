@@ -158,8 +158,8 @@ pub fn append_capture_params(
 //
 // These helpers walk a term and collect references that aren't bound locally
 // or globally. They're pure — no transformation, no allocation of new
-// symbols — so closure_convert and `parallelize` (which also needs FV
-// analysis for its outlining work) can share them.
+// symbols — so closure conversion can reuse the same analysis for nested
+// lambda discovery and capture construction.
 
 /// Compute the free variables of a term given explicit `bound`/`top_level`
 /// sets and the registry of intrinsic-style names. Returns one `Term` per
@@ -292,9 +292,6 @@ pub fn collect_free_vars(
         TermKind::Index { array, index } => {
             collect_free_vars(array, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars(index, bound, top_level, known_defs, symbols, free, seen);
-        }
-        TermKind::OutputSlotStore { value, .. } => {
-            collect_free_vars(value, bound, top_level, known_defs, symbols, free, seen);
         }
     }
 }
@@ -464,11 +461,6 @@ pub fn collect_free_vars_array_expr(
             if let Some(s) = step {
                 collect_free_vars(s, bound, top_level, known_defs, symbols, free, seen);
             }
-        }
-        ArrayExpr::StorageView(crate::tlc::StorageView { offset, len, .. }) => {
-            // set/binding are compile-time u32s; only offset/len carry refs.
-            collect_free_vars(offset, bound, top_level, known_defs, symbols, free, seen);
-            collect_free_vars(len, bound, top_level, known_defs, symbols, free, seen);
         }
     }
 }
@@ -895,15 +887,6 @@ impl<'a, 'ids> ClosureConverter<'a, 'ids> {
                 span,
                 kind: TermKind::VecLit(parts.into_iter().map(|p| self.convert_term(p)).collect()),
             },
-            TermKind::OutputSlotStore { slot_index, value } => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::OutputSlotStore {
-                    slot_index,
-                    value: Box::new(self.convert_term(*value)),
-                },
-            },
         }
     }
 
@@ -1186,12 +1169,6 @@ impl<'a, 'ids> ClosureConverter<'a, 'ids> {
                 len: Box::new(self.convert_term(*len)),
                 step: step.map(|s| Box::new(self.convert_term(*s))),
             },
-            ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(super::StorageView {
-                binding: sv.binding,
-                offset: Box::new(self.convert_term(*sv.offset)),
-                len: Box::new(self.convert_term(*sv.len)),
-                elem_ty: sv.elem_ty,
-            }),
         }
     }
 

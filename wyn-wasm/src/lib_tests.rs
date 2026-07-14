@@ -6,7 +6,8 @@ use super::*;
 /// `compile_to_wgsl_impl` and return the SSA program so tests can inspect
 /// the interface shape without going through JSON serialization.
 fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
-    let (mut node_counter, mut module_manager) = wyn_core::init_compiler().expect("compiler initialization failed");
+    let (mut node_counter, mut module_manager) =
+        wyn_core::init_compiler().expect("compiler initialization failed");
     let parsed = wyn_core::Compiler::parse(source, &mut node_counter).expect("parse failed");
     let parsed =
         parsed.elaborate_modules(&mut module_manager, &mut node_counter).expect("elaborate_modules failed");
@@ -33,16 +34,10 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
         .expose_entry_producer_helpers()
         .fuse_static_indices()
         .float_runtime_index_nested_producers()
-        .plan_execute_gather_residency()
-        .hoist_scalar_prepasses(false)
         .defunctionalize()
         .fold_generated_lambdas()
         .apply_ownership()
         .expect("apply_ownership failed")
-        .normalize_outputs()
-        .expect("normalize_outputs failed")
-        .parallelize_soacs(false)
-        .expect("parallelize_soacs failed")
         .filter_reachable()
         .infer_input_slice_bounds()
         .to_egraph()
@@ -56,8 +51,8 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
 }
 
 /// A fragment shader whose body contains a fragment-invariant reduce
-/// gets its reduce lifted into a compute pre-pass. The lift pass
-/// multi-stages that into two compute entries (`phase1_chunks` +
+/// gets an EGIR scalar materialization scheduled as a compute pre-pass. EGIR
+/// lowers that into two compute entries (`phase1_chunks` +
 /// `phase2_combine`), wires two compiler-allocated storage buffers
 /// (partials + result), and rewrites the fragment body to load the
 /// result scalar. The playground driver (`webgpu.ts`) needs the
@@ -65,11 +60,11 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
 /// storage buffers, build compute pipelines for the pre-passes, and
 /// dispatch them before each render pass.
 ///
-/// Regression guard: every lifted storage binding must appear in
+/// Regression guard: every materialization storage binding must appear in
 /// `interface.storage`, and each compute entry's inputs must expose
 /// the `(set, binding)` coordinates it reads/writes.
 #[test]
-fn interface_surfaces_lifted_prepass_storage_bindings() {
+fn interface_surfaces_materialization_storage_bindings() {
     let src = r#"
 #[vertex]
 entry vertex_main(#[builtin(vertex_index)] vid: i32)

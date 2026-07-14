@@ -289,9 +289,6 @@ impl<'a> PartialEvaluator<'a> {
                     parts.iter().zip(part_vals).map(|(p, v)| self.reify(v, &p.ty, p.span)).collect();
                 Value::Unknown(self.mk_term(term.ty.clone(), term.span, TermKind::VecLit(part_terms)))
             }
-            TermKind::OutputSlotStore { .. } => {
-                unreachable!("OutputSlotStore introduced by tlc::normalize_outputs (post-partial_eval)")
-            }
         }
     }
 

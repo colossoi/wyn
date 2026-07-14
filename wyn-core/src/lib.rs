@@ -325,7 +325,7 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //       .fold_ast_constants()                      -> AstConstFoldedEarly
 //       .type_check(&mut module_manager)           -> TypeChecked
 //
-// TLC stages (AST → SSA):
+// TLC stages (typed AST → semantic input):
 //       .to_tlc(&module_manager, fill_holes)       -> TlcTransformed
 //       .pin_entry_buffers()                       -> TlcBuffersPinned
 //       .validate_ownership()                      -> TlcOwnershipValidated
@@ -340,13 +340,9 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //       .expose_entry_producer_helpers()           -> TlcEntryProducersExposed
 //       .fuse_static_indices()                     -> TlcStaticIndexFused
 //       .float_runtime_index_nested_producers()    -> TlcRuntimeIndexProducersFloated
-//       .plan_execute_gather_residency()           -> TlcGathersLifted
-//       .hoist_scalar_prepasses(disable)           -> TlcScalarPrepassesHoisted
 //       .defunctionalize()                         -> TlcDefunctionalized
 //       .fold_generated_lambdas()                  -> TlcGeneratedLambdasFolded
 //       .apply_ownership()                         -> TlcOwnershipApplied
-//       .normalize_outputs()                       -> TlcOutputsNormalized
-//       .parallelize_soacs(disable)                -> TlcParallelized
 //       .filter_reachable()                        -> TlcReachable
 //       .to_egraph()                               -> EgirRaw
 //
@@ -685,50 +681,31 @@ impl TlcOwnershipValidated {
 }
 
 #[cfg(test)]
-impl TlcOwnershipValidated {
-    /// Test-only: run the canonical TLC optimization pipeline to
-    /// `TlcReachable` without the per-stage `time(...)` wrappers the
-    /// driver uses. Runs on the already-validated state, so the
-    /// fallible `pin_entry_buffers` / `validate_ownership` steps (and
-    /// their errors) are the caller's to propagate. The bool is
-    /// forwarded as `parallelize_soacs(disable=bool)`: `false` ⇒
-    /// parallelization enabled (default driver mode, what most tests
-    /// want); `true` ⇒ disabled (the `--single-stage` flag).
-    pub fn optimize_for_test(self, disable_parallelize: bool) -> TlcReachable {
-        self.optimize_for_test_thru_expose_producers()
-            .fuse_static_indices()
-            .float_runtime_index_nested_producers()
-            .plan_execute_gather_residency()
-            .hoist_scalar_prepasses(disable_parallelize)
-            .defunctionalize()
-            .fold_generated_lambdas()
-            .apply_ownership()
-            .expect("apply_ownership")
-            .normalize_outputs()
-            .expect("normalize_outputs")
-            .parallelize_soacs(disable_parallelize)
-            .expect("parallelize_soacs")
-            .filter_reachable()
-    }
+pub(crate) fn optimize_tlc_for_test(state: TlcOwnershipValidated) -> TlcReachable {
+    optimize_tlc_for_test_thru_expose_producers(state)
+        .fuse_static_indices()
+        .float_runtime_index_nested_producers()
+        .defunctionalize()
+        .fold_generated_lambdas()
+        .apply_ownership()
+        .expect("apply_ownership")
+        .filter_reachable()
+}
 
-    /// The shared `optimize_for_test` prefix up to and including
-    /// `expose_entry_producer_helpers` — the boundary just before the residency
-    /// cluster (`fuse_static_indices` → `float_runtime_index_nested_producers`
-    /// → `plan_execute_gather_residency`). Per-pass tests in that cluster start
-    /// here (chaining a couple more public stage methods as needed) so each pass
-    /// gets its real pre-pass input rather than re-running the whole pipeline.
-    /// A reorder of the prefix still only touches this method.
-    pub fn optimize_for_test_thru_expose_producers(self) -> TlcEntryProducersExposed {
-        self.partial_eval()
-            .normalize_soacs()
-            .monomorphize()
-            .rep_specialize()
-            .inline_small()
-            .force_inline_soac_helpers()
-            .canonicalize_producers()
-            .fuse_maps()
-            .expose_entry_producer_helpers()
-    }
+#[cfg(test)]
+pub(crate) fn optimize_tlc_for_test_thru_expose_producers(
+    state: TlcOwnershipValidated,
+) -> TlcEntryProducersExposed {
+    state
+        .partial_eval()
+        .normalize_soacs()
+        .monomorphize()
+        .rep_specialize()
+        .inline_small()
+        .force_inline_soac_helpers()
+        .canonicalize_producers()
+        .fuse_maps()
+        .expose_entry_producer_helpers()
 }
 
 /// TLC after partial evaluation
@@ -758,48 +735,6 @@ impl std::ops::Deref for TlcSoaNormalized {
     type Target = TlcEarlyInner;
     fn deref(&self) -> &TlcEarlyInner {
         &self.0
-    }
-}
-
-impl TlcGathersLifted {
-    /// Outline scalar reductions as compute pre-passes while their lexical
-    /// dependencies and lambda captures are still intact.
-    /// `disable` keeps single-stage compilation free of generated pre-passes.
-    pub fn hoist_scalar_prepasses(self, disable: bool) -> TlcScalarPrepassesHoisted {
-        let mut inner = self.0;
-        if !disable {
-            tlc::parallelize::hoist_scalar_prepasses(
-                &mut inner.tlc,
-                &mut inner.auto_storage_binding_ids,
-                &mut inner.term_ids,
-            );
-        }
-        TlcScalarPrepassesHoisted(inner)
-    }
-}
-
-/// TLC after scalar reductions have either been outlined before closure
-/// conversion or deliberately left inline in single-stage mode.
-pub struct TlcScalarPrepassesHoisted(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcScalarPrepassesHoisted {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcScalarPrepassesHoisted {
-    /// Closure-converts + specializes HOFs + threads captures, lifting SOAC
-    /// operators (including the ones fusion just composed) to function
-    /// references. SOAC envelopes stay inline (not lowered to loops).
-    pub fn defunctionalize(self) -> TlcDefunctionalized {
-        let mut inner = self.0;
-        let closure_info =
-            tlc::closure_convert::run(&mut inner.tlc, &inner.known_defs, &mut inner.term_ids);
-        tlc::hof_specialize::run(&mut inner.tlc, &closure_info, &mut inner.term_ids);
-        tlc::closure_calls_lower::run(&mut inner.tlc, &closure_info, &mut inner.term_ids);
-        TlcDefunctionalized(inner)
     }
 }
 
@@ -884,44 +819,9 @@ impl std::ops::Deref for TlcOwnershipApplied {
     }
 }
 
-impl TlcOutputsNormalized {
-    /// Parallelize SOACs in compute entry points at the TLC level (terminal
-    /// TLC pass in the experimental order). `disable` makes it a near no-op.
-    pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
-        let mut inner = self.0;
-        tlc::if_over_producer::run(&mut inner.tlc, &mut inner.term_ids);
-        let result = tlc::parallelize::run(
-            &mut inner.tlc,
-            disable,
-            &mut inner.auto_storage_binding_ids,
-            &mut inner.term_ids,
-        )?;
-        Ok(TlcParallelized(TlcPipelineInner {
-            tlc: inner.tlc,
-            pipeline: result.pipeline,
-            type_table: inner.type_table,
-            input_names: result.input_names,
-            auto_storage_binding_ids: inner.auto_storage_binding_ids,
-        }))
-    }
-}
-
-/// TLC with compute entries normalised to unit-producing bodies built
-/// from `TermKind::OutputSlotStore` per declared output.
-pub struct TlcOutputsNormalized(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcOutputsNormalized {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
 impl TlcGeneratedLambdasFolded {
-    /// Ownership/liveness analysis + ownership-driven rewrites. Runs after
-    /// gather residency and before output normalization, so the liveness walk
-    /// never encounters an `OutputSlotStore` (which `normalize_outputs`
-    /// introduces in the next step).
+    /// Ownership/liveness analysis and ownership-driven source rewrites.
+    /// Physical residency and output routing are deferred to EGIR.
     pub fn apply_ownership(self) -> Result<TlcOwnershipApplied> {
         let mut inner = self.0;
         tlc::ownership::apply_ownership(&mut inner.tlc)?;
@@ -941,7 +841,7 @@ impl std::ops::Deref for TlcEntryProducersExposed {
 
 impl TlcEntryProducersExposed {
     /// Fuse constant-index reads of directly nested elementwise producers
-    /// before the gather residency pass can materialize them.
+    /// while the source-level producer/consumer relationship is explicit.
     pub fn fuse_static_indices(self) -> TlcStaticIndexFused {
         let mut inner = self.0;
         tlc::static_index_fusion::run(&mut inner.tlc, &mut inner.term_ids);
@@ -960,8 +860,8 @@ impl std::ops::Deref for TlcStaticIndexFused {
 }
 
 impl TlcStaticIndexFused {
-    /// Float runtime-indexed nested producers into local let-bound producers so
-    /// gather residency can rewrite the indexed uses before defunctionalization.
+    /// Expose runtime-indexed nested producers as entry-local lets. This is a
+    /// source normalization only; EGIR decides whether they need residency.
     pub fn float_runtime_index_nested_producers(self) -> TlcRuntimeIndexProducersFloated {
         let mut inner = self.0;
         tlc::runtime_index_producers::run(&mut inner.tlc, &mut inner.term_ids);
@@ -969,7 +869,8 @@ impl TlcStaticIndexFused {
     }
 }
 
-/// TLC after runtime-indexed nested producers have been let-bound.
+/// TLC after runtime-indexed producers have been exposed without assigning
+/// resources or physical entries.
 pub struct TlcRuntimeIndexProducersFloated(pub TlcEarlyInner);
 
 impl std::ops::Deref for TlcRuntimeIndexProducersFloated {
@@ -980,39 +881,24 @@ impl std::ops::Deref for TlcRuntimeIndexProducersFloated {
 }
 
 impl TlcRuntimeIndexProducersFloated {
-    /// Plan and execute gather residency while producer lets and indexed uses
-    /// are still in the same pre-defunctionalization term.
-    pub fn plan_execute_gather_residency(self) -> TlcGathersLifted {
+    /// Closure-convert, specialize HOFs, and thread explicit captures. EGIR
+    /// performs subsequent residency and physical-entry decisions.
+    pub fn defunctionalize(self) -> TlcDefunctionalized {
         let mut inner = self.0;
-        tlc::lift_gathers::run(
-            &mut inner.tlc,
-            &mut inner.auto_storage_binding_ids,
-            &mut inner.term_ids,
-        );
-        TlcGathersLifted(inner)
-    }
-}
-
-/// TLC after randomly-indexed computed arrays have been lifted into gather
-/// pre-pass entries (computed-array gathers now read from storage buffers).
-pub struct TlcGathersLifted(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcGathersLifted {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
+        let closure_info =
+            tlc::closure_convert::run(&mut inner.tlc, &inner.known_defs, &mut inner.term_ids);
+        tlc::hof_specialize::run(&mut inner.tlc, &closure_info, &mut inner.term_ids);
+        tlc::closure_calls_lower::run(&mut inner.tlc, &closure_info, &mut inner.term_ids);
+        TlcDefunctionalized(inner)
     }
 }
 
 impl TlcOwnershipApplied {
-    /// Normalise compute-entry bodies into per-slot `OutputSlotStore` writes.
-    /// Runs after ownership, so `apply_ownership`'s liveness analysis sees the
-    /// pre-slot-store form.
-    pub fn normalize_outputs(self) -> Result<TlcOutputsNormalized> {
+    /// Eliminate unreachable defs before semantic EGIR conversion.
+    pub fn filter_reachable(self) -> TlcReachable {
         let mut inner = self.0;
-        tlc::normalize_outputs::run(&mut inner.tlc, &mut inner.term_ids)
-            .map_err(|e| crate::error::CompilerError::NormalizeOutputsError(format!("{e}"), None))?;
-        Ok(TlcOutputsNormalized(inner))
+        tlc::inline::run_reachable(&mut inner.tlc);
+        TlcReachable(inner)
     }
 }
 
@@ -1036,14 +922,6 @@ impl TlcSoaNormalized {
         tlc::monomorphize::run(&mut inner.tlc, &inner.schemes, &mut inner.term_ids);
         TlcMonomorphized(inner)
     }
-}
-
-/// Shared payload for TLC states that carry just `{tlc, type_table}`
-/// (`TlcMonomorphized`, `TlcGeneratedLambdasFolded`, `TlcSmallInlined`).
-pub struct TlcLateInner {
-    pub tlc: tlc::Program,
-    pub type_table: TypeTable,
-    pub auto_storage_binding_ids: IdSource<u32>,
 }
 
 /// TLC with all functions monomorphized (no type variables remain)
@@ -1086,36 +964,6 @@ impl TlcRepSpecialized {
     }
 }
 
-impl TlcGeneratedLambdasFolded {
-    /// Eliminate unreachable defs (dead code elimination at TLC level).
-    pub fn filter_reachable(self) -> TlcReachable {
-        let mut inner = self.0;
-        tlc::inline::run_reachable(&mut inner.tlc);
-        TlcReachable(TlcPipelineInner {
-            tlc: inner.tlc,
-            pipeline: pipeline_descriptor::PipelineDescriptor::default(),
-            type_table: inner.type_table,
-            input_names: LookupMap::new(),
-            auto_storage_binding_ids: inner.auto_storage_binding_ids,
-        })
-    }
-
-    /// Build the raw EGIR program. Callers chain the pipeline
-    /// (`expand_soacs → materialize → optimize_skeleton → elaborate`)
-    /// explicitly.
-    pub fn to_egraph(mut self) -> std::result::Result<EgirAllocated, ConvertError> {
-        let input_lens = tlc::input_slice_bounds::compute_for_program(&self.0.tlc);
-        let inner = egir::from_tlc::run(
-            &self.0.tlc,
-            pipeline_descriptor::PipelineDescriptor::default(),
-            &input_lens,
-            &mut self.0.auto_storage_binding_ids,
-        )?;
-        let realized = EgirRaw(inner).realize_outputs()?;
-        Ok(realized.segment().optimize().allocate(&self.0.auto_storage_binding_ids))
-    }
-}
-
 /// TLC after small function and constant inlining
 pub struct TlcSmallInlined(pub TlcEarlyInner);
 
@@ -1135,102 +983,14 @@ impl TlcSmallInlined {
         tlc::inline::run_force_soac_helpers(&mut inner.tlc, &mut inner.term_ids);
         TlcSoacHelpersInlined(inner)
     }
-
-    /// Direct shortcut: parallelize without the rep-specialize step.
-    /// Off-mainline test paths and any caller that's certain its
-    /// program doesn't ferry filter results across non-inlined call
-    /// boundaries can use this; the verifier catches anything that
-    /// slipped through. The canonical path goes through
-    /// `.rep_specialize().parallelize_soacs(...)`.
-    pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
-        let mut inner = self.0;
-        tlc::if_over_producer::run(&mut inner.tlc, &mut inner.term_ids);
-        let result = tlc::parallelize::run(
-            &mut inner.tlc,
-            disable,
-            &mut inner.auto_storage_binding_ids,
-            &mut inner.term_ids,
-        )?;
-        Ok(TlcParallelized(TlcPipelineInner {
-            tlc: inner.tlc,
-            pipeline: result.pipeline,
-            type_table: inner.type_table,
-            input_names: result.input_names,
-            auto_storage_binding_ids: inner.auto_storage_binding_ids,
-        }))
-    }
-
-    /// Eliminate unreachable defs (dead code elimination at TLC level).
-    pub fn filter_reachable(self) -> TlcReachable {
-        let mut inner = self.0;
-        tlc::inline::run_reachable(&mut inner.tlc);
-        TlcReachable(TlcPipelineInner {
-            tlc: inner.tlc,
-            pipeline: pipeline_descriptor::PipelineDescriptor::default(),
-            type_table: inner.type_table,
-            input_names: LookupMap::new(),
-            auto_storage_binding_ids: inner.auto_storage_binding_ids,
-        })
-    }
-}
-
-/// Shared payload for TLC states carrying `{tlc, pipeline, type_table}`
-/// (`TlcParallelized`, `TlcReachable`).
-pub struct TlcPipelineInner {
-    pub tlc: tlc::Program,
-    pub pipeline: pipeline_descriptor::PipelineDescriptor,
-    pub type_table: TypeTable,
-    pub auto_storage_binding_ids: IdSource<u32>,
-    /// Source-parameter name for each storage `(set, binding)`, captured
-    /// before parallelization replaced the original compute entries.
-    /// `to_egraph` applies these to the finalized descriptor's input
-    /// bindings, which the parallel path otherwise names positionally.
-    pub input_names: LookupMap<(u32, u32), String>,
-}
-
-/// TLC after SOAC parallelization
-pub struct TlcParallelized(pub TlcPipelineInner);
-
-impl std::ops::Deref for TlcParallelized {
-    type Target = TlcPipelineInner;
-    fn deref(&self) -> &TlcPipelineInner {
-        &self.0
-    }
-}
-
-impl TlcParallelized {
-    /// Eliminate unreachable defs (dead code elimination at TLC level).
-    /// Drops the original `Abstract`-param defs whose call sites all
-    /// got rewritten to specialized siblings by `rep_specialize`.
-    pub fn filter_reachable(self) -> TlcReachable {
-        let mut inner = self.0;
-        tlc::inline::run_reachable(&mut inner.tlc);
-        TlcReachable(inner)
-    }
-
-    pub fn to_egraph(self) -> std::result::Result<EgirAllocated, ConvertError> {
-        let TlcPipelineInner {
-            tlc,
-            pipeline,
-            input_names,
-            mut auto_storage_binding_ids,
-            ..
-        } = self.0;
-        let input_lens = tlc::input_slice_bounds::compute_for_program(&tlc);
-        let mut inner = egir::from_tlc::run(&tlc, pipeline, &input_lens, &mut auto_storage_binding_ids)?;
-        inner.input_names = input_names;
-        let realized = EgirRaw(inner).realize_outputs()?;
-        Ok(realized.segment().optimize().allocate(&auto_storage_binding_ids))
-    }
 }
 
 /// TLC after representation specialization (Phase 2 of array-variant-
 /// abstract). Every `App` whose `Var(Symbol(callee))` arg at an
 /// `Abstract`-typed position had a producer-known concrete variant now
 /// invokes a specialized clone of the callee with that concrete
-/// variant baked in. Lives between `materialize_entry_soacs` and
-/// `parallelize_soacs` so the parallelizer sees concrete reps on every
-/// call edge.
+/// variant baked in. Runs before source-level fusion so semantic conversion
+/// sees concrete representations on every call edge.
 pub struct TlcRepSpecialized(pub TlcEarlyInner);
 
 impl std::ops::Deref for TlcRepSpecialized {
@@ -1250,13 +1010,12 @@ impl TlcDefunctionalized {
     }
 }
 
-/// TLC after dead code elimination. Always carries a `PipelineDescriptor`
-/// (empty for non-parallelized paths).
-pub struct TlcReachable(pub TlcPipelineInner);
+/// TLC after dead code elimination, ready for semantic EGIR conversion.
+pub struct TlcReachable(pub TlcEarlyInner);
 
 impl std::ops::Deref for TlcReachable {
-    type Target = TlcPipelineInner;
-    fn deref(&self) -> &TlcPipelineInner {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
         &self.0
     }
 }
@@ -1283,29 +1042,25 @@ impl TlcReachable {
 /// minimum-required input buffer lengths that flows into
 /// `EntryInput.length` at `to_egraph` time.
 pub struct TlcInputSliceBoundsInferred {
-    pub inner: TlcPipelineInner,
+    pub inner: TlcEarlyInner,
     pub input_lens: tlc::input_slice_bounds::ProgramBounds,
 }
 
 impl std::ops::Deref for TlcInputSliceBoundsInferred {
-    type Target = TlcPipelineInner;
-    fn deref(&self) -> &TlcPipelineInner {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
         &self.inner
     }
 }
 
 impl TlcInputSliceBoundsInferred {
     pub fn to_egraph(self) -> std::result::Result<EgirAllocated, ConvertError> {
-        let TlcPipelineInner {
+        let TlcEarlyInner {
             tlc,
-            pipeline,
-            input_names,
             mut auto_storage_binding_ids,
             ..
         } = self.inner;
-        let mut inner =
-            egir::from_tlc::run(&tlc, pipeline, &self.input_lens, &mut auto_storage_binding_ids)?;
-        inner.input_names = input_names;
+        let inner = egir::from_tlc::run(&tlc, &self.input_lens, &mut auto_storage_binding_ids)?;
         let realized = EgirRaw(inner).realize_outputs()?;
         Ok(realized.segment().optimize().allocate(&auto_storage_binding_ids))
     }
@@ -1363,7 +1118,8 @@ pub struct EgirRaw(SemanticProgram);
 /// EGIR after entry-output realization. Every declared output has its
 /// writes materialised as side effects against the bound storage view
 /// (compute) or `OutputSlot` place (graphics). The body's `Return`
-/// terminator carries no value. See `egir::realize_outputs`.
+/// terminator carries no value. Non-output runtime arrays can still await
+/// EGIR residency planning. See `egir::realize_outputs`.
 pub struct EgirOutputsRealized(SemanticProgram);
 
 /// EGIR after all reachable SOACs have been reified as semantic
@@ -1397,11 +1153,9 @@ impl EgirRaw {
     /// retarget, fixed-aggregate element stores, scalar `Store` at
     /// index 0). For graphics entries: classify the body's
     /// `Return(Some(value))` and emit one store per declared
-    /// `OutputSlot { index }`. After this pass the
-    /// `realize_outputs::verify` invariant holds: no runtime-sized
-    /// Composite array is reachable from any entry output. Runs
-    /// before `parallelize` so the SOAC→OutputView rewrite precedes
-    /// SOAC wrapping.
+    /// `OutputSlot { index }`. Runs before segmentation so the
+    /// SOAC→OutputView rewrite precedes semantic segmented-op wrapping;
+    /// allocation later plans any remaining residency requirements.
     pub fn realize_outputs(self) -> std::result::Result<EgirOutputsRealized, ConvertError> {
         let EgirRaw(mut inner) = self;
         egir::realize_outputs::run(&mut inner)?;
@@ -1613,36 +1367,24 @@ pub fn compile_thru_frontend(source: &str) -> error::Result<TypeChecked> {
         .type_check(&mut module_manager)
 }
 
-/// Internal: run frontend + TLC pipeline with explicit
-/// `disable_parallelize`, returning `TlcReachable`. Parameterized so the
-/// canonical (`compile_thru_tlc`) and single-stage (`compile_thru_*
-/// _single_stage`) variants share the same code path.
+/// Run the canonical TLC optimization pipeline (no physical scheduling or
+/// hole-filling) through `filter_reachable`.
 #[cfg(test)]
-fn compile_thru_tlc_with(source: &str, disable_parallelize: bool) -> error::Result<TlcReachable> {
+pub fn compile_thru_tlc(source: &str) -> error::Result<TlcReachable> {
     let (mut node_counter, mut module_manager) = cached_compiler_init();
     let type_checked = Compiler::parse(source, &mut node_counter)?
         .elaborate_modules(&mut module_manager, &mut node_counter)?
         .resolve(&module_manager)?
         .fold_ast_constants()
         .type_check(&mut module_manager)?;
-    Ok(type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_buffers()?
-        .validate_ownership()?
-        .optimize_for_test(disable_parallelize))
-}
-
-/// Run the canonical TLC optimization pipeline (no compute parallelization,
-/// no hole-filling) through `filter_reachable`.
-#[cfg(test)]
-pub fn compile_thru_tlc(source: &str) -> error::Result<TlcReachable> {
-    compile_thru_tlc_with(source, false)
+    let state = type_checked.to_tlc(&module_manager, false).pin_entry_buffers()?.validate_ownership()?;
+    Ok(optimize_tlc_for_test(state))
 }
 
 /// Internal: run all the way through EGIR + elaborate to SSA from a
 /// pre-built `TlcReachable`. Both `compile_thru_ssa` and
 /// `compile_thru_spirv_single_stage` build the SSA the same way; only
-/// the upstream parallelize flag differs.
+/// the downstream scheduling profile differs.
 #[cfg(test)]
 fn ssa_from_reachable(
     tlc: TlcReachable,
@@ -1672,15 +1414,13 @@ pub fn compile_thru_spirv(source: &str) -> std::result::Result<Lowered, Box<dyn 
 }
 
 /// Single-stage equivalent of `compile_thru_spirv`: matches the CLI's
-/// `--single-stage` mode by disabling `parallelize_soacs`. Used by tests
-/// that exercise compiler paths the default driver-equivalent doesn't
-/// reach.
+/// `--single-stage` terminal scheduling policy.
 #[cfg(test)]
 pub fn compile_thru_spirv_single_stage(
     source: &str,
 ) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
     Ok(ssa_from_reachable(
-        compile_thru_tlc_with(source, true)?,
+        compile_thru_tlc(source)?,
         LoweringProfile::new(CodegenTarget::Spirv, SchedulePolicy::SingleStage),
     )?
     .lower()?)

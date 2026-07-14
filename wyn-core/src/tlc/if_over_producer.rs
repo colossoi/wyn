@@ -3,8 +3,8 @@
 //! Compute entries need a top-level producer shape for EGIR-side
 //! pointwise parallelization. An expression like
 //! `if c then map(f, xs) else map(g, xs)` is still pointwise, but if it
-//! reaches output normalization in that shape the parallelizer sees a
-//! branch that produces an array instead of a producer. This pass rewrites
+//! reaches EGIR in that shape, output routing sees a branch that produces an
+//! array instead of a producer. This pass rewrites
 //! the conservative cases to one `Map` whose lambda contains the branch.
 
 use super::VarRef;
@@ -368,7 +368,6 @@ fn array_expr_len_key(
             term_array_len_key(&t, env, resolving)
         }
         ArrayExpr::Range { len, .. } => len_key(len, env, resolving),
-        ArrayExpr::StorageView(crate::tlc::StorageView { len, .. }) => len_key(len, env, resolving),
         ArrayExpr::Literal(items) => Some(LenKey::Int(items.len().to_string())),
         ArrayExpr::Zip(items) => items.first().and_then(|item| array_expr_len_key(item, env, resolving)),
     }
@@ -558,10 +557,6 @@ fn collect_symbol_refs_array(ae: &ArrayExpr, out: &mut LookupSet<SymbolId>) {
             if let Some(step) = step {
                 collect_symbol_refs(step, out);
             }
-        }
-        ArrayExpr::StorageView(crate::tlc::StorageView { offset, len, .. }) => {
-            collect_symbol_refs(offset, out);
-            collect_symbol_refs(len, out);
         }
     }
 }

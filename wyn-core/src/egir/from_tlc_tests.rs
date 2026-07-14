@@ -4,7 +4,6 @@
 
 use super::{run, Converter, ResourceRegistry};
 use crate::ast::TypeName;
-use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::types::{FuncBody, InstKind, Program};
 use crate::tlc::VarRef;
 use crate::tlc::{Term, TermKind};
@@ -18,22 +17,19 @@ use std::collections::{HashMap, HashSet};
 /// → elaborate`) to a `Program`. No `materialize` — tests don't exercise
 /// SPIR-V-specific dynamic-index rewrites.
 fn compile_via_egir(src: &str) -> Program {
-    let tlc = crate::test_pipeline::compile_to_reachable(src, false);
+    let tlc = crate::test_pipeline::compile_to_reachable(src);
 
     let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc.tlc);
     let mut binding_ids = crate::IdSource::<u32>::new();
-    crate::EgirRaw(
-        run(&tlc.tlc, PipelineDescriptor::default(), &bounds, &mut binding_ids)
-            .expect("egir::from_tlc conversion failed"),
-    )
-    .realize_outputs()
-    .expect("egir::realize_outputs failed")
-    .segment()
-    .optimize()
-    .allocate(&binding_ids)
-    .lower_to_ssa(crate::LoweringProfile::PORTABLE)
-    .expect("semantic EGIR lowering failed")
-    .ssa
+    crate::EgirRaw(run(&tlc.tlc, &bounds, &mut binding_ids).expect("egir::from_tlc conversion failed"))
+        .realize_outputs()
+        .expect("egir::realize_outputs failed")
+        .segment()
+        .optimize()
+        .allocate(&binding_ids)
+        .lower_to_ssa(crate::LoweringProfile::PORTABLE)
+        .expect("semantic EGIR lowering failed")
+        .ssa
 }
 
 use crate::ast::Span;
@@ -563,9 +559,8 @@ fn texture_and_sampler_params_surface_bindings() {
 }
 
 /// Graphics entries must NOT derive `SemanticEntry.return_ty` from
-/// `def.ty`'s arrow-return position — that's the post-`normalize_outputs`
-/// shortcut for compute entries, and graphics entries don't go through
-/// `normalize_outputs`. The prior contract used `inner_body.ty`, which
+/// `def.ty`'s arrow-return position. Compute output routes use that signature,
+/// while graphics entries use `inner_body.ty`, which
 /// matches the body's actual produced shape after ownership /
 /// monomorphize / etc. Forcing the def.ty-derived form here makes any
 /// future divergence (e.g. a uniqueness wrapper that ownership doesn't
@@ -589,7 +584,7 @@ entry vertex_main(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: 
   (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) =
   (@[position.x, position.y, position.z, 1.0], color)
 "#;
-    let tlc = crate::test_pipeline::compile_to_reachable(src, false);
+    let tlc = crate::test_pipeline::compile_to_reachable(src);
 
     let mut tlc_program = tlc.tlc.clone();
 
@@ -610,13 +605,8 @@ entry vertex_main(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: 
 
     let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc_program);
     let mut binding_ids = crate::IdSource::<u32>::new();
-    let egir = super::run(
-        &tlc_program,
-        PipelineDescriptor::default(),
-        &bounds,
-        &mut binding_ids,
-    )
-    .expect("from_tlc::run on graphics entry must succeed");
+    let egir = super::run(&tlc_program, &bounds, &mut binding_ids)
+        .expect("from_tlc::run on graphics entry must succeed");
     let entry =
         egir.entry_points.iter().find(|e| e.name == "vertex_main").expect("vertex_main SemanticEntry");
 

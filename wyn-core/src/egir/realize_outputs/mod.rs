@@ -2,12 +2,10 @@
 //!
 //! After `from_tlc`, every entry has its writes laid out as one of:
 //!
-//!   * **Compute (slot-collected)**: each declared output has a
-//!     `Vec<SlotSource>` populated by `from_tlc::convert_slot_store`
-//!     during conversion. Sources are `(block, value)` pairs — one per
-//!     CFG path that writes the slot. A simple body produces a single
-//!     source per slot; an `If`-fork inside an `OutputSlotStore` produces
-//!     two; nested ifs produce more.
+//!   * **Compute (slot-routed)**: each declared output has explicit
+//!     `SlotSource`s derived from the original TLC tail during conversion.
+//!     Sources are `(block, value)` pairs, one per CFG path that produces the
+//!     slot. A simple body produces one source; branches can produce several.
 //!   * **Graphics**: the entry's body terminates in `Return(Some(value))`
 //!     where `value` is a scalar/vector/fixed aggregate (or a `Tuple`
 //!     of them across multiple location-decorated outputs).
@@ -19,12 +17,11 @@
 //! the consumer-finding walk over the completed graph. That's why this
 //! is a separate phase from `from_tlc`, not a part of it.
 //!
-//! After this pass the invariant pinned by `verify` holds: no
-//! runtime-sized Composite array is reachable from any entry output or
-//! output-side-effect operand. Downstream passes (parallelize, soac
-//! expansion, materialize, codegen) can rely on it.
+//! This pass establishes concrete output writers. The later residency planner
+//! materializes any runtime composite arrays exposed by non-output consumers;
+//! its verifier checks the completed representation boundary.
 //!
-//! Runs after `from_tlc::run`, before `parallelize`: the SOAC→OutputView
+//! Runs after `from_tlc::run`, before segmentation: the SOAC→OutputView
 //! rewrite must precede SOAC wrapping/expansion.
 
 use crate::ssa::framework::BlockId;
@@ -57,9 +54,6 @@ pub fn run(inner: &mut SemanticProgram) -> Result<(), ConvertError> {
     // array to a storage view; sync each capturing region's parameter type so
     // the region body lowers consistently.
     reconcile::run(inner)?;
-    if cfg!(debug_assertions) {
-        verify::check(inner)?;
-    }
     Ok(())
 }
 
@@ -93,7 +87,7 @@ fn clear_compute_returns(entry: &mut SemanticEntry) {
     }
 }
 
-/// Slot-sources path (compute entries post-`normalize_outputs`). Each
+/// Compute slot-source path. Each
 /// declared output's `SlotSource`s independently lower to a DPS write
 /// into the shared `OutputView`. Multi-source slots (`If`-forks etc.)
 /// share one view; runtime CFG picks which source's write fires.
@@ -127,9 +121,8 @@ fn realize_compute_slots(
             route_indices.iter().map(|&index| output_routes[index].source).collect();
         if sources.is_empty() {
             return Err(ConvertError::Unsupported(format!(
-                "compute output #{} has no source — `normalize_outputs` \
-                 should have emitted at least one `OutputSlotStore` for \
-                 every declared output",
+                "compute output #{} has no source — TLC-to-EGIR conversion \
+                 must derive at least one route for every declared output",
                 slot_index
             )));
         }
@@ -179,9 +172,7 @@ fn realize_compute_slots(
 ///
 ///   * Graphics entries (vertex / fragment) — outputs are scalar /
 ///     vector / matrix written to `OutputSlot { index }` places.
-///   * Compute entries synthesised after `normalize_outputs` (gather
-///     prepasses from `lift_gathers`, phase intermediates from
-///     `parallelize`, etc.) — outputs are storage-buffer-bound; the
+///   * Generated compute entries — outputs are storage-buffer-bound; the
 ///     SOAC at the tail may need retargeting via `compute_slot_source`.
 fn synthesize_compute_routes(entry: &mut SemanticEntry) {
     let SemanticEntry {

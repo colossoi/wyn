@@ -915,8 +915,6 @@ impl<'p> Builder<'p> {
             // Fresh-producer ArrayExprs: literal/range synthesize a new array,
             // so element views are mutable.
             ArrayExpr::Literal(_) | ArrayExpr::Range { .. } => Origin::BorrowedMutableElement,
-            // Storage-buffer-backed views: conservative borrow.
-            ArrayExpr::StorageView(_) => Origin::Borrowed,
             // Zip is a phase-scoped sentinel that should be absorbed
             // by `tlc::soa::run` before we get here. If one survives,
             // be conservative.
@@ -948,10 +946,6 @@ impl<'p> Builder<'p> {
                 if let Some(s) = step {
                     self.visit_term(s);
                 }
-            }
-            ArrayExpr::StorageView(crate::tlc::StorageView { offset, len, .. }) => {
-                self.visit_term(offset);
-                self.visit_term(len);
             }
         }
     }
@@ -1061,8 +1055,7 @@ impl<'p> Builder<'p> {
             | TermKind::UnitLit
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
-            | TermKind::Extern(_)
-            | TermKind::OutputSlotStore { .. } => Self::empty_alias_value_for_type(&term.ty),
+            | TermKind::Extern(_) => Self::empty_alias_value_for_type(&term.ty),
         }
     }
 
@@ -1203,7 +1196,7 @@ impl<'p> Builder<'p> {
     fn array_expr_aliases(&self, ae: &ArrayExpr) -> LookupSet<OwnerId> {
         match ae {
             ArrayExpr::Var(VarRef::Symbol(sym), _) => self.model.aliases_of(*sym),
-            ArrayExpr::Var(VarRef::Builtin { .. }, _) | ArrayExpr::StorageView(_) => LookupSet::new(),
+            ArrayExpr::Var(VarRef::Builtin { .. }, _) => LookupSet::new(),
             ArrayExpr::Zip(parts) => {
                 let mut aliases = LookupSet::new();
                 for part in parts {
@@ -1511,9 +1504,6 @@ impl<'m> Liveness<'m> {
                 let live = self.analyze(index, live);
                 self.analyze(array, live)
             }
-            TermKind::OutputSlotStore { .. } => {
-                unreachable!("OutputSlotStore introduced by tlc::normalize_outputs (post-ownership)")
-            }
         }
     }
 
@@ -1685,10 +1675,6 @@ impl<'m> Liveness<'m> {
                 let after = if let Some(s) = step { self.analyze(s, live_after) } else { live_after };
                 let after_start = self.analyze(len, after);
                 self.analyze(start, after_start)
-            }
-            ArrayExpr::StorageView(crate::tlc::StorageView { offset, len, .. }) => {
-                let after_offset = self.analyze(len, live_after);
-                self.analyze(offset, after_offset)
             }
         }
     }
@@ -2022,9 +2008,6 @@ fn check_linear_image_results_in_term(
         }
         TermKind::ArrayExpr(ae) => check_linear_image_results_in_array_expr(ae, program, model),
         TermKind::Soac(op) => check_linear_image_results_in_soac(op, program, model),
-        TermKind::OutputSlotStore { value, .. } => {
-            check_linear_image_results_in_term(value, program, model, LinearImageUseContext::Discarded)
-        }
         TermKind::Var(_)
         | TermKind::IntLit(_)
         | TermKind::FloatLit(_)
@@ -2074,17 +2057,6 @@ fn check_linear_image_results_in_array_expr(
                             LinearImageUseContext::Discarded,
                         )
                     })
-                })
-        }
-        ArrayExpr::StorageView(crate::tlc::StorageView { offset, len, .. }) => {
-            check_linear_image_results_in_term(offset, program, model, LinearImageUseContext::Discarded)
-                .or_else(|| {
-                    check_linear_image_results_in_term(
-                        len,
-                        program,
-                        model,
-                        LinearImageUseContext::Discarded,
-                    )
                 })
         }
         ArrayExpr::Zip(parts) => {

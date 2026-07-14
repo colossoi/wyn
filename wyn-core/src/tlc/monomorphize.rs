@@ -577,13 +577,6 @@ impl<'a, 'ids> Monomorphizer<'a, 'ids> {
             TermKind::VecLit(ref parts) => {
                 TermKind::VecLit(parts.iter().map(|p| self.process_term(p)).collect())
             }
-            TermKind::OutputSlotStore {
-                slot_index,
-                ref value,
-            } => TermKind::OutputSlotStore {
-                slot_index: *slot_index,
-                value: Box::new(self.process_term(value)),
-            },
         };
 
         Term {
@@ -714,12 +707,6 @@ impl<'a, 'ids> Monomorphizer<'a, 'ids> {
                 len: Box::new(self.process_term(len)),
                 step: step.as_ref().map(|s| Box::new(self.process_term(s))),
             },
-            ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(super::StorageView {
-                binding: sv.binding,
-                offset: Box::new(self.process_term(&sv.offset)),
-                len: Box::new(self.process_term(&sv.len)),
-                elem_ty: sv.elem_ty.clone(),
-            }),
         }
     }
 
@@ -889,11 +876,6 @@ impl<'a, 'ids> Monomorphizer<'a, 'ids> {
             TermKind::VecLit(parts) => {
                 TermKind::VecLit(parts.iter().map(|p| self.apply_subst_term(p, subst)).collect())
             }
-            TermKind::OutputSlotStore { slot_index, value } => TermKind::OutputSlotStore {
-                slot_index: *slot_index,
-                value: Box::new(self.apply_subst_term(value, subst)),
-            },
-
             TermKind::Lambda(Lambda { params, body, ret_ty }) => TermKind::Lambda(Lambda {
                 params: params.iter().map(|(p, ty)| (*p, apply_subst(ty, subst))).collect(),
                 body: Box::new(self.apply_subst_term(body, subst)),
@@ -1096,12 +1078,6 @@ impl<'a, 'ids> Monomorphizer<'a, 'ids> {
                 len: Box::new(self.apply_subst_term(len, subst)),
                 step: step.as_ref().map(|s| Box::new(self.apply_subst_term(s, subst))),
             },
-            ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(super::StorageView {
-                binding: sv.binding,
-                offset: Box::new(self.apply_subst_term(&sv.offset, subst)),
-                len: Box::new(self.apply_subst_term(&sv.len, subst)),
-                elem_ty: sv.elem_ty.clone(),
-            }),
         }
     }
 }

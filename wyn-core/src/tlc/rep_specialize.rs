@@ -310,10 +310,6 @@ impl<'a, 'ids> RepSpecializer<'a, 'ids> {
                     self.rewrite_term(s);
                 }
             }
-            ArrayExpr::StorageView(sv) => {
-                self.rewrite_term(&mut sv.offset);
-                self.rewrite_term(&mut sv.len);
-            }
         }
     }
 
@@ -537,9 +533,8 @@ fn array_size(ty: &Type<TypeName>) -> Option<&Type<TypeName>> {
 }
 
 /// Best-effort array-type extraction for the shapes a `SoacOp::Filter`
-/// input can take. The variants this pass cares about are `Ref` (a
-/// bound name with an Array-typed term) and `StorageView` (entry
-/// view-array). Other variants (Soac, Zip, Literal, Range) appear in
+/// input can take. This pass cares about `Ref` (a bound name with an
+/// Array-typed term). Other variants (Soac, Zip, Literal, Range) appear in
 /// fused chains; we don't need them for the simple producer-detection
 /// case, so return `None` — the call site falls through to "no
 /// producer-derived variant".

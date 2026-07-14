@@ -1,7 +1,7 @@
 //! Post-realization invariant check.
 //!
-//! After `realize_outputs::run`, the following must hold for every
-//! `SemanticEntry`:
+//! After output realization and residency planning, the following must hold
+//! for every `SemanticEntry` and materialization entry:
 //!
 //!   * Every declared output has at least one explicit route, and every route
 //!     names at least one realized writer.
@@ -21,10 +21,7 @@
 //! `Array` with `ArrayVariantComposite`, emit a diagnostic naming the
 //! entry and offending NodeId.
 //!
-//! In `debug_assertions` builds (the default for `cargo test`,
-//! `cargo build`, anything but `--release`), `realize_outputs::run`
-//! calls `check` automatically. Release builds skip the check —
-//! production compilation is the same as today.
+//! In debug builds, the residency planner calls `check` after all rewrites.
 
 use crate::LookupSet;
 use polytype::Type;
@@ -39,8 +36,10 @@ use super::super::types::{ENode, NodeId, SkeletonTerminator};
 /// `ConvertError::Internal` on the first violation, naming the entry
 /// and offending NodeId.
 pub fn check(inner: &SemanticProgram) -> Result<(), ConvertError> {
-    for entry in &inner.entry_points {
-        check_routes(entry)?;
+    for (endpoint, entry) in inner.entries_with_endpoints() {
+        if matches!(endpoint, super::super::program::CompilerFlowEndpoint::Entry(_)) {
+            check_routes(entry)?;
+        }
         check_entry(&entry.name, &entry.graph)?;
     }
     Ok(())
