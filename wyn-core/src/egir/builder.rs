@@ -9,7 +9,8 @@ use smallvec::smallvec;
 
 use super::graph_ops;
 use super::program::{LogicalSize, PlannedEntry, SemanticResourceDecl, SemanticResourceRef};
-use super::types::{EGraph, EgirSoac, NodeId, SkeletonTerminator, SoacDestination};
+use super::soac::screma;
+use super::types::{EGraph, NodeId, SkeletonTerminator, Soac, SoacDestination, SoacInputType};
 
 pub struct EntryBuilder {
     graph: EGraph,
@@ -111,20 +112,27 @@ impl EntryBuilder {
         output_view: NodeId,
         output_view_ty: Type<TypeName>,
     ) -> NodeId {
-        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![output_view_ty]);
+        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![output_view_ty.clone()]);
         graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
-            EgirSoac::Screma {
-                map_bodies: vec![super::types::SegBody { region, captures }],
-                accumulators: vec![],
-                input_array_types: vec![input_array_ty],
-                input_elem_types: vec![input_elem_ty],
-                map_output_elem_types: vec![output_elem_ty],
-                map_input_indices: vec![vec![0]],
-                map_destinations: vec![SoacDestination::OutputView],
-                acc_destinations: vec![],
-            },
+            Soac::Screma(screma::Op {
+                body: screma::Body {
+                    inputs: vec![SoacInputType {
+                        array: input_array_ty,
+                        element: input_elem_ty,
+                    }],
+                    maps: vec![screma::Map {
+                        body: super::types::SegBody { region, captures },
+                        input_indices: vec![0],
+                        output_element_type: output_elem_ty,
+                        destination: SoacDestination::OutputView,
+                        result_type: output_view_ty,
+                    }],
+                    kind: screma::Kind::Map,
+                },
+                state: screma::SemanticState::Serial,
+            }),
             smallvec![input_array, output_view],
             tuple_ty,
             &mut self.next_effect,

@@ -12,13 +12,10 @@ use smallvec::SmallVec;
 use super::space::seg_space_fusable;
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
-use crate::egir::program::SemanticProgram;
+use crate::egir::program::{OutputSlotId, SemanticProgram};
 use crate::egir::semantic_graph::SemanticGraph;
-use crate::egir::types::ScremaAccumulator;
-use crate::egir::types::{
-    reify_seg_kind_operators, EGraph, EgirSoac, NodeId, PureOp, SegBody, SegOpKind, SegPlacement,
-    SegResourceAccess, SideEffectKind, SoacDestination,
-};
+use crate::egir::soac::screma;
+use crate::egir::types::{EGraph, NodeId, PureOp, SegResourceAccess, SideEffectKind, Soac, SoacInputType};
 use crate::ssa::framework::BlockId;
 
 /// Find one legal sibling pair anywhere in the program and fuse it. Returns
@@ -59,7 +56,13 @@ fn fuse_in_graph(graph: &mut EGraph, scope: &str, oracle: &SemanticGraph) -> boo
 }
 
 fn is_fusable_seg(kind: &SideEffectKind) -> bool {
-    matches!(kind, SideEffectKind::Soac(EgirSoac::Seg { .. }))
+    matches!(
+        kind,
+        SideEffectKind::Soac(Soac::Screma(screma::Op {
+            state: screma::SemanticState::Segmented { .. },
+            ..
+        }))
+    )
 }
 
 /// Legality: equal space, compatible placement, no resource/effect conflict, and
@@ -76,26 +79,30 @@ fn sibling_fusable(
     let effect_i = &block.side_effects[i];
     let effect_j = &block.side_effects[j];
     let (
-        SideEffectKind::Soac(EgirSoac::Seg {
-            space: sp_i,
-            placement: pl_i,
-            kind: kind_i,
-            input_array_types: inputs_i,
-            ..
-        }),
+        SideEffectKind::Soac(Soac::Screma(screma::Op {
+            body: body_i,
+            state:
+                screma::SemanticState::Segmented {
+                    space: sp_i,
+                    placement: pl_i,
+                    ..
+                },
+        })),
         Some(_),
     ) = (&effect_i.kind, effect_i.result)
     else {
         return false;
     };
     let (
-        SideEffectKind::Soac(EgirSoac::Seg {
-            space: sp_j,
-            placement: pl_j,
-            kind: kind_j,
-            input_array_types: inputs_j,
-            ..
-        }),
+        SideEffectKind::Soac(Soac::Screma(screma::Op {
+            body: body_j,
+            state:
+                screma::SemanticState::Segmented {
+                    space: sp_j,
+                    placement: pl_j,
+                    ..
+                },
+        })),
         Some(_),
     ) = (&effect_j.kind, effect_j.result)
     else {
@@ -110,20 +117,22 @@ fn sibling_fusable(
         .first()
         .zip(effect_j.operand_nodes.first())
         .is_some_and(|(left, right)| left == right);
-    let shared_size = inputs_i
+    let shared_size = body_i
+        .inputs
         .first()
-        .and_then(crate::types::array_size)
-        .zip(inputs_j.first().and_then(crate::types::array_size))
+        .and_then(|input| crate::types::array_size(&input.array))
+        .zip(body_j.inputs.first().and_then(|input| crate::types::array_size(&input.array)))
         .is_some_and(|(left, right)| left == right);
     let symbolic_domain_matches = shared_input || shared_size;
     if pl_i != pl_j || (!seg_space_fusable(sp_i, sp_j) && !symbolic_domain_matches) {
         return false;
     }
-    let operators = kind_i.operators().iter().chain(kind_j.operators());
     let (mut has_reduce, mut has_scan) = (false, false);
-    for operator in operators {
-        has_reduce |= operator.kind == ScremaAccumulator::Reduce;
-        has_scan |= operator.kind == ScremaAccumulator::Scan;
+    for kind in [&body_i.kind, &body_j.kind] {
+        for index in 0..kind.len() {
+            has_scan |= kind.is_scan(index);
+            has_reduce |= !kind.is_scan(index);
+        }
     }
     if has_reduce && has_scan {
         // The target scheduler has separate reduction and scan phase models.
@@ -150,7 +159,7 @@ fn sibling_fusable(
     ((i + 1)..j).all(|k| {
         let effect = &block.side_effects[k];
         match (&effect.kind, effect.result) {
-            (SideEffectKind::Soac(EgirSoac::Seg { .. }), Some(_)) => {
+            (SideEffectKind::Soac(Soac::Screma(_)), Some(_)) => {
                 let Some(op_k) = effect.semantic_id else {
                     return false;
                 };
@@ -163,60 +172,79 @@ fn sibling_fusable(
 
 /// Merge the Seg at `j` into the Seg at `i`, remove `j`, and rewire results.
 /// Fields concatenate lane-wise; the operand vector is rebuilt in the canonical
-/// `[inputs, init_accs, output_views]` order with `map_input_indices` rebased by
+/// `[inputs, output_views]` order with `map_input_indices` rebased by
 /// the input offset. The fused op produces a tuple of both operands' outputs, so
 /// consumers of each original result are re-pointed at the corresponding fields.
 fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
     let p = extract_seg(graph, block_id, i);
     let q = extract_seg(graph, block_id, j);
 
-    let base = p.input_array_types.len();
+    let base = p.body.inputs.len();
     let mut raw_inputs = p.inputs.clone();
     raw_inputs.extend(q.inputs.iter().copied());
-    let mut raw_array_types = p.input_array_types.clone();
-    raw_array_types.extend(q.input_array_types.iter().cloned());
-    let mut raw_elem_types = p.input_elem_types.clone();
-    raw_elem_types.extend(q.input_elem_types.iter().cloned());
+    let mut raw_array_types: Vec<Type<TypeName>> =
+        p.body.inputs.iter().map(|input| input.array.clone()).collect();
+    raw_array_types.extend(q.body.inputs.iter().map(|input| input.array.clone()));
+    let mut raw_elem_types: Vec<Type<TypeName>> =
+        p.body.inputs.iter().map(|input| input.element.clone()).collect();
+    raw_elem_types.extend(q.body.inputs.iter().map(|input| input.element.clone()));
     let (inputs, input_array_types, input_elem_types, input_remap) =
         super::deduplicate_array_inputs(raw_inputs, raw_array_types, raw_elem_types);
-
-    let mut map_bodies = p.map_bodies.clone();
-    map_bodies.extend(q.map_bodies.iter().cloned());
-    // Q's map funcs now read inputs shifted right by P's input count.
-    let mut map_input_indices: Vec<Vec<usize>> = p
-        .map_input_indices
-        .iter()
-        .map(|lane| lane.iter().map(|&input| input_remap[input]).collect())
+    let input_types = input_array_types
+        .into_iter()
+        .zip(input_elem_types)
+        .map(|(array, element)| SoacInputType { array, element })
         .collect();
-    map_input_indices.extend(
-        q.map_input_indices
-            .iter()
-            .map(|lane| lane.iter().map(|&input| input_remap[base + input]).collect()),
-    );
 
-    let mut map_output_elem_types = p.map_output_elem_types.clone();
-    map_output_elem_types.extend(q.map_output_elem_types.iter().cloned());
-    let mut map_destinations = p.map_destinations.clone();
-    map_destinations.extend(q.map_destinations.iter().cloned());
-    let mut acc_destinations = p.acc_destinations.clone();
-    acc_destinations.extend(q.acc_destinations.iter().cloned());
+    let mut maps: Vec<screma::Map> = p
+        .body
+        .maps
+        .iter()
+        .cloned()
+        .map(|mut map| {
+            for input in &mut map.input_indices {
+                *input = input_remap[*input];
+            }
+            map
+        })
+        .collect();
+    maps.extend(q.body.maps.iter().cloned().map(|mut map| {
+        for input in &mut map.input_indices {
+            *input = input_remap[base + *input];
+        }
+        map
+    }));
 
-    let mut operators = p.kind.operators().to_vec();
+    let mut operators: Vec<screma::Operator> = p.body.kind.operators().into_iter().cloned().collect();
     for operator in &mut operators {
         for input in &mut operator.input_indices {
             *input = input_remap[*input];
         }
     }
-    operators.extend(q.kind.operators().iter().cloned().map(|mut operator| {
+    operators.extend(q.body.kind.operators().into_iter().cloned().map(|mut operator| {
         for input in &mut operator.input_indices {
             *input = input_remap[base + *input];
         }
         operator
     }));
-    let kind = reify_seg_kind_operators(operators);
+    let has_scan = (0..p.body.kind.len()).any(|index| p.body.kind.is_scan(index))
+        || (0..q.body.kind.len()).any(|index| q.body.kind.is_scan(index));
+    let kind = if operators.is_empty() {
+        screma::Kind::Map
+    } else if has_scan {
+        screma::Kind::Scan(
+            screma::NonEmpty::from_vec(operators).expect("fused scan operators are nonempty"),
+        )
+    } else {
+        screma::Kind::Reduce(
+            screma::NonEmpty::from_vec(operators).expect("fused reduction operators are nonempty"),
+        )
+    };
 
-    let mut result_types = p.result_types.clone();
-    result_types.extend(q.result_types.iter().cloned());
+    let p_result_types = p.body.result_types();
+    let q_result_types = q.body.result_types();
+    let mut result_types = p_result_types.clone();
+    result_types.extend(q_result_types.iter().cloned());
 
     let mut output_slots = p.output_slots.clone();
     output_slots.extend(q.output_slots.iter().copied());
@@ -225,12 +253,10 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
 
     let resources = SegResourceAccess::merge(&p.resources, &q.resources);
 
-    // Rebuild `[inputs, init_accs, output_views]`. init_accs are the operators'
-    // neutrals; output views are the trailing operands of each original op.
+    // Rebuild `[inputs, output_views]`. Operator neutrals stay in `kind`;
+    // output views are the trailing operands of each original op.
     let mut operands: SmallVec<[NodeId; 4]> = SmallVec::new();
     operands.extend(inputs);
-    operands.extend(p.init_accs.iter().copied());
-    operands.extend(q.init_accs.iter().copied());
     operands.extend(p.output_views.iter().copied());
     operands.extend(q.output_views.iter().copied());
 
@@ -240,30 +266,28 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
 
     // Re-point consumers: `Project(P.result, f)` → `Project(fused, f)`,
     // `Project(Q.result, f)` → `Project(fused, base_fields + f)`.
-    reproject(graph, p.result, fused_result, 0, &p.result_types);
+    reproject(graph, p.result, fused_result, 0, &p_result_types);
     reproject(
         graph,
         q.result,
         fused_result,
-        p.result_types.len() as u32,
-        &q.result_types,
+        p_result_types.len() as u32,
+        &q_result_types,
     );
 
-    let fused = EgirSoac::Seg {
-        space: p.space.clone(),
-        placement: p.placement,
-        kind,
-        map_bodies,
-        input_array_types,
-        input_elem_types,
-        map_output_elem_types,
-        map_input_indices,
-        map_destinations,
-        acc_destinations,
-        result_types,
-        output_slots,
-        resources,
-    };
+    let fused = Soac::Screma(screma::Op {
+        body: screma::Body {
+            inputs: input_types,
+            maps,
+            kind,
+        },
+        state: screma::SemanticState::Segmented {
+            space: p.space.clone(),
+            placement: p.placement,
+            output_slots,
+            resources,
+        },
+    });
 
     let block = &mut graph.skeleton.blocks[block_id];
     // Splice the effect chain: the fused op spans from P's input token to Q's
@@ -285,67 +309,41 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
 /// be read independently while the block is rebuilt.
 struct SegParts {
     space: crate::egir::types::SegSpace,
-    placement: SegPlacement,
-    kind: SegOpKind,
-    map_bodies: Vec<SegBody>,
-    input_array_types: Vec<Type<TypeName>>,
-    input_elem_types: Vec<Type<TypeName>>,
-    map_output_elem_types: Vec<Type<TypeName>>,
-    map_input_indices: Vec<Vec<usize>>,
-    map_destinations: Vec<SoacDestination>,
-    acc_destinations: Vec<SoacDestination>,
-    result_types: Vec<Type<TypeName>>,
-    output_slots: Vec<usize>,
+    placement: screma::Placement,
+    body: screma::Body,
+    output_slots: Vec<OutputSlotId>,
     resources: Vec<SegResourceAccess>,
     result: NodeId,
     inputs: Vec<NodeId>,
-    init_accs: Vec<NodeId>,
     output_views: Vec<NodeId>,
 }
 
 fn extract_seg(graph: &EGraph, block_id: BlockId, idx: usize) -> SegParts {
     let effect = &graph.skeleton.blocks[block_id].side_effects[idx];
-    let SideEffectKind::Soac(EgirSoac::Seg {
-        space,
-        placement,
-        kind,
-        map_bodies,
-        input_array_types,
-        input_elem_types,
-        map_output_elem_types,
-        map_input_indices,
-        map_destinations,
-        acc_destinations,
-        result_types,
-        output_slots,
-        resources,
-        ..
-    }) = &effect.kind
+    let SideEffectKind::Soac(Soac::Screma(screma::Op {
+        body,
+        state:
+            screma::SemanticState::Segmented {
+                space,
+                placement,
+                output_slots,
+                resources,
+            },
+    })) = &effect.kind
     else {
         unreachable!("extract_seg on non-Seg");
     };
-    let n_inputs = input_array_types.len();
-    let n_accs = kind.operators().len();
+    let n_inputs = body.inputs.len();
     let inputs = effect.operand_nodes[..n_inputs].to_vec();
-    let init_accs = effect.operand_nodes[n_inputs..n_inputs + n_accs].to_vec();
-    let output_views = effect.operand_nodes[n_inputs + n_accs..].to_vec();
+    let output_views = effect.operand_nodes[n_inputs..].to_vec();
     SegParts {
         space: space.clone(),
         placement: *placement,
-        kind: kind.clone(),
-        map_bodies: map_bodies.clone(),
-        input_array_types: input_array_types.clone(),
-        input_elem_types: input_elem_types.clone(),
-        map_output_elem_types: map_output_elem_types.clone(),
-        map_input_indices: map_input_indices.clone(),
-        map_destinations: map_destinations.clone(),
-        acc_destinations: acc_destinations.clone(),
-        result_types: result_types.clone(),
+        body: body.clone(),
         output_slots: output_slots.clone(),
         resources: resources.clone(),
         result: effect.result.expect("fusable Seg has a result"),
         inputs,
-        init_accs,
         output_views,
     }
 }

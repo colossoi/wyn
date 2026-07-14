@@ -29,13 +29,13 @@ use polytype::Type;
 use crate::ast::TypeName;
 
 use super::super::from_tlc::ConvertError;
-use super::super::program::{SemanticEntry, SemanticProgram};
-use super::super::types::{ENode, NodeId, SkeletonTerminator};
+use super::super::program::{Entry, Program};
+use super::super::types::{EGraph, ENode, EgirPhase, NodeId, SkeletonTerminator};
 
 /// Verify the post-realization invariant for every entry. Returns
 /// `ConvertError::Internal` on the first violation, naming the entry
 /// and offending NodeId.
-pub fn check(inner: &SemanticProgram) -> Result<(), ConvertError> {
+pub fn check<P: EgirPhase>(inner: &Program<P>) -> Result<(), ConvertError> {
     for (endpoint, entry) in inner.entries_with_endpoints() {
         if matches!(endpoint, super::super::program::CompilerFlowEndpoint::Entry(_)) {
             check_routes(entry)?;
@@ -45,7 +45,7 @@ pub fn check(inner: &SemanticProgram) -> Result<(), ConvertError> {
     Ok(())
 }
 
-fn check_routes(entry: &SemanticEntry) -> Result<(), ConvertError> {
+fn check_routes<P: EgirPhase>(entry: &Entry<P>) -> Result<(), ConvertError> {
     for route in &entry.output_routes {
         if route.slot.0 >= entry.outputs.len() {
             return Err(ConvertError::Internal(format!(
@@ -73,7 +73,7 @@ fn check_routes(entry: &SemanticEntry) -> Result<(), ConvertError> {
     Ok(())
 }
 
-fn check_entry(entry_name: &str, graph: &super::super::types::EGraph) -> Result<(), ConvertError> {
+fn check_entry<P: EgirPhase>(entry_name: &str, graph: &EGraph<P>) -> Result<(), ConvertError> {
     // Roots: the operand of every Return(Some(_)) terminator, plus
     // every Pure NodeId referenced by a side-effect store's operands.
     // We don't walk SOAC `EgirSoac` operands here: those are
@@ -150,7 +150,7 @@ fn is_runtime_sized_composite_array(ty: &Type<TypeName>) -> bool {
 
 /// Look up the Pure result type for `nid`. ENode::Pure carries its
 /// declared type; we just project the field.
-fn node_type<'a>(graph: &'a super::super::types::EGraph, nid: NodeId) -> Option<&'a Type<TypeName>> {
+fn node_type<P: EgirPhase>(graph: &EGraph<P>, nid: NodeId) -> Option<&Type<TypeName>> {
     match &graph.nodes[nid] {
         ENode::Pure { .. } => graph.types.get(&nid),
         _ => None,

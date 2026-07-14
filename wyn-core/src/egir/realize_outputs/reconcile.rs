@@ -25,8 +25,8 @@
 use polytype::Type;
 
 use super::super::from_tlc::ConvertError;
-use super::super::program::{SemanticFunc, SemanticProgram, SemanticRegion};
-use super::super::types::{EGraph, ENode, NodeId, PureOp, RegionId, SideEffectKind};
+use super::super::program::{Func, Program, Region};
+use super::super::types::{EGraph, ENode, EgirPhase, NodeId, PureOp, RegionId, SideEffectKind};
 use crate::ast::TypeName;
 use crate::LookupMap;
 
@@ -39,8 +39,8 @@ struct Retype {
     arg_ty: Type<TypeName>,
 }
 
-pub fn run(inner: &mut SemanticProgram) -> Result<(), ConvertError> {
-    let SemanticProgram {
+pub fn run<P: EgirPhase>(inner: &mut Program<P>) -> Result<(), ConvertError> {
+    let Program {
         entry_points,
         regions,
         functions,
@@ -84,9 +84,9 @@ pub fn run(inner: &mut SemanticProgram) -> Result<(), ConvertError> {
 
 /// Scan every `Seg` body in `graphs` for a capture whose type has drifted
 /// view-ward from the callee parameter it binds, pushing a retype for each.
-fn collect_drifts<'a>(
-    graphs: impl Iterator<Item = &'a EGraph>,
-    regions: &LookupMap<RegionId, SemanticRegion>,
+fn collect_drifts<'a, P: EgirPhase + 'a>(
+    graphs: impl Iterator<Item = &'a EGraph<P>>,
+    regions: &LookupMap<RegionId, Region<P>>,
     out: &mut Vec<Retype>,
 ) {
     for graph in graphs {
@@ -152,9 +152,9 @@ fn reject_shared_conflicts(drifts: &[Retype]) -> Result<(), ConvertError> {
 /// that share the name, plus each body's `FuncParam` node — then re-propagate
 /// aggregate types inside the callee so a projection out of the parameter sees
 /// the view.
-fn apply(
-    regions: &mut LookupMap<RegionId, SemanticRegion>,
-    functions: &mut [SemanticFunc],
+fn apply<P: EgirPhase>(
+    regions: &mut LookupMap<RegionId, Region<P>>,
+    functions: &mut [Func<P>],
     Retype {
         region,
         name,
@@ -192,7 +192,7 @@ fn apply(
 /// operand tuple; recomputing that projection from the still-composite tuple
 /// field would undo the retarget and oscillate. The view-ward gate keeps the
 /// retarget and makes the fixpoint monotone.
-fn recompute_aggregate_types(graph: &mut EGraph) {
+fn recompute_aggregate_types<P: EgirPhase>(graph: &mut EGraph<P>) {
     loop {
         let mut updates: Vec<(NodeId, Type<TypeName>)> = Vec::new();
         for (nid, node) in &graph.nodes {
@@ -269,7 +269,7 @@ fn is_view_ward_drift(param: &Type<TypeName>, cap: &Type<TypeName>) -> bool {
 }
 
 /// Retype the `FuncParam { index }` node in a region/function body graph.
-fn retype_func_param(graph: &mut EGraph, index: usize, view_ty: &Type<TypeName>) {
+fn retype_func_param<P: EgirPhase>(graph: &mut EGraph<P>, index: usize, view_ty: &Type<TypeName>) {
     let target = graph.nodes.iter().find_map(|(nid, node)| match node {
         ENode::FuncParam { index: i } if *i == index => Some(nid),
         _ => None,

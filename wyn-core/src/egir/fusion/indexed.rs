@@ -7,9 +7,9 @@
 use smallvec::smallvec;
 
 use crate::egir::program::{OutputRoute, OutputWriter, SemanticProgram};
+use crate::egir::soac::screma;
 use crate::egir::types::{
-    EGraph, ENode, EgirSoac, NodeId, PureOp, SegOpKind, SegResourceAccessKind, SideEffectKind,
-    SoacDestination,
+    EGraph, ENode, NodeId, PureOp, SegResourceAccessKind, SideEffectKind, Soac, SoacDestination,
 };
 use crate::ssa::types::ConstantValue;
 
@@ -64,25 +64,34 @@ fn find_in_graph(
 ) -> Option<Candidate> {
     for (block_id, block) in &graph.skeleton.blocks {
         for (effect_index, effect) in block.side_effects.iter().enumerate() {
-            let SideEffectKind::Soac(EgirSoac::Seg {
-                kind: SegOpKind::SegMap,
-                map_bodies,
-                map_destinations,
-                output_slots,
-                resources,
-                ..
-            }) = &effect.kind
+            let SideEffectKind::Soac(Soac::Screma(screma::Op {
+                body:
+                    screma::Body {
+                        kind: screma::Kind::Map,
+                        maps,
+                        ..
+                    },
+                state:
+                    screma::SemanticState::Segmented {
+                        output_slots,
+                        resources,
+                        ..
+                    },
+            })) = &effect.kind
             else {
                 continue;
             };
             let indirect_output_resources: std::collections::HashSet<_> = output_slots
                 .iter()
-                .filter_map(|&slot| output_resources.get(slot).copied().flatten())
+                .filter_map(|slot| output_resources.get(slot.0).copied().flatten())
                 .map(crate::egir::program::SemanticResourceRef)
                 .collect();
-            if map_bodies.is_empty()
-                || !map_destinations.iter().all(|destination| {
-                    matches!(destination, SoacDestination::Fresh | SoacDestination::UniqueInput)
+            if maps.is_empty()
+                || !maps.iter().all(|map| {
+                    matches!(
+                        map.destination,
+                        SoacDestination::Fresh | SoacDestination::UniqueInput
+                    )
                 })
                 || resources.iter().any(|resource| {
                     resource.access != SegResourceAccessKind::Read
@@ -117,7 +126,7 @@ fn find_in_graph(
             let [(index, index_value, output)] = demands.as_slice() else {
                 continue;
             };
-            if *output >= map_bodies.len()
+            if *output >= maps.len()
                 || !used_only_through(graph, block_id, effect_index, result, *index, output_routes)
             {
                 continue;
@@ -200,22 +209,16 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
     let (region_name, input_nodes, input_elem_types, captures, producer_result) = {
         let graph = graph(inner, candidate.site);
         let effect = &graph.skeleton.blocks[candidate.block].side_effects[candidate.effect];
-        let SideEffectKind::Soac(EgirSoac::Seg {
-            map_bodies,
-            map_input_indices,
-            input_elem_types,
-            ..
-        }) = &effect.kind
-        else {
+        let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
             unreachable!();
         };
-        let body = &map_bodies[candidate.output];
-        let indices = &map_input_indices[candidate.output];
+        let map = &op.body.maps[candidate.output];
+        let indices = &map.input_indices;
         (
-            inner.regions[&body.region].name.clone(),
+            inner.regions[&map.body.region].name.clone(),
             indices.iter().map(|&index| effect.operand_nodes[index]).collect::<Vec<_>>(),
-            indices.iter().map(|&index| input_elem_types[index].clone()).collect::<Vec<_>>(),
-            body.captures.clone(),
+            indices.iter().map(|&index| op.body.inputs[index].element.clone()).collect::<Vec<_>>(),
+            map.body.captures.clone(),
             effect.result.expect("indexed SegMap has no result"),
         )
     };

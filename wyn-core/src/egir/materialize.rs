@@ -31,7 +31,7 @@ use crate::ssa::types::ConstantValue;
 use crate::types::TypeExt;
 
 use super::program::PhysicalProgram;
-use super::types::{EGraph, ENode, NodeId, PureOp};
+use super::types::{EGraph, ENode, EgirPhase, NodeId, PureOp};
 
 /// Run `run_one_body` on every function and entry point in the program.
 pub(crate) fn run(inner: &mut PhysicalProgram) {
@@ -45,7 +45,7 @@ pub(crate) fn run(inner: &mut PhysicalProgram) {
 
 /// Rewrite all dynamic Index nodes in the e-graph to Materialize +
 /// DynamicExtract.
-fn run_one_body<R: super::types::GraphResource>(graph: &mut EGraph<R>) {
+fn run_one_body<P: EgirPhase>(graph: &mut EGraph<P>) {
     // Snapshot first; we'll mutate node entries and add new Materialize nodes.
     let targets: Vec<(NodeId, NodeId, NodeId)> = graph
         .nodes
@@ -83,7 +83,7 @@ fn run_one_body<R: super::types::GraphResource>(graph: &mut EGraph<R>) {
 
 /// Is `nid`'s array type a storage view? `lower_index` reads a view with a
 /// native dynamic `OpAccessChain`, so it must not be spilled to a composite.
-fn is_view<R>(graph: &EGraph<R>, nid: NodeId) -> bool {
+fn is_view<P: EgirPhase>(graph: &EGraph<P>, nid: NodeId) -> bool {
     graph.types.get(&nid).is_some_and(|ty| {
         matches!(
             ty.array_variant(),
@@ -94,7 +94,7 @@ fn is_view<R>(graph: &EGraph<R>, nid: NodeId) -> bool {
 
 /// Is this NodeId a compile-time integer constant? Includes both the inline
 /// `ENode::Constant(ConstantValue::I32|U32)` form and `ENode::Pure(PureOp::Int|Uint)`.
-fn is_const_int<R>(graph: &EGraph<R>, nid: NodeId) -> bool {
+fn is_const_int<P: EgirPhase>(graph: &EGraph<P>, nid: NodeId) -> bool {
     match &graph.nodes[nid] {
         ENode::Constant(ConstantValue::I32(_) | ConstantValue::U32(_)) => true,
         ENode::Pure {

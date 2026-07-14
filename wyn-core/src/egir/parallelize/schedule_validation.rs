@@ -181,7 +181,7 @@ impl KernelPlan {
     }
 }
 
-fn validate_entry(entry: &PlannedEntry) -> Result<(), String> {
+fn validate_entry<P: crate::egir::types::EgirPhase>(entry: &PlannedEntry<P>) -> Result<(), String> {
     let effects = entry
         .graph
         .skeleton

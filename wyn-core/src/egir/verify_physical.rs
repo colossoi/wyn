@@ -3,7 +3,7 @@ use polytype::Type;
 use crate::ast::TypeName;
 
 use super::program::{visit_type_names_mut, PhysicalEGraph, PhysicalProgram};
-use super::types::{EgirSoac, FilterState, SegOpKind, SegPlacement, SideEffectKind};
+use super::types::SideEffectKind;
 
 pub fn check(program: &PhysicalProgram) -> Result<(), String> {
     for resource in &program.resources {
@@ -24,13 +24,13 @@ pub fn check(program: &PhysicalProgram) -> Result<(), String> {
         for declaration in &entry.storage_bindings {
             physical_type(&declaration.elem_ty, &entry.name)?;
         }
-        graph(&entry.graph, &entry.name, true)?;
+        graph(&entry.graph, &entry.name)?;
     }
     for function in &program.functions {
-        graph(&function.graph, &function.name, false)?;
+        graph(&function.graph, &function.name)?;
     }
     for region in program.regions.values() {
-        graph(&region.graph, &region.name, false)?;
+        graph(&region.graph, &region.name)?;
     }
     Ok(())
 }
@@ -47,7 +47,7 @@ fn physical_type(ty: &Type<TypeName>, owner: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn graph(graph: &PhysicalEGraph, owner: &str, entry: bool) -> Result<(), String> {
+fn graph(graph: &PhysicalEGraph, owner: &str) -> Result<(), String> {
     for ty in graph.types.values() {
         physical_type(ty, owner)?;
     }
@@ -66,25 +66,9 @@ fn graph(graph: &PhysicalEGraph, owner: &str, entry: bool) -> Result<(), String>
         let SideEffectKind::Soac(soac) = &effect.kind else {
             continue;
         };
-        match soac {
-            EgirSoac::Filter {
-                state: FilterState::Semantic { .. },
-                ..
-            } => return Err(format!("physical body `{owner}` retains an unscheduled filter")),
-            EgirSoac::Seg {
-                placement: SegPlacement::Kernel,
-                kind: SegOpKind::SegRed { .. } | SegOpKind::SegScan { .. },
-                ..
-            } if entry => {
-                return Err(format!(
-                    "physical entry `{owner}` retains a pending segmented kernel"
-                ));
-            }
-            _ => {}
-        }
         let mut soac = soac.clone();
         let mut error = None;
-        soac.visit_types_mut(|ty| {
+        soac.for_each_type_mut(|ty| {
             if error.is_none() {
                 error = physical_type(ty, owner).err();
             }

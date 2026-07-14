@@ -13,7 +13,7 @@ mod resource_erasure_tests;
 use crate::ast::TypeName;
 use crate::egir::from_tlc::ConvertError;
 use crate::egir::program::{PhysicalFunc, PhysicalProgram};
-use crate::egir::types::{EGraph, ENode, PureOp, SideEffectKind, SkeletonTerminator};
+use crate::egir::types::{EGraph, ENode, EgirPhase, PureOp, SideEffectKind, SkeletonTerminator};
 use crate::ssa::types::{InstKind, ValueRef};
 use crate::{LookupMap, LookupSet};
 use polytype::Type;
@@ -45,8 +45,8 @@ fn is_storage_image(ty: &Type<TypeName>) -> bool {
     matches!(ty, Type::Constructed(TypeName::StorageTexture, _))
 }
 
-fn rewrite_graph<R: crate::egir::types::GraphResource>(
-    graph: &mut EGraph<R>,
+fn rewrite_graph<P: EgirPhase>(
+    graph: &mut EGraph<P>,
     erasures: &LookupMap<String, Vec<bool>>,
 ) -> Result<(), ConvertError> {
     // Calls can be pure nodes or effect-anchored instructions. Rewrite both;
@@ -182,7 +182,7 @@ fn erase_function_params(function: &mut PhysicalFunc) -> Result<(), ConvertError
     Ok(())
 }
 
-fn live_nodes<R>(graph: &EGraph<R>) -> LookupSet<crate::egir::types::NodeId> {
+fn live_nodes<P: EgirPhase>(graph: &EGraph<P>) -> LookupSet<crate::egir::types::NodeId> {
     let mut roots = Vec::new();
     for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {

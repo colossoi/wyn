@@ -1,8 +1,54 @@
 //! Unit tests for the dispatch helpers.
 
 use super::*;
-use crate::egir::types::{EGraph, RegionId, ScremaAccumulator, ScremaOperator, SegBody, SideEffect};
+use crate::egir::soac::{hist, screma};
+use crate::egir::types::{EGraph, Raw, RegionId, SegBody, SideEffect, Soac, SoacInputType};
 use smallvec::smallvec;
+
+fn raw_map_soac(
+    input: SoacInputType,
+    map_body: SegBody,
+    output_element_type: Type<TypeName>,
+    result_type: Type<TypeName>,
+) -> Soac<Raw> {
+    Soac::Screma(screma::Op {
+        body: screma::Body {
+            inputs: vec![input],
+            maps: vec![screma::Map {
+                body: map_body,
+                input_indices: vec![0],
+                output_element_type,
+                destination: SoacDestination::OutputView,
+                result_type,
+            }],
+            kind: screma::Kind::Map,
+        },
+        state: screma::RawState,
+    })
+}
+
+fn raw_hist_soac(
+    inputs: Vec<SoacInputType>,
+    captures: Vec<NodeId>,
+    index_type: Type<TypeName>,
+    value_type: Type<TypeName>,
+    dest_elem_type: Type<TypeName>,
+) -> Soac<Raw> {
+    Soac::Hist(hist::Op {
+        body: hist::Body {
+            body: SegBody {
+                region: RegionId::from_index(0),
+                captures,
+            },
+            inputs,
+            index_type,
+            value_type,
+            dest_elem_type,
+            update_policy: hist::UpdatePolicy::OrderedOverwrite,
+        },
+        state: hist::RawState,
+    })
+}
 
 /// A runtime-sized compute output that no retargetable Map/Scan produced
 /// must surface a clean `Unsupported` error.
@@ -21,7 +67,7 @@ fn compute_slot_source_rejects_unsized_array_without_soac() {
         ],
     );
 
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Raw>::new();
     let source = graph.alloc_side_effect_result(unsized_arr_ty.clone());
     let block = graph.skeleton.entry;
     let mut next_effect = 1u32;
@@ -100,8 +146,8 @@ fn composite_arr_ty(elem: Type<TypeName>, n: usize) -> Type<TypeName> {
 /// (an init-accumulator / output-view slot) must be rejected as non-input —
 /// only the leading input operands are per-element view reads.
 #[test]
-fn rewrite_sibling_index_consumers_rejects_screma_noninput_operand() {
-    let mut graph = EGraph::new();
+fn rewrite_sibling_index_consumers_rejects_map_output_view_operand() {
+    let mut graph = EGraph::<Raw>::new();
     let block = graph.skeleton.entry;
     let elem = vec4_ty();
     let arr_ty = composite_arr_ty(elem.clone(), 4);
@@ -122,19 +168,18 @@ fn rewrite_sibling_index_consumers_rejects_screma_noninput_operand() {
         graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(1), vec![arr_ty.clone()]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         semantic_id: None,
-        kind: SideEffectKind::Soac(EgirSoac::Screma {
-            map_bodies: vec![SegBody {
+        kind: SideEffectKind::Soac(raw_map_soac(
+            SoacInputType {
+                array: arr_ty.clone(),
+                element: elem.clone(),
+            },
+            SegBody {
                 region: RegionId::from_index(0),
-                captures: vec![source],
-            }],
-            accumulators: vec![],
-            input_array_types: vec![arr_ty.clone()],
-            input_elem_types: vec![elem.clone()],
-            map_output_elem_types: vec![elem.clone()],
-            map_input_indices: vec![vec![0]],
-            map_destinations: vec![SoacDestination::Fresh],
-            acc_destinations: vec![],
-        }),
+                captures: vec![],
+            },
+            elem.clone(),
+            arr_ty.clone(),
+        )),
         operand_nodes: smallvec![dummy_input, source],
         result: Some(result_nid),
         effects: None,
@@ -153,7 +198,7 @@ fn rewrite_sibling_index_consumers_rejects_screma_noninput_operand() {
         elem,
         0,
     )
-    .expect_err("Screma capture-position consumer of `source` must be rejected");
+    .expect_err("Screma output-view consumer of `source` must be rejected");
     match err {
         ConvertError::Unsupported(msg) => {
             assert!(
@@ -169,7 +214,7 @@ fn rewrite_sibling_index_consumers_rejects_screma_noninput_operand() {
 /// the dest is a write-storage view, not an input read.
 #[test]
 fn rewrite_sibling_index_consumers_rejects_scatter_dest_position() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Raw>::new();
     let block = graph.skeleton.entry;
     let elem = vec4_ty();
     let arr_ty = composite_arr_ty(elem.clone(), 4);
@@ -183,19 +228,16 @@ fn rewrite_sibling_index_consumers_rejects_scatter_dest_position() {
     let result_nid = graph.alloc_side_effect_result(Type::Constructed(TypeName::Bool, vec![]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         semantic_id: None,
-        kind: SideEffectKind::Soac(EgirSoac::Hist {
-            body: crate::egir::types::SegBody {
-                region: crate::egir::types::RegionId::from_index(0),
-                captures: vec![],
-            },
-            input_array_types: vec![arr_ty.clone()],
-            input_elem_types: vec![elem.clone()],
-            index_type: Type::Constructed(TypeName::Int(32), vec![]),
-            value_type: elem.clone(),
-            dest_elem_type: elem.clone(),
-            update_policy: crate::egir::types::HistUpdatePolicy::OrderedOverwrite,
-            execution: crate::egir::types::HistExecution::Raw,
-        }),
+        kind: SideEffectKind::Soac(raw_hist_soac(
+            vec![SoacInputType {
+                array: arr_ty.clone(),
+                element: elem.clone(),
+            }],
+            vec![],
+            Type::Constructed(TypeName::Int(32), vec![]),
+            elem.clone(),
+            elem.clone(),
+        )),
         operand_nodes: smallvec![source, dummy_input],
         result: Some(result_nid),
         effects: None,
@@ -231,7 +273,7 @@ fn rewrite_sibling_index_consumers_rejects_scatter_dest_position() {
 /// per-element view read.
 #[test]
 fn rewrite_sibling_index_consumers_rejects_scatter_capture_position() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Raw>::new();
     let block = graph.skeleton.entry;
     let elem = vec4_ty();
     let arr_ty = composite_arr_ty(elem.clone(), 4);
@@ -247,19 +289,16 @@ fn rewrite_sibling_index_consumers_rejects_scatter_capture_position() {
     let result_nid = graph.alloc_side_effect_result(Type::Constructed(TypeName::Bool, vec![]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         semantic_id: None,
-        kind: SideEffectKind::Soac(EgirSoac::Hist {
-            body: crate::egir::types::SegBody {
-                region: crate::egir::types::RegionId::from_index(0),
-                captures: vec![source],
-            },
-            input_array_types: vec![arr_ty.clone()],
-            input_elem_types: vec![elem.clone()],
-            index_type: Type::Constructed(TypeName::Int(32), vec![]),
-            value_type: elem.clone(),
-            dest_elem_type: elem.clone(),
-            update_policy: crate::egir::types::HistUpdatePolicy::OrderedOverwrite,
-            execution: crate::egir::types::HistExecution::Raw,
-        }),
+        kind: SideEffectKind::Soac(raw_hist_soac(
+            vec![SoacInputType {
+                array: arr_ty.clone(),
+                element: elem.clone(),
+            }],
+            vec![source],
+            Type::Constructed(TypeName::Int(32), vec![]),
+            elem.clone(),
+            elem.clone(),
+        )),
         operand_nodes: smallvec![dummy_dest, dummy_input, source],
         result: Some(result_nid),
         effects: None,
@@ -294,8 +333,8 @@ fn rewrite_sibling_index_consumers_rejects_scatter_capture_position() {
 /// must be rejected — init values are scalars/values, not per-element
 /// view reads.
 #[test]
-fn rewrite_sibling_index_consumers_rejects_screma_init_acc_position() {
-    let mut graph = EGraph::new();
+fn rewrite_sibling_index_consumers_rejects_accumulator_output_view_operand() {
+    let mut graph = EGraph::<Raw>::new();
     let block = graph.skeleton.entry;
     let elem = vec4_ty();
     let arr_ty = composite_arr_ty(elem.clone(), 4);
@@ -310,27 +349,35 @@ fn rewrite_sibling_index_consumers_rejects_screma_init_acc_position() {
         graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(1), vec![elem.clone()]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         semantic_id: None,
-        kind: SideEffectKind::Soac(EgirSoac::Screma {
-            map_bodies: vec![],
-            accumulators: vec![ScremaOperator {
-                kind: ScremaAccumulator::Reduce,
-                step: SegBody {
-                    region: RegionId::from_index(0),
-                    captures: vec![],
-                },
-                combine: SegBody {
-                    region: RegionId::from_index(1),
-                    captures: vec![],
-                },
-                input_indices: vec![0],
-            }],
-            input_array_types: vec![arr_ty.clone()],
-            input_elem_types: vec![elem.clone()],
-            map_output_elem_types: vec![],
-            map_input_indices: vec![],
-            map_destinations: vec![],
-            acc_destinations: vec![SoacDestination::Fresh],
-        }),
+        kind: SideEffectKind::Soac(Soac::Screma(screma::Op {
+            body: screma::Body {
+                inputs: vec![SoacInputType {
+                    array: arr_ty.clone(),
+                    element: elem.clone(),
+                }],
+                maps: vec![],
+                kind: screma::Kind::Reduce(screma::NonEmpty {
+                    first: screma::Operator {
+                        step: SegBody {
+                            region: RegionId::from_index(0),
+                            captures: vec![],
+                        },
+                        combine: SegBody {
+                            region: RegionId::from_index(1),
+                            captures: vec![],
+                        },
+                        input_indices: vec![0],
+                        neutral: source,
+                        shape: vec![],
+                        commutative: false,
+                        destination: SoacDestination::OutputView,
+                        result_type: elem.clone(),
+                    },
+                    rest: vec![],
+                }),
+            },
+            state: screma::RawState,
+        })),
         operand_nodes: smallvec![dummy_input, source],
         result: Some(result_nid),
         effects: None,
@@ -349,7 +396,7 @@ fn rewrite_sibling_index_consumers_rejects_screma_init_acc_position() {
         elem,
         0,
     )
-    .expect_err("Screma init-acc consumer of `source` must be rejected");
+    .expect_err("Screma accumulator output-view consumer of `source` must be rejected");
     match err {
         ConvertError::Unsupported(msg) => {
             assert!(

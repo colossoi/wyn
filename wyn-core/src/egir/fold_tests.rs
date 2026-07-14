@@ -1,10 +1,12 @@
 //! Tests for algebraic folds applied during `EGraph::intern_pure`.
 
-use super::super::types::{EGraph, ENode, NodeId, PureOp};
+use super::super::types::{EGraph as GenericEGraph, ENode, NodeId, PureOp};
 use crate::ast::TypeName;
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
 use smallvec::smallvec;
+
+type EGraph = GenericEGraph;
 
 fn f32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Float(32), vec![])

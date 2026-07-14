@@ -2,12 +2,14 @@
 
 use super::*;
 use crate::ast::TypeName;
-use crate::egir::types::{EGraph, NodeId, PureOp, SkeletonTerminator};
+use crate::egir::types::{EGraph as GenericEGraph, NodeId, PureOp, SkeletonTerminator};
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
 use smallvec::smallvec;
 use std::collections::HashMap;
+
+type EGraph = GenericEGraph;
 
 fn i32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Int(32), vec![])

@@ -24,9 +24,10 @@ use crate::ResourceId;
 use super::super::from_tlc::ConvertError;
 use super::super::graph_ops;
 use super::super::program::OutputWriter;
+use super::super::soac::filter;
 use super::super::types::{
-    EGraph, ENode, EgirSoac, NodeId, PureOp, ScremaAccumulator, SideEffectIndex, SideEffectKind,
-    SkeletonTerminator, SoacDestination,
+    EGraph, ENode, NodeId, PureOp, Raw, SideEffectIndex, SideEffectKind, SkeletonTerminator, Soac,
+    SoacDestination,
 };
 
 /// The set of Pure nodes reachable from an entry's live outputs — the operand
@@ -35,7 +36,7 @@ use super::super::types::{
 /// Mirrors the reachability the post-realization verifier walks
 /// (`realize_outputs::verify`). Nodes outside this set are dead: they have no
 /// runtime effect, so consuming `source` there must not fail a slot.
-fn reachable_from_outputs(graph: &EGraph) -> LookupSet<NodeId> {
+fn reachable_from_outputs(graph: &EGraph<Raw>) -> LookupSet<NodeId> {
     let mut roots: Vec<NodeId> = Vec::new();
     for (_, block) in &graph.skeleton.blocks {
         if let SkeletonTerminator::Return(Some(r)) = block.term {
@@ -85,7 +86,7 @@ mod dispatch_tests;
 /// caller's whole slot loop.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_slot_source(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Raw>,
     effect_index: &SideEffectIndex,
     aliases: &mut LookupMap<NodeId, NodeId>,
     next_effect: &mut u32,
@@ -188,7 +189,7 @@ pub fn compute_slot_source(
 /// `OutputSlot { index }` place. The whole value (which is a scalar,
 /// vector, or matrix in practice) is written in one operation.
 pub fn graphics_slot_source(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Raw>,
     block: BlockId,
     next_effect: &mut u32,
     source: NodeId,
@@ -211,7 +212,7 @@ pub fn graphics_slot_source(
 }
 
 fn projected_effect_result(
-    graph: &EGraph,
+    graph: &EGraph<Raw>,
     effect_index: &SideEffectIndex,
     source: NodeId,
 ) -> Option<NodeId> {
@@ -233,7 +234,7 @@ fn projected_effect_result(
 /// i.e. a consuming scan. The scan writes its prefix into its input
 /// buffer; the entry's auto-bound output is unused.
 pub(crate) fn result_soac_is_consuming_scan(
-    graph: &EGraph,
+    graph: &EGraph<Raw>,
     effect_index: &SideEffectIndex,
     result: NodeId,
 ) -> bool {
@@ -245,19 +246,13 @@ pub(crate) fn result_soac_is_consuming_scan(
         let field_idx = *index as usize;
         if let [screma_result] = operands.as_slice() {
             if let Some(se) = effect_index.effect(graph, *screma_result) {
-                if let SideEffectKind::Soac(EgirSoac::Screma {
-                    map_destinations,
-                    accumulators,
-                    acc_destinations,
-                    ..
-                }) = &se.kind
-                {
-                    let n_maps = map_destinations.len();
+                if let SideEffectKind::Soac(Soac::Screma(op)) = &se.kind {
+                    let n_maps = op.body.maps.len();
                     if field_idx >= n_maps {
                         let acc_idx = field_idx - n_maps;
-                        if acc_idx < accumulators.len()
-                            && matches!(accumulators[acc_idx].kind, ScremaAccumulator::Scan)
-                            && acc_destinations.get(acc_idx) == Some(&SoacDestination::InputBuffer)
+                        if op.body.kind.is_scan(acc_idx)
+                            && op.body.kind.operator(acc_idx).map(|operator| operator.destination)
+                                == Some(SoacDestination::InputBuffer)
                         {
                             return true;
                         }
@@ -273,7 +268,7 @@ pub(crate) fn result_soac_is_consuming_scan(
 /// If `source` is a retargetable array projection of a fresh Screma, return
 /// the underlying Screma result and field index.
 pub(crate) fn result_soac_is_array_projection(
-    graph: &EGraph,
+    graph: &EGraph<Raw>,
     effect_index: &SideEffectIndex,
     source: NodeId,
 ) -> Option<(NodeId, usize)> {
@@ -289,35 +284,18 @@ pub(crate) fn result_soac_is_array_projection(
         return None;
     };
     let se = effect_index.effect(graph, *screma_result)?;
-    match &se.kind {
-        SideEffectKind::Soac(EgirSoac::Screma { map_destinations, .. })
-            if field_idx < map_destinations.len()
-                && matches!(
-                    map_destinations[field_idx],
-                    SoacDestination::Fresh | SoacDestination::UniqueInput
-                ) =>
-        {
-            Some((*screma_result, field_idx))
-        }
-        SideEffectKind::Soac(EgirSoac::Screma {
-            map_destinations,
-            accumulators,
-            acc_destinations,
-            ..
-        }) if field_idx >= map_destinations.len() && {
-            let acc_idx = field_idx - map_destinations.len();
-            acc_idx < accumulators.len()
-                && accumulators[acc_idx].kind == ScremaAccumulator::Scan
-                && matches!(
-                    acc_destinations[acc_idx],
-                    SoacDestination::Fresh | SoacDestination::UniqueInput
-                )
-        } =>
-        {
-            Some((*screma_result, field_idx))
-        }
-        _ => None,
-    }
+    let SideEffectKind::Soac(Soac::Screma(op)) = &se.kind else {
+        return None;
+    };
+    let operator_field = field_idx.checked_sub(op.body.maps.len());
+    let supported =
+        field_idx < op.body.maps.len() || operator_field.is_some_and(|index| op.body.kind.is_scan(index));
+    (supported
+        && matches!(
+            op.body.destination(field_idx),
+            Some(SoacDestination::Fresh | SoacDestination::UniqueInput)
+        ))
+    .then_some((*screma_result, field_idx))
 }
 
 /// True iff `ty` is an Array whose size is a free variable or
@@ -340,21 +318,14 @@ pub(crate) fn is_unsized_array(ty: &Type<TypeName>) -> bool {
 /// Retarget one array-producing side of the Screma producing `target_result`
 /// to write into `output_view`.
 pub(crate) fn retarget_array_projection(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Raw>,
     effect_index: &SideEffectIndex,
     target_result: NodeId,
     field_idx: usize,
     output_view: NodeId,
 ) {
     if let Some(se) = effect_index.effect_mut(graph, target_result) {
-        let SideEffectKind::Soac(EgirSoac::Screma {
-            input_array_types,
-            accumulators,
-            map_destinations,
-            acc_destinations,
-            ..
-        }) = &mut se.kind
-        else {
+        let SideEffectKind::Soac(Soac::Screma(op)) = &mut se.kind else {
             panic!(
                 "retarget_array_projection: side effect for \
                      target_result={:?} is not Screma: {:?}",
@@ -362,51 +333,31 @@ pub(crate) fn retarget_array_projection(
             );
         };
 
-        // Operand layout is `[inputs.., init_accs.., output_views..]`;
-        // captures live on the `SegBody`s, not here.
-        let base_len = input_array_types.len() + accumulators.len();
+        // Operand layout is `[inputs.., output_views..]`; neutrals and
+        // captures are explicit in the Screma body.
+        let base_len = op.body.inputs.len();
         let mut cursor = base_len;
-        let mut map_views = Vec::with_capacity(map_destinations.len());
-        for dest in map_destinations.iter() {
-            if *dest == SoacDestination::OutputView {
-                map_views.push(Some(
-                    *se.operand_nodes.get(cursor).expect("Screma map output view operand missing"),
+        let mut views = Vec::with_capacity(op.body.result_count());
+        for field in 0..op.body.result_count() {
+            if op.body.destination(field) == Some(SoacDestination::OutputView) {
+                views.push(Some(
+                    *se.operand_nodes.get(cursor).expect("Screma output view operand missing"),
                 ));
                 cursor += 1;
             } else {
-                map_views.push(None);
-            }
-        }
-        let mut acc_views = Vec::with_capacity(acc_destinations.len());
-        for dest in acc_destinations.iter() {
-            if *dest == SoacDestination::OutputView {
-                acc_views.push(Some(
-                    *se.operand_nodes.get(cursor).expect("Screma accumulator output view operand missing"),
-                ));
-                cursor += 1;
-            } else {
-                acc_views.push(None);
+                views.push(None);
             }
         }
 
-        if field_idx < map_destinations.len() {
-            map_destinations[field_idx] = SoacDestination::OutputView;
-            map_views[field_idx] = Some(output_view);
-        } else {
-            let acc_idx = field_idx - map_destinations.len();
-            if acc_idx < accumulators.len() && accumulators[acc_idx].kind == ScremaAccumulator::Scan {
-                acc_destinations[acc_idx] = SoacDestination::OutputView;
-                acc_views[acc_idx] = Some(output_view);
-            } else {
-                panic!("retarget_array_projection: unsupported Screma field {field_idx}");
-            }
+        let operator_index = field_idx.checked_sub(op.body.maps.len());
+        if operator_index.is_some_and(|index| !op.body.kind.is_scan(index)) {
+            panic!("retarget_array_projection: unsupported Screma field {field_idx}");
         }
+        assert!(op.body.set_destination(field_idx, SoacDestination::OutputView));
+        views[field_idx] = Some(output_view);
 
         se.operand_nodes.truncate(base_len);
-        for view in map_views.into_iter().flatten() {
-            se.operand_nodes.push(view);
-        }
-        for view in acc_views.into_iter().flatten() {
+        for view in views.into_iter().flatten() {
             se.operand_nodes.push(view);
         }
         return;
@@ -438,7 +389,7 @@ pub(crate) fn retarget_array_projection(
 /// diagnostic.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rewrite_sibling_index_consumers(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Raw>,
     aliases: &mut LookupMap<NodeId, NodeId>,
     block: BlockId,
     next_effect: &mut u32,
@@ -463,16 +414,12 @@ pub(crate) fn rewrite_sibling_index_consumers(
                     continue;
                 }
                 match &se.kind {
-                    SideEffectKind::Soac(EgirSoac::Screma {
-                        input_array_types, ..
-                    }) => {
-                        // Screma operand layout:
-                        //   [inputs.., init_accs.., map_captures..,
-                        //    acc_step_captures.., acc_reduce_op_captures..,
-                        //    output_views..]
+                    SideEffectKind::Soac(Soac::Screma(op)) => {
+                        // Screma operand layout: [inputs.., output_views..].
+                        // Captures and neutrals live in the typed body.
                         // Only the leading `input_array_types.len()`
                         // slots are array inputs read per element.
-                        if op_idx < input_array_types.len() {
+                        if op_idx < op.body.inputs.len() {
                             input_hits.push((skel_bid, se_idx, op_idx));
                             continue;
                         }
@@ -484,16 +431,13 @@ pub(crate) fn rewrite_sibling_index_consumers(
                              substitution",
                             slot_index,
                             op_idx,
-                            input_array_types.len()
+                            op.body.inputs.len()
                         )));
                     }
-                    SideEffectKind::Soac(EgirSoac::Hist {
-                        input_array_types, ..
-                    }) => {
-                        // Scatter operand layout:
-                        //   [dest_view, inputs.., captures..]
+                    SideEffectKind::Soac(Soac::Hist(op)) => {
+                        // Scatter operand layout: [dest_view, inputs..].
                         // Input region is `1..1+input_array_types.len()`.
-                        if op_idx >= 1 && op_idx < 1 + input_array_types.len() {
+                        if op_idx >= 1 && op_idx < 1 + op.body.inputs.len() {
                             input_hits.push((skel_bid, se_idx, op_idx));
                             continue;
                         }
@@ -505,7 +449,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                              substitution",
                             slot_index,
                             op_idx,
-                            input_array_types.len()
+                            op.body.inputs.len()
                         )));
                     }
                     _ => {
@@ -534,41 +478,31 @@ pub(crate) fn rewrite_sibling_index_consumers(
         let se = &mut blk.side_effects[se_idx];
         se.operand_nodes[op_idx] = view;
         match &mut se.kind {
-            SideEffectKind::Soac(EgirSoac::Screma {
-                input_array_types,
-                input_elem_types,
-                ..
-            }) => {
+            SideEffectKind::Soac(Soac::Screma(op)) => {
                 let k = op_idx;
                 assert_eq!(
-                    input_elem_types[k], view_elem_ty,
+                    op.body.inputs[k].element, view_elem_ty,
                     "rewrite_sibling_index_consumers: Screma input_elem_types[{}] \
                      {:?} disagrees with output view's elem type {:?}; the SOAC's \
                      produced elements should equal the entry-output binding's \
                      element type",
-                    k, input_elem_types[k], view_elem_ty
+                    k, op.body.inputs[k].element, view_elem_ty
                 );
-                input_array_types[k] = view_arr_ty.clone();
+                op.body.inputs[k].array = view_arr_ty.clone();
             }
-            SideEffectKind::Soac(EgirSoac::Hist {
-                input_array_types,
-                input_elem_types,
-                ..
-            }) => {
+            SideEffectKind::Soac(Soac::Hist(op)) => {
                 let k = op_idx - 1;
                 assert_eq!(
-                    input_elem_types[k], view_elem_ty,
+                    op.body.inputs[k].element, view_elem_ty,
                     "rewrite_sibling_index_consumers: Scatter input_elem_types[{}] \
                      {:?} disagrees with output view's elem type {:?}; the SOAC's \
                      produced elements should equal the entry-output binding's \
                      element type",
-                    k, input_elem_types[k], view_elem_ty
+                    k, op.body.inputs[k].element, view_elem_ty
                 );
-                input_array_types[k] = view_arr_ty.clone();
+                op.body.inputs[k].array = view_arr_ty.clone();
             }
-            _ => unreachable!(
-                "classifier above only queues EgirSoac::Screma or EgirSoac::Hist input-region hits"
-            ),
+            _ => unreachable!("classifier above only queues Screma or Hist input-region hits"),
         }
     }
 
@@ -624,7 +558,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
 /// of its sources — rewriting `Index(merged, k)` would need
 /// Phi-tracking across CFG paths.
 pub(crate) fn reject_sibling_consumers(
-    graph: &EGraph,
+    graph: &EGraph<Raw>,
     source: NodeId,
     slot_index: usize,
 ) -> Result<(), ConvertError> {
@@ -656,7 +590,7 @@ pub(crate) fn reject_sibling_consumers(
 /// The output buffer is sized `LikeInput` on the filter's input (capacity `n`).
 #[allow(clippy::too_many_arguments)]
 pub fn retarget_filter_output(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Raw>,
     declarations: &mut [crate::egir::program::SemanticResourceDecl],
     resources: &mut [crate::egir::program::LogicalResource],
     output_resource: ResourceId,
@@ -672,27 +606,27 @@ pub fn retarget_filter_output(
             if se.result != Some(source) {
                 continue;
             }
-            if let SideEffectKind::Soac(EgirSoac::Filter {
-                output: filter_output,
-                input_array_type,
-                input_elem_type,
-                output_elem_type,
-                ..
-            }) = &mut se.kind
-            {
-                let super::super::types::FilterOutput::Runtime { scratch, .. } = filter_output else {
+            if let SideEffectKind::Soac(Soac::Filter(op)) = &mut se.kind {
+                let filter::RawStorage::Runtime { scratch, .. } = &mut op.state.storage else {
                     // Static Bounded filter — not a runtime scratch producer.
                     return Ok(false);
                 };
                 let scratch = *scratch;
-                let input_arr_ty = input_array_type.clone();
-                let input_elem_ty = input_elem_type.clone();
-                let output_elem_ty = output_elem_type.clone();
+                let (input, output_elem_ty) = match &op.body.input {
+                    filter::Input::Plain(input) => (input, input.element.clone()),
+                    filter::Input::Mapped {
+                        input,
+                        output_element_type,
+                        ..
+                    } => (input, output_element_type.clone()),
+                };
+                let input_arr_ty = input.array.clone();
+                let input_elem_ty = input.element.clone();
                 // Compact straight into the output resource; reuse the
                 // scratch resource as the paired length cell.
-                *filter_output = super::super::types::FilterOutput::Runtime {
+                op.state.storage = filter::RawStorage::Runtime {
                     scratch: crate::egir::program::SemanticResourceRef(output_resource),
-                    length: super::super::types::RuntimeFilterLength::EntryOutput(scratch),
+                    length: filter::RuntimeLength::EntryOutput(scratch),
                 };
                 retargeted = Some((scratch.0, input_arr_ty, input_elem_ty, output_elem_ty));
             }

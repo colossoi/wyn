@@ -12,9 +12,9 @@ use std::collections::{HashMap, HashSet};
 
 use super::graph_ops;
 use super::program::{SemanticDependency, SemanticDependencyKind, SemanticOpId, SemanticProgram};
+use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, EgirSoac, NodeId, SegOpKind, SegResourceAccess, SegResourceAccessKind, SideEffect,
-    SideEffectKind,
+    EGraph, NodeId, SegResourceAccess, SegResourceAccessKind, SideEffect, SideEffectKind, Soac,
 };
 
 /// Rebuild the semantic dependency DAG stored on `inner`.
@@ -55,14 +55,17 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
             };
             if let Some(result) = effect.result {
                 let resources = match soac {
-                    EgirSoac::Seg { resources, .. } => resources.clone(),
-                    EgirSoac::Filter { output, .. } => {
+                    Soac::Screma(op) => match &op.state {
+                        screma::SemanticState::Serial => read_resources(graph, effect),
+                        screma::SemanticState::Segmented { resources, .. } => resources.clone(),
+                    },
+                    Soac::Filter(op) => {
                         let mut resources = read_resources(graph, effect);
-                        let bindings: Vec<_> = match output {
-                            super::types::FilterOutput::Local { .. } => Vec::new(),
-                            super::types::FilterOutput::Runtime { scratch, length } => {
+                        let bindings: Vec<_> = match &op.state.storage {
+                            filter::Output::Local { .. } => Vec::new(),
+                            filter::Output::Runtime { scratch, length } => {
                                 let mut bindings = vec![*scratch];
-                                if let super::types::RuntimeFilterLength::EntryOutput(length) = length {
+                                if let filter::RuntimeLength::EntryOutput(length) = length {
                                     bindings.push(*length);
                                 }
                                 bindings
@@ -76,7 +79,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
                         }
                         resources
                     }
-                    EgirSoac::Hist { .. } => {
+                    Soac::Hist(_) => {
                         let mut resources = read_resources(graph, effect);
                         if let Some(destination) = effect
                             .operand_nodes
@@ -91,7 +94,6 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
                         }
                         resources
                     }
-                    EgirSoac::Screma { .. } => Vec::new(),
                 };
                 records.push(Record {
                     id: effect.required_semantic_id(),
@@ -197,81 +199,54 @@ pub(crate) fn read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResource
 /// Validate the semantic boundary before any target-aware scheduling occurs.
 pub(crate) fn verify(inner: &SemanticProgram) -> Result<(), String> {
     let verify_effect = |scope: &str, effect: &SideEffect| -> Result<(), String> {
-        if matches!(effect.kind, SideEffectKind::Soac(EgirSoac::Screma { .. })) {
-            return Err(format!("{scope}: raw Screma survived semantic segmentation"));
-        }
-        if let SideEffectKind::Soac(EgirSoac::Hist { execution, body, .. }) = &effect.kind {
-            let super::types::HistExecution::Segmented(space) = execution else {
-                return Err(format!("{scope}: semantic SegHist has no segmented execution"));
-            };
-            if space.dims.is_empty() {
-                return Err(format!("{scope}: semantic SegHist has no concrete dimensions"));
-            }
-            if !inner.regions.contains_key(&body.region) {
-                return Err(format!(
-                    "{scope}: histogram region `{}` is absent",
-                    body.region.index()
-                ));
-            }
+        let SideEffectKind::Soac(soac) = &effect.kind else {
             return Ok(());
-        }
-        if let SideEffectKind::Soac(EgirSoac::Filter {
-            state,
-            map_body,
-            pred_body,
-            ..
-        }) = &effect.kind
-        {
-            let (super::types::FilterState::Semantic { space }
-            | super::types::FilterState::Scheduled { space, .. }) = state
-            else {
-                return Err(format!("{scope}: raw filter survived semantic segmentation"));
-            };
-            if space.dims.is_empty() {
-                return Err(format!("{scope}: semantic SegFilter has no concrete dimensions"));
+        };
+        let verify_body = |family: &str, body: &super::types::SegBody| {
+            if inner.regions.contains_key(&body.region) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{scope}: {family} region `{}` is absent from the EGIR region arena",
+                    body.region.index()
+                ))
             }
-            for body in map_body.iter().chain(std::iter::once(pred_body)) {
-                if !inner.regions.contains_key(&body.region) {
-                    return Err(format!(
-                        "{scope}: filter region `{}` is absent",
-                        body.region.index()
-                    ));
+        };
+        match soac {
+            Soac::Screma(op) => {
+                if let screma::SemanticState::Segmented { space, .. } = &op.state {
+                    if space.dims.is_empty() {
+                        return Err(format!("{scope}: semantic Screma has no concrete dimensions"));
+                    }
+                }
+                for map in &op.body.maps {
+                    verify_body("map", &map.body)?;
+                }
+                for index in 0..op.body.kind.len() {
+                    let operator = op.body.kind.operator(index).expect("operator index from kind length");
+                    verify_body("operator step", &operator.step)?;
+                    verify_body("operator combine", &operator.combine)?;
                 }
             }
-            return Ok(());
-        }
-        let SideEffectKind::Soac(EgirSoac::Seg {
-            space,
-            kind,
-            map_bodies,
-            ..
-        }) = &effect.kind
-        else {
-            return Ok(());
-        };
-        if space.dims.is_empty() {
-            return Err(format!("{scope}: semantic SegOp has no concrete dimensions"));
-        }
-        for body in map_bodies {
-            if !inner.regions.contains_key(&body.region) {
-                return Err(format!(
-                    "{scope}: map region `{}` is absent from the EGIR region arena",
-                    body.region.index()
-                ));
+            Soac::Filter(op) => {
+                if op.state.space.dims.is_empty() {
+                    return Err(format!("{scope}: semantic filter has no concrete dimensions"));
+                }
+                if let filter::Input::Mapped { body, .. } = &op.body.input {
+                    verify_body("filter map", body)?;
+                }
+                verify_body("filter predicate", &op.body.predicate)?;
             }
-        }
-        let operators = match kind {
-            SegOpKind::SegMap => &[][..],
-            SegOpKind::SegRed { operators }
-            | SegOpKind::SegScan { operators }
-            | SegOpKind::SegComposite { operators } => operators.as_slice(),
-        };
-        for operator in operators {
-            for body in [&operator.step, &operator.combine] {
-                if !inner.regions.contains_key(&body.region) {
+            Soac::Hist(op) => {
+                if let hist::SemanticState::Segmented(space) = &op.state {
+                    if space.dims.is_empty() {
+                        return Err(format!("{scope}: semantic histogram has no concrete dimensions"));
+                    }
+                }
+                if !inner.regions.contains_key(&op.body.body.region) {
                     return Err(format!(
-                        "{scope}: operator region `{}` is absent from the EGIR region arena",
-                        body.region.index()
+                        "{scope}: histogram region `{}` is absent",
+                        op.body.body.region.index()
                     ));
                 }
             }
@@ -296,53 +271,41 @@ pub(crate) fn verify(inner: &SemanticProgram) -> Result<(), String> {
 }
 
 pub(crate) fn summary(inner: &SemanticProgram) -> String {
+    use std::fmt::Write;
+
     let mut output = String::new();
     let mut print_graph = |scope: &str, graph: &EGraph| {
         for (_, block) in &graph.skeleton.blocks {
             for effect in &block.side_effects {
                 match &effect.kind {
-                    SideEffectKind::Soac(EgirSoac::Seg {
-                        space,
-                        placement,
-                        kind,
-                        map_bodies,
-                        map_destinations,
-                        acc_destinations,
-                        output_slots,
-                        resources,
-                        ..
-                    }) => {
-                        use std::fmt::Write;
+                    SideEffectKind::Soac(Soac::Screma(op)) => {
+                        let kind = match &op.body.kind {
+                            screma::Kind::Map => "SegMap",
+                            screma::Kind::Reduce(_) => "SegRed",
+                            screma::Kind::Scan(_) => "SegScan",
+                            screma::Kind::Composite(_) => "SegComposite",
+                        };
                         let _ = writeln!(
                             output,
-                            "{scope}: {kind:?} {placement:?} space={space:?} maps={map_bodies:?} map_destinations={map_destinations:?} acc_destinations={acc_destinations:?} outputs={output_slots:?} resources={resources:?}"
+                            "{scope}: {kind} state={:?} inputs={:?} maps={:?} kind={:?}",
+                            op.state, op.body.inputs, op.body.maps, op.body.kind,
                         );
                     }
-                    SideEffectKind::Soac(EgirSoac::Filter {
-                        state,
-                        map_body,
-                        pred_body,
-                        ..
-                    }) => {
-                        use std::fmt::Write;
+                    SideEffectKind::Soac(Soac::Filter(op)) => {
                         let _ = writeln!(
                             output,
-                            "{scope}: SegFilter state={state:?} map={map_body:?} predicate={pred_body:?}"
+                            "{scope}: Filter state={:?} input={:?} predicate={:?}",
+                            op.state, op.body.input, op.body.predicate
                         );
                     }
-                    SideEffectKind::Soac(EgirSoac::Hist {
-                        execution,
-                        body,
-                        update_policy,
-                        ..
-                    }) => {
-                        use std::fmt::Write;
+                    SideEffectKind::Soac(Soac::Hist(op)) => {
                         let _ = writeln!(
                             output,
-                            "{scope}: SegHist execution={execution:?} body={body:?} update={update_policy:?}"
+                            "{scope}: Hist state={:?} body={:?} update={:?}",
+                            op.state, op.body.body, op.body.update_policy
                         );
                     }
-                    _ => {}
+                    SideEffectKind::Inst(_) => {}
                 }
             }
         }

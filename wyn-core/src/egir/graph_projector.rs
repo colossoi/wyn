@@ -11,12 +11,13 @@ use crate::LookupMap;
 
 use super::program::{OutputRoute, OutputWriter};
 use super::types::{
-    EGraph, ENode, EffectToken, NodeId, SideEffect, SideEffectIndex, SideEffectSite, SkeletonTerminator,
+    EGraph, ENode, EffectToken, NodeId, Semantic, SideEffect, SideEffectIndex, SideEffectSite,
+    SkeletonTerminator,
 };
 use crate::ssa::framework::BlockId;
 
 pub struct GraphProjection {
-    pub graph: EGraph,
+    pub graph: EGraph<Semantic>,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
     nodes: HashMap<NodeId, NodeId>,
     blocks: HashMap<BlockId, BlockId>,
@@ -91,12 +92,15 @@ pub(crate) fn remap_output_routes(
 }
 
 pub struct GraphProjector<'a> {
-    source: &'a EGraph,
+    source: &'a EGraph<Semantic>,
     control_headers: &'a LookupMap<BlockId, ControlHeader>,
 }
 
 impl<'a> GraphProjector<'a> {
-    pub fn new(source: &'a EGraph, control_headers: &'a LookupMap<BlockId, ControlHeader>) -> Self {
+    pub fn new(
+        source: &'a EGraph<Semantic>,
+        control_headers: &'a LookupMap<BlockId, ControlHeader>,
+    ) -> Self {
         Self {
             source,
             control_headers,
@@ -233,9 +237,9 @@ impl<'a> GraphProjector<'a> {
                     continue;
                 }
                 let mut projected = effect.clone();
-                projected.visit_referenced_nodes_mut(|node| {
+                for node in projected.referenced_node_slots() {
                     *node = nodes[node];
-                });
+                }
                 projected.result = effect.result.map(|result| nodes[&result]);
                 if let Some((input, output)) = projected.effects {
                     effects.insert(input);
@@ -268,7 +272,7 @@ impl<'a> GraphProjector<'a> {
         })
     }
 
-    fn effect_at(&self, site: SideEffectSite) -> Result<&SideEffect, String> {
+    fn effect_at(&self, site: SideEffectSite) -> Result<&SideEffect<Semantic>, String> {
         self.source
             .skeleton
             .blocks

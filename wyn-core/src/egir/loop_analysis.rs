@@ -14,7 +14,7 @@ use crate::{LookupMap, LookupSet};
 
 use crate::ssa::types::ControlHeader;
 
-use super::types::{Skeleton, SkeletonTerminator};
+use super::types::{EgirPhase, Skeleton, SkeletonTerminator};
 
 pub struct LoopAnalysis {
     /// All blocks inside each loop (key = loop header).
@@ -22,7 +22,10 @@ pub struct LoopAnalysis {
 }
 
 impl LoopAnalysis {
-    pub fn build<R>(skeleton: &Skeleton<R>, control_headers: &LookupMap<BlockId, ControlHeader>) -> Self {
+    pub fn build<P: EgirPhase>(
+        skeleton: &Skeleton<P>,
+        control_headers: &LookupMap<BlockId, ControlHeader>,
+    ) -> Self {
         let mut bodies: LookupMap<BlockId, LookupSet<BlockId>> = LookupMap::new();
 
         // Collect every header and DFS its body, stopping at `merge`.
@@ -49,7 +52,11 @@ impl LoopAnalysis {
 
 /// DFS the skeleton from `header`, stopping at `merge`. The header itself
 /// is included; `merge` is not.
-fn collect_loop_body<R>(skeleton: &Skeleton<R>, header: BlockId, merge: BlockId) -> LookupSet<BlockId> {
+fn collect_loop_body<P: EgirPhase>(
+    skeleton: &Skeleton<P>,
+    header: BlockId,
+    merge: BlockId,
+) -> LookupSet<BlockId> {
     let mut body = LookupSet::new();
     let mut stack = vec![header];
     while let Some(b) = stack.pop() {

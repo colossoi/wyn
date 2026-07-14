@@ -77,7 +77,7 @@ fn replace_all_references_does_not_leave_stale_hash_cons_key() {
 
 #[test]
 fn retype_node_does_not_leave_stale_hash_cons_key() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let int = i32_ty();
     let uint = u32_ty();
     let arg = graph.intern_pure(PureOp::Int("1".into()), smallvec::smallvec![], int.clone());

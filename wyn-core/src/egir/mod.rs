@@ -22,6 +22,7 @@ pub(crate) mod resource_erasure;
 pub mod rewrite;
 mod scoped_map;
 pub(crate) mod skel_opt;
+pub mod soac;
 pub(crate) mod soac_expand;
 pub mod types;
 
@@ -33,6 +34,7 @@ pub mod graph_projector;
 pub mod parallelize;
 pub(crate) mod pipeline_seed;
 pub mod realize_outputs;
+pub mod reify;
 pub(crate) mod semantic_graph;
 pub(crate) mod semantic_opt;
 pub(crate) mod target_lowering;

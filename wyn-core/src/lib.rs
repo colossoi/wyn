@@ -49,7 +49,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 
 use egir::from_tlc::ConvertError;
-use egir::program::SemanticProgram;
+use egir::program::{RawProgram, SemanticProgram};
 
 use ast::{NodeCounter, NodeId};
 use error::Result;
@@ -1091,7 +1091,7 @@ impl LoweringProfile {
 
 /// Raw EGIR program, directly produced by TLC → EGIR conversion.
 pub struct EgirRaw {
-    inner: SemanticProgram,
+    inner: RawProgram,
     binding_ids: IdSource<u32>,
 }
 
@@ -1101,7 +1101,7 @@ pub struct EgirRaw {
 /// terminator carries no value. Non-output runtime arrays can still await
 /// EGIR residency planning. See `egir::realize_outputs`.
 pub struct EgirOutputsRealized {
-    inner: SemanticProgram,
+    inner: RawProgram,
     binding_ids: IdSource<u32>,
 }
 
@@ -1159,11 +1159,8 @@ impl EgirOutputsRealized {
     /// Reify every reachable SOAC as a semantic segmented operation and choose
     /// kernel versus lane-local placement from EGIR value/effect context.
     pub fn segment(self) -> EgirSegmented {
-        let EgirOutputsRealized {
-            mut inner,
-            binding_ids,
-        } = self;
-        egir::parallelize::reify(&mut inner);
+        let EgirOutputsRealized { inner, binding_ids } = self;
+        let mut inner = egir::reify::run(inner);
         egir::program::assign_semantic_op_ids(&mut inner);
         if cfg!(debug_assertions) {
             egir::semantic_graph::verify(&inner).expect("invalid semantic EGIR");

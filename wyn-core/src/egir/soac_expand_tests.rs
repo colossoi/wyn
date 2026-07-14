@@ -16,15 +16,15 @@
 //! `arr` or `val` comes from the wrong projection.
 
 use crate::ast::TypeName;
-use crate::egir::types::{ENode, EgirSoac, PureOp, SideEffectKind};
+use crate::egir::program::{PhysicalEGraph, PhysicalSideEffectKind};
+use crate::egir::soac::hist;
+use crate::egir::types::{ENode, EgirPhase, Physical, PureOp, Soac, SoacInputType};
 use polytype::Type;
 
 /// Compile source through the pipeline to just-past `expand_soacs`,
 /// returning the EGraph for the (single) entry point so tests can
 /// introspect node structure.
-fn compile_to_expanded_egraph(
-    input: &str,
-) -> crate::egir::types::EGraph<crate::egir::program::PhysicalResourceRef> {
+fn compile_to_expanded_egraph(input: &str) -> PhysicalEGraph {
     let tlc = crate::compile_thru_tlc(input).expect("compile_thru_tlc");
     let allocated = tlc
         .infer_input_slice_bounds()
@@ -53,7 +53,9 @@ fn compile_to_expanded_egraph(
 }
 
 /// Collect all `_w_intrinsic_array_with_inplace` nodes in the graph.
-fn array_with_nodes<R>(graph: &crate::egir::types::EGraph<R>) -> Vec<crate::egir::types::NodeId> {
+fn array_with_nodes<P: EgirPhase>(
+    graph: &crate::egir::types::EGraph<P>,
+) -> Vec<crate::egir::types::NodeId> {
     let inplace_id = crate::builtins::catalog().known().array_with_in_place;
     graph
         .nodes
@@ -91,19 +93,29 @@ fn scatter_handleability_checks_every_input() {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
     let bad_input_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty.clone(), f32_ty.clone()]);
-    let kind = SideEffectKind::Soac(EgirSoac::Hist {
-        body: crate::egir::types::SegBody {
-            region: crate::egir::types::RegionId::from_index(0),
-            captures: vec![],
+    let kind: PhysicalSideEffectKind = PhysicalSideEffectKind::Soac(Soac::<Physical>::Hist(hist::Op {
+        body: hist::Body {
+            body: crate::egir::types::SegBody {
+                region: crate::egir::types::RegionId::from_index(0),
+                captures: vec![],
+            },
+            inputs: vec![
+                SoacInputType {
+                    array: plain_array_ty(i32_ty.clone()),
+                    element: i32_ty.clone(),
+                },
+                SoacInputType {
+                    array: bad_input_ty,
+                    element: f32_ty.clone(),
+                },
+            ],
+            index_type: i32_ty,
+            value_type: f32_ty.clone(),
+            dest_elem_type: f32_ty,
+            update_policy: hist::UpdatePolicy::OrderedOverwrite,
         },
-        input_array_types: vec![plain_array_ty(i32_ty.clone()), bad_input_ty],
-        input_elem_types: vec![i32_ty.clone(), f32_ty.clone()],
-        index_type: i32_ty,
-        value_type: f32_ty.clone(),
-        dest_elem_type: f32_ty,
-        update_policy: crate::egir::types::HistUpdatePolicy::OrderedOverwrite,
-        execution: crate::egir::types::HistExecution::Raw,
-    });
+        state: hist::PhysicalState::Serial,
+    }));
 
     assert!(
         !super::is_handleable_soac(&kind),

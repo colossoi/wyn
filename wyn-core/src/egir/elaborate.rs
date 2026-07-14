@@ -92,7 +92,9 @@ fn elaborate_one_body(
     )
 }
 
-pub(super) fn skeleton_domtree<R>(skeleton: &Skeleton<R>) -> wyn_graph::DominatorTree<SkelBlockId> {
+pub(super) fn skeleton_domtree<P: super::types::EgirPhase>(
+    skeleton: &Skeleton<P>,
+) -> wyn_graph::DominatorTree<SkelBlockId> {
     wyn_graph::DominatorTree::build(skeleton.entry, |block, successors| {
         match &skeleton.blocks[block].term {
             SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}

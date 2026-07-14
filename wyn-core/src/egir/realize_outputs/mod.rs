@@ -32,9 +32,9 @@ use ExecutionModel as _;
 use super::from_tlc::ConvertError;
 use super::graph_ops;
 use super::program::{
-    host_resource_map, OutputRoute, OutputSlotId, OutputWriter, SemanticEntry, SemanticProgram, SlotSource,
+    host_resource_map, Entry, OutputRoute, OutputSlotId, OutputWriter, RawEntry, RawProgram, SlotSource,
 };
-use super::types::{NodeId, SkeletonTerminator};
+use super::types::{EGraph, NodeId, Raw, SkeletonTerminator};
 use crate::ResourceId;
 use std::collections::HashMap;
 
@@ -44,7 +44,7 @@ pub mod verify;
 
 /// Realize every entry's outputs into side-effect stores. After this
 /// pass, `verify::check` confirms the invariant.
-pub fn run(inner: &mut SemanticProgram) -> Result<(), ConvertError> {
+pub fn run(inner: &mut RawProgram) -> Result<(), ConvertError> {
     let by_binding = host_resource_map(&inner.resources);
     let resources = &mut inner.resources;
     for entry in inner.entry_points.iter_mut() {
@@ -58,7 +58,7 @@ pub fn run(inner: &mut SemanticProgram) -> Result<(), ConvertError> {
 }
 
 fn realize_entry(
-    entry: &mut SemanticEntry,
+    entry: &mut RawEntry,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
     resources: &mut [super::program::LogicalResource],
 ) -> Result<(), ConvertError> {
@@ -79,7 +79,7 @@ fn realize_entry(
 
 /// Compute entry points publish exclusively through their output routes. Once
 /// those writers exist, no value may remain on an entry terminator.
-fn clear_compute_returns(entry: &mut SemanticEntry) {
+fn clear_compute_returns(entry: &mut RawEntry) {
     for (_, block) in &mut entry.graph.skeleton.blocks {
         if matches!(block.term, SkeletonTerminator::Return(Some(_))) {
             block.term = SkeletonTerminator::Return(None);
@@ -92,11 +92,11 @@ fn clear_compute_returns(entry: &mut SemanticEntry) {
 /// into the shared `OutputView`. Multi-source slots (`If`-forks etc.)
 /// share one view; runtime CFG picks which source's write fires.
 fn realize_compute_slots(
-    entry: &mut SemanticEntry,
+    entry: &mut RawEntry,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
     resources: &mut [super::program::LogicalResource],
 ) -> Result<(), ConvertError> {
-    let SemanticEntry {
+    let Entry {
         graph,
         outputs,
         aliases,
@@ -174,8 +174,8 @@ fn realize_compute_slots(
 ///     vector / matrix written to `OutputSlot { index }` places.
 ///   * Generated compute entries — outputs are storage-buffer-bound; the
 ///     SOAC at the tail may need retargeting via `compute_slot_source`.
-fn synthesize_compute_routes(entry: &mut SemanticEntry) {
-    let SemanticEntry {
+fn synthesize_compute_routes(entry: &mut RawEntry) {
+    let Entry {
         graph,
         outputs,
         output_routes,
@@ -200,8 +200,8 @@ fn synthesize_compute_routes(entry: &mut SemanticEntry) {
 
 /// Graphics entries retain return values because their ABI is location-based
 /// IO, not storage output routes.
-fn realize_graphics_returns(entry: &mut SemanticEntry) -> Result<(), ConvertError> {
-    let SemanticEntry {
+fn realize_graphics_returns(entry: &mut RawEntry) -> Result<(), ConvertError> {
+    let Entry {
         graph,
         outputs,
         output_routes,
@@ -237,7 +237,7 @@ fn realize_graphics_returns(entry: &mut SemanticEntry) -> Result<(), ConvertErro
     Ok(())
 }
 
-fn unique_value_return(graph: &super::types::EGraph) -> Option<(BlockId, NodeId)> {
+fn unique_value_return(graph: &EGraph<Raw>) -> Option<(BlockId, NodeId)> {
     let mut returns = graph.skeleton.blocks.iter().filter_map(|(block, body)| {
         let SkeletonTerminator::Return(Some(value)) = body.term else {
             return None;
@@ -253,7 +253,7 @@ fn unique_value_return(graph: &super::types::EGraph) -> Option<(BlockId, NodeId)
 }
 
 fn source_value_writers(
-    graph: &super::types::EGraph,
+    graph: &EGraph<Raw>,
     effect_index: &super::types::SideEffectIndex,
     source: NodeId,
 ) -> Vec<OutputWriter> {
@@ -291,7 +291,7 @@ fn dedup_output_writers(writers: &mut Vec<OutputWriter>) {
 /// Per-output source nodes: the single result, the operands of a literal
 /// `Tuple(n)` result, or `Project(result, i)` for an opaque tuple.
 fn output_sources(
-    graph: &mut super::types::EGraph,
+    graph: &mut EGraph<Raw>,
     result: NodeId,
     outputs: &[crate::ssa::types::EntryOutput],
 ) -> Vec<NodeId> {

@@ -45,7 +45,7 @@ fn every_kernel_kind_closes_over_a_complete_planned_entry() {
         KernelKind::ScanApplyOffsets,
     ];
     for (index, kind) in kinds.into_iter().enumerate() {
-        let recipe = KernelRecipe::close(kind, body(&format!("kernel_{index}")));
+        let recipe = KernelRecipe::close(kind, body(&format!("kernel_{index}")), None);
         assert_eq!(recipe.kind(), kind);
         assert_eq!(recipe.entry().name, format!("kernel_{index}"));
     }

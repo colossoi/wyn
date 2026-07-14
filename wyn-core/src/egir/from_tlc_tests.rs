@@ -237,7 +237,7 @@ fn test_hash_cons_distinguishes_by_result_type() {
     use crate::egir::types::{EGraph, PureOp};
     use smallvec::smallvec;
 
-    let mut g = EGraph::new();
+    let mut g = EGraph::<crate::egir::types::Semantic>::new();
     let i32_ty = i32_ty();
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
 

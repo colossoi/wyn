@@ -3,7 +3,7 @@
 //! Compiler state is explicit at both boundaries: public semantic pipeline
 //! newtypes wrap `SemanticProgram`, while each graph is parameterized by its
 //! phase-specific resource identity. Physicalization rebuilds those graphs as
-//! `EGraph<BindingRef>` inside a distinct `PhysicalProgram`.
+//! `EGraph<Physical>` inside a distinct `PhysicalProgram`.
 //!
 //! `SemanticProgram` carries, for each function and entry point, a per-body
 //! `EGraph` + control-headers + alias map, plus program-level metadata
@@ -23,7 +23,11 @@ use crate::types::TypeExt;
 use std::collections::HashMap;
 
 use super::parallelize::schedule::ValidatedKernelPlan;
-use super::types::{EGraph, EffectToken, NodeId, RegionId};
+use super::soac::{filter, hist, screma};
+use super::types::{
+    EGraph, EffectToken, EgirPhase, NodeId, Physical, Raw, RegionId, Scheduled, SegBody, SegExtent,
+    SegSpace, Semantic, Soac,
+};
 
 #[cfg(test)]
 #[path = "program_tests.rs"]
@@ -126,11 +130,11 @@ pub struct SemanticDependency {
 
 /// Callable body arena entry used by SegOps.
 #[derive(Clone)]
-pub struct Region<R = SemanticResourceRef> {
+pub struct Region<P: EgirPhase = Semantic> {
     pub name: String,
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
-    pub graph: EGraph<R>,
+    pub graph: EGraph<P>,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
 }
 
@@ -171,15 +175,17 @@ pub enum LogicalSize {
 pub struct SemanticResourceRef(pub ResourceId);
 
 pub type PhysicalResourceRef = crate::BindingRef;
-pub type SemanticRegion = Region<SemanticResourceRef>;
-pub type PhysicalRegion = Region<PhysicalResourceRef>;
-pub type PhysicalEGraph = EGraph<PhysicalResourceRef>;
-pub type PhysicalEgirSoac = super::types::EgirSoac<PhysicalResourceRef>;
-pub type PhysicalSideEffect = super::types::SideEffect<PhysicalResourceRef>;
-pub type PhysicalSideEffectKind = super::types::SideEffectKind<PhysicalResourceRef>;
+pub type RawRegion = Region<Raw>;
+pub type SemanticRegion = Region<Semantic>;
+pub type ScheduledRegion = Region<Scheduled>;
+pub type PhysicalRegion = Region<Physical>;
+pub type PhysicalEGraph = EGraph<Physical>;
+pub type PhysicalSoac = super::types::Soac<Physical>;
+pub type PhysicalSideEffect = super::types::SideEffect<Physical>;
+pub type PhysicalSideEffectKind = super::types::SideEffectKind<Physical>;
 pub type PhysicalSegSpace = super::types::SegSpace<PhysicalResourceRef>;
-pub type PhysicalFilterWorkBuffers = super::types::FilterWorkBuffers<PhysicalResourceRef>;
-pub type PhysicalFilterOutput = super::types::FilterOutput<PhysicalResourceRef>;
+pub type PhysicalFilterWorkBuffers = super::soac::filter::WorkBuffers<PhysicalResourceRef>;
+pub type PhysicalFilterOutput = super::soac::filter::Output<PhysicalResourceRef>;
 pub type PhysicalPureOp = super::types::PureOp<PhysicalResourceRef>;
 
 /// Entry-local use of a logical resource. Unlike `StorageBindingDecl`, this is
@@ -310,98 +316,14 @@ pub(crate) fn host_resource_map(resources: &[LogicalResource]) -> HashMap<crate:
 pub fn plan_logical_resources(inner: &mut SemanticProgram) {
     classify_existing_compiler_resources(inner);
     super::residency::run(inner);
-    resolve_filter_scratch_sizes(inner);
-    allocate_filter_work_resources(inner);
+    super::soac::filter::resolve_scratch_sizes(inner);
+    super::soac::filter::allocate_work_resources(inner);
     let mut scratch = super::parallelize::enumerate_seg_scratch(inner, inner.resources.len() as u32);
     inner.resources.append(&mut scratch);
     strip_compiler_abi(inner);
     record_compiler_resource_flows(inner);
     if cfg!(debug_assertions) {
         verify_allocated_resources(inner).expect("invalid allocated semantic resources");
-    }
-}
-
-/// Resolve filter compaction capacity from the post-fusion semantic domain.
-/// TLC conversion may reserve the scratch identity before a map producer has
-/// exposed its backing resource; allocation is the first boundary where the
-/// final filter input and execution space are both authoritative.
-fn resolve_filter_scratch_sizes(inner: &mut SemanticProgram) {
-    use super::types::{EgirSoac, FilterOutput, FilterState, SegExtent, SideEffectKind};
-
-    let mut resolved = Vec::new();
-    for entry in &inner.entry_points {
-        for (_, block) in &entry.graph.skeleton.blocks {
-            for effect in &block.side_effects {
-                let SideEffectKind::Soac(EgirSoac::Filter {
-                    state: FilterState::Semantic { space },
-                    output_elem_type,
-                    output: FilterOutput::Runtime { scratch, .. },
-                    ..
-                }) = &effect.kind
-                else {
-                    continue;
-                };
-                let elem_bytes = crate::ssa::layout::storage_elem_stride(output_elem_type).unwrap_or(1);
-                let size = match space.dims.as_slice() {
-                    [SegExtent::Fixed(count)] => LogicalSize::FixedBytes(*count as u64 * elem_bytes as u64),
-                    [SegExtent::ResourceLength {
-                        resource,
-                        elem_bytes: src_elem_bytes,
-                        ..
-                    }] => LogicalSize::LikeResource {
-                        resource: resource.0,
-                        elem_bytes,
-                        src_elem_bytes: *src_elem_bytes,
-                    },
-                    _ => LogicalSize::SameAsDispatch { elem_bytes },
-                };
-                let output_len = match &size {
-                    LogicalSize::FixedBytes(bytes) => {
-                        Some(crate::pipeline_descriptor::BufferLen::Fixed { bytes: *bytes })
-                    }
-                    LogicalSize::LikeResource {
-                        resource,
-                        elem_bytes,
-                        src_elem_bytes,
-                    } => inner
-                        .resources
-                        .get(resource.0 as usize)
-                        .and_then(LogicalResource::host_binding)
-                        .map(|binding| crate::pipeline_descriptor::BufferLen::LikeInput {
-                            set: binding.set,
-                            binding: binding.binding,
-                            elem_bytes: *elem_bytes,
-                            src_elem_bytes: *src_elem_bytes,
-                        }),
-                    LogicalSize::SameAsDispatch { elem_bytes } => {
-                        Some(crate::pipeline_descriptor::BufferLen::SameAsDispatch {
-                            elem_bytes: *elem_bytes,
-                        })
-                    }
-                    LogicalSize::Unspecified => None,
-                };
-                resolved.push((scratch.0, size, output_len));
-            }
-        }
-    }
-    for (resource, size, output_len) in resolved {
-        if let Some(logical) = inner.resources.get_mut(resource.0 as usize) {
-            logical.size = size.clone();
-        }
-        for entry in &mut inner.entry_points {
-            if let Some(declaration) = entry
-                .resource_declarations
-                .iter_mut()
-                .find(|declaration| declaration.resource.0 == resource)
-            {
-                declaration.size = size.clone();
-            }
-            for (slot, output_resource) in entry.resource_abi.outputs.iter().enumerate() {
-                if *output_resource == Some(resource) {
-                    entry.outputs[slot].length = output_len.clone();
-                }
-            }
-        }
     }
 }
 
@@ -451,7 +373,9 @@ fn classify_existing_compiler_resources(inner: &mut SemanticProgram) {
         .flat_map(|entry| entry.resource_abi.outputs.iter().flatten().copied())
         .collect::<std::collections::HashSet<_>>();
     classifications.extend(
-        filter_resource_kinds(inner).into_iter().filter(|(resource, _)| !source_outputs.contains(resource)),
+        super::soac::filter::resource_kinds(inner)
+            .into_iter()
+            .filter(|(resource, _)| !source_outputs.contains(resource)),
     );
     for (resource, compiler) in classifications {
         let logical = inner
@@ -526,7 +450,7 @@ fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
 /// just-built graphs and types. No later semantic pass is allowed to perform
 /// this rewrite or to introduce a binding-backed semantic resource.
 pub(crate) fn finalize_converted_resources(
-    inner: &mut SemanticProgram,
+    inner: &mut RawProgram,
     resources: Vec<LogicalResource>,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
 ) {
@@ -633,14 +557,14 @@ fn semantic_type_resource(ty: &Type<TypeName>) -> Option<ResourceId> {
 }
 
 fn normalize_converted_graph_types(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Raw>,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
 ) {
-    rewrite_graph_types(graph, |ty| normalize_type_resources(ty, by_binding));
+    rewrite_raw_graph_types(graph, |ty| normalize_type_resources(ty, by_binding));
 }
 
 fn normalize_structural_resources(
-    inner: &mut SemanticProgram,
+    inner: &mut RawProgram,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
 ) {
     for resource in &mut inner.resources {
@@ -691,17 +615,32 @@ pub(crate) fn visit_type_names_mut(ty: &mut Type<TypeName>, mut visit: impl FnMu
     recurse(ty, &mut visit);
 }
 
-fn rewrite_graph_types<R: super::types::GraphResource>(
-    graph: &mut EGraph<R>,
+fn rewrite_raw_graph_types(graph: &mut EGraph<Raw>, mut rewrite: impl FnMut(&mut Type<TypeName>)) {
+    for block in graph.skeleton.blocks.values_mut() {
+        for effect in &mut block.side_effects {
+            if let super::types::SideEffectKind::Soac(soac) = &mut effect.kind {
+                soac.for_each_type_mut(&mut rewrite);
+            }
+        }
+    }
+    rewrite_node_types(graph, rewrite);
+}
+
+fn rewrite_physical_graph_types(
+    graph: &mut EGraph<Physical>,
     mut rewrite: impl FnMut(&mut Type<TypeName>),
 ) {
     for block in graph.skeleton.blocks.values_mut() {
         for effect in &mut block.side_effects {
             if let super::types::SideEffectKind::Soac(soac) = &mut effect.kind {
-                soac.visit_types_mut(&mut rewrite);
+                soac.for_each_type_mut(&mut rewrite);
             }
         }
     }
+    rewrite_node_types(graph, rewrite);
+}
+
+fn rewrite_node_types<P: EgirPhase>(graph: &mut EGraph<P>, mut rewrite: impl FnMut(&mut Type<TypeName>)) {
     for node in graph.types.keys().copied().collect::<Vec<_>>() {
         let mut ty = graph.types[&node].clone();
         rewrite(&mut ty);
@@ -709,23 +648,242 @@ fn rewrite_graph_types<R: super::types::GraphResource>(
     }
 }
 
+fn physicalize_soac(
+    soac: Soac<Scheduled>,
+    nodes: &LookupMap<NodeId, NodeId>,
+    bindings: &PhysicalResourceTable,
+) -> Result<Soac<Physical>, String> {
+    fn binding(
+        reference: SemanticResourceRef,
+        bindings: &PhysicalResourceTable,
+    ) -> Result<PhysicalResourceRef, String> {
+        bindings
+            .binding(reference.0)
+            .ok_or_else(|| format!("semantic resource {:?} has no physical binding", reference.0))
+    }
+
+    fn seg_body(mut body: SegBody, nodes: &LookupMap<NodeId, NodeId>) -> SegBody {
+        for capture in &mut body.captures {
+            *capture = nodes[capture];
+        }
+        body
+    }
+
+    fn space(
+        space: SegSpace,
+        nodes: &LookupMap<NodeId, NodeId>,
+        bindings: &PhysicalResourceTable,
+    ) -> Result<PhysicalSegSpace, String> {
+        Ok(SegSpace {
+            level: space.level,
+            dims: space
+                .dims
+                .into_iter()
+                .map(|extent| {
+                    Ok(match extent {
+                        SegExtent::Fixed(value) => SegExtent::Fixed(value),
+                        SegExtent::PushConstant { node, offset } => SegExtent::PushConstant {
+                            node: nodes[&node],
+                            offset,
+                        },
+                        SegExtent::ResourceLength {
+                            node,
+                            resource,
+                            elem_bytes,
+                        } => SegExtent::ResourceLength {
+                            node: nodes[&node],
+                            resource: binding(resource, bindings)?,
+                            elem_bytes,
+                        },
+                        SegExtent::Value(node) => SegExtent::Value(nodes[&node]),
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+        })
+    }
+
+    fn operator(mut operator: screma::Operator, nodes: &LookupMap<NodeId, NodeId>) -> screma::Operator {
+        operator.step = seg_body(operator.step, nodes);
+        operator.combine = seg_body(operator.combine, nodes);
+        operator.neutral = nodes[&operator.neutral];
+        for node in &mut operator.shape {
+            *node = nodes[node];
+        }
+        operator
+    }
+
+    fn operators(
+        operators: screma::NonEmpty<screma::Operator>,
+        nodes: &LookupMap<NodeId, NodeId>,
+    ) -> screma::NonEmpty<screma::Operator> {
+        screma::NonEmpty {
+            first: operator(operators.first, nodes),
+            rest: operators.rest.into_iter().map(|value| operator(value, nodes)).collect(),
+        }
+    }
+
+    fn screma_body(mut body: screma::Body, nodes: &LookupMap<NodeId, NodeId>) -> screma::Body {
+        for map in &mut body.maps {
+            map.body = seg_body(map.body.clone(), nodes);
+        }
+        body.kind = match body.kind {
+            screma::Kind::Map => screma::Kind::Map,
+            screma::Kind::Reduce(values) => screma::Kind::Reduce(operators(values, nodes)),
+            screma::Kind::Scan(values) => screma::Kind::Scan(operators(values, nodes)),
+            screma::Kind::Composite(values) => {
+                let map = |value| match value {
+                    screma::CompositeOperator::Reduce(value) => {
+                        screma::CompositeOperator::Reduce(operator(value, nodes))
+                    }
+                    screma::CompositeOperator::Scan(value) => {
+                        screma::CompositeOperator::Scan(operator(value, nodes))
+                    }
+                };
+                screma::Kind::Composite(screma::NonEmpty {
+                    first: map(values.first),
+                    rest: values.rest.into_iter().map(map).collect(),
+                })
+            }
+        };
+        body
+    }
+
+    fn filter_output(
+        output: filter::Output,
+        bindings: &PhysicalResourceTable,
+    ) -> Result<PhysicalFilterOutput, String> {
+        Ok(match output {
+            filter::Output::Local {
+                capacity,
+                destination,
+            } => filter::Output::Local {
+                capacity,
+                destination,
+            },
+            filter::Output::Runtime { scratch, length } => filter::Output::Runtime {
+                scratch: binding(scratch, bindings)?,
+                length: match length {
+                    filter::RuntimeLength::ViewOnly => filter::RuntimeLength::ViewOnly,
+                    filter::RuntimeLength::EntryOutput(resource) => {
+                        filter::RuntimeLength::EntryOutput(binding(resource, bindings)?)
+                    }
+                },
+            },
+        })
+    }
+
+    fn work_buffers(
+        buffers: filter::WorkBuffers,
+        bindings: &PhysicalResourceTable,
+    ) -> Result<PhysicalFilterWorkBuffers, String> {
+        Ok(filter::WorkBuffers {
+            flags: binding(buffers.flags, bindings)?,
+            offsets: binding(buffers.offsets, bindings)?,
+            block_sums: binding(buffers.block_sums, bindings)?,
+            block_offsets: binding(buffers.block_offsets, bindings)?,
+        })
+    }
+
+    Ok(match soac {
+        Soac::Screma(screma::Op { body, state }) => {
+            let segmented_map = matches!(body.kind, screma::Kind::Map);
+            let body = screma_body(body, nodes);
+            let state = match state {
+                screma::ScheduledState::Serial => screma::PhysicalState::Serial,
+                screma::ScheduledState::Segmented {
+                    space: iteration_space,
+                    output_slots,
+                    resources,
+                } => {
+                    if !segmented_map {
+                        return Err("scheduled segmented reduce/scan reached physicalization".into());
+                    }
+                    screma::PhysicalState::SegMap {
+                        space: space(iteration_space, nodes, bindings)?,
+                        output_slots,
+                        resources: resources
+                            .into_iter()
+                            .map(|resource| {
+                                Ok(super::types::SegResourceAccess {
+                                    resource: binding(resource.resource, bindings)?,
+                                    access: resource.access,
+                                })
+                            })
+                            .collect::<Result<_, String>>()?,
+                    }
+                }
+            };
+            Soac::Screma(screma::Op { body, state })
+        }
+        Soac::Filter(filter::Op { mut body, state }) => {
+            if let filter::Input::Mapped { body, .. } = &mut body.input {
+                *body = seg_body(body.clone(), nodes);
+            }
+            body.predicate = seg_body(body.predicate, nodes);
+            let state = match state {
+                filter::ScheduledState::Serial {
+                    space: iteration_space,
+                    storage,
+                } => filter::ScheduledState::Serial {
+                    space: space(iteration_space, nodes, bindings)?,
+                    storage: filter_output(storage, bindings)?,
+                },
+                filter::ScheduledState::Parallel {
+                    space: iteration_space,
+                    storage,
+                    plan,
+                } => filter::ScheduledState::Parallel {
+                    space: space(iteration_space, nodes, bindings)?,
+                    storage: filter::RuntimeStorage {
+                        scratch: binding(storage.scratch, bindings)?,
+                        length: match storage.length {
+                            filter::RuntimeLength::ViewOnly => filter::RuntimeLength::ViewOnly,
+                            filter::RuntimeLength::EntryOutput(resource) => {
+                                filter::RuntimeLength::EntryOutput(binding(resource, bindings)?)
+                            }
+                        },
+                    },
+                    plan: filter::ParallelPlan {
+                        stage: plan.stage,
+                        buffers: work_buffers(plan.buffers, bindings)?,
+                    },
+                },
+            };
+            Soac::Filter(filter::Op { body, state })
+        }
+        Soac::Hist(hist::Op { mut body, state }) => {
+            body.body = seg_body(body.body, nodes);
+            let state = match state {
+                hist::ScheduledState::Serial => hist::ScheduledState::Serial,
+                hist::ScheduledState::Segmented(iteration_space) => {
+                    hist::ScheduledState::Segmented(space(iteration_space, nodes, bindings)?)
+                }
+            };
+            Soac::Hist(hist::Op { body, state })
+        }
+    })
+}
+
 pub(crate) fn physicalize_graph_resources(
-    graph: EGraph,
+    graph: EGraph<Scheduled>,
     bindings: &PhysicalResourceTable,
 ) -> Result<
     (
-        EGraph<PhysicalResourceRef>,
+        EGraph<Physical>,
         LookupMap<NodeId, NodeId>,
         LookupMap<BlockId, BlockId>,
     ),
     String,
 > {
-    let (mut graph, node_map, block_map) = graph.try_map_resources(|reference| {
-        let resource = reference.0;
-        bindings
-            .binding(resource)
-            .ok_or_else(|| format!("semantic resource {:?} has no physical binding", resource))
-    })?;
+    let (mut graph, node_map, block_map) = graph.try_map_resources_and_phase(
+        |reference| {
+            let resource = reference.0;
+            bindings
+                .binding(resource)
+                .ok_or_else(|| format!("semantic resource {:?} has no physical binding", resource))
+        },
+        |soac, nodes| physicalize_soac(soac, nodes, bindings),
+    )?;
     let pure_nodes = graph.nodes.keys().collect::<Vec<_>>();
     for node in pure_nodes {
         let resource_len = match graph.nodes.get(node) {
@@ -749,7 +907,7 @@ pub(crate) fn physicalize_graph_resources(
             continue;
         }
     }
-    rewrite_graph_types(&mut graph, |ty| physicalize_type_resources(ty, bindings));
+    rewrite_physical_graph_types(&mut graph, |ty| physicalize_type_resources(ty, bindings));
     Ok((graph, node_map, block_map))
 }
 
@@ -761,125 +919,6 @@ pub(crate) fn physicalize_type_resources(ty: &mut Type<TypeName>, bindings: &Phy
             );
         }
     });
-}
-
-fn allocate_filter_work_resources(inner: &mut SemanticProgram) {
-    use super::types::{EgirSoac, FilterOutput, FilterState, SegExtent, SideEffectKind};
-    let mut pending = Vec::new();
-    for entry in &inner.entry_points {
-        for (_, block) in &entry.graph.skeleton.blocks {
-            for effect in &block.side_effects {
-                let SideEffectKind::Soac(EgirSoac::Filter {
-                    state: FilterState::Semantic { space },
-                    output: FilterOutput::Runtime { .. },
-                    ..
-                }) = &effect.kind
-                else {
-                    continue;
-                };
-                let element_count_size = match space.dims.first() {
-                    Some(SegExtent::Fixed(count)) if space.dims.len() == 1 => {
-                        LogicalSize::FixedBytes(*count as u64 * 4)
-                    }
-                    Some(SegExtent::ResourceLength {
-                        resource, elem_bytes, ..
-                    }) if space.dims.len() == 1 => LogicalSize::LikeResource {
-                        resource: resource.0,
-                        elem_bytes: 4,
-                        src_elem_bytes: *elem_bytes,
-                    },
-                    _ => LogicalSize::SameAsDispatch { elem_bytes: 4 },
-                };
-                // The scan phase runs a fixed worker grid
-                // (`FILTER_SCAN_GROUPS * REDUCE_PHASE1_WIDTH` workers), so its
-                // per-worker `block_sums`/`block_offsets` have a fixed length
-                // independent of the input — which bounds the serial phase-2
-                // scan and decouples the buffer from any stage's dispatch.
-                let worker_count_size = LogicalSize::FixedBytes(
-                    (super::parallelize::FILTER_SCAN_GROUPS * super::parallelize::REDUCE_PHASE1_WIDTH)
-                        as u64
-                        * 4,
-                );
-                let owner = effect.semantic_id;
-                for (slot, (kind, size)) in [
-                    (CompilerResourceKind::FilterFlags, element_count_size.clone()),
-                    (CompilerResourceKind::FilterOffsets, element_count_size.clone()),
-                    (
-                        CompilerResourceKind::FilterScanBlockSums,
-                        worker_count_size.clone(),
-                    ),
-                    (
-                        CompilerResourceKind::FilterScanBlockOffsets,
-                        worker_count_size.clone(),
-                    ),
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    let compiler = CompilerResource::new(kind, owner, slot);
-                    pending.push((compiler, size));
-                }
-            }
-        }
-    }
-    for (compiler, size) in pending {
-        inner.alloc_compiler_resource(compiler, Type::Constructed(TypeName::UInt(32), vec![]), size);
-    }
-}
-
-/// Runtime `filter` bindings, classified so the mirror gives them a precise
-/// `CompilerResourceKind` rather than generic `Staging`.
-fn filter_resource_kinds(inner: &SemanticProgram) -> HashMap<ResourceId, CompilerResource> {
-    let mut kinds = HashMap::new();
-    for entry in &inner.entry_points {
-        for (_, block) in &entry.graph.skeleton.blocks {
-            for effect in &block.side_effects {
-                if let super::types::SideEffectKind::Soac(super::types::EgirSoac::Filter {
-                    output,
-                    state,
-                    ..
-                }) = &effect.kind
-                {
-                    let owner = effect.semantic_id;
-                    if let super::types::FilterOutput::Runtime { scratch, length } = output {
-                        kinds.insert(
-                            scratch.0,
-                            CompilerResource::new(CompilerResourceKind::FilterScratch, owner, 0),
-                        );
-                        if let super::types::RuntimeFilterLength::EntryOutput(len) = length {
-                            kinds.insert(
-                                len.0,
-                                CompilerResource::new(CompilerResourceKind::FilterLenCell, owner, 1),
-                            );
-                        }
-                    }
-                    if let super::types::FilterState::Scheduled { plan, .. } = state {
-                        let work = match plan {
-                            super::types::FilterPlan::Serial => None,
-                            super::types::FilterPlan::Flags(work)
-                            | super::types::FilterPlan::Scan(work)
-                            | super::types::FilterPlan::Scatter(work) => Some(work),
-                        };
-                        if let Some(work) = work {
-                            for (resource, kind, slot) in [
-                                (work.flags, CompilerResourceKind::FilterFlags, 2),
-                                (work.offsets, CompilerResourceKind::FilterOffsets, 3),
-                                (work.block_sums, CompilerResourceKind::FilterScanBlockSums, 4),
-                                (
-                                    work.block_offsets,
-                                    CompilerResourceKind::FilterScanBlockOffsets,
-                                    5,
-                                ),
-                            ] {
-                                kinds.insert(resource.0, CompilerResource::new(kind, owner, slot));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    kinds
 }
 
 /// Verify the allocation typestate. From this boundary through validation,
@@ -917,25 +956,25 @@ pub fn buffer_len(
 }
 
 #[derive(Clone, Debug)]
-pub struct Func<R = SemanticResourceRef> {
+pub struct Func<P: EgirPhase = Semantic> {
     pub name: String,
     pub span: Span,
     pub linkage_name: Option<String>,
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
-    pub graph: EGraph<R>,
+    pub graph: EGraph<P>,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
     pub aliases: LookupMap<NodeId, NodeId>,
 }
 
-impl<R> Func<R> {
+impl<P: EgirPhase> Func<P> {
     pub fn new(
         name: String,
         span: Span,
         linkage_name: Option<String>,
         params: Vec<(Type<TypeName>, String)>,
         return_ty: Type<TypeName>,
-        graph: EGraph<R>,
+        graph: EGraph<P>,
         control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
         Self {
@@ -951,11 +990,13 @@ impl<R> Func<R> {
     }
 }
 
-pub type SemanticFunc = Func<SemanticResourceRef>;
-pub type PhysicalFunc = Func<PhysicalResourceRef>;
+pub type RawFunc = Func<Raw>;
+pub type SemanticFunc = Func<Semantic>;
+pub type ScheduledFunc = Func<Scheduled>;
+pub type PhysicalFunc = Func<Physical>;
 
-impl<R: super::types::GraphResource> Region<R> {
-    pub fn from_function(function: &Func<R>) -> Self {
+impl<P: EgirPhase> Region<P> {
+    pub fn from_function(function: &Func<P>) -> Self {
         Self {
             name: function.name.clone(),
             params: function.params.clone(),
@@ -1010,7 +1051,7 @@ pub struct OutputRoute {
     pub writers: Vec<OutputWriter>,
 }
 
-pub struct SemanticEntry {
+pub struct Entry<P: EgirPhase = Semantic> {
     pub name: String,
     pub span: Span,
     pub execution_model: ExecutionModel,
@@ -1022,7 +1063,7 @@ pub struct SemanticEntry {
     pub resource_declarations: Vec<SemanticResourceDecl>,
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
-    pub graph: EGraph,
+    pub graph: EGraph<P>,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
     pub aliases: LookupMap<NodeId, NodeId>,
     /// Explicit value-to-output routes. A slot can have several routes when
@@ -1032,13 +1073,17 @@ pub struct SemanticEntry {
     pub output_routes: Vec<OutputRoute>,
 }
 
+pub type RawEntry = Entry<Raw>;
+pub type SemanticEntry = Entry<Semantic>;
+pub type ScheduledEntry = Entry<Scheduled>;
+
 #[derive(Clone, Debug, Default)]
 pub struct EntryResourceAbi {
     pub inputs: Vec<Option<ResourceId>>,
     pub outputs: Vec<Option<ResourceId>>,
 }
 
-impl SemanticEntry {
+impl<P: EgirPhase> Entry<P> {
     fn visit_types_mut(&mut self, mut visit: impl FnMut(&mut Type<TypeName>)) {
         for input in &mut self.inputs {
             visit(&mut input.ty);
@@ -1065,10 +1110,10 @@ impl SemanticEntry {
         resource_declarations: Vec<SemanticResourceDecl>,
         params: Vec<(Type<TypeName>, String)>,
         return_ty: Type<TypeName>,
-        graph: EGraph,
+        graph: EGraph<P>,
         control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
-        SemanticEntry {
+        Self {
             name,
             span,
             execution_model,
@@ -1090,7 +1135,7 @@ impl SemanticEntry {
 /// sole entry-shaped planner record: publication and physical construction
 /// both read it, so fields cannot drift between parallel representations.
 #[derive(Clone, Debug)]
-pub struct PlannedEntry {
+pub struct PlannedEntry<P: EgirPhase = Semantic> {
     pub name: String,
     pub span: Span,
     pub execution_model: ExecutionModel,
@@ -1099,7 +1144,7 @@ pub struct PlannedEntry {
     pub resource_declarations: Vec<SemanticResourceDecl>,
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
-    pub graph: EGraph,
+    pub graph: EGraph<P>,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
     pub aliases: LookupMap<NodeId, NodeId>,
     pub output_routes: Vec<OutputRoute>,
@@ -1139,7 +1184,7 @@ impl PlannedPublication {
     }
 }
 
-impl PlannedEntry {
+impl PlannedEntry<Semantic> {
     pub fn project(entry: &SemanticEntry) -> Result<Self, String> {
         let projection = super::graph_projector::GraphProjector::new(&entry.graph, &entry.control_headers)
             .all_with_values(entry.output_routes.iter().map(|route| route.source.value).collect())?;
@@ -1189,7 +1234,9 @@ impl PlannedEntry {
             output_routes,
         })
     }
+}
 
+impl<P: EgirPhase> PlannedEntry<P> {
     pub fn publication(&self, resources: &PhysicalResourceTable) -> Result<EntryPublication, String> {
         publish_entry(
             &self.name,
@@ -1243,11 +1290,11 @@ pub enum MaterializationKind {
     Scalar,
 }
 
-pub struct MaterializationRequirement {
+pub struct MaterializationRequirement<P: EgirPhase = Semantic> {
     pub id: MaterializationId,
     pub kind: MaterializationKind,
     pub producer: SemanticOpId,
-    pub entry: SemanticEntry,
+    pub entry: Entry<P>,
     pub substitutions: Vec<MaterializationSubstitution>,
 }
 
@@ -1278,7 +1325,7 @@ pub struct PhysicalEntry {
     pub storage_bindings: Vec<interface::StorageBindingDecl>,
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
-    pub graph: EGraph<PhysicalResourceRef>,
+    pub graph: EGraph<Physical>,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
     pub aliases: LookupMap<NodeId, NodeId>,
     pub output_routes: Vec<OutputRoute>,
@@ -1330,17 +1377,17 @@ impl PhysicalResourceTable {
 /// Whole-program EGIR container. Wrapped by the semantic `EgirRaw` /
 /// `EgirOutputsRealized` / `EgirSegmented` / `EgirOptimized` /
 /// `EgirAllocated` newtypes at the public-API layer (see `crate::lib`).
-pub struct SemanticProgram {
-    pub functions: Vec<SemanticFunc>,
+pub struct Program<P: EgirPhase> {
+    pub functions: Vec<Func<P>>,
     /// Extern function stubs. These don't have a body that flows through EGIR;
     /// they're already `Function` records with a 1-block Unreachable body and
     /// pass straight through.
     pub externs: Vec<Function>,
-    pub entry_points: Vec<SemanticEntry>,
+    pub entry_points: Vec<Entry<P>>,
     /// Residency requirements discovered during logical allocation.
     /// These are planned and physicalized directly; they never join the
     /// semantic entry arena.
-    pub materializations: Vec<MaterializationRequirement>,
+    pub materializations: Vec<MaterializationRequirement<P>>,
     pub constants: Vec<Constant>,
     pub pipeline: PipelineDescriptor,
     /// Source names retained until the descriptor is published atomically at
@@ -1348,7 +1395,7 @@ pub struct SemanticProgram {
     pub input_names: LookupMap<(u32, u32), String>,
     /// Complete callable regions referenced by semantic Seg bodies, keyed by
     /// their arena index.
-    pub regions: LookupMap<RegionId, SemanticRegion>,
+    pub regions: LookupMap<RegionId, Region<P>>,
     /// Name ↔ index interner shared with construction. Synthesized regions
     /// (e.g. scan offset wrappers) intern here to obtain a fresh index.
     pub region_interner: RegionInterner,
@@ -1359,6 +1406,10 @@ pub struct SemanticProgram {
     /// tokens, and conflicting logical resource accesses.
     pub semantic_dependencies: Vec<SemanticDependency>,
 }
+
+pub type RawProgram = Program<Raw>;
+pub type SemanticProgram = Program<Semantic>;
+pub type ScheduledProgram = Program<Scheduled>;
 
 /// EGIR after the plan has validated and every physical entry has been
 /// constructed. Only this type is accepted by expansion and SSA elaboration.
@@ -1399,12 +1450,13 @@ fn physicalize_function(
         control_headers,
         aliases,
     } = function;
-    let (mut graph, node_map, block_map) = physicalize_graph_resources(graph, resources)?;
+    let (graph, scheduled_blocks) = super::parallelize::prepare::graph(graph, serial)?;
+    let control_headers = remap_control_headers(&control_headers, |block| scheduled_blocks[&block]);
+    let (graph, node_map, block_map) = physicalize_graph_resources(graph, resources)?;
     for (ty, _) in &mut params {
         physicalize_type_resources(ty, resources);
     }
     physicalize_type_resources(&mut return_ty, resources);
-    super::parallelize::prepare_executable_graph(&mut graph, serial);
     Ok(PhysicalFunc {
         name,
         span,
@@ -1428,6 +1480,8 @@ fn physicalize_region(
         graph,
         control_headers,
     } = region;
+    let (graph, scheduled_blocks) = super::parallelize::prepare::graph(graph, false)?;
+    let control_headers = remap_control_headers(&control_headers, |block| scheduled_blocks[&block]);
     let (graph, _, block_map) = physicalize_graph_resources(graph, resources)?;
     for (ty, _) in &mut params {
         physicalize_type_resources(ty, resources);
@@ -1443,7 +1497,7 @@ fn physicalize_region(
 }
 
 fn physicalize_entry(
-    entry: &PlannedEntry,
+    entry: &PlannedEntry<Scheduled>,
     resources: &PhysicalResourceTable,
 ) -> Result<PhysicalEntry, String> {
     let mut inputs = entry.inputs.clone();
@@ -1559,17 +1613,17 @@ impl PhysicalProgram {
 /// Give `function` its region index and record its body under it. The index is
 /// the interned name, so calling this twice for one name refreshes the body
 /// rather than allocating a second region.
-fn record_region(
+fn record_region<P: EgirPhase>(
     interner: &mut RegionInterner,
-    regions: &mut LookupMap<RegionId, SemanticRegion>,
-    function: &SemanticFunc,
+    regions: &mut LookupMap<RegionId, Region<P>>,
+    function: &Func<P>,
 ) -> RegionId {
     let id = interner.intern(&function.name);
-    regions.insert(id, SemanticRegion::from_function(function));
+    regions.insert(id, Region::<P>::from_function(function));
     id
 }
 
-impl SemanticProgram {
+impl<P: EgirPhase> Program<P> {
     pub(crate) fn alloc_compiler_resource(
         &mut self,
         compiler: CompilerResource,
@@ -1586,9 +1640,7 @@ impl SemanticProgram {
         id
     }
 
-    pub(crate) fn entries_with_endpoints(
-        &self,
-    ) -> impl Iterator<Item = (CompilerFlowEndpoint, &SemanticEntry)> {
+    pub(crate) fn entries_with_endpoints(&self) -> impl Iterator<Item = (CompilerFlowEndpoint, &Entry<P>)> {
         self.entry_points
             .iter()
             .enumerate()
@@ -1603,7 +1655,7 @@ impl SemanticProgram {
 
     fn entries_with_endpoints_mut(
         &mut self,
-    ) -> impl Iterator<Item = (CompilerFlowEndpoint, &mut SemanticEntry)> {
+    ) -> impl Iterator<Item = (CompilerFlowEndpoint, &mut Entry<P>)> {
         self.entry_points
             .iter_mut()
             .enumerate()
@@ -1617,9 +1669,9 @@ impl SemanticProgram {
     }
 
     pub fn new(
-        functions: Vec<SemanticFunc>,
+        functions: Vec<Func<P>>,
         externs: Vec<Function>,
-        entry_points: Vec<SemanticEntry>,
+        entry_points: Vec<Entry<P>>,
         constants: Vec<Constant>,
         pipeline: PipelineDescriptor,
         mut region_interner: RegionInterner,
@@ -1631,7 +1683,7 @@ impl SemanticProgram {
         for function in &functions {
             record_region(&mut region_interner, &mut regions, function);
         }
-        SemanticProgram {
+        Self {
             functions,
             externs,
             entry_points,
@@ -1648,7 +1700,7 @@ impl SemanticProgram {
 
     /// Convenience: build an EGIR program wrapping a single function body.
     /// Used by the probe path in `from_tlc`.
-    pub fn single_function(func: SemanticFunc) -> Self {
+    pub fn single_function(func: Func<P>) -> Self {
         Self::new(
             vec![func],
             vec![],
@@ -1669,7 +1721,7 @@ impl SemanticProgram {
     /// arena and make it callable. The returned index is the one a `SegBody`
     /// must name to call it, and it equals `intern_region(&function.name)`, so a
     /// caller that needed the index before the body existed may use either.
-    pub fn define_region(&mut self, function: SemanticFunc) -> RegionId {
+    pub fn define_region(&mut self, function: Func<P>) -> RegionId {
         let id = record_region(&mut self.region_interner, &mut self.regions, &function);
         self.functions.push(function);
         id

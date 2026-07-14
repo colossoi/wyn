@@ -7,7 +7,8 @@
 
 use super::program::SemanticProgram;
 use super::semantic_graph::SemanticGraph;
-use super::types::{EGraph, EgirSoac, NodeId, SegResourceAccess, SegResourceAccessKind, SideEffectKind};
+use super::soac::screma;
+use super::types::{EGraph, NodeId, SegResourceAccess, SegResourceAccessKind, SideEffectKind, Soac};
 
 pub fn run(inner: &mut SemanticProgram) {
     for entry in &mut inner.entry_points {
@@ -57,10 +58,12 @@ pub fn run(inner: &mut SemanticProgram) {
 fn canonicalize_resource_accesses(graph: &mut EGraph) {
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
-            let SideEffectKind::Soac(EgirSoac::Seg { resources, .. }) = &mut effect.kind else {
+            let SideEffectKind::Soac(Soac::Screma(op)) = &mut effect.kind else {
                 continue;
             };
-            *resources = SegResourceAccess::merge(resources, &[]);
+            if let screma::SemanticState::Segmented { resources, .. } = &mut op.state {
+                *resources = SegResourceAccess::merge(resources, &[]);
+            }
         }
     }
 }
@@ -108,12 +111,15 @@ pub(super) fn eliminate_dead_seg_ops_in_graph(graph: &mut EGraph) -> bool {
             // only through its result. Filter/Hist/Screma may write in ways not
             // summarized here, so keep them conservatively.
             let observable = match soac {
-                EgirSoac::Seg {
-                    placement: _,
-                    resources,
-                    output_slots,
+                Soac::Screma(screma::Op {
+                    state:
+                        screma::SemanticState::Segmented {
+                            resources,
+                            output_slots,
+                            ..
+                        },
                     ..
-                } => {
+                }) => {
                     !output_slots.is_empty()
                         || resources.iter().any(|r| r.access != SegResourceAccessKind::Read)
                 }
@@ -130,8 +136,9 @@ pub(super) fn eliminate_dead_seg_ops_in_graph(graph: &mut EGraph) -> bool {
 mod tests {
     use super::*;
     use crate::ast::TypeName;
+    use crate::egir::soac::screma;
     use crate::egir::types::{
-        EgirSoac, PureOp, SegLevel, SegOpKind, SegPlacement, SegSpace, SideEffect, SoacDestination,
+        PureOp, SegLevel, SegSpace, SideEffect, Soac, SoacDestination, SoacInputType,
     };
     use polytype::Type;
     use smallvec::smallvec;
@@ -145,24 +152,31 @@ mod tests {
         let _dead_project = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![result], int.clone());
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
             semantic_id: None,
-            kind: SideEffectKind::Soac(EgirSoac::Seg {
-                space: SegSpace {
-                    level: SegLevel::Thread,
-                    dims: vec![crate::egir::types::SegExtent::Fixed(1)],
+            kind: SideEffectKind::Soac(Soac::Screma(screma::Op {
+                body: screma::Body {
+                    inputs: Vec::<SoacInputType>::new(),
+                    maps: vec![screma::Map {
+                        body: crate::egir::types::SegBody {
+                            region: crate::egir::types::RegionId::from_index(0),
+                            captures: vec![],
+                        },
+                        input_indices: vec![],
+                        output_element_type: int.clone(),
+                        destination: SoacDestination::Fresh,
+                        result_type: int,
+                    }],
+                    kind: screma::Kind::Map,
                 },
-                placement: SegPlacement::LaneLocal,
-                kind: SegOpKind::SegMap,
-                map_bodies: vec![],
-                input_array_types: vec![],
-                input_elem_types: vec![],
-                map_output_elem_types: vec![int],
-                map_input_indices: vec![],
-                map_destinations: vec![SoacDestination::Fresh],
-                acc_destinations: vec![],
-                result_types: vec![],
-                output_slots: vec![],
-                resources: vec![],
-            }),
+                state: screma::SemanticState::Segmented {
+                    space: SegSpace {
+                        level: SegLevel::Thread,
+                        dims: vec![crate::egir::types::SegExtent::Fixed(1)],
+                    },
+                    placement: screma::Placement::LaneLocal,
+                    output_slots: vec![],
+                    resources: vec![],
+                },
+            })),
             operand_nodes: smallvec![],
             result: Some(result),
             effects: None,

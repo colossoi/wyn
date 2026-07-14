@@ -30,10 +30,11 @@ use smallvec::{smallvec, SmallVec};
 use std::collections::HashMap;
 
 use super::program::{
-    CompilerResource, CompilerResourceKind, LogicalResource, LogicalSize, ResourceOrigin, SemanticEntry,
-    SemanticFunc, SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
+    CompilerResource, CompilerResourceKind, LogicalResource, LogicalSize, RawEntry, RawFunc, RawProgram,
+    ResourceOrigin, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::publish::PipelineDescriptorPublish;
+use super::soac::{filter, hist, screma};
 use super::types::*;
 use crate::pipeline_descriptor::BufferLen;
 
@@ -228,7 +229,7 @@ pub fn run(
     program: &TlcProgram,
     input_slice_bounds: &crate::tlc::input_slice_bounds::ProgramBounds,
     binding_ids: &mut crate::IdSource<u32>,
-) -> Result<SemanticProgram, ConvertError> {
+) -> Result<RawProgram, ConvertError> {
     let seed = super::pipeline_seed::run(program);
     let pipeline = seed.pipeline;
     let top_level: LookupMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
@@ -279,9 +280,9 @@ pub fn run(
     }
 
     // Phase 2: convert functions and entry points into raw EGIR records.
-    let mut functions: Vec<SemanticFunc> = Vec::new();
+    let mut functions: Vec<RawFunc> = Vec::new();
     let mut externs: Vec<Function> = Vec::new();
-    let mut entry_points: Vec<SemanticEntry> = Vec::new();
+    let mut entry_points: Vec<RawEntry> = Vec::new();
 
     for def in &program.defs {
         match &def.meta {
@@ -315,7 +316,7 @@ pub fn run(
 
     // Converters are done borrowing the interner; reclaim it for the arena.
     drop(ctx);
-    let mut semantic = SemanticProgram::new(
+    let mut semantic = RawProgram::new(
         functions,
         externs,
         entry_points,
@@ -331,7 +332,7 @@ pub fn run(
 
 enum ConvertedFunc {
     Extern(Function),
-    Regular(SemanticFunc),
+    Regular(RawFunc),
 }
 
 // ============================================================================
@@ -399,7 +400,7 @@ fn convert_function<'a>(
     }
 
     let (graph, control_headers) = converter.into_graph_parts();
-    Ok(ConvertedFunc::Regular(SemanticFunc::new(
+    Ok(ConvertedFunc::Regular(RawFunc::new(
         def_name,
         def.body.span,
         None,
@@ -500,7 +501,7 @@ fn convert_entry_point(
     workgroup: (u32, u32, u32),
     input_slice_bounds_for_entry: Option<&LookupMap<SymbolId, BufferLen>>,
     binding_ids: &mut crate::IdSource<u32>,
-) -> Result<SemanticEntry, ConvertError> {
+) -> Result<RawEntry, ConvertError> {
     use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration, PushConstantSlot};
 
     let symbols = ctx.symbols;
@@ -727,7 +728,7 @@ fn convert_entry_point(
     resource_declarations.extend(std::mem::take(&mut converter.extra_resource_declarations));
     let (graph, control_headers) = converter.into_graph_parts();
     let output_count = outputs.len();
-    let mut entry = SemanticEntry::new_with_resources(
+    let mut entry = RawEntry::new_with_resources(
         def_name.to_string(),
         def.body.span,
         execution_model,
@@ -783,7 +784,7 @@ fn entry_output_arity(entry: &interface::EntryDecl, ret_type: &Type<TypeName>) -
 
 struct Converter<'a, 'b> {
     /// The e-graph being built.
-    graph: EGraph,
+    graph: EGraph<Raw>,
     /// Current skeleton block for side effects and terminators.
     current_block: BlockId,
     /// TLC variable → EGraph node mapping.
@@ -909,7 +910,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// Extract the built EGraph + control_headers, leaving the rest of the
     /// Converter state behind. Used by the top-level `convert_program`
     /// phase to feed a ready-to-chain `SemanticFunc` / `SemanticEntry`.
-    fn into_graph_parts(self) -> (EGraph, LookupMap<BlockId, ControlHeader>) {
+    fn into_graph_parts(self) -> (EGraph<Raw>, LookupMap<BlockId, ControlHeader>) {
         (self.graph, self.control_headers)
     }
 
@@ -929,7 +930,8 @@ impl<'a, 'b> Converter<'a, 'b> {
         return_ty: Type<TypeName>,
     ) -> Option<FuncBody> {
         let (graph, control_headers) = self.into_graph_parts();
-        let (mut graph, _, block_map) = graph.try_map_resources::<BindingRef, ()>(|_| Err(())).ok()?;
+        let (mut graph, _, block_map) =
+            graph.try_map_resources_and_phase::<Physical, ()>(|_| Err(()), |_, _| Err(())).ok()?;
         let control_headers =
             super::program::remap_control_headers(&control_headers, |block| block_map[&block]);
         let aliases = super::skel_opt::run_one_body(&mut graph);
@@ -2117,7 +2119,12 @@ impl<'a, 'b> Converter<'a, 'b> {
 
     /// Emit a SOAC placeholder as a side effect in the skeleton. Returns the
     /// result NodeId that `soac_expand` will rebind during expansion.
-    fn emit_soac(&mut self, soac: EgirSoac, operands: SmallVec<[NodeId; 4]>, ty: Type<TypeName>) -> NodeId {
+    fn emit_soac(
+        &mut self,
+        soac: Soac<Raw>,
+        operands: SmallVec<[NodeId; 4]>,
+        ty: Type<TypeName>,
+    ) -> NodeId {
         let span = self.current_span;
         super::graph_ops::emit_pending_soac(
             &mut self.graph,
@@ -2194,19 +2201,27 @@ impl<'a, 'b> Converter<'a, 'b> {
         // Singleton map: its one lane reads every input.
         let map_input_indices = vec![(0..input_arr_types.len()).collect::<Vec<usize>>()];
         let screma_nid = self.emit_soac(
-            EgirSoac::Screma {
-                map_bodies: vec![SegBody {
-                    region: self.region(f_name),
-                    captures: capture_nids,
-                }],
-                accumulators: vec![],
-                input_array_types: input_arr_types,
-                input_elem_types,
-                map_output_elem_types: vec![output_elem_ty],
-                map_input_indices,
-                map_destinations: vec![destination],
-                acc_destinations: vec![],
-            },
+            Soac::Screma(screma::Op {
+                body: screma::Body {
+                    inputs: input_arr_types
+                        .into_iter()
+                        .zip(input_elem_types)
+                        .map(|(array, element)| SoacInputType { array, element })
+                        .collect(),
+                    maps: vec![screma::Map {
+                        body: SegBody {
+                            region: self.region(f_name),
+                            captures: capture_nids,
+                        },
+                        input_indices: map_input_indices.into_iter().next().unwrap_or_default(),
+                        output_element_type: output_elem_ty,
+                        destination,
+                        result_type: project_ty.clone(),
+                    }],
+                    kind: screma::Kind::Map,
+                },
+                state: screma::RawState,
+            }),
             operands,
             tuple_ty,
         );
@@ -2260,19 +2275,24 @@ impl<'a, 'b> Converter<'a, 'b> {
         operands.extend_from_slice(&input_nids);
 
         Ok(self.emit_soac(
-            EgirSoac::Hist {
-                body: SegBody {
-                    region: self.region(func),
-                    captures: capture_nids,
+            Soac::Hist(hist::Op {
+                body: hist::Body {
+                    body: SegBody {
+                        region: self.region(func),
+                        captures: capture_nids,
+                    },
+                    inputs: input_array_types
+                        .into_iter()
+                        .zip(input_elem_types)
+                        .map(|(array, element)| SoacInputType { array, element })
+                        .collect(),
+                    index_type,
+                    value_type,
+                    dest_elem_type: dest_elem_ty,
+                    update_policy: hist::UpdatePolicy::OrderedOverwrite,
                 },
-                input_array_types,
-                input_elem_types,
-                index_type,
-                value_type,
-                dest_elem_type: dest_elem_ty,
-                update_policy: HistUpdatePolicy::OrderedOverwrite,
-                execution: super::types::HistExecution::Raw,
-            },
+                state: hist::RawState,
+            }),
             operands,
             result_ty,
         ))
@@ -2296,30 +2316,38 @@ impl<'a, 'b> Converter<'a, 'b> {
         // Emit as Screma { 0 maps, 1 Reduce accumulator } + project field
         // 0. Reduce's `op` is both the step (per-element) and the
         // reduce_op (phase 2 combiner).
-        let operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
+        let operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
         let screma_nid = self.emit_soac(
-            EgirSoac::Screma {
-                map_bodies: vec![],
-                accumulators: vec![super::types::ScremaOperator {
-                    kind: ScremaAccumulator::Reduce,
-                    step: SegBody {
-                        region: self.region(op_name.clone()),
-                        captures: capture_nids,
-                    },
-                    combine: SegBody {
-                        region: self.region(op_name),
-                        captures: vec![],
-                    },
-                    input_indices: vec![0],
-                }],
-                input_array_types: vec![arr_ty],
-                input_elem_types: vec![elem_ty],
-                map_output_elem_types: vec![],
-                map_input_indices: vec![],
-                map_destinations: vec![],
-                acc_destinations: vec![SoacDestination::Fresh],
-            },
+            Soac::Screma(screma::Op {
+                body: screma::Body {
+                    inputs: vec![SoacInputType {
+                        array: arr_ty,
+                        element: elem_ty,
+                    }],
+                    maps: vec![],
+                    kind: screma::Kind::Reduce(screma::NonEmpty {
+                        first: screma::Operator {
+                            step: SegBody {
+                                region: self.region(op_name.clone()),
+                                captures: capture_nids,
+                            },
+                            combine: SegBody {
+                                region: self.region(op_name),
+                                captures: vec![],
+                            },
+                            input_indices: vec![0],
+                            neutral: init_nid,
+                            shape: Vec::new(),
+                            commutative: false,
+                            destination: SoacDestination::Fresh,
+                            result_type: result_ty.clone(),
+                        },
+                        rest: Vec::new(),
+                    }),
+                },
+                state: screma::RawState,
+            }),
             operands,
             tuple_ty,
         );
@@ -2342,7 +2370,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let input_elem_ty = self.value_elem_type(&arr_ty, input);
         let init_nid = self.convert_term(ne)?;
 
-        let operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
+        let operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
 
         // Emit as Screma { 0 maps, 1 Scan acc } + project field 0. For
         // consuming scan the result aliases the input, so the Project's
@@ -2366,27 +2394,35 @@ impl<'a, 'b> Converter<'a, 'b> {
         };
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
         let screma_nid = self.emit_soac(
-            EgirSoac::Screma {
-                map_bodies: vec![],
-                accumulators: vec![super::types::ScremaOperator {
-                    kind: ScremaAccumulator::Scan,
-                    step: SegBody {
-                        region: self.region(op_name.clone()),
-                        captures: capture_nids,
-                    },
-                    combine: SegBody {
-                        region: self.region(op_name),
-                        captures: vec![],
-                    },
-                    input_indices: vec![0],
-                }],
-                input_array_types: vec![arr_ty],
-                input_elem_types: vec![input_elem_ty],
-                map_output_elem_types: vec![],
-                map_input_indices: vec![],
-                map_destinations: vec![],
-                acc_destinations: vec![destination],
-            },
+            Soac::Screma(screma::Op {
+                body: screma::Body {
+                    inputs: vec![SoacInputType {
+                        array: arr_ty,
+                        element: input_elem_ty,
+                    }],
+                    maps: vec![],
+                    kind: screma::Kind::Scan(screma::NonEmpty {
+                        first: screma::Operator {
+                            step: SegBody {
+                                region: self.region(op_name.clone()),
+                                captures: capture_nids,
+                            },
+                            combine: SegBody {
+                                region: self.region(op_name),
+                                captures: vec![],
+                            },
+                            input_indices: vec![0],
+                            neutral: init_nid,
+                            shape: Vec::new(),
+                            commutative: false,
+                            destination,
+                            result_type: project_ty.clone(),
+                        },
+                        rest: Vec::new(),
+                    }),
+                },
+                state: screma::RawState,
+            }),
             operands,
             tuple_ty,
         );
@@ -2438,18 +2474,21 @@ impl<'a, 'b> Converter<'a, 'b> {
                 ],
             );
             return Ok(self.emit_soac(
-                EgirSoac::Filter {
-                    state: super::types::FilterState::Raw,
-                    map_body: None,
-                    output_elem_type: output_elem_ty,
-                    pred_body,
-                    input_array_type: arr_ty,
-                    input_elem_type: elem_ty,
-                    output: super::types::FilterOutput::Local {
-                        capacity: size,
-                        destination,
+                Soac::Filter(filter::Op {
+                    body: filter::Body {
+                        input: filter::Input::Plain(SoacInputType {
+                            array: arr_ty,
+                            element: elem_ty,
+                        }),
+                        predicate: pred_body,
                     },
-                },
+                    state: filter::RawState {
+                        storage: filter::RawStorage::Local {
+                            capacity: size,
+                            destination,
+                        },
+                    },
+                }),
                 operands,
                 bounded_result_ty,
             ));
@@ -2501,20 +2540,23 @@ impl<'a, 'b> Converter<'a, 'b> {
             Type::Constructed(TypeName::Resource(scratch_out), vec![]),
         );
         Ok(self.emit_soac(
-            EgirSoac::Filter {
-                state: super::types::FilterState::Raw,
-                map_body: None,
-                output_elem_type: output_elem_ty,
-                pred_body,
-                input_array_type: arr_ty,
-                input_elem_type: elem_ty,
-                output: super::types::FilterOutput::Runtime {
-                    scratch: super::program::SemanticResourceRef(scratch_out),
-                    length: super::types::RuntimeFilterLength::ViewOnly,
+            Soac::Filter(filter::Op {
+                body: filter::Body {
+                    input: filter::Input::Plain(SoacInputType {
+                        array: arr_ty,
+                        element: elem_ty,
+                    }),
+                    predicate: pred_body,
+                },
+                state: filter::RawState {
+                    storage: filter::RawStorage::Runtime {
+                        scratch: super::program::SemanticResourceRef(scratch_out),
+                        length: filter::RuntimeLength::ViewOnly,
+                    },
                 },
                 // Set by `realize_outputs` only when this filter is a compute
                 // entry's output (it then needs a host-readable length cell).
-            },
+            }),
             operands,
             view_result_ty,
         ))

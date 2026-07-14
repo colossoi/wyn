@@ -16,9 +16,10 @@ use super::program::{
     MaterializationRequirement, MaterializationSubstitution, ResourceId, SemanticDependencyKind,
     SemanticOpId, SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
 };
+use super::soac::{filter, screma};
 use super::types::{
-    EGraph, ENode, EgirSoac, FilterOutput, NodeId, PureOp, SegExtent, SegOpKind, SegPlacement,
-    SegResourceAccess, SegResourceAccessKind, SideEffectKind, SideEffectSite, SoacDestination,
+    EGraph, ENode, NodeId, PureOp, SegExtent, SegResourceAccess, SegResourceAccessKind, SideEffectKind,
+    SideEffectSite, Soac, SoacDestination,
 };
 use crate::ast::TypeName;
 use crate::interface::StorageRole;
@@ -92,27 +93,27 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
         let (operands, map_inputs, operator_inputs, map_destinations, acc_destinations, filter_candidate) = {
             let effect = &graph.skeleton.blocks[block_id].side_effects[effect_index];
             match &effect.kind {
-                SideEffectKind::Soac(EgirSoac::Seg {
-                    kind,
-                    map_input_indices,
-                    map_destinations,
-                    acc_destinations,
-                    ..
-                }) => (
+                SideEffectKind::Soac(Soac::Screma(op)) => (
                     effect.operand_nodes.to_vec(),
-                    map_input_indices.clone(),
-                    kind.operators()
-                        .iter()
+                    op.body.maps.iter().map(|map| map.input_indices.clone()).collect(),
+                    op.body
+                        .kind
+                        .operators()
+                        .into_iter()
                         .map(|operator| operator.input_indices.clone())
                         .collect::<Vec<_>>(),
-                    map_destinations.clone(),
-                    acc_destinations.clone(),
+                    op.body.maps.iter().map(|map| map.destination).collect(),
+                    op.body.kind.operators().into_iter().map(|operator| operator.destination).collect(),
                     false,
                 ),
-                SideEffectKind::Soac(EgirSoac::Filter {
-                    output: FilterOutput::Local { destination, .. },
+                SideEffectKind::Soac(Soac::Filter(filter::Op {
+                    state:
+                        filter::SemanticState {
+                            storage: filter::Output::Local { destination, .. },
+                            ..
+                        },
                     ..
-                }) => (
+                })) => (
                     effect.operand_nodes.to_vec(),
                     Vec::new(),
                     Vec::new(),
@@ -180,18 +181,22 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
         });
         let effect = &mut graph.skeleton.blocks[block_id].side_effects[effect_index];
         match &mut effect.kind {
-            SideEffectKind::Soac(EgirSoac::Seg {
-                map_destinations,
-                acc_destinations,
-                ..
-            }) => {
-                *map_destinations = new_maps;
-                *acc_destinations = new_accs;
+            SideEffectKind::Soac(Soac::Screma(op)) => {
+                for (map, destination) in op.body.maps.iter_mut().zip(new_maps) {
+                    map.destination = destination;
+                }
+                for (operator, destination) in op.body.kind.operators_mut().into_iter().zip(new_accs) {
+                    operator.destination = destination;
+                }
             }
-            SideEffectKind::Soac(EgirSoac::Filter {
-                output: FilterOutput::Local { destination, .. },
+            SideEffectKind::Soac(Soac::Filter(filter::Op {
+                state:
+                    filter::SemanticState {
+                        storage: filter::Output::Local { destination, .. },
+                        ..
+                    },
                 ..
-            }) => {
+            })) => {
                 if let Some(resolved) = filter_destination {
                     *destination = resolved;
                 }
@@ -223,19 +228,10 @@ fn retype_input_buffer_results(
         })
         .collect();
     let (result_types, changed) = {
-        let SideEffectKind::Soac(EgirSoac::Seg {
-            kind,
-            input_array_types,
-            map_input_indices,
-            map_destinations,
-            acc_destinations,
-            result_types,
-            ..
-        }) = &effect.kind
-        else {
+        let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
             return;
         };
-        let mut retyped = result_types.clone();
+        let mut retyped = op.body.result_types();
         // Output realization may already have changed a projected field to a
         // storage view. Preserve those later EGIR decisions while changing
         // only fields whose uniqueness candidate became a physical reuse.
@@ -243,20 +239,18 @@ fn retype_input_buffer_results(
             retyped[*field] = graph.types[projection].clone();
         }
         let mut changed = false;
-        for (lane, destination) in map_destinations.iter().enumerate() {
-            if *destination == SoacDestination::InputBuffer {
-                if let Some(input) = map_input_indices.get(lane).and_then(|inputs| inputs.first()) {
-                    retyped[lane] = input_array_types[*input].clone();
+        for (lane, map) in op.body.maps.iter().enumerate() {
+            if map.destination == SoacDestination::InputBuffer {
+                if let Some(input) = map.input_indices.first() {
+                    retyped[lane] = op.body.inputs[*input].array.clone();
                     changed = true;
                 }
             }
         }
-        for (operator, destination) in acc_destinations.iter().enumerate() {
-            if *destination == SoacDestination::InputBuffer {
-                if let Some(input) =
-                    kind.operators().get(operator).and_then(|operator| operator.input_indices.first())
-                {
-                    retyped[map_destinations.len() + operator] = input_array_types[*input].clone();
+        for (operator_index, operator) in op.body.kind.operators().into_iter().enumerate() {
+            if operator.destination == SoacDestination::InputBuffer {
+                if let Some(input) = operator.input_indices.first() {
+                    retyped[op.body.maps.len() + operator_index] = op.body.inputs[*input].array.clone();
                     changed = true;
                 }
             }
@@ -266,11 +260,10 @@ fn retype_input_buffer_results(
     if !changed {
         return;
     }
-    if let SideEffectKind::Soac(EgirSoac::Seg {
-        result_types: stored, ..
-    }) = &mut graph.skeleton.blocks[block].side_effects[effect_index].kind
+    if let SideEffectKind::Soac(Soac::Screma(op)) =
+        &mut graph.skeleton.blocks[block].side_effects[effect_index].kind
     {
-        *stored = result_types.clone();
+        op.body.set_result_types(&result_types);
     }
     graph.retype_node(
         result,
@@ -287,21 +280,26 @@ fn clear_unique_input_candidates(graph: &mut EGraph) {
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
             match &mut effect.kind {
-                SideEffectKind::Soac(EgirSoac::Seg {
-                    map_destinations,
-                    acc_destinations,
-                    ..
-                }) => {
-                    for destination in map_destinations.iter_mut().chain(acc_destinations) {
-                        if *destination == SoacDestination::UniqueInput {
-                            *destination = SoacDestination::Fresh;
+                SideEffectKind::Soac(Soac::Screma(op)) => {
+                    for map in &mut op.body.maps {
+                        if map.destination == SoacDestination::UniqueInput {
+                            map.destination = SoacDestination::Fresh;
+                        }
+                    }
+                    for operator in op.body.kind.operators_mut() {
+                        if operator.destination == SoacDestination::UniqueInput {
+                            operator.destination = SoacDestination::Fresh;
                         }
                     }
                 }
-                SideEffectKind::Soac(EgirSoac::Filter {
-                    output: FilterOutput::Local { destination, .. },
+                SideEffectKind::Soac(Soac::Filter(filter::Op {
+                    state:
+                        filter::SemanticState {
+                            storage: filter::Output::Local { destination, .. },
+                            ..
+                        },
                     ..
-                }) if *destination == SoacDestination::UniqueInput => {
+                })) if *destination == SoacDestination::UniqueInput => {
                     *destination = SoacDestination::Fresh;
                 }
                 _ => {}
@@ -364,18 +362,25 @@ fn verify_residency_requirements_satisfied(inner: &SemanticProgram) {
                 if consumers.get(&id).map_or(0, HashSet::len) < 2 {
                     continue;
                 }
-                let SideEffectKind::Soac(EgirSoac::Seg {
-                    kind: SegOpKind::SegMap,
-                    map_destinations,
-                    output_slots,
-                    resources,
-                    ..
-                }) = &effect.kind
+                let SideEffectKind::Soac(Soac::Screma(screma::Op {
+                    body:
+                        screma::Body {
+                            kind: screma::Kind::Map,
+                            maps,
+                            ..
+                        },
+                    state:
+                        screma::SemanticState::Segmented {
+                            output_slots,
+                            resources,
+                            ..
+                        },
+                })) = &effect.kind
                 else {
                     continue;
                 };
                 let internal_pure_map = output_slots.is_empty()
-                    && map_destinations.iter().all(|destination| *destination == SoacDestination::Fresh)
+                    && maps.iter().all(|map| map.destination == SoacDestination::Fresh)
                     && resources.iter().all(|resource| resource.access == SegResourceAccessKind::Read);
                 let materializable = entry.graph.skeleton.blocks.len() == 1
                     && dependencies_are_cloneable(
@@ -409,21 +414,19 @@ fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
                     continue;
                 };
                 let id = effect.required_semantic_id();
-                let SideEffectKind::Soac(EgirSoac::Seg {
-                    kind,
-                    map_bodies,
-                    map_destinations,
-                    acc_destinations,
-                    resources,
-                    ..
-                }) = &effect.kind
-                else {
+                let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
                     continue;
                 };
-                let pure = map_destinations
-                    .iter()
-                    .all(|destination| *destination == SoacDestination::Fresh)
-                    && acc_destinations.iter().all(|destination| *destination == SoacDestination::Fresh)
+                let screma::SemanticState::Segmented { resources, .. } = &op.state else {
+                    continue;
+                };
+                let pure = op.body.maps.iter().all(|map| map.destination == SoacDestination::Fresh)
+                    && op
+                        .body
+                        .kind
+                        .operators()
+                        .into_iter()
+                        .all(|operator| operator.destination == SoacDestination::Fresh)
                     && resources.iter().all(|resource| {
                         resource.access == SegResourceAccessKind::Read
                             || entry
@@ -444,8 +447,8 @@ fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
                 }
                 let semantic_consumers = consumers.get(&id);
                 let consumer_count = semantic_consumers.map_or(0, HashSet::len);
-                let materialization = match kind {
-                    SegOpKind::SegMap if !map_bodies.is_empty() => {
+                let materialization = match &op.body.kind {
+                    screma::Kind::Map if !op.body.maps.is_empty() => {
                         if consumer_count >= 2 {
                             Some(MaterializationKind::SharedArray)
                         } else if runtime_composite(&entry.graph.types[&result])
@@ -456,7 +459,7 @@ fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
                             None
                         }
                     }
-                    SegOpKind::SegScan { operators } if !operators.is_empty() => {
+                    screma::Kind::Scan(_) => {
                         if consumer_count >= 2 {
                             Some(MaterializationKind::SharedArray)
                         } else if runtime_composite(&entry.graph.types[&result])
@@ -467,8 +470,8 @@ fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
                             None
                         }
                     }
-                    SegOpKind::SegRed { operators }
-                        if operators.len() == 1
+                    screma::Kind::Reduce(operators)
+                        if operators.rest.is_empty()
                             && (has_segmented_consumer(entry, semantic_consumers)
                                 || !matches!(entry.execution_model, ExecutionModel::Compute { .. }))
                             && scalar_result_is_used(&entry.graph, result, block_id, effect_index)
@@ -500,8 +503,13 @@ fn has_segmented_consumer(
         return false;
     };
     entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects).any(|effect| {
-        matches!(effect.kind, SideEffectKind::Soac(EgirSoac::Seg { .. }))
-            && consumers.contains(&effect.required_semantic_id())
+        matches!(
+            effect.kind,
+            SideEffectKind::Soac(Soac::Screma(screma::Op {
+                state: screma::SemanticState::Segmented { .. },
+                ..
+            }))
+        ) && consumers.contains(&effect.required_semantic_id())
     })
 }
 
@@ -612,15 +620,18 @@ fn dependencies_are_cloneable(
     effects.iter().all(|&index| {
         matches!(
             &block.side_effects[index].kind,
-            SideEffectKind::Soac(EgirSoac::Seg {
-                map_destinations,
-                acc_destinations,
-                output_slots,
-                resources,
-                ..
-            }) if output_slots.is_empty()
-                && map_destinations.iter().all(|destination| *destination == SoacDestination::Fresh)
-                && acc_destinations.iter().all(|destination| *destination == SoacDestination::Fresh)
+            SideEffectKind::Soac(Soac::Screma(screma::Op {
+                body,
+                state: screma::SemanticState::Segmented {
+                    output_slots,
+                    resources,
+                    ..
+                },
+            })) if output_slots.is_empty()
+                && body.maps.iter().all(|map| map.destination == SoacDestination::Fresh)
+                && body.kind.operators().into_iter().all(|operator| {
+                    operator.destination == SoacDestination::Fresh
+                })
                 && resources.iter().all(|resource| resource.access == SegResourceAccessKind::Read)
         )
     })
@@ -636,25 +647,15 @@ fn materialize_candidate(inner: &mut SemanticProgram, candidate: Candidate) {
     let producer_effect = entry.graph.skeleton.blocks[block_id].side_effects[effect_index].clone();
     let producer_dependencies = dependency_effects(&entry.graph, block_id, effect_index);
     let dependency_resources = dependency_resources(&entry.graph, block_id, &producer_dependencies);
-    let SideEffectKind::Soac(EgirSoac::Seg {
-        space,
-        kind,
-        map_output_elem_types,
-        result_types,
-        ..
-    }) = &producer_effect.kind
+    let SideEffectKind::Soac(Soac::Screma(screma::Op {
+        body,
+        state: screma::SemanticState::Segmented { space, .. },
+    })) = &producer_effect.kind
     else {
         unreachable!();
     };
-    let output_specs = output_specs(
-        &entry.graph,
-        candidate.kind,
-        space,
-        kind,
-        map_output_elem_types,
-        result_types,
-    )
-    .expect("materialization candidate must expose concrete outputs");
+    let output_specs = output_specs(&entry.graph, candidate.kind, space, body)
+        .expect("materialization candidate must expose concrete outputs");
 
     let producer_storage = entry
         .resource_declarations
@@ -746,24 +747,30 @@ fn materialize_candidate(inner: &mut SemanticProgram, candidate: Candidate) {
     let producer_effect = retained_index
         .effect_mut(producer_graph, projected_result)
         .expect("producer projection retained its SegMap");
-    if let SideEffectKind::Soac(EgirSoac::Seg {
-        placement,
-        map_destinations,
-        acc_destinations,
-        output_slots,
-        resources,
-        ..
-    }) = &mut producer_effect.kind
+    if let SideEffectKind::Soac(Soac::Screma(screma::Op {
+        body,
+        state:
+            screma::SemanticState::Segmented {
+                placement,
+                output_slots,
+                resources,
+                ..
+            },
+    })) = &mut producer_effect.kind
     {
-        *placement = SegPlacement::Kernel;
+        *placement = screma::Placement::Kernel;
         *output_slots = Vec::new();
         resources.retain(|access| {
             access.access == SegResourceAccessKind::Read
                 || !source_output_resources.contains(&access.resource.0)
         });
         if candidate.kind != MaterializationKind::Scalar {
-            map_destinations.fill(SoacDestination::OutputView);
-            acc_destinations.fill(SoacDestination::OutputView);
+            for map in &mut body.maps {
+                map.destination = SoacDestination::OutputView;
+            }
+            for operator in body.kind.operators_mut() {
+                operator.destination = SoacDestination::OutputView;
+            }
             producer_effect.operand_nodes.extend(output_views.iter().copied());
             for &resource in &output_resources {
                 resources.push(SegResourceAccess {
@@ -927,24 +934,28 @@ fn output_specs(
     graph: &EGraph,
     materialization: MaterializationKind,
     space: &super::types::SegSpace,
-    kind: &SegOpKind,
-    map_output_elem_types: &[Type<TypeName>],
-    result_types: &[Type<TypeName>],
+    body: &screma::Body,
 ) -> Option<Vec<OutputSpec>> {
-    let output_elem_types = match (materialization, kind) {
-        (MaterializationKind::Scalar, SegOpKind::SegRed { .. }) => result_types.to_vec(),
-        (_, SegOpKind::SegMap) => map_output_elem_types.to_vec(),
-        (_, SegOpKind::SegScan { operators }) => map_output_elem_types
+    let result_types = body.result_types();
+    let output_elem_types = match (materialization, &body.kind) {
+        (MaterializationKind::Scalar, screma::Kind::Reduce(_)) => result_types.clone(),
+        (_, screma::Kind::Map) => body.maps.iter().map(|map| map.output_element_type.clone()).collect(),
+        (_, screma::Kind::Scan(operators)) => body
+            .maps
             .iter()
-            .cloned()
-            .chain(operators.iter().map(|operator| graph.types[&operator.neutral].clone()))
+            .map(|map| map.output_element_type.clone())
+            .chain(
+                std::iter::once(&operators.first)
+                    .chain(&operators.rest)
+                    .map(|operator| graph.types[&operator.neutral].clone()),
+            )
             .collect(),
         _ => return None,
     };
     (output_elem_types.len() == result_types.len()).then(|| {
         output_elem_types
             .into_iter()
-            .zip(result_types)
+            .zip(&result_types)
             .map(|(elem_ty, result_ty)| OutputSpec {
                 size: if materialization == MaterializationKind::Scalar {
                     LogicalSize::FixedBytes(crate::ssa::layout::type_byte_size(&elem_ty).unwrap_or(1) as u64)
@@ -996,16 +1007,23 @@ fn add_resource_read_for_value(graph: &mut EGraph, value: NodeId, resource: Reso
     let mut sites = Vec::new();
     for (block_id, block) in &graph.skeleton.blocks {
         for (index, effect) in block.side_effects.iter().enumerate() {
-            if matches!(effect.kind, SideEffectKind::Soac(EgirSoac::Seg { .. }))
-                && effect.referenced_nodes().any(|node| depends_on(graph, node, value))
+            if matches!(
+                effect.kind,
+                SideEffectKind::Soac(Soac::Screma(screma::Op {
+                    state: screma::SemanticState::Segmented { .. },
+                    ..
+                }))
+            ) && effect.referenced_nodes().any(|node| depends_on(graph, node, value))
             {
                 sites.push((block_id, index));
             }
         }
     }
     for (block, index) in sites {
-        let SideEffectKind::Soac(EgirSoac::Seg { resources, .. }) =
-            &mut graph.skeleton.blocks[block].side_effects[index].kind
+        let SideEffectKind::Soac(Soac::Screma(screma::Op {
+            state: screma::SemanticState::Segmented { resources, .. },
+            ..
+        })) = &mut graph.skeleton.blocks[block].side_effects[index].kind
         else {
             continue;
         };
@@ -1084,13 +1102,19 @@ fn dependency_resources(
             },
         );
         match &effect.kind {
-            SideEffectKind::Soac(EgirSoac::Seg { resources, .. }) => {
+            SideEffectKind::Soac(Soac::Screma(screma::Op {
+                state: screma::SemanticState::Segmented { resources, .. },
+                ..
+            })) => {
                 dependencies.extend(resources.iter().map(|access| access.resource.0));
             }
-            SideEffectKind::Soac(EgirSoac::Filter { output, .. }) => {
-                if let super::types::FilterOutput::Runtime { scratch, length } = output {
+            SideEffectKind::Soac(Soac::Filter(filter::Op {
+                state: filter::SemanticState { storage, .. },
+                ..
+            })) => {
+                if let filter::Output::Runtime { scratch, length } = storage {
                     dependencies.insert(scratch.0);
-                    if let super::types::RuntimeFilterLength::EntryOutput(length) = length {
+                    if let filter::RuntimeLength::EntryOutput(length) = length {
                         dependencies.insert(length.0);
                     }
                 }
@@ -1106,25 +1130,17 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
             match &mut effect.kind {
-                SideEffectKind::Soac(EgirSoac::Seg {
-                    space,
-                    kind,
-                    input_array_types,
-                    input_elem_types,
-                    map_input_indices,
-                    map_destinations,
-                    acc_destinations,
-                    result_types,
-                    resources,
-                    ..
-                }) => {
-                    for input in 0..input_array_types.len() {
+                SideEffectKind::Soac(Soac::Screma(op)) => {
+                    let screma::SemanticState::Segmented { space, resources, .. } = &mut op.state else {
+                        continue;
+                    };
+                    for (input, input_type) in op.body.inputs.iter_mut().enumerate() {
                         if let Some(replacement) = replacements
                             .iter()
                             .find(|replacement| effect.operand_nodes[input] == replacement.project)
                         {
-                            input_array_types[input] = replacement.view_ty.clone();
-                            input_elem_types[input] = replacement.elem_ty.clone();
+                            input_type.array = replacement.view_ty.clone();
+                            input_type.element = replacement.elem_ty.clone();
                             if !resources.iter().any(|access| access.resource.0 == replacement.resource) {
                                 resources.push(SegResourceAccess {
                                     resource: SemanticResourceRef(replacement.resource),
@@ -1134,66 +1150,36 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                         }
                     }
                     replace_space_nodes(space, replacements);
-                    for (lane, destination) in map_destinations.iter().enumerate() {
-                        if *destination == SoacDestination::InputBuffer {
-                            if let Some(input) =
-                                map_input_indices.get(lane).and_then(|inputs| inputs.first())
-                            {
-                                result_types[lane] = input_array_types[*input].clone();
+                    for map in &mut op.body.maps {
+                        if map.destination == SoacDestination::InputBuffer {
+                            if let Some(input) = map.input_indices.first() {
+                                map.result_type = op.body.inputs[*input].array.clone();
                             }
                         }
                     }
-                    for (lane, destination) in acc_destinations.iter().enumerate() {
-                        if *destination == SoacDestination::InputBuffer {
-                            if let Some(input) = kind
-                                .operators()
-                                .get(lane)
-                                .and_then(|operator| operator.input_indices.first())
-                            {
-                                result_types[map_destinations.len() + lane] =
-                                    input_array_types[*input].clone();
+                    for operator in op.body.kind.operators_mut() {
+                        if operator.destination == SoacDestination::InputBuffer {
+                            if let Some(input) = operator.input_indices.first() {
+                                operator.result_type = op.body.inputs[*input].array.clone();
                             }
                         }
                     }
                     if let Some(result) = effect.result {
-                        result_retypes.push((result, result_types.clone()));
+                        result_retypes.push((result, op.body.result_types()));
                     }
                 }
-                SideEffectKind::Soac(EgirSoac::Screma {
-                    input_array_types,
-                    input_elem_types,
-                    ..
-                }) => {
-                    for input in 0..input_array_types.len() {
-                        if let Some(replacement) = replacements
-                            .iter()
-                            .find(|replacement| effect.operand_nodes[input] == replacement.project)
-                        {
-                            input_array_types[input] = replacement.view_ty.clone();
-                            input_elem_types[input] = replacement.elem_ty.clone();
-                        }
-                    }
-                }
-                SideEffectKind::Soac(EgirSoac::Filter {
-                    state,
-                    input_array_type,
-                    input_elem_type,
-                    ..
-                }) => {
+                SideEffectKind::Soac(Soac::Filter(filter::Op { body, state })) => {
                     if let Some(replacement) = replacements
                         .iter()
                         .find(|replacement| effect.operand_nodes[0] == replacement.project)
                     {
-                        *input_array_type = replacement.view_ty.clone();
-                        *input_elem_type = replacement.elem_ty.clone();
+                        let input = match &mut body.input {
+                            filter::Input::Plain(input) | filter::Input::Mapped { input, .. } => input,
+                        };
+                        input.array = replacement.view_ty.clone();
+                        input.element = replacement.elem_ty.clone();
                     }
-                    match state {
-                        super::types::FilterState::Semantic { space }
-                        | super::types::FilterState::Scheduled { space, .. } => {
-                            replace_space_nodes(space, replacements)
-                        }
-                        super::types::FilterState::Raw => {}
-                    }
+                    replace_space_nodes(&mut state.space, replacements);
                 }
                 _ => {}
             }
