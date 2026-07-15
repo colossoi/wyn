@@ -16,8 +16,7 @@ use crate::LookupMap;
 use super::graph_ops;
 use super::program::{SemanticEntry, SemanticProgram};
 use super::types::{
-    EGraph, ENode, NodeId, PureViewSource, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator,
-    Soac,
+    EGraph, ENode, NodeId, PureViewSource, SideEffect, SideEffectKind, SkeletonTerminator, Soac,
 };
 
 pub(crate) const STORAGE_LOAD_COST: u64 = 4;
@@ -32,47 +31,36 @@ pub(crate) const SINGLETON_LAUNCH_COST: u64 = 256;
 #[derive(Debug)]
 pub(crate) struct PreludeAnalysis {
     pub(crate) cost: u64,
-    pub(crate) producer_effects: HashSet<SideEffectSite>,
 }
 
-/// Summarize one graph-local captured value. The root's producer closure is
-/// allowed to contain read-only loads and calls to known, safe user functions.
+/// Summarize one projected parallel-prefix recipe. The same structured path
+/// analysis prices straight-line values, selections, and loops; the source
+/// construct is not part of the residency decision.
 pub(crate) fn analyze_prelude(
     program: &SemanticProgram,
     entry: &SemanticEntry,
-    root: NodeId,
+    recipe: &super::graph_projector::ProjectedValueRecipe,
 ) -> Option<PreludeAnalysis> {
-    let closure = graph_ops::value_producer_closure(&entry.graph, [root]);
-    let mut summaries = HashMap::new();
-    let mut visiting = HashSet::new();
-    let mut cost = 0u64;
-
-    for node in &closure.nodes {
-        match &entry.graph.nodes[*node] {
-            ENode::Pure { op, .. } => {
-                cost = cost.saturating_add(operation_cost(program, op, &mut summaries, &mut visiting)?);
-            }
-            ENode::FuncParam { index } => {
-                if !entry_input_is_invariant(entry, *index) {
-                    return None;
-                }
-            }
-            ENode::BlockParam { .. } => {
-                // Stage 2 projects entry-block recipes only. Direct loop and
-                // branch recipes become eligible with the Stage 3 projector.
+    let graph = &recipe.projection.graph;
+    let reachable = graph_ops::execution_value_producer_closure(graph, [recipe.value]).nodes;
+    for node in reachable {
+        if let ENode::FuncParam { index } = graph.nodes[node] {
+            if !entry_input_is_invariant(entry, index) {
                 return None;
             }
-            ENode::Union { .. } | ENode::Constant(_) | ENode::SideEffectResult => {}
         }
     }
-    for site in &closure.effects {
-        let effect = &entry.graph.skeleton.blocks[site.block].side_effects[site.index];
-        cost = cost.saturating_add(effect_cost(program, effect, &mut summaries, &mut visiting)?);
-    }
-    Some(PreludeAnalysis {
-        cost,
-        producer_effects: closure.effects,
-    })
+
+    let mut summaries = HashMap::new();
+    let mut visiting = HashSet::new();
+    let extra_roots = HashMap::from([(recipe.result_block, vec![recipe.value])]);
+    let block_costs = graph_block_costs(program, graph, &extra_roots, &mut summaries, &mut visiting)?;
+    let cost = StructuredCost::new(graph, &recipe.projection.control_headers, &block_costs).path_cost(
+        graph.skeleton.entry,
+        None,
+        &mut HashSet::new(),
+    )?;
+    Some(PreludeAnalysis { cost })
 }
 
 /// Compare repeated evaluation with a one-thread producer and one handoff load
@@ -208,7 +196,7 @@ fn function_cost(
         .iter()
         .find(|function| function.name == callee && function.linkage_name.is_none())?;
 
-    let block_costs = function_block_costs(program, &function.graph, summaries, visiting)?;
+    let block_costs = graph_block_costs(program, &function.graph, &HashMap::new(), summaries, visiting)?;
     let cost = StructuredCost::new(&function.graph, &function.control_headers, &block_costs).path_cost(
         function.graph.skeleton.entry,
         None,
@@ -219,9 +207,10 @@ fn function_cost(
     Some(cost)
 }
 
-fn function_block_costs(
+fn graph_block_costs(
     program: &SemanticProgram,
     graph: &EGraph,
+    extra_roots: &HashMap<BlockId, Vec<NodeId>>,
     summaries: &mut HashMap<String, u64>,
     visiting: &mut HashSet<String>,
 ) -> Option<HashMap<BlockId, u64>> {
@@ -234,7 +223,8 @@ fn function_block_costs(
                 .side_effects
                 .iter()
                 .flat_map(|effect| effect.referenced_nodes())
-                .chain(block.term.referenced_nodes());
+                .chain(block.term.referenced_nodes())
+                .chain(extra_roots.get(&block_id).into_iter().flatten().copied());
             let mut local = local_value_cost(program, graph, roots, summaries, visiting)?;
             for effect in &block.side_effects {
                 local = local.saturating_add(effect_cost(program, effect, summaries, visiting)?);

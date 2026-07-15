@@ -118,6 +118,20 @@ pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
     closure
 }
 
+/// Follow every value used by executable graph structure, together with
+/// caller-supplied result roots. This is the common reachability boundary for
+/// analyses of a projected recipe: block effects and terminators are executed,
+/// while projection-preserved but unused metadata is not.
+pub(crate) fn execution_value_producer_closure<P: ValueProducerPhase>(
+    graph: &EGraph<P>,
+    result_roots: impl IntoIterator<Item = NodeId>,
+) -> ValueProducerClosure {
+    let execution_roots = graph.skeleton.blocks.iter().flat_map(|(_, block)| {
+        block.side_effects.iter().flat_map(P::effect_value_inputs).chain(block.term.referenced_nodes())
+    });
+    value_producer_closure(graph, execution_roots.chain(result_roots))
+}
+
 /// Remove projection-created function parameters that are absent from a
 /// compacted entry signature. Graph projection allocates every source
 /// parameter before cloning the selected value closure, so unused parameters
@@ -139,6 +153,44 @@ pub(crate) fn remove_unretained_func_params<P: EgirPhase>(
         graph.types.remove(&node);
         graph.node_spans.remove(&node);
     }
+}
+
+/// Verify that every CFG edge supplies exactly one argument per target block
+/// parameter. Projection and physicalization both use this stable skeleton
+/// contract before later optimization assumes it.
+pub(crate) fn verify_branch_arities<P: EgirPhase>(graph: &EGraph<P>) -> Result<(), String> {
+    for (source, block) in &graph.skeleton.blocks {
+        let check = |target: BlockId, args: &[NodeId]| {
+            let target_block = graph
+                .skeleton
+                .blocks
+                .get(target)
+                .ok_or_else(|| format!("branch from {source:?} targets an absent block {target:?}"))?;
+            if args.len() != target_block.params.len() {
+                return Err(format!(
+                    "branch from {source:?} to {target:?} supplies {} arguments for {} parameters",
+                    args.len(),
+                    target_block.params.len()
+                ));
+            }
+            Ok(())
+        };
+        match &block.term {
+            SkeletonTerminator::Branch { target, args } => check(*target, args)?,
+            SkeletonTerminator::CondBranch {
+                then_target,
+                then_args,
+                else_target,
+                else_args,
+                ..
+            } => {
+                check(*then_target, then_args)?;
+                check(*else_target, else_args)?;
+            }
+            SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
+        }
+    }
+    Ok(())
 }
 
 fn extend_incoming_block_args<P: EgirPhase>(

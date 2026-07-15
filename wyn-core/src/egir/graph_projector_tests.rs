@@ -1,13 +1,17 @@
 use super::*;
 use crate::ast::TypeName;
 use crate::egir::program::SemanticOpId;
-use crate::egir::types::{EffectToken, SideEffectKind};
+use crate::egir::types::{EffectToken, PureOp, SideEffectKind};
 use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
 use polytype::Type;
 use smallvec::smallvec;
 
 fn u32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::UInt(32), vec![])
+}
+
+fn bool_ty() -> Type<TypeName> {
+    Type::Constructed(TypeName::Bool, vec![])
 }
 
 #[test]
@@ -129,4 +133,150 @@ fn complete_projection_remaps_loop_headers_and_parameters() {
             if *merge == projected.block(exit).unwrap()
                 && *continue_block == projected.block(header).unwrap()
     ));
+}
+
+#[test]
+fn captured_value_recipe_projects_a_structured_loop_prefix() {
+    let mut graph = EGraph::new();
+    let entry = graph.skeleton.entry;
+    let header = graph.skeleton.create_block();
+    let body = graph.skeleton.create_block();
+    let continuation = graph.skeleton.create_block();
+    let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    let one = graph.intern_constant(ConstantValue::U32(1), u32_ty());
+    let bound = graph.intern_constant(ConstantValue::U32(32), u32_ty());
+    let acc = graph.add_block_param(header, 0, u32_ty());
+    let index = graph.add_block_param(header, 1, u32_ty());
+    graph.skeleton.blocks[header].params.extend([acc, index]);
+    let result = graph.add_block_param(continuation, 0, u32_ty());
+    graph.skeleton.blocks[continuation].params.push(result);
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
+        target: header,
+        args: vec![zero, zero],
+    };
+    let cond = graph.intern_pure(PureOp::BinOp("<".into()), smallvec![index, bound], bool_ty());
+    graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
+        cond,
+        then_target: body,
+        then_args: vec![],
+        else_target: continuation,
+        else_args: vec![acc],
+    };
+    let next_acc = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![acc, one], u32_ty());
+    let next_index = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![index, one], u32_ty());
+    graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
+        target: header,
+        args: vec![next_acc, next_index],
+    };
+    graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
+    let headers = LookupMap::from([(
+        header,
+        ControlHeader::Loop {
+            merge: continuation,
+            continue_block: body,
+        },
+    )]);
+
+    let recipe = GraphProjector::new(&graph, &headers)
+        .captured_value_recipe(
+            result,
+            SideEffectSite {
+                block: continuation,
+                index: 0,
+            },
+        )
+        .expect("structured loop recipe");
+    assert_eq!(recipe.projection.graph.skeleton.blocks.len(), 4);
+    assert_eq!(
+        recipe.result_block,
+        recipe.projection.block(continuation).unwrap()
+    );
+    assert!(matches!(
+        recipe.source,
+        ValueRecipeSource::StructuredPrefix { continuation: block } if block == continuation
+    ));
+    assert!(matches!(
+        recipe
+            .projection
+            .control_headers
+            .get(&recipe.projection.block(header).unwrap()),
+        Some(ControlHeader::Loop { merge, continue_block })
+            if *merge == recipe.projection.block(continuation).unwrap()
+                && *continue_block == recipe.projection.block(body).unwrap()
+    ));
+    crate::egir::graph_ops::verify_branch_arities(&recipe.projection.graph)
+        .expect("projected loop branch arity");
+}
+
+#[test]
+fn captured_value_recipe_projects_a_structured_selection_prefix() {
+    let mut graph = EGraph::new();
+    let entry = graph.skeleton.entry;
+    let then_block = graph.skeleton.create_block();
+    let else_block = graph.skeleton.create_block();
+    let continuation = graph.skeleton.create_block();
+    let cond = graph.intern_constant(ConstantValue::Bool(true), bool_ty());
+    let left = graph.intern_constant(ConstantValue::U32(1), u32_ty());
+    let right = graph.intern_constant(ConstantValue::U32(2), u32_ty());
+    let result = graph.add_block_param(continuation, 0, u32_ty());
+    graph.skeleton.blocks[continuation].params.push(result);
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
+        cond,
+        then_target: then_block,
+        then_args: vec![],
+        else_target: else_block,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[then_block].term = SkeletonTerminator::Branch {
+        target: continuation,
+        args: vec![left],
+    };
+    graph.skeleton.blocks[else_block].term = SkeletonTerminator::Branch {
+        target: continuation,
+        args: vec![right],
+    };
+    graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
+    let headers = LookupMap::from([(entry, ControlHeader::Selection { merge: continuation })]);
+
+    let recipe = GraphProjector::new(&graph, &headers)
+        .captured_value_recipe(
+            result,
+            SideEffectSite {
+                block: continuation,
+                index: 0,
+            },
+        )
+        .expect("structured selection recipe");
+    assert_eq!(recipe.projection.graph.skeleton.blocks.len(), 4);
+    assert!(matches!(
+        recipe
+            .projection
+            .control_headers
+            .get(&recipe.projection.graph.skeleton.entry),
+        Some(ControlHeader::Selection { merge })
+            if *merge == recipe.projection.block(continuation).unwrap()
+    ));
+    crate::egir::graph_ops::verify_branch_arities(&recipe.projection.graph)
+        .expect("projected selection branch arity");
+}
+
+#[test]
+fn projection_does_not_resurrect_eliminated_block_parameters() {
+    let mut graph = EGraph::new();
+    let entry = graph.skeleton.entry;
+    let continuation = graph.skeleton.create_block();
+    let eliminated = graph.add_block_param(continuation, 0, u32_ty());
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
+        target: continuation,
+        args: vec![],
+    };
+    graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
+
+    let projected = GraphProjector::new(&graph, &LookupMap::new())
+        .all()
+        .expect("projection with an eliminated historical parameter");
+    assert!(projected.node(eliminated).is_none());
+    assert!(projected.graph.skeleton.blocks[projected.block(continuation).unwrap()].params.is_empty());
+    crate::egir::graph_ops::verify_branch_arities(&projected.graph)
+        .expect("projection keeps eliminated parameter arity");
 }

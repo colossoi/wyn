@@ -1968,20 +1968,10 @@ fn spirv_entry_interface_has_storage_binding(
     })
 }
 
-#[test]
-fn expensive_scalar_source_is_one_singleton_feeding_two_map_domains() {
+fn assert_expensive_scalar_prefix_pipeline(lowered: &crate::Lowered, source_entry: &str) {
     use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize};
-    let source = format!(
-        "{SCALAR_PRELUDE_FOLD}\n\
-         #[compute]\n\
-         entry serial_prefix_before_maps(xs: []u32, ys: []u32, events: []u32) ([]u32, []u32) =\n\
-           let state = fold_events(events)\n\
-           let out_x = map(|x| x + state, xs)\n\
-           let out_y = map(|y| y ^ state, ys) in\n\
-           (out_x, out_y)\n"
-    );
-    let lowered = crate::compile_thru_spirv(&source).expect("expensive scalar source compiles");
-    let pipeline = scalar_prelude_pipeline(&lowered, "serial_prefix_before_maps");
+
+    let pipeline = scalar_prelude_pipeline(lowered, source_entry);
     let stages = &pipeline.stages;
     assert_eq!(stages.len(), 3, "one singleton plus two map stages");
     let singleton = stages
@@ -1999,7 +1989,7 @@ fn expensive_scalar_source_is_one_singleton_feeding_two_map_domains() {
     )));
     assert_ne!(
         maps[0].dispatch_size, maps[1].dispatch_size,
-        "maps retain the xs and ys dispatch domains"
+        "maps retain their independent input dispatch domains"
     );
     assert_eq!(
         singleton
@@ -2042,12 +2032,62 @@ fn expensive_scalar_source_is_one_singleton_feeding_two_map_domains() {
     );
     assert!(
         spirv_entry_reaches_loop(&lowered.spirv, &singleton.entry_point),
-        "the fold loop is reachable from the singleton"
+        "the expensive loop is reachable from the singleton"
     );
     assert!(
         maps.iter().all(|map| !spirv_entry_reaches_loop(&lowered.spirv, &map.entry_point)),
-        "the fold loop is not reachable from either map stage"
+        "the expensive loop is not reachable from either map stage"
     );
+}
+
+#[test]
+fn expensive_scalar_source_is_one_singleton_feeding_two_map_domains() {
+    let source = format!(
+        "{SCALAR_PRELUDE_FOLD}\n\
+         #[compute]\n\
+         entry serial_prefix_before_maps(xs: []u32, ys: []u32, events: []u32) ([]u32, []u32) =\n\
+           let state = fold_events(events)\n\
+           let out_x = map(|x| x + state, xs)\n\
+           let out_y = map(|y| y ^ state, ys) in\n\
+           (out_x, out_y)\n"
+    );
+    let lowered = crate::compile_thru_spirv(&source).expect("expensive scalar source compiles");
+    assert_expensive_scalar_prefix_pipeline(&lowered, "serial_prefix_before_maps");
+}
+
+#[test]
+fn direct_loop_scalar_prefix_uses_the_general_residency_policy() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry direct_loop_prefix(xs: []u32, ys: []u32, events: []u32) ([]u32, []u32) =
+  let state =
+    loop state = 0u32 for k < 32 do
+      (state ^ events[k]) * 1664525u32 + 1013904223u32
+  let out_x = map(|x| x + state, xs)
+  let out_y = map(|y| y ^ state, ys) in
+  (out_x, out_y)
+"#,
+    )
+    .expect("direct structured loop prefix compiles");
+    assert_expensive_scalar_prefix_pipeline(&lowered, "direct_loop_prefix");
+}
+
+#[test]
+fn conditional_scalar_prefix_uses_the_general_residency_policy() {
+    let source = format!(
+        "{SCALAR_PRELUDE_FOLD}\n\
+         #[compute]\n\
+         entry conditional_prefix(xs: []u32, ys: []u32, events: []u32) ([]u32, []u32) =\n\
+           let state = if events[0] == 0u32\n\
+                       then fold_events(events)\n\
+                       else fold_events(events) ^ 1u32\n\
+           let out_x = map(|x| x + state, xs)\n\
+           let out_y = map(|y| y ^ state, ys) in\n\
+           (out_x, out_y)\n"
+    );
+    let lowered = crate::compile_thru_spirv(&source).expect("conditional structured prefix compiles");
+    assert_expensive_scalar_prefix_pipeline(&lowered, "conditional_prefix");
 }
 
 #[test]
@@ -2065,17 +2105,9 @@ fn expensive_scalar_source_is_profitable_for_one_map() {
     assert_eq!(stages.iter().filter(|stage| is_singleton_stage(stage)).count(), 1);
 }
 
-#[test]
-fn expensive_scalar_source_emits_valid_wgsl() {
-    let source = format!(
-        "{SCALAR_PRELUDE_FOLD}\n\
-         #[compute]\n\
-         entry serial_prefix_wgsl(xs: []u32, events: []u32) []u32 =\n\
-           let state = fold_events(events) in\n\
-           map(|x| x + state, xs)\n"
-    );
+fn assert_scalar_prefix_emits_valid_wgsl(source: &str) {
     let wgsl = lower_semantic_egir(
-        compile_to_semantic_egir(&source),
+        compile_to_semantic_egir(source),
         crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
     )
     .lower_wgsl()
@@ -2088,6 +2120,32 @@ fn expensive_scalar_source_emits_valid_wgsl() {
     )
     .validate(&module)
     .unwrap_or_else(|error| panic!("Naga validation failed: {error:?}\n{wgsl}"));
+}
+
+#[test]
+fn expensive_scalar_source_emits_valid_wgsl() {
+    let source = format!(
+        "{SCALAR_PRELUDE_FOLD}\n\
+         #[compute]\n\
+         entry serial_prefix_wgsl(xs: []u32, events: []u32) []u32 =\n\
+           let state = fold_events(events) in\n\
+           map(|x| x + state, xs)\n"
+    );
+    assert_scalar_prefix_emits_valid_wgsl(&source);
+}
+
+#[test]
+fn structured_scalar_prefix_emits_valid_wgsl() {
+    assert_scalar_prefix_emits_valid_wgsl(
+        r#"
+#[compute]
+entry direct_loop_prefix_wgsl(xs: []u32, events: []u32) []u32 =
+  let state =
+    loop state = 0u32 for k < 32 do
+      (state ^ events[k]) * 1664525u32 + 1013904223u32 in
+  map(|x| x + state, xs)
+"#,
+    );
 }
 
 #[test]

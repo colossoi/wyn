@@ -22,6 +22,7 @@ pub struct GraphProjection {
     nodes: HashMap<NodeId, NodeId>,
     blocks: HashMap<BlockId, BlockId>,
     effects: HashSet<EffectToken>,
+    source_effects: HashSet<SideEffectSite>,
 }
 
 /// A projected producer recipe together with the projected identity of the
@@ -29,6 +30,19 @@ pub struct GraphProjection {
 pub struct ProjectedValueRecipe {
     pub projection: GraphProjection,
     pub value: NodeId,
+    pub result_block: BlockId,
+    pub source: ValueRecipeSource,
+}
+
+/// How a projected value recipe is removed from its source entry after its
+/// result has been replaced by a handoff load. This describes a prefix
+/// boundary, not the control construct inside it: selections, loops, and
+/// nested structured regions all use the same continuation form.
+pub enum ValueRecipeSource {
+    EntryBlock,
+    StructuredPrefix {
+        continuation: BlockId,
+    },
 }
 
 impl GraphProjection {
@@ -42,6 +56,10 @@ impl GraphProjection {
 
     pub fn block(&self, source: BlockId) -> Option<BlockId> {
         self.blocks.get(&source).copied()
+    }
+
+    pub fn source_effects(&self) -> &HashSet<SideEffectSite> {
+        &self.source_effects
     }
 
     pub fn remap_aliases(&self, aliases: &LookupMap<NodeId, NodeId>) -> LookupMap<NodeId, NodeId> {
@@ -103,6 +121,30 @@ pub struct GraphProjector<'a> {
     control_headers: &'a LookupMap<BlockId, ControlHeader>,
 }
 
+#[derive(Clone, Copy)]
+enum ProjectionMode {
+    Complete,
+    EntryRecipe {
+        effect_limit: Option<usize>,
+    },
+    StructuredPrefix {
+        continuation: BlockId,
+        effect_limit: usize,
+    },
+}
+
+struct ProjectionSelection {
+    blocks: HashSet<BlockId>,
+    effects: HashSet<SideEffectSite>,
+    values: HashSet<NodeId>,
+}
+
+struct ProjectionShell {
+    graph: EGraph<Semantic>,
+    blocks: HashMap<BlockId, BlockId>,
+    nodes: HashMap<NodeId, NodeId>,
+}
+
 impl<'a> GraphProjector<'a> {
     pub fn new(
         source: &'a EGraph<Semantic>,
@@ -128,7 +170,7 @@ impl<'a> GraphProjector<'a> {
                 (0..body.side_effects.len()).map(move |index| SideEffectSite { block, index })
             })
             .collect();
-        self.selected_with_values(selected, extra_values)
+        self.project(selected, extra_values, ProjectionMode::Complete)
     }
 
     pub fn selected(&self, roots: HashSet<SideEffectSite>) -> Result<GraphProjection, String> {
@@ -139,20 +181,62 @@ impl<'a> GraphProjector<'a> {
     /// entry's output/control-flow tail. Materialization requirements use this
     /// form for producers that execute before the source entry branches.
     pub fn selected_entry_recipe(&self, roots: HashSet<SideEffectSite>) -> Result<GraphProjection, String> {
-        self.project(roots, Vec::new(), false)
+        self.project(
+            roots,
+            Vec::new(),
+            ProjectionMode::EntryRecipe { effect_limit: None },
+        )
     }
 
-    /// Project the straight-line recipe for a captured value. Producer effects
-    /// are discovered from the value itself, so scheduling policy remains
-    /// independent of the producer's concrete shape.
-    pub fn captured_value_recipe(&self, value: NodeId) -> Result<ProjectedValueRecipe, String> {
-        let projection = self.project(HashSet::new(), vec![value], false)?;
+    /// Project the prefix recipe for a value captured by a parallel operation.
+    /// A consumer in the entry block produces the existing straight-line
+    /// recipe. A later consumer block projects the complete structured CFG
+    /// prefix ending at that block, without encoding whether the prefix
+    /// contains a selection, loop, or nested combination of both.
+    pub fn captured_value_recipe(
+        &self,
+        value: NodeId,
+        consumer: SideEffectSite,
+    ) -> Result<ProjectedValueRecipe, String> {
+        let (mode, source) = if consumer.block == self.source.skeleton.entry {
+            (
+                ProjectionMode::EntryRecipe {
+                    effect_limit: Some(consumer.index),
+                },
+                ValueRecipeSource::EntryBlock,
+            )
+        } else {
+            let continuation = self
+                .source
+                .skeleton
+                .blocks
+                .get(consumer.block)
+                .ok_or_else(|| "captured value consumer block is absent".to_string())?;
+            if continuation.params.as_slice() != [value] {
+                return Err("structured prefix must produce one captured boundary value".into());
+            }
+            (
+                ProjectionMode::StructuredPrefix {
+                    continuation: consumer.block,
+                    effect_limit: consumer.index,
+                },
+                ValueRecipeSource::StructuredPrefix {
+                    continuation: consumer.block,
+                },
+            )
+        };
+        let projection = self.project(HashSet::new(), vec![value], mode)?;
         let projected = projection
             .node(value)
             .ok_or_else(|| "captured value projection omitted its root".to_string())?;
+        let result_block = projection
+            .block(consumer.block)
+            .ok_or_else(|| "captured value projection omitted its result block".to_string())?;
         Ok(ProjectedValueRecipe {
             projection,
             value: projected,
+            result_block,
+            source,
         })
     }
 
@@ -161,97 +245,143 @@ impl<'a> GraphProjector<'a> {
         roots: HashSet<SideEffectSite>,
         extra_values: Vec<NodeId>,
     ) -> Result<GraphProjection, String> {
-        self.project(roots, extra_values, true)
+        self.project(roots, extra_values, ProjectionMode::Complete)
     }
 
     fn project(
         &self,
-        roots: HashSet<SideEffectSite>,
+        selected: HashSet<SideEffectSite>,
         extra_values: Vec<NodeId>,
-        preserve_control_flow: bool,
+        mode: ProjectionMode,
     ) -> Result<GraphProjection, String> {
-        let producers = self.source.side_effect_index();
-        let mut selected = roots;
-        let mut value_roots = if preserve_control_flow { self.terminator_values() } else { Vec::new() };
-        value_roots.extend(extra_values);
-        for site in selected.clone() {
-            let effect = self.effect_at(site)?;
-            value_roots.extend(effect.referenced_nodes());
+        let selection = self.select_projection(selected, extra_values, mode)?;
+        let mut shell = self.projection_shell(&selection)?;
+        for value in &selection.values {
+            super::graph_ops::clone_value_subgraph(
+                self.source,
+                &mut shell.graph,
+                *value,
+                &mut shell.nodes,
+                super::graph_ops::ConstantCopy::PreserveIdentity,
+                true,
+            )?;
         }
-        let projected_values = self.close_producers(&mut selected, &mut value_roots, &producers)?;
-        if !preserve_control_flow {
-            if selected.iter().any(|site| site.block != self.source.skeleton.entry) {
-                return Err("entry recipe depends on an effect outside the entry block".into());
-            }
-            if projected_values
-                .iter()
-                .any(|node| matches!(self.source.nodes[*node], ENode::BlockParam { .. }))
-            {
-                return Err("entry recipe depends on a control-flow block parameter".into());
-            }
-        }
+        let effects = self.clone_effects(&selection, &mut shell)?;
+        self.project_terminators(mode, &selection.blocks, &mut shell)?;
+        let control_headers = if matches!(mode, ProjectionMode::EntryRecipe { .. }) {
+            LookupMap::new()
+        } else {
+            self.project_control_headers(&shell.blocks)?
+        };
+        shell.graph.verify_hash_cons()?;
+        super::graph_ops::verify_branch_arities(&shell.graph)?;
+        Ok(GraphProjection {
+            graph: shell.graph,
+            control_headers,
+            nodes: shell.nodes,
+            blocks: shell.blocks,
+            effects,
+            source_effects: selection.effects,
+        })
+    }
 
+    fn select_projection(
+        &self,
+        mut selected: HashSet<SideEffectSite>,
+        extra_values: Vec<NodeId>,
+        mode: ProjectionMode,
+    ) -> Result<ProjectionSelection, String> {
+        let blocks = self.projected_blocks(mode)?;
+        let allowed_effects = self.allowed_effects(mode, &blocks);
+        if matches!(mode, ProjectionMode::StructuredPrefix { .. }) {
+            selected.extend(allowed_effects.iter().copied());
+        }
+        let mut roots = self.projected_terminator_values(mode, &blocks);
+        roots.extend(extra_values);
+        for site in selected.clone() {
+            roots.extend(self.effect_at(site)?.referenced_nodes());
+        }
+        let values = self.close_producers(&mut selected, &mut roots, &self.source.side_effect_index())?;
+        if selected.iter().any(|site| !allowed_effects.contains(site)) {
+            return Err("value recipe depends on an effect outside its prefix boundary".into());
+        }
+        if values.iter().any(|node| {
+            matches!(
+                self.source.nodes[*node],
+                ENode::BlockParam { block, .. } if !blocks.contains(&block)
+            )
+        }) {
+            return Err("value recipe depends on a block parameter outside its prefix boundary".into());
+        }
+        Ok(ProjectionSelection {
+            blocks,
+            effects: selected,
+            values,
+        })
+    }
+
+    fn projection_shell(&self, selection: &ProjectionSelection) -> Result<ProjectionShell, String> {
         let mut graph = EGraph::new();
-        let mut blocks = HashMap::new();
-        blocks.insert(self.source.skeleton.entry, graph.skeleton.entry);
-        if preserve_control_flow {
-            for (source_block, _) in &self.source.skeleton.blocks {
-                if source_block != self.source.skeleton.entry {
-                    blocks.insert(source_block, graph.skeleton.create_block());
-                }
+        let mut blocks = HashMap::from([(self.source.skeleton.entry, graph.skeleton.entry)]);
+        for (source_block, _) in &self.source.skeleton.blocks {
+            if source_block != self.source.skeleton.entry && selection.blocks.contains(&source_block) {
+                blocks.insert(source_block, graph.skeleton.create_block());
             }
         }
 
         let mut nodes = HashMap::new();
-        let mut block_params: HashMap<BlockId, Vec<(usize, NodeId)>> = HashMap::new();
-        // Parameters and selected effect results must exist before value
-        // closure cloning because branches and cross-block uses may point at
-        // them before their defining block is visited.
         for (source_id, node) in &self.source.nodes {
-            match node {
-                ENode::FuncParam { index } => {
-                    let target = graph.add_func_param(*index, self.source.types[&source_id].clone());
-                    nodes.insert(source_id, target);
-                }
-                ENode::BlockParam { block, index } if preserve_control_flow => {
-                    let target_block = blocks[block];
-                    let target =
-                        graph.add_block_param(target_block, *index, self.source.types[&source_id].clone());
-                    nodes.insert(source_id, target);
-                    block_params.entry(target_block).or_default().push((*index, target));
-                }
-                _ => {}
+            if let ENode::FuncParam { index } = node {
+                let target = graph.add_func_param(*index, self.source.types[&source_id].clone());
+                nodes.insert(source_id, target);
             }
         }
-        for (block, params) in &mut block_params {
-            params.sort_by_key(|(index, _)| *index);
-            graph.skeleton.blocks[*block].params = params.iter().map(|(_, node)| *node).collect();
-        }
-        for site in &selected {
+        self.clone_live_block_params(&selection.blocks, &mut graph, &blocks, &mut nodes);
+        for site in &selection.effects {
             if let Some(result) = self.effect_at(*site)?.result {
                 let target = graph.alloc_side_effect_result(self.source.types[&result].clone());
                 nodes.insert(result, target);
             }
         }
+        Ok(ProjectionShell { graph, blocks, nodes })
+    }
 
-        for value in projected_values {
-            super::graph_ops::clone_value_subgraph(
-                self.source,
-                &mut graph,
-                value,
-                &mut nodes,
-                super::graph_ops::ConstantCopy::PreserveIdentity,
-                true,
-            )?;
+    fn clone_live_block_params(
+        &self,
+        projected_blocks: &HashSet<BlockId>,
+        graph: &mut EGraph<Semantic>,
+        blocks: &HashMap<BlockId, BlockId>,
+        nodes: &mut HashMap<NodeId, NodeId>,
+    ) {
+        // The skeleton parameter list is authoritative. CFG cleanup leaves
+        // eliminated BlockParam definitions in the sea, so iterating every
+        // historical BlockParam node would resurrect removed parameters.
+        for (source_block, source_body) in &self.source.skeleton.blocks {
+            if !projected_blocks.contains(&source_block) {
+                continue;
+            }
+            let target_block = blocks[&source_block];
+            for (index, source_param) in source_body.params.iter().copied().enumerate() {
+                let target =
+                    graph.add_block_param(target_block, index, self.source.types[&source_param].clone());
+                nodes.insert(source_param, target);
+                graph.skeleton.blocks[target_block].params.push(target);
+            }
         }
+    }
 
+    fn clone_effects(
+        &self,
+        selection: &ProjectionSelection,
+        shell: &mut ProjectionShell,
+    ) -> Result<HashSet<EffectToken>, String> {
         let mut effects = HashSet::new();
         for (source_block, body) in &self.source.skeleton.blocks {
-            let Some(&target_block) = blocks.get(&source_block) else {
+            let Some(&target_block) = shell.blocks.get(&source_block) else {
                 continue;
             };
             for (index, effect) in body.side_effects.iter().enumerate() {
-                if !selected.contains(&SideEffectSite {
+                if !selection.effects.contains(&SideEffectSite {
                     block: source_block,
                     index,
                 }) {
@@ -259,38 +389,154 @@ impl<'a> GraphProjector<'a> {
                 }
                 let mut projected = effect.clone();
                 for node in projected.referenced_node_slots() {
-                    *node = nodes[node];
+                    *node = shell.nodes[node];
                 }
-                projected.result = effect.result.map(|result| nodes[&result]);
+                projected.result = effect.result.map(|result| shell.nodes[&result]);
                 if let Some((input, output)) = projected.effects {
-                    effects.insert(input);
-                    effects.insert(output);
+                    effects.extend([input, output]);
                 }
-                graph.skeleton.blocks[target_block].side_effects.push(projected);
+                shell.graph.skeleton.blocks[target_block].side_effects.push(projected);
             }
+        }
+        Ok(effects)
+    }
+
+    fn project_terminators(
+        &self,
+        mode: ProjectionMode,
+        projected_blocks: &HashSet<BlockId>,
+        shell: &mut ProjectionShell,
+    ) -> Result<(), String> {
+        for source_block in projected_blocks {
+            let target_block = shell.blocks[source_block];
+            let is_recipe_exit = matches!(
+                mode,
+                ProjectionMode::EntryRecipe { .. }
+                    if *source_block == self.source.skeleton.entry
+            ) || matches!(
+                mode,
+                ProjectionMode::StructuredPrefix { continuation, .. }
+                    if *source_block == continuation
+            );
+            shell.graph.skeleton.blocks[target_block].term = if is_recipe_exit {
+                SkeletonTerminator::Return(None)
+            } else {
+                remap_terminator(
+                    &self.source.skeleton.blocks[*source_block].term,
+                    &shell.nodes,
+                    &shell.blocks,
+                )?
+            };
+        }
+        Ok(())
+    }
+
+    fn projected_blocks(&self, mode: ProjectionMode) -> Result<HashSet<BlockId>, String> {
+        match mode {
+            ProjectionMode::Complete => Ok(self.source.skeleton.blocks.keys().collect()),
+            ProjectionMode::EntryRecipe { .. } => Ok(HashSet::from([self.source.skeleton.entry])),
+            ProjectionMode::StructuredPrefix { continuation, .. } => {
+                self.structured_prefix_blocks(continuation)
+            }
+        }
+    }
+
+    fn structured_prefix_blocks(&self, continuation: BlockId) -> Result<HashSet<BlockId>, String> {
+        if !self.source.skeleton.blocks.contains_key(continuation) {
+            return Err("structured prefix continuation is absent".into());
+        }
+        let mut blocks = HashSet::new();
+        let mut pending = vec![self.source.skeleton.entry];
+        while let Some(block) = pending.pop() {
+            if !blocks.insert(block) || block == continuation {
+                continue;
+            }
+            pending.extend(terminator_targets(&self.source.skeleton.blocks[block].term));
+        }
+        if !blocks.contains(&continuation) {
+            return Err("structured prefix continuation is unreachable".into());
         }
 
-        if preserve_control_flow {
-            for (source_block, body) in &self.source.skeleton.blocks {
-                let target_block = blocks[&source_block];
-                graph.skeleton.blocks[target_block].term = remap_terminator(&body.term, &nodes, &blocks)?;
+        let mut reaches_continuation = HashSet::from([continuation]);
+        loop {
+            let mut changed = false;
+            for block in blocks.iter().copied().collect::<Vec<_>>() {
+                if reaches_continuation.contains(&block) {
+                    continue;
+                }
+                if terminator_targets(&self.source.skeleton.blocks[block].term)
+                    .iter()
+                    .any(|target| reaches_continuation.contains(target))
+                {
+                    reaches_continuation.insert(block);
+                    changed = true;
+                }
             }
-        } else {
-            graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(None);
+            if !changed {
+                break;
+            }
         }
-        let control_headers = if preserve_control_flow {
-            super::program::remap_control_headers(self.control_headers, |block| blocks[&block])
-        } else {
-            LookupMap::new()
+        if reaches_continuation != blocks {
+            return Err("structured prefix contains a path that does not reach its continuation".into());
+        }
+        Ok(blocks)
+    }
+
+    fn allowed_effects(&self, mode: ProjectionMode, blocks: &HashSet<BlockId>) -> HashSet<SideEffectSite> {
+        let limit = match mode {
+            ProjectionMode::EntryRecipe { effect_limit } => effect_limit,
+            ProjectionMode::StructuredPrefix { effect_limit, .. } => Some(effect_limit),
+            ProjectionMode::Complete => None,
         };
-        graph.verify_hash_cons()?;
-        Ok(GraphProjection {
-            graph,
-            control_headers,
-            nodes,
-            blocks,
-            effects,
-        })
+        let boundary_block = match mode {
+            ProjectionMode::StructuredPrefix { continuation, .. } => Some(continuation),
+            ProjectionMode::EntryRecipe { .. } => Some(self.source.skeleton.entry),
+            ProjectionMode::Complete => None,
+        };
+        blocks
+            .iter()
+            .flat_map(|block| {
+                let count = if Some(*block) == boundary_block {
+                    limit.unwrap_or(self.source.skeleton.blocks[*block].side_effects.len())
+                } else {
+                    self.source.skeleton.blocks[*block].side_effects.len()
+                };
+                (0..count).map(move |index| SideEffectSite { block: *block, index })
+            })
+            .collect()
+    }
+
+    fn projected_terminator_values(&self, mode: ProjectionMode, blocks: &HashSet<BlockId>) -> Vec<NodeId> {
+        blocks
+            .iter()
+            .filter(|block| {
+                !matches!(mode, ProjectionMode::EntryRecipe { .. })
+                    && !matches!(
+                        mode,
+                        ProjectionMode::StructuredPrefix { continuation, .. }
+                            if **block == continuation
+                    )
+            })
+            .flat_map(|block| self.source.skeleton.blocks[*block].term.referenced_nodes())
+            .collect()
+    }
+
+    fn project_control_headers(
+        &self,
+        blocks: &HashMap<BlockId, BlockId>,
+    ) -> Result<LookupMap<BlockId, ControlHeader>, String> {
+        let mut projected = LookupMap::new();
+        for (header, control) in self.control_headers {
+            let Some(&target_header) = blocks.get(header) else {
+                continue;
+            };
+            let targets = control_header_targets(control);
+            if targets.iter().any(|target| !blocks.contains_key(target)) {
+                return Err("projected structured prefix cuts through a control region".into());
+            }
+            projected.insert(target_header, control.remap(&|block| blocks[&block]));
+        }
+        Ok(projected)
     }
 
     fn effect_at(&self, site: SideEffectSite) -> Result<&SideEffect<Semantic>, String> {
@@ -300,10 +546,6 @@ impl<'a> GraphProjector<'a> {
             .get(site.block)
             .and_then(|block| block.side_effects.get(site.index))
             .ok_or_else(|| format!("invalid graph-projection effect site {site:?}"))
-    }
-
-    fn terminator_values(&self) -> Vec<NodeId> {
-        self.source.skeleton.blocks.iter().flat_map(|(_, block)| block.term.referenced_nodes()).collect()
     }
 
     fn close_producers(
@@ -337,6 +579,28 @@ impl<'a> GraphProjector<'a> {
             }
         }
         Ok(seen)
+    }
+}
+
+fn terminator_targets(term: &SkeletonTerminator) -> Vec<BlockId> {
+    match term {
+        SkeletonTerminator::Branch { target, .. } => vec![*target],
+        SkeletonTerminator::CondBranch {
+            then_target,
+            else_target,
+            ..
+        } => vec![*then_target, *else_target],
+        SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => Vec::new(),
+    }
+}
+
+fn control_header_targets(control: &ControlHeader) -> Vec<BlockId> {
+    match control {
+        ControlHeader::Loop {
+            merge,
+            continue_block,
+        } => vec![*merge, *continue_block],
+        ControlHeader::Selection { merge } => vec![*merge],
     }
 }
 

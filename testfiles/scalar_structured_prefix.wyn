@@ -1,0 +1,24 @@
+def fold_events(events: []u32) u32 =
+  loop state = 0u32 for k < 32 do
+    (state ^ events[k]) * 1664525u32 + 1013904223u32
+
+#[compute]
+entry direct_loop_prefix(xs: []u32, ys: []u32, events: []u32)
+  ([]u32, []u32) =
+  let state =
+    loop state = 0u32 for k < 32 do
+      (state ^ events[k]) * 1664525u32 + 1013904223u32
+  let out_x = map(|x| x + state, xs)
+  let out_y = map(|y| y ^ state, ys) in
+  (out_x, out_y)
+
+#[compute]
+entry conditional_prefix(xs: []u32, ys: []u32, events: []u32)
+  ([]u32, []u32) =
+  let state =
+    if events[0] == 0u32
+    then fold_events(events)
+    else fold_events(events) ^ 1u32
+  let out_x = map(|x| x + state, xs)
+  let out_y = map(|y| y ^ state, ys) in
+  (out_x, out_y)
