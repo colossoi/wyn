@@ -174,14 +174,14 @@ fn is_reduction_of_filter(effect: &SideEffect, filter_result: NodeId) -> bool {
     let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
         return false;
     };
-    if !matches!(&op.body.kind, screma::Kind::Reduce(_)) {
+    let screma::Op::Reduce { lanes, operators, .. } = op else {
         return false;
-    }
-    let n_inputs = op.body.inputs.len();
+    };
+    let n_inputs = lanes.inputs.len();
     n_inputs != 0
-        && op.body.maps.is_empty()
+        && lanes.maps.is_empty()
         && effect.operand_nodes[..n_inputs].iter().all(|&input| input == filter_result)
-        && op.body.kind.operators().into_iter().all(|operator| {
+        && operators.iter().all(|operator| {
             operator.input_indices.len() == 1 && operator.input_indices[0].index() < n_inputs
         })
 }
@@ -294,7 +294,7 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
             let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
                 unreachable!();
             };
-            op.body.kind.operators().into_iter().cloned().collect()
+            op.operators().into_iter().cloned().collect()
         })
         .unwrap_or_default();
     for (index, operator) in operators.iter_mut().enumerate() {
@@ -354,16 +354,17 @@ fn apply_with_consumer(
     let SideEffectKind::Soac(Soac::Screma(op)) = &consumer_effect.kind else {
         unreachable!();
     };
-    let old_input_count = op.body.inputs.len();
+    let old_input_count = op.lanes().inputs.len();
     let old_result = consumer_effect.result.expect("filter reduction has no result");
-    let mut result_types = op.body.result_types();
+    let mut result_types = op.result_types();
     let screma::SemanticState::Segmented {
         resources: old_resources,
         ..
-    } = &op.state
+    } = op.semantic_state()
     else {
         unreachable!();
     };
+    let old_resources = old_resources.clone();
 
     let graph = graph_mut(inner, candidate.site);
     let count_neutral = count_ty.as_ref().map(|ty| integer_literal(graph, "0", ty));
@@ -399,20 +400,26 @@ fn apply_with_consumer(
             consumer.result = Some(new_result);
         }
         if let SideEffectKind::Soac(Soac::Screma(op)) = &mut consumer.kind {
-            let screma::SemanticState::Segmented { space, .. } = &mut op.state else {
+            let mut state = op.semantic_state().clone();
+            let screma::SemanticState::Segmented { space, .. } = &mut state else {
                 unreachable!();
             };
             *space = filter.space.clone();
-            op.body.inputs = vec![SoacInputType {
-                array: filter.input_array_type.clone(),
-                element: filter.input_elem_type.clone(),
-            }];
-            op.body.maps.clear();
-            op.body.kind = screma::Kind::Reduce(
-                screma::NonEmpty::from_vec(operators)
+            for (operator, result_type) in operators.iter_mut().zip(&result_types) {
+                operator.result_type = result_type.clone();
+            }
+            *op = screma::Op::Reduce {
+                lanes: screma::Lanes {
+                    inputs: vec![SoacInputType {
+                        array: filter.input_array_type.clone(),
+                        element: filter.input_elem_type.clone(),
+                    }],
+                    maps: Vec::new(),
+                },
+                operators: screma::NonEmpty::from_vec(operators)
                     .expect("filter reduction must retain at least one operator"),
-            );
-            op.body.set_result_types(&result_types);
+                state,
+            };
         }
     }
     let reads = {
@@ -424,11 +431,12 @@ fn apply_with_consumer(
         .copied()
         .filter(|resource| Some(resource.resource) != filter.scratch)
         .collect();
-    if let SideEffectKind::Soac(Soac::Screma(screma::Op {
-        state: screma::SemanticState::Segmented { resources, .. },
-        ..
-    })) = &mut graph.skeleton.blocks[candidate.block].side_effects[consumer_index].kind
+    if let SideEffectKind::Soac(Soac::Screma(op)) =
+        &mut graph.skeleton.blocks[candidate.block].side_effects[consumer_index].kind
     {
+        let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
+            unreachable!();
+        };
         *resources = SegResourceAccess::merge(&retained, &reads);
     }
     if let Some((_, project)) = count_project {
@@ -462,17 +470,17 @@ fn apply_count_only(
     let project = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![result], count_ty.clone());
     replace_lengths(graph, &candidate.lengths, project);
     let effect = &mut graph.skeleton.blocks[candidate.block].side_effects[candidate.filter];
-    effect.kind = SideEffectKind::Soac(Soac::Screma(screma::Op {
-        body: screma::Body {
+    effect.kind = SideEffectKind::Soac(Soac::Screma(screma::Op::Reduce {
+        lanes: screma::Lanes {
             inputs: vec![SoacInputType {
                 array: filter.input_array_type,
                 element: filter.input_elem_type,
             }],
             maps: Vec::new(),
-            kind: screma::Kind::Reduce(screma::NonEmpty {
-                first: count,
-                rest: Vec::new(),
-            }),
+        },
+        operators: screma::NonEmpty {
+            first: count,
+            rest: Vec::new(),
         },
         state: screma::SemanticState::Segmented {
             space: filter.space,
@@ -487,11 +495,12 @@ fn apply_count_only(
         let effect = &graph.skeleton.blocks[candidate.block].side_effects[candidate.filter];
         crate::egir::semantic_graph::read_resources(graph, effect)
     };
-    if let SideEffectKind::Soac(Soac::Screma(screma::Op {
-        state: screma::SemanticState::Segmented { resources, .. },
-        ..
-    })) = &mut graph.skeleton.blocks[candidate.block].side_effects[candidate.filter].kind
+    if let SideEffectKind::Soac(Soac::Screma(op)) =
+        &mut graph.skeleton.blocks[candidate.block].side_effects[candidate.filter].kind
     {
+        let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
+            unreachable!();
+        };
         *resources = reads;
     }
     finish_entry_metadata(

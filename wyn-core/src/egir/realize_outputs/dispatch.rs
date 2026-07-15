@@ -247,12 +247,11 @@ pub(crate) fn result_soac_is_consuming_scan(
         if let [screma_result] = operands.as_slice() {
             if let Some(se) = effect_index.effect(graph, *screma_result) {
                 if let SideEffectKind::Soac(Soac::Screma(op)) = &se.kind {
-                    let n_maps = op.body.maps.len();
+                    let n_maps = op.lanes().maps.len();
                     if field_idx >= n_maps {
                         let acc_idx = field_idx - n_maps;
-                        if op.body.kind.is_scan(acc_idx)
-                            && op.body.kind.operator(acc_idx).map(|operator| operator.destination)
-                                == Some(SoacDestination::InputBuffer)
+                        if op.is_scan(acc_idx)
+                            && op.destination(field_idx) == Some(SoacDestination::InputBuffer)
                         {
                             return true;
                         }
@@ -287,12 +286,12 @@ pub(crate) fn result_soac_is_array_projection(
     let SideEffectKind::Soac(Soac::Screma(op)) = &se.kind else {
         return None;
     };
-    let operator_field = field_idx.checked_sub(op.body.maps.len());
+    let operator_field = field_idx.checked_sub(op.lanes().maps.len());
     let supported =
-        field_idx < op.body.maps.len() || operator_field.is_some_and(|index| op.body.kind.is_scan(index));
+        field_idx < op.lanes().maps.len() || operator_field.is_some_and(|index| op.is_scan(index));
     (supported
         && matches!(
-            op.body.destination(field_idx),
+            op.destination(field_idx),
             Some(SoacDestination::Fresh | SoacDestination::UniqueInput)
         ))
     .then_some((*screma_result, field_idx))
@@ -335,11 +334,11 @@ pub(crate) fn retarget_array_projection(
 
         // Operand layout is `[inputs.., output_views..]`; neutrals and
         // captures are explicit in the Screma body.
-        let base_len = op.body.inputs.len();
+        let base_len = op.lanes().inputs.len();
         let mut cursor = base_len;
-        let mut views = Vec::with_capacity(op.body.result_count());
-        for field in 0..op.body.result_count() {
-            if op.body.destination(field) == Some(SoacDestination::OutputView) {
+        let mut views = Vec::with_capacity(op.result_count());
+        for field in 0..op.result_count() {
+            if op.destination(field) == Some(SoacDestination::OutputView) {
                 views.push(Some(
                     *se.operand_nodes.get(cursor).expect("Screma output view operand missing"),
                 ));
@@ -349,11 +348,11 @@ pub(crate) fn retarget_array_projection(
             }
         }
 
-        let operator_index = field_idx.checked_sub(op.body.maps.len());
-        if operator_index.is_some_and(|index| !op.body.kind.is_scan(index)) {
+        let operator_index = field_idx.checked_sub(op.lanes().maps.len());
+        if operator_index.is_some_and(|index| !op.is_scan(index)) {
             panic!("retarget_array_projection: unsupported Screma field {field_idx}");
         }
-        assert!(op.body.set_destination(field_idx, SoacDestination::OutputView));
+        assert!(op.set_destination(field_idx, SoacDestination::OutputView));
         views[field_idx] = Some(output_view);
 
         se.operand_nodes.truncate(base_len);
@@ -419,7 +418,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                         // Captures and neutrals live in the typed body.
                         // Only the leading `input_array_types.len()`
                         // slots are array inputs read per element.
-                        if op_idx < op.body.inputs.len() {
+                        if op_idx < op.lanes().inputs.len() {
                             input_hits.push((skel_bid, se_idx, op_idx));
                             continue;
                         }
@@ -431,7 +430,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                              substitution",
                             slot_index,
                             op_idx,
-                            op.body.inputs.len()
+                            op.lanes().inputs.len()
                         )));
                     }
                     SideEffectKind::Soac(Soac::Hist(op)) => {
@@ -481,14 +480,17 @@ pub(crate) fn rewrite_sibling_index_consumers(
             SideEffectKind::Soac(Soac::Screma(op)) => {
                 let k = op_idx;
                 assert_eq!(
-                    op.body.inputs[k].element, view_elem_ty,
+                    op.lanes().inputs[k].element,
+                    view_elem_ty,
                     "rewrite_sibling_index_consumers: Screma input_elem_types[{}] \
                      {:?} disagrees with output view's elem type {:?}; the SOAC's \
                      produced elements should equal the entry-output binding's \
                      element type",
-                    k, op.body.inputs[k].element, view_elem_ty
+                    k,
+                    op.lanes().inputs[k].element,
+                    view_elem_ty
                 );
-                op.body.inputs[k].array = view_arr_ty.clone();
+                op.lanes_mut().inputs[k].array = view_arr_ty.clone();
             }
             SideEffectKind::Soac(Soac::Hist(op)) => {
                 let k = op_idx - 1;

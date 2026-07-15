@@ -168,12 +168,11 @@ fn map_graph(
 
 fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
     match soac {
-        Soac::Screma(op) => {
+        Soac::Screma(screma::Op::Map { lanes, .. }) => {
             let mut placement = facts.placement;
-            if matches!(op.body.kind, screma::Kind::Map)
-                && placement == screma::Placement::Kernel
-                && (op.body.maps.is_empty()
-                    || !op.body.maps.iter().all(|map| {
+            if placement == screma::Placement::Kernel
+                && (lanes.maps.is_empty()
+                    || !lanes.maps.iter().all(|map| {
                         matches!(
                             map.destination,
                             SoacDestination::OutputView | SoacDestination::InputBuffer
@@ -185,11 +184,43 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
             if placement == screma::Placement::Kernel && facts.output_slots.is_empty() {
                 placement = screma::Placement::LaneLocal;
             }
-            Soac::Screma(screma::Op {
-                body: op.body,
+            Soac::Screma(screma::Op::Map {
+                lanes,
                 state: screma::SemanticState::Segmented {
                     space: facts.space,
                     placement,
+                    output_slots: facts.output_slots,
+                    resources: facts.resources,
+                },
+            })
+        }
+        Soac::Screma(screma::Op::Reduce { lanes, operators, .. }) => Soac::Screma(screma::Op::Reduce {
+            lanes,
+            operators,
+            state: screma::SemanticState::Segmented {
+                space: facts.space,
+                placement: facts.placement,
+                output_slots: facts.output_slots,
+                resources: facts.resources,
+            },
+        }),
+        Soac::Screma(screma::Op::Scan { lanes, operators, .. }) => Soac::Screma(screma::Op::Scan {
+            lanes,
+            operators,
+            state: screma::SemanticState::Segmented {
+                space: facts.space,
+                placement: facts.placement,
+                output_slots: facts.output_slots,
+                resources: facts.resources,
+            },
+        }),
+        Soac::Screma(screma::Op::Composite { lanes, operators, .. }) => {
+            Soac::Screma(screma::Op::Composite {
+                lanes,
+                operators,
+                state: screma::SemanticState::Segmented {
+                    space: facts.space,
+                    placement: facts.placement,
                     output_slots: facts.output_slots,
                     resources: facts.resources,
                 },
@@ -271,7 +302,7 @@ fn entry_facts(entry: &RawEntry) -> HashMap<(BlockId, usize), Facts> {
             let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
                 return false;
             };
-            matches!(op.body.kind, screma::Kind::Reduce(_) | screma::Kind::Scan(_))
+            matches!(op, screma::Op::Reduce { .. } | screma::Op::Scan { .. })
                 && matches!(
                     facts_by_location.get(&(*block, *index)),
                     Some(Facts {
@@ -302,7 +333,7 @@ fn semantic_facts(
         return None;
     };
     let (input, operand_index, is_screma) = match soac {
-        Soac::Screma(op) => (op.body.inputs.first(), 0, true),
+        Soac::Screma(op) => (op.lanes().inputs.first(), 0, true),
         Soac::Filter(op) => (Some(filter_input_type(&op.body.input)), 0, false),
         Soac::Hist(op) => (op.body.inputs.first(), 1, false),
     };
@@ -478,8 +509,7 @@ fn referenced_nodes(effect: &SideEffect<Raw>) -> Vec<NodeId> {
     };
     nodes.extend(soac.seg_bodies().into_iter().flat_map(|body| body.captures.iter().copied()));
     if let Soac::Screma(op) = soac {
-        for index in 0..op.body.kind.len() {
-            let operator = op.body.kind.operator(index).expect("operator index from kind length");
+        for operator in op.operators() {
             nodes.push(operator.neutral);
             nodes.extend(operator.shape.iter().copied());
         }

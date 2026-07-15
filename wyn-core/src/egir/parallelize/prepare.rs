@@ -68,40 +68,37 @@ fn schedule_soac_with_mode(
     serial: bool,
 ) -> Result<Soac<Scheduled>, String> {
     Ok(match soac {
-        Soac::Screma(screma::Op { body, state }) => {
-            let state = match state {
-                screma::SemanticState::Serial => screma::ScheduledState::Serial,
-                screma::SemanticState::Segmented {
-                    space,
-                    placement,
-                    output_slots,
-                    resources,
-                } if !serial && placement == screma::Placement::Kernel => match body.kind {
-                    screma::Kind::Map => screma::ScheduledState::SegMap {
-                        space,
-                        output_slots,
-                        resources,
-                    },
-                    screma::Kind::Reduce(_) => screma::ScheduledState::SegRed {
-                        space,
-                        output_slots,
-                        resources,
-                    },
-                    screma::Kind::Scan(_) => screma::ScheduledState::SegScan {
-                        space,
-                        output_slots,
-                        resources,
-                    },
-                    screma::Kind::Composite(_) => screma::ScheduledState::SegComposite {
-                        space,
-                        output_slots,
-                        resources,
-                    },
-                },
-                screma::SemanticState::Segmented { .. } => screma::ScheduledState::Serial,
-            };
-            Soac::Screma(screma::Op { body, state })
-        }
+        Soac::Screma(screma::Op::Map { lanes, state }) => Soac::Screma(screma::Op::Map {
+            lanes,
+            state: schedule_screma_state(state, serial),
+        }),
+        Soac::Screma(screma::Op::Reduce {
+            lanes,
+            operators,
+            state,
+        }) => Soac::Screma(screma::Op::Reduce {
+            lanes,
+            operators,
+            state: schedule_screma_state(state, serial),
+        }),
+        Soac::Screma(screma::Op::Scan {
+            lanes,
+            operators,
+            state,
+        }) => Soac::Screma(screma::Op::Scan {
+            lanes,
+            operators,
+            state: schedule_screma_state(state, serial),
+        }),
+        Soac::Screma(screma::Op::Composite {
+            lanes,
+            operators,
+            state,
+        }) => Soac::Screma(screma::Op::Composite {
+            lanes,
+            operators,
+            state: schedule_screma_state(state, serial),
+        }),
         Soac::Filter(filter::Op { body, state }) => {
             let filter::SemanticState { space, storage } = state;
             let state = match filter_plan.unwrap_or(filter::Plan::Serial) {
@@ -136,20 +133,44 @@ fn schedule_soac_with_mode(
     })
 }
 
+fn schedule_screma_state(
+    state: screma::SemanticState<SemanticResourceRef>,
+    serial: bool,
+) -> screma::ScheduledState<SemanticResourceRef> {
+    match state {
+        screma::SemanticState::Serial => screma::ScheduledState::Serial,
+        screma::SemanticState::Segmented {
+            space,
+            placement,
+            output_slots,
+            resources,
+        } if !serial && placement == screma::Placement::Kernel => {
+            screma::ScheduledState::Segmented(screma::Segmented {
+                space,
+                output_slots,
+                resources,
+            })
+        }
+        screma::SemanticState::Segmented { .. } => screma::ScheduledState::Serial,
+    }
+}
+
 pub(crate) fn force_serial(graph: &mut EGraph<Scheduled>) {
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
             let SideEffectKind::Soac(Soac::Screma(op)) = &mut effect.kind else {
                 continue;
             };
-            if matches!(
-                op.state,
-                screma::ScheduledState::SegMap { .. }
-                    | screma::ScheduledState::SegRed { .. }
-                    | screma::ScheduledState::SegScan { .. }
-                    | screma::ScheduledState::SegComposite { .. }
-            ) {
-                op.state = screma::ScheduledState::Serial;
+            match op {
+                screma::Op::Map { state, .. }
+                | screma::Op::Reduce { state, .. }
+                | screma::Op::Scan { state, .. }
+                | screma::Op::Composite { state, .. }
+                    if matches!(state, screma::ScheduledState::Segmented(_)) =>
+                {
+                    *state = screma::ScheduledState::Serial;
+                }
+                _ => {}
             }
         }
     }
@@ -160,13 +181,21 @@ pub(crate) fn kernel_effect(graph: &EGraph<Scheduled>) -> Option<(BlockId, usize
         contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
             matches!(
                 &effect.kind,
-                SideEffectKind::Soac(Soac::Screma(screma::Op {
-                    state: screma::ScheduledState::SegMap { .. }
-                        | screma::ScheduledState::SegRed { .. }
-                        | screma::ScheduledState::SegScan { .. }
-                        | screma::ScheduledState::SegComposite { .. },
-                    ..
-                })) | SideEffectKind::Soac(Soac::Filter(filter::Op {
+                SideEffectKind::Soac(Soac::Screma(
+                    screma::Op::Map {
+                        state: screma::ScheduledState::Segmented(_),
+                        ..
+                    } | screma::Op::Reduce {
+                        state: screma::ScheduledState::Segmented(_),
+                        ..
+                    } | screma::Op::Scan {
+                        state: screma::ScheduledState::Segmented(_),
+                        ..
+                    } | screma::Op::Composite {
+                        state: screma::ScheduledState::Segmented(_),
+                        ..
+                    }
+                )) | SideEffectKind::Soac(Soac::Filter(filter::Op {
                     state: filter::ScheduledState::Parallel { .. },
                     ..
                 }))

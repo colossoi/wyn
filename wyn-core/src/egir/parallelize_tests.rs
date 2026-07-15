@@ -2,7 +2,7 @@ use super::*;
 use crate::ast::Span;
 use crate::egir::program::{OutputRoute, OutputSlotId, SlotSource};
 use crate::egir::soac::screma;
-use crate::egir::types::EffectToken;
+use crate::egir::types::{EffectToken, Semantic};
 use crate::ssa::types::ExecutionModel;
 
 /// Region indices used by the operator fixtures below: step is region 0,
@@ -88,14 +88,19 @@ fn output_ownership_comes_from_explicit_route_writer() {
 fn reduction_kind_keeps_operator_payload_together() {
     let mut graph = EGraph::new();
     let ne = neutral(&mut graph, 0);
-    let kind = screma::Kind::Reduce(
-        screma::NonEmpty::from_vec(vec![operator(ne, vec![ne], vec![ne, ne])])
+    let op = screma::Op::<Semantic>::Reduce {
+        lanes: screma::Lanes {
+            inputs: vec![],
+            maps: vec![],
+        },
+        operators: screma::NonEmpty::from_vec(vec![operator(ne, vec![ne], vec![ne, ne])])
             .expect("one operator is non-empty"),
-    );
-    let screma::Kind::Reduce(_) = &kind else {
+        state: screma::SemanticState::Serial,
+    };
+    let screma::Op::Reduce { .. } = &op else {
         panic!("reduction must be represented as Reduce")
     };
-    let operators = kind.operators();
+    let operators = op.operators();
     assert_eq!(operators.len(), 1);
     assert_eq!(operators[0].step.region, STEP_REGION);
     assert_eq!(operators[0].combine.region, COMBINE_REGION);
@@ -113,11 +118,17 @@ fn reduction_kind_keeps_operator_payload_together() {
 fn scan_kind_is_non_empty_by_construction() {
     let mut graph = EGraph::new();
     let ne = neutral(&mut graph, 0);
-    let kind = screma::Kind::Scan(
-        screma::NonEmpty::from_vec(vec![operator(ne, vec![], vec![])]).expect("one operator is non-empty"),
-    );
-    assert!(matches!(kind, screma::Kind::Scan(_)));
-    assert_eq!(kind.len(), 1);
+    let op = screma::Op::<Semantic>::Scan {
+        lanes: screma::Lanes {
+            inputs: vec![],
+            maps: vec![],
+        },
+        operators: screma::NonEmpty::from_vec(vec![operator(ne, vec![], vec![])])
+            .expect("one operator is non-empty"),
+        state: screma::SemanticState::Serial,
+    };
+    assert!(matches!(op, screma::Op::Scan { .. }));
+    assert_eq!(op.operators().len(), 1);
 }
 
 #[test]
@@ -125,18 +136,25 @@ fn mixed_reduce_and_scan_has_explicit_composite_kind() {
     let mut graph = EGraph::new();
     let reduce_neutral = neutral(&mut graph, 0);
     let scan_neutral = neutral(&mut graph, 1);
-    let kind = screma::Kind::Composite(screma::NonEmpty {
-        first: screma::CompositeOperator::Reduce(operator(reduce_neutral, vec![], vec![])),
-        rest: vec![screma::CompositeOperator::Scan(operator(
-            scan_neutral,
-            vec![],
-            vec![],
-        ))],
-    });
-    assert!(matches!(kind, screma::Kind::Composite(_)));
-    assert_eq!(kind.len(), 2);
-    assert!(!kind.is_scan(0));
-    assert!(kind.is_scan(1));
+    let op = screma::Op::<Semantic>::Composite {
+        lanes: screma::Lanes {
+            inputs: vec![],
+            maps: vec![],
+        },
+        operators: screma::NonEmpty {
+            first: screma::CompositeOperator::Reduce(operator(reduce_neutral, vec![], vec![])),
+            rest: vec![screma::CompositeOperator::Scan(operator(
+                scan_neutral,
+                vec![],
+                vec![],
+            ))],
+        },
+        state: screma::SemanticState::Serial,
+    };
+    assert!(matches!(op, screma::Op::Composite { .. }));
+    assert_eq!(op.operators().len(), 2);
+    assert!(!op.is_scan(0));
+    assert!(op.is_scan(1));
 }
 
 #[test]

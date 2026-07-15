@@ -71,18 +71,18 @@ fn semantic_soac_stats(allocated: &crate::EgirAllocated) -> SemanticSoacStats {
                 Soac::Filter(_) => stats.filters += 1,
                 Soac::Hist(_) => stats.hists += 1,
                 Soac::Screma(op) => {
-                    stats.map_bodies += op.body.maps.len();
-                    match &op.body.kind {
-                        screma::Kind::Map => stats.seg_maps += 1,
-                        screma::Kind::Reduce(operators) => {
+                    stats.map_bodies += op.lanes().maps.len();
+                    match op {
+                        screma::Op::Map { .. } => stats.seg_maps += 1,
+                        screma::Op::Reduce { operators, .. } => {
                             stats.seg_reds += 1;
                             stats.reduce_operators += 1 + operators.rest.len();
                         }
-                        screma::Kind::Scan(operators) => {
+                        screma::Op::Scan { operators, .. } => {
                             stats.seg_scans += 1;
                             stats.scan_operators += 1 + operators.rest.len();
                         }
-                        screma::Kind::Composite(operators) => {
+                        screma::Op::Composite { operators, .. } => {
                             stats.seg_composites += 1;
                             let classify = |operator: &screma::CompositeOperator| match operator {
                                 screma::CompositeOperator::Reduce(_) => (1, 0),
@@ -156,14 +156,14 @@ entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
             let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
-            let screma::Kind::Map = &op.body.kind else {
+            let screma::Op::Map { .. } = op else {
                 return None;
             };
-            let screma::SemanticState::Segmented { resources, .. } = &op.state else {
+            let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() else {
                 return None;
             };
             Some((
-                op.body.inputs.len(),
+                op.lanes().inputs.len(),
                 resources.iter().filter(|resource| resource.access == SegResourceAccessKind::Read).count(),
             ))
         })
@@ -197,12 +197,12 @@ entry mixed() [4]i32 =
             let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
-            let screma::Kind::Map = &op.body.kind else {
+            let screma::Op::Map { .. } = op else {
                 return None;
             };
             Some((
-                op.body.inputs.len(),
-                op.body.maps.iter().map(|map| map.input_indices.clone()).collect::<Vec<_>>(),
+                op.lanes().inputs.len(),
+                op.lanes().maps.iter().map(|map| map.input_indices.clone()).collect::<Vec<_>>(),
             ))
         })
         .collect();
@@ -234,12 +234,12 @@ entry siblings<[n]>(xs: [n]i32, ys: [n]i32) ([n]i32, [n]i32) =
             let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
-            if !matches!(&op.body.kind, screma::Kind::Map) || op.body.maps.len() != 2 {
+            if !matches!(op, screma::Op::Map { .. }) || op.lanes().maps.len() != 2 {
                 return None;
             }
             Some((
-                op.body.inputs.len(),
-                op.body.maps.iter().map(|map| map.input_indices.clone()).collect::<Vec<_>>(),
+                op.lanes().inputs.len(),
+                op.lanes().maps.iter().map(|map| map.input_indices.clone()).collect::<Vec<_>>(),
             ))
         })
         .expect("one two-lane SegMap");
@@ -377,10 +377,10 @@ entry stats(xs: []i32) [4]i32 =
             let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
-            let screma::Kind::Reduce(operators) = &op.body.kind else {
+            let screma::Op::Reduce { operators, .. } = op else {
                 return None;
             };
-            (1 + operators.rest.len() == 3).then(|| op.body.kind.operators())
+            (1 + operators.rest.len() == 3).then(|| op.operators())
         })
         .expect("three-operator filtered SegRed");
     let step_names: Vec<_> = operators
@@ -511,13 +511,13 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
             let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
-            let screma::SemanticState::Segmented { space, .. } = &op.state else {
+            let screma::SemanticState::Segmented { space, .. } = op.semantic_state() else {
                 return None;
             };
-            Some((space, &op.body.kind))
+            Some((space, op.flavor()))
         })
         .expect("SegRed remains present before target lowering");
-    assert!(matches!(seg.1, screma::Kind::Reduce(_)));
+    assert_eq!(seg.1, screma::Flavor::Reduce);
     assert!(matches!(
         seg.0.dims.as_slice(),
         [SegExtent::ResourceLength { .. }]
@@ -579,7 +579,7 @@ entry e() [4]f32 =
             let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
-            (!matches!(&op.body.kind, screma::Kind::Map)).then(|| op.body.kind.len())
+            (!matches!(op, screma::Op::Map { .. })).then(|| op.operators().len())
         })
         .collect();
     assert_eq!(
@@ -595,13 +595,7 @@ entry e() [4]f32 =
         .filter(|effect| {
             matches!(
                 &effect.kind,
-                SideEffectKind::Soac(Soac::Screma(screma::Op {
-                    body: screma::Body {
-                        kind: screma::Kind::Map,
-                        ..
-                    },
-                    ..
-                }))
+                SideEffectKind::Soac(Soac::Screma(screma::Op::Map { .. }))
             )
         })
         .count();
@@ -625,7 +619,7 @@ entry e() [4]f32 =
             let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
-            matches!(&op.body.kind, screma::Kind::Reduce(_)).then(|| op.body.kind.operators())
+            matches!(op, screma::Op::Reduce { .. }).then(|| op.operators())
         })
         .expect("fused SegRed");
     for operator in operators {
@@ -664,7 +658,7 @@ entry e() [3]i32 =
             let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
-            matches!(&op.body.kind, screma::Kind::Reduce(_)).then(|| op.body.kind.len())
+            matches!(op, screma::Op::Reduce { .. }).then(|| op.operators().len())
         })
         .collect();
     assert_eq!(
@@ -696,10 +690,10 @@ entry e() [2]i32 =
             let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
-            let screma::Kind::Reduce(operators) = &op.body.kind else {
+            let screma::Op::Reduce { operators, .. } = op else {
                 return None;
             };
-            (1 + operators.rest.len() == 2).then(|| op.body.kind.operators())
+            (1 + operators.rest.len() == 2).then(|| op.operators())
         })
         .expect("two-accumulator SegRed");
     assert_eq!(operators[0].input_indices, vec![screma::InputId(0)]);
@@ -954,13 +948,7 @@ fn multi_consumer_producer_survival_is_characterized() {
                     block.side_effects.iter().filter_map(move |effect| {
                         matches!(
                             &effect.kind,
-                            SideEffectKind::Soac(Soac::Screma(screma::Op {
-                                body: screma::Body {
-                                    kind: screma::Kind::Map,
-                                    ..
-                                },
-                                ..
-                            }))
+                            SideEffectKind::Soac(Soac::Screma(screma::Op::Map { .. }))
                         )
                         .then_some(effect.semantic_id)
                         .flatten()

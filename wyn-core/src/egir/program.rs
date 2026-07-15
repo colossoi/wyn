@@ -722,30 +722,50 @@ fn physicalize_soac(
         }
     }
 
-    fn screma_body(mut body: screma::Body, nodes: &LookupMap<NodeId, NodeId>) -> screma::Body {
-        for map in &mut body.maps {
+    fn screma_lanes(mut lanes: screma::Lanes, nodes: &LookupMap<NodeId, NodeId>) -> screma::Lanes {
+        for map in &mut lanes.maps {
             map.body = seg_body(map.body.clone(), nodes);
         }
-        body.kind = match body.kind {
-            screma::Kind::Map => screma::Kind::Map,
-            screma::Kind::Reduce(values) => screma::Kind::Reduce(operators(values, nodes)),
-            screma::Kind::Scan(values) => screma::Kind::Scan(operators(values, nodes)),
-            screma::Kind::Composite(values) => {
-                let map = |value| match value {
-                    screma::CompositeOperator::Reduce(value) => {
-                        screma::CompositeOperator::Reduce(operator(value, nodes))
-                    }
-                    screma::CompositeOperator::Scan(value) => {
-                        screma::CompositeOperator::Scan(operator(value, nodes))
-                    }
-                };
-                screma::Kind::Composite(screma::NonEmpty {
-                    first: map(values.first),
-                    rest: values.rest.into_iter().map(map).collect(),
-                })
+        lanes
+    }
+
+    fn composite_operators(
+        values: screma::NonEmpty<screma::CompositeOperator>,
+        nodes: &LookupMap<NodeId, NodeId>,
+    ) -> screma::NonEmpty<screma::CompositeOperator> {
+        let map = |value| match value {
+            screma::CompositeOperator::Reduce(value) => {
+                screma::CompositeOperator::Reduce(operator(value, nodes))
+            }
+            screma::CompositeOperator::Scan(value) => {
+                screma::CompositeOperator::Scan(operator(value, nodes))
             }
         };
-        body
+        screma::NonEmpty {
+            first: map(values.first),
+            rest: values.rest.into_iter().map(map).collect(),
+        }
+    }
+
+    fn physical_segment(
+        segment: screma::Segmented<SemanticResourceRef>,
+        nodes: &LookupMap<NodeId, NodeId>,
+        bindings: &PhysicalResourceTable,
+    ) -> Result<screma::Segmented<PhysicalResourceRef>, String> {
+        Ok(screma::Segmented {
+            space: space(segment.space, nodes, bindings)?,
+            output_slots: segment.output_slots,
+            resources: segment
+                .resources
+                .into_iter()
+                .map(|resource| {
+                    Ok(super::types::SegResourceAccess {
+                        resource: binding(resource.resource, bindings)?,
+                        access: resource.access,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+        })
     }
 
     fn filter_output(
@@ -785,45 +805,67 @@ fn physicalize_soac(
     }
 
     Ok(match soac {
-        Soac::Screma(screma::Op { body, state }) => {
-            let body = screma_body(body, nodes);
+        Soac::Screma(screma::Op::Map { lanes, state }) => {
             let state = match state {
-                screma::ScheduledState::Serial => screma::PhysicalState::Serial,
-                screma::ScheduledState::SegMap {
-                    space: iteration_space,
-                    output_slots,
-                    resources,
-                } => screma::PhysicalState::SegMap {
-                    space: space(iteration_space, nodes, bindings)?,
-                    output_slots,
-                    resources: resources
-                        .into_iter()
-                        .map(|resource| {
-                            Ok(super::types::SegResourceAccess {
-                                resource: binding(resource.resource, bindings)?,
-                                access: resource.access,
-                            })
-                        })
-                        .collect::<Result<_, String>>()?,
-                },
-                screma::ScheduledState::SegRed { .. } => {
-                    return Err(
-                        "scheduled SegRed reached physicalization; split it into physical kernels first"
-                            .into(),
-                    )
+                screma::ScheduledState::Serial => screma::PhysicalMapState::Serial,
+                screma::ScheduledState::Segmented(segment) => {
+                    screma::PhysicalMapState::Segmented(physical_segment(segment, nodes, bindings)?)
                 }
-                screma::ScheduledState::SegScan { .. } => {
-                    return Err(
-                        "scheduled SegScan reached physicalization; split it into physical kernels first"
-                            .into(),
-                    )
-                }
-                screma::ScheduledState::SegComposite { .. } => return Err(
+            };
+            Soac::Screma(screma::Op::Map {
+                lanes: screma_lanes(lanes, nodes),
+                state,
+            })
+        }
+        Soac::Screma(screma::Op::Reduce {
+            lanes,
+            operators: values,
+            state,
+        }) => {
+            if matches!(state, screma::ScheduledState::Segmented(_)) {
+                return Err(
+                    "scheduled SegRed reached physicalization; split it into physical kernels first".into(),
+                );
+            }
+            Soac::Screma(screma::Op::Reduce {
+                lanes: screma_lanes(lanes, nodes),
+                operators: operators(values, nodes),
+                state: screma::PhysicalSerialState,
+            })
+        }
+        Soac::Screma(screma::Op::Scan {
+            lanes,
+            operators: values,
+            state,
+        }) => {
+            if matches!(state, screma::ScheduledState::Segmented(_)) {
+                return Err(
+                    "scheduled SegScan reached physicalization; split it into physical kernels first"
+                        .into(),
+                );
+            }
+            Soac::Screma(screma::Op::Scan {
+                lanes: screma_lanes(lanes, nodes),
+                operators: operators(values, nodes),
+                state: screma::PhysicalSerialState,
+            })
+        }
+        Soac::Screma(screma::Op::Composite {
+            lanes,
+            operators: values,
+            state,
+        }) => {
+            if matches!(state, screma::ScheduledState::Segmented(_)) {
+                return Err(
                     "scheduled SegComposite reached physicalization; split it into physical kernels first"
                         .into(),
-                ),
-            };
-            Soac::Screma(screma::Op { body, state })
+                );
+            }
+            Soac::Screma(screma::Op::Composite {
+                lanes: screma_lanes(lanes, nodes),
+                operators: composite_operators(values, nodes),
+                state: screma::PhysicalSerialState,
+            })
         }
         Soac::Filter(filter::Op { mut body, state }) => {
             if let filter::Input::Mapped { body, .. } = &mut body.input {

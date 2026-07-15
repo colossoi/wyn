@@ -11,8 +11,8 @@ fn raw_map_soac(
     output_element_type: Type<TypeName>,
     result_type: Type<TypeName>,
 ) -> Soac<Raw> {
-    Soac::Screma(screma::Op {
-        body: screma::Body {
+    Soac::Screma(screma::Op::Map {
+        lanes: screma::Lanes {
             inputs: vec![input],
             maps: vec![screma::Map {
                 body: map_body,
@@ -21,7 +21,6 @@ fn raw_map_soac(
                 destination: SoacDestination::OutputView,
                 result_type,
             }],
-            kind: screma::Kind::Map,
         },
         state: screma::RawState,
     })
@@ -349,32 +348,32 @@ fn rewrite_sibling_index_consumers_rejects_accumulator_output_view_operand() {
         graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(1), vec![elem.clone()]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         semantic_id: None,
-        kind: SideEffectKind::Soac(Soac::Screma(screma::Op {
-            body: screma::Body {
+        kind: SideEffectKind::Soac(Soac::Screma(screma::Op::Reduce {
+            lanes: screma::Lanes {
                 inputs: vec![SoacInputType {
                     array: arr_ty.clone(),
                     element: elem.clone(),
                 }],
                 maps: vec![],
-                kind: screma::Kind::Reduce(screma::NonEmpty {
-                    first: screma::Operator {
-                        step: SegBody {
-                            region: RegionId::from_index(0),
-                            captures: vec![],
-                        },
-                        combine: SegBody {
-                            region: RegionId::from_index(1),
-                            captures: vec![],
-                        },
-                        input_indices: vec![screma::InputId(0)],
-                        neutral: source,
-                        shape: vec![],
-                        commutative: false,
-                        destination: SoacDestination::OutputView,
-                        result_type: elem.clone(),
+            },
+            operators: screma::NonEmpty {
+                first: screma::Operator {
+                    step: SegBody {
+                        region: RegionId::from_index(0),
+                        captures: vec![],
                     },
-                    rest: vec![],
-                }),
+                    combine: SegBody {
+                        region: RegionId::from_index(1),
+                        captures: vec![],
+                    },
+                    input_indices: vec![screma::InputId(0)],
+                    neutral: source,
+                    shape: vec![],
+                    commutative: false,
+                    destination: SoacDestination::OutputView,
+                    result_type: elem.clone(),
+                },
+                rest: vec![],
             },
             state: screma::RawState,
         })),

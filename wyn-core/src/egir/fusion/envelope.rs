@@ -79,13 +79,8 @@ fn find_in_graph(graph: &EGraph, site: FusionSite, oracle: &SemanticGraph) -> Op
     for (block_id, block) in &graph.skeleton.blocks {
         for producer_index in 0..block.side_effects.len().saturating_sub(1) {
             let producer = &block.side_effects[producer_index];
-            let SideEffectKind::Soac(Soac::Screma(screma::Op {
-                body:
-                    screma::Body {
-                        kind: screma::Kind::Map,
-                        maps,
-                        ..
-                    },
+            let SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
+                lanes: screma::Lanes { maps, .. },
                 state:
                     screma::SemanticState::Segmented {
                         output_slots,
@@ -251,11 +246,10 @@ fn producer_reads_hist_destination(graph: &EGraph, producer: &SideEffect, hist: 
     else {
         return false;
     };
-    let SideEffectKind::Soac(Soac::Screma(screma::Op {
-        state: screma::SemanticState::Segmented { resources, .. },
-        ..
-    })) = &producer.kind
-    else {
+    let SideEffectKind::Soac(Soac::Screma(op)) = &producer.kind else {
+        return false;
+    };
+    let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() else {
         return false;
     };
     resources.iter().any(|resource| resource.resource == destination)
@@ -263,20 +257,20 @@ fn producer_reads_hist_destination(graph: &EGraph, producer: &SideEffect, hist: 
 
 fn producer_parts(graph: &EGraph, candidate: &Candidate) -> ProducerParts {
     let effect = &graph.skeleton.blocks[candidate.block].side_effects[candidate.producer];
-    let SideEffectKind::Soac(Soac::Screma(screma::Op {
-        body,
+    let SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
+        lanes,
         state: screma::SemanticState::Segmented { space, .. },
     })) = &effect.kind
     else {
         unreachable!();
     };
-    let map = &body.maps[candidate.output];
+    let map = &lanes.maps[candidate.output];
     let source_indices = &map.input_indices;
     ProducerParts {
         space: space.clone(),
         body: map.body.clone(),
         input_nodes: source_indices.iter().map(|index| effect.operand_nodes[index.index()]).collect(),
-        inputs: source_indices.iter().map(|index| body.inputs[index.index()].clone()).collect(),
+        inputs: source_indices.iter().map(|index| lanes.inputs[index.index()].clone()).collect(),
         output_elem_type: map.output_element_type.clone(),
     }
 }

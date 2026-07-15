@@ -75,13 +75,8 @@ fn find_in_graph(
     for (block_id, block) in &graph.skeleton.blocks {
         for producer_index in 0..block.side_effects.len().saturating_sub(1) {
             let producer = &block.side_effects[producer_index];
-            let SideEffectKind::Soac(Soac::Screma(screma::Op {
-                body:
-                    screma::Body {
-                        kind: screma::Kind::Map,
-                        maps,
-                        ..
-                    },
+            let SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
+                lanes: screma::Lanes { maps, .. },
                 state:
                     screma::SemanticState::Segmented {
                         placement: producer_placement,
@@ -117,14 +112,13 @@ fn find_in_graph(
 
             for consumer_index in (producer_index + 1)..block.side_effects.len() {
                 let consumer = &block.side_effects[consumer_index];
-                let SideEffectKind::Soac(Soac::Screma(screma::Op {
-                    body: consumer_body,
-                    state:
-                        screma::SemanticState::Segmented {
-                            resources: consumer_resources,
-                            ..
-                        },
-                })) = &consumer.kind
+                let SideEffectKind::Soac(Soac::Screma(consumer_op)) = &consumer.kind else {
+                    continue;
+                };
+                let screma::SemanticState::Segmented {
+                    resources: consumer_resources,
+                    ..
+                } = consumer_op.semantic_state()
                 else {
                     continue;
                 };
@@ -170,7 +164,7 @@ fn find_in_graph(
                 }) {
                     continue;
                 }
-                let n_inputs = consumer_body.inputs.len();
+                let n_inputs = consumer_op.lanes().inputs.len();
                 let projected: Vec<(usize, usize)> = consumer.operand_nodes[..n_inputs]
                     .iter()
                     .enumerate()
@@ -267,15 +261,15 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
     let producer_effect = graph.skeleton.blocks[candidate.block].side_effects[candidate.producer].clone();
     let consumer_effect = graph.skeleton.blocks[candidate.block].side_effects[candidate.consumer].clone();
 
-    let SideEffectKind::Soac(Soac::Screma(screma::Op {
-        body: producer_body,
+    let SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
+        lanes: producer_lanes,
         state: screma::SemanticState::Segmented { resources, space, .. },
     })) = producer_effect.kind
     else {
         unreachable!();
     };
-    let producer_input_count = producer_body.inputs.len();
-    let producer_map = &producer_body.maps[candidate.producer_output];
+    let producer_input_count = producer_lanes.inputs.len();
+    let producer_map = &producer_lanes.maps[candidate.producer_output];
     let source_indices = producer_map.input_indices.clone();
     let producer = ProducerParts {
         space,
@@ -285,16 +279,16 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
             .iter()
             .map(|index| producer_effect.operand_nodes[index.index()])
             .collect(),
-        inputs: source_indices.iter().map(|index| producer_body.inputs[index.index()].clone()).collect(),
+        inputs: source_indices.iter().map(|index| producer_lanes.inputs[index.index()].clone()).collect(),
         resources,
     };
     debug_assert!(producer_input_count >= producer.source_indices.len());
 
-    let SideEffectKind::Soac(Soac::Screma(consumer_op)) = &consumer_effect.kind else {
+    let SideEffectKind::Soac(Soac::Screma(mut consumer_op)) = consumer_effect.kind else {
         unreachable!();
     };
-    let old_input_count = consumer_op.body.inputs.len();
-    let mut new_inputs = consumer_op.body.inputs.clone();
+    let old_input_count = consumer_op.lanes().inputs.len();
+    let mut new_inputs = consumer_op.lanes().inputs.clone();
     for &input in candidate.consumer_inputs.iter().rev() {
         new_inputs.remove(input);
     }
@@ -302,7 +296,7 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
     let new_elem_types = new_inputs.iter().map(|input| input.element.clone()).collect::<Vec<_>>();
     let appended_base = old_input_count - candidate.consumer_inputs.len();
 
-    let mut new_maps = consumer_op.body.maps.clone();
+    let mut new_maps = consumer_op.lanes().maps.clone();
     let mut synthesized = Vec::new();
     for (lane, map) in new_maps.iter_mut().enumerate() {
         let body = map.body.clone();
@@ -342,8 +336,7 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
         map.input_indices = rebased;
     }
 
-    let mut new_kind = consumer_op.body.kind.clone();
-    for (operator_index, operator) in new_kind.operators_mut().into_iter().enumerate() {
+    for (operator_index, operator) in consumer_op.operators_mut().into_iter().enumerate() {
         let old_indices = operator.input_indices.clone();
         let mut rebased = Vec::new();
         for &index in &old_indices {
@@ -411,14 +404,15 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
     operands.extend(tail);
     consumer.operand_nodes = operands.into();
     if let SideEffectKind::Soac(Soac::Screma(op)) = &mut consumer.kind {
-        op.body.kind = new_kind;
-        op.body.maps = new_maps;
-        op.body.inputs = new_inputs;
-        let screma::SemanticState::Segmented { space, resources, .. } = &mut op.state else {
+        consumer_op.lanes_mut().maps = new_maps;
+        consumer_op.lanes_mut().inputs = new_inputs;
+        let screma::SemanticState::Segmented { space, resources, .. } = consumer_op.semantic_state_mut()
+        else {
             unreachable!();
         };
         *space = producer.space;
         *resources = SegResourceAccess::merge(resources, &producer.resources);
+        *op = consumer_op;
     }
     consumer.effects = fused_effects;
     block.side_effects.remove(candidate.producer);
@@ -709,8 +703,8 @@ mod tests {
         let producer_result = graph.alloc_side_effect_result(tuple.clone());
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
             semantic_id: None,
-            kind: SideEffectKind::Soac(Soac::Screma(screma::Op {
-                body: screma::Body {
+            kind: SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
+                lanes: screma::Lanes {
                     inputs: vec![SoacInputType {
                         array: array.clone(),
                         element: int.clone(),
@@ -725,7 +719,6 @@ mod tests {
                         destination: SoacDestination::Fresh,
                         result_type: array.clone(),
                     }],
-                    kind: screma::Kind::Map,
                 },
                 state: screma::SemanticState::Segmented {
                     space: SegSpace {
@@ -758,8 +751,8 @@ mod tests {
         let consumer_result = graph.alloc_side_effect_result(tuple.clone());
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
             semantic_id: None,
-            kind: SideEffectKind::Soac(Soac::Screma(screma::Op {
-                body: screma::Body {
+            kind: SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
+                lanes: screma::Lanes {
                     inputs: vec![SoacInputType {
                         array: array.clone(),
                         element: int.clone(),
@@ -774,7 +767,6 @@ mod tests {
                         destination: SoacDestination::Fresh,
                         result_type: array.clone(),
                     }],
-                    kind: screma::Kind::Map,
                 },
                 state: screma::SemanticState::Segmented {
                     space: SegSpace {
@@ -838,14 +830,14 @@ mod tests {
         assert_eq!(
             executor
                 .call(
-                    &op.body.maps[0].body.region,
+                    &op.lanes().maps[0].body.region,
                     &[Value::Int(3), Value::Int(1), Value::Int(2)],
                 )
                 .unwrap(),
             Value::Int(8)
         );
         assert_eq!(
-            op.body.maps[0].body.captures,
+            op.lanes().maps[0].body.captures,
             [producer_capture, consumer_capture]
         );
     }

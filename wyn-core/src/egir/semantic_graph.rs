@@ -55,7 +55,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
             };
             if let Some(result) = effect.result {
                 let resources = match soac {
-                    Soac::Screma(op) => match &op.state {
+                    Soac::Screma(op) => match op.semantic_state() {
                         screma::SemanticState::Serial => read_resources(graph, effect),
                         screma::SemanticState::Segmented { resources, .. } => resources.clone(),
                     },
@@ -214,16 +214,15 @@ pub(crate) fn verify(inner: &SemanticProgram) -> Result<(), String> {
         };
         match soac {
             Soac::Screma(op) => {
-                if let screma::SemanticState::Segmented { space, .. } = &op.state {
+                if let screma::SemanticState::Segmented { space, .. } = op.semantic_state() {
                     if space.dims.is_empty() {
                         return Err(format!("{scope}: semantic Screma has no concrete dimensions"));
                     }
                 }
-                for map in &op.body.maps {
+                for map in &op.lanes().maps {
                     verify_body("map", &map.body)?;
                 }
-                for index in 0..op.body.kind.len() {
-                    let operator = op.body.kind.operator(index).expect("operator index from kind length");
+                for operator in op.operators() {
                     verify_body("operator step", &operator.step)?;
                     verify_body("operator combine", &operator.combine)?;
                 }
@@ -279,16 +278,19 @@ pub(crate) fn summary(inner: &SemanticProgram) -> String {
             for effect in &block.side_effects {
                 match &effect.kind {
                     SideEffectKind::Soac(Soac::Screma(op)) => {
-                        let kind = match &op.body.kind {
-                            screma::Kind::Map => "SegMap",
-                            screma::Kind::Reduce(_) => "SegRed",
-                            screma::Kind::Scan(_) => "SegScan",
-                            screma::Kind::Composite(_) => "SegComposite",
+                        let kind = match op.flavor() {
+                            screma::Flavor::Map => "SegMap",
+                            screma::Flavor::Reduce => "SegRed",
+                            screma::Flavor::Scan => "SegScan",
+                            screma::Flavor::Composite => "SegComposite",
                         };
                         let _ = writeln!(
                             output,
                             "{scope}: {kind} state={:?} inputs={:?} maps={:?} kind={:?}",
-                            op.state, op.body.inputs, op.body.maps, op.body.kind,
+                            op.semantic_state(),
+                            op.lanes().inputs,
+                            op.lanes().maps,
+                            op.flavor(),
                         );
                     }
                     SideEffectKind::Soac(Soac::Filter(op)) => {

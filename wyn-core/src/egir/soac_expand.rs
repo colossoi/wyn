@@ -82,10 +82,9 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
         return false;
     };
     match soac {
-        Soac::Screma(screma::Op {
-            body,
-            state: screma::PhysicalState::Serial,
-        }) => body.inputs.iter().all(|input| is_plain_array_source(&input.array)),
+        Soac::Screma(op) if op.is_serial() => {
+            op.lanes().inputs.iter().all(|input| is_plain_array_source(&input.array))
+        }
         Soac::Filter(op) => {
             let input = match &op.body.input {
                 filter::Input::Plain(input) | filter::Input::Mapped { input, .. } => input,
@@ -99,15 +98,10 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
                 && op.body.inputs.iter().all(|input| is_plain_array_source(&input.array))
         }
         // A reified parallel map/reduce/scan; same source rules as its inputs.
-        Soac::Screma(screma::Op {
-            body:
-                screma::Body {
-                    kind: screma::Kind::Map,
-                    inputs,
-                    ..
-                },
-            state: screma::PhysicalState::SegMap { .. },
-        }) => inputs.iter().all(|input| is_plain_array_source(&input.array)),
+        Soac::Screma(screma::Op::Map {
+            lanes,
+            state: screma::PhysicalMapState::Segmented(_),
+        }) => lanes.inputs.iter().all(|input| is_plain_array_source(&input.array)),
         Soac::Screma(_) => false,
     }
 }
@@ -200,28 +194,25 @@ fn expand_one(
 ) {
     let se = graph.skeleton.blocks[bid].side_effects.remove(idx);
     match &se.kind {
-        SideEffectKind::Soac(Soac::Screma(screma::Op {
-            body,
-            state: screma::PhysicalState::Serial,
-        })) => {
+        SideEffectKind::Soac(Soac::Screma(op)) if op.is_serial() => {
+            let lanes = op.lanes();
             let map_input_indices =
-                body.maps.iter().map(|map| map.input_indices.clone()).collect::<Vec<_>>();
+                lanes.maps.iter().map(|map| map.input_indices.clone()).collect::<Vec<_>>();
             // Captures and the callee region are explicit on each `SegBody`;
             // the serial loop reads them directly rather than reslicing the
             // operand list by a separate capture-count layout.
-            let map_funcs = regions.names(body.maps.iter().map(|map| map.body.region));
+            let map_funcs = regions.names(lanes.maps.iter().map(|map| map.body.region));
             let map_captures: Vec<Vec<NodeId>> =
-                body.maps.iter().map(|map| map.body.captures.clone()).collect();
-            let acc_specs = body.kind.operators().into_iter().cloned().collect::<Vec<_>>();
-            let acc_is_scan =
-                (0..body.kind.len()).map(|index| body.kind.is_scan(index)).collect::<Vec<_>>();
+                lanes.maps.iter().map(|map| map.body.captures.clone()).collect();
+            let acc_specs = op.operators().into_iter().cloned().collect::<Vec<_>>();
+            let acc_is_scan = (0..acc_specs.len()).map(|index| op.is_scan(index)).collect::<Vec<_>>();
             let acc_step_captures: Vec<Vec<NodeId>> =
                 acc_specs.iter().map(|acc| acc.step.captures.clone()).collect();
-            let arr_tys = body.inputs.iter().map(|input| input.array.clone()).collect::<Vec<_>>();
-            let elem_tys = body.inputs.iter().map(|input| input.element.clone()).collect::<Vec<_>>();
+            let arr_tys = lanes.inputs.iter().map(|input| input.array.clone()).collect::<Vec<_>>();
+            let elem_tys = lanes.inputs.iter().map(|input| input.element.clone()).collect::<Vec<_>>();
             let map_output_elem_types =
-                body.maps.iter().map(|map| map.output_element_type.clone()).collect::<Vec<_>>();
-            let map_destinations = body.maps.iter().map(|map| map.destination).collect::<Vec<_>>();
+                lanes.maps.iter().map(|map| map.output_element_type.clone()).collect::<Vec<_>>();
+            let map_destinations = lanes.maps.iter().map(|map| map.destination).collect::<Vec<_>>();
             let acc_destinations =
                 acc_specs.iter().map(|operator| operator.destination).collect::<Vec<_>>();
             let n_maps = map_funcs.len();
@@ -659,14 +650,9 @@ fn expand_one(
             // conflict-safe parallel implementation.
             build_scatter_loop(graph, control_headers, bid, idx, scatter, next_effect);
         }
-        SideEffectKind::Soac(Soac::Screma(screma::Op {
-            body:
-                screma::Body {
-                    inputs,
-                    maps,
-                    kind: screma::Kind::Map,
-                },
-            state: screma::PhysicalState::SegMap { space, .. },
+        SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
+            lanes: screma::Lanes { inputs, maps },
+            state: screma::PhysicalMapState::Segmented(screma::Segmented { space, .. }),
         })) => {
             // SegRed/SegScan are consumed by `egir::parallelize::lower`
             // before expansion. This arm is therefore semantically map-only.

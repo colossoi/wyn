@@ -287,7 +287,10 @@ impl<R: Copy + Ord> SegResourceAccess<R> {
 
 pub trait EgirPhase: Clone + std::fmt::Debug {
     type Resource: GraphResource;
-    type ScremaState: Clone + std::fmt::Debug;
+    type MapState: Clone + std::fmt::Debug;
+    type ReduceState: Clone + std::fmt::Debug;
+    type ScanState: Clone + std::fmt::Debug;
+    type CompositeState: Clone + std::fmt::Debug;
     type FilterState: Clone + std::fmt::Debug;
     type HistState: Clone + std::fmt::Debug;
 }
@@ -312,28 +315,40 @@ pub struct SoacInputType {
 
 impl<R: GraphResource> EgirPhase for Raw<R> {
     type Resource = R;
-    type ScremaState = screma::RawState;
+    type MapState = screma::RawState;
+    type ReduceState = screma::RawState;
+    type ScanState = screma::RawState;
+    type CompositeState = screma::RawState;
     type FilterState = filter::RawState<R>;
     type HistState = hist::RawState;
 }
 
 impl<R: GraphResource> EgirPhase for Semantic<R> {
     type Resource = R;
-    type ScremaState = screma::SemanticState<R>;
+    type MapState = screma::SemanticState<R>;
+    type ReduceState = screma::SemanticState<R>;
+    type ScanState = screma::SemanticState<R>;
+    type CompositeState = screma::SemanticState<R>;
     type FilterState = filter::SemanticState<R>;
     type HistState = hist::SemanticState<R>;
 }
 
 impl<R: GraphResource> EgirPhase for Scheduled<R> {
     type Resource = R;
-    type ScremaState = screma::ScheduledState<R>;
+    type MapState = screma::ScheduledState<R>;
+    type ReduceState = screma::ScheduledState<R>;
+    type ScanState = screma::ScheduledState<R>;
+    type CompositeState = screma::ScheduledState<R>;
     type FilterState = filter::ScheduledState<R>;
     type HistState = hist::ScheduledState<R>;
 }
 
 impl EgirPhase for Physical {
     type Resource = super::program::PhysicalResourceRef;
-    type ScremaState = screma::PhysicalState;
+    type MapState = screma::PhysicalMapState;
+    type ReduceState = screma::PhysicalSerialState;
+    type ScanState = screma::PhysicalSerialState;
+    type CompositeState = screma::PhysicalSerialState;
     type FilterState = filter::PhysicalState;
     type HistState = hist::PhysicalState;
 }
@@ -348,7 +363,7 @@ pub enum Soac<P: EgirPhase> {
 impl<P: EgirPhase> Soac<P> {
     fn for_each_body_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
         match self {
-            Self::Screma(op) => op.body.for_each_type_mut(visit),
+            Self::Screma(op) => op.for_each_type_mut(visit),
             Self::Filter(op) => op.body.for_each_type_mut(visit),
             Self::Hist(op) => op.body.for_each_type_mut(visit),
         }
@@ -357,9 +372,8 @@ impl<P: EgirPhase> Soac<P> {
     pub(crate) fn seg_bodies(&self) -> Vec<&SegBody> {
         match self {
             Self::Screma(op) => {
-                let mut bodies = op.body.maps.iter().map(|map| &map.body).collect::<Vec<_>>();
-                for index in 0..op.body.kind.len() {
-                    let operator = op.body.kind.operator(index).expect("operator index from kind length");
+                let mut bodies = op.lanes().maps.iter().map(|map| &map.body).collect::<Vec<_>>();
+                for operator in op.operators() {
                     bodies.extend([&operator.step, &operator.combine]);
                 }
                 bodies

@@ -116,8 +116,8 @@ impl EntryBuilder {
         graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
-            Soac::Screma(screma::Op {
-                body: screma::Body {
+            Soac::Screma(screma::Op::Map {
+                lanes: screma::Lanes {
                     inputs: vec![SoacInputType {
                         array: input_array_ty,
                         element: input_elem_ty,
@@ -129,7 +129,6 @@ impl EntryBuilder {
                         destination: SoacDestination::OutputView,
                         result_type: output_view_ty,
                     }],
-                    kind: screma::Kind::Map,
                 },
                 state: screma::SemanticState::Serial,
             }),

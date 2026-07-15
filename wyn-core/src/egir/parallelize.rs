@@ -122,8 +122,8 @@ fn plan_segmented_kernel_body(
     else {
         unreachable!()
     };
-    match &op.body.kind {
-        screma::Kind::Map => {
+    match op {
+        screma::Op::Map { .. } => {
             if let Some(split) = split_multidomain_seg_maps(&body) {
                 let primary_slots = split.primary_slots;
                 if !split.entries.is_empty() {
@@ -168,7 +168,7 @@ fn plan_segmented_kernel_body(
                     .expect("seeded map kernel must remain addressable");
             }
         }
-        screma::Kind::Reduce(_) => {
+        screma::Op::Reduce { .. } => {
             if let Some(plan) = analyze_reduce_entry(&body, resources) {
                 let phases = emit_reduce_entry(&mut body, plan, schedule, resources);
                 let mut predecessor = schedule
@@ -188,7 +188,7 @@ fn plan_segmented_kernel_body(
                 commit_serial_kernel(body, kernel, schedule);
             }
         }
-        screma::Kind::Scan(_) => {
+        screma::Op::Scan { .. } => {
             if let Some(plan) = analyze_scan_entry(&body, resources) {
                 let phases = emit_scan_entry(&mut body, plan, schedule, resources);
                 let phase1_domain =
@@ -218,7 +218,7 @@ fn plan_segmented_kernel_body(
                 commit_serial_kernel(body, kernel, schedule);
             }
         }
-        screma::Kind::Composite(_) => {
+        screma::Op::Composite { .. } => {
             commit_serial_kernel(body, kernel, schedule);
         }
     }
@@ -594,13 +594,7 @@ pub(crate) fn attach_materializations(inner: &SemanticProgram, schedule: &mut sc
         if kernel_effect(&body.graph).is_some_and(|(block, index, _)| {
             matches!(
                 &body.graph.skeleton.blocks[block].side_effects[index].kind,
-                SideEffectKind::Soac(Soac::Screma(screma::Op {
-                    body: screma::Body {
-                        kind: screma::Kind::Reduce(_) | screma::Kind::Scan(_),
-                        ..
-                    },
-                    ..
-                }))
+                SideEffectKind::Soac(Soac::Screma(screma::Op::Reduce { .. } | screma::Op::Scan { .. }))
             )
         }) {
             plan_segmented_kernel_body(body, materialization, schedule, &inner.resources);
@@ -620,12 +614,10 @@ fn side_effect_output_slots_from_routes(
     routes: &[super::program::OutputRoute],
     se: &SideEffect,
 ) -> Vec<usize> {
-    if let SideEffectKind::Soac(Soac::Screma(screma::Op {
-        state: screma::SemanticState::Segmented { output_slots, .. },
-        ..
-    })) = &se.kind
-    {
-        return output_slots.iter().map(|slot| slot.0).collect();
+    if let SideEffectKind::Soac(Soac::Screma(op)) = &se.kind {
+        if let screma::SemanticState::Segmented { output_slots, .. } = op.semantic_state() {
+            return output_slots.iter().map(|slot| slot.0).collect();
+        }
     }
     let value_writer = se.result.map(OutputWriter::Value);
     let effect_writer = se.effects.map(|(_, output)| OutputWriter::Effect(output));
@@ -648,12 +640,9 @@ fn side_effect_output_slots_from_routes(
 fn is_seg_map(se: &SideEffect) -> bool {
     matches!(
         &se.kind,
-        SideEffectKind::Soac(Soac::Screma(screma::Op {
-            body: screma::Body {
-                kind: screma::Kind::Map,
-                ..
-            },
+        SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
             state: screma::SemanticState::Segmented { .. },
+            ..
         }))
     )
 }
@@ -669,11 +658,11 @@ fn is_write_effectful(se: &SideEffect) -> bool {
     match &se.kind {
         SideEffectKind::Soac(Soac::Hist(_) | Soac::Filter(_)) => true,
         SideEffectKind::Soac(Soac::Screma(op)) => op
-            .body
+            .lanes()
             .maps
             .iter()
             .map(|map| map.destination)
-            .chain(op.body.kind.operators().into_iter().map(|operator| operator.destination))
+            .chain(op.operators().into_iter().map(|operator| operator.destination))
             .any(|d| matches!(d, SoacDestination::OutputView | SoacDestination::InputBuffer)),
         SideEffectKind::Inst(InstKind::Store { .. }) => true,
         _ => false,
@@ -1437,16 +1426,11 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
 pub(crate) fn kernel_effect(graph: &EGraph) -> Option<(BlockId, usize, &SideEffect)> {
     graph.skeleton.blocks.iter().find_map(|(block, contents)| {
         contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
-            matches!(
-                &effect.kind,
-                SideEffectKind::Soac(Soac::Screma(screma::Op {
-                    state: screma::SemanticState::Segmented {
-                        placement: screma::Placement::Kernel,
-                        ..
-                    },
-                    ..
-                }))
-            )
+            matches!(&effect.kind,
+            SideEffectKind::Soac(Soac::Screma(op)) if matches!(
+                op.semantic_state(),
+                screma::SemanticState::Segmented { placement: screma::Placement::Kernel, .. }
+            ))
             .then_some((block, index, effect))
         })
     })
@@ -1458,7 +1442,7 @@ fn make_screma_serial(graph: &mut EGraph, block_id: BlockId, index: usize) {
     else {
         unreachable!()
     };
-    op.state = screma::SemanticState::Serial;
+    *op.semantic_state_mut() = screma::SemanticState::Serial;
 }
 
 fn project_root_index(graph: &super::types::EGraph, value: NodeId, root: NodeId) -> Option<u32> {
@@ -1504,24 +1488,26 @@ struct SegScratchSpec {
 /// Parse the shared eligibility gates and scratch owned by a parallel Seg op.
 /// Allocation and lowering consume this same result.
 fn seg_scratch_specs(graph: &EGraph, se: &SideEffect) -> Option<SegScratchSpec> {
-    let SideEffectKind::Soac(Soac::Screma(screma::Op {
-        body,
-        state:
-            screma::SemanticState::Segmented {
-                placement: screma::Placement::Kernel,
-                ..
-            },
-    })) = &se.kind
-    else {
+    let SideEffectKind::Soac(Soac::Screma(op)) = &se.kind else {
         return None;
     };
+    if !matches!(
+        op.semantic_state(),
+        screma::SemanticState::Segmented {
+            placement: screma::Placement::Kernel,
+            ..
+        }
+    ) {
+        return None;
+    }
     let elem_of = |neutral: NodeId| graph.types.get(&neutral).cloned();
-    let maps_are_output_views = body.maps.iter().all(|map| map.destination == SoacDestination::OutputView);
-    let operators = body.kind.operators();
-    match &body.kind {
-        screma::Kind::Reduce(_) => {
+    let lanes = op.lanes();
+    let operators = op.operators();
+    let maps_are_output_views = lanes.maps.iter().all(|map| map.destination == SoacDestination::OutputView);
+    match op {
+        screma::Op::Reduce { .. } => {
             if operators.iter().any(|op| !op.combine.captures.is_empty())
-                || body.inputs.is_empty()
+                || lanes.inputs.is_empty()
                 || !maps_are_output_views
                 || !operators.iter().all(|op| op.destination == SoacDestination::Fresh)
             {
@@ -1536,10 +1522,10 @@ fn seg_scratch_specs(graph: &EGraph, se: &SideEffect) -> Option<SegScratchSpec> 
                 resources,
             })
         }
-        screma::Kind::Scan(_) => {
+        screma::Op::Scan { .. } => {
             if operators.len() != 1
                 || !operators[0].combine.captures.is_empty()
-                || body.inputs.len() != 1
+                || lanes.inputs.len() != 1
                 || !maps_are_output_views
                 || !operators.iter().all(|op| op.destination == SoacDestination::OutputView)
             {
@@ -1554,7 +1540,7 @@ fn seg_scratch_specs(graph: &EGraph, se: &SideEffect) -> Option<SegScratchSpec> 
                 ],
             })
         }
-        screma::Kind::Map | screma::Kind::Composite(_) => None,
+        screma::Op::Map { .. } | screma::Op::Composite { .. } => None,
     }
 }
 
@@ -1620,16 +1606,14 @@ fn analyze_reduce_entry(
     if seg_scratch_specs(&entry.graph, side_effect)?.family != SegScratchFamily::Reduce {
         return None;
     }
-    let SideEffectKind::Soac(Soac::Screma(screma::Op { body, .. })) = &side_effect.kind else {
+    let SideEffectKind::Soac(Soac::Screma(screma::Op::Reduce { lanes, operators, .. })) = &side_effect.kind
+    else {
         return None;
     };
-    let screma::Kind::Reduce(_) = &body.kind else {
-        return None;
-    };
-    let operators = body.kind.operators();
-    let n_inputs = body.inputs.len();
+    let operators = operators.iter().collect::<Vec<_>>();
+    let n_inputs = lanes.inputs.len();
     let n_accs = operators.len();
-    let n_maps = body.maps.len();
+    let n_maps = lanes.maps.len();
     let operand = |index| side_effect.operand_nodes.get(index).copied();
     if !(0..n_inputs).all(|index| {
         operand(index)
@@ -1749,15 +1733,13 @@ fn emit_reduce_entry(
         screma_result_nid,
     ) = {
         let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
-        let SideEffectKind::Soac(Soac::Screma(screma::Op { body, .. })) = &se.kind else {
+        let SideEffectKind::Soac(Soac::Screma(screma::Op::Reduce { lanes, operators, .. })) = &se.kind
+        else {
             unreachable!("reduce analysis admitted a non-reduce recipe")
         };
-        let screma::Kind::Reduce(_) = &body.kind else {
-            unreachable!("reduce analysis admitted a non-reduce recipe")
-        };
-        let operators = body.kind.operators();
-        let n_inputs = body.inputs.len();
-        let n_maps = body.maps.len();
+        let operators = operators.iter().collect::<Vec<_>>();
+        let n_inputs = lanes.inputs.len();
+        let n_maps = lanes.maps.len();
         // Map outputs that have been retargeted to OutputView so the
         // chunked writes inside the Screma loop body land in the right
         // buffer. Fresh destinations would require building an immutable
@@ -1765,7 +1747,7 @@ fn emit_reduce_entry(
         // writes.
         // Reduce accumulators expect Fresh destination (scalar result
         // routed via a Project-based Store outside the Screma loop).
-        debug_assert!(body.maps.iter().all(|map| map.destination == SoacDestination::OutputView));
+        debug_assert!(lanes.maps.iter().all(|map| map.destination == SoacDestination::OutputView));
         debug_assert!(operators.iter().all(|operator| operator.destination == SoacDestination::Fresh));
         // Operand layout (gate enforces zero captures everywhere):
         //   [inputs(n_inputs), init_accs(n_accs), map_output_views(n_maps),
@@ -1953,14 +1935,11 @@ fn analyze_scan_entry(
     if seg_scratch_specs(&entry.graph, side_effect)?.family != SegScratchFamily::Scan {
         return None;
     }
-    let SideEffectKind::Soac(Soac::Screma(screma::Op { body, .. })) = &side_effect.kind else {
+    let SideEffectKind::Soac(Soac::Screma(screma::Op::Scan { lanes, operators, .. })) = &side_effect.kind
+    else {
         return None;
     };
-    let screma::Kind::Scan(_) = &body.kind else {
-        return None;
-    };
-    let operators = body.kind.operators();
-    let operator = operators[0];
+    let operator = &operators.first;
     if !can_clone_pure_subgraph(&entry.graph, operator.neutral, &[]) {
         return None;
     }
@@ -1968,8 +1947,8 @@ fn analyze_scan_entry(
     if !can_chunk_view(&entry.graph, input, ChunkInputKind::StorageOrRange) {
         return None;
     }
-    let output_base = body.inputs.len();
-    if !(0..body.maps.len()).all(|index| {
+    let output_base = lanes.inputs.len();
+    if !(0..lanes.maps.len()).all(|index| {
         side_effect
             .operand_nodes
             .get(output_base + index)
@@ -1977,7 +1956,7 @@ fn analyze_scan_entry(
     }) {
         return None;
     }
-    let scan_output = *side_effect.operand_nodes.get(output_base + body.maps.len())?;
+    let scan_output = *side_effect.operand_nodes.get(output_base + lanes.maps.len())?;
     graph_ops::extract_storage_view_source(&entry.graph, scan_output)?;
     let owner = side_effect.semantic_id?;
     let block_sums = *owned_resource_ids(resources, owner, CompilerResourceKind::ScanBlockSums).first()?;
@@ -2017,23 +1996,19 @@ fn emit_scan_entry(
         elem_ty,
     ) = {
         let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
-        let SideEffectKind::Soac(Soac::Screma(screma::Op { body, .. })) = &se.kind else {
+        let SideEffectKind::Soac(Soac::Screma(screma::Op::Scan { lanes, operators, .. })) = &se.kind else {
             unreachable!("scan analysis admitted a non-scan recipe")
         };
-        let screma::Kind::Scan(_) = &body.kind else {
-            unreachable!("scan analysis admitted a non-scan recipe")
-        };
-        let operators = body.kind.operators();
-        debug_assert_eq!(operators.len(), 1);
-        let op = operators[0];
-        let n_inputs = body.inputs.len();
+        debug_assert!(operators.rest.is_empty());
+        let op = &operators.first;
+        let n_inputs = lanes.inputs.len();
         debug_assert_eq!(n_inputs, 1);
         debug_assert!(op.combine.captures.is_empty());
-        debug_assert!(body.maps.iter().all(|map| map.destination == SoacDestination::OutputView));
+        debug_assert!(lanes.maps.iter().all(|map| map.destination == SoacDestination::OutputView));
         // `realize_outputs` retargets the scan accumulator to OutputView (its
         // prefixes feed the entry output) and appends the scan output buffer.
         debug_assert_eq!(op.destination, SoacDestination::OutputView);
-        let n_maps = body.maps.len();
+        let n_maps = lanes.maps.len();
         let input_nid = se.operand_nodes[0];
         let init_nid = op.neutral;
         let step_capture_nodes = op.step.captures.clone();
@@ -2043,7 +2018,7 @@ fn emit_scan_entry(
         let scan_output_view_op = output_view_base + n_maps;
         let map_output_view_ops: Vec<usize> = (0..n_maps).map(|map| output_view_base + map).collect();
         let input_ty = entry.graph.types[&input_nid].clone();
-        let input_elem = body.inputs[0].element.clone();
+        let input_elem = lanes.inputs[0].element.clone();
         let elem = entry.graph.types[&init_nid].clone();
         (
             schedule.callable_name(op.step.region).to_string(),
@@ -2123,32 +2098,32 @@ fn emit_scan_entry(
         let screma_nid = graph_ops::emit_pending_soac(
             &mut entry.graph,
             block_id,
-            Soac::Screma(screma::Op {
-                body: screma::Body {
+            Soac::Screma(screma::Op::Reduce {
+                lanes: screma::Lanes {
                     inputs: vec![super::types::SoacInputType {
                         array: input_view_ty,
                         element: input_elem_ty,
                     }],
                     maps: vec![],
-                    kind: screma::Kind::Reduce(
-                        screma::NonEmpty::from_vec(vec![screma::Operator {
-                            step: SegBody {
-                                region: schedule.intern_callable(&op_func),
-                                captures: step_capture_nodes,
-                            },
-                            combine: SegBody {
-                                region: schedule.intern_callable(&op_func),
-                                captures: vec![],
-                            },
-                            input_indices: vec![screma::InputId(0)],
-                            neutral: init_nid,
-                            shape: Vec::new(),
-                            commutative: false,
-                            destination: SoacDestination::Fresh,
-                            result_type: elem_ty.clone(),
-                        }])
-                        .expect("one reduce operator"),
-                    ),
+                },
+                operators: screma::NonEmpty {
+                    first: screma::Operator {
+                        step: SegBody {
+                            region: schedule.intern_callable(&op_func),
+                            captures: step_capture_nodes,
+                        },
+                        combine: SegBody {
+                            region: schedule.intern_callable(&op_func),
+                            captures: vec![],
+                        },
+                        input_indices: vec![screma::InputId(0)],
+                        neutral: init_nid,
+                        shape: Vec::new(),
+                        commutative: false,
+                        destination: SoacDestination::Fresh,
+                        result_type: elem_ty.clone(),
+                    },
+                    rest: Vec::new(),
                 },
                 state: screma::SemanticState::Serial,
             }),

@@ -61,7 +61,7 @@ fn canonicalize_resource_accesses(graph: &mut EGraph) {
             let SideEffectKind::Soac(Soac::Screma(op)) = &mut effect.kind else {
                 continue;
             };
-            if let screma::SemanticState::Segmented { resources, .. } = &mut op.state {
+            if let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() {
                 *resources = SegResourceAccess::merge(resources, &[]);
             }
         }
@@ -111,18 +111,17 @@ pub(super) fn eliminate_dead_seg_ops_in_graph(graph: &mut EGraph) -> bool {
             // only through its result. Filter/Hist/Screma may write in ways not
             // summarized here, so keep them conservatively.
             let observable = match soac {
-                Soac::Screma(screma::Op {
-                    state:
-                        screma::SemanticState::Segmented {
-                            resources,
-                            output_slots,
-                            ..
-                        },
-                    ..
-                }) => {
-                    !output_slots.is_empty()
-                        || resources.iter().any(|r| r.access != SegResourceAccessKind::Read)
-                }
+                Soac::Screma(op) => match op.semantic_state() {
+                    screma::SemanticState::Segmented {
+                        resources,
+                        output_slots,
+                        ..
+                    } => {
+                        !output_slots.is_empty()
+                            || resources.iter().any(|r| r.access != SegResourceAccessKind::Read)
+                    }
+                    screma::SemanticState::Serial => true,
+                },
                 _ => true,
             };
             observable || effect.result.is_some_and(|result| used.contains(&result))
@@ -152,8 +151,8 @@ mod tests {
         let _dead_project = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![result], int.clone());
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
             semantic_id: None,
-            kind: SideEffectKind::Soac(Soac::Screma(screma::Op {
-                body: screma::Body {
+            kind: SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
+                lanes: screma::Lanes {
                     inputs: Vec::<SoacInputType>::new(),
                     maps: vec![screma::Map {
                         body: crate::egir::types::SegBody {
@@ -165,7 +164,6 @@ mod tests {
                         destination: SoacDestination::Fresh,
                         result_type: int,
                     }],
-                    kind: screma::Kind::Map,
                 },
                 state: screma::SemanticState::Segmented {
                     space: SegSpace {

@@ -64,13 +64,8 @@ fn find_in_graph(
 ) -> Option<Candidate> {
     for (block_id, block) in &graph.skeleton.blocks {
         for (effect_index, effect) in block.side_effects.iter().enumerate() {
-            let SideEffectKind::Soac(Soac::Screma(screma::Op {
-                body:
-                    screma::Body {
-                        kind: screma::Kind::Map,
-                        maps,
-                        ..
-                    },
+            let SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
+                lanes: screma::Lanes { maps, .. },
                 state:
                     screma::SemanticState::Segmented {
                         output_slots,
@@ -212,12 +207,15 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
         let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
             unreachable!();
         };
-        let map = &op.body.maps[candidate.output];
+        let map = &op.lanes().maps[candidate.output];
         let indices = &map.input_indices;
         (
             inner.regions[&map.body.region].name.clone(),
             indices.iter().map(|index| effect.operand_nodes[index.index()]).collect::<Vec<_>>(),
-            indices.iter().map(|index| op.body.inputs[index.index()].element.clone()).collect::<Vec<_>>(),
+            indices
+                .iter()
+                .map(|index| op.lanes().inputs[index.index()].element.clone())
+                .collect::<Vec<_>>(),
             map.body.captures.clone(),
             effect.result.expect("indexed SegMap has no result"),
         )
