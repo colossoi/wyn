@@ -16,43 +16,44 @@ use polytype::Type;
 /// Maximum term size for a user function to be inlined.
 const INLINE_SIZE_THRESHOLD: usize = 30;
 
-/// Force-inline every helper whose body contains a SOAC anywhere in its
-/// term tree. This mirrors Futhark's "inline array/parallel callees" rule:
-/// a helper that performs SOAC work behind a call boundary blocks fusion
-/// from seeing the producer/consumer relationship across the boundary,
-/// so we expose it by inlining. Size threshold is ignored — a helper
-/// with a SOAC is by definition critical to fusion, regardless of source
-/// LOC.
+/// Force-inline every helper whose body contains a SOAC or an explicit array
+/// producer anywhere in its term tree. This mirrors Futhark's "inline
+/// array/parallel callees" rule: a helper that performs SOAC work or constructs
+/// a range/literal behind a call boundary blocks EGIR from seeing the complete
+/// producer/consumer relationship and dispatch extent, so we expose it by
+/// inlining. Size threshold is ignored — such a helper is by definition
+/// critical to fusion and scheduling, regardless of source LOC.
 ///
 /// Iterates to a fixpoint so chains like `clump → center → sum` (each a
 /// SOAC helper) fully expand: one round inlines `center`, the next sees
 /// `sum` calls inside the freshly-expanded clump body and inlines those
 /// too.
 pub fn run_force_soac_helpers(program: &mut Program, term_ids: &mut TermIdSource) {
-    force_inline_soac_helpers_to_fixpoint(program, term_ids);
+    force_inline_array_work_helpers_to_fixpoint(program, term_ids);
     debug_assert!(
-        verify_soac_helpers_inlined(program).is_ok(),
-        "force-inline left a SOAC helper behind a call boundary; \
+        verify_array_work_helpers_inlined(program).is_ok(),
+        "force-inline left an array-work helper behind a call boundary; \
          semantic EGIR would need an interprocedural path: {:?}",
-        verify_soac_helpers_inlined(program).err(),
+        verify_array_work_helpers_inlined(program).err(),
     );
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct CalledSoacHelper {
+struct CalledArrayWorkHelper {
     caller: SymbolId,
     callee: SymbolId,
 }
 
-/// EGIR fusion is deliberately intraprocedural. Keep source-level inlining as
-/// the one boundary operation that exposes every SOAC-bearing helper before
-/// conversion, then let EGIR own all producer/consumer decisions.
-fn verify_soac_helpers_inlined(program: &Program) -> Result<(), Vec<CalledSoacHelper>> {
-    let soac_bearing: LookupSet<SymbolId> =
-        program.defs.iter().filter(|def| contains_soac(&def.body)).map(|def| def.name).collect();
+/// EGIR fusion and dispatch inference are deliberately intraprocedural. Keep
+/// source-level inlining as the one boundary operation that exposes every
+/// array-work helper before conversion, then let EGIR own all
+/// producer/consumer and scheduling decisions.
+fn verify_array_work_helpers_inlined(program: &Program) -> Result<(), Vec<CalledArrayWorkHelper>> {
+    let array_work_bearing: LookupSet<SymbolId> =
+        program.defs.iter().filter(|def| contains_array_work(&def.body)).map(|def| def.name).collect();
     let mut violations = Vec::new();
     for def in &program.defs {
-        collect_called_soac_helpers(&def.body, def.name, &soac_bearing, &mut violations);
+        collect_called_array_work_helpers(&def.body, def.name, &array_work_bearing, &mut violations);
     }
     if violations.is_empty() {
         Ok(())
@@ -61,30 +62,32 @@ fn verify_soac_helpers_inlined(program: &Program) -> Result<(), Vec<CalledSoacHe
     }
 }
 
-fn collect_called_soac_helpers(
+fn collect_called_array_work_helpers(
     term: &Term,
     caller: SymbolId,
-    soac_bearing: &LookupSet<SymbolId>,
-    out: &mut Vec<CalledSoacHelper>,
+    array_work_bearing: &LookupSet<SymbolId>,
+    out: &mut Vec<CalledArrayWorkHelper>,
 ) {
     if let TermKind::App { func, .. } = &term.kind {
         if let TermKind::Var(VarRef::Symbol(callee)) = &func.kind {
-            if soac_bearing.contains(callee) {
-                out.push(CalledSoacHelper {
+            if array_work_bearing.contains(callee) {
+                out.push(CalledArrayWorkHelper {
                     caller,
                     callee: *callee,
                 });
             }
         }
     }
-    term.for_each_child(&mut |child| collect_called_soac_helpers(child, caller, soac_bearing, out));
+    term.for_each_child(&mut |child| {
+        collect_called_array_work_helpers(child, caller, array_work_bearing, out)
+    });
 }
 
-fn force_inline_soac_helpers_to_fixpoint(program: &mut Program, term_ids: &mut TermIdSource) {
+fn force_inline_array_work_helpers_to_fixpoint(program: &mut Program, term_ids: &mut TermIdSource) {
     // Bound iterations to guard against pathological recursion through
     // hand-crafted call graphs; typical wyn helper depth is 2–3.
     for _ in 0..8 {
-        let candidates = build_soac_helper_candidates(program);
+        let candidates = build_array_work_helper_candidates(program);
         if candidates.is_empty() {
             return;
         }
@@ -104,7 +107,7 @@ fn force_inline_soac_helpers_to_fixpoint(program: &mut Program, term_ids: &mut T
     }
 }
 
-fn build_soac_helper_candidates(program: &Program) -> LookupMap<SymbolId, InlineBody> {
+fn build_array_work_helper_candidates(program: &Program) -> LookupMap<SymbolId, InlineBody> {
     let mut candidates = LookupMap::new();
     for def in &program.defs {
         if !matches!(def.meta, DefMeta::Function) {
@@ -115,9 +118,10 @@ fn build_soac_helper_candidates(program: &Program) -> LookupMap<SymbolId, Inline
         if params.is_empty() {
             continue;
         }
-        // Any helper containing a SOAC is a candidate, control flow or not, so
-        // no SOAC is reachable behind a call (`verify_soac_helpers_inlined`).
-        if !contains_soac(&body) {
+        // Any helper containing array work is a candidate, control flow or
+        // not, so neither a SOAC nor an explicit range/literal producer is
+        // reachable behind a call (`verify_array_work_helpers_inlined`).
+        if !contains_array_work(&body) {
             continue;
         }
         // Skip helpers whose body carries an unresolved polytype `Variable`
@@ -171,10 +175,12 @@ fn term_contains_free_type_variable(term: &Term) -> bool {
     found
 }
 
-/// True if `term` contains a SOAC or a `length` call. Both must be visible in
-/// the caller so EGIR can build complete producer/use edges without summaries.
-pub(super) fn contains_soac(term: &Term) -> bool {
-    if matches!(&term.kind, TermKind::Soac(_)) {
+/// True if `term` contains a SOAC, an explicit array producer, or a `length`
+/// call. All must be visible in the caller so EGIR can build complete
+/// producer/use edges and derive dispatch extents without interprocedural
+/// summaries.
+pub(super) fn contains_array_work(term: &Term) -> bool {
+    if matches!(&term.kind, TermKind::Soac(_) | TermKind::ArrayExpr(_)) {
         return true;
     }
     if is_length_intrinsic_call(term) {
@@ -183,7 +189,7 @@ pub(super) fn contains_soac(term: &Term) -> bool {
     let mut found = false;
     term.for_each_child(&mut |c| {
         if !found {
-            found = contains_soac(c);
+            found = contains_array_work(c);
         }
     });
     found

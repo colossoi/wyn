@@ -1750,6 +1750,40 @@ entry generated() []i32 = map(|i: i32| i + 1, 0i32..<2048)
     );
 }
 
+/// A map over a fixed `iota` keeps its iteration domain when the array is
+/// returned directly from a helper. Regression: the helper-return boundary
+/// used to discard the map's domain, leaving the entry on the inferred
+/// `Fixed { 1, 1, 1 }` fallback (only 64 of 1024 lanes).
+#[test]
+fn iota_map_returned_from_helper_keeps_dispatch_domain() {
+    use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
+    let source = r#"
+def f(n: i32) []f32 =
+  map(|i| f32(i + n), iota(1024))
+
+#[compute]
+entry gen(events: []vec4f32) []f32 =
+  f(0)
+"#;
+    let lowered = crate::compile_thru_spirv(source).expect("iota map returned from a helper compiles");
+    let stage = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) => compute.stages.iter().find(|stage| stage.entry_point == "gen"),
+            _ => None,
+        })
+        .expect("gen stage");
+    assert_eq!(
+        stage.dispatch_size,
+        DispatchSize::DerivedFrom {
+            len: DispatchLen::Fixed { count: 1024 },
+            workgroup_size: 64,
+        }
+    );
+}
+
 #[test]
 fn scalar_prepass_and_consumer_share_one_scheduled_pipeline() {
     use crate::pipeline_descriptor::Pipeline;
