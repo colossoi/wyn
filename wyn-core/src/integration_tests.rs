@@ -884,6 +884,48 @@ entry r(xs: []u32) (?k. [k]u32, [1]u32) =
 }
 
 #[test]
+fn mixed_map_filter_outputs_keep_complete_phase_family() {
+    use crate::egir::parallelize::schedule::{KernelKind, OutputRouteProjection};
+    use crate::egir::program::OutputSlotId;
+
+    let source = r#"
+#[compute]
+entry mixed() ([]i32, []i32) =
+  let mapped = map(|i| i, iota(1))
+  let compacted = filter(|i| true, iota(1)) in
+  (mapped, compacted)
+"#;
+    let converted = crate::compile_thru_ssa(source).expect("mixed map/filter reaches SSA");
+    let phases = converted.kernel_plan.phases().collect::<Vec<_>>();
+    assert_eq!(
+        phases.iter().map(|phase| phase.kind).collect::<Vec<_>>(),
+        [
+            KernelKind::SerialCompute,
+            KernelKind::FilterFlags,
+            KernelKind::FilterScan,
+            KernelKind::FilterCombine,
+            KernelKind::FilterScan,
+            KernelKind::FilterScatter,
+        ]
+    );
+    assert_eq!(
+        phases[0].abi.output_routes,
+        [OutputRouteProjection {
+            semantic_slot: OutputSlotId(0),
+            physical_slot: OutputSlotId(0),
+        }]
+    );
+    assert_eq!(
+        phases[5].abi.output_routes,
+        [OutputRouteProjection {
+            semantic_slot: OutputSlotId(1),
+            physical_slot: OutputSlotId(0),
+        }]
+    );
+    assert!(!crate::compile_thru_spirv(source).expect("mixed map/filter emits SPIR-V").spirv.is_empty());
+}
+
+#[test]
 fn widened_filter_output_uses_output_element_size() {
     use crate::pipeline_descriptor::{BufferLen, BufferUsage, Pipeline};
 
@@ -1234,7 +1276,7 @@ fn terminal_scan_helpers_are_complete_region_arena_members() {
         !allocated.inner.functions.iter().any(|function| function.name.ends_with("_scan_op_swap")),
         "planner-generated scan helper leaked into semantic EGIR"
     );
-    let plan = crate::egir::parallelize::lower(&allocated.inner);
+    let plan = crate::egir::parallelize::lower(&allocated.inner).expect("parallel schedule");
     assert!(
         plan.generated_callables().any(|function| function.name.ends_with("_scan_op_swap")),
         "scan helper must be owned by the kernel plan"

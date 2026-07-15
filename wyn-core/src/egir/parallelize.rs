@@ -8,7 +8,7 @@
 pub(crate) mod prepare;
 pub mod schedule;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::LookupMap;
 
@@ -72,7 +72,7 @@ impl UnionFind {
 /// Pointwise `SegMap`s remain for `soac_expand`; `SegRed`s become a chunked
 /// phase 1 plus a synthesized tree reduction; `SegScan`s become chunk scans,
 /// an exclusive scan of block sums, and offset-application phases.
-pub fn lower(inner: &SemanticProgram) -> schedule::KernelPlan {
+pub fn lower(inner: &SemanticProgram) -> Result<schedule::KernelPlan, String> {
     use schedule::KernelPlan;
 
     let (mut schedule, seeded) = KernelPlan::seed(
@@ -82,9 +82,13 @@ pub fn lower(inner: &SemanticProgram) -> schedule::KernelPlan {
         &inner.region_interner,
     );
     attach_materializations(inner, &mut schedule);
-    lower_runtime_filters(inner, &seeded, &mut schedule);
+    let lowered_filters = lower_runtime_filters(inner, &seeded, &mut schedule)?;
     for (index, entry) in inner.entry_points.iter().enumerate() {
-        let Some(kernel) = seeded.entry(SemanticEntryId(index as u32)) else {
+        let source = SemanticEntryId(index as u32);
+        if lowered_filters.contains(&source) {
+            continue;
+        }
+        let Some(kernel) = seeded.entry(source) else {
             continue;
         };
         let body =
@@ -92,7 +96,7 @@ pub fn lower(inner: &SemanticProgram) -> schedule::KernelPlan {
         plan_segmented_kernel_body(body, kernel, &mut schedule, &inner.resources);
     }
     schedule.coalesce_resource_flows(&inner.resources);
-    schedule
+    Ok(schedule)
 }
 
 pub fn lower_sequential(inner: &SemanticProgram) -> schedule::KernelPlan {
@@ -242,16 +246,68 @@ fn lower_runtime_filters(
     inner: &SemanticProgram,
     seeded: &schedule::SeededKernels,
     schedule: &mut schedule::KernelPlan,
-) {
+) -> Result<HashSet<SemanticEntryId>, String> {
     use crate::interface::StorageRole;
     use schedule::KernelDomain;
+    let mut lowered = HashSet::new();
     for (index, entry) in inner.entry_points.iter().enumerate() {
-        let Some(kernel) = seeded.entry(SemanticEntryId(index as u32)) else {
+        let source = SemanticEntryId(index as u32);
+        let Some(seeded_kernel) = seeded.entry(source) else {
             continue;
         };
-        let Some(FilterAnalysis { space, work, len_out }) = analyze_filter_entry(entry, &inner.resources)
+        let Some(FilterAnalysis {
+            semantic_id,
+            space,
+            work,
+            len_out,
+        }) = analyze_filter_entry(entry, &inner.resources)
         else {
             continue;
+        };
+        let projected = super::program::PlannedEntry::project(entry)?;
+        let groups = if let Some(split) = split_multidomain_seg_maps(&projected) {
+            let mut groups = vec![SplitEntry {
+                entry: split.primary,
+                semantic_slots: split.primary_slots,
+            }];
+            groups.extend(split.entries);
+            groups
+        } else {
+            vec![SplitEntry {
+                entry: projected,
+                semantic_slots: (0..entry.outputs.len()).collect(),
+            }]
+        };
+        let mut filter_group = None;
+        for group in groups {
+            let kernel = if group.entry.name == entry.name {
+                seeded_kernel
+            } else {
+                schedule
+                    .add_sibling(
+                        seeded_kernel,
+                        group.entry.clone(),
+                        schedule::DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                        schedule::KernelKind::SerialCompute,
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            if contains_semantic_op(&group.entry, semantic_id) {
+                filter_group = Some((kernel, group.entry, group.semantic_slots));
+            } else {
+                plan_segmented_kernel_body(group.entry, kernel, schedule, &inner.resources);
+                schedule
+                    .set_output_projection(
+                        kernel,
+                        group.semantic_slots.iter().copied().map(super::program::OutputSlotId).collect(),
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        let Some((kernel, filter_entry, filter_slots)) = filter_group else {
+            return Err(format!(
+                "runtime filter {semantic_id:?} was lost during output splitting"
+            ));
         };
         let domain =
             schedule::domain_from_space(&space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
@@ -268,9 +324,9 @@ fn lower_runtime_filters(
         };
 
         let flags = project_kernel_body(
-            entry,
-            format!("{}_filter_flags", entry.name),
-            entry.execution_model.clone(),
+            &filter_entry,
+            format!("{}_filter_flags", filter_entry.name),
+            filter_entry.execution_model.clone(),
             Vec::new(),
             Vec::new(),
             vec![declaration(work.flags, StorageRole::Output)],
@@ -286,8 +342,8 @@ fn lower_runtime_filters(
         .map(|(resource, role)| declaration(resource, role))
         .collect();
         let mut scan = project_kernel_body(
-            entry,
-            format!("{}_filter_scan", entry.name),
+            &filter_entry,
+            format!("{}_filter_scan", filter_entry.name),
             crate::ssa::types::ExecutionModel::Compute {
                 local_size: (REDUCE_PHASE1_WIDTH, 1, 1),
             },
@@ -298,8 +354,8 @@ fn lower_runtime_filters(
         );
         let zero = graph_ops::intern_u32(&mut scan.graph, 0, None);
 
-        let add_name = format!("{}_filter_scan_add", entry.name);
-        let add_fn = synthesize_u32_add_function(add_name.clone(), entry.span);
+        let add_name = format!("{}_filter_scan_add", filter_entry.name);
+        let add_fn = synthesize_u32_add_function(add_name.clone(), filter_entry.span);
         schedule.define_callable(add_fn);
 
         let mut phase2 = synthesize_phase2_scan(
@@ -314,9 +370,13 @@ fn lower_runtime_filters(
         )
         .expect("filter scan phase-2 synthesis");
         apply_manifest_resource_sizes(&mut phase2, &inner.resources);
-        let swap_wrapper_name = format!("{}_filter_scan_add_offsets", entry.name);
-        let swap_wrapper =
-            synthesize_swap_wrapper(swap_wrapper_name.clone(), add_name, u32_ty.clone(), entry.span);
+        let swap_wrapper_name = format!("{}_filter_scan_add_offsets", filter_entry.name);
+        let swap_wrapper = synthesize_swap_wrapper(
+            swap_wrapper_name.clone(),
+            add_name,
+            u32_ty.clone(),
+            filter_entry.span,
+        );
         let swap_region = schedule.define_callable(swap_wrapper);
         let mut phase3 = synthesize_phase3_scan(
             &scan.name,
@@ -328,18 +388,18 @@ fn lower_runtime_filters(
         );
         apply_manifest_resource_sizes(&mut phase3, &inner.resources);
 
-        let mut scatter_resources = entry.resource_declarations.clone();
+        let mut scatter_resources = filter_entry.resource_declarations.clone();
         scatter_resources.push(declaration(work.flags, StorageRole::Input));
         scatter_resources.push(declaration(work.offsets, StorageRole::Input));
         scatter_resources.push(declaration(work.block_offsets, StorageRole::Input));
         let scatter = project_kernel_body(
-            entry,
-            entry.name.clone(),
-            entry.execution_model.clone(),
-            entry.outputs.clone(),
-            entry.output_routes.clone(),
+            &filter_entry,
+            filter_entry.name.clone(),
+            filter_entry.execution_model.clone(),
+            filter_entry.outputs.clone(),
+            filter_entry.output_routes.clone(),
             scatter_resources,
-            entry.return_ty.clone(),
+            filter_entry.return_ty.clone(),
         );
         schedule
             .commit_filter_kernel(
@@ -349,6 +409,12 @@ fn lower_runtime_filters(
                 filter::Plan::Scatter(work),
             )
             .expect("seeded filter kernel must remain addressable");
+        schedule
+            .set_output_projection(
+                kernel,
+                filter_slots.iter().copied().map(super::program::OutputSlotId).collect(),
+            )
+            .map_err(|error| error.to_string())?;
         schedule
             .add_filter_phase_before(
                 kernel,
@@ -391,13 +457,26 @@ fn lower_runtime_filters(
                 schedule::KernelKind::FilterScan,
             )
             .expect("seeded filter kernel must remain addressable");
+        lowered.insert(source);
     }
+    Ok(lowered)
 }
 
 struct FilterAnalysis {
+    semantic_id: SemanticOpId,
     space: SegSpace,
     work: filter::WorkBuffers,
     len_out: SemanticResourceRef,
+}
+
+fn contains_semantic_op(entry: &super::program::PlannedEntry, id: SemanticOpId) -> bool {
+    entry
+        .graph
+        .skeleton
+        .blocks
+        .iter()
+        .flat_map(|(_, block)| &block.side_effects)
+        .any(|effect| effect.semantic_id == Some(id))
 }
 
 fn analyze_filter_entry(entry: &SemanticEntry, resources: &[LogicalResource]) -> Option<FilterAnalysis> {
@@ -417,9 +496,11 @@ fn analyze_filter_entry(entry: &SemanticEntry, resources: &[LogicalResource]) ->
         let filter::RuntimeLength::EntryOutput(len_out) = length else {
             return None;
         };
-        let work = filter_work_buffers(effect.semantic_id?, resources)?;
+        let semantic_id = effect.semantic_id?;
+        let work = filter_work_buffers(semantic_id, resources)?;
         if analysis
             .replace(FilterAnalysis {
+                semantic_id,
                 space: space.clone(),
                 work,
                 len_out: *len_out,
@@ -434,7 +515,7 @@ fn analyze_filter_entry(entry: &SemanticEntry, resources: &[LogicalResource]) ->
 
 #[allow(clippy::too_many_arguments)]
 fn project_kernel_body(
-    source: &SemanticEntry,
+    source: &super::program::PlannedEntry,
     name: String,
     execution_model: crate::ssa::types::ExecutionModel,
     outputs: Vec<crate::ssa::types::EntryOutput>,
@@ -734,6 +815,20 @@ fn is_seg_map(se: &SideEffect) -> bool {
     )
 }
 
+fn is_parallel_output(se: &SideEffect) -> bool {
+    is_seg_map(se)
+        || matches!(
+            &se.kind,
+            SideEffectKind::Soac(Soac::Filter(filter::Op {
+                state: filter::SemanticState {
+                    storage: filter::Output::Runtime { .. },
+                    ..
+                },
+                ..
+            }))
+        )
+}
+
 /// True when the side-effect writes externally observable state: a `scatter`, a
 /// `filter` (compacted output + length cell), a SOAC writing a non-`Fresh`
 /// buffer (an `OutputView` output or an in-place `InputBuffer`), or a `Store`.
@@ -769,8 +864,9 @@ fn is_write_effectful(se: &SideEffect) -> bool {
 /// groups; fixed non-SOAC outputs each form their own group). Each group
 /// becomes its own entry and pipeline stage: the group owning the lowest slot
 /// keeps the entry's name, the rest become `{name}_dispatch_{slot}`. Only fires
-/// when at least two groups contain a parallel `SegMap`, so a single map
-/// alongside fixed slots stays one sharding kernel. Returns the new clones.
+/// when at least two groups contain a parallel map or runtime filter, so a
+/// single parallel output alongside fixed slots stays one kernel. Returns the
+/// new clones.
 struct SplitEntry {
     entry: super::program::PlannedEntry,
     semantic_slots: Vec<usize>,
@@ -801,16 +897,16 @@ fn split_multidomain_seg_maps(entry: &super::program::PlannedEntry) -> Option<En
             for &s in &slots[1..] {
                 groups.union(slots[0], s);
             }
-            producers.push(((bid, i), slots, is_seg_map(se)));
+            producers.push(((bid, i), slots, is_parallel_output(se)));
         }
     }
 
     // Assign each producing side-effect to its group root; collect each group's
-    // slots and whether it contains a parallel map.
+    // slots and whether it contains a parallel output operation.
     let mut group_of: LookupMap<(BlockId, usize), usize> = LookupMap::new();
     let mut group_slots: LookupMap<usize, Vec<usize>> = LookupMap::new();
     let mut parallel_groups: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for (loc, slots, is_map) in &producers {
+    for (loc, slots, is_parallel) in &producers {
         let root = groups.find(slots[0]);
         group_of.insert(*loc, root);
         let entry_slots = group_slots.entry(root).or_default();
@@ -819,7 +915,7 @@ fn split_multidomain_seg_maps(entry: &super::program::PlannedEntry) -> Option<En
                 entry_slots.push(s);
             }
         }
-        if *is_map {
+        if *is_parallel {
             parallel_groups.insert(root);
         }
     }

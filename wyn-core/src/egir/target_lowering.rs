@@ -18,7 +18,7 @@ pub fn schedule(
     let unpublished_descriptor = inner.pipeline.clone();
 
     let kernel_plan = if profile.schedule == SchedulePolicy::Parallel {
-        parallelize::lower(&inner)
+        parallelize::lower(&inner).map_err(ConvertError::Internal)?
     } else {
         parallelize::lower_sequential(&inner)
     };
