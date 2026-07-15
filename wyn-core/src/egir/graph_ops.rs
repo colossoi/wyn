@@ -15,6 +15,7 @@
 use crate::LookupMap;
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
+use std::collections::HashSet;
 
 use crate::ast::{Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};
@@ -23,9 +24,139 @@ use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
 use crate::BindingRef;
 
 use super::types::{
-    EGraph, ENode, EffectToken, EgirPhase, NodeId, Physical, PureOp, PureViewSource, Semantic, SideEffect,
-    SideEffectKind, Soac,
+    EGraph, ENode, EffectToken, EgirPhase, GraphResource, NodeId, Physical, PureOp, PureViewSource, Raw,
+    Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac,
 };
+
+#[cfg(test)]
+#[path = "graph_ops_tests.rs"]
+mod graph_ops_tests;
+
+/// Phase-specific SOAC metadata that contributes to a produced value.
+///
+/// Raw SOACs have captures and operator seeds but no resolved segmented
+/// iteration space.  Semantic SOACs additionally expose their resolved space
+/// through `SideEffect::referenced_nodes`.
+pub(crate) trait ValueProducerPhase: EgirPhase {
+    fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<NodeId>;
+}
+
+impl<R: GraphResource> ValueProducerPhase for Raw<R> {
+    fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<NodeId> {
+        let mut nodes = effect.operand_nodes.to_vec();
+        let SideEffectKind::Soac(soac) = &effect.kind else {
+            return nodes;
+        };
+        nodes.extend(soac.seg_bodies().into_iter().flat_map(|body| body.captures.iter().copied()));
+        if let Soac::Screma(op) = soac {
+            for operator in op.operators() {
+                nodes.push(operator.neutral);
+                nodes.extend(operator.shape.iter().copied());
+            }
+        }
+        nodes
+    }
+}
+
+impl<R: GraphResource> ValueProducerPhase for Semantic<R> {
+    fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<NodeId> {
+        effect.referenced_nodes().collect()
+    }
+}
+
+/// The complete value-producing closure behind one or more EGIR values.
+///
+/// `ENode::children` covers floating pure expressions, but intentionally has
+/// no edges for effect results or block parameters.  Analyses that need the
+/// actual producer must also follow an effect result to its anchored effect and
+/// a block parameter to every incoming CFG argument.  Keeping both visited
+/// sets makes loop-carried values finite even though those additional edges can
+/// form cycles.
+#[derive(Debug, Default)]
+pub(crate) struct ValueProducerClosure {
+    pub(crate) nodes: HashSet<NodeId>,
+    pub(crate) effects: HashSet<SideEffectSite>,
+}
+
+/// Follow pure tails, value-producing effects, and CFG block arguments to the
+/// values that can contribute to `roots`.
+pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
+    graph: &EGraph<P>,
+    roots: impl IntoIterator<Item = NodeId>,
+) -> ValueProducerClosure {
+    let producer_index = graph.side_effect_index();
+    let mut closure = ValueProducerClosure::default();
+    let mut pending = roots.into_iter().collect::<Vec<_>>();
+
+    while let Some(node) = pending.pop() {
+        if !closure.nodes.insert(node) {
+            continue;
+        }
+        let Some(definition) = graph.nodes.get(node) else {
+            continue;
+        };
+        match definition {
+            ENode::Pure { operands, .. } => pending.extend(operands.iter().copied()),
+            ENode::Union { left, right } => pending.extend([*left, *right]),
+            ENode::BlockParam { block, index } => {
+                extend_incoming_block_args(graph, *block, *index, &mut pending);
+            }
+            ENode::SideEffectResult => {
+                let Some(site) = producer_index.site(node) else {
+                    continue;
+                };
+                if closure.effects.insert(site) {
+                    pending.extend(P::effect_value_inputs(
+                        &graph.skeleton.blocks[site.block].side_effects[site.index],
+                    ));
+                }
+            }
+            ENode::FuncParam { .. } | ENode::Constant(_) => {}
+        }
+    }
+
+    closure
+}
+
+fn extend_incoming_block_args<P: EgirPhase>(
+    graph: &EGraph<P>,
+    target: BlockId,
+    index: usize,
+    pending: &mut Vec<NodeId>,
+) {
+    for (_, predecessor) in &graph.skeleton.blocks {
+        match &predecessor.term {
+            SkeletonTerminator::Branch {
+                target: branch_target,
+                args,
+            } if *branch_target == target => {
+                pending.extend(args.get(index).copied());
+            }
+            SkeletonTerminator::CondBranch {
+                cond,
+                then_target,
+                then_args,
+                else_target,
+                else_args,
+                ..
+            } => {
+                let mut reaches_target = false;
+                if *then_target == target {
+                    pending.extend(then_args.get(index).copied());
+                    reaches_target = true;
+                }
+                if *else_target == target {
+                    pending.extend(else_args.get(index).copied());
+                    reaches_target = true;
+                }
+                if reaches_target {
+                    pending.push(*cond);
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Pure ops

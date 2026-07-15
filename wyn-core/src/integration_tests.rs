@@ -2936,19 +2936,19 @@ entry eqn<[n]>(xs: [n]f32, ys: [n]f32) ([n]f32, [n]f32) =
     );
 }
 
-/// When a split entry's maps capture a storage entry param (`table`), every
-/// synthesized stage declares that buffer in its `reads`. The host binds each
-/// stage's inputs from that list, so a captured buffer missing from `reads`
-/// would be read unbound. Pins that captures — not just SOAC inputs — reach the
-/// descriptor.
+/// When split maps capture a scalar produced by loading `table`, every stage
+/// still publishes the transitive storage read. The load is a value-producing
+/// effect outside the maps, so a pure-node-only walk would leave the source
+/// buffer unbound.
 #[test]
-fn split_stage_reads_include_captured_storage_param() {
-    use crate::pipeline_descriptor::{Binding, Pipeline};
+fn split_stage_reads_include_storage_behind_scalar_producer() {
+    use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize, Pipeline};
     let lowered = crate::compile_thru_spirv(
         r#"
 #[compute]
 entry cap(a: []f32, b: []f32, table: []f32) ([]f32, []f32) =
-    (map(|x: f32| x + table[0], a), map(|y: f32| y + table[0], b))
+    let scalar = table[0] in
+    (map(|x: f32| x + scalar, a), map(|y: f32| y + scalar, b))
 "#,
     )
     .expect("cap compiles");
@@ -2967,26 +2967,58 @@ entry cap(a: []f32, b: []f32, table: []f32) ([]f32, []f32) =
         "a and b are distinct domains → two stages"
     );
 
-    // `table` is the third input param, bound at (set 0, binding 2).
-    let table_idx = compute
-        .bindings
-        .iter()
-        .position(|b| {
-            matches!(
-                b,
-                Binding::StorageBuffer {
-                    set: 0,
-                    binding: 2,
+    let dispatch_binding = |stage: &crate::pipeline_descriptor::ComputeStage| {
+        let DispatchSize::DerivedFrom {
+            len: DispatchLen::InputBinding { set, binding, .. },
+            ..
+        } = stage.dispatch_size
+        else {
+            panic!("map stage must retain its input-buffer dispatch domain")
+        };
+        compute
+            .bindings
+            .iter()
+            .position(|candidate| {
+                matches!(candidate, Binding::StorageBuffer {
+                    set: candidate_set,
+                    binding: candidate_binding,
                     ..
-                }
-            )
-        })
-        .expect("captured `table` buffer is declared in the pipeline bindings");
-    for (i, stage) in compute.stages.iter().enumerate() {
+                } if *candidate_set == set && *candidate_binding == binding)
+            })
+            .expect("dispatch input is published in the pipeline binding table")
+    };
+    let domains = compute.stages.iter().map(dispatch_binding).collect::<Vec<_>>();
+    assert_ne!(
+        domains[0], domains[1],
+        "the maps retain their distinct input domains"
+    );
+    for (stage, domain) in compute.stages.iter().zip(&domains) {
         assert!(
-            stage.reads.contains(&table_idx),
-            "stage {i} captures `table`, so it must read that buffer; reads = {:?}",
-            stage.reads
+            stage.reads.contains(domain),
+            "each map stage reads the input that supplies its dispatch domain"
+        );
+    }
+
+    let shared_reads = compute.stages[0]
+        .reads
+        .iter()
+        .copied()
+        .filter(|binding| compute.stages[1].reads.contains(binding))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shared_reads.len(),
+        1,
+        "the scalar source must be the one shared read of both map stages; reads = {:?}",
+        compute.stages.iter().map(|stage| &stage.reads).collect::<Vec<_>>()
+    );
+    assert!(
+        matches!(compute.bindings[shared_reads[0]], Binding::StorageBuffer { .. }),
+        "the shared scalar producer must retain its storage-buffer source"
+    );
+    for domain in domains {
+        assert_ne!(
+            shared_reads[0], domain,
+            "the transitive scalar source is separate from each map's dispatch input"
         );
     }
 }

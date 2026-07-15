@@ -107,13 +107,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
 
     for consumer_index in 0..records.len() {
         let consumer = &records[consumer_index];
-        let reachable = wyn_graph::reachable_set(
-            consumer.effect.referenced_nodes(),
-            wyn_graph::WalkOrder::DepthFirst,
-            |node, dependencies| {
-                dependencies.extend(graph.nodes[node].children());
-            },
-        );
+        let reachable = graph_ops::value_producer_closure(graph, consumer.effect.referenced_nodes()).nodes;
         for producer in &records[..consumer_index] {
             if reachable.contains(&producer.result) {
                 push_dependency(
@@ -174,17 +168,11 @@ fn push_dependency(
 }
 
 pub(crate) fn read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResourceAccess> {
-    let mut bindings = HashSet::new();
-    wyn_graph::for_each_reachable(
-        se.referenced_nodes(),
-        wyn_graph::WalkOrder::DepthFirst,
-        |node, out| out.extend(graph.nodes[node].children()),
-        |node| {
-            if let Some(binding) = graph_ops::extract_storage_view_source(graph, node) {
-                bindings.insert(binding);
-            }
-        },
-    );
+    let bindings = graph_ops::value_producer_closure(graph, se.referenced_nodes())
+        .nodes
+        .into_iter()
+        .filter_map(|node| graph_ops::extract_storage_view_source(graph, node))
+        .collect::<HashSet<_>>();
     let mut result: Vec<_> = bindings
         .into_iter()
         .map(|resource| SegResourceAccess {

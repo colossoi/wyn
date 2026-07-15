@@ -466,17 +466,11 @@ fn read_resources(
     graph: &EGraph<Raw>,
     effect: &SideEffect<Raw>,
 ) -> Vec<SegResourceAccess<SemanticResourceRef>> {
-    let mut resources = HashSet::new();
-    wyn_graph::for_each_reachable(
-        referenced_nodes(effect),
-        wyn_graph::WalkOrder::DepthFirst,
-        |node, out| out.extend(graph.nodes[node].children()),
-        |node| {
-            if let Some(resource) = graph_ops::extract_storage_view_source(graph, node) {
-                resources.insert(resource);
-            }
-        },
-    );
+    let resources = graph_ops::value_producer_closure(graph, referenced_nodes(effect))
+        .nodes
+        .into_iter()
+        .filter_map(|node| graph_ops::extract_storage_view_source(graph, node))
+        .collect::<HashSet<_>>();
     let mut resources = resources
         .into_iter()
         .map(|resource| SegResourceAccess {
@@ -497,9 +491,7 @@ fn soac_consumed_nodes(graph: &EGraph<Raw>) -> HashSet<NodeId> {
         .filter(|effect| matches!(effect.kind, SideEffectKind::Soac(_)))
         .flat_map(referenced_nodes)
         .collect::<Vec<_>>();
-    wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
-        out.extend(graph.nodes[node].children());
-    })
+    graph_ops::value_producer_closure(graph, roots).nodes
 }
 
 fn referenced_nodes(effect: &SideEffect<Raw>) -> Vec<NodeId> {

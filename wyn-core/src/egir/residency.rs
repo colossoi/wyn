@@ -512,12 +512,7 @@ fn runtime_composite(ty: &Type<TypeName>) -> bool {
 }
 
 fn depends_on(graph: &EGraph, root: NodeId, target: NodeId) -> bool {
-    wyn_graph::reachable_set([root], wyn_graph::WalkOrder::DepthFirst, |node, pending| {
-        if let Some(definition) = graph.nodes.get(node) {
-            pending.extend(definition.children());
-        }
-    })
-    .contains(&target)
+    graph_ops::value_producer_closure(graph, [root]).nodes.contains(&target)
 }
 
 fn requires_array_residency(
@@ -581,11 +576,7 @@ fn invocation_invariant(
     for &index in effects {
         roots.extend(block.side_effects[index].referenced_nodes());
     }
-    let reachable = wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |node, pending| {
-        if let Some(definition) = entry.graph.nodes.get(node) {
-            pending.extend(definition.children());
-        }
-    });
+    let reachable = graph_ops::value_producer_closure(&entry.graph, roots).nodes;
     reachable.into_iter().all(|node| {
         let Some(ENode::FuncParam { index }) = entry.graph.nodes.get(node) else {
             return true;
@@ -961,11 +952,7 @@ fn compact_graphics_materialization(entry: &mut super::program::SemanticEntry) {
         .blocks
         .iter()
         .flat_map(|(_, block)| block.side_effects.iter().flat_map(|effect| effect.referenced_nodes()));
-    let reachable = wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |node, pending| {
-        if let Some(definition) = entry.graph.nodes.get(node) {
-            pending.extend(definition.children());
-        }
-    });
+    let reachable = graph_ops::value_producer_closure(&entry.graph, roots).nodes;
     let mut kept = reachable
         .into_iter()
         .filter_map(|node| match entry.graph.nodes.get(node) {
@@ -1068,19 +1055,12 @@ fn dependency_resources(
     let mut dependencies = HashSet::new();
     for &effect_index in effects {
         let effect = &block.side_effects[effect_index];
-        wyn_graph::for_each_reachable(
-            effect.referenced_nodes(),
-            wyn_graph::WalkOrder::DepthFirst,
-            |node, nodes| {
-                if let Some(definition) = graph.nodes.get(node) {
-                    nodes.extend(definition.children());
-                }
-            },
-            |node| {
-                if let Some(resource) = graph_ops::extract_storage_view_source(graph, node) {
-                    dependencies.insert(resource.0);
-                }
-            },
+        dependencies.extend(
+            graph_ops::value_producer_closure(graph, effect.referenced_nodes())
+                .nodes
+                .into_iter()
+                .filter_map(|node| graph_ops::extract_storage_view_source(graph, node))
+                .map(|resource| resource.0),
         );
         match &effect.kind {
             SideEffectKind::Soac(Soac::Screma(op)) => {
