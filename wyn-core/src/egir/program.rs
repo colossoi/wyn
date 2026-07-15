@@ -786,32 +786,42 @@ fn physicalize_soac(
 
     Ok(match soac {
         Soac::Screma(screma::Op { body, state }) => {
-            let segmented_map = matches!(body.kind, screma::Kind::Map);
             let body = screma_body(body, nodes);
             let state = match state {
                 screma::ScheduledState::Serial => screma::PhysicalState::Serial,
-                screma::ScheduledState::Segmented {
+                screma::ScheduledState::SegMap {
                     space: iteration_space,
                     output_slots,
                     resources,
-                } => {
-                    if !segmented_map {
-                        return Err("scheduled segmented reduce/scan reached physicalization".into());
-                    }
-                    screma::PhysicalState::SegMap {
-                        space: space(iteration_space, nodes, bindings)?,
-                        output_slots,
-                        resources: resources
-                            .into_iter()
-                            .map(|resource| {
-                                Ok(super::types::SegResourceAccess {
-                                    resource: binding(resource.resource, bindings)?,
-                                    access: resource.access,
-                                })
+                } => screma::PhysicalState::SegMap {
+                    space: space(iteration_space, nodes, bindings)?,
+                    output_slots,
+                    resources: resources
+                        .into_iter()
+                        .map(|resource| {
+                            Ok(super::types::SegResourceAccess {
+                                resource: binding(resource.resource, bindings)?,
+                                access: resource.access,
                             })
-                            .collect::<Result<_, String>>()?,
-                    }
+                        })
+                        .collect::<Result<_, String>>()?,
+                },
+                screma::ScheduledState::SegRed { .. } => {
+                    return Err(
+                        "scheduled SegRed reached physicalization; split it into physical kernels first"
+                            .into(),
+                    )
                 }
+                screma::ScheduledState::SegScan { .. } => {
+                    return Err(
+                        "scheduled SegScan reached physicalization; split it into physical kernels first"
+                            .into(),
+                    )
+                }
+                screma::ScheduledState::SegComposite { .. } => return Err(
+                    "scheduled SegComposite reached physicalization; split it into physical kernels first"
+                        .into(),
+                ),
             };
             Soac::Screma(screma::Op { body, state })
         }

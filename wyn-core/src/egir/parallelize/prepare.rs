@@ -76,13 +76,28 @@ fn schedule_soac_with_mode(
                     placement,
                     output_slots,
                     resources,
-                } if !serial && placement == screma::Placement::Kernel => {
-                    screma::ScheduledState::Segmented {
+                } if !serial && placement == screma::Placement::Kernel => match body.kind {
+                    screma::Kind::Map => screma::ScheduledState::SegMap {
                         space,
                         output_slots,
                         resources,
-                    }
-                }
+                    },
+                    screma::Kind::Reduce(_) => screma::ScheduledState::SegRed {
+                        space,
+                        output_slots,
+                        resources,
+                    },
+                    screma::Kind::Scan(_) => screma::ScheduledState::SegScan {
+                        space,
+                        output_slots,
+                        resources,
+                    },
+                    screma::Kind::Composite(_) => screma::ScheduledState::SegComposite {
+                        space,
+                        output_slots,
+                        resources,
+                    },
+                },
                 screma::SemanticState::Segmented { .. } => screma::ScheduledState::Serial,
             };
             Soac::Screma(screma::Op { body, state })
@@ -127,7 +142,13 @@ pub(crate) fn force_serial(graph: &mut EGraph<Scheduled>) {
             let SideEffectKind::Soac(Soac::Screma(op)) = &mut effect.kind else {
                 continue;
             };
-            if matches!(op.state, screma::ScheduledState::Segmented { .. }) {
+            if matches!(
+                op.state,
+                screma::ScheduledState::SegMap { .. }
+                    | screma::ScheduledState::SegRed { .. }
+                    | screma::ScheduledState::SegScan { .. }
+                    | screma::ScheduledState::SegComposite { .. }
+            ) {
                 op.state = screma::ScheduledState::Serial;
             }
         }
@@ -140,7 +161,10 @@ pub(crate) fn kernel_effect(graph: &EGraph<Scheduled>) -> Option<(BlockId, usize
             matches!(
                 &effect.kind,
                 SideEffectKind::Soac(Soac::Screma(screma::Op {
-                    state: screma::ScheduledState::Segmented { .. },
+                    state: screma::ScheduledState::SegMap { .. }
+                        | screma::ScheduledState::SegRed { .. }
+                        | screma::ScheduledState::SegScan { .. }
+                        | screma::ScheduledState::SegComposite { .. },
                     ..
                 })) | SideEffectKind::Soac(Soac::Filter(filter::Op {
                     state: filter::ScheduledState::Parallel { .. },

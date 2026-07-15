@@ -300,13 +300,31 @@ pub enum SemanticState<R> {
 #[derive(Clone, Debug)]
 pub enum ScheduledState<R> {
     Serial,
-    Segmented {
+    SegMap {
+        space: SegSpace<R>,
+        output_slots: Vec<OutputSlotId>,
+        resources: Vec<SegResourceAccess<R>>,
+    },
+    SegRed {
+        space: SegSpace<R>,
+        output_slots: Vec<OutputSlotId>,
+        resources: Vec<SegResourceAccess<R>>,
+    },
+    SegScan {
+        space: SegSpace<R>,
+        output_slots: Vec<OutputSlotId>,
+        resources: Vec<SegResourceAccess<R>>,
+    },
+    SegComposite {
         space: SegSpace<R>,
         output_slots: Vec<OutputSlotId>,
         resources: Vec<SegResourceAccess<R>>,
     },
 }
 
+/// Executable Screma states. Parallel reductions, scans, and composites must
+/// be split into physical kernels before this boundary; only an unsplit map
+/// reaches the physical graph.
 #[derive(Clone, Debug)]
 pub enum PhysicalState {
     Serial,

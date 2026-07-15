@@ -1302,7 +1302,11 @@ fn semantic_domain_graph(graph: &crate::egir::types::EGraph) -> Option<KernelDom
 fn scheduled_domain_graph(graph: &crate::egir::types::EGraph<Scheduled>) -> Option<KernelDomain> {
     match &super::prepare::kernel_effect(graph)?.2.kind {
         SideEffectKind::Soac(Soac::Screma(screma::Op {
-            state: screma::ScheduledState::Segmented { space, .. },
+            state:
+                screma::ScheduledState::SegMap { space, .. }
+                | screma::ScheduledState::SegRed { space, .. }
+                | screma::ScheduledState::SegScan { space, .. }
+                | screma::ScheduledState::SegComposite { space, .. },
             ..
         })) => domain_from_space(space),
         SideEffectKind::Soac(Soac::Filter(filter::Op {
@@ -1384,7 +1388,11 @@ fn segmented_graph_resources(
         return Some(resources);
     }
     let SideEffectKind::Soac(Soac::Screma(screma::Op {
-        state: screma::ScheduledState::Segmented { resources, .. },
+        state:
+            screma::ScheduledState::SegMap { resources, .. }
+            | screma::ScheduledState::SegRed { resources, .. }
+            | screma::ScheduledState::SegScan { resources, .. }
+            | screma::ScheduledState::SegComposite { resources, .. },
         ..
     })) = &side_effect.kind
     else {
