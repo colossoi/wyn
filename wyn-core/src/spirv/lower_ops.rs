@@ -400,6 +400,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     pub(super) fn lower_primop(
         &mut self,
         prim_op: &PrimOp,
+        value_refs: &[ValueRef],
         arg_ids: &[spirv::Word],
         result_ty: spirv::Word,
     ) -> Result<spirv::Word> {
@@ -485,10 +486,16 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 Ok(self.constructor.builder.convert_u_to_f(result_ty, None, arg_ids[0])?)
             }
             PrimOp::Bitcast => {
-                if arg_ids.len() != 1 {
+                if arg_ids.len() != 1 || value_refs.len() != 1 {
                     bail_spirv!("Bitcast requires 1 arg");
                 }
-                Ok(self.constructor.builder.bitcast(result_ty, None, arg_ids[0])?)
+                let operand_ty = self.get_value_type_ref(value_refs[0]);
+                let operand_ty = self.constructor.polytype_to_spirv(&operand_ty);
+                if operand_ty == result_ty {
+                    Ok(arg_ids[0])
+                } else {
+                    Ok(self.constructor.builder.bitcast(result_ty, None, arg_ids[0])?)
+                }
             }
             PrimOp::IsNan => {
                 if arg_ids.len() != 1 {

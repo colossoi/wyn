@@ -16,7 +16,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         inst: &WynInstNode,
     ) -> Result<spirv::Word> {
         match builtin {
-            BuiltinLowering::PrimOp(prim_op) => self.lower_primop(prim_op, arg_ids, result_ty),
+            BuiltinLowering::PrimOp(prim_op) => self.lower_primop(prim_op, value_refs, arg_ids, result_ty),
             BuiltinLowering::LinkedSpirv(linkage_name) => {
                 let func_id = self
                     .constructor
@@ -274,7 +274,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                                 arg_ids[0],
                                 [1u32],
                             )?;
-                            Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
+                            if result_ty == u32_ty {
+                                Ok(len_u32)
+                            } else {
+                                Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
+                            }
                         }
                         // Virtual (range): struct {start, step, len} — len field
                         // type matches element type (may be u32), but SSA result
@@ -400,7 +404,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         buffer_var,
                         0,
                     )?;
-                    Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
+                    if result_ty == self.constructor.u32_type {
+                        Ok(len_u32)
+                    } else {
+                        Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
+                    }
                 } else if id == known.thread_id {
                     let gid_var = self
                         .constructor

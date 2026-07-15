@@ -5,9 +5,11 @@
 //! - `Index(Tuple/Vector/ArrayLit(a,b,…), const k) → k-th operand`
 //! - identity elim: `x+0`, `0+x`, `x-0`, `x*1`, `1*x`, `x/1`
 //! - absorbing:    `x*0 → 0`, `0*x → 0`
+//! - reciprocal:   `x/c → x*(1/c)` for a finite, non-zero f32 constant `c`
 //! - double negation: `-(-x) → x`, `!(!x) → x`
 //! - negate literal:   `-(c) → const` for an i32/f32 literal `c`
 //! - constant-constant: `BinOp(c1, c2) → const` for `+ - * /` over i32/u32/f32
+//! - redundant bitcasts: identity bitcasts and inverse bitcast pairs are removed
 //!
 //! Rules never keep borrows across mutations: constant folding extracts
 //! operand values first, then interns the result.
@@ -16,6 +18,7 @@ use crate::ast::TypeName;
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::builtins::{by_id, Purity};
 use crate::ssa::types::ConstantValue;
+use crate::types::TypeExt;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -36,6 +39,7 @@ impl<P: EgirPhase> EGraph<P> {
                 let (a, b) = (operands[0], operands[1]);
                 self.fold_binop_identity(name, a, b)
                     .or_else(|| self.fold_binop_const(name, a, b, result_ty))
+                    .or_else(|| self.fold_fdiv_const_to_mul(name, a, b, result_ty))
                     .or_else(|| self.fold_pow_to_mul_chain(name, a, b, result_ty))
             }
             PureOp::UnaryOp(name) if operands.len() == 1 => self.fold_unary(name, operands[0], result_ty),
@@ -127,6 +131,45 @@ impl<P: EgirPhase> EGraph<P> {
             }
             _ => None,
         }
+    }
+
+    /// `x / c → x * (1 / c)` for a runtime f32 scalar/vector and a
+    /// finite, non-zero f32 scalar constant. Constant/constant division has
+    /// already folded before this rule runs. Avoid materializing infinities
+    /// for zero or a reciprocal-overflowing subnormal divisor.
+    fn fold_fdiv_const_to_mul(
+        &mut self,
+        name: &str,
+        value: NodeId,
+        divisor: NodeId,
+        result_ty: &Type<TypeName>,
+    ) -> Option<NodeId> {
+        let f32_result = matches!(result_ty, Type::Constructed(TypeName::Float(32), _));
+        let f32_vector_result = result_ty.is_vec()
+            && matches!(
+                result_ty.elem_type(),
+                Some(Type::Constructed(TypeName::Float(32), _))
+            );
+        if name != "/" || (!f32_result && !f32_vector_result) {
+            return None;
+        }
+
+        let divisor_ty = self.types.get(&divisor)?.clone();
+        if !matches!(divisor_ty, Type::Constructed(TypeName::Float(32), _)) {
+            return None;
+        }
+        let divisor = self.as_f32(divisor)?;
+        let reciprocal = 1.0f32 / divisor;
+        if divisor == 0.0 || !divisor.is_finite() || !reciprocal.is_finite() {
+            return None;
+        }
+
+        let reciprocal = self.intern_constant(ConstantValue::from_f32(reciprocal), divisor_ty);
+        Some(self.intern_pure(
+            PureOp::BinOp("*".into()),
+            smallvec![value, reciprocal],
+            result_ty.clone(),
+        ))
     }
 
     /// `x ** k` → left-to-right multiply chain for small positive integer
@@ -231,6 +274,31 @@ impl<P: EgirPhase> EGraph<P> {
             return None;
         }
         let lowering = &def.overloads().get(overload_idx)?.lowering;
+        if matches!(lowering, BuiltinLowering::PrimOp(PrimOp::Bitcast)) && operands.len() == 1 {
+            let operand = operands[0];
+            if self.types.get(&operand) == Some(result_ty) {
+                return Some(operand);
+            }
+            if let ENode::Pure {
+                op:
+                    PureOp::Intrinsic {
+                        id: inner_id,
+                        overload_idx: inner_overload_idx,
+                    },
+                operands: inner_operands,
+            } = &self.nodes[operand]
+            {
+                let inner_def = by_id(*inner_id);
+                let inner_lowering = &inner_def.overloads().get(*inner_overload_idx)?.lowering;
+                if inner_def.raw.purity == Purity::Pure
+                    && matches!(inner_lowering, BuiltinLowering::PrimOp(PrimOp::Bitcast))
+                    && inner_operands.len() == 1
+                    && self.types.get(&inner_operands[0]) == Some(result_ty)
+                {
+                    return Some(inner_operands[0]);
+                }
+            }
+        }
         let value = match lowering {
             BuiltinLowering::PrimOp(PrimOp::GlslExt(8)) if operands.len() == 1 => {
                 ConstantValue::from_f32(self.as_f32(operands[0])?.floor())

@@ -7415,6 +7415,48 @@ fn assert_array_length_queried_on_descriptor(spirv_words: &[u32], set: u32, bind
     );
 }
 
+/// An `OpArrayLength` already produces `u32`; consuming it as `u32` must not
+/// insert the identity `OpBitcast %uint` that older storage-length lowering
+/// emitted. A cast to a genuinely different type remains legal.
+fn assert_array_lengths_have_no_identity_bitcasts(spirv_words: &[u32]) {
+    use std::collections::{HashMap, HashSet};
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::Op;
+
+    let mut loader = Loader::new();
+    parse_words(spirv_words, &mut loader).expect("parse spirv");
+    let module = loader.module();
+    let instructions = module
+        .functions
+        .iter()
+        .flat_map(|function| function.blocks.iter().flat_map(|block| block.instructions.iter()));
+
+    let mut result_types = HashMap::new();
+    let mut array_lengths = HashSet::new();
+    let instructions: Vec<_> = instructions.collect();
+    for inst in &instructions {
+        if let (Some(result_id), Some(result_type)) = (inst.result_id, inst.result_type) {
+            result_types.insert(result_id, result_type);
+            if inst.class.opcode == Op::ArrayLength {
+                array_lengths.insert(result_id);
+            }
+        }
+    }
+
+    for inst in instructions {
+        if inst.class.opcode != Op::Bitcast {
+            continue;
+        }
+        let Some(Operand::IdRef(source)) = inst.operands.first() else {
+            continue;
+        };
+        if array_lengths.contains(source) && result_types.get(source) == inst.result_type.as_ref() {
+            panic!("OpArrayLength result %{source} is followed by a redundant identity OpBitcast");
+        }
+    }
+}
+
 /// `length(view)` on an entry param must query *its* descriptor. The binding is
 /// baked into `_w_storage_len(set, binding)` as constants (not the side-map), so
 /// this also pins that the right `(set, binding)` reaches the `OpArrayLength`.
@@ -7427,6 +7469,7 @@ fn entry_length_queries_own_buffer() {
     "#;
     let lowered = crate::compile_thru_spirv(src).expect("entry length(view) compiles");
     assert_array_length_queried_on_descriptor(&lowered.spirv, 2, 0);
+    assert_array_lengths_have_no_identity_bitcasts(&lowered.spirv);
     // and the indexed read still hits the same descriptor
     assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
 }
