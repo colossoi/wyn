@@ -464,8 +464,10 @@ fn expand_one(
                     let mut new_carried = Vec::with_capacity(carried_nids.len());
                     for map_idx in 0..n_maps {
                         let out_nid = carried_nids[map_carried_indices[map_idx]];
-                        let mut map_operands: smallvec::SmallVec<[NodeId; 4]> =
-                            map_input_indices[map_idx].iter().map(|&i| elem_nids[i]).collect();
+                        let mut map_operands: smallvec::SmallVec<[NodeId; 4]> = map_input_indices[map_idx]
+                            .iter()
+                            .map(|input| elem_nids[input.index()])
+                            .collect();
                         map_operands.extend(map_captures[map_idx].iter().copied());
                         let mapped = graph.intern_pure(
                             PureOp::Call(map_funcs[map_idx].clone()),
@@ -512,7 +514,10 @@ fn expand_one(
                             reduce_operands.extend(elem_nids.iter().copied());
                         } else {
                             reduce_operands.extend(
-                                acc_specs[acc_idx].input_indices.iter().map(|&index| elem_nids[index]),
+                                acc_specs[acc_idx]
+                                    .input_indices
+                                    .iter()
+                                    .map(|input| elem_nids[input.index()]),
                             );
                         }
                         reduce_operands.extend(acc_step_captures[acc_idx].iter().copied());
@@ -892,7 +897,7 @@ struct ScremaMapsIntoLoop {
     /// Which `read_inputs` each lane consumes: `func_input_indices[k]` lists the
     /// input positions whose elements feed `funcs[k]`, in order, before its
     /// captures. One entry per func.
-    func_input_indices: Vec<Vec<usize>>,
+    func_input_indices: Vec<Vec<screma::InputId>>,
     output_views: Vec<NodeId>,
     output_elem_tys: Vec<Type<TypeName>>,
     result_node: NodeId,
@@ -975,7 +980,7 @@ fn build_parallel_maps(
 
     for map_idx in 0..spec.funcs.len() {
         let mut call_operands: smallvec::SmallVec<[NodeId; 4]> =
-            spec.func_input_indices[map_idx].iter().map(|&i| elems[i]).collect();
+            spec.func_input_indices[map_idx].iter().map(|input| elems[input.index()]).collect();
         call_operands.extend(spec.captures[map_idx].iter().copied());
         let y_nid = graph.intern_pure(
             PureOp::Call(spec.funcs[map_idx].clone()),

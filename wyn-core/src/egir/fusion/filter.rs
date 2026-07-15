@@ -181,12 +181,9 @@ fn is_reduction_of_filter(effect: &SideEffect, filter_result: NodeId) -> bool {
     n_inputs != 0
         && op.body.maps.is_empty()
         && effect.operand_nodes[..n_inputs].iter().all(|&input| input == filter_result)
-        && op
-            .body
-            .kind
-            .operators()
-            .into_iter()
-            .all(|operator| operator.input_indices.len() == 1 && operator.input_indices[0] < n_inputs)
+        && op.body.kind.operators().into_iter().all(|operator| {
+            operator.input_indices.len() == 1 && operator.input_indices[0].index() < n_inputs
+        })
 }
 
 fn intervening_ops_are_safe(
@@ -304,7 +301,7 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
         let (step, function) = masked_step(inner, &scope, span, index, &filter, operator, &outer_types);
         inner.define_region(function);
         operator.step = step;
-        operator.input_indices = vec![0];
+        operator.input_indices = vec![screma::InputId(0)];
     }
 
     let count_ty = candidate.lengths.first().map(|length| outer_types[length].clone());
@@ -780,7 +777,7 @@ fn count_operator(
                 region: combine_region,
                 captures: vec![],
             },
-            input_indices: vec![0],
+            input_indices: vec![screma::InputId(0)],
             neutral: NodeId::default(),
             shape: vec![],
             commutative: true,

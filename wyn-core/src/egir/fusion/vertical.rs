@@ -255,7 +255,7 @@ pub(super) fn producer_is_used_only_by(
 struct ProducerParts {
     space: SegSpace,
     body: SegBody,
-    source_indices: Vec<usize>,
+    source_indices: Vec<screma::InputId>,
     input_nodes: Vec<NodeId>,
     inputs: Vec<SoacInputType>,
     resources: Vec<SegResourceAccess>,
@@ -281,8 +281,11 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
         space,
         body: producer_map.body.clone(),
         source_indices: source_indices.clone(),
-        input_nodes: source_indices.iter().map(|&index| producer_effect.operand_nodes[index]).collect(),
-        inputs: source_indices.iter().map(|&index| producer_body.inputs[index].clone()).collect(),
+        input_nodes: source_indices
+            .iter()
+            .map(|index| producer_effect.operand_nodes[index.index()])
+            .collect(),
+        inputs: source_indices.iter().map(|index| producer_body.inputs[index.index()].clone()).collect(),
         resources,
     };
     debug_assert!(producer_input_count >= producer.source_indices.len());
@@ -306,13 +309,15 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
         let indices = map.input_indices.clone();
         let mut rebased = Vec::new();
         for &index in &indices {
-            if candidate.consumer_inputs.contains(&index) {
-                rebased.extend((0..producer.inputs.len()).map(|offset| appended_base + offset));
+            if candidate.consumer_inputs.contains(&index.index()) {
+                rebased.extend(
+                    (0..producer.inputs.len()).map(|offset| screma::InputId(appended_base + offset)),
+                );
             } else {
                 rebased.push(rebase_after_removals(index, &candidate.consumer_inputs));
             }
         }
-        if indices.iter().any(|index| candidate.consumer_inputs.contains(index)) {
+        if indices.iter().any(|index| candidate.consumer_inputs.contains(&index.index())) {
             let (new_body, function) = compose_map_region(
                 inner,
                 &scope,
@@ -329,7 +334,7 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
             map.body = new_body;
             synthesized.push(function);
             if map.destination == SoacDestination::UniqueInput
-                && indices.first().is_some_and(|index| candidate.consumer_inputs.contains(index))
+                && indices.first().is_some_and(|index| candidate.consumer_inputs.contains(&index.index()))
             {
                 map.destination = SoacDestination::Fresh;
             }
@@ -342,13 +347,15 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
         let old_indices = operator.input_indices.clone();
         let mut rebased = Vec::new();
         for &index in &old_indices {
-            if candidate.consumer_inputs.contains(&index) {
-                rebased.extend((0..producer.inputs.len()).map(|offset| appended_base + offset));
+            if candidate.consumer_inputs.contains(&index.index()) {
+                rebased.extend(
+                    (0..producer.inputs.len()).map(|offset| screma::InputId(appended_base + offset)),
+                );
             } else {
                 rebased.push(rebase_after_removals(index, &candidate.consumer_inputs));
             }
         }
-        if old_indices.iter().any(|index| candidate.consumer_inputs.contains(index)) {
+        if old_indices.iter().any(|index| candidate.consumer_inputs.contains(&index.index())) {
             let (step, function) = compose_step_region(
                 inner,
                 &scope,
@@ -365,7 +372,9 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
             operator.step = step;
             synthesized.push(function);
             if operator.destination == SoacDestination::UniqueInput
-                && old_indices.first().is_some_and(|index| candidate.consumer_inputs.contains(index))
+                && old_indices
+                    .first()
+                    .is_some_and(|index| candidate.consumer_inputs.contains(&index.index()))
             {
                 operator.destination = SoacDestination::Fresh;
             }
@@ -443,13 +452,14 @@ fn compose_map_region(
     lane: usize,
     producer: &ProducerParts,
     consumer: &SegBody,
-    old_indices: &[usize],
-    new_indices: &[usize],
+    old_indices: &[screma::InputId],
+    new_indices: &[screma::InputId],
     replaced_inputs: &[usize],
     new_elem_types: &[Type<TypeName>],
     outer_types: &LookupMap<NodeId, Type<TypeName>>,
 ) -> (SegBody, SemanticFunc) {
-    let element_types: Vec<_> = new_indices.iter().map(|&index| new_elem_types[index].clone()).collect();
+    let element_types: Vec<_> =
+        new_indices.iter().map(|index| new_elem_types[index.index()].clone()).collect();
     let capture_types = capture_types(
         outer_types,
         producer.body.captures.iter().chain(&consumer.captures),
@@ -474,7 +484,7 @@ fn compose_map_region(
     let mut producer_elements = None;
     let mut consumer_elements = Vec::with_capacity(old_indices.len());
     for &index in old_indices {
-        if replaced_inputs.contains(&index) {
+        if replaced_inputs.contains(&index.index()) {
             let end = cursor + producer.inputs.len();
             if producer_elements.is_none() {
                 producer_elements = Some(args[cursor..end].to_vec());
@@ -495,7 +505,7 @@ fn compose_map_region(
         producer_region.return_ty.clone(),
     );
     for (position, &index) in old_indices.iter().enumerate() {
-        if replaced_inputs.contains(&index) {
+        if replaced_inputs.contains(&index.index()) {
             consumer_elements[position] = produced;
         }
     }
@@ -535,8 +545,8 @@ fn compose_step_region(
     operator_index: usize,
     producer: &ProducerParts,
     operator: &screma::Operator,
-    old_indices: &[usize],
-    new_indices: &[usize],
+    old_indices: &[screma::InputId],
+    new_indices: &[screma::InputId],
     replaced_inputs: &[usize],
     new_elem_types: &[Type<TypeName>],
     outer_types: &LookupMap<NodeId, Type<TypeName>>,
@@ -549,7 +559,8 @@ fn compose_step_region(
         producer.body.captures.iter().chain(&operator.step.captures),
     );
     let mut params = vec![(accumulator_ty, "accumulator".to_string())];
-    let element_types: Vec<_> = new_indices.iter().map(|&index| new_elem_types[index].clone()).collect();
+    let element_types: Vec<_> =
+        new_indices.iter().map(|index| new_elem_types[index.index()].clone()).collect();
     params.extend(
         element_types.iter().enumerate().map(|(index, ty)| (ty.clone(), format!("element_{index}"))),
     );
@@ -565,7 +576,7 @@ fn compose_step_region(
     let mut producer_elements = None;
     let mut consumer_elements = Vec::with_capacity(old_indices.len());
     for &index in old_indices {
-        if replaced_inputs.contains(&index) {
+        if replaced_inputs.contains(&index.index()) {
             let end = cursor + producer.inputs.len();
             if producer_elements.is_none() {
                 producer_elements = Some(args[cursor..end].to_vec());
@@ -587,7 +598,7 @@ fn compose_step_region(
     );
     let mut consumer_args = smallvec![args[0]];
     for (position, &index) in old_indices.iter().enumerate() {
-        if replaced_inputs.contains(&index) {
+        if replaced_inputs.contains(&index.index()) {
             consumer_elements[position] = produced;
         }
     }
@@ -619,8 +630,10 @@ fn compose_step_region(
     )
 }
 
-fn rebase_after_removals(index: usize, removed: &[usize]) -> usize {
-    index - removed.iter().filter(|&&removed_index| removed_index < index).count()
+fn rebase_after_removals(index: screma::InputId, removed: &[usize]) -> screma::InputId {
+    screma::InputId(
+        index.index() - removed.iter().filter(|&&removed_index| removed_index < index.index()).count(),
+    )
 }
 
 pub(super) fn capture_types<'a>(
@@ -707,7 +720,7 @@ mod tests {
                             region: producer_region,
                             captures: vec![producer_capture],
                         },
-                        input_indices: vec![0],
+                        input_indices: vec![screma::InputId(0)],
                         output_element_type: int.clone(),
                         destination: SoacDestination::Fresh,
                         result_type: array.clone(),
@@ -756,7 +769,7 @@ mod tests {
                             region: consumer_region,
                             captures: vec![consumer_capture],
                         },
-                        input_indices: vec![0],
+                        input_indices: vec![screma::InputId(0)],
                         output_element_type: int,
                         destination: SoacDestination::Fresh,
                         result_type: array.clone(),

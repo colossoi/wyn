@@ -124,7 +124,7 @@ impl EntryBuilder {
                     }],
                     maps: vec![screma::Map {
                         body: super::types::SegBody { region, captures },
-                        input_indices: vec![0],
+                        input_indices: vec![screma::InputId(0)],
                         output_element_type: output_elem_ty,
                         destination: SoacDestination::OutputView,
                         result_type: output_view_ty,

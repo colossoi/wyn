@@ -16,7 +16,7 @@ fn raw_map_soac(
             inputs: vec![input],
             maps: vec![screma::Map {
                 body: map_body,
-                input_indices: vec![0],
+                input_indices: vec![screma::InputId(0)],
                 output_element_type,
                 destination: SoacDestination::OutputView,
                 result_type,
@@ -366,7 +366,7 @@ fn rewrite_sibling_index_consumers_rejects_accumulator_output_view_operand() {
                             region: RegionId::from_index(1),
                             captures: vec![],
                         },
-                        input_indices: vec![0],
+                        input_indices: vec![screma::InputId(0)],
                         neutral: source,
                         shape: vec![],
                         commutative: false,

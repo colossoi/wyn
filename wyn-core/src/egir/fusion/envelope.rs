@@ -275,8 +275,8 @@ fn producer_parts(graph: &EGraph, candidate: &Candidate) -> ProducerParts {
     ProducerParts {
         space: space.clone(),
         body: map.body.clone(),
-        input_nodes: source_indices.iter().map(|&index| effect.operand_nodes[index]).collect(),
-        inputs: source_indices.iter().map(|&index| body.inputs[index].clone()).collect(),
+        input_nodes: source_indices.iter().map(|index| effect.operand_nodes[index.index()]).collect(),
+        inputs: source_indices.iter().map(|index| body.inputs[index.index()].clone()).collect(),
         output_elem_type: map.output_element_type.clone(),
     }
 }

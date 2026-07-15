@@ -38,10 +38,20 @@ impl<T> NonEmpty<T> {
     }
 }
 
+/// An index into `Body::inputs` used by a map or accumulator lane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct InputId(pub usize);
+
+impl InputId {
+    pub const fn index(self) -> usize {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Map {
     pub body: SegBody,
-    pub input_indices: Vec<usize>,
+    pub input_indices: Vec<InputId>,
     pub output_element_type: Type<TypeName>,
     pub destination: SoacDestination,
     pub result_type: Type<TypeName>,
@@ -51,7 +61,7 @@ pub struct Map {
 pub struct Operator {
     pub step: SegBody,
     pub combine: SegBody,
-    pub input_indices: Vec<usize>,
+    pub input_indices: Vec<InputId>,
     pub neutral: NodeId,
     pub shape: Vec<NodeId>,
     pub commutative: bool,

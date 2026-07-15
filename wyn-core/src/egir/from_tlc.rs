@@ -2199,7 +2199,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         };
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
         // Singleton map: its one lane reads every input.
-        let map_input_indices = vec![(0..input_arr_types.len()).collect::<Vec<usize>>()];
+        let map_input_indices = vec![(0..input_arr_types.len()).map(screma::InputId).collect::<Vec<_>>()];
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op {
                 body: screma::Body {
@@ -2336,7 +2336,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                                 region: self.region(op_name),
                                 captures: vec![],
                             },
-                            input_indices: vec![0],
+                            input_indices: vec![screma::InputId(0)],
                             neutral: init_nid,
                             shape: Vec::new(),
                             commutative: false,
@@ -2411,7 +2411,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                                 region: self.region(op_name),
                                 captures: vec![],
                             },
-                            input_indices: vec![0],
+                            input_indices: vec![screma::InputId(0)],
                             neutral: init_nid,
                             shape: Vec::new(),
                             commutative: false,

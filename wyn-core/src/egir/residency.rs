@@ -127,7 +127,7 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
 
         let mut input_use_counts = HashMap::<usize, usize>::new();
         for &input in map_inputs.iter().flatten().chain(operator_inputs.iter().flatten()) {
-            *input_use_counts.entry(input).or_default() += 1;
+            *input_use_counts.entry(input.index()).or_default() += 1;
         }
         let mut claimed = HashSet::<usize>::new();
         let resolve = |input: usize, claimed: &mut HashSet<usize>| {
@@ -150,7 +150,7 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
                     .get(lane)
                     .and_then(|inputs| inputs.first())
                     .copied()
-                    .filter(|&input| resolve(input, &mut claimed))
+                    .filter(|input| resolve(input.index(), &mut claimed))
                     .map_or(SoacDestination::Fresh, |_| SoacDestination::InputBuffer)
             })
             .collect();
@@ -165,7 +165,7 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
                     .get(operator)
                     .and_then(|inputs| inputs.first())
                     .copied()
-                    .filter(|&input| resolve(input, &mut claimed))
+                    .filter(|input| resolve(input.index(), &mut claimed))
                     .map_or(SoacDestination::Fresh, |_| SoacDestination::InputBuffer)
             })
             .collect();
@@ -242,7 +242,7 @@ fn retype_input_buffer_results(
         for (lane, map) in op.body.maps.iter().enumerate() {
             if map.destination == SoacDestination::InputBuffer {
                 if let Some(input) = map.input_indices.first() {
-                    retyped[lane] = op.body.inputs[*input].array.clone();
+                    retyped[lane] = op.body.inputs[input.index()].array.clone();
                     changed = true;
                 }
             }
@@ -250,7 +250,8 @@ fn retype_input_buffer_results(
         for (operator_index, operator) in op.body.kind.operators().into_iter().enumerate() {
             if operator.destination == SoacDestination::InputBuffer {
                 if let Some(input) = operator.input_indices.first() {
-                    retyped[op.body.maps.len() + operator_index] = op.body.inputs[*input].array.clone();
+                    retyped[op.body.maps.len() + operator_index] =
+                        op.body.inputs[input.index()].array.clone();
                     changed = true;
                 }
             }
@@ -1153,14 +1154,14 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                     for map in &mut op.body.maps {
                         if map.destination == SoacDestination::InputBuffer {
                             if let Some(input) = map.input_indices.first() {
-                                map.result_type = op.body.inputs[*input].array.clone();
+                                map.result_type = op.body.inputs[input.index()].array.clone();
                             }
                         }
                     }
                     for operator in op.body.kind.operators_mut() {
                         if operator.destination == SoacDestination::InputBuffer {
                             if let Some(input) = operator.input_indices.first() {
-                                operator.result_type = op.body.inputs[*input].array.clone();
+                                operator.result_type = op.body.inputs[input.index()].array.clone();
                             }
                         }
                     }

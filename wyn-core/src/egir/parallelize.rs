@@ -2096,7 +2096,7 @@ fn emit_scan_entry(
                                 region: schedule.intern_callable(&op_func),
                                 captures: vec![],
                             },
-                            input_indices: vec![0],
+                            input_indices: vec![screma::InputId(0)],
                             neutral: init_nid,
                             shape: Vec::new(),
                             commutative: false,

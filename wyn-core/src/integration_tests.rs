@@ -244,7 +244,7 @@ entry siblings<[n]>(xs: [n]i32, ys: [n]i32) ([n]i32, [n]i32) =
         })
         .expect("one two-lane SegMap");
     assert_eq!(fused.0, 1, "the shared zipped input must not be duplicated");
-    assert_eq!(fused.1, vec![vec![0], vec![0]]);
+    assert_eq!(fused.1, vec![vec![screma::InputId(0)], vec![screma::InputId(0)]]);
 }
 
 #[test]
@@ -702,8 +702,8 @@ entry e() [2]i32 =
             (1 + operators.rest.len() == 2).then(|| op.body.kind.operators())
         })
         .expect("two-accumulator SegRed");
-    assert_eq!(operators[0].input_indices, vec![0]);
-    assert_eq!(operators[1].input_indices, vec![0]);
+    assert_eq!(operators[0].input_indices, vec![screma::InputId(0)]);
+    assert_eq!(operators[1].input_indices, vec![screma::InputId(0)]);
     assert_ne!(
         operators[0].step.region, operators[1].step.region,
         "deduplicated inputs may share a column, but composed map bodies must remain distinct"

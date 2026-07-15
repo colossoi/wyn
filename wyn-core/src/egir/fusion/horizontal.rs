@@ -203,14 +203,14 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
         .cloned()
         .map(|mut map| {
             for input in &mut map.input_indices {
-                *input = input_remap[*input];
+                *input = screma::InputId(input_remap[input.index()]);
             }
             map
         })
         .collect();
     maps.extend(q.body.maps.iter().cloned().map(|mut map| {
         for input in &mut map.input_indices {
-            *input = input_remap[base + *input];
+            *input = screma::InputId(input_remap[base + input.index()]);
         }
         map
     }));
@@ -218,12 +218,12 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
     let mut operators: Vec<screma::Operator> = p.body.kind.operators().into_iter().cloned().collect();
     for operator in &mut operators {
         for input in &mut operator.input_indices {
-            *input = input_remap[*input];
+            *input = screma::InputId(input_remap[input.index()]);
         }
     }
     operators.extend(q.body.kind.operators().into_iter().cloned().map(|mut operator| {
         for input in &mut operator.input_indices {
-            *input = input_remap[base + *input];
+            *input = screma::InputId(input_remap[base + input.index()]);
         }
         operator
     }));
