@@ -419,6 +419,22 @@ impl<R: GraphResource> Soac<Semantic<R>> {
         nodes.into_iter()
     }
 
+    /// Concrete iteration space seen by scheduling, independent of SOAC
+    /// family. Serial Scremas and histograms have no dispatched space.
+    pub(crate) fn scheduling_space(&self) -> Option<&SegSpace<R>> {
+        match self {
+            Self::Screma(op) => match op.semantic_state() {
+                screma::SemanticState::Serial => None,
+                screma::SemanticState::Segmented { space, .. } => Some(space),
+            },
+            Self::Filter(op) => Some(&op.state.space),
+            Self::Hist(op) => match &op.state {
+                hist::SemanticState::Serial => None,
+                hist::SemanticState::Segmented(space) => Some(space),
+            },
+        }
+    }
+
     fn referenced_nodes(&self) -> Vec<NodeId> {
         match self {
             Self::Screma(op) => op.referenced_nodes(),

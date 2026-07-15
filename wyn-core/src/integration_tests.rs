@@ -1804,6 +1804,286 @@ entry add_sum(xs: []i32) []i32 =
     );
 }
 
+const SCALAR_PRELUDE_FOLD: &str = r#"
+def fold_events(events: []u32) u32 =
+  loop state = 0u32 for k < 32 do
+    (state ^ events[k]) * 1664525u32 + 1013904223u32
+"#;
+
+fn scalar_prelude_pipeline<'a>(
+    lowered: &'a crate::Lowered,
+    source_entry: &str,
+) -> &'a crate::pipeline_descriptor::ComputePipeline {
+    use crate::pipeline_descriptor::Pipeline;
+    let mut pipelines = lowered.pipeline.pipelines.iter().filter_map(|pipeline| match pipeline {
+        Pipeline::Compute(compute)
+            if compute.stages.iter().any(|stage| stage.entry_point == source_entry) =>
+        {
+            Some(compute)
+        }
+        _ => None,
+    });
+    let pipeline = pipelines.next().expect("source entry has a compute pipeline");
+    assert!(
+        pipelines.next().is_none(),
+        "source entry must publish one coherent compute pipeline"
+    );
+    pipeline
+}
+
+fn is_singleton_stage(stage: &crate::pipeline_descriptor::ComputeStage) -> bool {
+    use crate::pipeline_descriptor::DispatchSize;
+    stage.workgroup_size == (1, 1, 1)
+        && matches!(stage.dispatch_size, DispatchSize::Fixed { x: 1, y: 1, z: 1, .. })
+}
+
+fn spirv_entry_reaches_loop(spirv: &[u32], entry_name: &str) -> bool {
+    use std::collections::{HashMap, HashSet};
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::Op;
+
+    let mut loader = Loader::new();
+    parse_words(spirv, &mut loader).expect("parse generated SPIR-V");
+    let module = loader.module();
+    let Some(entry) = module
+        .entry_points
+        .iter()
+        .find(|instruction| {
+            matches!(instruction.operands.get(2), Some(Operand::LiteralString(name)) if name == entry_name)
+        })
+    else {
+        return false;
+    };
+    let Some(Operand::IdRef(entry_function)) = entry.operands.get(1) else {
+        return false;
+    };
+    let mut calls = HashMap::<u32, Vec<u32>>::new();
+    let mut loops = HashSet::new();
+    for function in &module.functions {
+        let Some(function_id) = function.def.as_ref().and_then(|definition| definition.result_id) else {
+            continue;
+        };
+        for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
+            if instruction.class.opcode == Op::LoopMerge {
+                loops.insert(function_id);
+            }
+            if instruction.class.opcode == Op::FunctionCall {
+                if let Some(Operand::IdRef(callee)) = instruction.operands.first() {
+                    calls.entry(function_id).or_default().push(*callee);
+                }
+            }
+        }
+    }
+    let mut pending = vec![*entry_function];
+    let mut reachable = HashSet::new();
+    while let Some(function) = pending.pop() {
+        if !reachable.insert(function) {
+            continue;
+        }
+        pending.extend(calls.get(&function).into_iter().flatten().copied());
+    }
+    reachable.iter().any(|function| loops.contains(function))
+}
+
+fn spirv_entry_interface_has_storage_binding(
+    spirv: &[u32],
+    entry_name: &str,
+    set: u32,
+    binding: u32,
+) -> bool {
+    use std::collections::HashMap;
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::{Decoration, Op};
+
+    let mut loader = Loader::new();
+    parse_words(spirv, &mut loader).expect("parse generated SPIR-V");
+    let module = loader.module();
+    let mut sets = HashMap::new();
+    let mut bindings = HashMap::new();
+    for instruction in &module.annotations {
+        if instruction.class.opcode != Op::Decorate {
+            continue;
+        }
+        let Some(Operand::IdRef(target)) = instruction.operands.first() else {
+            continue;
+        };
+        match (instruction.operands.get(1), instruction.operands.get(2)) {
+            (Some(Operand::Decoration(Decoration::DescriptorSet)), Some(Operand::LiteralBit32(value))) => {
+                sets.insert(*target, *value);
+            }
+            (Some(Operand::Decoration(Decoration::Binding)), Some(Operand::LiteralBit32(value))) => {
+                bindings.insert(*target, *value);
+            }
+            _ => {}
+        }
+    }
+    let Some(variable) = sets.iter().find_map(|(variable, value)| {
+        (*value == set && bindings.get(variable) == Some(&binding)).then_some(*variable)
+    }) else {
+        return false;
+    };
+    module.entry_points.iter().any(|instruction| {
+        matches!(instruction.operands.get(2), Some(Operand::LiteralString(name)) if name == entry_name)
+            && instruction
+                .operands
+                .iter()
+                .skip(3)
+                .any(|operand| matches!(operand, Operand::IdRef(id) if *id == variable))
+    })
+}
+
+#[test]
+fn expensive_scalar_source_is_one_singleton_feeding_two_map_domains() {
+    use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize};
+    let source = format!(
+        "{SCALAR_PRELUDE_FOLD}\n\
+         #[compute]\n\
+         entry serial_prefix_before_maps(xs: []u32, ys: []u32, events: []u32) ([]u32, []u32) =\n\
+           let state = fold_events(events)\n\
+           let out_x = map(|x| x + state, xs)\n\
+           let out_y = map(|y| y ^ state, ys) in\n\
+           (out_x, out_y)\n"
+    );
+    let lowered = crate::compile_thru_spirv(&source).expect("expensive scalar source compiles");
+    let pipeline = scalar_prelude_pipeline(&lowered, "serial_prefix_before_maps");
+    let stages = &pipeline.stages;
+    assert_eq!(stages.len(), 3, "one singleton plus two map stages");
+    let singleton = stages
+        .iter()
+        .find(|stage| is_singleton_stage(stage))
+        .expect("expensive source runs in a singleton stage");
+    let maps = stages.iter().filter(|stage| !is_singleton_stage(stage)).collect::<Vec<_>>();
+    assert_eq!(maps.len(), 2);
+    assert!(maps.iter().all(|stage| matches!(
+        stage.dispatch_size,
+        DispatchSize::DerivedFrom {
+            len: DispatchLen::InputBinding { .. },
+            ..
+        }
+    )));
+    assert_ne!(
+        maps[0].dispatch_size, maps[1].dispatch_size,
+        "maps retain the xs and ys dispatch domains"
+    );
+    assert_eq!(
+        singleton
+            .writes
+            .iter()
+            .filter(|binding| maps.iter().all(|map| map.reads.contains(binding)))
+            .count(),
+        1,
+        "one singleton-written scalar feeds both maps"
+    );
+    let (events, events_set, events_binding) = pipeline
+        .bindings
+        .iter()
+        .enumerate()
+        .find_map(|(index, binding)| match binding {
+            Binding::StorageBuffer {
+                set, binding, name, ..
+            } if name == "events" => Some((index, *set, *binding)),
+            _ => None,
+        })
+        .expect("the source events input remains published");
+    assert!(
+        singleton.reads.contains(&events),
+        "the singleton reads the producer-only input"
+    );
+    assert!(
+        maps.iter().all(|map| !map.reads.contains(&events)),
+        "materialized consumers do not retain producer-only resource reads"
+    );
+    assert!(
+        maps.iter().all(|map| {
+            !spirv_entry_interface_has_storage_binding(
+                &lowered.spirv,
+                &map.entry_point,
+                events_set,
+                events_binding,
+            )
+        }),
+        "materialized consumers do not retain the producer-only SPIR-V interface binding"
+    );
+    assert!(
+        spirv_entry_reaches_loop(&lowered.spirv, &singleton.entry_point),
+        "the fold loop is reachable from the singleton"
+    );
+    assert!(
+        maps.iter().all(|map| !spirv_entry_reaches_loop(&lowered.spirv, &map.entry_point)),
+        "the fold loop is not reachable from either map stage"
+    );
+}
+
+#[test]
+fn expensive_scalar_source_is_profitable_for_one_map() {
+    let source = format!(
+        "{SCALAR_PRELUDE_FOLD}\n\
+         #[compute]\n\
+         entry serial_prefix_one_map(xs: []u32, events: []u32) []u32 =\n\
+           let state = fold_events(events) in\n\
+           map(|x| x + state, xs)\n"
+    );
+    let lowered = crate::compile_thru_spirv(&source).expect("single-map scalar source compiles");
+    let stages = &scalar_prelude_pipeline(&lowered, "serial_prefix_one_map").stages;
+    assert_eq!(stages.len(), 2, "one singleton and one map stage");
+    assert_eq!(stages.iter().filter(|stage| is_singleton_stage(stage)).count(), 1);
+}
+
+#[test]
+fn expensive_scalar_source_emits_valid_wgsl() {
+    let source = format!(
+        "{SCALAR_PRELUDE_FOLD}\n\
+         #[compute]\n\
+         entry serial_prefix_wgsl(xs: []u32, events: []u32) []u32 =\n\
+           let state = fold_events(events) in\n\
+           map(|x| x + state, xs)\n"
+    );
+    let wgsl = lower_semantic_egir(
+        compile_to_semantic_egir(&source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    )
+    .lower_wgsl()
+    .expect("scalar prepass lowers to WGSL");
+    let module = naga::front::wgsl::parse_str(&wgsl)
+        .unwrap_or_else(|error| panic!("Naga rejected generated WGSL: {error:?}\n{wgsl}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("Naga validation failed: {error:?}\n{wgsl}"));
+}
+
+#[test]
+fn cheap_scalar_source_stays_cloned_into_two_maps() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry cheap_prefix(xs: []u32, ys: []u32, factor: u32) ([]u32, []u32) =
+  let state = factor * 3u32
+  let out_x = map(|x| x + state, xs)
+  let out_y = map(|y| y ^ state, ys) in
+  (out_x, out_y)
+"#,
+    )
+    .expect("cheap scalar source compiles");
+    let stages = &scalar_prelude_pipeline(&lowered, "cheap_prefix").stages;
+    assert_eq!(stages.len(), 2, "cheap multiplication must not create a prepass");
+    assert!(stages.iter().all(|stage| !is_singleton_stage(stage)));
+    assert!(
+        stages.iter().enumerate().all(|(writer_index, writer)| {
+            writer.writes.iter().all(|binding| {
+                stages.iter().enumerate().all(|(reader_index, reader)| {
+                    writer_index == reader_index || !reader.reads.contains(binding)
+                })
+            })
+        }),
+        "cheap duplication must not create an inter-stage scalar binding"
+    );
+}
+
 #[test]
 fn scalar_prepass_flow_is_explicit_in_resource_manifest() {
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};

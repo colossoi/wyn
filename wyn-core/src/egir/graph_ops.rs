@@ -118,6 +118,29 @@ pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
     closure
 }
 
+/// Remove projection-created function parameters that are absent from a
+/// compacted entry signature. Graph projection allocates every source
+/// parameter before cloning the selected value closure, so unused parameters
+/// must be removed after the signature is narrowed or their stale indices can
+/// collide with retained parameters during elaboration.
+pub(crate) fn remove_unretained_func_params<P: EgirPhase>(
+    graph: &mut EGraph<P>,
+    retained: &HashSet<NodeId>,
+) {
+    let removed = graph
+        .nodes
+        .iter()
+        .filter_map(|(node, definition)| {
+            (matches!(definition, ENode::FuncParam { .. }) && !retained.contains(&node)).then_some(node)
+        })
+        .collect::<Vec<_>>();
+    for node in removed {
+        graph.nodes.remove(node);
+        graph.types.remove(&node);
+        graph.node_spans.remove(&node);
+    }
+}
+
 fn extend_incoming_block_args<P: EgirPhase>(
     graph: &EGraph<P>,
     target: BlockId,
@@ -420,10 +443,25 @@ pub fn emit_load<P: EgirPhase>(
     next_effect: &mut u32,
     span: Option<Span>,
 ) -> NodeId {
+    let (result, effect) = detached_load(graph, place_nid, elem_ty, next_effect, span);
+    graph.skeleton.blocks[block].side_effects.push(effect);
+    result
+}
+
+/// Construct a `Load` and its result without choosing its position in a
+/// block. Rewriters use this when a synthesized load must be inserted before
+/// an existing scheduled operation instead of appended to the block tail.
+pub fn detached_load<P: EgirPhase>(
+    graph: &mut EGraph<P>,
+    place_nid: NodeId,
+    elem_ty: Type<TypeName>,
+    next_effect: &mut u32,
+    span: Option<Span>,
+) -> (NodeId, SideEffect<P>) {
     let effect_in = EffectToken(0); // placeholder; elaborate builds the real chain
     let effect_out = alloc_effect(next_effect);
     let result = graph.alloc_side_effect_result(elem_ty);
-    graph.skeleton.blocks[block].side_effects.push(SideEffect {
+    let effect = SideEffect {
         semantic_id: None,
         kind: SideEffectKind::Inst(InstKind::Load {
             place: Default::default(),
@@ -432,8 +470,8 @@ pub fn emit_load<P: EgirPhase>(
         result: Some(result),
         effects: Some((effect_in, effect_out)),
         span,
-    });
-    result
+    };
+    (result, effect)
 }
 
 /// Emit a function-local `Alloca` side-effect in `block`. The returned NodeId

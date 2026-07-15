@@ -476,7 +476,7 @@ fn project_kernel_body_effects(
     let projection = super::graph_projector::GraphProjector::new(&source.graph, &source.control_headers)
         .selected_with_values(selected, route_values)
         .expect("selected entry projection must be internally valid");
-    super::program::PlannedEntry::from_projection(
+    let mut projected = super::program::PlannedEntry::from_projection(
         projection,
         name,
         source.span,
@@ -489,7 +489,71 @@ fn project_kernel_body_effects(
         &source.aliases,
         output_routes,
     )
-    .expect("selected entry projection must be internally valid")
+    .expect("selected entry projection must be internally valid");
+    compact_projected_entry_interface(&mut projected);
+    projected
+}
+
+fn compact_projected_entry_interface(entry: &mut super::program::PlannedEntry) {
+    let mut roots = entry
+        .graph
+        .skeleton
+        .blocks
+        .iter()
+        .flat_map(|(_, block)| {
+            block
+                .side_effects
+                .iter()
+                .flat_map(|effect| effect.referenced_nodes())
+                .chain(block.term.referenced_nodes())
+        })
+        .collect::<Vec<_>>();
+    for route in &entry.output_routes {
+        roots.push(route.source.value);
+        roots.extend(route.writers.iter().filter_map(|writer| match writer {
+            OutputWriter::Value(value) => Some(*value),
+            OutputWriter::Effect(_) => None,
+        }));
+    }
+    let reachable = graph_ops::value_producer_closure(&entry.graph, roots).nodes;
+    let mut kept = reachable
+        .into_iter()
+        .filter_map(|node| match entry.graph.nodes.get(node) {
+            Some(ENode::FuncParam { index }) => Some((*index, node)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    kept.sort_by_key(|(index, _)| *index);
+    kept.dedup_by_key(|(index, _)| *index);
+    entry.inputs = kept.iter().map(|(index, _)| entry.inputs[*index].clone()).collect();
+    entry.params = kept.iter().map(|(index, _)| entry.params[*index].clone()).collect();
+    let retained = kept.iter().map(|(_, node)| *node).collect::<std::collections::HashSet<_>>();
+    graph_ops::remove_unretained_func_params(&mut entry.graph, &retained);
+    for (new_index, (_, node)) in kept.into_iter().enumerate() {
+        if let Some(ENode::FuncParam { index }) = entry.graph.nodes.get_mut(node) {
+            *index = new_index;
+        }
+    }
+
+    let mut used_resources = std::collections::HashSet::new();
+    for (_, block) in &entry.graph.skeleton.blocks {
+        for effect in &block.side_effects {
+            used_resources.extend(
+                super::semantic_graph::read_resources(&entry.graph, effect)
+                    .into_iter()
+                    .map(|access| access.resource.0),
+            );
+            if let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind {
+                if let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() {
+                    used_resources.extend(resources.iter().map(|access| access.resource.0));
+                }
+            }
+        }
+    }
+    entry.resource_declarations.retain(|declaration| {
+        declaration.role != crate::interface::StorageRole::Input
+            || used_resources.contains(&declaration.resource.0)
+    });
 }
 
 fn filter_work_buffers(owner: SemanticOpId, resources: &[LogicalResource]) -> Option<filter::WorkBuffers> {

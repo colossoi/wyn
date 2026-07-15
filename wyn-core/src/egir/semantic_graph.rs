@@ -14,7 +14,8 @@ use super::graph_ops;
 use super::program::{SemanticDependency, SemanticDependencyKind, SemanticOpId, SemanticProgram};
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, NodeId, SegResourceAccess, SegResourceAccessKind, SideEffect, SideEffectKind, Soac,
+    EGraph, NodeId, SegResourceAccess, SegResourceAccessKind, SideEffect, SideEffectKind, SideEffectSite,
+    Soac,
 };
 
 /// Rebuild the semantic dependency DAG stored on `inner`.
@@ -315,53 +316,98 @@ pub(crate) fn summary(inner: &SemanticProgram) -> String {
 pub struct SemanticGraph {
     /// Dense interning of every op that appears in any edge.
     index: HashMap<SemanticOpId, usize>,
+    /// Reverse lookup for dense operation indices.
+    operations: Vec<SemanticOpId>,
     /// Value successors (consumers that read the producer's result).
     value_succ: Vec<Vec<usize>>,
     /// Unordered resource/effect reordering conflicts, stored both ways.
     conflict: HashSet<(usize, usize)>,
+    /// Graph-local scalar/aggregate values captured by each semantic
+    /// operation, stored in the same dense operation index as the ordinary
+    /// semantic DAG.
+    capture_pred: Vec<Vec<NodeId>>,
+    /// Stable-for-this-snapshot operation locations. Fusion does not require
+    /// these; scheduling policies use them to inspect and rewrite consumers.
+    operation_sites: Vec<Option<SideEffectSite>>,
 }
 
 impl SemanticGraph {
     pub fn new(deps: &[SemanticDependency]) -> Self {
-        let mut index: HashMap<SemanticOpId, usize> = HashMap::new();
-        let mut intern = |op: &SemanticOpId| -> usize {
-            if let Some(&i) = index.get(op) {
-                return i;
-            }
-            let i = index.len();
-            index.insert(op.clone(), i);
-            i
+        let mut graph = Self {
+            index: HashMap::new(),
+            operations: Vec::new(),
+            value_succ: Vec::new(),
+            conflict: HashSet::new(),
+            capture_pred: Vec::new(),
+            operation_sites: Vec::new(),
         };
-
-        let mut value_pairs = Vec::new();
-        let mut conflict = HashSet::new();
         for dep in deps {
-            let p = intern(&dep.producer);
-            let c = intern(&dep.consumer);
+            let p = graph.intern_operation(dep.producer);
+            let c = graph.intern_operation(dep.consumer);
             match dep.kind {
-                SemanticDependencyKind::Value => value_pairs.push((p, c)),
+                SemanticDependencyKind::Value => graph.value_succ[p].push(c),
                 // Both explicit effect ordering and resource aliasing prohibit
                 // moving another operation across this edge. A directly
                 // adjacent pair may still be fused in source order; callers use
                 // this relation for the operations *between* that pair.
                 SemanticDependencyKind::Effect | SemanticDependencyKind::Resource => {
-                    conflict.insert((p, c));
-                    conflict.insert((c, p));
+                    graph.conflict.insert((p, c));
+                    graph.conflict.insert((c, p));
                 }
             }
         }
+        graph
+    }
 
-        let n = index.len();
-        let mut value_succ = vec![Vec::new(); n];
-        for (p, c) in value_pairs {
-            value_succ[p].push(c);
+    /// Extend the semantic operation DAG with graph-local values captured by
+    /// its SOACs. Capture sources are not assigned synthetic `SemanticOpId`s;
+    /// their successors use the DAG's existing dense operation identities.
+    pub(crate) fn with_operation_captures(deps: &[SemanticDependency], egir: &EGraph) -> Self {
+        let mut graph = Self::new(deps);
+        for (block, skeleton_block) in &egir.skeleton.blocks {
+            for (effect_index, effect) in skeleton_block.side_effects.iter().enumerate() {
+                let SideEffectKind::Soac(soac) = &effect.kind else {
+                    continue;
+                };
+                let operation = graph.intern_operation(effect.required_semantic_id());
+                graph.operation_sites[operation] = Some(SideEffectSite {
+                    block,
+                    index: effect_index,
+                });
+                let mut seen = HashSet::new();
+                graph.capture_pred[operation]
+                    .extend(soac.capture_nodes().filter(|source| seen.insert(*source)));
+            }
         }
+        graph
+    }
 
-        Self {
-            index,
-            value_succ,
-            conflict,
+    fn intern_operation(&mut self, operation: SemanticOpId) -> usize {
+        if let Some(&index) = self.index.get(&operation) {
+            return index;
         }
+        let index = self.operations.len();
+        self.index.insert(operation, index);
+        self.operations.push(operation);
+        self.value_succ.push(Vec::new());
+        self.capture_pred.push(Vec::new());
+        self.operation_sites.push(None);
+        index
+    }
+
+    /// Semantic operations in deterministic dependency/source order.
+    pub(crate) fn operations(&self) -> impl Iterator<Item = SemanticOpId> + '_ {
+        self.operations.iter().copied()
+    }
+
+    /// Graph-local values directly captured by `operation`.
+    pub(crate) fn operation_captures(&self, operation: &SemanticOpId) -> impl Iterator<Item = NodeId> + '_ {
+        self.index.get(operation).into_iter().flat_map(|index| self.capture_pred[*index].iter().copied())
+    }
+
+    /// Locate an operation in the EGIR snapshot used to add capture sources.
+    pub(crate) fn operation_site(&self, operation: &SemanticOpId) -> Option<SideEffectSite> {
+        self.index.get(operation).and_then(|index| self.operation_sites[*index])
     }
 
     /// Resource and Effect edges are both reordering conflicts. A caller may

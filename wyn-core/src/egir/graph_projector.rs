@@ -24,6 +24,13 @@ pub struct GraphProjection {
     effects: HashSet<EffectToken>,
 }
 
+/// A projected producer recipe together with the projected identity of the
+/// value requested by the caller.
+pub struct ProjectedValueRecipe {
+    pub projection: GraphProjection,
+    pub value: NodeId,
+}
+
 impl GraphProjection {
     pub fn node(&self, source: NodeId) -> Option<NodeId> {
         self.nodes.get(&source).copied()
@@ -133,6 +140,20 @@ impl<'a> GraphProjector<'a> {
     /// form for producers that execute before the source entry branches.
     pub fn selected_entry_recipe(&self, roots: HashSet<SideEffectSite>) -> Result<GraphProjection, String> {
         self.project(roots, Vec::new(), false)
+    }
+
+    /// Project the straight-line recipe for a captured value. Producer effects
+    /// are discovered from the value itself, so scheduling policy remains
+    /// independent of the producer's concrete shape.
+    pub fn captured_value_recipe(&self, value: NodeId) -> Result<ProjectedValueRecipe, String> {
+        let projection = self.project(HashSet::new(), vec![value], false)?;
+        let projected = projection
+            .node(value)
+            .ok_or_else(|| "captured value projection omitted its root".to_string())?;
+        Ok(ProjectedValueRecipe {
+            projection,
+            value: projected,
+        })
     }
 
     pub fn selected_with_values(

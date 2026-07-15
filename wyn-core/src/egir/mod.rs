@@ -18,6 +18,7 @@ pub(crate) mod materialize;
 pub mod program;
 pub mod publish;
 pub(crate) mod residency;
+pub(crate) mod residency_cost;
 pub(crate) mod resource_erasure;
 pub mod rewrite;
 mod scoped_map;

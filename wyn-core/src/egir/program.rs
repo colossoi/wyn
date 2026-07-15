@@ -1345,7 +1345,9 @@ pub enum MaterializationKind {
 pub struct MaterializationRequirement<P: EgirPhase = Semantic> {
     pub id: MaterializationId,
     pub kind: MaterializationKind,
-    pub producer: SemanticOpId,
+    /// SOAC provenance when the source is a semantic operation. Captured
+    /// parallel preludes intentionally do not receive synthetic operation ids.
+    pub producer: Option<SemanticOpId>,
     pub entry: Entry<P>,
     pub substitutions: Vec<MaterializationSubstitution>,
 }
