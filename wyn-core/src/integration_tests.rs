@@ -3219,6 +3219,97 @@ entry two(a: []f32, b: []f32) ([]f32, []f32) =
     );
 }
 
+/// Splitting one compute entry into multiple fixed-domain map stages must keep
+/// the source storage input on every projected entry that reads it. Otherwise
+/// the descriptor still publishes the input as read-only while SPIR-V omits
+/// `NonWritable`, causing Naga/wgpu to infer a read-write shader binding and
+/// reject the pipeline layout.
+#[test]
+fn multidomain_input_storage_keeps_nonwritable_decoration() {
+    use crate::pipeline_descriptor::{Access, Binding, BufferUsage, Pipeline};
+    use std::collections::HashMap;
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::{Decoration, Op};
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry gen(data: []f32) ([]f32, []f32) =
+  (map(|i| data[i] + 1.0, iota(1024)),
+   map(|i| data[i] * 2.0, iota(128)))
+"#,
+    )
+    .expect("multidomain input repro compiles");
+    let compute = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) if compute.stages.iter().any(|stage| stage.entry_point == "gen") => {
+                Some(compute)
+            }
+            _ => None,
+        })
+        .expect("gen compute pipeline");
+    assert_eq!(
+        compute.stages.len(),
+        2,
+        "the two iota domains must split into two stages"
+    );
+    let (data_set, data_binding) = compute
+        .bindings
+        .iter()
+        .find_map(|binding| match binding {
+            Binding::StorageBuffer {
+                set,
+                binding,
+                access: Access::ReadOnly,
+                usage: BufferUsage::Input,
+                name,
+                ..
+            } if name == "data" => Some((*set, *binding)),
+            _ => None,
+        })
+        .expect("data is published as a read-only input");
+
+    let mut loader = Loader::new();
+    parse_words(&lowered.spirv, &mut loader).expect("parse SPIR-V");
+    let module = loader.module();
+    let mut sets = HashMap::new();
+    let mut bindings = HashMap::new();
+    for annotation in &module.annotations {
+        match annotation.operands.as_slice() {
+            [Operand::IdRef(variable), Operand::Decoration(Decoration::DescriptorSet), Operand::LiteralBit32(set)] =>
+            {
+                sets.insert(*variable, *set);
+            }
+            [Operand::IdRef(variable), Operand::Decoration(Decoration::Binding), Operand::LiteralBit32(binding)] =>
+            {
+                bindings.insert(*variable, *binding);
+            }
+            _ => {}
+        }
+    }
+    let data_variable = sets
+        .iter()
+        .find_map(|(variable, set)| {
+            (*set == data_set && bindings.get(variable) == Some(&data_binding)).then_some(*variable)
+        })
+        .expect("SPIR-V data storage variable");
+    assert!(
+        module.annotations.iter().any(|annotation| {
+            annotation.class.opcode == Op::Decorate
+                && annotation.operands.as_slice()
+                    == [
+                        Operand::IdRef(data_variable),
+                        Operand::Decoration(Decoration::NonWritable),
+                    ]
+        }),
+        "read-only multidomain input must carry NonWritable"
+    );
+}
+
 /// Sibling maps over *different* buffers that share one size var
 /// (`<[n]>(xs, ys)`) fuse into a single parallel kernel: both lanes read their
 /// own input at the same `tid` under one guard and write both outputs. This is

@@ -30,6 +30,7 @@ use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::{ControlHeader, InstKind};
+use crate::types::TypeExt;
 
 /// Per-workgroup width of a synthesized phase-2 tree reduce.
 pub const PHASE2_WIDTH: u32 = 256;
@@ -516,10 +517,32 @@ fn compact_projected_entry_interface(entry: &mut super::program::PlannedEntry) {
         }));
     }
     let reachable = graph_ops::value_producer_closure(&entry.graph, roots).nodes;
-    let mut kept = reachable
-        .into_iter()
-        .filter_map(|node| match entry.graph.nodes.get(node) {
-            Some(ENode::FuncParam { index }) => Some((*index, node)),
+    let reachable_storage_resources = reachable
+        .iter()
+        .filter_map(|node| graph_ops::extract_storage_view_source(&entry.graph, *node))
+        .map(|resource| resource.0)
+        .collect::<std::collections::HashSet<_>>();
+    let mut kept_indices = reachable
+        .iter()
+        .filter_map(|node| match entry.graph.nodes.get(*node) {
+            Some(ENode::FuncParam { index }) => Some(*index),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    for (index, input) in entry.inputs.iter().enumerate() {
+        let Some(Type::Constructed(TypeName::Resource(resource), _)) = input.ty.array_buffer() else {
+            continue;
+        };
+        if reachable_storage_resources.contains(resource) {
+            kept_indices.insert(index);
+        }
+    }
+    let mut kept = entry
+        .graph
+        .nodes
+        .iter()
+        .filter_map(|(node, definition)| match definition {
+            ENode::FuncParam { index } if kept_indices.contains(index) => Some((*index, node)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -535,7 +558,7 @@ fn compact_projected_entry_interface(entry: &mut super::program::PlannedEntry) {
         }
     }
 
-    let mut used_resources = std::collections::HashSet::new();
+    let mut used_resources = reachable_storage_resources;
     for (_, block) in &entry.graph.skeleton.blocks {
         for effect in &block.side_effects {
             used_resources.extend(
