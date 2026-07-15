@@ -19,8 +19,10 @@ fn phase(id: u32, name: &str, kind: KernelKind) -> KernelPhase {
 }
 
 fn plan(phases: Vec<KernelPhase>) -> KernelPlan {
+    let next_kernel_id = phases.iter().map(|phase| phase.id.0).max().map_or(0, |id| id + 1);
     KernelPlan {
         unpublished: phases,
+        next_kernel_id,
         ..KernelPlan::default()
     }
 }
@@ -74,4 +76,58 @@ fn validator_rejects_incomplete_phase_families() {
     head.flow_source = Some(CompilerFlowEndpoint::Materialization(MaterializationId(0)));
     let error = plan(vec![head]).validate_program(&[], &[], &PipelineDescriptor::default()).unwrap_err();
     assert!(error.contains("incomplete phase family"));
+}
+
+#[test]
+fn mutation_handles_survive_entry_point_changes_and_chain_insertions() {
+    let root = KernelId(7);
+    let mut plan = plan(vec![phase(root.0, "seeded", KernelKind::SerialCompute)]);
+
+    assert_eq!(
+        plan.commit_kernel(root, body("renamed"), KernelKind::SerialCompute),
+        Ok(root)
+    );
+    plan.set_output_projection(root, Vec::new()).unwrap();
+
+    let child = plan
+        .add_phase_after(
+            root,
+            body("child"),
+            DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+            KernelKind::ReduceCombine,
+        )
+        .unwrap();
+    let grandchild = plan
+        .add_phase_after(
+            child,
+            body("grandchild"),
+            DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+            KernelKind::ReduceCombine,
+        )
+        .unwrap();
+
+    let phases = plan.phases().collect::<Vec<_>>();
+    assert_eq!(
+        phases.iter().map(|phase| phase.entry_point.as_str()).collect::<Vec<_>>(),
+        ["renamed", "child", "grandchild",]
+    );
+    assert_eq!(phases[1].id, child);
+    assert_eq!(phases[1].dependencies, vec![root]);
+    assert_eq!(phases[2].id, grandchild);
+    assert_eq!(phases[2].dependencies, vec![child]);
+}
+
+#[test]
+fn mutation_apis_report_unknown_kernel_ids() {
+    let mut plan = plan(vec![phase(0, "seeded", KernelKind::SerialCompute)]);
+    let unknown = KernelId(99);
+
+    assert_eq!(
+        plan.commit_kernel(unknown, body("seeded"), KernelKind::SerialCompute),
+        Err(KernelMutationError::UnknownKernel(unknown))
+    );
+    assert_eq!(
+        plan.set_output_projection(unknown, Vec::new()),
+        Err(KernelMutationError::UnknownKernel(unknown))
+    );
 }

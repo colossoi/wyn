@@ -53,6 +53,26 @@ pub struct KernelPlan {
     region_interner: RegionInterner,
 }
 
+/// Typed handles for the physical kernels created while seeding a plan.
+/// Entries whose initial projection failed have no handle; the corresponding
+/// diagnostic remains on the plan and is reported during validation.
+#[derive(Clone, Debug)]
+pub struct SeededKernels {
+    by_entry: Vec<Option<KernelId>>,
+}
+
+impl SeededKernels {
+    pub fn entry(&self, source: SemanticEntryId) -> Option<KernelId> {
+        self.by_entry.get(source.0 as usize).copied().flatten()
+    }
+
+    fn record(&mut self, source: SemanticEntryId, kernel: KernelId) {
+        if let Some(slot) = self.by_entry.get_mut(source.0 as usize) {
+            *slot = Some(kernel);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SemanticAbi {
     name: String,
@@ -233,6 +253,23 @@ impl ValidatedKernelPlan {
 /// instead of vector positions so insertion cannot silently retarget an edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KernelId(pub u32);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KernelMutationError {
+    UnknownKernel(KernelId),
+    InvalidKernel(String),
+}
+
+impl std::fmt::Display for KernelMutationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownKernel(kernel) => write!(formatter, "no planned kernel with id {kernel:?}"),
+            Self::InvalidKernel(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for KernelMutationError {}
 
 /// Closed construction recipe retained by a planned kernel. The payload is a
 /// graph-only projection; ABI, publication, dispatch and resources remain
@@ -535,10 +572,8 @@ impl KernelPlan {
         self.phases().any(|phase| phase.flow_source == Some(source))
     }
 
-    pub fn entry_point_for_flow_source(&self, source: CompilerFlowEndpoint) -> Option<&str> {
-        self.phases()
-            .find(|phase| phase.flow_source == Some(source))
-            .map(|phase| phase.entry_point.as_str())
+    pub fn kernel_for_flow_source(&self, source: CompilerFlowEndpoint) -> Option<KernelId> {
+        self.phases().find(|phase| phase.flow_source == Some(source)).map(|phase| phase.id)
     }
 
     pub(super) fn flow_resource_phases(
@@ -572,7 +607,7 @@ impl KernelPlan {
         entries: &[SemanticEntry],
         resources: &[LogicalResource],
         region_interner: &RegionInterner,
-    ) -> Self {
+    ) -> (Self, SeededKernels) {
         let host_resources = crate::egir::program::host_resource_map(resources);
         let semantic_abi = entries
             .iter()
@@ -590,6 +625,9 @@ impl KernelPlan {
             })
             .collect::<HashMap<_, _>>();
         let mut unresolved_stages = Vec::new();
+        let mut seeded = SeededKernels {
+            by_entry: vec![None; entries.len()],
+        };
         let source_publications = entries.iter().map(PlannedPublication::from_semantic).collect();
         let by_name = entries
             .iter()
@@ -616,7 +654,12 @@ impl KernelPlan {
                     ))
                 };
                 match phase {
-                    Ok(phase) => phases.push(phase),
+                    Ok(phase) => {
+                        if let Some(source) = phase.abi.source_entry {
+                            seeded.record(source, phase.id);
+                        }
+                        phases.push(phase);
+                    }
                     Err(error) => unresolved_stages.push(error),
                 }
             }
@@ -639,7 +682,12 @@ impl KernelPlan {
                     .ok_or_else(|| format!("graphics stage `{}` has no semantic entry", stage.entry_point))
                     .and_then(|(source, entry)| graphics_passthrough_phase(id, *source, entry));
                 match phase {
-                    Ok(phase) => graphics_passthroughs.push(phase),
+                    Ok(phase) => {
+                        if let Some(source) = phase.abi.source_entry {
+                            seeded.record(source, phase.id);
+                        }
+                        graphics_passthroughs.push(phase);
+                    }
                     Err(error) => unresolved_stages.push(error),
                 }
             }
@@ -675,32 +723,34 @@ impl KernelPlan {
                 graphics_passthrough_phase(id, SemanticEntryId(index as u32), entry)
             };
             match result {
-                Ok(phase) => unpublished.push(phase),
+                Ok(phase) => {
+                    seeded.record(SemanticEntryId(index as u32), phase.id);
+                    unpublished.push(phase);
+                }
                 Err(error) => unresolved_stages.push(error),
             }
         }
-        Self {
-            pipelines,
-            graphics_passthroughs,
-            unpublished,
-            next_kernel_id,
-            semantic_abi,
-            source_publications,
-            unresolved_stages,
-            generated_callables: Vec::new(),
-            region_interner: region_interner.clone(),
-        }
+        (
+            Self {
+                pipelines,
+                graphics_passthroughs,
+                unpublished,
+                next_kernel_id,
+                semantic_abi,
+                source_publications,
+                unresolved_stages,
+                generated_callables: Vec::new(),
+                region_interner: region_interner.clone(),
+            },
+            seeded,
+        )
     }
 
-    pub fn domain_of(&self, entry_point: &str) -> Option<KernelDomain> {
-        self.pipelines
-            .iter()
-            .flat_map(|pipeline| &pipeline.phases)
-            .find(|phase| phase.entry_point == entry_point)
-            .map(|phase| phase.domain.clone())
+    pub fn domain_of(&self, kernel: KernelId) -> Option<KernelDomain> {
+        self.phases().find(|phase| phase.id == kernel).map(|phase| phase.domain.clone())
     }
 
-    fn locate(&self, name: &str) -> Option<(PhaseListId, usize)> {
+    fn locate(&self, kernel: KernelId) -> Option<(PhaseListId, usize)> {
         self.pipelines
             .iter()
             .enumerate()
@@ -708,13 +758,13 @@ impl KernelPlan {
                 planned
                     .phases
                     .iter()
-                    .position(|phase| phase.entry_point == name)
+                    .position(|phase| phase.id == kernel)
                     .map(|index| (PhaseListId::Pipeline(pipeline), index))
             })
             .or_else(|| {
                 self.unpublished
                     .iter()
-                    .position(|phase| phase.entry_point == name)
+                    .position(|phase| phase.id == kernel)
                     .map(|index| (PhaseListId::Unpublished, index))
             })
     }
@@ -741,20 +791,19 @@ impl KernelPlan {
 
     pub fn add_phase_after(
         &mut self,
-        parent: &str,
+        parent: KernelId,
         body: PlannedEntry,
         domain: DomainSelection,
         kind: KernelKind,
-    ) {
-        let (list_id, index) =
-            self.locate(parent).unwrap_or_else(|| panic!("no planned kernel named `{parent}`"));
+    ) -> Result<KernelId, KernelMutationError> {
+        let (list_id, index) = self.locate(parent).ok_or(KernelMutationError::UnknownKernel(parent))?;
         let (parent_id, source_entry, flow_source) = {
             let parent = &self.list(list_id)[index];
             (parent.id, parent.abi.source_entry, parent.flow_source)
         };
         let id = self.allocate_kernel_id();
         let mut phase = phase_from_body(id, flow_source, source_entry, body, domain, kind)
-            .expect("generated phase must project");
+            .map_err(KernelMutationError::InvalidKernel)?;
         phase.dependencies.push(parent_id);
         let list = self.list_mut(list_id);
         for dependent in list.iter_mut().skip(index + 1) {
@@ -767,17 +816,17 @@ impl KernelPlan {
             dependent.dependencies.dedup();
         }
         list.insert(index + 1, phase);
+        Ok(id)
     }
 
     pub fn add_phase_before(
         &mut self,
-        consumer: &str,
+        consumer: KernelId,
         body: PlannedEntry,
         domain: DomainSelection,
         kind: KernelKind,
-    ) {
-        let (list_id, index) =
-            self.locate(consumer).unwrap_or_else(|| panic!("no planned kernel named `{consumer}`"));
+    ) -> Result<KernelId, KernelMutationError> {
+        let (list_id, index) = self.locate(consumer).ok_or(KernelMutationError::UnknownKernel(consumer))?;
         let (dependencies, source_entry, flow_source) = {
             let consumer = &self.list(list_id)[index];
             (
@@ -788,23 +837,23 @@ impl KernelPlan {
         };
         let id = self.allocate_kernel_id();
         let mut phase = phase_from_body(id, flow_source, source_entry, body, domain, kind)
-            .expect("generated phase must project");
+            .map_err(KernelMutationError::InvalidKernel)?;
         phase.dependencies = dependencies;
         let list = self.list_mut(list_id);
         list.insert(index, phase);
         list[index + 1].dependencies = vec![id];
+        Ok(id)
     }
 
     pub(crate) fn add_filter_phase_before(
         &mut self,
-        consumer: &str,
+        consumer: KernelId,
         body: PlannedEntry,
         domain: DomainSelection,
         kind: KernelKind,
         plan: filter::Plan<SemanticResourceRef>,
-    ) {
-        let (list_id, index) =
-            self.locate(consumer).unwrap_or_else(|| panic!("no planned kernel named `{consumer}`"));
+    ) -> Result<KernelId, KernelMutationError> {
+        let (list_id, index) = self.locate(consumer).ok_or(KernelMutationError::UnknownKernel(consumer))?;
         let (dependencies, source_entry, flow_source) = {
             let consumer = &self.list(list_id)[index];
             (
@@ -815,47 +864,56 @@ impl KernelPlan {
         };
         let id = self.allocate_kernel_id();
         let mut phase = phase_from_filter_body(id, flow_source, source_entry, body, domain, kind, plan)
-            .expect("generated filter phase must project");
+            .map_err(KernelMutationError::InvalidKernel)?;
         phase.dependencies = dependencies;
         let list = self.list_mut(list_id);
         list.insert(index, phase);
         list[index + 1].dependencies = vec![id];
+        Ok(id)
     }
 
-    pub fn add_materialization_before(&mut self, consumer: &str, requirement: &MaterializationRequirement) {
+    pub fn add_materialization_before(
+        &mut self,
+        consumer: KernelId,
+        requirement: &MaterializationRequirement,
+    ) -> Result<KernelId, KernelMutationError> {
         let Some((list_id, index)) = self.locate(consumer) else {
+            if !self.graphics_passthroughs.iter().any(|phase| phase.id == consumer) {
+                return Err(KernelMutationError::UnknownKernel(consumer));
+            }
             let id = self.allocate_kernel_id();
             let phase = phase_from_materialization(id, requirement, Vec::new())
-                .expect("materialization must project");
+                .map_err(KernelMutationError::InvalidKernel)?;
             self.unpublished.push(phase);
-            return;
+            return Ok(id);
         };
         let dependencies = self.list(list_id)[index].dependencies.clone();
         let id = self.allocate_kernel_id();
         let phase = phase_from_materialization(id, requirement, dependencies)
-            .expect("materialization must project");
+            .map_err(KernelMutationError::InvalidKernel)?;
         let list = self.list_mut(list_id);
         list.insert(index, phase);
         list[index + 1].dependencies = vec![id];
+        Ok(id)
     }
 
     pub fn add_sibling(
         &mut self,
-        parent: &str,
+        parent: KernelId,
         body: PlannedEntry,
         domain: DomainSelection,
         kind: KernelKind,
-    ) {
-        let (list_id, index) =
-            self.locate(parent).unwrap_or_else(|| panic!("no planned kernel named `{parent}`"));
+    ) -> Result<KernelId, KernelMutationError> {
+        let (list_id, index) = self.locate(parent).ok_or(KernelMutationError::UnknownKernel(parent))?;
         let (source_entry, flow_source) = {
             let parent = &self.list(list_id)[index];
             (parent.abi.source_entry, parent.flow_source)
         };
         let id = self.allocate_kernel_id();
         let phase = phase_from_body(id, flow_source, source_entry, body, domain, kind)
-            .expect("sibling phase must project");
+            .map_err(KernelMutationError::InvalidKernel)?;
         self.list_mut(list_id).push(phase);
+        Ok(id)
     }
 
     pub(crate) fn select_sequential_recipes(&mut self) {
@@ -889,8 +947,12 @@ impl KernelPlan {
         }
     }
 
-    pub fn set_output_projection(&mut self, name: &str, outputs: Vec<OutputSlotId>) {
-        let (list, index) = self.locate(name).unwrap_or_else(|| panic!("no planned kernel named `{name}`"));
+    pub fn set_output_projection(
+        &mut self,
+        kernel: KernelId,
+        outputs: Vec<OutputSlotId>,
+    ) -> Result<(), KernelMutationError> {
+        let (list, index) = self.locate(kernel).ok_or(KernelMutationError::UnknownKernel(kernel))?;
         self.list_mut(list)[index].abi.output_routes = outputs
             .into_iter()
             .enumerate()
@@ -899,27 +961,34 @@ impl KernelPlan {
                 physical_slot: OutputSlotId(physical),
             })
             .collect();
+        Ok(())
     }
 
-    pub fn commit_kernel(&mut self, body: PlannedEntry, kind: KernelKind) {
-        let (list, index) =
-            self.locate(&body.name).unwrap_or_else(|| panic!("no planned kernel named `{}`", body.name));
+    pub fn commit_kernel(
+        &mut self,
+        kernel: KernelId,
+        body: PlannedEntry,
+        kind: KernelKind,
+    ) -> Result<KernelId, KernelMutationError> {
+        let (list, index) = self.locate(kernel).ok_or(KernelMutationError::UnknownKernel(kernel))?;
         let phase = &mut self.list_mut(list)[index];
         phase.recipe = KernelRecipe::close(kind, body, None);
         phase.refresh_phase_facts();
+        Ok(kernel)
     }
 
     pub(crate) fn commit_filter_kernel(
         &mut self,
+        kernel: KernelId,
         body: PlannedEntry,
         kind: KernelKind,
         plan: filter::Plan<SemanticResourceRef>,
-    ) {
-        let (list, index) =
-            self.locate(&body.name).unwrap_or_else(|| panic!("no planned kernel named `{}`", body.name));
+    ) -> Result<KernelId, KernelMutationError> {
+        let (list, index) = self.locate(kernel).ok_or(KernelMutationError::UnknownKernel(kernel))?;
         let phase = &mut self.list_mut(list)[index];
         phase.recipe = KernelRecipe::close(kind, body, Some(plan));
         phase.refresh_phase_facts();
+        Ok(kernel)
     }
 
     pub fn check_explicit_dispatch_coverage(&self, entries: &[SemanticEntry]) -> Result<(), String> {

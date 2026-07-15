@@ -18,7 +18,8 @@ use smallvec::smallvec;
 use super::graph_ops;
 use super::program::{
     CompilerResource, CompilerResourceKind, LogicalResource, OutputWriter, ResourceId, ResourceOrigin,
-    SemanticEntry, SemanticFunc, SemanticOpId, SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
+    SemanticEntry, SemanticEntryId, SemanticFunc, SemanticOpId, SemanticProgram, SemanticResourceDecl,
+    SemanticResourceRef,
 };
 use super::soac::{filter, screma};
 use super::types::{
@@ -73,25 +74,28 @@ impl UnionFind {
 pub fn lower(inner: &SemanticProgram) -> schedule::KernelPlan {
     use schedule::KernelPlan;
 
-    let mut schedule = KernelPlan::seed(
+    let (mut schedule, seeded) = KernelPlan::seed(
         &inner.pipeline,
         &inner.entry_points,
         &inner.resources,
         &inner.region_interner,
     );
     attach_materializations(inner, &mut schedule);
-    lower_runtime_filters(inner, &mut schedule);
-    for entry in &inner.entry_points {
+    lower_runtime_filters(inner, &seeded, &mut schedule);
+    for (index, entry) in inner.entry_points.iter().enumerate() {
+        let Some(kernel) = seeded.entry(SemanticEntryId(index as u32)) else {
+            continue;
+        };
         let body =
             super::program::PlannedEntry::project(entry).expect("segmented semantic entry projection");
-        plan_segmented_kernel_body(body, &mut schedule, &inner.resources);
+        plan_segmented_kernel_body(body, kernel, &mut schedule, &inner.resources);
     }
     schedule.coalesce_resource_flows(&inner.resources);
     schedule
 }
 
 pub fn lower_sequential(inner: &SemanticProgram) -> schedule::KernelPlan {
-    let mut plan = schedule::KernelPlan::seed(
+    let (mut plan, _) = schedule::KernelPlan::seed(
         &inner.pipeline,
         &inner.entry_points,
         &inner.resources,
@@ -105,6 +109,7 @@ pub fn lower_sequential(inner: &SemanticProgram) -> schedule::KernelPlan {
 
 fn plan_segmented_kernel_body(
     mut body: super::program::PlannedEntry,
+    kernel: schedule::KernelId,
     schedule: &mut schedule::KernelPlan,
     resources: &[LogicalResource],
 ) {
@@ -119,103 +124,130 @@ fn plan_segmented_kernel_body(
     };
     match &op.body.kind {
         screma::Kind::Map => {
-            let parent = body.name.clone();
             if let Some(split) = split_multidomain_seg_maps(&body) {
                 let primary_slots = split.primary_slots;
                 if !split.entries.is_empty() {
-                    schedule.commit_kernel(split.primary, schedule::KernelKind::OutputDomainProjection);
+                    schedule
+                        .commit_kernel(
+                            kernel,
+                            split.primary,
+                            schedule::KernelKind::OutputDomainProjection,
+                        )
+                        .expect("seeded map kernel must remain addressable");
                 }
-                schedule.set_output_projection(
-                    &parent,
-                    primary_slots.iter().copied().map(super::program::OutputSlotId).collect(),
-                );
+                schedule
+                    .set_output_projection(
+                        kernel,
+                        primary_slots.iter().copied().map(super::program::OutputSlotId).collect(),
+                    )
+                    .expect("seeded map kernel must remain addressable");
                 for projected in split.entries {
-                    let projected_name = projected.entry.name.clone();
-                    schedule.add_sibling(
-                        &parent,
-                        projected.entry,
-                        schedule::DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                        schedule::KernelKind::OutputDomainProjection,
-                    );
-                    schedule.set_output_projection(
-                        &projected_name,
-                        projected
-                            .semantic_slots
-                            .iter()
-                            .copied()
-                            .map(super::program::OutputSlotId)
-                            .collect(),
-                    );
+                    let projected_kernel = schedule
+                        .add_sibling(
+                            kernel,
+                            projected.entry,
+                            schedule::DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                            schedule::KernelKind::OutputDomainProjection,
+                        )
+                        .expect("seeded map kernel must remain addressable");
+                    schedule
+                        .set_output_projection(
+                            projected_kernel,
+                            projected
+                                .semantic_slots
+                                .iter()
+                                .copied()
+                                .map(super::program::OutputSlotId)
+                                .collect(),
+                        )
+                        .expect("new sibling kernel handle must be valid");
                 }
             } else {
-                schedule.commit_kernel(body, schedule::KernelKind::SerialCompute);
+                schedule
+                    .commit_kernel(kernel, body, schedule::KernelKind::SerialCompute)
+                    .expect("seeded map kernel must remain addressable");
             }
         }
         screma::Kind::Reduce(_) => {
             if let Some(plan) = analyze_reduce_entry(&body, resources) {
                 let phases = emit_reduce_entry(&mut body, plan, schedule, resources);
-                let mut predecessor = body.name.clone();
-                schedule.commit_kernel(body, schedule::KernelKind::ReducePhase1);
+                let mut predecessor = schedule
+                    .commit_kernel(kernel, body, schedule::KernelKind::ReducePhase1)
+                    .expect("seeded reduce kernel must remain addressable");
                 for phase in phases {
-                    let phase_name = phase.name.clone();
-                    schedule.add_phase_after(
-                        &predecessor,
-                        phase,
-                        schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                        schedule::KernelKind::ReduceCombine,
-                    );
-                    predecessor = phase_name;
+                    predecessor = schedule
+                        .add_phase_after(
+                            predecessor,
+                            phase,
+                            schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                            schedule::KernelKind::ReduceCombine,
+                        )
+                        .expect("new reduce phase handle must be valid");
                 }
             } else {
-                commit_serial_kernel(body, schedule);
+                commit_serial_kernel(body, kernel, schedule);
             }
         }
         screma::Kind::Scan(_) => {
             if let Some(plan) = analyze_scan_entry(&body, resources) {
                 let phases = emit_scan_entry(&mut body, plan, schedule, resources);
-                let mut predecessor = body.name.clone();
                 let phase1_domain =
-                    schedule.domain_of(&body.name).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
-                schedule.commit_kernel(body, schedule::KernelKind::ScanPhase1);
+                    schedule.domain_of(kernel).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+                let mut predecessor = schedule
+                    .commit_kernel(kernel, body, schedule::KernelKind::ScanPhase1)
+                    .expect("seeded scan kernel must remain addressable");
                 for (phase_index, phase) in phases.into_iter().enumerate() {
-                    let phase_name = phase.name.clone();
-                    schedule.add_phase_after(
-                        &predecessor,
-                        phase,
-                        schedule::DomainSelection::Explicit(if phase_index == 0 {
-                            KernelDomain::Fixed { x: 1, y: 1, z: 1 }
-                        } else {
-                            phase1_domain.clone()
-                        }),
-                        if phase_index == 0 {
-                            schedule::KernelKind::ScanBlock
-                        } else {
-                            schedule::KernelKind::ScanApplyOffsets
-                        },
-                    );
-                    predecessor = phase_name;
+                    predecessor = schedule
+                        .add_phase_after(
+                            predecessor,
+                            phase,
+                            schedule::DomainSelection::Explicit(if phase_index == 0 {
+                                KernelDomain::Fixed { x: 1, y: 1, z: 1 }
+                            } else {
+                                phase1_domain.clone()
+                            }),
+                            if phase_index == 0 {
+                                schedule::KernelKind::ScanBlock
+                            } else {
+                                schedule::KernelKind::ScanApplyOffsets
+                            },
+                        )
+                        .expect("new scan phase handle must be valid");
                 }
             } else {
-                commit_serial_kernel(body, schedule);
+                commit_serial_kernel(body, kernel, schedule);
             }
         }
         screma::Kind::Composite(_) => {
-            commit_serial_kernel(body, schedule);
+            commit_serial_kernel(body, kernel, schedule);
         }
     }
 }
 
-fn commit_serial_kernel(mut body: super::program::PlannedEntry, schedule: &mut schedule::KernelPlan) {
+fn commit_serial_kernel(
+    mut body: super::program::PlannedEntry,
+    kernel: schedule::KernelId,
+    schedule: &mut schedule::KernelPlan,
+) {
     let (block, effect, _) =
         kernel_effect(&body.graph).expect("serial recipe requires one pending kernel SegOp");
     make_screma_serial(&mut body.graph, block, effect);
-    schedule.commit_kernel(body, schedule::KernelKind::SerialCompute);
+    schedule
+        .commit_kernel(kernel, body, schedule::KernelKind::SerialCompute)
+        .expect("seeded serial kernel must remain addressable");
 }
 
-fn lower_runtime_filters(inner: &SemanticProgram, schedule: &mut schedule::KernelPlan) {
+fn lower_runtime_filters(
+    inner: &SemanticProgram,
+    seeded: &schedule::SeededKernels,
+    schedule: &mut schedule::KernelPlan,
+) {
     use crate::interface::StorageRole;
     use schedule::KernelDomain;
-    for entry in &inner.entry_points {
+    for (index, entry) in inner.entry_points.iter().enumerate() {
+        let Some(kernel) = seeded.entry(SemanticEntryId(index as u32)) else {
+            continue;
+        };
         let Some(FilterAnalysis { space, work, len_out }) = analyze_filter_entry(entry, &inner.resources)
         else {
             continue;
@@ -308,45 +340,56 @@ fn lower_runtime_filters(inner: &SemanticProgram, schedule: &mut schedule::Kerne
             scatter_resources,
             entry.return_ty.clone(),
         );
-        schedule.commit_filter_kernel(
-            scatter,
-            schedule::KernelKind::FilterScatter,
-            filter::Plan::Scatter(work),
-        );
-        schedule.add_filter_phase_before(
-            &entry.name,
-            flags,
-            schedule::DomainSelection::Explicit(domain.clone()),
-            schedule::KernelKind::FilterFlags,
-            filter::Plan::Flags(work),
-        );
+        schedule
+            .commit_filter_kernel(
+                kernel,
+                scatter,
+                schedule::KernelKind::FilterScatter,
+                filter::Plan::Scatter(work),
+            )
+            .expect("seeded filter kernel must remain addressable");
+        schedule
+            .add_filter_phase_before(
+                kernel,
+                flags,
+                schedule::DomainSelection::Explicit(domain.clone()),
+                schedule::KernelKind::FilterFlags,
+                filter::Plan::Flags(work),
+            )
+            .expect("seeded filter kernel must remain addressable");
         // The scan runs a fixed worker grid so each worker scans a large
         // chunk and `block_sums` stays `FILTER_SCAN_GROUPS * width`-sized,
         // keeping the serial phase-2 bounded by that constant rather than by
         // `len`. The flags and scatter phases stay per-element (`domain`).
-        schedule.add_filter_phase_before(
-            &entry.name,
-            scan,
-            schedule::DomainSelection::Explicit(KernelDomain::Fixed {
-                x: FILTER_SCAN_GROUPS,
-                y: 1,
-                z: 1,
-            }),
-            schedule::KernelKind::FilterScan,
-            filter::Plan::Scan(work),
-        );
-        schedule.add_phase_before(
-            &entry.name,
-            phase2,
-            schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-            schedule::KernelKind::FilterCombine,
-        );
-        schedule.add_phase_before(
-            &entry.name,
-            phase3,
-            schedule::DomainSelection::Explicit(domain),
-            schedule::KernelKind::FilterScan,
-        );
+        schedule
+            .add_filter_phase_before(
+                kernel,
+                scan,
+                schedule::DomainSelection::Explicit(KernelDomain::Fixed {
+                    x: FILTER_SCAN_GROUPS,
+                    y: 1,
+                    z: 1,
+                }),
+                schedule::KernelKind::FilterScan,
+                filter::Plan::Scan(work),
+            )
+            .expect("seeded filter kernel must remain addressable");
+        schedule
+            .add_phase_before(
+                kernel,
+                phase2,
+                schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                schedule::KernelKind::FilterCombine,
+            )
+            .expect("seeded filter kernel must remain addressable");
+        schedule
+            .add_phase_before(
+                kernel,
+                phase3,
+                schedule::DomainSelection::Explicit(domain),
+                schedule::KernelKind::FilterScan,
+            )
+            .expect("seeded filter kernel must remain addressable");
     }
 }
 
@@ -533,9 +576,8 @@ pub(crate) fn attach_materializations(inner: &SemanticProgram, schedule: &mut sc
         })
     {
         let consumer = schedule
-            .entry_point_for_flow_source(consumer_id)
-            .expect("scheduled flow consumer has no entry point")
-            .to_string();
+            .kernel_for_flow_source(consumer_id)
+            .expect("scheduled flow consumer has no kernel handle");
         let super::program::CompilerFlowEndpoint::Materialization(id) = producer_id else {
             panic!("typed entry/prepass producer was omitted while seeding the kernel plan")
         };
@@ -544,7 +586,9 @@ pub(crate) fn attach_materializations(inner: &SemanticProgram, schedule: &mut sc
             .get(id.0 as usize)
             .filter(|requirement| requirement.id == id)
             .expect("materialization flow references a missing requirement");
-        schedule.add_materialization_before(&consumer, requirement);
+        let materialization = schedule
+            .add_materialization_before(consumer, requirement)
+            .expect("scheduled flow consumer must remain addressable");
         let body = super::program::PlannedEntry::project(&requirement.entry)
             .expect("materialization entry projection");
         if kernel_effect(&body.graph).is_some_and(|(block, index, _)| {
@@ -559,7 +603,7 @@ pub(crate) fn attach_materializations(inner: &SemanticProgram, schedule: &mut sc
                 }))
             )
         }) {
-            plan_segmented_kernel_body(body, schedule, &inner.resources);
+            plan_segmented_kernel_body(body, materialization, schedule, &inner.resources);
         }
     }
 }
