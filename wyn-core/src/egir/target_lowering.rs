@@ -6,12 +6,12 @@
 
 use super::from_tlc::ConvertError;
 use super::parallelize;
-use super::program::{PhysicalProgram, PhysicalResourceTable, SemanticProgram};
+use super::program::{AllocatedProgram, PhysicalProgram, PhysicalResourceTable};
 use super::publish::PipelineDescriptorPublish;
 use crate::{IdSource, LoweringProfile, SchedulePolicy};
 
 pub fn schedule(
-    inner: SemanticProgram,
+    inner: AllocatedProgram,
     binding_ids: &mut IdSource<u32>,
     profile: LoweringProfile,
 ) -> Result<PhysicalProgram, ConvertError> {

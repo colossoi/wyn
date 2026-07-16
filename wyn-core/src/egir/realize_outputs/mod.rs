@@ -46,14 +46,14 @@ pub mod verify;
 /// pass, `verify::check` confirms the invariant.
 pub fn run(inner: &mut RawProgram) -> Result<(), ConvertError> {
     let by_binding = host_resource_map(&inner.resources);
-    let resources = &mut inner.resources;
-    for entry in inner.entry_points.iter_mut() {
+    let RawProgram { ir, resources } = inner;
+    for entry in &mut ir.entry_points {
         realize_entry(entry, &by_binding, resources)?;
     }
     // Output retargeting can rewrite a captured `map` result from a Composite
     // array to a storage view; sync each capturing region's parameter type so
     // the region body lowers consistently.
-    reconcile::run(inner)?;
+    reconcile::run(ir)?;
     Ok(())
 }
 

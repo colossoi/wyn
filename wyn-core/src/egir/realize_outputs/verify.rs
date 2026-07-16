@@ -29,13 +29,13 @@ use polytype::Type;
 use crate::ast::TypeName;
 
 use super::super::from_tlc::ConvertError;
-use super::super::program::{Entry, Program};
+use super::super::program::{AllocatedProgram, Entry};
 use super::super::types::{EGraph, ENode, EgirPhase, NodeId, SkeletonTerminator};
 
 /// Verify the post-realization invariant for every entry. Returns
 /// `ConvertError::Internal` on the first violation, naming the entry
 /// and offending NodeId.
-pub fn check<P: EgirPhase>(inner: &Program<P>) -> Result<(), ConvertError> {
+pub fn check(inner: &AllocatedProgram) -> Result<(), ConvertError> {
     for (endpoint, entry) in inner.entries_with_endpoints() {
         if matches!(endpoint, super::super::program::CompilerFlowEndpoint::Entry(_)) {
             check_routes(entry)?;

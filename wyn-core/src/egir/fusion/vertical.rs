@@ -463,8 +463,8 @@ fn compose_map_region(
     params.extend(
         capture_types.iter().enumerate().map(|(index, ty)| (ty.clone(), format!("capture_{index}"))),
     );
-    let producer_region = &inner.regions[&producer.body.region];
-    let consumer_region = &inner.regions[&consumer.region];
+    let producer_region = &inner.ir.regions[&producer.body.region];
+    let consumer_region = &inner.ir.regions[&consumer.region];
     let mut graph = EGraph::new();
     let args: Vec<_> =
         params.iter().enumerate().map(|(index, (ty, _))| graph.add_func_param(index, ty.clone())).collect();
@@ -511,7 +511,7 @@ fn compose_map_region(
     );
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
     let name = fresh_region_name(inner, &format!("{scope}_vertical_map_{lane}"));
-    let region = inner.region_interner.intern(&name);
+    let region = inner.ir.region_interner.intern(&name);
     let function = SemanticFunc::new(
         name,
         span,
@@ -544,8 +544,8 @@ fn compose_step_region(
     new_elem_types: &[Type<TypeName>],
     outer_types: &LookupMap<NodeId, Type<TypeName>>,
 ) -> (SegBody, SemanticFunc) {
-    let producer_region = &inner.regions[&producer.body.region];
-    let consumer_region = &inner.regions[&operator.step.region];
+    let producer_region = &inner.ir.regions[&producer.body.region];
+    let consumer_region = &inner.ir.regions[&operator.step.region];
     let accumulator_ty = consumer_region.params[0].0.clone();
     let capture_types = capture_types(
         outer_types,
@@ -606,7 +606,7 @@ fn compose_step_region(
     );
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
     let name = fresh_region_name(inner, &format!("{scope}_vertical_step_{operator_index}"));
-    let region = inner.region_interner.intern(&name);
+    let region = inner.ir.region_interner.intern(&name);
     let function = SemanticFunc::new(
         name,
         span,

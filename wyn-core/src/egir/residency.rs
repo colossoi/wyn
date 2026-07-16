@@ -13,9 +13,9 @@ use polytype::Type;
 
 use super::graph_ops;
 use super::program::{
-    CompilerResource, CompilerResourceKind, LogicalSize, MaterializationId, MaterializationKind,
-    MaterializationRequirement, MaterializationSubstitution, OutputWriter, ResourceId,
-    SemanticDependencyKind, SemanticOpId, SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
+    AllocatedProgram, CompilerResource, CompilerResourceKind, LogicalSize, MaterializationId,
+    MaterializationKind, MaterializationRequirement, MaterializationSubstitution, OutputWriter, ResourceId,
+    SemanticDependencyKind, SemanticOpId, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::soac::{filter, screma};
 use super::types::{
@@ -98,7 +98,7 @@ struct InputReplacement {
     resource: ResourceId,
 }
 
-pub fn run(inner: &mut SemanticProgram) {
+pub fn run(inner: &mut AllocatedProgram) {
     select_in_place_destinations(inner);
     loop {
         super::semantic_graph::rebuild_dependencies(inner);
@@ -120,7 +120,7 @@ pub fn run(inner: &mut SemanticProgram) {
 /// Resolve TLC's uniqueness-only candidates from the final semantic use graph.
 /// Output realization and fusion have already run, so `InputBuffer` here is a
 /// physical choice rather than a source-level prediction.
-fn select_in_place_destinations(inner: &mut SemanticProgram) {
+fn select_in_place_destinations(inner: &mut AllocatedProgram) {
     for entry in &mut inner.entry_points {
         select_in_place_in_graph(&mut entry.graph);
     }
@@ -401,7 +401,7 @@ fn reusable_input_type(ty: &Type<TypeName>) -> bool {
 /// shared logical resource.  Keep that promise executable: otherwise a newly
 /// introduced source shape can silently regress to one materialization per
 /// consumer.
-fn verify_residency_requirements_satisfied(inner: &SemanticProgram) {
+fn verify_residency_requirements_satisfied(inner: &AllocatedProgram) {
     let mut consumers: HashMap<SemanticOpId, HashSet<SemanticOpId>> = HashMap::new();
     for dependency in &inner.semantic_dependencies {
         if dependency.kind == SemanticDependencyKind::Value {
@@ -475,11 +475,11 @@ fn verify_residency_requirements_satisfied(inner: &SemanticProgram) {
     }
 }
 
-fn next_materialization_plan(inner: &SemanticProgram) -> Option<MaterializationPlan> {
+fn next_materialization_plan(inner: &AllocatedProgram) -> Option<MaterializationPlan> {
     plan_operation_result(inner).or_else(|| plan_parallel_prelude(inner))
 }
 
-fn apply_materialization(inner: &mut SemanticProgram, plan: MaterializationPlan) {
+fn apply_materialization(inner: &mut AllocatedProgram, plan: MaterializationPlan) {
     match plan.source {
         MaterializationSource::OperationResult(operation) => {
             materialize_operation_result(inner, plan.entry, plan.kind, operation);
@@ -490,7 +490,7 @@ fn apply_materialization(inner: &mut SemanticProgram, plan: MaterializationPlan)
     }
 }
 
-fn plan_operation_result(inner: &SemanticProgram) -> Option<MaterializationPlan> {
+fn plan_operation_result(inner: &AllocatedProgram) -> Option<MaterializationPlan> {
     let consumers = semantic_value_consumers(inner);
     for (entry_index, entry) in inner.entry_points.iter().enumerate() {
         for (block_id, block) in &entry.graph.skeleton.blocks {
@@ -591,7 +591,7 @@ fn filter_runtime_array_plan(
     })
 }
 
-fn semantic_value_consumers(inner: &SemanticProgram) -> HashMap<SemanticOpId, HashSet<SemanticOpId>> {
+fn semantic_value_consumers(inner: &AllocatedProgram) -> HashMap<SemanticOpId, HashSet<SemanticOpId>> {
     let mut consumers = HashMap::new();
     for dependency in &inner.semantic_dependencies {
         if dependency.kind == SemanticDependencyKind::Value {
@@ -692,7 +692,7 @@ fn operation_result_plan(
     })
 }
 
-fn plan_parallel_prelude(inner: &SemanticProgram) -> Option<MaterializationPlan> {
+fn plan_parallel_prelude(inner: &AllocatedProgram) -> Option<MaterializationPlan> {
     for (entry_index, entry) in inner.entry_points.iter().enumerate() {
         let dependencies = super::semantic_graph::SemanticGraph::with_operation_captures(
             &inner.semantic_dependencies,
@@ -1022,7 +1022,7 @@ fn dependencies_are_cloneable(
 }
 
 fn materialize_operation_result(
-    inner: &mut SemanticProgram,
+    inner: &mut AllocatedProgram,
     entry_index: usize,
     kind: MaterializationKind,
     operation: OperationResultMaterialization,
@@ -1126,7 +1126,7 @@ fn materialize_operation_result(
 }
 
 fn materialize_runtime_array_result(
-    inner: &mut SemanticProgram,
+    inner: &mut AllocatedProgram,
     entry_index: usize,
     operation: OperationResultMaterialization,
 ) {
@@ -1519,7 +1519,7 @@ fn rewrite_materialized_operation_source(
 }
 
 fn materialize_parallel_prelude(
-    inner: &mut SemanticProgram,
+    inner: &mut AllocatedProgram,
     entry_index: usize,
     prelude: ParallelPreludeMaterialization,
 ) {
@@ -1602,7 +1602,7 @@ fn materialize_parallel_prelude(
 }
 
 fn projected_materialization_entry(
-    program: &SemanticProgram,
+    program: &AllocatedProgram,
     source: &super::program::SemanticEntry,
     name_suffix: &str,
     execution_model: ExecutionModel,
@@ -2188,7 +2188,7 @@ fn size_for_space(space: &super::types::SegSpace, elem_ty: &Type<TypeName>) -> L
     }
 }
 
-fn fresh_entry_name(inner: &SemanticProgram, base: &str) -> String {
+fn fresh_entry_name(inner: &AllocatedProgram, base: &str) -> String {
     let available = |name: &str| {
         inner.entry_points.iter().all(|entry| entry.name != name)
             && inner.materializations.iter().all(|requirement| requirement.entry.name != name)

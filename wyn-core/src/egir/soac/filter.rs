@@ -5,8 +5,8 @@ use polytype::Type;
 use crate::ast::TypeName;
 
 use super::super::program::{
-    CompilerResource, CompilerResourceKind, LogicalResource, LogicalSize, PhysicalResourceRef, ResourceId,
-    SemanticProgram, SemanticResourceRef,
+    AllocatedProgram, CompilerResource, CompilerResourceKind, LogicalResource, LogicalSize,
+    PhysicalResourceRef, ResourceId, SemanticResourceRef,
 };
 use super::super::types::{
     EgirPhase, GraphResource, NodeId, SegBody, SegExtent, SegSpace, Semantic, SideEffectKind, Soac,
@@ -215,7 +215,7 @@ impl<R: GraphResource> Op<Semantic<R>> {
 }
 
 /// Resolve compaction capacity from the post-fusion semantic domain.
-pub(crate) fn resolve_scratch_sizes(inner: &mut SemanticProgram) {
+pub(crate) fn resolve_scratch_sizes(inner: &mut AllocatedProgram) {
     let mut resolved = Vec::new();
     for (_, entry) in inner.entries_with_endpoints() {
         for (_, block) in &entry.graph.skeleton.blocks {
@@ -282,10 +282,15 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut SemanticProgram) {
         if let Some(logical) = inner.resources.get_mut(resource.0 as usize) {
             logical.size = size.clone();
         }
-        for entry in inner
+        let AllocatedProgram {
+            semantic,
+            materializations,
+        } = &mut *inner;
+        for entry in semantic
+            .ir
             .entry_points
             .iter_mut()
-            .chain(inner.materializations.iter_mut().map(|requirement| &mut requirement.entry))
+            .chain(materializations.iter_mut().map(|requirement| &mut requirement.entry))
         {
             if let Some(declaration) = entry
                 .resource_declarations
@@ -303,7 +308,7 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut SemanticProgram) {
     }
 }
 
-pub(crate) fn allocate_work_resources(inner: &mut SemanticProgram) {
+pub(crate) fn allocate_work_resources(inner: &mut AllocatedProgram) {
     let mut pending = Vec::new();
     for (_, entry) in inner.entries_with_endpoints() {
         for (_, block) in &entry.graph.skeleton.blocks {
@@ -367,7 +372,7 @@ pub(crate) fn allocate_work_resources(inner: &mut SemanticProgram) {
 }
 
 /// Runtime filter identities that predate logical allocation.
-pub(crate) fn resource_kinds(inner: &SemanticProgram) -> HashMap<ResourceId, CompilerResource> {
+pub(crate) fn resource_kinds(inner: &AllocatedProgram) -> HashMap<ResourceId, CompilerResource> {
     let mut kinds = HashMap::new();
     for (_, entry) in inner.entries_with_endpoints() {
         for (_, block) in &entry.graph.skeleton.blocks {

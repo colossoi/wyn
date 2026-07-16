@@ -419,8 +419,8 @@ fn compose_hist_region(
     params.extend(
         capture_types.iter().enumerate().map(|(index, ty)| (ty.clone(), format!("capture_{index}"))),
     );
-    let producer_region = &inner.regions[&producer.body.region];
-    let hist_region = &inner.regions[&hist.region];
+    let producer_region = &inner.ir.regions[&producer.body.region];
+    let hist_region = &inner.ir.regions[&hist.region];
     let mut graph = EGraph::new();
     let args: Vec<_> =
         params.iter().enumerate().map(|(index, (ty, _))| graph.add_func_param(index, ty.clone())).collect();
@@ -452,7 +452,7 @@ fn compose_hist_region(
     );
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
     let name = fresh_region_name(inner, &format!("{scope}_map_hist"));
-    let region = inner.region_interner.intern(&name);
+    let region = inner.ir.region_interner.intern(&name);
     let function = SemanticFunc::new(
         name,
         span,

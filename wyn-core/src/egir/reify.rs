@@ -16,8 +16,8 @@ use crate::LookupMap;
 
 use super::graph_ops;
 use super::program::{
-    Entry, Func, MaterializationRequirement, OutputRoute, OutputSlotId, OutputWriter, Program, RawEntry,
-    RawProgram, Region, SemanticOpId, SemanticProgram, SemanticResourceRef,
+    Entry, Func, OutputRoute, OutputSlotId, OutputWriter, Program, RawEntry, RawProgram, Region,
+    SemanticOpId, SemanticProgram, SemanticResourceRef,
 };
 use super::soac::{filter, hist, screma};
 use super::types::{
@@ -34,50 +34,39 @@ struct Facts {
 }
 
 pub fn run(raw: RawProgram) -> SemanticProgram {
+    let RawProgram { ir, resources } = raw;
     let Program {
         functions,
         externs,
         entry_points,
-        materializations,
         constants,
         pipeline,
         input_names,
         regions,
         region_interner,
-        resources,
-        semantic_dependencies,
-    } = raw;
+    } = ir;
 
     let mut next_semantic_id = 0;
     let entry_points =
         entry_points.into_iter().map(|entry| reify_entry(entry, &mut next_semantic_id)).collect();
     let functions =
         functions.into_iter().map(|function| reify_func(function, &mut next_semantic_id)).collect();
-    let materializations = materializations
-        .into_iter()
-        .map(|requirement| MaterializationRequirement {
-            id: requirement.id,
-            kind: requirement.kind,
-            producer: requirement.producer,
-            entry: reify_entry(requirement.entry, &mut next_semantic_id),
-            substitutions: requirement.substitutions,
-        })
-        .collect();
     let regions =
         regions.into_iter().map(|(id, region)| (id, reify_region(region, &mut next_semantic_id))).collect();
 
-    let mut semantic = Program {
-        functions,
-        externs,
-        entry_points,
-        materializations,
-        constants,
-        pipeline,
-        input_names,
-        regions,
-        region_interner,
+    let mut semantic = SemanticProgram {
+        ir: Program {
+            functions,
+            externs,
+            entry_points,
+            constants,
+            pipeline,
+            input_names,
+            regions,
+            region_interner,
+        },
         resources,
-        semantic_dependencies,
+        semantic_dependencies: Vec::new(),
     };
     super::semantic_graph::rebuild_dependencies(&mut semantic);
     semantic

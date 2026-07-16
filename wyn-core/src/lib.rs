@@ -49,7 +49,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 
 use egir::from_tlc::ConvertError;
-use egir::program::{RawProgram, SemanticProgram};
+use egir::program::{AllocatedProgram, RawProgram, SemanticProgram};
 
 use ast::{NodeCounter, NodeId};
 use error::Result;
@@ -1123,7 +1123,7 @@ pub struct EgirOptimized {
 /// phase kernels, and descriptor publication are intentionally deferred until
 /// `plan` receives a target profile.
 pub struct EgirAllocated {
-    inner: SemanticProgram,
+    inner: AllocatedProgram,
     binding_ids: IdSource<u32>,
 }
 
@@ -1188,14 +1188,11 @@ impl EgirOptimized {
     /// The carried allocator lets terminal lowering allocate scratch
     /// transactionally without mutating upstream TLC state.
     pub fn allocate(self) -> EgirAllocated {
-        let EgirOptimized {
-            mut inner,
-            binding_ids,
-        } = self;
+        let EgirOptimized { inner, binding_ids } = self;
         if cfg!(debug_assertions) {
             egir::semantic_graph::verify(&inner).expect("invalid optimized semantic EGIR");
         }
-        egir::program::plan_logical_resources(&mut inner);
+        let inner = egir::program::plan_logical_resources(inner);
         EgirAllocated { inner, binding_ids }
     }
 }

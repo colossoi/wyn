@@ -1,13 +1,14 @@
 //! Whole-program EGIR container + per-body records.
 //!
-//! Compiler state is explicit at both boundaries: public semantic pipeline
-//! newtypes wrap `SemanticProgram`, while each graph is parameterized by its
-//! phase-specific resource identity. Physicalization rebuilds those graphs as
-//! `EGraph<Physical>` inside a distinct `PhysicalProgram`.
+//! Compiler state is explicit at both boundaries: program wrappers carry the
+//! metadata available at each pipeline checkpoint, while each graph is
+//! parameterized by its phase-specific resource identity. Physicalization
+//! rebuilds those graphs as `EGraph<Physical>` inside a distinct
+//! `PhysicalProgram`.
 //!
-//! `SemanticProgram` carries, for each function and entry point, a per-body
-//! `EGraph` + control-headers + alias map, plus program-level metadata
-//! (constants, uniforms, storage decls, pipeline descriptor, extern stubs).
+//! The underlying [`super::ir::Program`] carries only low-level IR. Logical
+//! resources, semantic dependencies, and allocation requirements live in the
+//! compiler-facing wrappers in this module.
 
 use crate::LookupMap;
 
@@ -21,6 +22,7 @@ use crate::ssa::types::{
 };
 use crate::types::TypeExt;
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 
 use super::parallelize::schedule::ValidatedKernelPlan;
 use super::soac::{filter, hist, screma};
@@ -267,21 +269,27 @@ pub(crate) fn host_resource_map(resources: &[LogicalResource]) -> HashMap<crate:
 /// boundary. Host resources already have stable identities; this pass adds
 /// semantic residency requirements and segmented-operation scratch, then
 /// records explicit producer/consumer flows.
-pub fn plan_logical_resources(inner: &mut SemanticProgram) {
-    classify_existing_compiler_resources(inner);
-    super::residency::run(inner);
-    super::soac::filter::resolve_scratch_sizes(inner);
-    super::soac::filter::allocate_work_resources(inner);
-    let mut scratch = super::parallelize::enumerate_seg_scratch(inner, inner.resources.len() as u32);
-    inner.resources.append(&mut scratch);
-    strip_compiler_abi(inner);
-    record_compiler_resource_flows(inner);
+pub fn plan_logical_resources(inner: SemanticProgram) -> AllocatedProgram {
+    let mut allocated = AllocatedProgram {
+        semantic: inner,
+        materializations: Vec::new(),
+    };
+    classify_existing_compiler_resources(&mut allocated);
+    super::residency::run(&mut allocated);
+    super::soac::filter::resolve_scratch_sizes(&mut allocated);
+    super::soac::filter::allocate_work_resources(&mut allocated);
+    let mut scratch =
+        super::parallelize::enumerate_seg_scratch(&allocated, allocated.resources.len() as u32);
+    allocated.resources.append(&mut scratch);
+    strip_compiler_abi(&mut allocated);
+    record_compiler_resource_flows(&mut allocated);
     if cfg!(debug_assertions) {
-        verify_allocated_resources(inner).expect("invalid allocated semantic resources");
+        verify_allocated_resources(&allocated).expect("invalid allocated semantic resources");
     }
+    allocated
 }
 
-pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), String> {
+pub(crate) fn verify_allocated_resources(inner: &AllocatedProgram) -> Result<(), String> {
     let ids = inner.resources.iter().map(|resource| resource.id).collect::<std::collections::HashSet<_>>();
     if ids.len() != inner.resources.len()
         || inner.resources.iter().enumerate().any(|(index, resource)| resource.id.0 as usize != index)
@@ -309,7 +317,7 @@ pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), 
     Ok(())
 }
 
-fn classify_existing_compiler_resources(inner: &mut SemanticProgram) {
+fn classify_existing_compiler_resources(inner: &mut AllocatedProgram) {
     let mut classifications = HashMap::new();
     for entry in &inner.entry_points {
         for declaration in &entry.resource_declarations {
@@ -341,7 +349,7 @@ fn classify_existing_compiler_resources(inner: &mut SemanticProgram) {
     }
 }
 
-fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
+fn record_compiler_resource_flows(inner: &mut AllocatedProgram) {
     let mut producers: HashMap<ResourceId, Vec<CompilerFlowEndpoint>> = HashMap::new();
     let mut consumers: HashMap<ResourceId, Vec<CompilerFlowEndpoint>> = HashMap::new();
     for (endpoint, entry) in inner.entries_with_endpoints() {
@@ -447,7 +455,7 @@ pub(crate) fn finalize_converted_resources(
     }
 }
 
-fn strip_compiler_abi(inner: &mut SemanticProgram) {
+fn strip_compiler_abi(inner: &mut AllocatedProgram) {
     let compiler_resources = inner
         .resources
         .iter()
@@ -526,7 +534,7 @@ fn normalize_structural_resources(
     for resource in &mut inner.resources {
         normalize_type_resources(&mut resource.elem_ty, by_binding);
     }
-    for (_, entry) in inner.entries_with_endpoints_mut() {
+    for entry in &mut inner.entry_points {
         entry.visit_types_mut(|ty| normalize_type_resources(ty, by_binding));
     }
     for function in &mut inner.functions {
@@ -1226,8 +1234,117 @@ impl PhysicalResourceTable {
     }
 }
 
-pub type RawProgram = Program<Raw>;
-pub type SemanticProgram = Program<Semantic>;
+/// Low-level raw EGIR plus the logical resources established during TLC
+/// conversion. Raw EGIR has neither semantic dependencies nor allocation
+/// requirements.
+pub struct RawProgram {
+    pub ir: Program<Raw>,
+    pub resources: Vec<LogicalResource>,
+}
+
+impl RawProgram {
+    pub fn new(
+        functions: Vec<RawFunc>,
+        externs: Vec<Function>,
+        entry_points: Vec<RawEntry>,
+        constants: Vec<Constant>,
+        pipeline: PipelineDescriptor,
+        region_interner: RegionInterner,
+    ) -> Self {
+        Self {
+            ir: Program::new(
+                functions,
+                externs,
+                entry_points,
+                constants,
+                pipeline,
+                region_interner,
+            ),
+            resources: Vec::new(),
+        }
+    }
+}
+
+impl Deref for RawProgram {
+    type Target = Program<Raw>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ir
+    }
+}
+
+impl DerefMut for RawProgram {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ir
+    }
+}
+
+/// Semantic EGIR plus its logical-resource manifest and dependency DAG.
+pub struct SemanticProgram {
+    pub ir: Program<Semantic>,
+    pub resources: Vec<LogicalResource>,
+    pub semantic_dependencies: Vec<SemanticDependency>,
+}
+
+impl SemanticProgram {
+    pub fn new(
+        functions: Vec<SemanticFunc>,
+        externs: Vec<Function>,
+        entry_points: Vec<SemanticEntry>,
+        constants: Vec<Constant>,
+        pipeline: PipelineDescriptor,
+        region_interner: RegionInterner,
+    ) -> Self {
+        Self {
+            ir: Program::new(
+                functions,
+                externs,
+                entry_points,
+                constants,
+                pipeline,
+                region_interner,
+            ),
+            resources: Vec::new(),
+            semantic_dependencies: Vec::new(),
+        }
+    }
+}
+
+impl Deref for SemanticProgram {
+    type Target = Program<Semantic>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ir
+    }
+}
+
+impl DerefMut for SemanticProgram {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ir
+    }
+}
+
+/// Semantic EGIR after logical resource planning has introduced every
+/// materialization requirement.
+pub struct AllocatedProgram {
+    pub semantic: SemanticProgram,
+    pub materializations: Vec<MaterializationRequirement>,
+}
+
+impl Deref for AllocatedProgram {
+    type Target = SemanticProgram;
+
+    fn deref(&self) -> &Self::Target {
+        &self.semantic
+    }
+}
+
+impl DerefMut for AllocatedProgram {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.semantic
+    }
+}
+
 pub type ScheduledProgram = Program<Scheduled>;
 
 /// EGIR after the plan has validated and every physical entry has been
@@ -1378,18 +1495,36 @@ fn physicalize_entry(
 
 impl PhysicalProgram {
     pub fn from_validated(
-        program: SemanticProgram,
+        program: AllocatedProgram,
         plan: ValidatedKernelPlan,
         physical_resources: PhysicalResourceTable,
         serial: bool,
         pipeline: PipelineDescriptor,
     ) -> Result<Self, String> {
+        let AllocatedProgram {
+            semantic,
+            materializations: _,
+        } = program;
+        let SemanticProgram {
+            ir,
+            resources,
+            semantic_dependencies,
+        } = semantic;
+        let Program {
+            functions,
+            externs,
+            entry_points: _,
+            constants,
+            pipeline: _,
+            input_names,
+            regions,
+            region_interner: _,
+        } = ir;
         let entry_points = plan
             .physical_kernels()
             .map(|phase| physicalize_entry(phase.recipe.entry(), &physical_resources))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut functions = program
-            .functions
+        let mut functions = functions
             .into_iter()
             .map(|function| physicalize_function(function, &physical_resources, serial))
             .collect::<Result<Vec<_>, _>>()?;
@@ -1401,8 +1536,7 @@ impl PhysicalProgram {
             )?);
         }
         let region_interner = plan.region_interner().clone();
-        let mut regions = program
-            .regions
+        let mut regions = regions
             .into_iter()
             .map(|(id, region)| Ok((id, physicalize_region(region, &physical_resources)?)))
             .collect::<Result<LookupMap<_, _>, String>>()?;
@@ -1414,22 +1548,22 @@ impl PhysicalProgram {
         }
         Ok(Self {
             functions,
-            externs: program.externs,
+            externs,
             entry_points,
-            constants: program.constants,
+            constants,
             pipeline,
-            input_names: program.input_names,
+            input_names,
             regions,
             region_interner,
-            resources: program.resources,
-            semantic_dependencies: program.semantic_dependencies,
+            resources,
+            semantic_dependencies,
             plan,
             physical_resources,
         })
     }
 }
 
-impl<P: EgirPhase> Program<P> {
+impl AllocatedProgram {
     pub(crate) fn alloc_compiler_resource(
         &mut self,
         compiler: CompilerResource,
@@ -1446,8 +1580,12 @@ impl<P: EgirPhase> Program<P> {
         id
     }
 
-    pub(crate) fn entries_with_endpoints(&self) -> impl Iterator<Item = (CompilerFlowEndpoint, &Entry<P>)> {
-        self.entry_points
+    pub(crate) fn entries_with_endpoints(
+        &self,
+    ) -> impl Iterator<Item = (CompilerFlowEndpoint, &SemanticEntry)> {
+        self.semantic
+            .ir
+            .entry_points
             .iter()
             .enumerate()
             .map(|(index, entry)| (CompilerFlowEndpoint::Entry(SemanticEntryId(index as u32)), entry))
@@ -1455,21 +1593,6 @@ impl<P: EgirPhase> Program<P> {
                 (
                     CompilerFlowEndpoint::Materialization(requirement.id),
                     &requirement.entry,
-                )
-            }))
-    }
-
-    fn entries_with_endpoints_mut(
-        &mut self,
-    ) -> impl Iterator<Item = (CompilerFlowEndpoint, &mut Entry<P>)> {
-        self.entry_points
-            .iter_mut()
-            .enumerate()
-            .map(|(index, entry)| (CompilerFlowEndpoint::Entry(SemanticEntryId(index as u32)), entry))
-            .chain(self.materializations.iter_mut().map(|requirement| {
-                (
-                    CompilerFlowEndpoint::Materialization(requirement.id),
-                    &mut requirement.entry,
                 )
             }))
     }

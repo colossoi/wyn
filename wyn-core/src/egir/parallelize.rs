@@ -17,8 +17,8 @@ use smallvec::smallvec;
 
 use super::graph_ops;
 use super::program::{
-    CompilerResource, CompilerResourceKind, LogicalResource, OutputWriter, ResourceId, ResourceOrigin,
-    SemanticEntry, SemanticEntryId, SemanticFunc, SemanticOpId, SemanticProgram, SemanticResourceDecl,
+    AllocatedProgram, CompilerResource, CompilerResourceKind, LogicalResource, OutputWriter, ResourceId,
+    ResourceOrigin, SemanticEntry, SemanticEntryId, SemanticFunc, SemanticOpId, SemanticResourceDecl,
     SemanticResourceRef,
 };
 use super::soac::{filter, screma};
@@ -72,7 +72,7 @@ impl UnionFind {
 /// Pointwise `SegMap`s remain for `soac_expand`; `SegRed`s become a chunked
 /// phase 1 plus a synthesized tree reduction; `SegScan`s become chunk scans,
 /// an exclusive scan of block sums, and offset-application phases.
-pub fn lower(inner: &SemanticProgram) -> Result<schedule::KernelPlan, String> {
+pub fn lower(inner: &AllocatedProgram) -> Result<schedule::KernelPlan, String> {
     use schedule::KernelPlan;
 
     let (mut schedule, seeded) = KernelPlan::seed(
@@ -100,7 +100,7 @@ pub fn lower(inner: &SemanticProgram) -> Result<schedule::KernelPlan, String> {
     Ok(schedule)
 }
 
-pub fn lower_sequential(inner: &SemanticProgram) -> schedule::KernelPlan {
+pub fn lower_sequential(inner: &AllocatedProgram) -> schedule::KernelPlan {
     let (mut plan, _) = schedule::KernelPlan::seed(
         &inner.pipeline,
         &inner.entry_points,
@@ -244,7 +244,7 @@ fn commit_serial_kernel(
 }
 
 fn lower_runtime_filters(
-    inner: &SemanticProgram,
+    inner: &AllocatedProgram,
     seeded: &schedule::SeededKernels,
     schedule: &mut schedule::KernelPlan,
 ) -> Result<HashSet<SemanticEntryId>, String> {
@@ -540,7 +540,7 @@ fn filter_resource_declaration(
 }
 
 fn lower_materialized_filters(
-    inner: &SemanticProgram,
+    inner: &AllocatedProgram,
     schedule: &mut schedule::KernelPlan,
 ) -> Result<(), String> {
     for requirement in &inner.materializations {
@@ -816,7 +816,7 @@ fn owned_resource_ids(
 
 /// Attach allocation-created materialization entries to their consumer's
 /// source pipeline before target recipes are selected.
-pub(crate) fn attach_materializations(inner: &SemanticProgram, schedule: &mut schedule::KernelPlan) {
+pub(crate) fn attach_materializations(inner: &AllocatedProgram, schedule: &mut schedule::KernelPlan) {
     let mut materializations = BTreeMap::new();
     for resource in &inner.resources {
         let ResourceOrigin::Compiler(compiler) = &resource.origin else {
@@ -1866,7 +1866,7 @@ fn seg_scratch_specs(graph: &EGraph, se: &SideEffect) -> Option<SegScratchSpec> 
 /// Reserve one binding-free logical resource for every parallel
 /// SegRed/SegScan scratch lane. Physical bindings are chosen only after plan
 /// validation.
-pub fn enumerate_seg_scratch(inner: &SemanticProgram, first_id: u32) -> Vec<LogicalResource> {
+pub fn enumerate_seg_scratch(inner: &AllocatedProgram, first_id: u32) -> Vec<LogicalResource> {
     let mut resources = Vec::new();
     let mut next = first_id;
     for (_, entry) in inner.entries_with_endpoints() {

@@ -41,7 +41,7 @@ fn empty_entry(name: &str) -> SemanticEntry {
     )
 }
 
-fn allocated_program(reference: SemanticResourceRef, size: LogicalSize) -> SemanticProgram {
+fn allocated_program(reference: SemanticResourceRef, size: LogicalSize) -> AllocatedProgram {
     let binding = crate::BindingRef::new(0, 7);
     let mut entry = empty_entry("main");
     entry.resource_declarations.push(SemanticResourceDecl {
@@ -64,7 +64,36 @@ fn allocated_program(reference: SemanticResourceRef, size: LogicalSize) -> Seman
         elem_ty: unit_ty(),
         size,
     });
-    program
+    AllocatedProgram {
+        semantic: program,
+        materializations: Vec::new(),
+    }
+}
+
+#[test]
+fn logical_allocation_introduces_the_allocated_sidecar() {
+    let binding = crate::BindingRef::new(2, 3);
+    let mut semantic = SemanticProgram::new(
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        PipelineDescriptor::default(),
+        RegionInterner::default(),
+    );
+    semantic.resources.push(LogicalResource {
+        id: ResourceId(0),
+        origin: ResourceOrigin::Host(binding),
+        elem_ty: unit_ty(),
+        size: LogicalSize::Unspecified,
+    });
+
+    let allocated = plan_logical_resources(semantic);
+
+    assert!(allocated.materializations.is_empty());
+    assert_eq!(allocated.resources.len(), 1);
+    assert_eq!(allocated.resources[0].host_binding(), Some(binding));
+    assert!(allocated.semantic_dependencies.is_empty());
 }
 
 #[test]

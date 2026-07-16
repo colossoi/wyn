@@ -14,7 +14,6 @@ use crate::ssa::types::{
 };
 use crate::LookupMap;
 
-use super::program::{LogicalResource, MaterializationRequirement, SemanticDependency};
 use super::soac::{filter, hist, screma};
 
 /// Effect token for ordering effectful ops during EGIR passes.
@@ -1082,15 +1081,11 @@ pub struct Program<P: EgirPhase, Ty, Abi, ResourceDecl> {
     /// Extern stubs pass through EGIR unchanged.
     pub externs: Vec<Function>,
     pub entry_points: Vec<Entry<P, Ty, Abi, ResourceDecl>>,
-    /// Residency requirements discovered during logical allocation.
-    pub materializations: Vec<MaterializationRequirement<P, Ty, Abi, ResourceDecl>>,
     pub constants: Vec<Constant>,
     pub pipeline: PipelineDescriptor,
     pub input_names: LookupMap<(u32, u32), String>,
     pub regions: LookupMap<RegionId, Region<P, Ty>>,
     pub region_interner: RegionInterner,
-    pub resources: Vec<LogicalResource>,
-    pub semantic_dependencies: Vec<SemanticDependency>,
 }
 
 fn record_region<P: EgirPhase, Ty: Clone>(
@@ -1120,14 +1115,11 @@ impl<P: EgirPhase, Ty: Clone, Abi, ResourceDecl> Program<P, Ty, Abi, ResourceDec
             functions,
             externs,
             entry_points,
-            materializations: Vec::new(),
             constants,
             pipeline,
             input_names: LookupMap::new(),
             regions,
             region_interner,
-            resources: Vec::new(),
-            semantic_dependencies: Vec::new(),
         }
     }
 
