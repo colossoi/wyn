@@ -128,7 +128,7 @@ Each notes how it's enforced; when you move a pass, check it here.
 | **EgirOptimized** | `egir::semantic_opt`, `egir::fusion` | Conflict-aware sibling and producer/consumer fusion, filter/envelope fusion, indexed-demand scalarization, and dead-SegOp elimination; SegOps remain semantic |
 | **EgirAllocated** | `egir::program`, `egir::residency` | Resolve uniqueness candidates from post-fusion liveness and build the logical resource manifest for scalar handoffs, gather/shared arrays, outputs, and reduce/scan/filter scratch. Physical bindings and entry splitting remain deferred |
 | **EgirPlanned** | `egir::target_lowering` | Given a `LoweringProfile`, choose algorithms and dispatches, split physical entries, allocate physical bindings, validate the `KernelPlan`, and publish the final descriptor as one transaction |
-| **SsaConverted** | `egir::soac_expand` → `egir::materialize` → `egir::skel_opt` → `egir::resource_erasure` → `egir::elaborate` | Expand only the validated physical plan, materialize and simplify its graph, erase compile-time resource handles, and elaborate the result to SSA |
+| **SsaConverted** | `egir::soac_expand` → `egir::materialize` → `egir::rewrite` → `egir::skel_opt` → `egir::resource_erasure` → `egir::elaborate` | Expand only the validated physical plan, materialize its graph, propose cost-arbitrated alternatives as union nodes (e.g. `x ** k` vs a multiply chain — extraction picks during elaboration), simplify the skeleton, erase compile-time resource handles, and elaborate the result to SSA |
 
 The EGIR order is also load-bearing:
 

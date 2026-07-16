@@ -1133,6 +1133,60 @@ impl<P: EgirPhase> EGraph<P> {
         self.types.insert(id, ty);
         id
     }
+
+    /// Turn a pure node into a union of itself and `alt`, in place: the
+    /// original node is re-inserted under a fresh id (returned) and `id`
+    /// becomes `Union { fresh, alt }`. Every existing reference to `id` —
+    /// pure operands, side-effect slots, terminator args — sees both
+    /// alternatives with no rewiring; extraction picks the cheaper side.
+    pub fn union_pure_in_place(&mut self, id: NodeId, alt: NodeId) -> NodeId {
+        assert_ne!(
+            id, alt,
+            "union_pure_in_place: alternative must differ from the node"
+        );
+        debug_assert!(matches!(self.nodes[id], ENode::Pure { .. }));
+        let ty = self.types[&id].clone();
+        let original = std::mem::replace(
+            &mut self.nodes[id],
+            ENode::Union {
+                left: alt,
+                right: alt,
+            },
+        );
+        let fresh = self.nodes.insert(original);
+        self.types.insert(fresh, ty);
+        if let Some(span) = self.node_spans.get(&id).copied() {
+            self.node_spans.insert(fresh, span);
+        }
+        // The hash-cons key for the original node now belongs to its fresh id.
+        if let Some(key) = self.pure_node_key(fresh) {
+            self.hash_cons.insert(key, fresh);
+        }
+        self.nodes[id] = ENode::Union {
+            left: fresh,
+            right: alt,
+        };
+        fresh
+    }
+
+    /// Discard a pure node in favor of `better`, in place: `id` becomes a
+    /// degenerate union both of whose sides are `better`, so extraction can
+    /// only pick `better` and existing references follow it. The discarded
+    /// node's hash-cons key is retired.
+    pub fn subsume_pure_in_place(&mut self, id: NodeId, better: NodeId) {
+        assert_ne!(
+            id, better,
+            "subsume_pure_in_place: replacement must differ from the node"
+        );
+        debug_assert!(matches!(self.nodes[id], ENode::Pure { .. }));
+        if let Some(key) = self.pure_node_key(id) {
+            self.hash_cons.remove(&key);
+        }
+        self.nodes[id] = ENode::Union {
+            left: better,
+            right: better,
+        };
+    }
 }
 
 #[cfg(test)]

@@ -1,8 +1,12 @@
 //! Cost-based extraction: pick the cheapest enode per eclass.
 //!
-//! In Phase 1 (no unions), this is trivially the identity: every node
-//! is its own best representative. When union nodes exist, bottom-up DP
-//! picks the cheaper child at each union.
+//! Union nodes are created by the rewrite pass (`egir::rewrite`) run on the
+//! physical program; a graph without them extracts trivially to the
+//! identity. Union alternatives are compared by the total cost of their
+//! *distinct* reachable nodes, so a subgraph shared by both sides cancels
+//! out instead of penalizing the side that references it more often.
+
+use std::collections::HashSet;
 
 use crate::LookupMap;
 
@@ -28,15 +32,16 @@ pub fn extract<P: EgirPhase>(graph: &EGraph<P>) -> LookupMap<NodeId, NodeId> {
         let node = &graph.nodes[nid];
         match node {
             ENode::Union { left, right } => {
-                let lc = best_cost.get(left).copied().unwrap_or(Cost::MAX);
-                let rc = best_cost.get(right).copied().unwrap_or(Cost::MAX);
-                if lc <= rc {
-                    best_cost.insert(nid, lc);
-                    best_node.insert(nid, best_node.get(left).copied().unwrap_or(*left));
-                } else {
-                    best_cost.insert(nid, rc);
-                    best_node.insert(nid, best_node.get(right).copied().unwrap_or(*right));
-                }
+                // A plain subtree-sum comparison would double-count operands
+                // shared by both sides — e.g. the base of a pow-vs-multiply-
+                // chain union — and mis-pick whenever the shared value is
+                // expensive. Closure costs count each distinct node once, so
+                // shared subgraphs contribute equally and cancel.
+                let lc = closure_cost(graph, *left, &best_node);
+                let rc = closure_cost(graph, *right, &best_node);
+                let chosen = if lc <= rc { left } else { right };
+                best_cost.insert(nid, best_cost.get(chosen).copied().unwrap_or(Cost::MAX));
+                best_node.insert(nid, best_node.get(chosen).copied().unwrap_or(*chosen));
             }
             ENode::Pure { op, operands } => {
                 let child_sum: Cost = operands
@@ -62,9 +67,36 @@ pub fn extract<P: EgirPhase>(graph: &EGraph<P>) -> LookupMap<NodeId, NodeId> {
     best_node
 }
 
+/// Total op cost of the distinct nodes reachable from `root`, following each
+/// union to its already-chosen representative (children precede parents in
+/// the topo order, so nested unions are resolved by the time this runs).
+fn closure_cost<P: EgirPhase>(graph: &EGraph<P>, root: NodeId, best: &LookupMap<NodeId, NodeId>) -> Cost {
+    let mut seen = HashSet::new();
+    let mut stack = vec![root];
+    let mut total: Cost = 0;
+    while let Some(nid) = stack.pop() {
+        let nid = best.get(&nid).copied().unwrap_or(nid);
+        if !seen.insert(nid) {
+            continue;
+        }
+        if let ENode::Pure { op, operands } = &graph.nodes[nid] {
+            total = total.saturating_add(op_cost(op));
+            stack.extend(operands.iter().copied());
+        }
+    }
+    total
+}
+
+/// Modeled cost of the backend's `**` lowering: GLSL.std.450 `Pow` (an
+/// exp/log sequence) for floats, an exponentiation-by-squaring helper for
+/// ints. A multiply chain proposed by `rewrite::PowToMulChain` wins while
+/// it needs fewer multiplies than this.
+const POW_COST: Cost = 8;
+
 /// Static cost per operation kind.
 fn op_cost<R>(op: &PureOp<R>) -> Cost {
     match op {
+        PureOp::BinOp(name) if name == "**" => POW_COST,
         PureOp::ResourceLen(_) => 0,
         // Leaves / free operations:
         PureOp::Int(_)

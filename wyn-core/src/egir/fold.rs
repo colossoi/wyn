@@ -40,7 +40,6 @@ impl<P: EgirPhase> EGraph<P> {
                 self.fold_binop_identity(name, a, b)
                     .or_else(|| self.fold_binop_const(name, a, b, result_ty))
                     .or_else(|| self.fold_fdiv_const_to_mul(name, a, b, result_ty))
-                    .or_else(|| self.fold_pow_to_mul_chain(name, a, b, result_ty))
             }
             PureOp::UnaryOp(name) if operands.len() == 1 => self.fold_unary(name, operands[0], result_ty),
             PureOp::Intrinsic { id, overload_idx } => {
@@ -170,64 +169,6 @@ impl<P: EgirPhase> EGraph<P> {
             smallvec![value, reciprocal],
             result_ty.clone(),
         ))
-    }
-
-    /// `x ** k` → left-to-right multiply chain for small positive integer
-    /// constant `k` (`2 ≤ k < 8`). For small exponents the chain is
-    /// strictly better than the backend's `**` lowering (GLSL.std.450
-    /// `Pow` for floats, exponentiation-by-squaring helper for ints):
-    /// fewer ops, exact, and no `x ≤ 0` edge cases for `Pow`. The base's
-    /// `result_ty` is preserved on every emitted multiply. The exponent
-    /// literal can be any numeric flavor (`i32` / `u32` / `f32`); float
-    /// requires same-typed operands, so `f32 ** f32` arrives here with
-    /// the exponent as `f32`. Non-integral or out-of-range exponents
-    /// (e.g. `2.5`, `-1`, `0`) leave the `**` node alone.
-    ///
-    /// Vector bases are skipped: there is no correct scalar fold for
-    /// `vec ** k` — a componentwise `v * v` looks like squared-magnitude
-    /// but isn't. With no fold here and no backend lowering for `**` on a
-    /// vec, the call falls through to a clean compile-time error so
-    /// users write the intended `dot(v, v)` / `magnitude(v) ** k` form.
-    fn fold_pow_to_mul_chain(
-        &mut self,
-        name: &str,
-        base: NodeId,
-        exp: NodeId,
-        result_ty: &Type<TypeName>,
-    ) -> Option<NodeId> {
-        if name != "**" {
-            return None;
-        }
-        if matches!(result_ty, Type::Constructed(TypeName::Vec, _)) {
-            return None;
-        }
-        let k: u32 = if let Some(v) = self.as_i32(exp) {
-            if v < 2 {
-                return None;
-            }
-            u32::try_from(v).ok()?
-        } else if let Some(v) = self.as_u32(exp) {
-            if v < 2 {
-                return None;
-            }
-            v
-        } else if let Some(f) = self.as_f32(exp) {
-            // Only integral floats in 2..8.
-            if f.fract() != 0.0 || !(2.0..8.0).contains(&f) {
-                return None;
-            }
-            f as u32
-        } else {
-            return None;
-        };
-        if k >= 8 {
-            return None;
-        }
-        let mut acc = base;
-        for _ in 1..k {
-            acc = self.intern_pure(PureOp::BinOp("*".into()), smallvec![acc, base], result_ty.clone());
-        }
-        Some(acc)
     }
 
     /// `-(const) → negated const`, plus `-(-x) → x` and `!(!x) → x`.
@@ -414,7 +355,7 @@ impl<P: EgirPhase> EGraph<P> {
 
     // ---- value extractors --------------------------------------------------
 
-    fn as_i32(&self, nid: NodeId) -> Option<i32> {
+    pub(super) fn as_i32(&self, nid: NodeId) -> Option<i32> {
         match &self.nodes[nid] {
             ENode::Constant(ConstantValue::I32(v)) => Some(*v),
             ENode::Pure {
@@ -425,7 +366,7 @@ impl<P: EgirPhase> EGraph<P> {
         }
     }
 
-    fn as_u32(&self, nid: NodeId) -> Option<u32> {
+    pub(super) fn as_u32(&self, nid: NodeId) -> Option<u32> {
         match &self.nodes[nid] {
             ENode::Constant(ConstantValue::U32(v)) => Some(*v),
             ENode::Pure {
@@ -436,7 +377,7 @@ impl<P: EgirPhase> EGraph<P> {
         }
     }
 
-    fn as_f32(&self, nid: NodeId) -> Option<f32> {
+    pub(super) fn as_f32(&self, nid: NodeId) -> Option<f32> {
         match &self.nodes[nid] {
             ENode::Constant(ConstantValue::F32(bits)) => Some(f32::from_bits(*bits)),
             ENode::Pure {

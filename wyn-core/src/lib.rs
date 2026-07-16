@@ -1235,6 +1235,7 @@ impl EgirPlanned {
         let plan = self.physical.plan.published_plan();
         egir::soac_expand::run(&mut self.physical);
         egir::materialize::run(&mut self.physical);
+        egir::rewrite::run(&mut self.physical);
         egir::skel_opt::run(&mut self.physical);
         egir::resource_erasure::run(&mut self.physical)?;
         let (ssa, pipeline) = egir::elaborate::run_program(self.physical);
