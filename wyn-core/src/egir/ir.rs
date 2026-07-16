@@ -330,6 +330,7 @@ impl<R: Copy + Ord> SegResourceAccess<R> {
 
 pub trait EgirPhase: Clone + std::fmt::Debug {
     type Resource: GraphResource;
+    type ResourceDecl: Clone + std::fmt::Debug;
     type SoacId: Clone + std::fmt::Debug;
     type MapState: Clone + std::fmt::Debug;
     type ReduceState: Clone + std::fmt::Debug;
@@ -1071,13 +1072,13 @@ impl<R> std::ops::DerefMut for EntryOutput<R> {
     }
 }
 
-pub struct Entry<P: EgirPhase, Ty, ResourceDecl> {
+pub struct Entry<P: EgirPhase, Ty> {
     pub name: String,
     pub span: Span,
     pub execution_model: ExecutionModel,
     pub inputs: Vec<EntryInput<P::Resource>>,
     pub outputs: Vec<EntryOutput<P::Resource>>,
-    pub resource_declarations: Vec<ResourceDecl>,
+    pub resource_declarations: Vec<P::ResourceDecl>,
     pub params: Vec<(Ty, String)>,
     pub return_ty: Ty,
     pub graph: EGraph<P, Ty>,
@@ -1086,7 +1087,7 @@ pub struct Entry<P: EgirPhase, Ty, ResourceDecl> {
     pub output_routes: Vec<OutputRoute>,
 }
 
-impl<P: EgirPhase, Ty, ResourceDecl> Entry<P, Ty, ResourceDecl> {
+impl<P: EgirPhase, Ty> Entry<P, Ty> {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_resources(
         name: String,
@@ -1094,7 +1095,7 @@ impl<P: EgirPhase, Ty, ResourceDecl> Entry<P, Ty, ResourceDecl> {
         execution_model: ExecutionModel,
         inputs: Vec<SsaEntryInput>,
         outputs: Vec<SsaEntryOutput>,
-        resource_declarations: Vec<ResourceDecl>,
+        resource_declarations: Vec<P::ResourceDecl>,
         params: Vec<(Ty, String)>,
         return_ty: Ty,
         graph: EGraph<P, Ty>,
@@ -1131,11 +1132,11 @@ impl<P: EgirPhase, Ty, ResourceDecl> Entry<P, Ty, ResourceDecl> {
 
 /// Whole-program EGIR container. Concrete compiler checkpoints wrap this
 /// generic substrate and determine the phase-specific graph payload.
-pub struct Program<P: EgirPhase, Ty, ResourceDecl> {
+pub struct Program<P: EgirPhase, Ty> {
     pub functions: Vec<Func<P, Ty>>,
     /// Extern stubs pass through EGIR unchanged.
     pub externs: Vec<Function>,
-    pub entry_points: Vec<Entry<P, Ty, ResourceDecl>>,
+    pub entry_points: Vec<Entry<P, Ty>>,
     pub constants: Vec<Constant>,
     pub pipeline: PipelineDescriptor,
     pub input_names: LookupMap<(u32, u32), String>,
@@ -1153,11 +1154,11 @@ fn record_region<P: EgirPhase, Ty: Clone>(
     id
 }
 
-impl<P: EgirPhase, Ty: Clone, ResourceDecl> Program<P, Ty, ResourceDecl> {
+impl<P: EgirPhase, Ty: Clone> Program<P, Ty> {
     pub fn new(
         functions: Vec<Func<P, Ty>>,
         externs: Vec<Function>,
-        entry_points: Vec<Entry<P, Ty, ResourceDecl>>,
+        entry_points: Vec<Entry<P, Ty>>,
         constants: Vec<Constant>,
         pipeline: PipelineDescriptor,
         mut region_interner: RegionInterner,

@@ -34,16 +34,14 @@ use super::types::{
 pub use super::ir::{OutputRoute, OutputSlotId, OutputWriter, RegionInterner, SlotSource};
 pub type Region<P = Semantic, Ty = Type<TypeName>> = super::ir::Region<P, Ty>;
 pub type Func<P = Semantic, Ty = Type<TypeName>> = super::ir::Func<P, Ty>;
-pub type Entry<P = Semantic, Ty = Type<TypeName>, ResourceDecl = SemanticResourceDecl> =
-    super::ir::Entry<P, Ty, ResourceDecl>;
-pub type Program<P = Semantic, Ty = Type<TypeName>, ResourceDecl = SemanticResourceDecl> =
-    super::ir::Program<P, Ty, ResourceDecl>;
+pub type Entry<P = Semantic, Ty = Type<TypeName>> = super::ir::Entry<P, Ty>;
+pub type Program<P = Semantic, Ty = Type<TypeName>> = super::ir::Program<P, Ty>;
 
 #[cfg(test)]
 #[path = "program_tests.rs"]
 mod program_tests;
 
-impl<P: EgirPhase> Entry<P> {
+impl<P: EgirPhase<ResourceDecl = SemanticResourceDecl>> Entry<P> {
     pub(super) fn visit_types_mut(&mut self, mut visit: impl FnMut(&mut Type<TypeName>)) {
         for input in &mut self.inputs {
             visit(&mut input.ty);
@@ -1110,17 +1108,13 @@ pub enum MaterializationKind {
     RuntimeArray,
 }
 
-pub struct MaterializationRequirement<
-    P: EgirPhase = Semantic,
-    Ty = Type<TypeName>,
-    ResourceDecl = SemanticResourceDecl,
-> {
+pub struct MaterializationRequirement {
     pub id: MaterializationId,
     pub kind: MaterializationKind,
     /// SOAC provenance when the source is a semantic operation. Captured
     /// parallel preludes intentionally do not receive synthetic operation ids.
     pub producer: Option<SemanticOpId>,
-    pub entry: Entry<P, Ty, ResourceDecl>,
+    pub entry: SemanticEntry,
     pub substitutions: Vec<MaterializationSubstitution>,
 }
 

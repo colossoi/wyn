@@ -54,6 +54,7 @@ pub struct Physical;
 
 impl<R: GraphResource> EgirPhase for Raw<R> {
     type Resource = R;
+    type ResourceDecl = super::program::SemanticResourceDecl;
     type SoacId = ();
     type MapState = screma::RawState;
     type ReduceState = screma::RawState;
@@ -65,6 +66,7 @@ impl<R: GraphResource> EgirPhase for Raw<R> {
 
 impl<R: GraphResource> EgirPhase for Semantic<R> {
     type Resource = R;
+    type ResourceDecl = super::program::SemanticResourceDecl;
     type SoacId = super::program::SemanticOpId;
     type MapState = screma::SemanticState<R>;
     type ReduceState = screma::SemanticState<R>;
@@ -76,6 +78,7 @@ impl<R: GraphResource> EgirPhase for Semantic<R> {
 
 impl<R: GraphResource> EgirPhase for Scheduled<R> {
     type Resource = R;
+    type ResourceDecl = super::program::SemanticResourceDecl;
     type SoacId = super::program::SemanticOpId;
     type MapState = screma::ScheduledState<R>;
     type ReduceState = screma::ScheduledState<R>;
@@ -87,6 +90,7 @@ impl<R: GraphResource> EgirPhase for Scheduled<R> {
 
 impl EgirPhase for Physical {
     type Resource = super::program::PhysicalResourceRef;
+    type ResourceDecl = crate::interface::StorageBindingDecl;
     type SoacId = super::program::SemanticOpId;
     type MapState = screma::PhysicalMapState;
     type ReduceState = screma::PhysicalSerialState;

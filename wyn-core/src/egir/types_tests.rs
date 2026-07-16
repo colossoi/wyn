@@ -18,6 +18,21 @@ fn effect(result: NodeId) -> SideEffect {
     }
 }
 
+#[derive(Clone, Debug)]
+struct TestPhase;
+
+impl EgirPhase for TestPhase {
+    type Resource = ();
+    type ResourceDecl = u16;
+    type SoacId = ();
+    type MapState = ();
+    type ReduceState = ();
+    type ScanState = ();
+    type CompositeState = ();
+    type FilterState = ();
+    type HistState = ();
+}
+
 #[test]
 fn graph_accepts_a_non_wyn_type_payload() {
     let mut graph = super::super::ir::EGraph::<Semantic, String>::new();
@@ -28,8 +43,8 @@ fn graph_accepts_a_non_wyn_type_payload() {
 
 #[test]
 fn entry_and_program_accept_non_wyn_resource_metadata() {
-    let graph = super::super::ir::EGraph::<Semantic, String>::new();
-    let entry = super::super::ir::Entry::<Semantic, String, u16>::new_with_resources(
+    let graph = super::super::ir::EGraph::<TestPhase, String>::new();
+    let entry = super::super::ir::Entry::<TestPhase, String>::new_with_resources(
         "custom".to_string(),
         crate::ast::Span::new(0, 0, 0, 0),
         crate::ssa::types::ExecutionModel::Compute {
@@ -45,7 +60,7 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
     );
     assert_eq!(entry.resource_declarations, [7]);
 
-    let program = super::super::ir::Program::<Semantic, String, u16>::new(
+    let program = super::super::ir::Program::<TestPhase, String>::new(
         vec![],
         vec![],
         vec![entry],
