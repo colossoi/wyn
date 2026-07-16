@@ -6,7 +6,7 @@
 
 use smallvec::smallvec;
 
-use crate::egir::program::{OutputRoute, OutputWriter, SemanticProgram};
+use crate::egir::program::{OutputRoute, OutputWriter, SemanticProgram, SemanticResourceRef};
 use crate::egir::soac::screma;
 use crate::egir::types::{
     EGraph, ENode, NodeId, PureOp, SegResourceAccessKind, SideEffectKind, Soac, SoacDestination,
@@ -39,10 +39,11 @@ pub fn scalarize_indexed_segmap(inner: &mut SemanticProgram) -> bool {
 
 fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
     for (index, entry) in inner.entry_points.iter().enumerate() {
+        let output_resources = entry.outputs.iter().map(|output| output.resource).collect::<Vec<_>>();
         if let Some(candidate) = find_in_graph(
             &entry.graph,
             Site::Entry(index),
-            &entry.resource_abi.outputs,
+            &output_resources,
             &entry.output_routes,
         ) {
             return Some(candidate);
@@ -59,7 +60,7 @@ fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
 fn find_in_graph(
     graph: &EGraph,
     site: Site,
-    output_resources: &[Option<crate::egir::program::ResourceId>],
+    output_resources: &[Option<SemanticResourceRef>],
     output_routes: &[OutputRoute],
 ) -> Option<Candidate> {
     for (block_id, block) in &graph.skeleton.blocks {
@@ -82,7 +83,6 @@ fn find_in_graph(
             let indirect_output_resources: std::collections::HashSet<_> = output_slots
                 .iter()
                 .filter_map(|slot| output_resources.get(slot.0).copied().flatten())
-                .map(crate::egir::program::SemanticResourceRef)
                 .collect();
             if maps.is_empty()
                 || !maps.iter().all(|map| {

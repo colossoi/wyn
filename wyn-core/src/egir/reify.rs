@@ -124,7 +124,6 @@ fn reify_entry(entry: Entry<Raw>, next_semantic_id: &mut u32) -> Entry<Semantic>
         execution_model,
         inputs,
         outputs,
-        resource_abi,
         resource_declarations,
         params,
         return_ty,
@@ -140,7 +139,6 @@ fn reify_entry(entry: Entry<Raw>, next_semantic_id: &mut u32) -> Entry<Semantic>
         execution_model,
         inputs,
         outputs,
-        resource_abi,
         resource_declarations,
         params,
         return_ty,
@@ -516,9 +514,9 @@ fn semantic_resources(
         .collect::<HashMap<_, _>>();
     if let Some(entry) = entry {
         for slot in output_slots {
-            if let Some(resource) = entry.resource_abi.outputs.get(slot.0).copied().flatten() {
+            if let Some(resource) = entry.outputs.get(slot.0).and_then(|output| output.resource) {
                 accesses
-                    .entry(SemanticResourceRef(resource))
+                    .entry(resource)
                     .and_modify(|access| *access = SegResourceAccessKind::ReadWrite)
                     .or_insert(SegResourceAccessKind::Write);
             }

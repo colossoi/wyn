@@ -615,7 +615,11 @@ fn operation_result_residency(
         && op.operators().into_iter().all(|operator| operator.destination == SoacDestination::Fresh)
         && resources.iter().all(|resource| {
             resource.access == SegResourceAccessKind::Read
-                || entry.resource_abi.outputs.iter().flatten().any(|output| *output == resource.resource.0)
+                || entry
+                    .outputs
+                    .iter()
+                    .filter_map(|output| output.resource)
+                    .any(|output| output == resource.resource)
         });
     let dependencies = dependency_effects(&entry.graph, site.block, site.index);
     let upstream =
@@ -1045,7 +1049,7 @@ fn materialize_operation_result(
     };
     let entry = &inner.entry_points[entry_index];
     let source_output_resources =
-        entry.resource_abi.outputs.iter().flatten().copied().collect::<HashSet<_>>();
+        entry.outputs.iter().filter_map(|output| output.resource.map(|resource| resource.0)).collect();
     let (block_id, effect_index) = (source_site.block, source_site.index);
     let producer_dependencies = dependency_effects(&entry.graph, block_id, effect_index);
     let dependency_resources = dependency_resources(entry, block_id, &producer_dependencies);
@@ -1616,10 +1620,6 @@ fn projected_materialization_entry(
         execution_model,
         inputs: source.inputs.clone(),
         outputs: Vec::new(),
-        resource_abi: super::program::EntryResourceAbi {
-            inputs: source.resource_abi.inputs.clone(),
-            outputs: Vec::new(),
-        },
         resource_declarations,
         params: source.params.clone(),
         return_ty: Type::Constructed(TypeName::Unit, vec![]),
@@ -1651,7 +1651,9 @@ fn resources_referenced_by_nodes(
             resources.insert(resource.0);
         }
         if let Some(ENode::FuncParam { index }) = graph.nodes.get(node) {
-            resources.extend(entry.resource_abi.inputs.get(*index).copied().flatten());
+            resources.extend(
+                entry.inputs.get(*index).and_then(|input| input.resource).map(|resource| resource.0),
+            );
         }
     }
     resources
@@ -1857,12 +1859,10 @@ fn output_specs(
 fn compact_entry_interface(entry: &mut super::program::SemanticEntry) {
     compact_entry_inputs(entry);
     let mut used_resources = entry
-        .resource_abi
         .inputs
         .iter()
-        .chain(&entry.resource_abi.outputs)
-        .copied()
-        .flatten()
+        .filter_map(|input| input.resource.map(|resource| resource.0))
+        .chain(entry.outputs.iter().filter_map(|output| output.resource.map(|resource| resource.0)))
         .collect::<HashSet<_>>();
     for (_, block) in &entry.graph.skeleton.blocks {
         for effect in &block.side_effects {
@@ -1913,8 +1913,8 @@ fn compact_entry_inputs(entry: &mut super::program::SemanticEntry) {
             _ => None,
         })
         .collect::<HashSet<_>>();
-    for (index, resource) in entry.resource_abi.inputs.iter().enumerate() {
-        if resource.is_some_and(|resource| reachable_resources.contains(&resource)) {
+    for (index, input) in entry.inputs.iter().enumerate() {
+        if input.resource.is_some_and(|resource| reachable_resources.contains(&resource.0)) {
             kept_indices.insert(index);
         }
     }
@@ -1931,7 +1931,6 @@ fn compact_entry_inputs(entry: &mut super::program::SemanticEntry) {
     kept.dedup_by_key(|(index, _)| *index);
     let inputs = kept.iter().map(|(index, _)| entry.inputs[*index].clone()).collect();
     let params = kept.iter().map(|(index, _)| entry.params[*index].clone()).collect();
-    let resource_inputs = kept.iter().map(|(index, _)| entry.resource_abi.inputs[*index]).collect();
     let retained = kept.iter().map(|(_, node)| *node).collect::<HashSet<_>>();
     graph_ops::remove_unretained_func_params(&mut entry.graph, &retained);
     for (new_index, (_, node)) in kept.into_iter().enumerate() {
@@ -1941,7 +1940,6 @@ fn compact_entry_inputs(entry: &mut super::program::SemanticEntry) {
     }
     entry.inputs = inputs;
     entry.params = params;
-    entry.resource_abi.inputs = resource_inputs;
 }
 
 fn refresh_resource_reads_for_values(graph: &mut EGraph, values: &[NodeId]) {

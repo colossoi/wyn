@@ -32,7 +32,8 @@ use ExecutionModel as _;
 use super::from_tlc::ConvertError;
 use super::graph_ops;
 use super::program::{
-    host_resource_map, Entry, OutputRoute, OutputSlotId, OutputWriter, RawEntry, RawProgram, SlotSource,
+    host_resource_map, Entry, OutputRoute, OutputSlotId, OutputWriter, RawEntry, RawProgram,
+    SemanticResourceRef, SlotSource,
 };
 use super::types::{EGraph, NodeId, Raw, SkeletonTerminator};
 use crate::ResourceId;
@@ -293,7 +294,7 @@ fn dedup_output_writers(writers: &mut Vec<OutputWriter>) {
 fn output_sources(
     graph: &mut EGraph<Raw>,
     result: NodeId,
-    outputs: &[crate::ssa::types::EntryOutput],
+    outputs: &[super::ir::EntryOutput<SemanticResourceRef>],
 ) -> Vec<NodeId> {
     use super::types::{ENode, PureOp};
     use smallvec::smallvec;

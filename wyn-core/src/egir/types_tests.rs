@@ -29,7 +29,7 @@ fn graph_accepts_a_non_wyn_type_payload() {
 #[test]
 fn entry_and_program_accept_non_wyn_resource_metadata() {
     let graph = super::super::ir::EGraph::<Semantic, String>::new();
-    let entry = super::super::ir::Entry::<Semantic, String, Vec<&'static str>, u16>::new_with_resources(
+    let entry = super::super::ir::Entry::<Semantic, String, u16>::new_with_resources(
         "custom".to_string(),
         crate::ast::Span::new(0, 0, 0, 0),
         crate::ssa::types::ExecutionModel::Compute {
@@ -43,10 +43,9 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
         graph,
         crate::LookupMap::new(),
     );
-    assert!(entry.resource_abi.is_empty());
     assert_eq!(entry.resource_declarations, [7]);
 
-    let program = super::super::ir::Program::<Semantic, String, Vec<&'static str>, u16>::new(
+    let program = super::super::ir::Program::<Semantic, String, u16>::new(
         vec![],
         vec![],
         vec![entry],

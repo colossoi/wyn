@@ -299,9 +299,9 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut AllocatedProgram) {
             {
                 declaration.size = size.clone();
             }
-            for (slot, output_resource) in entry.resource_abi.outputs.iter().enumerate() {
-                if *output_resource == Some(resource) {
-                    entry.outputs[slot].length = output_len.clone();
+            for output in &mut entry.outputs {
+                if output.resource == Some(SemanticResourceRef(resource)) {
+                    output.length = output_len.clone();
                 }
             }
         }

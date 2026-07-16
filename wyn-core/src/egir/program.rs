@@ -34,18 +34,10 @@ use super::types::{
 pub use super::ir::{OutputRoute, OutputSlotId, OutputWriter, RegionInterner, SlotSource};
 pub type Region<P = Semantic, Ty = Type<TypeName>> = super::ir::Region<P, Ty>;
 pub type Func<P = Semantic, Ty = Type<TypeName>> = super::ir::Func<P, Ty>;
-pub type Entry<
-    P = Semantic,
-    Ty = Type<TypeName>,
-    Abi = EntryResourceAbi,
-    ResourceDecl = SemanticResourceDecl,
-> = super::ir::Entry<P, Ty, Abi, ResourceDecl>;
-pub type Program<
-    P = Semantic,
-    Ty = Type<TypeName>,
-    Abi = EntryResourceAbi,
-    ResourceDecl = SemanticResourceDecl,
-> = super::ir::Program<P, Ty, Abi, ResourceDecl>;
+pub type Entry<P = Semantic, Ty = Type<TypeName>, ResourceDecl = SemanticResourceDecl> =
+    super::ir::Entry<P, Ty, ResourceDecl>;
+pub type Program<P = Semantic, Ty = Type<TypeName>, ResourceDecl = SemanticResourceDecl> =
+    super::ir::Program<P, Ty, ResourceDecl>;
 
 #[cfg(test)]
 #[path = "program_tests.rs"]
@@ -145,14 +137,6 @@ pub struct SemanticResourceDecl {
     pub role: interface::StorageRole,
     pub elem_ty: Type<TypeName>,
     pub size: LogicalSize,
-}
-
-/// Entry input/output slots mapped to the program's logical resource arena.
-/// This is conversion and semantic-pipeline metadata, not core graph IR.
-#[derive(Clone, Debug, Default)]
-pub struct EntryResourceAbi {
-    pub inputs: Vec<Option<ResourceId>>,
-    pub outputs: Vec<Option<ResourceId>>,
 }
 
 /// Why a compiler-introduced resource exists. The kind fixes its physical
@@ -332,7 +316,9 @@ fn classify_existing_compiler_resources(inner: &mut AllocatedProgram) {
     let source_outputs = inner
         .entry_points
         .iter()
-        .flat_map(|entry| entry.resource_abi.outputs.iter().flatten().copied())
+        .flat_map(|entry| {
+            entry.outputs.iter().filter_map(|output| output.resource.map(|resource| resource.0))
+        })
         .collect::<std::collections::HashSet<_>>();
     classifications.extend(
         super::soac::filter::resource_kinds(inner)
@@ -430,28 +416,20 @@ pub(crate) fn finalize_converted_resources(
     }
     normalize_structural_resources(inner, by_binding);
     for entry in &mut inner.entry_points {
-        entry.resource_abi = EntryResourceAbi {
-            inputs: entry
-                .inputs
-                .iter()
-                .map(|input| {
-                    input
-                        .storage_binding
-                        .and_then(|binding| by_binding.get(&binding).copied())
-                        .or_else(|| semantic_type_resource(&input.ty))
-                })
-                .collect(),
-            outputs: entry
-                .outputs
-                .iter()
-                .map(|output| {
-                    output
-                        .storage_binding
-                        .and_then(|binding| by_binding.get(&binding).copied())
-                        .or_else(|| semantic_type_resource(&output.ty))
-                })
-                .collect(),
-        };
+        for input in &mut entry.inputs {
+            input.resource = input
+                .storage_binding
+                .and_then(|binding| by_binding.get(&binding).copied())
+                .map(SemanticResourceRef)
+                .or_else(|| semantic_type_resource(&input.ty));
+        }
+        for output in &mut entry.outputs {
+            output.resource = output
+                .storage_binding
+                .and_then(|binding| by_binding.get(&binding).copied())
+                .map(SemanticResourceRef)
+                .or_else(|| semantic_type_resource(&output.ty));
+        }
     }
 }
 
@@ -463,30 +441,25 @@ fn strip_compiler_abi(inner: &mut AllocatedProgram) {
             matches!(resource.origin, ResourceOrigin::Compiler(_)).then_some(resource.id)
         })
         .collect::<std::collections::HashSet<_>>();
-    let strip = |inputs: &mut Vec<EntryInput>,
-                 outputs: &mut Vec<EntryOutput>,
-                 resource_abi: &mut EntryResourceAbi,
+    let strip = |inputs: &mut Vec<super::ir::EntryInput<SemanticResourceRef>>,
+                 outputs: &mut Vec<super::ir::EntryOutput<SemanticResourceRef>>,
                  routes: &mut Vec<OutputRoute>| {
-        for (input, resource) in inputs.iter_mut().zip(&resource_abi.inputs) {
-            if resource.is_some_and(|resource| compiler_resources.contains(&resource)) {
+        for input in inputs.iter_mut() {
+            if input.resource.is_some_and(|resource| compiler_resources.contains(&resource.0)) {
                 input.storage_binding = None;
             }
         }
         let mut output_slots = vec![None; outputs.len()];
         let mut host_outputs = Vec::with_capacity(outputs.len());
-        let mut host_resources = Vec::with_capacity(resource_abi.outputs.len());
-        for (slot, (output, resource)) in
-            std::mem::take(outputs).into_iter().zip(std::mem::take(&mut resource_abi.outputs)).enumerate()
-        {
-            let compiler_output = resource.is_some_and(|resource| compiler_resources.contains(&resource));
+        for (slot, output) in std::mem::take(outputs).into_iter().enumerate() {
+            let compiler_output =
+                output.resource.is_some_and(|resource| compiler_resources.contains(&resource.0));
             if !compiler_output {
                 output_slots[slot] = Some(host_outputs.len());
                 host_outputs.push(output);
-                host_resources.push(resource);
             }
         }
         *outputs = host_outputs;
-        resource_abi.outputs = host_resources;
         routes.retain_mut(|route| {
             let Some(slot) = output_slots.get(route.slot.0).copied().flatten() else {
                 return false;
@@ -496,28 +469,22 @@ fn strip_compiler_abi(inner: &mut AllocatedProgram) {
         });
     };
     for entry in &mut inner.entry_points {
-        strip(
-            &mut entry.inputs,
-            &mut entry.outputs,
-            &mut entry.resource_abi,
-            &mut entry.output_routes,
-        );
+        strip(&mut entry.inputs, &mut entry.outputs, &mut entry.output_routes);
     }
     for requirement in &mut inner.materializations {
         strip(
             &mut requirement.entry.inputs,
             &mut requirement.entry.outputs,
-            &mut requirement.entry.resource_abi,
             &mut requirement.entry.output_routes,
         );
     }
 }
 
-fn semantic_type_resource(ty: &Type<TypeName>) -> Option<ResourceId> {
+fn semantic_type_resource(ty: &Type<TypeName>) -> Option<SemanticResourceRef> {
     let Type::Constructed(TypeName::Resource(resource), _) = ty.array_buffer()? else {
         return None;
     };
-    Some(*resource)
+    Some(SemanticResourceRef(*resource))
 }
 
 fn normalize_converted_graph_types(
@@ -1015,8 +982,8 @@ impl PlannedPublication {
         Self {
             name: entry.name.clone(),
             execution_model: entry.execution_model.clone(),
-            inputs: entry.inputs.clone(),
-            outputs: entry.outputs.clone(),
+            inputs: entry.inputs.iter().map(|input| input.interface.clone()).collect(),
+            outputs: entry.outputs.iter().map(|output| output.interface.clone()).collect(),
             resource_declarations: entry.resource_declarations.clone(),
         }
     }
@@ -1042,8 +1009,8 @@ impl PlannedEntry<Semantic> {
             entry.name.clone(),
             entry.span,
             entry.execution_model.clone(),
-            entry.inputs.clone(),
-            entry.outputs.clone(),
+            entry.inputs.iter().map(|input| input.interface.clone()).collect(),
+            entry.outputs.iter().map(|output| output.interface.clone()).collect(),
             entry.resource_declarations.clone(),
             entry.params.clone(),
             entry.return_ty.clone(),
@@ -1146,7 +1113,6 @@ pub enum MaterializationKind {
 pub struct MaterializationRequirement<
     P: EgirPhase = Semantic,
     Ty = Type<TypeName>,
-    Abi = EntryResourceAbi,
     ResourceDecl = SemanticResourceDecl,
 > {
     pub id: MaterializationId,
@@ -1154,7 +1120,7 @@ pub struct MaterializationRequirement<
     /// SOAC provenance when the source is a semantic operation. Captured
     /// parallel preludes intentionally do not receive synthetic operation ids.
     pub producer: Option<SemanticOpId>,
-    pub entry: Entry<P, Ty, Abi, ResourceDecl>,
+    pub entry: Entry<P, Ty, ResourceDecl>,
     pub substitutions: Vec<MaterializationSubstitution>,
 }
 

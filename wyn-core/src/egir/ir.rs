@@ -10,7 +10,8 @@ use crate::op::{OpTag, PureViewSource as OpViewSource};
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::{
-    Constant, ConstantValue, ControlHeader, EntryInput, EntryOutput, ExecutionModel, Function, InstKind,
+    Constant, ConstantValue, ControlHeader, EntryInput as SsaEntryInput, EntryOutput as SsaEntryOutput,
+    ExecutionModel, Function, InstKind,
 };
 use crate::LookupMap;
 
@@ -1026,13 +1027,56 @@ pub struct OutputRoute {
     pub writers: Vec<OutputWriter>,
 }
 
-pub struct Entry<P: EgirPhase, Ty, Abi, ResourceDecl> {
+/// One entry input together with its phase-typed resource identity, when the
+/// slot is backed by a logical or physical resource.
+#[derive(Debug, Clone)]
+pub struct EntryInput<R> {
+    pub interface: SsaEntryInput,
+    pub resource: Option<R>,
+}
+
+impl<R> std::ops::Deref for EntryInput<R> {
+    type Target = SsaEntryInput;
+
+    fn deref(&self) -> &Self::Target {
+        &self.interface
+    }
+}
+
+impl<R> std::ops::DerefMut for EntryInput<R> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.interface
+    }
+}
+
+/// One entry output together with its phase-typed resource identity, when the
+/// slot is backed by a logical or physical resource.
+#[derive(Debug, Clone)]
+pub struct EntryOutput<R> {
+    pub interface: SsaEntryOutput,
+    pub resource: Option<R>,
+}
+
+impl<R> std::ops::Deref for EntryOutput<R> {
+    type Target = SsaEntryOutput;
+
+    fn deref(&self) -> &Self::Target {
+        &self.interface
+    }
+}
+
+impl<R> std::ops::DerefMut for EntryOutput<R> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.interface
+    }
+}
+
+pub struct Entry<P: EgirPhase, Ty, ResourceDecl> {
     pub name: String,
     pub span: Span,
     pub execution_model: ExecutionModel,
-    pub inputs: Vec<EntryInput>,
-    pub outputs: Vec<EntryOutput>,
-    pub resource_abi: Abi,
+    pub inputs: Vec<EntryInput<P::Resource>>,
+    pub outputs: Vec<EntryOutput<P::Resource>>,
     pub resource_declarations: Vec<ResourceDecl>,
     pub params: Vec<(Ty, String)>,
     pub return_ty: Ty,
@@ -1042,14 +1086,14 @@ pub struct Entry<P: EgirPhase, Ty, Abi, ResourceDecl> {
     pub output_routes: Vec<OutputRoute>,
 }
 
-impl<P: EgirPhase, Ty, Abi: Default, ResourceDecl> Entry<P, Ty, Abi, ResourceDecl> {
+impl<P: EgirPhase, Ty, ResourceDecl> Entry<P, Ty, ResourceDecl> {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_resources(
         name: String,
         span: Span,
         execution_model: ExecutionModel,
-        inputs: Vec<EntryInput>,
-        outputs: Vec<EntryOutput>,
+        inputs: Vec<SsaEntryInput>,
+        outputs: Vec<SsaEntryOutput>,
         resource_declarations: Vec<ResourceDecl>,
         params: Vec<(Ty, String)>,
         return_ty: Ty,
@@ -1060,9 +1104,20 @@ impl<P: EgirPhase, Ty, Abi: Default, ResourceDecl> Entry<P, Ty, Abi, ResourceDec
             name,
             span,
             execution_model,
-            inputs,
-            outputs,
-            resource_abi: Abi::default(),
+            inputs: inputs
+                .into_iter()
+                .map(|interface| EntryInput {
+                    interface,
+                    resource: None,
+                })
+                .collect(),
+            outputs: outputs
+                .into_iter()
+                .map(|interface| EntryOutput {
+                    interface,
+                    resource: None,
+                })
+                .collect(),
             resource_declarations,
             params,
             return_ty,
@@ -1076,11 +1131,11 @@ impl<P: EgirPhase, Ty, Abi: Default, ResourceDecl> Entry<P, Ty, Abi, ResourceDec
 
 /// Whole-program EGIR container. Concrete compiler checkpoints wrap this
 /// generic substrate and determine the phase-specific graph payload.
-pub struct Program<P: EgirPhase, Ty, Abi, ResourceDecl> {
+pub struct Program<P: EgirPhase, Ty, ResourceDecl> {
     pub functions: Vec<Func<P, Ty>>,
     /// Extern stubs pass through EGIR unchanged.
     pub externs: Vec<Function>,
-    pub entry_points: Vec<Entry<P, Ty, Abi, ResourceDecl>>,
+    pub entry_points: Vec<Entry<P, Ty, ResourceDecl>>,
     pub constants: Vec<Constant>,
     pub pipeline: PipelineDescriptor,
     pub input_names: LookupMap<(u32, u32), String>,
@@ -1098,11 +1153,11 @@ fn record_region<P: EgirPhase, Ty: Clone>(
     id
 }
 
-impl<P: EgirPhase, Ty: Clone, Abi, ResourceDecl> Program<P, Ty, Abi, ResourceDecl> {
+impl<P: EgirPhase, Ty: Clone, ResourceDecl> Program<P, Ty, ResourceDecl> {
     pub fn new(
         functions: Vec<Func<P, Ty>>,
         externs: Vec<Function>,
-        entry_points: Vec<Entry<P, Ty, Abi, ResourceDecl>>,
+        entry_points: Vec<Entry<P, Ty, ResourceDecl>>,
         constants: Vec<Constant>,
         pipeline: PipelineDescriptor,
         mut region_interner: RegionInterner,
