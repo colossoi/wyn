@@ -27,6 +27,37 @@ fn graph_accepts_a_non_wyn_type_payload() {
 }
 
 #[test]
+fn entry_and_program_accept_non_wyn_resource_metadata() {
+    let graph = super::super::ir::EGraph::<Semantic, String>::new();
+    let entry = super::super::ir::Entry::<Semantic, String, Vec<&'static str>, u16>::new_with_resources(
+        "custom".to_string(),
+        crate::ast::Span::new(0, 0, 0, 0),
+        crate::ssa::types::ExecutionModel::Compute {
+            local_size: (1, 1, 1),
+        },
+        vec![],
+        vec![],
+        vec![7],
+        vec![],
+        "unit".to_string(),
+        graph,
+        crate::LookupMap::new(),
+    );
+    assert!(entry.resource_abi.is_empty());
+    assert_eq!(entry.resource_declarations, [7]);
+
+    let program = super::super::ir::Program::<Semantic, String, Vec<&'static str>, u16>::new(
+        vec![],
+        vec![],
+        vec![entry],
+        vec![],
+        crate::pipeline_descriptor::PipelineDescriptor::default(),
+        super::super::ir::RegionInterner::default(),
+    );
+    assert_eq!(program.entry_points[0].resource_declarations, [7]);
+}
+
+#[test]
 fn indexes_results_across_skeleton_blocks() {
     let mut graph = EGraph::new();
     let unit = Type::Constructed(TypeName::Unit, vec![]);

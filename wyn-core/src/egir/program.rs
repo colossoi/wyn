@@ -29,13 +29,21 @@ use super::types::{
     Soac,
 };
 
-pub use super::ir::{
-    EntryResourceAbi, OutputRoute, OutputSlotId, OutputWriter, RegionInterner, SlotSource,
-};
+pub use super::ir::{OutputRoute, OutputSlotId, OutputWriter, RegionInterner, SlotSource};
 pub type Region<P = Semantic, Ty = Type<TypeName>> = super::ir::Region<P, Ty>;
 pub type Func<P = Semantic, Ty = Type<TypeName>> = super::ir::Func<P, Ty>;
-pub type Entry<P = Semantic, Ty = Type<TypeName>> = super::ir::Entry<P, Ty>;
-pub type Program<P = Semantic, Ty = Type<TypeName>> = super::ir::Program<P, Ty>;
+pub type Entry<
+    P = Semantic,
+    Ty = Type<TypeName>,
+    Abi = EntryResourceAbi,
+    ResourceDecl = SemanticResourceDecl,
+> = super::ir::Entry<P, Ty, Abi, ResourceDecl>;
+pub type Program<
+    P = Semantic,
+    Ty = Type<TypeName>,
+    Abi = EntryResourceAbi,
+    ResourceDecl = SemanticResourceDecl,
+> = super::ir::Program<P, Ty, Abi, ResourceDecl>;
 
 #[cfg(test)]
 #[path = "program_tests.rs"]
@@ -135,6 +143,14 @@ pub struct SemanticResourceDecl {
     pub role: interface::StorageRole,
     pub elem_ty: Type<TypeName>,
     pub size: LogicalSize,
+}
+
+/// Entry input/output slots mapped to the program's logical resource arena.
+/// This is conversion and semantic-pipeline metadata, not core graph IR.
+#[derive(Clone, Debug, Default)]
+pub struct EntryResourceAbi {
+    pub inputs: Vec<Option<ResourceId>>,
+    pub outputs: Vec<Option<ResourceId>>,
 }
 
 /// Why a compiler-introduced resource exists. The kind fixes its physical
@@ -1119,13 +1135,18 @@ pub enum MaterializationKind {
     RuntimeArray,
 }
 
-pub struct MaterializationRequirement<P: EgirPhase = Semantic> {
+pub struct MaterializationRequirement<
+    P: EgirPhase = Semantic,
+    Ty = Type<TypeName>,
+    Abi = EntryResourceAbi,
+    ResourceDecl = SemanticResourceDecl,
+> {
     pub id: MaterializationId,
     pub kind: MaterializationKind,
     /// SOAC provenance when the source is a semantic operation. Captured
     /// parallel preludes intentionally do not receive synthetic operation ids.
     pub producer: Option<SemanticOpId>,
-    pub entry: Entry<P>,
+    pub entry: Entry<P, Ty, Abi, ResourceDecl>,
     pub substitutions: Vec<MaterializationSubstitution>,
 }
 

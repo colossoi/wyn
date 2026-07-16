@@ -12,11 +12,9 @@ use crate::ssa::framework::BlockId;
 use crate::ssa::types::{
     Constant, ConstantValue, ControlHeader, EntryInput, EntryOutput, ExecutionModel, Function, InstKind,
 };
-use crate::{LookupMap, ResourceId};
+use crate::LookupMap;
 
-use super::program::{
-    LogicalResource, MaterializationRequirement, SemanticDependency, SemanticResourceDecl,
-};
+use super::program::{LogicalResource, MaterializationRequirement, SemanticDependency};
 use super::soac::{filter, hist, screma};
 
 /// Effect token for ordering effectful ops during EGIR passes.
@@ -1029,14 +1027,14 @@ pub struct OutputRoute {
     pub writers: Vec<OutputWriter>,
 }
 
-pub struct Entry<P: EgirPhase, Ty> {
+pub struct Entry<P: EgirPhase, Ty, Abi, ResourceDecl> {
     pub name: String,
     pub span: Span,
     pub execution_model: ExecutionModel,
     pub inputs: Vec<EntryInput>,
     pub outputs: Vec<EntryOutput>,
-    pub resource_abi: EntryResourceAbi,
-    pub resource_declarations: Vec<SemanticResourceDecl>,
+    pub resource_abi: Abi,
+    pub resource_declarations: Vec<ResourceDecl>,
     pub params: Vec<(Ty, String)>,
     pub return_ty: Ty,
     pub graph: EGraph<P, Ty>,
@@ -1045,13 +1043,7 @@ pub struct Entry<P: EgirPhase, Ty> {
     pub output_routes: Vec<OutputRoute>,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct EntryResourceAbi {
-    pub inputs: Vec<Option<ResourceId>>,
-    pub outputs: Vec<Option<ResourceId>>,
-}
-
-impl<P: EgirPhase, Ty> Entry<P, Ty> {
+impl<P: EgirPhase, Ty, Abi: Default, ResourceDecl> Entry<P, Ty, Abi, ResourceDecl> {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_resources(
         name: String,
@@ -1059,7 +1051,7 @@ impl<P: EgirPhase, Ty> Entry<P, Ty> {
         execution_model: ExecutionModel,
         inputs: Vec<EntryInput>,
         outputs: Vec<EntryOutput>,
-        resource_declarations: Vec<SemanticResourceDecl>,
+        resource_declarations: Vec<ResourceDecl>,
         params: Vec<(Ty, String)>,
         return_ty: Ty,
         graph: EGraph<P, Ty>,
@@ -1071,7 +1063,7 @@ impl<P: EgirPhase, Ty> Entry<P, Ty> {
             execution_model,
             inputs,
             outputs,
-            resource_abi: EntryResourceAbi::default(),
+            resource_abi: Abi::default(),
             resource_declarations,
             params,
             return_ty,
@@ -1085,13 +1077,13 @@ impl<P: EgirPhase, Ty> Entry<P, Ty> {
 
 /// Whole-program EGIR container. Concrete compiler checkpoints wrap this
 /// generic substrate and determine the phase-specific graph payload.
-pub struct Program<P: EgirPhase, Ty> {
+pub struct Program<P: EgirPhase, Ty, Abi, ResourceDecl> {
     pub functions: Vec<Func<P, Ty>>,
     /// Extern stubs pass through EGIR unchanged.
     pub externs: Vec<Function>,
-    pub entry_points: Vec<Entry<P, Ty>>,
+    pub entry_points: Vec<Entry<P, Ty, Abi, ResourceDecl>>,
     /// Residency requirements discovered during logical allocation.
-    pub materializations: Vec<MaterializationRequirement<P>>,
+    pub materializations: Vec<MaterializationRequirement<P, Ty, Abi, ResourceDecl>>,
     pub constants: Vec<Constant>,
     pub pipeline: PipelineDescriptor,
     pub input_names: LookupMap<(u32, u32), String>,
@@ -1111,11 +1103,11 @@ fn record_region<P: EgirPhase, Ty: Clone>(
     id
 }
 
-impl<P: EgirPhase, Ty: Clone> Program<P, Ty> {
+impl<P: EgirPhase, Ty: Clone, Abi, ResourceDecl> Program<P, Ty, Abi, ResourceDecl> {
     pub fn new(
         functions: Vec<Func<P, Ty>>,
         externs: Vec<Function>,
-        entry_points: Vec<Entry<P, Ty>>,
+        entry_points: Vec<Entry<P, Ty, Abi, ResourceDecl>>,
         constants: Vec<Constant>,
         pipeline: PipelineDescriptor,
         mut region_interner: RegionInterner,
