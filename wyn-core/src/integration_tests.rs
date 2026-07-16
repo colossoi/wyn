@@ -925,6 +925,52 @@ entry mixed() ([]i32, []i32) =
     assert!(!crate::compile_thru_spirv(source).expect("mixed map/filter emits SPIR-V").spirv.is_empty());
 }
 
+fn assert_naga_accepts_spirv(words: &[u32]) {
+    let bytes = words.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
+    let module = naga::front::spv::parse_u8_slice(
+        &bytes,
+        &naga::front::spv::Options {
+            strict_capabilities: false,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|error| panic!("Naga rejected generated SPIR-V: {error:?}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("Naga validation rejected generated SPIR-V: {error:?}"));
+}
+
+#[test]
+fn filter_over_iota_emits_well_typed_length_and_index_operations() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry compact_i32() []i32 =
+  filter(|i| i % 2 == 0, iota(128))
+"#,
+    )
+    .expect("filter over iota emits SPIR-V");
+    assert_naga_accepts_spirv(&lowered.spirv);
+}
+
+#[test]
+fn map_over_filtered_array_emits_well_typed_dynamic_extent() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry compact_then_map() ([]i32, [1]u32) =
+  let visible_indices = filter(|i| i % 2 == 0, iota(128))
+  let live_props = map(|i| i + 1, visible_indices) in
+  (live_props, [u32(length(visible_indices))])
+"#,
+    )
+    .expect("filter survivors feed a map");
+    assert_naga_accepts_spirv(&lowered.spirv);
+}
+
 #[test]
 fn widened_filter_output_uses_output_element_size() {
     use crate::pipeline_descriptor::{BufferLen, BufferUsage, Pipeline};

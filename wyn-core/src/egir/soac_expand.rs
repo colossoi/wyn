@@ -1013,7 +1013,15 @@ fn emit_seg_space_len(
             SegExtent::Fixed(count) => {
                 graph.intern_pure(PureOp::Int(count.to_string()), smallvec![], i32_ty.clone())
             }
-            SegExtent::PushConstant { node, .. } | SegExtent::Value(node) => *node,
+            SegExtent::PushConstant { node, .. } => *node,
+            SegExtent::Value(node) => {
+                let ty = graph.types[node].clone();
+                if is_plain_array_source(&ty) {
+                    emit_length(graph, *node, &ty, i32_ty)
+                } else {
+                    *node
+                }
+            }
             SegExtent::ResourceLength { node, .. } => {
                 let ty = graph.types[node].clone();
                 emit_length(graph, *node, &ty, i32_ty)
@@ -1528,11 +1536,8 @@ fn build_filter_flags(
     let pred_merge = graph.skeleton.create_block();
     graph.skeleton.blocks[after].term = SkeletonTerminator::Return(None);
     let gid = filter_thread_index(graph);
-    let len = graph.intern_pure(
-        PureOp::StorageViewLen,
-        smallvec![spec.arr_nid],
-        Type::Constructed(TypeName::UInt(32), vec![]),
-    );
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let len = emit_length(graph, spec.arr_nid, &spec.arr_ty, &u32_ty);
     let bounded = graph.intern_pure(
         PureOp::BinOp("<".into()),
         smallvec![gid, len],
@@ -1617,7 +1622,7 @@ fn build_filter_scan(
     let zero = intern_u32(graph, 0, None);
     let one = intern_u32(graph, 1, None);
     let gid = filter_thread_index(graph);
-    let input_len = graph.intern_pure(PureOp::StorageViewLen, smallvec![spec.arr_nid], u32_ty.clone());
+    let input_len = emit_length(graph, spec.arr_nid, &spec.arr_ty, &u32_ty);
     let nwg = graph.intern_pure(
         PureOp::Intrinsic {
             id: catalog().known().num_workgroups,
@@ -1774,7 +1779,7 @@ fn build_filter_scatter(
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let gid = filter_thread_index(graph);
-    let len = graph.intern_pure(PureOp::StorageViewLen, smallvec![spec.arr_nid], u32_ty.clone());
+    let len = emit_length(graph, spec.arr_nid, &spec.arr_ty, &u32_ty);
     let bounded = graph.intern_pure(PureOp::BinOp("<".into()), smallvec![gid, len], bool_ty.clone());
     graph.skeleton.blocks[bid].term = SkeletonTerminator::CondBranch {
         cond: bounded,
@@ -1914,7 +1919,7 @@ fn build_runtime_filter_loop(
     };
 
     // Header → cond_br(i < len, body, after(count)).
-    let len_nid = graph.intern_pure(PureOp::StorageViewLen, smallvec![spec.arr_nid], u32_ty.clone());
+    let len_nid = emit_length(graph, spec.arr_nid, &spec.arr_ty, &u32_ty);
     let cond_nid = graph.intern_pure(
         PureOp::BinOp("<".into()),
         smallvec![i_in_nid, len_nid],
@@ -2212,7 +2217,7 @@ fn increment(graph: &mut EGraph, idx_nid: NodeId) -> NodeId {
     graph.intern_pure(PureOp::BinOp("+".into()), smallvec![idx_nid, one_nid], i32_ty)
 }
 
-/// Emit the length of an input array as i32.
+/// Emit the length of an input array in the requested integer type.
 /// Composite, view, and virtual arrays share `_w_intrinsic_length`. For a SoA
 /// tuple, the length is the length of component 0 (all components share it
 /// post-`tlc::soa`).
@@ -2220,7 +2225,7 @@ fn emit_length(
     graph: &mut EGraph,
     arr_nid: NodeId,
     arr_ty: &Type<TypeName>,
-    i32_ty: &Type<TypeName>,
+    result_ty: &Type<TypeName>,
 ) -> NodeId {
     let actual_arr_ty = graph.types.get(&arr_nid).filter(|ty| is_plain_array_source(ty)).cloned();
     let arr_ty = actual_arr_ty.as_ref().unwrap_or(arr_ty);
@@ -2230,7 +2235,7 @@ fn emit_length(
             smallvec![arr_nid],
             components[0].clone(),
         );
-        return emit_length(graph, first_arr, &components[0], i32_ty);
+        return emit_length(graph, first_arr, &components[0], result_ty);
     }
     let length_id = catalog().known().length;
     graph.intern_pure(
@@ -2239,7 +2244,7 @@ fn emit_length(
             overload_idx: 0,
         },
         smallvec![arr_nid],
-        i32_ty.clone(),
+        result_ty.clone(),
     )
 }
 
