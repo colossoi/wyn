@@ -25,55 +25,20 @@ use std::collections::HashMap;
 use super::parallelize::schedule::ValidatedKernelPlan;
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, EffectToken, EgirPhase, NodeId, Physical, Raw, RegionId, Scheduled, SegBody, SegExtent,
-    SegSpace, Semantic, Soac,
+    EGraph, EgirPhase, NodeId, Physical, Raw, RegionId, Scheduled, SegBody, SegExtent, SegSpace, Semantic,
+    Soac,
 };
+
+pub use super::ir::{
+    EntryResourceAbi, OutputRoute, OutputSlotId, OutputWriter, Program, RegionInterner, SlotSource,
+};
+pub type Region<P = Semantic> = super::ir::Region<P>;
+pub type Func<P = Semantic> = super::ir::Func<P>;
+pub type Entry<P = Semantic> = super::ir::Entry<P>;
 
 #[cfg(test)]
 #[path = "program_tests.rs"]
 mod program_tests;
-
-/// Name ↔ arena-index interner for callable regions.
-///
-/// Region identity is the assigned `RegionId` (a dense index). The textual
-/// name is retained because it is the SSA `Call` ABI — a region lowers to a
-/// named function, and operator/lane Calls reference it by that name. Interning
-/// the same name twice returns the same index, so SegBody construction and the
-/// function arena agree without a separate resolution pass.
-#[derive(Clone, Debug, Default)]
-pub struct RegionInterner {
-    by_name: HashMap<String, RegionId>,
-    names: Vec<String>,
-}
-
-impl RegionInterner {
-    pub fn intern(&mut self, name: impl AsRef<str>) -> RegionId {
-        let name = name.as_ref();
-        if let Some(id) = self.by_name.get(name) {
-            return *id;
-        }
-        let id = RegionId::from_index(self.names.len() as u32);
-        self.names.push(name.to_string());
-        self.by_name.insert(name.to_string(), id);
-        id
-    }
-
-    pub fn get(&self, name: &str) -> Option<RegionId> {
-        self.by_name.get(name).copied()
-    }
-
-    /// Recover the SSA function name backing a region index.
-    pub fn name(&self, id: RegionId) -> &str {
-        &self.names[id.index() as usize]
-    }
-
-    /// Recover the owned SSA names for a sequence of regions — e.g. a SOAC's
-    /// map lanes or a reduction's per-operator combiners, which lower to
-    /// `PureOp::Call`s by name.
-    pub fn names(&self, ids: impl IntoIterator<Item = RegionId>) -> Vec<String> {
-        ids.into_iter().map(|id| self.name(id).to_string()).collect()
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SemanticOpId(pub u32);
@@ -126,16 +91,6 @@ pub struct SemanticDependency {
     pub producer: SemanticOpId,
     pub consumer: SemanticOpId,
     pub kind: SemanticDependencyKind,
-}
-
-/// Callable body arena entry used by SegOps.
-#[derive(Clone)]
-pub struct Region<P: EgirPhase = Semantic> {
-    pub name: String,
-    pub params: Vec<(Type<TypeName>, String)>,
-    pub return_ty: Type<TypeName>,
-    pub graph: EGraph<P>,
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
 }
 
 pub use crate::ResourceId;
@@ -1009,181 +964,14 @@ pub fn buffer_len(
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Func<P: EgirPhase = Semantic> {
-    pub name: String,
-    pub span: Span,
-    pub linkage_name: Option<String>,
-    pub params: Vec<(Type<TypeName>, String)>,
-    pub return_ty: Type<TypeName>,
-    pub graph: EGraph<P>,
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
-    pub aliases: LookupMap<NodeId, NodeId>,
-}
-
-impl<P: EgirPhase> Func<P> {
-    pub fn new(
-        name: String,
-        span: Span,
-        linkage_name: Option<String>,
-        params: Vec<(Type<TypeName>, String)>,
-        return_ty: Type<TypeName>,
-        graph: EGraph<P>,
-        control_headers: LookupMap<BlockId, ControlHeader>,
-    ) -> Self {
-        Self {
-            name,
-            span,
-            linkage_name,
-            params,
-            return_ty,
-            graph,
-            control_headers,
-            aliases: LookupMap::new(),
-        }
-    }
-}
-
 pub type RawFunc = Func<Raw>;
 pub type SemanticFunc = Func<Semantic>;
 pub type ScheduledFunc = Func<Scheduled>;
 pub type PhysicalFunc = Func<Physical>;
 
-impl<P: EgirPhase> Region<P> {
-    pub fn from_function(function: &Func<P>) -> Self {
-        Self {
-            name: function.name.clone(),
-            params: function.params.clone(),
-            return_ty: function.return_ty.clone(),
-            graph: function.graph.clone(),
-            control_headers: function.control_headers.clone(),
-        }
-    }
-}
-
-/// One write site for an entry output slot: the block in which the
-/// store fires and the value produced there. A slot can have multiple
-/// sources when different CFG paths each write it (e.g. both arms of
-/// an `If` whose result flows into the slot).
-///
-/// The `block` is load-bearing for any pass that emits side-effect
-/// stores at the producer site — retargeting a `Map`'s destination is
-/// metadata-only on the node, but emitting `Store` for a scalar
-/// requires knowing the block to insert it into.
-#[derive(Debug, Clone, Copy)]
-pub struct SlotSource {
-    pub block: BlockId,
-    pub value: NodeId,
-}
-
-/// Stable identity of a declared entry-output position.
-///
-/// Keeping this distinct from a raw vector index makes output ownership
-/// explicit in semantic records and prevents callers from confusing a result
-/// lane, a storage binding, and an entry-output position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct OutputSlotId(pub usize);
-
-/// The concrete side effect that fulfils an output route after realization.
-/// Value-producing effects (SOACs) are named by their result; stores, which do
-/// not produce an EGIR value, are named by their effect token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum OutputWriter {
-    Value(NodeId),
-    Effect(EffectToken),
-}
-
-/// Declared output ownership derived during TLC-to-EGIR conversion and carried
-/// through physicalization. `source.value` is the user-level value, `slot` is the
-/// declared output it fulfils, and `writers` are populated by output
-/// realization. The slot's `EntryOutput::storage_binding` then identifies the
-/// host resource until logical-resource allocation assigns a `ResourceId`.
-#[derive(Debug, Clone)]
-pub struct OutputRoute {
-    pub source: SlotSource,
-    pub slot: OutputSlotId,
-    pub writers: Vec<OutputWriter>,
-}
-
-pub struct Entry<P: EgirPhase = Semantic> {
-    pub name: String,
-    pub span: Span,
-    pub execution_model: ExecutionModel,
-    pub inputs: Vec<EntryInput>,
-    pub outputs: Vec<EntryOutput>,
-    /// Logical resources associated with ABI slots. Host bindings are only a
-    /// publication constraint; semantic passes use these identities directly.
-    pub resource_abi: EntryResourceAbi,
-    pub resource_declarations: Vec<SemanticResourceDecl>,
-    pub params: Vec<(Type<TypeName>, String)>,
-    pub return_ty: Type<TypeName>,
-    pub graph: EGraph<P>,
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
-    pub aliases: LookupMap<NodeId, NodeId>,
-    /// Explicit value-to-output routes. A slot can have several routes when
-    /// distinct CFG paths write it. Output realization fills `writers`; later
-    /// semantic passes consume these declarations instead of reconstructing
-    /// ownership from storage-view provenance and effect shape.
-    pub output_routes: Vec<OutputRoute>,
-}
-
 pub type RawEntry = Entry<Raw>;
 pub type SemanticEntry = Entry<Semantic>;
 pub type ScheduledEntry = Entry<Scheduled>;
-
-#[derive(Clone, Debug, Default)]
-pub struct EntryResourceAbi {
-    pub inputs: Vec<Option<ResourceId>>,
-    pub outputs: Vec<Option<ResourceId>>,
-}
-
-impl<P: EgirPhase> Entry<P> {
-    fn visit_types_mut(&mut self, mut visit: impl FnMut(&mut Type<TypeName>)) {
-        for input in &mut self.inputs {
-            visit(&mut input.ty);
-        }
-        for output in &mut self.outputs {
-            visit(&mut output.ty);
-        }
-        for (ty, _) in &mut self.params {
-            visit(ty);
-        }
-        visit(&mut self.return_ty);
-        for declaration in &mut self.resource_declarations {
-            visit(&mut declaration.elem_ty);
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_resources(
-        name: String,
-        span: Span,
-        execution_model: ExecutionModel,
-        inputs: Vec<EntryInput>,
-        outputs: Vec<EntryOutput>,
-        resource_declarations: Vec<SemanticResourceDecl>,
-        params: Vec<(Type<TypeName>, String)>,
-        return_ty: Type<TypeName>,
-        graph: EGraph<P>,
-        control_headers: LookupMap<BlockId, ControlHeader>,
-    ) -> Self {
-        Self {
-            name,
-            span,
-            execution_model,
-            inputs,
-            outputs,
-            resource_abi: EntryResourceAbi::default(),
-            resource_declarations,
-            params,
-            return_ty,
-            graph,
-            control_headers,
-            aliases: LookupMap::new(),
-            output_routes: Vec::new(),
-        }
-    }
-}
 
 /// A complete, fresh entry projection owned by a kernel recipe. This is the
 /// sole entry-shaped planner record: publication and physical construction
@@ -1434,39 +1222,6 @@ impl PhysicalResourceTable {
     }
 }
 
-/// Whole-program EGIR container. Wrapped by the semantic `EgirRaw` /
-/// `EgirOutputsRealized` / `EgirSegmented` / `EgirOptimized` /
-/// `EgirAllocated` newtypes at the public-API layer (see `crate::lib`).
-pub struct Program<P: EgirPhase> {
-    pub functions: Vec<Func<P>>,
-    /// Extern function stubs. These don't have a body that flows through EGIR;
-    /// they're already `Function` records with a 1-block Unreachable body and
-    /// pass straight through.
-    pub externs: Vec<Function>,
-    pub entry_points: Vec<Entry<P>>,
-    /// Residency requirements discovered during logical allocation.
-    /// These are planned and physicalized directly; they never join the
-    /// semantic entry arena.
-    pub materializations: Vec<MaterializationRequirement<P>>,
-    pub constants: Vec<Constant>,
-    pub pipeline: PipelineDescriptor,
-    /// Source names retained until the descriptor is published atomically at
-    /// terminal lowering.
-    pub input_names: LookupMap<(u32, u32), String>,
-    /// Complete callable regions referenced by semantic Seg bodies, keyed by
-    /// their arena index.
-    pub regions: LookupMap<RegionId, Region<P>>,
-    /// Name ↔ index interner shared with construction. Synthesized regions
-    /// (e.g. scan offset wrappers) intern here to obtain a fresh index.
-    pub region_interner: RegionInterner,
-    /// Logical host and compiler resources. Compiler resources receive a
-    /// physical binding only during target-aware lowering.
-    pub resources: Vec<LogicalResource>,
-    /// Whole-program semantic dependency DAG. Edges come from values, effect
-    /// tokens, and conflicting logical resource accesses.
-    pub semantic_dependencies: Vec<SemanticDependency>,
-}
-
 pub type RawProgram = Program<Raw>;
 pub type SemanticProgram = Program<Semantic>;
 pub type ScheduledProgram = Program<Scheduled>;
@@ -1670,19 +1425,6 @@ impl PhysicalProgram {
     }
 }
 
-/// Give `function` its region index and record its body under it. The index is
-/// the interned name, so calling this twice for one name refreshes the body
-/// rather than allocating a second region.
-fn record_region<P: EgirPhase>(
-    interner: &mut RegionInterner,
-    regions: &mut LookupMap<RegionId, Region<P>>,
-    function: &Func<P>,
-) -> RegionId {
-    let id = interner.intern(&function.name);
-    regions.insert(id, Region::<P>::from_function(function));
-    id
-}
-
 impl<P: EgirPhase> Program<P> {
     pub(crate) fn alloc_compiler_resource(
         &mut self,
@@ -1726,69 +1468,5 @@ impl<P: EgirPhase> Program<P> {
                     &mut requirement.entry,
                 )
             }))
-    }
-
-    pub fn new(
-        functions: Vec<Func<P>>,
-        externs: Vec<Function>,
-        entry_points: Vec<Entry<P>>,
-        constants: Vec<Constant>,
-        pipeline: PipelineDescriptor,
-        mut region_interner: RegionInterner,
-    ) -> Self {
-        // Every function is callable, so it owns a region index. Names already
-        // interned during construction keep their index; the rest are assigned
-        // here. The arena is then keyed by that index.
-        let mut regions = LookupMap::new();
-        for function in &functions {
-            record_region(&mut region_interner, &mut regions, function);
-        }
-        Self {
-            functions,
-            externs,
-            entry_points,
-            materializations: Vec::new(),
-            constants,
-            pipeline,
-            input_names: LookupMap::new(),
-            regions,
-            region_interner,
-            resources: Vec::new(),
-            semantic_dependencies: Vec::new(),
-        }
-    }
-
-    /// Convenience: build an EGIR program wrapping a single function body.
-    /// Used by the probe path in `from_tlc`.
-    pub fn single_function(func: Func<P>) -> Self {
-        Self::new(
-            vec![func],
-            vec![],
-            vec![],
-            vec![],
-            PipelineDescriptor::default(),
-            RegionInterner::default(),
-        )
-    }
-
-    /// Intern (or look up) the region backing a callable name. Synthesized
-    /// regions created after construction obtain their index this way.
-    pub fn intern_region(&mut self, name: impl AsRef<str>) -> RegionId {
-        self.region_interner.intern(name)
-    }
-
-    /// Add a synthesized function to the program: record its body in the region
-    /// arena and make it callable. The returned index is the one a `SegBody`
-    /// must name to call it, and it equals `intern_region(&function.name)`, so a
-    /// caller that needed the index before the body existed may use either.
-    pub fn define_region(&mut self, function: Func<P>) -> RegionId {
-        let id = record_region(&mut self.region_interner, &mut self.regions, &function);
-        self.functions.push(function);
-        id
-    }
-
-    /// SSA function name backing a region index (the `PureOp::Call` ABI).
-    pub fn region_name(&self, id: RegionId) -> &str {
-        self.region_interner.name(id)
     }
 }

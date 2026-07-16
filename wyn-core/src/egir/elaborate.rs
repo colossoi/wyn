@@ -11,6 +11,7 @@
 //!   unrelated CFG paths.
 
 use crate::ast::TypeName;
+use crate::op::OpTag;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::framework::BlockId as SkelBlockId;
@@ -648,7 +649,6 @@ impl<'a> Elaborator<'a> {
 use crate::ssa::types::ConstantValue;
 
 fn const_to_inst_kind(c: &ConstantValue) -> InstKind {
-    use crate::op::OpTag;
     let tag = match c {
         ConstantValue::I32(v) => OpTag::Int(v.to_string()),
         ConstantValue::U32(v) => OpTag::Uint(v.to_string()),
@@ -662,7 +662,20 @@ fn const_to_inst_kind(c: &ConstantValue) -> InstKind {
 }
 
 fn pure_to_inst_kind(op: &PhysicalPureOp, args: &[ValueId]) -> InstKind {
-    super::types::rebuild_inst_kind(op, args)
+    if matches!(
+        op,
+        OpTag::ViewIndex | OpTag::PlaceIndex | OpTag::OutputSlot { .. }
+    ) {
+        panic!(
+            "pure_to_inst_kind: place-producing op {:?} must use elaborate's \
+             place-aware path (allocates a fresh PlaceId from FuncBody.places)",
+            op
+        );
+    }
+    InstKind::Op {
+        tag: op.clone(),
+        operands: args.iter().map(|&id| ValueRef::Ssa(id)).collect(),
+    }
 }
 
 /// Rebuild an effectful InstKind from the original kind and new operands.

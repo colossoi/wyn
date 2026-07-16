@@ -13,6 +13,7 @@
 pub(crate) mod elaborate;
 mod extract;
 mod fold;
+pub mod ir;
 mod loop_analysis;
 pub(crate) mod materialize;
 pub mod program;
