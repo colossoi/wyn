@@ -1,4 +1,4 @@
-//! Algebraic folds applied eagerly inside `EGraph::intern_pure`.
+//! Algebraic folds used while constructing EGIR from TLC.
 //!
 //! Rules:
 //! - `Project{i}(Tuple/Vector/ArrayLit(a,b,…)) → i-th operand`
@@ -11,6 +11,8 @@
 //! - constant-constant: `BinOp(c1, c2) → const` for `+ - * /` over i32/u32/f32
 //! - redundant bitcasts: identity bitcasts and inverse bitcast pairs are removed
 //!
+//! The low-level `EGraph::intern_pure` operation only hash-conses. The TLC
+//! converter decides whether to apply these rules before interning a node.
 //! Rules never keep borrows across mutations: constant folding extracts
 //! operand values first, then interns the result.
 
@@ -168,6 +170,7 @@ impl<P: EgirPhase> EGraph<P> {
             PureOp::BinOp("*".into()),
             smallvec![value, reciprocal],
             result_ty.clone(),
+            None,
         ))
     }
 
@@ -484,7 +487,3 @@ fn eval_bool_pred(op: &str, a: bool, b: bool) -> Option<bool> {
         _ => return None,
     })
 }
-
-#[cfg(test)]
-#[path = "fold_tests.rs"]
-mod fold_tests;

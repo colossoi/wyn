@@ -497,6 +497,7 @@ fn compose_map_region(
         PureOp::Call(producer_region.name.clone()),
         producer_args,
         producer_region.return_ty.clone(),
+        None,
     );
     for (position, &index) in old_indices.iter().enumerate() {
         if replaced_inputs.contains(&index.index()) {
@@ -509,6 +510,7 @@ fn compose_map_region(
         PureOp::Call(consumer_region.name.clone()),
         consumer_args,
         consumer_region.return_ty.clone(),
+        None,
     );
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
     let name = fresh_region_name(inner, &format!("{scope}_vertical_map_{lane}"));
@@ -589,6 +591,7 @@ fn compose_step_region(
         PureOp::Call(producer_region.name.clone()),
         producer_args,
         producer_region.return_ty.clone(),
+        None,
     );
     let mut consumer_args = smallvec![args[0]];
     for (position, &index) in old_indices.iter().enumerate() {
@@ -602,6 +605,7 @@ fn compose_step_region(
         PureOp::Call(consumer_region.name.clone()),
         consumer_args,
         consumer_region.return_ty.clone(),
+        None,
     );
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
     let name = fresh_region_name(inner, &format!("{scope}_vertical_step_{operator_index}"));
@@ -665,7 +669,12 @@ mod tests {
         let mut graph = EGraph::new();
         let left = graph.add_func_param(0, int.clone());
         let right = graph.add_func_param(1, int.clone());
-        let result = graph.intern_pure(PureOp::BinOp(op.into()), smallvec![left, right], int.clone());
+        let result = graph.intern_pure(
+            PureOp::BinOp(op.into()),
+            smallvec![left, right],
+            int.clone(),
+            None,
+        );
         graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
         SemanticFunc::new(
             name.into(),
@@ -698,8 +707,8 @@ mod tests {
         let consumer_region = interner.intern("consumer");
         let mut graph = EGraph::new();
         let input = graph.add_func_param(0, array.clone());
-        let producer_capture = graph.intern_pure(PureOp::Int("1".into()), smallvec![], int.clone());
-        let consumer_capture = graph.intern_pure(PureOp::Int("2".into()), smallvec![], int.clone());
+        let producer_capture = graph.intern_pure(PureOp::Int("1".into()), smallvec![], int.clone(), None);
+        let consumer_capture = graph.intern_pure(PureOp::Int("2".into()), smallvec![], int.clone(), None);
         let producer_result = graph.alloc_side_effect_result(tuple.clone());
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
             semantic_id: None,
@@ -739,6 +748,7 @@ mod tests {
             PureOp::Project { index: 0 },
             smallvec![producer_result],
             array.clone(),
+            None,
         );
         // A token-free independent operation may sit between producer and
         // consumer. F3 must use the dependency oracle rather than requiring
@@ -787,6 +797,7 @@ mod tests {
             PureOp::Project { index: 0 },
             smallvec![consumer_result],
             array.clone(),
+            None,
         );
         graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(output));
         let entry = SemanticEntry::new_with_resources(

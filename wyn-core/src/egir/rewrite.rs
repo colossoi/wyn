@@ -178,6 +178,7 @@ impl<P: EgirPhase> RewriteRule<P> for PowToMulChain {
                 PureOp::BinOp("*".into()),
                 smallvec![chain, base],
                 result_ty.clone(),
+                None,
             );
         }
         RewriteResult::Replace(chain)

@@ -176,7 +176,7 @@ fn idle_chunk_start_is_clamped_before_remaining_subtraction() {
 fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
     let elem_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let mut phase1 = EGraph::new();
-    let neutral = phase1.intern_pure(PureOp::Int("0".into()), smallvec![], elem_ty.clone());
+    let neutral = phase1.intern_pure(PureOp::Int("0".into()), smallvec![], elem_ty.clone(), None);
     let sums = ResourceId(40);
     let offsets = ResourceId(41);
     let phase2 = synthesize_phase2_scan(

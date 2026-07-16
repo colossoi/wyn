@@ -30,9 +30,9 @@ fn canonical_fixed_range_loop_recovers_trip_count() {
     let header = graph.skeleton.create_block();
     let body = graph.skeleton.create_block();
     let merge = graph.skeleton.create_block();
-    let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty());
-    let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty());
-    let bound = graph.intern_pure(PureOp::Int("32".into()), smallvec![], i32_ty());
+    let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty(), None);
+    let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty(), None);
+    let bound = graph.intern_pure(PureOp::Int("32".into()), smallvec![], i32_ty(), None);
     let index = graph.add_block_param(header, 0, i32_ty());
     graph.skeleton.blocks[header].params.push(index);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
@@ -43,6 +43,7 @@ fn canonical_fixed_range_loop_recovers_trip_count() {
         PureOp::BinOp("<".into()),
         smallvec![index, bound],
         Type::Constructed(TypeName::Bool, vec![]),
+        None,
     );
     graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
         cond,
@@ -51,7 +52,7 @@ fn canonical_fixed_range_loop_recovers_trip_count() {
         else_target: merge,
         else_args: vec![],
     };
-    let next = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![index, one], i32_ty());
+    let next = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![index, one], i32_ty(), None);
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: header,
         args: vec![next],

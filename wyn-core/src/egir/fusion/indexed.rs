@@ -228,11 +228,12 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
             PureOp::Index,
             smallvec![*input, candidate.index_value],
             elem_ty.clone(),
+            None,
         ));
     }
     args.extend(captures);
     let result_ty = graph.types[&candidate.index].clone();
-    let scalar = graph.intern_pure(PureOp::Call(region_name), args, result_ty);
+    let scalar = graph.intern_pure(PureOp::Call(region_name), args, result_ty, None);
     crate::egir::graph_ops::replace_all_references(graph, candidate.index, scalar);
 
     let block = &mut graph.skeleton.blocks[candidate.block];

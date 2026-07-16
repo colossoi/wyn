@@ -319,6 +319,7 @@ fn output_sources(
                 PureOp::Project { index: i as u32 },
                 smallvec![result],
                 output.ty.clone(),
+                None,
             )
         })
         .collect()

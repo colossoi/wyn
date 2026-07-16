@@ -190,14 +190,19 @@ mod tests {
         let mut graph = EGraph::new();
         let left = graph.add_func_param(0, pair.clone());
         let right = graph.add_func_param(1, pair.clone());
-        let la = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![left], int.clone());
-        let lb = graph.intern_pure(PureOp::Project { index: 1 }, smallvec![left], int.clone());
-        let ra = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![right], int.clone());
-        let rb = graph.intern_pure(PureOp::Project { index: 1 }, smallvec![right], int.clone());
-        let out_a = graph.intern_pure(PureOp::BinOp("*".into()), smallvec![la, ra], int.clone());
-        let scaled = graph.intern_pure(PureOp::BinOp("*".into()), smallvec![la, rb], int.clone());
-        let out_b = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![scaled, lb], int.clone());
-        let result = graph.intern_pure(PureOp::Tuple(2), smallvec![out_a, out_b], pair.clone());
+        let la = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![left], int.clone(), None);
+        let lb = graph.intern_pure(PureOp::Project { index: 1 }, smallvec![left], int.clone(), None);
+        let ra = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![right], int.clone(), None);
+        let rb = graph.intern_pure(PureOp::Project { index: 1 }, smallvec![right], int.clone(), None);
+        let out_a = graph.intern_pure(PureOp::BinOp("*".into()), smallvec![la, ra], int.clone(), None);
+        let scaled = graph.intern_pure(PureOp::BinOp("*".into()), smallvec![la, rb], int.clone(), None);
+        let out_b = graph.intern_pure(
+            PureOp::BinOp("+".into()),
+            smallvec![scaled, lb],
+            int.clone(),
+            None,
+        );
+        let result = graph.intern_pure(PureOp::Tuple(2), smallvec![out_a, out_b], pair.clone(), None);
         graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
         let id = RegionId::from_index(0);
         let mut regions = LookupMap::new();

@@ -154,7 +154,12 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
         target: header,
         args: vec![zero, zero],
     };
-    let cond = graph.intern_pure(PureOp::BinOp("<".into()), smallvec![index, bound], bool_ty());
+    let cond = graph.intern_pure(
+        PureOp::BinOp("<".into()),
+        smallvec![index, bound],
+        bool_ty(),
+        None,
+    );
     graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
         cond,
         then_target: body,
@@ -162,8 +167,8 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
         else_target: continuation,
         else_args: vec![acc],
     };
-    let next_acc = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![acc, one], u32_ty());
-    let next_index = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![index, one], u32_ty());
+    let next_acc = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![acc, one], u32_ty(), None);
+    let next_index = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![index, one], u32_ty(), None);
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: header,
         args: vec![next_acc, next_index],

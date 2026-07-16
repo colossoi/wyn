@@ -1233,7 +1233,7 @@ fn chunk_view_like(
             if let Some(s) = step {
                 ops.push(s);
             }
-            return Ok(graph.intern_pure(PureOp::ArrayRange { has_step }, ops, view_ty));
+            return Ok(graph.intern_pure(PureOp::ArrayRange { has_step }, ops, view_ty, None));
         }
     }
     Err(format!("phase1 {context}: input is not a chunkable view"))
@@ -1367,6 +1367,7 @@ fn build_tree_reduce_phase2(
         PureOp::Call(op_func.clone()),
         smallvec![acc_in, elem_i],
         elem_ty.clone(),
+        None,
     );
     graph.skeleton.blocks[grid_body].term = SkeletonTerminator::Branch {
         target: grid_cont,
@@ -1463,7 +1464,12 @@ fn build_tree_reduce_phase2(
         &mut eff,
         None,
     );
-    let combined = graph.intern_pure(PureOp::Call(op_func.clone()), smallvec![a, bb], elem_ty.clone());
+    let combined = graph.intern_pure(
+        PureOp::Call(op_func.clone()),
+        smallvec![a, bb],
+        elem_ty.clone(),
+        None,
+    );
     graph_ops::emit_storage_store(
         graph,
         tree_then,
@@ -1617,7 +1623,7 @@ fn intern_index_lit(graph: &mut super::types::EGraph, n: u32, index_ty: &Type<Ty
         Type::Constructed(TypeName::UInt(32), _) => super::types::PureOp::Uint(n.to_string()),
         _ => super::types::PureOp::Int(n.to_string()),
     };
-    graph.intern_pure_with_span(op, smallvec![], index_ty.clone(), None)
+    graph.intern_pure(op, smallvec![], index_ty.clone(), None)
 }
 
 /// Cast a u32 value into `index_ty`: identity for u32, else the per-type
@@ -1654,6 +1660,7 @@ fn emit_resource_len(graph: &mut super::types::EGraph, resource: ResourceId) -> 
         PureOp::ResourceLen(SemanticResourceRef(resource)),
         smallvec![],
         Type::Constructed(TypeName::UInt(32), vec![]),
+        None,
     )
 }
 
@@ -2126,6 +2133,7 @@ fn emit_reduce_entry(
                 },
                 smallvec![screma_result_nid],
                 elem_tys[acc_i].clone(),
+                None,
             )
         })
         .collect();
@@ -2436,6 +2444,7 @@ fn emit_scan_entry(
             super::types::PureOp::Project { index: 0 },
             smallvec![screma_nid],
             elem_ty.clone(),
+            None,
         );
         let arr_ty = Type::Constructed(
             TypeName::Array,
@@ -2651,7 +2660,12 @@ fn build_exclusive_scan_phase2(
         None,
     );
     let value = graph_ops::emit_view_load(graph, body, sums, index, elem_ty.clone(), &mut effect, None);
-    let next_acc = graph.intern_pure(PureOp::Call(op_func), smallvec![acc, value], elem_ty.clone());
+    let next_acc = graph.intern_pure(
+        PureOp::Call(op_func),
+        smallvec![acc, value],
+        elem_ty.clone(),
+        None,
+    );
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: cont,
         args: vec![next_acc],
@@ -2728,6 +2742,7 @@ pub fn synthesize_phase3_scan(
         super::types::PureOp::ViewIndex,
         smallvec![block_offsets_view, tid],
         elem_ty.clone(),
+        None,
     );
     let off = b.emit_load(off_place, elem_ty.clone());
 
@@ -2791,7 +2806,7 @@ fn synthesize_swap_wrapper(
 ) -> SemanticFunc {
     let result_ty = elem_ty.clone();
     synthesize_binary_fn(wrapper_name, elem_ty, span, move |graph, a_nid, b_nid| {
-        graph.intern_pure(PureOp::Call(inner), smallvec![b_nid, a_nid], result_ty)
+        graph.intern_pure(PureOp::Call(inner), smallvec![b_nid, a_nid], result_ty, None)
     })
 }
 
@@ -2799,7 +2814,12 @@ fn synthesize_u32_add_function(name: String, span: crate::ast::Span) -> Semantic
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let result_ty = u32_ty.clone();
     synthesize_binary_fn(name, u32_ty, span, move |graph, a_nid, b_nid| {
-        graph.intern_pure(PureOp::BinOp("+".into()), smallvec![a_nid, b_nid], result_ty)
+        graph.intern_pure(
+            PureOp::BinOp("+".into()),
+            smallvec![a_nid, b_nid],
+            result_ty,
+            None,
+        )
     })
 }
 

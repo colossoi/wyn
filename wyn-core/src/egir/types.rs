@@ -21,14 +21,14 @@ use super::soac::{filter, hist, screma};
 
 pub use super::ir::{
     EffectToken, EgirPhase, GraphResource, NodeId, RegionId, SegBody, SegLevel, SegResourceAccessKind,
-    SideEffectIndex, SideEffectSite, SkeletonTerminator, Soac, SoacDestination, SoacInputType,
+    SideEffectIndex, SideEffectSite, SkeletonTerminator, Soac, SoacDestination,
 };
 
 // Keep the existing semantic defaults at the compatibility boundary. The
 // definitions in `ir` themselves have no knowledge of concrete EGIR phases.
 pub type PureOp<R = super::program::SemanticResourceRef> = super::ir::PureOp<R>;
 pub type PureViewSource<R = super::program::SemanticResourceRef> = super::ir::PureViewSource<R>;
-pub type NodeKey<R = super::program::SemanticResourceRef> = super::ir::NodeKey<R>;
+pub type NodeKey<R = super::program::SemanticResourceRef, Ty = Type<TypeName>> = super::ir::NodeKey<R, Ty>;
 pub type ENode<R = super::program::SemanticResourceRef> = super::ir::ENode<R>;
 pub type SegExtent<R = super::program::SemanticResourceRef> = super::ir::SegExtent<R>;
 pub type SegSpace<R = super::program::SemanticResourceRef> = super::ir::SegSpace<R>;
@@ -37,7 +37,8 @@ pub type SideEffect<P = Semantic> = super::ir::SideEffect<P>;
 pub type SideEffectKind<P = Semantic> = super::ir::SideEffectKind<P>;
 pub type SkeletonBlock<P = Semantic> = super::ir::SkeletonBlock<P>;
 pub type Skeleton<P = Semantic> = super::ir::Skeleton<P>;
-pub type EGraph<P = Semantic> = super::ir::EGraph<P>;
+pub type SoacInputType<Ty = Type<TypeName>> = super::ir::SoacInputType<Ty>;
+pub type EGraph<P = Semantic, Ty = Type<TypeName>> = super::ir::EGraph<P, Ty>;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Raw<R = super::program::SemanticResourceRef>(std::marker::PhantomData<fn() -> R>);
@@ -91,11 +92,14 @@ impl EgirPhase for Physical {
     type HistState = hist::PhysicalState;
 }
 
-impl<P: EgirPhase> super::ir::EGraph<P> {
+impl<P: EgirPhase, Ty> super::ir::EGraph<P, Ty>
+where
+    Ty: Clone + std::fmt::Debug + Eq + std::hash::Hash,
+{
     pub(crate) fn try_map_phase<Q, E>(
         self,
         mut map_soac: impl FnMut(BlockId, usize, Soac<P>) -> Result<Soac<Q>, E>,
-    ) -> Result<(EGraph<Q>, LookupMap<BlockId, BlockId>), E>
+    ) -> Result<(EGraph<Q, Ty>, LookupMap<BlockId, BlockId>), E>
     where
         Q: EgirPhase<Resource = P::Resource>,
     {
@@ -152,7 +156,7 @@ impl<P: EgirPhase> super::ir::EGraph<P> {
         }
 
         Ok((
-            super::ir::EGraph::<Q>::from_parts(super::ir::EGraphParts {
+            super::ir::EGraph::<Q, Ty>::from_parts(super::ir::EGraphParts {
                 nodes,
                 types,
                 const_cache,
@@ -173,7 +177,14 @@ impl<P: EgirPhase> super::ir::EGraph<P> {
         self,
         mut map_resource: impl FnMut(P::Resource) -> Result<Q::Resource, E>,
         mut map_soac: impl FnMut(Soac<P>, &LookupMap<NodeId, NodeId>) -> Result<Soac<Q>, E>,
-    ) -> Result<(EGraph<Q>, LookupMap<NodeId, NodeId>, LookupMap<BlockId, BlockId>), E>
+    ) -> Result<
+        (
+            EGraph<Q, Ty>,
+            LookupMap<NodeId, NodeId>,
+            LookupMap<BlockId, BlockId>,
+        ),
+        E,
+    >
     where
         Q: EgirPhase,
     {
@@ -262,7 +273,7 @@ impl<P: EgirPhase> super::ir::EGraph<P> {
             };
         }
 
-        let graph = super::ir::EGraph::<Q>::from_parts(super::ir::EGraphParts {
+        let graph = super::ir::EGraph::<Q, Ty>::from_parts(super::ir::EGraphParts {
             nodes,
             types: types.into_iter().map(|(node, ty)| (node_map[&node], ty)).collect(),
             const_cache: const_cache.into_iter().map(|(value, node)| (value, node_map[&node])).collect(),
@@ -281,6 +292,16 @@ impl From<crate::tlc::SoacDestination> for SoacDestination {
         match destination {
             crate::tlc::SoacDestination::Fresh => Self::Fresh,
             crate::tlc::SoacDestination::UniqueInput => Self::UniqueInput,
+        }
+    }
+}
+
+impl<P: EgirPhase> super::ir::Soac<P> {
+    fn for_each_body_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
+        match self {
+            Self::Screma(op) => op.for_each_type_mut(visit),
+            Self::Filter(op) => op.body.for_each_type_mut(visit),
+            Self::Hist(op) => op.body.for_each_type_mut(visit),
         }
     }
 }

@@ -149,8 +149,12 @@ pub fn compute_slot_source(
         let view = graph_ops::intern_resource_view(graph, resource, et.clone(), None);
         let mut writers = Vec::with_capacity(n);
         for j in 0..n {
-            let elem =
-                graph.intern_pure(PureOp::Project { index: j as u32 }, smallvec![source], et.clone());
+            let elem = graph.intern_pure(
+                PureOp::Project { index: j as u32 },
+                smallvec![source],
+                et.clone(),
+                None,
+            );
             let idx = graph_ops::intern_u32(graph, j as u32, None);
             let effect =
                 graph_ops::emit_storage_store(graph, block, view, idx, elem, et.clone(), next_effect, None);
@@ -200,6 +204,7 @@ pub fn graphics_slot_source(
         PureOp::OutputSlot { index: slot_index },
         smallvec![],
         slot_ty.clone(),
+        None,
     );
     OutputWriter::Effect(graph_ops::emit_store(
         graph,

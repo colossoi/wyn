@@ -20,6 +20,14 @@ fn effect(result: NodeId) -> SideEffect {
 }
 
 #[test]
+fn graph_accepts_a_non_wyn_type_payload() {
+    let mut graph = super::super::ir::EGraph::<Semantic, String>::new();
+    let node = graph.intern_pure(PureOp::Unit, SmallVec::new(), "unit".to_string(), None);
+
+    assert_eq!(graph.types[&node], "unit");
+}
+
+#[test]
 fn indexes_results_across_skeleton_blocks() {
     let mut graph = EGraph::new();
     let unit = Type::Constructed(TypeName::Unit, vec![]);
@@ -55,12 +63,13 @@ fn indexes_results_across_skeleton_blocks() {
 fn replace_all_references_does_not_leave_stale_hash_cons_key() {
     let mut graph = EGraph::new();
     let int = i32_ty();
-    let a = graph.intern_pure(PureOp::Int("1".into()), smallvec::smallvec![], int.clone());
-    let b = graph.intern_pure(PureOp::Int("2".into()), smallvec::smallvec![], int.clone());
+    let a = graph.intern_pure(PureOp::Int("1".into()), smallvec::smallvec![], int.clone(), None);
+    let b = graph.intern_pure(PureOp::Int("2".into()), smallvec::smallvec![], int.clone(), None);
     let old_call = graph.intern_pure(
         PureOp::Call("__test_hash_cons".into()),
         smallvec::smallvec![a, b],
         int.clone(),
+        None,
     );
 
     crate::egir::graph_ops::replace_all_references(&mut graph, b, a);
@@ -69,6 +78,7 @@ fn replace_all_references_does_not_leave_stale_hash_cons_key() {
         PureOp::Call("__test_hash_cons".into()),
         smallvec::smallvec![a, b],
         int,
+        None,
     );
 
     assert_ne!(old_call, reinterned_old_call);
@@ -80,11 +90,12 @@ fn retype_node_does_not_leave_stale_hash_cons_key() {
     let mut graph = EGraph::<Semantic>::new();
     let int = i32_ty();
     let uint = u32_ty();
-    let arg = graph.intern_pure(PureOp::Int("1".into()), smallvec::smallvec![], int.clone());
+    let arg = graph.intern_pure(PureOp::Int("1".into()), smallvec::smallvec![], int.clone(), None);
     let old_call = graph.intern_pure(
         PureOp::Call("__test_hash_cons_retype".into()),
         smallvec::smallvec![arg],
         int.clone(),
+        None,
     );
 
     graph.retype_node(old_call, uint);
@@ -93,6 +104,7 @@ fn retype_node_does_not_leave_stale_hash_cons_key() {
         PureOp::Call("__test_hash_cons_retype".into()),
         smallvec::smallvec![arg],
         int,
+        None,
     );
 
     assert_ne!(old_call, reinterned_old_call);

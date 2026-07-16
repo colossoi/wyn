@@ -387,10 +387,11 @@ fn reproject(
                 },
                 smallvec::smallvec![new_result],
                 ty.clone(),
+                None,
             )
         })
         .collect();
     let old_ty = graph.types[&old_result].clone();
-    let rebuilt = graph.intern_pure(PureOp::Tuple(field_types.len()), fields, old_ty);
+    let rebuilt = graph.intern_pure(PureOp::Tuple(field_types.len()), fields, old_ty, None);
     graph_ops::replace_all_references(graph, old_result, rebuilt);
 }

@@ -245,6 +245,7 @@ fn test_hash_cons_distinguishes_by_result_type() {
         PureOp::Uint("0".into()),
         smallvec::SmallVec::new(),
         u32_ty.clone(),
+        None,
     );
 
     let storage_len_id = crate::builtins::catalog().known().storage_len;
@@ -255,6 +256,7 @@ fn test_hash_cons_distinguishes_by_result_type() {
         },
         smallvec![zero_u32, zero_u32],
         i32_ty,
+        None,
     );
     let b = g.intern_pure(
         PureOp::Intrinsic {
@@ -263,6 +265,7 @@ fn test_hash_cons_distinguishes_by_result_type() {
         },
         smallvec![zero_u32, zero_u32],
         u32_ty,
+        None,
     );
     assert_ne!(
         a, b,

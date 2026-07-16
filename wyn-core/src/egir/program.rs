@@ -30,15 +30,34 @@ use super::types::{
 };
 
 pub use super::ir::{
-    EntryResourceAbi, OutputRoute, OutputSlotId, OutputWriter, Program, RegionInterner, SlotSource,
+    EntryResourceAbi, OutputRoute, OutputSlotId, OutputWriter, RegionInterner, SlotSource,
 };
-pub type Region<P = Semantic> = super::ir::Region<P>;
-pub type Func<P = Semantic> = super::ir::Func<P>;
-pub type Entry<P = Semantic> = super::ir::Entry<P>;
+pub type Region<P = Semantic, Ty = Type<TypeName>> = super::ir::Region<P, Ty>;
+pub type Func<P = Semantic, Ty = Type<TypeName>> = super::ir::Func<P, Ty>;
+pub type Entry<P = Semantic, Ty = Type<TypeName>> = super::ir::Entry<P, Ty>;
+pub type Program<P = Semantic, Ty = Type<TypeName>> = super::ir::Program<P, Ty>;
 
 #[cfg(test)]
 #[path = "program_tests.rs"]
 mod program_tests;
+
+impl<P: EgirPhase> Entry<P> {
+    pub(super) fn visit_types_mut(&mut self, mut visit: impl FnMut(&mut Type<TypeName>)) {
+        for input in &mut self.inputs {
+            visit(&mut input.ty);
+        }
+        for output in &mut self.outputs {
+            visit(&mut output.ty);
+        }
+        for (ty, _) in &mut self.params {
+            visit(ty);
+        }
+        visit(&mut self.return_ty);
+        for declaration in &mut self.resource_declarations {
+            visit(&mut declaration.elem_ty);
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SemanticOpId(pub u32);

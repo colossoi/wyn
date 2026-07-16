@@ -243,7 +243,7 @@ fn extend_incoming_block_args<P: EgirPhase>(
 /// emission paths.
 pub fn intern_u32<P: EgirPhase>(graph: &mut EGraph<P>, n: u32, span: Option<Span>) -> NodeId {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    graph.intern_pure_with_span(PureOp::Uint(n.to_string()), smallvec![], u32_ty, span)
+    graph.intern_pure(PureOp::Uint(n.to_string()), smallvec![], u32_ty, span)
 }
 
 /// Constant via `EGraph::intern_constant` (canonical `ENode::Constant`
@@ -267,7 +267,7 @@ pub fn intern_intrinsic<P: EgirPhase>(
     ty: Type<TypeName>,
     span: Option<Span>,
 ) -> NodeId {
-    graph.intern_pure_with_span(PureOp::Intrinsic { id, overload_idx: 0 }, operands, ty, span)
+    graph.intern_pure(PureOp::Intrinsic { id, overload_idx: 0 }, operands, ty, span)
 }
 
 /// Binary op (`PureOp::BinOp`). `op` is the operator string (`"+"`,
@@ -280,7 +280,7 @@ pub fn intern_binop<P: EgirPhase>(
     ty: Type<TypeName>,
     span: Option<Span>,
 ) -> NodeId {
-    graph.intern_pure_with_span(PureOp::BinOp(op.into()), smallvec![lhs, rhs], ty, span)
+    graph.intern_pure(PureOp::BinOp(op.into()), smallvec![lhs, rhs], ty, span)
 }
 
 /// `StorageView(Storage(br))` with the default
@@ -304,7 +304,7 @@ pub fn intern_storage_view(
     );
     let zero_nid = intern_u32(graph, 0, span);
     let view_ty = crate::types::view_array_of(&view_ty, crate::types::buffer_tag(br));
-    graph.intern_pure_with_span(
+    graph.intern_pure(
         PureOp::StorageView(PureViewSource::Storage(br)),
         smallvec![zero_nid, len_nid],
         view_ty,
@@ -320,7 +320,7 @@ pub fn intern_resource_view<P: EgirPhase<Resource = super::program::SemanticReso
     span: Option<Span>,
 ) -> NodeId {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let len = graph.intern_pure_with_span(
+    let len = graph.intern_pure(
         PureOp::ResourceLen(super::program::SemanticResourceRef(resource)),
         smallvec![],
         u32_ty,
@@ -340,7 +340,7 @@ pub fn intern_chunked_resource_view<P: EgirPhase<Resource = super::program::Sema
 ) -> NodeId {
     let view_ty =
         crate::types::view_array_of(&view_ty, Type::Constructed(TypeName::Resource(resource), vec![]));
-    graph.intern_pure_with_span(
+    graph.intern_pure(
         PureOp::StorageView(PureViewSource::Storage(super::program::SemanticResourceRef(
             resource,
         ))),
@@ -366,7 +366,7 @@ pub fn emit_workgroup_view<P: EgirPhase>(
     let count_nid = intern_u32(graph, count, span);
     // Workgroup-shared memory is not descriptor-bound: no (set, binding) region.
     let view_ty = crate::types::view_array_of(&view_ty, crate::types::no_buffer());
-    graph.intern_pure_with_span(
+    graph.intern_pure(
         PureOp::StorageView(PureViewSource::Workgroup { id, count }),
         smallvec![zero_nid, count_nid],
         view_ty,
@@ -386,7 +386,7 @@ pub fn intern_chunked_storage_view(
     span: Option<Span>,
 ) -> NodeId {
     let view_ty = crate::types::view_array_of(&view_ty, crate::types::buffer_tag(br));
-    graph.intern_pure_with_span(
+    graph.intern_pure(
         PureOp::StorageView(PureViewSource::Storage(br)),
         smallvec![offset, len],
         view_ty,
@@ -480,8 +480,7 @@ pub fn emit_storage_store<P: EgirPhase>(
     next_effect: &mut u32,
     span: Option<Span>,
 ) -> EffectToken {
-    let place_nid =
-        graph.intern_pure_with_span(PureOp::ViewIndex, smallvec![view_nid, index_nid], elem_ty, span);
+    let place_nid = graph.intern_pure(PureOp::ViewIndex, smallvec![view_nid, index_nid], elem_ty, span);
     emit_store(graph, block, place_nid, value_nid, next_effect, span)
 }
 
@@ -568,7 +567,7 @@ pub fn intern_place_index<P: EgirPhase>(
     elem_ty: Type<TypeName>,
     span: Option<Span>,
 ) -> NodeId {
-    graph.intern_pure_with_span(
+    graph.intern_pure(
         PureOp::PlaceIndex,
         smallvec![parent_place_nid, index_nid],
         elem_ty,
@@ -604,7 +603,7 @@ pub fn emit_view_load<P: EgirPhase>(
     next_effect: &mut u32,
     span: Option<Span>,
 ) -> NodeId {
-    let place_nid = graph.intern_pure_with_span(
+    let place_nid = graph.intern_pure(
         PureOp::ViewIndex,
         smallvec![view_nid, index_nid],
         elem_ty.clone(),
@@ -751,7 +750,7 @@ pub(crate) fn clone_value_subgraph<P: EgirPhase>(
                     .iter()
                     .map(|&operand| clone_value_subgraph(src, dst, operand, memo, constants, allow_unions))
                     .collect::<Result<_, _>>()?;
-                dst.intern_pure_with_span(op.clone(), new_ops, ty, src.node_spans.get(&nid).copied())
+                dst.intern_pure(op.clone(), new_ops, ty, src.node_spans.get(&nid).copied())
             }
             ENode::Union { left, right } if allow_unions => {
                 let left = clone_value_subgraph(src, dst, *left, memo, constants, allow_unions)?;

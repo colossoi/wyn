@@ -867,7 +867,10 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// Intern a pure node, attaching the current term's span (if any).
     /// Use in preference to `self.graph.intern_pure` so spans flow through.
     fn intern_pure(&mut self, op: PureOp, operands: SmallVec<[NodeId; 4]>, ty: Type<TypeName>) -> NodeId {
-        self.graph.intern_pure_with_span(op, operands, ty, self.current_span)
+        if let Some(folded) = self.graph.try_algebraic_fold(&op, &operands, &ty) {
+            return folded;
+        }
+        self.graph.intern_pure(op, operands, ty, self.current_span)
     }
 
     fn alloc_effect(&mut self) -> EffectToken {
@@ -2935,3 +2938,7 @@ fn build_entry_outputs(
 #[cfg(test)]
 #[path = "from_tlc_tests.rs"]
 mod from_tlc_tests;
+
+#[cfg(test)]
+#[path = "fold_tests.rs"]
+mod fold_tests;

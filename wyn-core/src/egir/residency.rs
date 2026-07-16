@@ -1377,6 +1377,7 @@ fn configure_materialized_result(
                     PureOp::Project { index: 0 },
                     smallvec::smallvec![result],
                     output.result_ty.clone(),
+                    None,
                 )
             };
             emit_scalar_handoff_store(graph, graph.skeleton.entry, output_view, value, &output.elem_ty);
@@ -1427,6 +1428,7 @@ fn rewrite_materialized_operation_source(
                     PureOp::Project { index: lane as u32 },
                     smallvec::smallvec![result],
                     output.result_ty.clone(),
+                    None,
                 )
             });
         let value = if kind == MaterializationKind::Scalar {
@@ -1471,6 +1473,7 @@ fn rewrite_materialized_operation_source(
             PureOp::Tuple(replacement_values.len()),
             replacement_values.into(),
             replacement_ty,
+            None,
         )
     };
     graph_ops::replace_all_references(&mut entry.graph, result, replacement_result);
@@ -1711,6 +1714,7 @@ fn detached_scalar_handoff_load(
         PureOp::ViewIndex,
         smallvec::smallvec![view, zero],
         elem_ty.clone(),
+        None,
     );
     let mut next_effect = graph_ops::next_effect_token(graph);
     graph_ops::detached_load(graph, place, elem_ty.clone(), &mut next_effect, None)

@@ -378,6 +378,7 @@ fn apply_with_consumer(
             PureOp::Project { index: field },
             smallvec![new_result],
             count_ty.clone(),
+            None,
         );
         result_types.push(count_ty.clone());
         operators.push(count);
@@ -467,7 +468,12 @@ fn apply_count_only(
     count.neutral = neutral;
     let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![count_ty.clone()]);
     let result = graph.alloc_side_effect_result(tuple_ty);
-    let project = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![result], count_ty.clone());
+    let project = graph.intern_pure(
+        PureOp::Project { index: 0 },
+        smallvec![result],
+        count_ty.clone(),
+        None,
+    );
     replace_lengths(graph, &candidate.lengths, project);
     let effect = &mut graph.skeleton.blocks[candidate.block].side_effects[candidate.filter];
     effect.kind = SideEffectKind::Soac(Soac::Screma(screma::Op::Reduce {
@@ -592,11 +598,12 @@ fn extend_result(
                 PureOp::Project { index: index as u32 },
                 smallvec![new_result],
                 ty.clone(),
+                None,
             )
         })
         .collect();
     let old_ty = graph.types[&old_result].clone();
-    let rebuilt = graph.intern_pure(PureOp::Tuple(old_fields.len()), rebuilt_fields, old_ty);
+    let rebuilt = graph.intern_pure(PureOp::Tuple(old_fields.len()), rebuilt_fields, old_ty, None);
     graph_ops::replace_all_references(graph, old_result, rebuilt);
     new_result
 }
@@ -606,7 +613,7 @@ fn integer_literal(graph: &mut EGraph, value: &str, ty: &Type<TypeName>) -> Node
         Type::Constructed(TypeName::UInt(_), _) => PureOp::Uint(value.to_string()),
         _ => PureOp::Int(value.to_string()),
     };
-    graph.intern_pure(op, smallvec![], ty.clone())
+    graph.intern_pure(op, smallvec![], ty.clone(), None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -650,6 +657,7 @@ fn masked_step(
             PureOp::Call(region.name.clone()),
             call_args,
             region.return_ty.clone(),
+            None,
         )
     } else {
         args[1]
@@ -662,6 +670,7 @@ fn masked_step(
         PureOp::Call(pred_region.name.clone()),
         pred_args,
         pred_region.return_ty.clone(),
+        None,
     );
     let mut reduce_args = smallvec![args[0], value];
     reduce_args.extend(args[cursor..].iter().copied());
@@ -669,6 +678,7 @@ fn masked_step(
         PureOp::Call(consumer.name.clone()),
         reduce_args,
         consumer.return_ty.clone(),
+        None,
     );
     let control_headers = conditional_return(&mut graph, pred, args[0], reduced, accumulator_ty);
     let name = fresh_region_name(inner, &format!("{scope}_filter_reduce_{index}"));
@@ -721,6 +731,7 @@ fn count_operator(
             PureOp::Call(region.name.clone()),
             call_args,
             region.return_ty.clone(),
+            None,
         )
     } else {
         args[1]
@@ -732,12 +743,14 @@ fn count_operator(
         PureOp::Call(pred_region.name.clone()),
         pred_args,
         pred_region.return_ty.clone(),
+        None,
     );
     let one = integer_literal(&mut graph, "1", &count_ty);
     let incremented = graph.intern_pure(
         PureOp::BinOp("+".into()),
         smallvec![args[0], one],
         count_ty.clone(),
+        None,
     );
     let control_headers = conditional_return(&mut graph, pred, args[0], incremented, count_ty.clone());
     let step_name = fresh_region_name(inner, &format!("{scope}_filter_count_step"));
@@ -759,6 +772,7 @@ fn count_operator(
         PureOp::BinOp("+".into()),
         smallvec![left, right],
         count_ty.clone(),
+        None,
     );
     combine_graph.skeleton.blocks[combine_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(sum));

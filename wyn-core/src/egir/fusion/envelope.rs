@@ -424,6 +424,7 @@ fn compose_hist_region(
         PureOp::Call(producer_region.name.clone()),
         producer_args,
         producer_region.return_ty.clone(),
+        None,
     );
     let mut hist_args = SmallVec::<[NodeId; 4]>::new();
     for (input, mapped) in old_to_new.iter().enumerate() {
@@ -438,6 +439,7 @@ fn compose_hist_region(
         PureOp::Call(hist_region.name.clone()),
         hist_args,
         hist_region.return_ty.clone(),
+        None,
     );
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
     let name = fresh_region_name(inner, &format!("{scope}_map_hist"));

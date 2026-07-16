@@ -37,14 +37,14 @@ fn is_const_bool_recognizes_constant_false() {
 #[test]
 fn is_const_bool_recognizes_pure_bool() {
     let mut graph = EGraph::new();
-    let b = graph.intern_pure(PureOp::Bool(true), smallvec![], bool_ty());
+    let b = graph.intern_pure(PureOp::Bool(true), smallvec![], bool_ty(), None);
     assert_eq!(is_const_bool(b, &graph.nodes), Some(true));
 }
 
 #[test]
 fn is_const_bool_rejects_non_bool() {
     let mut graph = EGraph::new();
-    let n = graph.intern_pure(PureOp::Int("42".into()), smallvec![], i32_ty());
+    let n = graph.intern_pure(PureOp::Int("42".into()), smallvec![], i32_ty(), None);
     assert_eq!(is_const_bool(n, &graph.nodes), None);
 }
 
@@ -119,8 +119,8 @@ fn fold_constant_branch_nonconst_left_alone() {
 fn fold_constant_branch_preserves_chosen_args() {
     let mut graph = EGraph::new();
     let t = graph.intern_constant(ConstantValue::Bool(true), bool_ty());
-    let x = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty());
-    let y = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty());
+    let x = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty(), None);
+    let y = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty(), None);
     let (entry, _then_bid, _else_bid) = build_condbranch_skel(&mut graph, t, Some(x), Some(y));
     fold_constant_branches(&mut graph);
     match &graph.skeleton.blocks[entry].term {
@@ -171,7 +171,7 @@ fn build_merge_skel(
 #[test]
 fn phi_elim_strips_param_with_matching_incoming() {
     let mut graph = EGraph::new();
-    let x = graph.intern_pure(PureOp::Int("7".into()), smallvec![], i32_ty());
+    let x = graph.intern_pure(PureOp::Int("7".into()), smallvec![], i32_ty(), None);
     let (merge, _b2, param) = build_merge_skel(&mut graph, x, x);
 
     let aliases = eliminate_redundant_params(&mut graph);
@@ -194,8 +194,8 @@ fn phi_elim_strips_param_with_matching_incoming() {
 fn phi_elim_preserves_param_with_differing_incoming() {
     // Loop-accumulator shape: preheader X, backedge Y.
     let mut graph = EGraph::new();
-    let x = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty());
-    let y = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty());
+    let x = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty(), None);
+    let y = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty(), None);
     let (merge, _b2, param) = build_merge_skel(&mut graph, x, y);
 
     let aliases = eliminate_redundant_params(&mut graph);
@@ -213,7 +213,7 @@ fn phi_elim_rejects_self_referential_param() {
     let b = graph.skeleton.create_block();
     let param = graph.add_block_param(b, 0, i32_ty());
     graph.skeleton.blocks[b].params.push(param);
-    let x = graph.intern_pure(PureOp::Int("5".into()), smallvec![], i32_ty());
+    let x = graph.intern_pure(PureOp::Int("5".into()), smallvec![], i32_ty(), None);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: b,
         args: vec![x],
@@ -233,15 +233,15 @@ fn phi_elim_rejects_self_referential_param() {
 // -- merge_aliases / close_aliases --------------------------------------
 
 fn mk_nid(graph: &mut EGraph) -> NodeId {
-    graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty())
+    graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty(), None)
 }
 
 #[test]
 fn merge_aliases_forwards_existing_through_new() {
     let mut graph = EGraph::new();
     let a = mk_nid(&mut graph);
-    let b = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty());
-    let c = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty());
+    let b = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty(), None);
+    let c = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty(), None);
     let mut aliases = HashMap::new();
     aliases.insert(a, b);
     let mut new_aliases = HashMap::new();
@@ -255,9 +255,9 @@ fn merge_aliases_forwards_existing_through_new() {
 fn close_aliases_compresses_chain() {
     let mut graph = EGraph::new();
     let a = mk_nid(&mut graph);
-    let b = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty());
-    let c = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty());
-    let d = graph.intern_pure(PureOp::Int("3".into()), smallvec![], i32_ty());
+    let b = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty(), None);
+    let c = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty(), None);
+    let d = graph.intern_pure(PureOp::Int("3".into()), smallvec![], i32_ty(), None);
     let mut aliases = HashMap::new();
     aliases.insert(a, b);
     aliases.insert(b, c);
@@ -273,7 +273,7 @@ fn close_aliases_compresses_chain() {
 fn close_aliases_panics_on_cycle() {
     let mut graph = EGraph::new();
     let a = mk_nid(&mut graph);
-    let b = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty());
+    let b = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty(), None);
     let mut aliases = HashMap::new();
     aliases.insert(a, b);
     aliases.insert(b, a); // cycle — logic bug upstream
@@ -287,9 +287,9 @@ fn close_aliases_compresses_two_step_chain() {
     // optimize_skeleton_alias_closure_invariant, but exercising the
     // helper in isolation is still worth a dedicated test.)
     let mut graph = EGraph::new();
-    let x = graph.intern_pure(PureOp::Int("42".into()), smallvec![], i32_ty());
-    let p1 = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty());
-    let p2 = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty());
+    let x = graph.intern_pure(PureOp::Int("42".into()), smallvec![], i32_ty(), None);
+    let p1 = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty(), None);
+    let p2 = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty(), None);
     let mut aliases = HashMap::new();
     aliases.insert(p1, p2);
     aliases.insert(p2, x);
@@ -307,7 +307,7 @@ fn optimize_skeleton_cascades_fold_into_phi_elim() {
     // once, phi-elim fires once, second iteration finds nothing.
     let mut graph = EGraph::new();
     let t = graph.intern_constant(ConstantValue::Bool(true), bool_ty());
-    let x = graph.intern_pure(PureOp::Int("9".into()), smallvec![], i32_ty());
+    let x = graph.intern_pure(PureOp::Int("9".into()), smallvec![], i32_ty(), None);
 
     let entry = graph.skeleton.entry;
     let a = graph.skeleton.create_block();
@@ -349,7 +349,7 @@ fn optimize_skeleton_alias_closure_invariant() {
     // entry → A(p1); A → B(p2); B returns p2. Both params get stripped
     // across two iterations; closure forwards p2 past p1 to x.
     let mut graph = EGraph::new();
-    let x = graph.intern_pure(PureOp::Int("42".into()), smallvec![], i32_ty());
+    let x = graph.intern_pure(PureOp::Int("42".into()), smallvec![], i32_ty(), None);
 
     let entry = graph.skeleton.entry;
     let a = graph.skeleton.create_block();
@@ -400,7 +400,7 @@ fn optimize_skeleton_removes_block_unreachable_post_fold() {
     // Entry CondBranch: true takes A (no args), false takes B (arg = some
     // literal). After folding, entry becomes Branch(A) and the edge into B
     // vanishes.
-    let lit = graph.intern_pure(PureOp::Int("99".into()), smallvec![], i32_ty());
+    let lit = graph.intern_pure(PureOp::Int("99".into()), smallvec![], i32_ty(), None);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
         cond: t,
         then_target: a,
@@ -428,8 +428,8 @@ fn phi_elim_preserves_loop_header_param() {
     // cond-branches to body or exit; body → header(body_val). The two
     // incoming args (init and body_val) are distinct → phi must stay.
     let mut graph = EGraph::new();
-    let init = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty());
-    let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty());
+    let init = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty(), None);
+    let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty(), None);
 
     let entry = graph.skeleton.entry; // preheader
     let header = graph.skeleton.create_block();
@@ -440,7 +440,7 @@ fn phi_elim_preserves_loop_header_param() {
     graph.skeleton.blocks[header].params.push(acc);
 
     // body_val = acc + 1 (a NodeId distinct from init)
-    let body_val = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![acc, one], i32_ty());
+    let body_val = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![acc, one], i32_ty(), None);
 
     // Entry unconditionally to header with init.
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
@@ -486,7 +486,7 @@ fn phi_elim_handles_condbranch_with_same_target_both_arms() {
     graph.skeleton.blocks[target].term = SkeletonTerminator::Return(Some(param));
 
     let cond = graph.add_func_param(0, bool_ty());
-    let x = graph.intern_pure(PureOp::Int("5".into()), smallvec![], i32_ty());
+    let x = graph.intern_pure(PureOp::Int("5".into()), smallvec![], i32_ty(), None);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
         cond,
         then_target: target,

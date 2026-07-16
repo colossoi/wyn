@@ -25,7 +25,7 @@ fn vec3f32_ty() -> Type<TypeName> {
 fn pow(g: &mut EGraph, base: NodeId, exp: ConstantValue, exp_ty: Type<TypeName>) -> NodeId {
     let result_ty = g.types[&base].clone();
     let exp = g.intern_constant(exp, exp_ty);
-    g.intern_pure(PureOp::BinOp("**".into()), smallvec![base, exp], result_ty)
+    g.intern_pure(PureOp::BinOp("**".into()), smallvec![base, exp], result_ty, None)
 }
 
 /// Apply the default rules to `node` (asserting one fired) and return
@@ -159,7 +159,7 @@ fn pow_non_const_exponent_does_not_rewrite() {
     let mut g = EGraph::new();
     let base = g.add_func_param(0, f32_ty());
     let exp = g.add_func_param(1, i32_ty()); // runtime
-    let p = g.intern_pure(PureOp::BinOp("**".into()), smallvec![base, exp], f32_ty());
+    let p = g.intern_pure(PureOp::BinOp("**".into()), smallvec![base, exp], f32_ty(), None);
     assert!(!default_rewrites().apply_to_node(&mut g, p));
     assert!(is_pow(&g, p));
 }
@@ -184,7 +184,7 @@ fn pow_of_expensive_shared_base_still_extracts_chain() {
     let mut base = g.add_func_param(0, f32_ty());
     for i in 0..10 {
         let c = g.intern_constant(ConstantValue::from_f32(1.5 + i as f32), f32_ty());
-        base = g.intern_pure(PureOp::BinOp("+".into()), smallvec![base, c], f32_ty());
+        base = g.intern_pure(PureOp::BinOp("+".into()), smallvec![base, c], f32_ty(), None);
     }
     let p = pow(&mut g, base, ConstantValue::I32(2), i32_ty());
     let winner = apply_and_extract(&mut g, p);
@@ -197,7 +197,7 @@ fn consumers_see_the_rewrite_through_the_original_id() {
     let base = g.add_func_param(0, f32_ty());
     let p = pow(&mut g, base, ConstantValue::I32(2), i32_ty());
     let one = g.intern_constant(ConstantValue::from_f32(1.0), f32_ty());
-    let consumer = g.intern_pure(PureOp::BinOp("+".into()), smallvec![p, one], f32_ty());
+    let consumer = g.intern_pure(PureOp::BinOp("+".into()), smallvec![p, one], f32_ty(), None);
 
     let winner = apply_and_extract(&mut g, p);
 

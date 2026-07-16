@@ -72,7 +72,7 @@ fn run_one_body<P: EgirPhase>(graph: &mut EGraph<P>) {
 
         // Materialize is hash-consed: two Index(arr, _) share the same
         // Materialize(arr) handle automatically.
-        let mat_nid = graph.intern_pure(PureOp::Materialize, smallvec![arr_nid], arr_ty);
+        let mat_nid = graph.intern_pure(PureOp::Materialize, smallvec![arr_nid], arr_ty, None);
 
         // Replace the original Index node in place with DynamicExtract(mat, idx).
         // The NodeId stays the same so all consumers continue to resolve through it.

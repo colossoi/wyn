@@ -2,11 +2,10 @@
 
 use std::collections::HashMap;
 
-use polytype::Type;
 use slotmap::{new_key_type, SlotMap};
 use smallvec::SmallVec;
 
-use crate::ast::{Span, TypeName};
+use crate::ast::Span;
 use crate::op::{OpTag, PureViewSource as OpViewSource};
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::framework::BlockId;
@@ -123,10 +122,10 @@ pub type PureViewSource<R> = OpViewSource<R>;
 /// `PureOp::Int` / `PureOp::Uint` tags for literals, but uniformly for
 /// every pure op.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct NodeKey<R> {
+pub struct NodeKey<R, Ty> {
     pub op: PureOp<R>,
     pub operands: SmallVec<[NodeId; 4]>,
-    pub ty: Type<TypeName>,
+    pub ty: Ty,
 }
 
 // ---------------------------------------------------------------------------
@@ -336,9 +335,9 @@ pub trait EgirPhase: Clone + std::fmt::Debug {
 }
 
 #[derive(Clone, Debug)]
-pub struct SoacInputType {
-    pub array: Type<TypeName>,
-    pub element: Type<TypeName>,
+pub struct SoacInputType<Ty> {
+    pub array: Ty,
+    pub element: Ty,
 }
 
 #[derive(Clone, Debug)]
@@ -349,14 +348,6 @@ pub enum Soac<P: EgirPhase> {
 }
 
 impl<P: EgirPhase> Soac<P> {
-    pub(super) fn for_each_body_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
-        match self {
-            Self::Screma(op) => op.for_each_type_mut(visit),
-            Self::Filter(op) => op.body.for_each_type_mut(visit),
-            Self::Hist(op) => op.body.for_each_type_mut(visit),
-        }
-    }
-
     pub(crate) fn seg_bodies(&self) -> Vec<&SegBody> {
         match self {
             Self::Screma(op) => {
@@ -527,7 +518,7 @@ pub struct SideEffectIndex {
 }
 
 impl SideEffectIndex {
-    pub fn build<P: EgirPhase>(graph: &EGraph<P>) -> Self {
+    pub fn build<P: EgirPhase, Ty>(graph: &EGraph<P, Ty>) -> Self {
         let mut by_result = LookupMap::new();
         for (block, skeleton_block) in &graph.skeleton.blocks {
             for (index, effect) in skeleton_block.side_effects.iter().enumerate() {
@@ -548,9 +539,9 @@ impl SideEffectIndex {
         self.by_result.get(&result).copied()
     }
 
-    pub fn effect<'a, P: EgirPhase>(
+    pub fn effect<'a, P: EgirPhase, Ty>(
         &self,
-        graph: &'a EGraph<P>,
+        graph: &'a EGraph<P, Ty>,
         result: NodeId,
     ) -> Option<&'a SideEffect<P>> {
         let site = self.site(result)?;
@@ -558,9 +549,9 @@ impl SideEffectIndex {
         (effect.result == Some(result)).then_some(effect)
     }
 
-    pub fn effect_mut<'a, P: EgirPhase>(
+    pub fn effect_mut<'a, P: EgirPhase, Ty>(
         &self,
-        graph: &'a mut EGraph<P>,
+        graph: &'a mut EGraph<P, Ty>,
         result: NodeId,
     ) -> Option<&'a mut SideEffect<P>> {
         let site = self.site(result)?;
@@ -575,13 +566,13 @@ impl SideEffectIndex {
 
 /// The acyclic e-graph: a sea of pure nodes + a CFG skeleton of side effects.
 #[derive(Clone, Debug)]
-pub struct EGraph<P: EgirPhase> {
+pub struct EGraph<P: EgirPhase, Ty> {
     /// All nodes (pure, union, params, constants, side-effect results).
     pub nodes: SlotMap<NodeId, ENode<P::Resource>>,
     /// Type of each node's result.
-    pub types: LookupMap<NodeId, Type<TypeName>>,
+    pub types: LookupMap<NodeId, Ty>,
     /// Hash-cons table: NodeKey → existing NodeId.
-    hash_cons: LookupMap<NodeKey<P::Resource>, NodeId>,
+    hash_cons: LookupMap<NodeKey<P::Resource, Ty>, NodeId>,
     /// Constant dedup cache.
     pub const_cache: LookupMap<ConstantValue, NodeId>,
     /// The CFG skeleton.
@@ -595,9 +586,9 @@ pub struct EGraph<P: EgirPhase> {
 ///
 /// Transformations may consume and rebuild an `EGraph` through this boundary
 /// without gaining direct access to its hash-consing internals.
-pub(super) struct EGraphParts<P: EgirPhase> {
+pub(super) struct EGraphParts<P: EgirPhase, Ty> {
     pub(super) nodes: SlotMap<NodeId, ENode<P::Resource>>,
-    pub(super) types: LookupMap<NodeId, Type<TypeName>>,
+    pub(super) types: LookupMap<NodeId, Ty>,
     pub(super) const_cache: LookupMap<ConstantValue, NodeId>,
     pub(super) skeleton: Skeleton<P>,
     pub(super) node_spans: LookupMap<NodeId, Span>,
@@ -607,7 +598,10 @@ pub trait GraphResource: Clone + std::fmt::Debug + Eq + std::hash::Hash {}
 
 impl<T> GraphResource for T where T: Clone + std::fmt::Debug + Eq + std::hash::Hash {}
 
-impl<P: EgirPhase> EGraph<P> {
+impl<P: EgirPhase, Ty> EGraph<P, Ty>
+where
+    Ty: Clone + std::fmt::Debug + Eq + std::hash::Hash,
+{
     pub fn new() -> Self {
         EGraph {
             nodes: SlotMap::with_key(),
@@ -619,7 +613,7 @@ impl<P: EgirPhase> EGraph<P> {
         }
     }
 
-    pub(super) fn into_parts(self) -> EGraphParts<P> {
+    pub(super) fn into_parts(self) -> EGraphParts<P, Ty> {
         let Self {
             nodes,
             types,
@@ -637,7 +631,7 @@ impl<P: EgirPhase> EGraph<P> {
         }
     }
 
-    pub(super) fn from_parts(parts: EGraphParts<P>) -> Self {
+    pub(super) fn from_parts(parts: EGraphParts<P, Ty>) -> Self {
         let EGraphParts {
             nodes,
             types,
@@ -661,7 +655,7 @@ impl<P: EgirPhase> EGraph<P> {
         SideEffectIndex::build(self)
     }
 
-    fn pure_node_key(&self, id: NodeId) -> Option<NodeKey<P::Resource>> {
+    fn pure_node_key(&self, id: NodeId) -> Option<NodeKey<P::Resource, Ty>> {
         let ENode::Pure { op, operands } = self.nodes.get(id)? else {
             return None;
         };
@@ -726,7 +720,7 @@ impl<P: EgirPhase> EGraph<P> {
 
     /// Change a node's result type while maintaining the pure-node hash-cons
     /// key when the node is hash-consed.
-    pub fn retype_node(&mut self, id: NodeId, ty: Type<TypeName>) {
+    pub fn retype_node(&mut self, id: NodeId, ty: Ty) {
         self.unindex_current_pure(id);
         self.types.insert(id, ty);
         self.index_current_pure(id);
@@ -825,21 +819,21 @@ impl<P: EgirPhase> EGraph<P> {
     }
 
     /// Allocate a function parameter node.
-    pub fn add_func_param(&mut self, index: usize, ty: Type<TypeName>) -> NodeId {
+    pub fn add_func_param(&mut self, index: usize, ty: Ty) -> NodeId {
         let id = self.nodes.insert(ENode::FuncParam { index });
         self.types.insert(id, ty);
         id
     }
 
     /// Allocate a block parameter node.
-    pub fn add_block_param(&mut self, block: BlockId, index: usize, ty: Type<TypeName>) -> NodeId {
+    pub fn add_block_param(&mut self, block: BlockId, index: usize, ty: Ty) -> NodeId {
         let id = self.nodes.insert(ENode::BlockParam { block, index });
         self.types.insert(id, ty);
         id
     }
 
     /// Intern a constant, deduplicating.
-    pub fn intern_constant(&mut self, c: ConstantValue, ty: Type<TypeName>) -> NodeId {
+    pub fn intern_constant(&mut self, c: ConstantValue, ty: Ty) -> NodeId {
         if let Some(&existing) = self.const_cache.get(&c) {
             return existing;
         }
@@ -849,30 +843,16 @@ impl<P: EgirPhase> EGraph<P> {
         id
     }
 
-    /// Intern a pure node, hash-consing to deduplicate.
-    /// Returns the existing NodeId if an equivalent node already exists (GVN).
+    /// Intern a pure node with an attached source span. The span is recorded
+    /// on first intern; subsequent interns of an equivalent hash-consed node
+    /// keep the original span.
     pub fn intern_pure(
         &mut self,
         op: PureOp<P::Resource>,
         operands: SmallVec<[NodeId; 4]>,
-        ty: Type<TypeName>,
-    ) -> NodeId {
-        self.intern_pure_with_span(op, operands, ty, None)
-    }
-
-    /// Intern a pure node with an attached source span. The span is recorded
-    /// on first intern; subsequent interns of an equivalent hash-consed node
-    /// keep the original span.
-    pub fn intern_pure_with_span(
-        &mut self,
-        op: PureOp<P::Resource>,
-        operands: SmallVec<[NodeId; 4]>,
-        ty: Type<TypeName>,
+        ty: Ty,
         span: Option<Span>,
     ) -> NodeId {
-        if let Some(folded) = self.try_algebraic_fold(&op, &operands, &ty) {
-            return folded;
-        }
         let key = NodeKey {
             op: op.clone(),
             operands: operands.clone(),
@@ -891,7 +871,7 @@ impl<P: EgirPhase> EGraph<P> {
     }
 
     /// Allocate a node for a side-effect result (not hash-consed).
-    pub fn alloc_side_effect_result(&mut self, ty: Type<TypeName>) -> NodeId {
+    pub fn alloc_side_effect_result(&mut self, ty: Ty) -> NodeId {
         let id = self.nodes.insert(ENode::SideEffectResult);
         self.types.insert(id, ty);
         id
@@ -967,34 +947,34 @@ impl<P: EgirPhase> EGraph<P> {
 
 /// Callable body arena entry used by segmented operations.
 #[derive(Clone)]
-pub struct Region<P: EgirPhase> {
+pub struct Region<P: EgirPhase, Ty> {
     pub name: String,
-    pub params: Vec<(Type<TypeName>, String)>,
-    pub return_ty: Type<TypeName>,
-    pub graph: EGraph<P>,
+    pub params: Vec<(Ty, String)>,
+    pub return_ty: Ty,
+    pub graph: EGraph<P, Ty>,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
 }
 
 #[derive(Clone, Debug)]
-pub struct Func<P: EgirPhase> {
+pub struct Func<P: EgirPhase, Ty> {
     pub name: String,
     pub span: Span,
     pub linkage_name: Option<String>,
-    pub params: Vec<(Type<TypeName>, String)>,
-    pub return_ty: Type<TypeName>,
-    pub graph: EGraph<P>,
+    pub params: Vec<(Ty, String)>,
+    pub return_ty: Ty,
+    pub graph: EGraph<P, Ty>,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
     pub aliases: LookupMap<NodeId, NodeId>,
 }
 
-impl<P: EgirPhase> Func<P> {
+impl<P: EgirPhase, Ty> Func<P, Ty> {
     pub fn new(
         name: String,
         span: Span,
         linkage_name: Option<String>,
-        params: Vec<(Type<TypeName>, String)>,
-        return_ty: Type<TypeName>,
-        graph: EGraph<P>,
+        params: Vec<(Ty, String)>,
+        return_ty: Ty,
+        graph: EGraph<P, Ty>,
         control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
         Self {
@@ -1010,8 +990,8 @@ impl<P: EgirPhase> Func<P> {
     }
 }
 
-impl<P: EgirPhase> Region<P> {
-    pub fn from_function(function: &Func<P>) -> Self {
+impl<P: EgirPhase, Ty: Clone> Region<P, Ty> {
+    pub fn from_function(function: &Func<P, Ty>) -> Self {
         Self {
             name: function.name.clone(),
             params: function.params.clone(),
@@ -1048,7 +1028,7 @@ pub struct OutputRoute {
     pub writers: Vec<OutputWriter>,
 }
 
-pub struct Entry<P: EgirPhase> {
+pub struct Entry<P: EgirPhase, Ty> {
     pub name: String,
     pub span: Span,
     pub execution_model: ExecutionModel,
@@ -1056,9 +1036,9 @@ pub struct Entry<P: EgirPhase> {
     pub outputs: Vec<EntryOutput>,
     pub resource_abi: EntryResourceAbi,
     pub resource_declarations: Vec<SemanticResourceDecl>,
-    pub params: Vec<(Type<TypeName>, String)>,
-    pub return_ty: Type<TypeName>,
-    pub graph: EGraph<P>,
+    pub params: Vec<(Ty, String)>,
+    pub return_ty: Ty,
+    pub graph: EGraph<P, Ty>,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
     pub aliases: LookupMap<NodeId, NodeId>,
     pub output_routes: Vec<OutputRoute>,
@@ -1070,23 +1050,7 @@ pub struct EntryResourceAbi {
     pub outputs: Vec<Option<ResourceId>>,
 }
 
-impl<P: EgirPhase> Entry<P> {
-    pub(super) fn visit_types_mut(&mut self, mut visit: impl FnMut(&mut Type<TypeName>)) {
-        for input in &mut self.inputs {
-            visit(&mut input.ty);
-        }
-        for output in &mut self.outputs {
-            visit(&mut output.ty);
-        }
-        for (ty, _) in &mut self.params {
-            visit(ty);
-        }
-        visit(&mut self.return_ty);
-        for declaration in &mut self.resource_declarations {
-            visit(&mut declaration.elem_ty);
-        }
-    }
-
+impl<P: EgirPhase, Ty> Entry<P, Ty> {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_resources(
         name: String,
@@ -1095,9 +1059,9 @@ impl<P: EgirPhase> Entry<P> {
         inputs: Vec<EntryInput>,
         outputs: Vec<EntryOutput>,
         resource_declarations: Vec<SemanticResourceDecl>,
-        params: Vec<(Type<TypeName>, String)>,
-        return_ty: Type<TypeName>,
-        graph: EGraph<P>,
+        params: Vec<(Ty, String)>,
+        return_ty: Ty,
+        graph: EGraph<P, Ty>,
         control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
         Self {
@@ -1120,37 +1084,37 @@ impl<P: EgirPhase> Entry<P> {
 
 /// Whole-program EGIR container. Concrete compiler checkpoints wrap this
 /// generic substrate and determine the phase-specific graph payload.
-pub struct Program<P: EgirPhase> {
-    pub functions: Vec<Func<P>>,
+pub struct Program<P: EgirPhase, Ty> {
+    pub functions: Vec<Func<P, Ty>>,
     /// Extern stubs pass through EGIR unchanged.
     pub externs: Vec<Function>,
-    pub entry_points: Vec<Entry<P>>,
+    pub entry_points: Vec<Entry<P, Ty>>,
     /// Residency requirements discovered during logical allocation.
     pub materializations: Vec<MaterializationRequirement<P>>,
     pub constants: Vec<Constant>,
     pub pipeline: PipelineDescriptor,
     pub input_names: LookupMap<(u32, u32), String>,
-    pub regions: LookupMap<RegionId, Region<P>>,
+    pub regions: LookupMap<RegionId, Region<P, Ty>>,
     pub region_interner: RegionInterner,
     pub resources: Vec<LogicalResource>,
     pub semantic_dependencies: Vec<SemanticDependency>,
 }
 
-fn record_region<P: EgirPhase>(
+fn record_region<P: EgirPhase, Ty: Clone>(
     interner: &mut RegionInterner,
-    regions: &mut LookupMap<RegionId, Region<P>>,
-    function: &Func<P>,
+    regions: &mut LookupMap<RegionId, Region<P, Ty>>,
+    function: &Func<P, Ty>,
 ) -> RegionId {
     let id = interner.intern(&function.name);
-    regions.insert(id, Region::<P>::from_function(function));
+    regions.insert(id, Region::<P, Ty>::from_function(function));
     id
 }
 
-impl<P: EgirPhase> Program<P> {
+impl<P: EgirPhase, Ty: Clone> Program<P, Ty> {
     pub fn new(
-        functions: Vec<Func<P>>,
+        functions: Vec<Func<P, Ty>>,
         externs: Vec<Function>,
-        entry_points: Vec<Entry<P>>,
+        entry_points: Vec<Entry<P, Ty>>,
         constants: Vec<Constant>,
         pipeline: PipelineDescriptor,
         mut region_interner: RegionInterner,
@@ -1175,7 +1139,7 @@ impl<P: EgirPhase> Program<P> {
     }
 
     /// Convenience constructor for a single function body.
-    pub fn single_function(func: Func<P>) -> Self {
+    pub fn single_function(func: Func<P, Ty>) -> Self {
         Self::new(
             vec![func],
             vec![],
@@ -1190,7 +1154,7 @@ impl<P: EgirPhase> Program<P> {
         self.region_interner.intern(name)
     }
 
-    pub fn define_region(&mut self, function: Func<P>) -> RegionId {
+    pub fn define_region(&mut self, function: Func<P, Ty>) -> RegionId {
         let id = record_region(&mut self.region_interner, &mut self.regions, &function);
         self.functions.push(function);
         id

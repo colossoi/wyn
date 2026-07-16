@@ -148,7 +148,8 @@ mod tests {
         let int = Type::Constructed(TypeName::Int(32), vec![]);
         let tuple = Type::Constructed(TypeName::Tuple(1), vec![int.clone()]);
         let result = graph.alloc_side_effect_result(tuple);
-        let _dead_project = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![result], int.clone());
+        let _dead_project =
+            graph.intern_pure(PureOp::Project { index: 0 }, smallvec![result], int.clone(), None);
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
             semantic_id: None,
             kind: SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
