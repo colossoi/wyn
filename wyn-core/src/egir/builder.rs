@@ -8,7 +8,7 @@ use polytype::Type;
 use smallvec::smallvec;
 
 use super::graph_ops;
-use super::program::{LogicalSize, PlannedEntry, SemanticResourceDecl, SemanticResourceRef};
+use super::program::{LogicalSize, PlannedEntry, SemanticOpId, SemanticResourceDecl, SemanticResourceRef};
 use super::soac::screma;
 use super::types::{EGraph, NodeId, SkeletonTerminator, Soac, SoacDestination, SoacInputType};
 
@@ -24,6 +24,7 @@ pub struct EntryBuilder {
     resource_declarations: Vec<SemanticResourceDecl>,
     params: Vec<(Type<TypeName>, String)>,
     return_ty: Type<TypeName>,
+    next_semantic_op: u32,
     next_effect: u32,
 }
 
@@ -43,6 +44,7 @@ impl EntryBuilder {
             resource_declarations: Vec::new(),
             params: Vec::new(),
             return_ty: Type::Constructed(TypeName::Unit, vec![]),
+            next_semantic_op: 0,
             next_effect: 1,
         }
     }
@@ -113,9 +115,12 @@ impl EntryBuilder {
         output_view_ty: Type<TypeName>,
     ) -> NodeId {
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![output_view_ty.clone()]);
+        let id = SemanticOpId(self.next_semantic_op);
+        self.next_semantic_op += 1;
         graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
+            id,
             Soac::Screma(screma::Op::Map {
                 lanes: screma::Lanes {
                     inputs: vec![SoacInputType {

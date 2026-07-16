@@ -1160,8 +1160,7 @@ impl EgirOutputsRealized {
     /// kernel versus lane-local placement from EGIR value/effect context.
     pub fn segment(self) -> EgirSegmented {
         let EgirOutputsRealized { inner, binding_ids } = self;
-        let mut inner = egir::reify::run(inner);
-        egir::program::assign_semantic_op_ids(&mut inner);
+        let inner = egir::reify::run(inner);
         if cfg!(debug_assertions) {
             egir::semantic_graph::verify(&inner).expect("invalid semantic EGIR");
         }

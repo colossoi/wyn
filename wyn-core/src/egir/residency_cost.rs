@@ -101,9 +101,9 @@ fn effect_cost(
     visiting: &mut HashSet<String>,
 ) -> Option<u64> {
     match &effect.kind {
-        SideEffectKind::Soac(Soac::Screma(_))
-        | SideEffectKind::Soac(Soac::Filter(_))
-        | SideEffectKind::Soac(Soac::Hist(_)) => None,
+        SideEffectKind::Soac(_, Soac::Screma(_))
+        | SideEffectKind::Soac(_, Soac::Filter(_))
+        | SideEffectKind::Soac(_, Soac::Hist(_)) => None,
         SideEffectKind::Inst(InstKind::Load { .. }) => Some(STORAGE_LOAD_COST),
         SideEffectKind::Inst(InstKind::Op { tag, .. }) => operation_cost(program, tag, summaries, visiting),
         SideEffectKind::Inst(

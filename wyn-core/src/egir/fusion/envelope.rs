@@ -79,15 +79,18 @@ fn find_in_graph(graph: &EGraph, site: FusionSite, oracle: &SemanticGraph) -> Op
     for (block_id, block) in &graph.skeleton.blocks {
         for producer_index in 0..block.side_effects.len().saturating_sub(1) {
             let producer = &block.side_effects[producer_index];
-            let SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
-                lanes: screma::Lanes { maps, .. },
-                state:
-                    screma::SemanticState::Segmented {
-                        output_slots,
-                        resources,
-                        ..
-                    },
-            })) = &producer.kind
+            let SideEffectKind::Soac(
+                producer_id,
+                Soac::Screma(screma::Op::Map {
+                    lanes: screma::Lanes { maps, .. },
+                    state:
+                        screma::SemanticState::Segmented {
+                            output_slots,
+                            resources,
+                            ..
+                        },
+                }),
+            ) = &producer.kind
             else {
                 continue;
             };
@@ -103,32 +106,33 @@ fn find_in_graph(graph: &EGraph, site: FusionSite, oracle: &SemanticGraph) -> Op
             {
                 continue;
             }
-            let (Some(producer_result), Some(producer_id)) =
-                (producer.result, producer.semantic_id.clone())
-            else {
+            let Some(producer_result) = producer.result else {
                 continue;
             };
-            if oracle.value_consumer_count(&producer_id) != 1 {
+            if oracle.value_consumer_count(producer_id) != 1 {
                 continue;
             }
 
             for consumer_index in (producer_index + 1)..block.side_effects.len() {
                 let consumer = &block.side_effects[consumer_index];
-                let Some(consumer_id) = consumer.semantic_id.as_ref() else {
+                let Some(consumer_id) = consumer.kind.soac_id() else {
                     continue;
                 };
-                if !intervening_ops_are_safe(block, producer_index, consumer_index, &producer_id, oracle) {
+                if !intervening_ops_are_safe(block, producer_index, consumer_index, producer_id, oracle) {
                     continue;
                 }
                 match &consumer.kind {
-                    SideEffectKind::Soac(Soac::Filter(filter::Op {
-                        body:
-                            filter::Body {
-                                input: filter::Input::Plain(_),
-                                ..
-                            },
-                        ..
-                    })) => {
+                    SideEffectKind::Soac(
+                        _,
+                        Soac::Filter(filter::Op {
+                            body:
+                                filter::Body {
+                                    input: filter::Input::Plain(_),
+                                    ..
+                                },
+                            ..
+                        }),
+                    ) => {
                         let Some(output) = consumer
                             .operand_nodes
                             .first()
@@ -151,8 +155,7 @@ fn find_in_graph(graph: &EGraph, site: FusionSite, oracle: &SemanticGraph) -> Op
                         // The direct pair stays in source order. An effect-token
                         // edge is therefore harmless; a resource edge is not
                         // expected because the filter writes fresh storage.
-                        if oracle.conflicts(&producer_id, consumer_id)
-                            && !token_adjacent(producer, consumer)
+                        if oracle.conflicts(producer_id, consumer_id) && !token_adjacent(producer, consumer)
                         {
                             continue;
                         }
@@ -166,10 +169,13 @@ fn find_in_graph(graph: &EGraph, site: FusionSite, oracle: &SemanticGraph) -> Op
                             kind: EnvelopeKind::Filter,
                         });
                     }
-                    SideEffectKind::Soac(Soac::Hist(hist::Op {
-                        body,
-                        state: hist::SemanticState::Segmented(_),
-                    })) => {
+                    SideEffectKind::Soac(
+                        _,
+                        Soac::Hist(hist::Op {
+                            body,
+                            state: hist::SemanticState::Segmented(_),
+                        }),
+                    ) => {
                         if producer_reads_hist_destination(graph, producer, consumer) {
                             continue;
                         }
@@ -224,10 +230,7 @@ fn intervening_ops_are_safe(
     ((producer + 1)..consumer).all(|index| {
         let effect = &block.side_effects[index];
         match &effect.kind {
-            SideEffectKind::Soac(_) => effect
-                .semantic_id
-                .as_ref()
-                .is_some_and(|intervening| !oracle.conflicts(producer_id, intervening)),
+            SideEffectKind::Soac(intervening, _) => !oracle.conflicts(producer_id, intervening),
             _ => effect.effects.is_none(),
         }
     })
@@ -246,7 +249,7 @@ fn producer_reads_hist_destination(graph: &EGraph, producer: &SideEffect, hist: 
     else {
         return false;
     };
-    let SideEffectKind::Soac(Soac::Screma(op)) = &producer.kind else {
+    let SideEffectKind::Soac(_, Soac::Screma(op)) = &producer.kind else {
         return false;
     };
     let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() else {
@@ -257,10 +260,13 @@ fn producer_reads_hist_destination(graph: &EGraph, producer: &SideEffect, hist: 
 
 fn producer_parts(graph: &EGraph, candidate: &Candidate) -> ProducerParts {
     let effect = &graph.skeleton.blocks[candidate.block].side_effects[candidate.producer];
-    let SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
-        lanes,
-        state: screma::SemanticState::Segmented { space, .. },
-    })) = &effect.kind
+    let SideEffectKind::Soac(
+        _,
+        Soac::Screma(screma::Op::Map {
+            lanes,
+            state: screma::SemanticState::Segmented { space, .. },
+        }),
+    ) = &effect.kind
     else {
         unreachable!();
     };
@@ -286,7 +292,7 @@ fn apply_filter(inner: &mut SemanticProgram, candidate: Candidate) {
     );
     let consumer = &mut block.side_effects[candidate.consumer];
     consumer.operand_nodes[0] = producer.input_nodes[0];
-    if let SideEffectKind::Soac(Soac::Filter(filter::Op { body, state })) = &mut consumer.kind {
+    if let SideEffectKind::Soac(_, Soac::Filter(filter::Op { body, state })) = &mut consumer.kind {
         body.input = filter::Input::Mapped {
             input: producer.inputs[0].clone(),
             body: producer.body,
@@ -314,7 +320,7 @@ fn apply_hist(inner: &mut SemanticProgram, candidate: Candidate) {
             scope,
         )
     };
-    let SideEffectKind::Soac(Soac::Hist(hist::Op { body: hist_body, .. })) = &hist_effect.kind else {
+    let SideEffectKind::Soac(_, Soac::Hist(hist::Op { body: hist_body, .. })) = &hist_effect.kind else {
         unreachable!();
     };
 
@@ -371,10 +377,13 @@ fn apply_hist(inner: &mut SemanticProgram, candidate: Candidate) {
     let consumer = &mut block.side_effects[candidate.consumer];
     consumer.operand_nodes =
         std::iter::once(destination).chain(new_input_nodes).collect::<SmallVec<[NodeId; 4]>>();
-    if let SideEffectKind::Soac(Soac::Hist(hist::Op {
-        body: consumer_body,
-        state,
-    })) = &mut consumer.kind
+    if let SideEffectKind::Soac(
+        _,
+        Soac::Hist(hist::Op {
+            body: consumer_body,
+            state,
+        }),
+    ) = &mut consumer.kind
     {
         consumer_body.body = body;
         consumer_body.inputs = new_array_types

@@ -1,6 +1,5 @@
 use super::*;
 use crate::ast::TypeName;
-use crate::egir::program::SemanticOpId;
 use crate::egir::types::{EffectToken, PureOp, SideEffectKind};
 use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
 use polytype::Type;
@@ -27,7 +26,6 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
     let place = graph.intern_constant(ConstantValue::U32(0), u32_ty());
     let produced = graph.alloc_side_effect_result(u32_ty());
     graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        semantic_id: Some(SemanticOpId(0)),
         kind: SideEffectKind::Inst(InstKind::Load {
             place: Default::default(),
         }),
@@ -38,7 +36,6 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
     });
     let unrelated = graph.alloc_side_effect_result(u32_ty());
     graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        semantic_id: Some(SemanticOpId(1)),
         kind: SideEffectKind::Inst(InstKind::Load {
             place: Default::default(),
         }),
@@ -50,7 +47,6 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
     let body_param = graph.add_block_param(body, 0, u32_ty());
     graph.skeleton.blocks[body].params.push(body_param);
     graph.skeleton.blocks[body].side_effects.push(SideEffect {
-        semantic_id: Some(SemanticOpId(2)),
         kind: SideEffectKind::Inst(InstKind::Store {
             place: Default::default(),
             value: ValueRef::Ssa(Default::default()),
@@ -279,7 +275,6 @@ fn selected_operation_recipe_detaches_an_independent_continuation_effect() {
     };
     let produced = graph.alloc_side_effect_result(u32_ty());
     graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
-        semantic_id: Some(SemanticOpId(0)),
         kind: SideEffectKind::Inst(InstKind::Load {
             place: Default::default(),
         }),
@@ -320,7 +315,6 @@ fn selected_operation_recipe_rejects_a_continuation_parameter_dependency() {
     };
     let produced = graph.alloc_side_effect_result(u32_ty());
     graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
-        semantic_id: Some(SemanticOpId(0)),
         kind: SideEffectKind::Inst(InstKind::Load {
             place: Default::default(),
         }),

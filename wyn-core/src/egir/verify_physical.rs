@@ -65,7 +65,7 @@ fn graph(graph: &PhysicalEGraph, owner: &str) -> Result<(), String> {
         }
     }
     for effect in graph.skeleton.blocks.values().flat_map(|block| &block.side_effects) {
-        let SideEffectKind::Soac(soac) = &effect.kind else {
+        let SideEffectKind::Soac(_, soac) = &effect.kind else {
             continue;
         };
         let mut soac = soac.clone();

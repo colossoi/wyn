@@ -182,9 +182,6 @@ impl<R> ENode<R> {
 /// A side-effectful instruction anchored in the skeleton CFG.
 #[derive(Clone, Debug)]
 pub struct SideEffect<P: EgirPhase> {
-    /// Stable semantic identity assigned after segmentation and preserved by
-    /// every projection. Synthesized physical-only effects use `None`.
-    pub semantic_id: Option<super::program::SemanticOpId>,
     /// What this side-effect is. Either an SSA `InstKind` that survives into
     /// the final `FuncBody`, or an intermediate `Soac` that must be
     /// rewritten by `soac_expand` before `elaborate` runs.
@@ -209,7 +206,16 @@ pub enum SideEffectKind<P: EgirPhase> {
     Inst(InstKind<P::Resource>),
     /// A placeholder for an unexpanded SOAC. Produced by `from_tlc` and
     /// consumed by `soac_expand`. Never reaches elaborate.
-    Soac(Soac<P>),
+    Soac(P::SoacId, Soac<P>),
+}
+
+impl<P: EgirPhase> SideEffectKind<P> {
+    pub fn soac_id(&self) -> Option<&P::SoacId> {
+        match self {
+            Self::Inst(_) => None,
+            Self::Soac(id, _) => Some(id),
+        }
+    }
 }
 
 /// Where an array-producing SOAC's per-iteration result is written. TLC only
@@ -326,6 +332,7 @@ impl<R: Copy + Ord> SegResourceAccess<R> {
 
 pub trait EgirPhase: Clone + std::fmt::Debug {
     type Resource: GraphResource;
+    type SoacId: Clone + std::fmt::Debug;
     type MapState: Clone + std::fmt::Debug;
     type ReduceState: Clone + std::fmt::Debug;
     type ScanState: Clone + std::fmt::Debug;
@@ -367,12 +374,6 @@ impl<P: EgirPhase> Soac<P> {
             }
             Self::Hist(op) => vec![&op.body.body],
         }
-    }
-}
-
-impl<P: EgirPhase> SideEffect<P> {
-    pub fn required_semantic_id(&self) -> super::program::SemanticOpId {
-        self.semantic_id.expect("semantic operation id assigned after segmentation")
     }
 }
 

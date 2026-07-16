@@ -54,6 +54,7 @@ pub struct Physical;
 
 impl<R: GraphResource> EgirPhase for Raw<R> {
     type Resource = R;
+    type SoacId = ();
     type MapState = screma::RawState;
     type ReduceState = screma::RawState;
     type ScanState = screma::RawState;
@@ -64,6 +65,7 @@ impl<R: GraphResource> EgirPhase for Raw<R> {
 
 impl<R: GraphResource> EgirPhase for Semantic<R> {
     type Resource = R;
+    type SoacId = super::program::SemanticOpId;
     type MapState = screma::SemanticState<R>;
     type ReduceState = screma::SemanticState<R>;
     type ScanState = screma::SemanticState<R>;
@@ -74,6 +76,7 @@ impl<R: GraphResource> EgirPhase for Semantic<R> {
 
 impl<R: GraphResource> EgirPhase for Scheduled<R> {
     type Resource = R;
+    type SoacId = super::program::SemanticOpId;
     type MapState = screma::ScheduledState<R>;
     type ReduceState = screma::ScheduledState<R>;
     type ScanState = screma::ScheduledState<R>;
@@ -84,6 +87,7 @@ impl<R: GraphResource> EgirPhase for Scheduled<R> {
 
 impl EgirPhase for Physical {
     type Resource = super::program::PhysicalResourceRef;
+    type SoacId = super::program::SemanticOpId;
     type MapState = screma::PhysicalMapState;
     type ReduceState = screma::PhysicalSerialState;
     type ScanState = screma::PhysicalSerialState;
@@ -98,7 +102,7 @@ where
 {
     pub(crate) fn try_map_phase<Q, E>(
         self,
-        mut map_soac: impl FnMut(BlockId, usize, Soac<P>) -> Result<Soac<Q>, E>,
+        mut map_soac: impl FnMut(BlockId, usize, P::SoacId, Soac<P>) -> Result<(Q::SoacId, Soac<Q>), E>,
     ) -> Result<(EGraph<Q, Ty>, LookupMap<BlockId, BlockId>), E>
     where
         Q: EgirPhase<Resource = P::Resource>,
@@ -132,12 +136,12 @@ where
                 .map(|(index, effect)| {
                     let kind = match effect.kind {
                         super::ir::SideEffectKind::Inst(inst) => super::ir::SideEffectKind::Inst(inst),
-                        super::ir::SideEffectKind::Soac(soac) => {
-                            super::ir::SideEffectKind::Soac(map_soac(source, index, soac)?)
+                        super::ir::SideEffectKind::Soac(id, soac) => {
+                            let (id, soac) = map_soac(source, index, id, soac)?;
+                            super::ir::SideEffectKind::Soac(id, soac)
                         }
                     };
                     Ok(super::ir::SideEffect {
-                        semantic_id: effect.semantic_id,
                         kind,
                         operand_nodes: effect.operand_nodes,
                         result: effect.result,
@@ -176,7 +180,11 @@ where
     pub(crate) fn try_map_resources_and_phase<Q, E>(
         self,
         mut map_resource: impl FnMut(P::Resource) -> Result<Q::Resource, E>,
-        mut map_soac: impl FnMut(Soac<P>, &LookupMap<NodeId, NodeId>) -> Result<Soac<Q>, E>,
+        mut map_soac: impl FnMut(
+            P::SoacId,
+            Soac<P>,
+            &LookupMap<NodeId, NodeId>,
+        ) -> Result<(Q::SoacId, Soac<Q>), E>,
     ) -> Result<
         (
             EGraph<Q, Ty>,
@@ -244,12 +252,12 @@ where
                         super::ir::SideEffectKind::Inst(inst) => {
                             super::ir::SideEffectKind::Inst(inst.try_map_resource(&mut map_resource)?)
                         }
-                        super::ir::SideEffectKind::Soac(soac) => {
-                            super::ir::SideEffectKind::Soac(map_soac(soac, &node_map)?)
+                        super::ir::SideEffectKind::Soac(id, soac) => {
+                            let (id, soac) = map_soac(id, soac, &node_map)?;
+                            super::ir::SideEffectKind::Soac(id, soac)
                         }
                     };
                     Ok(super::ir::SideEffect::<Q> {
-                        semantic_id: effect.semantic_id,
                         kind,
                         operand_nodes: effect
                             .operand_nodes
@@ -372,7 +380,7 @@ impl<R: GraphResource> super::ir::SideEffect<Semantic<R>> {
     /// operator metadata, and semantic iteration-space extents.
     pub fn referenced_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
         let metadata = match &self.kind {
-            SideEffectKind::Soac(soac) => soac.referenced_nodes(),
+            SideEffectKind::Soac(_, soac) => soac.referenced_nodes(),
             SideEffectKind::Inst(_) => Vec::new(),
         };
         self.operand_nodes.iter().copied().chain(metadata)
@@ -383,7 +391,7 @@ impl<R: GraphResource> super::ir::SideEffect<Semantic<R>> {
             kind, operand_nodes, ..
         } = self;
         let mut slots = operand_nodes.iter_mut().collect::<Vec<_>>();
-        if let SideEffectKind::Soac(soac) = kind {
+        if let SideEffectKind::Soac(_, soac) = kind {
             slots.extend(soac.referenced_node_slots());
         }
         slots

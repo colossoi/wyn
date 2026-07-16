@@ -1262,8 +1262,8 @@ fn source_kind(entry: &SemanticEntry) -> KernelKind {
         return KernelKind::GraphicsPassthrough;
     }
     match super::parallel_effect(&entry.graph).map(|(_, _, effect)| &effect.kind) {
-        Some(SideEffectKind::Soac(Soac::Screma(screma::Op::Reduce { .. }))) => KernelKind::ReducePhase1,
-        Some(SideEffectKind::Soac(Soac::Screma(screma::Op::Scan { .. }))) => KernelKind::ScanPhase1,
+        Some(SideEffectKind::Soac(_, Soac::Screma(screma::Op::Reduce { .. }))) => KernelKind::ReducePhase1,
+        Some(SideEffectKind::Soac(_, Soac::Screma(screma::Op::Scan { .. }))) => KernelKind::ScanPhase1,
         _ => KernelKind::SerialCompute,
     }
 }
@@ -1348,56 +1348,68 @@ fn materialization_domain(requirement: &MaterializationRequirement) -> Option<Ke
 
 fn semantic_domain_graph(graph: &crate::egir::types::EGraph) -> Option<KernelDomain> {
     match &super::parallel_effect(graph)?.2.kind {
-        SideEffectKind::Soac(Soac::Screma(
-            screma::Op::Map {
-                state: screma::SemanticState::Segmented { space, .. },
+        SideEffectKind::Soac(
+            _,
+            Soac::Screma(
+                screma::Op::Map {
+                    state: screma::SemanticState::Segmented { space, .. },
+                    ..
+                }
+                | screma::Op::Reduce {
+                    state: screma::SemanticState::Segmented { space, .. },
+                    ..
+                }
+                | screma::Op::Scan {
+                    state: screma::SemanticState::Segmented { space, .. },
+                    ..
+                }
+                | screma::Op::Composite {
+                    state: screma::SemanticState::Segmented { space, .. },
+                    ..
+                },
+            ),
+        ) => domain_from_space_in_graph(graph, space),
+        SideEffectKind::Soac(
+            _,
+            Soac::Filter(filter::Op {
+                state: filter::SemanticState { space, .. },
                 ..
-            }
-            | screma::Op::Reduce {
-                state: screma::SemanticState::Segmented { space, .. },
-                ..
-            }
-            | screma::Op::Scan {
-                state: screma::SemanticState::Segmented { space, .. },
-                ..
-            }
-            | screma::Op::Composite {
-                state: screma::SemanticState::Segmented { space, .. },
-                ..
-            },
-        )) => domain_from_space_in_graph(graph, space),
-        SideEffectKind::Soac(Soac::Filter(filter::Op {
-            state: filter::SemanticState { space, .. },
-            ..
-        })) => domain_from_space_in_graph(graph, space),
+            }),
+        ) => domain_from_space_in_graph(graph, space),
         _ => None,
     }
 }
 
 fn scheduled_domain_graph(graph: &crate::egir::types::EGraph<Scheduled>) -> Option<KernelDomain> {
     match &super::prepare::parallel_effect(graph)?.2.kind {
-        SideEffectKind::Soac(Soac::Screma(
-            screma::Op::Map {
-                state: screma::ScheduledState::Segmented(segment),
+        SideEffectKind::Soac(
+            _,
+            Soac::Screma(
+                screma::Op::Map {
+                    state: screma::ScheduledState::Segmented(segment),
+                    ..
+                }
+                | screma::Op::Reduce {
+                    state: screma::ScheduledState::Segmented(segment),
+                    ..
+                }
+                | screma::Op::Scan {
+                    state: screma::ScheduledState::Segmented(segment),
+                    ..
+                }
+                | screma::Op::Composite {
+                    state: screma::ScheduledState::Segmented(segment),
+                    ..
+                },
+            ),
+        ) => domain_from_space_in_graph(graph, &segment.space),
+        SideEffectKind::Soac(
+            _,
+            Soac::Filter(filter::Op {
+                state: filter::ScheduledState::Parallel { space, plan, .. },
                 ..
-            }
-            | screma::Op::Reduce {
-                state: screma::ScheduledState::Segmented(segment),
-                ..
-            }
-            | screma::Op::Scan {
-                state: screma::ScheduledState::Segmented(segment),
-                ..
-            }
-            | screma::Op::Composite {
-                state: screma::ScheduledState::Segmented(segment),
-                ..
-            },
-        )) => domain_from_space_in_graph(graph, &segment.space),
-        SideEffectKind::Soac(Soac::Filter(filter::Op {
-            state: filter::ScheduledState::Parallel { space, plan, .. },
-            ..
-        })) if matches!(
+            }),
+        ) if matches!(
             plan.stage,
             filter::ParallelStage::Flags | filter::ParallelStage::Scatter
         ) =>
@@ -1466,10 +1478,13 @@ fn segmented_graph_resources(
     declarations: &[SemanticResourceDecl],
 ) -> Option<Vec<ScheduledResource>> {
     let side_effect = super::prepare::parallel_effect(graph)?.2;
-    if let SideEffectKind::Soac(Soac::Filter(filter::Op {
-        state: filter::ScheduledState::Parallel { storage, plan, .. },
-        ..
-    })) = &side_effect.kind
+    if let SideEffectKind::Soac(
+        _,
+        Soac::Filter(filter::Op {
+            state: filter::ScheduledState::Parallel { storage, plan, .. },
+            ..
+        }),
+    ) = &side_effect.kind
     {
         let mut resources = graph_resources(graph, declarations);
         let mut push = |reference: SemanticResourceRef, access: ResourceAccess| {
@@ -1496,24 +1511,27 @@ fn segmented_graph_resources(
         resources.sort_by_key(|resource| resource.resource);
         return Some(resources);
     }
-    let SideEffectKind::Soac(Soac::Screma(
-        screma::Op::Map {
-            state: screma::ScheduledState::Segmented(segment),
-            ..
-        }
-        | screma::Op::Reduce {
-            state: screma::ScheduledState::Segmented(segment),
-            ..
-        }
-        | screma::Op::Scan {
-            state: screma::ScheduledState::Segmented(segment),
-            ..
-        }
-        | screma::Op::Composite {
-            state: screma::ScheduledState::Segmented(segment),
-            ..
-        },
-    )) = &side_effect.kind
+    let SideEffectKind::Soac(
+        _,
+        Soac::Screma(
+            screma::Op::Map {
+                state: screma::ScheduledState::Segmented(segment),
+                ..
+            }
+            | screma::Op::Reduce {
+                state: screma::ScheduledState::Segmented(segment),
+                ..
+            }
+            | screma::Op::Scan {
+                state: screma::ScheduledState::Segmented(segment),
+                ..
+            }
+            | screma::Op::Composite {
+                state: screma::ScheduledState::Segmented(segment),
+                ..
+            },
+        ),
+    ) = &side_effect.kind
     else {
         return None;
     };

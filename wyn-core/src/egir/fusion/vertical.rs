@@ -75,16 +75,19 @@ fn find_in_graph(
     for (block_id, block) in &graph.skeleton.blocks {
         for producer_index in 0..block.side_effects.len().saturating_sub(1) {
             let producer = &block.side_effects[producer_index];
-            let SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
-                lanes: screma::Lanes { maps, .. },
-                state:
-                    screma::SemanticState::Segmented {
-                        placement: producer_placement,
-                        output_slots,
-                        resources,
-                        ..
-                    },
-            })) = &producer.kind
+            let SideEffectKind::Soac(
+                producer_id,
+                Soac::Screma(screma::Op::Map {
+                    lanes: screma::Lanes { maps, .. },
+                    state:
+                        screma::SemanticState::Segmented {
+                            placement: producer_placement,
+                            output_slots,
+                            resources,
+                            ..
+                        },
+                }),
+            ) = &producer.kind
             else {
                 continue;
             };
@@ -103,16 +106,13 @@ fn find_in_graph(
             let Some(producer_result) = producer.result else {
                 continue;
             };
-            let Some(producer_id) = producer.semantic_id else {
-                continue;
-            };
             if oracle.value_consumer_count(&producer_id) != 1 {
                 continue;
             }
 
             for consumer_index in (producer_index + 1)..block.side_effects.len() {
                 let consumer = &block.side_effects[consumer_index];
-                let SideEffectKind::Soac(Soac::Screma(consumer_op)) = &consumer.kind else {
+                let SideEffectKind::Soac(consumer_id, Soac::Screma(consumer_op)) = &consumer.kind else {
                     continue;
                 };
                 let screma::SemanticState::Segmented {
@@ -126,9 +126,6 @@ fn find_in_graph(
                     continue;
                 }
                 let Some(_) = consumer.result else {
-                    continue;
-                };
-                let Some(consumer_id) = consumer.semantic_id else {
                     continue;
                 };
                 if oracle.conflicts(&producer_id, &consumer_id)
@@ -153,10 +150,7 @@ fn find_in_graph(
                 if !((producer_index + 1)..consumer_index).all(|index| {
                     let effect = &block.side_effects[index];
                     match (&effect.kind, effect.result) {
-                        (SideEffectKind::Soac(Soac::Screma(_)), Some(_)) => {
-                            let Some(intervening) = effect.semantic_id else {
-                                return false;
-                            };
+                        (SideEffectKind::Soac(intervening, Soac::Screma(_)), Some(_)) => {
                             !oracle.conflicts(&producer_id, &intervening)
                         }
                         _ => effect.effects.is_none(),
@@ -261,10 +255,13 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
     let producer_effect = graph.skeleton.blocks[candidate.block].side_effects[candidate.producer].clone();
     let consumer_effect = graph.skeleton.blocks[candidate.block].side_effects[candidate.consumer].clone();
 
-    let SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
-        lanes: producer_lanes,
-        state: screma::SemanticState::Segmented { resources, space, .. },
-    })) = producer_effect.kind
+    let SideEffectKind::Soac(
+        _,
+        Soac::Screma(screma::Op::Map {
+            lanes: producer_lanes,
+            state: screma::SemanticState::Segmented { resources, space, .. },
+        }),
+    ) = producer_effect.kind
     else {
         unreachable!();
     };
@@ -284,7 +281,7 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
     };
     debug_assert!(producer_input_count >= producer.source_indices.len());
 
-    let SideEffectKind::Soac(Soac::Screma(mut consumer_op)) = consumer_effect.kind else {
+    let SideEffectKind::Soac(_, Soac::Screma(mut consumer_op)) = consumer_effect.kind else {
         unreachable!();
     };
     let old_input_count = consumer_op.lanes().inputs.len();
@@ -403,7 +400,7 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
     operands.extend(producer.input_nodes.iter().copied());
     operands.extend(tail);
     consumer.operand_nodes = operands.into();
-    if let SideEffectKind::Soac(Soac::Screma(op)) = &mut consumer.kind {
+    if let SideEffectKind::Soac(_, Soac::Screma(op)) = &mut consumer.kind {
         consumer_op.lanes_mut().maps = new_maps;
         consumer_op.lanes_mut().inputs = new_inputs;
         let screma::SemanticState::Segmented { space, resources, .. } = consumer_op.semantic_state_mut()
@@ -659,7 +656,7 @@ pub(super) fn fresh_region_name(inner: &SemanticProgram, base: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::egir::program::{RegionInterner, SemanticEntry};
+    use crate::egir::program::{RegionInterner, SemanticEntry, SemanticOpId};
     use crate::egir::semantic_exec::{RegionExecutor, Value};
     use crate::egir::types::{EffectToken, SegExtent, SegLevel, SideEffect};
     use crate::ssa::types::ExecutionModel;
@@ -711,34 +708,36 @@ mod tests {
         let consumer_capture = graph.intern_pure(PureOp::Int("2".into()), smallvec![], int.clone(), None);
         let producer_result = graph.alloc_side_effect_result(tuple.clone());
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
-            semantic_id: None,
-            kind: SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
-                lanes: screma::Lanes {
-                    inputs: vec![SoacInputType {
-                        array: array.clone(),
-                        element: int.clone(),
-                    }],
-                    maps: vec![screma::Map {
-                        body: SegBody {
-                            region: producer_region,
-                            captures: vec![producer_capture],
-                        },
-                        input_indices: vec![screma::InputId(0)],
-                        output_element_type: int.clone(),
-                        destination: SoacDestination::Fresh,
-                        result_type: array.clone(),
-                    }],
-                },
-                state: screma::SemanticState::Segmented {
-                    space: SegSpace {
-                        level: SegLevel::Thread,
-                        dims: vec![SegExtent::Fixed(8)],
+            kind: SideEffectKind::Soac(
+                SemanticOpId(0),
+                Soac::Screma(screma::Op::Map {
+                    lanes: screma::Lanes {
+                        inputs: vec![SoacInputType {
+                            array: array.clone(),
+                            element: int.clone(),
+                        }],
+                        maps: vec![screma::Map {
+                            body: SegBody {
+                                region: producer_region,
+                                captures: vec![producer_capture],
+                            },
+                            input_indices: vec![screma::InputId(0)],
+                            output_element_type: int.clone(),
+                            destination: SoacDestination::Fresh,
+                            result_type: array.clone(),
+                        }],
                     },
-                    placement: screma::Placement::LaneLocal,
-                    output_slots: vec![],
-                    resources: vec![],
-                },
-            })),
+                    state: screma::SemanticState::Segmented {
+                        space: SegSpace {
+                            level: SegLevel::Thread,
+                            dims: vec![SegExtent::Fixed(8)],
+                        },
+                        placement: screma::Placement::LaneLocal,
+                        output_slots: vec![],
+                        resources: vec![],
+                    },
+                }),
+            ),
             operand_nodes: smallvec![input],
             result: Some(producer_result),
             effects: Some((EffectToken(0), EffectToken(1))),
@@ -755,39 +754,45 @@ mod tests {
         // textual adjacency.
         let unrelated_result = graph.alloc_side_effect_result(tuple.clone());
         let mut unrelated = graph.skeleton.blocks[graph.skeleton.entry].side_effects[0].clone();
+        let SideEffectKind::Soac(id, _) = &mut unrelated.kind else {
+            unreachable!();
+        };
+        *id = SemanticOpId(1);
         unrelated.result = Some(unrelated_result);
         unrelated.effects = None;
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(unrelated);
         let consumer_result = graph.alloc_side_effect_result(tuple.clone());
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
-            semantic_id: None,
-            kind: SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
-                lanes: screma::Lanes {
-                    inputs: vec![SoacInputType {
-                        array: array.clone(),
-                        element: int.clone(),
-                    }],
-                    maps: vec![screma::Map {
-                        body: SegBody {
-                            region: consumer_region,
-                            captures: vec![consumer_capture],
-                        },
-                        input_indices: vec![screma::InputId(0)],
-                        output_element_type: int,
-                        destination: SoacDestination::Fresh,
-                        result_type: array.clone(),
-                    }],
-                },
-                state: screma::SemanticState::Segmented {
-                    space: SegSpace {
-                        level: SegLevel::Thread,
-                        dims: vec![SegExtent::Fixed(8)],
+            kind: SideEffectKind::Soac(
+                SemanticOpId(2),
+                Soac::Screma(screma::Op::Map {
+                    lanes: screma::Lanes {
+                        inputs: vec![SoacInputType {
+                            array: array.clone(),
+                            element: int.clone(),
+                        }],
+                        maps: vec![screma::Map {
+                            body: SegBody {
+                                region: consumer_region,
+                                captures: vec![consumer_capture],
+                            },
+                            input_indices: vec![screma::InputId(0)],
+                            output_element_type: int,
+                            destination: SoacDestination::Fresh,
+                            result_type: array.clone(),
+                        }],
                     },
-                    placement: screma::Placement::LaneLocal,
-                    output_slots: vec![],
-                    resources: vec![],
-                },
-            })),
+                    state: screma::SemanticState::Segmented {
+                        space: SegSpace {
+                            level: SegLevel::Thread,
+                            dims: vec![SegExtent::Fixed(8)],
+                        },
+                        placement: screma::Placement::LaneLocal,
+                        output_slots: vec![],
+                        resources: vec![],
+                    },
+                }),
+            ),
             operand_nodes: smallvec![projected],
             result: Some(consumer_result),
             effects: Some((EffectToken(1), EffectToken(2))),
@@ -834,9 +839,14 @@ mod tests {
             Some((EffectToken(0), EffectToken(2)))
         );
         let effect = &block.side_effects[1];
-        let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
+        let SideEffectKind::Soac(id, Soac::Screma(op)) = &effect.kind else {
             panic!("one fused SegMap")
         };
+        assert_eq!(
+            *id,
+            SemanticOpId(2),
+            "fusion keeps the consumer's semantic identity"
+        );
         let executor = RegionExecutor::new(&inner.regions);
         assert_eq!(
             executor

@@ -64,15 +64,18 @@ fn find_in_graph(
 ) -> Option<Candidate> {
     for (block_id, block) in &graph.skeleton.blocks {
         for (effect_index, effect) in block.side_effects.iter().enumerate() {
-            let SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
-                lanes: screma::Lanes { maps, .. },
-                state:
-                    screma::SemanticState::Segmented {
-                        output_slots,
-                        resources,
-                        ..
-                    },
-            })) = &effect.kind
+            let SideEffectKind::Soac(
+                _,
+                Soac::Screma(screma::Op::Map {
+                    lanes: screma::Lanes { maps, .. },
+                    state:
+                        screma::SemanticState::Segmented {
+                            output_slots,
+                            resources,
+                            ..
+                        },
+                }),
+            ) = &effect.kind
             else {
                 continue;
             };
@@ -204,7 +207,7 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
     let (region_name, input_nodes, input_elem_types, captures, producer_result) = {
         let graph = graph(inner, candidate.site);
         let effect = &graph.skeleton.blocks[candidate.block].side_effects[candidate.effect];
-        let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
+        let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
             unreachable!();
         };
         let map = &op.lanes().maps[candidate.output];

@@ -17,7 +17,7 @@ use crate::LookupMap;
 use super::graph_ops;
 use super::program::{
     Entry, Func, MaterializationRequirement, OutputRoute, OutputSlotId, OutputWriter, Program, RawEntry,
-    RawProgram, Region, SemanticProgram, SemanticResourceRef,
+    RawProgram, Region, SemanticOpId, SemanticProgram, SemanticResourceRef,
 };
 use super::soac::{filter, hist, screma};
 use super::types::{
@@ -48,24 +48,33 @@ pub fn run(raw: RawProgram) -> SemanticProgram {
         semantic_dependencies,
     } = raw;
 
+    let mut next_semantic_id = 0;
+    let entry_points =
+        entry_points.into_iter().map(|entry| reify_entry(entry, &mut next_semantic_id)).collect();
+    let functions =
+        functions.into_iter().map(|function| reify_func(function, &mut next_semantic_id)).collect();
+    let materializations = materializations
+        .into_iter()
+        .map(|requirement| MaterializationRequirement {
+            id: requirement.id,
+            kind: requirement.kind,
+            producer: requirement.producer,
+            entry: reify_entry(requirement.entry, &mut next_semantic_id),
+            substitutions: requirement.substitutions,
+        })
+        .collect();
+    let regions =
+        regions.into_iter().map(|(id, region)| (id, reify_region(region, &mut next_semantic_id))).collect();
+
     let mut semantic = Program {
-        functions: functions.into_iter().map(reify_func).collect(),
+        functions,
         externs,
-        entry_points: entry_points.into_iter().map(reify_entry).collect(),
-        materializations: materializations
-            .into_iter()
-            .map(|requirement| MaterializationRequirement {
-                id: requirement.id,
-                kind: requirement.kind,
-                producer: requirement.producer,
-                entry: reify_entry(requirement.entry),
-                substitutions: requirement.substitutions,
-            })
-            .collect(),
+        entry_points,
+        materializations,
         constants,
         pipeline,
         input_names,
-        regions: regions.into_iter().map(|(id, region)| (id, reify_region(region))).collect(),
+        regions,
         region_interner,
         resources,
         semantic_dependencies,
@@ -74,7 +83,7 @@ pub fn run(raw: RawProgram) -> SemanticProgram {
     semantic
 }
 
-fn reify_func(function: Func<Raw>) -> Func<Semantic> {
+fn reify_func(function: Func<Raw>, next_semantic_id: &mut u32) -> Func<Semantic> {
     let facts = function_facts(&function.graph);
     let Func {
         name,
@@ -86,7 +95,7 @@ fn reify_func(function: Func<Raw>) -> Func<Semantic> {
         control_headers,
         aliases,
     } = function;
-    let (graph, blocks) = map_graph(graph, facts);
+    let (graph, blocks) = map_graph(graph, facts, next_semantic_id);
     Func {
         name,
         span,
@@ -99,7 +108,7 @@ fn reify_func(function: Func<Raw>) -> Func<Semantic> {
     }
 }
 
-fn reify_region(region: Region<Raw>) -> Region<Semantic> {
+fn reify_region(region: Region<Raw>, next_semantic_id: &mut u32) -> Region<Semantic> {
     let facts = function_facts(&region.graph);
     let Region {
         name,
@@ -108,7 +117,7 @@ fn reify_region(region: Region<Raw>) -> Region<Semantic> {
         graph,
         control_headers,
     } = region;
-    let (graph, blocks) = map_graph(graph, facts);
+    let (graph, blocks) = map_graph(graph, facts, next_semantic_id);
     Region {
         name,
         params,
@@ -118,7 +127,7 @@ fn reify_region(region: Region<Raw>) -> Region<Semantic> {
     }
 }
 
-fn reify_entry(entry: Entry<Raw>) -> Entry<Semantic> {
+fn reify_entry(entry: Entry<Raw>, next_semantic_id: &mut u32) -> Entry<Semantic> {
     let facts = entry_facts(&entry);
     let Entry {
         name,
@@ -135,7 +144,7 @@ fn reify_entry(entry: Entry<Raw>) -> Entry<Semantic> {
         aliases,
         output_routes,
     } = entry;
-    let (graph, blocks) = map_graph(graph, facts);
+    let (graph, blocks) = map_graph(graph, facts, next_semantic_id);
     Entry {
         name,
         span,
@@ -156,10 +165,13 @@ fn reify_entry(entry: Entry<Raw>) -> Entry<Semantic> {
 fn map_graph(
     graph: EGraph<Raw>,
     mut facts: HashMap<(BlockId, usize), Facts>,
+    next_semantic_id: &mut u32,
 ) -> (EGraph<Semantic>, LookupMap<BlockId, BlockId>) {
-    match graph.try_map_phase(|block, index, soac| {
+    match graph.try_map_phase(|block, index, (), soac| {
         let facts = facts.remove(&(block, index)).expect("every raw SOAC must have semantic facts");
-        Ok::<_, Infallible>(reify_soac(soac, facts))
+        let id = SemanticOpId(*next_semantic_id);
+        *next_semantic_id += 1;
+        Ok::<_, Infallible>((id, reify_soac(soac, facts)))
     }) {
         Ok(mapped) => mapped,
         Err(never) => match never {},
@@ -258,6 +270,75 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ssa::types::InstKind;
+    use smallvec::SmallVec;
+
+    fn raw_map() -> SideEffect<Raw> {
+        SideEffect {
+            kind: SideEffectKind::Soac(
+                (),
+                Soac::Screma(screma::Op::Map {
+                    lanes: screma::Lanes {
+                        inputs: vec![],
+                        maps: vec![],
+                    },
+                    state: screma::RawState,
+                }),
+            ),
+            operand_nodes: SmallVec::new(),
+            result: None,
+            effects: None,
+            span: None,
+        }
+    }
+
+    fn facts() -> Facts {
+        Facts {
+            space: SegSpace {
+                level: SegLevel::Thread,
+                dims: vec![],
+            },
+            placement: screma::Placement::LaneLocal,
+            output_slots: vec![],
+            resources: vec![],
+            entry: false,
+        }
+    }
+
+    #[test]
+    fn phase_boundary_assigns_ids_to_soacs_but_not_instructions() {
+        let mut graph = EGraph::<Raw>::new();
+        let block = graph.skeleton.entry;
+        graph.skeleton.blocks[block].side_effects.push(raw_map());
+        graph.skeleton.blocks[block].side_effects.push(SideEffect {
+            kind: SideEffectKind::Inst(InstKind::ControlBarrier),
+            operand_nodes: SmallVec::new(),
+            result: None,
+            effects: None,
+            span: None,
+        });
+        graph.skeleton.blocks[block].side_effects.push(raw_map());
+
+        let mut next = 7;
+        let (graph, _) = map_graph(
+            graph,
+            HashMap::from([((block, 0), facts()), ((block, 2), facts())]),
+            &mut next,
+        );
+        let ids: Vec<_> = graph.skeleton.blocks[graph.skeleton.entry]
+            .side_effects
+            .iter()
+            .map(|effect| effect.kind.soac_id().copied())
+            .collect();
+
+        assert_eq!(ids, vec![Some(SemanticOpId(7)), None, Some(SemanticOpId(8))]);
+        assert_eq!(next, 9);
+    }
+}
+
 fn function_facts(graph: &EGraph<Raw>) -> HashMap<(BlockId, usize), Facts> {
     graph
         .skeleton
@@ -299,7 +380,7 @@ fn entry_facts(entry: &RawEntry) -> HashMap<(BlockId, usize), Facts> {
             contents.side_effects.iter().enumerate().map(move |(index, effect)| (block, index, effect))
         })
         .filter(|(block, index, effect)| {
-            let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
                 return false;
             };
             matches!(op, screma::Op::Reduce { .. } | screma::Op::Scan { .. })
@@ -329,7 +410,7 @@ fn semantic_facts(
     effect: &SideEffect<Raw>,
     requested_placement: screma::Placement,
 ) -> Option<Facts> {
-    let SideEffectKind::Soac(soac) = &effect.kind else {
+    let SideEffectKind::Soac(_, soac) = &effect.kind else {
         return None;
     };
     let (input, operand_index, is_screma) = match soac {
@@ -488,7 +569,7 @@ fn soac_consumed_nodes(graph: &EGraph<Raw>) -> HashSet<NodeId> {
         .blocks
         .iter()
         .flat_map(|(_, block)| &block.side_effects)
-        .filter(|effect| matches!(effect.kind, SideEffectKind::Soac(_)))
+        .filter(|effect| matches!(effect.kind, SideEffectKind::Soac(_, _)))
         .flat_map(referenced_nodes)
         .collect::<Vec<_>>();
     graph_ops::value_producer_closure(graph, roots).nodes
@@ -496,7 +577,7 @@ fn soac_consumed_nodes(graph: &EGraph<Raw>) -> HashSet<NodeId> {
 
 fn referenced_nodes(effect: &SideEffect<Raw>) -> Vec<NodeId> {
     let mut nodes = effect.operand_nodes.to_vec();
-    let SideEffectKind::Soac(soac) = &effect.kind else {
+    let SideEffectKind::Soac(_, soac) = &effect.kind else {
         return nodes;
     };
     nodes.extend(soac.seg_bodies().into_iter().flat_map(|body| body.captures.iter().copied()));

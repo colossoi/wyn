@@ -44,7 +44,7 @@ pub(crate) trait ValueProducerPhase: EgirPhase {
 impl<R: GraphResource> ValueProducerPhase for Raw<R> {
     fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<NodeId> {
         let mut nodes = effect.operand_nodes.to_vec();
-        let SideEffectKind::Soac(soac) = &effect.kind else {
+        let SideEffectKind::Soac(_, soac) = &effect.kind else {
             return nodes;
         };
         nodes.extend(soac.seg_bodies().into_iter().flat_map(|body| body.captures.iter().copied()));
@@ -433,7 +433,6 @@ pub fn emit_store<P: EgirPhase>(
     let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
     let effect_out = alloc_effect(next_effect);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        semantic_id: None,
         kind: SideEffectKind::Inst(InstKind::Store {
             place: Default::default(),
             value: ValueRef::Ssa(Default::default()),
@@ -458,7 +457,6 @@ pub fn emit_workgroup_barrier<P: EgirPhase>(
     let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
     let effect_out = alloc_effect(next_effect);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        semantic_id: None,
         kind: SideEffectKind::Inst(InstKind::ControlBarrier),
         operand_nodes: smallvec![],
         result: None,
@@ -513,7 +511,6 @@ pub fn detached_load<P: EgirPhase>(
     let effect_out = alloc_effect(next_effect);
     let result = graph.alloc_side_effect_result(elem_ty);
     let effect = SideEffect {
-        semantic_id: None,
         kind: SideEffectKind::Inst(InstKind::Load {
             place: Default::default(),
         }),
@@ -541,7 +538,6 @@ pub fn emit_alloca<P: EgirPhase>(
     let effect_out = alloc_effect(next_effect);
     let place_nid = graph.alloc_side_effect_result(elem_ty.clone());
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        semantic_id: None,
         kind: SideEffectKind::Inst(InstKind::Alloca {
             elem_ty,
             // Real PlaceId is allocated by `elaborate`; the placeholder here
@@ -612,13 +608,14 @@ pub fn emit_view_load<P: EgirPhase>(
     emit_load(graph, block, place_nid, elem_ty, next_effect, span)
 }
 
-/// Push a `SideEffectKind::Soac(soac)` side-effect into `block` with
+/// Push a `SideEffectKind::Soac(id, soac)` side-effect into `block` with
 /// the given operands; returns the allocated `result_nid` (typed as
 /// `result_ty`, which the SOAC's lowering recovers from
 /// `graph.types[result_nid]`).
 pub fn emit_pending_soac<P: EgirPhase>(
     graph: &mut EGraph<P>,
     block: BlockId,
+    id: P::SoacId,
     soac: Soac<P>,
     operands: SmallVec<[NodeId; 4]>,
     result_ty: Type<TypeName>,
@@ -629,8 +626,7 @@ pub fn emit_pending_soac<P: EgirPhase>(
     let effect_in = EffectToken(0);
     let effect_out = alloc_effect(next_effect);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        semantic_id: None,
-        kind: SideEffectKind::Soac(soac),
+        kind: SideEffectKind::Soac(id, soac),
         operand_nodes: operands,
         result: Some(result_nid),
         effects: Some((effect_in, effect_out)),

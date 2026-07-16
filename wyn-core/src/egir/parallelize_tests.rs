@@ -45,7 +45,6 @@ fn output_ownership_comes_from_explicit_route_writer() {
     let source = neutral(&mut graph, 0);
     let writer = EffectToken(9);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        semantic_id: None,
         kind: SideEffectKind::Inst(InstKind::Store {
             place: Default::default(),
             value: crate::ssa::types::ValueRef::Ssa(Default::default()),

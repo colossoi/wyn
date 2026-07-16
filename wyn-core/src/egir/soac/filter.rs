@@ -220,14 +220,17 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut SemanticProgram) {
     for (_, entry) in inner.entries_with_endpoints() {
         for (_, block) in &entry.graph.skeleton.blocks {
             for effect in &block.side_effects {
-                let SideEffectKind::Soac(Soac::Filter(Op {
-                    body,
-                    state:
-                        SemanticState {
-                            space,
-                            storage: Output::Runtime { scratch, .. },
-                        },
-                })) = &effect.kind
+                let SideEffectKind::Soac(
+                    _,
+                    Soac::Filter(Op {
+                        body,
+                        state:
+                            SemanticState {
+                                space,
+                                storage: Output::Runtime { scratch, .. },
+                            },
+                    }),
+                ) = &effect.kind
                 else {
                     continue;
                 };
@@ -305,14 +308,17 @@ pub(crate) fn allocate_work_resources(inner: &mut SemanticProgram) {
     for (_, entry) in inner.entries_with_endpoints() {
         for (_, block) in &entry.graph.skeleton.blocks {
             for effect in &block.side_effects {
-                let SideEffectKind::Soac(Soac::Filter(Op {
-                    state:
-                        SemanticState {
-                            space,
-                            storage: Output::Runtime { .. },
-                        },
-                    ..
-                })) = &effect.kind
+                let SideEffectKind::Soac(
+                    owner,
+                    Soac::Filter(Op {
+                        state:
+                            SemanticState {
+                                space,
+                                storage: Output::Runtime { .. },
+                            },
+                        ..
+                    }),
+                ) = &effect.kind
                 else {
                     continue;
                 };
@@ -334,7 +340,7 @@ pub(crate) fn allocate_work_resources(inner: &mut SemanticProgram) {
                         * super::super::parallelize::REDUCE_PHASE1_WIDTH) as u64
                         * 4,
                 );
-                let owner = effect.semantic_id;
+                let owner = Some(*owner);
                 for (slot, (kind, size)) in [
                     (CompilerResourceKind::FilterFlags, element_count_size.clone()),
                     (CompilerResourceKind::FilterOffsets, element_count_size.clone()),
@@ -366,18 +372,21 @@ pub(crate) fn resource_kinds(inner: &SemanticProgram) -> HashMap<ResourceId, Com
     for (_, entry) in inner.entries_with_endpoints() {
         for (_, block) in &entry.graph.skeleton.blocks {
             for effect in &block.side_effects {
-                let SideEffectKind::Soac(Soac::Filter(Op {
-                    state:
-                        SemanticState {
-                            storage: Output::Runtime { scratch, length },
-                            ..
-                        },
-                    ..
-                })) = &effect.kind
+                let SideEffectKind::Soac(
+                    owner,
+                    Soac::Filter(Op {
+                        state:
+                            SemanticState {
+                                storage: Output::Runtime { scratch, length },
+                                ..
+                            },
+                        ..
+                    }),
+                ) = &effect.kind
                 else {
                     continue;
                 };
-                let owner = effect.semantic_id;
+                let owner = Some(*owner);
                 kinds.insert(
                     scratch.0,
                     CompilerResource::new(CompilerResourceKind::FilterScratch, owner, 0),

@@ -62,42 +62,6 @@ impl<P: EgirPhase> Entry<P> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SemanticOpId(pub u32);
 
-/// Assign stable operation identities once, immediately after segmentation.
-/// Graph projection copies these ids unchanged, so resource ownership and
-/// dependency edges never depend on arena-local `NodeId`s.
-pub fn assign_semantic_op_ids(inner: &mut SemanticProgram) {
-    let mut next = inner
-        .entry_points
-        .iter()
-        .flat_map(|entry| entry.graph.skeleton.blocks.iter())
-        .flat_map(|(_, block)| block.side_effects.iter())
-        .chain(
-            inner
-                .functions
-                .iter()
-                .flat_map(|function| function.graph.skeleton.blocks.iter())
-                .flat_map(|(_, block)| block.side_effects.iter()),
-        )
-        .filter_map(|effect| effect.semantic_id.map(|id| id.0))
-        .max()
-        .map_or(0, |id| id + 1);
-    let graphs = inner
-        .entry_points
-        .iter_mut()
-        .map(|entry| &mut entry.graph)
-        .chain(inner.functions.iter_mut().map(|function| &mut function.graph));
-    for graph in graphs {
-        for (_, block) in graph.skeleton.blocks.iter_mut() {
-            for effect in &mut block.side_effects {
-                if effect.semantic_id.is_none() {
-                    effect.semantic_id = Some(SemanticOpId(next));
-                    next += 1;
-                }
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SemanticDependencyKind {
     Value,
@@ -594,7 +558,7 @@ pub(crate) fn visit_type_names_mut(ty: &mut Type<TypeName>, mut visit: impl FnMu
 fn rewrite_raw_graph_types(graph: &mut EGraph<Raw>, mut rewrite: impl FnMut(&mut Type<TypeName>)) {
     for block in graph.skeleton.blocks.values_mut() {
         for effect in &mut block.side_effects {
-            if let super::types::SideEffectKind::Soac(soac) = &mut effect.kind {
+            if let super::types::SideEffectKind::Soac(_, soac) = &mut effect.kind {
                 soac.for_each_type_mut(&mut rewrite);
             }
         }
@@ -608,7 +572,7 @@ fn rewrite_physical_graph_types(
 ) {
     for block in graph.skeleton.blocks.values_mut() {
         for effect in &mut block.side_effects {
-            if let super::types::SideEffectKind::Soac(soac) = &mut effect.kind {
+            if let super::types::SideEffectKind::Soac(_, soac) = &mut effect.kind {
                 soac.for_each_type_mut(&mut rewrite);
             }
         }
@@ -910,7 +874,7 @@ pub(crate) fn physicalize_graph_resources(
                 .binding(resource)
                 .ok_or_else(|| format!("semantic resource {:?} has no physical binding", resource))
         },
-        |soac, nodes| physicalize_soac(soac, nodes, bindings),
+        |id, soac, nodes| physicalize_soac(soac, nodes, bindings).map(|soac| (id, soac)),
     )?;
     let pure_nodes = graph.nodes.keys().collect::<Vec<_>>();
     for node in pure_nodes {

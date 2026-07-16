@@ -934,7 +934,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     ) -> Option<FuncBody> {
         let (graph, control_headers) = self.into_graph_parts();
         let (mut graph, _, block_map) =
-            graph.try_map_resources_and_phase::<Physical, ()>(|_| Err(()), |_, _| Err(())).ok()?;
+            graph.try_map_resources_and_phase::<Physical, ()>(|_| Err(()), |_, _, _| Err(())).ok()?;
         let control_headers =
             super::program::remap_control_headers(&control_headers, |block| block_map[&block]);
         let aliases = super::skel_opt::run_one_body(&mut graph);
@@ -1375,7 +1375,6 @@ impl<'a, 'b> Converter<'a, 'b> {
                         let effect_in = EffectToken(0);
                         let effect_out = self.alloc_effect();
                         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                            semantic_id: None,
                             kind: SideEffectKind::Inst(InstKind::Op {
                                 tag: crate::op::OpTag::Call(name.to_string()),
                                 operands: arg_vrefs,
@@ -1402,7 +1401,6 @@ impl<'a, 'b> Converter<'a, 'b> {
                     let effect_in = EffectToken(0);
                     let effect_out = self.alloc_effect();
                     self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                        semantic_id: None,
                         kind: SideEffectKind::Inst(InstKind::Op {
                             tag: crate::op::OpTag::Call(name.to_string()),
                             operands: arg_vrefs,
@@ -1475,7 +1473,6 @@ impl<'a, 'b> Converter<'a, 'b> {
         let effect_in = EffectToken(0);
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-            semantic_id: None,
             kind: SideEffectKind::Inst(InstKind::Op {
                 tag: crate::op::OpTag::StorageImageStore(resource),
                 operands: arg_vrefs,
@@ -2132,6 +2129,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         super::graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
+            (),
             soac,
             operands,
             ty,

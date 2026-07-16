@@ -56,7 +56,7 @@ fn fuse_in_graph(graph: &mut EGraph, scope: &str, oracle: &SemanticGraph) -> boo
 }
 
 fn is_fusable_seg(kind: &SideEffectKind) -> bool {
-    matches!(kind, SideEffectKind::Soac(Soac::Screma(op)) if matches!(op.semantic_state(), screma::SemanticState::Segmented { .. }))
+    matches!(kind, SideEffectKind::Soac(_, Soac::Screma(op)) if matches!(op.semantic_state(), screma::SemanticState::Segmented { .. }))
 }
 
 /// Legality: equal space, compatible placement, no resource/effect conflict, and
@@ -72,7 +72,8 @@ fn sibling_fusable(
     let block = &graph.skeleton.blocks[block_id];
     let effect_i = &block.side_effects[i];
     let effect_j = &block.side_effects[j];
-    let (SideEffectKind::Soac(Soac::Screma(op_i)), Some(_)) = (&effect_i.kind, effect_i.result) else {
+    let (SideEffectKind::Soac(op_i_id, Soac::Screma(op_i)), Some(_)) = (&effect_i.kind, effect_i.result)
+    else {
         return false;
     };
     let screma::SemanticState::Segmented {
@@ -83,7 +84,8 @@ fn sibling_fusable(
     else {
         return false;
     };
-    let (SideEffectKind::Soac(Soac::Screma(op_j)), Some(_)) = (&effect_j.kind, effect_j.result) else {
+    let (SideEffectKind::Soac(op_j_id, Soac::Screma(op_j)), Some(_)) = (&effect_j.kind, effect_j.result)
+    else {
         return false;
     };
     let screma::SemanticState::Segmented {
@@ -126,12 +128,7 @@ fn sibling_fusable(
         // Keep mixed siblings independent until a joint physical recipe exists.
         return false;
     }
-    let Some(op_i) = block.side_effects[i].semantic_id else {
-        return false;
-    };
-    let Some(op_j) = block.side_effects[j].semantic_id else {
-        return false;
-    };
+    let (op_i, op_j) = (*op_i_id, *op_j_id);
     // A value edge either way makes them a producer/consumer chain (handled by
     // vertical EGIR fusion), never fusable siblings.
     if oracle.reachable_between(&op_i, &op_j) || oracle.reachable_between(&op_j, &op_i) {
@@ -146,10 +143,7 @@ fn sibling_fusable(
     ((i + 1)..j).all(|k| {
         let effect = &block.side_effects[k];
         match (&effect.kind, effect.result) {
-            (SideEffectKind::Soac(Soac::Screma(_)), Some(_)) => {
-                let Some(op_k) = effect.semantic_id else {
-                    return false;
-                };
+            (SideEffectKind::Soac(op_k, Soac::Screma(_)), Some(_)) => {
                 !oracle.conflicts(&op_k, &op_i) && !oracle.conflicts(&op_k, &op_j)
             }
             _ => effect.effects.is_none(),
@@ -283,7 +277,7 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
         (Some(effects), None) | (None, Some(effects)) => Some(effects),
         (None, None) => None,
     };
-    block.side_effects[i].kind = SideEffectKind::Soac(fused);
+    block.side_effects[i].kind = SideEffectKind::Soac(p.id, fused);
     block.side_effects[i].operand_nodes = operands;
     block.side_effects[i].result = Some(fused_result);
     block.side_effects[i].effects = fused_effects;
@@ -293,6 +287,7 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
 /// Everything `fuse_pair` needs from one Seg side-effect, cloned so the two can
 /// be read independently while the block is rebuilt.
 struct SegParts {
+    id: crate::egir::program::SemanticOpId,
     space: crate::egir::types::SegSpace,
     placement: screma::Placement,
     lanes: screma::Lanes,
@@ -318,7 +313,7 @@ impl SegParts {
 
 fn extract_seg(graph: &EGraph, block_id: BlockId, idx: usize) -> SegParts {
     let effect = &graph.skeleton.blocks[block_id].side_effects[idx];
-    let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
+    let SideEffectKind::Soac(id, Soac::Screma(op)) = &effect.kind else {
         unreachable!("extract_seg on non-Seg");
     };
     let screma::SemanticState::Segmented {
@@ -334,6 +329,7 @@ fn extract_seg(graph: &EGraph, block_id: BlockId, idx: usize) -> SegParts {
     let inputs = effect.operand_nodes[..n_inputs].to_vec();
     let output_views = effect.operand_nodes[n_inputs..].to_vec();
     SegParts {
+        id: *id,
         space: space.clone(),
         placement: *placement,
         lanes: op.lanes().clone(),

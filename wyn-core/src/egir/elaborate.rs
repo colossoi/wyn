@@ -326,7 +326,7 @@ impl<'a> Elaborator<'a> {
     fn elaborate_side_effect(&mut self, se: &PhysicalSideEffect, skel_bid: SkelBlockId) {
         let inst_kind = match &se.kind {
             super::types::SideEffectKind::Inst(k) => k,
-            super::types::SideEffectKind::Soac(p) => {
+            super::types::SideEffectKind::Soac(_, p) => {
                 panic!("elaborate: unexpanded EgirSoac in skeleton: {:?}", p)
             }
         };

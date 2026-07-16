@@ -16,7 +16,7 @@
 //! `arr` or `val` comes from the wrong projection.
 
 use crate::ast::TypeName;
-use crate::egir::program::{PhysicalEGraph, PhysicalSideEffectKind};
+use crate::egir::program::{PhysicalEGraph, PhysicalSideEffectKind, SemanticOpId};
 use crate::egir::soac::hist;
 use crate::egir::types::{ENode, EgirPhase, Physical, PureOp, Soac, SoacInputType};
 use polytype::Type;
@@ -93,29 +93,32 @@ fn scatter_handleability_checks_every_input() {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
     let bad_input_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty.clone(), f32_ty.clone()]);
-    let kind: PhysicalSideEffectKind = PhysicalSideEffectKind::Soac(Soac::<Physical>::Hist(hist::Op {
-        body: hist::Body {
-            body: crate::egir::types::SegBody {
-                region: crate::egir::types::RegionId::from_index(0),
-                captures: vec![],
+    let kind: PhysicalSideEffectKind = PhysicalSideEffectKind::Soac(
+        SemanticOpId(0),
+        Soac::<Physical>::Hist(hist::Op {
+            body: hist::Body {
+                body: crate::egir::types::SegBody {
+                    region: crate::egir::types::RegionId::from_index(0),
+                    captures: vec![],
+                },
+                inputs: vec![
+                    SoacInputType {
+                        array: plain_array_ty(i32_ty.clone()),
+                        element: i32_ty.clone(),
+                    },
+                    SoacInputType {
+                        array: bad_input_ty,
+                        element: f32_ty.clone(),
+                    },
+                ],
+                index_type: i32_ty,
+                value_type: f32_ty.clone(),
+                dest_elem_type: f32_ty,
+                update_policy: hist::UpdatePolicy::OrderedOverwrite,
             },
-            inputs: vec![
-                SoacInputType {
-                    array: plain_array_ty(i32_ty.clone()),
-                    element: i32_ty.clone(),
-                },
-                SoacInputType {
-                    array: bad_input_ty,
-                    element: f32_ty.clone(),
-                },
-            ],
-            index_type: i32_ty,
-            value_type: f32_ty.clone(),
-            dest_elem_type: f32_ty,
-            update_policy: hist::UpdatePolicy::OrderedOverwrite,
-        },
-        state: hist::PhysicalState::Serial,
-    }));
+            state: hist::PhysicalState::Serial,
+        }),
+    );
 
     assert!(
         !super::is_handleable_soac(&kind),

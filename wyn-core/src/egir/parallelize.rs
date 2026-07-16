@@ -123,7 +123,7 @@ fn plan_segmented_kernel_body(
     let Some((block, index, _)) = segmented_screma_effect(&body.graph) else {
         return;
     };
-    let SideEffectKind::Soac(Soac::Screma(op)) =
+    let SideEffectKind::Soac(_, Soac::Screma(op)) =
         &body.graph.skeleton.blocks[block].side_effects[index].kind
     else {
         unreachable!()
@@ -580,27 +580,30 @@ fn contains_semantic_op(entry: &super::program::PlannedEntry, id: SemanticOpId) 
         .blocks
         .iter()
         .flat_map(|(_, block)| &block.side_effects)
-        .any(|effect| effect.semantic_id == Some(id))
+        .any(|effect| effect.kind.soac_id() == Some(&id))
 }
 
 fn analyze_filter_entry(entry: &SemanticEntry, resources: &[LogicalResource]) -> Option<FilterAnalysis> {
     let mut analysis = None;
     for effect in entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects) {
-        let SideEffectKind::Soac(Soac::Filter(filter::Op {
-            state:
-                filter::SemanticState {
-                    space,
-                    storage: filter::Output::Runtime { length, .. },
-                },
-            ..
-        })) = &effect.kind
+        let SideEffectKind::Soac(
+            semantic_id,
+            Soac::Filter(filter::Op {
+                state:
+                    filter::SemanticState {
+                        space,
+                        storage: filter::Output::Runtime { length, .. },
+                    },
+                ..
+            }),
+        ) = &effect.kind
         else {
             continue;
         };
         let filter::RuntimeLength::Stored(len_out) = length else {
             return None;
         };
-        let semantic_id = effect.semantic_id?;
+        let semantic_id = *semantic_id;
         let work = filter_work_buffers(semantic_id, resources)?;
         if analysis
             .replace(FilterAnalysis {
@@ -751,7 +754,7 @@ fn compact_projected_entry_interface(entry: &mut super::program::PlannedEntry) {
                     .into_iter()
                     .map(|access| access.resource.0),
             );
-            if let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind {
+            if let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind {
                 if let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() {
                     used_resources.extend(resources.iter().map(|access| access.resource.0));
                 }
@@ -868,7 +871,10 @@ pub(crate) fn attach_materializations(inner: &SemanticProgram, schedule: &mut sc
         if segmented_screma_effect(&body.graph).is_some_and(|(block, index, _)| {
             matches!(
                 &body.graph.skeleton.blocks[block].side_effects[index].kind,
-                SideEffectKind::Soac(Soac::Screma(screma::Op::Reduce { .. } | screma::Op::Scan { .. }))
+                SideEffectKind::Soac(
+                    _,
+                    Soac::Screma(screma::Op::Reduce { .. } | screma::Op::Scan { .. })
+                )
             )
         }) {
             plan_segmented_kernel_body(body, materialization, schedule, &inner.resources);
@@ -888,7 +894,7 @@ fn side_effect_output_slots_from_routes(
     routes: &[super::program::OutputRoute],
     se: &SideEffect,
 ) -> Vec<usize> {
-    if let SideEffectKind::Soac(Soac::Screma(op)) = &se.kind {
+    if let SideEffectKind::Soac(_, Soac::Screma(op)) = &se.kind {
         if let screma::SemanticState::Segmented { output_slots, .. } = op.semantic_state() {
             return output_slots.iter().map(|slot| slot.0).collect();
         }
@@ -914,10 +920,13 @@ fn side_effect_output_slots_from_routes(
 fn is_seg_map(se: &SideEffect) -> bool {
     matches!(
         &se.kind,
-        SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
-            state: screma::SemanticState::Segmented { .. },
-            ..
-        }))
+        SideEffectKind::Soac(
+            _,
+            Soac::Screma(screma::Op::Map {
+                state: screma::SemanticState::Segmented { .. },
+                ..
+            })
+        )
     )
 }
 
@@ -925,13 +934,16 @@ fn is_parallel_output(se: &SideEffect) -> bool {
     is_seg_map(se)
         || matches!(
             &se.kind,
-            SideEffectKind::Soac(Soac::Filter(filter::Op {
-                state: filter::SemanticState {
-                    storage: filter::Output::Runtime { .. },
+            SideEffectKind::Soac(
+                _,
+                Soac::Filter(filter::Op {
+                    state: filter::SemanticState {
+                        storage: filter::Output::Runtime { .. },
+                        ..
+                    },
                     ..
-                },
-                ..
-            }))
+                })
+            )
         )
 }
 
@@ -944,8 +956,8 @@ fn is_parallel_output(se: &SideEffect) -> bool {
 /// recomputes what it consumes.
 fn is_write_effectful(se: &SideEffect) -> bool {
     match &se.kind {
-        SideEffectKind::Soac(Soac::Hist(_) | Soac::Filter(_)) => true,
-        SideEffectKind::Soac(Soac::Screma(op)) => op
+        SideEffectKind::Soac(_, Soac::Hist(_) | Soac::Filter(_)) => true,
+        SideEffectKind::Soac(_, Soac::Screma(op)) => op
             .lanes()
             .maps
             .iter()
@@ -1723,7 +1735,7 @@ pub(crate) fn parallel_effect(graph: &EGraph) -> Option<(BlockId, usize, &SideEf
     segmented_screma_effect(graph).or_else(|| {
         graph.skeleton.blocks.iter().find_map(|(block, contents)| {
             contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
-                matches!(&effect.kind, SideEffectKind::Soac(Soac::Filter(_)))
+                matches!(&effect.kind, SideEffectKind::Soac(_, Soac::Filter(_)))
                     .then_some((block, index, effect))
             })
         })
@@ -1734,7 +1746,7 @@ fn segmented_screma_effect(graph: &EGraph) -> Option<(BlockId, usize, &SideEffec
     graph.skeleton.blocks.iter().find_map(|(block, contents)| {
         contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
             matches!(&effect.kind,
-            SideEffectKind::Soac(Soac::Screma(op)) if matches!(
+            SideEffectKind::Soac(_, Soac::Screma(op)) if matches!(
                 op.semantic_state(),
                 screma::SemanticState::Segmented { placement: screma::Placement::Kernel, .. }
             ))
@@ -1744,7 +1756,7 @@ fn segmented_screma_effect(graph: &EGraph) -> Option<(BlockId, usize, &SideEffec
 }
 
 fn make_screma_serial(graph: &mut EGraph, block_id: BlockId, index: usize) {
-    let SideEffectKind::Soac(Soac::Screma(op)) =
+    let SideEffectKind::Soac(_, Soac::Screma(op)) =
         &mut graph.skeleton.blocks[block_id].side_effects[index].kind
     else {
         unreachable!()
@@ -1795,7 +1807,7 @@ struct SegScratchSpec {
 /// Parse the shared eligibility gates and scratch owned by a parallel Seg op.
 /// Allocation and lowering consume this same result.
 fn seg_scratch_specs(graph: &EGraph, se: &SideEffect) -> Option<SegScratchSpec> {
-    let SideEffectKind::Soac(Soac::Screma(op)) = &se.kind else {
+    let SideEffectKind::Soac(_, Soac::Screma(op)) = &se.kind else {
         return None;
     };
     if !matches!(
@@ -1869,7 +1881,7 @@ pub fn enumerate_seg_scratch(inner: &SemanticProgram, first_id: u32) -> Vec<Logi
             }
         }
         for (block_id, se_idx, specs) in plans {
-            let owner = entry.graph.skeleton.blocks[block_id].side_effects[se_idx].semantic_id;
+            let owner = entry.graph.skeleton.blocks[block_id].side_effects[se_idx].kind.soac_id().copied();
             for (slot, (elem_ty, kind)) in specs.into_iter().enumerate() {
                 let elem_bytes = crate::ssa::layout::type_byte_size(&elem_ty)
                     .expect("seg scratch element has no static size")
@@ -1913,7 +1925,8 @@ fn analyze_reduce_entry(
     if seg_scratch_specs(&entry.graph, side_effect)?.family != SegScratchFamily::Reduce {
         return None;
     }
-    let SideEffectKind::Soac(Soac::Screma(screma::Op::Reduce { lanes, operators, .. })) = &side_effect.kind
+    let SideEffectKind::Soac(_, Soac::Screma(screma::Op::Reduce { lanes, operators, .. })) =
+        &side_effect.kind
     else {
         return None;
     };
@@ -1936,7 +1949,7 @@ fn analyze_reduce_entry(
         return None;
     }
     let result = side_effect.result?;
-    let owner = side_effect.semantic_id?;
+    let owner = *side_effect.kind.soac_id()?;
     let partials = owned_resource_ids(resources, owner, CompilerResourceKind::ReducePartial);
     if partials.len() != n_accs
         || operators.iter().any(|operator| !can_clone_pure_subgraph(&entry.graph, operator.neutral, &[]))
@@ -2040,7 +2053,7 @@ fn emit_reduce_entry(
         screma_result_nid,
     ) = {
         let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
-        let SideEffectKind::Soac(Soac::Screma(screma::Op::Reduce { lanes, operators, .. })) = &se.kind
+        let SideEffectKind::Soac(_, Soac::Screma(screma::Op::Reduce { lanes, operators, .. })) = &se.kind
         else {
             unreachable!("reduce analysis admitted a non-reduce recipe")
         };
@@ -2243,7 +2256,8 @@ fn analyze_scan_entry(
     if seg_scratch_specs(&entry.graph, side_effect)?.family != SegScratchFamily::Scan {
         return None;
     }
-    let SideEffectKind::Soac(Soac::Screma(screma::Op::Scan { lanes, operators, .. })) = &side_effect.kind
+    let SideEffectKind::Soac(_, Soac::Screma(screma::Op::Scan { lanes, operators, .. })) =
+        &side_effect.kind
     else {
         return None;
     };
@@ -2266,7 +2280,7 @@ fn analyze_scan_entry(
     }
     let scan_output = *side_effect.operand_nodes.get(output_base + lanes.maps.len())?;
     graph_ops::extract_storage_view_source(&entry.graph, scan_output)?;
-    let owner = side_effect.semantic_id?;
+    let owner = *side_effect.kind.soac_id()?;
     let block_sums = *owned_resource_ids(resources, owner, CompilerResourceKind::ScanBlockSums).first()?;
     let block_offsets =
         *owned_resource_ids(resources, owner, CompilerResourceKind::ScanBlockOffsets).first()?;
@@ -2304,7 +2318,8 @@ fn emit_scan_entry(
         elem_ty,
     ) = {
         let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
-        let SideEffectKind::Soac(Soac::Screma(screma::Op::Scan { lanes, operators, .. })) = &se.kind else {
+        let SideEffectKind::Soac(_, Soac::Screma(screma::Op::Scan { lanes, operators, .. })) = &se.kind
+        else {
             unreachable!("scan analysis admitted a non-scan recipe")
         };
         debug_assert!(operators.rest.is_empty());
@@ -2399,6 +2414,16 @@ fn emit_scan_entry(
     // Append a chunked reduce over the same input that stores each thread's
     // final accumulator to `block_sums[tid]`.
     {
+        let next_semantic_op = entry
+            .graph
+            .skeleton
+            .blocks
+            .iter()
+            .flat_map(|(_, block)| &block.side_effects)
+            .filter_map(|effect| effect.kind.soac_id())
+            .map(|id| id.0)
+            .max()
+            .map_or(0, |id| id + 1);
         let mut next_effect = graph_ops::next_effect_token(&entry.graph);
         // `[chunked_input, init]` — the step captures live on the SegBody below.
         let reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![chunked_input_nid, init_nid];
@@ -2406,6 +2431,7 @@ fn emit_scan_entry(
         let screma_nid = graph_ops::emit_pending_soac(
             &mut entry.graph,
             block_id,
+            SemanticOpId(next_semantic_op),
             Soac::Screma(screma::Op::Reduce {
                 lanes: screma::Lanes {
                     inputs: vec![super::types::SoacInputType {

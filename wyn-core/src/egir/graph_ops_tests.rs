@@ -1,6 +1,5 @@
 use super::*;
 use crate::ast::TypeName;
-use crate::egir::program::SemanticOpId;
 use crate::egir::types::{EffectToken, SkeletonTerminator};
 use crate::ssa::types::{ConstantValue, InstKind};
 use polytype::Type;
@@ -19,7 +18,6 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
     let place = graph.intern_constant(ConstantValue::U32(0), ty.clone());
     let produced = graph.alloc_side_effect_result(ty.clone());
     graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        semantic_id: Some(SemanticOpId(0)),
         kind: SideEffectKind::Inst(InstKind::Load {
             place: Default::default(),
         }),

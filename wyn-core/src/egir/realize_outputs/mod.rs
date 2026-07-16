@@ -269,7 +269,7 @@ fn source_value_writers(
         |node| {
             if effect_index
                 .effect(graph, node)
-                .is_some_and(|effect| matches!(effect.kind, super::types::SideEffectKind::Soac(_)))
+                .is_some_and(|effect| matches!(effect.kind, super::types::SideEffectKind::Soac(_, _)))
             {
                 writers.push(OutputWriter::Value(node));
             }

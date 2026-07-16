@@ -64,7 +64,7 @@ fn semantic_soac_stats(allocated: &crate::EgirAllocated) -> SemanticSoacStats {
 
     fn visit(graph: &EGraph, stats: &mut SemanticSoacStats) {
         for effect in graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects) {
-            let SideEffectKind::Soac(soac) = &effect.kind else {
+            let SideEffectKind::Soac(_, soac) = &effect.kind else {
                 continue;
             };
             match soac {
@@ -153,7 +153,7 @@ entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter_map(|effect| {
-            let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
             let screma::Op::Map { .. } = op else {
@@ -194,7 +194,7 @@ entry mixed() [4]i32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter_map(|effect| {
-            let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
             let screma::Op::Map { .. } = op else {
@@ -231,7 +231,7 @@ entry siblings<[n]>(xs: [n]i32, ys: [n]i32) ([n]i32, [n]i32) =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
-            let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
             if !matches!(op, screma::Op::Map { .. }) || op.lanes().maps.len() != 2 {
@@ -374,7 +374,7 @@ entry stats(xs: []i32) [4]i32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
-            let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
             let screma::Op::Reduce { operators, .. } = op else {
@@ -439,13 +439,16 @@ entry pick(xs: []i32) ?k. [k]i32 =
         .any(|effect| {
             matches!(
                 &effect.kind,
-                SideEffectKind::Soac(Soac::Filter(filter::Op {
-                    body: filter::Body {
-                        input: filter::Input::Mapped { .. },
+                SideEffectKind::Soac(
+                    _,
+                    Soac::Filter(filter::Op {
+                        body: filter::Body {
+                            input: filter::Input::Mapped { .. },
+                            ..
+                        },
                         ..
-                    },
-                    ..
-                }))
+                    })
+                )
             )
         });
     assert!(
@@ -479,7 +482,7 @@ entry write(xs: []i32, #[storage(set=2, binding=0, access=write)] dest: *[]i32) 
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| match &effect.kind {
-            SideEffectKind::Soac(Soac::Hist(op)) => Some(op.body.inputs.len()),
+            SideEffectKind::Soac(_, Soac::Hist(op)) => Some(op.body.inputs.len()),
             _ => None,
         })
         .expect("fused SegHist");
@@ -508,7 +511,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
-            let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
             let screma::SemanticState::Segmented { space, .. } = op.semantic_state() else {
@@ -576,7 +579,7 @@ entry e() [4]f32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter_map(|effect| {
-            let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
             (!matches!(op, screma::Op::Map { .. })).then(|| op.operators().len())
@@ -595,7 +598,7 @@ entry e() [4]f32 =
         .filter(|effect| {
             matches!(
                 &effect.kind,
-                SideEffectKind::Soac(Soac::Screma(screma::Op::Map { .. }))
+                SideEffectKind::Soac(_, Soac::Screma(screma::Op::Map { .. }))
             )
         })
         .count();
@@ -616,7 +619,7 @@ entry e() [4]f32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
-            let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
             matches!(op, screma::Op::Reduce { .. }).then(|| op.operators())
@@ -655,7 +658,7 @@ entry e() [3]i32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter_map(|effect| {
-            let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
             matches!(op, screma::Op::Reduce { .. }).then(|| op.operators().len())
@@ -687,7 +690,7 @@ entry e() [2]i32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
-            let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
                 return None;
             };
             let screma::Op::Reduce { operators, .. } = op else {
@@ -1211,13 +1214,9 @@ fn multi_consumer_producer_survival_is_characterized() {
             .iter()
             .flat_map(|entry| {
                 entry.graph.skeleton.blocks.iter().flat_map(move |(_, block)| {
-                    block.side_effects.iter().filter_map(move |effect| {
-                        matches!(
-                            &effect.kind,
-                            SideEffectKind::Soac(Soac::Screma(screma::Op::Map { .. }))
-                        )
-                        .then_some(effect.semantic_id)
-                        .flatten()
+                    block.side_effects.iter().filter_map(move |effect| match &effect.kind {
+                        SideEffectKind::Soac(id, Soac::Screma(screma::Op::Map { .. })) => Some(*id),
+                        _ => None,
                     })
                 })
             })

@@ -28,7 +28,8 @@ pub(crate) fn entry(
         aliases,
         mut output_routes,
     } = entry;
-    let (graph, block_map) = graph.try_map_phase(|_, _, soac| schedule_soac(soac, filter_plan))?;
+    let (graph, block_map) =
+        graph.try_map_phase(|_, _, id, soac| schedule_soac(soac, filter_plan).map(|soac| (id, soac)))?;
     for route in &mut output_routes {
         route.source.block = block_map[&route.source.block];
     }
@@ -52,7 +53,7 @@ pub(crate) fn graph(
     graph: EGraph<Semantic>,
     serial: bool,
 ) -> Result<(EGraph<Scheduled>, crate::LookupMap<BlockId, BlockId>), String> {
-    graph.try_map_phase(|_, _, soac| schedule_soac_with_mode(soac, None, serial))
+    graph.try_map_phase(|_, _, id, soac| schedule_soac_with_mode(soac, None, serial).map(|soac| (id, soac)))
 }
 
 fn schedule_soac(
@@ -158,7 +159,7 @@ fn schedule_screma_state(
 pub(crate) fn force_serial(graph: &mut EGraph<Scheduled>) {
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
-            let SideEffectKind::Soac(Soac::Screma(op)) = &mut effect.kind else {
+            let SideEffectKind::Soac(_, Soac::Screma(op)) = &mut effect.kind else {
                 continue;
             };
             match op {
@@ -183,24 +184,30 @@ pub(crate) fn parallel_effect(
         contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
             matches!(
                 &effect.kind,
-                SideEffectKind::Soac(Soac::Screma(
-                    screma::Op::Map {
-                        state: screma::ScheduledState::Segmented(_),
+                SideEffectKind::Soac(
+                    _,
+                    Soac::Screma(
+                        screma::Op::Map {
+                            state: screma::ScheduledState::Segmented(_),
+                            ..
+                        } | screma::Op::Reduce {
+                            state: screma::ScheduledState::Segmented(_),
+                            ..
+                        } | screma::Op::Scan {
+                            state: screma::ScheduledState::Segmented(_),
+                            ..
+                        } | screma::Op::Composite {
+                            state: screma::ScheduledState::Segmented(_),
+                            ..
+                        }
+                    )
+                ) | SideEffectKind::Soac(
+                    _,
+                    Soac::Filter(filter::Op {
+                        state: filter::ScheduledState::Parallel { .. },
                         ..
-                    } | screma::Op::Reduce {
-                        state: screma::ScheduledState::Segmented(_),
-                        ..
-                    } | screma::Op::Scan {
-                        state: screma::ScheduledState::Segmented(_),
-                        ..
-                    } | screma::Op::Composite {
-                        state: screma::ScheduledState::Segmented(_),
-                        ..
-                    }
-                )) | SideEffectKind::Soac(Soac::Filter(filter::Op {
-                    state: filter::ScheduledState::Parallel { .. },
-                    ..
-                }))
+                    })
+                )
             )
             .then_some((block, index, effect))
         })

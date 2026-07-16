@@ -92,7 +92,7 @@ fn collect_drifts<'a, P: EgirPhase + 'a>(
     for graph in graphs {
         for (_, block) in &graph.skeleton.blocks {
             for se in &block.side_effects {
-                let SideEffectKind::Soac(soac) = &se.kind else {
+                let SideEffectKind::Soac(_, soac) = &se.kind else {
                     continue;
                 };
                 for body in soac.seg_bodies() {

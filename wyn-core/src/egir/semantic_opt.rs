@@ -58,7 +58,7 @@ pub fn run(inner: &mut SemanticProgram) {
 fn canonicalize_resource_accesses(graph: &mut EGraph) {
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
-            let SideEffectKind::Soac(Soac::Screma(op)) = &mut effect.kind else {
+            let SideEffectKind::Soac(_, Soac::Screma(op)) = &mut effect.kind else {
                 continue;
             };
             if let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() {
@@ -104,7 +104,7 @@ pub(super) fn eliminate_dead_seg_ops_in_graph(graph: &mut EGraph) -> bool {
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         let before = block.side_effects.len();
         block.side_effects.retain(|effect| {
-            let SideEffectKind::Soac(soac) = &effect.kind else {
+            let SideEffectKind::Soac(_, soac) = &effect.kind else {
                 return true;
             };
             // A Seg with no resource write and no output routing is observable
@@ -135,6 +135,7 @@ pub(super) fn eliminate_dead_seg_ops_in_graph(graph: &mut EGraph) -> bool {
 mod tests {
     use super::*;
     use crate::ast::TypeName;
+    use crate::egir::program::SemanticOpId;
     use crate::egir::soac::screma;
     use crate::egir::types::{
         PureOp, SegLevel, SegSpace, SideEffect, Soac, SoacDestination, SoacInputType,
@@ -151,31 +152,33 @@ mod tests {
         let _dead_project =
             graph.intern_pure(PureOp::Project { index: 0 }, smallvec![result], int.clone(), None);
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
-            semantic_id: None,
-            kind: SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
-                lanes: screma::Lanes {
-                    inputs: Vec::<SoacInputType>::new(),
-                    maps: vec![screma::Map {
-                        body: crate::egir::types::SegBody {
-                            region: crate::egir::types::RegionId::from_index(0),
-                            captures: vec![],
-                        },
-                        input_indices: vec![],
-                        output_element_type: int.clone(),
-                        destination: SoacDestination::Fresh,
-                        result_type: int,
-                    }],
-                },
-                state: screma::SemanticState::Segmented {
-                    space: SegSpace {
-                        level: SegLevel::Thread,
-                        dims: vec![crate::egir::types::SegExtent::Fixed(1)],
+            kind: SideEffectKind::Soac(
+                SemanticOpId(0),
+                Soac::Screma(screma::Op::Map {
+                    lanes: screma::Lanes {
+                        inputs: Vec::<SoacInputType>::new(),
+                        maps: vec![screma::Map {
+                            body: crate::egir::types::SegBody {
+                                region: crate::egir::types::RegionId::from_index(0),
+                                captures: vec![],
+                            },
+                            input_indices: vec![],
+                            output_element_type: int.clone(),
+                            destination: SoacDestination::Fresh,
+                            result_type: int,
+                        }],
                     },
-                    placement: screma::Placement::LaneLocal,
-                    output_slots: vec![],
-                    resources: vec![],
-                },
-            })),
+                    state: screma::SemanticState::Segmented {
+                        space: SegSpace {
+                            level: SegLevel::Thread,
+                            dims: vec![crate::egir::types::SegExtent::Fixed(1)],
+                        },
+                        placement: screma::Placement::LaneLocal,
+                        output_slots: vec![],
+                        resources: vec![],
+                    },
+                }),
+            ),
             operand_nodes: smallvec![],
             result: Some(result),
             effects: None,

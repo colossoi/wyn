@@ -1,4 +1,4 @@
-//! Expand physical `SideEffectKind::Soac(...)` skeleton side-effects
+//! Expand physical `SideEffectKind::Soac(_, ...)` skeleton side-effects
 //! into explicit loop subgraphs with pure ops in the sea and block params
 //! carrying accumulators.
 //!
@@ -78,7 +78,7 @@ pub fn run_one_body(
 
 /// Does this SOAC kind have a TLC→EGIR expansion implemented here?
 fn is_handleable_soac(kind: &SideEffectKind) -> bool {
-    let SideEffectKind::Soac(soac) = kind else {
+    let SideEffectKind::Soac(_, soac) = kind else {
         return false;
     };
     match soac {
@@ -194,7 +194,7 @@ fn expand_one(
 ) {
     let se = graph.skeleton.blocks[bid].side_effects.remove(idx);
     match &se.kind {
-        SideEffectKind::Soac(Soac::Screma(op)) if op.is_serial() => {
+        SideEffectKind::Soac(_, Soac::Screma(op)) if op.is_serial() => {
             let lanes = op.lanes();
             let map_input_indices =
                 lanes.maps.iter().map(|map| map.input_indices.clone()).collect::<Vec<_>>();
@@ -478,7 +478,6 @@ fn expand_one(
                             let eff_in = alloc_effect(next_effect);
                             let eff_out = alloc_effect(next_effect);
                             graph.skeleton.blocks[body_bid].side_effects.push(SideEffect {
-                                semantic_id: None,
                                 kind: SideEffectKind::Inst(InstKind::Store {
                                     place: Default::default(),
                                     value: ValueRef::Ssa(Default::default()),
@@ -534,7 +533,6 @@ fn expand_one(
                                 let eff_in = alloc_effect(next_effect);
                                 let eff_out = alloc_effect(next_effect);
                                 graph.skeleton.blocks[body_bid].side_effects.push(SideEffect {
-                                    semantic_id: None,
                                     kind: SideEffectKind::Inst(InstKind::Store {
                                         place: Default::default(),
                                         value: ValueRef::Ssa(Default::default()),
@@ -567,7 +565,7 @@ fn expand_one(
                 },
             );
         }
-        SideEffectKind::Soac(Soac::Filter(op)) => {
+        SideEffectKind::Soac(_, Soac::Filter(op)) => {
             let (input, map_body) = match &op.body.input {
                 filter::Input::Plain(input) => (input, None),
                 filter::Input::Mapped { input, body, .. } => (input, Some(body)),
@@ -626,7 +624,7 @@ fn expand_one(
                 }
             }
         }
-        SideEffectKind::Soac(Soac::Hist(op)) => {
+        SideEffectKind::Soac(_, Soac::Hist(op)) => {
             // Operands: [dest_view, inputs.., captures..].
             let dest_view = se.operand_nodes[0];
             let n_inputs = op.body.inputs.len();
@@ -656,10 +654,13 @@ fn expand_one(
             // conflict-safe parallel implementation.
             build_scatter_loop(graph, control_headers, bid, idx, scatter, next_effect);
         }
-        SideEffectKind::Soac(Soac::Screma(screma::Op::Map {
-            lanes: screma::Lanes { inputs, maps },
-            state: screma::PhysicalMapState::Segmented(screma::Segmented { space, .. }),
-        })) => {
+        SideEffectKind::Soac(
+            _,
+            Soac::Screma(screma::Op::Map {
+                lanes: screma::Lanes { inputs, maps },
+                state: screma::PhysicalMapState::Segmented(screma::Segmented { space, .. }),
+            }),
+        ) => {
             // SegRed/SegScan are consumed by `egir::parallelize::lower`
             // before expansion. This arm is therefore semantically map-only.
             let n_inputs = inputs.len();
@@ -996,7 +997,6 @@ fn build_parallel_maps(
         let eff_in = alloc_effect(next_effect);
         let eff_out = alloc_effect(next_effect);
         graph.skeleton.blocks[body].side_effects.push(SideEffect {
-            semantic_id: None,
             kind: SideEffectKind::Inst(InstKind::Store {
                 place: Default::default(),
                 value: ValueRef::Ssa(Default::default()),
@@ -2385,7 +2385,6 @@ fn emit_read_element(
         let eff_in = alloc_effect(next_effect);
         let eff_out = alloc_effect(next_effect);
         graph.skeleton.blocks[body].side_effects.push(SideEffect {
-            semantic_id: None,
             kind: SideEffectKind::Inst(InstKind::Load {
                 place: Default::default(),
             }),
