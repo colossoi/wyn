@@ -176,7 +176,9 @@ pub(crate) fn force_serial(graph: &mut EGraph<Scheduled>) {
     }
 }
 
-pub(crate) fn kernel_effect(graph: &EGraph<Scheduled>) -> Option<(BlockId, usize, &SideEffect<Scheduled>)> {
+pub(crate) fn parallel_effect(
+    graph: &EGraph<Scheduled>,
+) -> Option<(BlockId, usize, &SideEffect<Scheduled>)> {
     graph.skeleton.blocks.iter().find_map(|(block, contents)| {
         contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
             matches!(

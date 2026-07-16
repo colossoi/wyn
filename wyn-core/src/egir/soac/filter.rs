@@ -36,7 +36,10 @@ pub enum Output<R = SemanticResourceRef> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeLength<R = SemanticResourceRef> {
     ViewOnly,
-    EntryOutput(R),
+    /// Logical length stored in a scalar resource. Public filter outputs and
+    /// compiler-internal runtime-array handoffs use the same representation;
+    /// publication decides whether the resource belongs to the host ABI.
+    Stored(R),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,7 +217,7 @@ impl<R: GraphResource> Op<Semantic<R>> {
 /// Resolve compaction capacity from the post-fusion semantic domain.
 pub(crate) fn resolve_scratch_sizes(inner: &mut SemanticProgram) {
     let mut resolved = Vec::new();
-    for entry in &inner.entry_points {
+    for (_, entry) in inner.entries_with_endpoints() {
         for (_, block) in &entry.graph.skeleton.blocks {
             for effect in &block.side_effects {
                 let SideEffectKind::Soac(Soac::Filter(Op {
@@ -276,7 +279,11 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut SemanticProgram) {
         if let Some(logical) = inner.resources.get_mut(resource.0 as usize) {
             logical.size = size.clone();
         }
-        for entry in &mut inner.entry_points {
+        for entry in inner
+            .entry_points
+            .iter_mut()
+            .chain(inner.materializations.iter_mut().map(|requirement| &mut requirement.entry))
+        {
             if let Some(declaration) = entry
                 .resource_declarations
                 .iter_mut()
@@ -295,7 +302,7 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut SemanticProgram) {
 
 pub(crate) fn allocate_work_resources(inner: &mut SemanticProgram) {
     let mut pending = Vec::new();
-    for entry in &inner.entry_points {
+    for (_, entry) in inner.entries_with_endpoints() {
         for (_, block) in &entry.graph.skeleton.blocks {
             for effect in &block.side_effects {
                 let SideEffectKind::Soac(Soac::Filter(Op {
@@ -356,7 +363,7 @@ pub(crate) fn allocate_work_resources(inner: &mut SemanticProgram) {
 /// Runtime filter identities that predate logical allocation.
 pub(crate) fn resource_kinds(inner: &SemanticProgram) -> HashMap<ResourceId, CompilerResource> {
     let mut kinds = HashMap::new();
-    for entry in &inner.entry_points {
+    for (_, entry) in inner.entries_with_endpoints() {
         for (_, block) in &entry.graph.skeleton.blocks {
             for effect in &block.side_effects {
                 let SideEffectKind::Soac(Soac::Filter(Op {
@@ -375,7 +382,7 @@ pub(crate) fn resource_kinds(inner: &SemanticProgram) -> HashMap<ResourceId, Com
                     scratch.0,
                     CompilerResource::new(CompilerResourceKind::FilterScratch, owner, 0),
                 );
-                if let RuntimeLength::EntryOutput(length) = length {
+                if let RuntimeLength::Stored(length) = length {
                     kinds.insert(
                         length.0,
                         CompilerResource::new(CompilerResourceKind::FilterLenCell, owner, 1),

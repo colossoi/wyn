@@ -972,6 +972,184 @@ entry compact_then_map() ([]i32, [1]u32) =
 }
 
 #[test]
+fn filter_then_map_publishes_runtime_array_handoff() {
+    use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage, DispatchLen, DispatchSize};
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry filter_then_map() []i32 =
+  let kept = filter(|i| i % 2 == 0, iota(4096)) in
+  map(|i| i + 1, kept)
+"#,
+    )
+    .expect("filter survivors feed a separately scheduled map");
+    let pipeline = scalar_prelude_pipeline(&lowered, "filter_then_map");
+    let consumer_index = pipeline
+        .stages
+        .iter()
+        .position(|stage| stage.entry_point == "filter_then_map")
+        .expect("the public map stage is published");
+    let consumer = &pipeline.stages[consumer_index];
+    assert!(consumer_index > 0, "the runtime-array producer precedes the map");
+
+    let handoffs = pipeline
+        .bindings
+        .iter()
+        .enumerate()
+        .filter(|(binding, descriptor)| {
+            consumer.reads.contains(binding)
+                && matches!(
+                    descriptor,
+                    Binding::StorageBuffer {
+                        usage: BufferUsage::Intermediate,
+                        ..
+                    }
+                )
+                && pipeline.stages[..consumer_index].iter().any(|stage| stage.writes.contains(binding))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        handoffs.len(),
+        2,
+        "the producer passes one data buffer and one logical-length cell to the map"
+    );
+    let data = handoffs
+        .iter()
+        .find(|(_, descriptor)| {
+            matches!(
+                descriptor,
+                Binding::StorageBuffer {
+                    length: Some(BufferLen::Fixed { bytes: 16_384 }),
+                    ..
+                }
+            )
+        })
+        .expect("the runtime-array data buffer has input capacity");
+    assert!(handoffs.iter().any(|(_, descriptor)| {
+        matches!(
+            descriptor,
+            Binding::StorageBuffer {
+                length: Some(BufferLen::Fixed { bytes: 4 }),
+                ..
+            }
+        )
+    }));
+    let Binding::StorageBuffer {
+        set: data_set,
+        binding: data_binding,
+        ..
+    } = data.1
+    else {
+        unreachable!()
+    };
+    assert!(matches!(
+        consumer.dispatch_size,
+        DispatchSize::DerivedFrom {
+            len: DispatchLen::InputBinding { set, binding, elem_bytes: 4 },
+            ..
+        } if set == *data_set && binding == *data_binding
+    ));
+    assert!(
+        !spirv_entry_reaches_loop(&lowered.spirv, &consumer.entry_point),
+        "the map entry must not replay the filter's serial loop"
+    );
+}
+
+#[test]
+fn filter_after_serial_prefix_detaches_its_parallel_producer() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry filter_after_serial_prefix(xs: []i32) ([1]i32, []i32, i32) =
+  let prefix =
+    loop acc = 0 for k < 4 do
+      if xs[k] > 0 then acc + xs[k] else acc
+  let kept = filter(|i| i % 2 == 0, iota(4096))
+  let mapped = map(|i| i + 1, kept) in
+  ([prefix], mapped, length(kept))
+"#,
+    )
+    .expect("a continuation-block filter is materialized before its map consumer");
+    let pipeline = scalar_prelude_pipeline(&lowered, "filter_after_serial_prefix");
+    let consumer_index = pipeline
+        .stages
+        .iter()
+        .position(|stage| stage.entry_point == "filter_after_serial_prefix")
+        .expect("the public consumer stage is published");
+    let producer_stages = &pipeline.stages[..consumer_index];
+    let flags = producer_stages
+        .iter()
+        .enumerate()
+        .find_map(|(index, stage)| {
+            let output_feeds_later_phase = stage.writes.iter().any(|binding| {
+                producer_stages[index + 1..].iter().any(|later| later.reads.contains(binding))
+            });
+            (stage.reads.is_empty() && output_feeds_later_phase).then_some(stage)
+        })
+        .expect("the filter flags phase precedes the remaining producer phases");
+    assert!(
+        !spirv_entry_reaches_loop(&lowered.spirv, &flags.entry_point),
+        "the independent serial prefix must not be copied into the filter flags phase"
+    );
+}
+
+#[test]
+#[ignore = "fixed-output serial prefixes are not yet split from parallel output stages"]
+fn fixed_output_serial_prefix_is_not_cloned_into_parallel_output_stage() {
+    use crate::pipeline_descriptor::{Binding, BufferUsage};
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry filter_after_serial_prefix(xs: []i32) ([1]i32, []i32, i32) =
+  let prefix =
+    loop acc = 0 for k < 4 do
+      if xs[k] > 0 then acc + xs[k] else acc
+  let kept = filter(|i| i % 2 == 0, iota(4096))
+  let mapped = map(|i| i + 1, kept) in
+  ([prefix], mapped, length(kept))
+"#,
+    )
+    .expect("serial prefix and filtered map compile");
+    let pipeline = scalar_prelude_pipeline(&lowered, "filter_after_serial_prefix");
+    let output_bindings = pipeline
+        .bindings
+        .iter()
+        .enumerate()
+        .filter_map(|(index, binding)| {
+            matches!(
+                binding,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Output,
+                    ..
+                }
+            )
+            .then_some(index)
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let parallel_output_stages = pipeline
+        .stages
+        .iter()
+        .filter(|stage| {
+            !is_singleton_stage(stage)
+                && stage.writes.iter().any(|binding| output_bindings.contains(binding))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !parallel_output_stages.is_empty(),
+        "the mapped output must retain a parallel writer"
+    );
+    for stage in parallel_output_stages {
+        assert!(
+            !spirv_entry_reaches_loop(&lowered.spirv, &stage.entry_point),
+            "parallel output stage `{}` replays the independent serial prefix",
+            stage.entry_point
+        );
+    }
+}
+
+#[test]
 fn widened_filter_output_uses_output_element_size() {
     use crate::pipeline_descriptor::{BufferLen, BufferUsage, Pipeline};
 

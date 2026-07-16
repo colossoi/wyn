@@ -261,6 +261,85 @@ fn captured_value_recipe_projects_a_structured_selection_prefix() {
 }
 
 #[test]
+fn selected_operation_recipe_detaches_an_independent_continuation_effect() {
+    let mut graph = EGraph::new();
+    let entry = graph.skeleton.entry;
+    let continuation = graph.skeleton.create_block();
+    let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    let result = graph.add_block_param(continuation, 0, u32_ty());
+    graph.skeleton.blocks[continuation].params.push(result);
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
+        target: continuation,
+        args: vec![zero],
+    };
+    let produced = graph.alloc_side_effect_result(u32_ty());
+    graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
+        semantic_id: Some(SemanticOpId(0)),
+        kind: SideEffectKind::Inst(InstKind::Load {
+            place: Default::default(),
+        }),
+        operand_nodes: smallvec![zero],
+        result: Some(produced),
+        effects: Some((EffectToken(0), EffectToken(1))),
+        span: None,
+    });
+    graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
+
+    let projected = GraphProjector::new(&graph, &LookupMap::new())
+        .selected_operation_recipe(HashSet::from([SideEffectSite {
+            block: continuation,
+            index: 0,
+        }]))
+        .expect("detached operation recipe");
+    assert_eq!(projected.graph.skeleton.blocks.len(), 1);
+    assert!(projected.graph.skeleton.blocks[projected.graph.skeleton.entry].params.is_empty());
+    assert_eq!(
+        projected.block(continuation),
+        Some(projected.graph.skeleton.entry)
+    );
+    assert!(projected.block(entry).is_none());
+    assert!(projected.node(produced).is_some());
+}
+
+#[test]
+fn selected_operation_recipe_rejects_a_continuation_parameter_dependency() {
+    let mut graph = EGraph::new();
+    let entry = graph.skeleton.entry;
+    let continuation = graph.skeleton.create_block();
+    let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    let result = graph.add_block_param(continuation, 0, u32_ty());
+    graph.skeleton.blocks[continuation].params.push(result);
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
+        target: continuation,
+        args: vec![zero],
+    };
+    let produced = graph.alloc_side_effect_result(u32_ty());
+    graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
+        semantic_id: Some(SemanticOpId(0)),
+        kind: SideEffectKind::Inst(InstKind::Load {
+            place: Default::default(),
+        }),
+        operand_nodes: smallvec![result],
+        result: Some(produced),
+        effects: Some((EffectToken(0), EffectToken(1))),
+        span: None,
+    });
+    graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
+
+    let projection =
+        GraphProjector::new(&graph, &LookupMap::new()).selected_operation_recipe(HashSet::from([
+            SideEffectSite {
+                block: continuation,
+                index: 0,
+            },
+        ]));
+    assert!(matches!(
+        projection,
+        Err(error) if error.contains("block parameter")
+    ));
+}
+
+#[test]
 fn projection_does_not_resurrect_eliminated_block_parameters() {
     let mut graph = EGraph::new();
     let entry = graph.skeleton.entry;

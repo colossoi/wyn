@@ -1823,7 +1823,7 @@ fn build_filter_scatter(
     let (out_binding, len_binding) = match &spec.output {
         filter::Output::Runtime {
             scratch,
-            length: filter::RuntimeLength::EntryOutput(length),
+            length: filter::RuntimeLength::Stored(length),
         } => (scratch, length),
         _ => panic!("parallel filter scatter requires runtime entry output"),
     };
@@ -2019,7 +2019,7 @@ fn build_runtime_filter_loop(
     // count into the paired length cell `len_out[0]` so the host can read how
     // many elements are valid in the (capacity-n) output buffer.
     if let filter::Output::Runtime {
-        length: filter::RuntimeLength::EntryOutput(len_br),
+        length: filter::RuntimeLength::Stored(len_br),
         ..
     } = &spec.output
     {

@@ -2553,8 +2553,8 @@ impl<'a, 'b> Converter<'a, 'b> {
                         length: filter::RuntimeLength::ViewOnly,
                     },
                 },
-                // Set by `realize_outputs` only when this filter is a compute
-                // entry's output (it then needs a host-readable length cell).
+                // Residency or output realization upgrades this to `Stored`
+                // when the compacted array crosses a scheduling/ABI boundary.
             }),
             operands,
             view_result_ty,

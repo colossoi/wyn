@@ -1,0 +1,4 @@
+#[compute]
+entry filter_then_map() []i32 =
+  let kept = filter(|i| i % 2 == 0, iota(4096)) in
+  map(|i| i + 1, kept)

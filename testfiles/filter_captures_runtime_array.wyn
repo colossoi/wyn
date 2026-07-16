@@ -1,0 +1,5 @@
+#[compute]
+entry filter_captures_runtime_array(xs: []i32) ([]i32, i32) =
+  let kept = filter(|i| xs[i] > 0, iota(4096))
+  let mapped = map(|i| i + 1, kept) in
+  (mapped, length(kept))

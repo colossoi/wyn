@@ -939,6 +939,7 @@ impl KernelPlan {
                 KernelKind::SharedArrayMaterialization
                     | KernelKind::GatherPrepass
                     | KernelKind::ScalarPrepass
+                    | KernelKind::FilterScatter
             ) {
                 let domain = KernelDomain::Fixed { x: 1, y: 1, z: 1 };
                 phase.domain = domain.clone();
@@ -1219,6 +1220,7 @@ fn phase_from_materialization(
             MaterializationKind::SharedArray => KernelKind::SharedArrayMaterialization,
             MaterializationKind::Gather => KernelKind::GatherPrepass,
             MaterializationKind::Scalar => KernelKind::ScalarPrepass,
+            MaterializationKind::RuntimeArray => KernelKind::FilterScatter,
         },
     )?;
     phase.dependencies = dependencies;
@@ -1259,7 +1261,7 @@ fn source_kind(entry: &SemanticEntry) -> KernelKind {
     if !matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
         return KernelKind::GraphicsPassthrough;
     }
-    match super::kernel_effect(&entry.graph).map(|(_, _, effect)| &effect.kind) {
+    match super::parallel_effect(&entry.graph).map(|(_, _, effect)| &effect.kind) {
         Some(SideEffectKind::Soac(Soac::Screma(screma::Op::Reduce { .. }))) => KernelKind::ReducePhase1,
         Some(SideEffectKind::Soac(Soac::Screma(screma::Op::Scan { .. }))) => KernelKind::ScanPhase1,
         _ => KernelKind::SerialCompute,
@@ -1345,7 +1347,7 @@ fn materialization_domain(requirement: &MaterializationRequirement) -> Option<Ke
 }
 
 fn semantic_domain_graph(graph: &crate::egir::types::EGraph) -> Option<KernelDomain> {
-    match &super::kernel_effect(graph)?.2.kind {
+    match &super::parallel_effect(graph)?.2.kind {
         SideEffectKind::Soac(Soac::Screma(
             screma::Op::Map {
                 state: screma::SemanticState::Segmented { space, .. },
@@ -1363,13 +1365,17 @@ fn semantic_domain_graph(graph: &crate::egir::types::EGraph) -> Option<KernelDom
                 state: screma::SemanticState::Segmented { space, .. },
                 ..
             },
-        )) => domain_from_space(space),
+        )) => domain_from_space_in_graph(graph, space),
+        SideEffectKind::Soac(Soac::Filter(filter::Op {
+            state: filter::SemanticState { space, .. },
+            ..
+        })) => domain_from_space_in_graph(graph, space),
         _ => None,
     }
 }
 
 fn scheduled_domain_graph(graph: &crate::egir::types::EGraph<Scheduled>) -> Option<KernelDomain> {
-    match &super::prepare::kernel_effect(graph)?.2.kind {
+    match &super::prepare::parallel_effect(graph)?.2.kind {
         SideEffectKind::Soac(Soac::Screma(
             screma::Op::Map {
                 state: screma::ScheduledState::Segmented(segment),
@@ -1387,7 +1393,7 @@ fn scheduled_domain_graph(graph: &crate::egir::types::EGraph<Scheduled>) -> Opti
                 state: screma::ScheduledState::Segmented(segment),
                 ..
             },
-        )) => domain_from_space(&segment.space),
+        )) => domain_from_space_in_graph(graph, &segment.space),
         SideEffectKind::Soac(Soac::Filter(filter::Op {
             state: filter::ScheduledState::Parallel { space, plan, .. },
             ..
@@ -1396,7 +1402,7 @@ fn scheduled_domain_graph(graph: &crate::egir::types::EGraph<Scheduled>) -> Opti
             filter::ParallelStage::Flags | filter::ParallelStage::Scatter
         ) =>
         {
-            domain_from_space(space)
+            domain_from_space_in_graph(graph, space)
         }
         _ => None,
     }
@@ -1426,6 +1432,30 @@ pub(crate) fn domain_from_space(space: &crate::egir::types::SegSpace) -> Option<
     }
 }
 
+fn domain_from_space_in_graph<P>(
+    graph: &crate::egir::types::EGraph<P>,
+    space: &crate::egir::types::SegSpace,
+) -> Option<KernelDomain>
+where
+    P: EgirPhase<Resource = SemanticResourceRef>,
+{
+    domain_from_space(space).or_else(|| {
+        let [SegExtent::Value(value)] = space.dims.as_slice() else {
+            return None;
+        };
+        let resource = crate::egir::graph_ops::extract_storage_view_source(graph, *value)?;
+        let polytype::Type::Constructed(crate::ast::TypeName::Array, args) = graph.types.get(value)? else {
+            return None;
+        };
+        let elem_ty = args.first()?;
+        let elem_bytes = crate::ssa::layout::storage_elem_stride(elem_ty)?;
+        Some(KernelDomain::ResourceElements {
+            resource: resource.0,
+            elem_bytes,
+        })
+    })
+}
+
 fn planned_resources(entry: &PlannedEntry<Scheduled>) -> Vec<ScheduledResource> {
     segmented_graph_resources(&entry.graph, &entry.resource_declarations)
         .unwrap_or_else(|| graph_resources(&entry.graph, &entry.resource_declarations))
@@ -1435,7 +1465,7 @@ fn segmented_graph_resources(
     graph: &crate::egir::types::EGraph<Scheduled>,
     declarations: &[SemanticResourceDecl],
 ) -> Option<Vec<ScheduledResource>> {
-    let side_effect = super::prepare::kernel_effect(graph)?.2;
+    let side_effect = super::prepare::parallel_effect(graph)?.2;
     if let SideEffectKind::Soac(Soac::Filter(filter::Op {
         state: filter::ScheduledState::Parallel { storage, plan, .. },
         ..
@@ -1457,7 +1487,7 @@ fn segmented_graph_resources(
                 push(work.flags, ResourceAccess::Read);
                 push(work.offsets, ResourceAccess::Read);
                 push(work.block_offsets, ResourceAccess::Read);
-                if let filter::RuntimeLength::EntryOutput(binding) = storage.length {
+                if let filter::RuntimeLength::Stored(binding) = storage.length {
                     push(binding, ResourceAccess::Read);
                 }
                 push(storage.scratch, ResourceAccess::Write);

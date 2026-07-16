@@ -66,7 +66,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
                             filter::Output::Local { .. } => Vec::new(),
                             filter::Output::Runtime { scratch, length } => {
                                 let mut bindings = vec![*scratch];
-                                if let filter::RuntimeLength::EntryOutput(length) = length {
+                                if let filter::RuntimeLength::Stored(length) = length {
                                     bindings.push(*length);
                                 }
                                 bindings

@@ -628,7 +628,7 @@ pub fn retarget_filter_output(
                 // scratch resource as the paired length cell.
                 op.state.storage = filter::RawStorage::Runtime {
                     scratch: crate::egir::program::SemanticResourceRef(output_resource),
-                    length: filter::RuntimeLength::EntryOutput(scratch),
+                    length: filter::RuntimeLength::Stored(scratch),
                 };
                 retargeted = Some((scratch.0, input_arr_ty, input_elem_ty, output_elem_ty));
             }

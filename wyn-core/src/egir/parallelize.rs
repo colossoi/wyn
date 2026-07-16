@@ -82,6 +82,7 @@ pub fn lower(inner: &SemanticProgram) -> Result<schedule::KernelPlan, String> {
         &inner.region_interner,
     );
     attach_materializations(inner, &mut schedule);
+    lower_materialized_filters(inner, &mut schedule)?;
     let lowered_filters = lower_runtime_filters(inner, &seeded, &mut schedule)?;
     for (index, entry) in inner.entry_points.iter().enumerate() {
         let source = SemanticEntryId(index as u32);
@@ -119,7 +120,7 @@ fn plan_segmented_kernel_body(
     resources: &[LogicalResource],
 ) {
     use schedule::KernelDomain;
-    let Some((block, index, _)) = kernel_effect(&body.graph) else {
+    let Some((block, index, _)) = segmented_screma_effect(&body.graph) else {
         return;
     };
     let SideEffectKind::Soac(Soac::Screma(op)) =
@@ -235,7 +236,7 @@ fn commit_serial_kernel(
     schedule: &mut schedule::KernelPlan,
 ) {
     let (block, effect, _) =
-        kernel_effect(&body.graph).expect("serial recipe requires one pending kernel SegOp");
+        segmented_screma_effect(&body.graph).expect("serial recipe requires one pending kernel SegOp");
     make_screma_serial(&mut body.graph, block, effect);
     schedule
         .commit_kernel(kernel, body, schedule::KernelKind::SerialCompute)
@@ -247,7 +248,6 @@ fn lower_runtime_filters(
     seeded: &schedule::SeededKernels,
     schedule: &mut schedule::KernelPlan,
 ) -> Result<HashSet<SemanticEntryId>, String> {
-    use crate::interface::StorageRole;
     use schedule::KernelDomain;
     let mut lowered = HashSet::new();
     for (index, entry) in inner.entry_points.iter().enumerate() {
@@ -255,15 +255,10 @@ fn lower_runtime_filters(
         let Some(seeded_kernel) = seeded.entry(source) else {
             continue;
         };
-        let Some(FilterAnalysis {
-            semantic_id,
-            space,
-            work,
-            len_out,
-        }) = analyze_filter_entry(entry, &inner.resources)
-        else {
+        let Some(analysis) = analyze_filter_entry(entry, &inner.resources) else {
             continue;
         };
+        let semantic_id = analysis.semantic_id;
         let projected = super::program::PlannedEntry::project(entry)?;
         let groups = if let Some(split) = split_multidomain_seg_maps(&projected) {
             let mut groups = vec![SplitEntry {
@@ -309,157 +304,266 @@ fn lower_runtime_filters(
                 "runtime filter {semantic_id:?} was lost during output splitting"
             ));
         };
-        let domain =
-            schedule::domain_from_space(&space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
-        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-        let declaration = |reference: SemanticResourceRef, role| {
-            let resource = reference.0;
-            let logical = &inner.resources[resource.0 as usize];
-            SemanticResourceDecl {
-                resource: SemanticResourceRef(resource),
-                role,
-                elem_ty: u32_ty.clone(),
-                size: logical.size.clone(),
-            }
-        };
-
-        let flags = project_kernel_body(
-            &filter_entry,
-            format!("{}_filter_flags", filter_entry.name),
-            filter_entry.execution_model.clone(),
-            Vec::new(),
-            Vec::new(),
-            vec![declaration(work.flags, StorageRole::Output)],
-            Type::Constructed(TypeName::Unit, vec![]),
-        );
-
-        let scan_storage = [
-            (work.flags, StorageRole::Input),
-            (work.offsets, StorageRole::Output),
-            (work.block_sums, StorageRole::Output),
-        ]
-        .into_iter()
-        .map(|(resource, role)| declaration(resource, role))
-        .collect();
-        let mut scan = project_kernel_body(
-            &filter_entry,
-            format!("{}_filter_scan", filter_entry.name),
-            crate::ssa::types::ExecutionModel::Compute {
-                local_size: (REDUCE_PHASE1_WIDTH, 1, 1),
-            },
-            Vec::new(),
-            Vec::new(),
-            scan_storage,
-            Type::Constructed(TypeName::Unit, vec![]),
-        );
-        let zero = graph_ops::intern_u32(&mut scan.graph, 0, None);
-
-        let add_name = format!("{}_filter_scan_add", filter_entry.name);
-        let add_fn = synthesize_u32_add_function(add_name.clone(), filter_entry.span);
-        schedule.define_callable(add_fn);
-
-        let mut phase2 = synthesize_phase2_scan(
-            &scan.name,
-            add_name.clone(),
-            u32_ty.clone(),
-            &scan.graph,
-            zero,
-            required_resource(work.block_sums),
-            required_resource(work.block_offsets),
-            Some(required_resource(len_out)),
-        )
-        .expect("filter scan phase-2 synthesis");
-        apply_manifest_resource_sizes(&mut phase2, &inner.resources);
-        let swap_wrapper_name = format!("{}_filter_scan_add_offsets", filter_entry.name);
-        let swap_wrapper = synthesize_swap_wrapper(
-            swap_wrapper_name.clone(),
-            add_name,
-            u32_ty.clone(),
-            filter_entry.span,
-        );
-        let swap_region = schedule.define_callable(swap_wrapper);
-        let mut phase3 = synthesize_phase3_scan(
-            &scan.name,
-            swap_region,
-            u32_ty.clone(),
-            required_resource(work.offsets),
-            required_resource(work.block_offsets),
-            REDUCE_PHASE1_WIDTH,
-        );
-        apply_manifest_resource_sizes(&mut phase3, &inner.resources);
-
-        let mut scatter_resources = filter_entry.resource_declarations.clone();
-        scatter_resources.push(declaration(work.flags, StorageRole::Input));
-        scatter_resources.push(declaration(work.offsets, StorageRole::Input));
-        scatter_resources.push(declaration(work.block_offsets, StorageRole::Input));
-        let scatter = project_kernel_body(
-            &filter_entry,
-            filter_entry.name.clone(),
-            filter_entry.execution_model.clone(),
-            filter_entry.outputs.clone(),
-            filter_entry.output_routes.clone(),
-            scatter_resources,
-            filter_entry.return_ty.clone(),
-        );
-        schedule
-            .commit_filter_kernel(
-                kernel,
-                scatter,
-                schedule::KernelKind::FilterScatter,
-                filter::Plan::Scatter(work),
-            )
-            .expect("seeded filter kernel must remain addressable");
+        lower_filter_kernel(filter_entry, kernel, analysis, schedule, &inner.resources)?;
         schedule
             .set_output_projection(
                 kernel,
                 filter_slots.iter().copied().map(super::program::OutputSlotId).collect(),
             )
             .map_err(|error| error.to_string())?;
-        schedule
-            .add_filter_phase_before(
-                kernel,
-                flags,
-                schedule::DomainSelection::Explicit(domain.clone()),
-                schedule::KernelKind::FilterFlags,
-                filter::Plan::Flags(work),
-            )
-            .expect("seeded filter kernel must remain addressable");
-        // The scan runs a fixed worker grid so each worker scans a large
-        // chunk and `block_sums` stays `FILTER_SCAN_GROUPS * width`-sized,
-        // keeping the serial phase-2 bounded by that constant rather than by
-        // `len`. The flags and scatter phases stay per-element (`domain`).
-        schedule
-            .add_filter_phase_before(
-                kernel,
-                scan,
-                schedule::DomainSelection::Explicit(KernelDomain::Fixed {
-                    x: FILTER_SCAN_GROUPS,
-                    y: 1,
-                    z: 1,
-                }),
-                schedule::KernelKind::FilterScan,
-                filter::Plan::Scan(work),
-            )
-            .expect("seeded filter kernel must remain addressable");
-        schedule
-            .add_phase_before(
-                kernel,
-                phase2,
-                schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                schedule::KernelKind::FilterCombine,
-            )
-            .expect("seeded filter kernel must remain addressable");
-        schedule
-            .add_phase_before(
-                kernel,
-                phase3,
-                schedule::DomainSelection::Explicit(domain),
-                schedule::KernelKind::FilterScan,
-            )
-            .expect("seeded filter kernel must remain addressable");
         lowered.insert(source);
     }
     Ok(lowered)
+}
+
+fn lower_filter_kernel(
+    filter_entry: super::program::PlannedEntry,
+    kernel: schedule::KernelId,
+    analysis: FilterAnalysis,
+    schedule: &mut schedule::KernelPlan,
+    resources: &[LogicalResource],
+) -> Result<(), String> {
+    let family = build_filter_kernel_family(filter_entry, analysis, schedule, resources)?;
+    install_filter_kernel_family(kernel, family, schedule)
+}
+
+struct FilterKernelFamily {
+    domain: schedule::KernelDomain,
+    work: filter::WorkBuffers,
+    flags: super::program::PlannedEntry,
+    scan: super::program::PlannedEntry,
+    combine: super::program::PlannedEntry,
+    apply_offsets: super::program::PlannedEntry,
+    scatter: super::program::PlannedEntry,
+}
+
+fn build_filter_kernel_family(
+    filter_entry: super::program::PlannedEntry,
+    analysis: FilterAnalysis,
+    schedule: &mut schedule::KernelPlan,
+    resources: &[LogicalResource],
+) -> Result<FilterKernelFamily, String> {
+    use crate::interface::StorageRole;
+    use schedule::KernelDomain;
+
+    let FilterAnalysis {
+        space, work, len_out, ..
+    } = analysis;
+    let domain = schedule::domain_from_space(&space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let declaration = |resource, role| filter_resource_declaration(resources, resource, role, &u32_ty);
+
+    let mut flags_storage = filter_entry
+        .resource_declarations
+        .iter()
+        .filter(|declaration| declaration.role == StorageRole::Input)
+        .cloned()
+        .collect::<Vec<_>>();
+    flags_storage.push(declaration(work.flags, StorageRole::Output)?);
+    let flags = project_kernel_body(
+        &filter_entry,
+        format!("{}_filter_flags", filter_entry.name),
+        filter_entry.execution_model.clone(),
+        Vec::new(),
+        Vec::new(),
+        flags_storage,
+        Type::Constructed(TypeName::Unit, vec![]),
+    );
+    let scan_storage = [
+        (work.flags, StorageRole::Input),
+        (work.offsets, StorageRole::Output),
+        (work.block_sums, StorageRole::Output),
+    ]
+    .into_iter()
+    .map(|(resource, role)| declaration(resource, role))
+    .collect::<Result<Vec<_>, _>>()?;
+    let mut scan = project_kernel_body(
+        &filter_entry,
+        format!("{}_filter_scan", filter_entry.name),
+        crate::ssa::types::ExecutionModel::Compute {
+            local_size: (REDUCE_PHASE1_WIDTH, 1, 1),
+        },
+        Vec::new(),
+        Vec::new(),
+        scan_storage,
+        Type::Constructed(TypeName::Unit, vec![]),
+    );
+    let zero = graph_ops::intern_u32(&mut scan.graph, 0, None);
+
+    let add_name = format!("{}_filter_scan_add", filter_entry.name);
+    let add_fn = synthesize_u32_add_function(add_name.clone(), filter_entry.span);
+    schedule.define_callable(add_fn);
+    let mut combine = synthesize_phase2_scan(
+        &scan.name,
+        add_name.clone(),
+        u32_ty.clone(),
+        &scan.graph,
+        zero,
+        required_resource(work.block_sums),
+        required_resource(work.block_offsets),
+        Some(required_resource(len_out)),
+    )
+    .map_err(|error| {
+        format!(
+            "failed to synthesize filter scan for `{}`: {error}",
+            filter_entry.name
+        )
+    })?;
+    apply_manifest_resource_sizes(&mut combine, resources);
+    let swap_wrapper_name = format!("{}_filter_scan_add_offsets", filter_entry.name);
+    let swap_wrapper =
+        synthesize_swap_wrapper(swap_wrapper_name, add_name, u32_ty.clone(), filter_entry.span);
+    let swap_region = schedule.define_callable(swap_wrapper);
+    let mut apply_offsets = synthesize_phase3_scan(
+        &scan.name,
+        swap_region,
+        Type::Constructed(TypeName::UInt(32), vec![]),
+        required_resource(work.offsets),
+        required_resource(work.block_offsets),
+        REDUCE_PHASE1_WIDTH,
+    );
+    apply_manifest_resource_sizes(&mut apply_offsets, resources);
+
+    let mut scatter_resources = filter_entry.resource_declarations.clone();
+    for declaration in &mut scatter_resources {
+        if declaration.resource == len_out {
+            declaration.role = StorageRole::Input;
+        }
+    }
+    scatter_resources.push(declaration(work.flags, StorageRole::Input)?);
+    scatter_resources.push(declaration(work.offsets, StorageRole::Input)?);
+    scatter_resources.push(declaration(work.block_offsets, StorageRole::Input)?);
+    let scatter = project_kernel_body(
+        &filter_entry,
+        filter_entry.name.clone(),
+        filter_entry.execution_model.clone(),
+        filter_entry.outputs.clone(),
+        filter_entry.output_routes.clone(),
+        scatter_resources,
+        filter_entry.return_ty.clone(),
+    );
+    Ok(FilterKernelFamily {
+        domain,
+        work,
+        flags,
+        scan,
+        combine,
+        apply_offsets,
+        scatter,
+    })
+}
+
+fn install_filter_kernel_family(
+    kernel: schedule::KernelId,
+    family: FilterKernelFamily,
+    schedule: &mut schedule::KernelPlan,
+) -> Result<(), String> {
+    use schedule::KernelDomain;
+
+    let FilterKernelFamily {
+        domain,
+        work,
+        flags,
+        scan,
+        combine,
+        apply_offsets,
+        scatter,
+    } = family;
+    schedule
+        .commit_filter_kernel(
+            kernel,
+            scatter,
+            schedule::KernelKind::FilterScatter,
+            filter::Plan::Scatter(work),
+        )
+        .map_err(|error| error.to_string())?;
+    schedule
+        .add_filter_phase_before(
+            kernel,
+            flags,
+            schedule::DomainSelection::Explicit(domain.clone()),
+            schedule::KernelKind::FilterFlags,
+            filter::Plan::Flags(work),
+        )
+        .map_err(|error| error.to_string())?;
+    // The scan runs a fixed worker grid so each worker scans a large chunk;
+    // flags and scatter remain one-thread-per-input-element.
+    schedule
+        .add_filter_phase_before(
+            kernel,
+            scan,
+            schedule::DomainSelection::Explicit(KernelDomain::Fixed {
+                x: FILTER_SCAN_GROUPS,
+                y: 1,
+                z: 1,
+            }),
+            schedule::KernelKind::FilterScan,
+            filter::Plan::Scan(work),
+        )
+        .map_err(|error| error.to_string())?;
+    schedule
+        .add_phase_before(
+            kernel,
+            combine,
+            schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+            schedule::KernelKind::FilterCombine,
+        )
+        .map_err(|error| error.to_string())?;
+    schedule
+        .add_phase_before(
+            kernel,
+            apply_offsets,
+            schedule::DomainSelection::Explicit(domain),
+            schedule::KernelKind::FilterScan,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn filter_resource_declaration(
+    resources: &[LogicalResource],
+    reference: SemanticResourceRef,
+    role: crate::interface::StorageRole,
+    elem_ty: &Type<TypeName>,
+) -> Result<SemanticResourceDecl, String> {
+    let resource = reference.0;
+    let logical = resources
+        .get(resource.0 as usize)
+        .filter(|logical| logical.id == resource)
+        .ok_or_else(|| format!("filter references missing resource {resource:?}"))?;
+    Ok(SemanticResourceDecl {
+        resource: reference,
+        role,
+        elem_ty: elem_ty.clone(),
+        size: logical.size.clone(),
+    })
+}
+
+fn lower_materialized_filters(
+    inner: &SemanticProgram,
+    schedule: &mut schedule::KernelPlan,
+) -> Result<(), String> {
+    for requirement in &inner.materializations {
+        if requirement.kind != super::program::MaterializationKind::RuntimeArray {
+            continue;
+        }
+        let endpoint = super::program::CompilerFlowEndpoint::Materialization(requirement.id);
+        let kernel = schedule.kernel_for_flow_source(endpoint).ok_or_else(|| {
+            format!(
+                "runtime-array materialization {:?} was not scheduled",
+                requirement.id
+            )
+        })?;
+        let analysis = analyze_filter_entry(&requirement.entry, &inner.resources).ok_or_else(|| {
+            format!(
+                "materialization {:?} has no parallelizable filter",
+                requirement.id
+            )
+        })?;
+        let body = super::program::PlannedEntry::project(&requirement.entry)?;
+        lower_filter_kernel(body, kernel, analysis, schedule, &inner.resources)?;
+    }
+    Ok(())
 }
 
 struct FilterAnalysis {
@@ -493,7 +597,7 @@ fn analyze_filter_entry(entry: &SemanticEntry, resources: &[LogicalResource]) ->
         else {
             continue;
         };
-        let filter::RuntimeLength::EntryOutput(len_out) = length else {
+        let filter::RuntimeLength::Stored(len_out) = length else {
             return None;
         };
         let semantic_id = effect.semantic_id?;
@@ -597,7 +701,7 @@ fn compact_projected_entry_interface(entry: &mut super::program::PlannedEntry) {
             OutputWriter::Effect(_) => None,
         }));
     }
-    let reachable = graph_ops::value_producer_closure(&entry.graph, roots).nodes;
+    let reachable = graph_ops::execution_value_producer_closure(&entry.graph, roots).nodes;
     let reachable_storage_resources = reachable
         .iter()
         .filter_map(|node| graph_ops::extract_storage_view_source(&entry.graph, *node))
@@ -721,7 +825,9 @@ pub(crate) fn attach_materializations(inner: &SemanticProgram, schedule: &mut sc
         match compiler.kind {
             CompilerResourceKind::ScalarHandoff
             | CompilerResourceKind::GatherHandoff
-            | CompilerResourceKind::MultiConsumerArray => {}
+            | CompilerResourceKind::MultiConsumerArray
+            | CompilerResourceKind::FilterScratch
+            | CompilerResourceKind::FilterLenCell => {}
             _ => continue,
         }
         let consumers = materializations.entry(flow.producer).or_insert_with(Vec::new);
@@ -759,7 +865,7 @@ pub(crate) fn attach_materializations(inner: &SemanticProgram, schedule: &mut sc
             .expect("scheduled flow consumer must remain addressable");
         let body = super::program::PlannedEntry::project(&requirement.entry)
             .expect("materialization entry projection");
-        if kernel_effect(&body.graph).is_some_and(|(block, index, _)| {
+        if segmented_screma_effect(&body.graph).is_some_and(|(block, index, _)| {
             matches!(
                 &body.graph.skeleton.blocks[block].side_effects[index].kind,
                 SideEffectKind::Soac(Soac::Screma(screma::Op::Reduce { .. } | screma::Op::Scan { .. }))
@@ -1606,7 +1712,18 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
     Ok(b.build())
 }
 
-pub(crate) fn kernel_effect(graph: &EGraph) -> Option<(BlockId, usize, &SideEffect)> {
+pub(crate) fn parallel_effect(graph: &EGraph) -> Option<(BlockId, usize, &SideEffect)> {
+    segmented_screma_effect(graph).or_else(|| {
+        graph.skeleton.blocks.iter().find_map(|(block, contents)| {
+            contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
+                matches!(&effect.kind, SideEffectKind::Soac(Soac::Filter(_)))
+                    .then_some((block, index, effect))
+            })
+        })
+    })
+}
+
+fn segmented_screma_effect(graph: &EGraph) -> Option<(BlockId, usize, &SideEffect)> {
     graph.skeleton.blocks.iter().find_map(|(block, contents)| {
         contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
             matches!(&effect.kind,
@@ -1784,7 +1901,7 @@ fn analyze_reduce_entry(
     entry: &super::program::PlannedEntry,
     resources: &[LogicalResource],
 ) -> Option<ReduceAnalysis> {
-    let (block, effect, _) = kernel_effect(&entry.graph)?;
+    let (block, effect, _) = segmented_screma_effect(&entry.graph)?;
     let side_effect = &entry.graph.skeleton.blocks[block].side_effects[effect];
     if seg_scratch_specs(&entry.graph, side_effect)?.family != SegScratchFamily::Reduce {
         return None;
@@ -1891,7 +2008,7 @@ fn emit_reduce_entry(
         outputs: acc_output_decls,
     } = analysis;
     debug_assert_eq!(
-        kernel_effect(&entry.graph).map(|(block, effect, _)| (block, effect)),
+        segmented_screma_effect(&entry.graph).map(|(block, effect, _)| (block, effect)),
         Some((block_id, idx))
     );
     let total_threads = REDUCE_PHASE1_WIDTH;
@@ -2113,7 +2230,7 @@ fn analyze_scan_entry(
     entry: &super::program::PlannedEntry,
     resources: &[LogicalResource],
 ) -> Option<ScanAnalysis> {
-    let (block, effect, _) = kernel_effect(&entry.graph)?;
+    let (block, effect, _) = segmented_screma_effect(&entry.graph)?;
     let side_effect = &entry.graph.skeleton.blocks[block].side_effects[effect];
     if seg_scratch_specs(&entry.graph, side_effect)?.family != SegScratchFamily::Scan {
         return None;
@@ -2160,7 +2277,7 @@ fn emit_scan_entry(
     resources: &[LogicalResource],
 ) -> Vec<super::program::PlannedEntry> {
     debug_assert_eq!(
-        kernel_effect(&entry.graph).map(|(block, effect, _)| (block, effect)),
+        segmented_screma_effect(&entry.graph).map(|(block, effect, _)| (block, effect)),
         Some((analysis.block, analysis.effect))
     );
     let total_threads = REDUCE_PHASE1_WIDTH;

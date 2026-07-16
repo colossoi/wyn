@@ -127,6 +127,9 @@ enum ProjectionMode {
     EntryRecipe {
         effect_limit: Option<usize>,
     },
+    DetachedRecipe {
+        block: BlockId,
+    },
     StructuredPrefix {
         continuation: BlockId,
         effect_limit: usize,
@@ -177,15 +180,27 @@ impl<'a> GraphProjector<'a> {
         self.selected_with_values(roots, Vec::new())
     }
 
-    /// Project a straight-line entry recipe without retaining the source
-    /// entry's output/control-flow tail. Materialization requirements use this
-    /// form for producers that execute before the source entry branches.
-    pub fn selected_entry_recipe(&self, roots: HashSet<SideEffectSite>) -> Result<GraphProjection, String> {
-        self.project(
-            roots,
-            Vec::new(),
-            ProjectionMode::EntryRecipe { effect_limit: None },
-        )
+    /// Project selected operation effects as a standalone entry recipe. An
+    /// operation in a continuation block may be detached when its complete
+    /// producer closure is independent of that block's parameters and of
+    /// effects in other blocks.
+    pub fn selected_operation_recipe(
+        &self,
+        roots: HashSet<SideEffectSite>,
+    ) -> Result<GraphProjection, String> {
+        let mut blocks = roots.iter().map(|site| site.block);
+        let Some(block) = blocks.next() else {
+            return Err("operation recipe effects must belong to one block".into());
+        };
+        if blocks.any(|other| other != block) {
+            return Err("operation recipe effects must belong to one block".into());
+        }
+        let mode = if block == self.source.skeleton.entry {
+            ProjectionMode::EntryRecipe { effect_limit: None }
+        } else {
+            ProjectionMode::DetachedRecipe { block }
+        };
+        self.project(roots, Vec::new(), mode)
     }
 
     /// Project the prefix recipe for a value captured by a parallel operation.
@@ -255,7 +270,7 @@ impl<'a> GraphProjector<'a> {
         mode: ProjectionMode,
     ) -> Result<GraphProjection, String> {
         let selection = self.select_projection(selected, extra_values, mode)?;
-        let mut shell = self.projection_shell(&selection)?;
+        let mut shell = self.projection_shell(mode, &selection)?;
         for value in &selection.values {
             super::graph_ops::clone_value_subgraph(
                 self.source,
@@ -268,7 +283,10 @@ impl<'a> GraphProjector<'a> {
         }
         let effects = self.clone_effects(&selection, &mut shell)?;
         self.project_terminators(mode, &selection.blocks, &mut shell)?;
-        let control_headers = if matches!(mode, ProjectionMode::EntryRecipe { .. }) {
+        let control_headers = if matches!(
+            mode,
+            ProjectionMode::EntryRecipe { .. } | ProjectionMode::DetachedRecipe { .. }
+        ) {
             LookupMap::new()
         } else {
             self.project_control_headers(&shell.blocks)?
@@ -305,11 +323,11 @@ impl<'a> GraphProjector<'a> {
         if selected.iter().any(|site| !allowed_effects.contains(site)) {
             return Err("value recipe depends on an effect outside its prefix boundary".into());
         }
-        if values.iter().any(|node| {
-            matches!(
-                self.source.nodes[*node],
-                ENode::BlockParam { block, .. } if !blocks.contains(&block)
-            )
+        if values.iter().any(|node| match self.source.nodes[*node] {
+            ENode::BlockParam { block, .. } => {
+                !blocks.contains(&block) || matches!(mode, ProjectionMode::DetachedRecipe { .. })
+            }
+            _ => false,
         }) {
             return Err("value recipe depends on a block parameter outside its prefix boundary".into());
         }
@@ -320,11 +338,19 @@ impl<'a> GraphProjector<'a> {
         })
     }
 
-    fn projection_shell(&self, selection: &ProjectionSelection) -> Result<ProjectionShell, String> {
+    fn projection_shell(
+        &self,
+        mode: ProjectionMode,
+        selection: &ProjectionSelection,
+    ) -> Result<ProjectionShell, String> {
         let mut graph = EGraph::new();
-        let mut blocks = HashMap::from([(self.source.skeleton.entry, graph.skeleton.entry)]);
+        let source_entry = match mode {
+            ProjectionMode::DetachedRecipe { block } => block,
+            _ => self.source.skeleton.entry,
+        };
+        let mut blocks = HashMap::from([(source_entry, graph.skeleton.entry)]);
         for (source_block, _) in &self.source.skeleton.blocks {
-            if source_block != self.source.skeleton.entry && selection.blocks.contains(&source_block) {
+            if source_block != source_entry && selection.blocks.contains(&source_block) {
                 blocks.insert(source_block, graph.skeleton.create_block());
             }
         }
@@ -336,7 +362,9 @@ impl<'a> GraphProjector<'a> {
                 nodes.insert(source_id, target);
             }
         }
-        self.clone_live_block_params(&selection.blocks, &mut graph, &blocks, &mut nodes);
+        if !matches!(mode, ProjectionMode::DetachedRecipe { .. }) {
+            self.clone_live_block_params(&selection.blocks, &mut graph, &blocks, &mut nodes);
+        }
         for site in &selection.effects {
             if let Some(result) = self.effect_at(*site)?.result {
                 let target = graph.alloc_side_effect_result(self.source.types[&result].clone());
@@ -415,6 +443,10 @@ impl<'a> GraphProjector<'a> {
                     if *source_block == self.source.skeleton.entry
             ) || matches!(
                 mode,
+                ProjectionMode::DetachedRecipe { block }
+                    if *source_block == block
+            ) || matches!(
+                mode,
                 ProjectionMode::StructuredPrefix { continuation, .. }
                     if *source_block == continuation
             );
@@ -435,6 +467,7 @@ impl<'a> GraphProjector<'a> {
         match mode {
             ProjectionMode::Complete => Ok(self.source.skeleton.blocks.keys().collect()),
             ProjectionMode::EntryRecipe { .. } => Ok(HashSet::from([self.source.skeleton.entry])),
+            ProjectionMode::DetachedRecipe { block } => Ok(HashSet::from([block])),
             ProjectionMode::StructuredPrefix { continuation, .. } => {
                 self.structured_prefix_blocks(continuation)
             }
@@ -486,11 +519,12 @@ impl<'a> GraphProjector<'a> {
         let limit = match mode {
             ProjectionMode::EntryRecipe { effect_limit } => effect_limit,
             ProjectionMode::StructuredPrefix { effect_limit, .. } => Some(effect_limit),
-            ProjectionMode::Complete => None,
+            ProjectionMode::Complete | ProjectionMode::DetachedRecipe { .. } => None,
         };
         let boundary_block = match mode {
             ProjectionMode::StructuredPrefix { continuation, .. } => Some(continuation),
             ProjectionMode::EntryRecipe { .. } => Some(self.source.skeleton.entry),
+            ProjectionMode::DetachedRecipe { block } => Some(block),
             ProjectionMode::Complete => None,
         };
         blocks
@@ -510,12 +544,14 @@ impl<'a> GraphProjector<'a> {
         blocks
             .iter()
             .filter(|block| {
-                !matches!(mode, ProjectionMode::EntryRecipe { .. })
-                    && !matches!(
-                        mode,
-                        ProjectionMode::StructuredPrefix { continuation, .. }
-                            if **block == continuation
-                    )
+                !matches!(
+                    mode,
+                    ProjectionMode::EntryRecipe { .. } | ProjectionMode::DetachedRecipe { .. }
+                ) && !matches!(
+                    mode,
+                    ProjectionMode::StructuredPrefix { continuation, .. }
+                        if **block == continuation
+                )
             })
             .flat_map(|block| self.source.skeleton.blocks[*block].term.referenced_nodes())
             .collect()

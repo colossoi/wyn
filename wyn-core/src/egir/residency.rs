@@ -45,7 +45,29 @@ struct OperationResultMaterialization {
     projected_site: SideEffectSite,
     projected_result: NodeId,
     projection: super::graph_projector::GraphProjection,
-    output_specs: Vec<OutputSpec>,
+    layout: MaterializedValueLayout,
+}
+
+enum MaterializedValueLayout {
+    /// One independently storage-layoutable resource per result component.
+    /// Scalar, gather, and shared-array policies all use this layout.
+    FixedArity(Vec<OutputSpec>),
+    /// Variable-cardinality array represented by capacity storage plus a
+    /// separately stored logical length.
+    RuntimeArray {
+        scratch: ResourceId,
+        elem_ty: Type<TypeName>,
+        result_ty: Type<TypeName>,
+        size: LogicalSize,
+    },
+}
+
+struct RuntimeArrayHandoff {
+    data: ResourceId,
+    length: ResourceId,
+    elem_ty: Type<TypeName>,
+    result_ty: Type<TypeName>,
+    size: LogicalSize,
 }
 
 struct ParallelPrelude {
@@ -385,6 +407,24 @@ fn verify_residency_requirements_satisfied(inner: &SemanticProgram) {
                     continue;
                 };
                 let id = effect.required_semantic_id();
+                if matches!(
+                    &effect.kind,
+                    SideEffectKind::Soac(Soac::Filter(filter::Op {
+                        state: filter::SemanticState {
+                            storage: filter::Output::Runtime {
+                                length: filter::RuntimeLength::ViewOnly,
+                                ..
+                            },
+                            ..
+                        },
+                        ..
+                    }))
+                ) {
+                    assert!(
+                        !has_parallel_consumer(entry, consumers.get(&id)),
+                        "runtime-array producer {id:?} survived inside a parallel consumer"
+                    );
+                }
                 if consumers.get(&id).map_or(0, HashSet::len) < 2 {
                     continue;
                 }
@@ -437,36 +477,99 @@ fn plan_operation_result(inner: &SemanticProgram) -> Option<MaterializationPlan>
     let consumers = semantic_value_consumers(inner);
     for (entry_index, entry) in inner.entry_points.iter().enumerate() {
         for (block_id, block) in &entry.graph.skeleton.blocks {
-            if block_id != entry.graph.skeleton.entry {
-                continue;
-            }
             for (effect_index, effect) in block.side_effects.iter().enumerate() {
                 let Some(result) = effect.result else {
                     continue;
                 };
                 let id = effect.required_semantic_id();
-                let SideEffectKind::Soac(Soac::Screma(op)) = &effect.kind else {
-                    continue;
-                };
                 let semantic_consumers = consumers.get(&id);
                 let source_site = SideEffectSite {
                     block: block_id,
                     index: effect_index,
                 };
-                let Some(kind) =
-                    operation_result_residency(entry, op, result, source_site, semantic_consumers)
-                else {
-                    continue;
-                };
-                if let Some(plan) =
-                    operation_result_plan(entry_index, entry, op, result, id, source_site, kind)
-                {
-                    return Some(plan);
+                match &effect.kind {
+                    SideEffectKind::Soac(Soac::Screma(op)) => {
+                        let Some(kind) =
+                            operation_result_residency(entry, op, result, source_site, semantic_consumers)
+                        else {
+                            continue;
+                        };
+                        if let Some(plan) =
+                            operation_result_plan(entry_index, entry, op, result, id, source_site, kind)
+                        {
+                            return Some(plan);
+                        }
+                    }
+                    SideEffectKind::Soac(Soac::Filter(op)) => {
+                        if let Some(plan) = filter_runtime_array_plan(
+                            entry_index,
+                            entry,
+                            op,
+                            result,
+                            id,
+                            source_site,
+                            semantic_consumers,
+                        ) {
+                            return Some(plan);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
     }
     None
+}
+
+fn filter_runtime_array_plan(
+    entry_index: usize,
+    entry: &super::program::SemanticEntry,
+    op: &filter::Op<super::types::Semantic>,
+    result: NodeId,
+    producer: SemanticOpId,
+    source_site: SideEffectSite,
+    consumers: Option<&HashSet<SemanticOpId>>,
+) -> Option<MaterializationPlan> {
+    let filter::SemanticState {
+        space,
+        storage:
+            filter::Output::Runtime {
+                scratch,
+                length: filter::RuntimeLength::ViewOnly,
+            },
+    } = &op.state
+    else {
+        return None;
+    };
+    if !has_parallel_consumer(entry, consumers) {
+        return None;
+    }
+    let elem_ty = op.body.output_element_type().clone();
+    crate::ssa::layout::storage_elem_stride(&elem_ty)?;
+    let result_ty = entry.graph.types[&result].clone();
+    let projection = super::graph_projector::GraphProjector::new(&entry.graph, &entry.control_headers)
+        .selected_operation_recipe(HashSet::from([source_site]))
+        .ok()?;
+    let projected_result = projection.node(result)?;
+    let projected_site = projection.graph.side_effect_index().site(projected_result)?;
+    Some(MaterializationPlan {
+        entry: entry_index,
+        kind: MaterializationKind::RuntimeArray,
+        source: MaterializationSource::OperationResult(OperationResultMaterialization {
+            result,
+            producer,
+            source_site,
+            projected_site,
+            projected_result,
+            projection,
+            layout: MaterializedValueLayout::RuntimeArray {
+                scratch: scratch.0,
+                size: size_for_space(space, &elem_ty),
+                elem_ty,
+                result_ty,
+            },
+        }),
+    })
 }
 
 fn semantic_value_consumers(inner: &SemanticProgram) -> HashMap<SemanticOpId, HashSet<SemanticOpId>> {
@@ -509,7 +612,7 @@ fn operation_result_residency(
         screma::Op::Scan { .. } => array_result_residency(entry, result, site, consumers),
         screma::Op::Reduce { operators, .. }
             if operators.rest.is_empty()
-                && (has_segmented_consumer(entry, consumers)
+                && (has_segmented_screma_consumer(entry, consumers)
                     || !matches!(entry.execution_model, ExecutionModel::Compute { .. }))
                 && scalar_result_is_used(&entry.graph, result, site.block, site.index)
                 && invocation_invariant(entry, site.block, &dependencies) =>
@@ -551,7 +654,7 @@ fn operation_result_plan(
     };
     let output_specs = output_specs(&entry.graph, kind, space, op)?;
     let projection = super::graph_projector::GraphProjector::new(&entry.graph, &entry.control_headers)
-        .selected_entry_recipe(HashSet::from([source_site]))
+        .selected_operation_recipe(HashSet::from([source_site]))
         .ok()?;
     let projected_result = projection.node(result)?;
     let projected_site = projection.graph.side_effect_index().site(projected_result)?;
@@ -565,7 +668,7 @@ fn operation_result_plan(
             projected_site,
             projected_result,
             projection,
-            output_specs,
+            layout: MaterializedValueLayout::FixedArity(output_specs),
         }),
     })
 }
@@ -758,15 +861,36 @@ fn launched_consumer_invocations(
     })
 }
 
-fn has_segmented_consumer(
+fn has_parallel_consumer(
     entry: &super::program::SemanticEntry,
     consumers: Option<&HashSet<SemanticOpId>>,
+) -> bool {
+    has_matching_consumer(entry, consumers, |soac| soac.scheduling_space().is_some())
+}
+
+fn has_segmented_screma_consumer(
+    entry: &super::program::SemanticEntry,
+    consumers: Option<&HashSet<SemanticOpId>>,
+) -> bool {
+    has_matching_consumer(entry, consumers, |soac| {
+        matches!(
+            soac,
+            Soac::Screma(op)
+                if matches!(op.semantic_state(), screma::SemanticState::Segmented { .. })
+        )
+    })
+}
+
+fn has_matching_consumer(
+    entry: &super::program::SemanticEntry,
+    consumers: Option<&HashSet<SemanticOpId>>,
+    mut supports: impl FnMut(&Soac<super::types::Semantic>) -> bool,
 ) -> bool {
     let Some(consumers) = consumers else {
         return false;
     };
     entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects).any(|effect| {
-        matches!(&effect.kind, SideEffectKind::Soac(Soac::Screma(op)) if matches!(op.semantic_state(), screma::SemanticState::Segmented { .. }))
+        matches!(&effect.kind, SideEffectKind::Soac(soac) if supports(soac))
             && consumers.contains(&effect.required_semantic_id())
     })
 }
@@ -847,7 +971,7 @@ fn invocation_invariant(
     for &index in effects {
         roots.extend(block.side_effects[index].referenced_nodes());
     }
-    let reachable = graph_ops::value_producer_closure(&entry.graph, roots).nodes;
+    let reachable = graph_ops::execution_value_producer_closure(&entry.graph, roots).nodes;
     reachable.into_iter().all(|node| {
         let Some(ENode::FuncParam { index }) = entry.graph.nodes.get(node) else {
             return true;
@@ -885,6 +1009,10 @@ fn materialize_operation_result(
     kind: MaterializationKind,
     operation: OperationResultMaterialization,
 ) {
+    if matches!(&operation.layout, MaterializedValueLayout::RuntimeArray { .. }) {
+        materialize_runtime_array_result(inner, entry_index, operation);
+        return;
+    }
     let OperationResultMaterialization {
         result,
         producer: producer_id,
@@ -892,14 +1020,17 @@ fn materialize_operation_result(
         projected_site,
         projected_result,
         projection,
-        output_specs,
+        layout,
     } = operation;
+    let MaterializedValueLayout::FixedArity(output_specs) = layout else {
+        unreachable!("runtime-array layouts are handled before fixed-arity materialization")
+    };
     let entry = &inner.entry_points[entry_index];
     let source_output_resources =
         entry.resource_abi.outputs.iter().flatten().copied().collect::<HashSet<_>>();
     let (block_id, effect_index) = (source_site.block, source_site.index);
     let producer_dependencies = dependency_effects(&entry.graph, block_id, effect_index);
-    let dependency_resources = dependency_resources(&entry.graph, block_id, &producer_dependencies);
+    let dependency_resources = dependency_resources(entry, block_id, &producer_dependencies);
 
     let producer_storage = resource_declarations_for(entry, &dependency_resources);
     let execution_model = match entry.execution_model {
@@ -912,6 +1043,9 @@ fn materialize_operation_result(
         MaterializationKind::SharedArray => "materialize_shared",
         MaterializationKind::Gather => "gather_materialize",
         MaterializationKind::Scalar => "prepass_scalar",
+        MaterializationKind::RuntimeArray => {
+            unreachable!("runtime arrays use their layout-specific materialization path")
+        }
     };
     let compact_inputs = !matches!(entry.execution_model, ExecutionModel::Compute { .. });
     let producer_entry = projected_materialization_entry(
@@ -937,6 +1071,9 @@ fn materialize_operation_result(
         MaterializationKind::SharedArray => CompilerResourceKind::MultiConsumerArray,
         MaterializationKind::Gather => CompilerResourceKind::GatherHandoff,
         MaterializationKind::Scalar => CompilerResourceKind::ScalarHandoff,
+        MaterializationKind::RuntimeArray => {
+            unreachable!("runtime arrays reuse their existing data resource")
+        }
     };
     let output_resources = output_specs
         .iter()
@@ -968,6 +1105,171 @@ fn materialize_operation_result(
         &output_specs,
     );
     inner.materializations.push(producer);
+}
+
+fn materialize_runtime_array_result(
+    inner: &mut SemanticProgram,
+    entry_index: usize,
+    operation: OperationResultMaterialization,
+) {
+    let OperationResultMaterialization {
+        result,
+        producer: producer_id,
+        source_site,
+        projected_site,
+        projection,
+        layout,
+        ..
+    } = operation;
+    let MaterializedValueLayout::RuntimeArray {
+        scratch,
+        elem_ty,
+        result_ty,
+        size,
+    } = layout
+    else {
+        unreachable!("runtime-array materializer received a direct layout")
+    };
+    let entry = &inner.entry_points[entry_index];
+    let dependencies = dependency_effects(&entry.graph, source_site.block, source_site.index);
+    let dependency_resources = dependency_resources(entry, source_site.block, &dependencies);
+    let producer_storage = resource_declarations_for(entry, &dependency_resources);
+    let execution_model = match entry.execution_model {
+        ExecutionModel::Compute { local_size } => ExecutionModel::Compute { local_size },
+        ExecutionModel::Vertex | ExecutionModel::Fragment => ExecutionModel::Compute {
+            local_size: (64, 1, 1),
+        },
+    };
+    let producer_entry = projected_materialization_entry(
+        inner,
+        entry,
+        "materialize_filter",
+        execution_model,
+        producer_storage,
+        projection,
+    );
+    let id = MaterializationId(inner.materializations.len() as u32);
+    let length = inner.alloc_compiler_resource(
+        CompilerResource::new(CompilerResourceKind::FilterLenCell, Some(producer_id), 1),
+        Type::Constructed(TypeName::UInt(32), vec![]),
+        LogicalSize::FixedBytes(4),
+    );
+    let handoff = RuntimeArrayHandoff {
+        data: scratch,
+        length,
+        elem_ty,
+        result_ty,
+        size,
+    };
+    let mut producer = MaterializationRequirement {
+        id,
+        kind: MaterializationKind::RuntimeArray,
+        producer: Some(producer_id),
+        entry: producer_entry,
+        substitutions: [handoff.data, handoff.length]
+            .into_iter()
+            .map(|resource| MaterializationSubstitution {
+                resource: SemanticResourceRef(resource),
+                consumers: Vec::new(),
+            })
+            .collect(),
+    };
+    set_resource_declaration(
+        &mut producer.entry,
+        handoff.data,
+        StorageRole::Output,
+        &handoff.elem_ty,
+        &handoff.size,
+    );
+    set_resource_declaration(
+        &mut producer.entry,
+        handoff.length,
+        StorageRole::Output,
+        &Type::Constructed(TypeName::UInt(32), vec![]),
+        &LogicalSize::FixedBytes(4),
+    );
+    let effect =
+        &mut producer.entry.graph.skeleton.blocks[projected_site.block].side_effects[projected_site.index];
+    let SideEffectKind::Soac(Soac::Filter(filter::Op {
+        state: filter::SemanticState { storage, .. },
+        ..
+    })) = &mut effect.kind
+    else {
+        return;
+    };
+    *storage = filter::Output::Runtime {
+        scratch: SemanticResourceRef(handoff.data),
+        length: filter::RuntimeLength::Stored(SemanticResourceRef(handoff.length)),
+    };
+    compact_entry_interface(&mut producer.entry);
+
+    rewrite_runtime_array_source(
+        &mut inner.entry_points[entry_index],
+        result,
+        source_site,
+        &handoff,
+    );
+    inner.materializations.push(producer);
+}
+
+fn rewrite_runtime_array_source(
+    entry: &mut super::program::SemanticEntry,
+    result: NodeId,
+    source_site: SideEffectSite,
+    handoff: &RuntimeArrayHandoff,
+) {
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    set_resource_declaration(
+        entry,
+        handoff.data,
+        StorageRole::Input,
+        &handoff.elem_ty,
+        &handoff.size,
+    );
+    set_resource_declaration(
+        entry,
+        handoff.length,
+        StorageRole::Input,
+        &u32_ty,
+        &LogicalSize::FixedBytes(4),
+    );
+    let length_view =
+        graph_ops::intern_resource_view(&mut entry.graph, handoff.length, u32_ty.clone(), None);
+    let (survivor_count, load_effect) =
+        detached_scalar_handoff_load(&mut entry.graph, length_view, &u32_ty);
+    let zero = graph_ops::intern_u32(&mut entry.graph, 0, None);
+    let view = graph_ops::intern_chunked_resource_view(
+        &mut entry.graph,
+        handoff.data,
+        zero,
+        survivor_count,
+        handoff.elem_ty.clone(),
+        None,
+    );
+    let view_ty = entry.graph.types[&view].clone();
+    retarget_input_metadata(
+        &mut entry.graph,
+        &[InputReplacement {
+            project: result,
+            view,
+            view_ty,
+            elem_ty: handoff.elem_ty.clone(),
+            resource: handoff.data,
+        }],
+    );
+    graph_ops::replace_all_references(&mut entry.graph, result, view);
+    entry.graph.retype_node(result, handoff.result_ty.clone());
+    for route in &mut entry.output_routes {
+        if route.source.value == result {
+            route.source.value = view;
+        }
+    }
+    let block = &mut entry.graph.skeleton.blocks[source_site.block];
+    block.side_effects.remove(source_site.index);
+    block.side_effects.insert(source_site.index, load_effect);
+    refresh_resource_reads_for_values(&mut entry.graph, &[survivor_count, view]);
+    super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph);
+    compact_entry_interface(entry);
 }
 
 fn configure_operation_materialization(
@@ -1310,17 +1612,25 @@ fn producer_resources_for_graph(
     result: NodeId,
 ) -> Vec<SemanticResourceDecl> {
     let reachable = graph_ops::execution_value_producer_closure(graph, [result]).nodes;
-    let mut resources = reachable
-        .iter()
-        .filter_map(|node| graph_ops::extract_storage_view_source(graph, *node))
-        .map(|resource| resource.0)
-        .collect::<HashSet<_>>();
-    for node in reachable {
-        if let ENode::FuncParam { index } = graph.nodes[node] {
-            resources.extend(entry.resource_abi.inputs.get(index).copied().flatten());
+    let resources = resources_referenced_by_nodes(entry, graph, reachable);
+    resource_declarations_for(entry, &resources)
+}
+
+fn resources_referenced_by_nodes(
+    entry: &super::program::SemanticEntry,
+    graph: &EGraph,
+    nodes: impl IntoIterator<Item = NodeId>,
+) -> HashSet<ResourceId> {
+    let mut resources = HashSet::new();
+    for node in nodes {
+        if let Some(resource) = graph_ops::extract_storage_view_source(graph, node) {
+            resources.insert(resource.0);
+        }
+        if let Some(ENode::FuncParam { index }) = graph.nodes.get(node) {
+            resources.extend(entry.resource_abi.inputs.get(*index).copied().flatten());
         }
     }
-    resource_declarations_for(entry, &resources)
+    resources
 }
 
 fn resource_declarations_for(
@@ -1343,13 +1653,31 @@ fn declare_resource_view(
     size: &LogicalSize,
 ) -> NodeId {
     let view = graph_ops::intern_resource_view(&mut entry.graph, resource, elem_ty.clone(), None);
-    entry.resource_declarations.push(SemanticResourceDecl {
-        resource: SemanticResourceRef(resource),
-        role,
-        elem_ty: elem_ty.clone(),
-        size: size.clone(),
-    });
+    set_resource_declaration(entry, resource, role, elem_ty, size);
     view
+}
+
+fn set_resource_declaration(
+    entry: &mut super::program::SemanticEntry,
+    resource: ResourceId,
+    role: StorageRole,
+    elem_ty: &Type<TypeName>,
+    size: &LogicalSize,
+) {
+    if let Some(declaration) =
+        entry.resource_declarations.iter_mut().find(|declaration| declaration.resource.0 == resource)
+    {
+        declaration.role = role;
+        declaration.elem_ty = elem_ty.clone();
+        declaration.size = size.clone();
+    } else {
+        entry.resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef(resource),
+            role,
+            elem_ty: elem_ty.clone(),
+            size: size.clone(),
+        });
+    }
 }
 
 fn emit_scalar_handoff_store(
@@ -1551,11 +1879,26 @@ fn compact_entry_inputs(entry: &mut super::program::SemanticEntry) {
             OutputWriter::Effect(_) => None,
         }));
     }
-    let reachable = graph_ops::value_producer_closure(&entry.graph, roots).nodes;
-    let mut kept = reachable
-        .into_iter()
-        .filter_map(|node| match entry.graph.nodes.get(node) {
-            Some(ENode::FuncParam { index }) => Some((*index, node)),
+    let reachable = graph_ops::execution_value_producer_closure(&entry.graph, roots).nodes;
+    let reachable_resources = resources_referenced_by_nodes(entry, &entry.graph, reachable.iter().copied());
+    let mut kept_indices = reachable
+        .iter()
+        .filter_map(|node| match entry.graph.nodes.get(*node) {
+            Some(ENode::FuncParam { index }) => Some(*index),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    for (index, resource) in entry.resource_abi.inputs.iter().enumerate() {
+        if resource.is_some_and(|resource| reachable_resources.contains(&resource)) {
+            kept_indices.insert(index);
+        }
+    }
+    let mut kept = entry
+        .graph
+        .nodes
+        .iter()
+        .filter_map(|(node, definition)| match definition {
+            ENode::FuncParam { index } if kept_indices.contains(index) => Some((*index, node)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1661,21 +2004,17 @@ fn dependency_effects(
 }
 
 fn dependency_resources(
-    graph: &EGraph,
+    entry: &super::program::SemanticEntry,
     block_id: crate::ssa::framework::BlockId,
     effects: &HashSet<usize>,
 ) -> HashSet<ResourceId> {
+    let graph = &entry.graph;
     let block = &graph.skeleton.blocks[block_id];
     let mut dependencies = HashSet::new();
     for &effect_index in effects {
         let effect = &block.side_effects[effect_index];
-        dependencies.extend(
-            graph_ops::value_producer_closure(graph, effect.referenced_nodes())
-                .nodes
-                .into_iter()
-                .filter_map(|node| graph_ops::extract_storage_view_source(graph, node))
-                .map(|resource| resource.0),
-        );
+        let producer_nodes = graph_ops::value_producer_closure(graph, effect.referenced_nodes()).nodes;
+        dependencies.extend(resources_referenced_by_nodes(entry, graph, producer_nodes));
         match &effect.kind {
             SideEffectKind::Soac(Soac::Screma(op)) => {
                 if let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() {
@@ -1688,7 +2027,7 @@ fn dependency_resources(
             })) => {
                 if let filter::Output::Runtime { scratch, length } = storage {
                     dependencies.insert(scratch.0);
-                    if let filter::RuntimeLength::EntryOutput(length) = length {
+                    if let filter::RuntimeLength::Stored(length) = length {
                         dependencies.insert(length.0);
                     }
                 }

@@ -409,6 +409,8 @@ fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
             CompilerResourceKind::GatherHandoff
                 | CompilerResourceKind::ScalarHandoff
                 | CompilerResourceKind::MultiConsumerArray
+                | CompilerResourceKind::FilterScratch
+                | CompilerResourceKind::FilterLenCell
         ) {
             continue;
         }
@@ -784,8 +786,8 @@ fn physicalize_soac(
                 scratch: binding(scratch, bindings)?,
                 length: match length {
                     filter::RuntimeLength::ViewOnly => filter::RuntimeLength::ViewOnly,
-                    filter::RuntimeLength::EntryOutput(resource) => {
-                        filter::RuntimeLength::EntryOutput(binding(resource, bindings)?)
+                    filter::RuntimeLength::Stored(resource) => {
+                        filter::RuntimeLength::Stored(binding(resource, bindings)?)
                     }
                 },
             },
@@ -890,8 +892,8 @@ fn physicalize_soac(
                         scratch: binding(storage.scratch, bindings)?,
                         length: match storage.length {
                             filter::RuntimeLength::ViewOnly => filter::RuntimeLength::ViewOnly,
-                            filter::RuntimeLength::EntryOutput(resource) => {
-                                filter::RuntimeLength::EntryOutput(binding(resource, bindings)?)
+                            filter::RuntimeLength::Stored(resource) => {
+                                filter::RuntimeLength::Stored(binding(resource, bindings)?)
                             }
                         },
                     },
@@ -1340,6 +1342,10 @@ pub enum MaterializationKind {
     SharedArray,
     Gather,
     Scalar,
+    /// Runtime-sized array plus a stored logical-length cell.  Producers such
+    /// as filter require this layout when their result crosses a scheduling
+    /// boundary; future variable-cardinality producers can reuse it.
+    RuntimeArray,
 }
 
 pub struct MaterializationRequirement<P: EgirPhase = Semantic> {

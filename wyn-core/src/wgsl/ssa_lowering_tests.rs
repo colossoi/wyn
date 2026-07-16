@@ -584,6 +584,23 @@ entry mn(n: u32) u32 =
     validate_wgsl(&wgsl);
 }
 
+/// A parallel consumer requests its range extent as `u32`, even when the
+/// source range is element-typed as `i32`. The virtual-array length lowering
+/// must bridge that signedness boundary explicitly for WGSL.
+#[test]
+fn wgsl_i32_range_filter_then_map_validates() {
+    let wgsl = compile_to_wgsl(
+        r#"
+#[compute]
+entry filtered() []i32 =
+  let kept = filter(|i| i % 2 == 0, iota(64)) in
+  map(|i| i + 1, kept)
+"#,
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+}
+
 #[test]
 fn wgsl_compute_multi_output_runtime_sized_arrays() {
     // A compute entry returning a tuple of >1 runtime-sized array: each
