@@ -7,11 +7,10 @@ use smallvec::SmallVec;
 
 use crate::ast::Span;
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
+use crate::interface::{EntryInput as InterfaceEntryInput, EntryOutput as InterfaceEntryOutput};
 use crate::op::{OpTag, PureViewSource as OpViewSource};
 use crate::pipeline_descriptor::PipelineDescriptor;
-use crate::ssa::types::{
-    Constant, EntryInput as SsaEntryInput, EntryOutput as SsaEntryOutput, Function, InstKind,
-};
+use crate::types::ExternDecl;
 use crate::LookupMap;
 
 use super::soac::{filter, hist, screma};
@@ -35,7 +34,8 @@ impl std::fmt::Display for EffectToken {
 new_key_type! {
     /// Identity of a node in the e-graph. Every pure node, union node,
     /// block param, function param, and constant gets one.
-pub struct NodeId;
+    pub struct NodeId;
+
 }
 
 /// Opaque handle into the program-level region arena (`SemanticProgram::regions`).
@@ -182,16 +182,14 @@ impl<R, Lang: Language> ENode<R, Lang> {
 // Skeleton — the CFG of side-effectful instructions
 // ---------------------------------------------------------------------------
 
-/// A side-effectful instruction anchored in the skeleton CFG.
+/// A side effect anchored in the skeleton CFG.
 #[derive(Clone, Debug)]
-pub struct SideEffect<P: EgirPhase> {
-    /// What this side-effect is. Either an SSA `InstKind` that survives into
-    /// the final `FuncBody`, or an intermediate `Soac` that must be
-    /// rewritten by `soac_expand` before `elaborate` runs.
-    pub kind: SideEffectKind<P>,
-    /// Operands resolved to NodeIds.
+pub struct SideEffect<P: EgirPhase, Lang: Language> {
+    pub kind: SideEffectKind<P, Lang>,
+    /// Canonical EGIR value operands for this effect.
     pub operand_nodes: SmallVec<[NodeId; 4]>,
-    /// Result value, if this instruction produces one.
+    /// Result value, if this effect produces one. Addressable-place results
+    /// are carried by the corresponding `EffectOp` variant instead.
     pub result: Option<NodeId>,
     /// Effect token chain.
     pub effects: Option<(EffectToken, EffectToken)>,
@@ -200,22 +198,52 @@ pub struct SideEffect<P: EgirPhase> {
     pub span: Option<Span>,
 }
 
-/// A skeleton side-effect's concrete kind.
+/// EGIR-native effect operation. Value and place operands are represented by
+/// the enclosing side effect's `NodeId` operands; SSA identities are
+/// introduced only when the graph is elaborated.
 #[derive(Clone, Debug)]
-pub enum SideEffectKind<P: EgirPhase> {
-    /// An SSA-level effectful instruction (`Alloca` / `Load` / `Store` /
-    /// `Call` / `Intrinsic` / `StorageView*` / `OutputPtr` with effects).
-    /// This is what lands in the final `FuncBody` after elaboration.
-    Inst(InstKind<P::Resource>),
+pub enum EffectOp<R, Ty> {
+    Op {
+        tag: OpTag<R>,
+    },
+    Alloca {
+        elem_ty: Ty,
+    },
+    Load,
+    Store,
+    ControlBarrier,
+}
+
+impl<R, Ty> EffectOp<R, Ty> {
+    pub fn try_map_resource<S, E>(
+        self,
+        map: &mut impl FnMut(R) -> Result<S, E>,
+    ) -> Result<EffectOp<S, Ty>, E> {
+        Ok(match self {
+            Self::Op { tag } => EffectOp::Op {
+                tag: tag.try_map_resource(map)?,
+            },
+            Self::Alloca { elem_ty } => EffectOp::Alloca { elem_ty },
+            Self::Load => EffectOp::Load,
+            Self::Store => EffectOp::Store,
+            Self::ControlBarrier => EffectOp::ControlBarrier,
+        })
+    }
+}
+
+/// A skeleton side effect's concrete kind.
+#[derive(Clone, Debug)]
+pub enum SideEffectKind<P: EgirPhase, Lang: Language> {
+    Effect(EffectOp<P::Resource, Lang::Ty>),
     /// A placeholder for an unexpanded SOAC. Produced by `from_tlc` and
     /// consumed by `soac_expand`. Never reaches elaborate.
     Soac(P::SoacId, Soac<P>),
 }
 
-impl<P: EgirPhase> SideEffectKind<P> {
+impl<P: EgirPhase, Lang: Language> SideEffectKind<P, Lang> {
     pub fn soac_id(&self) -> Option<&P::SoacId> {
         match self {
-            Self::Inst(_) => None,
+            Self::Effect(_) => None,
             Self::Soac(id, _) => Some(id),
         }
     }
@@ -466,16 +494,16 @@ impl SkeletonTerminator {
 
 /// A block in the skeleton CFG.
 #[derive(Clone, Debug)]
-pub struct SkeletonBlock<P: EgirPhase> {
+pub struct SkeletonBlock<P: EgirPhase, Lang: Language> {
     /// Block parameters as NodeIds.
     pub params: Vec<NodeId>,
     /// Effectful instructions, in order.
-    pub side_effects: Vec<SideEffect<P>>,
+    pub side_effects: Vec<SideEffect<P, Lang>>,
     /// Block terminator.
     pub term: SkeletonTerminator,
 }
 
-impl<P: EgirPhase> SkeletonBlock<P> {
+impl<P: EgirPhase, Lang: Language> SkeletonBlock<P, Lang> {
     pub fn new() -> Self {
         SkeletonBlock {
             params: Vec::new(),
@@ -487,12 +515,12 @@ impl<P: EgirPhase> SkeletonBlock<P> {
 
 /// The skeleton CFG (blocks + effectful instructions).
 #[derive(Clone, Debug)]
-pub struct Skeleton<P: EgirPhase> {
+pub struct Skeleton<P: EgirPhase, Lang: Language> {
     pub entry: BlockId,
-    pub blocks: SlotMap<BlockId, SkeletonBlock<P>>,
+    pub blocks: SlotMap<BlockId, SkeletonBlock<P, Lang>>,
 }
 
-impl<P: EgirPhase> Skeleton<P> {
+impl<P: EgirPhase, Lang: Language> Skeleton<P, Lang> {
     pub fn new() -> Self {
         let mut blocks = SlotMap::with_key();
         let entry = blocks.insert(SkeletonBlock::new());
@@ -548,7 +576,7 @@ impl SideEffectIndex {
         &self,
         graph: &'a EGraph<P, Lang>,
         result: NodeId,
-    ) -> Option<&'a SideEffect<P>> {
+    ) -> Option<&'a SideEffect<P, Lang>> {
         let site = self.site(result)?;
         let effect = graph.skeleton.blocks.get(site.block)?.side_effects.get(site.index)?;
         (effect.result == Some(result)).then_some(effect)
@@ -558,7 +586,7 @@ impl SideEffectIndex {
         &self,
         graph: &'a mut EGraph<P, Lang>,
         result: NodeId,
-    ) -> Option<&'a mut SideEffect<P>> {
+    ) -> Option<&'a mut SideEffect<P, Lang>> {
         let site = self.site(result)?;
         let effect = graph.skeleton.blocks.get_mut(site.block)?.side_effects.get_mut(site.index)?;
         (effect.result == Some(result)).then_some(effect)
@@ -581,7 +609,7 @@ pub struct EGraph<P: EgirPhase, Lang: Language> {
     /// Constant dedup cache.
     pub const_cache: LookupMap<Lang::Const, NodeId>,
     /// The CFG skeleton.
-    pub skeleton: Skeleton<P>,
+    pub skeleton: Skeleton<P, Lang>,
     /// Source span associated with each pure node (first-writer-wins —
     /// later interns of the same hash-consed node keep the original span).
     pub node_spans: LookupMap<NodeId, Span>,
@@ -595,7 +623,7 @@ pub(super) struct EGraphParts<P: EgirPhase, Lang: Language> {
     pub(super) nodes: SlotMap<NodeId, ENode<P::Resource, Lang>>,
     pub(super) types: LookupMap<NodeId, Lang::Ty>,
     pub(super) const_cache: LookupMap<Lang::Const, NodeId>,
-    pub(super) skeleton: Skeleton<P>,
+    pub(super) skeleton: Skeleton<P, Lang>,
     pub(super) node_spans: LookupMap<NodeId, Span>,
 }
 
@@ -1004,6 +1032,18 @@ impl<P: EgirPhase, Lang: Language> Region<P, Lang> {
     }
 }
 
+/// A body-backed compile-time constant retained in EGIR until final
+/// elaboration. Constant bodies have no parameters and must be proven pure.
+#[derive(Clone, Debug)]
+pub struct ConstantDef<P: EgirPhase, Lang: Language> {
+    pub name: String,
+    pub span: Span,
+    pub return_ty: Lang::Ty,
+    pub graph: EGraph<P, Lang>,
+    pub control_headers: LookupMap<BlockId, ControlHeader>,
+    pub aliases: LookupMap<NodeId, NodeId>,
+}
+
 /// One write site for an entry output slot.
 #[derive(Debug, Clone, Copy)]
 pub struct SlotSource {
@@ -1033,44 +1073,44 @@ pub struct OutputRoute {
 /// One entry input together with its phase-typed resource identity, when the
 /// slot is backed by a logical or physical resource.
 #[derive(Debug, Clone)]
-pub struct EntryInput<R> {
-    pub interface: SsaEntryInput,
+pub struct EntryInput<R, Lang: Language> {
+    pub inner: InterfaceEntryInput<Lang::Ty>,
     pub resource: Option<R>,
 }
 
-impl<R> std::ops::Deref for EntryInput<R> {
-    type Target = SsaEntryInput;
+impl<R, Lang: Language> std::ops::Deref for EntryInput<R, Lang> {
+    type Target = InterfaceEntryInput<Lang::Ty>;
 
     fn deref(&self) -> &Self::Target {
-        &self.interface
+        &self.inner
     }
 }
 
-impl<R> std::ops::DerefMut for EntryInput<R> {
+impl<R, Lang: Language> std::ops::DerefMut for EntryInput<R, Lang> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.interface
+        &mut self.inner
     }
 }
 
 /// One entry output together with its phase-typed resource identity, when the
 /// slot is backed by a logical or physical resource.
 #[derive(Debug, Clone)]
-pub struct EntryOutput<R> {
-    pub interface: SsaEntryOutput,
+pub struct EntryOutput<R, Lang: Language> {
+    pub inner: InterfaceEntryOutput<Lang::Ty>,
     pub resource: Option<R>,
 }
 
-impl<R> std::ops::Deref for EntryOutput<R> {
-    type Target = SsaEntryOutput;
+impl<R, Lang: Language> std::ops::Deref for EntryOutput<R, Lang> {
+    type Target = InterfaceEntryOutput<Lang::Ty>;
 
     fn deref(&self) -> &Self::Target {
-        &self.interface
+        &self.inner
     }
 }
 
-impl<R> std::ops::DerefMut for EntryOutput<R> {
+impl<R, Lang: Language> std::ops::DerefMut for EntryOutput<R, Lang> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.interface
+        &mut self.inner
     }
 }
 
@@ -1078,8 +1118,8 @@ pub struct Entry<P: EgirPhase, Lang: Language> {
     pub name: String,
     pub span: Span,
     pub execution_model: ExecutionModel,
-    pub inputs: Vec<EntryInput<P::Resource>>,
-    pub outputs: Vec<EntryOutput<P::Resource>>,
+    pub inputs: Vec<EntryInput<P::Resource, Lang>>,
+    pub outputs: Vec<EntryOutput<P::Resource, Lang>>,
     pub resource_declarations: Vec<P::ResourceDecl>,
     pub params: Vec<(Lang::Ty, String)>,
     pub return_ty: Lang::Ty,
@@ -1095,8 +1135,8 @@ impl<P: EgirPhase, Lang: Language> Entry<P, Lang> {
         name: String,
         span: Span,
         execution_model: ExecutionModel,
-        inputs: Vec<SsaEntryInput>,
-        outputs: Vec<SsaEntryOutput>,
+        inputs: Vec<InterfaceEntryInput<Lang::Ty>>,
+        outputs: Vec<InterfaceEntryOutput<Lang::Ty>>,
         resource_declarations: Vec<P::ResourceDecl>,
         params: Vec<(Lang::Ty, String)>,
         return_ty: Lang::Ty,
@@ -1109,15 +1149,15 @@ impl<P: EgirPhase, Lang: Language> Entry<P, Lang> {
             execution_model,
             inputs: inputs
                 .into_iter()
-                .map(|interface| EntryInput {
-                    interface,
+                .map(|inner| EntryInput {
+                    inner,
                     resource: None,
                 })
                 .collect(),
             outputs: outputs
                 .into_iter()
-                .map(|interface| EntryOutput {
-                    interface,
+                .map(|inner| EntryOutput {
+                    inner,
                     resource: None,
                 })
                 .collect(),
@@ -1136,10 +1176,9 @@ impl<P: EgirPhase, Lang: Language> Entry<P, Lang> {
 /// generic substrate and determine the phase-specific graph payload.
 pub struct Program<P: EgirPhase, Lang: Language> {
     pub functions: Vec<Func<P, Lang>>,
-    /// Extern stubs pass through EGIR unchanged.
-    pub externs: Vec<Function>,
+    pub externs: Vec<ExternDecl<Lang::Ty>>,
     pub entry_points: Vec<Entry<P, Lang>>,
-    pub constants: Vec<Constant>,
+    pub constants: Vec<ConstantDef<P, Lang>>,
     pub pipeline: PipelineDescriptor,
     pub input_names: LookupMap<(u32, u32), String>,
     pub regions: LookupMap<RegionId, Region<P, Lang>>,
@@ -1159,9 +1198,9 @@ fn record_region<P: EgirPhase, Lang: Language>(
 impl<P: EgirPhase, Lang: Language> Program<P, Lang> {
     pub fn new(
         functions: Vec<Func<P, Lang>>,
-        externs: Vec<Function>,
+        externs: Vec<ExternDecl<Lang::Ty>>,
         entry_points: Vec<Entry<P, Lang>>,
-        constants: Vec<Constant>,
+        constants: Vec<ConstantDef<P, Lang>>,
         pipeline: PipelineDescriptor,
         mut region_interner: RegionInterner,
     ) -> Self {

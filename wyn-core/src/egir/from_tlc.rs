@@ -6,7 +6,6 @@
 //! back to `FuncBody` via demand-driven scheduling (giving DCE for free).
 
 use crate::builtins::catalog;
-use crate::ssa::types::{EntryInput, EntryOutput, IoDecoration};
 use crate::tlc::{SoacBody, VarRef};
 use crate::{LookupMap, LookupSet};
 
@@ -18,20 +17,24 @@ use crate::binding_layout::{
     extract_texture_binding, extract_texture_resource, extract_uniform_binding,
 };
 use crate::flow::{BlockId, ControlHeader};
-use crate::interface::{EntryParamBinding, EntryParamBindingKind};
-use crate::ssa::types::{FuncBody, Function, InstKind, ValueRef};
+use crate::interface::{
+    self, BindingExposure, EntryInput, EntryInputKind, EntryOutput, EntryOutputDestination,
+    EntryOutputKind, EntryParamBinding, EntryParamBindingKind, IoDecoration, PushConstantSlot,
+    StorageAccess, TextureSource,
+};
 use crate::tlc::{
     ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind, Program as TlcProgram, SoacOp, Term, TermKind,
 };
+use crate::types::ExternDecl;
 use crate::types::{extract_function_signature, TypeExt};
-use crate::{interface, BindingRef, SymbolId, SymbolTable};
+use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 use std::collections::HashMap;
 
 use super::program::{
-    CompilerResource, CompilerResourceKind, LogicalResource, LogicalSize, RawEntry, RawFunc, RawProgram,
-    ResourceOrigin, SemanticResourceDecl, SemanticResourceRef,
+    CompilerResource, CompilerResourceKind, ConstantDef, LogicalResource, LogicalSize, RawEntry, RawFunc,
+    RawProgram, ResourceOrigin, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::publish::PipelineDescriptorPublish;
 use super::soac::{filter, hist, screma};
@@ -269,19 +272,26 @@ pub fn run(
         let mut converter = ctx.new_converter(&pure_constant_names, binding_ids);
         if let Ok(result_nid) = converter.convert_term(&def.body) {
             converter.set_return(Some(result_nid));
-            if let Some(body) = converter.probe_constant_body(def.body.ty.clone()) {
-                if is_purely_constant_body(&body) {
-                    pure_constant_names.insert(def_name.clone());
-                    constants.push(crate::ssa::types::Constant { name: def_name, body });
-                    continue;
-                }
+            let (mut graph, control_headers) = converter.into_graph_parts();
+            let aliases = super::skel_opt::run_one_body(&mut graph);
+            if is_purely_constant_graph(&graph, &aliases) {
+                pure_constant_names.insert(def_name.clone());
+                constants.push(ConstantDef {
+                    name: def_name,
+                    span: def.body.span,
+                    return_ty: def.body.ty.clone(),
+                    graph,
+                    control_headers,
+                    aliases,
+                });
+                continue;
             }
         }
     }
 
     // Phase 2: convert functions and entry points into raw EGIR records.
     let mut functions: Vec<RawFunc> = Vec::new();
-    let mut externs: Vec<Function> = Vec::new();
+    let mut externs: Vec<ExternDecl<Type<TypeName>>> = Vec::new();
     let mut entry_points: Vec<RawEntry> = Vec::new();
 
     for def in &program.defs {
@@ -331,7 +341,7 @@ pub fn run(
 }
 
 enum ConvertedFunc {
-    Extern(Function),
+    Extern(ExternDecl<Type<TypeName>>),
     Regular(RawFunc),
 }
 
@@ -348,22 +358,18 @@ fn convert_function<'a>(
     let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?.to_string();
 
-    // Extern functions: emit a 1-block Unreachable stub directly; no EGIR
-    // passes apply to them. They flow through as `Function` records.
+    // Extern functions are bodyless declarations; SSA lowering decides how
+    // to represent the imported callable.
     if let TermKind::Extern(linkage_name) = &def.body.kind {
         let (param_types, ret_type) = extract_function_signature(&def.ty);
         let params: Vec<(Type<TypeName>, String)> =
             param_types.into_iter().enumerate().map(|(i, ty)| (ty, format!("arg{}", i))).collect();
-        let mut builder = crate::ssa::builder::FuncBuilder::new(params, ret_type);
-        builder
-            .terminate(crate::ssa::types::Terminator::Unreachable)
-            .map_err(|e| ConvertError::GraphError(e.to_string()))?;
-        let body = builder.finish().map_err(|e| ConvertError::GraphError(e.to_string()))?;
-        return Ok(ConvertedFunc::Extern(Function {
+        return Ok(ConvertedFunc::Extern(ExternDecl {
             name: def_name,
-            body,
             span: def.body.span,
-            linkage_name: Some(linkage_name.clone()),
+            linkage_name: linkage_name.clone(),
+            params,
+            return_ty: ret_type,
         }));
     }
 
@@ -472,22 +478,33 @@ fn entry_resource_declarations(
             }
         };
     for input in inputs {
-        if let Some(binding) = input.storage_binding {
-            let size = logical_size(resources, input.length.as_ref());
-            let elem_ty = input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone());
-            declare(binding, interface::StorageRole::Input, elem_ty, size);
-        }
-        if let Some((binding, _, _, _)) = input.storage_image_binding {
-            resources.borrow_mut().declare_host(binding, input.ty.clone(), LogicalSize::Unspecified);
+        match &input.kind {
+            EntryInputKind::Storage {
+                exposure: BindingExposure::Host(binding),
+                length,
+                ..
+            } => {
+                let size = logical_size(resources, length.as_ref());
+                let elem_ty = input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone());
+                declare(*binding, interface::StorageRole::Input, elem_ty, size);
+            }
+            EntryInputKind::StorageImage { binding, .. } => {
+                resources.borrow_mut().declare_host(*binding, input.ty.clone(), LogicalSize::Unspecified);
+            }
+            _ => {}
         }
     }
     for output in outputs {
-        let Some(binding) = output.storage_binding else {
+        let EntryOutputKind::Storage {
+            exposure: BindingExposure::Host(binding),
+            length,
+        } = &output.kind
+        else {
             continue;
         };
-        let size = logical_size(resources, output.length.as_ref());
+        let size = logical_size(resources, length.as_ref());
         let elem_ty = output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone());
-        declare(binding, interface::StorageRole::Output, elem_ty, size);
+        declare(*binding, interface::StorageRole::Output, elem_ty, size);
     }
     declarations
 }
@@ -503,7 +520,6 @@ fn convert_entry_point(
     binding_ids: &mut crate::IdSource<u32>,
 ) -> Result<RawEntry, ConvertError> {
     use crate::flow::ExecutionModel;
-    use crate::ssa::types::{EntryInput, IoDecoration, PushConstantSlot};
 
     let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?;
@@ -586,19 +602,12 @@ fn convert_entry_point(
                 inputs.push(EntryInput {
                     name: format!("{}_{}", name, field_idx),
                     ty: crate::types::canonical_storage_buffer_ty(field_ty),
-                    decoration: None,
                     size_hint: None,
-                    storage_binding: Some(slot.binding),
-                    storage_access: None,
-                    uniform_binding: None,
-                    push_constant: None,
-                    texture_binding: None,
-                    texture_backing: None,
-                    texture_resource: None,
-                    storage_image_resource: None,
-                    sampler_binding: None,
-                    storage_image_binding: None,
-                    length: None,
+                    kind: EntryInputKind::Storage {
+                        exposure: BindingExposure::Host(slot.binding),
+                        access: StorageAccess::ReadOnly,
+                        length: None,
+                    },
                 });
                 view_nids.push(converter.emit_storage_view(slot.binding, field_ty.clone()));
             }
@@ -639,22 +648,41 @@ fn convert_entry_point(
             converter.locals.insert(*sym, view_nid);
         }
 
+        let kind = if let Some(binding) = storage_binding {
+            EntryInputKind::Storage {
+                exposure: BindingExposure::Host(binding),
+                access: storage_access.unwrap_or(StorageAccess::ReadOnly),
+                length: None,
+            }
+        } else if let Some(binding) = uniform_binding {
+            EntryInputKind::Uniform { binding }
+        } else if let Some(binding) = texture_binding {
+            let source = match (texture_backing, texture_resource) {
+                (Some(backing), None) => TextureSource::Backing(backing),
+                (backing, Some(name)) => TextureSource::Resource { name, backing },
+                (None, None) => TextureSource::External,
+            };
+            EntryInputKind::Texture { binding, source }
+        } else if let Some(binding) = sampler_binding {
+            EntryInputKind::Sampler { binding }
+        } else if let Some((binding, format, access, size)) = storage_image_binding {
+            EntryInputKind::StorageImage {
+                binding,
+                format,
+                access,
+                size,
+                resource: storage_image_resource,
+            }
+        } else if let Some(slot) = push_constant {
+            EntryInputKind::PushConstant { slot }
+        } else {
+            EntryInputKind::Value { decoration }
+        };
         inputs.push(EntryInput {
             name: name.to_string(),
             ty: crate::types::canonical_storage_buffer_ty(ty),
-            decoration,
             size_hint,
-            storage_binding,
-            storage_access,
-            uniform_binding,
-            push_constant,
-            texture_binding,
-            texture_backing,
-            texture_resource,
-            sampler_binding,
-            storage_image_binding,
-            storage_image_resource,
-            length: None,
+            kind,
         });
     }
 
@@ -665,10 +693,11 @@ fn convert_entry_point(
     // entry param's TLC `SymbolId`.
     if let Some(map) = input_slice_bounds_for_entry {
         for (input, (sym, _)) in inputs.iter_mut().zip(params.iter()) {
-            if input.storage_binding.is_some() {
-                if let Some(len) = map.get(sym).cloned() {
-                    input.length = Some(len);
-                }
+            let EntryInputKind::Storage { length, .. } = &mut input.kind else {
+                continue;
+            };
+            if let Some(len) = map.get(sym).cloned() {
+                *length = Some(len);
             }
         }
     }
@@ -916,45 +945,6 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// phase to feed a ready-to-chain `SemanticFunc` / `SemanticEntry`.
     fn into_graph_parts(self) -> (EGraph<Raw>, LookupMap<BlockId, ControlHeader>) {
         (self.graph, self.control_headers)
-    }
-
-    /// Run the Converter's built EGraph through a throwaway single-function
-    /// pipeline (`expand_soacs → optimize_skeleton → elaborate`) and return
-    /// the resulting `FuncBody`. Used by:
-    ///   * the pure-constant detection phase of `convert_program` (with
-    ///     empty params);
-    ///   * the inline tests in `mod tests` below.
-    ///
-    /// Production (non-test) function and entry-point conversion goes
-    /// through `run`, which returns an `SemanticProgram` the caller wraps via
-    /// `EgirRaw` to compose the pipeline explicitly.
-    fn elaborate_to_funcbody(
-        self,
-        params: &[(Type<TypeName>, String)],
-        return_ty: Type<TypeName>,
-    ) -> Option<FuncBody> {
-        let (graph, control_headers) = self.into_graph_parts();
-        let (mut graph, _, block_map) =
-            graph.try_map_resources_and_phase::<Physical, ()>(|_| Err(()), |_, _, _| Err(())).ok()?;
-        let control_headers =
-            super::program::remap_control_headers(&control_headers, |block| block_map[&block]);
-        let aliases = super::skel_opt::run_one_body(&mut graph);
-        let skel_domtree = super::elaborate::skeleton_domtree(&graph.skeleton);
-        let identity_map: LookupMap<BlockId, BlockId> =
-            graph.skeleton.blocks.keys().map(|b| (b, b)).collect();
-        Some(super::elaborate::run(
-            &graph,
-            &skel_domtree,
-            params,
-            return_ty,
-            &control_headers,
-            &identity_map,
-            &aliases,
-        ))
-    }
-
-    fn probe_constant_body(self, return_ty: Type<TypeName>) -> Option<FuncBody> {
-        self.elaborate_to_funcbody(&[], return_ty)
     }
 
     // ========================================================================
@@ -1369,16 +1359,12 @@ impl<'a, 'b> Converter<'a, 'b> {
                     if def.arity == args.len() {
                         let arg_nids: SmallVec<[NodeId; 4]> =
                             args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                        let arg_vrefs: Vec<ValueRef> = (0..arg_nids.len())
-                            .map(|_| ValueRef::Ssa(crate::ssa::types::ValueId::default()))
-                            .collect();
                         let result_nid = self.graph.alloc_side_effect_result(ty.clone());
                         let effect_in = EffectToken(0);
                         let effect_out = self.alloc_effect();
                         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                            kind: SideEffectKind::Inst(InstKind::Op {
+                            kind: SideEffectKind::Effect(EffectOp::Op {
                                 tag: crate::op::OpTag::Call(name.to_string()),
-                                operands: arg_vrefs,
                             }),
                             operand_nodes: arg_nids,
                             result: Some(result_nid),
@@ -1395,16 +1381,12 @@ impl<'a, 'b> Converter<'a, 'b> {
                 {
                     let arg_nids: SmallVec<[NodeId; 4]> =
                         args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                    let arg_vrefs: Vec<ValueRef> = (0..arg_nids.len())
-                        .map(|_| ValueRef::Ssa(crate::ssa::types::ValueId::default()))
-                        .collect();
                     let result_nid = self.graph.alloc_side_effect_result(ty);
                     let effect_in = EffectToken(0);
                     let effect_out = self.alloc_effect();
                     self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                        kind: SideEffectKind::Inst(InstKind::Op {
+                        kind: SideEffectKind::Effect(EffectOp::Op {
                             tag: crate::op::OpTag::Call(name.to_string()),
-                            operands: arg_vrefs,
                         }),
                         operand_nodes: arg_nids,
                         result: Some(result_nid),
@@ -1467,16 +1449,13 @@ impl<'a, 'b> Converter<'a, 'b> {
         let resource = SemanticResourceRef(self.resources.borrow_mut().host_id(binding));
         let arg_nids: SmallVec<[NodeId; 4]> =
             args[1..].iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-        let arg_vrefs: Vec<ValueRef> =
-            (0..arg_nids.len()).map(|_| ValueRef::Ssa(crate::ssa::types::ValueId::default())).collect();
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let effect_result = self.graph.alloc_side_effect_result(unit_ty);
         let effect_in = EffectToken(0);
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-            kind: SideEffectKind::Inst(InstKind::Op {
+            kind: SideEffectKind::Effect(EffectOp::Op {
                 tag: crate::op::OpTag::StorageImageStore(resource),
-                operands: arg_vrefs,
             }),
             operand_nodes: arg_nids,
             result: Some(effect_result),
@@ -2688,25 +2667,70 @@ impl<'a, 'b> Converter<'a, 'b> {
 // Helpers
 // ============================================================================
 
-/// Check whether a FuncBody contains only purely constant instructions.
-fn is_purely_constant_body(body: &FuncBody) -> bool {
-    use crate::op::OpTag;
-    body.inner.insts.values().all(|inst| match &inst.data {
-        InstKind::Op { tag, .. } => matches!(
-            tag,
-            OpTag::Int(_)
-                | OpTag::Uint(_)
-                | OpTag::Float(_)
-                | OpTag::Bool(_)
-                | OpTag::Unit
-                | OpTag::Tuple(_)
-                | OpTag::Vector(_)
-                | OpTag::Matrix { .. }
-                | OpTag::ArrayLit(_)
-                | OpTag::Global(_)
-        ),
-        _ => false,
+/// Check whether every reachable value in a zero-parameter EGIR body is a
+/// compile-time constant expression. This is deliberately an EGIR property;
+/// no temporary SSA body is constructed for classification.
+fn is_purely_constant_graph(graph: &EGraph<Raw>, aliases: &LookupMap<NodeId, NodeId>) -> bool {
+    let mut memo = LookupMap::new();
+    graph.skeleton.blocks.values().all(|block| {
+        block.side_effects.is_empty()
+            && match &block.term {
+                SkeletonTerminator::Return(value) => {
+                    value.is_none_or(|node| is_constant_node(graph, aliases, node, &mut memo))
+                }
+                SkeletonTerminator::Branch { args, .. } => {
+                    args.iter().copied().all(|node| is_constant_node(graph, aliases, node, &mut memo))
+                }
+                SkeletonTerminator::CondBranch {
+                    cond,
+                    then_args,
+                    else_args,
+                    ..
+                } => std::iter::once(*cond)
+                    .chain(then_args.iter().copied())
+                    .chain(else_args.iter().copied())
+                    .all(|node| is_constant_node(graph, aliases, node, &mut memo)),
+                SkeletonTerminator::Unreachable => true,
+            }
     })
+}
+
+fn is_constant_node(
+    graph: &EGraph<Raw>,
+    aliases: &LookupMap<NodeId, NodeId>,
+    mut node: NodeId,
+    memo: &mut LookupMap<NodeId, bool>,
+) -> bool {
+    while let Some(replacement) = aliases.get(&node) {
+        node = *replacement;
+    }
+    if let Some(result) = memo.get(&node) {
+        return *result;
+    }
+    let result = match &graph.nodes[node] {
+        ENode::Constant(_) => true,
+        ENode::Pure { op, operands } => {
+            matches!(
+                op,
+                PureOp::Int(_)
+                    | PureOp::Uint(_)
+                    | PureOp::Float(_)
+                    | PureOp::Bool(_)
+                    | PureOp::Unit
+                    | PureOp::Tuple(_)
+                    | PureOp::Vector(_)
+                    | PureOp::Matrix { .. }
+                    | PureOp::ArrayLit(_)
+                    | PureOp::Global(_)
+            ) && operands.iter().copied().all(|operand| is_constant_node(graph, aliases, operand, memo))
+        }
+        ENode::Union { left, right } => {
+            is_constant_node(graph, aliases, *left, memo) && is_constant_node(graph, aliases, *right, memo)
+        }
+        ENode::FuncParam { .. } | ENode::BlockParam { .. } | ENode::SideEffectResult => false,
+    };
+    memo.insert(node, result);
+    result
 }
 
 /// Extract a `#[size_hint(N)]` attribute from a pattern.
@@ -2824,7 +2848,11 @@ fn build_entry_outputs(
                 }
                 // Rule 2: size variable shared with an entry input.
                 for input in inputs {
-                    let Some(in_binding) = input.storage_binding else {
+                    let EntryInputKind::Storage {
+                        exposure: BindingExposure::Host(in_binding),
+                        ..
+                    } = &input.kind
+                    else {
                         continue;
                     };
                     let Some(in_size) = crate::types::array_size(&input.ty) else {
@@ -2891,10 +2919,7 @@ fn build_entry_outputs(
             let length = length_for(storage_binding, &ty)?;
             Ok(vec![EntryOutput {
                 ty,
-                decoration: None,
-                target: None,
-                storage_binding,
-                length,
+                kind: entry_output_kind(storage_binding, length, None, None),
             }])
         } else {
             Ok(vec![])
@@ -2911,10 +2936,12 @@ fn build_entry_outputs(
                 let attribute = entry.outputs.get(slot).and_then(|output| output.attribute.as_ref());
                 Ok(EntryOutput {
                     ty,
-                    decoration: attribute.and_then(convert_to_io_decoration),
-                    target: target_of(attribute),
-                    storage_binding,
-                    length,
+                    kind: entry_output_kind(
+                        storage_binding,
+                        length,
+                        attribute.and_then(convert_to_io_decoration),
+                        target_of(attribute),
+                    ),
                 })
             })
             .collect()
@@ -2926,12 +2953,36 @@ fn build_entry_outputs(
         let first_attr = entry.outputs.first().and_then(|o| o.attribute.as_ref());
         Ok(vec![EntryOutput {
             ty,
-            decoration: first_attr.and_then(convert_to_io_decoration),
-            target: target_of(first_attr),
-            storage_binding,
-            length,
+            kind: entry_output_kind(
+                storage_binding,
+                length,
+                first_attr.and_then(convert_to_io_decoration),
+                target_of(first_attr),
+            ),
         }])
     }
+}
+
+fn entry_output_kind(
+    storage_binding: Option<BindingRef>,
+    length: Option<BufferLen>,
+    decoration: Option<IoDecoration>,
+    target: Option<String>,
+) -> EntryOutputKind {
+    if let Some(binding) = storage_binding {
+        return EntryOutputKind::Storage {
+            exposure: BindingExposure::Host(binding),
+            length,
+        };
+    }
+    let destination = match (decoration, target) {
+        (Some(IoDecoration::BuiltIn(builtin)), None) => EntryOutputDestination::BuiltIn(builtin),
+        (Some(IoDecoration::Location(location)), None) => EntryOutputDestination::Location(location),
+        (None, Some(target)) => EntryOutputDestination::Target(target),
+        (None, None) => EntryOutputDestination::Plain,
+        (Some(_), Some(_)) => unreachable!("entry output cannot have both a decoration and target"),
+    };
+    EntryOutputKind::Value { destination }
 }
 
 #[cfg(test)]

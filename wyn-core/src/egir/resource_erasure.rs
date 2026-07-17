@@ -13,8 +13,7 @@ mod resource_erasure_tests;
 use crate::ast::TypeName;
 use crate::egir::from_tlc::ConvertError;
 use crate::egir::program::{PhysicalFunc, PhysicalProgram};
-use crate::egir::types::{EGraph, ENode, EgirPhase, PureOp, SideEffectKind, SkeletonTerminator};
-use crate::ssa::types::{InstKind, ValueRef};
+use crate::egir::types::{EGraph, ENode, EffectOp, EgirPhase, PureOp, SideEffectKind, SkeletonTerminator};
 use crate::{LookupMap, LookupSet};
 use polytype::Type;
 use smallvec::SmallVec;
@@ -76,13 +75,12 @@ fn rewrite_graph<P: EgirPhase>(
 
     for (_, block) in &mut graph.skeleton.blocks {
         for effect in &mut block.side_effects {
-            let SideEffectKind::Inst(InstKind::Op { tag, operands }) = &mut effect.kind else {
+            let SideEffectKind::Effect(EffectOp::Op { tag }) = &mut effect.kind else {
                 continue;
             };
             if let PureOp::Call(callee) = tag {
                 if let Some(mask) = erasures.get(callee) {
                     filter_smallvec(&mut effect.operand_nodes, mask, callee)?;
-                    filter_vec(operands, mask, callee)?;
                 }
             }
         }
@@ -98,23 +96,6 @@ fn filter_smallvec(
     if operands.len() != mask.len() {
         return Err(ConvertError::Internal(format!(
             "call to `{callee}` has {} EGIR operands but its concrete signature has {} parameters",
-            operands.len(),
-            mask.len()
-        )));
-    }
-    *operands = operands
-        .iter()
-        .copied()
-        .zip(mask)
-        .filter_map(|(operand, erase)| (!erase).then_some(operand))
-        .collect();
-    Ok(())
-}
-
-fn filter_vec(operands: &mut Vec<ValueRef>, mask: &[bool], callee: &str) -> Result<(), ConvertError> {
-    if operands.len() != mask.len() {
-        return Err(ConvertError::Internal(format!(
-            "call to `{callee}` has {} SSA operand placeholders but its concrete signature has {} parameters",
             operands.len(),
             mask.len()
         )));

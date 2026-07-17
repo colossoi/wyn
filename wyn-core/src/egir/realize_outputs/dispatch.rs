@@ -601,7 +601,7 @@ pub fn retarget_filter_output(
     declarations: &mut [crate::egir::program::SemanticResourceDecl],
     resources: &mut [crate::egir::program::LogicalResource],
     output_resource: ResourceId,
-    output: &mut crate::ssa::types::EntryOutput,
+    output: &mut crate::interface::EntryOutput,
     source: NodeId,
 ) -> Result<bool, ConvertError> {
     use crate::pipeline_descriptor::BufferLen;
@@ -678,6 +678,6 @@ pub fn retarget_filter_output(
             src_elem_bytes,
         })
     });
-    output.length = out_len;
+    *output.storage_length_mut().expect("realized compute output must be storage") = out_len;
     Ok(true)
 }

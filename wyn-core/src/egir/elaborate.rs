@@ -16,8 +16,10 @@ use crate::op::OpTag;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{
-    BlockId, ControlHeader, EntryPoint, FuncBody, Function, InstKind, PlaceId, Program, ValueId, ValueRef,
+    BlockId, Constant, ControlHeader, EntryPoint, FuncBody, Function, InstKind, PlaceId, Program, ValueId,
+    ValueRef,
 };
+use crate::types::ExternDecl;
 use crate::LookupMap;
 use polytype::Type;
 use smallvec::SmallVec;
@@ -33,8 +35,15 @@ use super::types::*;
 /// assembled into a single `ssa::types::Program`. The pipeline
 /// descriptor passes through unchanged.
 pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
-    let functions: Vec<Function> = inner
-        .functions
+    let PhysicalProgram {
+        functions,
+        externs,
+        entry_points,
+        constants,
+        pipeline,
+        ..
+    } = inner;
+    let functions: Vec<Function> = functions
         .into_iter()
         .map(|f| {
             let body = elaborate_one_body(f.graph, &f.control_headers, &f.aliases, &f.params, f.return_ty);
@@ -45,11 +54,10 @@ pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
                 linkage_name: f.linkage_name,
             }
         })
-        .chain(inner.externs.into_iter())
+        .chain(externs.into_iter().map(elaborate_extern))
         .collect();
 
-    let entry_points: Vec<EntryPoint> = inner
-        .entry_points
+    let entry_points: Vec<EntryPoint> = entry_points
         .into_iter()
         .map(|e| {
             let body = elaborate_one_body(e.graph, &e.control_headers, &e.aliases, &e.params, e.return_ty);
@@ -65,15 +73,38 @@ pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
         })
         .collect();
 
+    let constants = constants
+        .into_iter()
+        .map(|constant| Constant {
+            name: constant.name,
+            body: elaborate_one_body(
+                constant.graph,
+                &constant.control_headers,
+                &constant.aliases,
+                &[],
+                constant.return_ty,
+            ),
+        })
+        .collect();
     let program = Program {
         functions,
         entry_points,
-        constants: inner.constants,
+        constants,
     };
-    (program, inner.pipeline)
+    (program, pipeline)
 }
 
-fn elaborate_one_body(
+fn elaborate_extern(declaration: ExternDecl<Type<TypeName>>) -> Function {
+    let body = FuncBuilder::new(declaration.params, declaration.return_ty).finish_unchecked();
+    Function {
+        name: declaration.name,
+        body,
+        span: declaration.span,
+        linkage_name: Some(declaration.linkage_name),
+    }
+}
+
+pub(super) fn elaborate_one_body(
     graph: PhysicalEGraph,
     control_headers: &LookupMap<BlockId, ControlHeader>,
     aliases: &LookupMap<NodeId, NodeId>,
@@ -324,8 +355,8 @@ impl<'a> Elaborator<'a> {
     /// their containing skeleton block — only the operands go through
     /// demand() where LICM may move them.
     fn elaborate_side_effect(&mut self, se: &PhysicalSideEffect, skel_bid: SkelBlockId) {
-        let inst_kind = match &se.kind {
-            super::types::SideEffectKind::Inst(k) => k,
+        let effect = match &se.kind {
+            super::types::SideEffectKind::Effect(effect) => effect,
             super::types::SideEffectKind::Soac(_, p) => {
                 panic!("elaborate: unexpanded EgirSoac in skeleton: {:?}", p)
             }
@@ -336,7 +367,7 @@ impl<'a> Elaborator<'a> {
         // typed as `PlaceId`, not a ValueId. Alloca produces a PlaceId rather
         // than a ValueId — register it in `elaborated_places` so downstream
         // `PlaceIndex` / `Load` / `Store` consumers resolve it via `demand_place`.
-        if let InstKind::Alloca { elem_ty, .. } = inst_kind {
+        if let EffectOp::Alloca { elem_ty } = effect {
             let result_nid =
                 se.result.expect("Alloca side-effect must carry a result NodeId for its place");
             let place = self.builder.new_place(elem_ty.clone());
@@ -351,12 +382,12 @@ impl<'a> Elaborator<'a> {
             return;
         }
 
-        let kind = match inst_kind {
-            InstKind::Load { .. } => {
+        let kind = match effect {
+            EffectOp::Load => {
                 let place = self.demand_place(se.operand_nodes[0]);
                 InstKind::Load { place }
             }
-            InstKind::Store { .. } => {
+            EffectOp::Store => {
                 let place = self.demand_place(se.operand_nodes[0]);
                 let value = self.demand(se.operand_nodes[1]);
                 InstKind::Store {
@@ -364,10 +395,15 @@ impl<'a> Elaborator<'a> {
                     value: ValueRef::Ssa(value),
                 }
             }
-            _ => {
+            EffectOp::Op { tag } => {
                 let args: Vec<ValueId> = se.operand_nodes.iter().map(|&nid| self.demand(nid)).collect();
-                rebuild_effectful_inst_kind(inst_kind, &args)
+                InstKind::Op {
+                    tag: tag.clone(),
+                    operands: args.into_iter().map(ValueRef::Ssa).collect(),
+                }
             }
+            EffectOp::ControlBarrier => InstKind::ControlBarrier,
+            EffectOp::Alloca { .. } => unreachable!("alloca handled above"),
         };
 
         if let Some(result_nid) = se.result {
@@ -676,15 +712,4 @@ fn pure_to_inst_kind(op: &PhysicalPureOp, args: &[ValueId]) -> InstKind {
         tag: op.clone(),
         operands: args.iter().map(|&id| ValueRef::Ssa(id)).collect(),
     }
-}
-
-/// Rebuild an effectful InstKind from the original kind and new operands.
-fn rebuild_effectful_inst_kind(original: &InstKind, operands: &[ValueId]) -> InstKind {
-    let mut result = original.clone();
-    let mut idx = 0;
-    result.substitute_values(&mut |vr| {
-        *vr = ValueRef::Ssa(operands[idx]);
-        idx += 1;
-    });
-    result
 }

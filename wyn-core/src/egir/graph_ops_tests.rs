@@ -1,7 +1,7 @@
 use super::*;
 use crate::ast::TypeName;
-use crate::egir::types::{EffectToken, SkeletonTerminator};
-use crate::ssa::types::{ConstantValue, InstKind};
+use crate::egir::types::{EffectOp, EffectToken, SkeletonTerminator};
+use crate::ssa::types::ConstantValue;
 use polytype::Type;
 
 fn u32_ty() -> Type<TypeName> {
@@ -18,9 +18,7 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
     let place = graph.intern_constant(ConstantValue::U32(0), ty.clone());
     let produced = graph.alloc_side_effect_result(ty.clone());
     graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Inst(InstKind::Load {
-            place: Default::default(),
-        }),
+        kind: SideEffectKind::Effect(EffectOp::Load),
         operand_nodes: smallvec![place],
         result: Some(produced),
         effects: Some((EffectToken(0), EffectToken(1))),

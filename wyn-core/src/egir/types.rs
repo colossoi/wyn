@@ -14,14 +14,12 @@ use crate::ssa::types::ConstantValue;
 use crate::LookupMap;
 
 #[cfg(test)]
-use crate::ssa::types::InstKind;
-#[cfg(test)]
 use smallvec::SmallVec;
 
 use super::soac::{filter, hist, screma};
 
 pub use super::ir::{
-    EffectToken, EgirPhase, GraphResource, Language, NodeId, RegionId, SegBody, SegLevel,
+    EffectOp, EffectToken, EgirPhase, GraphResource, Language, NodeId, RegionId, SegBody, SegLevel,
     SegResourceAccessKind, SideEffectIndex, SideEffectSite, SkeletonTerminator, Soac, SoacDestination,
 };
 
@@ -42,10 +40,10 @@ pub type ENode<R = super::program::SemanticResourceRef, Lang = WynLanguage> = su
 pub type SegExtent<R = super::program::SemanticResourceRef> = super::ir::SegExtent<R>;
 pub type SegSpace<R = super::program::SemanticResourceRef> = super::ir::SegSpace<R>;
 pub type SegResourceAccess<R = super::program::SemanticResourceRef> = super::ir::SegResourceAccess<R>;
-pub type SideEffect<P = Semantic> = super::ir::SideEffect<P>;
-pub type SideEffectKind<P = Semantic> = super::ir::SideEffectKind<P>;
-pub type SkeletonBlock<P = Semantic> = super::ir::SkeletonBlock<P>;
-pub type Skeleton<P = Semantic> = super::ir::Skeleton<P>;
+pub type SideEffect<P = Semantic, Lang = WynLanguage> = super::ir::SideEffect<P, Lang>;
+pub type SideEffectKind<P = Semantic, Lang = WynLanguage> = super::ir::SideEffectKind<P, Lang>;
+pub type SkeletonBlock<P = Semantic, Lang = WynLanguage> = super::ir::SkeletonBlock<P, Lang>;
+pub type Skeleton<P = Semantic, Lang = WynLanguage> = super::ir::Skeleton<P, Lang>;
 pub type SoacInputType<Ty = Type<TypeName>> = super::ir::SoacInputType<Ty>;
 pub type EGraph<P = Semantic, Lang = WynLanguage> = super::ir::EGraph<P, Lang>;
 
@@ -129,7 +127,10 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
         let mut blocks = SlotMap::with_key();
         let mut block_map = LookupMap::new();
         for (source, _) in &source_blocks {
-            block_map.insert(*source, blocks.insert(super::ir::SkeletonBlock::<Q>::new()));
+            block_map.insert(
+                *source,
+                blocks.insert(super::ir::SkeletonBlock::<Q, WynLanguage>::new()),
+            );
         }
 
         for node in nodes.values_mut() {
@@ -145,7 +146,9 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
                 .enumerate()
                 .map(|(index, effect)| {
                     let kind = match effect.kind {
-                        super::ir::SideEffectKind::Inst(inst) => super::ir::SideEffectKind::Inst(inst),
+                        super::ir::SideEffectKind::Effect(effect) => {
+                            super::ir::SideEffectKind::Effect(effect)
+                        }
                         super::ir::SideEffectKind::Soac(id, soac) => {
                             let (id, soac) = map_soac(source, index, id, soac)?;
                             super::ir::SideEffectKind::Soac(id, soac)
@@ -211,7 +214,10 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
         let mut blocks = SlotMap::with_key();
         let mut block_map = LookupMap::new();
         for (source, _) in &source_blocks {
-            block_map.insert(*source, blocks.insert(super::ir::SkeletonBlock::<Q>::new()));
+            block_map.insert(
+                *source,
+                blocks.insert(super::ir::SkeletonBlock::<Q, WynLanguage>::new()),
+            );
         }
 
         let source_nodes = nodes.into_iter().collect::<Vec<_>>();
@@ -252,15 +258,15 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
                 .into_iter()
                 .map(|effect| {
                     let kind = match effect.kind {
-                        super::ir::SideEffectKind::Inst(inst) => {
-                            super::ir::SideEffectKind::Inst(inst.try_map_resource(&mut map_resource)?)
+                        super::ir::SideEffectKind::Effect(effect) => {
+                            super::ir::SideEffectKind::Effect(effect.try_map_resource(&mut map_resource)?)
                         }
                         super::ir::SideEffectKind::Soac(id, soac) => {
                             let (id, soac) = map_soac(id, soac, &node_map)?;
                             super::ir::SideEffectKind::Soac(id, soac)
                         }
                     };
-                    Ok(super::ir::SideEffect::<Q> {
+                    Ok(super::ir::SideEffect::<Q, WynLanguage> {
                         kind,
                         operand_nodes: effect
                             .operand_nodes
@@ -378,13 +384,13 @@ impl<R: GraphResource> super::ir::Soac<Semantic<R>> {
     }
 }
 
-impl<R: GraphResource> super::ir::SideEffect<Semantic<R>> {
+impl<R: GraphResource> super::ir::SideEffect<Semantic<R>, WynLanguage> {
     /// Every graph value used by the effect, including SOAC captures,
     /// operator metadata, and semantic iteration-space extents.
     pub fn referenced_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
         let metadata = match &self.kind {
             SideEffectKind::Soac(_, soac) => soac.referenced_nodes(),
-            SideEffectKind::Inst(_) => Vec::new(),
+            SideEffectKind::Effect(_) => Vec::new(),
         };
         self.operand_nodes.iter().copied().chain(metadata)
     }

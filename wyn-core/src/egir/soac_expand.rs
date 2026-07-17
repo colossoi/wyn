@@ -23,10 +23,9 @@ use super::program::{
 };
 use super::soac::{filter, screma};
 use crate::ast::TypeName;
-use crate::ssa::types::{InstKind, ValueRef};
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
-use super::types::{ENode, NodeId, PureOp, SkeletonTerminator, SoacDestination};
+use super::types::{ENode, EffectOp, NodeId, PureOp, SkeletonTerminator, SoacDestination};
 
 /// Run `run_one_body` on every function and entry point in the program.
 pub fn run(inner: &mut PhysicalProgram) {
@@ -478,10 +477,7 @@ fn expand_one(
                             let eff_in = alloc_effect(next_effect);
                             let eff_out = alloc_effect(next_effect);
                             graph.skeleton.blocks[body_bid].side_effects.push(SideEffect {
-                                kind: SideEffectKind::Inst(InstKind::Store {
-                                    place: Default::default(),
-                                    value: ValueRef::Ssa(Default::default()),
-                                }),
+                                kind: SideEffectKind::Effect(EffectOp::Store),
                                 operand_nodes: smallvec![ptr_nid, mapped],
                                 result: None,
                                 effects: Some((eff_in, eff_out)),
@@ -533,10 +529,7 @@ fn expand_one(
                                 let eff_in = alloc_effect(next_effect);
                                 let eff_out = alloc_effect(next_effect);
                                 graph.skeleton.blocks[body_bid].side_effects.push(SideEffect {
-                                    kind: SideEffectKind::Inst(InstKind::Store {
-                                        place: Default::default(),
-                                        value: ValueRef::Ssa(Default::default()),
-                                    }),
+                                    kind: SideEffectKind::Effect(EffectOp::Store),
                                     operand_nodes: smallvec![ptr_nid, new_acc],
                                     result: None,
                                     effects: Some((eff_in, eff_out)),
@@ -997,10 +990,7 @@ fn build_parallel_maps(
         let eff_in = alloc_effect(next_effect);
         let eff_out = alloc_effect(next_effect);
         graph.skeleton.blocks[body].side_effects.push(SideEffect {
-            kind: SideEffectKind::Inst(InstKind::Store {
-                place: Default::default(),
-                value: ValueRef::Ssa(Default::default()),
-            }),
+            kind: SideEffectKind::Effect(EffectOp::Store),
             operand_nodes: smallvec![ptr_nid, y_nid],
             result: None,
             effects: Some((eff_in, eff_out)),
@@ -2385,9 +2375,7 @@ fn emit_read_element(
         let eff_in = alloc_effect(next_effect);
         let eff_out = alloc_effect(next_effect);
         graph.skeleton.blocks[body].side_effects.push(SideEffect {
-            kind: SideEffectKind::Inst(InstKind::Load {
-                place: Default::default(),
-            }),
+            kind: SideEffectKind::Effect(EffectOp::Load),
             operand_nodes: smallvec![ptr_nid],
             result: Some(load_result),
             effects: Some((eff_in, eff_out)),

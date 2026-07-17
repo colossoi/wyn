@@ -16,9 +16,8 @@ use polytype::Type;
 
 use crate::ast::{Span, TypeName};
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
-use crate::interface;
+use crate::interface::{self, EntryInput, EntryOutput};
 use crate::pipeline_descriptor::PipelineDescriptor;
-use crate::ssa::types::{Constant, EntryInput, EntryOutput, Function};
 use crate::types::TypeExt;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
@@ -31,6 +30,8 @@ use super::types::{
 };
 
 pub use super::ir::{OutputRoute, OutputSlotId, OutputWriter, RegionInterner, SlotSource};
+pub type ConstantDef<P = Semantic, Lang = WynLanguage> = super::ir::ConstantDef<P, Lang>;
+pub use crate::types::ExternDecl;
 pub type Region<P = Semantic, Lang = WynLanguage> = super::ir::Region<P, Lang>;
 pub type Func<P = Semantic, Lang = WynLanguage> = super::ir::Func<P, Lang>;
 pub type Entry<P = Semantic, Lang = WynLanguage> = super::ir::Entry<P, Lang>;
@@ -415,14 +416,14 @@ pub(crate) fn finalize_converted_resources(
     for entry in &mut inner.entry_points {
         for input in &mut entry.inputs {
             input.resource = input
-                .storage_binding
+                .storage_binding()
                 .and_then(|binding| by_binding.get(&binding).copied())
                 .map(SemanticResourceRef)
                 .or_else(|| semantic_type_resource(&input.ty));
         }
         for output in &mut entry.outputs {
             output.resource = output
-                .storage_binding
+                .storage_binding()
                 .and_then(|binding| by_binding.get(&binding).copied())
                 .map(SemanticResourceRef)
                 .or_else(|| semantic_type_resource(&output.ty));
@@ -438,12 +439,12 @@ fn strip_compiler_abi(inner: &mut AllocatedProgram) {
             matches!(resource.origin, ResourceOrigin::Compiler(_)).then_some(resource.id)
         })
         .collect::<std::collections::HashSet<_>>();
-    let strip = |inputs: &mut Vec<super::ir::EntryInput<SemanticResourceRef>>,
-                 outputs: &mut Vec<super::ir::EntryOutput<SemanticResourceRef>>,
+    let strip = |inputs: &mut Vec<super::ir::EntryInput<SemanticResourceRef, WynLanguage>>,
+                 outputs: &mut Vec<super::ir::EntryOutput<SemanticResourceRef, WynLanguage>>,
                  routes: &mut Vec<OutputRoute>| {
         for input in inputs.iter_mut() {
             if input.resource.is_some_and(|resource| compiler_resources.contains(&resource.0)) {
-                input.storage_binding = None;
+                input.make_storage_internal();
             }
         }
         let mut output_slots = vec![None; outputs.len()];
@@ -979,8 +980,8 @@ impl PlannedPublication {
         Self {
             name: entry.name.clone(),
             execution_model: entry.execution_model.clone(),
-            inputs: entry.inputs.iter().map(|input| input.interface.clone()).collect(),
-            outputs: entry.outputs.iter().map(|output| output.interface.clone()).collect(),
+            inputs: entry.inputs.iter().map(|input| input.inner.clone()).collect(),
+            outputs: entry.outputs.iter().map(|output| output.inner.clone()).collect(),
             resource_declarations: entry.resource_declarations.clone(),
         }
     }
@@ -1006,8 +1007,8 @@ impl PlannedEntry<Semantic> {
             entry.name.clone(),
             entry.span,
             entry.execution_model.clone(),
-            entry.inputs.iter().map(|input| input.interface.clone()).collect(),
-            entry.outputs.iter().map(|output| output.interface.clone()).collect(),
+            entry.inputs.iter().map(|input| input.inner.clone()).collect(),
+            entry.outputs.iter().map(|output| output.inner.clone()).collect(),
             entry.resource_declarations.clone(),
             entry.params.clone(),
             entry.return_ty.clone(),
@@ -1204,9 +1205,9 @@ pub struct RawProgram {
 impl RawProgram {
     pub fn new(
         functions: Vec<RawFunc>,
-        externs: Vec<Function>,
+        externs: Vec<ExternDecl<Type<TypeName>>>,
         entry_points: Vec<RawEntry>,
-        constants: Vec<Constant>,
+        constants: Vec<ConstantDef<Raw>>,
         pipeline: PipelineDescriptor,
         region_interner: RegionInterner,
     ) -> Self {
@@ -1248,9 +1249,9 @@ pub struct SemanticProgram {
 impl SemanticProgram {
     pub fn new(
         functions: Vec<SemanticFunc>,
-        externs: Vec<Function>,
+        externs: Vec<ExternDecl<Type<TypeName>>>,
         entry_points: Vec<SemanticEntry>,
-        constants: Vec<Constant>,
+        constants: Vec<ConstantDef<Semantic>>,
         pipeline: PipelineDescriptor,
         region_interner: RegionInterner,
     ) -> Self {
@@ -1310,9 +1311,9 @@ pub type ScheduledProgram = Program<Scheduled>;
 /// constructed. Only this type is accepted by expansion and SSA elaboration.
 pub struct PhysicalProgram {
     pub functions: Vec<PhysicalFunc>,
-    pub externs: Vec<Function>,
+    pub externs: Vec<ExternDecl<Type<TypeName>>>,
     pub entry_points: Vec<PhysicalEntry>,
-    pub constants: Vec<Constant>,
+    pub constants: Vec<ConstantDef<Physical>>,
     pub pipeline: PipelineDescriptor,
     pub input_names: LookupMap<(u32, u32), String>,
     pub regions: LookupMap<RegionId, PhysicalRegion>,
@@ -1357,6 +1358,32 @@ fn physicalize_function(
         span,
         linkage_name,
         params,
+        return_ty,
+        graph,
+        control_headers: remap_control_headers(&control_headers, |block| block_map[&block]),
+        aliases: aliases.into_iter().map(|(from, to)| (node_map[&from], node_map[&to])).collect(),
+    })
+}
+
+fn physicalize_constant(
+    constant: ConstantDef<Semantic>,
+    resources: &PhysicalResourceTable,
+) -> Result<ConstantDef<Physical>, String> {
+    let ConstantDef {
+        name,
+        span,
+        mut return_ty,
+        graph,
+        control_headers,
+        aliases,
+    } = constant;
+    let (graph, scheduled_blocks) = super::parallelize::prepare::graph(graph, false)?;
+    let control_headers = remap_control_headers(&control_headers, |block| scheduled_blocks[&block]);
+    let (graph, node_map, block_map) = physicalize_graph_resources(graph, resources)?;
+    physicalize_type_resources(&mut return_ty, resources);
+    Ok(ConstantDef {
+        name,
+        span,
         return_ty,
         graph,
         control_headers: remap_control_headers(&control_headers, |block| block_map[&block]),
@@ -1494,6 +1521,10 @@ impl PhysicalProgram {
                 serial,
             )?);
         }
+        let constants = constants
+            .into_iter()
+            .map(|constant| physicalize_constant(constant, &physical_resources))
+            .collect::<Result<Vec<_>, _>>()?;
         let region_interner = plan.region_interner().clone();
         let mut regions = regions
             .into_iter()

@@ -34,7 +34,6 @@ use crate::BindingRef;
 use crate::LookupMap;
 use polytype::Type;
 use slotmap::SlotMap;
-use wspirv::spirv;
 
 // Re-export shared and SSA-specific ID types.
 pub use crate::flow::{BlockId, ControlHeader, ExecutionModel};
@@ -482,103 +481,12 @@ pub struct EntryPoint {
     pub name: String,
     pub body: FuncBody,
     pub execution_model: ExecutionModel,
-    pub inputs: Vec<EntryInput>,
-    pub outputs: Vec<EntryOutput>,
+    pub inputs: Vec<interface::EntryInput<Type<TypeName>>>,
+    pub outputs: Vec<interface::EntryOutput<Type<TypeName>>>,
     /// Compiler-introduced storage bindings the entry touches beyond its
     /// declared inputs/outputs (e.g. partials/intermediate buffers emitted
     /// by `parallelize`). Carried end-to-end so SPIR-V generation has a
     /// single source of truth for each entry's buffer interface.
     pub storage_bindings: Vec<interface::StorageBindingDecl>,
     pub span: Span,
-}
-
-/// A compute-broadcast input's placement in the push-constant block.
-/// `offset` is the byte offset within the block; `size` is the byte
-/// width of the param's static layout. Both are decided at binding
-/// allocation time, so downstream backends never have to re-derive
-/// either from the param type.
-#[derive(Debug, Clone, Copy)]
-pub struct PushConstantSlot {
-    pub offset: u32,
-    pub size: u32,
-}
-
-/// Input to an entry point.
-#[derive(Debug, Clone)]
-pub struct EntryInput {
-    pub name: String,
-    pub ty: Type<TypeName>,
-    pub decoration: Option<IoDecoration>,
-    pub size_hint: Option<std::num::NonZeroU32>,
-    pub storage_binding: Option<BindingRef>,
-    /// Declared `access` of a `#[storage(...)]` param. `WriteOnly`/`ReadWrite`
-    /// mark the buffer as written in place (e.g. a `scatter` destination), so
-    /// the descriptor and WGSL emit a writable binding rather than read-only.
-    pub storage_access: Option<crate::interface::StorageAccess>,
-    /// Programmer-attributed `#[uniform(set, binding)]` on this param.
-    pub uniform_binding: Option<BindingRef>,
-    /// Placement in the per-entry push-constant block for compute-broadcast
-    /// inputs. `Some` carries both byte offset and byte size, decided at
-    /// the moment the offset was assigned.
-    pub push_constant: Option<PushConstantSlot>,
-    /// Programmer-attributed `#[texture(set, binding)]` on a `texture2d` param.
-    pub texture_binding: Option<BindingRef>,
-    /// The storage-image binding this texture is a sampled view of, when it
-    /// aliases a compiler-managed `resource` allocation. `None` for host
-    /// textures. Flows to the descriptor's `Binding::Texture.backing`.
-    pub texture_backing: Option<BindingRef>,
-    /// The render-target `resource` name this texture samples, from
-    /// `#[view(name, sampled)]` on a resource with no storage backing. Flows to
-    /// `Binding::Texture.resource` — the frame-graph identity shared with the
-    /// fragment `#[target(name)]` write.
-    pub texture_resource: Option<String>,
-    /// Programmer-attributed `#[sampler(set, binding)]` on a `sampler` param.
-    pub sampler_binding: Option<BindingRef>,
-    /// Programmer-attributed `#[storage_image(set, binding, format, access,
-    /// size)]` on a `storage_image` param. Carries the binding ref plus
-    /// the format / access / sizing-policy attributes from the source.
-    pub storage_image_binding: Option<(
-        BindingRef,
-        crate::pipeline_descriptor::StorageImageFormat,
-        crate::interface::StorageAccess,
-        crate::pipeline_descriptor::StorageTextureSize,
-    )>,
-    /// The `resource` name a `#[view(name, storage_*)]` storage image accesses.
-    /// Flows to `Binding::StorageTexture.resource` — the frame-graph identity
-    /// shared with the resource's other views and its `#[target]` write.
-    pub storage_image_resource: Option<String>,
-    /// Minimum-required host allocation for a `storage_binding` input,
-    /// inferred from the entry body's slice references to this param.
-    /// `Some(Fixed { bytes: K * sizeof(elem) })` when every reference to
-    /// the param symbol appears as the first arg of a
-    /// `_w_intrinsic_slice(param, 0, K)` call with `K` a compile-time
-    /// `IntLit`; the bytes are the maximum observed `K * sizeof(elem)`.
-    /// `None` whenever any reference falls outside that pattern, so the
-    /// host has to declare the size another way.
-    pub length: Option<crate::pipeline_descriptor::BufferLen>,
-}
-
-/// Output from an entry point.
-#[derive(Debug, Clone)]
-pub struct EntryOutput {
-    pub ty: Type<TypeName>,
-    pub decoration: Option<IoDecoration>,
-    /// The render-target resource a fragment output writes, from
-    /// `#[target(name)]`. The color-attachment slot is the output's tuple
-    /// position; codegen derives the SPIR-V `Location` from it.
-    pub target: Option<String>,
-    /// For compute shaders with unsized array outputs.
-    pub storage_binding: Option<BindingRef>,
-    /// Sizing policy for a runtime-sized storage output (a parallel map/scan
-    /// writes one element per thread → `SameAsDispatch`). `None` for
-    /// fixed/graphics outputs and entries whose output size the host already
-    /// knows another way.
-    pub length: Option<crate::pipeline_descriptor::BufferLen>,
-}
-
-/// I/O decoration for entry point parameters.
-#[derive(Debug, Clone)]
-pub enum IoDecoration {
-    BuiltIn(spirv::BuiltIn),
-    Location(u32),
 }

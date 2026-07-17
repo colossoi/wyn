@@ -990,9 +990,9 @@ fn invocation_invariant(
             return true;
         };
         entry.inputs.get(*index).is_some_and(|input| {
-            input.storage_binding.is_some()
-                || input.uniform_binding.is_some()
-                || input.push_constant.is_some()
+            input.storage_binding().is_some()
+                || input.uniform_binding().is_some()
+                || input.push_constant().is_some()
         })
     })
 }

@@ -23,10 +23,11 @@ use crate::{LookupMap, LookupSet};
 use crate::ast::{Span, TypeName};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::error::Result;
+use crate::interface::IoDecoration;
 use crate::ssa::layout::{buffer_array_strides, std430_alignment, type_byte_size};
 use crate::ssa::types::{
     BlockId, ConstantValue, ControlHeader, EntryPoint, ExecutionModel, FuncBody, Function, InstKind,
-    IoDecoration, Program, Terminator, ValueId, ValueRef, WynInstNode,
+    Program, Terminator, ValueId, ValueRef, WynInstNode,
 };
 use crate::types::TypeExt;
 use crate::{bail_spirv, bail_spirv_at, err_spirv, err_spirv_at, types, BindingRef};
@@ -441,14 +442,14 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     // resolve them during lowering, even though they're lowered before entry points.
     for entry in &program.entry_points {
         for input in &entry.inputs {
-            if let Some(br) = input.storage_binding {
+            if let Some(br) = input.storage_binding() {
                 if !constructor.storage_buffers.contains_key(&br) {
                     constructor.create_storage_buffer(&input.ty, br.set, br.binding);
                 }
             }
         }
         for output in &entry.outputs {
-            if let Some(br) = output.storage_binding {
+            if let Some(br) = output.storage_binding() {
                 if !constructor.storage_buffers.contains_key(&br) {
                     constructor.create_storage_buffer(&output.ty, br.set, br.binding);
                 }
@@ -480,7 +481,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     let mut image_access: LookupMap<BindingRef, crate::interface::StorageAccess> = LookupMap::new();
     for entry in &program.entry_points {
         for input in &entry.inputs {
-            if let Some((br, _format, access, _size)) = input.storage_image_binding {
+            if let Some((br, _format, access, _size)) = input.storage_image_binding() {
                 image_access
                     .entry(br)
                     .and_modify(|acc| *acc = union_storage_access(*acc, access))
@@ -490,7 +491,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     }
     for entry in &program.entry_points {
         for input in &entry.inputs {
-            if let Some((br, format, _access, _size)) = input.storage_image_binding {
+            if let Some((br, format, _access, _size)) = input.storage_image_binding() {
                 constructor.create_storage_image(br, format, image_access[&br]);
             }
         }
@@ -540,11 +541,11 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     let written_bindings: LookupSet<BindingRef> = program
         .entry_points
         .iter()
-        .flat_map(|e| e.outputs.iter().filter_map(|o| o.storage_binding))
+        .flat_map(|e| e.outputs.iter().filter_map(|o| o.storage_binding()))
         .chain(program.entry_points.iter().flat_map(|e| {
             e.inputs.iter().filter_map(|i| {
-                let br = i.storage_binding?;
-                match i.storage_access {
+                let br = i.storage_binding()?;
+                match i.storage_access() {
                     Some(
                         crate::interface::StorageAccess::WriteOnly
                         | crate::interface::StorageAccess::ReadWrite,
@@ -590,7 +591,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
             // entry points may have buffers this one doesn't reference.
             if let Some(entry) = program.entry_points.iter().find(|e| e.name == *name) {
                 for input in &entry.inputs {
-                    if let Some(br) = input.storage_binding {
+                    if let Some(br) = input.storage_binding() {
                         if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&br) {
                             if !interfaces.contains(&var_id) {
                                 interfaces.push(var_id);
@@ -599,7 +600,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
                     }
                 }
                 for output in &entry.outputs {
-                    if let Some(br) = output.storage_binding {
+                    if let Some(br) = output.storage_binding() {
                         if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&br) {
                             if !interfaces.contains(&var_id) {
                                 interfaces.push(var_id);

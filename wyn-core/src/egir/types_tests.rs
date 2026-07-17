@@ -10,7 +10,7 @@ fn u32_ty() -> Type<TypeName> {
 
 fn effect(result: NodeId) -> SideEffect {
     SideEffect {
-        kind: SideEffectKind::Inst(InstKind::ControlBarrier),
+        kind: SideEffectKind::Effect(EffectOp::ControlBarrier),
         operand_nodes: SmallVec::new(),
         result: Some(result),
         effects: None,

@@ -1,7 +1,7 @@
 use super::*;
 use crate::ast::TypeName;
-use crate::egir::types::{EffectToken, PureOp, SideEffectKind};
-use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
+use crate::egir::types::{EffectOp, EffectToken, PureOp, SideEffectKind};
+use crate::ssa::types::ConstantValue;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -26,9 +26,7 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
     let place = graph.intern_constant(ConstantValue::U32(0), u32_ty());
     let produced = graph.alloc_side_effect_result(u32_ty());
     graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Inst(InstKind::Load {
-            place: Default::default(),
-        }),
+        kind: SideEffectKind::Effect(EffectOp::Load),
         operand_nodes: smallvec![place],
         result: Some(produced),
         effects: Some((EffectToken(0), EffectToken(1))),
@@ -36,9 +34,7 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
     });
     let unrelated = graph.alloc_side_effect_result(u32_ty());
     graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Inst(InstKind::Load {
-            place: Default::default(),
-        }),
+        kind: SideEffectKind::Effect(EffectOp::Load),
         operand_nodes: smallvec![place],
         result: Some(unrelated),
         effects: Some((EffectToken(1), EffectToken(2))),
@@ -47,10 +43,7 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
     let body_param = graph.add_block_param(body, 0, u32_ty());
     graph.skeleton.blocks[body].params.push(body_param);
     graph.skeleton.blocks[body].side_effects.push(SideEffect {
-        kind: SideEffectKind::Inst(InstKind::Store {
-            place: Default::default(),
-            value: ValueRef::Ssa(Default::default()),
-        }),
+        kind: SideEffectKind::Effect(EffectOp::Store),
         operand_nodes: smallvec![place, body_param],
         result: None,
         effects: Some((EffectToken(2), EffectToken(3))),
@@ -275,9 +268,7 @@ fn selected_operation_recipe_detaches_an_independent_continuation_effect() {
     };
     let produced = graph.alloc_side_effect_result(u32_ty());
     graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
-        kind: SideEffectKind::Inst(InstKind::Load {
-            place: Default::default(),
-        }),
+        kind: SideEffectKind::Effect(EffectOp::Load),
         operand_nodes: smallvec![zero],
         result: Some(produced),
         effects: Some((EffectToken(0), EffectToken(1))),
@@ -315,9 +306,7 @@ fn selected_operation_recipe_rejects_a_continuation_parameter_dependency() {
     };
     let produced = graph.alloc_side_effect_result(u32_ty());
     graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
-        kind: SideEffectKind::Inst(InstKind::Load {
-            place: Default::default(),
-        }),
+        kind: SideEffectKind::Effect(EffectOp::Load),
         operand_nodes: smallvec![result],
         result: Some(produced),
         effects: Some((EffectToken(0), EffectToken(1))),

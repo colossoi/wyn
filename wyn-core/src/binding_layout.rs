@@ -11,8 +11,9 @@
 use polytype::Type;
 
 use crate::ast::{Pattern, PatternKind, TypeName};
-use crate::interface::{Attribute, EntryDecl, EntryParamBinding, EntryParamBindingKind, TupleFieldBinding};
-use crate::ssa::types::IoDecoration;
+use crate::interface::{
+    Attribute, EntryDecl, EntryParamBinding, EntryParamBindingKind, IoDecoration, TupleFieldBinding,
+};
 use crate::types::TypeExt;
 use crate::{BindingRef, SymbolId};
 

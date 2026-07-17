@@ -27,9 +27,9 @@
 
 use crate::ast::TypeName;
 use crate::error::CompilerError;
-use crate::interface::StorageBindingDecl;
+use crate::interface::{EntryInput, StorageBindingDecl};
 use crate::ssa::layout::type_byte_size;
-use crate::ssa::types::{EntryInput, EntryPoint, Program};
+use crate::ssa::types::{EntryPoint, Program};
 use crate::BindingRef;
 use polytype::Type;
 
@@ -44,12 +44,12 @@ pub fn run(program: &Program) -> Result<()> {
 
 fn check_entry(entry: &EntryPoint) -> Result<()> {
     for input in &entry.inputs {
-        if let Some(br) = input.storage_binding {
+        if let Some(br) = input.storage_binding() {
             check_buffer_elem(&entry.name, br, &input.ty, &input_label(input))?;
         }
     }
     for (i, output) in entry.outputs.iter().enumerate() {
-        if let Some(br) = output.storage_binding {
+        if let Some(br) = output.storage_binding() {
             check_buffer_elem(&entry.name, br, &output.ty, &format!("output #{}", i))?;
         }
     }

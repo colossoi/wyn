@@ -53,6 +53,33 @@ fn mk_term(ty: Type<TypeName>, kind: TermKind) -> Term {
     }
 }
 
+fn elaborate_converter(
+    converter: Converter<'_, '_>,
+    params: &[(Type<TypeName>, String)],
+    return_ty: Type<TypeName>,
+) -> FuncBody {
+    let (graph, control_headers) = converter.into_graph_parts();
+    let (graph, _, blocks) = graph
+        .try_map_resources_and_phase::<crate::egir::types::Physical, String>(
+            |resource| {
+                Err(format!(
+                    "unit-test graph unexpectedly references resource {resource:?}"
+                ))
+            },
+            |_, _, _| Err("unit-test graph unexpectedly contains an unexpanded SOAC".into()),
+        )
+        .expect("unit-test graph should be directly physicalizable");
+    let control_headers =
+        crate::egir::program::remap_control_headers(&control_headers, |block| blocks[&block]);
+    crate::egir::elaborate::elaborate_one_body(
+        graph,
+        &control_headers,
+        &crate::LookupMap::new(),
+        params,
+        return_ty,
+    )
+}
+
 /// Build a minimal TLC def and convert it via EGraph.
 fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> FuncBody {
     let symbols = SymbolTable::new();
@@ -82,7 +109,7 @@ fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> Fu
     }
     let result = converter.convert_term(&body).expect("conversion failed");
     converter.set_return(Some(result));
-    converter.elaborate_to_funcbody(&param_info, ret_ty).expect("elaboration failed")
+    elaborate_converter(converter, &param_info, ret_ty)
 }
 
 #[test]
@@ -142,7 +169,7 @@ fn test_add_roundtrip() {
     converter.set_return(Some(result));
 
     let params = vec![(i32_ty(), "a".into()), (i32_ty(), "b".into())];
-    let func = converter.elaborate_to_funcbody(&params, i32_ty()).expect("elaboration failed");
+    let func = elaborate_converter(converter, &params, i32_ty());
 
     let entry = func.get_block(func.entry_block());
     // Should have a BinOp(+) instruction.
@@ -211,7 +238,7 @@ fn test_gvn_via_let() {
     let result = converter.convert_term(&outer_let).expect("conversion failed");
     converter.set_return(Some(result));
 
-    let func = converter.elaborate_to_funcbody(&[], pair_ty).expect("elaboration failed");
+    let func = elaborate_converter(converter, &[], pair_ty);
 
     let entry = func.get_block(func.entry_block());
     // GVN: should have only ONE Int("42") instruction, not two.
@@ -315,7 +342,7 @@ fn test_if_else_roundtrip() {
     converter.set_return(Some(result));
 
     let params = vec![(Type::Constructed(TypeName::Bool, vec![]), "c".into())];
-    let func = converter.elaborate_to_funcbody(&params, i32_ty()).expect("elaboration failed");
+    let func = elaborate_converter(converter, &params, i32_ty());
 
     // Should have 4 blocks: entry, then, else, merge
     assert_eq!(func.inner.blocks.len(), 4, "if/else should produce 4 blocks");

@@ -1,9 +1,12 @@
 use crate::ast::TypeName;
 use crate::error::CompilerError;
-use crate::interface::{StorageBindingDecl, StorageRole};
+use crate::interface::{
+    BindingExposure, EntryInput, EntryInputKind, EntryOutput, EntryOutputKind, StorageBindingDecl,
+    StorageRole,
+};
 use crate::spirv::verify_buffer_layouts;
 use crate::ssa::builder::FuncBuilder;
-use crate::ssa::types::{EntryInput, EntryOutput, EntryPoint, ExecutionModel, Program};
+use crate::ssa::types::{EntryPoint, ExecutionModel, Program};
 use crate::{types, BindingRef};
 use polytype::Type;
 
@@ -68,29 +71,22 @@ fn storage_input(name: &str, set: u32, binding: u32, ty: Type<TypeName>) -> Entr
     EntryInput {
         name: name.into(),
         ty,
-        decoration: None,
         size_hint: None,
-        storage_binding: Some(BindingRef::new(set, binding)),
-        storage_access: Some(crate::interface::StorageAccess::ReadWrite),
-        uniform_binding: None,
-        push_constant: None,
-        texture_binding: None,
-        texture_backing: None,
-        texture_resource: None,
-        storage_image_resource: None,
-        sampler_binding: None,
-        storage_image_binding: None,
-        length: None,
+        kind: EntryInputKind::Storage {
+            exposure: BindingExposure::Host(BindingRef::new(set, binding)),
+            access: crate::interface::StorageAccess::ReadWrite,
+            length: None,
+        },
     }
 }
 
 fn storage_output(set: u32, binding: u32, ty: Type<TypeName>) -> EntryOutput {
     EntryOutput {
         ty,
-        decoration: None,
-        target: None,
-        storage_binding: Some(BindingRef::new(set, binding)),
-        length: None,
+        kind: EntryOutputKind::Storage {
+            exposure: BindingExposure::Host(BindingRef::new(set, binding)),
+            length: None,
+        },
     }
 }
 

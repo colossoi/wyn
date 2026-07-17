@@ -23,13 +23,12 @@ use super::program::{
 };
 use super::soac::{filter, screma};
 use super::types::{
-    EGraph, ENode, NodeId, PureOp, RegionId, SegBody, SegSpace, SideEffect, SideEffectKind, SideEffectSite,
-    SkeletonTerminator, Soac, SoacDestination,
+    EGraph, ENode, EffectOp, NodeId, PureOp, RegionId, SegBody, SegSpace, SideEffect, SideEffectKind,
+    SideEffectSite, SkeletonTerminator, Soac, SoacDestination,
 };
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
-use crate::ssa::types::InstKind;
 use crate::types::TypeExt;
 
 /// Per-workgroup width of a synthesized phase-2 tree reduce.
@@ -625,7 +624,7 @@ fn project_kernel_body(
     source: &super::program::PlannedEntry,
     name: String,
     execution_model: ExecutionModel,
-    outputs: Vec<crate::ssa::types::EntryOutput>,
+    outputs: Vec<crate::interface::EntryOutput>,
     output_routes: Vec<super::program::OutputRoute>,
     resource_declarations: Vec<SemanticResourceDecl>,
     return_ty: Type<TypeName>,
@@ -656,7 +655,7 @@ fn project_kernel_body_effects(
     selected: std::collections::HashSet<SideEffectSite>,
     name: String,
     execution_model: ExecutionModel,
-    outputs: Vec<crate::ssa::types::EntryOutput>,
+    outputs: Vec<crate::interface::EntryOutput>,
     output_routes: Vec<super::program::OutputRoute>,
     resource_declarations: Vec<SemanticResourceDecl>,
     return_ty: Type<TypeName>,
@@ -964,7 +963,7 @@ fn is_write_effectful(se: &SideEffect) -> bool {
             .map(|map| map.destination)
             .chain(op.operators().into_iter().map(|operator| operator.destination))
             .any(|d| matches!(d, SoacDestination::OutputView | SoacDestination::InputBuffer)),
-        SideEffectKind::Inst(InstKind::Store { .. }) => true,
+        SideEffectKind::Effect(EffectOp::Store) => true,
         _ => false,
     }
 }
@@ -1961,7 +1960,7 @@ fn analyze_reduce_entry(
         vec![Vec::new(); n_accs];
     for (block_id, block) in &entry.graph.skeleton.blocks {
         for (effect_index, effect) in block.side_effects.iter().enumerate() {
-            if !matches!(effect.kind, SideEffectKind::Inst(InstKind::Store { .. })) {
+            if !matches!(effect.kind, SideEffectKind::Effect(EffectOp::Store)) {
                 continue;
             }
             let (Some(&place), Some(&value)) = (effect.operand_nodes.first(), effect.operand_nodes.get(1))
@@ -2188,8 +2187,8 @@ fn emit_reduce_entry(
         for (resource, _, _) in &acc_output_decls[acc_i] {
             if let Some(binding) = resources[resource.0 as usize].host_binding() {
                 for output in &mut entry.outputs {
-                    if output.storage_binding == Some(binding) {
-                        output.storage_binding = None;
+                    if output.storage_binding() == Some(binding) {
+                        output.make_storage_internal();
                     }
                 }
             }

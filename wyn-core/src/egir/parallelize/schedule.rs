@@ -20,10 +20,10 @@ use crate::egir::types::{
     EgirPhase, RegionId, Scheduled, SegExtent, SegResourceAccessKind, Semantic, SideEffectKind, Soac,
 };
 use crate::flow::ExecutionModel;
+use crate::interface::EntryInput;
 use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
 };
-use crate::ssa::types::EntryInput;
 use crate::{BindingRef, ResourceId};
 
 #[path = "schedule_validation.rs"]
@@ -1286,7 +1286,7 @@ fn storage_image_domain_inputs(inputs: &[EntryInput], baseline: &KernelDomain) -
     if !matches!(baseline, KernelDomain::Fixed { x: 1, y: 1, z: 1 }) {
         return None;
     }
-    let (binding, ..) = inputs.iter().find_map(|input| input.storage_image_binding)?;
+    let (binding, ..) = inputs.iter().find_map(EntryInput::storage_image_binding)?;
     Some(KernelDomain::Elements(DispatchLen::StorageImage {
         set: binding.set,
         binding: binding.binding,

@@ -301,7 +301,8 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut AllocatedProgram) {
             }
             for output in &mut entry.outputs {
                 if output.resource == Some(SemanticResourceRef(resource)) {
-                    output.length = output_len.clone();
+                    *output.storage_length_mut().expect("filter output resource must be storage") =
+                        output_len.clone();
                 }
             }
         }

@@ -18,9 +18,9 @@ use polytype::Type as PolyType;
 use crate::ast::{Span, TypeName};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::error::Result;
+use crate::interface::IoDecoration;
 use crate::ssa::types::{
-    EntryPoint, ExecutionModel, FuncBody, Function, InstKind, IoDecoration, Program, ValueId, ValueRef,
-    WynInstNode,
+    EntryPoint, ExecutionModel, FuncBody, Function, InstKind, Program, ValueId, ValueRef, WynInstNode,
 };
 use crate::types::TypeExt;
 use crate::BindingRef;
@@ -793,7 +793,7 @@ impl<'a> LowerCtx<'a> {
             // array element type; the WGSL binding holds the full
             // `array<T>`.
             for input in &entry.inputs {
-                if let Some(br) = input.storage_binding {
+                if let Some(br) = input.storage_binding() {
                     if is_declared(br) {
                         continue;
                     }
@@ -815,7 +815,7 @@ impl<'a> LowerCtx<'a> {
                     // written in place (e.g. a `scatter` destination); WGSL
                     // needs `read_write` for the Store.
                     if matches!(
-                        input.storage_access,
+                        input.storage_access(),
                         Some(crate::interface::StorageAccess::WriteOnly)
                             | Some(crate::interface::StorageAccess::ReadWrite)
                     ) {
@@ -829,7 +829,7 @@ impl<'a> LowerCtx<'a> {
             // array of that scalar — the SOAC parallelize pass packs
             // the result into a single-element slot.
             for out in &entry.outputs {
-                if let Some(br) = out.storage_binding {
+                if let Some(br) = out.storage_binding() {
                     if is_declared(br) {
                         continue;
                     }
@@ -914,7 +914,7 @@ impl<'a> LowerCtx<'a> {
         let mut uniforms: LookupMap<String, (u32, u32, String)> = LookupMap::new();
         for entry in &self.program.entry_points {
             for input in &entry.inputs {
-                if let Some(br) = input.uniform_binding {
+                if let Some(br) = input.uniform_binding() {
                     let (set, binding) = (br.set, br.binding);
                     let ty_str = self.type_emitter.type_to_wgsl(&input.ty)?;
                     let key = self.mangle_tracked(&input.name)?;
@@ -949,7 +949,7 @@ impl<'a> LowerCtx<'a> {
         let mut handles: LookupMap<String, (u32, u32, String)> = LookupMap::new();
         for entry in &self.program.entry_points {
             for input in &entry.inputs {
-                let set_binding = input.texture_binding.or(input.sampler_binding);
+                let set_binding = input.texture_binding().or(input.sampler_binding());
                 if let Some(br) = set_binding {
                     let (set, binding) = (br.set, br.binding);
                     let ty_str = self.type_emitter.type_to_wgsl(&input.ty)?;
@@ -986,7 +986,7 @@ impl<'a> LowerCtx<'a> {
         let mut storage_images: LookupMap<BindingRef, String> = LookupMap::new();
         for entry in &self.program.entry_points {
             for input in &entry.inputs {
-                let Some((br, format, access, _size)) = input.storage_image_binding else {
+                let Some((br, format, access, _size)) = input.storage_image_binding() else {
                     continue;
                 };
                 let ty_str = format!(
@@ -1106,8 +1106,8 @@ impl<'a> LowerCtx<'a> {
         // storage-class struct; WGSL has no push constants, so we emit
         // a uniform block instead. Collected here so `lower_program`'s
         // module-scope pass can emit the struct + `var<uniform>` decl.
-        let pc_inputs: Vec<(usize, &crate::ssa::types::EntryInput)> =
-            entry.inputs.iter().enumerate().filter(|(_, inp)| inp.push_constant.is_some()).collect();
+        let pc_inputs: Vec<(usize, &crate::interface::EntryInput)> =
+            entry.inputs.iter().enumerate().filter(|(_, inp)| inp.push_constant().is_some()).collect();
         let pc_block: Option<PcBlock> = if !pc_inputs.is_empty() {
             // Synthetic (set, binding) chosen to avoid colliding with
             // user-declared storage/uniform bindings: set = 1 (user
@@ -1141,27 +1141,27 @@ impl<'a> LowerCtx<'a> {
         for (i, input) in entry.inputs.iter().enumerate() {
             // Storage-backed inputs (compute shader runtime-sized array
             // params) become module-scope bindings, not function params.
-            if input.storage_binding.is_some() {
+            if input.storage_binding().is_some() {
                 continue;
             }
             // Push-constant inputs are routed through the synthesized
             // uniform block — no function parameter emitted.
-            if input.push_constant.is_some() {
+            if input.push_constant().is_some() {
                 continue;
             }
             // `#[uniform]`-attributed inputs become module-scope
             // `var<uniform>` declarations; the body references them by
             // name directly.
-            if input.uniform_binding.is_some() {
+            if input.uniform_binding().is_some() {
                 continue;
             }
             // `#[texture]` / `#[sampler]` / `#[storage_image]` inputs
             // become module-scope handle vars (emitted in `lower_program`);
             // the body references them by the same mangled name, so no
             // function param.
-            if input.texture_binding.is_some()
-                || input.sampler_binding.is_some()
-                || input.storage_image_binding.is_some()
+            if input.texture_binding().is_some()
+                || input.sampler_binding().is_some()
+                || input.storage_image_binding().is_some()
             {
                 continue;
             }
@@ -1169,9 +1169,9 @@ impl<'a> LowerCtx<'a> {
                 body.params.get(i).map(|(_, _, n)| n.clone()).unwrap_or_else(|| input.name.clone());
             let mangled_name = self.mangle_tracked(&param_name)?;
             let user_ty_str = self.type_emitter.type_to_wgsl(&input.ty)?;
-            let (attr, param_ty_str, internal_name) = match &input.decoration {
+            let (attr, param_ty_str, internal_name) = match input.decoration() {
                 Some(IoDecoration::BuiltIn(b)) => {
-                    let wgsl_b = map_builtin_to_wgsl(b, stage_is_fragment).ok_or_else(|| {
+                    let wgsl_b = map_builtin_to_wgsl(&b, stage_is_fragment).ok_or_else(|| {
                         crate::err_wgsl!(
                             "entry input {}: WGSL has no @builtin mapping for {:?}",
                             param_name,
@@ -1179,7 +1179,7 @@ impl<'a> LowerCtx<'a> {
                         )
                     })?;
                     let attr = format!("@builtin({}) ", wgsl_b);
-                    match wgsl_builtin_type(b) {
+                    match wgsl_builtin_type(&b) {
                         Some(required) if required != user_ty_str => {
                             let internal = format!("_builtin_{}", wgsl_b);
                             builtin_casts.push((
@@ -1212,8 +1212,8 @@ impl<'a> LowerCtx<'a> {
         // Indices (into `entry.outputs`) of the non-storage outputs, so
         // we can route `OutputPtr { index: N }` to the right struct field
         // for multi-output entries.
-        let non_storage_outputs: Vec<(usize, &crate::ssa::types::EntryOutput)> =
-            entry.outputs.iter().enumerate().filter(|(_, o)| o.storage_binding.is_none()).collect();
+        let non_storage_outputs: Vec<(usize, &crate::interface::EntryOutput)> =
+            entry.outputs.iter().enumerate().filter(|(_, o)| o.storage_binding().is_none()).collect();
         // For multi-output: the generated struct name and the per-output
         // field mapping (orig_index → field_name), which pre-declares
         // `var _out_struct: VsOutN;` in the body prelude and routes
@@ -1231,9 +1231,9 @@ impl<'a> LowerCtx<'a> {
                 if non_storage_outputs.len() == 1 {
                     let (out_index, out) = non_storage_outputs[0];
                     let ty_str = self.type_emitter.type_to_wgsl(&out.ty)?;
-                    let attr = match &out.decoration {
+                    let attr = match out.decoration() {
                         Some(IoDecoration::BuiltIn(b)) => {
-                            let wgsl_b = map_builtin_to_wgsl(b, stage_is_fragment).ok_or_else(|| {
+                            let wgsl_b = map_builtin_to_wgsl(&b, stage_is_fragment).ok_or_else(|| {
                                 crate::err_wgsl!("entry output: WGSL has no @builtin mapping for {:?}", b)
                             })?;
                             format!("@builtin({}) ", wgsl_b)
@@ -1241,7 +1241,7 @@ impl<'a> LowerCtx<'a> {
                         Some(IoDecoration::Location(n)) => format!("@location({}) ", n),
                         // A `#[target(name)]` render output takes its color
                         // attachment slot from its position in the return tuple.
-                        None if out.target.is_some() => format!("@location({}) ", out_index),
+                        None if out.target().is_some() => format!("@location({}) ", out_index),
                         None => String::new(),
                     };
                     (format!("{}{}", attr, ty_str), false)
@@ -1254,10 +1254,10 @@ impl<'a> LowerCtx<'a> {
                     let mut index_to_field: LookupMap<usize, String> = LookupMap::new();
                     for (orig_index, out) in &non_storage_outputs {
                         let ty_str = self.type_emitter.type_to_wgsl(&out.ty)?;
-                        let attr = match &out.decoration {
+                        let attr = match out.decoration() {
                             Some(IoDecoration::BuiltIn(b)) => {
                                 let wgsl_b =
-                                    map_builtin_to_wgsl(b, stage_is_fragment).ok_or_else(|| {
+                                    map_builtin_to_wgsl(&b, stage_is_fragment).ok_or_else(|| {
                                         crate::err_wgsl!(
                                             "entry output: WGSL has no @builtin mapping for {:?}",
                                             b
@@ -1266,7 +1266,7 @@ impl<'a> LowerCtx<'a> {
                                 format!("@builtin({}) ", wgsl_b)
                             }
                             Some(IoDecoration::Location(n)) => format!("@location({}) ", n),
-                            None if out.target.is_some() => format!("@location({}) ", orig_index),
+                            None if out.target().is_some() => format!("@location({}) ", orig_index),
                             None => {
                                 return Err(crate::err_wgsl!(
                                     "entry '{}' output #{} has no decoration; multi-output \
@@ -1304,7 +1304,7 @@ impl<'a> LowerCtx<'a> {
         if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
             let user_gid = entry.inputs.iter().find(|i| {
                 matches!(
-                    &i.decoration,
+                    i.decoration(),
                     Some(IoDecoration::BuiltIn(spirv::BuiltIn::GlobalInvocationId))
                 )
             });
@@ -1393,7 +1393,7 @@ impl<'a> LowerCtx<'a> {
                 }
                 None => {
                     for (i, out) in entry.outputs.iter().enumerate() {
-                        if out.storage_binding.is_some() {
+                        if out.storage_binding().is_some() {
                             continue;
                         }
                         let ty_str = self.type_emitter.type_to_wgsl(&out.ty)?;
@@ -1715,8 +1715,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         let br = BindingRef::new(set, binding);
         for entry in &self.ctx.program.entry_points {
             if entry.storage_bindings.iter().any(|sb| sb.binding == br)
-                || entry.inputs.iter().any(|i| i.storage_binding == Some(br))
-                || entry.outputs.iter().any(|o| o.storage_binding == Some(br))
+                || entry.inputs.iter().any(|i| i.storage_binding() == Some(br))
+                || entry.outputs.iter().any(|o| o.storage_binding() == Some(br))
             {
                 return Ok(format!("_buf_{}_{}", set, binding));
             }
@@ -1732,7 +1732,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     fn storage_image_name(&self, binding: BindingRef) -> Result<String> {
         let declared =
             self.ctx.program.entry_points.iter().flat_map(|entry| &entry.inputs).any(|input| {
-                input.storage_image_binding.is_some_and(|(candidate, ..)| candidate == binding)
+                input.storage_image_binding().is_some_and(|(candidate, ..)| candidate == binding)
             });
         if !declared {
             return Err(crate::err_wgsl_at!(

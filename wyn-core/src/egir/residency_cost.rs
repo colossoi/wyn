@@ -10,13 +10,13 @@ use crate::builtins::{catalog, Purity};
 use crate::flow::{BlockId, ControlHeader};
 use crate::interface::StorageAccess;
 use crate::op::OpTag;
-use crate::ssa::types::{ConstantValue, InstKind};
+use crate::ssa::types::ConstantValue;
 use crate::LookupMap;
 
 use super::graph_ops;
 use super::program::{SemanticEntry, SemanticProgram};
 use super::types::{
-    EGraph, ENode, NodeId, PureViewSource, SideEffect, SideEffectKind, SkeletonTerminator, Soac,
+    EGraph, ENode, EffectOp, NodeId, PureViewSource, SideEffect, SideEffectKind, SkeletonTerminator, Soac,
 };
 
 pub(crate) const STORAGE_LOAD_COST: u64 = 4;
@@ -77,19 +77,19 @@ fn entry_input_is_invariant(entry: &SemanticEntry, index: usize) -> bool {
     let Some(input) = entry.inputs.get(index) else {
         return false;
     };
-    if input.storage_image_binding.is_some()
-        || input.texture_binding.is_some()
-        || input.sampler_binding.is_some()
-        || input.decoration.is_some()
+    if input.storage_image_binding().is_some()
+        || input.texture_binding().is_some()
+        || input.sampler_binding().is_some()
+        || input.decoration().is_some()
     {
         return false;
     }
-    if input.uniform_binding.is_some() || input.push_constant.is_some() {
+    if input.uniform_binding().is_some() || input.push_constant().is_some() {
         return true;
     }
-    input.storage_binding.is_some()
+    input.storage_binding().is_some()
         && !matches!(
-            input.storage_access,
+            input.storage_access(),
             Some(StorageAccess::WriteOnly | StorageAccess::ReadWrite)
         )
 }
@@ -104,16 +104,11 @@ fn effect_cost(
         SideEffectKind::Soac(_, Soac::Screma(_))
         | SideEffectKind::Soac(_, Soac::Filter(_))
         | SideEffectKind::Soac(_, Soac::Hist(_)) => None,
-        SideEffectKind::Inst(InstKind::Load { .. }) => Some(STORAGE_LOAD_COST),
-        SideEffectKind::Inst(InstKind::Op { tag, .. }) => operation_cost(program, tag, summaries, visiting),
-        SideEffectKind::Inst(
-            InstKind::Alloca { .. }
-            | InstKind::Store { .. }
-            | InstKind::ViewIndex { .. }
-            | InstKind::PlaceIndex { .. }
-            | InstKind::OutputSlot { .. }
-            | InstKind::ControlBarrier,
-        ) => None,
+        SideEffectKind::Effect(EffectOp::Load) => Some(STORAGE_LOAD_COST),
+        SideEffectKind::Effect(EffectOp::Op { tag }) => operation_cost(program, tag, summaries, visiting),
+        SideEffectKind::Effect(EffectOp::Alloca { .. } | EffectOp::Store | EffectOp::ControlBarrier) => {
+            None
+        }
     }
 }
 

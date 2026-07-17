@@ -9,6 +9,7 @@ pub mod checker;
 pub mod patterns;
 pub mod run;
 
+use crate::ast::Span;
 use crate::LookupMap;
 use std::hash::{Hash, Hasher};
 
@@ -70,6 +71,16 @@ pub fn vec_field_type(type_name: &str, field_name: &str) -> Option<Type> {
 // Type aliases for polytype types specialized to our TypeName
 pub type Type = polytype::Type<TypeName>;
 pub type TypeScheme = polytype::TypeScheme<TypeName>;
+
+/// A bodyless external callable declaration shared by compiler IRs.
+#[derive(Clone, Debug)]
+pub struct ExternDecl<Ty = Type> {
+    pub name: String,
+    pub span: Span,
+    pub linkage_name: String,
+    pub params: Vec<(Ty, String)>,
+    pub return_ty: Ty,
+}
 
 /// Record field names that preserve source order but have order-independent equality.
 /// The actual field types are stored in Type::Constructed's type argument vector.

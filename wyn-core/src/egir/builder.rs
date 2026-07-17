@@ -2,8 +2,8 @@
 
 use crate::ast::{Span, TypeName};
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
-use crate::ssa::types::{EntryInput, EntryOutput};
-use crate::{interface, LookupMap, ResourceId};
+use crate::interface::{self, EntryInput, EntryOutput};
+use crate::{LookupMap, ResourceId};
 use polytype::Type;
 use smallvec::smallvec;
 

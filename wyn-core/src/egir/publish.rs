@@ -25,11 +25,11 @@ use crate::{BindingRef, LookupMap, LookupSet};
 
 use crate::egir::program::EntryPublication;
 use crate::flow::ExecutionModel;
+use crate::interface::{IoDecoration, TextureSource};
 use crate::pipeline_descriptor::{
     Access, BackingRef, Binding, BufferUsage, FragmentOutput, Pipeline, PipelineDescriptor,
     SamplerBindingType, TextureSampleType, TextureViewDimension, VertexAttribute,
 };
-use crate::ssa::types::IoDecoration;
 
 pub trait PipelineDescriptorPublish {
     /// Append `Binding::StorageBuffer` / `Uniform` / `PushConstant` /
@@ -73,13 +73,13 @@ fn storage_access_bindings(
                 entry
                     .outputs
                     .iter()
-                    .filter_map(|output| output.storage_binding)
+                    .filter_map(|output| output.storage_binding())
                     .map(|binding| (binding.set, binding.binding)),
             );
         }
         bindings.extend(entry.inputs.iter().filter_map(|input| {
-            let binding = input.storage_binding?;
-            input_matches(input.storage_access).then_some((binding.set, binding.binding))
+            let binding = input.storage_binding()?;
+            input_matches(input.storage_access()).then_some((binding.set, binding.binding))
         }));
         bindings.extend(entry.storage_bindings.iter().filter_map(|declaration| {
             declaration_matches(&declaration.role)
@@ -160,7 +160,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                 bindings.iter().filter_map(binding_slot).collect();
 
             for input in &entry.inputs {
-                if let Some(br) = input.uniform_binding {
+                if let Some(br) = input.uniform_binding() {
                     let (size, members) = uniform_block_members(&input.ty);
                     let binding = Binding::Uniform {
                         set: br.set,
@@ -177,14 +177,14 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         continue;
                     }
                     bindings.push(binding);
-                } else if let Some(br) = input.storage_binding {
+                } else if let Some(br) = input.storage_binding() {
                     let binding = Binding::StorageBuffer {
                         set: br.set,
                         binding: br.binding,
                         access: Access::ReadOnly,
                         usage: BufferUsage::Input,
                         name: input.name.clone(),
-                        length: input.length.clone(),
+                        length: input.storage_length().cloned(),
                     };
                     let Some(slot) = binding_slot(&binding) else {
                         continue;
@@ -194,7 +194,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         continue;
                     }
                     bindings.push(binding);
-                } else if let Some(pc) = input.push_constant {
+                } else if let Some(pc) = input.push_constant() {
                     if claimed_pc_offsets.contains(&pc.offset) {
                         continue;
                     }
@@ -203,7 +203,24 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         size: pc.size,
                         name: input.name.clone(),
                     });
-                } else if let Some(br) = input.texture_binding {
+                } else if let Some(br) = input.texture_binding() {
+                    let (backing, resource) = match input.texture_source() {
+                        Some(TextureSource::Backing(binding)) => (
+                            Some(BackingRef {
+                                set: binding.set,
+                                binding: binding.binding,
+                            }),
+                            None,
+                        ),
+                        Some(TextureSource::Resource { name, backing }) => (
+                            backing.map(|binding| BackingRef {
+                                set: binding.set,
+                                binding: binding.binding,
+                            }),
+                            Some(name.clone()),
+                        ),
+                        Some(TextureSource::External) | None => (None, None),
+                    };
                     let binding = Binding::Texture {
                         set: br.set,
                         binding: br.binding,
@@ -211,11 +228,8 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         sample_type: TextureSampleType::Float { filterable: true },
                         view_dimension: TextureViewDimension::D2,
                         multisampled: false,
-                        backing: input.texture_backing.map(|b| BackingRef {
-                            set: b.set,
-                            binding: b.binding,
-                        }),
-                        resource: input.texture_resource.clone(),
+                        backing,
+                        resource,
                     };
                     let Some(slot) = binding_slot(&binding) else {
                         continue;
@@ -225,7 +239,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         continue;
                     }
                     bindings.push(binding);
-                } else if let Some(br) = input.sampler_binding {
+                } else if let Some(br) = input.sampler_binding() {
                     let binding = Binding::Sampler {
                         set: br.set,
                         binding: br.binding,
@@ -240,7 +254,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         continue;
                     }
                     bindings.push(binding);
-                } else if let Some((br, format, access, size)) = input.storage_image_binding {
+                } else if let Some((br, format, access, size)) = input.storage_image_binding() {
                     let binding = Binding::StorageTexture {
                         set: br.set,
                         binding: br.binding,
@@ -252,7 +266,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                             crate::interface::StorageAccess::ReadWrite => Access::ReadWrite,
                         },
                         size,
-                        resource: input.storage_image_resource.clone(),
+                        resource: input.storage_image_resource().map(str::to_owned),
                     };
                     let Some(slot) = binding_slot(&binding) else {
                         continue;
@@ -301,7 +315,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
             }
 
             for (i, output) in entry.outputs.iter().enumerate() {
-                let Some(br) = output.storage_binding else {
+                let Some(br) = output.storage_binding() else {
                     continue;
                 };
                 // This name is the buffer's frame-graph identity — a reader
@@ -310,7 +324,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                 // `#[target(name)]` sets it. Otherwise it is derived from the
                 // entry, with the position omitted when there is only one
                 // output.
-                let name = output.target.clone().unwrap_or_else(|| {
+                let name = output.target().map(str::to_owned).unwrap_or_else(|| {
                     if entry.outputs.len() == 1 {
                         format!("{}_output", entry.name)
                     } else {
@@ -323,7 +337,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                     access: Access::WriteOnly,
                     usage: BufferUsage::Output,
                     name,
-                    length: output.length.clone(),
+                    length: output.storage_length().cloned(),
                 };
                 let Some(slot) = binding_slot(&binding) else {
                     continue;
@@ -535,7 +549,7 @@ fn publish_vertex_inputs(pipeline: &mut PipelineDescriptor, entry: &EntryPublica
     };
 
     for input in &entry.inputs {
-        let Some(IoDecoration::Location(slot)) = input.decoration else {
+        let Some(IoDecoration::Location(slot)) = input.decoration() else {
             continue;
         };
         let format = crate::ssa::layout::vertex_format(&input.ty).expect(
@@ -564,7 +578,7 @@ fn publish_fragment_outputs(pipeline: &mut PipelineDescriptor, entry: &EntryPubl
     };
 
     for (i, output) in entry.outputs.iter().enumerate() {
-        let Some(name) = output.target.clone() else {
+        let Some(name) = output.target().map(str::to_owned) else {
             continue;
         };
         fragment_outputs.push(FragmentOutput {

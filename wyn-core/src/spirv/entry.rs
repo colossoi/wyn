@@ -67,7 +67,7 @@ pub(super) fn lower_ssa_entry_point(
         .inputs
         .iter()
         .enumerate()
-        .filter_map(|(i, inp)| inp.push_constant.map(|pc| (i, pc.offset)))
+        .filter_map(|(i, inp)| inp.push_constant().map(|pc| (i, pc.offset)))
         .collect();
     let pc_var = if !pc_inputs.is_empty() {
         // Build member types for push constant block
@@ -110,11 +110,11 @@ pub(super) fn lower_ssa_entry_point(
     let mut uniform_loads: Vec<(String, spirv::Word, spirv::Word, Option<Vec<spirv::Word>>)> = Vec::new();
     for input in &entry.inputs {
         // Push constant inputs are handled separately above
-        if input.push_constant.is_some() {
+        if input.push_constant().is_some() {
             continue;
         }
 
-        if let Some((br, format, access, _size)) = input.storage_image_binding {
+        if let Some((br, format, access, _size)) = input.storage_image_binding() {
             // Storage images are module-scope resources, never SSA values.
             // Binding-qualified image operations load this exact global.
             let var_id = constructor.create_storage_image(br, format, access);
@@ -125,7 +125,7 @@ pub(super) fn lower_ssa_entry_point(
 
         let input_type = constructor.polytype_to_spirv(&input.ty);
 
-        if let Some(IoDecoration::BuiltIn(builtin)) = &input.decoration {
+        if let Some(IoDecoration::BuiltIn(builtin)) = input.decoration() {
             // WGSL's `@builtin(position)` is stage-aware (vertex-out vs
             // fragment-in), so the Wyn frontend lets either `position` or
             // `frag_coord` parse to `BuiltIn::Position`/`BuiltIn::FragCoord`
@@ -135,7 +135,7 @@ pub(super) fn lower_ssa_entry_point(
             // zero a Position-decorated fragment input).
             let stage_builtin = match (&entry.execution_model, builtin) {
                 (ExecutionModel::Fragment, spirv::BuiltIn::Position) => spirv::BuiltIn::FragCoord,
-                _ => *builtin,
+                _ => builtin,
             };
             // Reuse the module-level cached variable for the shared
             // compute builtins so the entry's interface doesn't end
@@ -178,7 +178,7 @@ pub(super) fn lower_ssa_entry_point(
             if !interfaces.contains(&var_id) {
                 interfaces.push(var_id);
             }
-        } else if let Some(br) = input.uniform_binding {
+        } else if let Some(br) = input.uniform_binding() {
             // `#[uniform(set, binding)]` → Block-decorated struct in
             // Uniform storage class. A scalar/vector uniform is a
             // single-member `{value}` block; a record uniform's fields
@@ -230,7 +230,7 @@ pub(super) fn lower_ssa_entry_point(
             );
             interfaces.push(var_id);
             uniform_loads.push((input.name.clone(), var_id, input_type, member_types));
-        } else if let Some(br) = input.texture_binding.or(input.sampler_binding) {
+        } else if let Some(br) = input.texture_binding().or(input.sampler_binding()) {
             // `#[texture]` / `#[sampler]` → opaque handle in UniformConstant
             // storage, decorated DescriptorSet/Binding. Unlike a uniform
             // there is no Block struct: the var points straight at the
@@ -254,7 +254,7 @@ pub(super) fn lower_ssa_entry_point(
             );
             constructor.env.insert(input.name.clone(), var_id);
             interfaces.push(var_id);
-        } else if let Some(br) = input.storage_binding {
+        } else if let Some(br) = input.storage_binding() {
             let var_id = constructor.create_storage_buffer(&input.ty, br.set, br.binding);
             // Mark input storage buffers as non-writable ONLY if no other
             // entry point writes to the same binding. In multi-entry modules
@@ -272,10 +272,9 @@ pub(super) fn lower_ssa_entry_point(
         } else {
             // Regular input with location
             let loc = input
-                .decoration
-                .as_ref()
+                .decoration()
                 .and_then(|d| match d {
-                    IoDecoration::Location(l) => Some(*l),
+                    IoDecoration::Location(l) => Some(l),
                     _ => None,
                 })
                 .unwrap_or_else(|| {
@@ -296,24 +295,23 @@ pub(super) fn lower_ssa_entry_point(
     let mut output_vars = Vec::new();
     let mut output_location = 0u32;
     for output in &entry.outputs {
-        if let Some(br) = output.storage_binding {
+        if let Some(br) = output.storage_binding() {
             let var_id = constructor.create_storage_buffer(&output.ty, br.set, br.binding);
             interfaces.push(var_id);
             // Don't add to output_vars - storage buffers are accessed differently
-        } else if let Some(IoDecoration::BuiltIn(builtin)) = &output.decoration {
+        } else if let Some(IoDecoration::BuiltIn(builtin)) = output.decoration() {
             let output_type = constructor.polytype_to_spirv(&output.ty);
             let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Output, output_type);
             let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Output, None);
-            constructor.builder.decorate(var_id, spirv::Decoration::BuiltIn, [Operand::BuiltIn(*builtin)]);
+            constructor.builder.decorate(var_id, spirv::Decoration::BuiltIn, [Operand::BuiltIn(builtin)]);
             output_vars.push(var_id);
             interfaces.push(var_id);
         } else {
             let output_type = constructor.polytype_to_spirv(&output.ty);
             let loc = output
-                .decoration
-                .as_ref()
+                .decoration()
                 .and_then(|d| match d {
-                    IoDecoration::Location(l) => Some(*l),
+                    IoDecoration::Location(l) => Some(l),
                     _ => None,
                 })
                 .unwrap_or_else(|| {
@@ -450,9 +448,9 @@ pub(super) fn lower_ssa_entry_point(
     for input in &entry.inputs {
         // Skip storage buffers, push constants, and uniforms — each
         // uses a different access pattern handled above.
-        if input.storage_binding.is_some()
-            || input.push_constant.is_some()
-            || input.uniform_binding.is_some()
+        if input.storage_binding().is_some()
+            || input.push_constant().is_some()
+            || input.uniform_binding().is_some()
         {
             continue;
         }
@@ -461,7 +459,7 @@ pub(super) fn lower_ssa_entry_point(
         // above) — the polytype-derived placeholder has Format=Unknown
         // and doesn't match the variable's pointee type. Rebuild with
         // the binding's format for the load result type.
-        let input_type = if let Some((_, format, _, _)) = input.storage_image_binding {
+        let input_type = if let Some((_, format, _, _)) = input.storage_image_binding() {
             *constructor.builder.type_image(
                 wspirv::TypeId::new(constructor.f32_type),
                 spirv::Dim::Dim2D,

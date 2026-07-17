@@ -2,7 +2,7 @@ use super::*;
 use crate::ast::Span;
 use crate::egir::program::{OutputRoute, OutputSlotId, SlotSource};
 use crate::egir::soac::screma;
-use crate::egir::types::{EffectToken, Semantic};
+use crate::egir::types::{EffectOp, EffectToken, Semantic};
 use crate::flow::ExecutionModel;
 
 /// Region indices used by the operator fixtures below: step is region 0,
@@ -45,10 +45,7 @@ fn output_ownership_comes_from_explicit_route_writer() {
     let source = neutral(&mut graph, 0);
     let writer = EffectToken(9);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Inst(InstKind::Store {
-            place: Default::default(),
-            value: crate::ssa::types::ValueRef::Ssa(Default::default()),
-        }),
+        kind: SideEffectKind::Effect(EffectOp::Store),
         operand_nodes: smallvec![],
         result: None,
         effects: Some((EffectToken(8), writer)),
@@ -197,7 +194,7 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
         .iter()
         .flat_map(|(_, block)| &block.side_effects)
         .find_map(|effect| {
-            if !matches!(effect.kind, SideEffectKind::Inst(InstKind::Store { .. })) {
+            if !matches!(effect.kind, SideEffectKind::Effect(EffectOp::Store)) {
                 return None;
             }
             let place = *effect.operand_nodes.first()?;

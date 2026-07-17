@@ -202,13 +202,266 @@ pub struct AttributedType {
     pub ty: Type,
 }
 
+/// A compute-broadcast input's placement in the push-constant block.
+#[derive(Debug, Clone, Copy)]
+pub struct PushConstantSlot {
+    pub offset: u32,
+    pub size: u32,
+}
+
+/// I/O decoration for an entry-point parameter or result.
+#[derive(Debug, Clone, Copy)]
+pub enum IoDecoration {
+    BuiltIn(spirv::BuiltIn),
+    Location(u32),
+}
+
+/// Whether a storage slot is part of the host-visible entry interface.
+#[derive(Debug, Clone, Copy)]
+pub enum BindingExposure {
+    Host(BindingRef),
+    Internal,
+}
+
+/// Where a sampled texture gets its backing allocation.
+#[derive(Debug, Clone)]
+pub enum TextureSource {
+    External,
+    Backing(BindingRef),
+    Resource {
+        name: String,
+        backing: Option<BindingRef>,
+    },
+}
+
+/// Lowered input metadata shared by compiler IRs.
+#[derive(Debug, Clone)]
+pub struct EntryInput<Ty = Type> {
+    pub name: String,
+    pub ty: Ty,
+    pub size_hint: Option<std::num::NonZeroU32>,
+    pub kind: EntryInputKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum EntryInputKind {
+    Value {
+        decoration: Option<IoDecoration>,
+    },
+    Storage {
+        exposure: BindingExposure,
+        access: StorageAccess,
+        length: Option<crate::pipeline_descriptor::BufferLen>,
+    },
+    Uniform {
+        binding: BindingRef,
+    },
+    PushConstant {
+        slot: PushConstantSlot,
+    },
+    Texture {
+        binding: BindingRef,
+        source: TextureSource,
+    },
+    Sampler {
+        binding: BindingRef,
+    },
+    StorageImage {
+        binding: BindingRef,
+        format: crate::pipeline_descriptor::StorageImageFormat,
+        access: StorageAccess,
+        size: crate::pipeline_descriptor::StorageTextureSize,
+        resource: Option<String>,
+    },
+}
+
+impl<Ty> EntryInput<Ty> {
+    pub fn decoration(&self) -> Option<IoDecoration> {
+        match self.kind {
+            EntryInputKind::Value { decoration } => decoration,
+            _ => None,
+        }
+    }
+
+    pub fn storage_binding(&self) -> Option<BindingRef> {
+        match self.kind {
+            EntryInputKind::Storage {
+                exposure: BindingExposure::Host(binding),
+                ..
+            } => Some(binding),
+            _ => None,
+        }
+    }
+
+    pub fn storage_access(&self) -> Option<StorageAccess> {
+        match self.kind {
+            EntryInputKind::Storage { access, .. } => Some(access),
+            _ => None,
+        }
+    }
+
+    pub fn storage_length(&self) -> Option<&crate::pipeline_descriptor::BufferLen> {
+        match &self.kind {
+            EntryInputKind::Storage { length, .. } => length.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn make_storage_internal(&mut self) {
+        if let EntryInputKind::Storage { exposure, .. } = &mut self.kind {
+            *exposure = BindingExposure::Internal;
+        }
+    }
+
+    pub fn uniform_binding(&self) -> Option<BindingRef> {
+        match self.kind {
+            EntryInputKind::Uniform { binding } => Some(binding),
+            _ => None,
+        }
+    }
+
+    pub fn push_constant(&self) -> Option<PushConstantSlot> {
+        match self.kind {
+            EntryInputKind::PushConstant { slot } => Some(slot),
+            _ => None,
+        }
+    }
+
+    pub fn texture_binding(&self) -> Option<BindingRef> {
+        match self.kind {
+            EntryInputKind::Texture { binding, .. } => Some(binding),
+            _ => None,
+        }
+    }
+
+    pub fn texture_source(&self) -> Option<&TextureSource> {
+        match &self.kind {
+            EntryInputKind::Texture { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+
+    pub fn sampler_binding(&self) -> Option<BindingRef> {
+        match self.kind {
+            EntryInputKind::Sampler { binding } => Some(binding),
+            _ => None,
+        }
+    }
+
+    pub fn storage_image_binding(
+        &self,
+    ) -> Option<(
+        BindingRef,
+        crate::pipeline_descriptor::StorageImageFormat,
+        StorageAccess,
+        crate::pipeline_descriptor::StorageTextureSize,
+    )> {
+        match self.kind {
+            EntryInputKind::StorageImage {
+                binding,
+                format,
+                access,
+                size,
+                ..
+            } => Some((binding, format, access, size)),
+            _ => None,
+        }
+    }
+
+    pub fn storage_image_resource(&self) -> Option<&str> {
+        match &self.kind {
+            EntryInputKind::StorageImage { resource, .. } => resource.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+/// Lowered output metadata shared by compiler IRs.
+#[derive(Debug, Clone)]
+pub struct EntryOutput<Ty = Type> {
+    pub ty: Ty,
+    pub kind: EntryOutputKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum EntryOutputKind {
+    Value {
+        destination: EntryOutputDestination,
+    },
+    Storage {
+        exposure: BindingExposure,
+        length: Option<crate::pipeline_descriptor::BufferLen>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum EntryOutputDestination {
+    Plain,
+    BuiltIn(spirv::BuiltIn),
+    Location(u32),
+    Target(String),
+}
+
+impl<Ty> EntryOutput<Ty> {
+    pub fn decoration(&self) -> Option<IoDecoration> {
+        match self.kind {
+            EntryOutputKind::Value {
+                destination: EntryOutputDestination::BuiltIn(builtin),
+            } => Some(IoDecoration::BuiltIn(builtin)),
+            EntryOutputKind::Value {
+                destination: EntryOutputDestination::Location(location),
+            } => Some(IoDecoration::Location(location)),
+            _ => None,
+        }
+    }
+
+    pub fn target(&self) -> Option<&str> {
+        match &self.kind {
+            EntryOutputKind::Value {
+                destination: EntryOutputDestination::Target(target),
+            } => Some(target),
+            _ => None,
+        }
+    }
+
+    pub fn storage_binding(&self) -> Option<BindingRef> {
+        match self.kind {
+            EntryOutputKind::Storage {
+                exposure: BindingExposure::Host(binding),
+                ..
+            } => Some(binding),
+            _ => None,
+        }
+    }
+
+    pub fn storage_length(&self) -> Option<&crate::pipeline_descriptor::BufferLen> {
+        match &self.kind {
+            EntryOutputKind::Storage { length, .. } => length.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn storage_length_mut(&mut self) -> Option<&mut Option<crate::pipeline_descriptor::BufferLen>> {
+        match &mut self.kind {
+            EntryOutputKind::Storage { length, .. } => Some(length),
+            _ => None,
+        }
+    }
+
+    pub fn make_storage_internal(&mut self) {
+        if let EntryOutputKind::Storage { exposure, .. } = &mut self.kind {
+            *exposure = BindingExposure::Internal;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entry point declarations
 // ---------------------------------------------------------------------------
 
 /// Output field for entry point declarations.
 #[derive(Debug, Clone, PartialEq)]
-pub struct EntryOutput {
+pub struct EntryOutputDecl {
     pub ty: Type,
     pub attribute: Option<Attribute>,
 }
@@ -298,10 +551,10 @@ pub struct EntryDecl {
     pub compute_dispatch: Option<ComputeDispatchGrid>,
     pub name: String,
     pub name_span: Span,
-    pub size_params: Vec<String>,  // Size type parameters: <[n], [m]>
-    pub type_params: Vec<String>,  // Regular type parameters: <T, U>
-    pub params: Vec<Pattern>,      // Input parameters as patterns
-    pub outputs: Vec<EntryOutput>, // Output fields with optional attributes
+    pub size_params: Vec<String>,      // Size type parameters: <[n], [m]>
+    pub type_params: Vec<String>,      // Regular type parameters: <T, U>
+    pub params: Vec<Pattern>,          // Input parameters as patterns
+    pub outputs: Vec<EntryOutputDecl>, // Output fields with optional attributes
     /// Auto-allocated bindings for this entry's view-typed params,
     /// computed once and consulted by every pass that cares (buffer
     /// specialization and EGIR conversion). Empty

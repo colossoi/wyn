@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::error::Result;
-use crate::interface::{AttrExt, Attribute, EntryDecl, EntryOutput, StorageAccess, StorageLayout};
+use crate::interface::{AttrExt, Attribute, EntryDecl, EntryOutputDecl, StorageAccess, StorageLayout};
 use crate::lexer::{LocatedToken, Token};
 use crate::types;
 use crate::LookupMap;
@@ -529,11 +529,11 @@ impl<'a> Parser<'a> {
             }
         };
 
-        // Combine into EntryOutput structs
-        let outputs: Vec<EntryOutput> = return_types
+        // Combine into EntryOutputDecl structs
+        let outputs: Vec<EntryOutputDecl> = return_types
             .into_iter()
             .zip(return_attributes)
-            .map(|(ty, attribute)| EntryOutput { ty, attribute })
+            .map(|(ty, attribute)| EntryOutputDecl { ty, attribute })
             .collect();
 
         self.expect(Token::Assign)?;

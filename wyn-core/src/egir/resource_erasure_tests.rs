@@ -3,11 +3,10 @@
 //! runtime storage-image handle, validated by naga) is covered by the
 //! integration tests; these pin the positional-ABI rewrite in isolation.
 
-use super::{filter_smallvec, filter_vec, is_storage_image};
+use super::{filter_smallvec, is_storage_image};
 use crate::ast::TypeName;
 use crate::egir::from_tlc::ConvertError;
 use crate::egir::types::NodeId;
-use crate::ssa::types::{ValueId, ValueRef};
 use polytype::Type;
 use slotmap::SlotMap;
 use smallvec::{smallvec, SmallVec};
@@ -40,14 +39,4 @@ fn filter_smallvec_rejects_arity_mismatch() {
     let mut ops: SmallVec<[NodeId; 4]> = smallvec![n[0], n[1]];
     let err = filter_smallvec(&mut ops, &[false], "helper").unwrap_err();
     assert!(matches!(err, ConvertError::Internal(_)));
-}
-
-#[test]
-fn filter_vec_drops_masked_value_refs() {
-    let mut ops = vec![
-        ValueRef::Ssa(ValueId::default()),
-        ValueRef::Ssa(ValueId::default()),
-    ];
-    filter_vec(&mut ops, &[true, false], "helper").unwrap();
-    assert_eq!(ops.len(), 1);
 }

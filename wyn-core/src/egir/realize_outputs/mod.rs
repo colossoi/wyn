@@ -110,7 +110,7 @@ fn realize_compute_slots(
     let effect_index = graph.side_effect_index();
 
     for (slot_index, output) in outputs.iter_mut().enumerate() {
-        let binding = output.storage_binding.expect("BUG: compute output without storage binding");
+        let binding = output.storage_binding().expect("BUG: compute output without storage binding");
         let resource = *by_binding.get(&binding).expect("compute output must have a semantic resource");
         let route_indices: Vec<usize> = output_routes
             .iter()
@@ -293,7 +293,7 @@ fn dedup_output_writers(writers: &mut Vec<OutputWriter>) {
 fn output_sources(
     graph: &mut EGraph<Raw>,
     result: NodeId,
-    outputs: &[super::ir::EntryOutput<SemanticResourceRef>],
+    outputs: &[super::ir::EntryOutput<SemanticResourceRef, super::types::WynLanguage>],
 ) -> Vec<NodeId> {
     use super::types::{ENode, PureOp};
     use smallvec::smallvec;

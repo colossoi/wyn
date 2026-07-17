@@ -10316,7 +10316,7 @@ entry e(xs: []u32, #[uniform(set=1, binding=0)] c: block) []u32 =
     let c: Vec<_> = entry.inputs.iter().filter(|i| i.name == "c").collect();
     assert_eq!(c.len(), 1, "record uniform must stay one input, got {:?}", c);
     assert!(
-        c[0].uniform_binding.is_some(),
+        c[0].uniform_binding().is_some(),
         "input `c` must carry the uniform binding"
     );
     assert!(

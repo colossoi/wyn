@@ -20,12 +20,12 @@ use std::collections::HashSet;
 use crate::ast::{Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};
 use crate::flow::BlockId;
-use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
+use crate::ssa::types::ConstantValue;
 use crate::BindingRef;
 
 use super::types::{
-    EGraph, ENode, EffectToken, EgirPhase, GraphResource, NodeId, Physical, PureOp, PureViewSource, Raw,
-    Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac,
+    EGraph, ENode, EffectOp, EffectToken, EgirPhase, GraphResource, NodeId, Physical, PureOp,
+    PureViewSource, Raw, Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac,
 };
 
 #[cfg(test)]
@@ -433,10 +433,7 @@ pub fn emit_store<P: EgirPhase>(
     let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
     let effect_out = alloc_effect(next_effect);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Inst(InstKind::Store {
-            place: Default::default(),
-            value: ValueRef::Ssa(Default::default()),
-        }),
+        kind: SideEffectKind::Effect(EffectOp::Store),
         operand_nodes: smallvec![place_nid, value_nid],
         result: None,
         effects: Some((effect_in, effect_out)),
@@ -445,7 +442,7 @@ pub fn emit_store<P: EgirPhase>(
     effect_out
 }
 
-/// Emit a workgroup execution+memory barrier (`InstKind::ControlBarrier`)
+/// Emit a workgroup execution+memory barrier
 /// in `block`. No operands or result; the effect token keeps it ordered
 /// against the workgroup-shared loads/stores it synchronizes. Returns the
 /// produced effect-out token.
@@ -457,7 +454,7 @@ pub fn emit_workgroup_barrier<P: EgirPhase>(
     let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
     let effect_out = alloc_effect(next_effect);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Inst(InstKind::ControlBarrier),
+        kind: SideEffectKind::Effect(EffectOp::ControlBarrier),
         operand_nodes: smallvec![],
         result: None,
         effects: Some((effect_in, effect_out)),
@@ -511,9 +508,7 @@ pub fn detached_load<P: EgirPhase>(
     let effect_out = alloc_effect(next_effect);
     let result = graph.alloc_side_effect_result(elem_ty);
     let effect = SideEffect {
-        kind: SideEffectKind::Inst(InstKind::Load {
-            place: Default::default(),
-        }),
+        kind: SideEffectKind::Effect(EffectOp::Load),
         operand_nodes: smallvec![place_nid],
         result: Some(result),
         effects: Some((effect_in, effect_out)),
@@ -538,12 +533,7 @@ pub fn emit_alloca<P: EgirPhase>(
     let effect_out = alloc_effect(next_effect);
     let place_nid = graph.alloc_side_effect_result(elem_ty.clone());
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Inst(InstKind::Alloca {
-            elem_ty,
-            // Real PlaceId is allocated by `elaborate`; the placeholder here
-            // is never read.
-            result: Default::default(),
-        }),
+        kind: SideEffectKind::Effect(EffectOp::Alloca { elem_ty }),
         operand_nodes: smallvec![],
         result: Some(place_nid),
         effects: Some((effect_in, effect_out)),

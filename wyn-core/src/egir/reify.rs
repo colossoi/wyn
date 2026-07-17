@@ -15,8 +15,8 @@ use crate::LookupMap;
 
 use super::graph_ops;
 use super::program::{
-    Entry, Func, OutputRoute, OutputSlotId, OutputWriter, Program, RawEntry, RawProgram, Region,
-    SemanticOpId, SemanticProgram, SemanticResourceRef,
+    ConstantDef, Entry, Func, OutputRoute, OutputSlotId, OutputWriter, Program, RawEntry, RawProgram,
+    Region, SemanticOpId, SemanticProgram, SemanticResourceRef,
 };
 use super::soac::{filter, hist, screma};
 use super::types::{
@@ -52,6 +52,8 @@ pub fn run(raw: RawProgram) -> SemanticProgram {
         functions.into_iter().map(|function| reify_func(function, &mut next_semantic_id)).collect();
     let regions =
         regions.into_iter().map(|(id, region)| (id, reify_region(region, &mut next_semantic_id))).collect();
+    let constants =
+        constants.into_iter().map(|constant| reify_constant(constant, &mut next_semantic_id)).collect();
 
     let mut semantic = SemanticProgram {
         ir: Program {
@@ -69,6 +71,27 @@ pub fn run(raw: RawProgram) -> SemanticProgram {
     };
     super::semantic_graph::rebuild_dependencies(&mut semantic);
     semantic
+}
+
+fn reify_constant(constant: ConstantDef<Raw>, next_semantic_id: &mut u32) -> ConstantDef<Semantic> {
+    let facts = function_facts(&constant.graph);
+    let ConstantDef {
+        name,
+        span,
+        return_ty,
+        graph,
+        control_headers,
+        aliases,
+    } = constant;
+    let (graph, blocks) = map_graph(graph, facts, next_semantic_id);
+    ConstantDef {
+        name,
+        span,
+        return_ty,
+        graph,
+        control_headers: remap_headers(control_headers, &blocks),
+        aliases,
+    }
 }
 
 fn reify_func(function: Func<Raw>, next_semantic_id: &mut u32) -> Func<Semantic> {
@@ -259,7 +282,7 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ssa::types::InstKind;
+    use crate::egir::types::EffectOp;
     use smallvec::SmallVec;
 
     fn raw_map() -> SideEffect<Raw> {
@@ -300,7 +323,7 @@ mod tests {
         let block = graph.skeleton.entry;
         graph.skeleton.blocks[block].side_effects.push(raw_map());
         graph.skeleton.blocks[block].side_effects.push(SideEffect {
-            kind: SideEffectKind::Inst(InstKind::ControlBarrier),
+            kind: SideEffectKind::Effect(EffectOp::ControlBarrier),
             operand_nodes: SmallVec::new(),
             result: None,
             effects: None,
@@ -472,7 +495,7 @@ fn extent_from_node(
         } => value.parse().map(SegExtent::Fixed).unwrap_or(SegExtent::Value(node)),
         ENode::FuncParam { index } => entry
             .and_then(|entry| entry.inputs.get(*index))
-            .and_then(|input| input.push_constant)
+            .and_then(|input| input.push_constant())
             .map(|slot| SegExtent::PushConstant {
                 node,
                 offset: slot.offset,

@@ -295,7 +295,7 @@ pub(crate) fn summary(inner: &SemanticProgram) -> String {
                             op.state, op.body.body, op.body.update_policy
                         );
                     }
-                    SideEffectKind::Inst(_) => {}
+                    SideEffectKind::Effect(_) => {}
                 }
             }
         }
