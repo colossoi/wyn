@@ -20,8 +20,9 @@ use super::soac::{filter, hist, screma};
 
 pub use super::ir::{
     EffectOp, EffectToken, EgirPhase, GraphResource, Language, NodeId, RegionId, SegBody, SegLevel,
-    SegResourceAccessKind, SideEffectIndex, SideEffectSite, SkeletonTerminator, Soac, SoacDestination,
+    SideEffectIndex, SideEffectSite, SkeletonTerminator, Soac, SoacDestination,
 };
+pub use crate::ResourceAccess;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct WynLanguage;

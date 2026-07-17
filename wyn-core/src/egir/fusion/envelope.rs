@@ -18,7 +18,7 @@ use crate::egir::program::{SemanticFunc, SemanticProgram};
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::{filter, hist, screma};
 use crate::egir::types::{
-    EGraph, NodeId, PureOp, SegBody, SegResourceAccessKind, SegSpace, SideEffect, SideEffectKind,
+    EGraph, NodeId, PureOp, ResourceAccess, SegBody, SegSpace, SideEffect, SideEffectKind,
     SkeletonTerminator, Soac, SoacDestination, SoacInputType,
 };
 use crate::flow::BlockId;
@@ -102,7 +102,7 @@ fn find_in_graph(graph: &EGraph, site: FusionSite, oracle: &SemanticGraph) -> Op
                         SoacDestination::Fresh | SoacDestination::UniqueInput
                     )
                 })
-                || resources.iter().any(|resource| resource.access != SegResourceAccessKind::Read)
+                || resources.iter().any(|resource| resource.access != ResourceAccess::Read)
             {
                 continue;
             }

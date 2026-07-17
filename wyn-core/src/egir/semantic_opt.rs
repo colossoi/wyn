@@ -8,7 +8,7 @@
 use super::program::SemanticProgram;
 use super::semantic_graph::SemanticGraph;
 use super::soac::screma;
-use super::types::{EGraph, NodeId, SegResourceAccess, SegResourceAccessKind, SideEffectKind, Soac};
+use super::types::{EGraph, NodeId, ResourceAccess, SegResourceAccess, SideEffectKind, Soac};
 
 #[cfg(test)]
 #[path = "semantic_opt_tests.rs"]
@@ -122,7 +122,7 @@ pub(super) fn eliminate_dead_seg_ops_in_graph(graph: &mut EGraph) -> bool {
                         ..
                     } => {
                         !output_slots.is_empty()
-                            || resources.iter().any(|r| r.access != SegResourceAccessKind::Read)
+                            || resources.iter().any(|r| r.access != ResourceAccess::Read)
                     }
                     screma::SemanticState::Serial => true,
                 },

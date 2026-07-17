@@ -9,7 +9,7 @@ use smallvec::smallvec;
 use crate::egir::program::{OutputRoute, OutputWriter, SemanticProgram, SemanticResourceRef};
 use crate::egir::soac::screma;
 use crate::egir::types::{
-    EGraph, ENode, NodeId, PureOp, SegResourceAccessKind, SideEffectKind, Soac, SoacDestination,
+    EGraph, ENode, NodeId, PureOp, ResourceAccess, SideEffectKind, Soac, SoacDestination,
 };
 use crate::flow::BlockId;
 use crate::ssa::types::ConstantValue;
@@ -93,7 +93,7 @@ fn find_in_graph(
                     )
                 })
                 || resources.iter().any(|resource| {
-                    resource.access != SegResourceAccessKind::Read
+                    resource.access != ResourceAccess::Read
                         && !indirect_output_resources.contains(&resource.resource)
                 })
             {

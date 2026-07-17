@@ -20,8 +20,8 @@ use super::program::{
 };
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, ENode, NodeId, PureOp, Raw, SegExtent, SegLevel, SegResourceAccess, SegResourceAccessKind,
-    SegSpace, Semantic, SideEffect, SideEffectKind, Soac, SoacDestination, SoacInputType,
+    EGraph, ENode, NodeId, PureOp, Raw, ResourceAccess, SegExtent, SegLevel, SegResourceAccess, SegSpace,
+    Semantic, SideEffect, SideEffectKind, Soac, SoacDestination, SoacInputType,
 };
 
 struct Facts {
@@ -518,8 +518,8 @@ fn semantic_resources(
             if let Some(resource) = entry.outputs.get(slot.0).and_then(|output| output.resource) {
                 accesses
                     .entry(resource)
-                    .and_modify(|access| *access = SegResourceAccessKind::ReadWrite)
-                    .or_insert(SegResourceAccessKind::Write);
+                    .and_modify(|access| *access = ResourceAccess::ReadWrite)
+                    .or_insert(ResourceAccess::Write);
             }
         }
     }
@@ -544,7 +544,7 @@ fn read_resources(
         .into_iter()
         .map(|resource| SegResourceAccess {
             resource,
-            access: SegResourceAccessKind::Read,
+            access: ResourceAccess::Read,
         })
         .collect::<Vec<_>>();
     resources.sort_by_key(|resource| resource.resource);

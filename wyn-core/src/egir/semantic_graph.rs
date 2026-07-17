@@ -14,8 +14,7 @@ use super::graph_ops;
 use super::program::{SemanticDependency, SemanticDependencyKind, SemanticOpId, SemanticProgram};
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, NodeId, SegResourceAccess, SegResourceAccessKind, SideEffect, SideEffectKind, SideEffectSite,
-    Soac,
+    EGraph, NodeId, ResourceAccess, SegResourceAccess, SideEffect, SideEffectKind, SideEffectSite, Soac,
 };
 
 /// Rebuild the semantic dependency DAG stored on `inner`.
@@ -74,7 +73,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
                         for binding in bindings {
                             resources.push(SegResourceAccess {
                                 resource: binding,
-                                access: SegResourceAccessKind::Write,
+                                access: ResourceAccess::Write,
                             });
                         }
                         resources
@@ -89,7 +88,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
                             if let Some(resource) =
                                 resources.iter_mut().find(|resource| resource.resource == destination)
                             {
-                                resource.access = SegResourceAccessKind::ReadWrite;
+                                resource.access = ResourceAccess::ReadWrite;
                             }
                         }
                         resources
@@ -132,8 +131,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
             if producer.resources.iter().any(|left| {
                 consumer.resources.iter().any(|right| {
                     left.resource == right.resource
-                        && (left.access != SegResourceAccessKind::Read
-                            || right.access != SegResourceAccessKind::Read)
+                        && (left.access != ResourceAccess::Read || right.access != ResourceAccess::Read)
                 })
             }) {
                 push_dependency(
@@ -177,7 +175,7 @@ pub(crate) fn read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResource
         .into_iter()
         .map(|resource| SegResourceAccess {
             resource,
-            access: SegResourceAccessKind::Read,
+            access: ResourceAccess::Read,
         })
         .collect();
     result.sort_by_key(|resource| resource.resource);

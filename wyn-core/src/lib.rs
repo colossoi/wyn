@@ -249,6 +249,32 @@ impl std::fmt::Display for BindingRef {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ResourceId(pub u32);
 
+/// Conservative read/write access to a compiler-internal resource.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ResourceAccess {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+impl ResourceAccess {
+    pub fn merge(self, other: Self) -> Self {
+        if self == other {
+            self
+        } else {
+            Self::ReadWrite
+        }
+    }
+
+    pub fn reads(self) -> bool {
+        matches!(self, Self::Read | Self::ReadWrite)
+    }
+
+    pub fn writes(self) -> bool {
+        matches!(self, Self::Write | Self::ReadWrite)
+    }
+}
+
 /// Look up `sym`'s source name in `symbols`, or panic with a uniform
 /// "internal compiler bug" message. Use this when downstream code
 /// structurally requires that every `SymbolId` it sees was registered

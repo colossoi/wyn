@@ -15,8 +15,8 @@ use crate::egir::program::{SemanticFunc, SemanticProgram};
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
 use crate::egir::types::{
-    EGraph, ENode, NodeId, PureOp, SegBody, SegResourceAccess, SegResourceAccessKind, SegSpace,
-    SideEffectKind, SkeletonTerminator, Soac, SoacDestination, SoacInputType,
+    EGraph, ENode, NodeId, PureOp, ResourceAccess, SegBody, SegResourceAccess, SegSpace, SideEffectKind,
+    SkeletonTerminator, Soac, SoacDestination, SoacInputType,
 };
 use crate::flow::BlockId;
 use crate::LookupMap;
@@ -99,7 +99,7 @@ fn find_in_graph(
                         SoacDestination::Fresh | SoacDestination::UniqueInput
                     )
                 })
-                || resources.iter().any(|resource| resource.access != SegResourceAccessKind::Read)
+                || resources.iter().any(|resource| resource.access != ResourceAccess::Read)
             {
                 continue;
             }
@@ -137,8 +137,8 @@ fn find_in_graph(
                 if resources.iter().any(|producer_resource| {
                     consumer_resources.iter().any(|consumer_resource| {
                         producer_resource.resource == consumer_resource.resource
-                            && (producer_resource.access != SegResourceAccessKind::Read
-                                || consumer_resource.access != SegResourceAccessKind::Read)
+                            && (producer_resource.access != ResourceAccess::Read
+                                || consumer_resource.access != ResourceAccess::Read)
                     })
                 }) {
                     continue;

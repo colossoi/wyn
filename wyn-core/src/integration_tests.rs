@@ -136,7 +136,7 @@ entry chain(xs: []i32) []i32 =
 #[test]
 fn egir_vertical_fusion_preserves_multi_input_producer_sources() {
     use crate::egir::soac::screma;
-    use crate::egir::types::{SegResourceAccessKind, SideEffectKind, Soac};
+    use crate::egir::types::{ResourceAccess, SideEffectKind, Soac};
 
     let allocated = compile_to_semantic_egir(
         r#"
@@ -164,7 +164,7 @@ entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
             };
             Some((
                 op.lanes().inputs.len(),
-                resources.iter().filter(|resource| resource.access == SegResourceAccessKind::Read).count(),
+                resources.iter().filter(|resource| resource.access == ResourceAccess::Read).count(),
             ))
         })
         .collect();
@@ -1367,8 +1367,7 @@ entry e() [4]i32 =
     assert!(stages.iter().any(|stage| stage.contains("prepass_scalar")));
     let phases: Vec<_> = lowered.kernel_plan.phases().collect();
     assert!(phases[0].resources.iter().any(|resource| {
-        resource.resource == shared_resource
-            && resource.access == crate::egir::parallelize::schedule::ResourceAccess::Write
+        resource.resource == shared_resource && resource.access == crate::ResourceAccess::Write
     }));
     assert!(phases
         .last()

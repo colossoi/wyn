@@ -16,15 +16,13 @@ use crate::egir::program::{
     SemanticResourceDecl, SemanticResourceRef,
 };
 use crate::egir::soac::{filter, screma};
-use crate::egir::types::{
-    EgirPhase, RegionId, Scheduled, SegExtent, SegResourceAccessKind, Semantic, SideEffectKind, Soac,
-};
+use crate::egir::types::{EgirPhase, RegionId, Scheduled, SegExtent, Semantic, SideEffectKind, Soac};
 use crate::flow::ExecutionModel;
 use crate::interface::EntryInput;
 use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
 };
-use crate::{BindingRef, ResourceId};
+use crate::{BindingRef, ResourceAccess, ResourceId};
 
 #[path = "schedule_validation.rs"]
 mod validation;
@@ -501,31 +499,6 @@ pub enum DomainSelection {
 pub struct ScheduledResource {
     pub resource: ResourceId,
     pub access: ResourceAccess,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResourceAccess {
-    Read,
-    Write,
-    ReadWrite,
-}
-
-impl ResourceAccess {
-    fn merge(self, other: Self) -> Self {
-        if self == other {
-            self
-        } else {
-            Self::ReadWrite
-        }
-    }
-
-    pub fn reads(self) -> bool {
-        matches!(self, Self::Read | Self::ReadWrite)
-    }
-
-    pub fn writes(self) -> bool {
-        matches!(self, Self::Write | Self::ReadWrite)
-    }
 }
 
 impl KernelPlan {
@@ -1542,11 +1515,7 @@ fn segmented_graph_resources(
             .iter()
             .map(|resource| ScheduledResource {
                 resource: resource.resource.0,
-                access: match resource.access {
-                    SegResourceAccessKind::Read => ResourceAccess::Read,
-                    SegResourceAccessKind::Write => ResourceAccess::Write,
-                    SegResourceAccessKind::ReadWrite => ResourceAccess::ReadWrite,
-                },
+                access: resource.access,
             })
             .collect(),
     )

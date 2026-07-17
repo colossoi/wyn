@@ -19,7 +19,7 @@ use super::program::{
 };
 use super::soac::{filter, screma};
 use super::types::{
-    EGraph, ENode, EffectToken, NodeId, PureOp, SegExtent, SegResourceAccess, SegResourceAccessKind,
+    EGraph, ENode, EffectToken, NodeId, PureOp, ResourceAccess, SegExtent, SegResourceAccess,
     SideEffectKind, SideEffectSite, Soac, SoacDestination,
 };
 use crate::ast::TypeName;
@@ -450,7 +450,7 @@ fn verify_residency_requirements_satisfied(inner: &AllocatedProgram) {
                 };
                 let internal_pure_map = output_slots.is_empty()
                     && maps.iter().all(|map| map.destination == SoacDestination::Fresh)
-                    && resources.iter().all(|resource| resource.access == SegResourceAccessKind::Read);
+                    && resources.iter().all(|resource| resource.access == ResourceAccess::Read);
                 let materializable = entry.graph.skeleton.blocks.len() == 1
                     && dependencies_are_cloneable(
                         &entry.graph,
@@ -609,7 +609,7 @@ fn operation_result_residency(
     let cloneable = op.lanes().maps.iter().all(|map| map.destination == SoacDestination::Fresh)
         && op.operators().into_iter().all(|operator| operator.destination == SoacDestination::Fresh)
         && resources.iter().all(|resource| {
-            resource.access == SegResourceAccessKind::Read
+            resource.access == ResourceAccess::Read
                 || entry
                     .outputs
                     .iter()
@@ -1011,7 +1011,7 @@ fn dependencies_are_cloneable(graph: &EGraph, block_id: BlockId, effects: &HashS
                     if output_slots.is_empty()
                         && op.lanes().maps.iter().all(|map| map.destination == SoacDestination::Fresh)
                         && op.operators().into_iter().all(|operator| operator.destination == SoacDestination::Fresh)
-                        && resources.iter().all(|resource| resource.access == SegResourceAccessKind::Read))
+                        && resources.iter().all(|resource| resource.access == ResourceAccess::Read))
         )
     })
 }
@@ -1361,8 +1361,7 @@ fn configure_materialized_soac(
     *placement = screma::Placement::Kernel;
     *output_slots = Vec::new();
     resources.retain(|access| {
-        access.access == SegResourceAccessKind::Read
-            || !source_output_resources.contains(&access.resource.0)
+        access.access == ResourceAccess::Read || !source_output_resources.contains(&access.resource.0)
     });
     if kind == MaterializationKind::Scalar {
         return;
@@ -1379,7 +1378,7 @@ fn configure_materialized_soac(
     };
     resources.extend(output_resources.iter().map(|resource| SegResourceAccess {
         resource: SemanticResourceRef(*resource),
-        access: SegResourceAccessKind::Write,
+        access: ResourceAccess::Write,
     }));
     resources.sort_by_key(|access| access.resource);
 }
@@ -1981,11 +1980,11 @@ fn refresh_resource_reads_for_values(graph: &mut EGraph, values: &[NodeId]) {
         let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
             continue;
         };
-        resources.retain(|access| access.access != SegResourceAccessKind::Read);
+        resources.retain(|access| access.access != ResourceAccess::Read);
         for read in reads {
             if let Some(existing) = resources.iter_mut().find(|access| access.resource == read.resource) {
-                if existing.access == SegResourceAccessKind::Write {
-                    existing.access = SegResourceAccessKind::ReadWrite;
+                if existing.access == ResourceAccess::Write {
+                    existing.access = ResourceAccess::ReadWrite;
                 }
             } else {
                 resources.push(read);
@@ -2098,7 +2097,7 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                             if !resources.iter().any(|access| access.resource.0 == resource) {
                                 resources.push(SegResourceAccess {
                                     resource: SemanticResourceRef(resource),
-                                    access: SegResourceAccessKind::Read,
+                                    access: ResourceAccess::Read,
                                 });
                             }
                         }
