@@ -17,6 +17,7 @@ use super::graph_ops;
 use super::program::{SemanticEntry, SemanticProgram};
 use super::types::{
     EGraph, ENode, EffectOp, NodeId, PureViewSource, SideEffect, SideEffectKind, SkeletonTerminator, Soac,
+    SoacEffect,
 };
 
 pub(crate) const STORAGE_LOAD_COST: u64 = 4;
@@ -101,9 +102,9 @@ fn effect_cost(
     visiting: &mut HashSet<String>,
 ) -> Option<u64> {
     match &effect.kind {
-        SideEffectKind::Soac(_, Soac::Screma(_))
-        | SideEffectKind::Soac(_, Soac::Filter(_))
-        | SideEffectKind::Soac(_, Soac::Hist(_)) => None,
+        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(_)))
+        | SideEffectKind::Soac(SoacEffect(_, Soac::Filter(_)))
+        | SideEffectKind::Soac(SoacEffect(_, Soac::Hist(_))) => None,
         SideEffectKind::Effect(EffectOp::Load) => Some(STORAGE_LOAD_COST),
         SideEffectKind::Effect(EffectOp::Op { tag }) => operation_cost(program, tag, summaries, visiting),
         SideEffectKind::Effect(EffectOp::Alloca { .. } | EffectOp::Store | EffectOp::ControlBarrier) => {

@@ -10,7 +10,7 @@ use super::super::program::{
 };
 use super::super::types::{
     GraphResource, NodeId, SegBody, SegExtent, SegSpace, Semantic, SideEffectKind, Soac, SoacDestination,
-    SoacInputType, WynSoacPhase,
+    SoacEffect, SoacInputType, WynSoacPhase,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,7 +207,7 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut AllocatedProgram) {
     for (_, entry) in inner.entries_with_endpoints() {
         for (_, block) in &entry.graph.skeleton.blocks {
             for effect in &block.side_effects {
-                let SideEffectKind::Soac(
+                let SideEffectKind::Soac(SoacEffect(
                     _,
                     Soac::Filter(Op {
                         body,
@@ -217,7 +217,7 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut AllocatedProgram) {
                                 storage: Output::Runtime { scratch, .. },
                             },
                     }),
-                ) = &effect.kind
+                )) = &effect.kind
                 else {
                     continue;
                 };
@@ -301,7 +301,7 @@ pub(crate) fn allocate_work_resources(inner: &mut AllocatedProgram) {
     for (_, entry) in inner.entries_with_endpoints() {
         for (_, block) in &entry.graph.skeleton.blocks {
             for effect in &block.side_effects {
-                let SideEffectKind::Soac(
+                let SideEffectKind::Soac(SoacEffect(
                     owner,
                     Soac::Filter(Op {
                         state:
@@ -311,7 +311,7 @@ pub(crate) fn allocate_work_resources(inner: &mut AllocatedProgram) {
                             },
                         ..
                     }),
-                ) = &effect.kind
+                )) = &effect.kind
                 else {
                     continue;
                 };
@@ -365,7 +365,7 @@ pub(crate) fn resource_kinds(inner: &AllocatedProgram) -> HashMap<ResourceId, Co
     for (_, entry) in inner.entries_with_endpoints() {
         for (_, block) in &entry.graph.skeleton.blocks {
             for effect in &block.side_effects {
-                let SideEffectKind::Soac(
+                let SideEffectKind::Soac(SoacEffect(
                     owner,
                     Soac::Filter(Op {
                         state:
@@ -375,7 +375,7 @@ pub(crate) fn resource_kinds(inner: &AllocatedProgram) -> HashMap<ResourceId, Co
                             },
                         ..
                     }),
-                ) = &effect.kind
+                )) = &effect.kind
                 else {
                     continue;
                 };

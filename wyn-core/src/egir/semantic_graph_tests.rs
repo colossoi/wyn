@@ -1,7 +1,7 @@
 use super::*;
 use crate::ast::TypeName;
 use crate::egir::soac::screma;
-use crate::egir::types::{RegionId, SegBody, Semantic, SoacDestination};
+use crate::egir::types::{RegionId, SegBody, Semantic, SoacDestination, SoacEffect};
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -74,7 +74,7 @@ fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<Nod
     let result = graph.alloc_side_effect_result(ty.clone());
     let block = graph.skeleton.entry;
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Soac(
+        kind: SideEffectKind::Soac(SoacEffect(
             op(id),
             Soac::Screma(screma::Op::Map {
                 lanes: screma::Lanes {
@@ -92,7 +92,7 @@ fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<Nod
                 },
                 state: screma::SemanticState::Serial,
             }),
-        ),
+        )),
         operand_nodes: smallvec![],
         result: Some(result),
         effects: None,

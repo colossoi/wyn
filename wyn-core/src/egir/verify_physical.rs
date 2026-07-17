@@ -3,7 +3,7 @@ use polytype::Type;
 use crate::ast::TypeName;
 
 use super::program::{visit_type_names_mut, PhysicalEGraph, PhysicalProgram};
-use super::types::SideEffectKind;
+use super::types::{SideEffectKind, SoacEffect};
 
 pub fn check(program: &PhysicalProgram) -> Result<(), String> {
     for resource in &program.resources {
@@ -64,7 +64,7 @@ fn graph(graph: &PhysicalEGraph, owner: &str) -> Result<(), String> {
         }
     }
     for effect in graph.skeleton.blocks.values().flat_map(|block| &block.side_effects) {
-        let SideEffectKind::Soac(_, soac) = &effect.kind else {
+        let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
             continue;
         };
         let mut soac = soac.clone();

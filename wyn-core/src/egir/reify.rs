@@ -21,7 +21,7 @@ use super::program::{
 use super::soac::{filter, hist, screma};
 use super::types::{
     EGraph, ENode, NodeId, PureOp, Raw, ResourceAccess, SegExtent, SegResourceAccess, SegSpace, Semantic,
-    SideEffect, SideEffectKind, Soac, SoacInputType,
+    SideEffect, SideEffectKind, Soac, SoacEffect, SoacInputType,
 };
 
 struct Facts {
@@ -245,7 +245,7 @@ mod tests {
 
     fn raw_map() -> SideEffect<Raw> {
         SideEffect {
-            kind: SideEffectKind::Soac(
+            kind: SideEffectKind::Soac(SoacEffect(
                 (),
                 Soac::Screma(screma::Op::Map {
                     lanes: screma::Lanes {
@@ -254,7 +254,7 @@ mod tests {
                     },
                     state: screma::RawState,
                 }),
-            ),
+            )),
             operand_nodes: SmallVec::new(),
             result: None,
             effects: None,
@@ -344,7 +344,7 @@ fn entry_facts(entry: &RawEntry) -> HashMap<(BlockId, usize), Facts> {
             contents.side_effects.iter().enumerate().map(move |(index, effect)| (block, index, effect))
         })
         .filter(|(block, index, effect)| {
-            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return false;
             };
             matches!(op, screma::Op::Reduce { .. } | screma::Op::Scan { .. })
@@ -374,7 +374,7 @@ fn semantic_facts(
     effect: &SideEffect<Raw>,
     requested_placement: screma::Placement,
 ) -> Option<Facts> {
-    let SideEffectKind::Soac(_, soac) = &effect.kind else {
+    let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
         return None;
     };
     let (input, operand_index, is_screma) = match soac {
@@ -532,7 +532,7 @@ fn soac_consumed_nodes(graph: &EGraph<Raw>) -> HashSet<NodeId> {
         .blocks
         .iter()
         .flat_map(|(_, block)| &block.side_effects)
-        .filter(|effect| matches!(effect.kind, SideEffectKind::Soac(_, _)))
+        .filter(|effect| matches!(effect.kind, SideEffectKind::Soac(SoacEffect(_, _))))
         .flat_map(referenced_nodes)
         .collect::<Vec<_>>();
     graph_ops::value_producer_closure(graph, roots).nodes
@@ -540,7 +540,7 @@ fn soac_consumed_nodes(graph: &EGraph<Raw>) -> HashSet<NodeId> {
 
 fn referenced_nodes(effect: &SideEffect<Raw>) -> Vec<NodeId> {
     let mut nodes = effect.operand_nodes.to_vec();
-    let SideEffectKind::Soac(_, soac) = &effect.kind else {
+    let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
         return nodes;
     };
     nodes.extend(soac.seg_bodies().into_iter().flat_map(|body| body.captures.iter().copied()));

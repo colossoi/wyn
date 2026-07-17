@@ -26,7 +26,7 @@ use super::parallelize::schedule::ValidatedKernelPlan;
 use super::soac::{filter, hist, screma};
 use super::types::{
     EGraph, EgirPhase, NodeId, Physical, Raw, Scheduled, SegBody, SegExtent, SegSpace, Semantic, Soac,
-    WynLanguage,
+    SoacEffect, WynLanguage,
 };
 
 pub use super::ir::{OutputRoute, OutputSlotId, OutputWriter, RegionInterner, SlotSource};
@@ -536,7 +536,7 @@ pub(crate) fn visit_type_names_mut(ty: &mut Type<TypeName>, mut visit: impl FnMu
 fn rewrite_raw_graph_types(graph: &mut EGraph<Raw>, mut rewrite: impl FnMut(&mut Type<TypeName>)) {
     for block in graph.skeleton.blocks.values_mut() {
         for effect in &mut block.side_effects {
-            if let super::types::SideEffectKind::Soac(_, soac) = &mut effect.kind {
+            if let super::types::SideEffectKind::Soac(SoacEffect(_, soac)) = &mut effect.kind {
                 soac.for_each_type_mut(&mut rewrite);
             }
         }
@@ -550,7 +550,7 @@ fn rewrite_physical_graph_types(
 ) {
     for block in graph.skeleton.blocks.values_mut() {
         for effect in &mut block.side_effects {
-            if let super::types::SideEffectKind::Soac(_, soac) = &mut effect.kind {
+            if let super::types::SideEffectKind::Soac(SoacEffect(_, soac)) = &mut effect.kind {
                 soac.for_each_type_mut(&mut rewrite);
             }
         }

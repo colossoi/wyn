@@ -91,7 +91,7 @@ fn check_entry<P: EgirPhase>(entry_name: &str, graph: &EGraph<P>) -> Result<(), 
             // not output writes.
             use super::super::types::SideEffectKind;
             match &se.kind {
-                SideEffectKind::Soac(_, _) => continue,
+                SideEffectKind::Soac(_) => continue,
                 _ => {
                     roots.extend(se.operand_nodes.iter().copied());
                 }

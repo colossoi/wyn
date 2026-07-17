@@ -15,6 +15,7 @@ use super::program::{SemanticDependency, SemanticDependencyKind, SemanticOpId, S
 use super::soac::{filter, hist, screma};
 use super::types::{
     EGraph, NodeId, ResourceAccess, SegResourceAccess, SideEffect, SideEffectKind, SideEffectSite, Soac,
+    SoacEffect,
 };
 
 /// Rebuild the semantic dependency DAG stored on `inner`.
@@ -49,7 +50,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
     let mut records = Vec::new();
     for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {
-            let SideEffectKind::Soac(id, soac) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(id, soac)) = &effect.kind else {
                 continue;
             };
             if let Some(result) = effect.result {
@@ -185,7 +186,7 @@ pub(crate) fn read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResource
 /// Validate the semantic boundary before any target-aware scheduling occurs.
 pub(crate) fn verify(inner: &SemanticProgram) -> Result<(), String> {
     let verify_effect = |scope: &str, effect: &SideEffect| -> Result<(), String> {
-        let SideEffectKind::Soac(_, soac) = &effect.kind else {
+        let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
             return Ok(());
         };
         let verify_body = |family: &str, body: &super::types::SegBody| {
@@ -263,7 +264,7 @@ pub(crate) fn summary(inner: &SemanticProgram) -> String {
         for (_, block) in &graph.skeleton.blocks {
             for effect in &block.side_effects {
                 match &effect.kind {
-                    SideEffectKind::Soac(_, Soac::Screma(op)) => {
+                    SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                         let kind = match op.flavor() {
                             screma::Flavor::Map => "SegMap",
                             screma::Flavor::Reduce => "SegRed",
@@ -279,14 +280,14 @@ pub(crate) fn summary(inner: &SemanticProgram) -> String {
                             op.flavor(),
                         );
                     }
-                    SideEffectKind::Soac(_, Soac::Filter(op)) => {
+                    SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => {
                         let _ = writeln!(
                             output,
                             "{scope}: Filter state={:?} input={:?} predicate={:?}",
                             op.state, op.body.input, op.body.predicate
                         );
                     }
-                    SideEffectKind::Soac(_, Soac::Hist(op)) => {
+                    SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
                         let _ = writeln!(
                             output,
                             "{scope}: Hist state={:?} body={:?} update={:?}",
@@ -363,7 +364,7 @@ impl SemanticGraph {
         let mut graph = Self::new(deps);
         for (block, skeleton_block) in &egir.skeleton.blocks {
             for (effect_index, effect) in skeleton_block.side_effects.iter().enumerate() {
-                let SideEffectKind::Soac(id, soac) = &effect.kind else {
+                let SideEffectKind::Soac(SoacEffect(id, soac)) = &effect.kind else {
                     continue;
                 };
                 let operation = graph.intern_operation(*id);

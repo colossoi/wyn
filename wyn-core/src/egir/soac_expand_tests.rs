@@ -18,7 +18,7 @@
 use crate::ast::TypeName;
 use crate::egir::program::{PhysicalEGraph, PhysicalSideEffectKind, SemanticOpId};
 use crate::egir::soac::hist;
-use crate::egir::types::{ENode, EgirPhase, Physical, PureOp, Soac, SoacInputType};
+use crate::egir::types::{ENode, EgirPhase, Physical, PureOp, Soac, SoacEffect, SoacInputType};
 use polytype::Type;
 
 /// Compile source through the pipeline to just-past `expand_soacs`,
@@ -95,7 +95,7 @@ fn scatter_handleability_checks_every_input() {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
     let bad_input_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty.clone(), f32_ty.clone()]);
-    let kind: PhysicalSideEffectKind = PhysicalSideEffectKind::Soac(
+    let kind: PhysicalSideEffectKind = PhysicalSideEffectKind::Soac(SoacEffect(
         SemanticOpId(0),
         Soac::<Physical>::Hist(hist::Op {
             body: hist::Body {
@@ -116,7 +116,7 @@ fn scatter_handleability_checks_every_input() {
             },
             state: hist::PhysicalState::Serial,
         }),
-    );
+    ));
 
     assert!(
         !super::is_handleable_soac(&kind),

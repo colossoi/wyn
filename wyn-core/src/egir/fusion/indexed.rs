@@ -8,7 +8,7 @@ use smallvec::smallvec;
 
 use crate::egir::program::{OutputRoute, OutputWriter, SemanticProgram, SemanticResourceRef};
 use crate::egir::soac::screma;
-use crate::egir::types::{EGraph, ENode, NodeId, PureOp, ResourceAccess, SideEffectKind, Soac};
+use crate::egir::types::{EGraph, ENode, NodeId, PureOp, ResourceAccess, SideEffectKind, Soac, SoacEffect};
 use crate::flow::BlockId;
 use crate::ssa::types::ConstantValue;
 
@@ -60,7 +60,7 @@ fn find_in_graph(
 ) -> Option<Candidate> {
     for (block_id, block) in &graph.skeleton.blocks {
         for (effect_index, effect) in block.side_effects.iter().enumerate() {
-            let SideEffectKind::Soac(
+            let SideEffectKind::Soac(SoacEffect(
                 _,
                 Soac::Screma(screma::Op::Map {
                     lanes: screma::Lanes { maps, .. },
@@ -71,7 +71,7 @@ fn find_in_graph(
                             ..
                         },
                 }),
-            ) = &effect.kind
+            )) = &effect.kind
             else {
                 continue;
             };
@@ -197,7 +197,7 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
     let (region_name, input_nodes, input_elem_types, captures, producer_result) = {
         let graph = graph(inner, candidate.site);
         let effect = &graph.skeleton.blocks[candidate.block].side_effects[candidate.effect];
-        let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
+        let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
             unreachable!();
         };
         let map = &op.lanes().maps[candidate.output];

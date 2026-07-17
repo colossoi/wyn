@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::egir::soac::{hist, screma};
-use crate::egir::types::{EGraph, Raw, RegionId, SegBody, SideEffect, Soac, SoacInputType};
+use crate::egir::types::{EGraph, Raw, RegionId, SegBody, SideEffect, Soac, SoacEffect, SoacInputType};
 use smallvec::smallvec;
 
 fn raw_map_soac(
@@ -166,7 +166,7 @@ fn rewrite_sibling_index_consumers_rejects_map_output_view_operand() {
     let result_nid =
         graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(1), vec![arr_ty.clone()]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Soac(
+        kind: SideEffectKind::Soac(SoacEffect(
             (),
             raw_map_soac(
                 SoacInputType {
@@ -179,7 +179,7 @@ fn rewrite_sibling_index_consumers_rejects_map_output_view_operand() {
                 elem.clone(),
                 arr_ty.clone(),
             ),
-        ),
+        )),
         operand_nodes: smallvec![dummy_input, source],
         result: Some(result_nid),
         effects: None,
@@ -227,7 +227,7 @@ fn rewrite_sibling_index_consumers_rejects_scatter_dest_position() {
     let dummy_input = graph.alloc_side_effect_result(arr_ty.clone());
     let result_nid = graph.alloc_side_effect_result(Type::Constructed(TypeName::Bool, vec![]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Soac(
+        kind: SideEffectKind::Soac(SoacEffect(
             (),
             raw_hist_soac(
                 vec![SoacInputType {
@@ -238,7 +238,7 @@ fn rewrite_sibling_index_consumers_rejects_scatter_dest_position() {
                 elem.clone(),
                 elem.clone(),
             ),
-        ),
+        )),
         operand_nodes: smallvec![source, dummy_input],
         result: Some(result_nid),
         effects: None,
@@ -289,7 +289,7 @@ fn rewrite_sibling_index_consumers_rejects_scatter_capture_position() {
     let dummy_input = graph.alloc_side_effect_result(arr_ty.clone());
     let result_nid = graph.alloc_side_effect_result(Type::Constructed(TypeName::Bool, vec![]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Soac(
+        kind: SideEffectKind::Soac(SoacEffect(
             (),
             raw_hist_soac(
                 vec![SoacInputType {
@@ -300,7 +300,7 @@ fn rewrite_sibling_index_consumers_rejects_scatter_capture_position() {
                 elem.clone(),
                 elem.clone(),
             ),
-        ),
+        )),
         operand_nodes: smallvec![dummy_dest, dummy_input, source],
         result: Some(result_nid),
         effects: None,
@@ -350,7 +350,7 @@ fn rewrite_sibling_index_consumers_rejects_accumulator_output_view_operand() {
     let result_nid =
         graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(1), vec![elem.clone()]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Soac(
+        kind: SideEffectKind::Soac(SoacEffect(
             (),
             Soac::Screma(screma::Op::Reduce {
                 lanes: screma::Lanes {
@@ -380,7 +380,7 @@ fn rewrite_sibling_index_consumers_rejects_accumulator_output_view_operand() {
                 },
                 state: screma::RawState,
             }),
-        ),
+        )),
         operand_nodes: smallvec![dummy_input, source],
         result: Some(result_nid),
         effects: None,

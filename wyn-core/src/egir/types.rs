@@ -32,7 +32,8 @@ impl Language for WynLanguage {
     type Ty = Type<TypeName>;
 }
 
-pub trait WynSoacPhase: EgirPhase<Soac = Soac<Self>> + Sized {
+pub trait WynSoacPhase: EgirPhase<Soac = SoacEffect<Self>> + Sized {
+    type SoacId: Clone + std::fmt::Debug;
     type MapState: Clone + std::fmt::Debug;
     type ReduceState: Clone + std::fmt::Debug;
     type ScanState: Clone + std::fmt::Debug;
@@ -40,6 +41,10 @@ pub trait WynSoacPhase: EgirPhase<Soac = Soac<Self>> + Sized {
     type FilterState: Clone + std::fmt::Debug;
     type HistState: Clone + std::fmt::Debug;
 }
+
+/// A compiler SOAC together with its stable semantic identity.
+#[derive(Clone, Debug)]
+pub struct SoacEffect<P: WynSoacPhase>(pub P::SoacId, pub Soac<P>);
 
 #[derive(Clone, Debug)]
 pub enum Soac<P: WynSoacPhase> {
@@ -67,6 +72,15 @@ impl<P: WynSoacPhase> Soac<P> {
                 bodies
             }
             Self::Hist(op) => vec![&op.body.body],
+        }
+    }
+}
+
+impl<P: WynSoacPhase> super::ir::SideEffectKind<P, WynLanguage> {
+    pub fn soac_id(&self) -> Option<&P::SoacId> {
+        match self {
+            Self::Effect(_) => None,
+            Self::Soac(SoacEffect(id, _)) => Some(id),
         }
     }
 }
@@ -141,11 +155,11 @@ pub struct Physical;
 impl<R: GraphResource> EgirPhase for Raw<R> {
     type Resource = R;
     type ResourceDecl = super::program::SemanticResourceDecl;
-    type SoacId = ();
-    type Soac = Soac<Self>;
+    type Soac = SoacEffect<Self>;
 }
 
 impl<R: GraphResource> WynSoacPhase for Raw<R> {
+    type SoacId = ();
     type MapState = screma::RawState;
     type ReduceState = screma::RawState;
     type ScanState = screma::RawState;
@@ -157,11 +171,11 @@ impl<R: GraphResource> WynSoacPhase for Raw<R> {
 impl<R: GraphResource> EgirPhase for Semantic<R> {
     type Resource = R;
     type ResourceDecl = super::program::SemanticResourceDecl;
-    type SoacId = super::program::SemanticOpId;
-    type Soac = Soac<Self>;
+    type Soac = SoacEffect<Self>;
 }
 
 impl<R: GraphResource> WynSoacPhase for Semantic<R> {
+    type SoacId = super::program::SemanticOpId;
     type MapState = screma::SemanticState<R>;
     type ReduceState = screma::SemanticState<R>;
     type ScanState = screma::SemanticState<R>;
@@ -173,11 +187,11 @@ impl<R: GraphResource> WynSoacPhase for Semantic<R> {
 impl<R: GraphResource> EgirPhase for Scheduled<R> {
     type Resource = R;
     type ResourceDecl = super::program::SemanticResourceDecl;
-    type SoacId = super::program::SemanticOpId;
-    type Soac = Soac<Self>;
+    type Soac = SoacEffect<Self>;
 }
 
 impl<R: GraphResource> WynSoacPhase for Scheduled<R> {
+    type SoacId = super::program::SemanticOpId;
     type MapState = screma::ScheduledState<R>;
     type ReduceState = screma::ScheduledState<R>;
     type ScanState = screma::ScheduledState<R>;
@@ -189,11 +203,11 @@ impl<R: GraphResource> WynSoacPhase for Scheduled<R> {
 impl EgirPhase for Physical {
     type Resource = super::program::PhysicalResourceRef;
     type ResourceDecl = crate::interface::StorageBindingDecl;
-    type SoacId = super::program::SemanticOpId;
-    type Soac = Soac<Self>;
+    type Soac = SoacEffect<Self>;
 }
 
 impl WynSoacPhase for Physical {
+    type SoacId = super::program::SemanticOpId;
     type MapState = screma::ScheduledState<super::program::PhysicalResourceRef>;
     type ReduceState = screma::PhysicalSerialState;
     type ScanState = screma::PhysicalSerialState;
@@ -244,9 +258,9 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
                         super::ir::SideEffectKind::Effect(effect) => {
                             super::ir::SideEffectKind::Effect(effect)
                         }
-                        super::ir::SideEffectKind::Soac(id, soac) => {
+                        super::ir::SideEffectKind::Soac(SoacEffect(id, soac)) => {
                             let (id, soac) = map_soac(source, index, id, soac)?;
-                            super::ir::SideEffectKind::Soac(id, soac)
+                            super::ir::SideEffectKind::Soac(SoacEffect(id, soac))
                         }
                     };
                     Ok(super::ir::SideEffect {
@@ -355,9 +369,9 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
                         super::ir::SideEffectKind::Effect(effect) => {
                             super::ir::SideEffectKind::Effect(effect.try_map_resource(&mut map_resource)?)
                         }
-                        super::ir::SideEffectKind::Soac(id, soac) => {
+                        super::ir::SideEffectKind::Soac(SoacEffect(id, soac)) => {
                             let (id, soac) = map_soac(id, soac, &node_map)?;
-                            super::ir::SideEffectKind::Soac(id, soac)
+                            super::ir::SideEffectKind::Soac(SoacEffect(id, soac))
                         }
                     };
                     Ok(super::ir::SideEffect::<Q, WynLanguage> {
@@ -482,7 +496,7 @@ impl<R: GraphResource> super::ir::SideEffect<Semantic<R>, WynLanguage> {
     /// operator metadata, and semantic iteration-space extents.
     pub fn referenced_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
         let metadata = match &self.kind {
-            SideEffectKind::Soac(_, soac) => soac.referenced_nodes(),
+            SideEffectKind::Soac(SoacEffect(_, soac)) => soac.referenced_nodes(),
             SideEffectKind::Effect(_) => Vec::new(),
         };
         self.operand_nodes.iter().copied().chain(metadata)
@@ -493,7 +507,7 @@ impl<R: GraphResource> super::ir::SideEffect<Semantic<R>, WynLanguage> {
             kind, operand_nodes, ..
         } = self;
         let mut slots = operand_nodes.iter_mut().collect::<Vec<_>>();
-        if let SideEffectKind::Soac(_, soac) = kind {
+        if let SideEffectKind::Soac(SoacEffect(_, soac)) = kind {
             slots.extend(soac.referenced_node_slots());
         }
         slots

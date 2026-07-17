@@ -2,7 +2,7 @@ use super::*;
 use crate::ast::TypeName;
 use crate::egir::program::SemanticOpId;
 use crate::egir::soac::screma;
-use crate::egir::types::{PureOp, SegSpace, SideEffect, Soac, SoacDestination, SoacInputType};
+use crate::egir::types::{PureOp, SegSpace, SideEffect, Soac, SoacDestination, SoacEffect, SoacInputType};
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -15,7 +15,7 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
     let _dead_project =
         graph.intern_pure(PureOp::Project { index: 0 }, smallvec![result], int.clone(), None);
     graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Soac(
+        kind: SideEffectKind::Soac(SoacEffect(
             SemanticOpId(0),
             Soac::Screma(screma::Op::Map {
                 lanes: screma::Lanes {
@@ -40,7 +40,7 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
                     resources: vec![],
                 },
             }),
-        ),
+        )),
         operand_nodes: smallvec![],
         result: Some(result),
         effects: None,

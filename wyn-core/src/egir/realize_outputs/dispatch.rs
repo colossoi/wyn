@@ -27,7 +27,7 @@ use super::super::program::OutputWriter;
 use super::super::soac::filter;
 use super::super::types::{
     EGraph, ENode, EffectToken, NodeId, PureOp, Raw, SideEffectIndex, SideEffectKind, SkeletonTerminator,
-    Soac, SoacDestination, SoacPlacement,
+    Soac, SoacDestination, SoacEffect, SoacPlacement,
 };
 
 /// The set of Pure nodes reachable from an entry's live outputs — the operand
@@ -46,7 +46,7 @@ fn reachable_from_outputs(graph: &EGraph<Raw>) -> LookupSet<NodeId> {
             // A SOAC's array operands are inputs, not output writes — excluded,
             // matching the verifier. Store operands carry written values.
             match &se.kind {
-                SideEffectKind::Soac(_, _) => continue,
+                SideEffectKind::Soac(SoacEffect(_, _)) => continue,
                 _ => roots.extend(se.operand_nodes.iter().copied()),
             }
         }
@@ -239,7 +239,7 @@ pub(crate) fn result_soac_is_consuming_scan(
         let field_idx = *index as usize;
         if let [screma_result] = operands.as_slice() {
             if let Some(se) = effect_index.effect(graph, *screma_result) {
-                if let SideEffectKind::Soac(_, Soac::Screma(op)) = &se.kind {
+                if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &se.kind {
                     let n_maps = op.lanes().maps.len();
                     if field_idx >= n_maps {
                         let acc_idx = field_idx - n_maps;
@@ -276,7 +276,7 @@ pub(crate) fn result_soac_is_array_projection(
         return None;
     };
     let se = effect_index.effect(graph, *screma_result)?;
-    let SideEffectKind::Soac(_, Soac::Screma(op)) = &se.kind else {
+    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &se.kind else {
         return None;
     };
     let operator_field = field_idx.checked_sub(op.lanes().maps.len());
@@ -313,7 +313,7 @@ pub(crate) fn retarget_array_projection(
     output_view: NodeId,
 ) {
     if let Some(se) = effect_index.effect_mut(graph, target_result) {
-        let SideEffectKind::Soac(_, Soac::Screma(op)) = &mut se.kind else {
+        let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut se.kind else {
             panic!(
                 "retarget_array_projection: side effect for \
                      target_result={:?} is not Screma: {:?}",
@@ -402,7 +402,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                     continue;
                 }
                 match &se.kind {
-                    SideEffectKind::Soac(_, Soac::Screma(op)) => {
+                    SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                         // Screma operand layout: [inputs.., output_views..].
                         // Captures and neutrals live in the typed body.
                         // Only the leading `input_array_types.len()`
@@ -422,7 +422,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                             op.lanes().inputs.len()
                         )));
                     }
-                    SideEffectKind::Soac(_, Soac::Hist(op)) => {
+                    SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
                         // Scatter operand layout: [dest_view, inputs..].
                         // Input region is `1..1+input_array_types.len()`.
                         if op_idx >= 1 && op_idx < 1 + op.body.inputs.len() {
@@ -466,7 +466,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
         let se = &mut blk.side_effects[se_idx];
         se.operand_nodes[op_idx] = view;
         match &mut se.kind {
-            SideEffectKind::Soac(_, Soac::Screma(op)) => {
+            SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                 let k = op_idx;
                 assert_eq!(
                     op.lanes().inputs[k].element(),
@@ -481,7 +481,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                 );
                 op.lanes_mut().inputs[k].array = view_arr_ty.clone();
             }
-            SideEffectKind::Soac(_, Soac::Hist(op)) => {
+            SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
                 let k = op_idx - 1;
                 assert_eq!(
                     op.body.inputs[k].element(),
@@ -600,7 +600,7 @@ pub fn retarget_filter_output(
             if se.result != Some(source) {
                 continue;
             }
-            if let SideEffectKind::Soac(_, Soac::Filter(op)) = &mut se.kind {
+            if let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) = &mut se.kind {
                 let filter::Output::Runtime { scratch, .. } = &mut op.state.storage else {
                     // Static Bounded filter — not a runtime scratch producer.
                     return Ok(false);

@@ -27,7 +27,7 @@ use polytype::Type;
 use super::super::from_tlc::ConvertError;
 use super::super::program::{Func, Program};
 use super::super::types::{
-    EGraph, ENode, EgirPhase, NodeId, PureOp, RegionId, SideEffectKind, WynSoacPhase,
+    EGraph, ENode, EgirPhase, NodeId, PureOp, RegionId, SideEffectKind, SoacEffect, WynSoacPhase,
 };
 use crate::ast::TypeName;
 use crate::LookupMap;
@@ -102,7 +102,7 @@ fn collect_drifts<'a, P: WynSoacPhase + 'a>(
     for graph in graphs {
         for (_, block) in &graph.skeleton.blocks {
             for se in &block.side_effects {
-                let SideEffectKind::Soac(_, soac) = &se.kind else {
+                let SideEffectKind::Soac(SoacEffect(_, soac)) = &se.kind else {
                     continue;
                 };
                 for body in soac.seg_bodies() {

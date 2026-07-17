@@ -236,16 +236,7 @@ pub enum SideEffectKind<P: EgirPhase, Lang: Language> {
     Effect(EffectOp<P::Resource, Lang::Ty>),
     /// A placeholder for an unexpanded SOAC. Produced by `from_tlc` and
     /// consumed by `soac_expand`. Never reaches elaborate.
-    Soac(P::SoacId, P::Soac),
-}
-
-impl<P: EgirPhase, Lang: Language> SideEffectKind<P, Lang> {
-    pub fn soac_id(&self) -> Option<&P::SoacId> {
-        match self {
-            Self::Effect(_) => None,
-            Self::Soac(id, _) => Some(id),
-        }
-    }
+    Soac(P::Soac),
 }
 
 /// External storage selected for a SOAC result by EGIR lowering.
@@ -396,7 +387,6 @@ impl<R: Copy + Ord> SegResourceAccess<R> {
 pub trait EgirPhase: Clone + std::fmt::Debug {
     type Resource: GraphResource;
     type ResourceDecl: Clone + std::fmt::Debug;
-    type SoacId: Clone + std::fmt::Debug;
     type Soac: Clone + std::fmt::Debug;
 }
 

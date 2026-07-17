@@ -33,7 +33,7 @@ use super::program::{
     host_resource_map, Entry, OutputRoute, OutputSlotId, OutputWriter, RawEntry, RawProgram,
     SemanticResourceRef, SlotSource,
 };
-use super::types::{EGraph, EffectToken, NodeId, Raw, SkeletonTerminator};
+use super::types::{EGraph, EffectToken, NodeId, Raw, SkeletonTerminator, SoacEffect};
 use crate::ResourceId;
 use std::collections::HashMap;
 
@@ -272,10 +272,9 @@ fn source_value_writers(
             }
         },
         |node| {
-            if effect_index
-                .effect(graph, node)
-                .is_some_and(|effect| matches!(effect.kind, super::types::SideEffectKind::Soac(_, _)))
-            {
+            if effect_index.effect(graph, node).is_some_and(|effect| {
+                matches!(effect.kind, super::types::SideEffectKind::Soac(SoacEffect(_, _)))
+            }) {
                 writers.push(OutputWriter::Value(node));
             }
         },

@@ -37,7 +37,6 @@ impl Language for TestLanguage {
 impl EgirPhase for TestPhase {
     type Resource = ();
     type ResourceDecl = u16;
-    type SoacId = ();
     type Soac = ();
 }
 
@@ -58,7 +57,7 @@ fn graph_accepts_non_wyn_payloads() {
     let constant = graph.intern_constant(TestConst::FortyTwo, "number".to_string());
     let entry = graph.skeleton.entry;
     graph.skeleton.blocks[entry].side_effects.push(super::super::ir::SideEffect {
-        kind: super::super::ir::SideEffectKind::Soac((), ()),
+        kind: super::super::ir::SideEffectKind::Soac(()),
         operand_nodes: SmallVec::new(),
         result: None,
         effects: None,
@@ -72,7 +71,7 @@ fn graph_accepts_non_wyn_payloads() {
     ));
     assert!(matches!(
         graph.skeleton.blocks[entry].side_effects[0].kind,
-        super::super::ir::SideEffectKind::Soac((), ())
+        super::super::ir::SideEffectKind::Soac(())
     ));
 }
 

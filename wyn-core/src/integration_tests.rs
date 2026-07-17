@@ -60,11 +60,11 @@ struct SemanticSoacStats {
 
 fn semantic_soac_stats(allocated: &crate::EgirAllocated) -> SemanticSoacStats {
     use crate::egir::soac::screma;
-    use crate::egir::types::{EGraph, SideEffectKind, Soac};
+    use crate::egir::types::{EGraph, SideEffectKind, Soac, SoacEffect};
 
     fn visit(graph: &EGraph, stats: &mut SemanticSoacStats) {
         for effect in graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects) {
-            let SideEffectKind::Soac(_, soac) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
                 continue;
             };
             match soac {
@@ -136,7 +136,7 @@ entry chain(xs: []i32) []i32 =
 #[test]
 fn egir_vertical_fusion_preserves_multi_input_producer_sources() {
     use crate::egir::soac::screma;
-    use crate::egir::types::{ResourceAccess, SideEffectKind, Soac};
+    use crate::egir::types::{ResourceAccess, SideEffectKind, Soac, SoacEffect};
 
     let allocated = compile_to_semantic_egir(
         r#"
@@ -153,7 +153,7 @@ entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter_map(|effect| {
-            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
             let screma::Op::Map { .. } = op else {
@@ -178,7 +178,7 @@ entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
 #[test]
 fn egir_vertical_fusion_composes_one_slot_of_multi_input_consumer() {
     use crate::egir::soac::screma;
-    use crate::egir::types::{SideEffectKind, Soac};
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let allocated = compile_to_semantic_egir(
         r#"
@@ -194,7 +194,7 @@ entry mixed() [4]i32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter_map(|effect| {
-            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
             let screma::Op::Map { .. } = op else {
@@ -213,7 +213,7 @@ entry mixed() [4]i32 =
 #[test]
 fn egir_horizontal_fusion_deduplicates_shared_multi_input_vector() {
     use crate::egir::soac::screma;
-    use crate::egir::types::{SideEffectKind, Soac};
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let allocated = compile_to_semantic_egir(
         r#"
@@ -231,7 +231,7 @@ entry siblings<[n]>(xs: [n]i32, ys: [n]i32) ([n]i32, [n]i32) =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
-            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
             if !matches!(op, screma::Op::Map { .. }) || op.lanes().maps.len() != 2 {
@@ -347,7 +347,7 @@ entry count(xs: []i32) i32 =
 #[test]
 fn egir_filter_fusion_reuses_count_for_multiple_reductions() {
     use crate::egir::soac::screma;
-    use crate::egir::types::{SideEffectKind, Soac};
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let source = r#"
 #[compute]
@@ -374,7 +374,7 @@ entry stats(xs: []i32) [4]i32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
-            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
             let screma::Op::Reduce { operators, .. } = op else {
@@ -419,7 +419,7 @@ entry both(xs: []i32) ?k. ([k]i32, i32) =
 #[test]
 fn egir_map_filter_envelope_fuses_producer_into_escaping_filter() {
     use crate::egir::soac::filter;
-    use crate::egir::types::{SideEffectKind, Soac};
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let source = r#"
 #[compute]
@@ -439,7 +439,7 @@ entry pick(xs: []i32) ?k. [k]i32 =
         .any(|effect| {
             matches!(
                 &effect.kind,
-                SideEffectKind::Soac(
+                SideEffectKind::Soac(SoacEffect(
                     _,
                     Soac::Filter(filter::Op {
                         body: filter::Body {
@@ -448,7 +448,7 @@ entry pick(xs: []i32) ?k. [k]i32 =
                         },
                         ..
                     })
-                )
+                ))
             )
         });
     assert!(
@@ -459,7 +459,7 @@ entry pick(xs: []i32) ?k. [k]i32 =
 
 #[test]
 fn egir_map_scatter_envelope_fuses_and_deduplicates_both_producers() {
-    use crate::egir::types::{SideEffectKind, Soac};
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let source = r#"
 #[compute]
@@ -482,7 +482,7 @@ entry write(xs: []i32, #[storage(set=2, binding=0, access=write)] dest: *[]i32) 
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| match &effect.kind {
-            SideEffectKind::Soac(_, Soac::Hist(op)) => Some(op.body.inputs.len()),
+            SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => Some(op.body.inputs.len()),
             _ => None,
         })
         .expect("fused SegHist");
@@ -496,7 +496,7 @@ entry write(xs: []i32, #[storage(set=2, binding=0, access=write)] dest: *[]i32) 
 #[test]
 fn semantic_segops_survive_optimization_and_logical_allocation() {
     use crate::egir::soac::screma;
-    use crate::egir::types::{SegExtent, SideEffectKind, Soac};
+    use crate::egir::types::{SegExtent, SideEffectKind, Soac, SoacEffect};
 
     let allocated = compile_to_semantic_egir(
         r#"
@@ -511,7 +511,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
-            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
             let screma::SemanticState::Segmented { space, .. } = op.semantic_state() else {
@@ -562,7 +562,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 #[test]
 fn same_space_reductions_fuse_into_one_multi_accumulator_op() {
     use crate::egir::soac::screma;
-    use crate::egir::types::{SideEffectKind, Soac};
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let allocated = compile_to_semantic_egir(
         r#"
@@ -579,7 +579,7 @@ entry e() [4]f32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter_map(|effect| {
-            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
             (!matches!(op, screma::Op::Map { .. })).then(|| op.operators().len())
@@ -598,7 +598,7 @@ entry e() [4]f32 =
         .filter(|effect| {
             matches!(
                 &effect.kind,
-                SideEffectKind::Soac(_, Soac::Screma(screma::Op::Map { .. }))
+                SideEffectKind::Soac(SoacEffect(_, Soac::Screma(screma::Op::Map { .. })))
             )
         })
         .count();
@@ -619,7 +619,7 @@ entry e() [4]f32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
-            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
             matches!(op, screma::Op::Reduce { .. }).then(|| op.operators())
@@ -638,7 +638,7 @@ entry e() [4]f32 =
 #[test]
 fn horizontal_fusion_does_not_cross_an_intervening_effect_token() {
     use crate::egir::soac::screma;
-    use crate::egir::types::{SideEffectKind, Soac};
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
     let allocated = compile_to_semantic_egir(
         r#"
 #[compute]
@@ -658,7 +658,7 @@ entry e() [3]i32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter_map(|effect| {
-            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
             matches!(op, screma::Op::Reduce { .. }).then(|| op.operators().len())
@@ -674,7 +674,7 @@ entry e() [3]i32 =
 #[test]
 fn fused_accumulators_preserve_distinct_composed_steps_on_shared_input() {
     use crate::egir::soac::screma;
-    use crate::egir::types::{SideEffectKind, Soac};
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
     let source = r#"
 #[compute]
 entry e() [2]i32 =
@@ -690,7 +690,7 @@ entry e() [2]i32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
-            let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
             let screma::Op::Reduce { operators, .. } = op else {
@@ -1203,7 +1203,7 @@ entry r(bidx: []u32) ?k. [k]vec4f32 =
 fn multi_consumer_producer_survival_is_characterized() {
     use crate::egir::program::SemanticDependencyKind;
     use crate::egir::soac::screma;
-    use crate::egir::types::{SideEffectKind, Soac};
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
     use std::collections::HashMap;
 
     fn multi_consumer_producers(src: &str) -> usize {
@@ -1215,7 +1215,9 @@ fn multi_consumer_producer_survival_is_characterized() {
             .flat_map(|entry| {
                 entry.graph.skeleton.blocks.iter().flat_map(move |(_, block)| {
                     block.side_effects.iter().filter_map(move |effect| match &effect.kind {
-                        SideEffectKind::Soac(id, Soac::Screma(screma::Op::Map { .. })) => Some(*id),
+                        SideEffectKind::Soac(SoacEffect(id, Soac::Screma(screma::Op::Map { .. }))) => {
+                            Some(*id)
+                        }
                         _ => None,
                     })
                 })

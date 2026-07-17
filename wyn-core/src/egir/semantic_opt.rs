@@ -8,7 +8,7 @@
 use super::program::SemanticProgram;
 use super::semantic_graph::SemanticGraph;
 use super::soac::screma;
-use super::types::{EGraph, NodeId, ResourceAccess, SegResourceAccess, SideEffectKind, Soac};
+use super::types::{EGraph, NodeId, ResourceAccess, SegResourceAccess, SideEffectKind, Soac, SoacEffect};
 
 #[cfg(test)]
 #[path = "semantic_opt_tests.rs"]
@@ -62,7 +62,7 @@ pub fn run(inner: &mut SemanticProgram) {
 fn canonicalize_resource_accesses(graph: &mut EGraph) {
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
-            let SideEffectKind::Soac(_, Soac::Screma(op)) = &mut effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut effect.kind else {
                 continue;
             };
             if let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() {
@@ -108,7 +108,7 @@ pub(super) fn eliminate_dead_seg_ops_in_graph(graph: &mut EGraph) -> bool {
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         let before = block.side_effects.len();
         block.side_effects.retain(|effect| {
-            let SideEffectKind::Soac(_, soac) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
                 return true;
             };
             // A Seg with no resource write and no output routing is observable

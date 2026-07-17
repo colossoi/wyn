@@ -26,7 +26,7 @@ use crate::BindingRef;
 use super::types::{
     EGraph, ENode, EffectOp, EffectToken, EgirPhase, GraphResource, NodeId, Physical, PureOp,
     PureViewSource, Raw, Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac,
-    WynSoacPhase,
+    SoacEffect, WynSoacPhase,
 };
 
 #[cfg(test)]
@@ -45,7 +45,7 @@ pub(crate) trait ValueProducerPhase: EgirPhase {
 impl<R: GraphResource> ValueProducerPhase for Raw<R> {
     fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<NodeId> {
         let mut nodes = effect.operand_nodes.to_vec();
-        let SideEffectKind::Soac(_, soac) = &effect.kind else {
+        let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
             return nodes;
         };
         nodes.extend(soac.seg_bodies().into_iter().flat_map(|body| body.captures.iter().copied()));
@@ -519,7 +519,7 @@ pub fn emit_view_load<P: EgirPhase>(
     emit_load(graph, block, place_nid, elem_ty, effect_ids, span)
 }
 
-/// Push a `SideEffectKind::Soac(id, soac)` side-effect into `block` with
+/// Push a `SideEffectKind::Soac(SoacEffect(id, soac))` side-effect into `block` with
 /// the given operands; returns the allocated `result_nid` (typed as
 /// `result_ty`, which the SOAC's lowering recovers from
 /// `graph.types[result_nid]`).
@@ -537,7 +537,7 @@ pub fn emit_pending_soac<P: WynSoacPhase>(
     let effect_in = alloc_effect(effect_ids);
     let effect_out = alloc_effect(effect_ids);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Soac(id, soac),
+        kind: SideEffectKind::Soac(SoacEffect(id, soac)),
         operand_nodes: operands,
         result: Some(result_nid),
         effects: Some((effect_in, effect_out)),

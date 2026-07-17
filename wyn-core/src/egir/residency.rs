@@ -20,7 +20,7 @@ use super::program::{
 use super::soac::{filter, screma};
 use super::types::{
     EGraph, ENode, EffectToken, NodeId, PureOp, ResourceAccess, SegExtent, SegResourceAccess,
-    SideEffectKind, SideEffectSite, Soac, SoacDestination, SoacPlacement,
+    SideEffectKind, SideEffectSite, Soac, SoacDestination, SoacEffect, SoacPlacement,
 };
 use crate::ast::TypeName;
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
@@ -141,7 +141,7 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
         let (operands, map_inputs, operator_inputs, map_destinations, acc_destinations, filter_candidate) = {
             let effect = &graph.skeleton.blocks[block_id].side_effects[effect_index];
             match &effect.kind {
-                SideEffectKind::Soac(_, Soac::Screma(op)) => (
+                SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => (
                     effect.operand_nodes.to_vec(),
                     op.lanes().maps.iter().map(|map| map.input_indices.clone()).collect(),
                     op.operators()
@@ -152,7 +152,7 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
                     op.operators().into_iter().map(|operator| operator.destination).collect(),
                     false,
                 ),
-                SideEffectKind::Soac(
+                SideEffectKind::Soac(SoacEffect(
                     _,
                     Soac::Filter(filter::Op {
                         state:
@@ -162,7 +162,7 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
                             },
                         ..
                     }),
-                ) => (
+                )) => (
                     effect.operand_nodes.to_vec(),
                     Vec::new(),
                     Vec::new(),
@@ -234,7 +234,7 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
         });
         let effect = &mut graph.skeleton.blocks[block_id].side_effects[effect_index];
         match &mut effect.kind {
-            SideEffectKind::Soac(_, Soac::Screma(op)) => {
+            SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                 for (map, destination) in op.lanes_mut().maps.iter_mut().zip(new_maps) {
                     map.destination = destination;
                 }
@@ -242,7 +242,7 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
                     operator.destination = destination;
                 }
             }
-            SideEffectKind::Soac(
+            SideEffectKind::Soac(SoacEffect(
                 _,
                 Soac::Filter(filter::Op {
                     state:
@@ -252,7 +252,7 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
                         },
                     ..
                 }),
-            ) => {
+            )) => {
                 if let Some(resolved) = filter_destination {
                     *destination = resolved;
                 }
@@ -280,7 +280,7 @@ fn retype_input_buffer_results(graph: &mut EGraph, block: BlockId, effect_index:
         })
         .collect();
     let (result_types, changed) = {
-        let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind else {
+        let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
             return;
         };
         let mut retyped = op.result_types();
@@ -313,7 +313,7 @@ fn retype_input_buffer_results(graph: &mut EGraph, block: BlockId, effect_index:
     if !changed {
         return;
     }
-    if let SideEffectKind::Soac(_, Soac::Screma(op)) =
+    if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) =
         &mut graph.skeleton.blocks[block].side_effects[effect_index].kind
     {
         op.set_result_types(&result_types);
@@ -333,7 +333,7 @@ fn clear_unique_input_candidates(graph: &mut EGraph) {
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
             match &mut effect.kind {
-                SideEffectKind::Soac(_, Soac::Screma(op)) => {
+                SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                     for map in &mut op.lanes_mut().maps {
                         if map.destination.is_unplaced_unique_input() {
                             map.destination.make_fresh();
@@ -345,7 +345,7 @@ fn clear_unique_input_candidates(graph: &mut EGraph) {
                         }
                     }
                 }
-                SideEffectKind::Soac(
+                SideEffectKind::Soac(SoacEffect(
                     _,
                     Soac::Filter(filter::Op {
                         state:
@@ -355,7 +355,7 @@ fn clear_unique_input_candidates(graph: &mut EGraph) {
                             },
                         ..
                     }),
-                ) if destination.is_unplaced_unique_input() => {
+                )) if destination.is_unplaced_unique_input() => {
                     destination.make_fresh();
                 }
                 _ => {}
@@ -414,7 +414,7 @@ fn verify_residency_requirements_satisfied(inner: &AllocatedProgram) {
                 };
                 if matches!(
                     &effect.kind,
-                    SideEffectKind::Soac(
+                    SideEffectKind::Soac(SoacEffect(
                         _,
                         Soac::Filter(filter::Op {
                             state: filter::SemanticState {
@@ -426,7 +426,7 @@ fn verify_residency_requirements_satisfied(inner: &AllocatedProgram) {
                             },
                             ..
                         })
-                    )
+                    ))
                 ) {
                     assert!(
                         !has_parallel_consumer(entry, consumers.get(&id)),
@@ -436,7 +436,7 @@ fn verify_residency_requirements_satisfied(inner: &AllocatedProgram) {
                 if consumers.get(&id).map_or(0, HashSet::len) < 2 {
                     continue;
                 }
-                let SideEffectKind::Soac(
+                let SideEffectKind::Soac(SoacEffect(
                     _,
                     Soac::Screma(screma::Op::Map {
                         lanes: screma::Lanes { maps, .. },
@@ -447,7 +447,7 @@ fn verify_residency_requirements_satisfied(inner: &AllocatedProgram) {
                                 ..
                             },
                     }),
-                ) = &effect.kind
+                )) = &effect.kind
                 else {
                     continue;
                 };
@@ -505,7 +505,7 @@ fn plan_operation_result(inner: &AllocatedProgram) -> Option<MaterializationPlan
                     index: effect_index,
                 };
                 match &effect.kind {
-                    SideEffectKind::Soac(_, Soac::Screma(op)) => {
+                    SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                         let Some(kind) =
                             operation_result_residency(entry, op, result, source_site, semantic_consumers)
                         else {
@@ -517,7 +517,7 @@ fn plan_operation_result(inner: &AllocatedProgram) -> Option<MaterializationPlan
                             return Some(plan);
                         }
                     }
-                    SideEffectKind::Soac(_, Soac::Filter(op)) => {
+                    SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => {
                         if let Some(plan) = filter_runtime_array_plan(
                             entry_index,
                             entry,
@@ -765,7 +765,7 @@ fn parallel_preludes(
         let Some(site) = dependencies.operation_site(&operation) else {
             continue;
         };
-        let SideEffectKind::Soac(_, soac) = &entry.graph.skeleton.effect(site).kind else {
+        let SideEffectKind::Soac(SoacEffect(_, soac)) = &entry.graph.skeleton.effect(site).kind else {
             continue;
         };
         if soac.scheduling_space().is_none() {
@@ -796,10 +796,10 @@ fn operation_sites(
 fn supports_parallel_prefix_consumer(entry: &super::program::SemanticEntry, site: SideEffectSite) -> bool {
     matches!(
         &entry.graph.skeleton.effect(site).kind,
-        SideEffectKind::Soac(_, Soac::Screma(screma::Op::Map {
+        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(screma::Op::Map {
             lanes,
             state: screma::SemanticState::Segmented { .. },
-        })) if !lanes.maps.is_empty()
+        }))) if !lanes.maps.is_empty()
     )
 }
 
@@ -863,7 +863,7 @@ fn launched_consumer_invocations(
         let Some(site) = dependencies.operation_site(consumer) else {
             return total;
         };
-        let SideEffectKind::Soac(_, soac) = &entry.graph.skeleton.effect(site).kind else {
+        let SideEffectKind::Soac(SoacEffect(_, soac)) = &entry.graph.skeleton.effect(site).kind else {
             return total;
         };
         let Some(space) = soac.scheduling_space() else {
@@ -907,7 +907,7 @@ fn has_matching_consumer(
         return false;
     };
     entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects).any(|effect| {
-        matches!(&effect.kind, SideEffectKind::Soac(id, soac) if supports(soac) && consumers.contains(id))
+        matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(id, soac)) if supports(soac) && consumers.contains(id))
     })
 }
 
@@ -942,7 +942,7 @@ fn requires_array_residency(
             if block_id == producer_block && index == producer_index {
                 return false;
             }
-            let SideEffectKind::Soac(_, soac) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
                 return false;
             };
             soac.capture_nodes().any(|capture| depends_on(graph, capture, result))
@@ -1005,7 +1005,7 @@ fn dependencies_are_cloneable(graph: &EGraph, block_id: BlockId, effects: &HashS
     effects.iter().all(|&index| {
         matches!(
             &block.side_effects[index].kind,
-            SideEffectKind::Soac(_, Soac::Screma(op))
+            SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
                 if matches!(op.semantic_state(), screma::SemanticState::Segmented { output_slots, resources, .. }
                     if output_slots.is_empty()
                         && op
@@ -1212,13 +1212,13 @@ fn materialize_runtime_array_result(
         &LogicalSize::FixedBytes(4),
     );
     let effect = producer.entry.graph.skeleton.effect_mut(projected_site);
-    let SideEffectKind::Soac(
+    let SideEffectKind::Soac(SoacEffect(
         _,
         Soac::Filter(filter::Op {
             state: filter::SemanticState { storage, .. },
             ..
         }),
-    ) = &mut effect.kind
+    )) = &mut effect.kind
     else {
         return;
     };
@@ -1350,7 +1350,7 @@ fn configure_materialized_soac(
     source_output_resources: &HashSet<ResourceId>,
 ) {
     let producer_effect = graph.skeleton.effect_mut(producer_site);
-    let SideEffectKind::Soac(_, Soac::Screma(op)) = &mut producer_effect.kind else {
+    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut producer_effect.kind else {
         return;
     };
     let screma::SemanticState::Segmented {
@@ -1883,7 +1883,7 @@ fn compact_entry_interface(entry: &mut super::program::SemanticEntry) {
                     .into_iter()
                     .map(|access| access.resource.0),
             );
-            if let SideEffectKind::Soac(_, Soac::Screma(op)) = &effect.kind {
+            if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind {
                 if let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() {
                     used_resources.extend(resources.iter().map(|access| access.resource.0));
                 }
@@ -1937,7 +1937,7 @@ fn refresh_resource_reads_for_values(graph: &mut EGraph, values: &[NodeId]) {
     let mut sites = Vec::<SideEffectSite>::new();
     for (block_id, block) in &graph.skeleton.blocks {
         for (index, effect) in block.side_effects.iter().enumerate() {
-            if matches!(&effect.kind, SideEffectKind::Soac(_, Soac::Screma(op)) if matches!(op.semantic_state(), screma::SemanticState::Segmented { .. }))
+            if matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if matches!(op.semantic_state(), screma::SemanticState::Segmented { .. }))
                 && effect
                     .referenced_nodes()
                     .any(|node| values.iter().any(|value| depends_on(graph, node, *value)))
@@ -1954,7 +1954,9 @@ fn refresh_resource_reads_for_values(graph: &mut EGraph, values: &[NodeId]) {
             let effect = graph.skeleton.effect(site);
             super::semantic_graph::read_resources(graph, effect)
         };
-        let SideEffectKind::Soac(_, Soac::Screma(op)) = &mut graph.skeleton.effect_mut(site).kind else {
+        let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) =
+            &mut graph.skeleton.effect_mut(site).kind
+        else {
             continue;
         };
         let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
@@ -2024,18 +2026,18 @@ fn dependency_resources(
         let producer_nodes = graph_ops::value_producer_closure(graph, effect.referenced_nodes()).nodes;
         dependencies.extend(resources_referenced_by_nodes(entry, graph, producer_nodes));
         match &effect.kind {
-            SideEffectKind::Soac(_, Soac::Screma(op)) => {
+            SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                 if let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() {
                     dependencies.extend(resources.iter().map(|access| access.resource.0));
                 }
             }
-            SideEffectKind::Soac(
+            SideEffectKind::Soac(SoacEffect(
                 _,
                 Soac::Filter(filter::Op {
                     state: filter::SemanticState { storage, .. },
                     ..
                 }),
-            ) => {
+            )) => {
                 if let filter::Output::Runtime { scratch, length } = storage {
                     dependencies.insert(scratch.0);
                     if let filter::RuntimeLength::Stored(length) = length {
@@ -2054,7 +2056,7 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
             match &mut effect.kind {
-                SideEffectKind::Soac(_, Soac::Screma(op)) => {
+                SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                     let mut new_resources = Vec::new();
                     for (input, input_type) in op.lanes_mut().inputs.iter_mut().enumerate() {
                         if let Some(replacement) = replacements
@@ -2101,7 +2103,7 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                         result_retypes.push((result, op.result_types()));
                     }
                 }
-                SideEffectKind::Soac(_, Soac::Filter(filter::Op { body, state })) => {
+                SideEffectKind::Soac(SoacEffect(_, Soac::Filter(filter::Op { body, state }))) => {
                     if let Some(replacement) = replacements
                         .iter()
                         .find(|replacement| effect.operand_nodes[0] == replacement.project)
