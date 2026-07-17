@@ -6,12 +6,11 @@ use slotmap::{new_key_type, SlotMap};
 use smallvec::SmallVec;
 
 use crate::ast::Span;
+use crate::flow::{BlockId, ControlHeader, ExecutionModel};
 use crate::op::{OpTag, PureViewSource as OpViewSource};
 use crate::pipeline_descriptor::PipelineDescriptor;
-use crate::ssa::framework::BlockId;
 use crate::ssa::types::{
-    Constant, ControlHeader, EntryInput as SsaEntryInput, EntryOutput as SsaEntryOutput, ExecutionModel,
-    Function, InstKind,
+    Constant, EntryInput as SsaEntryInput, EntryOutput as SsaEntryOutput, Function, InstKind,
 };
 use crate::LookupMap;
 

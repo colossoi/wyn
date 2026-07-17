@@ -3,7 +3,7 @@
 use super::*;
 use crate::ast::TypeName;
 use crate::egir::types::{EGraph as GenericEGraph, NodeId, PureOp, SkeletonTerminator};
-use crate::ssa::framework::BlockId;
+use crate::flow::BlockId;
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
 use smallvec::smallvec;

@@ -24,11 +24,12 @@
 use crate::{BindingRef, LookupMap, LookupSet};
 
 use crate::egir::program::EntryPublication;
+use crate::flow::ExecutionModel;
 use crate::pipeline_descriptor::{
     Access, BackingRef, Binding, BufferUsage, FragmentOutput, Pipeline, PipelineDescriptor,
     SamplerBindingType, TextureSampleType, TextureViewDimension, VertexAttribute,
 };
-use crate::ssa::types::{ExecutionModel, IoDecoration};
+use crate::ssa::types::IoDecoration;
 
 pub trait PipelineDescriptorPublish {
     /// Append `Binding::StorageBuffer` / `Uniform` / `PushConstant` /

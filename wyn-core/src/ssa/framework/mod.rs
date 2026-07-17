@@ -1,3 +1,4 @@
+pub use crate::flow::BlockId;
 use crate::LookupMap;
 pub use slotmap::Key;
 use slotmap::{new_key_type, SlotMap};
@@ -8,7 +9,6 @@ use std::hash::Hash;
 use crate::ast::Span;
 
 new_key_type! {
-    pub struct BlockId;
     pub struct InstId;
     pub struct ValueId;
     pub struct PlaceId;

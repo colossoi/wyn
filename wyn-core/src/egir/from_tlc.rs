@@ -17,9 +17,9 @@ use crate::binding_layout::{
     extract_storage_image_binding, extract_storage_image_resource, extract_texture_backing,
     extract_texture_binding, extract_texture_resource, extract_uniform_binding,
 };
+use crate::flow::{BlockId, ControlHeader};
 use crate::interface::{EntryParamBinding, EntryParamBindingKind};
-use crate::ssa::framework::BlockId;
-use crate::ssa::types::{ControlHeader, FuncBody, Function, InstKind, ValueRef};
+use crate::ssa::types::{FuncBody, Function, InstKind, ValueRef};
 use crate::tlc::{
     ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind, Program as TlcProgram, SoacOp, Term, TermKind,
 };
@@ -502,7 +502,8 @@ fn convert_entry_point(
     input_slice_bounds_for_entry: Option<&LookupMap<SymbolId, BufferLen>>,
     binding_ids: &mut crate::IdSource<u32>,
 ) -> Result<RawEntry, ConvertError> {
-    use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration, PushConstantSlot};
+    use crate::flow::ExecutionModel;
+    use crate::ssa::types::{EntryInput, IoDecoration, PushConstantSlot};
 
     let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?;
@@ -1122,7 +1123,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// `SlotSource { block: self.current_block, value: <converted> }`
     /// is pushed to `slot_sources_accum[slot_index]`.
     fn convert_output_source(&mut self, slot_index: usize, value: &Term) -> Result<(), ConvertError> {
-        use crate::ssa::types::ControlHeader;
+        use crate::flow::ControlHeader;
         match &value.kind {
             TermKind::Let {
                 name,

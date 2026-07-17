@@ -65,7 +65,7 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
     let entry = super::super::ir::Entry::<TestPhase, TestLanguage>::new_with_resources(
         "custom".to_string(),
         crate::ast::Span::new(0, 0, 0, 0),
-        crate::ssa::types::ExecutionModel::Compute {
+        crate::flow::ExecutionModel::Compute {
             local_size: (1, 1, 1),
         },
         vec![],

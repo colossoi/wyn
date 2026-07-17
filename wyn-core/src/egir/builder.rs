@@ -1,8 +1,8 @@
 //! Focused construction API for planner-generated kernel entries.
 
 use crate::ast::{Span, TypeName};
-use crate::ssa::framework::BlockId;
-use crate::ssa::types::{ControlHeader, EntryInput, EntryOutput, ExecutionModel};
+use crate::flow::{BlockId, ControlHeader, ExecutionModel};
+use crate::ssa::types::{EntryInput, EntryOutput};
 use crate::{interface, LookupMap, ResourceId};
 use polytype::Type;
 use smallvec::smallvec;

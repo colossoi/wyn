@@ -19,7 +19,7 @@ use std::collections::HashSet;
 
 use crate::ast::{Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};
-use crate::ssa::framework::BlockId;
+use crate::flow::BlockId;
 use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
 use crate::BindingRef;
 

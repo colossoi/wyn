@@ -1,7 +1,8 @@
 //! Pretty-printer for SSA programs.
 
 use crate::ast::TypeName;
-use crate::ssa::types::{ExecutionModel, Program};
+use crate::flow::ExecutionModel;
+use crate::ssa::types::Program;
 use polytype::Type;
 use std::fmt::Write;
 

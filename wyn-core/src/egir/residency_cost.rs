@@ -7,10 +7,10 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::builtins::{catalog, Purity};
+use crate::flow::{BlockId, ControlHeader};
 use crate::interface::StorageAccess;
 use crate::op::OpTag;
-use crate::ssa::framework::BlockId;
-use crate::ssa::types::{ConstantValue, ControlHeader, InstKind};
+use crate::ssa::types::{ConstantValue, InstKind};
 use crate::LookupMap;
 
 use super::graph_ops;

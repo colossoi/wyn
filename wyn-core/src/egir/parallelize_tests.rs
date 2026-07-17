@@ -3,7 +3,7 @@ use crate::ast::Span;
 use crate::egir::program::{OutputRoute, OutputSlotId, SlotSource};
 use crate::egir::soac::screma;
 use crate::egir::types::{EffectToken, Semantic};
-use crate::ssa::types::ExecutionModel;
+use crate::flow::ExecutionModel;
 
 /// Region indices used by the operator fixtures below: step is region 0,
 /// combine is region 1. Opaque indices stand in for the named regions a

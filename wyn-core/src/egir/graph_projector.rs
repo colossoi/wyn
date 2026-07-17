@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ssa::types::ControlHeader;
+use crate::flow::{BlockId, ControlHeader};
 use crate::LookupMap;
 
 use super::program::{OutputRoute, OutputWriter};
@@ -14,8 +14,6 @@ use super::types::{
     EGraph, ENode, EffectToken, NodeId, Semantic, SideEffect, SideEffectIndex, SideEffectSite,
     SkeletonTerminator,
 };
-use crate::ssa::framework::BlockId;
-
 pub struct GraphProjection {
     pub graph: EGraph<Semantic>,
     pub control_headers: LookupMap<BlockId, ControlHeader>,

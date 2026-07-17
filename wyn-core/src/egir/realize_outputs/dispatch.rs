@@ -17,7 +17,7 @@ use polytype::Type;
 use smallvec::smallvec;
 
 use crate::ast::TypeName;
-use crate::ssa::framework::BlockId;
+use crate::flow::BlockId;
 use crate::types::TypeExt;
 use crate::ResourceId;
 

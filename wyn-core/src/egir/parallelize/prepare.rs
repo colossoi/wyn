@@ -4,7 +4,7 @@
 //! consumes that graph and records the execution decisions made by the
 //! scheduler in phase-specific SOAC states.
 
-use crate::ssa::types::BlockId;
+use crate::flow::BlockId;
 
 use super::super::program::{remap_control_headers, PlannedEntry, SemanticResourceRef};
 use super::super::soac::{filter, hist, screma};

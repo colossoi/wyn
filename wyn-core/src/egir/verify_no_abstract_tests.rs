@@ -1,8 +1,9 @@
 use crate::ast::TypeName;
 use crate::egir::verify_no_abstract;
 use crate::error::CompilerError;
+use crate::flow::ExecutionModel;
 use crate::ssa::builder::FuncBuilder;
-use crate::ssa::types::{EntryPoint, ExecutionModel, Function, Program};
+use crate::ssa::types::{EntryPoint, Function, Program};
 use crate::types;
 use polytype::Type;
 

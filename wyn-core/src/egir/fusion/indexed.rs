@@ -11,6 +11,7 @@ use crate::egir::soac::screma;
 use crate::egir::types::{
     EGraph, ENode, NodeId, PureOp, SegResourceAccessKind, SideEffectKind, Soac, SoacDestination,
 };
+use crate::flow::BlockId;
 use crate::ssa::types::ConstantValue;
 
 #[derive(Clone, Copy)]
@@ -22,7 +23,7 @@ enum Site {
 #[derive(Clone)]
 struct Candidate {
     site: Site,
-    block: crate::ssa::framework::BlockId,
+    block: BlockId,
     effect: usize,
     index: NodeId,
     index_value: NodeId,
@@ -171,7 +172,7 @@ fn reaches(graph: &EGraph, start: NodeId, target: NodeId) -> bool {
 
 fn used_only_through(
     graph: &EGraph,
-    producer_block: crate::ssa::framework::BlockId,
+    producer_block: BlockId,
     producer_effect: usize,
     result: NodeId,
     demand: NodeId,

@@ -15,11 +15,10 @@ use crate::LookupMap;
 use polytype::Type;
 
 use crate::ast::{Span, TypeName};
+use crate::flow::{BlockId, ControlHeader, ExecutionModel};
 use crate::interface;
 use crate::pipeline_descriptor::PipelineDescriptor;
-use crate::ssa::types::{
-    BlockId, Constant, ControlHeader, EntryInput, EntryOutput, ExecutionModel, Function,
-};
+use crate::ssa::types::{Constant, EntryInput, EntryOutput, Function};
 use crate::types::TypeExt;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};

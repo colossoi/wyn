@@ -18,7 +18,7 @@ use crate::egir::types::{
     EGraph, ENode, NodeId, PureOp, SegBody, SegResourceAccess, SegResourceAccessKind, SegSpace,
     SideEffectKind, SkeletonTerminator, Soac, SoacDestination, SoacInputType,
 };
-use crate::ssa::framework::BlockId;
+use crate::flow::BlockId;
 use crate::LookupMap;
 
 #[derive(Clone, Copy)]
@@ -659,7 +659,7 @@ mod tests {
     use crate::egir::program::{RegionInterner, SemanticEntry, SemanticOpId};
     use crate::egir::semantic_exec::{RegionExecutor, Value};
     use crate::egir::types::{EffectToken, SegExtent, SegLevel, SideEffect};
-    use crate::ssa::types::ExecutionModel;
+    use crate::flow::ExecutionModel;
 
     fn captured_binary_function(name: &str, op: &str) -> SemanticFunc {
         let int = Type::Constructed(TypeName::Int(32), vec![]);

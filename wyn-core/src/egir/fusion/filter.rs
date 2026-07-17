@@ -23,8 +23,7 @@ use crate::egir::types::{
     EGraph, ENode, NodeId, PureOp, SegBody, SegResourceAccess, SegSpace, SideEffect, SideEffectKind,
     SkeletonTerminator, Soac, SoacDestination, SoacInputType,
 };
-use crate::ssa::framework::BlockId;
-use crate::ssa::types::ControlHeader;
+use crate::flow::{BlockId, ControlHeader};
 use crate::LookupMap;
 
 #[derive(Clone)]

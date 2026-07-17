@@ -1,7 +1,7 @@
 //! Common utilities shared between lowering backends (SPIR-V, WGSL).
 
 use crate::ast::TypeName;
-use crate::ssa::types::ExecutionModel;
+use crate::flow::ExecutionModel;
 use polytype::Type as PolyType;
 
 /// Shader stage for entry points

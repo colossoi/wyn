@@ -9,7 +9,7 @@
 //!
 //! - `framework`: Generic `Function` / `BasicBlock` / `InstNode` / `Terminator`
 //!   types parameterized over instruction + value-type kind.
-//! - `types`: Wyn-specific `InstKind`, `ControlHeader`, `Program`, and the
+//! - `types`: Wyn-specific `InstKind`, `Program`, and the
 //!   concrete `FuncBody = Function<InstKind, Type>` instantiation.
 //! - `builder`: `FuncBuilder` that EGIR's `elaborate` uses to materialize SSA.
 //! - `layout`: Type byte-size helpers for SPIR-V memory operations.

@@ -23,7 +23,7 @@
 //! 3. `aliases` values are never themselves aliases (closure is walked
 //!    before the map is returned).
 
-use crate::ssa::framework::BlockId;
+use crate::flow::BlockId;
 use crate::{LookupMap, LookupSet};
 
 use crate::ssa::types::ConstantValue;

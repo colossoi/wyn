@@ -24,8 +24,7 @@
 //! Runs after `from_tlc::run`, before segmentation: the SOAC→OutputView
 //! rewrite must precede SOAC wrapping/expansion.
 
-use crate::ssa::framework::BlockId;
-use crate::ssa::types::ExecutionModel;
+use crate::flow::{BlockId, ExecutionModel};
 #[allow(unused_imports)]
 use ExecutionModel as _;
 

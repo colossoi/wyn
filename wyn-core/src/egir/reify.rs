@@ -9,8 +9,7 @@ use std::convert::Infallible;
 use polytype::Type;
 
 use crate::ast::TypeName;
-use crate::ssa::framework::BlockId;
-use crate::ssa::types::{ControlHeader, ExecutionModel};
+use crate::flow::{BlockId, ControlHeader, ExecutionModel};
 use crate::types::TypeExt;
 use crate::LookupMap;
 

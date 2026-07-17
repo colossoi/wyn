@@ -28,8 +28,8 @@ use super::types::{
 };
 use crate::ast::TypeName;
 use crate::builtins::catalog;
-use crate::ssa::framework::BlockId;
-use crate::ssa::types::{ControlHeader, InstKind};
+use crate::flow::{BlockId, ControlHeader, ExecutionModel};
+use crate::ssa::types::InstKind;
 use crate::types::TypeExt;
 
 /// Per-workgroup width of a synthesized phase-2 tree reduce.
@@ -380,7 +380,7 @@ fn build_filter_kernel_family(
     let mut scan = project_kernel_body(
         &filter_entry,
         format!("{}_filter_scan", filter_entry.name),
-        crate::ssa::types::ExecutionModel::Compute {
+        ExecutionModel::Compute {
             local_size: (REDUCE_PHASE1_WIDTH, 1, 1),
         },
         Vec::new(),
@@ -624,7 +624,7 @@ fn analyze_filter_entry(entry: &SemanticEntry, resources: &[LogicalResource]) ->
 fn project_kernel_body(
     source: &super::program::PlannedEntry,
     name: String,
-    execution_model: crate::ssa::types::ExecutionModel,
+    execution_model: ExecutionModel,
     outputs: Vec<crate::ssa::types::EntryOutput>,
     output_routes: Vec<super::program::OutputRoute>,
     resource_declarations: Vec<SemanticResourceDecl>,
@@ -655,7 +655,7 @@ fn project_kernel_body_effects(
     source: &super::program::PlannedEntry,
     selected: std::collections::HashSet<SideEffectSite>,
     name: String,
-    execution_model: crate::ssa::types::ExecutionModel,
+    execution_model: ExecutionModel,
     outputs: Vec<crate::ssa::types::EntryOutput>,
     output_routes: Vec<super::program::OutputRoute>,
     resource_declarations: Vec<SemanticResourceDecl>,

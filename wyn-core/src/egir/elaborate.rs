@@ -11,10 +11,10 @@
 //!   unrelated CFG paths.
 
 use crate::ast::TypeName;
+use crate::flow::BlockId as SkelBlockId;
 use crate::op::OpTag;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::builder::FuncBuilder;
-use crate::ssa::framework::BlockId as SkelBlockId;
 use crate::ssa::types::{
     BlockId, ControlHeader, EntryPoint, FuncBody, Function, InstKind, PlaceId, Program, ValueId, ValueRef,
 };

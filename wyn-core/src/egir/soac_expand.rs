@@ -7,9 +7,9 @@
 //! fallback. Any semantic SOAC left in the skeleton at elaboration time is a bug.
 
 use crate::builtins::catalog;
+use crate::flow::{BlockId, ControlHeader};
 use crate::LookupMap;
 
-use crate::ssa::framework::BlockId;
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
@@ -23,7 +23,7 @@ use super::program::{
 };
 use super::soac::{filter, screma};
 use crate::ast::TypeName;
-use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
+use crate::ssa::types::{InstKind, ValueRef};
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
 use super::types::{ENode, NodeId, PureOp, SkeletonTerminator, SoacDestination};

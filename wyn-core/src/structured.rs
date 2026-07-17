@@ -6,8 +6,9 @@
 //! doesn't go through this; it's needed only for backends whose output is
 //! structured source rather than a basic-block graph.
 
+use crate::flow::{BlockId, ControlHeader};
 use crate::ssa::framework::InstId;
-use crate::ssa::types::{BlockId, ControlHeader, FuncBody, Terminator, ValueId};
+use crate::ssa::types::{FuncBody, Terminator, ValueId};
 use crate::LookupSet;
 
 /// A node in the structured control flow tree.

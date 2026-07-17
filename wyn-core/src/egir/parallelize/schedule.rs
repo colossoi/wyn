@@ -19,10 +19,11 @@ use crate::egir::soac::{filter, screma};
 use crate::egir::types::{
     EgirPhase, RegionId, Scheduled, SegExtent, SegResourceAccessKind, Semantic, SideEffectKind, Soac,
 };
+use crate::flow::ExecutionModel;
 use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
 };
-use crate::ssa::types::{EntryInput, ExecutionModel};
+use crate::ssa::types::EntryInput;
 use crate::{BindingRef, ResourceId};
 
 #[path = "schedule_validation.rs"]

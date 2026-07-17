@@ -8,8 +8,8 @@ use polytype::Type;
 use slotmap::SlotMap;
 
 use crate::ast::TypeName;
+use crate::flow::BlockId;
 use crate::op::OpTag;
-use crate::ssa::framework::BlockId;
 use crate::ssa::types::ConstantValue;
 use crate::LookupMap;
 

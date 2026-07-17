@@ -36,8 +36,9 @@ use polytype::Type;
 use slotmap::SlotMap;
 use wspirv::spirv;
 
-// Re-export ID types from wyn-ssa.
-pub use crate::ssa::framework::{BlockId, InstId, PlaceId, ValueId};
+// Re-export shared and SSA-specific ID types.
+pub use crate::flow::{BlockId, ControlHeader, ExecutionModel};
+pub use crate::ssa::framework::{InstId, PlaceId, ValueId};
 // Re-export Terminator from wyn-ssa.
 pub use crate::ssa::framework::Terminator;
 // Re-export BasicBlock from wyn-ssa.
@@ -100,40 +101,6 @@ impl ValueRef {
 impl From<ValueId> for ValueRef {
     fn from(id: ValueId) -> Self {
         ValueRef::Ssa(id)
-    }
-}
-
-// =============================================================================
-// ControlHeader (side-map metadata, not part of BasicBlock)
-// =============================================================================
-
-/// Structured control flow header information for SPIR-V lowering.
-///
-/// SPIR-V requires explicit merge/continue annotations for loops and selections.
-/// Stored in a side-map on FuncBody, keyed by BlockId.
-#[derive(Debug, Clone)]
-pub enum ControlHeader {
-    Loop {
-        merge: BlockId,
-        continue_block: BlockId,
-    },
-    Selection {
-        merge: BlockId,
-    },
-}
-
-impl ControlHeader {
-    pub fn remap(&self, rb: &impl Fn(BlockId) -> BlockId) -> ControlHeader {
-        match self {
-            ControlHeader::Loop {
-                merge,
-                continue_block,
-            } => ControlHeader::Loop {
-                merge: rb(*merge),
-                continue_block: rb(*continue_block),
-            },
-            ControlHeader::Selection { merge } => ControlHeader::Selection { merge: rb(*merge) },
-        }
     }
 }
 
@@ -523,16 +490,6 @@ pub struct EntryPoint {
     /// single source of truth for each entry's buffer interface.
     pub storage_bindings: Vec<interface::StorageBindingDecl>,
     pub span: Span,
-}
-
-/// Execution model for entry points.
-#[derive(Debug, Clone)]
-pub enum ExecutionModel {
-    Vertex,
-    Fragment,
-    Compute {
-        local_size: (u32, u32, u32),
-    },
 }
 
 /// A compute-broadcast input's placement in the push-constant block.

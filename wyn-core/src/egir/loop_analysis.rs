@@ -9,10 +9,8 @@
 //! - `is_header(b)` — do we need to push a loop frame when we enter `b`?
 //! - `is_in_loop(b, header)` — is block `b` inside the loop rooted at `header`?
 
-use crate::ssa::framework::BlockId;
+use crate::flow::{BlockId, ControlHeader};
 use crate::{LookupMap, LookupSet};
-
-use crate::ssa::types::ControlHeader;
 
 use super::types::{EgirPhase, Skeleton, SkeletonTerminator};
 

@@ -4,8 +4,8 @@
 use super::*;
 use crate::ast::{Span, TypeName};
 use crate::egir::types::{EGraph, RegionId};
+use crate::flow::ExecutionModel;
 use crate::pipeline_descriptor::PipelineDescriptor;
-use crate::ssa::types::ExecutionModel;
 use polytype::Type;
 
 fn unit_ty() -> Type<TypeName> {

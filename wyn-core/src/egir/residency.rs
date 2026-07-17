@@ -23,8 +23,8 @@ use super::types::{
     SideEffectSite, Soac, SoacDestination,
 };
 use crate::ast::TypeName;
+use crate::flow::{BlockId, ControlHeader, ExecutionModel};
 use crate::interface::StorageRole;
-use crate::ssa::types::ExecutionModel;
 use crate::types::TypeExt;
 
 struct MaterializationPlan {
@@ -260,11 +260,7 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
     }
 }
 
-fn retype_input_buffer_results(
-    graph: &mut EGraph,
-    block: crate::ssa::framework::BlockId,
-    effect_index: usize,
-) {
+fn retype_input_buffer_results(graph: &mut EGraph, block: BlockId, effect_index: usize) {
     let effect = &graph.skeleton.blocks[block].side_effects[effect_index];
     let Some(result) = effect.result else {
         return;
@@ -365,12 +361,7 @@ fn clear_unique_input_candidates(graph: &mut EGraph) {
     }
 }
 
-fn input_is_dead_after(
-    graph: &EGraph,
-    block: crate::ssa::framework::BlockId,
-    index: usize,
-    input: NodeId,
-) -> bool {
+fn input_is_dead_after(graph: &EGraph, block: BlockId, index: usize, input: NodeId) -> bool {
     let body = &graph.skeleton.blocks[block];
     body.side_effects[index + 1..]
         .iter()
@@ -935,7 +926,7 @@ fn depends_on(graph: &EGraph, root: NodeId, target: NodeId) -> bool {
 fn requires_array_residency(
     graph: &EGraph,
     result: NodeId,
-    producer_block: crate::ssa::framework::BlockId,
+    producer_block: BlockId,
     producer_index: usize,
 ) -> bool {
     if graph.nodes.iter().any(|(_, node)| {
@@ -959,7 +950,7 @@ fn requires_array_residency(
 fn scalar_result_is_used(
     graph: &EGraph,
     result: NodeId,
-    producer_block: crate::ssa::framework::BlockId,
+    producer_block: BlockId,
     producer_index: usize,
 ) -> bool {
     graph.skeleton.blocks.iter().any(|(block_id, block)| {
@@ -979,7 +970,7 @@ fn scalar_result_is_used(
 
 fn invocation_invariant(
     entry: &super::program::SemanticEntry,
-    block_id: crate::ssa::framework::BlockId,
+    block_id: BlockId,
     effects: &HashSet<usize>,
 ) -> bool {
     if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
@@ -1006,11 +997,7 @@ fn invocation_invariant(
     })
 }
 
-fn dependencies_are_cloneable(
-    graph: &EGraph,
-    block_id: crate::ssa::framework::BlockId,
-    effects: &HashSet<usize>,
-) -> bool {
+fn dependencies_are_cloneable(graph: &EGraph, block_id: BlockId, effects: &HashSet<usize>) -> bool {
     let block = &graph.skeleton.blocks[block_id];
     effects.iter().all(|&index| {
         matches!(
@@ -1708,7 +1695,7 @@ fn set_resource_declaration(
 
 fn emit_scalar_handoff_store(
     graph: &mut EGraph,
-    block: crate::ssa::framework::BlockId,
+    block: BlockId,
     output_view: NodeId,
     value: NodeId,
     elem_ty: &Type<TypeName>,
@@ -1764,7 +1751,7 @@ fn replace_prelude_effects_with_load(
 fn replace_structured_prefix_with_load(
     entry: &mut super::program::SemanticEntry,
     producer_effects: &HashSet<SideEffectSite>,
-    continuation: crate::ssa::framework::BlockId,
+    continuation: BlockId,
     loaded: NodeId,
     load_effect: super::types::SideEffect,
 ) {
@@ -1781,7 +1768,7 @@ fn replace_structured_prefix_with_load(
 }
 
 fn remove_effect_sites(graph: &mut EGraph, effects: &HashSet<SideEffectSite>) {
-    let mut by_block = HashMap::<crate::ssa::framework::BlockId, Vec<usize>>::new();
+    let mut by_block = HashMap::<BlockId, Vec<usize>>::new();
     for site in effects {
         by_block.entry(site.block).or_default().push(site.index);
     }
@@ -1806,11 +1793,11 @@ fn retain_live_control_headers(entry: &mut super::program::SemanticEntry) {
             return false;
         }
         match control {
-            crate::ssa::types::ControlHeader::Loop {
+            ControlHeader::Loop {
                 merge,
                 continue_block,
             } => blocks.contains_key(*merge) && blocks.contains_key(*continue_block),
-            crate::ssa::types::ControlHeader::Selection { merge } => blocks.contains_key(*merge),
+            ControlHeader::Selection { merge } => blocks.contains_key(*merge),
         }
     });
 }
@@ -1989,11 +1976,7 @@ fn refresh_resource_reads_for_values(graph: &mut EGraph, values: &[NodeId]) {
 /// effect.  Materialization is an entry prepass, so an internal producer chain
 /// must move with the multi-consumer map instead of leaving dangling Project
 /// nodes in the cloned graph.
-fn dependency_effects(
-    graph: &EGraph,
-    block_id: crate::ssa::framework::BlockId,
-    root: usize,
-) -> HashSet<usize> {
+fn dependency_effects(graph: &EGraph, block_id: BlockId, root: usize) -> HashSet<usize> {
     let block = &graph.skeleton.blocks[block_id];
     let producers: HashMap<NodeId, usize> = block
         .side_effects
@@ -2028,7 +2011,7 @@ fn dependency_effects(
 
 fn dependency_resources(
     entry: &super::program::SemanticEntry,
-    block_id: crate::ssa::framework::BlockId,
+    block_id: BlockId,
     effects: &HashSet<usize>,
 ) -> HashSet<ResourceId> {
     let graph = &entry.graph;

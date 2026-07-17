@@ -16,7 +16,7 @@ use crate::egir::program::{OutputSlotId, SemanticProgram};
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
 use crate::egir::types::{EGraph, NodeId, PureOp, SegResourceAccess, SideEffectKind, Soac, SoacInputType};
-use crate::ssa::framework::BlockId;
+use crate::flow::BlockId;
 
 /// Find one legal sibling pair anywhere in the program and fuse it. Returns
 /// whether a fusion happened.
