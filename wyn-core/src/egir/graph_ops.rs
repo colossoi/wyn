@@ -132,27 +132,6 @@ pub(crate) fn execution_value_producer_closure<P: ValueProducerPhase>(
     value_producer_closure(graph, execution_roots.chain(result_roots))
 }
 
-/// Remove projection-created function parameters that are absent from a
-/// compacted entry signature. Graph projection allocates every source
-/// parameter before cloning the selected value closure, so unused parameters
-/// must be removed after the signature is narrowed or their stale indices can
-/// collide with retained parameters during elaboration.
-pub(crate) fn remove_unretained_func_params<P: EgirPhase>(
-    graph: &mut EGraph<P>,
-    retained: &HashSet<NodeId>,
-) {
-    let removed = graph
-        .nodes
-        .iter()
-        .filter_map(|(node, definition)| {
-            (matches!(definition, ENode::FuncParam { .. }) && !retained.contains(&node)).then_some(node)
-        })
-        .collect::<Vec<_>>();
-    for node in removed {
-        graph.remove_func_param(node);
-    }
-}
-
 /// Verify that every CFG edge supplies exactly one argument per target block
 /// parameter. Projection and physicalization both use this stable skeleton
 /// contract before later optimization assumes it.

@@ -1929,34 +1929,13 @@ fn compact_entry_inputs(entry: &mut super::program::SemanticEntry) {
             Some(ENode::FuncParam { index }) => Some(*index),
             _ => None,
         })
-        .collect::<HashSet<_>>();
+        .collect::<crate::SortedSet<_>>();
     for (index, input) in entry.inputs.iter().enumerate() {
         if input.resource.is_some_and(|resource| reachable_resources.contains(&resource.0)) {
             kept_indices.insert(index);
         }
     }
-    let mut kept = entry
-        .graph
-        .nodes
-        .iter()
-        .filter_map(|(node, definition)| match definition {
-            ENode::FuncParam { index } if kept_indices.contains(index) => Some((*index, node)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    kept.sort_by_key(|(index, _)| *index);
-    kept.dedup_by_key(|(index, _)| *index);
-    let inputs = kept.iter().map(|(index, _)| entry.inputs[*index].clone()).collect();
-    let params = kept.iter().map(|(index, _)| entry.params[*index].clone()).collect();
-    let retained = kept.iter().map(|(_, node)| *node).collect::<HashSet<_>>();
-    graph_ops::remove_unretained_func_params(&mut entry.graph, &retained);
-    for (new_index, (_, node)) in kept.into_iter().enumerate() {
-        if let Some(ENode::FuncParam { index }) = entry.graph.nodes.get_mut(node) {
-            *index = new_index;
-        }
-    }
-    entry.inputs = inputs;
-    entry.params = params;
+    entry.retain_parameter_indices(&kept_indices);
 }
 
 fn refresh_resource_reads_for_values(graph: &mut EGraph, values: &[NodeId]) {

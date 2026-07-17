@@ -215,6 +215,61 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
 }
 
 #[test]
+fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
+    let mut graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
+    let first = graph.add_func_param(0, "first".to_string());
+    let removed = graph.add_func_param(1, "removed".to_string());
+    let third = graph.add_func_param(2, "third".to_string());
+    let inputs = ["first", "removed", "third"]
+        .into_iter()
+        .map(|name| crate::interface::EntryInput {
+            name: name.to_string(),
+            ty: name.to_string(),
+            size_hint: None,
+            kind: crate::interface::EntryInputKind::Value { decoration: None },
+        })
+        .collect();
+    let params = ["first", "removed", "third"]
+        .into_iter()
+        .map(|name| (name.to_string(), name.to_string()))
+        .collect();
+    let mut entry = super::super::ir::Entry::<TestPhase, TestLanguage>::new_with_resources(
+        "compact".to_string(),
+        crate::ast::Span::dummy(),
+        crate::flow::ExecutionModel::Compute {
+            local_size: (1, 1, 1),
+        },
+        inputs,
+        vec![],
+        vec![],
+        params,
+        "unit".to_string(),
+        graph,
+        crate::LookupMap::new(),
+    );
+
+    entry.retain_parameter_indices(&[0, 2].into_iter().collect());
+
+    assert_eq!(
+        entry.inputs.iter().map(|input| input.name.as_str()).collect::<Vec<_>>(),
+        ["first", "third"]
+    );
+    assert_eq!(
+        entry.params.iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>(),
+        ["first", "third"]
+    );
+    assert!(matches!(
+        entry.graph.nodes[first],
+        super::super::ir::ENode::FuncParam { index: 0 }
+    ));
+    assert!(!entry.graph.nodes.contains_key(removed));
+    assert!(matches!(
+        entry.graph.nodes[third],
+        super::super::ir::ENode::FuncParam { index: 1 }
+    ));
+}
+
+#[test]
 fn indexes_results_across_skeleton_blocks() {
     let mut graph: EGraph = EGraph::new();
     let unit = Type::Constructed(TypeName::Unit, vec![]);

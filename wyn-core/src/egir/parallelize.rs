@@ -735,7 +735,7 @@ fn compact_projected_entry_interface(entry: &mut super::program::PlannedEntry) {
             Some(ENode::FuncParam { index }) => Some(*index),
             _ => None,
         })
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::SortedSet<_>>();
     for (index, input) in entry.inputs.iter().enumerate() {
         let Some(Type::Constructed(TypeName::Resource(resource), _)) = input.ty.array_buffer() else {
             continue;
@@ -744,26 +744,7 @@ fn compact_projected_entry_interface(entry: &mut super::program::PlannedEntry) {
             kept_indices.insert(index);
         }
     }
-    let mut kept = entry
-        .graph
-        .nodes
-        .iter()
-        .filter_map(|(node, definition)| match definition {
-            ENode::FuncParam { index } if kept_indices.contains(index) => Some((*index, node)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    kept.sort_by_key(|(index, _)| *index);
-    kept.dedup_by_key(|(index, _)| *index);
-    entry.inputs = kept.iter().map(|(index, _)| entry.inputs[*index].clone()).collect();
-    entry.params = kept.iter().map(|(index, _)| entry.params[*index].clone()).collect();
-    let retained = kept.iter().map(|(_, node)| *node).collect::<std::collections::HashSet<_>>();
-    graph_ops::remove_unretained_func_params(&mut entry.graph, &retained);
-    for (new_index, (_, node)) in kept.into_iter().enumerate() {
-        if let Some(ENode::FuncParam { index }) = entry.graph.nodes.get_mut(node) {
-            *index = new_index;
-        }
-    }
+    entry.retain_parameter_indices(&kept_indices);
 
     let mut used_resources = reachable_storage_resources;
     for (_, block) in &entry.graph.skeleton.blocks {

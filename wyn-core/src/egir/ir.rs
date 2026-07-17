@@ -9,7 +9,7 @@ use crate::interface::{EntryInput as InterfaceEntryInput, EntryOutput as Interfa
 use crate::op::OpTag;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::types::ExternDecl;
-use crate::{LookupMap, SortedSet};
+use crate::{LookupMap, LookupSet, SortedSet};
 
 pub use crate::op::PureViewSource;
 pub use crate::types::SoacOwnership;
@@ -1192,6 +1192,44 @@ impl<P: EgirPhase, Lang: Language> Entry<P, Lang> {
             control_headers,
             aliases: LookupMap::new(),
             output_routes: Vec::new(),
+        }
+    }
+
+    /// Retain selected original parameter indices and compact the entry
+    /// interface and corresponding function-parameter nodes together.
+    pub fn retain_parameter_indices(&mut self, retained: &SortedSet<usize>) {
+        let mut kept = self
+            .graph
+            .nodes
+            .iter()
+            .filter_map(|(node, definition)| match definition {
+                ENode::FuncParam { index } if retained.contains(index) => Some((*index, node)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        kept.sort_by_key(|(index, _)| *index);
+        kept.dedup_by_key(|(index, _)| *index);
+
+        self.inputs = kept.iter().map(|(index, _)| self.inputs[*index].clone()).collect();
+        self.params = kept.iter().map(|(index, _)| self.params[*index].clone()).collect();
+
+        let retained_nodes = kept.iter().map(|(_, node)| *node).collect::<LookupSet<_>>();
+        let removed = self
+            .graph
+            .nodes
+            .iter()
+            .filter_map(|(node, definition)| {
+                (matches!(definition, ENode::FuncParam { .. }) && !retained_nodes.contains(&node))
+                    .then_some(node)
+            })
+            .collect::<Vec<_>>();
+        for node in removed {
+            self.graph.remove_func_param(node);
+        }
+        for (new_index, (_, node)) in kept.into_iter().enumerate() {
+            if let Some(ENode::FuncParam { index }) = self.graph.nodes.get_mut(node) {
+                *index = new_index;
+            }
         }
     }
 }
