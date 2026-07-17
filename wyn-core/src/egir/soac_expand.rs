@@ -1117,15 +1117,7 @@ fn build_filter_loop(
     // throughout — matches the index type taken by element-place stores,
     // the result type of `length()` at the backend boundary, and
     // `Bounded`'s on-disk `len` field.
-    let after_count_nid = graph.alloc_side_effect_result(i32_ty.clone());
-    graph.replace_node_preserving_type(
-        after_count_nid,
-        ENode::BlockParam {
-            block: after,
-            index: 0,
-        },
-    );
-    graph.skeleton.blocks[after].params.push(after_count_nid);
+    let after_count_nid = graph.add_block_param(after, i32_ty.clone());
 
     // Build header, body, then, else_, sel_merge, continue blocks. The
     // SPIR-V structured-control-flow rules need the inner selection's
@@ -1141,10 +1133,8 @@ fn build_filter_loop(
 
     // Header block params: count_in, i_in. The buffer place is referenced
     // through `buf_place_nid` directly.
-    let count_in_nid = graph.add_block_param(header, 0, i32_ty.clone());
-    graph.skeleton.blocks[header].params.push(count_in_nid);
-    let i_in_nid = graph.add_block_param(header, 1, i32_ty.clone());
-    graph.skeleton.blocks[header].params.push(i_in_nid);
+    let count_in_nid = graph.add_block_param(header, i32_ty.clone());
+    let i_in_nid = graph.add_block_param(header, i32_ty.clone());
 
     // Preheader: allocate the function-local buffer place; for an
     // `InputBuffer` destination, seed it with the input array so the result
@@ -1245,8 +1235,7 @@ fn build_filter_loop(
     };
 
     // sel_merge: param count_next; Branch(continue, [count_next]).
-    let count_next_nid = graph.add_block_param(sel_merge, 0, i32_ty.clone());
-    graph.skeleton.blocks[sel_merge].params.push(count_next_nid);
+    let count_next_nid = graph.add_block_param(sel_merge, i32_ty.clone());
     graph.skeleton.blocks[sel_merge].term = SkeletonTerminator::Branch {
         target: continue_blk,
         args: vec![count_next_nid],
@@ -1254,8 +1243,7 @@ fn build_filter_loop(
 
     // continue: param (count_for_continue);
     // i_next = i+1; Branch(header, [count_for_continue, i_next]).
-    let cont_count_nid = graph.add_block_param(continue_blk, 0, i32_ty.clone());
-    graph.skeleton.blocks[continue_blk].params.push(cont_count_nid);
+    let cont_count_nid = graph.add_block_param(continue_blk, i32_ty.clone());
     let next_i_nid = increment(graph, i_in_nid);
     graph.skeleton.blocks[continue_blk].term = SkeletonTerminator::Branch {
         target: header,
@@ -1687,9 +1675,8 @@ fn build_filter_scan(
         target: header,
         args: vec![zero, zero],
     };
-    let i = graph.add_block_param(header, 0, u32_ty.clone());
-    let acc = graph.add_block_param(header, 1, u32_ty.clone());
-    graph.skeleton.blocks[header].params.extend([i, acc]);
+    let i = graph.add_block_param(header, u32_ty.clone());
+    let acc = graph.add_block_param(header, u32_ty.clone());
     let cond = graph.intern_pure(
         PureOp::BinOp("<".into()),
         smallvec![i, chunk_len],
@@ -1746,8 +1733,7 @@ fn build_filter_scan(
         target: header,
         args: vec![next_i, next],
     };
-    let final_count = graph.add_block_param(after, 0, u32_ty.clone());
-    graph.skeleton.blocks[after].params.push(final_count);
+    let final_count = graph.add_block_param(after, u32_ty.clone());
     let block_sums = intern_storage_view(graph, work.block_sums, u32_ty.clone(), None);
     emit_storage_store(
         graph,
@@ -1912,8 +1898,7 @@ fn build_runtime_filter_loop(
     }
 
     // After-block param: the final surviving count.
-    let after_count_nid = graph.add_block_param(after, 0, u32_ty.clone());
-    graph.skeleton.blocks[after].params.push(after_count_nid);
+    let after_count_nid = graph.add_block_param(after, u32_ty.clone());
 
     let header = graph.skeleton.create_block();
     let body = graph.skeleton.create_block();
@@ -1923,10 +1908,8 @@ fn build_runtime_filter_loop(
     let continue_blk = graph.skeleton.create_block();
 
     // Header params: count_in, i_in.
-    let count_in_nid = graph.add_block_param(header, 0, u32_ty.clone());
-    graph.skeleton.blocks[header].params.push(count_in_nid);
-    let i_in_nid = graph.add_block_param(header, 1, u32_ty.clone());
-    graph.skeleton.blocks[header].params.push(i_in_nid);
+    let count_in_nid = graph.add_block_param(header, u32_ty.clone());
+    let i_in_nid = graph.add_block_param(header, u32_ty.clone());
 
     // Preheader → header(0, 0).
     let zero_count_nid = intern_u32(graph, 0, None);
@@ -2014,16 +1997,14 @@ fn build_runtime_filter_loop(
     };
 
     // sel_merge: param count_next; Branch(continue, [count_next]).
-    let count_next_nid = graph.add_block_param(sel_merge, 0, u32_ty.clone());
-    graph.skeleton.blocks[sel_merge].params.push(count_next_nid);
+    let count_next_nid = graph.add_block_param(sel_merge, u32_ty.clone());
     graph.skeleton.blocks[sel_merge].term = SkeletonTerminator::Branch {
         target: continue_blk,
         args: vec![count_next_nid],
     };
 
     // continue: param cont_count; i_next = i + 1; Branch(header, [cont_count, i_next]).
-    let cont_count_nid = graph.add_block_param(continue_blk, 0, u32_ty.clone());
-    graph.skeleton.blocks[continue_blk].params.push(cont_count_nid);
+    let cont_count_nid = graph.add_block_param(continue_blk, u32_ty.clone());
     let one_i_nid = intern_u32(graph, 1, None);
     let next_i_nid = graph.intern_pure(
         PureOp::BinOp("+".into()),
@@ -2157,12 +2138,11 @@ fn build_loop_skeleton(
             indices,
         } => {
             let mut operands = smallvec::SmallVec::new();
-            for (param_idx, carried_idx) in indices.iter().enumerate() {
+            for carried_idx in indices {
                 let Some((part_ty, _)) = spec.carried.get(*carried_idx) else {
                     continue;
                 };
-                let part_nid = graph.add_block_param(after, param_idx, part_ty.clone());
-                graph.skeleton.blocks[after].params.push(part_nid);
+                let part_nid = graph.add_block_param(after, part_ty.clone());
                 operands.push(part_nid);
             }
             graph.replace_pure_node(*result_node, PureOp::Tuple(operands.len()), operands);
@@ -2180,13 +2160,11 @@ fn build_loop_skeleton(
     let header = graph.skeleton.create_block();
     let body = graph.skeleton.create_block();
     let mut carried_nids = Vec::with_capacity(spec.carried.len());
-    for (i, (ty, _)) in spec.carried.iter().enumerate() {
-        let nid = graph.add_block_param(header, i, ty.clone());
-        graph.skeleton.blocks[header].params.push(nid);
+    for (ty, _) in &spec.carried {
+        let nid = graph.add_block_param(header, ty.clone());
         carried_nids.push(nid);
     }
-    let idx_nid = graph.add_block_param(header, spec.carried.len(), i32_ty.clone());
-    graph.skeleton.blocks[header].params.push(idx_nid);
+    let idx_nid = graph.add_block_param(header, i32_ty.clone());
 
     // Preheader terminator: br header(init_carried..., 0).
     let zero_nid = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone(), None);

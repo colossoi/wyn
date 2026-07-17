@@ -29,8 +29,7 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
         args: vec![produced],
     };
 
-    let current = graph.add_block_param(header, 0, ty.clone());
-    graph.skeleton.blocks[header].params.push(current);
+    let current = graph.add_block_param(header, ty.clone());
     let one = graph.intern_constant(ConstantValue::U32(1), ty.clone());
     let next = graph.intern_pure(
         PureOp::BinOp("+".into()),
@@ -43,8 +42,7 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
         Type::Constructed(TypeName::Bool, vec![]),
     );
 
-    let merged = graph.add_block_param(exit, 0, ty.clone());
-    graph.skeleton.blocks[exit].params.push(merged);
+    let merged = graph.add_block_param(exit, ty.clone());
     graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
         cond,
         then_target: header,

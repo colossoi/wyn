@@ -805,10 +805,12 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
         id
     }
 
-    /// Allocate a block parameter node.
-    pub fn add_block_param(&mut self, block: BlockId, index: usize, ty: Lang::Ty) -> NodeId {
+    /// Append a parameter to a block and allocate its corresponding node.
+    pub fn add_block_param(&mut self, block: BlockId, ty: Lang::Ty) -> NodeId {
+        let index = self.skeleton.blocks[block].params.len();
         let id = self.nodes.insert(ENode::BlockParam { block, index });
         self.types.insert(id, ty);
+        self.skeleton.blocks[block].params.push(id);
         id
     }
 

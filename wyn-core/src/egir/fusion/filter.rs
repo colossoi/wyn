@@ -819,8 +819,7 @@ fn conditional_return(
     let entry = graph.skeleton.entry;
     let then_block = graph.skeleton.create_block();
     let merge = graph.skeleton.create_block();
-    let result = graph.add_block_param(merge, 0, ty);
-    graph.skeleton.blocks[merge].params.push(result);
+    let result = graph.add_block_param(merge, ty);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
         cond: predicate,
         then_target: then_block,

@@ -70,6 +70,27 @@ fn graph_accepts_non_wyn_payloads() {
 }
 
 #[test]
+fn adding_block_params_registers_them_in_order() {
+    let mut graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
+    let block = graph.skeleton.create_block();
+
+    let first = graph.add_block_param(block, "first".to_string());
+    let second = graph.add_block_param(block, "second".to_string());
+
+    assert_eq!(graph.skeleton.blocks[block].params, [first, second]);
+    assert!(matches!(
+        graph.nodes[first],
+        super::super::ir::ENode::BlockParam { block: owner, index: 0 } if owner == block
+    ));
+    assert!(matches!(
+        graph.nodes[second],
+        super::super::ir::ENode::BlockParam { block: owner, index: 1 } if owner == block
+    ));
+    assert_eq!(graph.types[&first], "first");
+    assert_eq!(graph.types[&second], "second");
+}
+
+#[test]
 fn entry_and_program_accept_non_wyn_resource_metadata() {
     let graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
     let entry = super::super::ir::Entry::<TestPhase, TestLanguage>::new_with_resources(

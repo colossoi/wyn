@@ -1358,10 +1358,8 @@ fn build_tree_reduce_phase2(
     let end_blk = graph.skeleton.create_block();
 
     // grid_header params: (acc, i)
-    let acc_in = graph.add_block_param(grid_header, 0, elem_ty.clone());
-    graph.skeleton.blocks[grid_header].params.push(acc_in);
-    let i_in = graph.add_block_param(grid_header, 1, u32_ty.clone());
-    graph.skeleton.blocks[grid_header].params.push(i_in);
+    let acc_in = graph.add_block_param(grid_header, elem_ty.clone());
+    let i_in = graph.add_block_param(grid_header, u32_ty.clone());
 
     // entry → grid_header(init, start)
     graph.skeleton.blocks[entry_bid].term = SkeletonTerminator::Branch {
@@ -1401,8 +1399,7 @@ fn build_tree_reduce_phase2(
     };
 
     // grid_cont(acc_c): i_next = i + W; → grid_header(acc_c, i_next)
-    let acc_c = graph.add_block_param(grid_cont, 0, elem_ty.clone());
-    graph.skeleton.blocks[grid_cont].params.push(acc_c);
+    let acc_c = graph.add_block_param(grid_cont, elem_ty.clone());
     let one_u32 = graph_ops::intern_u32(graph, 1, None);
     let i_next = graph_ops::intern_binop(graph, "+", i_in, one_u32, u32_ty.clone(), None);
     graph.skeleton.blocks[grid_cont].term = SkeletonTerminator::Branch {
@@ -1411,8 +1408,7 @@ fn build_tree_reduce_phase2(
     };
 
     // grid_after(acc_final): shared[lid] = acc_final; barrier; → tree_header(1)
-    let acc_final = graph.add_block_param(grid_after, 0, elem_ty.clone());
-    graph.skeleton.blocks[grid_after].params.push(acc_final);
+    let acc_final = graph.add_block_param(grid_after, elem_ty.clone());
     graph_ops::emit_storage_store(
         graph,
         grid_after,
@@ -1431,8 +1427,7 @@ fn build_tree_reduce_phase2(
 
     // Grow an adjacent-pair tree from stride 1. This preserves source order
     // for associative, non-commutative operators.
-    let stride_in = graph.add_block_param(tree_header, 0, u32_ty.clone());
-    graph.skeleton.blocks[tree_header].params.push(stride_in);
+    let stride_in = graph.add_block_param(tree_header, u32_ty.clone());
     let stride_cond = graph_ops::intern_binop(graph, "<", stride_in, w_nid, bool_ty.clone(), None);
     graph.skeleton.blocks[tree_header].term = SkeletonTerminator::CondBranch {
         cond: stride_cond,
@@ -2648,10 +2643,8 @@ fn build_exclusive_scan_phase2(
     let body = graph.skeleton.create_block();
     let cont = graph.skeleton.create_block();
     let after = graph.skeleton.create_block();
-    let acc = graph.add_block_param(header, 0, elem_ty.clone());
-    graph.skeleton.blocks[header].params.push(acc);
-    let index = graph.add_block_param(header, 1, u32_ty.clone());
-    graph.skeleton.blocks[header].params.push(index);
+    let acc = graph.add_block_param(header, elem_ty.clone());
+    let index = graph.add_block_param(header, u32_ty.clone());
     graph.skeleton.blocks[entry_block].term = SkeletonTerminator::Branch {
         target: header,
         args: vec![init_nid, zero],
@@ -2693,8 +2686,7 @@ fn build_exclusive_scan_phase2(
         target: cont,
         args: vec![next_acc],
     };
-    let continued_acc = graph.add_block_param(cont, 0, graph.types[&acc].clone());
-    graph.skeleton.blocks[cont].params.push(continued_acc);
+    let continued_acc = graph.add_block_param(cont, graph.types[&acc].clone());
     let next_index = graph_ops::intern_binop(graph, "+", index, one, u32_ty, None);
     graph.skeleton.blocks[cont].term = SkeletonTerminator::Branch {
         target: header,
@@ -2704,8 +2696,7 @@ fn build_exclusive_scan_phase2(
     // caller (a filter compaction) appends its own store. The generic scan
     // never touches a length cell.
     let total = if want_total {
-        let total = graph.add_block_param(after, 0, elem_ty.clone());
-        graph.skeleton.blocks[after].params.push(total);
+        let total = graph.add_block_param(after, elem_ty.clone());
         Some(total)
     } else {
         None

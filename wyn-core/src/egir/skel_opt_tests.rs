@@ -145,8 +145,7 @@ fn build_merge_skel(
     let b2 = graph.skeleton.create_block();
     let merge = graph.skeleton.create_block();
 
-    let param = graph.add_block_param(merge, 0, i32_ty());
-    graph.skeleton.blocks[merge].params.push(param);
+    let param = graph.add_block_param(merge, i32_ty());
     graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(param));
 
     let cond = graph.add_func_param(0, bool_ty());
@@ -211,8 +210,7 @@ fn phi_elim_rejects_self_referential_param() {
     let mut graph = EGraph::new();
     let entry = graph.skeleton.entry;
     let b = graph.skeleton.create_block();
-    let param = graph.add_block_param(b, 0, i32_ty());
-    graph.skeleton.blocks[b].params.push(param);
+    let param = graph.add_block_param(b, i32_ty());
     let x = graph.intern_pure(PureOp::Int("5".into()), smallvec![], i32_ty(), None);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: b,
@@ -314,8 +312,7 @@ fn optimize_skeleton_cascades_fold_into_phi_elim() {
     let b = graph.skeleton.create_block();
     let merge = graph.skeleton.create_block();
 
-    let param = graph.add_block_param(merge, 0, i32_ty());
-    graph.skeleton.blocks[merge].params.push(param);
+    let param = graph.add_block_param(merge, i32_ty());
     graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(param));
 
     graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
@@ -355,10 +352,8 @@ fn optimize_skeleton_alias_closure_invariant() {
     let a = graph.skeleton.create_block();
     let b = graph.skeleton.create_block();
 
-    let p1 = graph.add_block_param(a, 0, i32_ty());
-    graph.skeleton.blocks[a].params.push(p1);
-    let p2 = graph.add_block_param(b, 0, i32_ty());
-    graph.skeleton.blocks[b].params.push(p2);
+    let p1 = graph.add_block_param(a, i32_ty());
+    let p2 = graph.add_block_param(b, i32_ty());
 
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: a,
@@ -393,8 +388,7 @@ fn optimize_skeleton_removes_block_unreachable_post_fold() {
     let b = graph.skeleton.create_block();
     // B has a block param (pretending it expects an arg from a predecessor
     // that will disappear post-fold).
-    let b_param = graph.add_block_param(b, 0, i32_ty());
-    graph.skeleton.blocks[b].params.push(b_param);
+    let b_param = graph.add_block_param(b, i32_ty());
     graph.skeleton.blocks[b].term = SkeletonTerminator::Return(Some(b_param));
     graph.skeleton.blocks[a].term = SkeletonTerminator::Return(None);
     // Entry CondBranch: true takes A (no args), false takes B (arg = some
@@ -436,8 +430,7 @@ fn phi_elim_preserves_loop_header_param() {
     let body = graph.skeleton.create_block();
     let exit = graph.skeleton.create_block();
 
-    let acc = graph.add_block_param(header, 0, i32_ty());
-    graph.skeleton.blocks[header].params.push(acc);
+    let acc = graph.add_block_param(header, i32_ty());
 
     // body_val = acc + 1 (a NodeId distinct from init)
     let body_val = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![acc, one], i32_ty(), None);
@@ -481,8 +474,7 @@ fn phi_elim_handles_condbranch_with_same_target_both_arms() {
     let entry = graph.skeleton.entry;
     let target = graph.skeleton.create_block();
 
-    let param = graph.add_block_param(target, 0, i32_ty());
-    graph.skeleton.blocks[target].params.push(param);
+    let param = graph.add_block_param(target, i32_ty());
     graph.skeleton.blocks[target].term = SkeletonTerminator::Return(Some(param));
 
     let cond = graph.add_func_param(0, bool_ty());

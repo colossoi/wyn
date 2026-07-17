@@ -387,11 +387,9 @@ impl<'a> GraphProjector<'a> {
                 continue;
             }
             let target_block = blocks[&source_block];
-            for (index, source_param) in source_body.params.iter().copied().enumerate() {
-                let target =
-                    graph.add_block_param(target_block, index, self.source.types[&source_param].clone());
+            for source_param in source_body.params.iter().copied() {
+                let target = graph.add_block_param(target_block, self.source.types[&source_param].clone());
                 nodes.insert(source_param, target);
-                graph.skeleton.blocks[target_block].params.push(target);
             }
         }
     }

@@ -40,8 +40,7 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
         effects: Some((EffectToken::from(1), EffectToken::from(2))),
         span: None,
     });
-    let body_param = graph.add_block_param(body, 0, u32_ty());
-    graph.skeleton.blocks[body].params.push(body_param);
+    let body_param = graph.add_block_param(body, u32_ty());
     graph.skeleton.blocks[body].side_effects.push(SideEffect {
         kind: SideEffectKind::Effect(EffectOp::Store),
         operand_nodes: smallvec![place, body_param],
@@ -95,8 +94,7 @@ fn complete_projection_remaps_loop_headers_and_parameters() {
         target: header,
         args: vec![zero],
     };
-    let index = graph.add_block_param(header, 0, u32_ty());
-    graph.skeleton.blocks[header].params.push(index);
+    let _index = graph.add_block_param(header, u32_ty());
     graph.skeleton.blocks[header].term = SkeletonTerminator::Branch {
         target: exit,
         args: vec![],
@@ -134,11 +132,9 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
     let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
     let one = graph.intern_constant(ConstantValue::U32(1), u32_ty());
     let bound = graph.intern_constant(ConstantValue::U32(32), u32_ty());
-    let acc = graph.add_block_param(header, 0, u32_ty());
-    let index = graph.add_block_param(header, 1, u32_ty());
-    graph.skeleton.blocks[header].params.extend([acc, index]);
-    let result = graph.add_block_param(continuation, 0, u32_ty());
-    graph.skeleton.blocks[continuation].params.push(result);
+    let acc = graph.add_block_param(header, u32_ty());
+    let index = graph.add_block_param(header, u32_ty());
+    let result = graph.add_block_param(continuation, u32_ty());
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: header,
         args: vec![zero, zero],
@@ -212,8 +208,7 @@ fn captured_value_recipe_projects_a_structured_selection_prefix() {
     let cond = graph.intern_constant(ConstantValue::Bool(true), bool_ty());
     let left = graph.intern_constant(ConstantValue::U32(1), u32_ty());
     let right = graph.intern_constant(ConstantValue::U32(2), u32_ty());
-    let result = graph.add_block_param(continuation, 0, u32_ty());
-    graph.skeleton.blocks[continuation].params.push(result);
+    let result = graph.add_block_param(continuation, u32_ty());
     graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
         cond,
         then_target: then_block,
@@ -260,8 +255,7 @@ fn selected_operation_recipe_detaches_an_independent_continuation_effect() {
     let entry = graph.skeleton.entry;
     let continuation = graph.skeleton.create_block();
     let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
-    let result = graph.add_block_param(continuation, 0, u32_ty());
-    graph.skeleton.blocks[continuation].params.push(result);
+    let _result = graph.add_block_param(continuation, u32_ty());
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: continuation,
         args: vec![zero],
@@ -298,8 +292,7 @@ fn selected_operation_recipe_rejects_a_continuation_parameter_dependency() {
     let entry = graph.skeleton.entry;
     let continuation = graph.skeleton.create_block();
     let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
-    let result = graph.add_block_param(continuation, 0, u32_ty());
-    graph.skeleton.blocks[continuation].params.push(result);
+    let result = graph.add_block_param(continuation, u32_ty());
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: continuation,
         args: vec![zero],
@@ -332,7 +325,11 @@ fn projection_does_not_resurrect_eliminated_block_parameters() {
     let mut graph = EGraph::new();
     let entry = graph.skeleton.entry;
     let continuation = graph.skeleton.create_block();
-    let eliminated = graph.add_block_param(continuation, 0, u32_ty());
+    let eliminated = graph.nodes.insert(ENode::BlockParam {
+        block: continuation,
+        index: 0,
+    });
+    graph.types.insert(eliminated, u32_ty());
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: continuation,
         args: vec![],

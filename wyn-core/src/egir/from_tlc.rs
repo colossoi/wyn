@@ -1493,8 +1493,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let result_nid = if storage_image_result {
             None
         } else {
-            let result_nid = self.graph.add_block_param(merge_block, 0, ty.clone());
-            self.graph.skeleton.blocks[merge_block].params.push(result_nid);
+            let result_nid = self.graph.add_block_param(merge_block, ty.clone());
             Some(result_nid)
         };
 
@@ -1699,8 +1698,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let header = self.graph.skeleton.create_block();
         let body_block = self.graph.skeleton.create_block();
         let exit = self.graph.skeleton.create_block();
-        let idx_nid = self.graph.add_block_param(header, 0, i32_ty.clone());
-        self.graph.skeleton.blocks[header].params.push(idx_nid);
+        let idx_nid = self.graph.add_block_param(header, i32_ty.clone());
 
         self.control_headers.insert(
             header,
@@ -1761,8 +1759,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let header = self.graph.skeleton.create_block();
         let body_block = self.graph.skeleton.create_block();
         let exit = self.graph.skeleton.create_block();
-        let idx_nid = self.graph.add_block_param(header, 0, i32_ty.clone());
-        self.graph.skeleton.blocks[header].params.push(idx_nid);
+        let idx_nid = self.graph.add_block_param(header, i32_ty.clone());
 
         self.control_headers.insert(
             header,
@@ -1831,10 +1828,8 @@ impl<'a, 'b> Converter<'a, 'b> {
         let exit = self.graph.skeleton.create_block();
 
         // Header has acc param; exit has result param
-        let acc_nid = self.graph.add_block_param(header, 0, acc_ty.clone());
-        self.graph.skeleton.blocks[header].params.push(acc_nid);
-        let result_nid = self.graph.add_block_param(exit, 0, acc_ty.clone());
-        self.graph.skeleton.blocks[exit].params.push(result_nid);
+        let acc_nid = self.graph.add_block_param(header, acc_ty.clone());
+        let result_nid = self.graph.add_block_param(exit, acc_ty.clone());
 
         // Loop header for SPIR-V
         self.control_headers.insert(
@@ -1906,12 +1901,9 @@ impl<'a, 'b> Converter<'a, 'b> {
         let exit = self.graph.skeleton.create_block();
 
         // Header has (acc, index) params; exit has result param
-        let acc_nid = self.graph.add_block_param(header, 0, acc_ty.clone());
-        let idx_nid = self.graph.add_block_param(header, 1, i32_ty.clone());
-        self.graph.skeleton.blocks[header].params.push(acc_nid);
-        self.graph.skeleton.blocks[header].params.push(idx_nid);
-        let result_nid = self.graph.add_block_param(exit, 0, acc_ty.clone());
-        self.graph.skeleton.blocks[exit].params.push(result_nid);
+        let acc_nid = self.graph.add_block_param(header, acc_ty.clone());
+        let idx_nid = self.graph.add_block_param(header, i32_ty.clone());
+        let result_nid = self.graph.add_block_param(exit, acc_ty.clone());
 
         self.control_headers.insert(
             header,
@@ -1988,12 +1980,9 @@ impl<'a, 'b> Converter<'a, 'b> {
         let body_block = self.graph.skeleton.create_block();
         let exit = self.graph.skeleton.create_block();
 
-        let acc_nid = self.graph.add_block_param(header, 0, acc_ty.clone());
-        let idx_nid = self.graph.add_block_param(header, 1, i32_ty.clone());
-        self.graph.skeleton.blocks[header].params.push(acc_nid);
-        self.graph.skeleton.blocks[header].params.push(idx_nid);
-        let result_nid = self.graph.add_block_param(exit, 0, acc_ty.clone());
-        self.graph.skeleton.blocks[exit].params.push(result_nid);
+        let acc_nid = self.graph.add_block_param(header, acc_ty.clone());
+        let idx_nid = self.graph.add_block_param(header, i32_ty.clone());
+        let result_nid = self.graph.add_block_param(exit, acc_ty.clone());
 
         self.control_headers.insert(
             header,
