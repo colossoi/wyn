@@ -863,10 +863,7 @@ fn build_parallel_maps(
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
-    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
-    if let Some(header_meta) = control_headers.remove(&bid) {
-        control_headers.insert(after, header_meta);
-    }
+    let after = graph.skeleton.split_block_before_effect(control_headers, bid, idx_in_block);
 
     graph.replace_node_preserving_type(
         spec.result_node,
@@ -1384,10 +1381,7 @@ fn build_parallel_scatter(
         result_node,
     } = spec;
 
-    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
-    if let Some(header_meta) = control_headers.remove(&bid) {
-        control_headers.insert(after, header_meta);
-    }
+    let after = graph.skeleton.split_block_before_effect(control_headers, bid, idx_in_block);
 
     graph.replace_node_preserving_type(
         result_node,
@@ -1748,7 +1742,7 @@ fn build_filter_scatter(
     next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     use super::graph_ops::{emit_load, emit_storage_store, intern_storage_view, intern_u32};
-    let after = graph.skeleton.split_block_before_effect(bid, idx);
+    let after = graph.skeleton.split_block_before_effect(control_headers, bid, idx);
     let in_range = graph.skeleton.create_block();
     let write = graph.skeleton.create_block();
     let skip = graph.skeleton.create_block();
@@ -1864,10 +1858,7 @@ fn build_runtime_filter_loop(
     let scratch_view = intern_storage_view(graph, scratch_out, spec.output_elem_ty.clone(), None);
 
     // Split `bid` into preheader (bid) + after, moving the suffix + terminator.
-    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
-    if let Some(header_meta) = control_headers.remove(&bid) {
-        control_headers.insert(after, header_meta);
-    }
+    let after = graph.skeleton.split_block_before_effect(control_headers, bid, idx_in_block);
 
     // After-block param: the final surviving count.
     let after_count_nid = graph.add_block_param(after, u32_ty.clone());
@@ -2079,17 +2070,13 @@ fn build_loop_skeleton(
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
     // Split `bid` into preheader (bid) + after (holding suffix side-effects + old term).
-    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
+    let after = graph.skeleton.split_block_before_effect(control_headers, bid, idx_in_block);
 
     // The split moves the branching terminator to `after`: if `bid`
     // carries structured-control-flow header metadata (e.g. a Selection
     // whose CondBranch is in `old_term`), that metadata follows to
     // `after`, since `bid`'s new terminator is an unconditional branch to
     // the loop header — `after` is the selection/loop header now.
-    if let Some(header_meta) = control_headers.remove(&bid) {
-        control_headers.insert(after, header_meta);
-    }
-
     // Rebind the SOAC's original result NodeId:
     //   - Carried: becomes the `after` block's param, populated from
     //     `carried[idx]` via the header's else branch below.

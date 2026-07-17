@@ -487,9 +487,15 @@ impl<P: EgirPhase, Lang: Language> Skeleton<P, Lang> {
     /// Split a block immediately before one of its side effects.
     ///
     /// The returned continuation receives the selected effect and every
-    /// following effect, plus the original terminator. The original block is
-    /// terminated by an unconditional branch to the continuation.
-    pub fn split_block_before_effect(&mut self, block: BlockId, effect_index: usize) -> BlockId {
+    /// following effect, plus the original terminator and any structured
+    /// control metadata. The original block is terminated by an unconditional
+    /// branch to the continuation.
+    pub fn split_block_before_effect(
+        &mut self,
+        control_headers: &mut LookupMap<BlockId, ControlHeader>,
+        block: BlockId,
+        effect_index: usize,
+    ) -> BlockId {
         let continuation = self.create_block();
         let source = &mut self.blocks[block];
         let suffix = source.side_effects.split_off(effect_index);
@@ -502,6 +508,9 @@ impl<P: EgirPhase, Lang: Language> Skeleton<P, Lang> {
         );
         self.blocks[continuation].side_effects = suffix;
         self.blocks[continuation].term = old_term;
+        if let Some(header) = control_headers.remove(&block) {
+            control_headers.insert(continuation, header);
+        }
         continuation
     }
 

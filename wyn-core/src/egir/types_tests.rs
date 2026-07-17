@@ -154,8 +154,10 @@ fn splitting_block_moves_effect_suffix_and_original_terminator() {
     let entry = graph.skeleton.entry;
     graph.skeleton.blocks[entry].side_effects = vec![effect(first), effect(second), effect(third)];
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(Some(third));
+    let mut control_headers = crate::LookupMap::new();
+    control_headers.insert(entry, crate::flow::ControlHeader::Selection { merge: entry });
 
-    let continuation = graph.skeleton.split_block_before_effect(entry, 1);
+    let continuation = graph.skeleton.split_block_before_effect(&mut control_headers, entry, 1);
 
     assert_eq!(
         graph.skeleton.blocks[entry]
@@ -181,6 +183,11 @@ fn splitting_block_moves_effect_suffix_and_original_terminator() {
     assert!(matches!(
         graph.skeleton.blocks[continuation].term,
         SkeletonTerminator::Return(Some(result)) if result == third
+    ));
+    assert!(!control_headers.contains_key(&entry));
+    assert!(matches!(
+        control_headers.get(&continuation),
+        Some(crate::flow::ControlHeader::Selection { merge }) if *merge == entry
     ));
 }
 
