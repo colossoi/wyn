@@ -3,7 +3,8 @@ use crate::egir::builder::EntryBuilder;
 use crate::egir::program::MaterializationId;
 
 fn body(name: &str) -> PlannedEntry {
-    EntryBuilder::new_compute(name.to_string(), (1, 1, 1)).build()
+    let mut effect_ids = crate::IdSource::new();
+    EntryBuilder::new_compute(name.to_string(), (1, 1, 1), &mut effect_ids).build()
 }
 
 fn phase(id: u32, name: &str, kind: KernelKind) -> KernelPhase {

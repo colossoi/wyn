@@ -10,9 +10,9 @@ use smallvec::smallvec;
 use super::graph_ops;
 use super::program::{LogicalSize, PlannedEntry, SemanticOpId, SemanticResourceDecl, SemanticResourceRef};
 use super::soac::screma;
-use super::types::{EGraph, NodeId, SkeletonTerminator, Soac, SoacDestination, SoacInputType};
+use super::types::{EGraph, EffectToken, NodeId, SkeletonTerminator, Soac, SoacDestination, SoacInputType};
 
-pub struct EntryBuilder {
+pub struct EntryBuilder<'a> {
     graph: EGraph,
     control_headers: LookupMap<BlockId, ControlHeader>,
     current_block: BlockId,
@@ -25,11 +25,15 @@ pub struct EntryBuilder {
     params: Vec<(Type<TypeName>, String)>,
     return_ty: Type<TypeName>,
     next_semantic_op: u32,
-    next_effect: u32,
+    effect_ids: &'a mut crate::IdSource<EffectToken>,
 }
 
-impl EntryBuilder {
-    pub fn new_compute(name: String, local_size: (u32, u32, u32)) -> Self {
+impl<'a> EntryBuilder<'a> {
+    pub fn new_compute(
+        name: String,
+        local_size: (u32, u32, u32),
+        effect_ids: &'a mut crate::IdSource<EffectToken>,
+    ) -> Self {
         let graph = EGraph::new();
         let current_block = graph.skeleton.entry;
         Self {
@@ -45,7 +49,7 @@ impl EntryBuilder {
             params: Vec::new(),
             return_ty: Type::Constructed(TypeName::Unit, vec![]),
             next_semantic_op: 0,
-            next_effect: 1,
+            effect_ids,
         }
     }
 
@@ -88,6 +92,16 @@ impl EntryBuilder {
 
     pub fn graph_mut(&mut self) -> &mut EGraph {
         &mut self.graph
+    }
+
+    pub fn construction_parts_mut(
+        &mut self,
+    ) -> (
+        &mut EGraph,
+        &mut LookupMap<BlockId, ControlHeader>,
+        &mut crate::IdSource<EffectToken>,
+    ) {
+        (&mut self.graph, &mut self.control_headers, self.effect_ids)
     }
 
     pub fn control_headers_mut(&mut self) -> &mut LookupMap<BlockId, ControlHeader> {
@@ -139,7 +153,7 @@ impl EntryBuilder {
             }),
             smallvec![input_array, output_view],
             tuple_ty,
-            &mut self.next_effect,
+            self.effect_ids,
             Some(self.span),
         )
     }
@@ -150,7 +164,7 @@ impl EntryBuilder {
             self.current_block,
             place,
             elem_ty,
-            &mut self.next_effect,
+            self.effect_ids,
             Some(self.span),
         )
     }

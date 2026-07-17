@@ -19,6 +19,7 @@ fn with_converter<T>(test: impl FnOnce(&mut Converter<'_, '_>) -> T) -> T {
     let symbols = SymbolTable::new();
     let pure_constants = HashSet::new();
     let mut binding_ids = crate::IdSource::<u32>::new();
+    let mut effect_ids = crate::IdSource::new();
     let region_interner = RefCell::new(crate::egir::program::RegionInterner::default());
     let resources = RefCell::new(ResourceRegistry::default());
     let mut converter = Converter::new(
@@ -27,6 +28,7 @@ fn with_converter<T>(test: impl FnOnce(&mut Converter<'_, '_>) -> T) -> T {
         &symbols,
         pure_constants,
         &mut binding_ids,
+        &mut effect_ids,
         &region_interner,
         &resources,
     );

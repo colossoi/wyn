@@ -8,19 +8,21 @@ use super::from_tlc::ConvertError;
 use super::parallelize;
 use super::program::{AllocatedProgram, PhysicalProgram, PhysicalResourceTable};
 use super::publish::PipelineDescriptorPublish;
+use super::types::EffectToken;
 use crate::{IdSource, LoweringProfile, SchedulePolicy};
 
 pub fn schedule(
     inner: AllocatedProgram,
     binding_ids: &mut IdSource<u32>,
+    effect_ids: &mut IdSource<EffectToken>,
     profile: LoweringProfile,
 ) -> Result<PhysicalProgram, ConvertError> {
     let unpublished_descriptor = inner.pipeline.clone();
 
     let kernel_plan = if profile.schedule == SchedulePolicy::Parallel {
-        parallelize::lower(&inner).map_err(ConvertError::Internal)?
+        parallelize::lower(&inner, effect_ids).map_err(ConvertError::Internal)?
     } else {
-        parallelize::lower_sequential(&inner)
+        parallelize::lower_sequential(&inner, effect_ids)
     };
     kernel_plan
         .check_explicit_dispatch_coverage(&inner.entry_points)

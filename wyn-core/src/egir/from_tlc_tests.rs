@@ -21,9 +21,12 @@ fn compile_via_egir(src: &str) -> Program {
 
     let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc.tlc);
     let mut binding_ids = crate::IdSource::<u32>::new();
+    let mut effect_ids = crate::IdSource::new();
     crate::EgirRaw {
-        inner: run(&tlc.tlc, &bounds, &mut binding_ids).expect("egir::from_tlc conversion failed"),
+        inner: run(&tlc.tlc, &bounds, &mut binding_ids, &mut effect_ids)
+            .expect("egir::from_tlc conversion failed"),
         binding_ids,
+        effect_ids,
     }
     .realize_outputs()
     .expect("egir::realize_outputs failed")
@@ -92,6 +95,7 @@ fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> Fu
         params.iter().enumerate().map(|(i, (_, ty))| (ty.clone(), format!("p{}", i))).collect();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
+    let mut effect_ids = crate::IdSource::new();
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
     let resources = std::cell::RefCell::new(ResourceRegistry::default());
     let mut converter = Converter::new(
@@ -100,6 +104,7 @@ fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> Fu
         &symbols,
         pure_constants,
         &mut binding_ids,
+        &mut effect_ids,
         &region_interner,
         &resources,
     );
@@ -149,6 +154,7 @@ fn test_add_roundtrip() {
     let pure_constants = HashSet::new();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
+    let mut effect_ids = crate::IdSource::new();
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
     let resources = std::cell::RefCell::new(ResourceRegistry::default());
     let mut converter = Converter::new(
@@ -157,6 +163,7 @@ fn test_add_roundtrip() {
         &symbols,
         pure_constants,
         &mut binding_ids,
+        &mut effect_ids,
         &region_interner,
         &resources,
     );
@@ -224,6 +231,7 @@ fn test_gvn_via_let() {
     let pure_constants = HashSet::new();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
+    let mut effect_ids = crate::IdSource::new();
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
     let resources = std::cell::RefCell::new(ResourceRegistry::default());
     let mut converter = Converter::new(
@@ -232,6 +240,7 @@ fn test_gvn_via_let() {
         &symbols,
         pure_constants,
         &mut binding_ids,
+        &mut effect_ids,
         &region_interner,
         &resources,
     );
@@ -324,6 +333,7 @@ fn test_if_else_roundtrip() {
     let pure_constants = HashSet::new();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
+    let mut effect_ids = crate::IdSource::new();
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
     let resources = std::cell::RefCell::new(ResourceRegistry::default());
     let mut converter = Converter::new(
@@ -332,6 +342,7 @@ fn test_if_else_roundtrip() {
         &symbols,
         pure_constants,
         &mut binding_ids,
+        &mut effect_ids,
         &region_interner,
         &resources,
     );
@@ -640,7 +651,8 @@ entry vertex_main(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: 
 
     let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc_program);
     let mut binding_ids = crate::IdSource::<u32>::new();
-    let egir = super::run(&tlc_program, &bounds, &mut binding_ids)
+    let mut effect_ids = crate::IdSource::new();
+    let egir = super::run(&tlc_program, &bounds, &mut binding_ids, &mut effect_ids)
         .expect("from_tlc::run on graphics entry must succeed");
     let entry =
         egir.entry_points.iter().find(|e| e.name == "vertex_main").expect("vertex_main SemanticEntry");

@@ -21,7 +21,7 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
         kind: SideEffectKind::Effect(EffectOp::Load),
         operand_nodes: smallvec![place],
         result: Some(produced),
-        effects: Some((EffectToken(0), EffectToken(1))),
+        effects: Some((EffectToken::from(0), EffectToken::from(1))),
         span: None,
     });
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {

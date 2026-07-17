@@ -23,8 +23,8 @@ use super::program::{
 };
 use super::soac::{filter, screma};
 use super::types::{
-    EGraph, ENode, EffectOp, NodeId, PureOp, RegionId, SegBody, SegSpace, SideEffect, SideEffectKind,
-    SideEffectSite, SkeletonTerminator, Soac, SoacDestination,
+    EGraph, ENode, EffectOp, EffectToken, NodeId, PureOp, RegionId, SegBody, SegSpace, SideEffect,
+    SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacDestination,
 };
 use crate::ast::TypeName;
 use crate::builtins::catalog;
@@ -71,7 +71,10 @@ impl UnionFind {
 /// Pointwise `SegMap`s remain for `soac_expand`; `SegRed`s become a chunked
 /// phase 1 plus a synthesized tree reduction; `SegScan`s become chunk scans,
 /// an exclusive scan of block sums, and offset-application phases.
-pub fn lower(inner: &AllocatedProgram) -> Result<schedule::KernelPlan, String> {
+pub fn lower(
+    inner: &AllocatedProgram,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) -> Result<schedule::KernelPlan, String> {
     use schedule::KernelPlan;
 
     let (mut schedule, seeded) = KernelPlan::seed(
@@ -80,9 +83,9 @@ pub fn lower(inner: &AllocatedProgram) -> Result<schedule::KernelPlan, String> {
         &inner.resources,
         &inner.region_interner,
     );
-    attach_materializations(inner, &mut schedule);
-    lower_materialized_filters(inner, &mut schedule)?;
-    let lowered_filters = lower_runtime_filters(inner, &seeded, &mut schedule)?;
+    attach_materializations(inner, &mut schedule, effect_ids);
+    lower_materialized_filters(inner, &mut schedule, effect_ids)?;
+    let lowered_filters = lower_runtime_filters(inner, &seeded, &mut schedule, effect_ids)?;
     for (index, entry) in inner.entry_points.iter().enumerate() {
         let source = SemanticEntryId(index as u32);
         if lowered_filters.contains(&source) {
@@ -93,20 +96,23 @@ pub fn lower(inner: &AllocatedProgram) -> Result<schedule::KernelPlan, String> {
         };
         let body =
             super::program::PlannedEntry::project(entry).expect("segmented semantic entry projection");
-        plan_segmented_kernel_body(body, kernel, &mut schedule, &inner.resources);
+        plan_segmented_kernel_body(body, kernel, &mut schedule, &inner.resources, effect_ids);
     }
     schedule.coalesce_resource_flows(&inner.resources);
     Ok(schedule)
 }
 
-pub fn lower_sequential(inner: &AllocatedProgram) -> schedule::KernelPlan {
+pub fn lower_sequential(
+    inner: &AllocatedProgram,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) -> schedule::KernelPlan {
     let (mut plan, _) = schedule::KernelPlan::seed(
         &inner.pipeline,
         &inner.entry_points,
         &inner.resources,
         &inner.region_interner,
     );
-    attach_materializations(inner, &mut plan);
+    attach_materializations(inner, &mut plan, effect_ids);
     plan.select_sequential_recipes();
     plan.coalesce_resource_flows(&inner.resources);
     plan
@@ -117,6 +123,7 @@ fn plan_segmented_kernel_body(
     kernel: schedule::KernelId,
     schedule: &mut schedule::KernelPlan,
     resources: &[LogicalResource],
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
     use schedule::KernelDomain;
     let Some((block, index, _)) = segmented_screma_effect(&body.graph) else {
@@ -175,7 +182,7 @@ fn plan_segmented_kernel_body(
         }
         screma::Op::Reduce { .. } => {
             if let Some(plan) = analyze_reduce_entry(&body, resources) {
-                let phases = emit_reduce_entry(&mut body, plan, schedule, resources);
+                let phases = emit_reduce_entry(&mut body, plan, schedule, resources, effect_ids);
                 let mut predecessor = schedule
                     .commit_kernel(kernel, body, schedule::KernelKind::ReducePhase1)
                     .expect("seeded reduce kernel must remain addressable");
@@ -195,7 +202,7 @@ fn plan_segmented_kernel_body(
         }
         screma::Op::Scan { .. } => {
             if let Some(plan) = analyze_scan_entry(&body, resources) {
-                let phases = emit_scan_entry(&mut body, plan, schedule, resources);
+                let phases = emit_scan_entry(&mut body, plan, schedule, resources, effect_ids);
                 let phase1_domain =
                     schedule.domain_of(kernel).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
                 let mut predecessor = schedule
@@ -246,6 +253,7 @@ fn lower_runtime_filters(
     inner: &AllocatedProgram,
     seeded: &schedule::SeededKernels,
     schedule: &mut schedule::KernelPlan,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<HashSet<SemanticEntryId>, String> {
     use schedule::KernelDomain;
     let mut lowered = HashSet::new();
@@ -289,7 +297,7 @@ fn lower_runtime_filters(
             if contains_semantic_op(&group.entry, semantic_id) {
                 filter_group = Some((kernel, group.entry, group.semantic_slots));
             } else {
-                plan_segmented_kernel_body(group.entry, kernel, schedule, &inner.resources);
+                plan_segmented_kernel_body(group.entry, kernel, schedule, &inner.resources, effect_ids);
                 schedule
                     .set_output_projection(
                         kernel,
@@ -303,7 +311,14 @@ fn lower_runtime_filters(
                 "runtime filter {semantic_id:?} was lost during output splitting"
             ));
         };
-        lower_filter_kernel(filter_entry, kernel, analysis, schedule, &inner.resources)?;
+        lower_filter_kernel(
+            filter_entry,
+            kernel,
+            analysis,
+            schedule,
+            &inner.resources,
+            effect_ids,
+        )?;
         schedule
             .set_output_projection(
                 kernel,
@@ -321,8 +336,9 @@ fn lower_filter_kernel(
     analysis: FilterAnalysis,
     schedule: &mut schedule::KernelPlan,
     resources: &[LogicalResource],
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), String> {
-    let family = build_filter_kernel_family(filter_entry, analysis, schedule, resources)?;
+    let family = build_filter_kernel_family(filter_entry, analysis, schedule, resources, effect_ids)?;
     install_filter_kernel_family(kernel, family, schedule)
 }
 
@@ -341,6 +357,7 @@ fn build_filter_kernel_family(
     analysis: FilterAnalysis,
     schedule: &mut schedule::KernelPlan,
     resources: &[LogicalResource],
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<FilterKernelFamily, String> {
     use crate::interface::StorageRole;
     use schedule::KernelDomain;
@@ -401,6 +418,7 @@ fn build_filter_kernel_family(
         required_resource(work.block_sums),
         required_resource(work.block_offsets),
         Some(required_resource(len_out)),
+        effect_ids,
     )
     .map_err(|error| {
         format!(
@@ -420,6 +438,7 @@ fn build_filter_kernel_family(
         required_resource(work.offsets),
         required_resource(work.block_offsets),
         REDUCE_PHASE1_WIDTH,
+        effect_ids,
     );
     apply_manifest_resource_sizes(&mut apply_offsets, resources);
 
@@ -541,6 +560,7 @@ fn filter_resource_declaration(
 fn lower_materialized_filters(
     inner: &AllocatedProgram,
     schedule: &mut schedule::KernelPlan,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), String> {
     for requirement in &inner.materializations {
         if requirement.kind != super::program::MaterializationKind::RuntimeArray {
@@ -560,7 +580,7 @@ fn lower_materialized_filters(
             )
         })?;
         let body = super::program::PlannedEntry::project(&requirement.entry)?;
-        lower_filter_kernel(body, kernel, analysis, schedule, &inner.resources)?;
+        lower_filter_kernel(body, kernel, analysis, schedule, &inner.resources, effect_ids)?;
     }
     Ok(())
 }
@@ -815,7 +835,11 @@ fn owned_resource_ids(
 
 /// Attach allocation-created materialization entries to their consumer's
 /// source pipeline before target recipes are selected.
-pub(crate) fn attach_materializations(inner: &AllocatedProgram, schedule: &mut schedule::KernelPlan) {
+pub(crate) fn attach_materializations(
+    inner: &AllocatedProgram,
+    schedule: &mut schedule::KernelPlan,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) {
     let mut materializations = BTreeMap::new();
     for resource in &inner.resources {
         let ResourceOrigin::Compiler(compiler) = &resource.origin else {
@@ -876,7 +900,7 @@ pub(crate) fn attach_materializations(inner: &AllocatedProgram, schedule: &mut s
                 )
             )
         }) {
-            plan_segmented_kernel_body(body, materialization, schedule, &inner.resources);
+            plan_segmented_kernel_body(body, materialization, schedule, &inner.resources, effect_ids);
         }
     }
 }
@@ -1283,8 +1307,7 @@ fn build_tree_reduce_phase2(
 
     // ---- entry block: lid, partials view + length, shared view, result view ----
     let entry_bid = b.graph_mut().skeleton.entry;
-    let graph = b.graph_mut();
-    let mut eff = graph_ops::next_effect_token(graph);
+    let (graph, control_headers, eff) = b.construction_parts_mut();
 
     let lid = graph_ops::intern_intrinsic(
         graph,
@@ -1355,7 +1378,7 @@ fn build_tree_reduce_phase2(
         else_target: grid_after,
         else_args: vec![acc_in],
     };
-    b.control_headers_mut().insert(
+    control_headers.insert(
         grid_header,
         ControlHeader::Loop {
             merge: grid_after,
@@ -1364,16 +1387,8 @@ fn build_tree_reduce_phase2(
     );
 
     // grid_body: acc' = op(acc, partials[i]); → grid_cont(acc')
-    let graph = b.graph_mut();
-    let elem_i = graph_ops::emit_view_load(
-        graph,
-        grid_body,
-        partials_view,
-        i_in,
-        elem_ty.clone(),
-        &mut eff,
-        None,
-    );
+    let elem_i =
+        graph_ops::emit_view_load(graph, grid_body, partials_view, i_in, elem_ty.clone(), eff, None);
     let acc_next = graph.intern_pure(
         PureOp::Call(op_func.clone()),
         smallvec![acc_in, elem_i],
@@ -1405,10 +1420,10 @@ fn build_tree_reduce_phase2(
         lid,
         acc_final,
         elem_ty.clone(),
-        &mut eff,
+        eff,
         None,
     );
-    graph_ops::emit_workgroup_barrier(graph, grid_after, &mut eff);
+    graph_ops::emit_workgroup_barrier(graph, grid_after, eff);
     graph.skeleton.blocks[grid_after].term = SkeletonTerminator::Branch {
         target: tree_header,
         args: vec![one_u32],
@@ -1426,7 +1441,7 @@ fn build_tree_reduce_phase2(
         else_target: tree_after,
         else_args: vec![],
     };
-    b.control_headers_mut().insert(
+    control_headers.insert(
         tree_header,
         ControlHeader::Loop {
             merge: tree_after,
@@ -1435,7 +1450,6 @@ fn build_tree_reduce_phase2(
     );
 
     // Only the first lane in each adjacent pair combines the two runs.
-    let graph = b.graph_mut();
     let two = graph_ops::intern_u32(graph, 2, None);
     let pair_width = graph_ops::intern_binop(graph, "*", stride_in, two, u32_ty.clone(), None);
     let lane_in_pair = graph_ops::intern_binop(graph, "%", lid, pair_width, u32_ty.clone(), None);
@@ -1447,7 +1461,7 @@ fn build_tree_reduce_phase2(
         else_target: tree_sel_merge,
         else_args: vec![],
     };
-    b.control_headers_mut().insert(
+    control_headers.insert(
         tree_body,
         ControlHeader::Selection {
             merge: tree_sel_merge,
@@ -1455,16 +1469,7 @@ fn build_tree_reduce_phase2(
     );
 
     // tree_then: shared[lid] = op(shared[lid], shared[lid+stride]); → tree_sel_merge
-    let graph = b.graph_mut();
-    let a = graph_ops::emit_view_load(
-        graph,
-        tree_then,
-        shared_view,
-        lid,
-        elem_ty.clone(),
-        &mut eff,
-        None,
-    );
+    let a = graph_ops::emit_view_load(graph, tree_then, shared_view, lid, elem_ty.clone(), eff, None);
     let lid_plus = graph_ops::intern_binop(graph, "+", lid, stride_in, u32_ty.clone(), None);
     let bb = graph_ops::emit_view_load(
         graph,
@@ -1472,7 +1477,7 @@ fn build_tree_reduce_phase2(
         shared_view,
         lid_plus,
         elem_ty.clone(),
-        &mut eff,
+        eff,
         None,
     );
     let combined = graph.intern_pure(
@@ -1488,7 +1493,7 @@ fn build_tree_reduce_phase2(
         lid,
         combined,
         elem_ty.clone(),
-        &mut eff,
+        eff,
         None,
     );
     graph.skeleton.blocks[tree_then].term = SkeletonTerminator::Branch {
@@ -1503,7 +1508,7 @@ fn build_tree_reduce_phase2(
     };
 
     // tree_cont: barrier; stride_next = stride*2; → tree_header(stride_next)
-    graph_ops::emit_workgroup_barrier(graph, tree_cont, &mut eff);
+    graph_ops::emit_workgroup_barrier(graph, tree_cont, eff);
     let stride_next = graph_ops::intern_binop(graph, "*", stride_in, two, u32_ty.clone(), None);
     graph.skeleton.blocks[tree_cont].term = SkeletonTerminator::Branch {
         target: tree_header,
@@ -1519,20 +1524,19 @@ fn build_tree_reduce_phase2(
         else_target: end_blk,
         else_args: vec![],
     };
-    b.control_headers_mut().insert(tree_after, ControlHeader::Selection { merge: end_blk });
+    control_headers.insert(tree_after, ControlHeader::Selection { merge: end_blk });
 
     // write_blk: combined = shared[0]; replay each captured output store reading
     // `combined` in place of the per-thread accumulator value. A scalar reduce
     // has one store (`out[0] = combined`); a tuple-element reduce decomposes
     // across one store per field.
-    let graph = b.graph_mut();
     let s0 = graph_ops::emit_view_load(
         graph,
         write_blk,
         shared_view,
         zero_u32,
         elem_ty.clone(),
-        &mut eff,
+        eff,
         None,
     );
     for &(place, value) in output_stores {
@@ -1543,7 +1547,7 @@ fn build_tree_reduce_phase2(
             value,
             &[(accumulator_value, s0)],
         )?;
-        graph_ops::emit_store(graph, write_blk, cloned_place, cloned_value, &mut eff, None);
+        graph_ops::emit_store(graph, write_blk, cloned_place, cloned_value, eff, None);
     }
     graph.skeleton.blocks[write_blk].term = SkeletonTerminator::Branch {
         target: end_blk,
@@ -1704,9 +1708,10 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
     accumulator_value: NodeId,
     output_stores: &[(NodeId, NodeId)],
     output_decls: &[(ResourceId, Type<TypeName>, super::program::LogicalSize)],
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<super::program::PlannedEntry, String> {
     use super::builder::EntryBuilder;
-    let mut b = EntryBuilder::new_compute(full_name, (PHASE2_WIDTH, 1, 1));
+    let mut b = EntryBuilder::new_compute(full_name, (PHASE2_WIDTH, 1, 1), effect_ids);
     b.declare_intermediate_storage_sized(
         partials_resource,
         elem_ty.clone(),
@@ -2018,6 +2023,7 @@ fn emit_reduce_entry(
     analysis: ReduceAnalysis,
     schedule: &schedule::KernelPlan,
     resources: &[LogicalResource],
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Vec<super::program::PlannedEntry> {
     let ReduceAnalysis {
         block: block_id,
@@ -2159,7 +2165,6 @@ fn emit_reduce_entry(
             |writer| !matches!(writer, OutputWriter::Effect(effect) if dropped_writers.contains(effect)),
         );
     }
-    let mut next_effect = graph_ops::next_effect_token(&entry.graph);
     for acc_i in 0..n_accs {
         let elem_ty = elem_tys[acc_i].clone();
         let arr_ty = Type::Constructed(
@@ -2180,7 +2185,7 @@ fn emit_reduce_entry(
             chunked.tid,
             accumulator_values[acc_i],
             elem_ty,
-            &mut next_effect,
+            effect_ids,
             None,
         );
         // Clear the moved output bindings from phase 1; register partials.
@@ -2228,6 +2233,7 @@ fn emit_reduce_entry(
             accumulator_values[acc_i],
             &acc_stores[acc_i],
             &acc_output_decls[acc_i],
+            effect_ids,
         )
         .expect("reduce analysis admitted an unprojectable output");
         phase2s.push(phase2);
@@ -2296,6 +2302,7 @@ fn emit_scan_entry(
     analysis: ScanAnalysis,
     schedule: &mut schedule::KernelPlan,
     resources: &[LogicalResource],
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Vec<super::program::PlannedEntry> {
     debug_assert_eq!(
         segmented_screma_effect(&entry.graph).map(|(block, effect, _)| (block, effect)),
@@ -2423,7 +2430,6 @@ fn emit_scan_entry(
             .map(|id| id.0)
             .max()
             .map_or(0, |id| id + 1);
-        let mut next_effect = graph_ops::next_effect_token(&entry.graph);
         // `[chunked_input, init]` — the step captures live on the SegBody below.
         let reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![chunked_input_nid, init_nid];
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![elem_ty.clone()]);
@@ -2462,7 +2468,7 @@ fn emit_scan_entry(
             }),
             reduce_operands,
             tuple_ty,
-            &mut next_effect,
+            effect_ids,
             None,
         );
         let result_nid = entry.graph.intern_pure(
@@ -2489,7 +2495,7 @@ fn emit_scan_entry(
             chunked.tid,
             result_nid,
             elem_ty.clone(),
-            &mut next_effect,
+            effect_ids,
             None,
         );
     }
@@ -2515,6 +2521,7 @@ fn emit_scan_entry(
         block_sums_resource,
         block_offsets_resource,
         None,
+        effect_ids,
     )
     .expect("scan analysis admitted an unprojectable neutral");
     apply_manifest_resource_sizes(&mut phase2, resources);
@@ -2533,6 +2540,7 @@ fn emit_scan_entry(
         required_resource(scan_output_storage),
         block_offsets_resource,
         total_threads,
+        effect_ids,
     );
     apply_manifest_resource_sizes(&mut phase3, resources);
 
@@ -2554,9 +2562,11 @@ pub fn synthesize_phase2_scan(
     block_sums_resource: ResourceId,
     block_offsets_resource: ResourceId,
     len_out: Option<ResourceId>,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<super::program::PlannedEntry, String> {
     use super::builder::EntryBuilder;
-    let mut b = EntryBuilder::new_compute(format!("{}_phase2_scan_sums", entry_name), (1, 1, 1));
+    let mut b =
+        EntryBuilder::new_compute(format!("{}_phase2_scan_sums", entry_name), (1, 1, 1), effect_ids);
     let scratch_len = dispatch_worker_logical_size(&elem_ty);
     b.declare_intermediate_storage_sized(block_sums_resource, elem_ty.clone(), scratch_len.clone());
     b.declare_intermediate_storage_sized(block_offsets_resource, elem_ty.clone(), scratch_len);
@@ -2582,8 +2592,7 @@ pub fn synthesize_phase2_scan(
     // into the length cell. The generic scan builder above stays oblivious to
     // this; only the bridge that knows the filter's `len_out` wires it up.
     if let (Some(len_out), Some(total)) = (len_out, phase2.total) {
-        let mut effect = phase2.effect;
-        let graph = b.graph_mut();
+        let (graph, _, effect_ids) = b.construction_parts_mut();
         let len_view = graph_ops::intern_resource_view(graph, len_out, elem_ty.clone(), None);
         graph_ops::emit_storage_store(
             graph,
@@ -2592,7 +2601,7 @@ pub fn synthesize_phase2_scan(
             phase2.zero,
             total,
             elem_ty,
-            &mut effect,
+            effect_ids,
             None,
         );
     }
@@ -2609,9 +2618,6 @@ struct ExclusiveScanPhase2 {
     total: Option<NodeId>,
     /// The post-loop block (also left as the builder's current block).
     after: BlockId,
-    /// Effect-chain cursor after the loop, so an appended store sequences after
-    /// the loop's own effects with the same token the loop would have used.
-    effect: u32,
     /// The interned `0` node, reusable as a store index.
     zero: NodeId,
 }
@@ -2637,13 +2643,12 @@ fn build_exclusive_scan_phase2(
         ],
     );
     let entry_block = b.graph_mut().skeleton.entry;
-    let graph = b.graph_mut();
+    let (graph, control_headers, effect_ids) = b.construction_parts_mut();
     let sums = graph_ops::intern_resource_view(graph, block_sums_resource, arr_ty.clone(), None);
     let offsets = graph_ops::intern_resource_view(graph, block_offsets_resource, arr_ty, None);
     let len = emit_resource_len(graph, block_sums_resource);
     let zero = graph_ops::intern_u32(graph, 0, None);
     let one = graph_ops::intern_u32(graph, 1, None);
-    let mut effect = graph_ops::next_effect_token(graph);
 
     let header = graph.skeleton.create_block();
     let body = graph.skeleton.create_block();
@@ -2665,7 +2670,7 @@ fn build_exclusive_scan_phase2(
         else_target: after,
         else_args: if want_total { vec![acc] } else { vec![] },
     };
-    b.control_headers_mut().insert(
+    control_headers.insert(
         header,
         ControlHeader::Loop {
             merge: after,
@@ -2673,7 +2678,6 @@ fn build_exclusive_scan_phase2(
         },
     );
 
-    let graph = b.graph_mut();
     graph_ops::emit_storage_store(
         graph,
         body,
@@ -2681,10 +2685,10 @@ fn build_exclusive_scan_phase2(
         index,
         acc,
         elem_ty.clone(),
-        &mut effect,
+        effect_ids,
         None,
     );
-    let value = graph_ops::emit_view_load(graph, body, sums, index, elem_ty.clone(), &mut effect, None);
+    let value = graph_ops::emit_view_load(graph, body, sums, index, elem_ty.clone(), effect_ids, None);
     let next_acc = graph.intern_pure(
         PureOp::Call(op_func),
         smallvec![acc, value],
@@ -2713,12 +2717,7 @@ fn build_exclusive_scan_phase2(
         None
     };
     b.set_current_block(after);
-    ExclusiveScanPhase2 {
-        total,
-        after,
-        effect,
-        zero,
-    }
+    ExclusiveScanPhase2 { total, after, zero }
 }
 
 /// Synthesize phase 3 of a parallel scan: a chunked compute entry where each
@@ -2734,11 +2733,13 @@ pub fn synthesize_phase3_scan(
     output_resource: ResourceId,
     block_offsets_resource: ResourceId,
     total_threads: u32,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> super::program::PlannedEntry {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(
         format!("{}_phase3_add_offsets", entry_name),
         (total_threads, 1, 1),
+        effect_ids,
     );
     b.declare_output_storage(output_resource, elem_ty.clone());
     b.declare_intermediate_storage_sized(

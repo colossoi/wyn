@@ -398,25 +398,8 @@ pub fn intern_chunked_storage_view(
 // Side effects
 // ---------------------------------------------------------------------------
 
-/// Find the next unused `EffectToken` by scanning all skeleton blocks.
-/// Mirrors (and supersedes) `soac_expand::next_effect_token` and the
-/// `egir::parallelize::max_effect` helper.
-pub fn next_effect_token<P: EgirPhase>(graph: &EGraph<P>) -> u32 {
-    let mut max = 0u32;
-    for (_, block) in &graph.skeleton.blocks {
-        for se in &block.side_effects {
-            if let Some((a, b)) = se.effects {
-                max = max.max(a.0).max(b.0);
-            }
-        }
-    }
-    max + 1
-}
-
-pub fn alloc_effect(next_effect: &mut u32) -> EffectToken {
-    let t = EffectToken(*next_effect);
-    *next_effect += 1;
-    t
+pub fn alloc_effect(effect_ids: &mut crate::IdSource<EffectToken>) -> EffectToken {
+    effect_ids.next_id()
 }
 
 /// Emit a `Store` side-effect in `block`. `place_nid` must be a place-
@@ -427,11 +410,11 @@ pub fn emit_store<P: EgirPhase>(
     block: BlockId,
     place_nid: NodeId,
     value_nid: NodeId,
-    next_effect: &mut u32,
+    effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> EffectToken {
-    let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
-    let effect_out = alloc_effect(next_effect);
+    let effect_in = alloc_effect(effect_ids);
+    let effect_out = alloc_effect(effect_ids);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Effect(EffectOp::Store),
         operand_nodes: smallvec![place_nid, value_nid],
@@ -449,10 +432,10 @@ pub fn emit_store<P: EgirPhase>(
 pub fn emit_workgroup_barrier<P: EgirPhase>(
     graph: &mut EGraph<P>,
     block: BlockId,
-    next_effect: &mut u32,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> EffectToken {
-    let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
-    let effect_out = alloc_effect(next_effect);
+    let effect_in = alloc_effect(effect_ids);
+    let effect_out = alloc_effect(effect_ids);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Effect(EffectOp::ControlBarrier),
         operand_nodes: smallvec![],
@@ -472,11 +455,11 @@ pub fn emit_storage_store<P: EgirPhase>(
     index_nid: NodeId,
     value_nid: NodeId,
     elem_ty: Type<TypeName>,
-    next_effect: &mut u32,
+    effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> EffectToken {
     let place_nid = graph.intern_pure(PureOp::ViewIndex, smallvec![view_nid, index_nid], elem_ty, span);
-    emit_store(graph, block, place_nid, value_nid, next_effect, span)
+    emit_store(graph, block, place_nid, value_nid, effect_ids, span)
 }
 
 /// Emit a `Load` of `place_nid` (a place-producing pure op like `ViewIndex`)
@@ -486,10 +469,10 @@ pub fn emit_load<P: EgirPhase>(
     block: BlockId,
     place_nid: NodeId,
     elem_ty: Type<TypeName>,
-    next_effect: &mut u32,
+    effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> NodeId {
-    let (result, effect) = detached_load(graph, place_nid, elem_ty, next_effect, span);
+    let (result, effect) = detached_load(graph, place_nid, elem_ty, effect_ids, span);
     graph.skeleton.blocks[block].side_effects.push(effect);
     result
 }
@@ -501,11 +484,11 @@ pub fn detached_load<P: EgirPhase>(
     graph: &mut EGraph<P>,
     place_nid: NodeId,
     elem_ty: Type<TypeName>,
-    next_effect: &mut u32,
+    effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> (NodeId, SideEffect<P>) {
-    let effect_in = EffectToken(0); // placeholder; elaborate builds the real chain
-    let effect_out = alloc_effect(next_effect);
+    let effect_in = alloc_effect(effect_ids);
+    let effect_out = alloc_effect(effect_ids);
     let result = graph.alloc_side_effect_result(elem_ty);
     let effect = SideEffect {
         kind: SideEffectKind::Effect(EffectOp::Load),
@@ -526,11 +509,11 @@ pub fn emit_alloca<P: EgirPhase>(
     graph: &mut EGraph<P>,
     block: BlockId,
     elem_ty: Type<TypeName>,
-    next_effect: &mut u32,
+    effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> NodeId {
-    let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
-    let effect_out = alloc_effect(next_effect);
+    let effect_in = alloc_effect(effect_ids);
+    let effect_out = alloc_effect(effect_ids);
     let place_nid = graph.alloc_side_effect_result(elem_ty.clone());
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Effect(EffectOp::Alloca { elem_ty }),
@@ -571,11 +554,11 @@ pub fn emit_place_index_store<P: EgirPhase>(
     index_nid: NodeId,
     value_nid: NodeId,
     elem_ty: Type<TypeName>,
-    next_effect: &mut u32,
+    effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) {
     let elem_place_nid = intern_place_index(graph, parent_place_nid, index_nid, elem_ty, span);
-    let _ = emit_store(graph, block, elem_place_nid, value_nid, next_effect, span);
+    let _ = emit_store(graph, block, elem_place_nid, value_nid, effect_ids, span);
 }
 
 /// Emit `view[index]` as a `ViewIndex` place + `Load` in `block`; returns the
@@ -586,7 +569,7 @@ pub fn emit_view_load<P: EgirPhase>(
     view_nid: NodeId,
     index_nid: NodeId,
     elem_ty: Type<TypeName>,
-    next_effect: &mut u32,
+    effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> NodeId {
     let place_nid = graph.intern_pure(
@@ -595,7 +578,7 @@ pub fn emit_view_load<P: EgirPhase>(
         elem_ty.clone(),
         span,
     );
-    emit_load(graph, block, place_nid, elem_ty, next_effect, span)
+    emit_load(graph, block, place_nid, elem_ty, effect_ids, span)
 }
 
 /// Push a `SideEffectKind::Soac(id, soac)` side-effect into `block` with
@@ -609,12 +592,12 @@ pub fn emit_pending_soac<P: EgirPhase>(
     soac: Soac<P>,
     operands: SmallVec<[NodeId; 4]>,
     result_ty: Type<TypeName>,
-    next_effect: &mut u32,
+    effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> NodeId {
     let result_nid = graph.alloc_side_effect_result(result_ty);
-    let effect_in = EffectToken(0);
-    let effect_out = alloc_effect(next_effect);
+    let effect_in = alloc_effect(effect_ids);
+    let effect_out = alloc_effect(effect_ids);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Soac(id, soac),
         operand_nodes: operands,

@@ -13,9 +13,7 @@ use crate::LookupMap;
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
-use super::graph_ops::{
-    alloc_effect, emit_alloca, emit_load, emit_place_index_store, emit_store, next_effect_token,
-};
+use super::graph_ops::{alloc_effect, emit_alloca, emit_load, emit_place_index_store, emit_store};
 use super::program::{
     PhysicalEGraph as EGraph, PhysicalFilterOutput, PhysicalFilterWorkBuffers as FilterWorkBuffers,
     PhysicalProgram, PhysicalSegSpace as SegSpace, PhysicalSideEffect as SideEffect,
@@ -25,10 +23,10 @@ use super::soac::{filter, screma};
 use crate::ast::TypeName;
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
-use super::types::{ENode, EffectOp, NodeId, PureOp, SkeletonTerminator, SoacDestination};
+use super::types::{ENode, EffectOp, EffectToken, NodeId, PureOp, SkeletonTerminator, SoacDestination};
 
 /// Run `run_one_body` on every function and entry point in the program.
-pub fn run(inner: &mut PhysicalProgram) {
+pub fn run(inner: &mut PhysicalProgram, effect_ids: &mut crate::IdSource<EffectToken>) {
     // Borrow the region interner disjointly from the bodies being expanded; it
     // is read-only here (recovering the SSA `Call` name for each region).
     let PhysicalProgram {
@@ -38,10 +36,10 @@ pub fn run(inner: &mut PhysicalProgram) {
         ..
     } = inner;
     for f in functions.iter_mut() {
-        run_one_body(&mut f.graph, &mut f.control_headers, region_interner);
+        run_one_body(&mut f.graph, &mut f.control_headers, region_interner, effect_ids);
     }
     for e in entry_points.iter_mut() {
-        run_one_body(&mut e.graph, &mut e.control_headers, region_interner);
+        run_one_body(&mut e.graph, &mut e.control_headers, region_interner, effect_ids);
     }
 }
 
@@ -50,6 +48,7 @@ pub fn run_one_body(
     graph: &mut EGraph,
     control_headers: &mut LookupMap<BlockId, ControlHeader>,
     regions: &RegionInterner,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
     // Collect (block, index) of every handleable Soac in a stable order.
     // Process back-to-front within each block so earlier indices stay valid.
@@ -65,15 +64,10 @@ pub fn run_one_body(
     // don't shift earlier target indices.
     targets.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
 
-    let mut next_effect = next_effect_token(graph);
     for (bid, idx) in targets {
-        expand_one(graph, control_headers, bid, idx, &mut next_effect, regions);
+        expand_one(graph, control_headers, bid, idx, effect_ids, regions);
     }
-    let _ = next_effect; // silence unused when no view-array reductions
 }
-
-// Effect-token helpers (`next_effect_token`, `alloc_effect`) live in
-// `graph_ops` and are imported up top.
 
 /// Does this SOAC kind have a TLC→EGIR expansion implemented here?
 fn is_handleable_soac(kind: &SideEffectKind) -> bool {
@@ -188,7 +182,7 @@ fn expand_one(
     control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx: usize,
-    next_effect: &mut u32,
+    next_effect: &mut crate::IdSource<EffectToken>,
     regions: &RegionInterner,
 ) {
     let se = graph.skeleton.blocks[bid].side_effects.remove(idx);
@@ -713,10 +707,10 @@ fn build_loop<F>(
     len_input: &(NodeId, Type<TypeName>),
     carried: &[(Type<TypeName>, NodeId)],
     result: &ResultBinding,
-    next_effect: &mut u32,
+    next_effect: &mut crate::IdSource<EffectToken>,
     mut emit_body: F,
 ) where
-    F: FnMut(&mut EGraph, &mut u32, BlockId, NodeId, &[NodeId]) -> Vec<NodeId>,
+    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, NodeId, &[NodeId]) -> Vec<NodeId>,
 {
     let handles = build_loop_skeleton(
         graph,
@@ -757,11 +751,11 @@ fn expand_loop<F>(
     len_input: &(NodeId, Type<TypeName>),
     carried: &[(Type<TypeName>, NodeId)],
     result: &ResultBinding,
-    next_effect: &mut u32,
+    next_effect: &mut crate::IdSource<EffectToken>,
     allow_unroll: bool,
     mut emit_body: F,
 ) where
-    F: FnMut(&mut EGraph, &mut u32, BlockId, NodeId, &[NodeId]) -> Vec<NodeId>,
+    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, NodeId, &[NodeId]) -> Vec<NodeId>,
 {
     if allow_unroll
         && try_unroll(
@@ -804,11 +798,11 @@ fn try_unroll<F>(
     len_input: &(NodeId, Type<TypeName>),
     carried: &[(Type<TypeName>, NodeId)],
     result: &ResultBinding,
-    next_effect: &mut u32,
+    next_effect: &mut crate::IdSource<EffectToken>,
     mut emit_body: F,
 ) -> bool
 where
-    F: FnMut(&mut EGraph, &mut u32, BlockId, NodeId, &[NodeId]) -> Vec<NodeId>,
+    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, NodeId, &[NodeId]) -> Vec<NodeId>,
 {
     const UNROLL_THRESHOLD: usize = 16;
 
@@ -897,7 +891,7 @@ fn build_parallel_maps(
     bid: BlockId,
     idx_in_block: usize,
     spec: ScremaMapsIntoLoop,
-    next_effect: &mut u32,
+    next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
@@ -1097,7 +1091,7 @@ fn build_filter_loop(
     bid: BlockId,
     idx_in_block: usize,
     spec: FilterLoop,
-    next_effect: &mut u32,
+    next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     let runtime_scratch = match &spec.output {
         filter::Output::Runtime { scratch, .. } => Some(*scratch),
@@ -1353,7 +1347,7 @@ fn build_scatter_loop(
     bid: BlockId,
     idx_in_block: usize,
     spec: ScatterLoop,
-    next_effect: &mut u32,
+    next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     use super::graph_ops::emit_storage_store;
     let ScatterLoop {
@@ -1425,7 +1419,7 @@ fn build_parallel_scatter(
     bid: BlockId,
     idx_in_block: usize,
     spec: ScatterLoop,
-    next_effect: &mut u32,
+    next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     use super::graph_ops::emit_storage_store;
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
@@ -1553,7 +1547,7 @@ fn build_filter_flags(
     idx: usize,
     spec: FilterLoop,
     flags: crate::BindingRef,
-    next_effect: &mut u32,
+    next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     use super::graph_ops::{emit_storage_store, intern_storage_view, intern_u32};
     graph.skeleton.blocks[bid].side_effects.drain(idx..);
@@ -1641,7 +1635,7 @@ fn build_filter_scan(
     idx: usize,
     spec: FilterLoop,
     work: FilterWorkBuffers,
-    next_effect: &mut u32,
+    next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     use super::graph_ops::{emit_load, emit_storage_store, intern_storage_view, intern_u32};
     graph.skeleton.blocks[bid].side_effects.drain(idx..);
@@ -1813,7 +1807,7 @@ fn build_filter_scatter(
     idx: usize,
     spec: FilterLoop,
     work: FilterWorkBuffers,
-    next_effect: &mut u32,
+    next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     use super::graph_ops::{emit_load, emit_storage_store, intern_storage_view, intern_u32};
     let after = graph.skeleton.create_block();
@@ -1928,7 +1922,7 @@ fn build_runtime_filter_loop(
     idx_in_block: usize,
     spec: FilterLoop,
     scratch_out: crate::BindingRef,
-    next_effect: &mut u32,
+    next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     use super::graph_ops::{emit_storage_store, intern_storage_view, intern_u32};
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
@@ -2331,7 +2325,7 @@ fn emit_read_element(
     idx_nid: NodeId,
     arr_ty: &Type<TypeName>,
     elem_ty: &Type<TypeName>,
-    next_effect: &mut u32,
+    next_effect: &mut crate::IdSource<EffectToken>,
 ) -> NodeId {
     let actual_arr_ty = graph.types.get(&arr_nid).filter(|ty| is_plain_array_source(ty)).cloned();
     let arr_ty = actual_arr_ty.as_ref().unwrap_or(arr_ty);

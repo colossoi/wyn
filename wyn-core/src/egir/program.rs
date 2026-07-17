@@ -251,13 +251,16 @@ pub(crate) fn host_resource_map(resources: &[LogicalResource]) -> HashMap<crate:
 /// boundary. Host resources already have stable identities; this pass adds
 /// semantic residency requirements and segmented-operation scratch, then
 /// records explicit producer/consumer flows.
-pub fn plan_logical_resources(inner: SemanticProgram) -> AllocatedProgram {
+pub fn plan_logical_resources(
+    inner: SemanticProgram,
+    effect_ids: &mut crate::IdSource<super::types::EffectToken>,
+) -> AllocatedProgram {
     let mut allocated = AllocatedProgram {
         semantic: inner,
         materializations: Vec::new(),
     };
     classify_existing_compiler_resources(&mut allocated);
-    super::residency::run(&mut allocated);
+    super::residency::run(&mut allocated, effect_ids);
     super::soac::filter::resolve_scratch_sizes(&mut allocated);
     super::soac::filter::allocate_work_resources(&mut allocated);
     let mut scratch =

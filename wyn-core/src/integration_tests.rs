@@ -1492,22 +1492,25 @@ fn target_profiles_are_selected_before_ssa_lowering() {
 
 #[test]
 fn terminal_scan_helpers_are_complete_region_arena_members() {
-    let allocated = compile_to_semantic_egir(
+    let mut allocated = compile_to_semantic_egir(
         "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
     );
     assert!(
         !allocated.inner.functions.iter().any(|function| function.name.ends_with("_scan_op_swap")),
         "planner-generated scan helper leaked into semantic EGIR"
     );
-    let plan = crate::egir::parallelize::lower(&allocated.inner).expect("parallel schedule");
+    let plan = crate::egir::parallelize::lower(&allocated.inner, &mut allocated.effect_ids)
+        .expect("parallel schedule");
     assert!(
         plan.generated_callables().any(|function| function.name.ends_with("_scan_op_swap")),
         "scan helper must be owned by the kernel plan"
     );
     let mut binding_ids = allocated.binding_ids;
+    let mut effect_ids = allocated.effect_ids;
     let physical = crate::egir::target_lowering::schedule(
         allocated.inner,
         &mut binding_ids,
+        &mut effect_ids,
         crate::LoweringProfile::PORTABLE,
     )
     .expect("terminal schedule");

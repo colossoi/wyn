@@ -29,7 +29,7 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
         kind: SideEffectKind::Effect(EffectOp::Load),
         operand_nodes: smallvec![place],
         result: Some(produced),
-        effects: Some((EffectToken(0), EffectToken(1))),
+        effects: Some((EffectToken::from(0), EffectToken::from(1))),
         span: None,
     });
     let unrelated = graph.alloc_side_effect_result(u32_ty());
@@ -37,7 +37,7 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
         kind: SideEffectKind::Effect(EffectOp::Load),
         operand_nodes: smallvec![place],
         result: Some(unrelated),
-        effects: Some((EffectToken(1), EffectToken(2))),
+        effects: Some((EffectToken::from(1), EffectToken::from(2))),
         span: None,
     });
     let body_param = graph.add_block_param(body, 0, u32_ty());
@@ -46,7 +46,7 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
         kind: SideEffectKind::Effect(EffectOp::Store),
         operand_nodes: smallvec![place, body_param],
         result: None,
-        effects: Some((EffectToken(2), EffectToken(3))),
+        effects: Some((EffectToken::from(2), EffectToken::from(3))),
         span: None,
     });
     graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
@@ -271,7 +271,7 @@ fn selected_operation_recipe_detaches_an_independent_continuation_effect() {
         kind: SideEffectKind::Effect(EffectOp::Load),
         operand_nodes: smallvec![zero],
         result: Some(produced),
-        effects: Some((EffectToken(0), EffectToken(1))),
+        effects: Some((EffectToken::from(0), EffectToken::from(1))),
         span: None,
     });
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
@@ -309,7 +309,7 @@ fn selected_operation_recipe_rejects_a_continuation_parameter_dependency() {
         kind: SideEffectKind::Effect(EffectOp::Load),
         operand_nodes: smallvec![result],
         result: Some(produced),
-        effects: Some((EffectToken(0), EffectToken(1))),
+        effects: Some((EffectToken::from(0), EffectToken::from(1))),
         span: None,
     });
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);

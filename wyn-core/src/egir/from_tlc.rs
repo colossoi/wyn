@@ -122,6 +122,7 @@ impl<'a> GlobalContext<'a> {
         &self,
         pure_constants: &LookupSet<String>,
         binding_ids: &'b mut crate::IdSource<u32>,
+        effect_ids: &'b mut crate::IdSource<EffectToken>,
     ) -> Converter<'a, 'b> {
         Converter::new(
             self.top_level,
@@ -129,6 +130,7 @@ impl<'a> GlobalContext<'a> {
             self.symbols,
             pure_constants.clone(),
             binding_ids,
+            effect_ids,
             self.region_interner,
             self.resources,
         )
@@ -232,6 +234,7 @@ pub fn run(
     program: &TlcProgram,
     input_slice_bounds: &crate::tlc::input_slice_bounds::ProgramBounds,
     binding_ids: &mut crate::IdSource<u32>,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<RawProgram, ConvertError> {
     let seed = super::pipeline_seed::run(program);
     let pipeline = seed.pipeline;
@@ -269,7 +272,7 @@ pub fn run(
         }
         let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
 
-        let mut converter = ctx.new_converter(&pure_constant_names, binding_ids);
+        let mut converter = ctx.new_converter(&pure_constant_names, binding_ids, effect_ids);
         if let Ok(result_nid) = converter.convert_term(&def.body) {
             converter.set_return(Some(result_nid));
             let (mut graph, control_headers) = converter.into_graph_parts();
@@ -301,7 +304,7 @@ pub fn run(
                 if pure_constant_names.contains(def_name) {
                     continue;
                 }
-                match convert_function(def, &ctx, &pure_constant_names, binding_ids)? {
+                match convert_function(def, &ctx, &pure_constant_names, binding_ids, effect_ids)? {
                     ConvertedFunc::Extern(f) => externs.push(f),
                     ConvertedFunc::Regular(fe) => functions.push(fe),
                 }
@@ -318,6 +321,7 @@ pub fn run(
                     workgroup,
                     entry_input_bounds,
                     binding_ids,
+                    effect_ids,
                 )?;
                 entry_points.push(ep);
             }
@@ -354,6 +358,7 @@ fn convert_function<'a>(
     ctx: &GlobalContext<'a>,
     pure_constants: &LookupSet<String>,
     binding_ids: &'a mut crate::IdSource<u32>,
+    effect_ids: &'a mut crate::IdSource<EffectToken>,
 ) -> Result<ConvertedFunc, ConvertError> {
     let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?.to_string();
@@ -381,7 +386,7 @@ fn convert_function<'a>(
         .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))
         .collect::<Result<_, ConvertError>>()?;
 
-    let mut converter = ctx.new_converter(pure_constants, binding_ids);
+    let mut converter = ctx.new_converter(pure_constants, binding_ids, effect_ids);
     for (i, (sym, ty)) in params.iter().enumerate() {
         let nid = converter.graph.add_func_param(i, ty.clone());
         converter.locals.insert(*sym, nid);
@@ -518,6 +523,7 @@ fn convert_entry_point(
     workgroup: (u32, u32, u32),
     input_slice_bounds_for_entry: Option<&LookupMap<SymbolId, BufferLen>>,
     binding_ids: &mut crate::IdSource<u32>,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<RawEntry, ConvertError> {
     use crate::flow::ExecutionModel;
 
@@ -534,7 +540,7 @@ fn convert_entry_point(
         .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))
         .collect::<Result<_, ConvertError>>()?;
 
-    let mut converter = ctx.new_converter(pure_constants, binding_ids);
+    let mut converter = ctx.new_converter(pure_constants, binding_ids, effect_ids);
 
     // Build entry inputs alongside the symbol → NodeId bindings. A compute
     // entry param that's a tuple-of-unsized-arrays gets one storage binding
@@ -831,8 +837,8 @@ struct Converter<'a, 'b> {
     pure_constants: LookupSet<String>,
     /// Control headers for structured control flow (SPIR-V).
     control_headers: LookupMap<BlockId, ControlHeader>,
-    /// Effect token counter.
-    next_effect: u32,
+    /// Program-wide identity source for effect-chain endpoints.
+    effect_ids: &'b mut crate::IdSource<EffectToken>,
     /// Span of the term currently being converted. Threaded through every
     /// pure-node intern and side-effect push so backend errors can blame
     /// the originating source. Pushed/popped in `convert_term`; `None`
@@ -864,6 +870,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         symbols: &'a SymbolTable,
         pure_constants: LookupSet<String>,
         binding_ids: &'b mut crate::IdSource<u32>,
+        effect_ids: &'b mut crate::IdSource<EffectToken>,
         region_interner: &'a std::cell::RefCell<crate::egir::program::RegionInterner>,
         resources: &'a std::cell::RefCell<ResourceRegistry>,
     ) -> Self {
@@ -879,7 +886,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             inlined_constants: LookupMap::new(),
             pure_constants,
             control_headers: LookupMap::new(),
-            next_effect: 1,
+            effect_ids,
             current_span: None,
             output_sources: Vec::new(),
             binding_ids,
@@ -904,7 +911,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     }
 
     fn alloc_effect(&mut self) -> EffectToken {
-        super::graph_ops::alloc_effect(&mut self.next_effect)
+        super::graph_ops::alloc_effect(self.effect_ids)
     }
 
     /// Set the return terminator on the current block.
@@ -935,7 +942,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             index_nid,
             value_nid,
             elem_ty,
-            &mut self.next_effect,
+            self.effect_ids,
             span,
         );
     }
@@ -1065,7 +1072,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         self.current_block,
                         place_nid,
                         ty.clone(),
-                        &mut self.next_effect,
+                        self.effect_ids,
                         self.current_span,
                     ))
                 } else {
@@ -1360,7 +1367,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         let arg_nids: SmallVec<[NodeId; 4]> =
                             args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
                         let result_nid = self.graph.alloc_side_effect_result(ty.clone());
-                        let effect_in = EffectToken(0);
+                        let effect_in = self.alloc_effect();
                         let effect_out = self.alloc_effect();
                         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
                             kind: SideEffectKind::Effect(EffectOp::Op {
@@ -1382,7 +1389,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     let arg_nids: SmallVec<[NodeId; 4]> =
                         args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
                     let result_nid = self.graph.alloc_side_effect_result(ty);
-                    let effect_in = EffectToken(0);
+                    let effect_in = self.alloc_effect();
                     let effect_out = self.alloc_effect();
                     self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
                         kind: SideEffectKind::Effect(EffectOp::Op {
@@ -1419,7 +1426,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             self.current_block,
             place_nid,
             ty.clone(),
-            &mut self.next_effect,
+            self.effect_ids,
             self.current_span,
         ))
     }
@@ -1451,7 +1458,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             args[1..].iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let effect_result = self.graph.alloc_side_effect_result(unit_ty);
-        let effect_in = EffectToken(0);
+        let effect_in = self.alloc_effect();
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
             kind: SideEffectKind::Effect(EffectOp::Op {
@@ -2113,7 +2120,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             soac,
             operands,
             ty,
-            &mut self.next_effect,
+            self.effect_ids,
             span,
         )
     }

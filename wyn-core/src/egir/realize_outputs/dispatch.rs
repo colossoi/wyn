@@ -26,8 +26,8 @@ use super::super::graph_ops;
 use super::super::program::OutputWriter;
 use super::super::soac::filter;
 use super::super::types::{
-    EGraph, ENode, NodeId, PureOp, Raw, SideEffectIndex, SideEffectKind, SkeletonTerminator, Soac,
-    SoacDestination,
+    EGraph, ENode, EffectToken, NodeId, PureOp, Raw, SideEffectIndex, SideEffectKind, SkeletonTerminator,
+    Soac, SoacDestination,
 };
 
 /// The set of Pure nodes reachable from an entry's live outputs — the operand
@@ -89,7 +89,7 @@ pub fn compute_slot_source(
     graph: &mut EGraph<Raw>,
     effect_index: &SideEffectIndex,
     aliases: &mut LookupMap<NodeId, NodeId>,
-    next_effect: &mut u32,
+    effect_ids: &mut crate::IdSource<EffectToken>,
     block: BlockId,
     source: NodeId,
     slot_index: usize,
@@ -115,14 +115,7 @@ pub fn compute_slot_source(
             reject_sibling_consumers(graph, source, slot_index)?;
         } else {
             rewrite_sibling_index_consumers(
-                graph,
-                aliases,
-                block,
-                next_effect,
-                source,
-                view,
-                elem_ty,
-                slot_index,
+                graph, aliases, block, effect_ids, source, view, elem_ty, slot_index,
             )?;
         }
         retarget_array_projection(graph, effect_index, screma_result, field_idx, view);
@@ -157,7 +150,7 @@ pub fn compute_slot_source(
             );
             let idx = graph_ops::intern_u32(graph, j as u32, None);
             let effect =
-                graph_ops::emit_storage_store(graph, block, view, idx, elem, et.clone(), next_effect, None);
+                graph_ops::emit_storage_store(graph, block, view, idx, elem, et.clone(), effect_ids, None);
             writers.push(OutputWriter::Effect(effect));
         }
         return Ok(writers);
@@ -183,7 +176,7 @@ pub fn compute_slot_source(
         idx0,
         source,
         slot_ty.clone(),
-        next_effect,
+        effect_ids,
         None,
     );
     Ok(vec![OutputWriter::Effect(effect)])
@@ -195,7 +188,7 @@ pub fn compute_slot_source(
 pub fn graphics_slot_source(
     graph: &mut EGraph<Raw>,
     block: BlockId,
-    next_effect: &mut u32,
+    effect_ids: &mut crate::IdSource<EffectToken>,
     source: NodeId,
     slot_index: usize,
     slot_ty: &Type<TypeName>,
@@ -207,12 +200,7 @@ pub fn graphics_slot_source(
         None,
     );
     OutputWriter::Effect(graph_ops::emit_store(
-        graph,
-        block,
-        place,
-        source,
-        next_effect,
-        None,
+        graph, block, place, source, effect_ids, None,
     ))
 }
 
@@ -396,7 +384,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
     graph: &mut EGraph<Raw>,
     aliases: &mut LookupMap<NodeId, NodeId>,
     block: BlockId,
-    next_effect: &mut u32,
+    effect_ids: &mut crate::IdSource<EffectToken>,
     source: NodeId,
     view: NodeId,
     elem_ty: Type<TypeName>,
@@ -543,7 +531,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                     view,
                     idx_nid,
                     elem_ty.clone(),
-                    next_effect,
+                    effect_ids,
                     None,
                 );
                 aliases.insert(cid, load_result);

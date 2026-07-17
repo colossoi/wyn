@@ -740,7 +740,7 @@ mod tests {
             ),
             operand_nodes: smallvec![input],
             result: Some(producer_result),
-            effects: Some((EffectToken(0), EffectToken(1))),
+            effects: Some((EffectToken::from(0), EffectToken::from(1))),
             span: None,
         });
         let projected = graph.intern_pure(
@@ -795,7 +795,7 @@ mod tests {
             ),
             operand_nodes: smallvec![projected],
             result: Some(consumer_result),
-            effects: Some((EffectToken(1), EffectToken(2))),
+            effects: Some((EffectToken::from(1), EffectToken::from(2))),
             span: None,
         });
         let output = graph.intern_pure(
@@ -836,7 +836,7 @@ mod tests {
         assert_eq!(block.side_effects[0].result, Some(unrelated_result));
         assert_eq!(
             block.side_effects[1].effects,
-            Some((EffectToken(0), EffectToken(2)))
+            Some((EffectToken::from(0), EffectToken::from(2)))
         );
         let effect = &block.side_effects[1];
         let SideEffectKind::Soac(id, Soac::Screma(op)) = &effect.kind else {

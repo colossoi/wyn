@@ -23,7 +23,13 @@ use super::soac::{filter, hist, screma};
 /// rewriting passes (e.g. `soac_expand` allocating fresh tokens for new
 /// Load/Store side-effects so they don't collide with existing ones).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EffectToken(pub u32);
+pub struct EffectToken(u32);
+
+impl From<u32> for EffectToken {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
 
 impl std::fmt::Display for EffectToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

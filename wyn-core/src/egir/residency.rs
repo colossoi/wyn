@@ -19,8 +19,8 @@ use super::program::{
 };
 use super::soac::{filter, screma};
 use super::types::{
-    EGraph, ENode, NodeId, PureOp, SegExtent, SegResourceAccess, SegResourceAccessKind, SideEffectKind,
-    SideEffectSite, Soac, SoacDestination,
+    EGraph, ENode, EffectToken, NodeId, PureOp, SegExtent, SegResourceAccess, SegResourceAccessKind,
+    SideEffectKind, SideEffectSite, Soac, SoacDestination,
 };
 use crate::ast::TypeName;
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
@@ -98,14 +98,14 @@ struct InputReplacement {
     resource: ResourceId,
 }
 
-pub fn run(inner: &mut AllocatedProgram) {
+pub fn run(inner: &mut AllocatedProgram, effect_ids: &mut crate::IdSource<EffectToken>) {
     select_in_place_destinations(inner);
     loop {
         super::semantic_graph::rebuild_dependencies(inner);
         let Some(plan) = next_materialization_plan(inner) else {
             break;
         };
-        apply_materialization(inner, plan);
+        apply_materialization(inner, plan, effect_ids);
     }
     super::semantic_graph::rebuild_dependencies(inner);
     super::realize_outputs::reconcile::run(inner)
@@ -470,13 +470,17 @@ fn next_materialization_plan(inner: &AllocatedProgram) -> Option<Materialization
     plan_operation_result(inner).or_else(|| plan_parallel_prelude(inner))
 }
 
-fn apply_materialization(inner: &mut AllocatedProgram, plan: MaterializationPlan) {
+fn apply_materialization(
+    inner: &mut AllocatedProgram,
+    plan: MaterializationPlan,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) {
     match plan.source {
         MaterializationSource::OperationResult(operation) => {
-            materialize_operation_result(inner, plan.entry, plan.kind, operation);
+            materialize_operation_result(inner, plan.entry, plan.kind, operation, effect_ids);
         }
         MaterializationSource::ParallelPrelude(prelude) => {
-            materialize_parallel_prelude(inner, plan.entry, prelude);
+            materialize_parallel_prelude(inner, plan.entry, prelude, effect_ids);
         }
     }
 }
@@ -1017,9 +1021,10 @@ fn materialize_operation_result(
     entry_index: usize,
     kind: MaterializationKind,
     operation: OperationResultMaterialization,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
     if matches!(&operation.layout, MaterializedValueLayout::RuntimeArray { .. }) {
-        materialize_runtime_array_result(inner, entry_index, operation);
+        materialize_runtime_array_result(inner, entry_index, operation, effect_ids);
         return;
     }
     let OperationResultMaterialization {
@@ -1103,6 +1108,7 @@ fn materialize_operation_result(
         &output_resources,
         &output_specs,
         &source_output_resources,
+        effect_ids,
     );
 
     rewrite_materialized_operation_source(
@@ -1112,6 +1118,7 @@ fn materialize_operation_result(
         source_site,
         &output_resources,
         &output_specs,
+        effect_ids,
     );
     inner.materializations.push(producer);
 }
@@ -1120,6 +1127,7 @@ fn materialize_runtime_array_result(
     inner: &mut AllocatedProgram,
     entry_index: usize,
     operation: OperationResultMaterialization,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
     let OperationResultMaterialization {
         result,
@@ -1220,6 +1228,7 @@ fn materialize_runtime_array_result(
         result,
         source_site,
         &handoff,
+        effect_ids,
     );
     inner.materializations.push(producer);
 }
@@ -1229,6 +1238,7 @@ fn rewrite_runtime_array_source(
     result: NodeId,
     source_site: SideEffectSite,
     handoff: &RuntimeArrayHandoff,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     set_resource_declaration(
@@ -1248,7 +1258,7 @@ fn rewrite_runtime_array_source(
     let length_view =
         graph_ops::intern_resource_view(&mut entry.graph, handoff.length, u32_ty.clone(), None);
     let (survivor_count, load_effect) =
-        detached_scalar_handoff_load(&mut entry.graph, length_view, &u32_ty);
+        detached_scalar_handoff_load(&mut entry.graph, length_view, &u32_ty, effect_ids);
     let zero = graph_ops::intern_u32(&mut entry.graph, 0, None);
     let view = graph_ops::intern_chunked_resource_view(
         &mut entry.graph,
@@ -1292,6 +1302,7 @@ fn configure_operation_materialization(
     output_resources: &[ResourceId],
     output_specs: &[OutputSpec],
     source_output_resources: &HashSet<ResourceId>,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
     let mut output_views = Vec::new();
     for (&resource, output) in output_resources.iter().zip(output_specs) {
@@ -1322,6 +1333,7 @@ fn configure_operation_materialization(
         producer_result,
         &output_views,
         output_specs,
+        effect_ids,
     );
 }
 
@@ -1378,6 +1390,7 @@ fn configure_materialized_result(
     result: NodeId,
     output_views: &[NodeId],
     output_specs: &[OutputSpec],
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
     if kind == MaterializationKind::Scalar {
         if let Some((&output_view, output)) = output_views.first().zip(output_specs.first()) {
@@ -1392,7 +1405,14 @@ fn configure_materialized_result(
                     None,
                 )
             };
-            emit_scalar_handoff_store(graph, graph.skeleton.entry, output_view, value, &output.elem_ty);
+            emit_scalar_handoff_store(
+                graph,
+                graph.skeleton.entry,
+                output_view,
+                value,
+                &output.elem_ty,
+                effect_ids,
+            );
         }
         return;
     }
@@ -1416,6 +1436,7 @@ fn rewrite_materialized_operation_source(
     producer_site: SideEffectSite,
     output_resources: &[ResourceId],
     output_specs: &[OutputSpec],
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
     let (block_id, effect_index) = (producer_site.block, producer_site.index);
     let mut array_replacements = Vec::new();
@@ -1445,7 +1466,7 @@ fn rewrite_materialized_operation_source(
             });
         let value = if kind == MaterializationKind::Scalar {
             let (loaded, load_effect) =
-                detached_scalar_handoff_load(&mut entry.graph, view, &output.elem_ty);
+                detached_scalar_handoff_load(&mut entry.graph, view, &output.elem_ty, effect_ids);
             scalar_effects.push(load_effect);
             loaded
         } else {
@@ -1513,6 +1534,7 @@ fn materialize_parallel_prelude(
     inner: &mut AllocatedProgram,
     entry_index: usize,
     prelude: ParallelPreludeMaterialization,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
     let ParallelPreludeMaterialization {
         prelude,
@@ -1571,12 +1593,13 @@ fn materialize_parallel_prelude(
         output_view,
         projected_root,
         &elem_ty,
+        effect_ids,
     );
     compact_entry_interface(&mut producer.entry);
 
     let entry = &mut inner.entry_points[entry_index];
     let view = declare_resource_view(entry, resource, StorageRole::Input, &elem_ty, &size);
-    let (loaded, load_effect) = detached_scalar_handoff_load(&mut entry.graph, view, &elem_ty);
+    let (loaded, load_effect) = detached_scalar_handoff_load(&mut entry.graph, view, &elem_ty, effect_ids);
     graph_ops::replace_all_references(&mut entry.graph, root, loaded);
     match source {
         super::graph_projector::ValueRecipeSource::EntryBlock => {
@@ -1699,9 +1722,9 @@ fn emit_scalar_handoff_store(
     output_view: NodeId,
     value: NodeId,
     elem_ty: &Type<TypeName>,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
     let zero = graph_ops::intern_u32(graph, 0, None);
-    let mut next_effect = graph_ops::next_effect_token(graph);
     graph_ops::emit_storage_store(
         graph,
         block,
@@ -1709,7 +1732,7 @@ fn emit_scalar_handoff_store(
         zero,
         value,
         elem_ty.clone(),
-        &mut next_effect,
+        effect_ids,
         None,
     );
 }
@@ -1718,6 +1741,7 @@ fn detached_scalar_handoff_load(
     graph: &mut EGraph,
     view: NodeId,
     elem_ty: &Type<TypeName>,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> (NodeId, super::types::SideEffect) {
     let zero = graph_ops::intern_u32(graph, 0, None);
     let place = graph.intern_pure(
@@ -1726,8 +1750,7 @@ fn detached_scalar_handoff_load(
         elem_ty.clone(),
         None,
     );
-    let mut next_effect = graph_ops::next_effect_token(graph);
-    graph_ops::detached_load(graph, place, elem_ty.clone(), &mut next_effect, None)
+    graph_ops::detached_load(graph, place, elem_ty.clone(), effect_ids, None)
 }
 
 fn replace_prelude_effects_with_load(

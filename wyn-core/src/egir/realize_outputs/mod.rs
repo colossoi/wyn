@@ -29,12 +29,11 @@ use crate::flow::{BlockId, ExecutionModel};
 use ExecutionModel as _;
 
 use super::from_tlc::ConvertError;
-use super::graph_ops;
 use super::program::{
     host_resource_map, Entry, OutputRoute, OutputSlotId, OutputWriter, RawEntry, RawProgram,
     SemanticResourceRef, SlotSource,
 };
-use super::types::{EGraph, NodeId, Raw, SkeletonTerminator};
+use super::types::{EGraph, EffectToken, NodeId, Raw, SkeletonTerminator};
 use crate::ResourceId;
 use std::collections::HashMap;
 
@@ -44,11 +43,14 @@ pub mod verify;
 
 /// Realize every entry's outputs into side-effect stores. After this
 /// pass, `verify::check` confirms the invariant.
-pub fn run(inner: &mut RawProgram) -> Result<(), ConvertError> {
+pub fn run(
+    inner: &mut RawProgram,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) -> Result<(), ConvertError> {
     let by_binding = host_resource_map(&inner.resources);
     let RawProgram { ir, resources } = inner;
     for entry in &mut ir.entry_points {
-        realize_entry(entry, &by_binding, resources)?;
+        realize_entry(entry, &by_binding, resources, effect_ids)?;
     }
     // Output retargeting can rewrite a captured `map` result from a Composite
     // array to a storage view; sync each capturing region's parameter type so
@@ -61,6 +63,7 @@ fn realize_entry(
     entry: &mut RawEntry,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
     resources: &mut [super::program::LogicalResource],
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), ConvertError> {
     if entry.outputs.is_empty() {
         return Ok(());
@@ -69,11 +72,11 @@ fn realize_entry(
         if entry.output_routes.is_empty() {
             synthesize_compute_routes(entry);
         }
-        realize_compute_slots(entry, by_binding, resources)?;
+        realize_compute_slots(entry, by_binding, resources, effect_ids)?;
         clear_compute_returns(entry);
         Ok(())
     } else {
-        realize_graphics_returns(entry)
+        realize_graphics_returns(entry, effect_ids)
     }
 }
 
@@ -95,6 +98,7 @@ fn realize_compute_slots(
     entry: &mut RawEntry,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
     resources: &mut [super::program::LogicalResource],
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), ConvertError> {
     let Entry {
         graph,
@@ -104,7 +108,6 @@ fn realize_compute_slots(
         resource_declarations,
         ..
     } = entry;
-    let mut next_effect = graph_ops::next_effect_token(graph);
     // One producer snapshot for the whole slot loop: everything below
     // appends side effects or rewrites them in place, so sites stay valid.
     let effect_index = graph.side_effect_index();
@@ -151,7 +154,7 @@ fn realize_compute_slots(
                 graph,
                 &effect_index,
                 aliases,
-                &mut next_effect,
+                effect_ids,
                 src.block,
                 src.value,
                 slot_index,
@@ -200,7 +203,10 @@ fn synthesize_compute_routes(entry: &mut RawEntry) {
 
 /// Graphics entries retain return values because their ABI is location-based
 /// IO, not storage output routes.
-fn realize_graphics_returns(entry: &mut RawEntry) -> Result<(), ConvertError> {
+fn realize_graphics_returns(
+    entry: &mut RawEntry,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) -> Result<(), ConvertError> {
     let Entry {
         graph,
         outputs,
@@ -210,14 +216,13 @@ fn realize_graphics_returns(entry: &mut RawEntry) -> Result<(), ConvertError> {
     let Some((return_block, result)) = unique_value_return(graph) else {
         return Ok(());
     };
-    let mut next_effect = graph_ops::next_effect_token(graph);
     let effect_index = graph.side_effect_index();
     for (slot, (output, source)) in outputs.iter().zip(output_sources(graph, result, outputs)).enumerate() {
         let mut writers = source_value_writers(graph, &effect_index, source);
         writers.push(dispatch::graphics_slot_source(
             graph,
             return_block,
-            &mut next_effect,
+            effect_ids,
             source,
             slot,
             &output.ty,

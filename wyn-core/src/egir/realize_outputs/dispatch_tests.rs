@@ -69,7 +69,7 @@ fn compute_slot_source_rejects_unsized_array_without_soac() {
     let mut graph = EGraph::<Raw>::new();
     let source = graph.alloc_side_effect_result(unsized_arr_ty.clone());
     let block = graph.skeleton.entry;
-    let mut next_effect = 1u32;
+    let mut next_effect = crate::IdSource::new();
     let mut aliases = std::collections::HashMap::new();
 
     let effect_index = graph.side_effect_index();
@@ -188,7 +188,7 @@ fn rewrite_sibling_index_consumers_rejects_map_output_view_operand() {
     });
 
     let mut aliases = std::collections::HashMap::new();
-    let mut next_effect = 1u32;
+    let mut next_effect = crate::IdSource::new();
     let err = rewrite_sibling_index_consumers(
         &mut graph,
         &mut aliases,
@@ -248,7 +248,7 @@ fn rewrite_sibling_index_consumers_rejects_scatter_dest_position() {
     });
 
     let mut aliases = std::collections::HashMap::new();
-    let mut next_effect = 1u32;
+    let mut next_effect = crate::IdSource::new();
     let err = rewrite_sibling_index_consumers(
         &mut graph,
         &mut aliases,
@@ -311,7 +311,7 @@ fn rewrite_sibling_index_consumers_rejects_scatter_capture_position() {
     });
 
     let mut aliases = std::collections::HashMap::new();
-    let mut next_effect = 1u32;
+    let mut next_effect = crate::IdSource::new();
     let err = rewrite_sibling_index_consumers(
         &mut graph,
         &mut aliases,
@@ -392,7 +392,7 @@ fn rewrite_sibling_index_consumers_rejects_accumulator_output_view_operand() {
     });
 
     let mut aliases = std::collections::HashMap::new();
-    let mut next_effect = 1u32;
+    let mut next_effect = crate::IdSource::new();
     let err = rewrite_sibling_index_consumers(
         &mut graph,
         &mut aliases,

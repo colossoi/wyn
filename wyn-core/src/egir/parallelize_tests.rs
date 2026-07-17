@@ -43,12 +43,12 @@ fn output_ownership_comes_from_explicit_route_writer() {
     let mut graph = EGraph::new();
     let block = graph.skeleton.entry;
     let source = neutral(&mut graph, 0);
-    let writer = EffectToken(9);
+    let writer = EffectToken::from(9);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Effect(EffectOp::Store),
         operand_nodes: smallvec![],
         result: None,
-        effects: Some((EffectToken(8), writer)),
+        effects: Some((EffectToken::from(8), writer)),
         span: None,
     });
     let mut entry = SemanticEntry::new_with_resources(
@@ -175,6 +175,7 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
     let neutral = phase1.intern_pure(PureOp::Int("0".into()), smallvec![], elem_ty.clone(), None);
     let sums = ResourceId(40);
     let offsets = ResourceId(41);
+    let mut effect_ids = crate::IdSource::new();
     let phase2 = synthesize_phase2_scan(
         "prefix",
         "combine".into(),
@@ -184,6 +185,7 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
         sums,
         offsets,
         None,
+        &mut effect_ids,
     )
     .expect("phase2 synthesis");
 

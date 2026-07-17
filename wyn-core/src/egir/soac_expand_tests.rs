@@ -36,13 +36,15 @@ fn compile_to_expanded_egraph(input: &str) -> PhysicalEGraph {
         .optimize()
         .allocate();
     let mut binding_ids = allocated.binding_ids;
+    let mut effect_ids = allocated.effect_ids;
     let mut physical = crate::egir::target_lowering::schedule(
         allocated.inner,
         &mut binding_ids,
+        &mut effect_ids,
         crate::LoweringProfile::PORTABLE,
     )
     .expect("terminal schedule");
-    crate::egir::soac_expand::run(&mut physical);
+    crate::egir::soac_expand::run(&mut physical, &mut effect_ids);
     let inner = &physical;
     assert_eq!(
         inner.entry_points.len(),

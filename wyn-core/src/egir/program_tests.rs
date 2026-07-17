@@ -88,7 +88,8 @@ fn logical_allocation_introduces_the_allocated_sidecar() {
         size: LogicalSize::Unspecified,
     });
 
-    let allocated = plan_logical_resources(semantic);
+    let mut effect_ids = crate::IdSource::new();
+    let allocated = plan_logical_resources(semantic, &mut effect_ids);
 
     assert!(allocated.materializations.is_empty());
     assert_eq!(allocated.resources.len(), 1);
