@@ -38,6 +38,18 @@ impl std::fmt::Display for EffectToken {
     }
 }
 
+/// Splice a producer and consumer's effect-token chains around a fused operation.
+pub fn splice_effect_tokens(
+    producer: Option<(EffectToken, EffectToken)>,
+    consumer: Option<(EffectToken, EffectToken)>,
+) -> Option<(EffectToken, EffectToken)> {
+    match (producer, consumer) {
+        (Some((input, _)), Some((_, output))) => Some((input, output)),
+        (Some(effects), None) | (None, Some(effects)) => Some(effects),
+        (None, None) => None,
+    }
+}
+
 new_key_type! {
     /// Identity of a node in the e-graph. Every pure node, union node,
     /// block param, function param, and constant gets one.

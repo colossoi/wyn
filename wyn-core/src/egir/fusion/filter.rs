@@ -11,11 +11,11 @@ use std::collections::HashSet;
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
-use super::envelope::splice_effects;
 use super::vertical::{capture_types, fresh_region_name, graph_and_span, graph_mut, FusionSite};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::egir::graph_ops;
+use crate::egir::ir::splice_effect_tokens;
 use crate::egir::program::{OutputWriter, SemanticFunc, SemanticProgram, SemanticResourceRef};
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::{filter, screma};
@@ -385,7 +385,7 @@ fn apply_with_consumer(
     operands.push(filter.input);
     operands.extend(output_views);
 
-    let fused_effects = splice_effects(filter_effect.effects, consumer_effect.effects);
+    let fused_effects = splice_effect_tokens(filter_effect.effects, consumer_effect.effects);
     {
         let consumer = &mut graph.skeleton.blocks[candidate.block].side_effects[consumer_index];
         consumer.operand_nodes = operands;

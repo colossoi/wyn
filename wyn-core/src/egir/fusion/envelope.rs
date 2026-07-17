@@ -14,6 +14,7 @@ use super::vertical::{
 };
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
+use crate::egir::ir::splice_effect_tokens;
 use crate::egir::program::{SemanticFunc, SemanticProgram};
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::{filter, hist, screma};
@@ -281,7 +282,7 @@ fn apply_filter(inner: &mut SemanticProgram, candidate: Candidate) {
     debug_assert_eq!(producer.input_nodes.len(), 1);
     let graph = graph_mut(inner, candidate.site);
     let block = &mut graph.skeleton.blocks[candidate.block];
-    let fused_effects = splice_effects(
+    let fused_effects = splice_effect_tokens(
         block.side_effects[candidate.producer].effects,
         block.side_effects[candidate.consumer].effects,
     );
@@ -364,7 +365,7 @@ fn apply_hist(inner: &mut SemanticProgram, candidate: Candidate) {
 
     let graph = graph_mut(inner, candidate.site);
     let block = &mut graph.skeleton.blocks[candidate.block];
-    let fused_effects = splice_effects(
+    let fused_effects = splice_effect_tokens(
         block.side_effects[candidate.producer].effects,
         block.side_effects[candidate.consumer].effects,
     );
@@ -453,15 +454,4 @@ fn compose_hist_region(
         },
         function,
     )
-}
-
-pub(super) fn splice_effects(
-    producer: Option<(crate::egir::types::EffectToken, crate::egir::types::EffectToken)>,
-    consumer: Option<(crate::egir::types::EffectToken, crate::egir::types::EffectToken)>,
-) -> Option<(crate::egir::types::EffectToken, crate::egir::types::EffectToken)> {
-    match (producer, consumer) {
-        (Some((input, _)), Some((_, output))) => Some((input, output)),
-        (Some(effects), None) | (None, Some(effects)) => Some(effects),
-        (None, None) => None,
-    }
 }

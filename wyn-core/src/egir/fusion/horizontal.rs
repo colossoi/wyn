@@ -12,6 +12,7 @@ use smallvec::SmallVec;
 use super::space::seg_space_fusable;
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
+use crate::egir::ir::splice_effect_tokens;
 use crate::egir::program::{OutputSlotId, SemanticProgram};
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
@@ -268,11 +269,7 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
     // Splice the effect chain: the fused op spans from P's input token to Q's
     // output token (P precedes Q in the block), so any downstream effect that
     // read Q's output stays connected once Q is removed.
-    let fused_effects = match (block.side_effects[i].effects, block.side_effects[j].effects) {
-        (Some((p_in, _)), Some((_, q_out))) => Some((p_in, q_out)),
-        (Some(effects), None) | (None, Some(effects)) => Some(effects),
-        (None, None) => None,
-    };
+    let fused_effects = splice_effect_tokens(block.side_effects[i].effects, block.side_effects[j].effects);
     block.side_effects[i].kind = SideEffectKind::Soac(p.id, fused);
     block.side_effects[i].operand_nodes = operands;
     block.side_effects[i].result = Some(fused_result);

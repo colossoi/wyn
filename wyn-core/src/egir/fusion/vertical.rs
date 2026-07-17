@@ -11,6 +11,7 @@ use polytype::Type;
 use smallvec::smallvec;
 
 use crate::ast::{Span, TypeName};
+use crate::egir::ir::splice_effect_tokens;
 use crate::egir::program::{SemanticFunc, SemanticProgram};
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
@@ -380,11 +381,7 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
     // Legality above ensures that every intervening effect is token-free, so
     // the producer/consumer token endpoints can be spliced exactly as for an
     // adjacent pair.
-    let fused_effects = match (producer_effects, consumer_effects) {
-        (Some((input, _)), Some((_, output))) => Some((input, output)),
-        (Some(effects), None) | (None, Some(effects)) => Some(effects),
-        (None, None) => None,
-    };
+    let fused_effects = splice_effect_tokens(producer_effects, consumer_effects);
     let consumer = &mut block.side_effects[candidate.consumer];
     let n_old_inputs = old_input_count;
     let tail = consumer.operand_nodes[n_old_inputs..].to_vec();
