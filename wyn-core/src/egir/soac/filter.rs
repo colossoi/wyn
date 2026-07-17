@@ -9,8 +9,8 @@ use super::super::program::{
     PhysicalResourceRef, ResourceId, SemanticResourceRef,
 };
 use super::super::types::{
-    EgirPhase, GraphResource, NodeId, SegBody, SegExtent, SegSpace, Semantic, SideEffectKind, Soac,
-    SoacDestination, SoacInputType,
+    GraphResource, NodeId, SegBody, SegExtent, SegSpace, Semantic, SideEffectKind, Soac, SoacDestination,
+    SoacInputType, WynSoacPhase,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,7 +177,7 @@ impl<R> ScheduledState<R> {
 pub type PhysicalState = ScheduledState<PhysicalResourceRef>;
 
 #[derive(Clone, Debug)]
-pub struct Op<P: EgirPhase> {
+pub struct Op<P: WynSoacPhase> {
     pub body: Body,
     pub state: P::FilterState,
 }

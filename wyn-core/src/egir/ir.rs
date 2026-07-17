@@ -398,12 +398,6 @@ pub trait EgirPhase: Clone + std::fmt::Debug {
     type ResourceDecl: Clone + std::fmt::Debug;
     type SoacId: Clone + std::fmt::Debug;
     type Soac: Clone + std::fmt::Debug;
-    type MapState: Clone + std::fmt::Debug;
-    type ReduceState: Clone + std::fmt::Debug;
-    type ScanState: Clone + std::fmt::Debug;
-    type CompositeState: Clone + std::fmt::Debug;
-    type FilterState: Clone + std::fmt::Debug;
-    type HistState: Clone + std::fmt::Debug;
 }
 
 #[derive(Clone, Debug)]

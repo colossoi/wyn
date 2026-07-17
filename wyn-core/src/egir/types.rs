@@ -32,14 +32,23 @@ impl Language for WynLanguage {
     type Ty = Type<TypeName>;
 }
 
+pub trait WynSoacPhase: EgirPhase<Soac = Soac<Self>> + Sized {
+    type MapState: Clone + std::fmt::Debug;
+    type ReduceState: Clone + std::fmt::Debug;
+    type ScanState: Clone + std::fmt::Debug;
+    type CompositeState: Clone + std::fmt::Debug;
+    type FilterState: Clone + std::fmt::Debug;
+    type HistState: Clone + std::fmt::Debug;
+}
+
 #[derive(Clone, Debug)]
-pub enum Soac<P: EgirPhase> {
+pub enum Soac<P: WynSoacPhase> {
     Screma(screma::Op<P>),
     Filter(filter::Op<P>),
     Hist(hist::Op<P>),
 }
 
-impl<P: EgirPhase> Soac<P> {
+impl<P: WynSoacPhase> Soac<P> {
     pub(crate) fn seg_bodies(&self) -> Vec<&SegBody> {
         match self {
             Self::Screma(op) => {
@@ -134,6 +143,9 @@ impl<R: GraphResource> EgirPhase for Raw<R> {
     type ResourceDecl = super::program::SemanticResourceDecl;
     type SoacId = ();
     type Soac = Soac<Self>;
+}
+
+impl<R: GraphResource> WynSoacPhase for Raw<R> {
     type MapState = screma::RawState;
     type ReduceState = screma::RawState;
     type ScanState = screma::RawState;
@@ -147,6 +159,9 @@ impl<R: GraphResource> EgirPhase for Semantic<R> {
     type ResourceDecl = super::program::SemanticResourceDecl;
     type SoacId = super::program::SemanticOpId;
     type Soac = Soac<Self>;
+}
+
+impl<R: GraphResource> WynSoacPhase for Semantic<R> {
     type MapState = screma::SemanticState<R>;
     type ReduceState = screma::SemanticState<R>;
     type ScanState = screma::SemanticState<R>;
@@ -160,6 +175,9 @@ impl<R: GraphResource> EgirPhase for Scheduled<R> {
     type ResourceDecl = super::program::SemanticResourceDecl;
     type SoacId = super::program::SemanticOpId;
     type Soac = Soac<Self>;
+}
+
+impl<R: GraphResource> WynSoacPhase for Scheduled<R> {
     type MapState = screma::ScheduledState<R>;
     type ReduceState = screma::ScheduledState<R>;
     type ScanState = screma::ScheduledState<R>;
@@ -173,6 +191,9 @@ impl EgirPhase for Physical {
     type ResourceDecl = crate::interface::StorageBindingDecl;
     type SoacId = super::program::SemanticOpId;
     type Soac = Soac<Self>;
+}
+
+impl WynSoacPhase for Physical {
     type MapState = screma::ScheduledState<super::program::PhysicalResourceRef>;
     type ReduceState = screma::PhysicalSerialState;
     type ScanState = screma::PhysicalSerialState;
@@ -187,8 +208,8 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
         mut map_soac: impl FnMut(BlockId, usize, P::SoacId, Soac<P>) -> Result<(Q::SoacId, Soac<Q>), E>,
     ) -> Result<(EGraph<Q>, LookupMap<BlockId, BlockId>), E>
     where
-        P: EgirPhase<Soac = Soac<P>>,
-        Q: EgirPhase<Resource = P::Resource, Soac = Soac<Q>>,
+        P: WynSoacPhase,
+        Q: WynSoacPhase<Resource = P::Resource>,
     {
         let super::ir::EGraphParts {
             mut nodes,
@@ -273,8 +294,8 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
         ) -> Result<(Q::SoacId, Soac<Q>), E>,
     ) -> Result<(EGraph<Q>, LookupMap<NodeId, NodeId>, LookupMap<BlockId, BlockId>), E>
     where
-        P: EgirPhase<Soac = Soac<P>>,
-        Q: EgirPhase<Soac = Soac<Q>>,
+        P: WynSoacPhase,
+        Q: WynSoacPhase,
     {
         let super::ir::EGraphParts {
             nodes,
@@ -385,7 +406,7 @@ impl From<SoacOwnership> for SoacDestination {
     }
 }
 
-impl<P: EgirPhase> Soac<P> {
+impl<P: WynSoacPhase> Soac<P> {
     fn for_each_body_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
         match self {
             Self::Screma(op) => op.for_each_type_mut(visit),

@@ -39,12 +39,6 @@ impl EgirPhase for TestPhase {
     type ResourceDecl = u16;
     type SoacId = ();
     type Soac = ();
-    type MapState = ();
-    type ReduceState = ();
-    type ScanState = ();
-    type CompositeState = ();
-    type FilterState = ();
-    type HistState = ();
 }
 
 #[test]

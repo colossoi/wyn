@@ -3,7 +3,9 @@ use polytype::Type;
 use crate::ast::TypeName;
 
 use super::super::program::PhysicalResourceRef;
-use super::super::types::{EgirPhase, GraphResource, NodeId, SegBody, SegSpace, Semantic, SoacInputType};
+use super::super::types::{
+    GraphResource, NodeId, SegBody, SegSpace, Semantic, SoacInputType, WynSoacPhase,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpdatePolicy {
@@ -51,7 +53,7 @@ pub enum State<R> {
 pub type PhysicalState = State<PhysicalResourceRef>;
 
 #[derive(Clone, Debug)]
-pub struct Op<P: EgirPhase> {
+pub struct Op<P: WynSoacPhase> {
     pub body: Body,
     pub state: P::HistState,
 }

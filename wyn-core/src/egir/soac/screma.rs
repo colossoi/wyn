@@ -4,8 +4,8 @@ use crate::ast::TypeName;
 
 use super::super::program::OutputSlotId;
 use super::super::types::{
-    EgirPhase, GraphResource, NodeId, SegBody, SegResourceAccess, SegSpace, Semantic, SoacDestination,
-    SoacInputType,
+    GraphResource, NodeId, SegBody, SegResourceAccess, SegSpace, Semantic, SoacDestination, SoacInputType,
+    WynSoacPhase,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,7 +124,7 @@ pub enum ScheduledState<R> {
 pub struct PhysicalSerialState;
 
 #[derive(Clone, Debug)]
-pub enum Op<P: EgirPhase> {
+pub enum Op<P: WynSoacPhase> {
     Map {
         lanes: Lanes,
         state: P::MapState,
@@ -154,7 +154,7 @@ pub enum Flavor {
     Composite,
 }
 
-impl<P: EgirPhase> Op<P> {
+impl<P: WynSoacPhase> Op<P> {
     pub fn flavor(&self) -> Flavor {
         match self {
             Self::Map { .. } => Flavor::Map,

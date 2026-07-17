@@ -26,6 +26,7 @@ use crate::BindingRef;
 use super::types::{
     EGraph, ENode, EffectOp, EffectToken, EgirPhase, GraphResource, NodeId, Physical, PureOp,
     PureViewSource, Raw, Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac,
+    WynSoacPhase,
 };
 
 #[cfg(test)]
@@ -522,7 +523,7 @@ pub fn emit_view_load<P: EgirPhase>(
 /// the given operands; returns the allocated `result_nid` (typed as
 /// `result_ty`, which the SOAC's lowering recovers from
 /// `graph.types[result_nid]`).
-pub fn emit_pending_soac<P: EgirPhase<Soac = Soac<P>>>(
+pub fn emit_pending_soac<P: WynSoacPhase>(
     graph: &mut EGraph<P>,
     block: BlockId,
     id: P::SoacId,
