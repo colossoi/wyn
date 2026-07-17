@@ -27,7 +27,7 @@ use super::super::program::OutputWriter;
 use super::super::soac::filter;
 use super::super::types::{
     EGraph, ENode, EffectToken, NodeId, PureOp, Raw, SideEffectIndex, SideEffectKind, SkeletonTerminator,
-    Soac, SoacDestination,
+    Soac, SoacDestination, SoacPlacement,
 };
 
 /// The set of Pure nodes reachable from an entry's live outputs — the operand
@@ -244,7 +244,7 @@ pub(crate) fn result_soac_is_consuming_scan(
                     if field_idx >= n_maps {
                         let acc_idx = field_idx - n_maps;
                         if op.is_scan(acc_idx)
-                            && op.destination(field_idx) == Some(SoacDestination::InputBuffer)
+                            && op.destination(field_idx).is_some_and(SoacDestination::is_input_buffer)
                         {
                             return true;
                         }
@@ -282,12 +282,8 @@ pub(crate) fn result_soac_is_array_projection(
     let operator_field = field_idx.checked_sub(op.lanes().maps.len());
     let supported =
         field_idx < op.lanes().maps.len() || operator_field.is_some_and(|index| op.is_scan(index));
-    (supported
-        && matches!(
-            op.destination(field_idx),
-            Some(SoacDestination::Fresh | SoacDestination::UniqueInput)
-        ))
-    .then_some((*screma_result, field_idx))
+    (supported && op.destination(field_idx).is_some_and(SoacDestination::is_unplaced))
+        .then_some((*screma_result, field_idx))
 }
 
 /// True iff `ty` is an Array whose size is a free variable or
@@ -331,7 +327,7 @@ pub(crate) fn retarget_array_projection(
         let mut cursor = base_len;
         let mut views = Vec::with_capacity(op.result_count());
         for field in 0..op.result_count() {
-            if op.destination(field) == Some(SoacDestination::OutputView) {
+            if op.destination(field).is_some_and(SoacDestination::is_output_view) {
                 views.push(Some(
                     *se.operand_nodes.get(cursor).expect("Screma output view operand missing"),
                 ));
@@ -345,7 +341,7 @@ pub(crate) fn retarget_array_projection(
         if operator_index.is_some_and(|index| !op.is_scan(index)) {
             panic!("retarget_array_projection: unsupported Screma field {field_idx}");
         }
-        assert!(op.set_destination(field_idx, SoacDestination::OutputView));
+        assert!(op.place_destination(field_idx, SoacPlacement::OutputView));
         views[field_idx] = Some(output_view);
 
         se.operand_nodes.truncate(base_len);
@@ -605,7 +601,7 @@ pub fn retarget_filter_output(
                 continue;
             }
             if let SideEffectKind::Soac(_, Soac::Filter(op)) = &mut se.kind {
-                let filter::RawStorage::Runtime { scratch, .. } = &mut op.state.storage else {
+                let filter::Output::Runtime { scratch, .. } = &mut op.state.storage else {
                     // Static Bounded filter — not a runtime scratch producer.
                     return Ok(false);
                 };
@@ -622,7 +618,7 @@ pub fn retarget_filter_output(
                 let input_elem_ty = input.element();
                 // Compact straight into the output resource; reuse the
                 // scratch resource as the paired length cell.
-                op.state.storage = filter::RawStorage::Runtime {
+                op.state.storage = filter::Output::Runtime {
                     scratch: crate::egir::program::SemanticResourceRef(output_resource),
                     length: filter::RuntimeLength::Stored(scratch),
                 };

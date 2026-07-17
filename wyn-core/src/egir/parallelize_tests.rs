@@ -29,7 +29,7 @@ fn operator(
         neutral,
         shape: vec![],
         commutative: false,
-        destination: SoacDestination::Fresh,
+        destination: SoacDestination::fresh(),
         result_type: Type::Constructed(TypeName::Unit, vec![]),
     }
 }

@@ -801,7 +801,7 @@ fn count_operator(
             neutral: NodeId::default(),
             shape: vec![],
             commutative: true,
-            destination: SoacDestination::Fresh,
+            destination: SoacDestination::fresh(),
             result_type: count_ty,
         },
         step,

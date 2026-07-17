@@ -1661,7 +1661,7 @@ impl<'a> TypeChecker<'a> {
                 // the backends assume the layout exists.
                 if kind == "uniform" {
                     if let Some(t) = &ty {
-                        if crate::ssa::layout::block_layout(t, crate::ssa::layout::LayoutRules::Std140)
+                        if crate::ssa::layout::block_layout(t, crate::interface::StorageLayout::Std140)
                             .is_none()
                         {
                             bail_type_at!(

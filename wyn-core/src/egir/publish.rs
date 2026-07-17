@@ -598,8 +598,9 @@ fn uniform_block_members(
     ty: &polytype::Type<crate::ast::TypeName>,
 ) -> (u32, Vec<wyn_pipeline_descriptor::UniformMember>) {
     use crate::ast::TypeName;
-    use crate::ssa::layout::{block_layout, type_byte_size, LayoutRules};
-    let Some(layout) = block_layout(ty, LayoutRules::Std140) else {
+    use crate::interface::StorageLayout;
+    use crate::ssa::layout::{block_layout, type_byte_size};
+    let Some(layout) = block_layout(ty, StorageLayout::Std140) else {
         return (0, Vec::new());
     };
     let (names, field_tys): (Vec<String>, Vec<&polytype::Type<crate::ast::TypeName>>) = match ty {

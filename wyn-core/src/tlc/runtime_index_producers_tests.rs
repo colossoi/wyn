@@ -1,8 +1,7 @@
 use super::run;
 use crate::ast::{Span, TypeName};
 use crate::tlc::{
-    ArrayExpr, Def, DefMeta, Lambda, Place, Program, SoacBody, SoacDestination, SoacOp, Term, TermIdSource,
-    TermKind, VarRef,
+    ArrayExpr, Def, DefMeta, Lambda, Place, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
 };
 use polytype::Type;
 
@@ -185,7 +184,7 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
                 static_array_ty(i32_ty(), 8),
                 &mut ids,
             )))],
-            destination: SoacDestination::Fresh,
+            destination: crate::types::SoacOwnership::Fresh,
         }),
         runtime_array_ty(i32_ty()),
         &mut ids,

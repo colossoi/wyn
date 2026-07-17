@@ -127,7 +127,7 @@ impl Constructor {
         // elements take their aligned size from `block_layout`, which also
         // supplies the member offsets below (a tight `type_byte_size` sum
         // under-strides structs whose members pad).
-        let layout = crate::ssa::layout::block_layout(&elem_ty, crate::ssa::layout::LayoutRules::Std430);
+        let layout = crate::ssa::layout::block_layout(&elem_ty, crate::interface::StorageLayout::Std430);
         let stride = match &layout {
             Some(l) => l.size,
             None => {

@@ -82,6 +82,16 @@ pub struct ExternDecl<Ty = Type> {
     pub return_ty: Ty,
 }
 
+/// Source-level ownership of an array-producing SOAC result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoacOwnership {
+    /// No unique input was proved.
+    Fresh,
+    /// The primary input is uniquely owned and is a candidate for in-place
+    /// reuse. Later lowering must still prove that the input is dead.
+    UniqueInput,
+}
+
 /// Record field names that preserve source order but have order-independent equality.
 /// The actual field types are stored in Type::Constructed's type argument vector.
 #[derive(Debug, Clone)]

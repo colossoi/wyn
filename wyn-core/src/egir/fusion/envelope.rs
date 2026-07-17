@@ -19,7 +19,7 @@ use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::{filter, hist, screma};
 use crate::egir::types::{
     EGraph, NodeId, PureOp, ResourceAccess, SegBody, SegSpace, SideEffect, SideEffectKind,
-    SkeletonTerminator, Soac, SoacDestination, SoacInputType,
+    SkeletonTerminator, Soac, SoacInputType,
 };
 use crate::flow::BlockId;
 use crate::LookupMap;
@@ -96,12 +96,7 @@ fn find_in_graph(graph: &EGraph, site: FusionSite, oracle: &SemanticGraph) -> Op
             };
             if maps.is_empty()
                 || !output_slots.is_empty()
-                || !maps.iter().all(|map| {
-                    matches!(
-                        map.destination,
-                        SoacDestination::Fresh | SoacDestination::UniqueInput
-                    )
-                })
+                || !maps.iter().all(|map| map.destination.is_unplaced())
                 || resources.iter().any(|resource| resource.access != ResourceAccess::Read)
             {
                 continue;
@@ -173,7 +168,7 @@ fn find_in_graph(graph: &EGraph, site: FusionSite, oracle: &SemanticGraph) -> Op
                         _,
                         Soac::Hist(hist::Op {
                             body,
-                            state: hist::SemanticState::Segmented(_),
+                            state: hist::State::Segmented(_),
                         }),
                     ) => {
                         if producer_reads_hist_destination(graph, producer, consumer) {
@@ -300,8 +295,8 @@ fn apply_filter(inner: &mut SemanticProgram, candidate: Candidate) {
         };
         state.space = producer.space;
         if let filter::Output::Local { destination, .. } = &mut state.storage {
-            if *destination == SoacDestination::UniqueInput {
-                *destination = SoacDestination::Fresh;
+            if destination.is_unplaced_unique_input() {
+                destination.make_fresh();
             }
         }
     }
@@ -387,7 +382,7 @@ fn apply_hist(inner: &mut SemanticProgram, candidate: Candidate) {
     {
         consumer_body.body = body;
         consumer_body.inputs = new_array_types.into_iter().map(|array| SoacInputType { array }).collect();
-        *state = hist::SemanticState::Segmented(producer.space);
+        *state = hist::State::Segmented(producer.space);
     }
     consumer.effects = fused_effects;
     block.side_effects.remove(candidate.producer);

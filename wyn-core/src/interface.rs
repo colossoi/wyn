@@ -581,7 +581,7 @@ pub struct EntryDecl {
 // ---------------------------------------------------------------------------
 
 /// Memory layout for storage buffers.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StorageLayout {
     #[default]
     Std430, // Default for SSBOs, tightly packed

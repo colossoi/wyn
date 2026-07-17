@@ -27,7 +27,7 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
                         },
                         input_indices: vec![],
                         output_element_type: int.clone(),
-                        destination: SoacDestination::Fresh,
+                        destination: SoacDestination::fresh(),
                         result_type: int,
                     }],
                 },

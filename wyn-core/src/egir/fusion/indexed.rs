@@ -8,21 +8,15 @@ use smallvec::smallvec;
 
 use crate::egir::program::{OutputRoute, OutputWriter, SemanticProgram, SemanticResourceRef};
 use crate::egir::soac::screma;
-use crate::egir::types::{
-    EGraph, ENode, NodeId, PureOp, ResourceAccess, SideEffectKind, Soac, SoacDestination,
-};
+use crate::egir::types::{EGraph, ENode, NodeId, PureOp, ResourceAccess, SideEffectKind, Soac};
 use crate::flow::BlockId;
 use crate::ssa::types::ConstantValue;
 
-#[derive(Clone, Copy)]
-enum Site {
-    Entry(usize),
-    Function(usize),
-}
+use super::vertical::FusionSite;
 
 #[derive(Clone)]
 struct Candidate {
-    site: Site,
+    site: FusionSite,
     block: BlockId,
     effect: usize,
     index: NodeId,
@@ -43,7 +37,7 @@ fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
         let output_resources = entry.outputs.iter().map(|output| output.resource).collect::<Vec<_>>();
         if let Some(candidate) = find_in_graph(
             &entry.graph,
-            Site::Entry(index),
+            FusionSite::Entry(index),
             &output_resources,
             &entry.output_routes,
         ) {
@@ -51,7 +45,7 @@ fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
         }
     }
     for (index, function) in inner.functions.iter().enumerate() {
-        if let Some(candidate) = find_in_graph(&function.graph, Site::Function(index), &[], &[]) {
+        if let Some(candidate) = find_in_graph(&function.graph, FusionSite::Function(index), &[], &[]) {
             return Some(candidate);
         }
     }
@@ -60,7 +54,7 @@ fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
 
 fn find_in_graph(
     graph: &EGraph,
-    site: Site,
+    site: FusionSite,
     output_resources: &[Option<SemanticResourceRef>],
     output_routes: &[OutputRoute],
 ) -> Option<Candidate> {
@@ -86,12 +80,7 @@ fn find_in_graph(
                 .filter_map(|slot| output_resources.get(slot.0).copied().flatten())
                 .collect();
             if maps.is_empty()
-                || !maps.iter().all(|map| {
-                    matches!(
-                        map.destination,
-                        SoacDestination::Fresh | SoacDestination::UniqueInput
-                    )
-                })
+                || !maps.iter().all(|map| map.destination.is_unplaced())
                 || resources.iter().any(|resource| {
                     resource.access != ResourceAccess::Read
                         && !indirect_output_resources.contains(&resource.resource)
@@ -251,7 +240,7 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
         }
     }
 
-    if let Site::Entry(index) = candidate.site {
+    if let FusionSite::Entry(index) = candidate.site {
         for route in &mut inner.entry_points[index].output_routes {
             if route.source.value == candidate.index {
                 route.source.value = scalar;
@@ -261,16 +250,16 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
     }
 }
 
-fn graph(inner: &SemanticProgram, site: Site) -> &EGraph {
+fn graph(inner: &SemanticProgram, site: FusionSite) -> &EGraph {
     match site {
-        Site::Entry(index) => &inner.entry_points[index].graph,
-        Site::Function(index) => &inner.functions[index].graph,
+        FusionSite::Entry(index) => &inner.entry_points[index].graph,
+        FusionSite::Function(index) => &inner.functions[index].graph,
     }
 }
 
-fn graph_mut(inner: &mut SemanticProgram, site: Site) -> &mut EGraph {
+fn graph_mut(inner: &mut SemanticProgram, site: FusionSite) -> &mut EGraph {
     match site {
-        Site::Entry(index) => &mut inner.entry_points[index].graph,
-        Site::Function(index) => &mut inner.functions[index].graph,
+        FusionSite::Entry(index) => &mut inner.entry_points[index].graph,
+        FusionSite::Function(index) => &mut inner.functions[index].graph,
     }
 }

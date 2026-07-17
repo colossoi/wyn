@@ -86,7 +86,7 @@ fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<Nod
                         },
                         input_indices: vec![],
                         output_element_type: ty.clone(),
-                        destination: SoacDestination::Fresh,
+                        destination: SoacDestination::fresh(),
                         result_type: ty,
                     }],
                 },

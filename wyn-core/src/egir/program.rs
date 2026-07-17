@@ -25,8 +25,8 @@ use std::ops::{Deref, DerefMut};
 use super::parallelize::schedule::ValidatedKernelPlan;
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, EgirPhase, NodeId, Physical, Raw, RegionId, Scheduled, SegBody, SegExtent, SegSpace, Semantic,
-    Soac, WynLanguage,
+    EGraph, EgirPhase, NodeId, Physical, Raw, Scheduled, SegBody, SegExtent, SegSpace, Semantic, Soac,
+    WynLanguage,
 };
 
 pub use super::ir::{OutputRoute, OutputSlotId, OutputWriter, RegionInterner, SlotSource};
@@ -724,9 +724,9 @@ fn physicalize_soac(
     Ok(match soac {
         Soac::Screma(screma::Op::Map { lanes, state }) => {
             let state = match state {
-                screma::ScheduledState::Serial => screma::PhysicalMapState::Serial,
+                screma::ScheduledState::Serial => screma::ScheduledState::Serial,
                 screma::ScheduledState::Segmented(segment) => {
-                    screma::PhysicalMapState::Segmented(physical_segment(segment, nodes, bindings)?)
+                    screma::ScheduledState::Segmented(physical_segment(segment, nodes, bindings)?)
                 }
             };
             Soac::Screma(screma::Op::Map {
@@ -823,9 +823,9 @@ fn physicalize_soac(
         Soac::Hist(hist::Op { mut body, state }) => {
             body.body = seg_body(body.body, nodes);
             let state = match state {
-                hist::ScheduledState::Serial => hist::ScheduledState::Serial,
-                hist::ScheduledState::Segmented(iteration_space) => {
-                    hist::ScheduledState::Segmented(space(iteration_space, nodes, bindings)?)
+                hist::State::Serial => hist::State::Serial,
+                hist::State::Segmented(iteration_space) => {
+                    hist::State::Segmented(space(iteration_space, nodes, bindings)?)
                 }
             };
             Soac::Hist(hist::Op { body, state })
@@ -933,24 +933,8 @@ pub type RawEntry = Entry<Raw>;
 pub type SemanticEntry = Entry<Semantic>;
 pub type ScheduledEntry = Entry<Scheduled>;
 
-/// A complete, fresh entry projection owned by a kernel recipe. This is the
-/// sole entry-shaped planner record: publication and physical construction
-/// both read it, so fields cannot drift between parallel representations.
-#[derive(Clone, Debug)]
-pub struct PlannedEntry<P: EgirPhase = Semantic> {
-    pub name: String,
-    pub span: Span,
-    pub execution_model: ExecutionModel,
-    pub inputs: Vec<EntryInput>,
-    pub outputs: Vec<EntryOutput>,
-    pub resource_declarations: Vec<SemanticResourceDecl>,
-    pub params: Vec<(Type<TypeName>, String)>,
-    pub return_ty: Type<TypeName>,
-    pub graph: EGraph<P>,
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
-    pub aliases: LookupMap<NodeId, NodeId>,
-    pub output_routes: Vec<OutputRoute>,
-}
+/// A complete, fresh entry projection owned by a kernel recipe.
+pub type PlannedEntry<P = Semantic> = super::ir::Entry<P, WynLanguage>;
 
 /// Backend-visible entry metadata retained by the plan without retaining a
 /// second copy of the semantic graph.
@@ -986,7 +970,7 @@ impl PlannedPublication {
     }
 }
 
-impl PlannedEntry<Semantic> {
+impl super::ir::Entry<Semantic, WynLanguage> {
     pub fn project(entry: &SemanticEntry) -> Result<Self, String> {
         let projection = super::graph_projector::GraphProjector::new(&entry.graph, &entry.control_headers)
             .all_with_values(entry.output_routes.iter().map(|route| route.source.value).collect())?;
@@ -1025,8 +1009,20 @@ impl PlannedEntry<Semantic> {
             name,
             span,
             execution_model,
-            inputs,
-            outputs,
+            inputs: inputs
+                .into_iter()
+                .map(|inner| super::ir::EntryInput {
+                    inner,
+                    resource: None,
+                })
+                .collect(),
+            outputs: outputs
+                .into_iter()
+                .map(|inner| super::ir::EntryOutput {
+                    inner,
+                    resource: None,
+                })
+                .collect(),
             resource_declarations,
             params,
             return_ty,
@@ -1038,13 +1034,15 @@ impl PlannedEntry<Semantic> {
     }
 }
 
-impl<P: EgirPhase> PlannedEntry<P> {
+impl<P: EgirPhase<ResourceDecl = SemanticResourceDecl>> super::ir::Entry<P, WynLanguage> {
     pub fn publication(&self, resources: &PhysicalResourceTable) -> Result<EntryPublication, String> {
+        let inputs = self.inputs.iter().map(|input| input.inner.clone()).collect::<Vec<_>>();
+        let outputs = self.outputs.iter().map(|output| output.inner.clone()).collect::<Vec<_>>();
         publish_entry(
             &self.name,
             &self.execution_model,
-            &self.inputs,
-            &self.outputs,
+            &inputs,
+            &outputs,
             &self.resource_declarations,
             resources,
         )
@@ -1122,22 +1120,7 @@ pub struct EntryPublication {
 }
 
 /// A complete entry after a validated kernel recipe has been physicalized.
-/// This is intentionally a distinct type from `SemanticEntry`: downstream
-/// codegen passes cannot receive an entry that is still legal to reschedule.
-pub struct PhysicalEntry {
-    pub name: String,
-    pub span: Span,
-    pub execution_model: ExecutionModel,
-    pub inputs: Vec<EntryInput>,
-    pub outputs: Vec<EntryOutput>,
-    pub storage_bindings: Vec<interface::StorageBindingDecl>,
-    pub params: Vec<(Type<TypeName>, String)>,
-    pub return_ty: Type<TypeName>,
-    pub graph: EGraph<Physical>,
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
-    pub aliases: LookupMap<NodeId, NodeId>,
-    pub output_routes: Vec<OutputRoute>,
-}
+pub type PhysicalEntry = super::ir::Entry<Physical, WynLanguage>;
 
 /// Deterministic allocation of logical resources to backend bindings.
 #[derive(Clone, Debug, Default)]
@@ -1298,19 +1281,25 @@ pub type ScheduledProgram = Program<Scheduled>;
 /// EGIR after the plan has validated and every physical entry has been
 /// constructed. Only this type is accepted by expansion and SSA elaboration.
 pub struct PhysicalProgram {
-    pub functions: Vec<PhysicalFunc>,
-    pub externs: Vec<ExternDecl<Type<TypeName>>>,
-    pub entry_points: Vec<PhysicalEntry>,
-    pub constants: Vec<ConstantDef<Physical>>,
-    pub pipeline: PipelineDescriptor,
-    pub input_names: LookupMap<(u32, u32), String>,
-    /// Region identity to the corresponding entry in `functions`.
-    pub regions: LookupMap<RegionId, usize>,
-    pub region_interner: RegionInterner,
+    pub ir: Program<Physical>,
     pub resources: Vec<LogicalResource>,
     pub semantic_dependencies: Vec<SemanticDependency>,
     pub plan: ValidatedKernelPlan,
     pub physical_resources: PhysicalResourceTable,
+}
+
+impl Deref for PhysicalProgram {
+    type Target = Program<Physical>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ir
+    }
+}
+
+impl DerefMut for PhysicalProgram {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ir
+    }
 }
 
 pub(crate) fn remap_control_headers(
@@ -1384,18 +1373,50 @@ fn physicalize_entry(
     entry: &PlannedEntry<Scheduled>,
     resources: &PhysicalResourceTable,
 ) -> Result<PhysicalEntry, String> {
-    let mut inputs = entry.inputs.clone();
-    let mut outputs = entry.outputs.clone();
+    let inputs = entry
+        .inputs
+        .iter()
+        .cloned()
+        .map(|mut input| {
+            physicalize_type_resources(&mut input.ty, resources);
+            let resource = input
+                .resource
+                .map(|resource| {
+                    resources
+                        .binding(resource.0)
+                        .ok_or_else(|| format!("entry `{}` references an unallocated resource", entry.name))
+                })
+                .transpose()?;
+            Ok(super::ir::EntryInput {
+                inner: input.inner,
+                resource,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let outputs = entry
+        .outputs
+        .iter()
+        .cloned()
+        .map(|mut output| {
+            physicalize_type_resources(&mut output.ty, resources);
+            let resource = output
+                .resource
+                .map(|resource| {
+                    resources
+                        .binding(resource.0)
+                        .ok_or_else(|| format!("entry `{}` references an unallocated resource", entry.name))
+                })
+                .transpose()?;
+            Ok(super::ir::EntryOutput {
+                inner: output.inner,
+                resource,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let mut declarations = entry.resource_declarations.clone();
     let mut params = entry.params.clone();
     let mut return_ty = entry.return_ty.clone();
     let (graph, nodes, blocks) = physicalize_graph_resources(entry.graph.clone(), resources)?;
-    for input in &mut inputs {
-        physicalize_type_resources(&mut input.ty, resources);
-    }
-    for output in &mut outputs {
-        physicalize_type_resources(&mut output.ty, resources);
-    }
     for (ty, _) in &mut params {
         physicalize_type_resources(ty, resources);
     }
@@ -1403,7 +1424,7 @@ fn physicalize_entry(
     for declaration in &mut declarations {
         physicalize_type_resources(&mut declaration.elem_ty, resources);
     }
-    let storage_bindings = declarations
+    let resource_declarations = declarations
         .into_iter()
         .map(|declaration| {
             let binding = resources
@@ -1431,7 +1452,7 @@ fn physicalize_entry(
         execution_model: entry.execution_model.clone(),
         inputs,
         outputs,
-        storage_bindings,
+        resource_declarations,
         params,
         return_ty,
         graph,
@@ -1496,33 +1517,21 @@ impl PhysicalProgram {
             regions.insert(id, index);
         }
         Ok(Self {
-            functions,
-            externs,
-            entry_points,
-            constants,
-            pipeline,
-            input_names,
-            regions,
-            region_interner,
+            ir: Program {
+                functions,
+                externs,
+                entry_points,
+                constants,
+                pipeline,
+                input_names,
+                regions,
+                region_interner,
+            },
             resources,
             semantic_dependencies,
             plan,
             physical_resources,
         })
-    }
-
-    pub fn contains_region(&self, id: RegionId) -> bool {
-        self.regions.contains_key(&id)
-    }
-
-    pub fn region(&self, id: RegionId) -> Option<&PhysicalFunc> {
-        self.regions.get(&id).and_then(|&index| self.functions.get(index))
-    }
-
-    pub fn iter_regions(&self) -> impl Iterator<Item = (RegionId, &PhysicalFunc)> {
-        self.regions
-            .iter()
-            .filter_map(|(&id, &index)| self.functions.get(index).map(|function| (id, function)))
     }
 }
 

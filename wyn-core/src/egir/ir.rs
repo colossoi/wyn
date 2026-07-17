@@ -12,6 +12,7 @@ use crate::types::ExternDecl;
 use crate::LookupMap;
 
 pub use crate::op::PureViewSource;
+pub use crate::types::SoacOwnership;
 
 use super::soac::{filter, hist, screma};
 
@@ -237,20 +238,71 @@ impl<P: EgirPhase, Lang: Language> SideEffectKind<P, Lang> {
     }
 }
 
-/// Where an array-producing SOAC's per-iteration result is written. TLC only
-/// supplies the logical `Fresh`/`UniqueInput` ownership fact; the physical
-/// `InputBuffer`/`OutputView` choices exist exclusively in EGIR.
-///
-/// A Screma side effect stores only `[inputs..., output_views...]` in its
-/// operand vector. Callable captures and accumulator neutrals are explicit in
-/// `screma::Body`, so they cannot drift out of sync with the operation.
-/// `InputBuffer` has no output-view operand; its result aliases an input.
+/// External storage selected for a SOAC result by EGIR lowering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SoacDestination {
-    Fresh,
-    UniqueInput,
+pub enum SoacPlacement {
     InputBuffer,
     OutputView,
+}
+
+/// Logical ownership plus any external placement selected during lowering.
+/// An unplaced result is function-local; `InputBuffer` aliases an input and
+/// `OutputView` consumes an explicit output-view operand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SoacDestination {
+    pub ownership: SoacOwnership,
+    pub placement: Option<SoacPlacement>,
+}
+
+impl SoacDestination {
+    pub const fn fresh() -> Self {
+        Self {
+            ownership: SoacOwnership::Fresh,
+            placement: None,
+        }
+    }
+
+    pub const fn unique_input() -> Self {
+        Self {
+            ownership: SoacOwnership::UniqueInput,
+            placement: None,
+        }
+    }
+
+    pub const fn placed(self, placement: SoacPlacement) -> Self {
+        Self {
+            placement: Some(placement),
+            ..self
+        }
+    }
+
+    pub fn place(&mut self, placement: SoacPlacement) {
+        self.placement = Some(placement);
+    }
+
+    pub fn make_fresh(&mut self) {
+        *self = Self::fresh();
+    }
+
+    pub const fn is_unplaced_fresh(self) -> bool {
+        matches!(self.ownership, SoacOwnership::Fresh) && self.placement.is_none()
+    }
+
+    pub const fn is_unplaced(self) -> bool {
+        self.placement.is_none()
+    }
+
+    pub const fn is_unplaced_unique_input(self) -> bool {
+        matches!(self.ownership, SoacOwnership::UniqueInput) && self.placement.is_none()
+    }
+
+    pub const fn is_input_buffer(self) -> bool {
+        matches!(self.placement, Some(SoacPlacement::InputBuffer))
+    }
+
+    pub const fn is_output_view(self) -> bool {
+        matches!(self.placement, Some(SoacPlacement::OutputView))
+    }
 }
 
 /// One concrete dimension of a segmented iteration space.
@@ -990,6 +1042,7 @@ impl<R, Lang: Language> std::ops::DerefMut for EntryOutput<R, Lang> {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Entry<P: EgirPhase, Lang: Language> {
     pub name: String,
     pub span: Span,

@@ -18,7 +18,6 @@ use crate::egir::program::{
 use crate::egir::soac::{filter, screma};
 use crate::egir::types::{EgirPhase, RegionId, Scheduled, SegExtent, Semantic, SideEffectKind, Soac};
 use crate::flow::ExecutionModel;
-use crate::interface::EntryInput;
 use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
 };
@@ -1255,11 +1254,14 @@ fn inferred_body_domain(body: &PlannedEntry<Scheduled>, baseline: KernelDomain) 
 /// don't opt out; the image is the domain. Only upgrades the single-workgroup
 /// placeholder domain; an explicit fixed grid stays as scheduled.
 ///
-fn storage_image_domain_inputs(inputs: &[EntryInput], baseline: &KernelDomain) -> Option<KernelDomain> {
+fn storage_image_domain_inputs(
+    inputs: &[crate::egir::ir::EntryInput<SemanticResourceRef, crate::egir::types::WynLanguage>],
+    baseline: &KernelDomain,
+) -> Option<KernelDomain> {
     if !matches!(baseline, KernelDomain::Fixed { x: 1, y: 1, z: 1 }) {
         return None;
     }
-    let (binding, ..) = inputs.iter().find_map(EntryInput::storage_image_binding)?;
+    let (binding, ..) = inputs.iter().find_map(|input| input.storage_image_binding())?;
     Some(KernelDomain::Elements(DispatchLen::StorageImage {
         set: binding.set,
         binding: binding.binding,

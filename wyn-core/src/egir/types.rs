@@ -20,7 +20,7 @@ use super::soac::{filter, hist, screma};
 
 pub use super::ir::{
     EffectOp, EffectToken, EgirPhase, GraphResource, Language, NodeId, RegionId, SegBody, SideEffectIndex,
-    SideEffectSite, SkeletonTerminator, Soac, SoacDestination,
+    SideEffectSite, SkeletonTerminator, Soac, SoacDestination, SoacOwnership, SoacPlacement,
 };
 pub use crate::ResourceAccess;
 
@@ -120,7 +120,7 @@ impl<R: GraphResource> EgirPhase for Semantic<R> {
     type ScanState = screma::SemanticState<R>;
     type CompositeState = screma::SemanticState<R>;
     type FilterState = filter::SemanticState<R>;
-    type HistState = hist::SemanticState<R>;
+    type HistState = hist::State<R>;
 }
 
 impl<R: GraphResource> EgirPhase for Scheduled<R> {
@@ -132,14 +132,14 @@ impl<R: GraphResource> EgirPhase for Scheduled<R> {
     type ScanState = screma::ScheduledState<R>;
     type CompositeState = screma::ScheduledState<R>;
     type FilterState = filter::ScheduledState<R>;
-    type HistState = hist::ScheduledState<R>;
+    type HistState = hist::State<R>;
 }
 
 impl EgirPhase for Physical {
     type Resource = super::program::PhysicalResourceRef;
     type ResourceDecl = crate::interface::StorageBindingDecl;
     type SoacId = super::program::SemanticOpId;
-    type MapState = screma::PhysicalMapState;
+    type MapState = screma::ScheduledState<super::program::PhysicalResourceRef>;
     type ReduceState = screma::PhysicalSerialState;
     type ScanState = screma::PhysicalSerialState;
     type CompositeState = screma::PhysicalSerialState;
@@ -340,11 +340,11 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
     }
 }
 
-impl From<crate::tlc::SoacDestination> for SoacDestination {
-    fn from(destination: crate::tlc::SoacDestination) -> Self {
-        match destination {
-            crate::tlc::SoacDestination::Fresh => Self::Fresh,
-            crate::tlc::SoacDestination::UniqueInput => Self::UniqueInput,
+impl From<SoacOwnership> for SoacDestination {
+    fn from(ownership: SoacOwnership) -> Self {
+        Self {
+            ownership,
+            placement: None,
         }
     }
 }
@@ -397,8 +397,8 @@ impl<R: GraphResource> super::ir::Soac<Semantic<R>> {
             },
             Self::Filter(op) => Some(&op.state.space),
             Self::Hist(op) => match &op.state {
-                hist::SemanticState::Serial => None,
-                hist::SemanticState::Segmented(space) => Some(space),
+                hist::State::Serial => None,
+                hist::State::Segmented(space) => Some(space),
             },
         }
     }

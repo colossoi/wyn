@@ -28,9 +28,7 @@ use crate::tlc::var_term_builtin_id;
 use crate::{LookupMap, LookupSet};
 
 use crate::ast::{Span, TypeName};
-use crate::tlc::{
-    ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacDestination, SoacOp, Term, TermId, TermKind,
-};
+use crate::tlc::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermId, TermKind};
 use crate::types;
 use crate::types::Diet;
 use crate::types::TypeExt;
@@ -2187,7 +2185,7 @@ impl<'m> Rewriter<'m> {
                 TermKind::Soac(SoacOp::Map { destination, .. })
                 | TermKind::Soac(SoacOp::Scan { destination, .. })
                 | TermKind::Soac(SoacOp::Filter { destination, .. }) => {
-                    *destination = SoacDestination::UniqueInput;
+                    *destination = crate::types::SoacOwnership::UniqueInput;
                 }
                 _ => {}
             }

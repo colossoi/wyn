@@ -1,6 +1,7 @@
 //! Type size and alignment helpers for buffer layout calculations.
 
 use crate::ast::{Type, TypeName};
+use crate::interface::StorageLayout;
 use crate::types::TypeExt;
 use wyn_pipeline_descriptor::VertexFormat;
 
@@ -187,12 +188,6 @@ fn collect_array_strides(ty: &Type, out: &mut Vec<u32>) {
 /// vectors of them) the two sets produce identical member offsets;
 /// they differ only in the final size rounding — std140 rounds the
 /// block size up to 16.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LayoutRules {
-    Std140,
-    Std430,
-}
-
 /// Computed layout for an interface block value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockLayout {
@@ -215,9 +210,9 @@ pub struct BlockLayout {
 /// uniforms. Returns `None` for anything else (bool, matrices, nested
 /// aggregates, runtime arrays, non-32-bit scalars) — callers gate
 /// support on this.
-pub fn block_layout(ty: &Type, rules: LayoutRules) -> Option<BlockLayout> {
+pub fn block_layout(ty: &Type, rules: StorageLayout) -> Option<BlockLayout> {
     // (size, alignment) of one supported member.
-    fn member(ty: &Type, rules: LayoutRules) -> Option<(u32, u32)> {
+    fn member(ty: &Type, rules: StorageLayout) -> Option<(u32, u32)> {
         match ty {
             Type::Constructed(TypeName::Int(32), _)
             | Type::Constructed(TypeName::UInt(32), _)
@@ -231,7 +226,7 @@ pub fn block_layout(ty: &Type, rules: LayoutRules) -> Option<BlockLayout> {
                 }
                 Some((4 * n, if n == 2 { 8 } else { 16 }))
             }
-            _ if ty.is_array() && rules == LayoutRules::Std430 => {
+            _ if ty.is_array() && rules == StorageLayout::Std430 => {
                 let (elem_size, elem_align) = member(ty.elem_type()?, rules)?;
                 let n = match ty.array_size()? {
                     Type::Constructed(TypeName::Size(n), _) => *n as u32,
@@ -265,7 +260,7 @@ pub fn block_layout(ty: &Type, rules: LayoutRules) -> Option<BlockLayout> {
         align = align.max(field_align);
     }
     let mut size = offset.div_ceil(align) * align;
-    if rules == LayoutRules::Std140 {
+    if rules == StorageLayout::Std140 {
         size = size.div_ceil(16) * 16;
     }
     Some(BlockLayout {
@@ -284,7 +279,7 @@ pub fn block_layout(ty: &Type, rules: LayoutRules) -> Option<BlockLayout> {
 pub fn storage_elem_stride(ty: &Type) -> Option<u32> {
     match ty {
         Type::Constructed(TypeName::Tuple(_), _) | Type::Constructed(TypeName::Record(_), _) => {
-            block_layout(ty, LayoutRules::Std430).map(|l| l.size)
+            block_layout(ty, StorageLayout::Std430).map(|l| l.size)
         }
         _ => type_byte_size(ty),
     }

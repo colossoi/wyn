@@ -16,7 +16,7 @@ use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
 use crate::egir::types::{
     EGraph, ENode, NodeId, PureOp, ResourceAccess, SegBody, SegResourceAccess, SegSpace, SideEffectKind,
-    SkeletonTerminator, Soac, SoacDestination, SoacInputType,
+    SkeletonTerminator, Soac, SoacInputType,
 };
 use crate::flow::BlockId;
 use crate::LookupMap;
@@ -93,12 +93,7 @@ fn find_in_graph(
             };
             if maps.is_empty()
                 || !output_slots.is_empty()
-                || !maps.iter().all(|map| {
-                    matches!(
-                        map.destination,
-                        SoacDestination::Fresh | SoacDestination::UniqueInput
-                    )
-                })
+                || !maps.iter().all(|map| map.destination.is_unplaced())
                 || resources.iter().any(|resource| resource.access != ResourceAccess::Read)
             {
                 continue;
@@ -324,10 +319,10 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
             );
             map.body = new_body;
             synthesized.push(function);
-            if map.destination == SoacDestination::UniqueInput
+            if map.destination.is_unplaced_unique_input()
                 && indices.first().is_some_and(|index| candidate.consumer_inputs.contains(&index.index()))
             {
-                map.destination = SoacDestination::Fresh;
+                map.destination.make_fresh();
             }
         }
         map.input_indices = rebased;
@@ -361,12 +356,12 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
             );
             operator.step = step;
             synthesized.push(function);
-            if operator.destination == SoacDestination::UniqueInput
+            if operator.destination.is_unplaced_unique_input()
                 && old_indices
                     .first()
                     .is_some_and(|index| candidate.consumer_inputs.contains(&index.index()))
             {
-                operator.destination = SoacDestination::Fresh;
+                operator.destination.make_fresh();
             }
         }
         operator.input_indices = rebased;
@@ -673,7 +668,7 @@ mod tests {
     use super::*;
     use crate::egir::program::{RegionInterner, SemanticEntry, SemanticOpId};
     use crate::egir::semantic_exec::{RegionExecutor, Value};
-    use crate::egir::types::{EffectToken, SegExtent, SideEffect};
+    use crate::egir::types::{EffectToken, SegExtent, SideEffect, SoacDestination};
     use crate::flow::ExecutionModel;
 
     fn captured_binary_function(name: &str, op: &str) -> SemanticFunc {
@@ -735,7 +730,7 @@ mod tests {
                             },
                             input_indices: vec![screma::InputId(0)],
                             output_element_type: int.clone(),
-                            destination: SoacDestination::Fresh,
+                            destination: SoacDestination::fresh(),
                             result_type: array.clone(),
                         }],
                     },
@@ -786,7 +781,7 @@ mod tests {
                             },
                             input_indices: vec![screma::InputId(0)],
                             output_element_type: int,
-                            destination: SoacDestination::Fresh,
+                            destination: SoacDestination::fresh(),
                             result_type: array.clone(),
                         }],
                     },

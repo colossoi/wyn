@@ -455,7 +455,7 @@ fn build_filter_kernel_family(
         &filter_entry,
         filter_entry.name.clone(),
         filter_entry.execution_model.clone(),
-        filter_entry.outputs.clone(),
+        filter_entry.outputs.iter().map(|output| output.inner.clone()).collect(),
         filter_entry.output_routes.clone(),
         scatter_resources,
         filter_entry.return_ty.clone(),
@@ -658,7 +658,7 @@ fn project_kernel_body(
         name,
         source.span,
         execution_model,
-        source.inputs.clone(),
+        source.inputs.iter().map(|input| input.inner.clone()).collect(),
         outputs,
         resource_declarations,
         source.params.clone(),
@@ -689,7 +689,7 @@ fn project_kernel_body_effects(
         name,
         source.span,
         execution_model,
-        source.inputs.clone(),
+        source.inputs.iter().map(|input| input.inner.clone()).collect(),
         outputs,
         resource_declarations,
         source.params.clone(),
@@ -986,7 +986,7 @@ fn is_write_effectful(se: &SideEffect) -> bool {
             .iter()
             .map(|map| map.destination)
             .chain(op.operators().into_iter().map(|operator| operator.destination))
-            .any(|d| matches!(d, SoacDestination::OutputView | SoacDestination::InputBuffer)),
+            .any(|destination| !destination.is_unplaced()),
         SideEffectKind::Effect(EffectOp::Store) => true,
         _ => false,
     }
@@ -1097,7 +1097,7 @@ fn split_multidomain_seg_maps(entry: &super::program::PlannedEntry) -> Option<En
                 (group == root).then_some(SideEffectSite { block, index })
             })
             .collect();
-        let outputs = slots.iter().map(|&slot| entry.outputs[slot].clone()).collect();
+        let outputs = slots.iter().map(|&slot| entry.outputs[slot].inner.clone()).collect();
         let mut routes = entry
             .output_routes
             .iter()
@@ -1826,13 +1826,13 @@ fn seg_scratch_specs(graph: &EGraph, se: &SideEffect) -> Option<SegScratchSpec> 
     let elem_of = |neutral: NodeId| graph.types.get(&neutral).cloned();
     let lanes = op.lanes();
     let operators = op.operators();
-    let maps_are_output_views = lanes.maps.iter().all(|map| map.destination == SoacDestination::OutputView);
+    let maps_are_output_views = lanes.maps.iter().all(|map| map.destination.is_output_view());
     match op {
         screma::Op::Reduce { .. } => {
             if operators.iter().any(|op| !op.combine.captures.is_empty())
                 || lanes.inputs.is_empty()
                 || !maps_are_output_views
-                || !operators.iter().all(|op| op.destination == SoacDestination::Fresh)
+                || !operators.iter().all(|op| op.destination.is_unplaced_fresh())
             {
                 return None;
             }
@@ -1850,7 +1850,7 @@ fn seg_scratch_specs(graph: &EGraph, se: &SideEffect) -> Option<SegScratchSpec> 
                 || !operators[0].combine.captures.is_empty()
                 || lanes.inputs.len() != 1
                 || !maps_are_output_views
-                || !operators.iter().all(|op| op.destination == SoacDestination::OutputView)
+                || !operators.iter().all(|op| op.destination.is_output_view())
             {
                 return None;
             }
@@ -2072,8 +2072,8 @@ fn emit_reduce_entry(
         // writes.
         // Reduce accumulators expect Fresh destination (scalar result
         // routed via a Project-based Store outside the Screma loop).
-        debug_assert!(lanes.maps.iter().all(|map| map.destination == SoacDestination::OutputView));
-        debug_assert!(operators.iter().all(|operator| operator.destination == SoacDestination::Fresh));
+        debug_assert!(lanes.maps.iter().all(|map| map.destination.is_output_view()));
+        debug_assert!(operators.iter().all(|operator| operator.destination.is_unplaced_fresh()));
         // Operand layout (gate enforces zero captures everywhere):
         //   [inputs(n_inputs), init_accs(n_accs), map_output_views(n_maps),
         //    acc_output_views(0 — all Fresh)]
@@ -2332,10 +2332,10 @@ fn emit_scan_entry(
         let n_inputs = lanes.inputs.len();
         debug_assert_eq!(n_inputs, 1);
         debug_assert!(op.combine.captures.is_empty());
-        debug_assert!(lanes.maps.iter().all(|map| map.destination == SoacDestination::OutputView));
+        debug_assert!(lanes.maps.iter().all(|map| map.destination.is_output_view()));
         // `realize_outputs` retargets the scan accumulator to OutputView (its
         // prefixes feed the entry output) and appends the scan output buffer.
-        debug_assert_eq!(op.destination, SoacDestination::OutputView);
+        debug_assert!(op.destination.is_output_view());
         let n_maps = lanes.maps.len();
         let input_nid = se.operand_nodes[0];
         let init_nid = op.neutral;
@@ -2453,7 +2453,7 @@ fn emit_scan_entry(
                         neutral: init_nid,
                         shape: Vec::new(),
                         commutative: false,
-                        destination: SoacDestination::Fresh,
+                        destination: SoacDestination::fresh(),
                         result_type: elem_ty.clone(),
                     },
                     rest: Vec::new(),

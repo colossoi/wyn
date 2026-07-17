@@ -125,9 +125,9 @@ fn schedule_soac_with_mode(
         }
         Soac::Hist(hist::Op { body, state }) => {
             let state = match state {
-                hist::SemanticState::Serial => hist::ScheduledState::Serial,
-                hist::SemanticState::Segmented(space) if !serial => hist::ScheduledState::Segmented(space),
-                hist::SemanticState::Segmented(_) => hist::ScheduledState::Serial,
+                hist::State::Serial => hist::State::Serial,
+                hist::State::Segmented(space) if !serial => hist::State::Segmented(space),
+                hist::State::Segmented(_) => hist::State::Serial,
             };
             Soac::Hist(hist::Op { body, state })
         }

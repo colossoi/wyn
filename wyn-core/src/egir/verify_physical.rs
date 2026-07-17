@@ -21,7 +21,7 @@ pub fn check(program: &PhysicalProgram) -> Result<(), String> {
         for output in &entry.outputs {
             physical_type(&output.ty, &entry.name)?;
         }
-        for declaration in &entry.storage_bindings {
+        for declaration in &entry.resource_declarations {
             physical_type(&declaration.elem_ty, &entry.name)?;
         }
         graph(&entry.graph, &entry.name)?;

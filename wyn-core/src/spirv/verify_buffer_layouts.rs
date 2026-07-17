@@ -133,7 +133,7 @@ fn elem_is_layoutable(elem_ty: &Type<TypeName>) -> bool {
         Type::Constructed(TN::Tuple(_), _) | Type::Constructed(TN::Record(_), _)
     );
     if is_struct {
-        crate::ssa::layout::block_layout(elem_ty, crate::ssa::layout::LayoutRules::Std430).is_some()
+        crate::ssa::layout::block_layout(elem_ty, crate::interface::StorageLayout::Std430).is_some()
     } else {
         type_byte_size(elem_ty).is_some()
     }

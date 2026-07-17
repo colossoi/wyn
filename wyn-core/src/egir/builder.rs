@@ -10,7 +10,9 @@ use smallvec::smallvec;
 use super::graph_ops;
 use super::program::{LogicalSize, PlannedEntry, SemanticOpId, SemanticResourceDecl, SemanticResourceRef};
 use super::soac::screma;
-use super::types::{EGraph, EffectToken, NodeId, SkeletonTerminator, Soac, SoacDestination, SoacInputType};
+use super::types::{
+    EGraph, EffectToken, NodeId, SkeletonTerminator, Soac, SoacDestination, SoacInputType, SoacPlacement,
+};
 
 pub struct EntryBuilder<'a> {
     graph: EGraph,
@@ -143,7 +145,7 @@ impl<'a> EntryBuilder<'a> {
                         body: super::types::SegBody { region, captures },
                         input_indices: vec![screma::InputId(0)],
                         output_element_type: output_elem_ty,
-                        destination: SoacDestination::OutputView,
+                        destination: SoacDestination::fresh().placed(SoacPlacement::OutputView),
                         result_type: output_view_ty,
                     }],
                 },
@@ -173,8 +175,22 @@ impl<'a> EntryBuilder<'a> {
             name: self.name,
             span: self.span,
             execution_model: self.execution_model,
-            inputs: self.inputs,
-            outputs: self.outputs,
+            inputs: self
+                .inputs
+                .into_iter()
+                .map(|inner| super::ir::EntryInput {
+                    inner,
+                    resource: None,
+                })
+                .collect(),
+            outputs: self
+                .outputs
+                .into_iter()
+                .map(|inner| super::ir::EntryOutput {
+                    inner,
+                    resource: None,
+                })
+                .collect(),
             resource_declarations: self.resource_declarations,
             params: self.params,
             return_ty: self.return_ty,

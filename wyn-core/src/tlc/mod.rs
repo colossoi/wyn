@@ -31,7 +31,7 @@ use crate::ast::{self, NodeId, Span, TypeName};
 use crate::builtins::{by_id, catalog, BuiltinId};
 use crate::error::CompilerError;
 use crate::name_resolution::{NameResolution, ResolvedValueRef, SoacKind};
-use crate::types::TypeExt;
+use crate::types::{SoacOwnership, TypeExt};
 use crate::{interface, LookupMap, SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
 
@@ -421,19 +421,6 @@ impl ArrayExpr {
     }
 }
 
-/// TLC ownership annotation for an array-producing SOAC. This deliberately
-/// cannot name a physical buffer: EGIR resolves the uniqueness candidate from
-/// post-fusion liveness and output routing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SoacDestination {
-    /// No unique input was proved.
-    Fresh,
-    /// TLC proved the primary input uniquely owned and safe for pointwise
-    /// overwrite. This is not a physical destination: EGIR must still prove
-    /// the input dead after the final fused operation.
-    UniqueInput,
-}
-
 /// A second-order array combinator (SOAC) operation.
 ///
 /// `Reduce`, `Scan`, and `ReduceByIndex` parallelize freely on
@@ -449,7 +436,7 @@ pub enum SoacOp {
         inputs: Vec<ArrayExpr>,
         /// Logical uniqueness fact from TLC ownership; EGIR decides whether
         /// the candidate becomes an in-place write.
-        destination: SoacDestination,
+        destination: SoacOwnership,
     },
     Reduce {
         op: SoacBody,
@@ -464,7 +451,7 @@ pub enum SoacOp {
         /// TLC may mark a pointwise-safe uniquely owned input as
         /// `UniqueInput`; EGIR resolves post-fusion liveness and routing into
         /// the physical destination.
-        destination: SoacDestination,
+        destination: SoacOwnership,
     },
     Filter {
         pred: SoacBody,
@@ -472,7 +459,7 @@ pub enum SoacOp {
         /// TLC may mark a pointwise-safe uniquely owned input as
         /// `UniqueInput`; EGIR resolves post-fusion liveness and routing into
         /// the physical destination.
-        destination: SoacDestination,
+        destination: SoacOwnership,
     },
     /// Indexed writes into `dest`: over the parallel `inputs`, `lam` yields an
     /// `(index, value)` pair per element, written as `dest[index] = value`.
@@ -2436,7 +2423,7 @@ impl<'a> Transformer<'a> {
             TermKind::Soac(SoacOp::Map {
                 lam,
                 inputs,
-                destination: SoacDestination::Fresh,
+                destination: SoacOwnership::Fresh,
             }),
         );
         self.wrap_binds(binds, soac, span)
@@ -2484,7 +2471,7 @@ impl<'a> Transformer<'a> {
                 ne: Box::new(ne_term),
                 input,
                 // Initial construction; apply_ownership may flip later.
-                destination: SoacDestination::Fresh,
+                destination: SoacOwnership::Fresh,
             }),
         );
         self.wrap_binds(binds, soac, span)
@@ -2507,7 +2494,7 @@ impl<'a> Transformer<'a> {
                 pred,
                 input,
                 // Initial construction; apply_ownership may flip later.
-                destination: SoacDestination::Fresh,
+                destination: SoacOwnership::Fresh,
             }),
         );
         self.wrap_binds(binds, soac, span)

@@ -836,7 +836,7 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
         &mut self,
         sb: super::SoacBody,
         inputs: Vec<ArrayExpr>,
-        destination: super::SoacDestination,
+        destination: crate::types::SoacOwnership,
     ) -> SoacOp {
         if inputs.len() <= 1 || sb.lam.params.len() != 1 {
             return SoacOp::Map {

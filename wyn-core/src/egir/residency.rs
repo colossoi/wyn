@@ -20,7 +20,7 @@ use super::program::{
 use super::soac::{filter, screma};
 use super::types::{
     EGraph, ENode, EffectToken, NodeId, PureOp, ResourceAccess, SegExtent, SegResourceAccess,
-    SideEffectKind, SideEffectSite, Soac, SoacDestination,
+    SideEffectKind, SideEffectSite, Soac, SoacDestination, SoacPlacement,
 };
 use crate::ast::TypeName;
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
@@ -168,7 +168,7 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
-                    *destination == SoacDestination::UniqueInput,
+                    destination.is_unplaced_unique_input(),
                 ),
                 _ => continue,
             }
@@ -192,7 +192,7 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
             .iter()
             .enumerate()
             .map(|(lane, destination)| {
-                if *destination != SoacDestination::UniqueInput {
+                if !destination.is_unplaced_unique_input() {
                     return *destination;
                 }
                 map_inputs
@@ -200,14 +200,16 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
                     .and_then(|inputs| inputs.first())
                     .copied()
                     .filter(|input| resolve(input.index(), &mut claimed))
-                    .map_or(SoacDestination::Fresh, |_| SoacDestination::InputBuffer)
+                    .map_or_else(SoacDestination::fresh, |_| {
+                        destination.placed(SoacPlacement::InputBuffer)
+                    })
             })
             .collect();
         let new_accs: Vec<_> = acc_destinations
             .iter()
             .enumerate()
             .map(|(operator, destination)| {
-                if *destination != SoacDestination::UniqueInput {
+                if !destination.is_unplaced_unique_input() {
                     return *destination;
                 }
                 operator_inputs
@@ -215,7 +217,9 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
                     .and_then(|inputs| inputs.first())
                     .copied()
                     .filter(|input| resolve(input.index(), &mut claimed))
-                    .map_or(SoacDestination::Fresh, |_| SoacDestination::InputBuffer)
+                    .map_or_else(SoacDestination::fresh, |_| {
+                        destination.placed(SoacPlacement::InputBuffer)
+                    })
             })
             .collect();
 
@@ -223,9 +227,9 @@ fn select_in_place_in_graph(graph: &mut EGraph) {
             if reusable_input_type(&graph.types[&operands[0]])
                 && input_is_dead_after(graph, block_id, effect_index, operands[0])
             {
-                SoacDestination::InputBuffer
+                SoacDestination::unique_input().placed(SoacPlacement::InputBuffer)
             } else {
-                SoacDestination::Fresh
+                SoacDestination::fresh()
             }
         });
         let effect = &mut graph.skeleton.blocks[block_id].side_effects[effect_index];
@@ -288,7 +292,7 @@ fn retype_input_buffer_results(graph: &mut EGraph, block: BlockId, effect_index:
         }
         let mut changed = false;
         for (lane, map) in op.lanes().maps.iter().enumerate() {
-            if map.destination == SoacDestination::InputBuffer {
+            if map.destination.is_input_buffer() {
                 if let Some(input) = map.input_indices.first() {
                     retyped[lane] = op.lanes().inputs[input.index()].array.clone();
                     changed = true;
@@ -296,7 +300,7 @@ fn retype_input_buffer_results(graph: &mut EGraph, block: BlockId, effect_index:
             }
         }
         for (operator_index, operator) in op.operators().into_iter().enumerate() {
-            if operator.destination == SoacDestination::InputBuffer {
+            if operator.destination.is_input_buffer() {
                 if let Some(input) = operator.input_indices.first() {
                     retyped[op.lanes().maps.len() + operator_index] =
                         op.lanes().inputs[input.index()].array.clone();
@@ -331,13 +335,13 @@ fn clear_unique_input_candidates(graph: &mut EGraph) {
             match &mut effect.kind {
                 SideEffectKind::Soac(_, Soac::Screma(op)) => {
                     for map in &mut op.lanes_mut().maps {
-                        if map.destination == SoacDestination::UniqueInput {
-                            map.destination = SoacDestination::Fresh;
+                        if map.destination.is_unplaced_unique_input() {
+                            map.destination.make_fresh();
                         }
                     }
                     for operator in op.operators_mut() {
-                        if operator.destination == SoacDestination::UniqueInput {
-                            operator.destination = SoacDestination::Fresh;
+                        if operator.destination.is_unplaced_unique_input() {
+                            operator.destination.make_fresh();
                         }
                     }
                 }
@@ -351,8 +355,8 @@ fn clear_unique_input_candidates(graph: &mut EGraph) {
                             },
                         ..
                     }),
-                ) if *destination == SoacDestination::UniqueInput => {
-                    *destination = SoacDestination::Fresh;
+                ) if destination.is_unplaced_unique_input() => {
+                    destination.make_fresh();
                 }
                 _ => {}
             }
@@ -448,7 +452,7 @@ fn verify_residency_requirements_satisfied(inner: &AllocatedProgram) {
                     continue;
                 };
                 let internal_pure_map = output_slots.is_empty()
-                    && maps.iter().all(|map| map.destination == SoacDestination::Fresh)
+                    && maps.iter().all(|map| map.destination.is_unplaced_fresh())
                     && resources.iter().all(|resource| resource.access == ResourceAccess::Read);
                 let materializable = entry.graph.skeleton.blocks.len() == 1
                     && dependencies_are_cloneable(
@@ -605,8 +609,8 @@ fn operation_result_residency(
     let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() else {
         return None;
     };
-    let cloneable = op.lanes().maps.iter().all(|map| map.destination == SoacDestination::Fresh)
-        && op.operators().into_iter().all(|operator| operator.destination == SoacDestination::Fresh)
+    let cloneable = op.lanes().maps.iter().all(|map| map.destination.is_unplaced_fresh())
+        && op.operators().into_iter().all(|operator| operator.destination.is_unplaced_fresh())
         && resources.iter().all(|resource| {
             resource.access == ResourceAccess::Read
                 || entry
@@ -1008,8 +1012,15 @@ fn dependencies_are_cloneable(graph: &EGraph, block_id: BlockId, effects: &HashS
             SideEffectKind::Soac(_, Soac::Screma(op))
                 if matches!(op.semantic_state(), screma::SemanticState::Segmented { output_slots, resources, .. }
                     if output_slots.is_empty()
-                        && op.lanes().maps.iter().all(|map| map.destination == SoacDestination::Fresh)
-                        && op.operators().into_iter().all(|operator| operator.destination == SoacDestination::Fresh)
+                        && op
+                            .lanes()
+                            .maps
+                            .iter()
+                            .all(|map| map.destination.is_unplaced_fresh())
+                        && op
+                            .operators()
+                            .into_iter()
+                            .all(|operator| operator.destination.is_unplaced_fresh())
                         && resources.iter().all(|resource| resource.access == ResourceAccess::Read))
         )
     })
@@ -1365,10 +1376,10 @@ fn configure_materialized_soac(
         return;
     }
     for map in &mut op.lanes_mut().maps {
-        map.destination = SoacDestination::OutputView;
+        map.destination.place(SoacPlacement::OutputView);
     }
     for operator in op.operators_mut() {
-        operator.destination = SoacDestination::OutputView;
+        operator.destination.place(SoacPlacement::OutputView);
     }
     producer_effect.operand_nodes.extend(output_views.iter().copied());
     let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
@@ -2101,14 +2112,14 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                     let input_arrays =
                         op.lanes().inputs.iter().map(|input| input.array.clone()).collect::<Vec<_>>();
                     for map in &mut op.lanes_mut().maps {
-                        if map.destination == SoacDestination::InputBuffer {
+                        if map.destination.is_input_buffer() {
                             if let Some(input) = map.input_indices.first() {
                                 map.result_type = input_arrays[input.index()].clone();
                             }
                         }
                     }
                     for operator in op.operators_mut() {
-                        if operator.destination == SoacDestination::InputBuffer {
+                        if operator.destination.is_input_buffer() {
                             if let Some(input) = operator.input_indices.first() {
                                 operator.result_type = input_arrays[input.index()].clone();
                             }

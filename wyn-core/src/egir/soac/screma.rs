@@ -2,7 +2,7 @@ use polytype::Type;
 
 use crate::ast::TypeName;
 
-use super::super::program::{OutputSlotId, PhysicalResourceRef};
+use super::super::program::OutputSlotId;
 use super::super::types::{
     EgirPhase, GraphResource, NodeId, SegBody, SegResourceAccess, SegSpace, Semantic, SoacDestination,
     SoacInputType,
@@ -120,15 +120,6 @@ pub enum ScheduledState<R> {
     Segmented(Segmented<R>),
 }
 
-/// Executable Screma states. Parallel reductions, scans, and composites must
-/// be split into physical kernels before this boundary; only an unsplit map
-/// reaches the physical graph.
-#[derive(Clone, Debug)]
-pub enum PhysicalMapState {
-    Serial,
-    Segmented(Segmented<PhysicalResourceRef>),
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct PhysicalSerialState;
 
@@ -241,10 +232,14 @@ impl<P: EgirPhase> Op<P> {
             .map(|operator| operator.destination)
     }
 
-    pub fn set_destination(&mut self, field: usize, destination: SoacDestination) -> bool {
+    pub fn place_destination(
+        &mut self,
+        field: usize,
+        placement: super::super::types::SoacPlacement,
+    ) -> bool {
         let map_count = self.lanes().maps.len();
         if field < map_count {
-            self.lanes_mut().maps[field].destination = destination;
+            self.lanes_mut().maps[field].destination.place(placement);
             return true;
         }
         let operator = field - map_count;
@@ -252,7 +247,7 @@ impl<P: EgirPhase> Op<P> {
         let Some(operator) = operators.get_mut(operator) else {
             return false;
         };
-        operator.destination = destination;
+        operator.destination.place(placement);
         true
     }
 
@@ -424,7 +419,7 @@ impl Op<super::super::types::Physical> {
         matches!(
             self,
             Self::Map {
-                state: PhysicalMapState::Serial,
+                state: ScheduledState::Serial,
                 ..
             } | Self::Reduce { .. }
                 | Self::Scan { .. }

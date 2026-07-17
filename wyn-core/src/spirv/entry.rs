@@ -195,7 +195,7 @@ pub(super) fn lower_ssa_entry_point(
             };
             let (block_struct, member_types) = if let Some(args) = record_fields {
                 let layout =
-                    crate::ssa::layout::block_layout(&input.ty, crate::ssa::layout::LayoutRules::Std140)
+                    crate::ssa::layout::block_layout(&input.ty, crate::interface::StorageLayout::Std140)
                         .unwrap_or_else(|| {
                             panic!(
                                 "uniform block `{}`: members must be 32-bit scalars or \

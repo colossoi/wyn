@@ -43,18 +43,12 @@ impl Body {
 pub struct RawState;
 
 #[derive(Clone, Debug)]
-pub enum SemanticState<R> {
+pub enum State<R> {
     Serial,
     Segmented(SegSpace<R>),
 }
 
-#[derive(Clone, Debug)]
-pub enum ScheduledState<R> {
-    Serial,
-    Segmented(SegSpace<R>),
-}
-
-pub type PhysicalState = ScheduledState<PhysicalResourceRef>;
+pub type PhysicalState = State<PhysicalResourceRef>;
 
 #[derive(Clone, Debug)]
 pub struct Op<P: EgirPhase> {
@@ -69,7 +63,7 @@ impl<R: GraphResource> Op<Semantic<R>> {
 
     pub(crate) fn referenced_nodes(&self) -> Vec<NodeId> {
         let mut nodes = self.body.capture_nodes();
-        if let SemanticState::Segmented(space) = &self.state {
+        if let State::Segmented(space) = &self.state {
             nodes.extend(space.referenced_nodes());
         }
         nodes
@@ -78,7 +72,7 @@ impl<R: GraphResource> Op<Semantic<R>> {
     pub(crate) fn referenced_node_slots(&mut self) -> Vec<&mut NodeId> {
         let Self { body, state } = self;
         let mut nodes = body.referenced_node_slots();
-        if let SemanticState::Segmented(space) = state {
+        if let State::Segmented(space) = state {
             nodes.extend(space.referenced_node_slots());
         }
         nodes

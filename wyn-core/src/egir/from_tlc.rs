@@ -2177,7 +2177,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         // A non-in-place `map` is shape-preserving — inherit the input's
         // representation when `result_ty` carries an unresolved `Skolem` size
         // (see `shape_preserving_result_ty`); otherwise keep `result_ty`.
-        let project_ty = if matches!(destination, SoacDestination::InputBuffer) {
+        let project_ty = if destination.is_input_buffer() {
             input_arr_types[0].clone()
         } else {
             input_arr_types
@@ -2311,7 +2311,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         neutral: init_nid,
                         shape: Vec::new(),
                         commutative: false,
-                        destination: SoacDestination::Fresh,
+                        destination: SoacDestination::fresh(),
                         result_type: result_ty.clone(),
                     },
                     rest: Vec::new(),
@@ -2353,7 +2353,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         // Mirror of the `convert_soac_map` guard; without it
         // `scan(op, ne, filter(p, xs))` leaks the filter's Skolem size into the
         // backend.
-        let project_ty = if matches!(destination, SoacDestination::InputBuffer) {
+        let project_ty = if destination.is_input_buffer() {
             arr_ty.clone()
         } else {
             result_ty
@@ -2446,7 +2446,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         predicate: pred_body,
                     },
                     state: filter::RawState {
-                        storage: filter::RawStorage::Local {
+                        storage: filter::Output::Local {
                             capacity: size,
                             destination,
                         },
@@ -2509,7 +2509,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     predicate: pred_body,
                 },
                 state: filter::RawState {
-                    storage: filter::RawStorage::Runtime {
+                    storage: filter::Output::Runtime {
                         scratch: super::program::SemanticResourceRef(scratch_out),
                         length: filter::RuntimeLength::ViewOnly,
                     },

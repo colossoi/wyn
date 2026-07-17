@@ -8,7 +8,7 @@
 //! the conservative cases to one `Map` whose lambda contains the branch.
 
 use super::VarRef;
-use super::{ArrayExpr, Lambda, Program, SoacBody, SoacDestination, SoacOp};
+use super::{ArrayExpr, Lambda, Program, SoacBody, SoacOp};
 use super::{Term, TermIdSource, TermKind};
 use crate::ast::{Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};
@@ -147,7 +147,7 @@ fn try_compose_prefix_map(
         TermKind::Soac(SoacOp::Map {
             lam,
             inputs,
-            destination: SoacDestination::Fresh,
+            destination: crate::types::SoacOwnership::Fresh,
         }) => (lam, inputs),
         _ => return false,
     };
@@ -316,7 +316,7 @@ fn build_fused_map_if(
                 captures: Vec::new(),
             },
             inputs,
-            destination: SoacDestination::Fresh,
+            destination: crate::types::SoacOwnership::Fresh,
         }),
     };
 

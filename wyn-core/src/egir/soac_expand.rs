@@ -25,19 +25,19 @@ use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
 use super::types::{
     as_soa_tuple, soac_element_type, ENode, EffectOp, EffectToken, NodeId, PureOp, SkeletonTerminator,
-    SoacDestination,
+    SoacOwnership, SoacPlacement,
 };
 
 /// Run `run_one_body` on every function and entry point in the program.
 pub fn run(inner: &mut PhysicalProgram, effect_ids: &mut crate::IdSource<EffectToken>) {
     // Borrow the region interner disjointly from the bodies being expanded; it
     // is read-only here (recovering the SSA `Call` name for each region).
-    let PhysicalProgram {
+    let super::ir::Program {
         functions,
         entry_points,
         region_interner,
         ..
-    } = inner;
+    } = &mut inner.ir;
     for f in functions.iter_mut() {
         run_one_body(&mut f.graph, &mut f.control_headers, region_interner, effect_ids);
     }
@@ -96,7 +96,7 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
         // A reified parallel map/reduce/scan; same source rules as its inputs.
         Soac::Screma(screma::Op::Map {
             lanes,
-            state: screma::PhysicalMapState::Segmented(_),
+            state: screma::ScheduledState::Segmented(_),
         }) => lanes.inputs.iter().all(|input| is_plain_array_source(&input.array)),
         Soac::Screma(_) => false,
     }
@@ -197,15 +197,15 @@ fn expand_one(
             let mut map_output_views = Vec::with_capacity(n_maps);
             let mut map_input_buffer_inits = Vec::with_capacity(n_maps);
             for (map_idx, dest) in map_destinations.iter().enumerate() {
-                match dest {
-                    SoacDestination::UniqueInput => {
+                match (dest.ownership, dest.placement) {
+                    (SoacOwnership::UniqueInput, None) => {
                         panic!("unresolved UniqueInput destination reached physical expansion")
                     }
-                    SoacDestination::Fresh => {
+                    (SoacOwnership::Fresh, None) => {
                         map_output_views.push(None);
                         map_input_buffer_inits.push(None);
                     }
-                    SoacDestination::OutputView => {
+                    (_, Some(SoacPlacement::OutputView)) => {
                         let view = *se
                             .operand_nodes
                             .get(view_cursor)
@@ -214,7 +214,7 @@ fn expand_one(
                         map_output_views.push(Some(view));
                         map_input_buffer_inits.push(None);
                     }
-                    SoacDestination::InputBuffer => {
+                    (_, Some(SoacPlacement::InputBuffer)) => {
                         // Consuming map: loop carries `inputs[map_idx]`
                         // (or `inputs[0]` for single-input Screma) as the
                         // initial output, so the result aliases the input
@@ -229,15 +229,15 @@ fn expand_one(
             let mut acc_output_views = Vec::with_capacity(n_accs);
             let mut acc_input_buffer_inits = Vec::with_capacity(n_accs);
             for dest in &acc_destinations {
-                match dest {
-                    SoacDestination::UniqueInput => {
+                match (dest.ownership, dest.placement) {
+                    (SoacOwnership::UniqueInput, None) => {
                         panic!("unresolved UniqueInput destination reached physical expansion")
                     }
-                    SoacDestination::Fresh => {
+                    (SoacOwnership::Fresh, None) => {
                         acc_output_views.push(None);
                         acc_input_buffer_inits.push(None);
                     }
-                    SoacDestination::OutputView => {
+                    (_, Some(SoacPlacement::OutputView)) => {
                         let view = *se
                             .operand_nodes
                             .get(view_cursor)
@@ -246,7 +246,7 @@ fn expand_one(
                         acc_output_views.push(Some(view));
                         acc_input_buffer_inits.push(None);
                     }
-                    SoacDestination::InputBuffer => {
+                    (_, Some(SoacPlacement::InputBuffer)) => {
                         // Consuming Scan accumulator: writes back to the
                         // input buffer in-place. Loop carries inputs[0]
                         // as the initial scan-output value.
@@ -611,7 +611,7 @@ fn expand_one(
             _,
             Soac::Screma(screma::Op::Map {
                 lanes: screma::Lanes { inputs, maps },
-                state: screma::PhysicalMapState::Segmented(screma::Segmented { space, .. }),
+                state: screma::ScheduledState::Segmented(screma::Segmented { space, .. }),
             }),
         ) => {
             // SegRed/SegScan are consumed by `egir::parallelize::lower`
@@ -622,7 +622,7 @@ fn expand_one(
             let cursor = n_inputs;
             let map_captures: Vec<Vec<NodeId>> = maps.iter().map(|map| map.body.captures.clone()).collect();
             let map_funcs = regions.resolve_cloned(maps.iter().map(|map| map.body.region));
-            let output_views = if maps.iter().all(|map| map.destination == SoacDestination::InputBuffer) {
+            let output_views = if maps.iter().all(|map| map.destination.is_input_buffer()) {
                 vec![input_nids[0]; map_funcs.len()]
             } else {
                 se.operand_nodes[cursor..].to_vec()
@@ -1152,9 +1152,9 @@ fn build_filter_loop(
     // surviving element is written through `PlaceIndex` before `count`
     // advances past it, so unread slots are never observed.
     let buf_place_nid = emit_alloca(graph, bid, buf_ty.clone(), next_effect, None);
-    if matches!(destination, SoacDestination::InputBuffer) {
+    if destination.is_input_buffer() {
         let _ = emit_store(graph, bid, buf_place_nid, spec.arr_nid, next_effect, None);
-    } else if !matches!(destination, SoacDestination::Fresh) {
+    } else if !destination.is_unplaced_fresh() {
         panic!("Filter[OutputView] not supported — see filter-consuming-input.md");
     }
     let zero_i32_nid = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone(), None);

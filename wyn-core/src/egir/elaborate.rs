@@ -35,14 +35,14 @@ use super::types::*;
 /// assembled into a single `ssa::types::Program`. The pipeline
 /// descriptor passes through unchanged.
 pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
-    let PhysicalProgram {
+    let super::ir::Program {
         functions,
         externs,
         entry_points,
         constants,
         pipeline,
         ..
-    } = inner;
+    } = inner.ir;
     let functions: Vec<Function> = functions
         .into_iter()
         .map(|f| {
@@ -65,9 +65,9 @@ pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
                 name: e.name,
                 body,
                 execution_model: e.execution_model,
-                inputs: e.inputs,
-                outputs: e.outputs,
-                storage_bindings: e.storage_bindings,
+                inputs: e.inputs.into_iter().map(|input| input.inner).collect(),
+                outputs: e.outputs.into_iter().map(|output| output.inner).collect(),
+                storage_bindings: e.resource_declarations,
                 span: e.span,
             }
         })

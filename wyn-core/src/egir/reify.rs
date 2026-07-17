@@ -21,7 +21,7 @@ use super::program::{
 use super::soac::{filter, hist, screma};
 use super::types::{
     EGraph, ENode, NodeId, PureOp, Raw, ResourceAccess, SegExtent, SegResourceAccess, SegSpace, Semantic,
-    SideEffect, SideEffectKind, Soac, SoacDestination, SoacInputType,
+    SideEffect, SideEffectKind, Soac, SoacInputType,
 };
 
 struct Facts {
@@ -171,13 +171,7 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
         Soac::Screma(screma::Op::Map { lanes, .. }) => {
             let mut placement = facts.placement;
             if placement == screma::Placement::Kernel
-                && (lanes.maps.is_empty()
-                    || !lanes.maps.iter().all(|map| {
-                        matches!(
-                            map.destination,
-                            SoacDestination::OutputView | SoacDestination::InputBuffer
-                        )
-                    }))
+                && (lanes.maps.is_empty() || !lanes.maps.iter().all(|map| !map.destination.is_unplaced()))
             {
                 placement = screma::Placement::LaneLocal;
             }
@@ -227,18 +221,7 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
             })
         }
         Soac::Filter(op) => {
-            let storage = match op.state.storage {
-                filter::RawStorage::Local {
-                    capacity,
-                    destination,
-                } => filter::Output::Local {
-                    capacity,
-                    destination,
-                },
-                filter::RawStorage::Runtime { scratch, length } => {
-                    filter::Output::Runtime { scratch, length }
-                }
-            };
+            let storage = op.state.storage;
             Soac::Filter(filter::Op {
                 body: op.body,
                 state: filter::SemanticState {
@@ -249,11 +232,7 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
         }
         Soac::Hist(op) => Soac::Hist(hist::Op {
             body: op.body,
-            state: if facts.entry {
-                hist::SemanticState::Segmented(facts.space)
-            } else {
-                hist::SemanticState::Serial
-            },
+            state: if facts.entry { hist::State::Segmented(facts.space) } else { hist::State::Serial },
         }),
     }
 }

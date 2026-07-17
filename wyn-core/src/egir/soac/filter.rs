@@ -112,25 +112,13 @@ impl Body {
 }
 
 #[derive(Clone, Debug)]
-pub enum RawStorage<R> {
-    Local {
-        capacity: Type<TypeName>,
-        destination: SoacDestination,
-    },
-    Runtime {
-        scratch: R,
-        length: RuntimeLength<R>,
-    },
-}
-
-#[derive(Clone, Debug)]
 pub struct RawState<R> {
-    pub storage: RawStorage<R>,
+    pub storage: Output<R>,
 }
 
 impl<R> RawState<R> {
     pub(crate) fn for_each_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
-        if let RawStorage::Local { capacity, .. } = &mut self.storage {
+        if let Output::Local { capacity, .. } = &mut self.storage {
             visit(capacity);
         }
     }

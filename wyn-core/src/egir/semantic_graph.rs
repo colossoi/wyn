@@ -223,7 +223,7 @@ pub(crate) fn verify(inner: &SemanticProgram) -> Result<(), String> {
                 verify_body("filter predicate", &op.body.predicate)?;
             }
             Soac::Hist(op) => {
-                if let hist::SemanticState::Segmented(space) = &op.state {
+                if let hist::State::Segmented(space) = &op.state {
                     if space.dims.is_empty() {
                         return Err(format!("{scope}: semantic histogram has no concrete dimensions"));
                     }
