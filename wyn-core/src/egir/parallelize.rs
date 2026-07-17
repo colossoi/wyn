@@ -2318,7 +2318,6 @@ fn emit_scan_entry(
         scan_output_view_op,
         input_view_nid,
         input_view_ty,
-        input_elem_ty,
         step_capture_nodes,
         init_nid,
         elem_ty,
@@ -2347,7 +2346,6 @@ fn emit_scan_entry(
         let scan_output_view_op = output_view_base + n_maps;
         let map_output_view_ops: Vec<usize> = (0..n_maps).map(|map| output_view_base + map).collect();
         let input_ty = entry.graph.types[&input_nid].clone();
-        let input_elem = lanes.inputs[0].element.clone();
         let elem = entry.graph.types[&init_nid].clone();
         (
             schedule.callable_name(op.step.region).to_string(),
@@ -2356,7 +2354,6 @@ fn emit_scan_entry(
             scan_output_view_op,
             input_nid,
             input_ty,
-            input_elem,
             step_capture_nodes,
             init_nid,
             elem,
@@ -2439,10 +2436,7 @@ fn emit_scan_entry(
             SemanticOpId(next_semantic_op),
             Soac::Screma(screma::Op::Reduce {
                 lanes: screma::Lanes {
-                    inputs: vec![super::types::SoacInputType {
-                        array: input_view_ty,
-                        element: input_elem_ty,
-                    }],
+                    inputs: vec![super::types::SoacInputType { array: input_view_ty }],
                     maps: vec![],
                 },
                 operators: screma::NonEmpty {
@@ -2785,7 +2779,6 @@ pub fn synthesize_phase3_scan(
         swap_region,
         chunked_output,
         arr_ty.clone(),
-        elem_ty.clone(),
         elem_ty,
         vec![off],
         chunked_output,

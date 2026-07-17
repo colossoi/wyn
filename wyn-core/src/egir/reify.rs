@@ -20,8 +20,8 @@ use super::program::{
 };
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, ENode, NodeId, PureOp, Raw, ResourceAccess, SegExtent, SegLevel, SegResourceAccess, SegSpace,
-    Semantic, SideEffect, SideEffectKind, Soac, SoacDestination, SoacInputType,
+    EGraph, ENode, NodeId, PureOp, Raw, ResourceAccess, SegExtent, SegResourceAccess, SegSpace, Semantic,
+    SideEffect, SideEffectKind, Soac, SoacDestination, SoacInputType,
 };
 
 struct Facts {
@@ -285,10 +285,7 @@ mod tests {
 
     fn facts() -> Facts {
         Facts {
-            space: SegSpace {
-                level: SegLevel::Thread,
-                dims: vec![],
-            },
+            space: SegSpace { dims: vec![] },
             placement: screma::Placement::LaneLocal,
             output_slots: vec![],
             resources: vec![],
@@ -438,7 +435,7 @@ fn space(
     let extent = effect.operand_nodes.get(operand_index).copied().map(|node| {
         if let Some(resource) = graph_ops::extract_storage_view_source(graph, node) {
             let elem_bytes = input
-                .and_then(|input| crate::ssa::layout::type_byte_size(&input.element))
+                .and_then(|input| crate::ssa::layout::type_byte_size(&input.element()))
                 .unwrap_or(1) as u32;
             return SegExtent::ResourceLength {
                 node,
@@ -457,7 +454,6 @@ fn space(
         SegExtent::Value(node)
     });
     SegSpace {
-        level: SegLevel::Thread,
         dims: extent.into_iter().collect(),
     }
 }

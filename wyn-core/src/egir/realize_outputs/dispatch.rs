@@ -473,14 +473,14 @@ pub(crate) fn rewrite_sibling_index_consumers(
             SideEffectKind::Soac(_, Soac::Screma(op)) => {
                 let k = op_idx;
                 assert_eq!(
-                    op.lanes().inputs[k].element,
+                    op.lanes().inputs[k].element(),
                     view_elem_ty,
                     "rewrite_sibling_index_consumers: Screma input_elem_types[{}] \
                      {:?} disagrees with output view's elem type {:?}; the SOAC's \
                      produced elements should equal the entry-output binding's \
                      element type",
                     k,
-                    op.lanes().inputs[k].element,
+                    op.lanes().inputs[k].element(),
                     view_elem_ty
                 );
                 op.lanes_mut().inputs[k].array = view_arr_ty.clone();
@@ -488,12 +488,15 @@ pub(crate) fn rewrite_sibling_index_consumers(
             SideEffectKind::Soac(_, Soac::Hist(op)) => {
                 let k = op_idx - 1;
                 assert_eq!(
-                    op.body.inputs[k].element, view_elem_ty,
+                    op.body.inputs[k].element(),
+                    view_elem_ty,
                     "rewrite_sibling_index_consumers: Scatter input_elem_types[{}] \
                      {:?} disagrees with output view's elem type {:?}; the SOAC's \
                      produced elements should equal the entry-output binding's \
                      element type",
-                    k, op.body.inputs[k].element, view_elem_ty
+                    k,
+                    op.body.inputs[k].element(),
+                    view_elem_ty
                 );
                 op.body.inputs[k].array = view_arr_ty.clone();
             }
@@ -608,7 +611,7 @@ pub fn retarget_filter_output(
                 };
                 let scratch = *scratch;
                 let (input, output_elem_ty) = match &op.body.input {
-                    filter::Input::Plain(input) => (input, input.element.clone()),
+                    filter::Input::Plain(input) => (input, input.element()),
                     filter::Input::Mapped {
                         input,
                         output_element_type,
@@ -616,7 +619,7 @@ pub fn retarget_filter_output(
                     } => (input, output_element_type.clone()),
                 };
                 let input_arr_ty = input.array.clone();
-                let input_elem_ty = input.element.clone();
+                let input_elem_ty = input.element();
                 // Compact straight into the output resource; reuse the
                 // scratch resource as the paired length cell.
                 op.state.storage = filter::RawStorage::Runtime {

@@ -80,15 +80,14 @@ impl Body {
             }
         };
         visit(&mut input.array);
-        visit(&mut input.element);
     }
 
-    pub fn output_element_type(&self) -> &Type<TypeName> {
+    pub fn output_element_type(&self) -> Type<TypeName> {
         match &self.input {
-            Input::Plain(input) => &input.element,
+            Input::Plain(input) => input.element(),
             Input::Mapped {
                 output_element_type, ..
-            } => output_element_type,
+            } => output_element_type.clone(),
         }
     }
 
@@ -235,7 +234,7 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut AllocatedProgram) {
                     continue;
                 };
                 let elem_bytes =
-                    crate::ssa::layout::storage_elem_stride(body.output_element_type()).unwrap_or(1);
+                    crate::ssa::layout::storage_elem_stride(&body.output_element_type()).unwrap_or(1);
                 let size = match space.dims.as_slice() {
                     [SegExtent::Fixed(count)] => LogicalSize::FixedBytes(*count as u64 * elem_bytes as u64),
                     [SegExtent::ResourceLength {

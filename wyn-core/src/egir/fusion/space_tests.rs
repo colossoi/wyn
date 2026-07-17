@@ -1,6 +1,6 @@
 use super::*;
 use crate::egir::program::SemanticResourceRef;
-use crate::egir::types::{NodeId, SegExtent, SegLevel, SegSpace};
+use crate::egir::types::{NodeId, SegExtent, SegSpace};
 use crate::ResourceId;
 use slotmap::SlotMap;
 
@@ -62,10 +62,7 @@ fn mismatched_variants_never_fuse() {
 
 #[test]
 fn spaces_fuse_dimensionwise() {
-    let space = |dims| SegSpace {
-        level: SegLevel::Thread,
-        dims,
-    };
+    let space = |dims| SegSpace { dims };
     assert!(seg_space_fusable(
         &space(vec![SegExtent::Fixed(8)]),
         &space(vec![SegExtent::Fixed(8)]),

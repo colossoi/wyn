@@ -171,7 +171,6 @@ fn rewrite_sibling_index_consumers_rejects_map_output_view_operand() {
             raw_map_soac(
                 SoacInputType {
                     array: arr_ty.clone(),
-                    element: elem.clone(),
                 },
                 SegBody {
                     region: RegionId::from_index(0),
@@ -233,7 +232,6 @@ fn rewrite_sibling_index_consumers_rejects_scatter_dest_position() {
             raw_hist_soac(
                 vec![SoacInputType {
                     array: arr_ty.clone(),
-                    element: elem.clone(),
                 }],
                 vec![],
                 Type::Constructed(TypeName::Int(32), vec![]),
@@ -296,7 +294,6 @@ fn rewrite_sibling_index_consumers_rejects_scatter_capture_position() {
             raw_hist_soac(
                 vec![SoacInputType {
                     array: arr_ty.clone(),
-                    element: elem.clone(),
                 }],
                 vec![source],
                 Type::Constructed(TypeName::Int(32), vec![]),
@@ -359,7 +356,6 @@ fn rewrite_sibling_index_consumers_rejects_accumulator_output_view_operand() {
                 lanes: screma::Lanes {
                     inputs: vec![SoacInputType {
                         array: arr_ty.clone(),
-                        element: elem.clone(),
                     }],
                     maps: vec![],
                 },

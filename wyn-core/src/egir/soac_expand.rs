@@ -23,7 +23,10 @@ use super::soac::{filter, screma};
 use crate::ast::TypeName;
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
-use super::types::{ENode, EffectOp, EffectToken, NodeId, PureOp, SkeletonTerminator, SoacDestination};
+use super::types::{
+    as_soa_tuple, soac_element_type, ENode, EffectOp, EffectToken, NodeId, PureOp, SkeletonTerminator,
+    SoacDestination,
+};
 
 /// Run `run_one_body` on every function and entry point in the program.
 pub fn run(inner: &mut PhysicalProgram, effect_ids: &mut crate::IdSource<EffectToken>) {
@@ -124,46 +127,9 @@ fn is_plain_array_source(arr_ty: &Type<TypeName>) -> bool {
 /// If `ty` is a SoA tuple (tuple where every component is an Array or itself
 /// a SoA tuple), return the component types. Mirrors the helper in
 /// `ssa::soa_helpers`.
-pub(super) fn as_soa_tuple(ty: &Type<TypeName>) -> Option<&[Type<TypeName>]> {
-    let Type::Constructed(TypeName::Tuple(_), components) = ty else {
-        return None;
-    };
-    if components.is_empty() {
-        return None;
-    }
-    // Rank-1 invariant on each component ([elem, variant, size, region]).
-    let all_soa = components.iter().all(|ct| {
-        matches!(ct, Type::Constructed(TypeName::Array, args) if args.len() == 4)
-            || as_soa_tuple(ct).is_some()
-    });
-    if all_soa {
-        Some(components)
-    } else {
-        None
-    }
-}
 
 /// Element type of a SoA tuple: `([n]A, [n]B)` → `(A, B)`. Nested SoA tuples
 /// recurse into their own element types.
-pub(super) fn soa_element_type(soa_ty: &Type<TypeName>) -> Type<TypeName> {
-    let Type::Constructed(TypeName::Tuple(n), components) = soa_ty else {
-        panic!("soa_element_type: expected tuple, got {:?}", soa_ty)
-    };
-    let elem_tys: Vec<Type<TypeName>> = components
-        .iter()
-        .map(|ct| {
-            if ct.is_array() {
-                ct.elem_type().expect("Array has elem").clone()
-            } else if as_soa_tuple(ct).is_some() {
-                soa_element_type(ct)
-            } else {
-                ct.clone()
-            }
-        })
-        .collect();
-    Type::Constructed(TypeName::Tuple(*n), elem_tys)
-}
-
 fn is_view_source(arr_ty: &Type<TypeName>) -> bool {
     matches!(
         arr_ty,
@@ -202,7 +168,7 @@ fn expand_one(
             let acc_step_captures: Vec<Vec<NodeId>> =
                 acc_specs.iter().map(|acc| acc.step.captures.clone()).collect();
             let arr_tys = lanes.inputs.iter().map(|input| input.array.clone()).collect::<Vec<_>>();
-            let elem_tys = lanes.inputs.iter().map(|input| input.element.clone()).collect::<Vec<_>>();
+            let elem_tys = lanes.inputs.iter().map(|input| input.element()).collect::<Vec<_>>();
             let map_output_elem_types =
                 lanes.maps.iter().map(|map| map.output_element_type.clone()).collect::<Vec<_>>();
             let map_destinations = lanes.maps.iter().map(|map| map.destination).collect::<Vec<_>>();
@@ -303,7 +269,7 @@ fn expand_one(
                         if result_ty.is_array() {
                             result_ty.elem_type().expect("Array has elem").clone()
                         } else if as_soa_tuple(result_ty).is_some() {
-                            soa_element_type(result_ty)
+                            soac_element_type(result_ty)
                         } else {
                             panic!("Screma[Scan] accumulator result must be an array or SoA tuple")
                         }
@@ -558,10 +524,10 @@ fn expand_one(
                 filter::Input::Mapped { input, body, .. } => (input, Some(body)),
             };
             let map_func = map_body.map(|body| regions.resolve(body.region).to_string());
-            let output_elem_ty = op.body.output_element_type().clone();
+            let output_elem_ty = op.body.output_element_type();
             let pred_func = regions.resolve(op.body.predicate.region).to_string();
             let arr_ty = input.array.clone();
-            let elem_ty = input.element.clone();
+            let elem_ty = input.element();
             let (output, plan) = match &op.state {
                 filter::ScheduledState::Serial { storage, .. } => (storage.clone(), filter::Plan::Serial),
                 filter::ScheduledState::Parallel { storage, plan, .. } => {
@@ -620,7 +586,7 @@ fn expand_one(
             let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
                 .iter()
                 .zip(op.body.inputs.iter())
-                .map(|(nid, input)| (*nid, input.array.clone(), input.element.clone()))
+                .map(|(nid, input)| (*nid, input.array.clone(), input.element()))
                 .collect();
             let len_input = (input_nids[0], op.body.inputs[0].array.clone());
             let result_nid = se.result.expect("Scatter has a result");
@@ -670,7 +636,7 @@ fn expand_one(
             let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
                 .iter()
                 .zip(inputs.iter())
-                .map(|(nid, input)| (*nid, input.array.clone(), input.element.clone()))
+                .map(|(nid, input)| (*nid, input.array.clone(), input.element()))
                 .collect();
             let len_input = (input_nids[0], inputs[0].array.clone());
             build_parallel_maps(
@@ -2338,7 +2304,7 @@ fn emit_read_element(
                 if ct.is_array() {
                     ct.elem_type().expect("Array has elem").clone()
                 } else if as_soa_tuple(ct).is_some() {
-                    soa_element_type(ct)
+                    soac_element_type(ct)
                 } else {
                     ct.clone()
                 }
@@ -2411,7 +2377,7 @@ fn emit_read_element(
 ///
 /// `elem_ty` must be the logical element type of `arr_ty`:
 /// - Plain composite array: `arr_ty.elem_type()`.
-/// - SoA tuple: `soa_element_type(arr_ty)` (a tuple whose components line
+/// - SoA tuple: `soac_element_type(arr_ty)` (a tuple whose components line
 ///   up with `as_soa_tuple(arr_ty)`).
 ///
 /// For a SoA tuple, this projects each component array out of `arr_nid`,
@@ -2493,11 +2459,11 @@ fn emit_write_element(
 }
 
 /// The logical element type implied by `arr_ty`: `arr_ty.elem_type()` for
-/// composite arrays, `soa_element_type(arr_ty)` for SoA tuples. Only used
+/// composite arrays, `soac_element_type(arr_ty)` for SoA tuples. Only used
 /// by `emit_write_element`'s debug_assert.
 fn derive_elem_ty(arr_ty: &Type<TypeName>) -> Type<TypeName> {
     if as_soa_tuple(arr_ty).is_some() {
-        soa_element_type(arr_ty)
+        soac_element_type(arr_ty)
     } else {
         arr_ty.elem_type().expect("composite array has elem").clone()
     }

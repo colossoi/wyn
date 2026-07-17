@@ -593,7 +593,6 @@ fn physicalize_soac(
         bindings: &PhysicalResourceTable,
     ) -> Result<PhysicalSegSpace, String> {
         Ok(SegSpace {
-            level: space.level,
             dims: space
                 .dims
                 .into_iter()

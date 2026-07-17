@@ -122,7 +122,6 @@ impl<'a> EntryBuilder<'a> {
         region: super::types::RegionId,
         input_array: NodeId,
         input_array_ty: Type<TypeName>,
-        input_elem_ty: Type<TypeName>,
         output_elem_ty: Type<TypeName>,
         captures: Vec<NodeId>,
         output_view: NodeId,
@@ -139,7 +138,6 @@ impl<'a> EntryBuilder<'a> {
                 lanes: screma::Lanes {
                     inputs: vec![SoacInputType {
                         array: input_array_ty,
-                        element: input_elem_ty,
                     }],
                     maps: vec![screma::Map {
                         body: super::types::SegBody { region, captures },

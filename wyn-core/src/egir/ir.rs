@@ -253,13 +253,6 @@ pub enum SoacDestination {
     OutputView,
 }
 
-/// Execution level of a `Seg` op. wyn currently only emits thread-level
-/// kernels (one invocation per lane); block-level would be added here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SegLevel {
-    Thread,
-}
-
 /// One concrete dimension of a segmented iteration space.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SegExtent<R> {
@@ -284,7 +277,6 @@ pub enum SegExtent<R> {
 /// node-construction time.
 #[derive(Clone, Debug)]
 pub struct SegSpace<R> {
-    pub level: SegLevel,
     pub dims: Vec<SegExtent<R>>,
 }
 
@@ -354,7 +346,6 @@ pub trait EgirPhase: Clone + std::fmt::Debug {
 #[derive(Clone, Debug)]
 pub struct SoacInputType<Ty> {
     pub array: Ty,
-    pub element: Ty,
 }
 
 #[derive(Clone, Debug)]

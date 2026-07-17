@@ -94,7 +94,6 @@ struct InputReplacement {
     project: NodeId,
     view: NodeId,
     view_ty: Type<TypeName>,
-    elem_ty: Type<TypeName>,
     resource: ResourceId,
 }
 
@@ -1275,7 +1274,6 @@ fn rewrite_runtime_array_source(
             project: result,
             view,
             view_ty,
-            elem_ty: handoff.elem_ty.clone(),
             resource: handoff.data,
         }],
     );
@@ -1473,7 +1471,6 @@ fn rewrite_materialized_operation_source(
                 project,
                 view,
                 view_ty: entry.graph.types[&view].clone(),
-                elem_ty: output.elem_ty.clone(),
                 resource,
             });
             view
@@ -2082,7 +2079,6 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                             .find(|replacement| effect.operand_nodes[input] == replacement.project)
                         {
                             input_type.array = replacement.view_ty.clone();
-                            input_type.element = replacement.elem_ty.clone();
                             new_resources.push(replacement.resource);
                         }
                     }
@@ -2131,7 +2127,6 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                             filter::Input::Plain(input) | filter::Input::Mapped { input, .. } => input,
                         };
                         input.array = replacement.view_ty.clone();
-                        input.element = replacement.elem_ty.clone();
                     }
                     replace_space_nodes(&mut state.space, replacements);
                 }

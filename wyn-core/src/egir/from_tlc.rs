@@ -2146,11 +2146,11 @@ impl<'a, 'b> Converter<'a, 'b> {
             .collect();
         let output_elem_ty = if result_ty.is_array() {
             result_ty.elem_type().expect("Array has elem").clone()
-        } else if super::soac_expand::as_soa_tuple(&result_ty).is_some() {
+        } else if as_soa_tuple(&result_ty).is_some() {
             // After `tlc::soa`, the map's output `[N](A, B)` becomes a
             // SoA tuple `([N]A, [N]B)`. The per-iteration element type
             // is the corresponding tuple-of-elements `(A, B)`.
-            super::soac_expand::soa_element_type(&result_ty)
+            soac_element_type(&result_ty)
         } else if !input_elem_types.is_empty() {
             input_elem_types[0].clone()
         } else {
@@ -2191,11 +2191,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op::Map {
                 lanes: screma::Lanes {
-                    inputs: input_arr_types
-                        .into_iter()
-                        .zip(input_elem_types)
-                        .map(|(array, element)| SoacInputType { array, element })
-                        .collect(),
+                    inputs: input_arr_types.into_iter().map(|array| SoacInputType { array }).collect(),
                     maps: vec![screma::Map {
                         body: SegBody {
                             region: self.region(f_name),
@@ -2249,11 +2245,6 @@ impl<'a, 'b> Converter<'a, 'b> {
             inputs.iter().map(|ae| self.convert_array_expr_value(ae)).collect::<Result<_, _>>()?;
         let input_array_types: Vec<Type<TypeName>> =
             inputs.iter().zip(input_nids.iter()).map(|(ae, nid)| self.value_array_type(*nid, ae)).collect();
-        let input_elem_types: Vec<Type<TypeName>> = input_array_types
-            .iter()
-            .zip(inputs.iter())
-            .map(|(ty, ae)| self.value_elem_type(ty, ae))
-            .collect();
         let capture_nids: Vec<NodeId> =
             lam.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
 
@@ -2268,11 +2259,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         region: self.region(func),
                         captures: capture_nids,
                     },
-                    inputs: input_array_types
-                        .into_iter()
-                        .zip(input_elem_types)
-                        .map(|(array, element)| SoacInputType { array, element })
-                        .collect(),
+                    inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
                     index_type,
                     value_type,
                     dest_elem_type: dest_elem_ty,
@@ -2297,7 +2284,6 @@ impl<'a, 'b> Converter<'a, 'b> {
             op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let arr_nid = self.convert_array_expr_value(input)?;
         let arr_ty = self.value_array_type(arr_nid, input);
-        let elem_ty = self.value_elem_type(&arr_ty, input);
         let init_nid = self.convert_term(ne)?;
 
         // Emit as Screma { 0 maps, 1 Reduce accumulator } + project field
@@ -2308,10 +2294,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op::Reduce {
                 lanes: screma::Lanes {
-                    inputs: vec![SoacInputType {
-                        array: arr_ty,
-                        element: elem_ty,
-                    }],
+                    inputs: vec![SoacInputType { array: arr_ty }],
                     maps: vec![],
                 },
                 operators: screma::NonEmpty {
@@ -2354,7 +2337,6 @@ impl<'a, 'b> Converter<'a, 'b> {
             op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let arr_nid = self.convert_array_expr_value(input)?;
         let arr_ty = self.value_array_type(arr_nid, input);
-        let input_elem_ty = self.value_elem_type(&arr_ty, input);
         let init_nid = self.convert_term(ne)?;
 
         let operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
@@ -2383,10 +2365,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op::Scan {
                 lanes: screma::Lanes {
-                    inputs: vec![SoacInputType {
-                        array: arr_ty,
-                        element: input_elem_ty,
-                    }],
+                    inputs: vec![SoacInputType { array: arr_ty }],
                     maps: vec![],
                 },
                 operators: screma::NonEmpty {
@@ -2463,10 +2442,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             return Ok(self.emit_soac(
                 Soac::Filter(filter::Op {
                     body: filter::Body {
-                        input: filter::Input::Plain(SoacInputType {
-                            array: arr_ty,
-                            element: elem_ty,
-                        }),
+                        input: filter::Input::Plain(SoacInputType { array: arr_ty }),
                         predicate: pred_body,
                     },
                     state: filter::RawState {
@@ -2529,10 +2505,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         Ok(self.emit_soac(
             Soac::Filter(filter::Op {
                 body: filter::Body {
-                    input: filter::Input::Plain(SoacInputType {
-                        array: arr_ty,
-                        element: elem_ty,
-                    }),
+                    input: filter::Input::Plain(SoacInputType { array: arr_ty }),
                     predicate: pred_body,
                 },
                 state: filter::RawState {
@@ -2617,9 +2590,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 // SoA tuple. The per-iteration element type is the
                 // corresponding `(A, B)` element tuple, not the tuple
                 // itself.
-                ty if super::soac_expand::as_soa_tuple(ty).is_some() => {
-                    super::soac_expand::soa_element_type(ty)
-                }
+                ty if as_soa_tuple(ty).is_some() => soac_element_type(ty),
                 _ => ty.clone(),
             },
             // SoA tuple input: the per-iteration element is the tuple of each
@@ -2646,9 +2617,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// the value type rather than the source type.
     fn value_array_type(&self, nid: NodeId, fallback: &ArrayExpr) -> Type<TypeName> {
         if let Some(ty) = self.graph.types.get(&nid) {
-            if matches!(ty, Type::Constructed(TypeName::Array, _))
-                || super::soac_expand::as_soa_tuple(ty).is_some()
-            {
+            if matches!(ty, Type::Constructed(TypeName::Array, _)) || as_soa_tuple(ty).is_some() {
                 return ty.clone();
             }
         }
@@ -2663,8 +2632,8 @@ impl<'a, 'b> Converter<'a, 'b> {
                 return args[0].clone();
             }
         }
-        if super::soac_expand::as_soa_tuple(arr_ty).is_some() {
-            return super::soac_expand::soa_element_type(arr_ty);
+        if as_soa_tuple(arr_ty).is_some() {
+            return soac_element_type(arr_ty);
         }
         self.array_expr_elem_type(fallback)
     }

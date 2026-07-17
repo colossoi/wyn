@@ -2,7 +2,7 @@ use super::*;
 use crate::ast::TypeName;
 use crate::egir::program::SemanticOpId;
 use crate::egir::soac::screma;
-use crate::egir::types::{PureOp, SegLevel, SegSpace, SideEffect, Soac, SoacDestination, SoacInputType};
+use crate::egir::types::{PureOp, SegSpace, SideEffect, Soac, SoacDestination, SoacInputType};
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -33,7 +33,6 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
                 },
                 state: screma::SemanticState::Segmented {
                     space: SegSpace {
-                        level: SegLevel::Thread,
                         dims: vec![crate::egir::types::SegExtent::Fixed(1)],
                     },
                     placement: screma::Placement::LaneLocal,

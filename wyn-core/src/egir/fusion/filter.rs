@@ -259,7 +259,7 @@ fn filter_parts(effect: &SideEffect) -> FilterParts {
         pred: op.body.predicate.clone(),
         input: effect.operand_nodes[0],
         input_array_type: input_type.array.clone(),
-        input_elem_type: input_type.element.clone(),
+        input_elem_type: input_type.element(),
         scratch: match &op.state.storage {
             filter::Output::Local { .. } => None,
             filter::Output::Runtime { scratch, .. } => Some(*scratch),
@@ -406,7 +406,6 @@ fn apply_with_consumer(
                 lanes: screma::Lanes {
                     inputs: vec![SoacInputType {
                         array: filter.input_array_type.clone(),
-                        element: filter.input_elem_type.clone(),
                     }],
                     maps: Vec::new(),
                 },
@@ -478,7 +477,6 @@ fn apply_count_only(
             lanes: screma::Lanes {
                 inputs: vec![SoacInputType {
                     array: filter.input_array_type,
-                    element: filter.input_elem_type,
                 }],
                 maps: Vec::new(),
             },

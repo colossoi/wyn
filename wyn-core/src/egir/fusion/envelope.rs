@@ -332,7 +332,7 @@ fn apply_hist(inner: &mut SemanticProgram, candidate: Candidate) {
     for input in 0..hist_body.inputs.len() {
         if input == insert_at {
             new_array_types.extend(producer.inputs.iter().map(|input| input.array.clone()));
-            new_elem_types.extend(producer.inputs.iter().map(|input| input.element.clone()));
+            new_elem_types.extend(producer.inputs.iter().map(SoacInputType::element));
             new_input_nodes.extend(producer.input_nodes.iter().copied());
         }
         if candidate.consumer_inputs.contains(&input) {
@@ -340,7 +340,7 @@ fn apply_hist(inner: &mut SemanticProgram, candidate: Candidate) {
         }
         old_to_new[input] = Some(new_array_types.len());
         new_array_types.push(hist_body.inputs[input].array.clone());
-        new_elem_types.push(hist_body.inputs[input].element.clone());
+        new_elem_types.push(hist_body.inputs[input].element());
         new_input_nodes.push(hist_effect.operand_nodes[1 + input]);
     }
     let producer_base =
@@ -386,11 +386,7 @@ fn apply_hist(inner: &mut SemanticProgram, candidate: Candidate) {
     ) = &mut consumer.kind
     {
         consumer_body.body = body;
-        consumer_body.inputs = new_array_types
-            .into_iter()
-            .zip(new_elem_types)
-            .map(|(array, element)| SoacInputType { array, element })
-            .collect();
+        consumer_body.inputs = new_array_types.into_iter().map(|array| SoacInputType { array }).collect();
         *state = hist::SemanticState::Segmented(producer.space);
     }
     consumer.effects = fused_effects;

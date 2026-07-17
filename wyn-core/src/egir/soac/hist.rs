@@ -24,7 +24,6 @@ impl Body {
     pub(crate) fn for_each_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
         for input in &mut self.inputs {
             visit(&mut input.array);
-            visit(&mut input.element);
         }
         visit(&mut self.index_type);
         visit(&mut self.value_type);

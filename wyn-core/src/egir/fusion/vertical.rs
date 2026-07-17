@@ -290,7 +290,7 @@ fn apply_fusion(inner: &mut SemanticProgram, candidate: Candidate) {
         new_inputs.remove(input);
     }
     new_inputs.extend(producer.inputs.iter().cloned());
-    let new_elem_types = new_inputs.iter().map(|input| input.element.clone()).collect::<Vec<_>>();
+    let new_elem_types = new_inputs.iter().map(SoacInputType::element).collect::<Vec<_>>();
     let appended_base = old_input_count - candidate.consumer_inputs.len();
 
     let mut new_maps = consumer_op.lanes().maps.clone();
@@ -673,7 +673,7 @@ mod tests {
     use super::*;
     use crate::egir::program::{RegionInterner, SemanticEntry, SemanticOpId};
     use crate::egir::semantic_exec::{RegionExecutor, Value};
-    use crate::egir::types::{EffectToken, SegExtent, SegLevel, SideEffect};
+    use crate::egir::types::{EffectToken, SegExtent, SideEffect};
     use crate::flow::ExecutionModel;
 
     fn captured_binary_function(name: &str, op: &str) -> SemanticFunc {
@@ -727,10 +727,7 @@ mod tests {
                 SemanticOpId(0),
                 Soac::Screma(screma::Op::Map {
                     lanes: screma::Lanes {
-                        inputs: vec![SoacInputType {
-                            array: array.clone(),
-                            element: int.clone(),
-                        }],
+                        inputs: vec![SoacInputType { array: array.clone() }],
                         maps: vec![screma::Map {
                             body: SegBody {
                                 region: producer_region,
@@ -744,7 +741,6 @@ mod tests {
                     },
                     state: screma::SemanticState::Segmented {
                         space: SegSpace {
-                            level: SegLevel::Thread,
                             dims: vec![SegExtent::Fixed(8)],
                         },
                         placement: screma::Placement::LaneLocal,
@@ -782,10 +778,7 @@ mod tests {
                 SemanticOpId(2),
                 Soac::Screma(screma::Op::Map {
                     lanes: screma::Lanes {
-                        inputs: vec![SoacInputType {
-                            array: array.clone(),
-                            element: int.clone(),
-                        }],
+                        inputs: vec![SoacInputType { array: array.clone() }],
                         maps: vec![screma::Map {
                             body: SegBody {
                                 region: consumer_region,
@@ -799,7 +792,6 @@ mod tests {
                     },
                     state: screma::SemanticState::Segmented {
                         space: SegSpace {
-                            level: SegLevel::Thread,
                             dims: vec![SegExtent::Fixed(8)],
                         },
                         placement: screma::Placement::LaneLocal,

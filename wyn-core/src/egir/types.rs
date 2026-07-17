@@ -19,8 +19,8 @@ use smallvec::SmallVec;
 use super::soac::{filter, hist, screma};
 
 pub use super::ir::{
-    EffectOp, EffectToken, EgirPhase, GraphResource, Language, NodeId, RegionId, SegBody, SegLevel,
-    SideEffectIndex, SideEffectSite, SkeletonTerminator, Soac, SoacDestination,
+    EffectOp, EffectToken, EgirPhase, GraphResource, Language, NodeId, RegionId, SegBody, SideEffectIndex,
+    SideEffectSite, SkeletonTerminator, Soac, SoacDestination,
 };
 pub use crate::ResourceAccess;
 
@@ -47,6 +47,45 @@ pub type SkeletonBlock<P = Semantic, Lang = WynLanguage> = super::ir::SkeletonBl
 pub type Skeleton<P = Semantic, Lang = WynLanguage> = super::ir::Skeleton<P, Lang>;
 pub type SoacInputType<Ty = Type<TypeName>> = super::ir::SoacInputType<Ty>;
 pub type EGraph<P = Semantic, Lang = WynLanguage> = super::ir::EGraph<P, Lang>;
+
+/// If `ty` is a structure-of-arrays tuple, return its array component types.
+pub(crate) fn as_soa_tuple(ty: &Type<TypeName>) -> Option<&[Type<TypeName>]> {
+    let Type::Constructed(TypeName::Tuple(_), components) = ty else {
+        return None;
+    };
+    if components.is_empty() {
+        return None;
+    }
+    components
+        .iter()
+        .all(|component| {
+            matches!(component, Type::Constructed(TypeName::Array, args) if args.len() == 4)
+                || as_soa_tuple(component).is_some()
+        })
+        .then_some(components)
+}
+
+/// Derive the logical element represented by an array or SoA tuple type.
+pub(crate) fn soac_element_type(array: &Type<TypeName>) -> Type<TypeName> {
+    if as_soa_tuple(array).is_some() {
+        let Type::Constructed(TypeName::Tuple(arity), components) = array else {
+            unreachable!()
+        };
+        return Type::Constructed(
+            TypeName::Tuple(*arity),
+            components.iter().map(soac_element_type).collect(),
+        );
+    }
+    crate::types::array_elem(array)
+        .cloned()
+        .unwrap_or_else(|| panic!("expected an array or SoA tuple, got {array:?}"))
+}
+
+impl super::ir::SoacInputType<Type<TypeName>> {
+    pub(crate) fn element(&self) -> Type<TypeName> {
+        soac_element_type(&self.array)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Raw<R = super::program::SemanticResourceRef>(std::marker::PhantomData<fn() -> R>);

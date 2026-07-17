@@ -106,12 +106,8 @@ fn scatter_handleability_checks_every_input() {
                 inputs: vec![
                     SoacInputType {
                         array: plain_array_ty(i32_ty.clone()),
-                        element: i32_ty.clone(),
                     },
-                    SoacInputType {
-                        array: bad_input_ty,
-                        element: f32_ty.clone(),
-                    },
+                    SoacInputType { array: bad_input_ty },
                 ],
                 index_type: i32_ty,
                 value_type: f32_ty.clone(),

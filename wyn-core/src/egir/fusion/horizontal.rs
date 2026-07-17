@@ -167,15 +167,11 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
         p.lanes.inputs.iter().map(|input| input.array.clone()).collect();
     raw_array_types.extend(q.lanes.inputs.iter().map(|input| input.array.clone()));
     let mut raw_elem_types: Vec<Type<TypeName>> =
-        p.lanes.inputs.iter().map(|input| input.element.clone()).collect();
-    raw_elem_types.extend(q.lanes.inputs.iter().map(|input| input.element.clone()));
-    let (inputs, input_array_types, input_elem_types, input_remap) =
+        p.lanes.inputs.iter().map(SoacInputType::element).collect();
+    raw_elem_types.extend(q.lanes.inputs.iter().map(SoacInputType::element));
+    let (inputs, input_array_types, _input_elem_types, input_remap) =
         super::deduplicate_array_inputs(raw_inputs, raw_array_types, raw_elem_types);
-    let input_types = input_array_types
-        .into_iter()
-        .zip(input_elem_types)
-        .map(|(array, element)| SoacInputType { array, element })
-        .collect();
+    let input_types = input_array_types.into_iter().map(|array| SoacInputType { array }).collect();
 
     let mut maps: Vec<screma::Map> = p
         .lanes

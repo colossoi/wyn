@@ -216,10 +216,7 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
         (
             inner.region(map.body.region).expect("map region").name.clone(),
             indices.iter().map(|index| effect.operand_nodes[index.index()]).collect::<Vec<_>>(),
-            indices
-                .iter()
-                .map(|index| op.lanes().inputs[index.index()].element.clone())
-                .collect::<Vec<_>>(),
+            indices.iter().map(|index| op.lanes().inputs[index.index()].element()).collect::<Vec<_>>(),
             map.body.captures.clone(),
             effect.result.expect("indexed SegMap has no result"),
         )
