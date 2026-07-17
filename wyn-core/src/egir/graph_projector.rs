@@ -290,7 +290,7 @@ impl<'a> GraphProjector<'a> {
             self.project_control_headers(&shell.blocks)?
         };
         shell.graph.verify_hash_cons()?;
-        super::graph_ops::verify_branch_arities(&shell.graph)?;
+        shell.graph.skeleton.verify_branch_arities()?;
         Ok(GraphProjection {
             graph: shell.graph,
             control_headers,

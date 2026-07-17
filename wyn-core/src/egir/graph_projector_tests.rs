@@ -194,8 +194,7 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
             if *merge == recipe.projection.block(continuation).unwrap()
                 && *continue_block == recipe.projection.block(body).unwrap()
     ));
-    crate::egir::graph_ops::verify_branch_arities(&recipe.projection.graph)
-        .expect("projected loop branch arity");
+    recipe.projection.graph.skeleton.verify_branch_arities().expect("projected loop branch arity");
 }
 
 #[test]
@@ -245,8 +244,7 @@ fn captured_value_recipe_projects_a_structured_selection_prefix() {
         Some(ControlHeader::Selection { merge })
             if *merge == recipe.projection.block(continuation).unwrap()
     ));
-    crate::egir::graph_ops::verify_branch_arities(&recipe.projection.graph)
-        .expect("projected selection branch arity");
+    recipe.projection.graph.skeleton.verify_branch_arities().expect("projected selection branch arity");
 }
 
 #[test]
@@ -341,6 +339,9 @@ fn projection_does_not_resurrect_eliminated_block_parameters() {
         .expect("projection with an eliminated historical parameter");
     assert!(projected.node(eliminated).is_none());
     assert!(projected.graph.skeleton.blocks[projected.block(continuation).unwrap()].params.is_empty());
-    crate::egir::graph_ops::verify_branch_arities(&projected.graph)
+    projected
+        .graph
+        .skeleton
+        .verify_branch_arities()
         .expect("projection keeps eliminated parameter arity");
 }

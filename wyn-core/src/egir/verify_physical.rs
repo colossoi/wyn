@@ -45,7 +45,9 @@ fn physical_type(ty: &Type<TypeName>, owner: &str) -> Result<(), String> {
 }
 
 fn graph(graph: &PhysicalEGraph, owner: &str) -> Result<(), String> {
-    super::graph_ops::verify_branch_arities(graph)
+    graph
+        .skeleton
+        .verify_branch_arities()
         .map_err(|error| format!("physical body `{owner}` has invalid control flow: {error}"))?;
     for ty in graph.types.values() {
         physical_type(ty, owner)?;

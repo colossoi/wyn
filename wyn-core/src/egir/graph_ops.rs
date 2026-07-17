@@ -132,44 +132,6 @@ pub(crate) fn execution_value_producer_closure<P: ValueProducerPhase>(
     value_producer_closure(graph, execution_roots.chain(result_roots))
 }
 
-/// Verify that every CFG edge supplies exactly one argument per target block
-/// parameter. Projection and physicalization both use this stable skeleton
-/// contract before later optimization assumes it.
-pub(crate) fn verify_branch_arities<P: EgirPhase>(graph: &EGraph<P>) -> Result<(), String> {
-    for (source, block) in &graph.skeleton.blocks {
-        let check = |target: BlockId, args: &[NodeId]| {
-            let target_block = graph
-                .skeleton
-                .blocks
-                .get(target)
-                .ok_or_else(|| format!("branch from {source:?} targets an absent block {target:?}"))?;
-            if args.len() != target_block.params.len() {
-                return Err(format!(
-                    "branch from {source:?} to {target:?} supplies {} arguments for {} parameters",
-                    args.len(),
-                    target_block.params.len()
-                ));
-            }
-            Ok(())
-        };
-        match &block.term {
-            SkeletonTerminator::Branch { target, args } => check(*target, args)?,
-            SkeletonTerminator::CondBranch {
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-                ..
-            } => {
-                check(*then_target, then_args)?;
-                check(*else_target, else_args)?;
-            }
-            SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
-        }
-    }
-    Ok(())
-}
-
 fn extend_incoming_block_args<P: EgirPhase>(
     graph: &EGraph<P>,
     target: BlockId,

@@ -273,41 +273,11 @@ fn eliminate_redundant_params<P: EgirPhase>(graph: &mut EGraph<P>) -> LookupMap<
     // target block's param count. This is the exact class of bug that
     // the descending-index sweep is designed to preserve; assert it.
     debug_assert!(
-        check_branch_arity(graph),
+        graph.skeleton.verify_branch_arities().is_ok(),
         "branch/param arity mismatch after eliminate_redundant_params"
     );
 
     aliases
-}
-
-/// Debug check: for every terminator branching to a block, the arg list
-/// must have the same length as the target block's param list.
-fn check_branch_arity<P: EgirPhase>(graph: &EGraph<P>) -> bool {
-    for (_bid, block) in &graph.skeleton.blocks {
-        match &block.term {
-            SkeletonTerminator::Branch { target, args } => {
-                if args.len() != graph.skeleton.blocks[*target].params.len() {
-                    return false;
-                }
-            }
-            SkeletonTerminator::CondBranch {
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-                ..
-            } => {
-                if then_args.len() != graph.skeleton.blocks[*then_target].params.len() {
-                    return false;
-                }
-                if else_args.len() != graph.skeleton.blocks[*else_target].params.len() {
-                    return false;
-                }
-            }
-            SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
-        }
-    }
-    true
 }
 
 /// Insert every entry from `new_aliases` into `aliases`, and partially
