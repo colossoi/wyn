@@ -26,7 +26,7 @@ use polytype::Type;
 
 use super::super::from_tlc::ConvertError;
 use super::super::program::{Func, Program};
-use super::super::types::{EGraph, ENode, EgirPhase, NodeId, PureOp, RegionId, SideEffectKind};
+use super::super::types::{EGraph, ENode, EgirPhase, NodeId, PureOp, RegionId, SideEffectKind, Soac};
 use crate::ast::TypeName;
 use crate::LookupMap;
 
@@ -39,7 +39,7 @@ struct Retype {
     arg_ty: Type<TypeName>,
 }
 
-pub fn run<P: EgirPhase>(inner: &mut Program<P>) -> Result<(), ConvertError> {
+pub fn run<P: EgirPhase<Soac = Soac<P>>>(inner: &mut Program<P>) -> Result<(), ConvertError> {
     let Program {
         entry_points,
         regions,
@@ -91,7 +91,7 @@ pub fn run<P: EgirPhase>(inner: &mut Program<P>) -> Result<(), ConvertError> {
 
 /// Scan every `Seg` body in `graphs` for a capture whose type has drifted
 /// view-ward from the callee parameter it binds, pushing a retype for each.
-fn collect_drifts<'a, P: EgirPhase + 'a>(
+fn collect_drifts<'a, P: EgirPhase<Soac = Soac<P>> + 'a>(
     graphs: impl Iterator<Item = &'a EGraph<P>>,
     regions: &LookupMap<RegionId, usize>,
     functions: &[Func<P>],

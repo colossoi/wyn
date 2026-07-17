@@ -38,6 +38,7 @@ impl EgirPhase for TestPhase {
     type Resource = ();
     type ResourceDecl = u16;
     type SoacId = ();
+    type Soac = ();
     type MapState = ();
     type ReduceState = ();
     type ScanState = ();
@@ -58,14 +59,26 @@ fn soac_placement_preserves_logical_ownership() {
 
 #[test]
 fn graph_accepts_non_wyn_payloads() {
-    let mut graph = super::super::ir::EGraph::<Semantic, TestLanguage>::new();
+    let mut graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
     let node = graph.intern_pure(PureOp::Unit, SmallVec::new(), "unit".to_string(), None);
     let constant = graph.intern_constant(TestConst::FortyTwo, "number".to_string());
+    let entry = graph.skeleton.entry;
+    graph.skeleton.blocks[entry].side_effects.push(super::super::ir::SideEffect {
+        kind: super::super::ir::SideEffectKind::Soac((), ()),
+        operand_nodes: SmallVec::new(),
+        result: None,
+        effects: None,
+        span: None,
+    });
 
     assert_eq!(graph.types[&node], "unit");
     assert!(matches!(
         graph.nodes[constant],
         super::super::ir::ENode::Constant(TestConst::FortyTwo)
+    ));
+    assert!(matches!(
+        graph.skeleton.blocks[entry].side_effects[0].kind,
+        super::super::ir::SideEffectKind::Soac((), ())
     ));
 }
 

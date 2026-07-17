@@ -14,8 +14,6 @@ use crate::{LookupMap, LookupSet, SortedSet};
 pub use crate::op::PureViewSource;
 pub use crate::types::SoacOwnership;
 
-use super::soac::{filter, hist, screma};
-
 /// Effect token for ordering effectful ops during EGIR passes.
 ///
 /// These are purely an EGIR-internal concept — they never reach the SSA
@@ -238,7 +236,7 @@ pub enum SideEffectKind<P: EgirPhase, Lang: Language> {
     Effect(EffectOp<P::Resource, Lang::Ty>),
     /// A placeholder for an unexpanded SOAC. Produced by `from_tlc` and
     /// consumed by `soac_expand`. Never reaches elaborate.
-    Soac(P::SoacId, Soac<P>),
+    Soac(P::SoacId, P::Soac),
 }
 
 impl<P: EgirPhase, Lang: Language> SideEffectKind<P, Lang> {
@@ -399,6 +397,7 @@ pub trait EgirPhase: Clone + std::fmt::Debug {
     type Resource: GraphResource;
     type ResourceDecl: Clone + std::fmt::Debug;
     type SoacId: Clone + std::fmt::Debug;
+    type Soac: Clone + std::fmt::Debug;
     type MapState: Clone + std::fmt::Debug;
     type ReduceState: Clone + std::fmt::Debug;
     type ScanState: Clone + std::fmt::Debug;
@@ -410,36 +409,6 @@ pub trait EgirPhase: Clone + std::fmt::Debug {
 #[derive(Clone, Debug)]
 pub struct SoacInputType<Ty> {
     pub array: Ty,
-}
-
-#[derive(Clone, Debug)]
-pub enum Soac<P: EgirPhase> {
-    Screma(screma::Op<P>),
-    Filter(filter::Op<P>),
-    Hist(hist::Op<P>),
-}
-
-impl<P: EgirPhase> Soac<P> {
-    pub(crate) fn seg_bodies(&self) -> Vec<&SegBody> {
-        match self {
-            Self::Screma(op) => {
-                let mut bodies = op.lanes().maps.iter().map(|map| &map.body).collect::<Vec<_>>();
-                for operator in op.operators() {
-                    bodies.extend([&operator.step, &operator.combine]);
-                }
-                bodies
-            }
-            Self::Filter(op) => {
-                let mut bodies = Vec::with_capacity(2);
-                if let filter::Input::Mapped { body, .. } = &op.body.input {
-                    bodies.push(body);
-                }
-                bodies.push(&op.body.predicate);
-                bodies
-            }
-            Self::Hist(op) => vec![&op.body.body],
-        }
-    }
 }
 
 /// Terminator using NodeIds for value references.

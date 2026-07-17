@@ -20,7 +20,7 @@ use super::soac::{filter, hist, screma};
 
 pub use super::ir::{
     EffectOp, EffectToken, EgirPhase, GraphResource, Language, NodeId, RegionId, SegBody, SideEffectIndex,
-    SideEffectSite, SkeletonTerminator, Soac, SoacDestination, SoacOwnership, SoacPlacement,
+    SideEffectSite, SkeletonTerminator, SoacDestination, SoacOwnership, SoacPlacement,
 };
 pub use crate::ResourceAccess;
 
@@ -30,6 +30,36 @@ pub struct WynLanguage;
 impl Language for WynLanguage {
     type Const = ConstantValue;
     type Ty = Type<TypeName>;
+}
+
+#[derive(Clone, Debug)]
+pub enum Soac<P: EgirPhase> {
+    Screma(screma::Op<P>),
+    Filter(filter::Op<P>),
+    Hist(hist::Op<P>),
+}
+
+impl<P: EgirPhase> Soac<P> {
+    pub(crate) fn seg_bodies(&self) -> Vec<&SegBody> {
+        match self {
+            Self::Screma(op) => {
+                let mut bodies = op.lanes().maps.iter().map(|map| &map.body).collect::<Vec<_>>();
+                for operator in op.operators() {
+                    bodies.extend([&operator.step, &operator.combine]);
+                }
+                bodies
+            }
+            Self::Filter(op) => {
+                let mut bodies = Vec::with_capacity(2);
+                if let filter::Input::Mapped { body, .. } = &op.body.input {
+                    bodies.push(body);
+                }
+                bodies.push(&op.body.predicate);
+                bodies
+            }
+            Self::Hist(op) => vec![&op.body.body],
+        }
+    }
 }
 
 // Keep the existing semantic defaults at the compatibility boundary. The
@@ -103,6 +133,7 @@ impl<R: GraphResource> EgirPhase for Raw<R> {
     type Resource = R;
     type ResourceDecl = super::program::SemanticResourceDecl;
     type SoacId = ();
+    type Soac = Soac<Self>;
     type MapState = screma::RawState;
     type ReduceState = screma::RawState;
     type ScanState = screma::RawState;
@@ -115,6 +146,7 @@ impl<R: GraphResource> EgirPhase for Semantic<R> {
     type Resource = R;
     type ResourceDecl = super::program::SemanticResourceDecl;
     type SoacId = super::program::SemanticOpId;
+    type Soac = Soac<Self>;
     type MapState = screma::SemanticState<R>;
     type ReduceState = screma::SemanticState<R>;
     type ScanState = screma::SemanticState<R>;
@@ -127,6 +159,7 @@ impl<R: GraphResource> EgirPhase for Scheduled<R> {
     type Resource = R;
     type ResourceDecl = super::program::SemanticResourceDecl;
     type SoacId = super::program::SemanticOpId;
+    type Soac = Soac<Self>;
     type MapState = screma::ScheduledState<R>;
     type ReduceState = screma::ScheduledState<R>;
     type ScanState = screma::ScheduledState<R>;
@@ -139,6 +172,7 @@ impl EgirPhase for Physical {
     type Resource = super::program::PhysicalResourceRef;
     type ResourceDecl = crate::interface::StorageBindingDecl;
     type SoacId = super::program::SemanticOpId;
+    type Soac = Soac<Self>;
     type MapState = screma::ScheduledState<super::program::PhysicalResourceRef>;
     type ReduceState = screma::PhysicalSerialState;
     type ScanState = screma::PhysicalSerialState;
@@ -153,7 +187,8 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
         mut map_soac: impl FnMut(BlockId, usize, P::SoacId, Soac<P>) -> Result<(Q::SoacId, Soac<Q>), E>,
     ) -> Result<(EGraph<Q>, LookupMap<BlockId, BlockId>), E>
     where
-        Q: EgirPhase<Resource = P::Resource>,
+        P: EgirPhase<Soac = Soac<P>>,
+        Q: EgirPhase<Resource = P::Resource, Soac = Soac<Q>>,
     {
         let super::ir::EGraphParts {
             mut nodes,
@@ -238,7 +273,8 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
         ) -> Result<(Q::SoacId, Soac<Q>), E>,
     ) -> Result<(EGraph<Q>, LookupMap<NodeId, NodeId>, LookupMap<BlockId, BlockId>), E>
     where
-        Q: EgirPhase,
+        P: EgirPhase<Soac = Soac<P>>,
+        Q: EgirPhase<Soac = Soac<Q>>,
     {
         let super::ir::EGraphParts {
             nodes,
@@ -349,7 +385,7 @@ impl From<SoacOwnership> for SoacDestination {
     }
 }
 
-impl<P: EgirPhase> super::ir::Soac<P> {
+impl<P: EgirPhase> Soac<P> {
     fn for_each_body_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
         match self {
             Self::Screma(op) => op.for_each_type_mut(visit),
@@ -359,7 +395,7 @@ impl<P: EgirPhase> super::ir::Soac<P> {
     }
 }
 
-impl<R: GraphResource> super::ir::Soac<Raw<R>> {
+impl<R: GraphResource> Soac<Raw<R>> {
     pub(crate) fn for_each_type_mut(&mut self, mut visit: impl FnMut(&mut Type<TypeName>)) {
         self.for_each_body_type_mut(&mut visit);
         if let Self::Filter(op) = self {
@@ -368,7 +404,7 @@ impl<R: GraphResource> super::ir::Soac<Raw<R>> {
     }
 }
 
-impl super::ir::Soac<Physical> {
+impl Soac<Physical> {
     pub(crate) fn for_each_type_mut(&mut self, mut visit: impl FnMut(&mut Type<TypeName>)) {
         self.for_each_body_type_mut(&mut visit);
         if let Self::Filter(op) = self {
@@ -377,7 +413,7 @@ impl super::ir::Soac<Physical> {
     }
 }
 
-impl<R: GraphResource> super::ir::Soac<Semantic<R>> {
+impl<R: GraphResource> Soac<Semantic<R>> {
     pub fn capture_nodes(&self) -> impl Iterator<Item = NodeId> {
         let nodes = match self {
             Self::Screma(op) => op.capture_nodes(),
