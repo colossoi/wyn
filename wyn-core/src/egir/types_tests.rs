@@ -145,6 +145,46 @@ fn removing_block_param_slots_updates_incoming_edges_and_indices() {
 }
 
 #[test]
+fn splitting_block_moves_effect_suffix_and_original_terminator() {
+    let mut graph: EGraph = EGraph::new();
+    let unit = Type::Constructed(TypeName::Unit, vec![]);
+    let first = graph.alloc_side_effect_result(unit.clone());
+    let second = graph.alloc_side_effect_result(unit.clone());
+    let third = graph.alloc_side_effect_result(unit);
+    let entry = graph.skeleton.entry;
+    graph.skeleton.blocks[entry].side_effects = vec![effect(first), effect(second), effect(third)];
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(Some(third));
+
+    let continuation = graph.skeleton.split_block_before_effect(entry, 1);
+
+    assert_eq!(
+        graph.skeleton.blocks[entry]
+            .side_effects
+            .iter()
+            .filter_map(|effect| effect.result)
+            .collect::<Vec<_>>(),
+        [first]
+    );
+    assert!(matches!(
+        &graph.skeleton.blocks[entry].term,
+        SkeletonTerminator::Branch { target, args }
+            if *target == continuation && args.is_empty()
+    ));
+    assert_eq!(
+        graph.skeleton.blocks[continuation]
+            .side_effects
+            .iter()
+            .filter_map(|effect| effect.result)
+            .collect::<Vec<_>>(),
+        [second, third]
+    );
+    assert!(matches!(
+        graph.skeleton.blocks[continuation].term,
+        SkeletonTerminator::Return(Some(result)) if result == third
+    ));
+}
+
+#[test]
 fn entry_and_program_accept_non_wyn_resource_metadata() {
     let graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
     let entry = super::super::ir::Entry::<TestPhase, TestLanguage>::new_with_resources(

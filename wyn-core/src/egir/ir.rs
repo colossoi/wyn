@@ -471,6 +471,27 @@ impl<P: EgirPhase, Lang: Language> Skeleton<P, Lang> {
     pub fn create_block(&mut self) -> BlockId {
         self.blocks.insert(SkeletonBlock::new())
     }
+
+    /// Split a block immediately before one of its side effects.
+    ///
+    /// The returned continuation receives the selected effect and every
+    /// following effect, plus the original terminator. The original block is
+    /// terminated by an unconditional branch to the continuation.
+    pub fn split_block_before_effect(&mut self, block: BlockId, effect_index: usize) -> BlockId {
+        let continuation = self.create_block();
+        let source = &mut self.blocks[block];
+        let suffix = source.side_effects.split_off(effect_index);
+        let old_term = std::mem::replace(
+            &mut source.term,
+            SkeletonTerminator::Branch {
+                target: continuation,
+                args: Vec::new(),
+            },
+        );
+        self.blocks[continuation].side_effects = suffix;
+        self.blocks[continuation].term = old_term;
+        continuation
+    }
 }
 
 /// Stable-for-a-snapshot location of a side effect in the skeleton.

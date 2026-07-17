@@ -863,14 +863,7 @@ fn build_parallel_maps(
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
-    let after = graph.skeleton.create_block();
-    let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
-    let old_term = std::mem::replace(
-        &mut graph.skeleton.blocks[bid].term,
-        SkeletonTerminator::Unreachable,
-    );
-    graph.skeleton.blocks[after].side_effects = suffix;
-    graph.skeleton.blocks[after].term = old_term;
+    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
     if let Some(header_meta) = control_headers.remove(&bid) {
         control_headers.insert(after, header_meta);
     }
@@ -1391,14 +1384,7 @@ fn build_parallel_scatter(
         result_node,
     } = spec;
 
-    let after = graph.skeleton.create_block();
-    let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
-    let old_term = std::mem::replace(
-        &mut graph.skeleton.blocks[bid].term,
-        SkeletonTerminator::Unreachable,
-    );
-    graph.skeleton.blocks[after].side_effects = suffix;
-    graph.skeleton.blocks[after].term = old_term;
+    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
     if let Some(header_meta) = control_headers.remove(&bid) {
         control_headers.insert(after, header_meta);
     }
@@ -1762,14 +1748,7 @@ fn build_filter_scatter(
     next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     use super::graph_ops::{emit_load, emit_storage_store, intern_storage_view, intern_u32};
-    let after = graph.skeleton.create_block();
-    let suffix: Vec<_> = graph.skeleton.blocks[bid].side_effects.drain(idx..).collect();
-    let old_term = std::mem::replace(
-        &mut graph.skeleton.blocks[bid].term,
-        SkeletonTerminator::Unreachable,
-    );
-    graph.skeleton.blocks[after].side_effects = suffix;
-    graph.skeleton.blocks[after].term = old_term;
+    let after = graph.skeleton.split_block_before_effect(bid, idx);
     let in_range = graph.skeleton.create_block();
     let write = graph.skeleton.create_block();
     let skip = graph.skeleton.create_block();
@@ -1885,14 +1864,7 @@ fn build_runtime_filter_loop(
     let scratch_view = intern_storage_view(graph, scratch_out, spec.output_elem_ty.clone(), None);
 
     // Split `bid` into preheader (bid) + after, moving the suffix + terminator.
-    let after = graph.skeleton.create_block();
-    let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
-    let old_term = std::mem::replace(
-        &mut graph.skeleton.blocks[bid].term,
-        SkeletonTerminator::Unreachable,
-    );
-    graph.skeleton.blocks[after].side_effects = suffix;
-    graph.skeleton.blocks[after].term = old_term;
+    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
     if let Some(header_meta) = control_headers.remove(&bid) {
         control_headers.insert(after, header_meta);
     }
@@ -2107,14 +2079,7 @@ fn build_loop_skeleton(
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
     // Split `bid` into preheader (bid) + after (holding suffix side-effects + old term).
-    let after = graph.skeleton.create_block();
-    let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
-    let old_term = std::mem::replace(
-        &mut graph.skeleton.blocks[bid].term,
-        SkeletonTerminator::Unreachable,
-    );
-    graph.skeleton.blocks[after].side_effects = suffix;
-    graph.skeleton.blocks[after].term = old_term;
+    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
 
     // The split moves the branching terminator to `after`: if `bid`
     // carries structured-control-flow header metadata (e.g. a Selection
