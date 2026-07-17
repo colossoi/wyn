@@ -765,9 +765,7 @@ fn parallel_preludes(
         let Some(site) = dependencies.operation_site(&operation) else {
             continue;
         };
-        let SideEffectKind::Soac(_, soac) =
-            &entry.graph.skeleton.blocks[site.block].side_effects[site.index].kind
-        else {
+        let SideEffectKind::Soac(_, soac) = &entry.graph.skeleton.effect(site).kind else {
             continue;
         };
         if soac.scheduling_space().is_none() {
@@ -797,7 +795,7 @@ fn operation_sites(
 
 fn supports_parallel_prefix_consumer(entry: &super::program::SemanticEntry, site: SideEffectSite) -> bool {
     matches!(
-        &entry.graph.skeleton.blocks[site.block].side_effects[site.index].kind,
+        &entry.graph.skeleton.effect(site).kind,
         SideEffectKind::Soac(_, Soac::Screma(screma::Op::Map {
             lanes,
             state: screma::SemanticState::Segmented { .. },
@@ -865,9 +863,7 @@ fn launched_consumer_invocations(
         let Some(site) = dependencies.operation_site(consumer) else {
             return total;
         };
-        let SideEffectKind::Soac(_, soac) =
-            &entry.graph.skeleton.blocks[site.block].side_effects[site.index].kind
-        else {
+        let SideEffectKind::Soac(_, soac) = &entry.graph.skeleton.effect(site).kind else {
             return total;
         };
         let Some(space) = soac.scheduling_space() else {
@@ -1215,8 +1211,7 @@ fn materialize_runtime_array_result(
         &Type::Constructed(TypeName::UInt(32), vec![]),
         &LogicalSize::FixedBytes(4),
     );
-    let effect =
-        &mut producer.entry.graph.skeleton.blocks[projected_site.block].side_effects[projected_site.index];
+    let effect = producer.entry.graph.skeleton.effect_mut(projected_site);
     let SideEffectKind::Soac(
         _,
         Soac::Filter(filter::Op {
@@ -1354,7 +1349,7 @@ fn configure_materialized_soac(
     output_resources: &[ResourceId],
     source_output_resources: &HashSet<ResourceId>,
 ) {
-    let producer_effect = &mut graph.skeleton.blocks[producer_site.block].side_effects[producer_site.index];
+    let producer_effect = graph.skeleton.effect_mut(producer_site);
     let SideEffectKind::Soac(_, Soac::Screma(op)) = &mut producer_effect.kind else {
         return;
     };
@@ -1956,12 +1951,10 @@ fn refresh_resource_reads_for_values(graph: &mut EGraph, values: &[NodeId]) {
     }
     for site in sites {
         let reads = {
-            let effect = &graph.skeleton.blocks[site.block].side_effects[site.index];
+            let effect = graph.skeleton.effect(site);
             super::semantic_graph::read_resources(graph, effect)
         };
-        let SideEffectKind::Soac(_, Soac::Screma(op)) =
-            &mut graph.skeleton.blocks[site.block].side_effects[site.index].kind
-        else {
+        let SideEffectKind::Soac(_, Soac::Screma(op)) = &mut graph.skeleton.effect_mut(site).kind else {
             continue;
         };
         let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {

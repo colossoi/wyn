@@ -106,9 +106,7 @@ pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
                     continue;
                 };
                 if closure.effects.insert(site) {
-                    pending.extend(P::effect_value_inputs(
-                        &graph.skeleton.blocks[site.block].side_effects[site.index],
-                    ));
+                    pending.extend(P::effect_value_inputs(graph.skeleton.effect(site)));
                 }
             }
             ENode::FuncParam { .. } | ENode::Constant(_) => {}
