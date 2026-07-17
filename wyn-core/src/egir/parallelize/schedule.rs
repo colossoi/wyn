@@ -535,15 +535,15 @@ impl KernelPlan {
     }
 
     pub(crate) fn intern_callable(&mut self, name: impl AsRef<str>) -> RegionId {
-        self.region_interner.intern(name)
+        self.region_interner.intern(name.as_ref())
     }
 
     pub(crate) fn callable_name(&self, id: RegionId) -> &str {
-        self.region_interner.name(id)
+        self.region_interner.resolve(id)
     }
 
     pub(crate) fn callable_names(&self, ids: impl IntoIterator<Item = RegionId>) -> Vec<String> {
-        self.region_interner.names(ids)
+        self.region_interner.resolve_cloned(ids)
     }
 
     pub(crate) fn define_callable(&mut self, function: SemanticFunc) -> RegionId {

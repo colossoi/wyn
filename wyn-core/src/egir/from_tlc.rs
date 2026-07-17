@@ -898,7 +898,7 @@ impl<'a, 'b> Converter<'a, 'b> {
 
     /// Resolve a callable name to its region index, interning it on first use.
     fn region(&self, name: impl AsRef<str>) -> RegionId {
-        self.region_interner.borrow_mut().intern(name)
+        self.region_interner.borrow_mut().intern(name.as_ref())
     }
 
     /// Intern a pure node, attaching the current term's span (if any).

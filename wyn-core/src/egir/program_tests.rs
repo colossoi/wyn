@@ -173,8 +173,8 @@ fn interner_assigns_dense_indices_and_deduplicates_names() {
     assert_ne!(foo, bar);
     assert_eq!(foo.index(), 0);
     assert_eq!(bar.index(), 1);
-    assert_eq!(interner.name(foo), "foo");
-    assert_eq!(interner.name(bar), "bar");
+    assert_eq!(interner.resolve(foo), "foo");
+    assert_eq!(interner.resolve(bar), "bar");
     assert_eq!(interner.get("foo"), Some(foo));
     assert_eq!(interner.get("absent"), None);
 }

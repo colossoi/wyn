@@ -1,17 +1,17 @@
 //! Phase-agnostic, low-level data structures for EGIR.
 
-use std::collections::HashMap;
-
 use slotmap::{new_key_type, SlotMap};
 use smallvec::SmallVec;
 
 use crate::ast::Span;
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
 use crate::interface::{EntryInput as InterfaceEntryInput, EntryOutput as InterfaceEntryOutput};
-use crate::op::{OpTag, PureViewSource as OpViewSource};
+use crate::op::OpTag;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::types::ExternDecl;
 use crate::LookupMap;
+
+pub use crate::op::PureViewSource;
 
 use super::soac::{filter, hist, screma};
 
@@ -69,38 +69,13 @@ impl RegionId {
 /// name is retained because it is the SSA `Call` ABI. Interning the same name
 /// twice returns the same index, so segmented-body construction and the
 /// function arena agree without a separate resolution pass.
-#[derive(Clone, Debug, Default)]
-pub struct RegionInterner {
-    by_name: HashMap<String, RegionId>,
-    names: Vec<String>,
-}
-
-impl RegionInterner {
-    pub fn intern(&mut self, name: impl AsRef<str>) -> RegionId {
-        let name = name.as_ref();
-        if let Some(id) = self.by_name.get(name) {
-            return *id;
-        }
-        let id = RegionId::from_index(self.names.len() as u32);
-        self.names.push(name.to_string());
-        self.by_name.insert(name.to_string(), id);
-        id
-    }
-
-    pub fn get(&self, name: &str) -> Option<RegionId> {
-        self.by_name.get(name).copied()
-    }
-
-    /// Recover the SSA function name backing a region index.
-    pub fn name(&self, id: RegionId) -> &str {
-        &self.names[id.index() as usize]
-    }
-
-    /// Recover owned SSA names for a sequence of regions.
-    pub fn names(&self, ids: impl IntoIterator<Item = RegionId>) -> Vec<String> {
-        ids.into_iter().map(|id| self.name(id).to_string()).collect()
+impl From<u32> for RegionId {
+    fn from(index: u32) -> Self {
+        Self::from_index(index)
     }
 }
+
+pub type RegionInterner = crate::Interner<RegionId, String>;
 
 // ---------------------------------------------------------------------------
 // PureOp — operator identity for hash-consing
@@ -114,7 +89,6 @@ pub trait Language: Clone + std::fmt::Debug + Eq + std::hash::Hash {
 
 /// Phase-typed operator identity without operands.
 pub type PureOp<R> = OpTag<R>;
-pub type PureViewSource<R> = OpViewSource<R>;
 
 // ---------------------------------------------------------------------------
 // NodeKey — hash-cons key = operator + operands + result type
@@ -1239,7 +1213,7 @@ impl<P: EgirPhase, Lang: Language> Program<P, Lang> {
     }
 
     pub fn intern_region(&mut self, name: impl AsRef<str>) -> RegionId {
-        self.region_interner.intern(name)
+        self.region_interner.intern(name.as_ref())
     }
 
     pub fn define_region(&mut self, function: Func<P, Lang>) -> RegionId {
@@ -1249,6 +1223,6 @@ impl<P: EgirPhase, Lang: Language> Program<P, Lang> {
     }
 
     pub fn region_name(&self, id: RegionId) -> &str {
-        self.region_interner.name(id)
+        self.region_interner.resolve(id)
     }
 }

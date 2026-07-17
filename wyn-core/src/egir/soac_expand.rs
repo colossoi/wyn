@@ -194,7 +194,7 @@ fn expand_one(
             // Captures and the callee region are explicit on each `SegBody`;
             // the serial loop reads them directly rather than reslicing the
             // operand list by a separate capture-count layout.
-            let map_funcs = regions.names(lanes.maps.iter().map(|map| map.body.region));
+            let map_funcs = regions.resolve_cloned(lanes.maps.iter().map(|map| map.body.region));
             let map_captures: Vec<Vec<NodeId>> =
                 lanes.maps.iter().map(|map| map.body.captures.clone()).collect();
             let acc_specs = op.operators().into_iter().cloned().collect::<Vec<_>>();
@@ -506,7 +506,7 @@ fn expand_one(
                         }
                         reduce_operands.extend(acc_step_captures[acc_idx].iter().copied());
                         let new_acc = graph.intern_pure(
-                            PureOp::Call(regions.name(acc_specs[acc_idx].step.region).to_string()),
+                            PureOp::Call(regions.resolve(acc_specs[acc_idx].step.region).to_string()),
                             reduce_operands,
                             acc_elem_tys[acc_idx].clone(),
                             None,
@@ -557,9 +557,9 @@ fn expand_one(
                 filter::Input::Plain(input) => (input, None),
                 filter::Input::Mapped { input, body, .. } => (input, Some(body)),
             };
-            let map_func = map_body.map(|body| regions.name(body.region).to_string());
+            let map_func = map_body.map(|body| regions.resolve(body.region).to_string());
             let output_elem_ty = op.body.output_element_type().clone();
-            let pred_func = regions.name(op.body.predicate.region).to_string();
+            let pred_func = regions.resolve(op.body.predicate.region).to_string();
             let arr_ty = input.array.clone();
             let elem_ty = input.element.clone();
             let (output, plan) = match &op.state {
@@ -628,7 +628,7 @@ fn expand_one(
             let scatter = ScatterLoop {
                 dest_view,
                 dest_elem_ty: op.body.dest_elem_type.clone(),
-                func: regions.name(op.body.body.region).to_string(),
+                func: regions.resolve(op.body.body.region).to_string(),
                 read_inputs,
                 captures,
                 index_type: op.body.index_type.clone(),
@@ -655,7 +655,7 @@ fn expand_one(
             // `[inputs.., output_views..]`: views start right after the inputs.
             let cursor = n_inputs;
             let map_captures: Vec<Vec<NodeId>> = maps.iter().map(|map| map.body.captures.clone()).collect();
-            let map_funcs = regions.names(maps.iter().map(|map| map.body.region));
+            let map_funcs = regions.resolve_cloned(maps.iter().map(|map| map.body.region));
             let output_views = if maps.iter().all(|map| map.destination == SoacDestination::InputBuffer) {
                 vec![input_nids[0]; map_funcs.len()]
             } else {
