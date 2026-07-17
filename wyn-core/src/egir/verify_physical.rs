@@ -29,9 +29,6 @@ pub fn check(program: &PhysicalProgram) -> Result<(), String> {
     for function in &program.functions {
         graph(&function.graph, &function.name)?;
     }
-    for region in program.regions.values() {
-        graph(&region.graph, &region.name)?;
-    }
     Ok(())
 }
 

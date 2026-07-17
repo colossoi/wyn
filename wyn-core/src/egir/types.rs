@@ -118,7 +118,6 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
         let super::ir::EGraphParts {
             mut nodes,
             types,
-            const_cache,
             skeleton,
             node_spans,
         } = self.into_parts();
@@ -176,7 +175,6 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
             super::ir::EGraph::<Q, WynLanguage>::from_parts(super::ir::EGraphParts {
                 nodes,
                 types,
-                const_cache,
                 skeleton: super::ir::Skeleton {
                     entry: block_map[&source_entry],
                     blocks,
@@ -205,7 +203,6 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
         let super::ir::EGraphParts {
             nodes,
             types,
-            const_cache,
             skeleton,
             node_spans,
         } = self.into_parts();
@@ -293,7 +290,6 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
         let graph = super::ir::EGraph::<Q, WynLanguage>::from_parts(super::ir::EGraphParts {
             nodes,
             types: types.into_iter().map(|(node, ty)| (node_map[&node], ty)).collect(),
-            const_cache: const_cache.into_iter().map(|(value, node)| (value, node_map[&node])).collect(),
             skeleton: super::ir::Skeleton {
                 entry: block_map[&source_entry],
                 blocks,

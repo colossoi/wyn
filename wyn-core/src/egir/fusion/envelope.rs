@@ -419,8 +419,14 @@ fn compose_hist_region(
     params.extend(
         capture_types.iter().enumerate().map(|(index, ty)| (ty.clone(), format!("capture_{index}"))),
     );
-    let producer_region = &inner.ir.regions[&producer.body.region];
-    let hist_region = &inner.ir.regions[&hist.region];
+    let (producer_name, producer_return_ty) = {
+        let region = inner.ir.region(producer.body.region).expect("producer region");
+        (region.name.clone(), region.return_ty.clone())
+    };
+    let (hist_name, hist_return_ty) = {
+        let region = inner.ir.region(hist.region).expect("histogram region");
+        (region.name.clone(), region.return_ty.clone())
+    };
     let mut graph = EGraph::new();
     let args: Vec<_> =
         params.iter().enumerate().map(|(index, (ty, _))| graph.add_func_param(index, ty.clone())).collect();
@@ -430,9 +436,9 @@ fn compose_hist_region(
         producer_inputs.iter().map(|&input| args[input]).collect();
     producer_args.extend(args[producer_capture_start..hist_capture_start].iter().copied());
     let produced = graph.intern_pure(
-        PureOp::Call(producer_region.name.clone()),
+        PureOp::Call(producer_name),
         producer_args,
-        producer_region.return_ty.clone(),
+        producer_return_ty,
         None,
     );
     let mut hist_args = SmallVec::<[NodeId; 4]>::new();
@@ -444,24 +450,11 @@ fn compose_hist_region(
         });
     }
     hist_args.extend(args[hist_capture_start..].iter().copied());
-    let result = graph.intern_pure(
-        PureOp::Call(hist_region.name.clone()),
-        hist_args,
-        hist_region.return_ty.clone(),
-        None,
-    );
+    let result = graph.intern_pure(PureOp::Call(hist_name), hist_args, hist_return_ty.clone(), None);
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
     let name = fresh_region_name(inner, &format!("{scope}_map_hist"));
     let region = inner.ir.region_interner.intern(&name);
-    let function = SemanticFunc::new(
-        name,
-        span,
-        None,
-        params,
-        hist_region.return_ty.clone(),
-        graph,
-        LookupMap::new(),
-    );
+    let function = SemanticFunc::new(name, span, None, params, hist_return_ty, graph, LookupMap::new());
     (
         SegBody {
             region,

@@ -463,8 +463,14 @@ fn compose_map_region(
     params.extend(
         capture_types.iter().enumerate().map(|(index, ty)| (ty.clone(), format!("capture_{index}"))),
     );
-    let producer_region = &inner.ir.regions[&producer.body.region];
-    let consumer_region = &inner.ir.regions[&consumer.region];
+    let (producer_name, producer_return_ty) = {
+        let region = inner.ir.region(producer.body.region).expect("producer region");
+        (region.name.clone(), region.return_ty.clone())
+    };
+    let (consumer_name, consumer_return_ty) = {
+        let region = inner.ir.region(consumer.region).expect("consumer region");
+        (region.name.clone(), region.return_ty.clone())
+    };
     let mut graph = EGraph::new();
     let args: Vec<_> =
         params.iter().enumerate().map(|(index, (ty, _))| graph.add_func_param(index, ty.clone())).collect();
@@ -491,9 +497,9 @@ fn compose_map_region(
         producer_elements.expect("composed map body consumes producer output").into_iter().collect();
     producer_args.extend(args[producer_capture_start..consumer_capture_start].iter().copied());
     let produced = graph.intern_pure(
-        PureOp::Call(producer_region.name.clone()),
+        PureOp::Call(producer_name),
         producer_args,
-        producer_region.return_ty.clone(),
+        producer_return_ty,
         None,
     );
     for (position, &index) in old_indices.iter().enumerate() {
@@ -504,9 +510,9 @@ fn compose_map_region(
     let mut consumer_args: smallvec::SmallVec<[NodeId; 4]> = consumer_elements.into_iter().collect();
     consumer_args.extend(args[consumer_capture_start..].iter().copied());
     let result = graph.intern_pure(
-        PureOp::Call(consumer_region.name.clone()),
+        PureOp::Call(consumer_name),
         consumer_args,
-        consumer_region.return_ty.clone(),
+        consumer_return_ty.clone(),
         None,
     );
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
@@ -517,7 +523,7 @@ fn compose_map_region(
         span,
         None,
         params,
-        consumer_region.return_ty.clone(),
+        consumer_return_ty,
         graph,
         LookupMap::new(),
     );
@@ -544,9 +550,18 @@ fn compose_step_region(
     new_elem_types: &[Type<TypeName>],
     outer_types: &LookupMap<NodeId, Type<TypeName>>,
 ) -> (SegBody, SemanticFunc) {
-    let producer_region = &inner.ir.regions[&producer.body.region];
-    let consumer_region = &inner.ir.regions[&operator.step.region];
-    let accumulator_ty = consumer_region.params[0].0.clone();
+    let (producer_name, producer_return_ty) = {
+        let region = inner.ir.region(producer.body.region).expect("producer region");
+        (region.name.clone(), region.return_ty.clone())
+    };
+    let (consumer_name, consumer_return_ty, accumulator_ty) = {
+        let region = inner.ir.region(operator.step.region).expect("consumer region");
+        (
+            region.name.clone(),
+            region.return_ty.clone(),
+            region.params[0].0.clone(),
+        )
+    };
     let capture_types = capture_types(
         outer_types,
         producer.body.captures.iter().chain(&operator.step.captures),
@@ -585,9 +600,9 @@ fn compose_step_region(
         producer_elements.expect("composed accumulator consumes producer output").into_iter().collect();
     producer_args.extend(args[producer_capture_start..consumer_capture_start].iter().copied());
     let produced = graph.intern_pure(
-        PureOp::Call(producer_region.name.clone()),
+        PureOp::Call(producer_name),
         producer_args,
-        producer_region.return_ty.clone(),
+        producer_return_ty,
         None,
     );
     let mut consumer_args = smallvec![args[0]];
@@ -599,9 +614,9 @@ fn compose_step_region(
     consumer_args.extend(consumer_elements);
     consumer_args.extend(args[consumer_capture_start..].iter().copied());
     let result = graph.intern_pure(
-        PureOp::Call(consumer_region.name.clone()),
+        PureOp::Call(consumer_name),
         consumer_args,
-        consumer_region.return_ty.clone(),
+        consumer_return_ty.clone(),
         None,
     );
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
@@ -612,7 +627,7 @@ fn compose_step_region(
         span,
         None,
         params,
-        consumer_region.return_ty.clone(),
+        consumer_return_ty,
         graph,
         LookupMap::new(),
     );
@@ -847,7 +862,7 @@ mod tests {
             SemanticOpId(2),
             "fusion keeps the consumer's semantic identity"
         );
-        let executor = RegionExecutor::new(&inner.regions);
+        let executor = RegionExecutor::new(&inner);
         assert_eq!(
             executor
                 .call(

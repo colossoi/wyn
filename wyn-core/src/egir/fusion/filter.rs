@@ -625,7 +625,7 @@ fn masked_step(
     operator: &screma::Operator,
     outer_types: &LookupMap<NodeId, Type<TypeName>>,
 ) -> (SegBody, SemanticFunc) {
-    let consumer = inner.regions[&operator.step.region].clone();
+    let consumer = inner.region(operator.step.region).expect("operator step region").clone();
     let accumulator_ty = consumer.params[0].0.clone();
     let captures: Vec<NodeId> = filter
         .map
@@ -648,7 +648,7 @@ fn masked_step(
         params.iter().enumerate().map(|(param, (ty, _))| graph.add_func_param(param, ty.clone())).collect();
     let mut cursor = 2;
     let value = if let Some(map) = &filter.map {
-        let region = &inner.regions[&map.region];
+        let region = inner.region(map.region).expect("map region");
         let mut call_args = smallvec![args[1]];
         call_args.extend(args[cursor..cursor + map.captures.len()].iter().copied());
         cursor += map.captures.len();
@@ -661,7 +661,7 @@ fn masked_step(
     } else {
         args[1]
     };
-    let pred_region = &inner.regions[&filter.pred.region];
+    let pred_region = inner.region(filter.pred.region).expect("filter predicate region");
     let mut pred_args = smallvec![value];
     pred_args.extend(args[cursor..cursor + filter.pred.captures.len()].iter().copied());
     cursor += filter.pred.captures.len();
@@ -722,7 +722,7 @@ fn count_operator(
         params.iter().enumerate().map(|(param, (ty, _))| graph.add_func_param(param, ty.clone())).collect();
     let mut cursor = 2;
     let value = if let Some(map) = &filter.map {
-        let region = &inner.regions[&map.region];
+        let region = inner.region(map.region).expect("map region");
         let mut call_args = smallvec![args[1]];
         call_args.extend(args[cursor..cursor + map.captures.len()].iter().copied());
         cursor += map.captures.len();
@@ -735,7 +735,7 @@ fn count_operator(
     } else {
         args[1]
     };
-    let pred_region = &inner.regions[&filter.pred.region];
+    let pred_region = inner.region(filter.pred.region).expect("filter predicate region");
     let mut pred_args = smallvec![value];
     pred_args.extend(args[cursor..].iter().copied());
     let pred = graph.intern_pure(

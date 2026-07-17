@@ -32,7 +32,6 @@ use super::types::{
 pub use super::ir::{OutputRoute, OutputSlotId, OutputWriter, RegionInterner, SlotSource};
 pub type ConstantDef<P = Semantic, Lang = WynLanguage> = super::ir::ConstantDef<P, Lang>;
 pub use crate::types::ExternDecl;
-pub type Region<P = Semantic, Lang = WynLanguage> = super::ir::Region<P, Lang>;
 pub type Func<P = Semantic, Lang = WynLanguage> = super::ir::Func<P, Lang>;
 pub type Entry<P = Semantic, Lang = WynLanguage> = super::ir::Entry<P, Lang>;
 pub type Program<P = Semantic, Lang = WynLanguage> = super::ir::Program<P, Lang>;
@@ -113,10 +112,6 @@ pub enum LogicalSize {
 pub struct SemanticResourceRef(pub ResourceId);
 
 pub type PhysicalResourceRef = crate::BindingRef;
-pub type RawRegion = Region<Raw>;
-pub type SemanticRegion = Region<Semantic>;
-pub type ScheduledRegion = Region<Scheduled>;
-pub type PhysicalRegion = Region<Physical>;
 pub type PhysicalEGraph = EGraph<Physical>;
 pub type PhysicalSoac = super::types::Soac<Physical>;
 pub type PhysicalSideEffect = super::types::SideEffect<Physical>;
@@ -412,9 +407,6 @@ pub(crate) fn finalize_converted_resources(
     for function in &mut inner.functions {
         normalize_converted_graph_types(&mut function.graph, by_binding);
     }
-    for region in inner.regions.values_mut() {
-        normalize_converted_graph_types(&mut region.graph, by_binding);
-    }
     normalize_structural_resources(inner, by_binding);
     for entry in &mut inner.entry_points {
         for input in &mut entry.inputs {
@@ -510,12 +502,6 @@ fn normalize_structural_resources(
             normalize_type_resources(ty, by_binding);
         }
         normalize_type_resources(&mut function.return_ty, by_binding);
-    }
-    for region in inner.regions.values_mut() {
-        for (ty, _) in &mut region.params {
-            normalize_type_resources(ty, by_binding);
-        }
-        normalize_type_resources(&mut region.return_ty, by_binding);
     }
 }
 
@@ -1319,7 +1305,8 @@ pub struct PhysicalProgram {
     pub constants: Vec<ConstantDef<Physical>>,
     pub pipeline: PipelineDescriptor,
     pub input_names: LookupMap<(u32, u32), String>,
-    pub regions: LookupMap<RegionId, PhysicalRegion>,
+    /// Region identity to the corresponding entry in `functions`.
+    pub regions: LookupMap<RegionId, usize>,
     pub region_interner: RegionInterner,
     pub resources: Vec<LogicalResource>,
     pub semantic_dependencies: Vec<SemanticDependency>,
@@ -1391,33 +1378,6 @@ fn physicalize_constant(
         graph,
         control_headers: remap_control_headers(&control_headers, |block| block_map[&block]),
         aliases: aliases.into_iter().map(|(from, to)| (node_map[&from], node_map[&to])).collect(),
-    })
-}
-
-fn physicalize_region(
-    region: SemanticRegion,
-    resources: &PhysicalResourceTable,
-) -> Result<PhysicalRegion, String> {
-    let SemanticRegion {
-        name,
-        mut params,
-        mut return_ty,
-        graph,
-        control_headers,
-    } = region;
-    let (graph, scheduled_blocks) = super::parallelize::prepare::graph(graph, false)?;
-    let control_headers = remap_control_headers(&control_headers, |block| scheduled_blocks[&block]);
-    let (graph, _, block_map) = physicalize_graph_resources(graph, resources)?;
-    for (ty, _) in &mut params {
-        physicalize_type_resources(ty, resources);
-    }
-    physicalize_type_resources(&mut return_ty, resources);
-    Ok(PhysicalRegion {
-        name,
-        params,
-        return_ty,
-        graph,
-        control_headers: remap_control_headers(&control_headers, |block| block_map[&block]),
     })
 }
 
@@ -1529,15 +1489,12 @@ impl PhysicalProgram {
             .map(|constant| physicalize_constant(constant, &physical_resources))
             .collect::<Result<Vec<_>, _>>()?;
         let region_interner = plan.region_interner().clone();
-        let mut regions = regions
-            .into_iter()
-            .map(|(id, region)| Ok((id, physicalize_region(region, &physical_resources)?)))
-            .collect::<Result<LookupMap<_, _>, String>>()?;
-        for function in &functions {
+        let mut regions = regions;
+        for (index, function) in functions.iter().enumerate() {
             let id = region_interner
                 .get(&function.name)
                 .ok_or_else(|| format!("physical callable `{}` has no region identity", function.name))?;
-            regions.insert(id, PhysicalRegion::from_function(function));
+            regions.insert(id, index);
         }
         Ok(Self {
             functions,
@@ -1553,6 +1510,20 @@ impl PhysicalProgram {
             plan,
             physical_resources,
         })
+    }
+
+    pub fn contains_region(&self, id: RegionId) -> bool {
+        self.regions.contains_key(&id)
+    }
+
+    pub fn region(&self, id: RegionId) -> Option<&PhysicalFunc> {
+        self.regions.get(&id).and_then(|&index| self.functions.get(index))
+    }
+
+    pub fn iter_regions(&self) -> impl Iterator<Item = (RegionId, &PhysicalFunc)> {
+        self.regions
+            .iter()
+            .filter_map(|(&id, &index)| self.functions.get(index).map(|function| (id, function)))
     }
 }
 

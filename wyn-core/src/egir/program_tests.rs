@@ -202,12 +202,9 @@ fn segbody_index_resolves_to_its_arena_function() {
 
     // The pre-interned index is preserved and points at the right body.
     assert_eq!(inner.region_interner.get("op"), Some(op_id));
-    assert!(
-        inner.regions.contains_key(&op_id),
-        "callee region must be in the arena"
-    );
+    assert!(inner.contains_region(op_id), "callee region must be in the arena");
     assert_eq!(inner.region_name(op_id), "op");
-    assert_eq!(inner.regions.get(&op_id).unwrap().name, "op");
+    assert_eq!(inner.region(op_id).unwrap().name, "op");
     // `main` was assigned its index by `SemanticProgram::new`, after `op`.
     let main_id = inner.region_interner.get("main").expect("main interned");
     assert_ne!(main_id, op_id);
@@ -231,14 +228,14 @@ fn define_region_records_the_body_under_the_reserved_index() {
 
     let reserved = inner.intern_region("composed");
     assert!(
-        !inner.regions.contains_key(&reserved),
+        !inner.contains_region(reserved),
         "reserving an index must not invent a body"
     );
 
     let defined = inner.define_region(empty_func("composed"));
 
     assert_eq!(defined, reserved, "define_region honors the reserved index");
-    assert_eq!(inner.regions.get(&defined).unwrap().name, "composed");
+    assert_eq!(inner.region(defined).unwrap().name, "composed");
     assert!(
         inner.functions.iter().any(|function| function.name == "composed"),
         "the region is callable"

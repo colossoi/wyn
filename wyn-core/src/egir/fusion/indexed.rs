@@ -214,7 +214,7 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
         let map = &op.lanes().maps[candidate.output];
         let indices = &map.input_indices;
         (
-            inner.regions[&map.body.region].name.clone(),
+            inner.region(map.body.region).expect("map region").name.clone(),
             indices.iter().map(|index| effect.operand_nodes[index.index()]).collect::<Vec<_>>(),
             indices
                 .iter()

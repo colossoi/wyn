@@ -1,7 +1,8 @@
 use super::*;
-use crate::ast::TypeName;
-use crate::egir::program::SemanticRegion;
+use crate::ast::{Span, TypeName};
+use crate::egir::program::{RegionInterner, SemanticFunc, SemanticProgram};
 use crate::egir::types::{EGraph, PureOp, SkeletonTerminator};
+use crate::pipeline_descriptor::PipelineDescriptor;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -14,7 +15,7 @@ fn compose(left: &(i64, i64), right: &(i64, i64)) -> (i64, i64) {
     )
 }
 
-fn affine_region() -> (RegionId, LookupMap<RegionId, SemanticRegion>) {
+fn affine_program() -> (RegionId, SemanticProgram) {
     let int = Type::Constructed(TypeName::Int(64), vec![]);
     let pair = Type::Constructed(TypeName::Tuple(2), vec![int.clone(), int.clone()]);
     let mut graph = EGraph::new();
@@ -34,25 +35,31 @@ fn affine_region() -> (RegionId, LookupMap<RegionId, SemanticRegion>) {
     );
     let result = graph.intern_pure(PureOp::Tuple(2), smallvec![out_a, out_b], pair.clone(), None);
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
-    let id = RegionId::from_index(0);
-    let mut regions = LookupMap::new();
-    regions.insert(
-        id,
-        SemanticRegion {
-            name: "affine_compose".to_string(),
-            params: vec![(pair.clone(), "left".into()), (pair.clone(), "right".into())],
-            return_ty: pair,
-            graph,
-            control_headers: LookupMap::new(),
-        },
+    let function = SemanticFunc::new(
+        "affine_compose".to_string(),
+        Span::dummy(),
+        None,
+        vec![(pair.clone(), "left".into()), (pair.clone(), "right".into())],
+        pair,
+        graph,
+        LookupMap::new(),
     );
-    (id, regions)
+    let program = SemanticProgram::new(
+        vec![function],
+        vec![],
+        vec![],
+        vec![],
+        PipelineDescriptor::default(),
+        RegionInterner::default(),
+    );
+    let id = program.region_interner.get("affine_compose").unwrap();
+    (id, program)
 }
 
 #[test]
 fn region_executor_runs_noncommutative_reduce_and_scan_values() {
-    let (region, regions) = affine_region();
-    let executor = RegionExecutor::new(&regions);
+    let (region, program) = affine_program();
+    let executor = RegionExecutor::new(&program);
     for len in [0usize, 1, 63, 64, 65, 513] {
         let inputs: Vec<_> =
             (0..len).map(|index| Value::Tuple(vec![Value::Int(2), Value::Int(index as i64 + 1)])).collect();

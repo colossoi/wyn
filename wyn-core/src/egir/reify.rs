@@ -16,7 +16,7 @@ use crate::LookupMap;
 use super::graph_ops;
 use super::program::{
     ConstantDef, Entry, Func, OutputRoute, OutputSlotId, OutputWriter, Program, RawEntry, RawProgram,
-    Region, SemanticOpId, SemanticProgram, SemanticResourceRef,
+    SemanticOpId, SemanticProgram, SemanticResourceRef,
 };
 use super::soac::{filter, hist, screma};
 use super::types::{
@@ -50,8 +50,6 @@ pub fn run(raw: RawProgram) -> SemanticProgram {
         entry_points.into_iter().map(|entry| reify_entry(entry, &mut next_semantic_id)).collect();
     let functions =
         functions.into_iter().map(|function| reify_func(function, &mut next_semantic_id)).collect();
-    let regions =
-        regions.into_iter().map(|(id, region)| (id, reify_region(region, &mut next_semantic_id))).collect();
     let constants =
         constants.into_iter().map(|constant| reify_constant(constant, &mut next_semantic_id)).collect();
 
@@ -116,25 +114,6 @@ fn reify_func(function: Func<Raw>, next_semantic_id: &mut u32) -> Func<Semantic>
         graph,
         control_headers: remap_headers(control_headers, &blocks),
         aliases,
-    }
-}
-
-fn reify_region(region: Region<Raw>, next_semantic_id: &mut u32) -> Region<Semantic> {
-    let facts = function_facts(&region.graph);
-    let Region {
-        name,
-        params,
-        return_ty,
-        graph,
-        control_headers,
-    } = region;
-    let (graph, blocks) = map_graph(graph, facts, next_semantic_id);
-    Region {
-        name,
-        params,
-        return_ty,
-        graph,
-        control_headers: remap_headers(control_headers, &blocks),
     }
 }
 

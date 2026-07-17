@@ -17,15 +17,15 @@
 //!   * **Call boundaries.** A `Seg` body capture — the record `w` passed to a
 //!     downstream `map`, or a bare array read by another `map` — binds a callee
 //!     parameter. The parameter type must equal the argument type, so retype the
-//!     callee (its semantic `SemanticRegion`, its lowered `SemanticFunc`, and the body's
-//!     `FuncParam` node) and re-propagate inside the callee. An `Index` over a
+//!     callee (its callable `Func` and the body's `FuncParam` node) and
+//!     re-propagate inside the callee. An `Index` over a
 //!     view — bare or projected out of a record parameter — then lowers as a
 //!     storage load, variant-generic like every other view read.
 
 use polytype::Type;
 
 use super::super::from_tlc::ConvertError;
-use super::super::program::{Func, Program, Region};
+use super::super::program::{Func, Program};
 use super::super::types::{EGraph, ENode, EgirPhase, NodeId, PureOp, RegionId, SideEffectKind};
 use crate::ast::TypeName;
 use crate::LookupMap;
@@ -55,9 +55,6 @@ pub fn run<P: EgirPhase>(inner: &mut Program<P>) -> Result<(), ConvertError> {
     for func in functions.iter_mut() {
         recompute_aggregate_types(&mut func.graph);
     }
-    for region in regions.values_mut() {
-        recompute_aggregate_types(&mut region.graph);
-    }
 
     // Phase B: reconcile callee parameters to their capture arguments. Retyping a
     // callee parameter re-propagates inside that callee (`recompute_aggregate_types`
@@ -68,8 +65,18 @@ pub fn run<P: EgirPhase>(inner: &mut Program<P>) -> Result<(), ConvertError> {
     // succeeding after 64 iterations with representation drift still present.
     for _ in 0..64 {
         let mut drifts: Vec<Retype> = Vec::new();
-        collect_drifts(entry_points.iter().map(|e| &e.graph), regions, &mut drifts);
-        collect_drifts(functions.iter().map(|f| &f.graph), regions, &mut drifts);
+        collect_drifts(
+            entry_points.iter().map(|e| &e.graph),
+            regions,
+            functions,
+            &mut drifts,
+        );
+        collect_drifts(
+            functions.iter().map(|f| &f.graph),
+            regions,
+            functions,
+            &mut drifts,
+        );
         if drifts.is_empty() {
             break;
         }
@@ -86,7 +93,8 @@ pub fn run<P: EgirPhase>(inner: &mut Program<P>) -> Result<(), ConvertError> {
 /// view-ward from the callee parameter it binds, pushing a retype for each.
 fn collect_drifts<'a, P: EgirPhase + 'a>(
     graphs: impl Iterator<Item = &'a EGraph<P>>,
-    regions: &LookupMap<RegionId, Region<P>>,
+    regions: &LookupMap<RegionId, usize>,
+    functions: &[Func<P>],
     out: &mut Vec<Retype>,
 ) {
     for graph in graphs {
@@ -96,7 +104,8 @@ fn collect_drifts<'a, P: EgirPhase + 'a>(
                     continue;
                 };
                 for body in soac.seg_bodies() {
-                    let Some(region) = regions.get(&body.region) else {
+                    let Some(region) = regions.get(&body.region).and_then(|&index| functions.get(index))
+                    else {
                         continue;
                     };
                     let n_caps = body.captures.len();
@@ -153,23 +162,16 @@ fn reject_shared_conflicts(drifts: &[Retype]) -> Result<(), ConvertError> {
 /// aggregate types inside the callee so a projection out of the parameter sees
 /// the view.
 fn apply<P: EgirPhase>(
-    regions: &mut LookupMap<RegionId, Region<P>>,
+    regions: &LookupMap<RegionId, usize>,
     functions: &mut [Func<P>],
     Retype {
         region,
-        name,
+        name: _,
         param_index,
         arg_ty,
     }: Retype,
 ) {
-    if let Some(region) = regions.get_mut(&region) {
-        if let Some(slot) = region.params.get_mut(param_index) {
-            slot.0 = arg_ty.clone();
-        }
-        retype_func_param(&mut region.graph, param_index, &arg_ty);
-        recompute_aggregate_types(&mut region.graph);
-    }
-    if let Some(func) = functions.iter_mut().find(|f| f.name == name) {
+    if let Some(func) = regions.get(&region).and_then(|&index| functions.get_mut(index)) {
         if let Some(slot) = func.params.get_mut(param_index) {
             slot.0 = arg_ty.clone();
         }

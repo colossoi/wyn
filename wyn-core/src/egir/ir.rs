@@ -48,18 +48,26 @@ new_key_type! {
 ///
 /// Region *identity* is a checked arena index, never a re-derived string. A
 /// region still lowers to a named SSA function — that name is the call ABI and
-/// lives on `SemanticRegion`/the `RegionInterner`, recovered via the arena when a
+/// lives on the callable `Func`/the `RegionInterner`, recovered via the arena when a
 /// `PureOp::Call` is emitted. Semantic SegOps carry only this index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RegionId(u32);
 
 impl RegionId {
+    #[cfg(test)]
     pub const fn from_index(index: u32) -> Self {
         Self(index)
     }
 
+    #[cfg(test)]
     pub const fn index(self) -> u32 {
         self.0
+    }
+}
+
+impl std::fmt::Display for RegionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}", self.0)
     }
 }
 
@@ -71,7 +79,7 @@ impl RegionId {
 /// function arena agree without a separate resolution pass.
 impl From<u32> for RegionId {
     fn from(index: u32) -> Self {
-        Self::from_index(index)
+        Self(index)
     }
 }
 
@@ -587,7 +595,7 @@ pub struct EGraph<P: EgirPhase, Lang: Language> {
     /// Hash-cons table: NodeKey → existing NodeId.
     hash_cons: LookupMap<NodeKey<P::Resource, Lang>, NodeId>,
     /// Constant dedup cache.
-    pub const_cache: LookupMap<Lang::Const, NodeId>,
+    const_cache: LookupMap<Lang::Const, NodeId>,
     /// The CFG skeleton.
     pub skeleton: Skeleton<P, Lang>,
     /// Source span associated with each pure node (first-writer-wins —
@@ -602,7 +610,6 @@ pub struct EGraph<P: EgirPhase, Lang: Language> {
 pub(super) struct EGraphParts<P: EgirPhase, Lang: Language> {
     pub(super) nodes: SlotMap<NodeId, ENode<P::Resource, Lang>>,
     pub(super) types: LookupMap<NodeId, Lang::Ty>,
-    pub(super) const_cache: LookupMap<Lang::Const, NodeId>,
     pub(super) skeleton: Skeleton<P, Lang>,
     pub(super) node_spans: LookupMap<NodeId, Span>,
 }
@@ -628,14 +635,13 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
             nodes,
             types,
             hash_cons: _,
-            const_cache,
+            const_cache: _,
             skeleton,
             node_spans,
         } = self;
         EGraphParts {
             nodes,
             types,
-            const_cache,
             skeleton,
             node_spans,
         }
@@ -645,7 +651,6 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
         let EGraphParts {
             nodes,
             types,
-            const_cache,
             skeleton,
             node_spans,
         } = parts;
@@ -653,11 +658,12 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
             nodes,
             types,
             hash_cons: LookupMap::new(),
-            const_cache,
+            const_cache: LookupMap::new(),
             skeleton,
             node_spans,
         };
         graph.rebuild_hash_cons();
+        graph.rebuild_const_cache();
         graph
     }
 
@@ -782,6 +788,17 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
             }
         }
         self.hash_cons = rebuilt;
+    }
+
+    fn rebuild_const_cache(&mut self) {
+        self.const_cache = self
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| match node {
+                ENode::Constant(value) => Some((value.clone(), id)),
+                _ => None,
+            })
+            .collect();
     }
 
     /// Check that every hash-cons entry points to a pure node matching its key
@@ -955,16 +972,6 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
 // Program and body containers
 // ---------------------------------------------------------------------------
 
-/// Callable body arena entry used by segmented operations.
-#[derive(Clone)]
-pub struct Region<P: EgirPhase, Lang: Language> {
-    pub name: String,
-    pub params: Vec<(Lang::Ty, String)>,
-    pub return_ty: Lang::Ty,
-    pub graph: EGraph<P, Lang>,
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
-}
-
 #[derive(Clone, Debug)]
 pub struct Func<P: EgirPhase, Lang: Language> {
     pub name: String,
@@ -996,18 +1003,6 @@ impl<P: EgirPhase, Lang: Language> Func<P, Lang> {
             graph,
             control_headers,
             aliases: LookupMap::new(),
-        }
-    }
-}
-
-impl<P: EgirPhase, Lang: Language> Region<P, Lang> {
-    pub fn from_function(function: &Func<P, Lang>) -> Self {
-        Self {
-            name: function.name.clone(),
-            params: function.params.clone(),
-            return_ty: function.return_ty.clone(),
-            graph: function.graph.clone(),
-            control_headers: function.control_headers.clone(),
         }
     }
 }
@@ -1161,17 +1156,19 @@ pub struct Program<P: EgirPhase, Lang: Language> {
     pub constants: Vec<ConstantDef<P, Lang>>,
     pub pipeline: PipelineDescriptor,
     pub input_names: LookupMap<(u32, u32), String>,
-    pub regions: LookupMap<RegionId, Region<P, Lang>>,
+    /// Region identity to the corresponding entry in `functions`.
+    pub regions: LookupMap<RegionId, usize>,
     pub region_interner: RegionInterner,
 }
 
-fn record_region<P: EgirPhase, Lang: Language>(
+fn record_region(
     interner: &mut RegionInterner,
-    regions: &mut LookupMap<RegionId, Region<P, Lang>>,
-    function: &Func<P, Lang>,
+    regions: &mut LookupMap<RegionId, usize>,
+    function_index: usize,
+    function_name: &str,
 ) -> RegionId {
-    let id = interner.intern(&function.name);
-    regions.insert(id, Region::<P, Lang>::from_function(function));
+    let id = interner.intern(function_name);
+    regions.insert(id, function_index);
     id
 }
 
@@ -1185,8 +1182,8 @@ impl<P: EgirPhase, Lang: Language> Program<P, Lang> {
         mut region_interner: RegionInterner,
     ) -> Self {
         let mut regions = LookupMap::new();
-        for function in &functions {
-            record_region(&mut region_interner, &mut regions, function);
+        for (index, function) in functions.iter().enumerate() {
+            record_region(&mut region_interner, &mut regions, index, &function.name);
         }
         Self {
             functions,
@@ -1217,9 +1214,34 @@ impl<P: EgirPhase, Lang: Language> Program<P, Lang> {
     }
 
     pub fn define_region(&mut self, function: Func<P, Lang>) -> RegionId {
-        let id = record_region(&mut self.region_interner, &mut self.regions, &function);
+        let index = self.functions.len();
+        let id = record_region(
+            &mut self.region_interner,
+            &mut self.regions,
+            index,
+            &function.name,
+        );
         self.functions.push(function);
         id
+    }
+
+    pub fn contains_region(&self, id: RegionId) -> bool {
+        self.regions.contains_key(&id)
+    }
+
+    pub fn region(&self, id: RegionId) -> Option<&Func<P, Lang>> {
+        self.regions.get(&id).and_then(|&index| self.functions.get(index))
+    }
+
+    pub fn region_mut(&mut self, id: RegionId) -> Option<&mut Func<P, Lang>> {
+        let index = *self.regions.get(&id)?;
+        self.functions.get_mut(index)
+    }
+
+    pub fn iter_regions(&self) -> impl Iterator<Item = (RegionId, &Func<P, Lang>)> {
+        self.regions
+            .iter()
+            .filter_map(|(&id, &index)| self.functions.get(index).map(|function| (id, function)))
     }
 
     pub fn region_name(&self, id: RegionId) -> &str {

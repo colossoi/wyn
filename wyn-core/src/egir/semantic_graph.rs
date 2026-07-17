@@ -191,12 +191,12 @@ pub(crate) fn verify(inner: &SemanticProgram) -> Result<(), String> {
             return Ok(());
         };
         let verify_body = |family: &str, body: &super::types::SegBody| {
-            if inner.regions.contains_key(&body.region) {
+            if inner.contains_region(body.region) {
                 Ok(())
             } else {
                 Err(format!(
                     "{scope}: {family} region `{}` is absent from the EGIR region arena",
-                    body.region.index()
+                    body.region
                 ))
             }
         };
@@ -230,10 +230,10 @@ pub(crate) fn verify(inner: &SemanticProgram) -> Result<(), String> {
                         return Err(format!("{scope}: semantic histogram has no concrete dimensions"));
                     }
                 }
-                if !inner.regions.contains_key(&op.body.body.region) {
+                if !inner.contains_region(op.body.body.region) {
                     return Err(format!(
                         "{scope}: histogram region `{}` is absent",
-                        op.body.body.region.index()
+                        op.body.body.region
                     ));
                 }
             }

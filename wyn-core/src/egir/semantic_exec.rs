@@ -3,7 +3,7 @@
 //! This deliberately executes semantic values rather than scheduled kernels;
 //! optional adapter tests compare backend readback against the same oracle.
 
-use crate::egir::program::SemanticRegion;
+use crate::egir::program::{SemanticFunc, SemanticProgram};
 use crate::egir::types::{ENode, NodeId, PureOp, RegionId, SkeletonTerminator};
 use crate::LookupMap;
 
@@ -22,17 +22,16 @@ pub enum Value {
 /// typed region arena used by SegBody/SegBinOp, so semantic tests exercise the
 /// representation rather than parallel Rust closures alone.
 pub struct RegionExecutor<'a> {
-    regions: &'a LookupMap<RegionId, SemanticRegion>,
+    program: &'a SemanticProgram,
 }
 
 impl<'a> RegionExecutor<'a> {
-    pub fn new(regions: &'a LookupMap<RegionId, SemanticRegion>) -> Self {
-        Self { regions }
+    pub fn new(program: &'a SemanticProgram) -> Self {
+        Self { program }
     }
 
     pub fn call(&self, region: &RegionId, arguments: &[Value]) -> Result<Value, String> {
-        let body =
-            self.regions.get(region).ok_or_else(|| format!("unknown EGIR region #{}", region.index()))?;
+        let body = self.program.region(*region).ok_or_else(|| format!("unknown EGIR region {region}"))?;
         let SkeletonTerminator::Return(Some(result)) =
             body.graph.skeleton.blocks[body.graph.skeleton.entry].term
         else {
@@ -44,7 +43,7 @@ impl<'a> RegionExecutor<'a> {
 
     fn eval_node(
         &self,
-        region: &SemanticRegion,
+        region: &SemanticFunc,
         node: NodeId,
         arguments: &[Value],
         memo: &mut LookupMap<NodeId, Value>,
@@ -114,10 +113,9 @@ impl<'a> RegionExecutor<'a> {
             }
             PureOp::Call(callee) => {
                 let region = self
-                    .regions
-                    .iter()
-                    .find(|(_, body)| body.name == *callee)
-                    .map(|(id, _)| *id)
+                    .program
+                    .region_interner
+                    .get(callee)
                     .ok_or_else(|| format!("unknown EGIR region `{callee}`"))?;
                 self.call(&region, values)
             }

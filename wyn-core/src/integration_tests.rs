@@ -385,7 +385,7 @@ entry stats(xs: []i32) [4]i32 =
         .expect("three-operator filtered SegRed");
     let step_names: Vec<_> = operators
         .iter()
-        .map(|operator| allocated.inner.regions[&operator.step.region].name.as_str())
+        .map(|operator| allocated.inner.region(operator.step.region).unwrap().name.as_str())
         .collect();
     assert!(step_names[0].contains("filter_reduce"));
     assert!(step_names[1].contains("filter_reduce"));
@@ -628,7 +628,7 @@ entry e() [4]f32 =
     for operator in operators {
         assert_eq!(operator.input_indices.len(), 1);
         assert_eq!(
-            allocated.inner.regions[&operator.step.region].params.len(),
+            allocated.inner.region(operator.step.region).unwrap().params.len(),
             2,
             "composed step receives accumulator plus only its routed input"
         );
