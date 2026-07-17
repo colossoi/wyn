@@ -28,14 +28,14 @@ use super::parallelize::schedule::ValidatedKernelPlan;
 use super::soac::{filter, hist, screma};
 use super::types::{
     EGraph, EgirPhase, NodeId, Physical, Raw, RegionId, Scheduled, SegBody, SegExtent, SegSpace, Semantic,
-    Soac,
+    Soac, WynLanguage,
 };
 
 pub use super::ir::{OutputRoute, OutputSlotId, OutputWriter, RegionInterner, SlotSource};
-pub type Region<P = Semantic, Ty = Type<TypeName>> = super::ir::Region<P, Ty>;
-pub type Func<P = Semantic, Ty = Type<TypeName>> = super::ir::Func<P, Ty>;
-pub type Entry<P = Semantic, Ty = Type<TypeName>> = super::ir::Entry<P, Ty>;
-pub type Program<P = Semantic, Ty = Type<TypeName>> = super::ir::Program<P, Ty>;
+pub type Region<P = Semantic, Lang = WynLanguage> = super::ir::Region<P, Lang>;
+pub type Func<P = Semantic, Lang = WynLanguage> = super::ir::Func<P, Lang>;
+pub type Entry<P = Semantic, Lang = WynLanguage> = super::ir::Entry<P, Lang>;
+pub type Program<P = Semantic, Lang = WynLanguage> = super::ir::Program<P, Lang>;
 
 #[cfg(test)]
 #[path = "program_tests.rs"]

@@ -21,6 +21,19 @@ fn effect(result: NodeId) -> SideEffect {
 #[derive(Clone, Debug)]
 struct TestPhase;
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum TestConst {
+    FortyTwo,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TestLanguage;
+
+impl Language for TestLanguage {
+    type Const = TestConst;
+    type Ty = String;
+}
+
 impl EgirPhase for TestPhase {
     type Resource = ();
     type ResourceDecl = u16;
@@ -34,17 +47,22 @@ impl EgirPhase for TestPhase {
 }
 
 #[test]
-fn graph_accepts_a_non_wyn_type_payload() {
-    let mut graph = super::super::ir::EGraph::<Semantic, String>::new();
+fn graph_accepts_non_wyn_payloads() {
+    let mut graph = super::super::ir::EGraph::<Semantic, TestLanguage>::new();
     let node = graph.intern_pure(PureOp::Unit, SmallVec::new(), "unit".to_string(), None);
+    let constant = graph.intern_constant(TestConst::FortyTwo, "number".to_string());
 
     assert_eq!(graph.types[&node], "unit");
+    assert!(matches!(
+        graph.nodes[constant],
+        super::super::ir::ENode::Constant(TestConst::FortyTwo)
+    ));
 }
 
 #[test]
 fn entry_and_program_accept_non_wyn_resource_metadata() {
-    let graph = super::super::ir::EGraph::<TestPhase, String>::new();
-    let entry = super::super::ir::Entry::<TestPhase, String>::new_with_resources(
+    let graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
+    let entry = super::super::ir::Entry::<TestPhase, TestLanguage>::new_with_resources(
         "custom".to_string(),
         crate::ast::Span::new(0, 0, 0, 0),
         crate::ssa::types::ExecutionModel::Compute {
@@ -60,7 +78,7 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
     );
     assert_eq!(entry.resource_declarations, [7]);
 
-    let program = super::super::ir::Program::<TestPhase, String>::new(
+    let program = super::super::ir::Program::<TestPhase, TestLanguage>::new(
         vec![],
         vec![],
         vec![entry],
@@ -73,7 +91,7 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
 
 #[test]
 fn indexes_results_across_skeleton_blocks() {
-    let mut graph = EGraph::new();
+    let mut graph: EGraph = EGraph::new();
     let unit = Type::Constructed(TypeName::Unit, vec![]);
     let first = graph.alloc_side_effect_result(unit.clone());
     let second = graph.alloc_side_effect_result(unit);

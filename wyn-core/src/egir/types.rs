@@ -8,6 +8,7 @@ use polytype::Type;
 use slotmap::SlotMap;
 
 use crate::ast::TypeName;
+use crate::op::OpTag;
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::ConstantValue;
 use crate::LookupMap;
@@ -20,16 +21,24 @@ use smallvec::SmallVec;
 use super::soac::{filter, hist, screma};
 
 pub use super::ir::{
-    EffectToken, EgirPhase, GraphResource, NodeId, RegionId, SegBody, SegLevel, SegResourceAccessKind,
-    SideEffectIndex, SideEffectSite, SkeletonTerminator, Soac, SoacDestination,
+    EffectToken, EgirPhase, GraphResource, Language, NodeId, RegionId, SegBody, SegLevel,
+    SegResourceAccessKind, SideEffectIndex, SideEffectSite, SkeletonTerminator, Soac, SoacDestination,
 };
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct WynLanguage;
+
+impl Language for WynLanguage {
+    type Const = ConstantValue;
+    type Ty = Type<TypeName>;
+}
 
 // Keep the existing semantic defaults at the compatibility boundary. The
 // definitions in `ir` themselves have no knowledge of concrete EGIR phases.
-pub type PureOp<R = super::program::SemanticResourceRef> = super::ir::PureOp<R>;
+pub type PureOp<R = super::program::SemanticResourceRef> = OpTag<R>;
 pub type PureViewSource<R = super::program::SemanticResourceRef> = super::ir::PureViewSource<R>;
-pub type NodeKey<R = super::program::SemanticResourceRef, Ty = Type<TypeName>> = super::ir::NodeKey<R, Ty>;
-pub type ENode<R = super::program::SemanticResourceRef> = super::ir::ENode<R>;
+pub type NodeKey<R = super::program::SemanticResourceRef, Lang = WynLanguage> = super::ir::NodeKey<R, Lang>;
+pub type ENode<R = super::program::SemanticResourceRef, Lang = WynLanguage> = super::ir::ENode<R, Lang>;
 pub type SegExtent<R = super::program::SemanticResourceRef> = super::ir::SegExtent<R>;
 pub type SegSpace<R = super::program::SemanticResourceRef> = super::ir::SegSpace<R>;
 pub type SegResourceAccess<R = super::program::SemanticResourceRef> = super::ir::SegResourceAccess<R>;
@@ -38,7 +47,7 @@ pub type SideEffectKind<P = Semantic> = super::ir::SideEffectKind<P>;
 pub type SkeletonBlock<P = Semantic> = super::ir::SkeletonBlock<P>;
 pub type Skeleton<P = Semantic> = super::ir::Skeleton<P>;
 pub type SoacInputType<Ty = Type<TypeName>> = super::ir::SoacInputType<Ty>;
-pub type EGraph<P = Semantic, Ty = Type<TypeName>> = super::ir::EGraph<P, Ty>;
+pub type EGraph<P = Semantic, Lang = WynLanguage> = super::ir::EGraph<P, Lang>;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Raw<R = super::program::SemanticResourceRef>(std::marker::PhantomData<fn() -> R>);
@@ -100,14 +109,11 @@ impl EgirPhase for Physical {
     type HistState = hist::PhysicalState;
 }
 
-impl<P: EgirPhase, Ty> super::ir::EGraph<P, Ty>
-where
-    Ty: Clone + std::fmt::Debug + Eq + std::hash::Hash,
-{
+impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
     pub(crate) fn try_map_phase<Q, E>(
         self,
         mut map_soac: impl FnMut(BlockId, usize, P::SoacId, Soac<P>) -> Result<(Q::SoacId, Soac<Q>), E>,
-    ) -> Result<(EGraph<Q, Ty>, LookupMap<BlockId, BlockId>), E>
+    ) -> Result<(EGraph<Q>, LookupMap<BlockId, BlockId>), E>
     where
         Q: EgirPhase<Resource = P::Resource>,
     {
@@ -164,7 +170,7 @@ where
         }
 
         Ok((
-            super::ir::EGraph::<Q, Ty>::from_parts(super::ir::EGraphParts {
+            super::ir::EGraph::<Q, WynLanguage>::from_parts(super::ir::EGraphParts {
                 nodes,
                 types,
                 const_cache,
@@ -189,14 +195,7 @@ where
             Soac<P>,
             &LookupMap<NodeId, NodeId>,
         ) -> Result<(Q::SoacId, Soac<Q>), E>,
-    ) -> Result<
-        (
-            EGraph<Q, Ty>,
-            LookupMap<NodeId, NodeId>,
-            LookupMap<BlockId, BlockId>,
-        ),
-        E,
-    >
+    ) -> Result<(EGraph<Q>, LookupMap<NodeId, NodeId>, LookupMap<BlockId, BlockId>), E>
     where
         Q: EgirPhase,
     {
@@ -221,9 +220,9 @@ where
         for (source, _) in &source_nodes {
             node_map.insert(
                 *source,
-                nodes.insert(super::ir::ENode::<Q::Resource>::Constant(ConstantValue::Bool(
-                    false,
-                ))),
+                nodes.insert(super::ir::ENode::<Q::Resource, WynLanguage>::Constant(
+                    ConstantValue::Bool(false),
+                )),
             );
         }
         for (source, node) in source_nodes {
@@ -285,7 +284,7 @@ where
             };
         }
 
-        let graph = super::ir::EGraph::<Q, Ty>::from_parts(super::ir::EGraphParts {
+        let graph = super::ir::EGraph::<Q, WynLanguage>::from_parts(super::ir::EGraphParts {
             nodes,
             types: types.into_iter().map(|(node, ty)| (node_map[&node], ty)).collect(),
             const_cache: const_cache.into_iter().map(|(value, node)| (value, node_map[&node])).collect(),
