@@ -68,6 +68,9 @@ pub type StableMap<K, V> = indexmap::IndexMap<K, V>;
 /// Set companion to [`StableMap`]: insertion-order iteration.
 pub type StableSet<T> = indexmap::IndexSet<T>;
 
+/// Use for sets whose iteration follows the values' [`Ord`] ordering.
+pub type SortedSet<T> = std::collections::BTreeSet<T>;
+
 /// Use for maps consulted only via `get`/`contains_key`. Iteration
 /// order doesn't escape into observable output, so `HashMap`'s
 /// per-process random hash is fine — and we get the slightly faster

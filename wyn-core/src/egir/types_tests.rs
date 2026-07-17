@@ -91,6 +91,60 @@ fn adding_block_params_registers_them_in_order() {
 }
 
 #[test]
+fn removing_block_param_slots_updates_incoming_edges_and_indices() {
+    let mut graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
+    let entry = graph.skeleton.entry;
+    let branch_predecessor = graph.skeleton.create_block();
+    let target = graph.skeleton.create_block();
+
+    let first = graph.add_block_param(target, "first".to_string());
+    let second = graph.add_block_param(target, "second".to_string());
+    let third = graph.add_block_param(target, "third".to_string());
+
+    let args = (0..9).map(|index| graph.add_func_param(index, format!("arg-{index}"))).collect::<Vec<_>>();
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
+        cond: args[0],
+        then_target: target,
+        then_args: vec![args[1], args[2], args[3]],
+        else_target: target,
+        else_args: vec![args[4], args[5], args[6]],
+    };
+    graph.skeleton.blocks[branch_predecessor].term = SkeletonTerminator::Branch {
+        target,
+        args: vec![args[6], args[7], args[8]],
+    };
+
+    let slots = [2, 0, 2].into_iter().collect::<crate::SortedSet<_>>();
+    let removed = graph.remove_block_param_slots(target, &slots);
+
+    assert_eq!(removed, [first, third]);
+    assert_eq!(graph.skeleton.blocks[target].params, [second]);
+    assert!(matches!(
+        graph.nodes[second],
+        super::super::ir::ENode::BlockParam { block, index: 0 } if block == target
+    ));
+    assert!(graph.nodes.contains_key(first));
+    assert!(graph.nodes.contains_key(third));
+    match &graph.skeleton.blocks[entry].term {
+        SkeletonTerminator::CondBranch {
+            then_args, else_args, ..
+        } => {
+            assert_eq!(then_args, &[args[2]]);
+            assert_eq!(else_args, &[args[5]]);
+        }
+        other => panic!("{other:?}"),
+    }
+    match &graph.skeleton.blocks[branch_predecessor].term {
+        SkeletonTerminator::Branch {
+            args: branch_args, ..
+        } => {
+            assert_eq!(branch_args, &[args[7]]);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn entry_and_program_accept_non_wyn_resource_metadata() {
     let graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
     let entry = super::super::ir::Entry::<TestPhase, TestLanguage>::new_with_resources(

@@ -9,7 +9,7 @@ use crate::interface::{EntryInput as InterfaceEntryInput, EntryOutput as Interfa
 use crate::op::OpTag;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::types::ExternDecl;
-use crate::LookupMap;
+use crate::{LookupMap, SortedSet};
 
 pub use crate::op::PureViewSource;
 pub use crate::types::SoacOwnership;
@@ -812,6 +812,68 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
         self.types.insert(id, ty);
         self.skeleton.blocks[block].params.push(id);
         id
+    }
+
+    /// Remove parameter slots from a block and from every incoming branch.
+    ///
+    /// Removed parameter nodes remain in the node sea so a caller can alias
+    /// their uses before a later cleanup. Surviving parameter nodes are
+    /// renumbered to match their new positions in the block parameter list.
+    /// Returns the removed nodes in ascending order of their former slots.
+    pub fn remove_block_param_slots(&mut self, block: BlockId, slots: &SortedSet<usize>) -> Vec<NodeId> {
+        let param_count = self.skeleton.blocks[block].params.len();
+        assert!(
+            slots.iter().all(|&slot| slot < param_count),
+            "block parameter slot out of bounds"
+        );
+
+        let removed = slots.iter().map(|&slot| self.skeleton.blocks[block].params[slot]).collect();
+
+        for &slot in slots.iter().rev() {
+            self.skeleton.blocks[block].params.remove(slot);
+        }
+
+        for (_, predecessor) in self.skeleton.blocks.iter_mut() {
+            match &mut predecessor.term {
+                SkeletonTerminator::Branch { target, args } if *target == block => {
+                    for &slot in slots.iter().rev() {
+                        args.remove(slot);
+                    }
+                }
+                SkeletonTerminator::CondBranch {
+                    then_target,
+                    then_args,
+                    else_target,
+                    else_args,
+                    ..
+                } => {
+                    if *then_target == block {
+                        for &slot in slots.iter().rev() {
+                            then_args.remove(slot);
+                        }
+                    }
+                    if *else_target == block {
+                        for &slot in slots.iter().rev() {
+                            else_args.remove(slot);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let surviving_params = self.skeleton.blocks[block].params.clone();
+        for (index, param) in surviving_params.into_iter().enumerate() {
+            match &mut self.nodes[param] {
+                ENode::BlockParam {
+                    block: owner,
+                    index: old_index,
+                } if *owner == block => *old_index = index,
+                _ => panic!("block parameter list contains a mismatched node"),
+            }
+        }
+
+        removed
     }
 
     /// Intern a constant, deduplicating.

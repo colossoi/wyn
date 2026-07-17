@@ -24,7 +24,7 @@
 //!    before the map is returned).
 
 use crate::flow::BlockId;
-use crate::{LookupMap, LookupSet};
+use crate::{LookupMap, LookupSet, SortedSet};
 
 use crate::ssa::types::ConstantValue;
 
@@ -258,57 +258,15 @@ fn eliminate_redundant_params<P: EgirPhase>(graph: &mut EGraph<P>) -> LookupMap<
         }
     }
 
-    // Apply removals: for each block with redundant params, strip those
-    // slots from block.params AND from every incoming branch's args, in
-    // descending index order so earlier indices stay valid.
+    // Apply removals while keeping each block's parameter list and every
+    // incoming branch's argument list in sync.
     if redundant.is_empty() {
         return aliases;
     }
 
-    // 1. Strip block.params.
-    for (bid, mut slots) in redundant.iter().map(|(k, v)| (*k, v.clone())) {
-        slots.sort_by_key(|(i, _)| std::cmp::Reverse(*i));
-        for (i, _) in &slots {
-            graph.skeleton.blocks[bid].params.remove(*i);
-        }
-    }
-
-    // 2. Strip matching arg slots from every terminator.
-    for (_bid, block) in graph.skeleton.blocks.iter_mut() {
-        match &mut block.term {
-            SkeletonTerminator::Branch { target, args } => {
-                if let Some(slots) = redundant.get(target) {
-                    let mut to_remove: Vec<usize> = slots.iter().map(|(i, _)| *i).collect();
-                    to_remove.sort_by(|a, b| b.cmp(a));
-                    for i in to_remove {
-                        args.remove(i);
-                    }
-                }
-            }
-            SkeletonTerminator::CondBranch {
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-                ..
-            } => {
-                if let Some(slots) = redundant.get(then_target) {
-                    let mut to_remove: Vec<usize> = slots.iter().map(|(i, _)| *i).collect();
-                    to_remove.sort_by(|a, b| b.cmp(a));
-                    for i in to_remove {
-                        then_args.remove(i);
-                    }
-                }
-                if let Some(slots) = redundant.get(else_target) {
-                    let mut to_remove: Vec<usize> = slots.iter().map(|(i, _)| *i).collect();
-                    to_remove.sort_by(|a, b| b.cmp(a));
-                    for i in to_remove {
-                        else_args.remove(i);
-                    }
-                }
-            }
-            SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
-        }
+    for (bid, slots) in &redundant {
+        let slots = slots.iter().map(|(index, _)| *index).collect::<SortedSet<_>>();
+        graph.remove_block_param_slots(*bid, &slots);
     }
 
     // Invariant 1 from the plan: every branch's arg count must equal its
