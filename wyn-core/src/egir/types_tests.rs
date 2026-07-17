@@ -273,6 +273,19 @@ fn replace_all_references_does_not_leave_stale_hash_cons_key() {
 }
 
 #[test]
+fn removing_func_param_clears_its_metadata() {
+    let mut graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
+    let span = crate::ast::Span::new(1, 2, 3, 4);
+    let param = graph.add_func_param(0, "number".to_string());
+    graph.node_spans.insert(param, span);
+
+    assert!(graph.remove_func_param(param));
+    assert!(!graph.nodes.contains_key(param));
+    assert!(!graph.types.contains_key(&param));
+    assert!(!graph.node_spans.contains_key(&param));
+}
+
+#[test]
 fn retype_node_does_not_leave_stale_hash_cons_key() {
     let mut graph = EGraph::<Semantic>::new();
     let int = i32_ty();

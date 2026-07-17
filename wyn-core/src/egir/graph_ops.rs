@@ -149,9 +149,7 @@ pub(crate) fn remove_unretained_func_params<P: EgirPhase>(
         })
         .collect::<Vec<_>>();
     for node in removed {
-        graph.nodes.remove(node);
-        graph.types.remove(&node);
-        graph.node_spans.remove(&node);
+        graph.remove_func_param(node);
     }
 }
 

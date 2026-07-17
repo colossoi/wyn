@@ -150,8 +150,7 @@ fn erase_function_params(function: &mut PhysicalFunc) -> Result<(), ConvertError
         // renumbering above and can collide with a surviving param's new
         // index, making elaboration's index-keyed param registration pick
         // the corpse over the real param.
-        function.graph.nodes.remove(erased);
-        function.graph.types.remove(&erased);
+        function.graph.remove_func_param(erased);
     }
 
     function.params = function

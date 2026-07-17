@@ -716,6 +716,16 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
         self.index_current_pure(id);
     }
 
+    /// Remove a function-parameter node and its graph-owned metadata.
+    pub fn remove_func_param(&mut self, id: NodeId) -> bool {
+        if !matches!(self.nodes.get(id), Some(ENode::FuncParam { .. })) {
+            return false;
+        }
+        self.types.remove(&id);
+        self.node_spans.remove(&id);
+        self.nodes.remove(id).is_some()
+    }
+
     /// Replace references inside graph-owned nodes. Skeleton side-effect
     /// operands are handled by higher-level graph rewriting helpers.
     pub fn replace_node_references(&mut self, old: NodeId, new: NodeId) {
