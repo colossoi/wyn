@@ -116,12 +116,12 @@ pub(super) fn analyze_reduce_candidate(
             else {
                 continue;
             };
-            let Some(root) = project_root_index(&entry.graph, value, result)
+            let Some(root) = graph_ops::root_projection_index(&entry.graph, value, result)
                 .or_else(|| (value == result && n_maps + n_accs == 1).then_some(0))
             else {
                 continue;
             };
-            let accumulator = root as usize;
+            let accumulator = root;
             if accumulator < n_maps || accumulator - n_maps >= n_accs {
                 continue;
             }
@@ -137,7 +137,9 @@ pub(super) fn analyze_reduce_candidate(
                 value,
                 writer: effect.effects.map(|(_, writer)| writer),
             });
-            if let Some(resource) = storage_resource_under(&entry.graph, place).map(|resource| resource.0) {
+            if let Some(resource) =
+                graph_ops::storage_resource_under(&entry.graph, place).map(|resource| resource.0)
+            {
                 let logical = resources.get(resource)?;
                 let output = entry.resource_declarations.iter().find(|declaration| {
                     declaration.role == crate::interface::StorageRole::Output
@@ -326,15 +328,8 @@ pub(super) fn emit_reduce_entry(
     }
     for acc_i in 0..n_accs {
         let elem_ty = elem_tys[acc_i].clone();
-        let arr_ty = Type::Constructed(
-            TypeName::Array,
-            vec![
-                elem_ty.clone(),
-                Type::Constructed(TypeName::ArrayVariantView, vec![]),
-                Type::Variable(0),
-                crate::types::no_buffer(),
-            ],
-        );
+        let arr_ty =
+            crate::types::view_array_with_size(&elem_ty, Type::Variable(0), crate::types::no_buffer());
         let partials_view =
             graph_ops::intern_resource_view(&mut entry.graph, partial_resources[acc_i], arr_ty, None);
         graph_ops::emit_storage_store(
@@ -425,15 +420,11 @@ fn build_tree_reduce_phase2(
     let w = width;
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-    let view_arr_ty = Type::Constructed(
-        TypeName::Array,
-        vec![
-            elem_ty.clone(),
-            Type::Constructed(TypeName::ArrayVariantView, vec![]),
-            Type::Variable(0),
-            // resource stamped by `intern_resource_view`.
-            crate::types::no_buffer(),
-        ],
+    let view_arr_ty = crate::types::view_array_with_size(
+        &elem_ty,
+        Type::Variable(0),
+        // Resource stamped by `intern_resource_view`.
+        crate::types::no_buffer(),
     );
 
     // ---- entry block: lid, partials view + length, shared view, result view ----
@@ -449,7 +440,7 @@ fn build_tree_reduce_phase2(
     );
     let partials_view =
         graph_ops::intern_resource_view(graph, partials_resource, view_arr_ty.clone(), None);
-    let len = emit_resource_len(graph, partials_resource);
+    let len = graph_ops::intern_resource_len(graph, partials_resource, None);
     // Workgroup-shared `array<elem, W>` (id 0 within this entry).
     let shared_view = graph_ops::emit_workgroup_view(graph, 0, w, view_arr_ty.clone(), None);
     let w_nid = graph_ops::intern_u32(graph, w, None);

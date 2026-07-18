@@ -11,12 +11,13 @@ use polytype::Type;
 use smallvec::smallvec;
 
 use crate::ast::{Span, TypeName};
+use crate::egir::graph_ops;
 use crate::egir::ir::splice_effect_tokens;
 use crate::egir::program::{SemanticFunc, SemanticProgram};
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
 use crate::egir::types::{
-    EGraph, ENode, NodeId, PureOp, ResourceAccess, SegBody, SegResourceAccess, SegSpace, SideEffectKind,
+    EGraph, NodeId, PureOp, ResourceAccess, SegBody, SegResourceAccess, SegSpace, SideEffectKind,
     SkeletonTerminator, Soac, SoacEffect, SoacInputType,
 };
 use crate::flow::BlockId;
@@ -161,7 +162,8 @@ fn find_in_graph(
                     .iter()
                     .enumerate()
                     .filter_map(|(input, &operand)| {
-                        projection_of(graph, operand, producer_result).map(|output| (input, output))
+                        graph_ops::projection_index(graph, operand, producer_result)
+                            .map(|output| (input, output))
                     })
                     .collect();
                 let Some(&(_, producer_output)) = projected.first() else {
@@ -196,16 +198,6 @@ fn find_in_graph(
         }
     }
     None
-}
-
-pub(super) fn projection_of(graph: &EGraph, node: NodeId, root: NodeId) -> Option<usize> {
-    match &graph.nodes[node] {
-        ENode::Pure {
-            op: PureOp::Project { index },
-            operands,
-        } if operands.first() == Some(&root) => Some(*index as usize),
-        _ => None,
-    }
 }
 
 pub(super) fn reaches(graph: &EGraph, start: NodeId, target: NodeId) -> bool {

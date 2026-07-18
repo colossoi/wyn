@@ -76,9 +76,10 @@ pub(crate) fn parallel_recipe_effect(
 pub(super) fn make_screma_serial(graph: &mut EGraph, block_id: BlockId, index: usize) -> error::Result<()> {
     let effect = graph
         .skeleton
-        .blocks
-        .get_mut(block_id)
-        .and_then(|block| block.side_effects.get_mut(index))
+        .get_effect_mut(SideEffectSite {
+            block: block_id,
+            index,
+        })
         .ok_or_else(|| {
             error::ParallelizeError::Invalid(format!("stale segmented effect site {block_id:?}:{index}"))
         })?;
@@ -90,9 +91,9 @@ pub(super) fn make_screma_serial(graph: &mut EGraph, block_id: BlockId, index: u
 }
 
 pub(super) fn semantic_effect(graph: &EGraph, block: BlockId, index: usize) -> error::Result<&SideEffect> {
-    graph.skeleton.blocks.get(block).and_then(|contents| contents.side_effects.get(index)).ok_or_else(
-        || error::ParallelizeError::Invalid(format!("stale semantic effect site {block:?}:{index}")),
-    )
+    graph.skeleton.get_effect(SideEffectSite { block, index }).ok_or_else(|| {
+        error::ParallelizeError::Invalid(format!("stale semantic effect site {block:?}:{index}"))
+    })
 }
 
 pub(super) fn semantic_effect_mut(
@@ -100,14 +101,9 @@ pub(super) fn semantic_effect_mut(
     block: BlockId,
     index: usize,
 ) -> error::Result<&mut SideEffect> {
-    graph
-        .skeleton
-        .blocks
-        .get_mut(block)
-        .and_then(|contents| contents.side_effects.get_mut(index))
-        .ok_or_else(|| {
-            error::ParallelizeError::Invalid(format!("stale semantic effect site {block:?}:{index}"))
-        })
+    graph.skeleton.get_effect_mut(SideEffectSite { block, index }).ok_or_else(|| {
+        error::ParallelizeError::Invalid(format!("stale semantic effect site {block:?}:{index}"))
+    })
 }
 
 pub(super) fn semantic_node_type(graph: &EGraph, node: NodeId) -> error::Result<Type<TypeName>> {
@@ -116,46 +112,6 @@ pub(super) fn semantic_node_type(graph: &EGraph, node: NodeId) -> error::Result<
         .get(&node)
         .cloned()
         .ok_or_else(|| error::ParallelizeError::Invalid(format!("semantic node {node:?} has no type")))
-}
-
-pub(super) fn project_root_index(
-    graph: &crate::egir::types::EGraph,
-    value: NodeId,
-    root: NodeId,
-) -> Option<u32> {
-    let mut cur = value;
-    let mut last_index = None;
-    loop {
-        if cur == root {
-            return last_index;
-        }
-        match graph.nodes.get(cur) {
-            Some(crate::egir::types::ENode::Pure {
-                op: crate::egir::types::PureOp::Project { index },
-                operands,
-            }) => {
-                last_index = Some(*index);
-                cur = *operands.first()?;
-            }
-            _ => return None,
-        }
-    }
-}
-
-pub(super) fn storage_resource_under(
-    graph: &crate::egir::types::EGraph,
-    root: NodeId,
-) -> Option<SemanticResourceRef> {
-    wyn_graph::find_map_reachable(
-        [root],
-        wyn_graph::WalkOrder::DepthFirst,
-        |node, out| {
-            if let Some(value) = graph.nodes.get(node) {
-                out.extend(value.children());
-            }
-        },
-        |node| graph_ops::extract_storage_view_source(graph, node),
-    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

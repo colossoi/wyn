@@ -167,20 +167,7 @@ fn push_dependency(
 }
 
 pub(crate) fn read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResourceAccess> {
-    let bindings = graph_ops::value_producer_closure(graph, se.referenced_nodes())
-        .nodes
-        .into_iter()
-        .filter_map(|node| graph_ops::extract_storage_view_source(graph, node))
-        .collect::<HashSet<_>>();
-    let mut result: Vec<_> = bindings
-        .into_iter()
-        .map(|resource| SegResourceAccess {
-            resource,
-            access: ResourceAccess::Read,
-        })
-        .collect();
-    result.sort_by_key(|resource| resource.resource);
-    result
+    graph_ops::read_storage_resources(graph, se.referenced_nodes())
 }
 
 /// Validate the semantic boundary before any target-aware scheduling occurs.

@@ -135,7 +135,7 @@ pub struct SemanticResourceDecl {
 /// Why a compiler-introduced resource exists. The kind fixes its physical
 /// storage role and lets descriptor publication build the right
 /// `StorageBindingDecl` without re-deriving it from the lowering site.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CompilerResourceKind {
     /// A pre-existing generic intermediate surfaced from a
     /// `StorageBindingDecl` and not owned by a Seg op.

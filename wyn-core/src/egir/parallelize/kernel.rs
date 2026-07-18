@@ -3,10 +3,6 @@
 #![cfg_attr(not(test), deny(clippy::expect_used, clippy::unwrap_used))]
 
 use super::*;
-pub(super) fn required_resource(reference: SemanticResourceRef) -> ResourceId {
-    reference.0
-}
-
 pub(super) fn apply_manifest_resource_sizes(
     entry: &mut crate::egir::program::PlannedEntry,
     resources: &planning::ResourceIndex<'_>,
@@ -130,22 +126,6 @@ fn cast_u32_to_index(
     }
 }
 
-pub(super) fn emit_semantic_resource_len(
-    graph: &mut crate::egir::types::EGraph,
-    resource: SemanticResourceRef,
-) -> NodeId {
-    emit_resource_len(graph, resource.0)
-}
-
-pub(super) fn emit_resource_len(graph: &mut crate::egir::types::EGraph, resource: ResourceId) -> NodeId {
-    graph.intern_pure(
-        PureOp::ResourceLen(SemanticResourceRef(resource)),
-        smallvec![],
-        Type::Constructed(TypeName::UInt(32), vec![]),
-        None,
-    )
-}
-
 pub(super) fn dispatch_worker_logical_size(elem_ty: &Type<TypeName>) -> crate::egir::program::LogicalSize {
     crate::ssa::layout::type_byte_size(elem_ty)
         .map_or(crate::egir::program::LogicalSize::Unspecified, |bytes| {
@@ -244,7 +224,7 @@ impl ChunkableView {
 
     fn len(self, graph: &mut EGraph) -> NodeId {
         match self {
-            Self::Storage(resource) => emit_semantic_resource_len(graph, resource),
+            Self::Storage(resource) => graph_ops::intern_resource_len(graph, resource.0, None),
             Self::Range { len, .. } => len,
         }
     }

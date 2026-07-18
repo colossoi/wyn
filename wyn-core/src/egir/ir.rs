@@ -445,6 +445,14 @@ impl<P: EgirPhase, Lang: Language> Skeleton<P, Lang> {
         &mut self.blocks[site.block].side_effects[site.index]
     }
 
+    pub fn get_effect(&self, site: SideEffectSite) -> Option<&SideEffect<P, Lang>> {
+        self.blocks.get(site.block)?.side_effects.get(site.index)
+    }
+
+    pub fn get_effect_mut(&mut self, site: SideEffectSite) -> Option<&mut SideEffect<P, Lang>> {
+        self.blocks.get_mut(site.block)?.side_effects.get_mut(site.index)
+    }
+
     /// Split a block immediately before one of its side effects.
     ///
     /// The returned continuation receives the selected effect and every

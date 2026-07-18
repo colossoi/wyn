@@ -510,20 +510,7 @@ fn read_resources(
     graph: &EGraph<Raw>,
     effect: &SideEffect<Raw>,
 ) -> Vec<SegResourceAccess<SemanticResourceRef>> {
-    let resources = graph_ops::value_producer_closure(graph, referenced_nodes(effect))
-        .nodes
-        .into_iter()
-        .filter_map(|node| graph_ops::extract_storage_view_source(graph, node))
-        .collect::<HashSet<_>>();
-    let mut resources = resources
-        .into_iter()
-        .map(|resource| SegResourceAccess {
-            resource,
-            access: ResourceAccess::Read,
-        })
-        .collect::<Vec<_>>();
-    resources.sort_by_key(|resource| resource.resource);
-    resources
+    graph_ops::read_storage_resources(graph, referenced_nodes(effect))
 }
 
 fn soac_consumed_nodes(graph: &EGraph<Raw>) -> HashSet<NodeId> {

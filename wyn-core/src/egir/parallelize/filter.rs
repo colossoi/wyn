@@ -194,9 +194,9 @@ fn build_filter_kernel_family(
         u32_ty.clone(),
         &scan.graph,
         zero,
-        required_resource(work.block_sums),
-        required_resource(work.block_offsets),
-        Some(required_resource(len_out)),
+        work.block_sums.0,
+        work.block_offsets.0,
+        Some(len_out.0),
         effect_ids,
     )
     .map_err(|error| {
@@ -214,8 +214,8 @@ fn build_filter_kernel_family(
         &scan.name,
         swap_region,
         Type::Constructed(TypeName::UInt(32), vec![]),
-        required_resource(work.offsets),
-        required_resource(work.block_offsets),
+        work.offsets.0,
+        work.block_offsets.0,
         policy.reduce_phase1_width,
         effect_ids,
     )?;

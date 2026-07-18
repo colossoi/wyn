@@ -9,8 +9,7 @@ use polytype::Type;
 use smallvec::SmallVec;
 
 use super::vertical::{
-    capture_types, fresh_region_name, graph_and_span, graph_mut, producer_is_used_only_by, projection_of,
-    FusionSite,
+    capture_types, fresh_region_name, graph_and_span, graph_mut, producer_is_used_only_by, FusionSite,
 };
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
@@ -129,11 +128,9 @@ fn find_in_graph(graph: &EGraph, site: FusionSite, oracle: &SemanticGraph) -> Op
                             ..
                         }),
                     )) => {
-                        let Some(output) = consumer
-                            .operand_nodes
-                            .first()
-                            .and_then(|&operand| projection_of(graph, operand, producer_result))
-                        else {
+                        let Some(output) = consumer.operand_nodes.first().and_then(|&operand| {
+                            graph_ops::projection_index(graph, operand, producer_result)
+                        }) else {
                             continue;
                         };
                         if output >= maps.len()
@@ -180,7 +177,8 @@ fn find_in_graph(graph: &EGraph, site: FusionSite, oracle: &SemanticGraph) -> Op
                             .iter()
                             .enumerate()
                             .filter_map(|(input, &operand)| {
-                                projection_of(graph, operand, producer_result).map(|output| (input, output))
+                                graph_ops::projection_index(graph, operand, producer_result)
+                                    .map(|output| (input, output))
                             })
                             .collect();
                         let Some(&(_, output)) = projected.first() else {

@@ -119,18 +119,12 @@ fn projection_metadata(
     let semantic_ops = selected_effects
         .iter()
         .map(|site| {
-            source
-                .graph
-                .skeleton
-                .blocks
-                .get(site.block)
-                .and_then(|block| block.side_effects.get(site.index))
-                .ok_or_else(|| {
-                    format!(
-                        "projection selected stale side-effect site {:?}/{}",
-                        site.block, site.index
-                    )
-                })
+            source.graph.skeleton.get_effect(*site).ok_or_else(|| {
+                format!(
+                    "projection selected stale side-effect site {:?}/{}",
+                    site.block, site.index
+                )
+            })
         })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()

@@ -39,14 +39,14 @@ pub mod schedule;
 
 pub(crate) use facts::parallel_recipe_effect;
 use facts::{
-    make_screma_serial, project_root_index, seg_recipe_family, segmented_recipe_effect, semantic_effect,
-    semantic_effect_mut, semantic_node_type, storage_resource_under, SegScratchFamily,
+    make_screma_serial, seg_recipe_family, segmented_recipe_effect, semantic_effect, semantic_effect_mut,
+    semantic_node_type, SegScratchFamily,
 };
 use filter::{analyze_filter_candidates, lower_materialized_filters, lower_runtime_filters};
 use kernel::{
     apply_manifest_resource_sizes, can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs,
-    chunk_view_like, dispatch_worker_logical_size, emit_chunk_arithmetic, emit_resource_len,
-    required_resource, synthesize_swap_wrapper, synthesize_u32_add_function, ChunkInputKind,
+    chunk_view_like, dispatch_worker_logical_size, emit_chunk_arithmetic, synthesize_swap_wrapper,
+    synthesize_u32_add_function, ChunkInputKind,
 };
 use planning as error;
 #[cfg(test)]

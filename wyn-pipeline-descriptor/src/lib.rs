@@ -632,6 +632,19 @@ pub enum StorageTextureSize {
 }
 
 impl Binding {
+    /// Descriptor-set slot for resources represented by `(set, binding)`.
+    /// Push constants are addressed by byte range and therefore have no slot.
+    pub fn slot(&self) -> Option<(u32, u32)> {
+        match self {
+            Binding::StorageBuffer { set, binding, .. }
+            | Binding::Uniform { set, binding, .. }
+            | Binding::Texture { set, binding, .. }
+            | Binding::Sampler { set, binding, .. }
+            | Binding::StorageTexture { set, binding, .. } => Some((*set, *binding)),
+            Binding::PushConstant { .. } => None,
+        }
+    }
+
     /// Descriptor-set binding number for storage / uniform / texture /
     /// sampler bindings. Panics on `PushConstant`, which has no binding
     /// number — push constants live in their own range and are addressed
@@ -766,8 +779,8 @@ impl FrameGraphBuilder {
             binding_index,
             name: binding_name(binding).to_string(),
             kind: binding_kind(binding),
-            set: binding_slot(binding).map(|(set, _)| set),
-            binding: binding_slot(binding).map(|(_, binding)| binding),
+            set: binding.slot().map(|(set, _)| set),
+            binding: binding.slot().map(|(_, binding)| binding),
         };
         if !resource.bindings.iter().any(|existing| {
             existing.pipeline_index == pipeline_index && existing.binding_index == binding_index
@@ -855,7 +868,7 @@ impl FrameGraphBuilder {
         bindings
             .iter()
             .enumerate()
-            .find(|(_, candidate)| binding_slot(candidate) == Some((set, binding)))
+            .find(|(_, candidate)| candidate.slot() == Some((set, binding)))
             .map(|(binding_index, candidate)| self.ensure_binding(pipeline_index, binding_index, candidate))
     }
 
@@ -952,7 +965,7 @@ impl FrameGraphBuilder {
         feedback_reads: &BTreeSet<(u32, u32)>,
     ) {
         let resource = self.ensure_binding(pipeline_index, binding_index, binding);
-        let role = if binding_slot(binding).is_some_and(|slot| feedback_reads.contains(&slot)) {
+        let role = if binding.slot().is_some_and(|slot| feedback_reads.contains(&slot)) {
             FrameAccessRole::Previous
         } else {
             FrameAccessRole::Current
@@ -1207,17 +1220,6 @@ fn resource_name(binding: &Binding) -> &str {
             ..
         } => resource,
         _ => binding_name(binding),
-    }
-}
-
-fn binding_slot(binding: &Binding) -> Option<(u32, u32)> {
-    match binding {
-        Binding::StorageBuffer { set, binding, .. }
-        | Binding::Uniform { set, binding, .. }
-        | Binding::Texture { set, binding, .. }
-        | Binding::Sampler { set, binding, .. }
-        | Binding::StorageTexture { set, binding, .. } => Some((*set, *binding)),
-        Binding::PushConstant { .. } => None,
     }
 }
 

@@ -6,6 +6,7 @@
 
 use smallvec::smallvec;
 
+use crate::egir::graph_ops;
 use crate::egir::program::{OutputRoute, OutputWriter, SemanticProgram, SemanticResourceRef};
 use crate::egir::soac::screma;
 use crate::egir::types::{EGraph, ENode, NodeId, PureOp, ResourceAccess, SideEffectKind, Soac, SoacEffect};
@@ -108,7 +109,7 @@ fn find_in_graph(
                     if !is_static_index(graph, *index) {
                         return None;
                     }
-                    projection_of(graph, *base, result).map(|output| (node, *index, output))
+                    graph_ops::projection_index(graph, *base, result).map(|output| (node, *index, output))
                 })
                 .collect::<Vec<_>>();
             let [(index, index_value, output)] = demands.as_slice() else {
@@ -130,16 +131,6 @@ fn find_in_graph(
         }
     }
     None
-}
-
-fn projection_of(graph: &EGraph, node: NodeId, root: NodeId) -> Option<usize> {
-    match &graph.nodes[node] {
-        ENode::Pure {
-            op: PureOp::Project { index },
-            operands,
-        } if operands.first() == Some(&root) => Some(*index as usize),
-        _ => None,
-    }
 }
 
 fn is_static_index(graph: &EGraph, node: NodeId) -> bool {

@@ -922,13 +922,18 @@ pub fn array_with_buffer(ty: &Type, region: Type) -> Type {
 pub fn view_array_of(view_ty: &Type, region: Type) -> Type {
     match view_ty {
         Type::Constructed(TypeName::Array, _) => array_with_buffer(view_ty, region),
-        elem => make_array1(
-            elem.clone(),
-            Type::Constructed(TypeName::ArrayVariantView, vec![]),
-            Type::Constructed(TypeName::SizePlaceholder, vec![]),
-            region,
-        ),
+        elem => view_array_with_size(elem, Type::Constructed(TypeName::SizePlaceholder, vec![]), region),
     }
+}
+
+/// A view-array type with an explicit size and storage-region marker.
+pub fn view_array_with_size(elem: &Type, size: Type, region: Type) -> Type {
+    make_array1(
+        elem.clone(),
+        Type::Constructed(TypeName::ArrayVariantView, vec![]),
+        size,
+        region,
+    )
 }
 
 /// Read the concrete buffer off an array type's buffer slot, if it has

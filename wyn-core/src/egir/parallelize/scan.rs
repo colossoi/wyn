@@ -273,15 +273,8 @@ pub(super) fn emit_scan_entry(
             elem_ty.clone(),
             None,
         );
-        let arr_ty = Type::Constructed(
-            TypeName::Array,
-            vec![
-                elem_ty.clone(),
-                Type::Constructed(TypeName::ArrayVariantView, vec![]),
-                Type::Variable(0),
-                crate::types::no_buffer(),
-            ],
-        );
+        let arr_ty =
+            crate::types::view_array_with_size(&elem_ty, Type::Variable(0), crate::types::no_buffer());
         let block_sums_view =
             graph_ops::intern_resource_view(&mut entry.graph, block_sums_resource, arr_ty, None);
         graph_ops::emit_storage_store(
@@ -332,7 +325,7 @@ pub(super) fn emit_scan_entry(
         &entry.name,
         swap_region,
         elem_ty,
-        required_resource(scan_output_storage),
+        scan_output_storage.0,
         block_offsets_resource,
         total_threads,
         effect_ids,
@@ -428,20 +421,12 @@ fn build_exclusive_scan_phase2(
 ) -> ExclusiveScanPhase2 {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-    let arr_ty = Type::Constructed(
-        TypeName::Array,
-        vec![
-            elem_ty.clone(),
-            Type::Constructed(TypeName::ArrayVariantView, vec![]),
-            Type::Variable(0),
-            crate::types::no_buffer(),
-        ],
-    );
+    let arr_ty = crate::types::view_array_with_size(&elem_ty, Type::Variable(0), crate::types::no_buffer());
     let entry_block = b.graph_mut().skeleton.entry;
     let (graph, control_headers, effect_ids) = b.construction_parts_mut();
     let sums = graph_ops::intern_resource_view(graph, block_sums_resource, arr_ty.clone(), None);
     let offsets = graph_ops::intern_resource_view(graph, block_offsets_resource, arr_ty, None);
-    let len = emit_resource_len(graph, block_sums_resource);
+    let len = graph_ops::intern_resource_len(graph, block_sums_resource, None);
     let zero = graph_ops::intern_u32(graph, 0, None);
     let one = graph_ops::intern_u32(graph, 1, None);
 
@@ -539,19 +524,11 @@ pub(super) fn synthesize_phase3_scan(
         dispatch_worker_logical_size(&elem_ty),
     );
 
-    let arr_ty = Type::Constructed(
-        TypeName::Array,
-        vec![
-            elem_ty.clone(),
-            Type::Constructed(TypeName::ArrayVariantView, vec![]),
-            Type::Variable(0),
-            crate::types::no_buffer(),
-        ],
-    );
+    let arr_ty = crate::types::view_array_with_size(&elem_ty, Type::Variable(0), crate::types::no_buffer());
     let _output_view = b.emit_storage_view(output_resource, arr_ty.clone());
     let block_offsets_view = b.emit_storage_view(block_offsets_resource, arr_ty.clone());
 
-    let output_len = emit_resource_len(b.graph_mut(), output_resource);
+    let output_len = graph_ops::intern_resource_len(b.graph_mut(), output_resource, None);
     let (tid, chunk_start, chunk_len) = emit_chunk_arithmetic(b.graph_mut(), total_threads, output_len)?;
 
     let off_place = b.graph_mut().intern_pure(

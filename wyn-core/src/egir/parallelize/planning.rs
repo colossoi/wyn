@@ -393,7 +393,7 @@ pub(crate) fn allocate_parallel_scratch(
         (
             request.endpoint,
             request.compiler.owner,
-            resource_kind_rank(request.compiler.kind),
+            request.compiler.kind,
             request.compiler.slot,
         )
     });
@@ -588,19 +588,6 @@ fn scratch_request(
         elem_ty,
         size: LogicalSize::SameAsDispatch { elem_bytes },
     })
-}
-
-fn resource_kind_rank(kind: CompilerResourceKind) -> u8 {
-    match kind {
-        CompilerResourceKind::ReducePartial => 0,
-        CompilerResourceKind::ScanBlockSums => 1,
-        CompilerResourceKind::ScanBlockOffsets => 2,
-        CompilerResourceKind::FilterFlags => 3,
-        CompilerResourceKind::FilterOffsets => 4,
-        CompilerResourceKind::FilterScanBlockSums => 5,
-        CompilerResourceKind::FilterScanBlockOffsets => 6,
-        _ => 7,
-    }
 }
 
 #[cfg(test)]

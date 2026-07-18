@@ -25,8 +25,8 @@ use crate::BindingRef;
 
 use super::types::{
     EGraph, ENode, EffectOp, EffectToken, EgirPhase, GraphResource, NodeId, Physical, PureOp,
-    PureViewSource, Raw, Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac,
-    SoacEffect, WynSoacPhase,
+    PureViewSource, Raw, ResourceAccess, SegResourceAccess, Semantic, SideEffect, SideEffectKind,
+    SideEffectSite, SkeletonTerminator, Soac, SoacEffect, WynSoacPhase,
 };
 
 #[cfg(test)]
@@ -129,6 +129,70 @@ pub(crate) fn execution_value_producer_closure<P: ValueProducerPhase>(
         block.side_effects.iter().flat_map(P::effect_value_inputs).chain(block.term.referenced_nodes())
     });
     value_producer_closure(graph, execution_roots.chain(result_roots))
+}
+
+/// Storage resources read by the complete producer closure behind `roots`.
+pub(crate) fn read_storage_resources<P>(
+    graph: &EGraph<P>,
+    roots: impl IntoIterator<Item = NodeId>,
+) -> Vec<SegResourceAccess<super::program::SemanticResourceRef>>
+where
+    P: ValueProducerPhase + EgirPhase<Resource = super::program::SemanticResourceRef>,
+{
+    let resources = value_producer_closure(graph, roots)
+        .nodes
+        .into_iter()
+        .filter_map(|node| extract_storage_view_source(graph, node))
+        .collect::<HashSet<_>>();
+    let mut resources = resources
+        .into_iter()
+        .map(|resource| SegResourceAccess {
+            resource,
+            access: ResourceAccess::Read,
+        })
+        .collect::<Vec<_>>();
+    resources.sort_by_key(|resource| resource.resource);
+    resources
+}
+
+/// Return the output selected by a direct projection of `root`.
+pub(crate) fn projection_index<P: EgirPhase>(
+    graph: &EGraph<P>,
+    node: NodeId,
+    root: NodeId,
+) -> Option<usize> {
+    match graph.nodes.get(node)? {
+        ENode::Pure {
+            op: PureOp::Project { index },
+            operands,
+        } if operands.first() == Some(&root) => Some(*index as usize),
+        _ => None,
+    }
+}
+
+/// Follow nested projections back to `root` and return its selected output.
+/// For `Project(Project(root, outer), inner)`, this is `outer`.
+pub(crate) fn root_projection_index<P: EgirPhase>(
+    graph: &EGraph<P>,
+    node: NodeId,
+    root: NodeId,
+) -> Option<usize> {
+    let mut current = node;
+    let mut root_index = None;
+    loop {
+        if current == root {
+            return root_index;
+        }
+        let ENode::Pure {
+            op: PureOp::Project { index },
+            operands,
+        } = graph.nodes.get(current)?
+        else {
+            return None;
+        };
+        root_index = Some(*index as usize);
+        current = *operands.first()?;
+    }
 }
 
 fn extend_incoming_block_args<P: EgirPhase>(
@@ -257,15 +321,23 @@ pub fn intern_resource_view<P: EgirPhase<Resource = super::program::SemanticReso
     view_ty: Type<TypeName>,
     span: Option<Span>,
 ) -> NodeId {
-    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let len = graph.intern_pure(
-        PureOp::ResourceLen(super::program::SemanticResourceRef(resource)),
-        smallvec![],
-        u32_ty,
-        span,
-    );
+    let len = intern_resource_len(graph, resource, span);
     let zero = intern_u32(graph, 0, span);
     intern_chunked_resource_view(graph, resource, zero, len, view_ty, span)
+}
+
+/// Target-independent logical-resource length.
+pub fn intern_resource_len<P: EgirPhase<Resource = super::program::SemanticResourceRef>>(
+    graph: &mut EGraph<P>,
+    resource: crate::ResourceId,
+    span: Option<Span>,
+) -> NodeId {
+    graph.intern_pure(
+        PureOp::ResourceLen(super::program::SemanticResourceRef(resource)),
+        smallvec![],
+        Type::Constructed(TypeName::UInt(32), vec![]),
+        span,
+    )
 }
 
 pub fn intern_chunked_resource_view<P: EgirPhase<Resource = super::program::SemanticResourceRef>>(
@@ -562,6 +634,23 @@ pub fn extract_storage_view_source<P: EgirPhase<Resource = super::program::Seman
         } => Some(*resource),
         _ => None,
     }
+}
+
+/// Find the storage resource beneath a semantic place expression.
+pub(crate) fn storage_resource_under(
+    graph: &EGraph,
+    root: NodeId,
+) -> Option<super::program::SemanticResourceRef> {
+    wyn_graph::find_map_reachable(
+        [root],
+        wyn_graph::WalkOrder::DepthFirst,
+        |node, out| {
+            if let Some(value) = graph.nodes.get(node) {
+                out.extend(value.children());
+            }
+        },
+        |node| extract_storage_view_source(graph, node),
+    )
 }
 
 /// If `nid` is a `PureOp::ArrayRange`, return `(start, len, step?)`

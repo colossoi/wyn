@@ -501,14 +501,7 @@ impl DescriptorLayout {
 }
 
 fn binding_slot(binding: &Binding) -> Option<BindingRef> {
-    match binding {
-        Binding::StorageBuffer { set, binding, .. }
-        | Binding::Uniform { set, binding, .. }
-        | Binding::Texture { set, binding, .. }
-        | Binding::Sampler { set, binding, .. }
-        | Binding::StorageTexture { set, binding, .. } => Some(BindingRef::new(*set, *binding)),
-        Binding::PushConstant { .. } => None,
-    }
+    binding.slot().map(|(set, binding)| BindingRef::new(set, binding))
 }
 
 fn binding_shape(binding: &Binding) -> Option<DescriptorShape> {

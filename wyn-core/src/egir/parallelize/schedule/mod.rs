@@ -1616,67 +1616,12 @@ fn merge_bindings(target: &mut Vec<Binding>, source: Vec<Binding>) {
 }
 
 fn same_binding_slot(left: &Binding, right: &Binding) -> bool {
+    if std::mem::discriminant(left) == std::mem::discriminant(right)
+        && left.slot().is_some_and(|slot| right.slot() == Some(slot))
+    {
+        return true;
+    }
     match (left, right) {
-        (
-            Binding::StorageBuffer {
-                set: left_set,
-                binding: left_binding,
-                ..
-            },
-            Binding::StorageBuffer {
-                set: right_set,
-                binding: right_binding,
-                ..
-            },
-        )
-        | (
-            Binding::Uniform {
-                set: left_set,
-                binding: left_binding,
-                ..
-            },
-            Binding::Uniform {
-                set: right_set,
-                binding: right_binding,
-                ..
-            },
-        )
-        | (
-            Binding::Texture {
-                set: left_set,
-                binding: left_binding,
-                ..
-            },
-            Binding::Texture {
-                set: right_set,
-                binding: right_binding,
-                ..
-            },
-        )
-        | (
-            Binding::Sampler {
-                set: left_set,
-                binding: left_binding,
-                ..
-            },
-            Binding::Sampler {
-                set: right_set,
-                binding: right_binding,
-                ..
-            },
-        )
-        | (
-            Binding::StorageTexture {
-                set: left_set,
-                binding: left_binding,
-                ..
-            },
-            Binding::StorageTexture {
-                set: right_set,
-                binding: right_binding,
-                ..
-            },
-        ) => left_set == right_set && left_binding == right_binding,
         (
             Binding::PushConstant {
                 offset: left_offset,
