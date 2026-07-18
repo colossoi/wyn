@@ -3,6 +3,7 @@
 #![cfg_attr(not(test), deny(clippy::expect_used, clippy::unwrap_used))]
 
 use super::*;
+use crate::egir::soac::filter as filter_soac;
 use crate::egir::{graph_projector, program, semantic_graph};
 
 pub(super) struct UnionFind {
@@ -262,9 +263,9 @@ fn is_parallel_output(effect: &SideEffect) -> bool {
             &effect.kind,
             SideEffectKind::Soac(SoacEffect(
                 _,
-                Soac::Filter(filter::Op {
-                    state: filter::SemanticState {
-                        storage: filter::Output::Runtime { .. },
+                Soac::Filter(filter_soac::Op {
+                    state: filter_soac::SemanticState {
+                        storage: filter_soac::Output::Runtime { .. },
                         ..
                     },
                     ..

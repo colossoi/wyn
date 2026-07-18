@@ -3,6 +3,8 @@
 #![cfg_attr(not(test), deny(clippy::expect_used, clippy::unwrap_used))]
 
 use super::*;
+use crate::egir::soac::filter as filter_soac;
+
 pub(super) fn lower_runtime_filters(
     inner: &AllocatedProgram,
     seeded: &schedule::SeededKernels,
@@ -119,7 +121,7 @@ fn lower_filter_kernel(
 
 struct FilterKernelFamily {
     domain: schedule::KernelDomain,
-    work: filter::WorkBuffers,
+    work: filter_soac::WorkBuffers,
     flags: crate::egir::program::PlannedEntry,
     scan: crate::egir::program::PlannedEntry,
     combine: crate::egir::program::PlannedEntry,
@@ -272,7 +274,7 @@ fn install_filter_kernel_family(
         kernel,
         scatter,
         schedule::KernelKind::FilterScatter,
-        filter::Plan::Scatter(filter::ParallelConfig {
+        filter_soac::Plan::Scatter(filter_soac::ParallelConfig {
             buffers: work,
             scan_workgroup_width,
         }),
@@ -282,7 +284,7 @@ fn install_filter_kernel_family(
         flags,
         schedule::DomainSelection::Explicit(domain.clone()),
         schedule::KernelKind::FilterFlags,
-        filter::Plan::Flags(filter::ParallelConfig {
+        filter_soac::Plan::Flags(filter_soac::ParallelConfig {
             buffers: work,
             scan_workgroup_width,
         }),
@@ -298,7 +300,7 @@ fn install_filter_kernel_family(
             z: 1,
         }),
         schedule::KernelKind::FilterScan,
-        filter::Plan::Scan(filter::ParallelConfig {
+        filter_soac::Plan::Scan(filter_soac::ParallelConfig {
             buffers: work,
             scan_workgroup_width,
         }),
@@ -386,7 +388,7 @@ pub(super) struct FilterCandidate {
 
 struct FilterAnalysis {
     candidate: FilterCandidate,
-    work: filter::WorkBuffers,
+    work: filter_soac::WorkBuffers,
 }
 
 pub(super) fn analyze_filter_candidates(
@@ -396,11 +398,11 @@ pub(super) fn analyze_filter_candidates(
     for effect in entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects) {
         let SideEffectKind::Soac(SoacEffect(
             semantic_id,
-            Soac::Filter(filter::Op {
+            Soac::Filter(filter_soac::Op {
                 state:
-                    filter::SemanticState {
+                    filter_soac::SemanticState {
                         space,
-                        storage: filter::Output::Runtime { length, .. },
+                        storage: filter_soac::Output::Runtime { length, .. },
                     },
                 ..
             }),
@@ -410,12 +412,12 @@ pub(super) fn analyze_filter_candidates(
         };
         let semantic_id = *semantic_id;
         let selection = match length {
-            filter::RuntimeLength::Stored(len_out) => RecipeSelection::Parallel(FilterCandidate {
+            filter_soac::RuntimeLength::Stored(len_out) => RecipeSelection::Parallel(FilterCandidate {
                 semantic_id,
                 space: space.clone(),
                 len_out: *len_out,
             }),
-            filter::RuntimeLength::ViewOnly => {
+            filter_soac::RuntimeLength::ViewOnly => {
                 RecipeSelection::Serial(FallbackReason::UnsupportedDestination)
             }
         };
@@ -440,11 +442,11 @@ fn bind_filter_candidate(
 fn filter_work_buffers(
     owner: SemanticOpId,
     resources: &planning::ResourceIndex<'_>,
-) -> error::Result<filter::WorkBuffers> {
+) -> error::Result<filter_soac::WorkBuffers> {
     let resource_id = |kind, slot| {
         resources.exactly_one_at(owner, kind, slot).map(|resource| SemanticResourceRef(resource.id))
     };
-    Ok(filter::WorkBuffers {
+    Ok(filter_soac::WorkBuffers {
         flags: resource_id(CompilerResourceKind::FilterFlags, 0)?,
         offsets: resource_id(CompilerResourceKind::FilterOffsets, 1)?,
         block_sums: resource_id(CompilerResourceKind::FilterScanBlockSums, 2)?,

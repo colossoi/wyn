@@ -1,20 +1,71 @@
-//! Planning-session indexes and deterministic recipe-owned scratch allocation.
+//! Target policy, checked planning failures, session indexes, and deterministic
+//! recipe-owned scratch allocation.
 
 #![cfg_attr(not(test), deny(clippy::expect_used, clippy::unwrap_used))]
 
 use std::collections::{BTreeMap, HashMap};
 
 use polytype::Type;
+use thiserror::Error;
 
 use crate::ast::TypeName;
 
-use super::error::{ParallelizeError, Result};
-use super::policy::ParallelPolicy;
+use super::schedule::KernelMutationError;
 use crate::egir::program::{
     AllocatedProgram, CompilerFlowEndpoint, CompilerResource, CompilerResourceFlow, CompilerResourceKind,
     LogicalResource, LogicalSize, ResourceOrigin, SemanticOpId,
 };
 use crate::egir::types::SegExtent;
+
+/// Scheduling choices shared by candidate analysis, scratch sizing, and
+/// physical kernel construction. Selected recipes retain any policy values
+/// needed by later lowering stages instead of re-deriving them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ParallelPolicy {
+    pub reduce_phase1_width: u32,
+    pub reduce_phase2_width: u32,
+    pub filter_scan_groups: u32,
+}
+
+impl Default for ParallelPolicy {
+    fn default() -> Self {
+        Self {
+            reduce_phase1_width: REDUCE_PHASE1_WIDTH,
+            reduce_phase2_width: PHASE2_WIDTH,
+            filter_scan_groups: FILTER_SCAN_GROUPS,
+        }
+    }
+}
+
+/// Per-workgroup width of a synthesized phase-2 tree reduce.
+pub const PHASE2_WIDTH: u32 = 256;
+/// Per-workgroup width used to chunk a phase-1 partial reduce or scan.
+pub(crate) const REDUCE_PHASE1_WIDTH: u32 = 64;
+/// Workgroup count for the runtime-filter chunk scan.
+pub(crate) const FILTER_SCAN_GROUPS: u32 = 4;
+
+/// Checked failures produced while selecting and constructing kernel recipes.
+#[derive(Debug, Error)]
+pub(crate) enum ParallelizeError {
+    #[error("{0}")]
+    Invalid(String),
+    #[error("kernel schedule mutation failed: {0}")]
+    Schedule(#[from] KernelMutationError),
+}
+
+impl From<String> for ParallelizeError {
+    fn from(value: String) -> Self {
+        Self::Invalid(value)
+    }
+}
+
+impl From<&str> for ParallelizeError {
+    fn from(value: &str) -> Self {
+        Self::Invalid(value.to_owned())
+    }
+}
+
+pub(crate) type Result<T> = std::result::Result<T, ParallelizeError>;
 
 /// Immutable lookup view over the final logical resource manifest used by one
 /// planning session. Owner/kind buckets are ordered by compiler slot.

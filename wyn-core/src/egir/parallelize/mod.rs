@@ -16,43 +16,46 @@
 //!   recipe can select serial lowering without rolling back partial rewrites;
 //! - host-provided bindings are ABI identities and target planning never
 //!   renumbers or replaces them.
+//!
+//! Organization follows ownership rather than pass chronology: `planning`
+//! owns policy, checked errors, indexes, selections, and scratch assignment;
+//! `facts` owns short-lived graph observations; `projection` owns entry and
+//! route projection; `kernel` owns shared graph-building utilities; `reduce`,
+//! `scan`, and `filter` own their complete recipes; `prepare` converts selected
+//! semantic operations to scheduled form; and `schedule` owns phase ordering,
+//! dependency validation, and publication.
 
 #![cfg_attr(not(test), deny(clippy::expect_used, clippy::unwrap_used))]
 
-mod chunk;
-mod error;
 mod facts;
-mod filter_recipe;
+mod filter;
 mod kernel;
-mod materialization;
 mod planning;
-mod policy;
 pub(crate) mod prepare;
 mod projection;
 mod reduce;
 mod scan;
 pub mod schedule;
 
-use chunk::{can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs, chunk_view_like, ChunkInputKind};
 pub(crate) use facts::parallel_recipe_effect;
 use facts::{
     make_screma_serial, project_root_index, seg_recipe_family, segmented_recipe_effect, semantic_effect,
     semantic_effect_mut, semantic_node_type, storage_resource_under, SegScratchFamily,
 };
-use filter_recipe::{analyze_filter_candidates, lower_materialized_filters, lower_runtime_filters};
+use filter::{analyze_filter_candidates, lower_materialized_filters, lower_runtime_filters};
 use kernel::{
-    apply_manifest_resource_sizes, dispatch_worker_logical_size, emit_chunk_arithmetic, emit_resource_len,
-    emit_semantic_resource_len, required_resource, synthesize_swap_wrapper, synthesize_u32_add_function,
+    apply_manifest_resource_sizes, can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs,
+    chunk_view_like, dispatch_worker_logical_size, emit_chunk_arithmetic, emit_resource_len,
+    required_resource, synthesize_swap_wrapper, synthesize_u32_add_function, ChunkInputKind,
 };
-use materialization::attach_materializations;
+use planning as error;
 #[cfg(test)]
 pub(crate) use planning::preflight_fallback_reasons;
 pub(crate) use planning::FallbackReason;
-use planning::RecipeSelection;
-use policy::ParallelPolicy;
-pub use policy::PHASE2_WIDTH;
+pub use planning::PHASE2_WIDTH;
+use planning::{ParallelPolicy, RecipeSelection};
 #[cfg(test)]
-pub(crate) use policy::{FILTER_SCAN_GROUPS, REDUCE_PHASE1_WIDTH};
+pub(crate) use planning::{FILTER_SCAN_GROUPS, REDUCE_PHASE1_WIDTH};
 #[cfg(test)]
 use projection::side_effect_output_slots_from_routes;
 use projection::{project_kernel_body, split_multidomain_seg_maps, SplitEntry, UnionFind};
@@ -74,7 +77,7 @@ use super::program::{
     AllocatedProgram, CompilerResourceKind, OutputWriter, ResourceId, SemanticEntry, SemanticEntryId,
     SemanticFunc, SemanticOpId, SemanticResourceDecl, SemanticResourceRef,
 };
-use super::soac::{filter, screma};
+use super::soac::screma;
 use super::types::{
     EGraph, ENode, EffectOp, EffectToken, NodeId, PureOp, RegionId, SegBody, SegSpace, SideEffect,
     SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacDestination, SoacEffect,
@@ -172,6 +175,77 @@ pub(crate) fn lower_sequential(
     plan.select_sequential_recipes();
     plan.coalesce_resource_flows(flows.flows());
     Ok(plan)
+}
+
+/// Attach allocation-created producer entries in compiler-flow order, then
+/// select a recipe for any segmented operation they contain.
+fn attach_materializations(
+    inner: &AllocatedProgram,
+    schedule: &mut schedule::KernelPlan,
+    resources: &planning::ResourceIndex<'_>,
+    flows: &planning::ResourceFlowIndex,
+    candidates: &planning::CandidateIndex,
+    policy: ParallelPolicy,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) -> error::Result<()> {
+    let mut ready = std::collections::BTreeSet::new();
+    for (_, flow) in flows.flows() {
+        for consumer in &flow.consumers {
+            if schedule.contains_flow_source(*consumer) {
+                ready.insert((flow.producer, *consumer));
+            }
+        }
+    }
+
+    while let Some((producer_id, consumer_id)) = ready.pop_first() {
+        if schedule.contains_flow_source(producer_id) {
+            continue;
+        }
+        let consumer = schedule.kernel_for_flow_source(consumer_id).ok_or_else(|| {
+            error::ParallelizeError::Invalid(format!(
+                "scheduled flow consumer {consumer_id:?} has no kernel handle"
+            ))
+        })?;
+        let crate::egir::program::CompilerFlowEndpoint::Materialization(id) = producer_id else {
+            return Err(error::ParallelizeError::Invalid(
+                "typed entry/prepass producer was omitted while seeding the kernel plan".into(),
+            ));
+        };
+        let requirement = inner
+            .materializations
+            .get(id.0 as usize)
+            .filter(|requirement| requirement.id == id)
+            .ok_or_else(|| {
+                error::ParallelizeError::Invalid(format!(
+                    "materialization flow references missing requirement {id:?}"
+                ))
+            })?;
+        let materialization = schedule.add_materialization_before(consumer, requirement)?;
+        let body = crate::egir::program::PlannedEntry::project(&requirement.entry)?;
+        if segmented_recipe_effect(&body).is_some_and(|(_, _, effect)| {
+            matches!(
+                &effect.kind,
+                SideEffectKind::Soac(SoacEffect(
+                    _,
+                    Soac::Screma(screma::Op::Reduce { .. } | screma::Op::Scan { .. })
+                ))
+            )
+        }) {
+            plan_segmented_kernel_body(
+                body,
+                materialization,
+                schedule,
+                resources,
+                candidates,
+                policy,
+                effect_ids,
+            )?;
+        }
+        for upstream in flows.incoming(producer_id) {
+            ready.insert((*upstream, producer_id));
+        }
+    }
+    Ok(())
 }
 
 fn plan_segmented_kernel_body(

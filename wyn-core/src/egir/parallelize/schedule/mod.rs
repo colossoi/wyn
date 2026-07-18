@@ -29,12 +29,10 @@ use crate::pipeline_descriptor::{
 };
 use crate::{BindingRef, ResourceAccess, ResourceId};
 
-#[path = "schedule_validation.rs"]
 mod validation;
 
 #[cfg(test)]
-#[path = "schedule_tests.rs"]
-mod schedule_tests;
+mod tests;
 
 /// A complete module-level compute schedule.
 #[derive(Clone, Debug, Default)]
