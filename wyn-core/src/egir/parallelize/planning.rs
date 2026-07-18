@@ -1,8 +1,6 @@
 //! Target policy, checked planning failures, session indexes, and deterministic
 //! recipe-owned scratch allocation.
 
-#![cfg_attr(not(test), deny(clippy::expect_used, clippy::unwrap_used))]
-
 use std::collections::{BTreeMap, HashMap};
 
 use polytype::Type;
@@ -21,10 +19,10 @@ use crate::egir::types::SegExtent;
 /// physical kernel construction. Selected recipes retain any policy values
 /// needed by later lowering stages instead of re-deriving them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ParallelPolicy {
-    pub reduce_phase1_width: u32,
-    pub reduce_phase2_width: u32,
-    pub filter_scan_groups: u32,
+pub(super) struct ParallelPolicy {
+    pub(super) reduce_phase1_width: u32,
+    pub(super) reduce_phase2_width: u32,
+    pub(super) filter_scan_groups: u32,
 }
 
 impl Default for ParallelPolicy {
@@ -38,15 +36,15 @@ impl Default for ParallelPolicy {
 }
 
 /// Per-workgroup width of a synthesized phase-2 tree reduce.
-pub const PHASE2_WIDTH: u32 = 256;
+const PHASE2_WIDTH: u32 = 256;
 /// Per-workgroup width used to chunk a phase-1 partial reduce or scan.
-pub(crate) const REDUCE_PHASE1_WIDTH: u32 = 64;
+pub(super) const REDUCE_PHASE1_WIDTH: u32 = 64;
 /// Workgroup count for the runtime-filter chunk scan.
-pub(crate) const FILTER_SCAN_GROUPS: u32 = 4;
+pub(super) const FILTER_SCAN_GROUPS: u32 = 4;
 
 /// Checked failures produced while selecting and constructing kernel recipes.
 #[derive(Debug, Error)]
-pub(crate) enum ParallelizeError {
+pub(in crate::egir) enum ParallelizeError {
     #[error("{0}")]
     Invalid(String),
     #[error("kernel schedule mutation failed: {0}")]
@@ -65,11 +63,11 @@ impl From<&str> for ParallelizeError {
     }
 }
 
-pub(crate) type Result<T> = std::result::Result<T, ParallelizeError>;
+pub(in crate::egir) type Result<T> = std::result::Result<T, ParallelizeError>;
 
 /// Immutable lookup view over the final logical resource manifest used by one
 /// planning session. Owner/kind buckets are ordered by compiler slot.
-pub(crate) struct ResourceIndex<'a> {
+pub(super) struct ResourceIndex<'a> {
     resources: &'a [LogicalResource],
     owned: HashMap<(SemanticOpId, CompilerResourceKind), Vec<&'a LogicalResource>>,
 }
@@ -77,7 +75,7 @@ pub(crate) struct ResourceIndex<'a> {
 /// Canonical indexed view of compiler producer/consumer edges for one planning
 /// session. Both materialization attachment and phase dependency coalescing
 /// consume this same data.
-pub(crate) struct ResourceFlowIndex {
+pub(super) struct ResourceFlowIndex {
     flows: Vec<(crate::ResourceId, CompilerResourceFlow)>,
     incoming: BTreeMap<CompilerFlowEndpoint, Vec<CompilerFlowEndpoint>>,
 }
@@ -87,7 +85,7 @@ pub(crate) struct ResourceFlowIndex {
 /// These reasons describe supported serial fallbacks. Missing graph facts,
 /// resources, or routes remain checked internal errors instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FallbackReason {
+pub(super) enum FallbackReason {
     SequentialPolicy,
     UnsupportedPlacement,
     UnsupportedCaptures,
@@ -101,7 +99,7 @@ pub(crate) enum FallbackReason {
 /// its immediate consumer; serial selection carries the reason no scratch or
 /// graph mutation may occur.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RecipeSelection<T> {
+pub(super) enum RecipeSelection<T> {
     Parallel(T),
     Serial(FallbackReason),
 }
@@ -115,13 +113,28 @@ impl<T> RecipeSelection<T> {
     }
 }
 
+/// A graph-local segmented recipe paired with the projected body from which
+/// its node handles were derived. Emission consumes the pair before mutating
+/// the body, so those handles never cross a graph projection boundary.
+pub(super) enum PreparedSegmented {
+    Reduce {
+        body: crate::egir::program::PlannedEntry,
+        candidate: super::reduce::ReduceCandidate,
+    },
+    Scan {
+        body: crate::egir::program::PlannedEntry,
+        candidate: super::scan::ScanCandidate,
+    },
+}
+
 /// Authoritative record of the recipes selected during immutable preflight.
-/// Emission may rebuild short-lived graph handles, but it must not reconsider
-/// whether an operation is parallel or serial after scratch has been added.
-pub(crate) struct CandidateIndex {
+/// Parallel reduce and scan recipes retain their owning projected bodies;
+/// emission consumes those prepared units rather than repeating analysis.
+pub(super) struct CandidateIndex {
     filters: HashMap<SemanticOpId, RecipeSelection<()>>,
     reduces: HashMap<SemanticOpId, RecipeSelection<()>>,
     scans: HashMap<SemanticOpId, RecipeSelection<()>>,
+    prepared_segmented: HashMap<CompilerFlowEndpoint, PreparedSegmented>,
     default_fallback: Option<FallbackReason>,
 }
 
@@ -131,27 +144,32 @@ impl CandidateIndex {
             filters: HashMap::new(),
             reduces: HashMap::new(),
             scans: HashMap::new(),
+            prepared_segmented: HashMap::new(),
             default_fallback: None,
         }
     }
 
-    pub(crate) fn sequential() -> Self {
+    pub(super) fn sequential() -> Self {
         Self {
             default_fallback: Some(FallbackReason::SequentialPolicy),
             ..Self::preflight()
         }
     }
 
-    pub(crate) fn filter(&self, owner: SemanticOpId) -> Result<RecipeSelection<()>> {
+    pub(super) fn filter(&self, owner: SemanticOpId) -> Result<RecipeSelection<()>> {
         self.selection(&self.filters, owner, "filter")
     }
 
-    pub(crate) fn reduce(&self, owner: SemanticOpId) -> Result<RecipeSelection<()>> {
+    pub(super) fn reduce(&self, owner: SemanticOpId) -> Result<RecipeSelection<()>> {
         self.selection(&self.reduces, owner, "reduce")
     }
 
-    pub(crate) fn scan(&self, owner: SemanticOpId) -> Result<RecipeSelection<()>> {
+    pub(super) fn scan(&self, owner: SemanticOpId) -> Result<RecipeSelection<()>> {
         self.selection(&self.scans, owner, "scan")
+    }
+
+    pub(super) fn take_prepared(&mut self, endpoint: CompilerFlowEndpoint) -> Option<PreparedSegmented> {
+        self.prepared_segmented.remove(&endpoint)
     }
 
     fn selection(
@@ -183,6 +201,19 @@ impl CandidateIndex {
         Self::record(&mut self.scans, owner, selection, "scan")
     }
 
+    fn prepare_segmented(
+        &mut self,
+        endpoint: CompilerFlowEndpoint,
+        prepared: PreparedSegmented,
+    ) -> Result<()> {
+        if self.prepared_segmented.insert(endpoint, prepared).is_some() {
+            return Err(ParallelizeError::Invalid(format!(
+                "flow endpoint {endpoint:?} has multiple prepared segmented recipes"
+            )));
+        }
+        Ok(())
+    }
+
     fn record<T>(
         selections: &mut HashMap<SemanticOpId, RecipeSelection<()>>,
         owner: SemanticOpId,
@@ -199,7 +230,7 @@ impl CandidateIndex {
 }
 
 impl ResourceFlowIndex {
-    pub(crate) fn new(resources: &[LogicalResource]) -> Self {
+    pub(super) fn new(resources: &[LogicalResource]) -> Self {
         let mut flows = resources
             .iter()
             .filter_map(|resource| match &resource.origin {
@@ -221,17 +252,17 @@ impl ResourceFlowIndex {
         Self { flows, incoming }
     }
 
-    pub(crate) fn flows(&self) -> &[(crate::ResourceId, CompilerResourceFlow)] {
+    pub(super) fn flows(&self) -> &[(crate::ResourceId, CompilerResourceFlow)] {
         &self.flows
     }
 
-    pub(crate) fn incoming(&self, consumer: CompilerFlowEndpoint) -> &[CompilerFlowEndpoint] {
+    pub(super) fn incoming(&self, consumer: CompilerFlowEndpoint) -> &[CompilerFlowEndpoint] {
         self.incoming.get(&consumer).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 
 impl<'a> ResourceIndex<'a> {
-    pub(crate) fn new(resources: &'a [LogicalResource]) -> Result<Self> {
+    pub(super) fn new(resources: &'a [LogicalResource]) -> Result<Self> {
         let mut owned: HashMap<_, Vec<_>> = HashMap::new();
         for (index, resource) in resources.iter().enumerate() {
             if resource.id.0 as usize != index {
@@ -271,18 +302,18 @@ impl<'a> ResourceIndex<'a> {
         Ok(Self { resources, owned })
     }
 
-    pub(crate) fn get(&self, id: crate::ResourceId) -> Result<&'a LogicalResource> {
+    pub(super) fn get(&self, id: crate::ResourceId) -> Result<&'a LogicalResource> {
         self.resources
             .get(id.0 as usize)
             .filter(|resource| resource.id == id)
             .ok_or_else(|| ParallelizeError::Invalid(format!("missing logical resource {id:?}")))
     }
 
-    pub(crate) fn owned(&self, owner: SemanticOpId, kind: CompilerResourceKind) -> &[&'a LogicalResource] {
+    pub(super) fn owned(&self, owner: SemanticOpId, kind: CompilerResourceKind) -> &[&'a LogicalResource] {
         self.owned.get(&(owner, kind)).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    pub(crate) fn exactly_one(
+    pub(super) fn exactly_one(
         &self,
         owner: SemanticOpId,
         kind: CompilerResourceKind,
@@ -297,7 +328,7 @@ impl<'a> ResourceIndex<'a> {
         }
     }
 
-    pub(crate) fn exactly_one_at(
+    pub(super) fn exactly_one_at(
         &self,
         owner: SemanticOpId,
         kind: CompilerResourceKind,
@@ -318,7 +349,7 @@ impl<'a> ResourceIndex<'a> {
         Ok(resource)
     }
 
-    pub(crate) fn ordered_slots(
+    pub(super) fn ordered_slots(
         &self,
         owner: SemanticOpId,
         kind: CompilerResourceKind,
@@ -350,7 +381,7 @@ impl<'a> ResourceIndex<'a> {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn optional(
+    pub(super) fn optional(
         &self,
         owner: SemanticOpId,
         kind: CompilerResourceKind,
@@ -381,7 +412,7 @@ struct ScratchPlan {
 /// Append target-recipe work buffers immediately before kernel planning.
 /// Semantic residency resources have already been established; these buffers
 /// exist only when the parallel policy is selected.
-pub(crate) fn allocate_parallel_scratch(
+pub(super) fn allocate_parallel_scratch(
     inner: &mut AllocatedProgram,
     policy: ParallelPolicy,
 ) -> Result<CandidateIndex> {
@@ -423,7 +454,8 @@ pub(crate) fn allocate_parallel_scratch(
 }
 
 /// Analyze all candidate operations and produce owned scratch requests without
-/// mutating the program or retaining graph-local node handles.
+/// mutating the program. Graph-local reduce and scan handles stay paired with
+/// the projected body that owns them until emission consumes the pair.
 fn preflight_parallel_recipes(inner: &AllocatedProgram, policy: ParallelPolicy) -> Result<ScratchPlan> {
     let resource_index = ResourceIndex::new(&inner.resources)?;
     let mut candidates = CandidateIndex::preflight();
@@ -433,7 +465,7 @@ fn preflight_parallel_recipes(inner: &AllocatedProgram, policy: ParallelPolicy) 
 }
 
 #[cfg(test)]
-pub(crate) fn preflight_fallback_reasons(inner: &AllocatedProgram) -> Result<Vec<FallbackReason>> {
+pub(super) fn preflight_fallback_reasons(inner: &AllocatedProgram) -> Result<Vec<FallbackReason>> {
     let plan = preflight_parallel_recipes(inner, ParallelPolicy::default())?;
     let mut reasons = plan
         .candidates
@@ -513,23 +545,23 @@ fn segmented_requests(
     let mut requests = Vec::new();
     for (endpoint, entry) in inner.entries_with_endpoints() {
         let projected = crate::egir::program::PlannedEntry::project(entry)?;
-        let Some((_, _, effect)) = super::segmented_recipe_effect(&projected) else {
+        let Some(located) = super::segmented_recipe_effect(&projected) else {
             continue;
         };
-        let Some(owner) = effect.kind.soac_id().copied() else {
+        let Some(owner) = located.effect.kind.soac_id().copied() else {
             return Err(ParallelizeError::Invalid(
                 "segmented recipe effect has no semantic operation id".into(),
             ));
         };
-        match &effect.kind {
-            crate::egir::types::SideEffectKind::Soac(crate::egir::types::SoacEffect(
-                _,
-                crate::egir::types::Soac::Screma(crate::egir::soac::screma::Op::Reduce { .. }),
-            )) => {
+        let Ok(family) = super::seg_recipe_family(located.effect) else {
+            continue;
+        };
+        match family {
+            super::SegScratchFamily::Reduce => {
                 let selection = super::analyze_reduce_candidate(&projected, resources)?;
                 candidates.record_reduce(owner, &selection)?;
                 if let RecipeSelection::Parallel(candidate) = selection {
-                    for (slot, elem_ty) in candidate.scratch_types.into_iter().enumerate() {
+                    for (slot, elem_ty) in candidate.scratch_types.iter().cloned().enumerate() {
                         requests.push(scratch_request(
                             endpoint,
                             candidate.owner,
@@ -538,12 +570,16 @@ fn segmented_requests(
                             elem_ty,
                         )?);
                     }
+                    candidates.prepare_segmented(
+                        endpoint,
+                        PreparedSegmented::Reduce {
+                            body: projected,
+                            candidate,
+                        },
+                    )?;
                 }
             }
-            crate::egir::types::SideEffectKind::Soac(crate::egir::types::SoacEffect(
-                _,
-                crate::egir::types::Soac::Screma(crate::egir::soac::screma::Op::Scan { .. }),
-            )) => {
+            super::SegScratchFamily::Scan => {
                 let selection = super::analyze_scan_candidate(&projected)?;
                 candidates.record_scan(owner, &selection)?;
                 if let RecipeSelection::Parallel(candidate) = selection {
@@ -562,9 +598,15 @@ fn segmented_requests(
                             candidate.scratch_type.clone(),
                         )?);
                     }
+                    candidates.prepare_segmented(
+                        endpoint,
+                        PreparedSegmented::Scan {
+                            body: projected,
+                            candidate,
+                        },
+                    )?;
                 }
             }
-            _ => {}
         }
     }
     Ok(requests)
@@ -591,88 +633,5 @@ fn scratch_request(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn resource(id: u32, owner: u32, kind: CompilerResourceKind, slot: usize) -> LogicalResource {
-        LogicalResource {
-            id: crate::ResourceId(id),
-            origin: ResourceOrigin::Compiler(CompilerResource::new(kind, Some(SemanticOpId(owner)), slot)),
-            elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
-            size: LogicalSize::FixedBytes(4),
-        }
-    }
-
-    #[test]
-    fn resource_index_checks_density_and_exact_cardinality() {
-        let sparse = [resource(1, 7, CompilerResourceKind::ReducePartial, 0)];
-        assert!(ResourceIndex::new(&sparse).is_err());
-
-        let missing_slot = [resource(0, 7, CompilerResourceKind::ReducePartial, 1)];
-        let missing_slot = ResourceIndex::new(&missing_slot).expect("dense manifest");
-        assert!(missing_slot
-            .ordered_slots(SemanticOpId(7), CompilerResourceKind::ReducePartial, 0, 1)
-            .is_err());
-
-        let duplicate_slot = [
-            resource(0, 7, CompilerResourceKind::ReducePartial, 0),
-            resource(1, 7, CompilerResourceKind::ReducePartial, 0),
-        ];
-        assert!(ResourceIndex::new(&duplicate_slot).is_err());
-
-        let resources = [
-            resource(0, 7, CompilerResourceKind::ReducePartial, 1),
-            resource(1, 7, CompilerResourceKind::ReducePartial, 0),
-            resource(2, 8, CompilerResourceKind::ScanBlockSums, 0),
-        ];
-        let index = ResourceIndex::new(&resources).expect("dense test manifest");
-        let ordered = index.owned(SemanticOpId(7), CompilerResourceKind::ReducePartial);
-        assert_eq!(
-            ordered.iter().map(|resource| resource.id.0).collect::<Vec<_>>(),
-            [1, 0]
-        );
-        assert!(index.ordered_slots(SemanticOpId(7), CompilerResourceKind::ReducePartial, 0, 2).is_ok());
-        assert!(index.exactly_one(SemanticOpId(7), CompilerResourceKind::ReducePartial).is_err());
-        assert_eq!(
-            index
-                .exactly_one(SemanticOpId(8), CompilerResourceKind::ScanBlockSums)
-                .expect("one scan-sum resource")
-                .id,
-            crate::ResourceId(2)
-        );
-        assert!(index.exactly_one_at(SemanticOpId(8), CompilerResourceKind::ScanBlockSums, 0).is_ok());
-        assert!(index.exactly_one(SemanticOpId(9), CompilerResourceKind::ScanBlockSums).is_err());
-        assert!(index.exactly_one(SemanticOpId(7), CompilerResourceKind::ScanBlockSums).is_err());
-        assert!(index
-            .optional(SemanticOpId(9), CompilerResourceKind::ScanBlockSums)
-            .expect("missing optional resource is valid")
-            .is_none());
-        assert!(index.optional(SemanticOpId(7), CompilerResourceKind::ReducePartial).is_err());
-    }
-
-    #[test]
-    fn candidate_index_preserves_parallel_and_serial_decisions() {
-        let owner = SemanticOpId(11);
-        let mut candidates = CandidateIndex::preflight();
-        candidates
-            .record_reduce(
-                owner,
-                &RecipeSelection::<()>::Serial(FallbackReason::UnsupportedViewShape),
-            )
-            .expect("record serial selection");
-        assert_eq!(
-            candidates.reduce(owner).expect("recorded reduce selection"),
-            RecipeSelection::Serial(FallbackReason::UnsupportedViewShape)
-        );
-        assert!(
-            candidates.scan(owner).is_err(),
-            "parallel preflight must reject a missing decision"
-        );
-
-        let sequential = CandidateIndex::sequential();
-        assert_eq!(
-            sequential.scan(owner).expect("sequential default selection"),
-            RecipeSelection::Serial(FallbackReason::SequentialPolicy)
-        );
-    }
-}
+#[path = "planning_tests.rs"]
+mod tests;

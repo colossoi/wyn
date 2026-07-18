@@ -837,7 +837,7 @@ entry add_sum(xs: []i32) []i32 =
     assert_eq!(
         crate::egir::parallelize::preflight_fallback_reasons(&fallback.inner)
             .expect("analyze fallback without mutating the allocated program"),
-        [crate::egir::parallelize::FallbackReason::UnsupportedCaptures]
+        ["unsupported captures"]
     );
     assert_eq!(
         fallback.logical_resources().len(),
@@ -911,11 +911,11 @@ entry sums() (i32, i32) =
     let scratch = planned_scratch(multi_reduce.logical_resources());
     assert_eq!(scratch.len(), 2);
     assert_eq!(
-        multi_reduce.kernel_plan().phases().map(|phase| phase.recipe.kind()).collect::<Vec<_>>(),
+        multi_reduce.kernel_plan().phases().map(|phase| phase.kind).collect::<Vec<_>>(),
         [
-            crate::egir::parallelize::schedule::KernelKind::ReducePhase1,
-            crate::egir::parallelize::schedule::KernelKind::ReduceCombine,
-            crate::egir::parallelize::schedule::KernelKind::ReduceCombine,
+            crate::egir::parallelize::KernelKind::ReducePhase1,
+            crate::egir::parallelize::KernelKind::ReduceCombine,
+            crate::egir::parallelize::KernelKind::ReduceCombine,
         ]
     );
     let owner = scratch[0].1.expect("scratch has an operation owner");
@@ -995,7 +995,7 @@ entry sums() (i32, i32) =
 
 #[test]
 fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
-    use crate::egir::parallelize::schedule::{KernelDomain, KernelKind};
+    use crate::egir::parallelize::{KernelDomain, KernelKind};
 
     let reduce = crate::compile_thru_ssa(
         "#[compute] entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)",
@@ -1038,7 +1038,7 @@ fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
 
 #[test]
 fn chunked_recipes_accept_empty_small_uneven_and_unsigned_ranges() {
-    use crate::egir::parallelize::schedule::KernelKind;
+    use crate::egir::parallelize::KernelKind;
 
     let cases = [
         (
@@ -1071,7 +1071,7 @@ fn chunked_recipes_accept_empty_small_uneven_and_unsigned_ranges() {
 
 #[test]
 fn associative_noncommutative_reduce_and_scan_keep_parallel_ordered_recipes() {
-    use crate::egir::parallelize::schedule::KernelKind;
+    use crate::egir::parallelize::KernelKind;
 
     // Dihedral-group composition encoded as `rotation + 3 * reflected`.
     // It is associative with identity 0, but reflections and rotations do not
@@ -1152,7 +1152,7 @@ entry compose_prefix(xs: []i32) []i32 =
 #[test]
 fn runtime_filter_lowers_to_flag_scan_scatter_pipeline() {
     use crate::builtins::catalog;
-    use crate::egir::parallelize::schedule::KernelDomain;
+    use crate::egir::parallelize::KernelDomain;
     use crate::op::OpTag;
     use crate::ssa::types::InstKind;
 
@@ -1240,7 +1240,7 @@ entry r(xs: []u32) (?k. [k]u32, [1]u32) =
 
 #[test]
 fn mixed_map_filter_outputs_keep_complete_phase_family() {
-    use crate::egir::parallelize::schedule::{KernelKind, OutputRouteProjection};
+    use crate::egir::parallelize::{KernelKind, OutputRouteProjection};
     use crate::egir::program::OutputSlotId;
 
     let source = r#"
@@ -1758,7 +1758,7 @@ entry e() [4]i32 =
     );
     assert!(matches!(
         single_phases[0].domain,
-        crate::egir::parallelize::schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 }
+        crate::egir::parallelize::KernelDomain::Fixed { x: 1, y: 1, z: 1 }
     ));
 
     let wgsl = lower_semantic_egir(
@@ -1852,15 +1852,16 @@ fn terminal_scan_helpers_are_complete_region_arena_members() {
         !allocated.inner.functions.iter().any(|function| function.name.ends_with("_scan_op_swap")),
         "planner-generated scan helper leaked into semantic EGIR"
     );
-    let plan = crate::egir::parallelize::lower(&mut allocated.inner, &mut allocated.effect_ids)
-        .expect("parallel schedule");
+    let planned_callables =
+        crate::egir::parallelize::planned_callable_names(&mut allocated.inner, &mut allocated.effect_ids)
+            .expect("parallel schedule");
     assert!(
-        plan.generated_callables().any(|function| function.name.ends_with("_scan_op_swap")),
+        planned_callables.iter().any(|name| name.ends_with("_scan_op_swap")),
         "scan helper must be owned by the kernel plan"
     );
     let mut binding_ids = allocated.binding_ids;
     let mut effect_ids = allocated.effect_ids;
-    let physical = crate::egir::target_lowering::schedule(
+    let (physical, _) = crate::egir::parallelize::plan(
         allocated.inner,
         &mut binding_ids,
         &mut effect_ids,
@@ -10597,7 +10598,7 @@ entry g6(pxl: []u32,
 /// domain inference can touch it.
 #[test]
 fn filter_scan_domain_ignores_storage_image_entry_binding() {
-    use crate::egir::parallelize::schedule::KernelDomain;
+    use crate::egir::parallelize::KernelDomain;
     use crate::pipeline_descriptor::{DispatchSize, Pipeline};
 
     let src = r#"

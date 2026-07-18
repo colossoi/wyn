@@ -22,7 +22,7 @@ use crate::types::TypeExt;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 
-use super::parallelize::schedule::ValidatedKernelPlan;
+use super::parallelize::ValidatedKernelPlan;
 use super::soac::{filter, hist, screma};
 use super::types::{
     EGraph, EgirPhase, NodeId, Physical, Raw, Scheduled, SegBody, SegExtent, SegSpace, Semantic, Soac,
@@ -1285,7 +1285,7 @@ pub struct PhysicalProgram {
     pub ir: Program<Physical>,
     pub resources: Vec<LogicalResource>,
     pub semantic_dependencies: Vec<SemanticDependency>,
-    pub plan: ValidatedKernelPlan,
+    pub(in crate::egir) plan: ValidatedKernelPlan,
     pub physical_resources: PhysicalResourceTable,
 }
 
@@ -1464,7 +1464,7 @@ fn physicalize_entry(
 }
 
 impl PhysicalProgram {
-    pub fn from_validated(
+    pub(in crate::egir) fn from_validated(
         program: AllocatedProgram,
         plan: ValidatedKernelPlan,
         physical_resources: PhysicalResourceTable,
@@ -1491,8 +1491,8 @@ impl PhysicalProgram {
             region_interner: _,
         } = ir;
         let entry_points = plan
-            .physical_kernels()
-            .map(|phase| physicalize_entry(phase.recipe.entry(), &physical_resources))
+            .physical_entries()
+            .map(|entry| physicalize_entry(entry, &physical_resources))
             .collect::<Result<Vec<_>, _>>()?;
         let mut functions = functions
             .into_iter()

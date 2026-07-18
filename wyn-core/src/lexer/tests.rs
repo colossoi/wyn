@@ -1,3 +1,5 @@
+#![allow(clippy::approx_constant)]
+
 use super::*;
 
 // Helper to extract just the tokens from LocatedToken for testing

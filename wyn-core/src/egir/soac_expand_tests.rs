@@ -37,7 +37,7 @@ fn compile_to_expanded_egraph(input: &str) -> PhysicalEGraph {
         .allocate();
     let mut binding_ids = allocated.binding_ids;
     let mut effect_ids = allocated.effect_ids;
-    let mut physical = crate::egir::target_lowering::schedule(
+    let (mut physical, _) = crate::egir::parallelize::plan(
         allocated.inner,
         &mut binding_ids,
         &mut effect_ids,

@@ -8,15 +8,12 @@ fn body(name: &str) -> PlannedEntry {
 }
 
 fn phase(id: u32, name: &str, kind: KernelKind) -> KernelPhase {
-    phase_from_body(
-        KernelId(id),
-        None,
-        None,
+    let spec = PhaseSpec::new(
         body(name),
         DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
         kind,
-    )
-    .unwrap()
+    );
+    phase_from_body(KernelId(id), None, None, spec).unwrap()
 }
 
 fn plan(phases: Vec<KernelPhase>) -> KernelPlan {
@@ -48,7 +45,7 @@ fn every_kernel_kind_closes_over_a_complete_planned_entry() {
         KernelKind::ScanApplyOffsets,
     ];
     for (index, kind) in kinds.into_iter().enumerate() {
-        let recipe = KernelRecipe::close(kind, body(&format!("kernel_{index}")), None);
+        let recipe = KernelRecipe::close(KernelRecipeSpec::new(body(&format!("kernel_{index}")), kind));
         assert_eq!(recipe.kind(), kind);
         assert_eq!(recipe.entry().name, format!("kernel_{index}"));
     }
@@ -85,7 +82,10 @@ fn mutation_handles_survive_entry_point_changes_and_chain_insertions() {
     let mut plan = plan(vec![phase(root.0, "seeded", KernelKind::SerialCompute)]);
 
     assert_eq!(
-        plan.commit_kernel(root, body("renamed"), KernelKind::SerialCompute),
+        plan.commit_kernel(
+            root,
+            KernelRecipeSpec::new(body("renamed"), KernelKind::SerialCompute),
+        ),
         Ok(root)
     );
     plan.set_output_projection(root, Vec::new()).unwrap();
@@ -93,17 +93,21 @@ fn mutation_handles_survive_entry_point_changes_and_chain_insertions() {
     let child = plan
         .add_phase_after(
             root,
-            body("child"),
-            DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-            KernelKind::ReduceCombine,
+            PhaseSpec::new(
+                body("child"),
+                DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                KernelKind::ReduceCombine,
+            ),
         )
         .unwrap();
     let grandchild = plan
         .add_phase_after(
             child,
-            body("grandchild"),
-            DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-            KernelKind::ReduceCombine,
+            PhaseSpec::new(
+                body("grandchild"),
+                DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                KernelKind::ReduceCombine,
+            ),
         )
         .unwrap();
 
@@ -124,7 +128,10 @@ fn mutation_apis_report_unknown_kernel_ids() {
     let unknown = KernelId(99);
 
     assert_eq!(
-        plan.commit_kernel(unknown, body("seeded"), KernelKind::SerialCompute),
+        plan.commit_kernel(
+            unknown,
+            KernelRecipeSpec::new(body("seeded"), KernelKind::SerialCompute),
+        ),
         Err(KernelMutationError::UnknownKernel(unknown))
     );
     assert_eq!(

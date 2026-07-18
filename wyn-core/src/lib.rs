@@ -1246,6 +1246,7 @@ pub struct EgirAllocated {
 /// `EgirAllocated::plan`, so callers cannot bypass plan validation.
 pub struct EgirPlanned {
     physical: egir::program::PhysicalProgram,
+    kernel_plan: egir::parallelize::PublishedKernelPlan,
     profile: LoweringProfile,
     effect_ids: IdSource<egir::types::EffectToken>,
 }
@@ -1361,10 +1362,11 @@ impl EgirAllocated {
     pub fn plan(self, profile: LoweringProfile) -> std::result::Result<EgirPlanned, ConvertError> {
         let mut binding_ids = self.binding_ids;
         let mut effect_ids = self.effect_ids;
-        let physical =
-            egir::target_lowering::schedule(self.inner, &mut binding_ids, &mut effect_ids, profile)?;
+        let (physical, kernel_plan) =
+            egir::parallelize::plan(self.inner, &mut binding_ids, &mut effect_ids, profile)?;
         Ok(EgirPlanned {
             physical,
+            kernel_plan,
             profile,
             effect_ids,
         })
@@ -1379,13 +1381,13 @@ impl EgirPlanned {
         &self.physical.resources
     }
 
-    pub fn kernel_plan(&self) -> &egir::parallelize::schedule::ValidatedKernelPlan {
-        &self.physical.plan
+    pub fn kernel_plan(&self) -> &egir::parallelize::PublishedKernelPlan {
+        &self.kernel_plan
     }
 
     /// Expand and elaborate the validated physical plan into SSA.
     pub fn lower_to_ssa(mut self) -> std::result::Result<SsaConverted, ConvertError> {
-        let plan = self.physical.plan.published_plan();
+        let plan = self.kernel_plan;
         egir::soac_expand::run(&mut self.physical, &mut self.effect_ids);
         egir::materialize::run(&mut self.physical);
         egir::rewrite::run(&mut self.physical);
@@ -1406,7 +1408,7 @@ pub struct SsaConverted {
     pub ssa: ssa::types::Program,
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
     pub profile: LoweringProfile,
-    pub kernel_plan: egir::parallelize::schedule::PublishedKernelPlan,
+    pub kernel_plan: egir::parallelize::PublishedKernelPlan,
 }
 
 impl SsaConverted {

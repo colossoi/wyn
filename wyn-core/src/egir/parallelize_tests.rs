@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use super::*;
 use crate::ast::Span;
 use crate::egir::program::{OutputRoute, OutputSlotId, SlotSource};
@@ -176,17 +178,19 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
     let sums = ResourceId(40);
     let offsets = ResourceId(41);
     let mut effect_ids = crate::IdSource::new();
-    let phase2 = synthesize_phase2_scan(
-        "prefix",
-        "combine".into(),
+    let phase2 = ScanPhase2Spec {
+        entry_name: "prefix".into(),
+        operator: "combine".into(),
         elem_ty,
-        &phase1,
+        source_graph: &phase1,
         neutral,
-        sums,
-        offsets,
-        None,
-        &mut effect_ids,
-    )
+        scratch: ScanScratch {
+            block_sums: sums,
+            block_offsets: offsets,
+        },
+        total_out: None,
+    }
+    .build(&mut effect_ids)
     .expect("phase2 synthesis");
 
     let stored_value = phase2

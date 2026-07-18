@@ -10,7 +10,7 @@ use super::super::program::{remap_control_headers, PlannedEntry, SemanticResourc
 use super::super::soac::{filter, hist, screma};
 use super::super::types::{EGraph, Scheduled, Semantic, SideEffect, SideEffectKind, Soac, SoacEffect};
 
-pub(crate) fn entry(
+pub(super) fn entry(
     entry: PlannedEntry<Semantic>,
     filter_plan: Option<filter::Plan<SemanticResourceRef>>,
 ) -> Result<PlannedEntry<Scheduled>, String> {
@@ -49,7 +49,7 @@ pub(crate) fn entry(
     })
 }
 
-pub(crate) fn graph(
+pub(in crate::egir) fn graph(
     graph: EGraph<Semantic>,
     serial: bool,
 ) -> Result<(EGraph<Scheduled>, crate::LookupMap<BlockId, BlockId>), String> {
@@ -162,7 +162,7 @@ fn schedule_screma_state(
     }
 }
 
-pub(crate) fn force_serial(graph: &mut EGraph<Scheduled>) {
+pub(super) fn force_serial(graph: &mut EGraph<Scheduled>) {
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut effect.kind else {
@@ -183,7 +183,7 @@ pub(crate) fn force_serial(graph: &mut EGraph<Scheduled>) {
     }
 }
 
-pub(crate) fn parallel_effect(
+pub(super) fn parallel_effect(
     graph: &EGraph<Scheduled>,
 ) -> Option<(BlockId, usize, &SideEffect<Scheduled>)> {
     graph.skeleton.blocks.iter().find_map(|(block, contents)| {

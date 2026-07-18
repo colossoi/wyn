@@ -4,10 +4,14 @@
 //! them for a projected entry and emission consumes them before mutating that
 //! graph. Persistent parallel/serial decisions belong to `planning` instead.
 
-#![cfg_attr(not(test), deny(clippy::expect_used, clippy::unwrap_used))]
-
 use super::*;
-fn segmented_screma_effect(graph: &EGraph) -> Option<(BlockId, usize, &SideEffect)> {
+
+pub(super) struct LocatedEffect<'a> {
+    pub site: SideEffectSite,
+    pub effect: &'a SideEffect,
+}
+
+fn segmented_screma_effect(graph: &EGraph) -> Option<LocatedEffect<'_>> {
     graph.skeleton.blocks.iter().find_map(|(block, contents)| {
         contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
             matches!(
@@ -21,14 +25,17 @@ fn segmented_screma_effect(graph: &EGraph) -> Option<(BlockId, usize, &SideEffec
                         }
                     )
             )
-            .then_some((block, index, effect))
+            .then_some(LocatedEffect {
+                site: SideEffectSite { block, index },
+                effect,
+            })
         })
     })
 }
 
 pub(super) fn segmented_recipe_effect(
     entry: &crate::egir::program::PlannedEntry,
-) -> Option<(BlockId, usize, &SideEffect)> {
+) -> Option<LocatedEffect<'_>> {
     if let Some(effect) = segmented_screma_effect(&entry.graph) {
         return Some(effect);
     }
@@ -53,36 +60,40 @@ pub(super) fn segmented_recipe_effect(
                 if promoted.is_some() {
                     return None;
                 }
-                promoted = Some((block, index, effect));
+                promoted = Some(LocatedEffect {
+                    site: SideEffectSite { block, index },
+                    effect,
+                });
             }
         }
     }
     promoted
 }
 
-pub(crate) fn parallel_recipe_effect(
+pub(super) fn parallel_recipe_effect(
     entry: &crate::egir::program::PlannedEntry,
-) -> Option<(BlockId, usize, &SideEffect)> {
+) -> Option<LocatedEffect<'_>> {
     segmented_recipe_effect(entry).or_else(|| {
         entry.graph.skeleton.blocks.iter().find_map(|(block, contents)| {
             contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
-                matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Filter(_))))
-                    .then_some((block, index, effect))
+                matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Filter(_)))).then_some(
+                    LocatedEffect {
+                        site: SideEffectSite { block, index },
+                        effect,
+                    },
+                )
             })
         })
     })
 }
 
-pub(super) fn make_screma_serial(graph: &mut EGraph, block_id: BlockId, index: usize) -> error::Result<()> {
-    let effect = graph
-        .skeleton
-        .get_effect_mut(SideEffectSite {
-            block: block_id,
-            index,
-        })
-        .ok_or_else(|| {
-            error::ParallelizeError::Invalid(format!("stale segmented effect site {block_id:?}:{index}"))
-        })?;
+pub(super) fn make_screma_serial(graph: &mut EGraph, site: SideEffectSite) -> error::Result<()> {
+    let effect = graph.skeleton.get_effect_mut(site).ok_or_else(|| {
+        error::ParallelizeError::Invalid(format!(
+            "stale segmented effect site {:?}:{}",
+            site.block, site.index
+        ))
+    })?;
     let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut effect.kind else {
         return Err("segmented effect site no longer contains a Screma operation".into());
     };
@@ -90,19 +101,24 @@ pub(super) fn make_screma_serial(graph: &mut EGraph, block_id: BlockId, index: u
     Ok(())
 }
 
-pub(super) fn semantic_effect(graph: &EGraph, block: BlockId, index: usize) -> error::Result<&SideEffect> {
-    graph.skeleton.get_effect(SideEffectSite { block, index }).ok_or_else(|| {
-        error::ParallelizeError::Invalid(format!("stale semantic effect site {block:?}:{index}"))
+pub(super) fn semantic_effect(graph: &EGraph, site: SideEffectSite) -> error::Result<&SideEffect> {
+    graph.skeleton.get_effect(site).ok_or_else(|| {
+        error::ParallelizeError::Invalid(format!(
+            "stale semantic effect site {:?}:{}",
+            site.block, site.index
+        ))
     })
 }
 
 pub(super) fn semantic_effect_mut(
     graph: &mut EGraph,
-    block: BlockId,
-    index: usize,
+    site: SideEffectSite,
 ) -> error::Result<&mut SideEffect> {
-    graph.skeleton.get_effect_mut(SideEffectSite { block, index }).ok_or_else(|| {
-        error::ParallelizeError::Invalid(format!("stale semantic effect site {block:?}:{index}"))
+    graph.skeleton.get_effect_mut(site).ok_or_else(|| {
+        error::ParallelizeError::Invalid(format!(
+            "stale semantic effect site {:?}:{}",
+            site.block, site.index
+        ))
     })
 }
 

@@ -1,3 +1,5 @@
+#![allow(clippy::approx_constant)]
+
 use super::*;
 use crate::ast::NodeCounter;
 use crate::error::CompilerError;

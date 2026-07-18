@@ -25,44 +25,49 @@
 //! semantic operations to scheduled form; and `schedule` owns phase ordering,
 //! dependency validation, and publication.
 
-#![cfg_attr(not(test), deny(clippy::expect_used, clippy::unwrap_used))]
+#![deny(clippy::expect_used, clippy::unwrap_used)]
 
 mod facts;
 mod filter;
 mod kernel;
 mod planning;
-pub(crate) mod prepare;
+pub(super) mod prepare;
 mod projection;
 mod reduce;
 mod scan;
-pub mod schedule;
+mod schedule;
+mod target;
+#[cfg(test)]
+mod test_support;
 
-pub(crate) use facts::parallel_recipe_effect;
-use facts::{
-    make_screma_serial, seg_recipe_family, segmented_recipe_effect, semantic_effect, semantic_effect_mut,
-    semantic_node_type, SegScratchFamily,
+pub(super) use schedule::ValidatedKernelPlan;
+pub use schedule::{
+    EntryAbiProjection, KernelDomain, KernelId, KernelKind, KernelPlacement, OutputRouteProjection,
+    PublishedKernel, PublishedKernelPlan, ScheduledResource,
 };
-use filter::{analyze_filter_candidates, lower_materialized_filters, lower_runtime_filters};
+pub(crate) use target::plan;
+
+use facts::{
+    make_screma_serial, parallel_recipe_effect, seg_recipe_family, segmented_recipe_effect,
+    semantic_effect, semantic_effect_mut, semantic_node_type, SegScratchFamily,
+};
+use filter::analyze_filter_candidates;
 use kernel::{
     apply_manifest_resource_sizes, can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs,
     chunk_view_like, dispatch_worker_logical_size, emit_chunk_arithmetic, synthesize_swap_wrapper,
     synthesize_u32_add_function, ChunkInputKind,
 };
 use planning as error;
-#[cfg(test)]
-pub(crate) use planning::preflight_fallback_reasons;
-pub(crate) use planning::FallbackReason;
-pub use planning::PHASE2_WIDTH;
+use planning::FallbackReason;
 use planning::{ParallelPolicy, RecipeSelection};
 #[cfg(test)]
-pub(crate) use planning::{FILTER_SCAN_GROUPS, REDUCE_PHASE1_WIDTH};
-#[cfg(test)]
 use projection::side_effect_output_slots_from_routes;
-use projection::{project_kernel_body, split_multidomain_seg_maps, SplitEntry, UnionFind};
-use reduce::{analyze_reduce_candidate, bind_reduce_candidate, emit_reduce_entry};
-use scan::{
-    analyze_scan_candidate, bind_scan_candidate, emit_scan_entry, synthesize_phase2_scan,
-    synthesize_phase3_scan,
+use projection::{project_kernel_body, split_multidomain_seg_maps, ProjectionSpec, SplitEntry, UnionFind};
+use reduce::{analyze_reduce_candidate, ReduceCandidate};
+use scan::{analyze_scan_candidate, ScanCandidate, ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
+#[cfg(test)]
+pub(crate) use test_support::{
+    planned_callable_names, preflight_fallback_reasons, FILTER_SCAN_GROUPS, REDUCE_PHASE1_WIDTH,
 };
 
 use std::collections::HashSet;
@@ -74,8 +79,8 @@ use smallvec::smallvec;
 
 use super::graph_ops;
 use super::program::{
-    AllocatedProgram, CompilerResourceKind, OutputWriter, ResourceId, SemanticEntry, SemanticEntryId,
-    SemanticFunc, SemanticOpId, SemanticResourceDecl, SemanticResourceRef,
+    AllocatedProgram, CompilerFlowEndpoint, CompilerResourceKind, OutputWriter, ResourceId, SemanticEntry,
+    SemanticEntryId, SemanticFunc, SemanticOpId, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::soac::screma;
 use super::types::{
@@ -91,7 +96,7 @@ use crate::types::TypeExt;
 /// Pointwise `SegMap`s remain for `soac_expand`; `SegRed`s become a chunked
 /// phase 1 plus a synthesized tree reduction; `SegScan`s become chunk scans,
 /// an exclusive scan of block sums, and offset-application phases.
-pub(crate) fn lower(
+pub(super) fn lower(
     inner: &mut AllocatedProgram,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> error::Result<schedule::KernelPlan> {
@@ -102,285 +107,352 @@ pub(crate) fn lower(
     let resources = planning::ResourceIndex::new(&inner.resources)?;
     let flows = planning::ResourceFlowIndex::new(&inner.resources);
 
-    let (mut schedule, seeded) = KernelPlan::seed(
+    let (schedule, seeded) = KernelPlan::seed(
         &inner.pipeline,
         &inner.entry_points,
         &inner.resources,
         &inner.region_interner,
     );
-    attach_materializations(
-        inner,
-        &mut schedule,
-        &resources,
-        &flows,
-        &candidates,
-        policy,
-        effect_ids,
-    )?;
-    lower_materialized_filters(inner, &mut schedule, &resources, &candidates, policy, effect_ids)?;
-    let lowered_filters = lower_runtime_filters(
-        inner,
-        &seeded,
-        &mut schedule,
-        &resources,
-        &candidates,
-        policy,
-        effect_ids,
-    )?;
-    for (index, entry) in inner.entry_points.iter().enumerate() {
-        let source = SemanticEntryId(index as u32);
-        if lowered_filters.contains(&source) {
-            continue;
-        }
-        let Some(kernel) = seeded.entry(source) else {
-            continue;
-        };
-        let body = super::program::PlannedEntry::project(entry)?;
-        plan_segmented_kernel_body(
-            body,
-            kernel,
-            &mut schedule,
-            &resources,
-            &candidates,
-            policy,
-            effect_ids,
-        )?;
-    }
-    schedule.coalesce_resource_flows(flows.flows());
-    Ok(schedule)
+    let mut lowering = ParallelLowering::new(schedule, resources, candidates, policy, effect_ids);
+    lowering.attach_materializations(inner, &flows)?;
+    lowering.lower_entries(inner, &seeded)?;
+    lowering.schedule.coalesce_resource_flows(flows.flows());
+    Ok(lowering.schedule)
 }
 
-pub(crate) fn lower_sequential(
+pub(super) fn lower_sequential(
     inner: &AllocatedProgram,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> error::Result<schedule::KernelPlan> {
     let resources = planning::ResourceIndex::new(&inner.resources)?;
     let flows = planning::ResourceFlowIndex::new(&inner.resources);
     let candidates = planning::CandidateIndex::sequential();
-    let (mut plan, _) = schedule::KernelPlan::seed(
+    let (plan, _) = schedule::KernelPlan::seed(
         &inner.pipeline,
         &inner.entry_points,
         &inner.resources,
         &inner.region_interner,
     );
-    attach_materializations(
-        inner,
-        &mut plan,
-        &resources,
-        &flows,
-        &candidates,
-        ParallelPolicy::default(),
-        effect_ids,
-    )?;
-    plan.select_sequential_recipes();
-    plan.coalesce_resource_flows(flows.flows());
-    Ok(plan)
+    let mut lowering =
+        ParallelLowering::new(plan, resources, candidates, ParallelPolicy::default(), effect_ids);
+    lowering.attach_materializations(inner, &flows)?;
+    lowering.schedule.select_sequential_recipes();
+    lowering.schedule.coalesce_resource_flows(flows.flows());
+    Ok(lowering.schedule)
 }
 
-/// Attach allocation-created producer entries in compiler-flow order, then
-/// select a recipe for any segmented operation they contain.
-fn attach_materializations(
-    inner: &AllocatedProgram,
-    schedule: &mut schedule::KernelPlan,
-    resources: &planning::ResourceIndex<'_>,
-    flows: &planning::ResourceFlowIndex,
-    candidates: &planning::CandidateIndex,
+struct ParallelLowering<'resources, 'effects> {
+    schedule: schedule::KernelPlan,
+    resources: planning::ResourceIndex<'resources>,
+    candidates: planning::CandidateIndex,
     policy: ParallelPolicy,
-    effect_ids: &mut crate::IdSource<EffectToken>,
-) -> error::Result<()> {
-    let mut ready = std::collections::BTreeSet::new();
-    for (_, flow) in flows.flows() {
-        for consumer in &flow.consumers {
-            if schedule.contains_flow_source(*consumer) {
-                ready.insert((flow.producer, *consumer));
-            }
+    effect_ids: &'effects mut crate::IdSource<EffectToken>,
+}
+
+enum LoweringSource<'a> {
+    Entry {
+        id: SemanticEntryId,
+        entry: &'a SemanticEntry,
+    },
+    Materialization(&'a crate::egir::program::MaterializationRequirement),
+}
+
+impl LoweringSource<'_> {
+    fn entry(&self) -> &SemanticEntry {
+        match self {
+            Self::Entry { entry, .. } => entry,
+            Self::Materialization(requirement) => &requirement.entry,
         }
     }
 
-    while let Some((producer_id, consumer_id)) = ready.pop_first() {
-        if schedule.contains_flow_source(producer_id) {
-            continue;
+    fn is_entry(&self) -> bool {
+        matches!(self, Self::Entry { .. })
+    }
+
+    fn endpoint(&self) -> CompilerFlowEndpoint {
+        match self {
+            Self::Entry { id, .. } => CompilerFlowEndpoint::Entry(*id),
+            Self::Materialization(requirement) => CompilerFlowEndpoint::Materialization(requirement.id),
         }
-        let consumer = schedule.kernel_for_flow_source(consumer_id).ok_or_else(|| {
-            error::ParallelizeError::Invalid(format!(
-                "scheduled flow consumer {consumer_id:?} has no kernel handle"
-            ))
-        })?;
-        let crate::egir::program::CompilerFlowEndpoint::Materialization(id) = producer_id else {
-            return Err(error::ParallelizeError::Invalid(
-                "typed entry/prepass producer was omitted while seeding the kernel plan".into(),
-            ));
-        };
-        let requirement = inner
-            .materializations
-            .get(id.0 as usize)
-            .filter(|requirement| requirement.id == id)
-            .ok_or_else(|| {
+    }
+}
+
+impl<'resources, 'effects> ParallelLowering<'resources, 'effects> {
+    fn new(
+        schedule: schedule::KernelPlan,
+        resources: planning::ResourceIndex<'resources>,
+        candidates: planning::CandidateIndex,
+        policy: ParallelPolicy,
+        effect_ids: &'effects mut crate::IdSource<EffectToken>,
+    ) -> Self {
+        Self {
+            schedule,
+            resources,
+            candidates,
+            policy,
+            effect_ids,
+        }
+    }
+
+    fn lower_entries(
+        &mut self,
+        inner: &'resources AllocatedProgram,
+        seeded: &schedule::SeededKernels,
+    ) -> error::Result<()> {
+        for (index, entry) in inner.entry_points.iter().enumerate() {
+            let source = SemanticEntryId(index as u32);
+            let Some(kernel) = seeded.entry(source) else {
+                continue;
+            };
+            self.lower_kernel(LoweringSource::Entry { id: source, entry }, kernel)?;
+        }
+        Ok(())
+    }
+
+    /// Attach allocation-created producer entries in compiler-flow order and
+    /// immediately lower the recipe owned by each new physical kernel.
+    fn attach_materializations(
+        &mut self,
+        inner: &'resources AllocatedProgram,
+        flows: &planning::ResourceFlowIndex,
+    ) -> error::Result<()> {
+        let mut ready = std::collections::BTreeSet::new();
+        for (_, flow) in flows.flows() {
+            for consumer in &flow.consumers {
+                if self.schedule.contains_flow_source(*consumer) {
+                    ready.insert((flow.producer, *consumer));
+                }
+            }
+        }
+
+        while let Some((producer_id, consumer_id)) = ready.pop_first() {
+            if self.schedule.contains_flow_source(producer_id) {
+                continue;
+            }
+            let consumer = self.schedule.kernel_for_flow_source(consumer_id).ok_or_else(|| {
                 error::ParallelizeError::Invalid(format!(
-                    "materialization flow references missing requirement {id:?}"
+                    "scheduled flow consumer {consumer_id:?} has no kernel handle"
                 ))
             })?;
-        let materialization = schedule.add_materialization_before(consumer, requirement)?;
-        let body = crate::egir::program::PlannedEntry::project(&requirement.entry)?;
-        if segmented_recipe_effect(&body).is_some_and(|(_, _, effect)| {
-            matches!(
-                &effect.kind,
-                SideEffectKind::Soac(SoacEffect(
-                    _,
-                    Soac::Screma(screma::Op::Reduce { .. } | screma::Op::Scan { .. })
-                ))
-            )
-        }) {
-            plan_segmented_kernel_body(
-                body,
-                materialization,
-                schedule,
-                resources,
-                candidates,
-                policy,
-                effect_ids,
-            )?;
+            let crate::egir::program::CompilerFlowEndpoint::Materialization(id) = producer_id else {
+                return Err(error::ParallelizeError::Invalid(
+                    "typed entry/prepass producer was omitted while seeding the kernel plan".into(),
+                ));
+            };
+            let requirement = inner
+                .materializations
+                .get(id.0 as usize)
+                .filter(|requirement| requirement.id == id)
+                .ok_or_else(|| {
+                    error::ParallelizeError::Invalid(format!(
+                        "materialization flow references missing requirement {id:?}"
+                    ))
+                })?;
+            let kernel = self.schedule.add_materialization_before(consumer, requirement)?;
+            self.lower_kernel(LoweringSource::Materialization(requirement), kernel)?;
+            for upstream in flows.incoming(producer_id) {
+                ready.insert((*upstream, producer_id));
+            }
         }
-        for upstream in flows.incoming(producer_id) {
-            ready.insert((*upstream, producer_id));
+        Ok(())
+    }
+
+    fn lower_kernel(
+        &mut self,
+        source: LoweringSource<'resources>,
+        kernel: schedule::KernelId,
+    ) -> error::Result<()> {
+        let endpoint = source.endpoint();
+        if self.lower_filter_if_selected(source.entry(), kernel, source.is_entry())? {
+            return Ok(());
+        }
+        if let Some(prepared) = self.candidates.take_prepared(endpoint) {
+            return self.lower_prepared_segmented(prepared, kernel);
+        }
+        let body = super::program::PlannedEntry::project(source.entry())?;
+        if !source.is_entry()
+            && !segmented_recipe_effect(&body).is_some_and(|located| {
+                matches!(
+                    &located.effect.kind,
+                    SideEffectKind::Soac(SoacEffect(
+                        _,
+                        Soac::Screma(screma::Op::Reduce { .. } | screma::Op::Scan { .. })
+                    ))
+                )
+            })
+        {
+            return Ok(());
+        }
+        self.lower_segmented_kernel_body(body, kernel)
+    }
+
+    fn lower_prepared_segmented(
+        &mut self,
+        prepared: planning::PreparedSegmented,
+        kernel: schedule::KernelId,
+    ) -> error::Result<()> {
+        match prepared {
+            planning::PreparedSegmented::Reduce { body, candidate } => {
+                self.lower_parallel_reduce(body, kernel, candidate)
+            }
+            planning::PreparedSegmented::Scan { body, candidate } => {
+                self.lower_parallel_scan(body, kernel, candidate)
+            }
         }
     }
-    Ok(())
-}
 
-fn plan_segmented_kernel_body(
-    mut body: super::program::PlannedEntry,
-    kernel: schedule::KernelId,
-    schedule: &mut schedule::KernelPlan,
-    resources: &planning::ResourceIndex<'_>,
-    candidates: &planning::CandidateIndex,
-    policy: ParallelPolicy,
-    effect_ids: &mut crate::IdSource<EffectToken>,
-) -> error::Result<()> {
-    use schedule::KernelDomain;
-    let Some((_, _, effect)) = segmented_recipe_effect(&body) else {
-        return Ok(());
-    };
-    let SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) = &effect.kind else {
-        return Err("segmented effect changed kind before recipe selection".into());
-    };
-    let owner = *owner;
-    match op {
-        screma::Op::Map { .. } => {
-            if let Some(split) = split_multidomain_seg_maps(&body)? {
-                let primary_slots = split.primary_slots;
-                if !split.entries.is_empty() {
-                    schedule.commit_kernel(
-                        kernel,
-                        split.primary,
-                        schedule::KernelKind::OutputDomainProjection,
-                    )?;
-                }
-                schedule.set_output_projection(
-                    kernel,
-                    primary_slots.iter().copied().map(super::program::OutputSlotId).collect(),
-                )?;
-                for projected in split.entries {
-                    let projected_kernel = schedule.add_sibling(
-                        kernel,
-                        projected.entry,
-                        schedule::DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                        schedule::KernelKind::OutputDomainProjection,
-                    )?;
-                    schedule.set_output_projection(
-                        projected_kernel,
-                        projected
-                            .semantic_slots
-                            .iter()
-                            .copied()
-                            .map(super::program::OutputSlotId)
-                            .collect(),
-                    )?;
-                }
-            } else {
-                schedule.commit_kernel(kernel, body, schedule::KernelKind::SerialCompute)?;
-            }
-        }
-        screma::Op::Reduce { .. } => {
-            if matches!(candidates.reduce(owner)?, RecipeSelection::Parallel(())) {
-                let candidate = match analyze_reduce_candidate(&body, resources)? {
-                    RecipeSelection::Parallel(candidate) => candidate,
-                    RecipeSelection::Serial(reason) => {
-                        return Err(error::ParallelizeError::Invalid(format!(
-                            "preflight reduce candidate {owner:?} changed before emission: {reason:?}"
-                        )));
+    fn lower_segmented_kernel_body(
+        &mut self,
+        body: super::program::PlannedEntry,
+        kernel: schedule::KernelId,
+    ) -> error::Result<()> {
+        use schedule::KernelDomain;
+        let Some(located) = segmented_recipe_effect(&body) else {
+            return Ok(());
+        };
+        let SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) = &located.effect.kind else {
+            return Err("segmented effect changed kind before recipe selection".into());
+        };
+        let owner = *owner;
+        match op {
+            screma::Op::Map { .. } => {
+                if let Some(split) = split_multidomain_seg_maps(&body)? {
+                    let primary_slots = split.primary_slots;
+                    if !split.entries.is_empty() {
+                        let recipe = schedule::KernelRecipeSpec::new(
+                            split.primary,
+                            schedule::KernelKind::OutputDomainProjection,
+                        );
+                        self.schedule.commit_kernel(kernel, recipe)?;
                     }
-                };
-                let plan = bind_reduce_candidate(candidate, resources)?;
-                let phases = emit_reduce_entry(&mut body, plan, schedule, resources, policy, effect_ids)?;
-                let mut predecessor =
-                    schedule.commit_kernel(kernel, body, schedule::KernelKind::ReducePhase1)?;
-                for phase in phases {
-                    predecessor = schedule.add_phase_after(
-                        predecessor,
-                        phase,
-                        schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                        schedule::KernelKind::ReduceCombine,
+                    self.schedule.set_output_projection(
+                        kernel,
+                        primary_slots.iter().copied().map(super::program::OutputSlotId).collect(),
                     )?;
-                }
-            } else {
-                commit_serial_kernel(body, kernel, schedule)?;
-            }
-        }
-        screma::Op::Scan { .. } => {
-            if matches!(candidates.scan(owner)?, RecipeSelection::Parallel(())) {
-                let candidate = match analyze_scan_candidate(&body)? {
-                    RecipeSelection::Parallel(candidate) => candidate,
-                    RecipeSelection::Serial(reason) => {
-                        return Err(error::ParallelizeError::Invalid(format!(
-                            "preflight scan candidate {owner:?} changed before emission: {reason:?}"
-                        )));
+                    for projected in split.entries {
+                        let phase = schedule::PhaseSpec::new(
+                            projected.entry,
+                            schedule::DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                            schedule::KernelKind::OutputDomainProjection,
+                        );
+                        let projected_kernel = self.schedule.add_sibling(kernel, phase)?;
+                        self.schedule.set_output_projection(
+                            projected_kernel,
+                            projected
+                                .semantic_slots
+                                .iter()
+                                .copied()
+                                .map(super::program::OutputSlotId)
+                                .collect(),
+                        )?;
                     }
-                };
-                let plan = bind_scan_candidate(candidate, resources)?;
-                let phases = emit_scan_entry(&mut body, plan, schedule, resources, policy, effect_ids)?;
-                let phase1_domain =
-                    schedule.domain_of(kernel).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
-                let mut predecessor =
-                    schedule.commit_kernel(kernel, body, schedule::KernelKind::ScanPhase1)?;
-                for (phase_index, phase) in phases.into_iter().enumerate() {
-                    predecessor = schedule.add_phase_after(
-                        predecessor,
-                        phase,
-                        schedule::DomainSelection::Explicit(if phase_index == 0 {
-                            KernelDomain::Fixed { x: 1, y: 1, z: 1 }
-                        } else {
-                            phase1_domain.clone()
-                        }),
-                        if phase_index == 0 {
-                            schedule::KernelKind::ScanBlock
-                        } else {
-                            schedule::KernelKind::ScanApplyOffsets
-                        },
-                    )?;
+                } else {
+                    let recipe = schedule::KernelRecipeSpec::new(body, schedule::KernelKind::SerialCompute);
+                    self.schedule.commit_kernel(kernel, recipe)?;
                 }
-            } else {
-                commit_serial_kernel(body, kernel, schedule)?;
             }
+            screma::Op::Reduce { .. } => {
+                if matches!(self.candidates.reduce(owner)?, RecipeSelection::Parallel(())) {
+                    let candidate = match analyze_reduce_candidate(&body, &self.resources)? {
+                        RecipeSelection::Parallel(candidate) => candidate,
+                        RecipeSelection::Serial(reason) => {
+                            return Err(error::ParallelizeError::Invalid(format!(
+                                "preflight reduce candidate {owner:?} changed before emission: {reason:?}"
+                            )));
+                        }
+                    };
+                    self.lower_parallel_reduce(body, kernel, candidate)?;
+                } else {
+                    self.commit_serial_kernel(body, kernel)?;
+                }
+            }
+            screma::Op::Scan { .. } => {
+                if matches!(self.candidates.scan(owner)?, RecipeSelection::Parallel(())) {
+                    let candidate = match analyze_scan_candidate(&body)? {
+                        RecipeSelection::Parallel(candidate) => candidate,
+                        RecipeSelection::Serial(reason) => {
+                            return Err(error::ParallelizeError::Invalid(format!(
+                                "preflight scan candidate {owner:?} changed before emission: {reason:?}"
+                            )));
+                        }
+                    };
+                    self.lower_parallel_scan(body, kernel, candidate)?;
+                } else {
+                    self.commit_serial_kernel(body, kernel)?;
+                }
+            }
+            screma::Op::Composite { .. } => self.commit_serial_kernel(body, kernel)?,
         }
-        screma::Op::Composite { .. } => {
-            commit_serial_kernel(body, kernel, schedule)?;
-        }
+        Ok(())
     }
-    Ok(())
-}
 
-fn commit_serial_kernel(
-    mut body: super::program::PlannedEntry,
-    kernel: schedule::KernelId,
-    schedule: &mut schedule::KernelPlan,
-) -> error::Result<()> {
-    let (block, effect, _) = segmented_recipe_effect(&body).ok_or_else(|| {
-        error::ParallelizeError::Invalid("serial recipe has no pending kernel SegOp".into())
-    })?;
-    make_screma_serial(&mut body.graph, block, effect)?;
-    schedule.commit_kernel(kernel, body, schedule::KernelKind::SerialCompute)?;
-    Ok(())
+    fn lower_parallel_reduce(
+        &mut self,
+        mut body: super::program::PlannedEntry,
+        kernel: schedule::KernelId,
+        candidate: ReduceCandidate,
+    ) -> error::Result<()> {
+        use schedule::KernelDomain;
+
+        let phases = self.emit_reduce_entry(&mut body, candidate)?;
+        let recipe = schedule::KernelRecipeSpec::new(body, schedule::KernelKind::ReducePhase1);
+        let mut predecessor = self.schedule.commit_kernel(kernel, recipe)?;
+        for phase in phases {
+            let phase = schedule::PhaseSpec::new(
+                phase,
+                schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                schedule::KernelKind::ReduceCombine,
+            );
+            predecessor = self.schedule.add_phase_after(predecessor, phase)?;
+        }
+        Ok(())
+    }
+
+    fn lower_parallel_scan(
+        &mut self,
+        mut body: super::program::PlannedEntry,
+        kernel: schedule::KernelId,
+        candidate: ScanCandidate,
+    ) -> error::Result<()> {
+        use schedule::KernelDomain;
+
+        let phases = self.emit_scan_entry(&mut body, candidate)?;
+        let phase1_domain =
+            self.schedule.domain_of(kernel).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+        let recipe = schedule::KernelRecipeSpec::new(body, schedule::KernelKind::ScanPhase1);
+        let mut predecessor = self.schedule.commit_kernel(kernel, recipe)?;
+        for (phase_index, phase) in phases.into_iter().enumerate() {
+            let phase = schedule::PhaseSpec::new(
+                phase,
+                schedule::DomainSelection::Explicit(if phase_index == 0 {
+                    KernelDomain::Fixed { x: 1, y: 1, z: 1 }
+                } else {
+                    phase1_domain.clone()
+                }),
+                if phase_index == 0 {
+                    schedule::KernelKind::ScanBlock
+                } else {
+                    schedule::KernelKind::ScanApplyOffsets
+                },
+            );
+            predecessor = self.schedule.add_phase_after(predecessor, phase)?;
+        }
+        Ok(())
+    }
+
+    fn commit_serial_kernel(
+        &mut self,
+        mut body: super::program::PlannedEntry,
+        kernel: schedule::KernelId,
+    ) -> error::Result<()> {
+        let site = segmented_recipe_effect(&body).map(|located| located.site).ok_or_else(|| {
+            error::ParallelizeError::Invalid("serial recipe has no pending kernel SegOp".into())
+        })?;
+        make_screma_serial(&mut body.graph, site)?;
+        let recipe = schedule::KernelRecipeSpec::new(body, schedule::KernelKind::SerialCompute);
+        self.schedule.commit_kernel(kernel, recipe)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

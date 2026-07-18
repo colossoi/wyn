@@ -1,7 +1,5 @@
 //! Physical-entry projection, interface compaction, and output-domain split.
 
-#![cfg_attr(not(test), deny(clippy::expect_used, clippy::unwrap_used))]
-
 use super::*;
 use crate::egir::soac::filter as filter_soac;
 use crate::egir::{graph_projector, program, semantic_graph};
@@ -45,6 +43,62 @@ struct ProjectionMetadata {
 struct ProjectedEntry {
     entry: program::PlannedEntry,
     metadata: ProjectionMetadata,
+}
+
+pub(super) struct ProjectionSpec {
+    name: String,
+    execution_model: ExecutionModel,
+    outputs: Vec<crate::interface::EntryOutput>,
+    output_routes: Vec<program::OutputRoute>,
+    resource_declarations: Vec<SemanticResourceDecl>,
+    return_ty: Type<TypeName>,
+}
+
+impl ProjectionSpec {
+    pub(super) fn unit(
+        name: String,
+        execution_model: ExecutionModel,
+        resource_declarations: Vec<SemanticResourceDecl>,
+    ) -> Self {
+        Self {
+            name,
+            execution_model,
+            outputs: Vec::new(),
+            output_routes: Vec::new(),
+            resource_declarations,
+            return_ty: Type::Constructed(TypeName::Unit, vec![]),
+        }
+    }
+
+    pub(super) fn preserving_interface(
+        source: &program::PlannedEntry,
+        resource_declarations: Vec<SemanticResourceDecl>,
+    ) -> Self {
+        Self {
+            name: source.name.clone(),
+            execution_model: source.execution_model.clone(),
+            outputs: source.outputs.iter().map(|output| output.inner.clone()).collect(),
+            output_routes: source.output_routes.clone(),
+            resource_declarations,
+            return_ty: source.return_ty.clone(),
+        }
+    }
+
+    fn selected_outputs(
+        source: &program::PlannedEntry,
+        name: String,
+        outputs: Vec<crate::interface::EntryOutput>,
+        output_routes: Vec<program::OutputRoute>,
+    ) -> Self {
+        Self {
+            name,
+            execution_model: source.execution_model.clone(),
+            outputs,
+            output_routes,
+            resource_declarations: source.resource_declarations.clone(),
+            return_ty: source.return_ty.clone(),
+        }
+    }
 }
 
 fn projection_metadata(
@@ -139,16 +193,18 @@ fn projection_metadata(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn project_kernel_body(
     source: &program::PlannedEntry,
-    name: String,
-    execution_model: ExecutionModel,
-    outputs: Vec<crate::interface::EntryOutput>,
-    output_routes: Vec<program::OutputRoute>,
-    resource_declarations: Vec<SemanticResourceDecl>,
-    return_ty: Type<TypeName>,
+    spec: ProjectionSpec,
 ) -> Result<program::PlannedEntry, String> {
+    let ProjectionSpec {
+        name,
+        execution_model,
+        outputs,
+        output_routes,
+        resource_declarations,
+        return_ty,
+    } = spec;
     let route_values = output_routes.iter().map(|route| route.source.value).collect();
     let projection = graph_projector::GraphProjector::new(&source.graph, &source.control_headers)
         .all_with_values(route_values)?;
@@ -167,17 +223,19 @@ pub(super) fn project_kernel_body(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn project_kernel_body_effects(
     source: &program::PlannedEntry,
     selected: HashSet<SideEffectSite>,
-    name: String,
-    execution_model: ExecutionModel,
-    outputs: Vec<crate::interface::EntryOutput>,
-    output_routes: Vec<program::OutputRoute>,
-    resource_declarations: Vec<SemanticResourceDecl>,
-    return_ty: Type<TypeName>,
+    spec: ProjectionSpec,
 ) -> Result<ProjectedEntry, String> {
+    let ProjectionSpec {
+        name,
+        execution_model,
+        outputs,
+        output_routes,
+        resource_declarations,
+        return_ty,
+    } = spec;
     let route_values = output_routes.iter().map(|route| route.source.value).collect();
     let projection = graph_projector::GraphProjector::new(&source.graph, &source.control_headers)
         .selected_with_values(selected.clone(), route_values)?;
@@ -403,16 +461,8 @@ pub(super) fn split_multidomain_seg_maps(
                 .ok_or_else(|| format!("selected route {} is absent from split group", route.slot.0))?;
             route.slot = program::OutputSlotId(projected_slot);
         }
-        let projected = project_kernel_body_effects(
-            entry,
-            selected,
-            name,
-            entry.execution_model.clone(),
-            outputs,
-            routes,
-            entry.resource_declarations.clone(),
-            entry.return_ty.clone(),
-        )?;
+        let spec = ProjectionSpec::selected_outputs(entry, name, outputs, routes);
+        let projected = project_kernel_body_effects(entry, selected, spec)?;
         debug_assert_eq!(projected.metadata.selected_effects.len(), selected_count);
         Ok((projected.entry, projected.metadata.semantic_ops))
     };

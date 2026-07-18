@@ -20,9 +20,7 @@ use crate::egir::program::{
     SemanticResourceDecl, SemanticResourceRef,
 };
 use crate::egir::soac::{filter, screma};
-use crate::egir::types::{
-    EgirPhase, RegionId, Scheduled, SegExtent, Semantic, SideEffectKind, Soac, SoacEffect,
-};
+use crate::egir::types::{EgirPhase, RegionId, Scheduled, SegExtent, SideEffectKind, Soac, SoacEffect};
 use crate::flow::ExecutionModel;
 use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
@@ -36,7 +34,7 @@ mod tests;
 
 /// A complete module-level compute schedule.
 #[derive(Clone, Debug, Default)]
-pub struct KernelPlan {
+pub(in crate::egir) struct KernelPlan {
     pipelines: Vec<ScheduledPipeline>,
     graphics_passthroughs: Vec<KernelPhase>,
     /// Executable entries used by descriptor-less probes and tests. They are
@@ -59,12 +57,12 @@ pub struct KernelPlan {
 /// Entries whose initial projection failed have no handle; the corresponding
 /// diagnostic remains on the plan and is reported during validation.
 #[derive(Clone, Debug)]
-pub struct SeededKernels {
+pub(super) struct SeededKernels {
     by_entry: Vec<Option<KernelId>>,
 }
 
 impl SeededKernels {
-    pub fn entry(&self, source: SemanticEntryId) -> Option<KernelId> {
+    pub(super) fn entry(&self, source: SemanticEntryId) -> Option<KernelId> {
         self.by_entry.get(source.0 as usize).copied().flatten()
     }
 
@@ -88,25 +86,20 @@ struct SemanticAbi {
 /// this module, so physicalization cannot accidentally accept an unchecked
 /// plan.
 #[derive(Clone, Debug)]
-pub struct ValidatedKernelPlan(KernelPlan);
-
-impl std::ops::Deref for ValidatedKernelPlan {
-    type Target = KernelPlan;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+pub(in crate::egir) struct ValidatedKernelPlan(KernelPlan);
 
 impl ValidatedKernelPlan {
-    pub fn published_plan(&self) -> PublishedKernelPlan {
+    pub(in crate::egir) fn published_plan(&self) -> PublishedKernelPlan {
         PublishedKernelPlan::from(&self.0)
     }
 
     /// Entry ABI records in deterministic descriptor-publication order. The
     /// validated plan, rather than physical graphs, is the sole authority for
     /// backend-visible entry metadata.
-    pub fn publications(&self, resources: &PhysicalResourceTable) -> Result<Vec<EntryPublication>, String> {
+    pub(in crate::egir) fn publications(
+        &self,
+        resources: &PhysicalResourceTable,
+    ) -> Result<Vec<EntryPublication>, String> {
         let mut names = HashSet::new();
         let mut publications = Vec::new();
         for source in &self.0.source_publications {
@@ -123,19 +116,22 @@ impl ValidatedKernelPlan {
         Ok(publications)
     }
 
-    pub(crate) fn physical_kernels(&self) -> impl Iterator<Item = &KernelPhase> {
-        self.0.phases()
+    pub(in crate::egir) fn physical_entries(&self) -> impl Iterator<Item = &PlannedEntry<Scheduled>> {
+        self.0.phases().map(|phase| phase.recipe.entry())
     }
 
-    pub(crate) fn generated_callables(&self) -> impl Iterator<Item = &SemanticFunc> {
+    pub(in crate::egir) fn generated_callables(&self) -> impl Iterator<Item = &SemanticFunc> {
         self.0.generated_callables.iter()
     }
 
-    pub(crate) fn region_interner(&self) -> &RegionInterner {
+    pub(in crate::egir) fn region_interner(&self) -> &RegionInterner {
         &self.0.region_interner
     }
 
-    pub fn install_phase_shells(&self, descriptor: &mut PipelineDescriptor) -> Result<(), String> {
+    pub(in crate::egir) fn install_phase_shells(
+        &self,
+        descriptor: &mut PipelineDescriptor,
+    ) -> Result<(), String> {
         let mut rebuilt = descriptor
             .pipelines
             .iter()
@@ -169,7 +165,7 @@ impl ValidatedKernelPlan {
         Ok(())
     }
 
-    pub fn publish(
+    pub(in crate::egir) fn publish(
         &self,
         descriptor: &mut PipelineDescriptor,
         physical_resources: &PhysicalResourceTable,
@@ -249,6 +245,10 @@ impl ValidatedKernelPlan {
         }
         Ok(())
     }
+
+    pub(in crate::egir) fn contains_entry(&self, entry_point: &str) -> bool {
+        self.0.contains_entry(entry_point)
+    }
 }
 
 /// Stable identity of a physical kernel in a plan. Dependencies use this id
@@ -257,7 +257,7 @@ impl ValidatedKernelPlan {
 pub struct KernelId(pub u32);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum KernelMutationError {
+pub(in crate::egir) enum KernelMutationError {
     UnknownKernel(KernelId),
     InvalidKernel(String),
 }
@@ -298,18 +298,73 @@ pub enum KernelKind {
 /// Closed construction recipe: a classified reason paired with the only
 /// retained planned-entry projection. There is no open or absent recipe state.
 #[derive(Clone, Debug)]
-pub struct KernelRecipe {
+struct KernelRecipe {
     kind: KernelKind,
     entry: Arc<PlannedEntry<Scheduled>>,
 }
 
-impl KernelRecipe {
-    fn close(
+pub(super) struct KernelRecipeSpec {
+    body: PlannedEntry,
+    kind: KernelKind,
+    filter_plan: Option<filter::Plan<SemanticResourceRef>>,
+}
+
+impl KernelRecipeSpec {
+    pub(super) fn new(body: PlannedEntry, kind: KernelKind) -> Self {
+        Self {
+            body,
+            kind,
+            filter_plan: None,
+        }
+    }
+
+    pub(super) fn filter(
+        body: PlannedEntry,
         kind: KernelKind,
-        entry: PlannedEntry<Semantic>,
-        filter_plan: Option<filter::Plan<SemanticResourceRef>>,
+        plan: filter::Plan<SemanticResourceRef>,
     ) -> Self {
-        let entry = super::prepare::entry(entry, filter_plan)
+        Self {
+            body,
+            kind,
+            filter_plan: Some(plan),
+        }
+    }
+}
+
+pub(super) struct PhaseSpec {
+    recipe: KernelRecipeSpec,
+    domain: DomainSelection,
+}
+
+impl PhaseSpec {
+    pub(super) fn new(body: PlannedEntry, domain: DomainSelection, kind: KernelKind) -> Self {
+        Self {
+            recipe: KernelRecipeSpec::new(body, kind),
+            domain,
+        }
+    }
+
+    pub(super) fn filter(
+        body: PlannedEntry,
+        domain: DomainSelection,
+        kind: KernelKind,
+        plan: filter::Plan<SemanticResourceRef>,
+    ) -> Self {
+        Self {
+            recipe: KernelRecipeSpec::filter(body, kind, plan),
+            domain,
+        }
+    }
+}
+
+impl KernelRecipe {
+    fn close(spec: KernelRecipeSpec) -> Self {
+        let KernelRecipeSpec {
+            body,
+            kind,
+            filter_plan,
+        } = spec;
+        let entry = super::prepare::entry(body, filter_plan)
             .expect("kernel recipe must have valid scheduled SOAC states");
         Self {
             kind,
@@ -317,11 +372,11 @@ impl KernelRecipe {
         }
     }
 
-    pub fn kind(&self) -> KernelKind {
+    fn kind(&self) -> KernelKind {
         self.kind
     }
 
-    pub(crate) fn entry(&self) -> &PlannedEntry<Scheduled> {
+    fn entry(&self) -> &PlannedEntry<Scheduled> {
         &self.entry
     }
 }
@@ -343,7 +398,7 @@ pub struct OutputRouteProjection {
 
 /// Ordered phases that share one host binding table.
 #[derive(Clone, Debug)]
-pub struct ScheduledPipeline {
+struct ScheduledPipeline {
     /// Original descriptor position, retained solely for stable publication.
     order: usize,
     /// Non-stage host metadata and already-published source bindings.
@@ -359,23 +414,23 @@ enum PhaseListId {
 
 /// One executable kernel phase.
 #[derive(Clone, Debug)]
-pub struct KernelPhase {
-    pub id: KernelId,
+struct KernelPhase {
+    id: KernelId,
     /// Typed identity used by compiler-resource flow edges. It is separate
     /// from the projected source ABI because generated requirements have no
     /// semantic entry ABI of their own.
-    pub flow_source: Option<CompilerFlowEndpoint>,
-    pub entry_point: String,
-    pub recipe: KernelRecipe,
-    pub abi: EntryAbiProjection,
-    pub workgroup_size: (u32, u32, u32),
-    pub domain: KernelDomain,
+    flow_source: Option<CompilerFlowEndpoint>,
+    entry_point: String,
+    recipe: KernelRecipe,
+    abi: EntryAbiProjection,
+    workgroup_size: (u32, u32, u32),
+    domain: KernelDomain,
     /// The authoritative selection request. Inferred selections retain their
     /// descriptor baseline while the recipe establishes its final domain.
-    pub domain_selection: DomainSelection,
-    pub resources: Vec<ScheduledResource>,
+    domain_selection: DomainSelection,
+    resources: Vec<ScheduledResource>,
     /// Stable kernel identities that must complete first.
-    pub dependencies: Vec<KernelId>,
+    dependencies: Vec<KernelId>,
 }
 
 impl KernelPhase {
@@ -492,7 +547,7 @@ pub enum KernelDomain {
 
 /// A domain together with the authority the caller assigns to it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DomainSelection {
+pub(super) enum DomainSelection {
     Inferred(KernelDomain),
     Explicit(KernelDomain),
 }
@@ -506,23 +561,23 @@ pub struct ScheduledResource {
 
 impl KernelPlan {
     #[cfg(test)]
-    pub(crate) fn generated_callables(&self) -> impl Iterator<Item = &SemanticFunc> {
+    pub(super) fn generated_callables(&self) -> impl Iterator<Item = &SemanticFunc> {
         self.generated_callables.iter()
     }
 
-    pub(crate) fn intern_callable(&mut self, name: impl AsRef<str>) -> RegionId {
+    pub(super) fn intern_callable(&mut self, name: impl AsRef<str>) -> RegionId {
         self.region_interner.intern(name.as_ref())
     }
 
-    pub(crate) fn callable_name(&self, id: RegionId) -> &str {
+    pub(super) fn callable_name(&self, id: RegionId) -> &str {
         self.region_interner.resolve(id)
     }
 
-    pub(crate) fn callable_names(&self, ids: impl IntoIterator<Item = RegionId>) -> Vec<String> {
+    pub(super) fn callable_names(&self, ids: impl IntoIterator<Item = RegionId>) -> Vec<String> {
         self.region_interner.resolve_cloned(ids)
     }
 
-    pub(crate) fn define_callable(&mut self, function: SemanticFunc) -> RegionId {
+    pub(super) fn define_callable(&mut self, function: SemanticFunc) -> RegionId {
         assert!(
             self.region_interner.get(&function.name).is_none(),
             "planner-generated callable `{}` collides with a semantic callable",
@@ -533,7 +588,7 @@ impl KernelPlan {
         id
     }
 
-    pub fn phases(&self) -> impl Iterator<Item = &KernelPhase> {
+    fn phases(&self) -> impl Iterator<Item = &KernelPhase> {
         self.pipelines
             .iter()
             .flat_map(|pipeline| pipeline.phases.iter())
@@ -541,19 +596,19 @@ impl KernelPlan {
             .chain(self.unpublished.iter())
     }
 
-    pub fn contains_entry(&self, entry_point: &str) -> bool {
+    fn contains_entry(&self, entry_point: &str) -> bool {
         self.phases().any(|phase| phase.entry_point == entry_point)
     }
 
-    pub fn contains_flow_source(&self, source: CompilerFlowEndpoint) -> bool {
+    pub(super) fn contains_flow_source(&self, source: CompilerFlowEndpoint) -> bool {
         self.phases().any(|phase| phase.flow_source == Some(source))
     }
 
-    pub fn kernel_for_flow_source(&self, source: CompilerFlowEndpoint) -> Option<KernelId> {
+    pub(super) fn kernel_for_flow_source(&self, source: CompilerFlowEndpoint) -> Option<KernelId> {
         self.phases().find(|phase| phase.flow_source == Some(source)).map(|phase| phase.id)
     }
 
-    pub(super) fn flow_resource_phases(
+    fn flow_resource_phases(
         &self,
         source: CompilerFlowEndpoint,
         resource: ResourceId,
@@ -568,7 +623,7 @@ impl KernelPlan {
         })
     }
 
-    pub fn into_validated(
+    pub(in crate::egir) fn into_validated(
         self,
         entries: &[SemanticEntry],
         resources: &[LogicalResource],
@@ -579,7 +634,7 @@ impl KernelPlan {
         Ok(ValidatedKernelPlan(self))
     }
 
-    pub fn seed(
+    pub(super) fn seed(
         descriptor: &PipelineDescriptor,
         entries: &[SemanticEntry],
         resources: &[LogicalResource],
@@ -723,7 +778,7 @@ impl KernelPlan {
         )
     }
 
-    pub fn domain_of(&self, kernel: KernelId) -> Option<KernelDomain> {
+    pub(super) fn domain_of(&self, kernel: KernelId) -> Option<KernelDomain> {
         self.phases().find(|phase| phase.id == kernel).map(|phase| phase.domain.clone())
     }
 
@@ -766,12 +821,10 @@ impl KernelPlan {
         id
     }
 
-    pub fn add_phase_after(
+    pub(super) fn add_phase_after(
         &mut self,
         parent: KernelId,
-        body: PlannedEntry,
-        domain: DomainSelection,
-        kind: KernelKind,
+        spec: PhaseSpec,
     ) -> Result<KernelId, KernelMutationError> {
         let (list_id, index) = self.locate(parent).ok_or(KernelMutationError::UnknownKernel(parent))?;
         let (parent_id, source_entry, flow_source) = {
@@ -779,7 +832,7 @@ impl KernelPlan {
             (parent.id, parent.abi.source_entry, parent.flow_source)
         };
         let id = self.allocate_kernel_id();
-        let mut phase = phase_from_body(id, flow_source, source_entry, body, domain, kind)
+        let mut phase = phase_from_body(id, flow_source, source_entry, spec)
             .map_err(KernelMutationError::InvalidKernel)?;
         phase.dependencies.push(parent_id);
         let list = self.list_mut(list_id);
@@ -796,12 +849,10 @@ impl KernelPlan {
         Ok(id)
     }
 
-    pub fn add_phase_before(
+    pub(super) fn add_phase_before(
         &mut self,
         consumer: KernelId,
-        body: PlannedEntry,
-        domain: DomainSelection,
-        kind: KernelKind,
+        spec: PhaseSpec,
     ) -> Result<KernelId, KernelMutationError> {
         let (list_id, index) = self.locate(consumer).ok_or(KernelMutationError::UnknownKernel(consumer))?;
         let (dependencies, source_entry, flow_source) = {
@@ -813,7 +864,7 @@ impl KernelPlan {
             )
         };
         let id = self.allocate_kernel_id();
-        let mut phase = phase_from_body(id, flow_source, source_entry, body, domain, kind)
+        let mut phase = phase_from_body(id, flow_source, source_entry, spec)
             .map_err(KernelMutationError::InvalidKernel)?;
         phase.dependencies = dependencies;
         let list = self.list_mut(list_id);
@@ -822,34 +873,7 @@ impl KernelPlan {
         Ok(id)
     }
 
-    pub(crate) fn add_filter_phase_before(
-        &mut self,
-        consumer: KernelId,
-        body: PlannedEntry,
-        domain: DomainSelection,
-        kind: KernelKind,
-        plan: filter::Plan<SemanticResourceRef>,
-    ) -> Result<KernelId, KernelMutationError> {
-        let (list_id, index) = self.locate(consumer).ok_or(KernelMutationError::UnknownKernel(consumer))?;
-        let (dependencies, source_entry, flow_source) = {
-            let consumer = &self.list(list_id)[index];
-            (
-                consumer.dependencies.clone(),
-                consumer.abi.source_entry,
-                consumer.flow_source,
-            )
-        };
-        let id = self.allocate_kernel_id();
-        let mut phase = phase_from_filter_body(id, flow_source, source_entry, body, domain, kind, plan)
-            .map_err(KernelMutationError::InvalidKernel)?;
-        phase.dependencies = dependencies;
-        let list = self.list_mut(list_id);
-        list.insert(index, phase);
-        list[index + 1].dependencies = vec![id];
-        Ok(id)
-    }
-
-    pub fn add_materialization_before(
+    pub(super) fn add_materialization_before(
         &mut self,
         consumer: KernelId,
         requirement: &MaterializationRequirement,
@@ -874,12 +898,10 @@ impl KernelPlan {
         Ok(id)
     }
 
-    pub fn add_sibling(
+    pub(super) fn add_sibling(
         &mut self,
         parent: KernelId,
-        body: PlannedEntry,
-        domain: DomainSelection,
-        kind: KernelKind,
+        spec: PhaseSpec,
     ) -> Result<KernelId, KernelMutationError> {
         let (list_id, index) = self.locate(parent).ok_or(KernelMutationError::UnknownKernel(parent))?;
         let (source_entry, flow_source) = {
@@ -887,13 +909,13 @@ impl KernelPlan {
             (parent.abi.source_entry, parent.flow_source)
         };
         let id = self.allocate_kernel_id();
-        let phase = phase_from_body(id, flow_source, source_entry, body, domain, kind)
+        let phase = phase_from_body(id, flow_source, source_entry, spec)
             .map_err(KernelMutationError::InvalidKernel)?;
         self.list_mut(list_id).push(phase);
         Ok(id)
     }
 
-    pub(crate) fn select_sequential_recipes(&mut self) {
+    pub(super) fn select_sequential_recipes(&mut self) {
         for phase in self
             .pipelines
             .iter_mut()
@@ -925,7 +947,7 @@ impl KernelPlan {
         }
     }
 
-    pub fn set_output_projection(
+    pub(super) fn set_output_projection(
         &mut self,
         kernel: KernelId,
         outputs: Vec<OutputSlotId>,
@@ -942,34 +964,22 @@ impl KernelPlan {
         Ok(())
     }
 
-    pub fn commit_kernel(
+    pub(super) fn commit_kernel(
         &mut self,
         kernel: KernelId,
-        body: PlannedEntry,
-        kind: KernelKind,
+        spec: KernelRecipeSpec,
     ) -> Result<KernelId, KernelMutationError> {
         let (list, index) = self.locate(kernel).ok_or(KernelMutationError::UnknownKernel(kernel))?;
         let phase = &mut self.list_mut(list)[index];
-        phase.recipe = KernelRecipe::close(kind, body, None);
+        phase.recipe = KernelRecipe::close(spec);
         phase.refresh_phase_facts();
         Ok(kernel)
     }
 
-    pub(crate) fn commit_filter_kernel(
-        &mut self,
-        kernel: KernelId,
-        body: PlannedEntry,
-        kind: KernelKind,
-        plan: filter::Plan<SemanticResourceRef>,
-    ) -> Result<KernelId, KernelMutationError> {
-        let (list, index) = self.locate(kernel).ok_or(KernelMutationError::UnknownKernel(kernel))?;
-        let phase = &mut self.list_mut(list)[index];
-        phase.recipe = KernelRecipe::close(kind, body, Some(plan));
-        phase.refresh_phase_facts();
-        Ok(kernel)
-    }
-
-    pub fn check_explicit_dispatch_coverage(&self, entries: &[SemanticEntry]) -> Result<(), String> {
+    pub(in crate::egir) fn check_explicit_dispatch_coverage(
+        &self,
+        entries: &[SemanticEntry],
+    ) -> Result<(), String> {
         let by_name = entries.iter().map(|entry| (entry.name.as_str(), entry)).collect::<HashMap<_, _>>();
         for phase in self.pipelines.iter().flat_map(|pipeline| &pipeline.phases) {
             let DomainSelection::Explicit(KernelDomain::Fixed { x, y, z }) = phase.domain_selection else {
@@ -999,7 +1009,7 @@ impl KernelPlan {
         Ok(())
     }
 
-    pub fn coalesce_resource_flows(&mut self, flows: &[(ResourceId, CompilerResourceFlow)]) {
+    pub(super) fn coalesce_resource_flows(&mut self, flows: &[(ResourceId, CompilerResourceFlow)]) {
         self.complete_resource_flows(flows);
         self.merge_connected_pipelines();
     }
@@ -1108,13 +1118,12 @@ fn phase_from_entry(
     selection: DomainSelection,
     kind: KernelKind,
 ) -> Result<KernelPhase, String> {
+    let body = PlannedEntry::project(entry)?;
     phase_from_body(
         id,
         source_entry.map(CompilerFlowEndpoint::Entry),
         source_entry,
-        PlannedEntry::project(entry)?,
-        selection,
-        kind,
+        PhaseSpec::new(body, selection, kind),
     )
 }
 
@@ -1122,42 +1131,21 @@ fn phase_from_body(
     id: KernelId,
     flow_source: Option<CompilerFlowEndpoint>,
     source_entry: Option<SemanticEntryId>,
-    body: PlannedEntry,
-    selection: DomainSelection,
-    kind: KernelKind,
+    spec: PhaseSpec,
 ) -> Result<KernelPhase, String> {
-    phase_from_body_with_filter_plan(id, flow_source, source_entry, body, selection, kind, None)
-}
-
-fn phase_from_filter_body(
-    id: KernelId,
-    flow_source: Option<CompilerFlowEndpoint>,
-    source_entry: Option<SemanticEntryId>,
-    body: PlannedEntry,
-    selection: DomainSelection,
-    kind: KernelKind,
-    plan: filter::Plan<SemanticResourceRef>,
-) -> Result<KernelPhase, String> {
-    phase_from_body_with_filter_plan(id, flow_source, source_entry, body, selection, kind, Some(plan))
-}
-
-fn phase_from_body_with_filter_plan(
-    id: KernelId,
-    flow_source: Option<CompilerFlowEndpoint>,
-    source_entry: Option<SemanticEntryId>,
-    body: PlannedEntry,
-    selection: DomainSelection,
-    kind: KernelKind,
-    filter_plan: Option<filter::Plan<SemanticResourceRef>>,
-) -> Result<KernelPhase, String> {
+    let PhaseSpec {
+        recipe,
+        domain: selection,
+    } = spec;
     let domain = match &selection {
         DomainSelection::Inferred(baseline) | DomainSelection::Explicit(baseline) => baseline.clone(),
     };
+    let entry_point = recipe.body.name.clone();
     let mut phase = KernelPhase {
         id,
         flow_source,
-        entry_point: body.name.clone(),
-        recipe: KernelRecipe::close(kind, body, filter_plan),
+        entry_point,
+        recipe: KernelRecipe::close(recipe),
         abi: EntryAbiProjection {
             source_entry,
             inputs: Vec::new(),
@@ -1179,10 +1167,7 @@ fn phase_from_materialization(
     dependencies: Vec<KernelId>,
 ) -> Result<KernelPhase, String> {
     let domain = materialization_domain(requirement).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
-    let mut phase = phase_from_body(
-        id,
-        Some(CompilerFlowEndpoint::Materialization(requirement.id)),
-        None,
+    let spec = PhaseSpec::new(
         PlannedEntry::project(&requirement.entry)?,
         DomainSelection::Explicit(domain),
         match requirement.kind {
@@ -1191,6 +1176,12 @@ fn phase_from_materialization(
             MaterializationKind::Scalar => KernelKind::ScalarPrepass,
             MaterializationKind::RuntimeArray => KernelKind::FilterScatter,
         },
+    );
+    let mut phase = phase_from_body(
+        id,
+        Some(CompilerFlowEndpoint::Materialization(requirement.id)),
+        None,
+        spec,
     )?;
     phase.dependencies = dependencies;
     Ok(phase)
@@ -1202,13 +1193,16 @@ fn graphics_passthrough_phase(
     entry: &SemanticEntry,
 ) -> Result<KernelPhase, String> {
     let domain = KernelDomain::Fixed { x: 1, y: 1, z: 1 };
+    let spec = PhaseSpec::new(
+        PlannedEntry::project(entry)?,
+        DomainSelection::Inferred(domain),
+        KernelKind::GraphicsPassthrough,
+    );
     phase_from_body(
         id,
         Some(CompilerFlowEndpoint::Entry(source_entry)),
         Some(source_entry),
-        PlannedEntry::project(entry)?,
-        DomainSelection::Inferred(domain),
-        KernelKind::GraphicsPassthrough,
+        spec,
     )
 }
 
@@ -1230,7 +1224,7 @@ fn source_kind(entry: &SemanticEntry) -> KernelKind {
     if !matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
         return KernelKind::GraphicsPassthrough;
     }
-    match super::parallel_recipe_effect(entry).map(|(_, _, effect)| &effect.kind) {
+    match super::parallel_recipe_effect(entry).map(|located| &located.effect.kind) {
         Some(SideEffectKind::Soac(SoacEffect(_, Soac::Screma(screma::Op::Reduce { .. })))) => {
             KernelKind::ReducePhase1
         }
@@ -1314,7 +1308,7 @@ fn domain_selection_from_stage(
     }
 }
 
-pub(crate) fn segmented_domain(entry: &SemanticEntry) -> Option<KernelDomain> {
+fn segmented_domain(entry: &SemanticEntry) -> Option<KernelDomain> {
     semantic_domain_entry(entry)
 }
 
@@ -1323,7 +1317,7 @@ fn materialization_domain(requirement: &MaterializationRequirement) -> Option<Ke
 }
 
 fn semantic_domain_entry(entry: &SemanticEntry) -> Option<KernelDomain> {
-    match &super::parallel_recipe_effect(entry)?.2.kind {
+    match &super::parallel_recipe_effect(entry)?.effect.kind {
         SideEffectKind::Soac(SoacEffect(
             _,
             Soac::Screma(
@@ -1396,7 +1390,7 @@ fn scheduled_domain_graph(graph: &crate::egir::types::EGraph<Scheduled>) -> Opti
     }
 }
 
-pub(crate) fn domain_from_space(space: &crate::egir::types::SegSpace) -> Option<KernelDomain> {
+pub(super) fn domain_from_space(space: &crate::egir::types::SegSpace) -> Option<KernelDomain> {
     if space.dims.iter().all(|extent| matches!(extent, SegExtent::Fixed(_))) {
         let count = space.dims.iter().try_fold(1u32, |product, extent| match extent {
             SegExtent::Fixed(n) => product.checked_mul(*n),
@@ -1578,9 +1572,7 @@ fn binding_ref(binding: &crate::pipeline_descriptor::Binding) -> Option<BindingR
     }
 }
 
-pub(super) fn topologically_order_phases(
-    phases: Vec<KernelPhase>,
-) -> Result<Vec<KernelPhase>, Vec<KernelPhase>> {
+fn topologically_order_phases(phases: Vec<KernelPhase>) -> Result<Vec<KernelPhase>, Vec<KernelPhase>> {
     let phase_ids = phases.iter().map(|phase| phase.id).collect::<HashSet<_>>();
     let mut remaining = phases.into_iter().map(Some).collect::<Vec<_>>();
     let mut emitted = HashSet::new();

@@ -1,7 +1,5 @@
 //! Shared chunk arithmetic, resource sizing, and callable construction.
 
-#![cfg_attr(not(test), deny(clippy::expect_used, clippy::unwrap_used))]
-
 use super::*;
 pub(super) fn apply_manifest_resource_sizes(
     entry: &mut crate::egir::program::PlannedEntry,

@@ -1,30 +1,29 @@
-//! Target-aware destruction of semantic EGIR.
+//! Terminal target planning and physical EGIR construction.
 //!
-//! No pass before this module may replace SegRed/SegScan with physical phase
-//! entries.  This module owns scheduling, scratch allocation, descriptor
-//! publication, and the transition to low-level SOAC expansion.
+//! No earlier pass may replace semantic reductions or scans with physical
+//! phase entries. This boundary selects recipes, validates and publishes the
+//! resulting schedule, allocates physical bindings, and constructs the EGIR
+//! consumed by low-level SOAC expansion.
 
-use super::from_tlc::ConvertError;
-use super::parallelize;
-use super::program::{AllocatedProgram, PhysicalProgram, PhysicalResourceTable};
-use super::publish::PipelineDescriptorPublish;
-use super::types::EffectToken;
+use super::{lower, lower_sequential, PublishedKernelPlan};
+use crate::egir::from_tlc::ConvertError;
+use crate::egir::program::{AllocatedProgram, PhysicalProgram, PhysicalResourceTable};
+use crate::egir::publish::PipelineDescriptorPublish;
+use crate::egir::types::EffectToken;
 use crate::{IdSource, LoweringProfile, SchedulePolicy};
 
-pub fn schedule(
+pub(crate) fn plan(
     mut inner: AllocatedProgram,
     binding_ids: &mut IdSource<u32>,
     effect_ids: &mut IdSource<EffectToken>,
     profile: LoweringProfile,
-) -> Result<PhysicalProgram, ConvertError> {
+) -> Result<(PhysicalProgram, PublishedKernelPlan), ConvertError> {
     let unpublished_descriptor = inner.pipeline.clone();
 
     let kernel_plan = if profile.schedule == SchedulePolicy::Parallel {
-        parallelize::lower(&mut inner, effect_ids)
-            .map_err(|error| ConvertError::Internal(error.to_string()))?
+        lower(&mut inner, effect_ids).map_err(|error| ConvertError::Internal(error.to_string()))?
     } else {
-        parallelize::lower_sequential(&inner, effect_ids)
-            .map_err(|error| ConvertError::Internal(error.to_string()))?
+        lower_sequential(&inner, effect_ids).map_err(|error| ConvertError::Internal(error.to_string()))?
     };
     kernel_plan
         .check_explicit_dispatch_coverage(&inner.entry_points)
@@ -44,6 +43,8 @@ pub fn schedule(
     validated.publish(&mut descriptor, &physical_resources).map_err(ConvertError::Internal)?;
     descriptor.relabel_input_storage_names(&inner.input_names);
     descriptor.rebuild_frame_graph();
+
+    let published_plan = validated.published_plan();
     let physical = PhysicalProgram::from_validated(
         inner,
         validated,
@@ -52,6 +53,6 @@ pub fn schedule(
         descriptor,
     )
     .map_err(ConvertError::Internal)?;
-    super::verify_physical::check(&physical).map_err(ConvertError::Internal)?;
-    Ok(physical)
+    crate::egir::verify_physical::check(&physical).map_err(ConvertError::Internal)?;
+    Ok((physical, published_plan))
 }
