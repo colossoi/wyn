@@ -27,6 +27,7 @@ use crate::pipeline_descriptor::{
 };
 use crate::{BindingRef, ResourceAccess, ResourceId};
 
+mod finalize;
 mod validation;
 
 #[cfg(test)]
@@ -257,7 +258,7 @@ impl ValidatedKernelPlan {
 pub struct KernelId(pub u32);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::egir) enum KernelMutationError {
+pub(super) enum KernelMutationError {
     UnknownKernel(KernelId),
     InvalidKernel(String),
 }

@@ -3,7 +3,7 @@
 use super::*;
 pub(super) fn apply_manifest_resource_sizes(
     entry: &mut crate::egir::program::PlannedEntry,
-    resources: &planning::ResourceIndex<'_>,
+    resources: &model::ResourceIndex<'_>,
 ) -> error::Result<()> {
     for declaration in &mut entry.resource_declarations {
         let resource = declaration.resource.0;

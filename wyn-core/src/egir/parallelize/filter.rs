@@ -3,21 +3,26 @@
 use super::*;
 use crate::egir::soac::filter as filter_soac;
 
+pub(super) enum FilterLowering {
+    NotSelected,
+    Lowered(Vec<(schedule::KernelId, crate::egir::program::PlannedEntry, Vec<usize>)>),
+}
+
 impl ParallelLowering<'_, '_> {
     pub(super) fn lower_filter_if_selected(
         &mut self,
         entry: &SemanticEntry,
         kernel: schedule::KernelId,
         split_outputs: bool,
-    ) -> error::Result<bool> {
+    ) -> error::Result<FilterLowering> {
         use schedule::KernelDomain;
         let selections = analyze_filter_candidates(entry)?;
         let [(semantic_id, selection)] = selections.as_slice() else {
-            return Ok(false);
+            return Ok(FilterLowering::NotSelected);
         };
         let semantic_id = *semantic_id;
         if matches!(self.candidates.filter(semantic_id)?, RecipeSelection::Serial(_)) {
-            return Ok(false);
+            return Ok(FilterLowering::NotSelected);
         }
         let candidate = match selection.clone() {
             RecipeSelection::Parallel(candidate) => candidate,
@@ -31,7 +36,7 @@ impl ParallelLowering<'_, '_> {
         if !split_outputs {
             let body = crate::egir::program::PlannedEntry::project(entry)?;
             self.lower_bound_filter(body, kernel, recipe)?;
-            return Ok(true);
+            return Ok(FilterLowering::Lowered(Vec::new()));
         }
         let projected = crate::egir::program::PlannedEntry::project(entry)?;
         let groups = if let Some(split) = split_multidomain_seg_maps(&projected)? {
@@ -50,6 +55,7 @@ impl ParallelLowering<'_, '_> {
             }]
         };
         let mut filter_group = None;
+        let mut deferred = Vec::new();
         for group in groups {
             let kernel = if group.entry.name == entry.name {
                 kernel
@@ -64,11 +70,7 @@ impl ParallelLowering<'_, '_> {
             if group.semantic_ops.contains(&semantic_id) {
                 filter_group = Some((kernel, group.entry, group.semantic_slots));
             } else {
-                self.lower_segmented_kernel_body(group.entry, kernel)?;
-                self.schedule.set_output_projection(
-                    kernel,
-                    group.semantic_slots.iter().copied().map(crate::egir::program::OutputSlotId).collect(),
-                )?;
+                deferred.push((kernel, group.entry, group.semantic_slots));
             }
         }
         let Some((kernel, filter_entry, filter_slots)) = filter_group else {
@@ -79,7 +81,7 @@ impl ParallelLowering<'_, '_> {
             kernel,
             filter_slots.iter().copied().map(crate::egir::program::OutputSlotId).collect(),
         )?;
-        Ok(true)
+        Ok(FilterLowering::Lowered(deferred))
     }
 
     fn lower_bound_filter(
@@ -88,7 +90,7 @@ impl ParallelLowering<'_, '_> {
         kernel: schedule::KernelId,
         recipe: BoundFilter,
     ) -> error::Result<()> {
-        let family = self.build_filter_kernel_family(filter_entry, recipe)?;
+        let family = FilterKernelFamilyBuilder::new(self, filter_entry, recipe).build()?;
         family.install(kernel, &mut self.schedule)
     }
 }
@@ -105,114 +107,159 @@ struct FilterKernelFamily {
     scan_groups: u32,
 }
 
-impl ParallelLowering<'_, '_> {
-    fn build_filter_kernel_family(
-        &mut self,
-        filter_entry: crate::egir::program::PlannedEntry,
+struct FilterKernelFamilyBuilder<'lowering, 'resources, 'effects> {
+    lowering: &'lowering mut ParallelLowering<'resources, 'effects>,
+    entry: crate::egir::program::PlannedEntry,
+    candidate: FilterCandidate,
+    work: filter_soac::WorkBuffers,
+    elem_ty: Type<TypeName>,
+}
+
+impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'resources, 'effects> {
+    fn new(
+        lowering: &'lowering mut ParallelLowering<'resources, 'effects>,
+        entry: crate::egir::program::PlannedEntry,
         recipe: BoundFilter,
-    ) -> error::Result<FilterKernelFamily> {
-        use crate::interface::StorageRole;
-        use schedule::KernelDomain;
-
-        let BoundFilter { candidate, work } = recipe;
-        let FilterCandidate { space, len_out, .. } = candidate;
-        let domain =
-            schedule::domain_from_space(&space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
-        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-        let declaration =
-            |resource, role| filter_resource_declaration(&self.resources, resource, role, &u32_ty);
-
-        let mut flags_storage = filter_entry
-            .resource_declarations
-            .iter()
-            .filter(|declaration| declaration.role == StorageRole::Input)
-            .cloned()
-            .collect::<Vec<_>>();
-        flags_storage.push(declaration(work.flags, StorageRole::Output)?);
-        let flags_spec = ProjectionSpec::unit(
-            format!("{}_filter_flags", filter_entry.name),
-            filter_entry.execution_model.clone(),
-            flags_storage,
-        );
-        let flags = project_kernel_body(&filter_entry, flags_spec)?;
-        let scan_storage = [
-            (work.flags, StorageRole::Input),
-            (work.offsets, StorageRole::Output),
-            (work.block_sums, StorageRole::Output),
-        ]
-        .into_iter()
-        .map(|(resource, role)| declaration(resource, role))
-        .collect::<Result<Vec<_>, _>>()?;
-        let scan_spec = ProjectionSpec::unit(
-            format!("{}_filter_scan", filter_entry.name),
-            ExecutionModel::Compute {
-                local_size: (self.policy.reduce_phase1_width, 1, 1),
-            },
-            scan_storage,
-        );
-        let mut scan = project_kernel_body(&filter_entry, scan_spec)?;
-        let zero = graph_ops::intern_u32(&mut scan.graph, 0, None);
-
-        let add_name = format!("{}_filter_scan_add", filter_entry.name);
-        let add_fn = synthesize_u32_add_function(add_name.clone(), filter_entry.span);
-        self.schedule.define_callable(add_fn);
-        let scan_scratch = ScanScratch {
-            block_sums: work.block_sums.0,
-            block_offsets: work.block_offsets.0,
-        };
-        let combine = ScanPhase2Spec {
-            entry_name: scan.name.clone(),
-            operator: add_name.clone(),
-            elem_ty: u32_ty.clone(),
-            source_graph: &scan.graph,
-            neutral: zero,
-            scratch: scan_scratch,
-            total_out: Some(len_out.0),
-        };
-        let mut combine = combine.build(self.effect_ids).map_err(|error| {
-            format!(
-                "failed to synthesize filter scan for `{}`: {error}",
-                filter_entry.name
-            )
-        })?;
-        apply_manifest_resource_sizes(&mut combine, &self.resources)?;
-        let swap_wrapper_name = format!("{}_filter_scan_add_offsets", filter_entry.name);
-        let swap_wrapper =
-            synthesize_swap_wrapper(swap_wrapper_name, add_name, u32_ty.clone(), filter_entry.span);
-        let swap_region = self.schedule.define_callable(swap_wrapper);
-        let apply_offsets = ScanPhase3Spec {
-            entry_name: scan.name.clone(),
-            swap_region,
+    ) -> Self {
+        Self {
+            lowering,
+            entry,
+            candidate: recipe.candidate,
+            work: recipe.work,
             elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
-            output_resource: work.offsets.0,
-            block_offsets: work.block_offsets.0,
-            width: self.policy.reduce_phase1_width,
-        };
-        let mut apply_offsets = apply_offsets.build(self.effect_ids)?;
-        apply_manifest_resource_sizes(&mut apply_offsets, &self.resources)?;
-
-        let mut scatter_resources = filter_entry.resource_declarations.clone();
-        for declaration in &mut scatter_resources {
-            if declaration.resource == len_out {
-                declaration.role = StorageRole::Input;
-            }
         }
-        scatter_resources.push(declaration(work.flags, StorageRole::Input)?);
-        scatter_resources.push(declaration(work.offsets, StorageRole::Input)?);
-        scatter_resources.push(declaration(work.block_offsets, StorageRole::Input)?);
-        let scatter_spec = ProjectionSpec::preserving_interface(&filter_entry, scatter_resources);
-        let scatter = project_kernel_body(&filter_entry, scatter_spec)?;
+    }
+
+    fn build(mut self) -> error::Result<FilterKernelFamily> {
+        let domain = schedule::domain_from_space(&self.candidate.space)
+            .unwrap_or(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+        let flags = self.build_flags()?;
+        let mut scan = self.build_scan()?;
+        let (combine, apply_offsets) = self.build_scan_tail(&mut scan)?;
+        let scatter = self.build_scatter()?;
         Ok(FilterKernelFamily {
             domain,
-            work,
+            work: self.work,
             flags,
             scan,
             combine,
             apply_offsets,
             scatter,
-            scan_workgroup_width: self.policy.reduce_phase1_width,
-            scan_groups: self.policy.filter_scan_groups,
+            scan_workgroup_width: self.lowering.policy.reduce_phase1_width,
+            scan_groups: self.lowering.policy.filter_scan_groups,
         })
+    }
+
+    fn build_flags(&self) -> error::Result<crate::egir::program::PlannedEntry> {
+        use crate::interface::StorageRole;
+
+        let mut storage = self
+            .entry
+            .resource_declarations
+            .iter()
+            .filter(|declaration| declaration.role == StorageRole::Input)
+            .cloned()
+            .collect::<Vec<_>>();
+        storage.push(self.declaration(self.work.flags, StorageRole::Output)?);
+        let spec = ProjectionSpec::unit(
+            format!("{}_filter_flags", self.entry.name),
+            self.entry.execution_model.clone(),
+            storage,
+        );
+        Ok(project_kernel_body(&self.entry, spec)?)
+    }
+
+    fn build_scan(&self) -> error::Result<crate::egir::program::PlannedEntry> {
+        use crate::interface::StorageRole;
+
+        let storage = [
+            (self.work.flags, StorageRole::Input),
+            (self.work.offsets, StorageRole::Output),
+            (self.work.block_sums, StorageRole::Output),
+        ]
+        .into_iter()
+        .map(|(resource, role)| self.declaration(resource, role))
+        .collect::<Result<Vec<_>, _>>()?;
+        let spec = ProjectionSpec::unit(
+            format!("{}_filter_scan", self.entry.name),
+            ExecutionModel::Compute {
+                local_size: (self.lowering.policy.reduce_phase1_width, 1, 1),
+            },
+            storage,
+        );
+        Ok(project_kernel_body(&self.entry, spec)?)
+    }
+
+    fn build_scan_tail(
+        &mut self,
+        scan: &mut crate::egir::program::PlannedEntry,
+    ) -> error::Result<(
+        crate::egir::program::PlannedEntry,
+        crate::egir::program::PlannedEntry,
+    )> {
+        let zero = graph_ops::intern_u32(&mut scan.graph, 0, None);
+        let add_name = format!("{}_filter_scan_add", self.entry.name);
+        let add_fn = synthesize_u32_add_function(add_name.clone(), self.entry.span);
+        self.lowering.schedule.define_callable(add_fn);
+        let scan_scratch = ScanScratch {
+            block_sums: self.work.block_sums.0,
+            block_offsets: self.work.block_offsets.0,
+        };
+        let combine = ScanPhase2Spec {
+            entry_name: scan.name.clone(),
+            operator: add_name.clone(),
+            elem_ty: self.elem_ty.clone(),
+            source_graph: &scan.graph,
+            neutral: zero,
+            scratch: scan_scratch,
+            total_out: Some(self.candidate.len_out.0),
+        };
+        let mut combine = combine.build(self.lowering.effect_ids).map_err(|error| {
+            format!(
+                "failed to synthesize filter scan for `{}`: {error}",
+                self.entry.name
+            )
+        })?;
+        apply_manifest_resource_sizes(&mut combine, &self.lowering.resources)?;
+        let swap_wrapper_name = format!("{}_filter_scan_add_offsets", self.entry.name);
+        let swap_wrapper =
+            synthesize_swap_wrapper(swap_wrapper_name, add_name, self.elem_ty.clone(), self.entry.span);
+        let swap_region = self.lowering.schedule.define_callable(swap_wrapper);
+        let apply_offsets = ScanPhase3Spec {
+            entry_name: scan.name.clone(),
+            swap_region,
+            elem_ty: self.elem_ty.clone(),
+            output_resource: self.work.offsets.0,
+            block_offsets: self.work.block_offsets.0,
+            width: self.lowering.policy.reduce_phase1_width,
+        };
+        let mut apply_offsets = apply_offsets.build(self.lowering.effect_ids)?;
+        apply_manifest_resource_sizes(&mut apply_offsets, &self.lowering.resources)?;
+        Ok((combine, apply_offsets))
+    }
+
+    fn build_scatter(&self) -> error::Result<crate::egir::program::PlannedEntry> {
+        use crate::interface::StorageRole;
+
+        let mut resources = self.entry.resource_declarations.clone();
+        for declaration in &mut resources {
+            if declaration.resource == self.candidate.len_out {
+                declaration.role = StorageRole::Input;
+            }
+        }
+        resources.push(self.declaration(self.work.flags, StorageRole::Input)?);
+        resources.push(self.declaration(self.work.offsets, StorageRole::Input)?);
+        resources.push(self.declaration(self.work.block_offsets, StorageRole::Input)?);
+        let spec = ProjectionSpec::preserving_interface(&self.entry, resources);
+        Ok(project_kernel_body(&self.entry, spec)?)
+    }
+
+    fn declaration(
+        &self,
+        resource: SemanticResourceRef,
+        role: crate::interface::StorageRole,
+    ) -> error::Result<SemanticResourceDecl> {
+        filter_resource_declaration(&self.lowering.resources, resource, role, &self.elem_ty)
     }
 }
 
@@ -283,7 +330,7 @@ impl FilterKernelFamily {
 }
 
 fn filter_resource_declaration(
-    resources: &planning::ResourceIndex<'_>,
+    resources: &model::ResourceIndex<'_>,
     reference: SemanticResourceRef,
     role: crate::interface::StorageRole,
     elem_ty: &Type<TypeName>,
@@ -352,7 +399,7 @@ pub(super) fn analyze_filter_candidates(
 }
 
 impl BoundFilter {
-    fn bind(candidate: FilterCandidate, resources: &planning::ResourceIndex<'_>) -> error::Result<Self> {
+    fn bind(candidate: FilterCandidate, resources: &model::ResourceIndex<'_>) -> error::Result<Self> {
         let owner = candidate.semantic_id;
         let resource_id = |kind, slot| {
             resources.exactly_one_at(owner, kind, slot).map(|resource| SemanticResourceRef(resource.id))

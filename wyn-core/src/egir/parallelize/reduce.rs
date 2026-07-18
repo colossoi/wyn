@@ -30,7 +30,7 @@ struct ReduceOutputStore {
 
 pub(super) fn analyze_reduce_candidate(
     entry: &crate::egir::program::PlannedEntry,
-    resources: &planning::ResourceIndex<'_>,
+    resources: &model::ResourceIndex<'_>,
 ) -> error::Result<RecipeSelection<ReduceCandidate>> {
     let located = segmented_recipe_effect(entry).ok_or_else(|| {
         error::ParallelizeError::Invalid("reduce analysis has no selected segmented effect".into())
@@ -170,7 +170,7 @@ pub(super) fn analyze_reduce_candidate(
 }
 
 impl BoundReduce {
-    fn bind(candidate: ReduceCandidate, resources: &planning::ResourceIndex<'_>) -> error::Result<Self> {
+    fn bind(candidate: ReduceCandidate, resources: &model::ResourceIndex<'_>) -> error::Result<Self> {
         let partials = resources
             .ordered_slots(
                 candidate.owner,

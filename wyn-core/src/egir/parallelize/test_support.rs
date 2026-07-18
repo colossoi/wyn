@@ -1,7 +1,7 @@
 use super::*;
 
-pub(crate) const FILTER_SCAN_GROUPS: u32 = planning::FILTER_SCAN_GROUPS;
-pub(crate) const REDUCE_PHASE1_WIDTH: u32 = planning::REDUCE_PHASE1_WIDTH;
+pub(crate) const FILTER_SCAN_GROUPS: u32 = model::FILTER_SCAN_GROUPS;
+pub(crate) const REDUCE_PHASE1_WIDTH: u32 = model::REDUCE_PHASE1_WIDTH;
 
 pub(crate) fn preflight_fallback_reasons(
     inner: &AllocatedProgram,
@@ -15,7 +15,7 @@ pub(crate) fn planned_callable_names(
     inner: &mut AllocatedProgram,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> std::result::Result<Vec<String>, String> {
-    let plan = lower(inner, effect_ids).map_err(|error| error.to_string())?;
+    let plan = lower_parallel(inner, effect_ids).map_err(|error| error.to_string())?;
     Ok(plan.generated_callables().map(|function| function.name.clone()).collect())
 }
 

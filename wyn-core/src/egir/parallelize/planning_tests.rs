@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
+use crate::egir::program::LogicalResource;
 
 fn resource(id: u32, owner: u32, kind: CompilerResourceKind, slot: usize) -> LogicalResource {
     LogicalResource {

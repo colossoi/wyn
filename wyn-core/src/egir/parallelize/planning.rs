@@ -1,117 +1,19 @@
-//! Target policy, checked planning failures, session indexes, and deterministic
-//! recipe-owned scratch allocation.
+//! Immutable recipe analysis and deterministic recipe-owned scratch allocation.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use polytype::Type;
-use thiserror::Error;
 
 use crate::ast::TypeName;
 
-use super::schedule::KernelMutationError;
+use super::model::{
+    FallbackReason, ParallelPolicy, ParallelizeError, RecipeSelection, ResourceIndex, Result,
+};
 use crate::egir::program::{
-    AllocatedProgram, CompilerFlowEndpoint, CompilerResource, CompilerResourceFlow, CompilerResourceKind,
-    LogicalResource, LogicalSize, ResourceOrigin, SemanticOpId,
+    AllocatedProgram, CompilerFlowEndpoint, CompilerResource, CompilerResourceKind, LogicalSize,
+    ResourceOrigin, SemanticOpId,
 };
 use crate::egir::types::SegExtent;
-
-/// Scheduling choices shared by candidate analysis, scratch sizing, and
-/// physical kernel construction. Selected recipes retain any policy values
-/// needed by later lowering stages instead of re-deriving them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct ParallelPolicy {
-    pub(super) reduce_phase1_width: u32,
-    pub(super) reduce_phase2_width: u32,
-    pub(super) filter_scan_groups: u32,
-}
-
-impl Default for ParallelPolicy {
-    fn default() -> Self {
-        Self {
-            reduce_phase1_width: REDUCE_PHASE1_WIDTH,
-            reduce_phase2_width: PHASE2_WIDTH,
-            filter_scan_groups: FILTER_SCAN_GROUPS,
-        }
-    }
-}
-
-/// Per-workgroup width of a synthesized phase-2 tree reduce.
-const PHASE2_WIDTH: u32 = 256;
-/// Per-workgroup width used to chunk a phase-1 partial reduce or scan.
-pub(super) const REDUCE_PHASE1_WIDTH: u32 = 64;
-/// Workgroup count for the runtime-filter chunk scan.
-pub(super) const FILTER_SCAN_GROUPS: u32 = 4;
-
-/// Checked failures produced while selecting and constructing kernel recipes.
-#[derive(Debug, Error)]
-pub(in crate::egir) enum ParallelizeError {
-    #[error("{0}")]
-    Invalid(String),
-    #[error("kernel schedule mutation failed: {0}")]
-    Schedule(#[from] KernelMutationError),
-}
-
-impl From<String> for ParallelizeError {
-    fn from(value: String) -> Self {
-        Self::Invalid(value)
-    }
-}
-
-impl From<&str> for ParallelizeError {
-    fn from(value: &str) -> Self {
-        Self::Invalid(value.to_owned())
-    }
-}
-
-pub(in crate::egir) type Result<T> = std::result::Result<T, ParallelizeError>;
-
-/// Immutable lookup view over the final logical resource manifest used by one
-/// planning session. Owner/kind buckets are ordered by compiler slot.
-pub(super) struct ResourceIndex<'a> {
-    resources: &'a [LogicalResource],
-    owned: HashMap<(SemanticOpId, CompilerResourceKind), Vec<&'a LogicalResource>>,
-}
-
-/// Canonical indexed view of compiler producer/consumer edges for one planning
-/// session. Both materialization attachment and phase dependency coalescing
-/// consume this same data.
-pub(super) struct ResourceFlowIndex {
-    flows: Vec<(crate::ResourceId, CompilerResourceFlow)>,
-    incoming: BTreeMap<CompilerFlowEndpoint, Vec<CompilerFlowEndpoint>>,
-}
-
-/// Why a valid semantic operation cannot use a target-parallel recipe.
-///
-/// These reasons describe supported serial fallbacks. Missing graph facts,
-/// resources, or routes remain checked internal errors instead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FallbackReason {
-    SequentialPolicy,
-    UnsupportedPlacement,
-    UnsupportedCaptures,
-    UnsupportedViewShape,
-    UnsupportedDestination,
-    UnsupportedScratchLayout,
-    UnsupportedOperationShape,
-}
-
-/// Result of immutable recipe analysis. A parallel payload is complete for
-/// its immediate consumer; serial selection carries the reason no scratch or
-/// graph mutation may occur.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum RecipeSelection<T> {
-    Parallel(T),
-    Serial(FallbackReason),
-}
-
-impl<T> RecipeSelection<T> {
-    fn without_payload(&self) -> RecipeSelection<()> {
-        match self {
-            Self::Parallel(_) => RecipeSelection::Parallel(()),
-            Self::Serial(reason) => RecipeSelection::Serial(*reason),
-        }
-    }
-}
 
 /// A graph-local segmented recipe paired with the projected body from which
 /// its node handles were derived. Emission consumes the pair before mutating
@@ -229,174 +131,6 @@ impl CandidateIndex {
     }
 }
 
-impl ResourceFlowIndex {
-    pub(super) fn new(resources: &[LogicalResource]) -> Self {
-        let mut flows = resources
-            .iter()
-            .filter_map(|resource| match &resource.origin {
-                ResourceOrigin::Compiler(compiler) => compiler.flow.clone().map(|flow| (resource.id, flow)),
-                ResourceOrigin::Host(_) => None,
-            })
-            .collect::<Vec<_>>();
-        flows.sort_by_key(|(resource, _)| resource.0);
-        let mut incoming = BTreeMap::<_, Vec<_>>::new();
-        for (_, flow) in &flows {
-            for consumer in &flow.consumers {
-                incoming.entry(*consumer).or_default().push(flow.producer);
-            }
-        }
-        for producers in incoming.values_mut() {
-            producers.sort_unstable();
-            producers.dedup();
-        }
-        Self { flows, incoming }
-    }
-
-    pub(super) fn flows(&self) -> &[(crate::ResourceId, CompilerResourceFlow)] {
-        &self.flows
-    }
-
-    pub(super) fn incoming(&self, consumer: CompilerFlowEndpoint) -> &[CompilerFlowEndpoint] {
-        self.incoming.get(&consumer).map(Vec::as_slice).unwrap_or(&[])
-    }
-}
-
-impl<'a> ResourceIndex<'a> {
-    pub(super) fn new(resources: &'a [LogicalResource]) -> Result<Self> {
-        let mut owned: HashMap<_, Vec<_>> = HashMap::new();
-        for (index, resource) in resources.iter().enumerate() {
-            if resource.id.0 as usize != index {
-                return Err(ParallelizeError::Invalid(format!(
-                    "resource manifest is not dense at {:?}",
-                    resource.id
-                )));
-            }
-            let ResourceOrigin::Compiler(compiler) = &resource.origin else {
-                continue;
-            };
-            if let Some(owner) = compiler.owner {
-                owned.entry((owner, compiler.kind)).or_default().push(resource);
-            }
-        }
-        for values in owned.values_mut() {
-            values.sort_by_key(|resource| match &resource.origin {
-                ResourceOrigin::Compiler(compiler) => compiler.slot,
-                ResourceOrigin::Host(_) => usize::MAX,
-            });
-            for pair in values.windows(2) {
-                let slots = pair.iter().map(|resource| match &resource.origin {
-                    ResourceOrigin::Compiler(compiler) => Ok(compiler.slot),
-                    ResourceOrigin::Host(_) => Err(ParallelizeError::Invalid(
-                        "host resource appeared in compiler ownership index".into(),
-                    )),
-                });
-                let slots = slots.collect::<Result<Vec<_>>>()?;
-                if slots[0] == slots[1] {
-                    return Err(ParallelizeError::Invalid(format!(
-                        "compiler resource ownership bucket has duplicate slot {}",
-                        slots[0]
-                    )));
-                }
-            }
-        }
-        Ok(Self { resources, owned })
-    }
-
-    pub(super) fn get(&self, id: crate::ResourceId) -> Result<&'a LogicalResource> {
-        self.resources
-            .get(id.0 as usize)
-            .filter(|resource| resource.id == id)
-            .ok_or_else(|| ParallelizeError::Invalid(format!("missing logical resource {id:?}")))
-    }
-
-    pub(super) fn owned(&self, owner: SemanticOpId, kind: CompilerResourceKind) -> &[&'a LogicalResource] {
-        self.owned.get(&(owner, kind)).map(Vec::as_slice).unwrap_or(&[])
-    }
-
-    pub(super) fn exactly_one(
-        &self,
-        owner: SemanticOpId,
-        kind: CompilerResourceKind,
-    ) -> Result<&'a LogicalResource> {
-        let resources = self.owned(owner, kind);
-        match resources {
-            [resource] => Ok(*resource),
-            _ => Err(ParallelizeError::Invalid(format!(
-                "semantic operation {owner:?} requires exactly one {kind:?} resource, found {}",
-                resources.len()
-            ))),
-        }
-    }
-
-    pub(super) fn exactly_one_at(
-        &self,
-        owner: SemanticOpId,
-        kind: CompilerResourceKind,
-        slot: usize,
-    ) -> Result<&'a LogicalResource> {
-        let resource = self.exactly_one(owner, kind)?;
-        let ResourceOrigin::Compiler(compiler) = &resource.origin else {
-            return Err(ParallelizeError::Invalid(
-                "host resource appeared in compiler ownership index".into(),
-            ));
-        };
-        if compiler.slot != slot {
-            return Err(ParallelizeError::Invalid(format!(
-                "semantic operation {owner:?} requires {kind:?} at slot {slot}, found slot {}",
-                compiler.slot
-            )));
-        }
-        Ok(resource)
-    }
-
-    pub(super) fn ordered_slots(
-        &self,
-        owner: SemanticOpId,
-        kind: CompilerResourceKind,
-        first_slot: usize,
-        count: usize,
-    ) -> Result<&[&'a LogicalResource]> {
-        let resources = self.owned(owner, kind);
-        if resources.len() != count {
-            return Err(ParallelizeError::Invalid(format!(
-                "semantic operation {owner:?} requires {count} {kind:?} resources, found {}",
-                resources.len()
-            )));
-        }
-        for (offset, resource) in resources.iter().enumerate() {
-            let ResourceOrigin::Compiler(compiler) = &resource.origin else {
-                return Err(ParallelizeError::Invalid(
-                    "host resource appeared in compiler ownership index".into(),
-                ));
-            };
-            let expected = first_slot + offset;
-            if compiler.slot != expected {
-                return Err(ParallelizeError::Invalid(format!(
-                    "semantic operation {owner:?} requires {kind:?} slot {expected}, found {}",
-                    compiler.slot
-                )));
-            }
-        }
-        Ok(resources)
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn optional(
-        &self,
-        owner: SemanticOpId,
-        kind: CompilerResourceKind,
-    ) -> Result<Option<&'a LogicalResource>> {
-        match self.owned(owner, kind) {
-            [] => Ok(None),
-            [resource] => Ok(Some(*resource)),
-            resources => Err(ParallelizeError::Invalid(format!(
-                "semantic operation {owner:?} has {} optional {kind:?} resources",
-                resources.len()
-            ))),
-        }
-    }
-}
-
 struct ScratchRequest {
     endpoint: CompilerFlowEndpoint,
     compiler: CompilerResource,
@@ -404,69 +138,63 @@ struct ScratchRequest {
     size: LogicalSize,
 }
 
-struct ScratchPlan {
+pub(super) struct ParallelPlan {
     candidates: CandidateIndex,
     requests: Vec<ScratchRequest>,
 }
 
-/// Append target-recipe work buffers immediately before kernel planning.
-/// Semantic residency resources have already been established; these buffers
-/// exist only when the parallel policy is selected.
-pub(super) fn allocate_parallel_scratch(
-    inner: &mut AllocatedProgram,
-    policy: ParallelPolicy,
-) -> Result<CandidateIndex> {
-    let ScratchPlan {
-        candidates,
-        mut requests,
-    } = preflight_parallel_recipes(inner, policy)?;
-    requests.sort_by_key(|request| {
-        (
-            request.endpoint,
-            request.compiler.owner,
-            request.compiler.kind,
-            request.compiler.slot,
-        )
-    });
-
-    for request in requests {
-        let existing = inner.resources.iter().find(|resource| {
-            matches!(
-                &resource.origin,
-                ResourceOrigin::Compiler(existing)
-                    if existing.kind == request.compiler.kind
-                        && existing.owner == request.compiler.owner
-                        && existing.slot == request.compiler.slot
+impl ParallelPlan {
+    /// Allocate exactly the scratch requested by successfully selected recipes.
+    /// This is the first mutation after immutable analysis has completed.
+    pub(super) fn allocate(mut self, inner: &mut AllocatedProgram) -> Result<CandidateIndex> {
+        self.requests.sort_by_key(|request| {
+            (
+                request.endpoint,
+                request.compiler.owner,
+                request.compiler.kind,
+                request.compiler.slot,
             )
         });
-        if let Some(existing) = existing {
-            if existing.elem_ty != request.elem_ty || existing.size != request.size {
-                return Err(ParallelizeError::Invalid(format!(
-                    "planned scratch {:?} for {:?} slot {} changed layout",
-                    request.compiler.kind, request.compiler.owner, request.compiler.slot
-                )));
+
+        for request in self.requests {
+            let existing = inner.resources.iter().find(|resource| {
+                matches!(
+                    &resource.origin,
+                    ResourceOrigin::Compiler(existing)
+                        if existing.kind == request.compiler.kind
+                            && existing.owner == request.compiler.owner
+                            && existing.slot == request.compiler.slot
+                )
+            });
+            if let Some(existing) = existing {
+                if existing.elem_ty != request.elem_ty || existing.size != request.size {
+                    return Err(ParallelizeError::Invalid(format!(
+                        "planned scratch {:?} for {:?} slot {} changed layout",
+                        request.compiler.kind, request.compiler.owner, request.compiler.slot
+                    )));
+                }
+                continue;
             }
-            continue;
+            inner.alloc_compiler_resource(request.compiler, request.elem_ty, request.size);
         }
-        inner.alloc_compiler_resource(request.compiler, request.elem_ty, request.size);
+        Ok(self.candidates)
     }
-    Ok(candidates)
 }
 
 /// Analyze all candidate operations and produce owned scratch requests without
 /// mutating the program. Graph-local reduce and scan handles stay paired with
 /// the projected body that owns them until emission consumes the pair.
-fn preflight_parallel_recipes(inner: &AllocatedProgram, policy: ParallelPolicy) -> Result<ScratchPlan> {
+pub(super) fn analyze(inner: &AllocatedProgram, policy: ParallelPolicy) -> Result<ParallelPlan> {
     let resource_index = ResourceIndex::new(&inner.resources)?;
     let mut candidates = CandidateIndex::preflight();
     let mut requests = filter_requests(inner, policy, &mut candidates)?;
     requests.extend(segmented_requests(inner, &resource_index, &mut candidates)?);
-    Ok(ScratchPlan { candidates, requests })
+    Ok(ParallelPlan { candidates, requests })
 }
 
 #[cfg(test)]
 pub(super) fn preflight_fallback_reasons(inner: &AllocatedProgram) -> Result<Vec<FallbackReason>> {
-    let plan = preflight_parallel_recipes(inner, ParallelPolicy::default())?;
+    let plan = analyze(inner, ParallelPolicy::default())?;
     let mut reasons = plan
         .candidates
         .filters
