@@ -1373,9 +1373,8 @@ impl EgirAllocated {
 
 impl EgirPlanned {
     /// Final logical resource manifest after target recipe selection has added
-    /// only the algorithm-specific work buffers used by the validated plan.
-    /// The target-complete manifest, including only the algorithm scratch
-    /// required by the recipes selected for this plan.
+    /// only the algorithm-specific work buffers required by the validated
+    /// target recipes.
     pub fn logical_resources(&self) -> &[egir::program::LogicalResource] {
         &self.physical.resources
     }

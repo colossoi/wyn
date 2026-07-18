@@ -31,6 +31,9 @@ impl UnionFind {
     }
 }
 
+/// Retained-interface facts owned by one projection result. Interface
+/// compaction consumes them immediately; graph-local ids never outlive the
+/// projected entry they describe.
 struct ProjectionMetadata {
     parameters: crate::SortedSet<usize>,
     resources: HashSet<ResourceId>,
@@ -381,6 +384,7 @@ pub(super) fn split_multidomain_seg_maps(
                 (group == root).then_some(SideEffectSite { block, index })
             })
             .collect::<HashSet<_>>();
+        let selected_count = selected.len();
         let outputs = slots
             .iter()
             .map(|slot| {
@@ -414,10 +418,7 @@ pub(super) fn split_multidomain_seg_maps(
             entry.resource_declarations.clone(),
             entry.return_ty.clone(),
         )?;
-        debug_assert_eq!(
-            projected.metadata.selected_effects.len(),
-            projected.metadata.selected_effects.iter().count()
-        );
+        debug_assert_eq!(projected.metadata.selected_effects.len(), selected_count);
         Ok((projected.entry, projected.metadata.semantic_ops))
     };
 

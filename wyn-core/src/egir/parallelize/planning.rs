@@ -2,7 +2,7 @@
 
 #![cfg_attr(not(test), deny(clippy::expect_used, clippy::unwrap_used))]
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use polytype::Type;
 
@@ -31,45 +31,119 @@ pub(crate) struct ResourceFlowIndex {
     incoming: BTreeMap<CompilerFlowEndpoint, Vec<CompilerFlowEndpoint>>,
 }
 
+/// Why a valid semantic operation cannot use a target-parallel recipe.
+///
+/// These reasons describe supported serial fallbacks. Missing graph facts,
+/// resources, or routes remain checked internal errors instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FallbackReason {
+    SequentialPolicy,
+    UnsupportedPlacement,
+    UnsupportedCaptures,
+    UnsupportedViewShape,
+    UnsupportedDestination,
+    UnsupportedScratchLayout,
+    UnsupportedOperationShape,
+}
+
+/// Result of immutable recipe analysis. A parallel payload is complete for
+/// its immediate consumer; serial selection carries the reason no scratch or
+/// graph mutation may occur.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RecipeSelection<T> {
+    Parallel(T),
+    Serial(FallbackReason),
+}
+
+impl<T> RecipeSelection<T> {
+    fn without_payload(&self) -> RecipeSelection<()> {
+        match self {
+            Self::Parallel(_) => RecipeSelection::Parallel(()),
+            Self::Serial(reason) => RecipeSelection::Serial(*reason),
+        }
+    }
+}
+
 /// Authoritative record of the recipes selected during immutable preflight.
 /// Emission may rebuild short-lived graph handles, but it must not reconsider
 /// whether an operation is parallel or serial after scratch has been added.
-#[derive(Default)]
 pub(crate) struct CandidateIndex {
-    filters: HashSet<SemanticOpId>,
-    reduces: HashSet<SemanticOpId>,
-    scans: HashSet<SemanticOpId>,
+    filters: HashMap<SemanticOpId, RecipeSelection<()>>,
+    reduces: HashMap<SemanticOpId, RecipeSelection<()>>,
+    scans: HashMap<SemanticOpId, RecipeSelection<()>>,
+    default_fallback: Option<FallbackReason>,
 }
 
 impl CandidateIndex {
-    pub(crate) fn filter(&self, owner: SemanticOpId) -> bool {
-        self.filters.contains(&owner)
-    }
-
-    pub(crate) fn reduce(&self, owner: SemanticOpId) -> bool {
-        self.reduces.contains(&owner)
-    }
-
-    pub(crate) fn scan(&self, owner: SemanticOpId) -> bool {
-        self.scans.contains(&owner)
-    }
-
-    fn record(&mut self, request: &ScratchRequest) {
-        let Some(owner) = request.compiler.owner else {
-            return;
-        };
-        match request.compiler.kind {
-            CompilerResourceKind::FilterFlags => {
-                self.filters.insert(owner);
-            }
-            CompilerResourceKind::ReducePartial => {
-                self.reduces.insert(owner);
-            }
-            CompilerResourceKind::ScanBlockSums => {
-                self.scans.insert(owner);
-            }
-            _ => {}
+    fn preflight() -> Self {
+        Self {
+            filters: HashMap::new(),
+            reduces: HashMap::new(),
+            scans: HashMap::new(),
+            default_fallback: None,
         }
+    }
+
+    pub(crate) fn sequential() -> Self {
+        Self {
+            default_fallback: Some(FallbackReason::SequentialPolicy),
+            ..Self::preflight()
+        }
+    }
+
+    pub(crate) fn filter(&self, owner: SemanticOpId) -> Result<RecipeSelection<()>> {
+        self.selection(&self.filters, owner, "filter")
+    }
+
+    pub(crate) fn reduce(&self, owner: SemanticOpId) -> Result<RecipeSelection<()>> {
+        self.selection(&self.reduces, owner, "reduce")
+    }
+
+    pub(crate) fn scan(&self, owner: SemanticOpId) -> Result<RecipeSelection<()>> {
+        self.selection(&self.scans, owner, "scan")
+    }
+
+    fn selection(
+        &self,
+        selections: &HashMap<SemanticOpId, RecipeSelection<()>>,
+        owner: SemanticOpId,
+        family: &str,
+    ) -> Result<RecipeSelection<()>> {
+        if let Some(selection) = selections.get(&owner) {
+            return Ok(selection.clone());
+        }
+        if let Some(reason) = self.default_fallback {
+            return Ok(RecipeSelection::Serial(reason));
+        }
+        Err(ParallelizeError::Invalid(format!(
+            "semantic operation {owner:?} has no preflight {family} selection"
+        )))
+    }
+
+    fn record_filter<T>(&mut self, owner: SemanticOpId, selection: &RecipeSelection<T>) -> Result<()> {
+        Self::record(&mut self.filters, owner, selection, "filter")
+    }
+
+    fn record_reduce<T>(&mut self, owner: SemanticOpId, selection: &RecipeSelection<T>) -> Result<()> {
+        Self::record(&mut self.reduces, owner, selection, "reduce")
+    }
+
+    fn record_scan<T>(&mut self, owner: SemanticOpId, selection: &RecipeSelection<T>) -> Result<()> {
+        Self::record(&mut self.scans, owner, selection, "scan")
+    }
+
+    fn record<T>(
+        selections: &mut HashMap<SemanticOpId, RecipeSelection<()>>,
+        owner: SemanticOpId,
+        selection: &RecipeSelection<T>,
+        family: &str,
+    ) -> Result<()> {
+        if selections.insert(owner, selection.without_payload()).is_some() {
+            return Err(ParallelizeError::Invalid(format!(
+                "semantic operation {owner:?} has duplicate {family} preflight selections"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -248,6 +322,11 @@ struct ScratchRequest {
     size: LogicalSize,
 }
 
+struct ScratchPlan {
+    candidates: CandidateIndex,
+    requests: Vec<ScratchRequest>,
+}
+
 /// Append target-recipe work buffers immediately before kernel planning.
 /// Semantic residency resources have already been established; these buffers
 /// exist only when the parallel policy is selected.
@@ -255,9 +334,10 @@ pub(crate) fn allocate_parallel_scratch(
     inner: &mut AllocatedProgram,
     policy: ParallelPolicy,
 ) -> Result<CandidateIndex> {
-    let resource_index = ResourceIndex::new(&inner.resources)?;
-    let mut requests = filter_requests(inner, policy);
-    requests.extend(segmented_requests(inner, &resource_index)?);
+    let ScratchPlan {
+        candidates,
+        mut requests,
+    } = preflight_parallel_recipes(inner, policy)?;
     requests.sort_by_key(|request| {
         (
             request.endpoint,
@@ -266,10 +346,8 @@ pub(crate) fn allocate_parallel_scratch(
             request.compiler.slot,
         )
     });
-    let mut candidates = CandidateIndex::default();
 
     for request in requests {
-        candidates.record(&request);
         let existing = inner.resources.iter().find(|resource| {
             matches!(
                 &resource.origin,
@@ -293,86 +371,149 @@ pub(crate) fn allocate_parallel_scratch(
     Ok(candidates)
 }
 
-fn filter_requests(inner: &AllocatedProgram, policy: ParallelPolicy) -> Vec<ScratchRequest> {
+/// Analyze all candidate operations and produce owned scratch requests without
+/// mutating the program or retaining graph-local node handles.
+fn preflight_parallel_recipes(inner: &AllocatedProgram, policy: ParallelPolicy) -> Result<ScratchPlan> {
+    let resource_index = ResourceIndex::new(&inner.resources)?;
+    let mut candidates = CandidateIndex::preflight();
+    let mut requests = filter_requests(inner, policy, &mut candidates)?;
+    requests.extend(segmented_requests(inner, &resource_index, &mut candidates)?);
+    Ok(ScratchPlan { candidates, requests })
+}
+
+#[cfg(test)]
+pub(crate) fn preflight_fallback_reasons(inner: &AllocatedProgram) -> Result<Vec<FallbackReason>> {
+    let plan = preflight_parallel_recipes(inner, ParallelPolicy::default())?;
+    let mut reasons = plan
+        .candidates
+        .filters
+        .values()
+        .chain(plan.candidates.reduces.values())
+        .chain(plan.candidates.scans.values())
+        .filter_map(|selection| match selection {
+            RecipeSelection::Parallel(()) => None,
+            RecipeSelection::Serial(reason) => Some(*reason),
+        })
+        .collect::<Vec<_>>();
+    reasons.sort_by_key(|reason| *reason as u8);
+    Ok(reasons)
+}
+
+fn filter_requests(
+    inner: &AllocatedProgram,
+    policy: ParallelPolicy,
+    candidates: &mut CandidateIndex,
+) -> Result<Vec<ScratchRequest>> {
     let mut requests = Vec::new();
     for (endpoint, entry) in inner.entries_with_endpoints() {
-        let Some(candidate) = super::analyze_filter_candidate(entry) else {
-            continue;
-        };
-        let element_count_size = match candidate.space.dims.first() {
-            Some(SegExtent::Fixed(count)) if candidate.space.dims.len() == 1 => {
-                LogicalSize::FixedBytes(*count as u64 * 4)
+        for (owner, selection) in super::analyze_filter_candidates(entry)? {
+            candidates.record_filter(owner, &selection)?;
+            let RecipeSelection::Parallel(candidate) = selection else {
+                continue;
+            };
+            let element_count_size = match candidate.space.dims.first() {
+                Some(SegExtent::Fixed(count)) if candidate.space.dims.len() == 1 => {
+                    LogicalSize::FixedBytes(*count as u64 * 4)
+                }
+                Some(SegExtent::ResourceLength {
+                    resource, elem_bytes, ..
+                }) if candidate.space.dims.len() == 1 => LogicalSize::LikeResource {
+                    resource: resource.0,
+                    elem_bytes: 4,
+                    src_elem_bytes: *elem_bytes,
+                },
+                _ => LogicalSize::SameAsDispatch { elem_bytes: 4 },
+            };
+            let worker_count_size = LogicalSize::FixedBytes(
+                (policy.filter_scan_groups * policy.reduce_phase1_width) as u64 * 4,
+            );
+            for (slot, (kind, size)) in [
+                (CompilerResourceKind::FilterFlags, element_count_size.clone()),
+                (CompilerResourceKind::FilterOffsets, element_count_size.clone()),
+                (
+                    CompilerResourceKind::FilterScanBlockSums,
+                    worker_count_size.clone(),
+                ),
+                (
+                    CompilerResourceKind::FilterScanBlockOffsets,
+                    worker_count_size.clone(),
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                requests.push(ScratchRequest {
+                    endpoint,
+                    compiler: CompilerResource::new(kind, Some(candidate.semantic_id), slot),
+                    elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
+                    size,
+                });
             }
-            Some(SegExtent::ResourceLength {
-                resource, elem_bytes, ..
-            }) if candidate.space.dims.len() == 1 => LogicalSize::LikeResource {
-                resource: resource.0,
-                elem_bytes: 4,
-                src_elem_bytes: *elem_bytes,
-            },
-            _ => LogicalSize::SameAsDispatch { elem_bytes: 4 },
-        };
-        let worker_count_size =
-            LogicalSize::FixedBytes((policy.filter_scan_groups * policy.reduce_phase1_width) as u64 * 4);
-        for (slot, (kind, size)) in [
-            (CompilerResourceKind::FilterFlags, element_count_size.clone()),
-            (CompilerResourceKind::FilterOffsets, element_count_size.clone()),
-            (
-                CompilerResourceKind::FilterScanBlockSums,
-                worker_count_size.clone(),
-            ),
-            (
-                CompilerResourceKind::FilterScanBlockOffsets,
-                worker_count_size.clone(),
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            requests.push(ScratchRequest {
-                endpoint,
-                compiler: CompilerResource::new(kind, Some(candidate.semantic_id), slot),
-                elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
-                size,
-            });
         }
     }
-    requests
+    Ok(requests)
 }
 
 fn segmented_requests(
     inner: &AllocatedProgram,
     resources: &ResourceIndex<'_>,
+    candidates: &mut CandidateIndex,
 ) -> Result<Vec<ScratchRequest>> {
     let mut requests = Vec::new();
     for (endpoint, entry) in inner.entries_with_endpoints() {
         let projected = crate::egir::program::PlannedEntry::project(entry)?;
-        if let Some(candidate) = super::analyze_reduce_candidate(&projected, resources) {
-            for (slot, elem_ty) in candidate.scratch_types.into_iter().enumerate() {
-                requests.push(scratch_request(
-                    endpoint,
-                    candidate.owner,
-                    slot,
-                    CompilerResourceKind::ReducePartial,
-                    elem_ty,
-                )?);
+        let Some((_, _, effect)) = super::segmented_recipe_effect(&projected) else {
+            continue;
+        };
+        let Some(owner) = effect.kind.soac_id().copied() else {
+            return Err(ParallelizeError::Invalid(
+                "segmented recipe effect has no semantic operation id".into(),
+            ));
+        };
+        match &effect.kind {
+            crate::egir::types::SideEffectKind::Soac(crate::egir::types::SoacEffect(
+                _,
+                crate::egir::types::Soac::Screma(crate::egir::soac::screma::Op::Reduce { .. }),
+            )) => {
+                let selection = super::analyze_reduce_candidate(&projected, resources)?;
+                candidates.record_reduce(owner, &selection)?;
+                if let RecipeSelection::Parallel(candidate) = selection {
+                    for (slot, elem_ty) in candidate.scratch_types.into_iter().enumerate() {
+                        requests.push(scratch_request(
+                            endpoint,
+                            candidate.owner,
+                            slot,
+                            CompilerResourceKind::ReducePartial,
+                            elem_ty,
+                        )?);
+                    }
+                }
             }
-        } else if let Some(candidate) = super::analyze_scan_candidate(&projected) {
-            for (slot, kind) in [
-                CompilerResourceKind::ScanBlockSums,
-                CompilerResourceKind::ScanBlockOffsets,
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                requests.push(scratch_request(
-                    endpoint,
-                    candidate.owner,
-                    slot,
-                    kind,
-                    candidate.scratch_type.clone(),
-                )?);
+            crate::egir::types::SideEffectKind::Soac(crate::egir::types::SoacEffect(
+                _,
+                crate::egir::types::Soac::Screma(crate::egir::soac::screma::Op::Scan { .. }),
+            )) => {
+                let selection = super::analyze_scan_candidate(&projected)?;
+                candidates.record_scan(owner, &selection)?;
+                if let RecipeSelection::Parallel(candidate) = selection {
+                    for (slot, kind) in [
+                        CompilerResourceKind::ScanBlockSums,
+                        CompilerResourceKind::ScanBlockOffsets,
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        requests.push(scratch_request(
+                            endpoint,
+                            candidate.owner,
+                            slot,
+                            kind,
+                            candidate.scratch_type.clone(),
+                        )?);
+                    }
+                }
             }
+            _ => {}
         }
     }
     Ok(requests)
@@ -389,7 +530,7 @@ fn scratch_request(
         ParallelizeError::Invalid(format!(
             "parallel scratch for {owner:?} has no static element size"
         ))
-    })? as u32;
+    })?;
     Ok(ScratchRequest {
         endpoint,
         compiler: CompilerResource::new(kind, Some(owner), slot),
@@ -469,5 +610,31 @@ mod tests {
             .expect("missing optional resource is valid")
             .is_none());
         assert!(index.optional(SemanticOpId(7), CompilerResourceKind::ReducePartial).is_err());
+    }
+
+    #[test]
+    fn candidate_index_preserves_parallel_and_serial_decisions() {
+        let owner = SemanticOpId(11);
+        let mut candidates = CandidateIndex::preflight();
+        candidates
+            .record_reduce(
+                owner,
+                &RecipeSelection::<()>::Serial(FallbackReason::UnsupportedViewShape),
+            )
+            .expect("record serial selection");
+        assert_eq!(
+            candidates.reduce(owner).expect("recorded reduce selection"),
+            RecipeSelection::Serial(FallbackReason::UnsupportedViewShape)
+        );
+        assert!(
+            candidates.scan(owner).is_err(),
+            "parallel preflight must reject a missing decision"
+        );
+
+        let sequential = CandidateIndex::sequential();
+        assert_eq!(
+            sequential.scan(owner).expect("sequential default selection"),
+            RecipeSelection::Serial(FallbackReason::SequentialPolicy)
+        );
     }
 }

@@ -832,9 +832,20 @@ entry add_sum(xs: []i32) []i32 =
 
     let fallback = compile_to_semantic_egir(
         "#[compute] entry sum_from(xs: []i32, z: i32) i32 = reduce(|a: i32, b: i32| a + b, z, xs)",
-    )
-    .plan(crate::LoweringProfile::PORTABLE)
-    .expect("plan reduction with a runtime neutral");
+    );
+    let resources_before = fallback.logical_resources().len();
+    assert_eq!(
+        crate::egir::parallelize::preflight_fallback_reasons(&fallback.inner)
+            .expect("analyze fallback without mutating the allocated program"),
+        [crate::egir::parallelize::FallbackReason::UnsupportedCaptures]
+    );
+    assert_eq!(
+        fallback.logical_resources().len(),
+        resources_before,
+        "immutable fallback analysis must not allocate speculative scratch"
+    );
+    let fallback =
+        fallback.plan(crate::LoweringProfile::PORTABLE).expect("plan reduction with a runtime neutral");
     assert!(
         !kinds(fallback.logical_resources()).contains(&CompilerResourceKind::ReducePartial),
         "a reduction rejected before mutation must not retain speculative scratch"

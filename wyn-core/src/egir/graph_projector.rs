@@ -44,13 +44,6 @@ pub enum ValueRecipeSource {
 }
 
 impl GraphProjection {
-    /// Source nodes retained by this projection. Consumers can derive
-    /// interface metadata before the projection is consumed without walking
-    /// the freshly built graph a second time.
-    pub fn source_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.nodes.keys().copied()
-    }
-
     pub fn node(&self, source: NodeId) -> Option<NodeId> {
         self.nodes.get(&source).copied()
     }
