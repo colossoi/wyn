@@ -12,7 +12,7 @@ use super::types::EffectToken;
 use crate::{IdSource, LoweringProfile, SchedulePolicy};
 
 pub fn schedule(
-    inner: AllocatedProgram,
+    mut inner: AllocatedProgram,
     binding_ids: &mut IdSource<u32>,
     effect_ids: &mut IdSource<EffectToken>,
     profile: LoweringProfile,
@@ -20,9 +20,11 @@ pub fn schedule(
     let unpublished_descriptor = inner.pipeline.clone();
 
     let kernel_plan = if profile.schedule == SchedulePolicy::Parallel {
-        parallelize::lower(&inner, effect_ids).map_err(ConvertError::Internal)?
+        parallelize::lower(&mut inner, effect_ids)
+            .map_err(|error| ConvertError::Internal(error.to_string()))?
     } else {
         parallelize::lower_sequential(&inner, effect_ids)
+            .map_err(|error| ConvertError::Internal(error.to_string()))?
     };
     kernel_plan
         .check_explicit_dispatch_coverage(&inner.entry_points)

@@ -535,10 +535,14 @@ fn expand_one(
                         scratch: storage.scratch,
                         length: storage.length,
                     };
+                    let config = filter::ParallelConfig {
+                        buffers: plan.buffers,
+                        scan_workgroup_width: plan.scan_workgroup_width,
+                    };
                     let plan = match plan.stage {
-                        filter::ParallelStage::Flags => filter::Plan::Flags(plan.buffers),
-                        filter::ParallelStage::Scan => filter::Plan::Scan(plan.buffers),
-                        filter::ParallelStage::Scatter => filter::Plan::Scatter(plan.buffers),
+                        filter::ParallelStage::Flags => filter::Plan::Flags(config),
+                        filter::ParallelStage::Scan => filter::Plan::Scan(config),
+                        filter::ParallelStage::Scatter => filter::Plan::Scatter(config),
                     };
                     (output, plan)
                 }
@@ -563,15 +567,34 @@ fn expand_one(
                 result_node: result_nid,
             };
             match plan {
-                filter::Plan::Flags(work) => {
-                    build_filter_flags(graph, control_headers, bid, idx, spec, work.flags, next_effect)
-                }
-                filter::Plan::Scan(work) => {
-                    build_filter_scan(graph, control_headers, bid, idx, spec, work, next_effect)
-                }
-                filter::Plan::Scatter(work) => {
-                    build_filter_scatter(graph, control_headers, bid, idx, spec, work, next_effect)
-                }
+                filter::Plan::Flags(config) => build_filter_flags(
+                    graph,
+                    control_headers,
+                    bid,
+                    idx,
+                    spec,
+                    config.buffers.flags,
+                    next_effect,
+                ),
+                filter::Plan::Scan(config) => build_filter_scan(
+                    graph,
+                    control_headers,
+                    bid,
+                    idx,
+                    spec,
+                    config.buffers,
+                    config.scan_workgroup_width,
+                    next_effect,
+                ),
+                filter::Plan::Scatter(config) => build_filter_scatter(
+                    graph,
+                    control_headers,
+                    bid,
+                    idx,
+                    spec,
+                    config.buffers,
+                    next_effect,
+                ),
                 filter::Plan::Serial => {
                     build_filter_loop(graph, control_headers, bid, idx, spec, next_effect)
                 }
@@ -1569,6 +1592,7 @@ fn build_filter_scan(
     idx: usize,
     spec: FilterLoop,
     work: FilterWorkBuffers,
+    scan_workgroup_width: u32,
     next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     use super::graph_ops::{emit_load, emit_storage_store, intern_storage_view, intern_u32};
@@ -1591,7 +1615,7 @@ fn build_filter_scan(
         None,
     );
     let wg_width = graph.intern_pure(
-        PureOp::Uint(super::parallelize::REDUCE_PHASE1_WIDTH.to_string()),
+        PureOp::Uint(scan_workgroup_width.to_string()),
         smallvec![],
         u32_ty.clone(),
         None,

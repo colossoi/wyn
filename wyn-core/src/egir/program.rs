@@ -223,6 +223,8 @@ pub enum ResourceOrigin {
 
 #[derive(Clone, Debug)]
 pub struct LogicalResource {
+    /// Dense planning-session identity. Compiler-owned ids may change when
+    /// target recipes change and must not be treated as host ABI bindings.
     pub id: ResourceId,
     pub origin: ResourceOrigin,
     pub elem_ty: Type<TypeName>,
@@ -242,10 +244,9 @@ pub(crate) fn host_resource_map(resources: &[LogicalResource]) -> HashMap<crate:
     resources.iter().filter_map(|resource| Some((resource.host_binding()?, resource.id))).collect()
 }
 
-/// Complete the authoritative logical-resource manifest at the allocation
-/// boundary. Host resources already have stable identities; this pass adds
-/// semantic residency requirements and segmented-operation scratch, then
-/// records explicit producer/consumer flows.
+/// Establish target-independent logical residency and materialization
+/// resources. Algorithm-specific reduce/scan/filter work buffers are selected
+/// later by target planning, before physical bindings are allocated.
 pub fn plan_logical_resources(
     inner: SemanticProgram,
     effect_ids: &mut crate::IdSource<super::types::EffectToken>,
@@ -257,10 +258,6 @@ pub fn plan_logical_resources(
     classify_existing_compiler_resources(&mut allocated);
     super::residency::run(&mut allocated, effect_ids);
     super::soac::filter::resolve_scratch_sizes(&mut allocated);
-    super::soac::filter::allocate_work_resources(&mut allocated);
-    let mut scratch =
-        super::parallelize::enumerate_seg_scratch(&allocated, allocated.resources.len() as u32);
-    allocated.resources.append(&mut scratch);
     strip_compiler_abi(&mut allocated);
     record_compiler_resource_flows(&mut allocated);
     if cfg!(debug_assertions) {
@@ -815,6 +812,7 @@ fn physicalize_soac(
                     plan: filter::ParallelPlan {
                         stage: plan.stage,
                         buffers: work_buffers(plan.buffers, bindings)?,
+                        scan_workgroup_width: plan.scan_workgroup_width,
                     },
                 },
             };
@@ -1130,6 +1128,9 @@ pub struct PhysicalResourceTable {
 }
 
 impl PhysicalResourceTable {
+    /// Assign backend bindings deterministically. Host resources retain their
+    /// declared ABI identities; only compiler-owned resources draw automatic
+    /// bindings from `ids`.
     pub fn allocate(resources: &[LogicalResource], ids: &mut crate::IdSource<u32>) -> Self {
         let mut ordered = resources.iter().collect::<Vec<_>>();
         ordered.sort_by_key(|resource| resource.id.0);

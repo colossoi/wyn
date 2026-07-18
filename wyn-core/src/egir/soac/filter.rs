@@ -45,9 +45,17 @@ pub enum RuntimeLength<R = SemanticResourceRef> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plan<R = SemanticResourceRef> {
     Serial,
-    Flags(WorkBuffers<R>),
-    Scan(WorkBuffers<R>),
-    Scatter(WorkBuffers<R>),
+    Flags(ParallelConfig<R>),
+    Scan(ParallelConfig<R>),
+    Scatter(ParallelConfig<R>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParallelConfig<R = SemanticResourceRef> {
+    pub buffers: WorkBuffers<R>,
+    /// Width selected when the recipe was planned. Expansion consumes this
+    /// value instead of consulting parallelization policy again.
+    pub scan_workgroup_width: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +155,7 @@ pub enum ParallelStage {
 pub struct ParallelPlan<R> {
     pub stage: ParallelStage,
     pub buffers: WorkBuffers<R>,
+    pub scan_workgroup_width: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -293,69 +302,6 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut AllocatedProgram) {
                 }
             }
         }
-    }
-}
-
-pub(crate) fn allocate_work_resources(inner: &mut AllocatedProgram) {
-    let mut pending = Vec::new();
-    for (_, entry) in inner.entries_with_endpoints() {
-        for (_, block) in &entry.graph.skeleton.blocks {
-            for effect in &block.side_effects {
-                let SideEffectKind::Soac(SoacEffect(
-                    owner,
-                    Soac::Filter(Op {
-                        state:
-                            SemanticState {
-                                space,
-                                storage: Output::Runtime { .. },
-                            },
-                        ..
-                    }),
-                )) = &effect.kind
-                else {
-                    continue;
-                };
-                let element_count_size = match space.dims.first() {
-                    Some(SegExtent::Fixed(count)) if space.dims.len() == 1 => {
-                        LogicalSize::FixedBytes(*count as u64 * 4)
-                    }
-                    Some(SegExtent::ResourceLength {
-                        resource, elem_bytes, ..
-                    }) if space.dims.len() == 1 => LogicalSize::LikeResource {
-                        resource: resource.0,
-                        elem_bytes: 4,
-                        src_elem_bytes: *elem_bytes,
-                    },
-                    _ => LogicalSize::SameAsDispatch { elem_bytes: 4 },
-                };
-                let worker_count_size = LogicalSize::FixedBytes(
-                    (super::super::parallelize::FILTER_SCAN_GROUPS
-                        * super::super::parallelize::REDUCE_PHASE1_WIDTH) as u64
-                        * 4,
-                );
-                let owner = Some(*owner);
-                for (slot, (kind, size)) in [
-                    (CompilerResourceKind::FilterFlags, element_count_size.clone()),
-                    (CompilerResourceKind::FilterOffsets, element_count_size.clone()),
-                    (
-                        CompilerResourceKind::FilterScanBlockSums,
-                        worker_count_size.clone(),
-                    ),
-                    (
-                        CompilerResourceKind::FilterScanBlockOffsets,
-                        worker_count_size.clone(),
-                    ),
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    pending.push((CompilerResource::new(kind, owner, slot), size));
-                }
-            }
-        }
-    }
-    for (compiler, size) in pending {
-        inner.alloc_compiler_resource(compiler, Type::Constructed(TypeName::UInt(32), vec![]), size);
     }
 }
 

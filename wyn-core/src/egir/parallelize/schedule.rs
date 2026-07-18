@@ -6,6 +6,10 @@
 //! lowering has finished; it is not mutated while an individual lowering is
 //! still speculative.
 
+// The validated schedule implementation predates the algorithm split and has
+// separately audited internal assertions. New recipe modules deny these lints.
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -997,16 +1001,8 @@ impl KernelPlan {
         Ok(())
     }
 
-    pub fn coalesce_resource_flows(&mut self, resources: &[LogicalResource]) {
-        let mut flows = resources
-            .iter()
-            .filter_map(|resource| match &resource.origin {
-                ResourceOrigin::Compiler(compiler) => compiler.flow.clone().map(|flow| (resource.id, flow)),
-                ResourceOrigin::Host(_) => None,
-            })
-            .collect::<Vec<_>>();
-        flows.sort_by_key(|(resource, _)| resource.0);
-        self.complete_resource_flows(&flows);
+    pub fn coalesce_resource_flows(&mut self, flows: &[(ResourceId, CompilerResourceFlow)]) {
+        self.complete_resource_flows(flows);
         self.merge_connected_pipelines();
     }
 
@@ -1236,7 +1232,7 @@ fn source_kind(entry: &SemanticEntry) -> KernelKind {
     if !matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
         return KernelKind::GraphicsPassthrough;
     }
-    match super::parallel_effect(&entry.graph).map(|(_, _, effect)| &effect.kind) {
+    match super::parallel_recipe_effect(entry).map(|(_, _, effect)| &effect.kind) {
         Some(SideEffectKind::Soac(SoacEffect(_, Soac::Screma(screma::Op::Reduce { .. })))) => {
             KernelKind::ReducePhase1
         }
@@ -1321,15 +1317,15 @@ fn domain_selection_from_stage(
 }
 
 pub(crate) fn segmented_domain(entry: &SemanticEntry) -> Option<KernelDomain> {
-    semantic_domain_graph(&entry.graph)
+    semantic_domain_entry(entry)
 }
 
 fn materialization_domain(requirement: &MaterializationRequirement) -> Option<KernelDomain> {
-    semantic_domain_graph(&requirement.entry.graph)
+    semantic_domain_entry(&requirement.entry)
 }
 
-fn semantic_domain_graph(graph: &crate::egir::types::EGraph) -> Option<KernelDomain> {
-    match &super::parallel_effect(graph)?.2.kind {
+fn semantic_domain_entry(entry: &SemanticEntry) -> Option<KernelDomain> {
+    match &super::parallel_recipe_effect(entry)?.2.kind {
         SideEffectKind::Soac(SoacEffect(
             _,
             Soac::Screma(
@@ -1350,14 +1346,14 @@ fn semantic_domain_graph(graph: &crate::egir::types::EGraph) -> Option<KernelDom
                     ..
                 },
             ),
-        )) => domain_from_space_in_graph(graph, space),
+        )) => domain_from_space_in_graph(&entry.graph, space),
         SideEffectKind::Soac(SoacEffect(
             _,
             Soac::Filter(filter::Op {
                 state: filter::SemanticState { space, .. },
                 ..
             }),
-        )) => domain_from_space_in_graph(graph, space),
+        )) => domain_from_space_in_graph(&entry.graph, space),
         _ => None,
     }
 }

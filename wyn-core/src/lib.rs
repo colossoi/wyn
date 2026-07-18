@@ -1345,6 +1345,9 @@ impl EgirAllocated {
         egir::semantic_graph::summary(&self.inner)
     }
 
+    /// The pre-target residency manifest. It contains semantic output storage,
+    /// materializations, filter capacity/length cells, and compiler flows, but
+    /// deliberately excludes reduce/scan/filter algorithm work buffers.
     pub fn logical_resources(&self) -> &[egir::program::LogicalResource] {
         &self.inner.resources
     }
@@ -1369,6 +1372,14 @@ impl EgirAllocated {
 }
 
 impl EgirPlanned {
+    /// Final logical resource manifest after target recipe selection has added
+    /// only the algorithm-specific work buffers used by the validated plan.
+    /// The target-complete manifest, including only the algorithm scratch
+    /// required by the recipes selected for this plan.
+    pub fn logical_resources(&self) -> &[egir::program::LogicalResource] {
+        &self.physical.resources
+    }
+
     pub fn kernel_plan(&self) -> &egir::parallelize::schedule::ValidatedKernelPlan {
         &self.physical.plan
     }

@@ -108,16 +108,22 @@ fn schedule_soac_with_mode(
                     let filter::Output::Runtime { scratch, length } = storage else {
                         return Err("parallel filter plan requires runtime output storage".into());
                     };
-                    let (stage, buffers) = match plan {
-                        filter::Plan::Flags(buffers) => (filter::ParallelStage::Flags, buffers),
-                        filter::Plan::Scan(buffers) => (filter::ParallelStage::Scan, buffers),
-                        filter::Plan::Scatter(buffers) => (filter::ParallelStage::Scatter, buffers),
-                        filter::Plan::Serial => unreachable!(),
+                    let (stage, config) = match plan {
+                        filter::Plan::Flags(config) => (filter::ParallelStage::Flags, config),
+                        filter::Plan::Scan(config) => (filter::ParallelStage::Scan, config),
+                        filter::Plan::Scatter(config) => (filter::ParallelStage::Scatter, config),
+                        filter::Plan::Serial => {
+                            return Err("serial filter plan reached the parallel scheduler branch".into());
+                        }
                     };
                     filter::ScheduledState::Parallel {
                         space,
                         storage: filter::RuntimeStorage { scratch, length },
-                        plan: filter::ParallelPlan { stage, buffers },
+                        plan: filter::ParallelPlan {
+                            stage,
+                            buffers: config.buffers,
+                            scan_workgroup_width: config.scan_workgroup_width,
+                        },
                     }
                 }
             };

@@ -532,8 +532,8 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
     assert!(allocated.semantic_ir().contains("SegRed"));
     assert!(allocated.semantic_ir().contains("ResourceLength"));
 
-    // The reduce's partial buffer is an authoritative owner-tagged logical
-    // resource; the semantic operation does not carry phase-local scratch ids.
+    // Residency allocation is target independent: the semantic operation does
+    // not reserve a phase-local partial buffer yet.
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
     let partials = allocated
         .inner
@@ -547,8 +547,9 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
             )
         })
         .count();
-    assert_eq!(partials, 1, "one reduce partial reserved as a logical resource");
-    assert!(allocated.inner.resources.iter().any(|resource| matches!(
+    assert_eq!(partials, 0, "pre-target allocation has no reduce scratch");
+    let planned = allocated.plan(crate::LoweringProfile::PORTABLE).expect("plan parallel reduction");
+    assert!(planned.logical_resources().iter().any(|resource| matches!(
         resource.origin,
         ResourceOrigin::Compiler(ref compiler)
             if compiler.kind == CompilerResourceKind::ReducePartial && compiler.owner.is_some()
@@ -721,23 +722,30 @@ entry e() [2]i32 =
 }
 
 #[test]
-fn logical_manifest_covers_scan_and_filter_scratch() {
+fn target_planning_owns_parallel_work_scratch() {
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
+
+    let kinds = |resources: &[crate::egir::program::LogicalResource]| {
+        resources
+            .iter()
+            .filter_map(|resource| match &resource.origin {
+                ResourceOrigin::Compiler(compiler) => Some(compiler.kind),
+                ResourceOrigin::Host(_) => None,
+            })
+            .collect::<std::collections::HashSet<_>>()
+    };
 
     let scan = compile_to_semantic_egir(
         "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
     );
-    let scan_kinds: std::collections::HashSet<_> = scan
-        .logical_resources()
-        .iter()
-        .filter_map(|resource| match &resource.origin {
-            ResourceOrigin::Compiler(compiler) => Some(compiler.kind),
-            _ => None,
-        })
-        .collect();
+    let scan_kinds = kinds(scan.logical_resources());
+    assert!(!scan_kinds.contains(&CompilerResourceKind::ScanBlockSums));
+    assert!(!scan_kinds.contains(&CompilerResourceKind::ScanBlockOffsets));
+    let scan = scan.plan(crate::LoweringProfile::PORTABLE).expect("plan parallel scan");
+    let scan_kinds = kinds(scan.logical_resources());
     assert!(scan_kinds.contains(&CompilerResourceKind::ScanBlockSums));
     assert!(scan_kinds.contains(&CompilerResourceKind::ScanBlockOffsets));
-    let scan_resources: Vec<_> = scan
+    let scan_resource_count = scan
         .logical_resources()
         .iter()
         .filter_map(|resource| match &resource.origin {
@@ -747,24 +755,22 @@ fn logical_manifest_covers_scan_and_filter_scratch() {
                     CompilerResourceKind::ScanBlockSums | CompilerResourceKind::ScanBlockOffsets
                 ) =>
             {
-                Some(resource.id)
+                Some(())
             }
             _ => None,
         })
-        .collect();
-    assert_eq!(scan_resources.len(), 2);
+        .count();
+    assert_eq!(scan_resource_count, 2);
 
     let filter = compile_to_semantic_egir(
         "#[compute] entry evens(xs: []i32) []i32 = filter(|x: i32| x % 2 == 0, xs)",
     );
-    let filter_kinds: std::collections::HashSet<_> = filter
+    let host_abi = filter
         .logical_resources()
         .iter()
-        .filter_map(|resource| match &resource.origin {
-            ResourceOrigin::Compiler(compiler) => Some(compiler.kind),
-            _ => None,
-        })
-        .collect();
+        .filter_map(|resource| resource.host_binding())
+        .collect::<Vec<_>>();
+    let filter_kinds = kinds(filter.logical_resources());
     assert!(
         filter
             .logical_resources()
@@ -775,6 +781,21 @@ fn logical_manifest_covers_scan_and_filter_scratch() {
         "the input and returned filter capacity remain host ABI resources"
     );
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterLenCell));
+    assert!(!filter_kinds.contains(&CompilerResourceKind::FilterFlags));
+    assert!(!filter_kinds.contains(&CompilerResourceKind::FilterOffsets));
+    assert!(!filter_kinds.contains(&CompilerResourceKind::FilterScanBlockSums));
+    assert!(!filter_kinds.contains(&CompilerResourceKind::FilterScanBlockOffsets));
+    let filter = filter.plan(crate::LoweringProfile::PORTABLE).expect("plan parallel filter");
+    assert_eq!(
+        filter
+            .logical_resources()
+            .iter()
+            .filter_map(|resource| resource.host_binding())
+            .collect::<Vec<_>>(),
+        host_abi,
+        "target scratch allocation must not change host ABI bindings"
+    );
+    let filter_kinds = kinds(filter.logical_resources());
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterFlags));
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterOffsets));
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterScanBlockSums));
@@ -795,6 +816,326 @@ entry add_sum(xs: []i32) []i32 =
                 if compiler.kind == CompilerResourceKind::ScalarHandoff
         )
     }));
+
+    let single = compile_to_semantic_egir(
+        "#[compute] entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)",
+    )
+    .plan(crate::LoweringProfile::new(
+        crate::CodegenTarget::Portable,
+        crate::SchedulePolicy::SingleStage,
+    ))
+    .expect("plan sequential reduction");
+    assert!(
+        !kinds(single.logical_resources()).contains(&CompilerResourceKind::ReducePartial),
+        "single-stage planning must not reserve parallel partial buffers"
+    );
+
+    let fallback = compile_to_semantic_egir(
+        "#[compute] entry sum_from(xs: []i32, z: i32) i32 = reduce(|a: i32, b: i32| a + b, z, xs)",
+    )
+    .plan(crate::LoweringProfile::PORTABLE)
+    .expect("plan reduction with a runtime neutral");
+    assert!(
+        !kinds(fallback.logical_resources()).contains(&CompilerResourceKind::ReducePartial),
+        "a reduction rejected before mutation must not retain speculative scratch"
+    );
+}
+
+#[test]
+fn selected_recipes_allocate_exact_ordered_scratch() {
+    use crate::egir::program::{CompilerResourceKind as Kind, LogicalSize, ResourceOrigin};
+
+    let planned_scratch = |resources: &[crate::egir::program::LogicalResource]| {
+        resources
+            .iter()
+            .filter_map(|resource| match &resource.origin {
+                ResourceOrigin::Compiler(compiler)
+                    if matches!(
+                        compiler.kind,
+                        Kind::ReducePartial
+                            | Kind::ScanBlockSums
+                            | Kind::ScanBlockOffsets
+                            | Kind::FilterFlags
+                            | Kind::FilterOffsets
+                            | Kind::FilterScanBlockSums
+                            | Kind::FilterScanBlockOffsets
+                    ) =>
+                {
+                    Some((
+                        compiler.kind,
+                        compiler.owner,
+                        compiler.slot,
+                        resource.size.clone(),
+                    ))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let scalar_reduce = compile_to_semantic_egir(
+        "#[compute] entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)",
+    )
+    .plan(crate::LoweringProfile::PORTABLE)
+    .expect("plan scalar reduction");
+    let scratch = planned_scratch(scalar_reduce.logical_resources());
+    assert_eq!(scratch.len(), 1);
+    assert_eq!(scratch[0].0, Kind::ReducePartial);
+    assert!(scratch[0].1.is_some());
+    assert_eq!(scratch[0].2, 0);
+    assert_eq!(scratch[0].3, LogicalSize::SameAsDispatch { elem_bytes: 4 });
+
+    let multi_reduce = compile_to_semantic_egir(
+        r#"
+#[compute]
+entry sums() (i32, i32) =
+  let xs = map(|i: i32| i + 1, 0i32 ..< 8) in
+  let ys = map(|i: i32| i * 2, 0i32 ..< 8) in
+  (reduce(|a: i32, b: i32| a + b, 0, xs),
+   reduce(|a: i32, b: i32| a + b, 0, ys))
+"#,
+    );
+    let multi_reduce =
+        multi_reduce.plan(crate::LoweringProfile::PORTABLE).expect("plan multi-accumulator reduction");
+    let scratch = planned_scratch(multi_reduce.logical_resources());
+    assert_eq!(scratch.len(), 2);
+    assert_eq!(
+        multi_reduce.kernel_plan().phases().map(|phase| phase.recipe.kind()).collect::<Vec<_>>(),
+        [
+            crate::egir::parallelize::schedule::KernelKind::ReducePhase1,
+            crate::egir::parallelize::schedule::KernelKind::ReduceCombine,
+            crate::egir::parallelize::schedule::KernelKind::ReduceCombine,
+        ]
+    );
+    let owner = scratch[0].1.expect("scratch has an operation owner");
+    assert_eq!(
+        scratch
+            .iter()
+            .map(|(kind, candidate, slot, size)| (*kind, *candidate, *slot, size.clone()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                Kind::ReducePartial,
+                Some(owner),
+                0,
+                LogicalSize::SameAsDispatch { elem_bytes: 4 },
+            ),
+            (
+                Kind::ReducePartial,
+                Some(owner),
+                1,
+                LogicalSize::SameAsDispatch { elem_bytes: 4 },
+            ),
+        ]
+    );
+
+    let scan = compile_to_semantic_egir(
+        "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
+    )
+    .plan(crate::LoweringProfile::PORTABLE)
+    .expect("plan scan");
+    let scratch = planned_scratch(scan.logical_resources());
+    let owner = scratch[0].1.expect("scratch has an operation owner");
+    assert_eq!(
+        scratch,
+        [
+            (
+                Kind::ScanBlockSums,
+                Some(owner),
+                0,
+                LogicalSize::SameAsDispatch { elem_bytes: 4 },
+            ),
+            (
+                Kind::ScanBlockOffsets,
+                Some(owner),
+                1,
+                LogicalSize::SameAsDispatch { elem_bytes: 4 },
+            ),
+        ]
+    );
+
+    let filter = compile_to_semantic_egir(
+        "#[compute] entry evens(xs: []i32) []i32 = filter(|x: i32| x % 2 == 0, xs)",
+    )
+    .plan(crate::LoweringProfile::PORTABLE)
+    .expect("plan runtime filter");
+    let scratch = planned_scratch(filter.logical_resources());
+    assert_eq!(scratch.len(), 4);
+    let owner = scratch[0].1.expect("scratch has an operation owner");
+    assert_eq!(
+        scratch.iter().map(|item| (item.0, item.1, item.2)).collect::<Vec<_>>(),
+        [
+            (Kind::FilterFlags, Some(owner), 0),
+            (Kind::FilterOffsets, Some(owner), 1),
+            (Kind::FilterScanBlockSums, Some(owner), 2),
+            (Kind::FilterScanBlockOffsets, Some(owner), 3),
+        ]
+    );
+    assert!(scratch[..2].iter().all(|item| matches!(
+        item.3,
+        LogicalSize::LikeResource {
+            elem_bytes: 4,
+            src_elem_bytes: 4,
+            ..
+        }
+    )));
+    assert!(scratch[2..].iter().all(|item| item.3 == LogicalSize::FixedBytes(4 * 64 * 4)));
+}
+
+#[test]
+fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
+    use crate::egir::parallelize::schedule::{KernelDomain, KernelKind};
+
+    let reduce = crate::compile_thru_ssa(
+        "#[compute] entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)",
+    )
+    .expect("parallel reduction reaches SSA");
+    let phases = reduce.kernel_plan.phases().collect::<Vec<_>>();
+    assert_eq!(
+        phases.iter().map(|phase| phase.kind).collect::<Vec<_>>(),
+        [KernelKind::ReducePhase1, KernelKind::ReduceCombine]
+    );
+    assert_eq!(phases[0].workgroup_size, (64, 1, 1));
+    assert_eq!(phases[1].workgroup_size, (256, 1, 1));
+    assert!(matches!(
+        phases[1].domain,
+        KernelDomain::Fixed { x: 1, y: 1, z: 1 }
+    ));
+
+    let scan = crate::compile_thru_ssa(
+        "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
+    )
+    .expect("parallel scan reaches SSA");
+    let phases = scan.kernel_plan.phases().collect::<Vec<_>>();
+    assert_eq!(
+        phases.iter().map(|phase| phase.kind).collect::<Vec<_>>(),
+        [
+            KernelKind::ScanPhase1,
+            KernelKind::ScanBlock,
+            KernelKind::ScanApplyOffsets
+        ]
+    );
+    assert_eq!(
+        phases.iter().map(|phase| phase.workgroup_size).collect::<Vec<_>>(),
+        [(64, 1, 1), (1, 1, 1), (64, 1, 1)]
+    );
+    assert!(matches!(
+        phases[1].domain,
+        KernelDomain::Fixed { x: 1, y: 1, z: 1 }
+    ));
+}
+
+#[test]
+fn chunked_recipes_accept_empty_small_uneven_and_unsigned_ranges() {
+    use crate::egir::parallelize::schedule::KernelKind;
+
+    let cases = [
+        (
+            "#[compute] entry empty() i32 = reduce(|a: i32, b: i32| a + b, 0, 0i32 ..< 0)",
+            KernelKind::ReducePhase1,
+        ),
+        (
+            "#[compute] entry small() []i32 = scan(|a: i32, b: i32| a + b, 0, 0i32 ..< 7)",
+            KernelKind::ScanPhase1,
+        ),
+        (
+            "#[compute] entry uneven() i32 = reduce(|a: i32, b: i32| a + b, 0, 0i32 ..< 70)",
+            KernelKind::ReducePhase1,
+        ),
+        (
+            "#[compute] entry unsigned() u32 = reduce(|a: u32, b: u32| a + b, 0u32, 0u32 ..< 70u32)",
+            KernelKind::ReducePhase1,
+        ),
+    ];
+
+    for (source, expected) in cases {
+        let lowered = crate::compile_thru_ssa(source).expect("edge-domain recipe reaches SSA");
+        assert_eq!(
+            lowered.kernel_plan.phases().next().map(|phase| phase.kind),
+            Some(expected),
+            "edge-domain shape must retain its selected parallel recipe"
+        );
+    }
+}
+
+#[test]
+fn associative_noncommutative_reduce_and_scan_keep_parallel_ordered_recipes() {
+    use crate::egir::parallelize::schedule::KernelKind;
+
+    // Dihedral-group composition encoded as `rotation + 3 * reflected`.
+    // It is associative with identity 0, but reflections and rotations do not
+    // commute, making it a useful ordering characterization in one scalar.
+    let compose = |left: &i32, right: &i32| {
+        let (left_rotation, left_reflected) = (left % 3, left / 3);
+        let (right_rotation, right_reflected) = (right % 3, right / 3);
+        let rotation = if left_reflected == 0 {
+            (left_rotation + right_rotation) % 3
+        } else {
+            (left_rotation + 3 - right_rotation) % 3
+        };
+        rotation + 3 * ((left_reflected + right_reflected) % 2)
+    };
+    let values = [3, 1];
+    let forward = crate::egir::semantic_exec::reduce(&values, 0, compose);
+    let mut reversed = values;
+    reversed.reverse();
+    assert_ne!(
+        forward,
+        crate::egir::semantic_exec::reduce(&reversed, 0, compose),
+        "the characterization operator must actually be non-commutative"
+    );
+
+    let reduce = crate::compile_thru_ssa(
+        r#"
+#[compute]
+entry compose_all(xs: []i32) i32 =
+  reduce(
+    |left: i32, right: i32|
+      let left_rotation = left % 3
+      let left_reflected = left / 3
+      let right_rotation = right % 3
+      let right_reflected = right / 3
+      let rotation = if left_reflected == 0
+        then (left_rotation + right_rotation) % 3
+        else (left_rotation + 3 - right_rotation) % 3 in
+      rotation + 3 * ((left_reflected + right_reflected) % 2),
+    0,
+    xs)
+"#,
+    )
+    .expect("ordered tuple reduction reaches SSA");
+    assert_eq!(
+        reduce.kernel_plan.phases().map(|phase| phase.kind).collect::<Vec<_>>(),
+        [KernelKind::ReducePhase1, KernelKind::ReduceCombine]
+    );
+
+    let scan = crate::compile_thru_ssa(
+        r#"
+#[compute]
+entry compose_prefix(xs: []i32) []i32 =
+  scan(
+    |left: i32, right: i32|
+      let left_rotation = left % 3
+      let left_reflected = left / 3
+      let right_rotation = right % 3
+      let right_reflected = right / 3
+      let rotation = if left_reflected == 0
+        then (left_rotation + right_rotation) % 3
+        else (left_rotation + 3 - right_rotation) % 3 in
+      rotation + 3 * ((left_reflected + right_reflected) % 2),
+    0,
+    xs)
+"#,
+    )
+    .expect("ordered tuple scan reaches SSA");
+    assert_eq!(
+        scan.kernel_plan.phases().map(|phase| phase.kind).collect::<Vec<_>>(),
+        [
+            KernelKind::ScanPhase1,
+            KernelKind::ScanBlock,
+            KernelKind::ScanApplyOffsets,
+        ]
+    );
 }
 
 #[test]
@@ -1401,8 +1742,8 @@ entry e() [4]i32 =
     let single_phases: Vec<_> = single.kernel_plan.phases().collect();
     assert_eq!(
         single_phases.len(),
-        4,
-        "shared array, two scalar-reduction phases, and source entry"
+        3,
+        "shared array, serial scalar reduction, and source entry"
     );
     assert!(matches!(
         single_phases[0].domain,
@@ -1500,7 +1841,7 @@ fn terminal_scan_helpers_are_complete_region_arena_members() {
         !allocated.inner.functions.iter().any(|function| function.name.ends_with("_scan_op_swap")),
         "planner-generated scan helper leaked into semantic EGIR"
     );
-    let plan = crate::egir::parallelize::lower(&allocated.inner, &mut allocated.effect_ids)
+    let plan = crate::egir::parallelize::lower(&mut allocated.inner, &mut allocated.effect_ids)
         .expect("parallel schedule");
     assert!(
         plan.generated_callables().any(|function| function.name.ends_with("_scan_op_swap")),

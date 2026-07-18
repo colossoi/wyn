@@ -124,10 +124,10 @@ Each notes how it's enforced; when you move a pass, check it here.
 |-------|--------|-------------|
 | **EgirRaw** | `egir::from_tlc` | TLC → semantic EGraph; intrinsic calls become pure nodes (with explicit arms for effectful ones), callable bodies become regions, and each entry records stable per-slot `OutputRoute`s. No scheduling or physical resource choice occurs here |
 | **EgirOutputsRealized** | `egir::realize_outputs` | Per-slot output realization: each declared output's writes are materialized as side effects against the bound storage view (compute) or `OutputSlot` place (graphics); the body's `Return` carries no value. The post-pass verifier checks no runtime-sized Composite array is reachable from any entry output |
-| **EgirSegmented** | `egir::parallelize::reify` | Every reachable raw map/reduce/scan Screma becomes a semantic SegMap/SegRed/SegScan with authoritative `SegSpace`, typed bodies, explicit captures, output routing, effects, placement, and dependencies. No phases are selected here |
+| **EgirSegmented** | `egir::reify` | Every reachable raw map/reduce/scan Screma becomes a semantic SegMap/SegRed/SegScan with authoritative `SegSpace`, typed bodies, explicit captures, output routing, effects, placement, and dependencies. No phases are selected here |
 | **EgirOptimized** | `egir::semantic_opt`, `egir::fusion` | Conflict-aware sibling and producer/consumer fusion, filter/envelope fusion, indexed-demand scalarization, and dead-SegOp elimination; SegOps remain semantic |
-| **EgirAllocated** | `egir::program`, `egir::residency` | Resolve uniqueness candidates from post-fusion liveness and build the logical resource manifest for scalar handoffs, gather/shared arrays, outputs, and reduce/scan/filter scratch. Physical bindings and entry splitting remain deferred |
-| **EgirPlanned** | `egir::target_lowering` | Given a `LoweringProfile`, choose algorithms and dispatches, split physical entries, allocate physical bindings, validate the `KernelPlan`, and publish the final descriptor as one transaction |
+| **EgirAllocated** | `egir::program`, `egir::residency` | Resolve uniqueness candidates from post-fusion liveness and build the target-independent residency manifest for scalar handoffs, gather/shared arrays, filter capacity/length cells, and outputs. Algorithm work buffers, physical bindings, and entry splitting remain deferred |
+| **EgirPlanned** | `egir::target_lowering` | Given a `LoweringProfile`, choose algorithms and dispatches, add only the selected reduce/scan/filter work buffers, split physical entries, allocate physical bindings, validate the `KernelPlan`, and publish the final descriptor as one transaction |
 | **SsaConverted** | `egir::soac_expand` → `egir::materialize` → `egir::rewrite` → `egir::skel_opt` → `egir::resource_erasure` → `egir::elaborate` | Expand only the validated physical plan, materialize its graph, propose cost-arbitrated alternatives as union nodes (e.g. `x ** k` vs a multiply chain — extraction picks during elaboration), simplify the skeleton, erase compile-time resource handles, and elaborate the result to SSA |
 
 The EGIR order is also load-bearing:
@@ -138,9 +138,9 @@ The EGIR order is also load-bearing:
   semantic operation IDs, effects, and dependency edges.
 - **`optimize` ≺ `allocate`** — residency and uniqueness resolution use the
   final fused graph's liveness and demands.
-- **`allocate` ≺ `plan`** — target scheduling consumes the complete logical
-  resource and scratch manifest; only then may it choose bindings, dispatches,
-  and physical entries.
+- **`allocate` ≺ `plan`** — target scheduling consumes the final semantic
+  residency manifest, then transactionally adds recipe-owned work buffers
+  before choosing bindings, dispatches, and physical entries.
 - **`plan` ≺ `lower_to_ssa`** — SOAC expansion accepts only the validated
   physical program built from the kernel plan.
 
