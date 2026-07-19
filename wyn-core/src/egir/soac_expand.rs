@@ -37,7 +37,7 @@ pub fn run(inner: &mut PhysicalProgram, effect_ids: &mut crate::IdSource<EffectT
         entry_points,
         region_interner,
         ..
-    } = &mut inner.ir;
+    } = inner.ir_mut();
     for f in functions.iter_mut() {
         run_one_body(&mut f.graph, &mut f.control_headers, region_interner, effect_ids);
     }

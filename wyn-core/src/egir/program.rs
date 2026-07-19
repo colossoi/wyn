@@ -22,7 +22,7 @@ use crate::types::TypeExt;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 
-use super::parallelize::ValidatedKernelPlan;
+use super::parallelize::KernelPlan;
 use super::soac::{filter, hist, screma};
 use super::types::{
     EGraph, EgirPhase, NodeId, Physical, Raw, Scheduled, SegBody, SegExtent, SegSpace, Semantic, Soac,
@@ -1279,14 +1279,12 @@ impl DerefMut for AllocatedProgram {
 
 pub type ScheduledProgram = Program<Scheduled>;
 
-/// EGIR after the plan has validated and every physical entry has been
-/// constructed. Only this type is accepted by expansion and SSA elaboration.
+/// Fully constructed physical EGIR. Schedule validation and physical binding
+/// verification are complete before this value is returned; transient
+/// planning state is not retained.
 pub struct PhysicalProgram {
-    pub ir: Program<Physical>,
-    pub resources: Vec<LogicalResource>,
-    pub semantic_dependencies: Vec<SemanticDependency>,
-    pub(in crate::egir) plan: ValidatedKernelPlan,
-    pub physical_resources: PhysicalResourceTable,
+    ir: Program<Physical>,
+    resources: Vec<LogicalResource>,
 }
 
 impl Deref for PhysicalProgram {
@@ -1464,10 +1462,10 @@ fn physicalize_entry(
 }
 
 impl PhysicalProgram {
-    pub(in crate::egir) fn from_validated(
+    pub(in crate::egir) fn from_plan(
         program: AllocatedProgram,
-        plan: ValidatedKernelPlan,
-        physical_resources: PhysicalResourceTable,
+        plan: &KernelPlan,
+        physical_resources: &PhysicalResourceTable,
         serial: bool,
         pipeline: PipelineDescriptor,
     ) -> Result<Self, String> {
@@ -1478,7 +1476,7 @@ impl PhysicalProgram {
         let SemanticProgram {
             ir,
             resources,
-            semantic_dependencies,
+            semantic_dependencies: _,
         } = semantic;
         let Program {
             functions,
@@ -1492,22 +1490,22 @@ impl PhysicalProgram {
         } = ir;
         let entry_points = plan
             .physical_entries()
-            .map(|entry| physicalize_entry(entry, &physical_resources))
+            .map(|entry| physicalize_entry(entry, physical_resources))
             .collect::<Result<Vec<_>, _>>()?;
         let mut functions = functions
             .into_iter()
-            .map(|function| physicalize_function(function, &physical_resources, serial))
+            .map(|function| physicalize_function(function, physical_resources, serial))
             .collect::<Result<Vec<_>, _>>()?;
         for generated in plan.generated_callables() {
             functions.push(physicalize_function(
                 generated.clone(),
-                &physical_resources,
+                physical_resources,
                 serial,
             )?);
         }
         let constants = constants
             .into_iter()
-            .map(|constant| physicalize_constant(constant, &physical_resources))
+            .map(|constant| physicalize_constant(constant, physical_resources))
             .collect::<Result<Vec<_>, _>>()?;
         let region_interner = plan.region_interner().clone();
         let mut regions = regions;
@@ -1529,10 +1527,19 @@ impl PhysicalProgram {
                 region_interner,
             },
             resources,
-            semantic_dependencies,
-            plan,
-            physical_resources,
         })
+    }
+
+    pub(crate) fn logical_resources(&self) -> &[LogicalResource] {
+        &self.resources
+    }
+
+    pub(in crate::egir) fn ir_mut(&mut self) -> &mut Program<Physical> {
+        &mut self.ir
+    }
+
+    pub(in crate::egir) fn into_ir(self) -> Program<Physical> {
+        self.ir
     }
 }
 

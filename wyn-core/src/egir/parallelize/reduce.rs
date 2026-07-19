@@ -185,7 +185,7 @@ impl BoundReduce {
     }
 }
 
-impl ParallelLowering<'_, '_> {
+impl KernelPlanBuilder<'_, '_> {
     pub(super) fn emit_reduce_entry(
         &mut self,
         entry: &mut crate::egir::program::PlannedEntry,

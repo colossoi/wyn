@@ -8,7 +8,7 @@ pub(super) enum FilterLowering {
     Lowered(Vec<(schedule::KernelId, crate::egir::program::PlannedEntry, Vec<usize>)>),
 }
 
-impl ParallelLowering<'_, '_> {
+impl KernelPlanBuilder<'_, '_> {
     pub(super) fn lower_filter_if_selected(
         &mut self,
         entry: &SemanticEntry,
@@ -108,7 +108,7 @@ struct FilterKernelFamily {
 }
 
 struct FilterKernelFamilyBuilder<'lowering, 'resources, 'effects> {
-    lowering: &'lowering mut ParallelLowering<'resources, 'effects>,
+    lowering: &'lowering mut KernelPlanBuilder<'resources, 'effects>,
     entry: crate::egir::program::PlannedEntry,
     candidate: FilterCandidate,
     work: filter_soac::WorkBuffers,
@@ -117,7 +117,7 @@ struct FilterKernelFamilyBuilder<'lowering, 'resources, 'effects> {
 
 impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'resources, 'effects> {
     fn new(
-        lowering: &'lowering mut ParallelLowering<'resources, 'effects>,
+        lowering: &'lowering mut KernelPlanBuilder<'resources, 'effects>,
         entry: crate::egir::program::PlannedEntry,
         recipe: BoundFilter,
     ) -> Self {

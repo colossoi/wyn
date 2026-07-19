@@ -69,7 +69,6 @@ impl KernelPlan {
 
     pub(super) fn validate_program(
         &self,
-        _entries: &[SemanticEntry],
         resources: &[LogicalResource],
         descriptor: &PipelineDescriptor,
     ) -> Result<(), String> {

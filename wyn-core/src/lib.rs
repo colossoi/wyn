@@ -1241,12 +1241,12 @@ pub struct EgirAllocated {
     effect_ids: IdSource<egir::types::EffectToken>,
 }
 
-/// A validated kernel plan together with the freshly constructed physical
-/// EGIR program that implements it. Construction is private to
-/// `EgirAllocated::plan`, so callers cannot bypass plan validation.
+/// Physical EGIR together with a graph-free summary of the schedule that
+/// produced it. Construction is private to `EgirAllocated::plan`, so callers
+/// cannot bypass schedule validation.
 pub struct EgirPlanned {
     physical: egir::program::PhysicalProgram,
-    kernel_plan: egir::parallelize::PublishedKernelPlan,
+    kernel_plan: egir::parallelize::KernelPlanSummary,
     profile: LoweringProfile,
     effect_ids: IdSource<egir::types::EffectToken>,
 }
@@ -1378,10 +1378,10 @@ impl EgirPlanned {
     /// only the algorithm-specific work buffers required by the validated
     /// target recipes.
     pub fn logical_resources(&self) -> &[egir::program::LogicalResource] {
-        &self.physical.resources
+        self.physical.logical_resources()
     }
 
-    pub fn kernel_plan(&self) -> &egir::parallelize::PublishedKernelPlan {
+    pub fn kernel_plan(&self) -> &egir::parallelize::KernelPlanSummary {
         &self.kernel_plan
     }
 
@@ -1408,7 +1408,7 @@ pub struct SsaConverted {
     pub ssa: ssa::types::Program,
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
     pub profile: LoweringProfile,
-    pub kernel_plan: egir::parallelize::PublishedKernelPlan,
+    pub kernel_plan: egir::parallelize::KernelPlanSummary,
 }
 
 impl SsaConverted {

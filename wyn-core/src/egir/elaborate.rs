@@ -42,7 +42,7 @@ pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
         constants,
         pipeline,
         ..
-    } = inner.ir;
+    } = inner.into_ir();
     let functions: Vec<Function> = functions
         .into_iter()
         .map(|f| {

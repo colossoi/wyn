@@ -14,33 +14,32 @@ impl KernelPlan {
         binding_ids: &mut IdSource<u32>,
         profile: LoweringProfile,
         mut descriptor: PipelineDescriptor,
-    ) -> Result<(PhysicalProgram, super::PublishedKernelPlan), ConvertError> {
+    ) -> Result<(PhysicalProgram, super::KernelPlanSummary), ConvertError> {
         self.check_explicit_dispatch_coverage(&inner.entry_points)
             .map_err(ConvertError::InvalidDispatch)?;
-        let validated = self
-            .into_validated(&inner.entry_points, &inner.resources, &descriptor)
-            .map_err(ConvertError::Internal)?;
+        self.validate_for_finalization(&inner.resources, &descriptor).map_err(ConvertError::Internal)?;
 
-        validated.install_phase_shells(&mut descriptor).map_err(ConvertError::Internal)?;
+        self.install_phase_shells(&mut descriptor).map_err(ConvertError::Internal)?;
         let physical_resources = PhysicalResourceTable::allocate(&inner.resources, binding_ids);
-        let publications = validated.publications(&physical_resources).map_err(ConvertError::Internal)?;
+        let publications = self.publications(&physical_resources).map_err(ConvertError::Internal)?;
         let publication_refs = publications.iter().collect::<Vec<_>>();
         descriptor.publish_implicit_bindings(&publication_refs).map_err(ConvertError::DescriptorLayout)?;
         descriptor.publish_graphics_io(&publication_refs);
-        validated.publish(&mut descriptor, &physical_resources).map_err(ConvertError::Internal)?;
+        self.publish(&mut descriptor, &physical_resources).map_err(ConvertError::Internal)?;
         descriptor.relabel_input_storage_names(&inner.input_names);
         descriptor.rebuild_frame_graph();
 
-        let published_plan = validated.published_plan();
-        let physical = PhysicalProgram::from_validated(
+        let summary = self.summary();
+        let physical = PhysicalProgram::from_plan(
             inner,
-            validated,
-            physical_resources,
+            &self,
+            &physical_resources,
             profile.schedule == SchedulePolicy::SingleStage,
             descriptor,
         )
         .map_err(ConvertError::Internal)?;
-        crate::egir::verify_physical::check(&physical).map_err(ConvertError::Internal)?;
-        Ok((physical, published_plan))
+        crate::egir::verify_physical::check(&physical, &physical_resources)
+            .map_err(ConvertError::Internal)?;
+        Ok((physical, summary))
     }
 }

@@ -15,7 +15,7 @@ pub(crate) fn planned_callable_names(
     inner: &mut AllocatedProgram,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> std::result::Result<Vec<String>, String> {
-    let plan = lower_parallel(inner, effect_ids).map_err(|error| error.to_string())?;
+    let plan = build_parallel_plan(inner, effect_ids).map_err(|error| error.to_string())?;
     Ok(plan.generated_callables().map(|function| function.name.clone()).collect())
 }
 

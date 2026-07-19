@@ -2,19 +2,16 @@ use polytype::Type;
 
 use crate::ast::TypeName;
 
-use super::program::{visit_type_names_mut, PhysicalEGraph, PhysicalProgram};
+use super::program::{visit_type_names_mut, PhysicalEGraph, PhysicalProgram, PhysicalResourceTable};
 use super::types::{SideEffectKind, SoacEffect};
 
-pub fn check(program: &PhysicalProgram) -> Result<(), String> {
-    for resource in &program.resources {
-        if program.physical_resources.binding(resource.id).is_none() {
+pub fn check(program: &PhysicalProgram, physical_resources: &PhysicalResourceTable) -> Result<(), String> {
+    for resource in program.logical_resources() {
+        if physical_resources.binding(resource.id).is_none() {
             return Err(format!("resource {:?} has no physical binding", resource.id));
         }
     }
     for entry in &program.entry_points {
-        if !program.plan.contains_entry(&entry.name) {
-            return Err(format!("physical entry `{}` is absent from the plan", entry.name));
-        }
         for input in &entry.inputs {
             physical_type(&input.ty, &entry.name)?;
         }

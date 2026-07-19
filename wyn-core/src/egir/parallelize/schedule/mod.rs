@@ -6,7 +6,7 @@
 //! lowering has finished; it is not mutated while an individual lowering is
 //! still speculative.
 
-// The validated schedule implementation predates the algorithm split and has
+// The schedule implementation predates the algorithm split and has
 // separately audited internal assertions. New recipe modules deny these lints.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -47,7 +47,7 @@ pub(in crate::egir) struct KernelPlan {
     unresolved_stages: Vec<String>,
     /// Callable helpers synthesized by target planning. They are not admitted
     /// to semantic EGIR; physical construction publishes them only after the
-    /// plan has validated.
+    /// schedule has validated.
     generated_callables: Vec<SemanticFunc>,
     /// Source callable identities plus planner-generated additions. Planned
     /// Seg bodies use these stable ids before physical functions exist.
@@ -82,33 +82,23 @@ struct SemanticAbi {
     routed_outputs: HashSet<OutputSlotId>,
 }
 
-/// Proof that all plan-local identities, dependency edges and ABI projections
-/// have been checked. The inner plan is inaccessible to constructors outside
-/// this module, so physicalization cannot accidentally accept an unchecked
-/// plan.
-#[derive(Clone, Debug)]
-pub(in crate::egir) struct ValidatedKernelPlan(KernelPlan);
-
-impl ValidatedKernelPlan {
-    pub(in crate::egir) fn published_plan(&self) -> PublishedKernelPlan {
-        PublishedKernelPlan::from(&self.0)
+impl KernelPlan {
+    fn summary(&self) -> KernelPlanSummary {
+        KernelPlanSummary::from(self)
     }
 
     /// Entry ABI records in deterministic descriptor-publication order. The
-    /// validated plan, rather than physical graphs, is the sole authority for
+    /// kernel plan, rather than physical graphs, is the sole authority for
     /// backend-visible entry metadata.
-    pub(in crate::egir) fn publications(
-        &self,
-        resources: &PhysicalResourceTable,
-    ) -> Result<Vec<EntryPublication>, String> {
+    fn publications(&self, resources: &PhysicalResourceTable) -> Result<Vec<EntryPublication>, String> {
         let mut names = HashSet::new();
         let mut publications = Vec::new();
-        for source in &self.0.source_publications {
+        for source in &self.source_publications {
             if names.insert(source.name.as_str()) {
                 publications.push(source.publication(resources)?);
             }
         }
-        for phase in self.0.phases() {
+        for phase in self.phases() {
             let entry = phase.recipe.entry();
             if names.insert(entry.name.as_str()) {
                 publications.push(entry.publication(resources)?);
@@ -118,21 +108,18 @@ impl ValidatedKernelPlan {
     }
 
     pub(in crate::egir) fn physical_entries(&self) -> impl Iterator<Item = &PlannedEntry<Scheduled>> {
-        self.0.phases().map(|phase| phase.recipe.entry())
+        self.phases().map(|phase| phase.recipe.entry())
     }
 
     pub(in crate::egir) fn generated_callables(&self) -> impl Iterator<Item = &SemanticFunc> {
-        self.0.generated_callables.iter()
+        self.generated_callables.iter()
     }
 
     pub(in crate::egir) fn region_interner(&self) -> &RegionInterner {
-        &self.0.region_interner
+        &self.region_interner
     }
 
-    pub(in crate::egir) fn install_phase_shells(
-        &self,
-        descriptor: &mut PipelineDescriptor,
-    ) -> Result<(), String> {
+    fn install_phase_shells(&self, descriptor: &mut PipelineDescriptor) -> Result<(), String> {
         let mut rebuilt = descriptor
             .pipelines
             .iter()
@@ -141,7 +128,7 @@ impl ValidatedKernelPlan {
                 matches!(pipeline, Pipeline::Graphics(_)).then(|| (order, pipeline.clone()))
             })
             .collect::<Vec<_>>();
-        for scheduled in &self.0.pipelines {
+        for scheduled in &self.pipelines {
             let mut compute = scheduled.template.clone();
             compute.stages = scheduled
                 .phases
@@ -166,12 +153,12 @@ impl ValidatedKernelPlan {
         Ok(())
     }
 
-    pub(in crate::egir) fn publish(
+    fn publish(
         &self,
         descriptor: &mut PipelineDescriptor,
         physical_resources: &PhysicalResourceTable,
     ) -> Result<(), String> {
-        for scheduled in &self.0.pipelines {
+        for scheduled in &self.pipelines {
             let Some(Pipeline::Compute(compute)) = descriptor.pipelines.iter_mut().find(|pipeline| {
                 matches!(pipeline, Pipeline::Compute(candidate) if scheduled.phases.iter().any(|phase| {
                     candidate.stages.iter().any(|stage| stage.entry_point == phase.entry_point)
@@ -245,10 +232,6 @@ impl ValidatedKernelPlan {
             compute.stages = stages;
         }
         Ok(())
-    }
-
-    pub(in crate::egir) fn contains_entry(&self, entry_point: &str) -> bool {
-        self.0.contains_entry(entry_point)
     }
 }
 
@@ -448,20 +431,20 @@ impl KernelPhase {
     }
 }
 
-/// Graph-free plan summary retained after physical EGIR has lowered to SSA.
+/// Graph-free schedule summary retained after physical EGIR has lowered to SSA.
 #[derive(Clone, Debug)]
-pub struct PublishedKernelPlan {
-    phases: Vec<PublishedKernel>,
+pub struct KernelPlanSummary {
+    phases: Vec<KernelPhaseSummary>,
 }
 
-impl PublishedKernelPlan {
-    pub fn phases(&self) -> impl Iterator<Item = &PublishedKernel> {
+impl KernelPlanSummary {
+    pub fn phases(&self) -> impl Iterator<Item = &KernelPhaseSummary> {
         self.phases.iter()
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct PublishedKernel {
+pub struct KernelPhaseSummary {
     pub id: KernelId,
     pub placement: KernelPlacement,
     pub entry_point: String,
@@ -483,12 +466,12 @@ pub enum KernelPlacement {
     Unpublished,
 }
 
-impl From<&KernelPlan> for PublishedKernelPlan {
+impl From<&KernelPlan> for KernelPlanSummary {
     fn from(plan: &KernelPlan) -> Self {
         let mut phases = Vec::new();
         for pipeline in &plan.pipelines {
             phases.extend(pipeline.phases.iter().enumerate().map(|(phase_index, phase)| {
-                PublishedKernel::from_phase(
+                KernelPhaseSummary::from_phase(
                     phase,
                     KernelPlacement::Compute {
                         pipeline_order: pipeline.order,
@@ -500,18 +483,18 @@ impl From<&KernelPlan> for PublishedKernelPlan {
         phases.extend(
             plan.graphics_passthroughs
                 .iter()
-                .map(|phase| PublishedKernel::from_phase(phase, KernelPlacement::Graphics)),
+                .map(|phase| KernelPhaseSummary::from_phase(phase, KernelPlacement::Graphics)),
         );
         phases.extend(
             plan.unpublished
                 .iter()
-                .map(|phase| PublishedKernel::from_phase(phase, KernelPlacement::Unpublished)),
+                .map(|phase| KernelPhaseSummary::from_phase(phase, KernelPlacement::Unpublished)),
         );
         Self { phases }
     }
 }
 
-impl PublishedKernel {
+impl KernelPhaseSummary {
     fn from_phase(phase: &KernelPhase, placement: KernelPlacement) -> Self {
         Self {
             id: phase.id,
@@ -561,11 +544,6 @@ pub struct ScheduledResource {
 }
 
 impl KernelPlan {
-    #[cfg(test)]
-    pub(super) fn generated_callables(&self) -> impl Iterator<Item = &SemanticFunc> {
-        self.generated_callables.iter()
-    }
-
     pub(super) fn intern_callable(&mut self, name: impl AsRef<str>) -> RegionId {
         self.region_interner.intern(name.as_ref())
     }
@@ -624,15 +602,13 @@ impl KernelPlan {
         })
     }
 
-    pub(in crate::egir) fn into_validated(
-        self,
-        entries: &[SemanticEntry],
+    fn validate_for_finalization(
+        &self,
         resources: &[LogicalResource],
         descriptor: &PipelineDescriptor,
-    ) -> Result<ValidatedKernelPlan, String> {
+    ) -> Result<(), String> {
         self.validate()?;
-        self.validate_program(entries, resources, descriptor)?;
-        Ok(ValidatedKernelPlan(self))
+        self.validate_program(resources, descriptor)
     }
 
     pub(super) fn seed(

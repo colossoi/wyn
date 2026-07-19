@@ -61,10 +61,10 @@ use projection::side_effect_output_slots_from_routes;
 use projection::{project_kernel_body, split_multidomain_seg_maps, ProjectionSpec, SplitEntry, UnionFind};
 use reduce::{analyze_reduce_candidate, ReduceCandidate};
 use scan::{analyze_scan_candidate, ScanCandidate};
-pub(super) use schedule::ValidatedKernelPlan;
+pub(super) use schedule::KernelPlan;
 pub use schedule::{
-    EntryAbiProjection, KernelDomain, KernelId, KernelKind, KernelPlacement, OutputRouteProjection,
-    PublishedKernel, PublishedKernelPlan, ScheduledResource,
+    EntryAbiProjection, KernelDomain, KernelId, KernelKind, KernelPhaseSummary, KernelPlacement,
+    KernelPlanSummary, OutputRouteProjection, ScheduledResource,
 };
 #[cfg(test)]
 pub(crate) use test_support::{
@@ -101,44 +101,44 @@ pub(crate) fn plan(
     binding_ids: &mut IdSource<u32>,
     effect_ids: &mut IdSource<EffectToken>,
     profile: LoweringProfile,
-) -> Result<(PhysicalProgram, PublishedKernelPlan), ConvertError> {
+) -> Result<(PhysicalProgram, KernelPlanSummary), ConvertError> {
     let descriptor = inner.pipeline.clone();
-    let schedule = if profile.schedule == SchedulePolicy::Parallel {
-        lower_parallel(&mut inner, effect_ids)
+    let kernel_plan = if profile.schedule == SchedulePolicy::Parallel {
+        build_parallel_plan(&mut inner, effect_ids)
     } else {
-        lower_sequential(&inner, effect_ids)
+        build_sequential_plan(&inner, effect_ids)
     }
     .map_err(|error| ConvertError::Internal(error.to_string()))?;
 
-    schedule.finalize(inner, binding_ids, profile, descriptor)
+    kernel_plan.finalize(inner, binding_ids, profile, descriptor)
 }
 
-/// Lower semantic segmented operations into executable kernel entries.
-/// Pointwise `SegMap`s remain for `soac_expand`; `SegRed`s become a chunked
-/// phase 1 plus a synthesized tree reduction; `SegScan`s become chunk scans,
-/// an exclusive scan of block sums, and offset-application phases.
-fn lower_parallel(
+/// Analyze target recipes, allocate their scratch resources, and build the
+/// executable parallel kernel plan.
+fn build_parallel_plan(
     inner: &mut AllocatedProgram,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> error::Result<schedule::KernelPlan> {
     let policy = ParallelPolicy::default();
     let plan = planning::analyze(inner, policy)?;
     let candidates = plan.allocate(inner)?;
-    let lowering = ParallelLowering::start(inner, candidates, policy, effect_ids)?;
-    lowering.run_parallel(inner)
+    let builder = KernelPlanBuilder::new(inner, candidates, policy, effect_ids)?;
+    builder.build_parallel_schedule(inner)
 }
 
-fn lower_sequential(
+/// Build a kernel plan that selects serial recipes without allocating
+/// algorithm-specific parallel scratch resources.
+fn build_sequential_plan(
     inner: &AllocatedProgram,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> error::Result<schedule::KernelPlan> {
     let policy = ParallelPolicy::default();
     let candidates = planning::CandidateIndex::sequential();
-    let lowering = ParallelLowering::start(inner, candidates, policy, effect_ids)?;
-    lowering.run_sequential(inner)
+    let builder = KernelPlanBuilder::new(inner, candidates, policy, effect_ids)?;
+    builder.build_sequential_schedule(inner)
 }
 
-struct ParallelLowering<'resources, 'effects> {
+struct KernelPlanBuilder<'resources, 'effects> {
     schedule: schedule::KernelPlan,
     seeded: schedule::SeededKernels,
     resources: model::ResourceIndex<'resources>,
@@ -176,8 +176,8 @@ impl LoweringSource<'_> {
     }
 }
 
-impl<'resources, 'effects> ParallelLowering<'resources, 'effects> {
-    fn start(
+impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
+    fn new(
         inner: &'resources AllocatedProgram,
         candidates: planning::CandidateIndex,
         policy: ParallelPolicy,
@@ -202,14 +202,17 @@ impl<'resources, 'effects> ParallelLowering<'resources, 'effects> {
         })
     }
 
-    fn run_parallel(mut self, inner: &'resources AllocatedProgram) -> error::Result<schedule::KernelPlan> {
+    fn build_parallel_schedule(
+        mut self,
+        inner: &'resources AllocatedProgram,
+    ) -> error::Result<schedule::KernelPlan> {
         self.attach_materializations(inner)?;
-        self.lower_entries(inner)?;
+        self.schedule_entries(inner)?;
         self.schedule.coalesce_resource_flows(self.flows.flows());
         Ok(self.schedule)
     }
 
-    fn run_sequential(
+    fn build_sequential_schedule(
         mut self,
         inner: &'resources AllocatedProgram,
     ) -> error::Result<schedule::KernelPlan> {
@@ -219,7 +222,7 @@ impl<'resources, 'effects> ParallelLowering<'resources, 'effects> {
         Ok(self.schedule)
     }
 
-    fn lower_entries(&mut self, inner: &'resources AllocatedProgram) -> error::Result<()> {
+    fn schedule_entries(&mut self, inner: &'resources AllocatedProgram) -> error::Result<()> {
         for (index, entry) in inner.entry_points.iter().enumerate() {
             let source = SemanticEntryId(index as u32);
             let Some(kernel) = self.seeded.entry(source) else {
