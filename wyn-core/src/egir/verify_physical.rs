@@ -7,8 +7,8 @@ use super::types::{SideEffectKind, SoacEffect};
 
 pub fn check(program: &PhysicalProgram, physical_resources: &PhysicalResourceTable) -> Result<(), String> {
     for resource in program.logical_resources() {
-        if physical_resources.binding(resource.id).is_none() {
-            return Err(format!("resource {:?} has no physical binding", resource.id));
+        if physical_resources.binding(resource.id()).is_none() {
+            return Err(format!("resource {:?} has no physical binding", resource.id()));
         }
     }
     for entry in &program.entry_points {

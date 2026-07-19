@@ -27,6 +27,7 @@ impl KernelPlanBuilder<'_, '_> {
 struct FilterKernelFamily {
     domain: schedule::KernelDomain,
     work: filter_soac::WorkBuffers,
+    storage: filter_soac::RuntimeStorage<SemanticResourceRef>,
     flags: crate::egir::program::PlannedEntry,
     scan: crate::egir::program::PlannedEntry,
     combine: crate::egir::program::PlannedEntry,
@@ -69,6 +70,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         Ok(FilterKernelFamily {
             domain,
             work: self.work,
+            storage: self.candidate.storage.runtime(),
             flags,
             scan,
             combine,
@@ -141,7 +143,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             source_graph: &scan.graph,
             neutral: zero,
             scratch: scan_scratch,
-            total_out: Some(self.candidate.len_out.0),
+            total_out: Some(self.candidate.storage.length.0),
         };
         let mut combine = combine.build(self.lowering.effect_ids).map_err(|error| {
             format!(
@@ -172,7 +174,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
 
         let mut resources = self.entry.resource_declarations.clone();
         for declaration in &mut resources {
-            if declaration.resource == self.candidate.len_out {
+            if declaration.resource == self.candidate.storage.length {
                 declaration.role = StorageRole::Input;
             }
         }
@@ -199,6 +201,7 @@ impl FilterKernelFamily {
         let FilterKernelFamily {
             domain,
             work,
+            storage,
             flags,
             scan,
             combine,
@@ -215,6 +218,7 @@ impl FilterKernelFamily {
                 buffers: work,
                 scan_workgroup_width,
             },
+            storage,
         );
         let flags = schedule::PhaseSpec::filter(
             flags,
@@ -225,6 +229,7 @@ impl FilterKernelFamily {
                 buffers: work,
                 scan_workgroup_width,
             },
+            storage,
         );
         // The scan runs a fixed worker grid so each worker scans a large chunk;
         // flags and scatter remain one-thread-per-input-element.
@@ -241,6 +246,7 @@ impl FilterKernelFamily {
                 buffers: work,
                 scan_workgroup_width,
             },
+            storage,
         );
         let combine = schedule::PhaseSpec::new(
             combine,
@@ -281,7 +287,22 @@ fn filter_resource_declaration(
 pub(super) struct FilterCandidate {
     pub semantic_id: SemanticOpId,
     pub space: SegSpace,
-    pub len_out: SemanticResourceRef,
+    storage: StoredFilterStorage,
+}
+
+#[derive(Clone, Copy)]
+struct StoredFilterStorage {
+    scratch: SemanticResourceRef,
+    length: SemanticResourceRef,
+}
+
+impl StoredFilterStorage {
+    fn runtime(self) -> filter_soac::RuntimeStorage<SemanticResourceRef> {
+        filter_soac::RuntimeStorage {
+            scratch: self.scratch,
+            length: filter_soac::RuntimeLength::Stored(self.length),
+        }
+    }
 }
 
 pub(super) struct BoundFilter {
@@ -300,7 +321,7 @@ pub(super) fn analyze_filter_candidates(
                 state:
                     filter_soac::SemanticState {
                         space,
-                        storage: filter_soac::Output::Runtime { length, .. },
+                        storage: filter_soac::Output::Runtime { scratch, length },
                     },
                 ..
             }),
@@ -313,7 +334,10 @@ pub(super) fn analyze_filter_candidates(
             filter_soac::RuntimeLength::Stored(len_out) => RecipeSelection::Parallel(FilterCandidate {
                 semantic_id,
                 space: space.clone(),
-                len_out: *len_out,
+                storage: StoredFilterStorage {
+                    scratch: *scratch,
+                    length: *len_out,
+                },
             }),
             filter_soac::RuntimeLength::ViewOnly => {
                 RecipeSelection::Serial(FallbackReason::UnsupportedDestination)
@@ -336,7 +360,7 @@ impl BoundFilter {
     ) -> error::Result<Self> {
         let owner = candidate.semantic_id;
         let resource_id = |kind, slot| {
-            resources.exactly_one_at(owner, kind, slot).map(|resource| SemanticResourceRef(resource.id))
+            resources.exactly_one_at(owner, kind, slot).map(|resource| SemanticResourceRef(resource.id()))
         };
         let work = filter_soac::WorkBuffers {
             flags: resource_id(CompilerResourceKind::FilterFlags, 0)?,

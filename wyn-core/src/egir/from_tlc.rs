@@ -33,8 +33,8 @@ use smallvec::{smallvec, SmallVec};
 use std::collections::HashMap;
 
 use super::program::{
-    CompilerResource, CompilerResourceKind, ConstantDef, LogicalResource, LogicalSize, RawEntry, RawFunc,
-    RawProgram, ResourceOrigin, SemanticResourceDecl, SemanticResourceRef,
+    CompilerResource, CompilerResourceKind, ConstantDef, LogicalResourceArena, LogicalSize, RawEntry,
+    RawFunc, RawProgram, ResourceOrigin, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::publish::PipelineDescriptorPublish;
 use super::soac::{filter, hist, screma};
@@ -144,7 +144,13 @@ impl<'a> GlobalContext<'a> {
 #[derive(Default)]
 struct ResourceRegistry {
     by_binding: HashMap<BindingRef, crate::ResourceId>,
-    resources: Vec<Option<LogicalResource>>,
+    resources: Vec<Option<LogicalResourceDraft>>,
+}
+
+struct LogicalResourceDraft {
+    origin: ResourceOrigin,
+    elem_ty: Type<TypeName>,
+    size: LogicalSize,
 }
 
 impl ResourceRegistry {
@@ -175,8 +181,7 @@ impl ResourceRegistry {
                 }
             }
             None => {
-                *slot = Some(LogicalResource {
-                    id: resource,
+                *slot = Some(LogicalResourceDraft {
                     origin: ResourceOrigin::Host(binding),
                     elem_ty,
                     size,
@@ -193,8 +198,7 @@ impl ResourceRegistry {
         size: LogicalSize,
     ) -> crate::ResourceId {
         let resource = crate::ResourceId(self.resources.len() as u32);
-        self.resources.push(Some(LogicalResource {
-            id: resource,
+        self.resources.push(Some(LogicalResourceDraft {
             origin: ResourceOrigin::Compiler(compiler),
             elem_ty,
             size,
@@ -204,21 +208,18 @@ impl ResourceRegistry {
 
     fn finish(
         self,
-    ) -> Result<(HashMap<BindingRef, crate::ResourceId>, Vec<LogicalResource>), ConvertError> {
-        let resources = self
-            .resources
-            .into_iter()
-            .enumerate()
-            .map(|(index, resource)| {
-                resource.ok_or_else(|| {
-                    ConvertError::Internal(format!(
-                        "semantic resource {:?} was referenced but never declared",
-                        crate::ResourceId(index as u32)
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((self.by_binding, resources))
+    ) -> Result<(HashMap<BindingRef, crate::ResourceId>, LogicalResourceArena), ConvertError> {
+        let mut arena = LogicalResourceArena::default();
+        for (index, resource) in self.resources.into_iter().enumerate() {
+            let resource = resource.ok_or_else(|| {
+                ConvertError::Internal(format!(
+                    "semantic resource {:?} was referenced but never declared",
+                    crate::ResourceId(index as u32)
+                ))
+            })?;
+            arena.allocate(resource.origin, resource.elem_ty, resource.size);
+        }
+        Ok((self.by_binding, arena))
     }
 }
 

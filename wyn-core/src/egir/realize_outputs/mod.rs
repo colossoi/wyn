@@ -30,8 +30,8 @@ use ExecutionModel as _;
 
 use super::from_tlc::ConvertError;
 use super::program::{
-    host_resource_map, Entry, OutputRoute, OutputSlotId, OutputWriter, RawEntry, RawProgram,
-    SemanticResourceRef, SlotSource,
+    host_resource_map, Entry, LogicalResourceArena, OutputRoute, OutputSlotId, OutputWriter, RawEntry,
+    RawProgram, SemanticResourceRef, SlotSource,
 };
 use super::types::{EGraph, EffectToken, NodeId, Raw, SkeletonTerminator, SoacEffect};
 use crate::ResourceId;
@@ -62,7 +62,7 @@ pub fn run(
 fn realize_entry(
     entry: &mut RawEntry,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
-    resources: &mut [super::program::LogicalResource],
+    resources: &mut LogicalResourceArena,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), ConvertError> {
     if entry.outputs.is_empty() {
@@ -97,7 +97,7 @@ fn clear_compute_returns(entry: &mut RawEntry) {
 fn realize_compute_slots(
     entry: &mut RawEntry,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
-    resources: &mut [super::program::LogicalResource],
+    resources: &mut LogicalResourceArena,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), ConvertError> {
     let Entry {

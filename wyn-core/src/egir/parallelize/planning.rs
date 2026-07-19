@@ -13,7 +13,7 @@ use crate::egir::program::{
     AllocatedProgram, CompilerFlowEndpoint, CompilerResource, CompilerResourceKind, LogicalSize,
     ResourceOrigin, SemanticOpId,
 };
-use crate::egir::types::{SegExtent, SideEffectSite};
+use crate::egir::types::SegExtent;
 
 /// The target recipe selected for one projected physical kernel. Parallel
 /// variants own the exact graph-local analysis payload consumed by emission;
@@ -23,7 +23,7 @@ enum AnalyzedRecipe {
     Reduce(super::reduce::ReduceCandidate),
     Scan(super::scan::ScanCandidate),
     Map,
-    Serial(SideEffectSite),
+    Serial(super::facts::SerialScremaRecipe),
     Unchanged,
 }
 
@@ -32,24 +32,104 @@ pub(super) enum PlannedRecipe {
     Reduce(super::reduce::BoundReduce),
     Scan(super::scan::BoundScan),
     Map,
-    Serial(SideEffectSite),
+    Serial(super::facts::SerialScremaRecipe),
     Unchanged,
 }
 
 /// One projected physical kernel and its ownership of semantic output slots.
 pub(super) struct PlannedKernel<R = PlannedRecipe> {
-    pub body: crate::egir::program::PlannedEntry,
-    pub semantic_slots: Vec<usize>,
-    pub recipe: R,
+    body: crate::egir::program::PlannedEntry,
+    semantic_slots: Vec<usize>,
+    recipe: R,
+}
+
+impl<R> PlannedKernel<R> {
+    fn new(body: crate::egir::program::PlannedEntry, semantic_slots: Vec<usize>, recipe: R) -> Self {
+        Self {
+            body,
+            semantic_slots,
+            recipe,
+        }
+    }
+
+    /// The selected recipe and every graph-local handle it contains stay
+    /// coupled to this body until lowering consumes the pair.
+    fn into_parts(self) -> (crate::egir::program::PlannedEntry, Vec<usize>, R) {
+        (self.body, self.semantic_slots, self.recipe)
+    }
+
+    pub(super) fn seed_body(&self) -> crate::egir::program::PlannedEntry {
+        self.body.clone()
+    }
+}
+
+impl PlannedKernel {
+    /// Consume the selected body and its graph-local recipe as one operation.
+    /// No caller can retain a recipe handle while independently mutating the
+    /// graph it addresses.
+    pub(super) fn lower(
+        self,
+        lowering: &mut super::KernelPlanBuilder<'_, '_>,
+        kernel: super::schedule::KernelId,
+        split_outputs: bool,
+    ) -> Result<()> {
+        let (body, semantic_slots, recipe) = self.into_parts();
+        match recipe {
+            PlannedRecipe::Filter(candidate) => lowering.lower_parallel_filter(body, kernel, candidate)?,
+            PlannedRecipe::Reduce(candidate) => lowering.lower_parallel_reduce(body, kernel, candidate)?,
+            PlannedRecipe::Scan(candidate) => lowering.lower_parallel_scan(body, kernel, candidate)?,
+            PlannedRecipe::Map => {
+                lowering.schedule.commit_kernel(
+                    kernel,
+                    super::schedule::KernelRecipeSpec::new(
+                        body,
+                        super::schedule::KernelKind::SerialCompute,
+                    ),
+                )?;
+            }
+            PlannedRecipe::Serial(recipe) => lowering.commit_serial_kernel(body, kernel, recipe)?,
+            PlannedRecipe::Unchanged if split_outputs => {
+                lowering.schedule.commit_kernel(
+                    kernel,
+                    super::schedule::KernelRecipeSpec::new(
+                        body,
+                        super::schedule::KernelKind::SerialCompute,
+                    ),
+                )?;
+            }
+            PlannedRecipe::Unchanged => {}
+        }
+        if split_outputs {
+            lowering.schedule.set_output_projection(
+                kernel,
+                semantic_slots.into_iter().map(crate::egir::program::OutputSlotId).collect(),
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// A non-empty endpoint plan. `primary` always reuses the seeded kernel;
 /// siblings are installed beside it only when output-domain projection split
 /// the source entry.
 pub(super) struct EndpointPlan<R = PlannedRecipe> {
-    pub split_outputs: bool,
-    pub primary: PlannedKernel<R>,
-    pub siblings: Vec<PlannedKernel<R>>,
+    split_outputs: bool,
+    primary: PlannedKernel<R>,
+    siblings: Vec<PlannedKernel<R>>,
+}
+
+impl<R> EndpointPlan<R> {
+    fn new(split_outputs: bool, primary: PlannedKernel<R>, siblings: Vec<PlannedKernel<R>>) -> Self {
+        Self {
+            split_outputs,
+            primary,
+            siblings,
+        }
+    }
+
+    pub(super) fn into_parts(self) -> (bool, PlannedKernel<R>, Vec<PlannedKernel<R>>) {
+        (self.split_outputs, self.primary, self.siblings)
+    }
 }
 
 /// Authoritative target recipes indexed by the endpoint that owns the seeded
@@ -166,22 +246,20 @@ fn bind_endpoint(
     plan: EndpointPlan<AnalyzedRecipe>,
     resources: &ResourceIndex<'_>,
 ) -> Result<EndpointPlan> {
-    Ok(EndpointPlan {
-        split_outputs: plan.split_outputs,
-        primary: bind_kernel(plan.primary, resources)?,
-        siblings: plan
-            .siblings
-            .into_iter()
-            .map(|kernel| bind_kernel(kernel, resources))
-            .collect::<Result<Vec<_>>>()?,
-    })
+    let (split_outputs, primary, siblings) = plan.into_parts();
+    Ok(EndpointPlan::new(
+        split_outputs,
+        bind_kernel(primary, resources)?,
+        siblings.into_iter().map(|kernel| bind_kernel(kernel, resources)).collect::<Result<Vec<_>>>()?,
+    ))
 }
 
 fn bind_kernel(
     kernel: PlannedKernel<AnalyzedRecipe>,
     resources: &ResourceIndex<'_>,
 ) -> Result<PlannedKernel> {
-    let recipe = match kernel.recipe {
+    let (body, semantic_slots, recipe) = kernel.into_parts();
+    let recipe = match recipe {
         AnalyzedRecipe::Filter(candidate) => {
             PlannedRecipe::Filter(super::filter::BoundFilter::bind(candidate, resources)?)
         }
@@ -195,11 +273,7 @@ fn bind_kernel(
         AnalyzedRecipe::Serial(site) => PlannedRecipe::Serial(site),
         AnalyzedRecipe::Unchanged => PlannedRecipe::Unchanged,
     };
-    Ok(PlannedKernel {
-        body: kernel.body,
-        semantic_slots: kernel.semantic_slots,
-        recipe,
-    })
+    Ok(PlannedKernel::new(body, semantic_slots, recipe))
 }
 
 /// Analyze every projected endpoint once. Recipes retain their projected body
@@ -265,22 +339,14 @@ fn analyze_endpoint(
                     )
                 })
                 .collect::<Result<Vec<_>>>()?;
-            return Ok(EndpointPlan {
-                split_outputs: true,
-                primary,
-                siblings,
-            });
+            return Ok(EndpointPlan::new(true, primary, siblings));
         }
     }
 
     let slots = (0..projected.outputs.len()).collect();
     let primary =
         analyze_projected_kernel(projected, slots, endpoint, policy, resources, requests, fallbacks)?;
-    Ok(EndpointPlan {
-        split_outputs: false,
-        primary,
-        siblings: Vec::new(),
-    })
+    Ok(EndpointPlan::new(false, primary, Vec::new()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -299,11 +365,11 @@ fn analyze_projected_kernel(
         match selection {
             RecipeSelection::Parallel(candidate) => {
                 requests.extend(filter_scratch_requests(endpoint, policy, &candidate));
-                return Ok(PlannedKernel {
+                return Ok(PlannedKernel::new(
                     body,
                     semantic_slots,
-                    recipe: AnalyzedRecipe::Filter(candidate),
-                });
+                    AnalyzedRecipe::Filter(candidate),
+                ));
             }
             RecipeSelection::Serial(reason) => fallbacks.push(reason),
         }
@@ -316,7 +382,7 @@ fn analyze_projected_kernel(
 
     let recipe = match super::segmented_recipe(&body) {
         Some(super::SegmentedRecipe::Reduce(located)) => {
-            let site = located.site;
+            let serial = located.serial_recipe();
             match super::analyze_reduce_candidate(&body, located, resources)? {
                 RecipeSelection::Parallel(candidate) => {
                     for (slot, elem_ty) in candidate.scratch_types().cloned().enumerate() {
@@ -332,12 +398,12 @@ fn analyze_projected_kernel(
                 }
                 RecipeSelection::Serial(reason) => {
                     fallbacks.push(reason);
-                    AnalyzedRecipe::Serial(site)
+                    AnalyzedRecipe::Serial(serial)
                 }
             }
         }
         Some(super::SegmentedRecipe::Scan(located)) => {
-            let site = located.site;
+            let serial = located.serial_recipe();
             match super::analyze_scan_candidate(&body, located)? {
                 RecipeSelection::Parallel(candidate) => {
                     for (slot, kind) in [
@@ -359,19 +425,15 @@ fn analyze_projected_kernel(
                 }
                 RecipeSelection::Serial(reason) => {
                     fallbacks.push(reason);
-                    AnalyzedRecipe::Serial(site)
+                    AnalyzedRecipe::Serial(serial)
                 }
             }
         }
         Some(super::SegmentedRecipe::Map) => AnalyzedRecipe::Map,
-        Some(super::SegmentedRecipe::Composite(site)) => AnalyzedRecipe::Serial(site),
+        Some(super::SegmentedRecipe::Composite(located)) => AnalyzedRecipe::Serial(located.serial_recipe()),
         _ => AnalyzedRecipe::Unchanged,
     };
-    Ok(PlannedKernel {
-        body,
-        semantic_slots,
-        recipe,
-    })
+    Ok(PlannedKernel::new(body, semantic_slots, recipe))
 }
 
 fn filter_scratch_requests(

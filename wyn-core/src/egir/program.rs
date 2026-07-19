@@ -225,18 +225,98 @@ pub enum ResourceOrigin {
 pub struct LogicalResource {
     /// Dense planning-session identity. Compiler-owned ids may change when
     /// target recipes change and must not be treated as host ABI bindings.
-    pub id: ResourceId,
+    id: ResourceId,
     pub origin: ResourceOrigin,
     pub elem_ty: Type<TypeName>,
     pub size: LogicalSize,
 }
 
 impl LogicalResource {
+    pub fn id(&self) -> ResourceId {
+        self.id
+    }
+
     pub fn host_binding(&self) -> Option<crate::BindingRef> {
         match self.origin {
             ResourceOrigin::Host(binding) => Some(binding),
             ResourceOrigin::Compiler(_) => None,
         }
+    }
+}
+
+/// Dense logical-resource storage. Resource identities are assigned only by
+/// this arena, so a manifest cannot contain duplicate, sparse, or mismatched
+/// ids. The resource payload remains mutable, but its identity does not.
+#[derive(Clone, Debug, Default)]
+pub struct LogicalResourceArena {
+    resources: Vec<LogicalResource>,
+}
+
+impl LogicalResourceArena {
+    pub(crate) fn allocate(
+        &mut self,
+        origin: ResourceOrigin,
+        elem_ty: Type<TypeName>,
+        size: LogicalSize,
+    ) -> ResourceId {
+        let id = ResourceId(self.resources.len() as u32);
+        self.resources.push(LogicalResource {
+            id,
+            origin,
+            elem_ty,
+            size,
+        });
+        id
+    }
+
+    pub fn get(&self, id: ResourceId) -> Option<&LogicalResource> {
+        self.resources.get(id.0 as usize)
+    }
+
+    pub(crate) fn get_mut(&mut self, id: ResourceId) -> Option<&mut LogicalResource> {
+        self.resources.get_mut(id.0 as usize)
+    }
+
+    pub(crate) fn contains(&self, id: ResourceId) -> bool {
+        self.get(id).is_some()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, LogicalResource> {
+        self.resources.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.resources.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.resources.is_empty()
+    }
+}
+
+impl Deref for LogicalResourceArena {
+    type Target = [LogicalResource];
+
+    fn deref(&self) -> &Self::Target {
+        &self.resources
+    }
+}
+
+impl<'a> IntoIterator for &'a LogicalResourceArena {
+    type Item = &'a LogicalResource;
+    type IntoIter = std::slice::Iter<'a, LogicalResource>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut LogicalResourceArena {
+    type Item = &'a mut LogicalResource;
+    type IntoIter = std::slice::IterMut<'a, LogicalResource>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.resources.iter_mut()
     }
 }
 
@@ -267,14 +347,8 @@ pub fn plan_logical_resources(
 }
 
 pub(crate) fn verify_allocated_resources(inner: &AllocatedProgram) -> Result<(), String> {
-    let ids = inner.resources.iter().map(|resource| resource.id).collect::<std::collections::HashSet<_>>();
-    if ids.len() != inner.resources.len()
-        || inner.resources.iter().enumerate().any(|(index, resource)| resource.id.0 as usize != index)
-    {
-        return Err("resource manifest is not dense and unique".into());
-    }
     let check_size = |size: &LogicalSize| match size {
-        LogicalSize::LikeResource { resource, .. } if !ids.contains(resource) => {
+        LogicalSize::LikeResource { resource, .. } if !inner.resources.contains(*resource) => {
             Err(format!("resource size references missing source {resource:?}"))
         }
         _ => Ok(()),
@@ -283,7 +357,7 @@ pub(crate) fn verify_allocated_resources(inner: &AllocatedProgram) -> Result<(),
         check_size(&resource.size)?;
     }
     for declaration in inner.entries_with_endpoints().flat_map(|(_, entry)| &entry.resource_declarations) {
-        if !ids.contains(&declaration.resource.0) {
+        if !inner.resources.contains(declaration.resource.0) {
             return Err(format!(
                 "entry references missing resource {:?}",
                 declaration.resource.0
@@ -321,8 +395,7 @@ fn classify_existing_compiler_resources(inner: &mut AllocatedProgram) {
     for (resource, compiler) in classifications {
         let logical = inner
             .resources
-            .get_mut(resource.0 as usize)
-            .filter(|logical| logical.id == resource)
+            .get_mut(resource)
             .expect("compiler classification references a missing resource");
         logical.origin = ResourceOrigin::Compiler(compiler);
     }
@@ -394,7 +467,7 @@ fn record_compiler_resource_flows(inner: &mut AllocatedProgram) {
 /// this rewrite or to introduce a binding-backed semantic resource.
 pub(crate) fn finalize_converted_resources(
     inner: &mut RawProgram,
-    resources: Vec<LogicalResource>,
+    resources: LogicalResourceArena,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
 ) {
     inner.resources = resources;
@@ -1131,13 +1204,11 @@ impl PhysicalResourceTable {
     /// Assign backend bindings deterministically. Host resources retain their
     /// declared ABI identities; only compiler-owned resources draw automatic
     /// bindings from `ids`.
-    pub fn allocate(resources: &[LogicalResource], ids: &mut crate::IdSource<u32>) -> Self {
-        let mut ordered = resources.iter().collect::<Vec<_>>();
-        ordered.sort_by_key(|resource| resource.id.0);
+    pub fn allocate(resources: &LogicalResourceArena, ids: &mut crate::IdSource<u32>) -> Self {
         let mut used = host_resource_map(resources).into_keys().collect::<std::collections::HashSet<_>>();
-        let mut bindings = Vec::with_capacity(ordered.len());
-        let mut compiler_owned = Vec::with_capacity(ordered.len());
-        for resource in ordered {
+        let mut bindings = Vec::with_capacity(resources.len());
+        let mut compiler_owned = Vec::with_capacity(resources.len());
+        for resource in resources {
             compiler_owned.push(matches!(resource.origin, ResourceOrigin::Compiler(_)));
             let binding = match resource.origin {
                 ResourceOrigin::Host(binding) => binding,
@@ -1171,7 +1242,7 @@ impl PhysicalResourceTable {
 /// requirements.
 pub struct RawProgram {
     pub ir: Program<Raw>,
-    pub resources: Vec<LogicalResource>,
+    pub resources: LogicalResourceArena,
 }
 
 impl RawProgram {
@@ -1192,7 +1263,7 @@ impl RawProgram {
                 pipeline,
                 region_interner,
             ),
-            resources: Vec::new(),
+            resources: LogicalResourceArena::default(),
         }
     }
 }
@@ -1214,7 +1285,7 @@ impl DerefMut for RawProgram {
 /// Semantic EGIR plus its logical-resource manifest and dependency DAG.
 pub struct SemanticProgram {
     pub ir: Program<Semantic>,
-    pub resources: Vec<LogicalResource>,
+    pub resources: LogicalResourceArena,
     pub semantic_dependencies: Vec<SemanticDependency>,
 }
 
@@ -1236,7 +1307,7 @@ impl SemanticProgram {
                 pipeline,
                 region_interner,
             ),
-            resources: Vec::new(),
+            resources: LogicalResourceArena::default(),
             semantic_dependencies: Vec::new(),
         }
     }
@@ -1284,7 +1355,7 @@ pub type ScheduledProgram = Program<Scheduled>;
 /// planning state is not retained.
 pub struct PhysicalProgram {
     ir: Program<Physical>,
-    resources: Vec<LogicalResource>,
+    resources: LogicalResourceArena,
 }
 
 impl Deref for PhysicalProgram {
@@ -1550,14 +1621,7 @@ impl AllocatedProgram {
         elem_ty: Type<TypeName>,
         size: LogicalSize,
     ) -> ResourceId {
-        let id = ResourceId(self.resources.len() as u32);
-        self.resources.push(LogicalResource {
-            id,
-            origin: ResourceOrigin::Compiler(compiler),
-            elem_ty,
-            size,
-        });
-        id
+        self.resources.allocate(ResourceOrigin::Compiler(compiler), elem_ty, size)
     }
 
     pub(crate) fn entries_with_endpoints(

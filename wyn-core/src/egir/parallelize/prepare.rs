@@ -14,14 +14,20 @@ use super::super::types::{EGraph, Scheduled, Semantic, SideEffect, SideEffectKin
 pub(super) struct ParallelFilterPlan {
     stage: filter::ParallelStage,
     config: filter::ParallelConfig<SemanticResourceRef>,
+    storage: filter::RuntimeStorage<SemanticResourceRef>,
 }
 
 impl ParallelFilterPlan {
     pub(super) fn new(
         stage: filter::ParallelStage,
         config: filter::ParallelConfig<SemanticResourceRef>,
+        storage: filter::RuntimeStorage<SemanticResourceRef>,
     ) -> Self {
-        Self { stage, config }
+        Self {
+            stage,
+            config,
+            storage,
+        }
     }
 }
 
@@ -119,20 +125,19 @@ fn schedule_soac_with_mode(
             let filter::SemanticState { space, storage } = state;
             let state = match filter_plan {
                 None => filter::ScheduledState::Serial { space, storage },
-                Some(ParallelFilterPlan { stage, config }) => {
-                    let filter::Output::Runtime { scratch, length } = storage else {
-                        return Err("parallel filter plan requires runtime output storage".into());
-                    };
-                    filter::ScheduledState::Parallel {
-                        space,
-                        storage: filter::RuntimeStorage { scratch, length },
-                        plan: filter::ParallelPlan {
-                            stage,
-                            buffers: config.buffers,
-                            scan_workgroup_width: config.scan_workgroup_width,
-                        },
-                    }
-                }
+                Some(ParallelFilterPlan {
+                    stage,
+                    config,
+                    storage,
+                }) => filter::ScheduledState::Parallel {
+                    space,
+                    storage,
+                    plan: filter::ParallelPlan {
+                        stage,
+                        buffers: config.buffers,
+                        scan_workgroup_width: config.scan_workgroup_width,
+                    },
+                },
             };
             Soac::Filter(filter::Op { body, state })
         }

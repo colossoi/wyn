@@ -110,7 +110,8 @@ fn checked_dependency_insertion_preserves_the_dag() {
 fn validator_rejects_incomplete_phase_families() {
     let mut head = phase(0, "reduce", KernelKind::ReducePhase1);
     head.flow_source = Some(CompilerFlowEndpoint::Materialization(MaterializationId(0)));
-    let error = plan(vec![head]).validate_program(&[], &PipelineDescriptor::default()).unwrap_err();
+    let resources = LogicalResourceArena::default();
+    let error = plan(vec![head]).validate_program(&resources, &PipelineDescriptor::default()).unwrap_err();
     assert!(error.contains("incomplete phase family"));
 }
 

@@ -1672,7 +1672,7 @@ entry e() [4]i32 =
         1,
         "the surviving producer owns one shared logical buffer"
     );
-    let shared_resource = shared[0].id;
+    let shared_resource = shared[0].id();
     let shared_requirements = allocated
         .inner
         .materializations

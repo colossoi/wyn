@@ -586,7 +586,7 @@ pub(crate) fn reject_sibling_consumers(
 pub fn retarget_filter_output(
     graph: &mut EGraph<Raw>,
     declarations: &mut [crate::egir::program::SemanticResourceDecl],
-    resources: &mut [crate::egir::program::LogicalResource],
+    resources: &mut crate::egir::program::LogicalResourceArena,
     output_resource: ResourceId,
     output: &mut crate::interface::EntryOutput,
     source: NodeId,
@@ -640,7 +640,7 @@ pub fn retarget_filter_output(
             break;
         }
     }
-    if let Some(resource) = resources.iter_mut().find(|resource| resource.id == scratch) {
+    if let Some(resource) = resources.get_mut(scratch) {
         resource.elem_ty = u32_ty;
         resource.size = crate::egir::program::LogicalSize::FixedBytes(4);
     }
@@ -653,8 +653,8 @@ pub fn retarget_filter_output(
             return None;
         };
         let in_binding = resources
-            .get(input_resource.0 as usize)
-            .filter(|resource| resource.id == *input_resource)
+            .get(*input_resource)
+            .filter(|resource| resource.id() == *input_resource)
             .and_then(crate::egir::program::LogicalResource::host_binding)?;
         let src_elem_bytes = crate::ssa::layout::storage_elem_stride(&input_elem_ty)?;
         let elem_bytes = crate::ssa::layout::storage_elem_stride(&output_elem_ty)?;

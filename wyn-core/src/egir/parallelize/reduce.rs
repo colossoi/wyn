@@ -5,6 +5,7 @@ use super::*;
 pub(super) struct ReduceCandidate {
     pub site: SideEffectSite,
     pub owner: SemanticOpId,
+    serial: facts::SerialScremaRecipe,
     input_views: Vec<(NodeId, Type<TypeName>)>,
     map_output_view_operands: Vec<usize>,
     map_count: usize,
@@ -52,6 +53,7 @@ pub(super) fn analyze_reduce_candidate(
     located: LocatedReduce<'_>,
     resources: &model::ResourceIndex<'_>,
 ) -> error::Result<RecipeSelection<ReduceCandidate>> {
+    let serial = located.serial_recipe();
     let site = located.site;
     let side_effect = located.effect;
     if let Err(reason) = reduce_recipe_eligibility(&located) {
@@ -92,14 +94,14 @@ pub(super) fn analyze_reduce_candidate(
     let scratch_types = operators
         .iter()
         .map(|operator| semantic_node_type(&entry.graph, operator.neutral))
-        .collect::<error::Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
     if scratch_types.iter().any(|ty| crate::ssa::layout::type_byte_size(ty).is_none()) {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedScratchLayout));
     }
     let input_views = (0..n_inputs)
         .map(|index| {
             let view = operand(index)?;
-            Ok((view, semantic_node_type(&entry.graph, view)?))
+            Ok((view, semantic_node_type(&entry.graph, view)))
         })
         .collect::<error::Result<Vec<_>>>()?;
     let map_output_view_operands = (0..n_maps).map(|index| map_base + index).collect();
@@ -173,6 +175,7 @@ pub(super) fn analyze_reduce_candidate(
     Ok(RecipeSelection::Parallel(ReduceCandidate {
         site,
         owner,
+        serial,
         input_views,
         map_output_view_operands,
         map_count: n_maps,
@@ -194,7 +197,7 @@ impl BoundReduce {
                 candidate.accumulators.len(),
             )?
             .iter()
-            .map(|resource| resource.id)
+            .map(|resource| resource.id())
             .collect();
         Ok(Self { candidate, partials })
     }
@@ -212,6 +215,7 @@ impl KernelPlanBuilder<'_, '_> {
         } = bound;
         let ReduceCandidate {
             site,
+            serial,
             input_views: input_view_data,
             map_output_view_operands,
             map_count: n_maps,
@@ -220,10 +224,6 @@ impl KernelPlanBuilder<'_, '_> {
             ..
         } = candidate;
         let block_id = site.block;
-        debug_assert_eq!(
-            segmented_recipe_effect(entry).map(|located| located.site),
-            Some(site)
-        );
         let total_threads = self.policy.reduce_phase1_width;
         let n_accs = accumulators.len();
         let mut drop_locations = Vec::new();
@@ -260,24 +260,14 @@ impl KernelPlanBuilder<'_, '_> {
         let chunk_start = chunked.chunk_start;
         let chunk_len = chunked.chunk_len;
         {
-            let se = semantic_effect_mut(&mut entry.graph, site)?;
+            let se = semantic_effect_mut(&mut entry.graph, site);
             for (i, &new_view) in chunked.views.iter().enumerate() {
-                let operand = se.operand_nodes.get_mut(i).ok_or_else(|| {
-                    error::ParallelizeError::Invalid(format!("reduce recipe is missing input operand {i}"))
-                })?;
-                *operand = new_view;
+                se.operand_nodes[i] = new_view;
             }
         }
         for (map_index, operand_index) in map_output_view_operands.iter().enumerate() {
-            let orig_view = *semantic_effect(&entry.graph, site)?
-                .operand_nodes
-                .get(*operand_index)
-                .ok_or_else(|| {
-                    error::ParallelizeError::Invalid(format!(
-                        "reduce recipe is missing map output operand {operand_index}"
-                    ))
-                })?;
-            let view_ty = semantic_node_type(&entry.graph, orig_view)?;
+            let orig_view = semantic_effect(&entry.graph, site).operand_nodes[*operand_index];
+            let view_ty = semantic_node_type(&entry.graph, orig_view);
             let chunked_view = chunk_view_like(
                 &mut entry.graph,
                 orig_view,
@@ -287,15 +277,7 @@ impl KernelPlanBuilder<'_, '_> {
                 ChunkInputKind::StorageOnly,
                 &format!("SegRed map output {map_index}"),
             )?;
-            let operand = semantic_effect_mut(&mut entry.graph, site)?
-                .operand_nodes
-                .get_mut(*operand_index)
-                .ok_or_else(|| {
-                    error::ParallelizeError::Invalid(format!(
-                        "reduce recipe lost map output operand {operand_index}"
-                    ))
-                })?;
-            *operand = chunked_view;
+            semantic_effect_mut(&mut entry.graph, site).operand_nodes[*operand_index] = chunked_view;
         }
 
         // 5. Phase 1 stores each thread's whole accumulator value to `partials[tid]`
@@ -318,23 +300,7 @@ impl KernelPlanBuilder<'_, '_> {
         // Drop the decomposed output stores (highest index first per block).
         drop_locations.sort_by_key(|location| std::cmp::Reverse(location.1));
         for (bid, sx) in drop_locations {
-            let effects = &mut entry
-                .graph
-                .skeleton
-                .blocks
-                .get_mut(bid)
-                .ok_or_else(|| {
-                    error::ParallelizeError::Invalid(format!(
-                        "reduce output store references stale block {bid:?}"
-                    ))
-                })?
-                .side_effects;
-            if sx >= effects.len() {
-                return Err(error::ParallelizeError::Invalid(format!(
-                    "reduce output store references stale effect {bid:?}:{sx}"
-                )));
-            }
-            effects.remove(sx);
+            entry.graph.skeleton.blocks[bid].side_effects.remove(sx);
         }
         for route in &mut entry.output_routes {
             route.writers.retain(
@@ -416,7 +382,7 @@ impl KernelPlanBuilder<'_, '_> {
         // Scheduling consumed the semantic SegRed. Phase 1 is now an ordinary
         // per-invocation Screma over the thread's chunk; `soac_expand` lowers that
         // local loop while the synthesized phase-2 entries combine its partials.
-        make_screma_serial(&mut entry.graph, site)?;
+        make_screma_serial(&mut entry.graph, serial);
         Ok(phase2s)
     }
 }

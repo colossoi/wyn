@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::egir::program::{
-    CompilerFlowEndpoint, CompilerResourceFlow, EntryPublication, InputSlotId, LogicalResource,
+    CompilerFlowEndpoint, CompilerResourceFlow, EntryPublication, InputSlotId, LogicalResourceArena,
     MaterializationKind, MaterializationRequirement, OutputSlotId, PhysicalResourceTable, PlannedEntry,
     PlannedPublication, RegionInterner, ResourceOrigin, SemanticEntry, SemanticEntryId, SemanticFunc,
     SemanticResourceDecl, SemanticResourceRef,
@@ -348,11 +348,12 @@ impl KernelRecipeSpec {
         kind: KernelKind,
         stage: filter::ParallelStage,
         config: filter::ParallelConfig<SemanticResourceRef>,
+        storage: filter::RuntimeStorage<SemanticResourceRef>,
     ) -> Self {
         Self {
             body,
             kind,
-            filter_plan: Some(super::prepare::ParallelFilterPlan::new(stage, config)),
+            filter_plan: Some(super::prepare::ParallelFilterPlan::new(stage, config, storage)),
         }
     }
 }
@@ -376,9 +377,10 @@ impl PhaseSpec {
         kind: KernelKind,
         stage: filter::ParallelStage,
         config: filter::ParallelConfig<SemanticResourceRef>,
+        storage: filter::RuntimeStorage<SemanticResourceRef>,
     ) -> Self {
         Self {
-            recipe: KernelRecipeSpec::filter(body, kind, stage, config),
+            recipe: KernelRecipeSpec::filter(body, kind, stage, config, storage),
             domain,
         }
     }
@@ -723,7 +725,7 @@ impl KernelPlan {
     #[cfg(any(test, debug_assertions))]
     fn validate_for_finalization(
         &self,
-        resources: &[LogicalResource],
+        resources: &LogicalResourceArena,
         descriptor: &PipelineDescriptor,
     ) -> Result<(), String> {
         self.validate()?;
@@ -733,7 +735,7 @@ impl KernelPlan {
     pub(super) fn seed(
         descriptor: &PipelineDescriptor,
         entries: &[SemanticEntry],
-        resources: &[LogicalResource],
+        resources: &LogicalResourceArena,
         region_interner: &RegionInterner,
     ) -> Result<(Self, SeededKernels), String> {
         let host_resources = crate::egir::program::host_resource_map(resources);

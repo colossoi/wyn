@@ -31,11 +31,48 @@ pub(super) struct LocatedScan<'a> {
     op: &'a screma::Op<crate::egir::types::Semantic>,
 }
 
+#[derive(Clone)]
+pub(super) struct SerialScremaRecipe {
+    site: SideEffectSite,
+    owner: SemanticOpId,
+    op: screma::Op<crate::egir::types::Semantic>,
+}
+
+impl LocatedScrema<'_> {
+    pub(super) fn serial_recipe(&self) -> SerialScremaRecipe {
+        SerialScremaRecipe {
+            site: self.site,
+            owner: self.owner,
+            op: self.op.clone(),
+        }
+    }
+}
+
+impl LocatedReduce<'_> {
+    pub(super) fn serial_recipe(&self) -> SerialScremaRecipe {
+        SerialScremaRecipe {
+            site: self.site,
+            owner: self.owner,
+            op: self.op.clone(),
+        }
+    }
+}
+
+impl LocatedScan<'_> {
+    pub(super) fn serial_recipe(&self) -> SerialScremaRecipe {
+        SerialScremaRecipe {
+            site: self.site,
+            owner: self.owner,
+            op: self.op.clone(),
+        }
+    }
+}
+
 pub(super) enum SegmentedRecipe<'a> {
     Reduce(LocatedReduce<'a>),
     Scan(LocatedScan<'a>),
     Map,
-    Composite(SideEffectSite),
+    Composite(LocatedScrema<'a>),
 }
 
 fn segmented_screma_effect(graph: &EGraph) -> Option<LocatedScrema<'_>> {
@@ -120,7 +157,7 @@ pub(super) fn segmented_recipe(entry: &crate::egir::program::PlannedEntry) -> Op
             op: located.op,
         }),
         screma::Op::Map { .. } => SegmentedRecipe::Map,
-        screma::Op::Composite { .. } => SegmentedRecipe::Composite(located.site),
+        screma::Op::Composite { .. } => SegmentedRecipe::Composite(located),
     })
 }
 
@@ -135,47 +172,23 @@ pub(super) fn parallel_recipe_effect(entry: &crate::egir::program::PlannedEntry)
     })
 }
 
-pub(super) fn make_screma_serial(graph: &mut EGraph, site: SideEffectSite) -> error::Result<()> {
-    let effect = graph.skeleton.get_effect_mut(site).ok_or_else(|| {
-        error::ParallelizeError::Invalid(format!(
-            "stale segmented effect site {:?}:{}",
-            site.block, site.index
-        ))
-    })?;
-    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut effect.kind else {
-        return Err("segmented effect site no longer contains a Screma operation".into());
-    };
+pub(super) fn make_screma_serial(graph: &mut EGraph, recipe: SerialScremaRecipe) {
+    let mut op = recipe.op;
     *op.semantic_state_mut() = screma::SemanticState::Serial;
-    Ok(())
+    graph.skeleton.effect_mut(recipe.site).kind =
+        SideEffectKind::Soac(SoacEffect(recipe.owner, Soac::Screma(op)));
 }
 
-pub(super) fn semantic_effect(graph: &EGraph, site: SideEffectSite) -> error::Result<&SideEffect> {
-    graph.skeleton.get_effect(site).ok_or_else(|| {
-        error::ParallelizeError::Invalid(format!(
-            "stale semantic effect site {:?}:{}",
-            site.block, site.index
-        ))
-    })
+pub(super) fn semantic_effect(graph: &EGraph, site: SideEffectSite) -> &SideEffect {
+    graph.skeleton.effect(site)
 }
 
-pub(super) fn semantic_effect_mut(
-    graph: &mut EGraph,
-    site: SideEffectSite,
-) -> error::Result<&mut SideEffect> {
-    graph.skeleton.get_effect_mut(site).ok_or_else(|| {
-        error::ParallelizeError::Invalid(format!(
-            "stale semantic effect site {:?}:{}",
-            site.block, site.index
-        ))
-    })
+pub(super) fn semantic_effect_mut(graph: &mut EGraph, site: SideEffectSite) -> &mut SideEffect {
+    graph.skeleton.effect_mut(site)
 }
 
-pub(super) fn semantic_node_type(graph: &EGraph, node: NodeId) -> error::Result<Type<TypeName>> {
-    graph
-        .types
-        .get(&node)
-        .cloned()
-        .ok_or_else(|| error::ParallelizeError::Invalid(format!("semantic node {node:?} has no type")))
+pub(super) fn semantic_node_type(graph: &EGraph, node: NodeId) -> Type<TypeName> {
+    graph.types[&node].clone()
 }
 
 fn valid_recipe_placement(op: &screma::Op<crate::egir::types::Semantic>) -> bool {

@@ -43,16 +43,12 @@ impl KernelPlan {
 
     pub(super) fn validate_program(
         &self,
-        resources: &[LogicalResource],
+        resources: &LogicalResourceArena,
         descriptor: &PipelineDescriptor,
     ) -> Result<(), String> {
-        let resource_ids = resources.iter().map(|resource| resource.id).collect::<HashSet<_>>();
-        if resource_ids.len() != resources.len()
-            || resources.iter().enumerate().any(|(index, resource)| resource.id.0 as usize != index)
-        {
-            return Err("logical resource arena is not dense and unique".into());
-        }
-        let host_bindings = resources.iter().filter_map(LogicalResource::host_binding).collect::<Vec<_>>();
+        let resource_ids = resources.iter().map(|resource| resource.id()).collect::<HashSet<_>>();
+        let host_bindings =
+            resources.iter().filter_map(|resource| resource.host_binding()).collect::<Vec<_>>();
         if host_bindings.iter().copied().collect::<HashSet<_>>().len() != host_bindings.len() {
             return Err("host resources contain a binding collision".into());
         }
@@ -238,7 +234,7 @@ fn validate_families(families: &HashMap<CompilerFlowEndpoint, HashSet<KernelKind
     Ok(())
 }
 
-fn validate_resource_flows(plan: &KernelPlan, resources: &[LogicalResource]) -> Result<(), String> {
+fn validate_resource_flows(plan: &KernelPlan, resources: &LogicalResourceArena) -> Result<(), String> {
     for resource in resources {
         let ResourceOrigin::Compiler(compiler) = &resource.origin else {
             continue;
@@ -247,19 +243,19 @@ fn validate_resource_flows(plan: &KernelPlan, resources: &[LogicalResource]) -> 
             continue;
         };
         let writers = plan
-            .flow_resource_phases(flow.producer, resource.id, true)
+            .flow_resource_phases(flow.producer, resource.id(), true)
             .map(|phase| phase.id)
             .collect::<HashSet<_>>();
         if writers.is_empty() {
-            return Err(format!("resource {:?} has no producer", resource.id));
+            return Err(format!("resource {:?} has no producer", resource.id()));
         }
         for consumer in &flow.consumers {
-            for reader in plan.flow_resource_phases(*consumer, resource.id, false) {
+            for reader in plan.flow_resource_phases(*consumer, resource.id(), false) {
                 if !reader.dependencies.iter().any(|dependency| writers.contains(dependency)) {
                     return Err(format!(
                         "kernel `{}` reads {:?} without a producer dependency",
                         reader.entry_point(),
-                        resource.id
+                        resource.id()
                     ));
                 }
             }

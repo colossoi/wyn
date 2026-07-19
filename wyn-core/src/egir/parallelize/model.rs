@@ -6,8 +6,8 @@ use thiserror::Error;
 
 use super::schedule::KernelMutationError;
 use crate::egir::program::{
-    CompilerFlowEndpoint, CompilerResourceFlow, CompilerResourceKind, LogicalResource, ResourceOrigin,
-    SemanticOpId,
+    CompilerFlowEndpoint, CompilerResourceFlow, CompilerResourceKind, LogicalResource,
+    LogicalResourceArena, ResourceOrigin, SemanticOpId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,20 +73,14 @@ pub(super) enum RecipeSelection<T> {
 
 /// Checked view of resources grouped by semantic owner, kind, and slot.
 pub(super) struct ResourceIndex<'a> {
-    resources: &'a [LogicalResource],
+    resources: &'a LogicalResourceArena,
     owned: HashMap<(SemanticOpId, CompilerResourceKind), BTreeMap<usize, &'a LogicalResource>>,
 }
 
 impl<'a> ResourceIndex<'a> {
-    pub(super) fn new(resources: &'a [LogicalResource]) -> Result<Self> {
+    pub(super) fn new(resources: &'a LogicalResourceArena) -> Result<Self> {
         let mut owned: HashMap<_, BTreeMap<_, _>> = HashMap::new();
-        for (index, resource) in resources.iter().enumerate() {
-            if resource.id.0 as usize != index {
-                return Err(ParallelizeError::Invalid(format!(
-                    "resource manifest is not dense at {:?}",
-                    resource.id
-                )));
-            }
+        for resource in resources {
             let ResourceOrigin::Compiler(compiler) = &resource.origin else {
                 continue;
             };
@@ -105,8 +99,7 @@ impl<'a> ResourceIndex<'a> {
 
     pub(super) fn get(&self, id: crate::ResourceId) -> Result<&'a LogicalResource> {
         self.resources
-            .get(id.0 as usize)
-            .filter(|resource| resource.id == id)
+            .get(id)
             .ok_or_else(|| ParallelizeError::Invalid(format!("missing logical resource {id:?}")))
     }
 
@@ -210,11 +203,13 @@ pub(super) struct ResourceFlowIndex {
 }
 
 impl ResourceFlowIndex {
-    pub(super) fn new(resources: &[LogicalResource]) -> Self {
+    pub(super) fn new(resources: &LogicalResourceArena) -> Self {
         let mut flows = resources
             .iter()
             .filter_map(|resource| match &resource.origin {
-                ResourceOrigin::Compiler(compiler) => compiler.flow.clone().map(|flow| (resource.id, flow)),
+                ResourceOrigin::Compiler(compiler) => {
+                    compiler.flow.clone().map(|flow| (resource.id(), flow))
+                }
                 ResourceOrigin::Host(_) => None,
             })
             .collect::<Vec<_>>();

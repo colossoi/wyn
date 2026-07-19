@@ -58,12 +58,8 @@ fn allocated_program(reference: SemanticResourceRef, size: LogicalSize) -> Alloc
         PipelineDescriptor::default(),
         RegionInterner::default(),
     );
-    program.resources.push(LogicalResource {
-        id: ResourceId(0),
-        origin: ResourceOrigin::Host(binding),
-        elem_ty: unit_ty(),
-        size,
-    });
+    let resource = program.resources.allocate(ResourceOrigin::Host(binding), unit_ty(), size);
+    assert_eq!(resource, reference.0);
     AllocatedProgram {
         semantic: program,
         materializations: Vec::new(),
@@ -81,12 +77,7 @@ fn logical_allocation_introduces_the_allocated_sidecar() {
         PipelineDescriptor::default(),
         RegionInterner::default(),
     );
-    semantic.resources.push(LogicalResource {
-        id: ResourceId(0),
-        origin: ResourceOrigin::Host(binding),
-        elem_ty: unit_ty(),
-        size: LogicalSize::Unspecified,
-    });
+    semantic.resources.allocate(ResourceOrigin::Host(binding), unit_ty(), LogicalSize::Unspecified);
 
     let mut effect_ids = crate::IdSource::new();
     let allocated = plan_logical_resources(semantic, &mut effect_ids);
@@ -110,14 +101,38 @@ fn semantic_resource_ref_has_no_binding_constructor() {
 }
 
 #[test]
+fn logical_resource_arena_owns_dense_identity_assignment() {
+    let mut resources = LogicalResourceArena::default();
+    let first = resources.allocate(
+        ResourceOrigin::Host(crate::BindingRef::new(0, 1)),
+        unit_ty(),
+        LogicalSize::Unspecified,
+    );
+    let second = resources.allocate(
+        ResourceOrigin::Compiler(CompilerResource::new(
+            CompilerResourceKind::ReducePartial,
+            Some(SemanticOpId(7)),
+            0,
+        )),
+        unit_ty(),
+        LogicalSize::FixedBytes(4),
+    );
+
+    assert_eq!(first, ResourceId(0));
+    assert_eq!(second, ResourceId(1));
+    assert_eq!(resources.get(first).map(LogicalResource::id), Some(first));
+    assert_eq!(resources.get(second).map(LogicalResource::id), Some(second));
+}
+
+#[test]
 fn physicalization_rebuilds_resource_nodes_as_binding_nodes() {
     let binding = crate::BindingRef::new(3, 5);
-    let resources = [LogicalResource {
-        id: ResourceId(0),
-        origin: ResourceOrigin::Host(binding),
-        elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
-        size: LogicalSize::Unspecified,
-    }];
+    let mut resources = LogicalResourceArena::default();
+    resources.allocate(
+        ResourceOrigin::Host(binding),
+        Type::Constructed(TypeName::UInt(32), vec![]),
+        LogicalSize::Unspecified,
+    );
     let table = PhysicalResourceTable::allocate(&resources, &mut crate::IdSource::new());
     let mut graph = EGraph::new();
     let view = crate::egir::graph_ops::intern_resource_view(

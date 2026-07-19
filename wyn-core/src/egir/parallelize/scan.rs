@@ -6,6 +6,7 @@ pub(super) struct ScanCandidate {
     pub site: SideEffectSite,
     pub owner: SemanticOpId,
     pub scratch_type: Type<TypeName>,
+    serial: facts::SerialScremaRecipe,
     step_region: RegionId,
     combine_region: RegionId,
     step_captures: Vec<NodeId>,
@@ -28,6 +29,7 @@ pub(super) fn analyze_scan_candidate(
     entry: &crate::egir::program::PlannedEntry,
     located: LocatedScan<'_>,
 ) -> error::Result<RecipeSelection<ScanCandidate>> {
+    let serial = located.serial_recipe();
     let site = located.site;
     let side_effect = located.effect;
     if let Err(reason) = scan_recipe_eligibility(&located) {
@@ -62,16 +64,17 @@ pub(super) fn analyze_scan_candidate(
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedDestination));
     };
     let owner = located.owner;
-    let scratch_type = semantic_node_type(&entry.graph, operator.neutral)?;
+    let scratch_type = semantic_node_type(&entry.graph, operator.neutral);
     if crate::ssa::layout::type_byte_size(&scratch_type).is_none() {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedScratchLayout));
     }
-    let input_view_type = semantic_node_type(&entry.graph, input)?;
-    let scan_output_view_type = semantic_node_type(&entry.graph, scan_output)?;
+    let input_view_type = semantic_node_type(&entry.graph, input);
+    let scan_output_view_type = semantic_node_type(&entry.graph, scan_output);
     Ok(RecipeSelection::Parallel(ScanCandidate {
         site,
         owner,
         scratch_type,
+        serial,
         step_region: operator.step.region,
         combine_region: operator.combine.region,
         step_captures: operator.step.captures.clone(),
@@ -91,9 +94,9 @@ impl BoundScan {
         resources: &model::ResourceIndex<'_>,
     ) -> error::Result<Self> {
         let block_sums =
-            resources.exactly_one_at(candidate.owner, CompilerResourceKind::ScanBlockSums, 0)?.id;
+            resources.exactly_one_at(candidate.owner, CompilerResourceKind::ScanBlockSums, 0)?.id();
         let block_offsets =
-            resources.exactly_one_at(candidate.owner, CompilerResourceKind::ScanBlockOffsets, 1)?.id;
+            resources.exactly_one_at(candidate.owner, CompilerResourceKind::ScanBlockOffsets, 1)?.id();
         Ok(Self {
             candidate,
             block_sums,
@@ -108,14 +111,11 @@ impl KernelPlanBuilder<'_, '_> {
         entry: &mut crate::egir::program::PlannedEntry,
         analysis: BoundScan,
     ) -> error::Result<Vec<crate::egir::program::PlannedEntry>> {
-        debug_assert_eq!(
-            segmented_recipe_effect(entry).map(|located| located.site),
-            Some(analysis.candidate.site)
-        );
         let total_threads = self.policy.reduce_phase1_width;
         let ScanCandidate {
             site,
             scratch_type: elem_ty,
+            serial,
             step_region,
             combine_region,
             step_captures: step_capture_nodes,
@@ -145,22 +145,11 @@ impl KernelPlanBuilder<'_, '_> {
         let chunk_len = chunked.chunk_len;
         let chunked_input_nid = chunked.views[0];
         {
-            let operand =
-                semantic_effect_mut(&mut entry.graph, site)?.operand_nodes.first_mut().ok_or_else(
-                    || error::ParallelizeError::Invalid("scan recipe lost its input operand".into()),
-                )?;
-            *operand = chunked_input_nid;
+            semantic_effect_mut(&mut entry.graph, site).operand_nodes[0] = chunked_input_nid;
         }
         for (map_index, operand_index) in map_output_view_ops.iter().enumerate() {
-            let original = *semantic_effect(&entry.graph, site)?
-                .operand_nodes
-                .get(*operand_index)
-                .ok_or_else(|| {
-                    error::ParallelizeError::Invalid(format!(
-                        "scan recipe is missing map output operand {operand_index}"
-                    ))
-                })?;
-            let view_ty = semantic_node_type(&entry.graph, original)?;
+            let original = semantic_effect(&entry.graph, site).operand_nodes[*operand_index];
+            let view_ty = semantic_node_type(&entry.graph, original);
             let chunked_view = chunk_view_like(
                 &mut entry.graph,
                 original,
@@ -170,15 +159,7 @@ impl KernelPlanBuilder<'_, '_> {
                 ChunkInputKind::StorageOnly,
                 &format!("SegScan map output {map_index}"),
             )?;
-            let operand = semantic_effect_mut(&mut entry.graph, site)?
-                .operand_nodes
-                .get_mut(*operand_index)
-                .ok_or_else(|| {
-                    error::ParallelizeError::Invalid(format!(
-                        "scan recipe lost map output operand {operand_index}"
-                    ))
-                })?;
-            *operand = chunked_view;
+            semantic_effect_mut(&mut entry.graph, site).operand_nodes[*operand_index] = chunked_view;
         }
         let chunked_scan_output = graph_ops::intern_chunked_resource_view(
             &mut entry.graph,
@@ -189,13 +170,8 @@ impl KernelPlanBuilder<'_, '_> {
             None,
         );
         {
-            let operand = semantic_effect_mut(&mut entry.graph, site)?
-                .operand_nodes
-                .get_mut(scan_output_view_op)
-                .ok_or_else(|| {
-                    error::ParallelizeError::Invalid("scan recipe lost its output-view operand".into())
-                })?;
-            *operand = chunked_scan_output;
+            semantic_effect_mut(&mut entry.graph, site).operand_nodes[scan_output_view_op] =
+                chunked_scan_output;
         }
 
         // Append a chunked reduce over the same input that stores each thread's
@@ -319,7 +295,7 @@ impl KernelPlanBuilder<'_, '_> {
 
         // Phase 1 is now a per-invocation Screma scan over the thread's chunk plus
         // the appended block-sum reduce; `soac_expand` lowers both.
-        make_screma_serial(&mut entry.graph, site)?;
+        make_screma_serial(&mut entry.graph, serial);
         Ok(vec![phase2, phase3])
     }
 }
