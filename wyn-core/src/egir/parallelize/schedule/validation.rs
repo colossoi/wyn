@@ -2,9 +2,6 @@ use super::*;
 
 impl KernelPlan {
     pub(super) fn validate(&self) -> Result<(), String> {
-        if !self.unresolved_stages.is_empty() {
-            return Err(self.unresolved_stages.join("; "));
-        }
         let phases = self.phases().collect::<Vec<_>>();
         let mut ids = HashSet::new();
         let mut names = HashSet::new();
@@ -12,44 +9,21 @@ impl KernelPlan {
             if !ids.insert(phase.id) {
                 return Err(format!("duplicate kernel id {:?}", phase.id));
             }
-            if !names.insert(phase.entry_point.as_str()) {
-                return Err(format!("duplicate physical entry `{}`", phase.entry_point));
-            }
-            if phase.entry_point != phase.recipe.entry().name {
-                return Err(format!(
-                    "kernel `{}` owns recipe `{}`",
-                    phase.entry_point,
-                    phase.recipe.entry().name
-                ));
+            if !names.insert(phase.entry_point()) {
+                return Err(format!("duplicate physical entry `{}`", phase.entry_point()));
             }
             if phase.dependencies.iter().any(|dependency| *dependency == phase.id) {
-                return Err(format!("kernel `{}` depends on itself", phase.entry_point));
+                return Err(format!("kernel `{}` depends on itself", phase.entry_point()));
             }
             validate_entry(phase.recipe.entry())?;
-            match (&phase.recipe.entry().execution_model, phase.recipe.kind()) {
-                (ExecutionModel::Compute { .. }, KernelKind::GraphicsPassthrough) => {
-                    return Err(format!(
-                        "compute kernel `{}` is a graphics passthrough",
-                        phase.entry_point
-                    ));
-                }
-                (ExecutionModel::Vertex | ExecutionModel::Fragment, kind)
-                    if kind != KernelKind::GraphicsPassthrough =>
-                {
-                    return Err(format!(
-                        "graphics kernel `{}` has compute recipe {kind:?}",
-                        phase.entry_point
-                    ));
-                }
-                _ => {}
-            }
         }
         for phase in &phases {
             for dependency in &phase.dependencies {
                 if !ids.contains(dependency) {
                     return Err(format!(
                         "kernel `{}` depends on missing kernel {:?}",
-                        phase.entry_point, dependency
+                        phase.entry_point(),
+                        dependency
                     ));
                 }
             }
@@ -89,20 +63,22 @@ impl KernelPlan {
         let mut family = HashMap::<CompilerFlowEndpoint, HashSet<KernelKind>>::new();
         for phase in self.phases() {
             let entry = phase.recipe.entry();
-            for scheduled in &phase.resources {
+            let resources = phase.resources();
+            for scheduled in &resources {
                 if !resource_ids.contains(&scheduled.resource) {
                     return Err(format!(
                         "kernel `{}` references missing resource {:?}",
-                        phase.entry_point, scheduled.resource
+                        phase.entry_point(),
+                        scheduled.resource
                     ));
                 }
             }
             for actual in planned_resources(entry) {
-                let Some(scheduled) = phase.resources.iter().find(|item| item.resource == actual.resource)
-                else {
+                let Some(scheduled) = resources.iter().find(|item| item.resource == actual.resource) else {
                     return Err(format!(
                         "kernel `{}` omits resource {:?}",
-                        phase.entry_point, actual.resource
+                        phase.entry_point(),
+                        actual.resource
                     ));
                 };
                 if actual.access.reads() && !scheduled.access.reads()
@@ -110,38 +86,55 @@ impl KernelPlan {
                 {
                     return Err(format!(
                         "kernel `{}` understates access to {:?}",
-                        phase.entry_point, actual.resource
+                        phase.entry_point(),
+                        actual.resource
                     ));
                 }
             }
             if let Some(flow) = phase.flow_source {
                 family.entry(flow).or_default().insert(phase.recipe.kind());
             }
-            let Some(source) = phase.abi.source_entry else {
+            let projection = phase.abi_projection();
+            let Some(source) = projection.source_entry else {
                 continue;
             };
             let abi = self
-                .semantic_abi
+                .entry_schedules
                 .get(&source)
-                .ok_or_else(|| format!("kernel `{}` has invalid source id", phase.entry_point))?;
-            if phase.entry_point == abi.name {
+                .ok_or_else(|| format!("kernel `{}` has invalid source id", phase.entry_point()))?;
+            if phase.id == abi.primary {
                 *primary.entry(source).or_default() += 1;
+                if phase.entry_point() != abi.name {
+                    return Err(format!(
+                        "semantic entry `{}` has primary kernel `{}`",
+                        abi.name,
+                        phase.entry_point()
+                    ));
+                }
             }
-            if phase.abi.inputs.iter().any(|slot| slot.0 >= abi.input_count) {
+            if projection.inputs.iter().any(|slot| slot.0 >= abi.input_count) {
                 return Err(format!(
                     "kernel `{}` has an invalid input projection",
-                    phase.entry_point
+                    phase.entry_point()
                 ));
             }
             let mut physical_slots = HashSet::new();
-            for route in &phase.abi.output_routes {
+            for route in &projection.output_routes {
                 if route.semantic_slot.0 >= abi.output_count
                     || route.physical_slot.0 >= entry.outputs.len()
                     || !physical_slots.insert(route.physical_slot)
                 {
                     return Err(format!(
                         "kernel `{}` has an invalid output projection",
-                        phase.entry_point
+                        phase.entry_point()
+                    ));
+                }
+                if abi.output_owners.get(&route.semantic_slot) != Some(&phase.id) {
+                    return Err(format!(
+                        "kernel `{}` does not own semantic output {:?}/{}",
+                        phase.entry_point(),
+                        source,
+                        route.semantic_slot.0
                     ));
                 }
                 if let Some(owner) = output_owners.insert((source, route.semantic_slot), phase.id) {
@@ -153,7 +146,7 @@ impl KernelPlan {
                 projected.entry(source).or_default().insert(route.semantic_slot);
             }
         }
-        for (&source, abi) in &self.semantic_abi {
+        for (&source, abi) in &self.entry_schedules {
             if primary.get(&source).copied().unwrap_or(0) != 1 {
                 return Err(format!(
                     "semantic entry `{}` has no unique primary kernel",
@@ -161,7 +154,7 @@ impl KernelPlan {
                 ));
             }
             let routed = projected.get(&source).cloned().unwrap_or_default();
-            if !abi.routed_outputs.is_subset(&routed) {
+            if !abi.output_owners.keys().all(|output| routed.contains(output)) {
                 return Err(format!("semantic entry `{}` has unpublished outputs", abi.name));
             }
         }
@@ -265,7 +258,8 @@ fn validate_resource_flows(plan: &KernelPlan, resources: &[LogicalResource]) -> 
                 if !reader.dependencies.iter().any(|dependency| writers.contains(dependency)) {
                     return Err(format!(
                         "kernel `{}` reads {:?} without a producer dependency",
-                        reader.entry_point, resource.id
+                        reader.entry_point(),
+                        resource.id
                     ));
                 }
             }

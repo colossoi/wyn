@@ -10,9 +10,24 @@ use super::super::program::{remap_control_headers, PlannedEntry, SemanticResourc
 use super::super::soac::{filter, hist, screma};
 use super::super::types::{EGraph, Scheduled, Semantic, SideEffect, SideEffectKind, Soac, SoacEffect};
 
+#[derive(Clone, Copy)]
+pub(super) struct ParallelFilterPlan {
+    stage: filter::ParallelStage,
+    config: filter::ParallelConfig<SemanticResourceRef>,
+}
+
+impl ParallelFilterPlan {
+    pub(super) fn new(
+        stage: filter::ParallelStage,
+        config: filter::ParallelConfig<SemanticResourceRef>,
+    ) -> Self {
+        Self { stage, config }
+    }
+}
+
 pub(super) fn entry(
     entry: PlannedEntry<Semantic>,
-    filter_plan: Option<filter::Plan<SemanticResourceRef>>,
+    filter_plan: Option<ParallelFilterPlan>,
 ) -> Result<PlannedEntry<Scheduled>, String> {
     let PlannedEntry {
         name,
@@ -58,14 +73,14 @@ pub(in crate::egir) fn graph(
 
 fn schedule_soac(
     soac: Soac<Semantic>,
-    filter_plan: Option<filter::Plan<SemanticResourceRef>>,
+    filter_plan: Option<ParallelFilterPlan>,
 ) -> Result<Soac<Scheduled>, String> {
     schedule_soac_with_mode(soac, filter_plan, false)
 }
 
 fn schedule_soac_with_mode(
     soac: Soac<Semantic>,
-    filter_plan: Option<filter::Plan<SemanticResourceRef>>,
+    filter_plan: Option<ParallelFilterPlan>,
     serial: bool,
 ) -> Result<Soac<Scheduled>, String> {
     Ok(match soac {
@@ -102,19 +117,11 @@ fn schedule_soac_with_mode(
         }),
         Soac::Filter(filter::Op { body, state }) => {
             let filter::SemanticState { space, storage } = state;
-            let state = match filter_plan.unwrap_or(filter::Plan::Serial) {
-                filter::Plan::Serial => filter::ScheduledState::Serial { space, storage },
-                plan => {
+            let state = match filter_plan {
+                None => filter::ScheduledState::Serial { space, storage },
+                Some(ParallelFilterPlan { stage, config }) => {
                     let filter::Output::Runtime { scratch, length } = storage else {
                         return Err("parallel filter plan requires runtime output storage".into());
-                    };
-                    let (stage, config) = match plan {
-                        filter::Plan::Flags(config) => (filter::ParallelStage::Flags, config),
-                        filter::Plan::Scan(config) => (filter::ParallelStage::Scan, config),
-                        filter::Plan::Scatter(config) => (filter::ParallelStage::Scatter, config),
-                        filter::Plan::Serial => {
-                            return Err("serial filter plan reached the parallel scheduler branch".into());
-                        }
                     };
                     filter::ScheduledState::Parallel {
                         space,

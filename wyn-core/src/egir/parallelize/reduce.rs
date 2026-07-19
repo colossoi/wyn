@@ -5,20 +5,33 @@ use super::*;
 pub(super) struct ReduceCandidate {
     pub site: SideEffectSite,
     pub owner: SemanticOpId,
-    pub scratch_types: Vec<Type<TypeName>>,
-    combine_regions: Vec<RegionId>,
     input_views: Vec<(NodeId, Type<TypeName>)>,
     map_output_view_operands: Vec<usize>,
     map_count: usize,
-    neutral_values: Vec<NodeId>,
     result: NodeId,
-    stores: Vec<Vec<ReduceOutputStore>>,
-    outputs: Vec<Vec<(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)>>,
+    accumulators: Vec<ReduceAccumulator>,
 }
 
-struct BoundReduce {
+struct ReduceAccumulator {
+    scratch_type: Type<TypeName>,
+    combine_region: RegionId,
+    neutral: NodeId,
+    stores: Vec<ReduceOutputStore>,
+    outputs: Vec<(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)>,
+}
+
+pub(super) struct BoundReduce {
     candidate: ReduceCandidate,
     partials: Vec<ResourceId>,
+}
+
+struct EmissionAccumulator {
+    scratch_type: Type<TypeName>,
+    operator: String,
+    neutral: NodeId,
+    stores: Vec<(NodeId, NodeId)>,
+    outputs: Vec<(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)>,
+    partial: ResourceId,
 }
 
 struct ReduceOutputStore {
@@ -28,32 +41,24 @@ struct ReduceOutputStore {
     writer: Option<crate::egir::types::EffectToken>,
 }
 
+impl ReduceCandidate {
+    pub(super) fn scratch_types(&self) -> impl Iterator<Item = &Type<TypeName>> {
+        self.accumulators.iter().map(|accumulator| &accumulator.scratch_type)
+    }
+}
+
 pub(super) fn analyze_reduce_candidate(
     entry: &crate::egir::program::PlannedEntry,
+    located: LocatedReduce<'_>,
     resources: &model::ResourceIndex<'_>,
 ) -> error::Result<RecipeSelection<ReduceCandidate>> {
-    let located = segmented_recipe_effect(entry).ok_or_else(|| {
-        error::ParallelizeError::Invalid("reduce analysis has no selected segmented effect".into())
-    })?;
     let site = located.site;
     let side_effect = located.effect;
-    match seg_recipe_family(side_effect) {
-        Ok(SegScratchFamily::Reduce) => {}
-        Ok(SegScratchFamily::Scan) => {
-            return Err(error::ParallelizeError::Invalid(
-                "reduce analysis received a scan operation".into(),
-            ));
-        }
-        Err(reason) => return Ok(RecipeSelection::Serial(reason)),
+    if let Err(reason) = reduce_recipe_eligibility(&located) {
+        return Ok(RecipeSelection::Serial(reason));
     }
-    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(screma::Op::Reduce { lanes, operators, .. }))) =
-        &side_effect.kind
-    else {
-        return Err(error::ParallelizeError::Invalid(
-            "selected reduce effect changed operation kind during analysis".into(),
-        ));
-    };
-    let operators = operators.iter().collect::<Vec<_>>();
+    let lanes = located.lanes;
+    let operators = located.operators.iter().collect::<Vec<_>>();
     let n_inputs = lanes.inputs.len();
     let n_accs = operators.len();
     let n_maps = lanes.maps.len();
@@ -80,9 +85,7 @@ pub(super) fn analyze_reduce_candidate(
     let result = side_effect.result.ok_or_else(|| {
         error::ParallelizeError::Invalid("selected reduce effect has no result node".into())
     })?;
-    let owner = side_effect.kind.soac_id().copied().ok_or_else(|| {
-        error::ParallelizeError::Invalid("selected reduce effect has no semantic operation id".into())
-    })?;
+    let owner = located.owner;
     if operators.iter().any(|operator| !can_clone_pure_subgraph(&entry.graph, operator.neutral, &[])) {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedCaptures));
     }
@@ -99,8 +102,6 @@ pub(super) fn analyze_reduce_candidate(
             Ok((view, semantic_node_type(&entry.graph, view)?))
         })
         .collect::<error::Result<Vec<_>>>()?;
-    let combine_regions = operators.iter().map(|operator| operator.combine.region).collect();
-    let neutral_values = operators.iter().map(|operator| operator.neutral).collect();
     let map_output_view_operands = (0..n_maps).map(|index| map_base + index).collect();
     let mut stores = (0..n_accs).map(|_| Vec::new()).collect::<Vec<_>>();
     let mut outputs: Vec<Vec<(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)>> =
@@ -154,29 +155,43 @@ pub(super) fn analyze_reduce_candidate(
     if !(0..n_accs).all(|index| !stores[index].is_empty() && !outputs[index].is_empty()) {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedDestination));
     }
+    let accumulators = operators
+        .into_iter()
+        .zip(scratch_types)
+        .zip(stores)
+        .zip(outputs)
+        .map(
+            |(((operator, scratch_type), stores), outputs)| ReduceAccumulator {
+                scratch_type,
+                combine_region: operator.combine.region,
+                neutral: operator.neutral,
+                stores,
+                outputs,
+            },
+        )
+        .collect();
     Ok(RecipeSelection::Parallel(ReduceCandidate {
         site,
         owner,
-        scratch_types,
-        combine_regions,
         input_views,
         map_output_view_operands,
         map_count: n_maps,
-        neutral_values,
         result,
-        stores,
-        outputs,
+        accumulators,
     }))
 }
 
 impl BoundReduce {
-    fn bind(candidate: ReduceCandidate, resources: &model::ResourceIndex<'_>) -> error::Result<Self> {
+    pub(super) fn bind(
+        candidate: ReduceCandidate,
+        resources: &model::ResourceIndex<'_>,
+    ) -> error::Result<Self> {
         let partials = resources
             .ordered_slots(
                 candidate.owner,
                 CompilerResourceKind::ReducePartial,
                 0,
-                candidate.scratch_types.len(),
+                candidate.accumulators.len(),
             )?
             .iter()
             .map(|resource| resource.id)
@@ -189,23 +204,19 @@ impl KernelPlanBuilder<'_, '_> {
     pub(super) fn emit_reduce_entry(
         &mut self,
         entry: &mut crate::egir::program::PlannedEntry,
-        candidate: ReduceCandidate,
+        bound: BoundReduce,
     ) -> error::Result<Vec<crate::egir::program::PlannedEntry>> {
         let BoundReduce {
             candidate,
             partials: partial_resources,
-        } = BoundReduce::bind(candidate, &self.resources)?;
+        } = bound;
         let ReduceCandidate {
             site,
-            scratch_types: elem_tys,
-            combine_regions,
             input_views: input_view_data,
             map_output_view_operands,
             map_count: n_maps,
-            neutral_values: init_nids,
             result: screma_result_nid,
-            stores,
-            outputs: acc_output_decls,
+            accumulators,
             ..
         } = candidate;
         let block_id = site.block;
@@ -214,20 +225,29 @@ impl KernelPlanBuilder<'_, '_> {
             Some(site)
         );
         let total_threads = self.policy.reduce_phase1_width;
-        let n_accs = stores.len();
-        let mut acc_stores = (0..n_accs).map(|_| Vec::new()).collect::<Vec<_>>();
+        let n_accs = accumulators.len();
         let mut drop_locations = Vec::new();
         let mut dropped_writers = std::collections::HashSet::new();
-        for (accumulator, stores) in stores.into_iter().enumerate() {
-            for store in stores {
-                acc_stores[accumulator].push((store.place, store.value));
-                drop_locations.push(store.location);
-                dropped_writers.extend(store.writer);
-            }
-        }
-        let reduce_funcs = self.schedule.callable_names(combine_regions);
-
-        debug_assert_eq!(n_accs, elem_tys.len());
+        let accumulators = accumulators
+            .into_iter()
+            .zip(partial_resources)
+            .map(|(accumulator, partial)| {
+                let mut stores = Vec::with_capacity(accumulator.stores.len());
+                for store in accumulator.stores {
+                    stores.push((store.place, store.value));
+                    drop_locations.push(store.location);
+                    dropped_writers.extend(store.writer);
+                }
+                EmissionAccumulator {
+                    scratch_type: accumulator.scratch_type,
+                    operator: self.schedule.callable_name(accumulator.combine_region).to_string(),
+                    neutral: accumulator.neutral,
+                    stores,
+                    outputs: accumulator.outputs,
+                    partial,
+                }
+            })
+            .collect::<Vec<_>>();
         // 3. Chunk all input views and every map output view; swap them back
         // into the Screma operand list.
         let chunked = chunk_soac_inputs(
@@ -283,13 +303,14 @@ impl KernelPlanBuilder<'_, '_> {
         // `Project{acc_pos}(screma_result)` node — phase 2 substitutes it for the
         // combined result when replaying the captured stores.
         let accumulator_values: Vec<NodeId> = (0..n_accs)
-            .map(|acc_i| {
+            .zip(&accumulators)
+            .map(|(acc_i, accumulator)| {
                 entry.graph.intern_pure(
                     crate::egir::types::PureOp::Project {
                         index: (n_maps + acc_i) as u32,
                     },
                     smallvec![screma_result_nid],
-                    elem_tys[acc_i].clone(),
+                    accumulator.scratch_type.clone(),
                     None,
                 )
             })
@@ -320,24 +341,24 @@ impl KernelPlanBuilder<'_, '_> {
             |writer| !matches!(writer, OutputWriter::Effect(effect) if dropped_writers.contains(effect)),
         );
         }
-        for acc_i in 0..n_accs {
-            let elem_ty = elem_tys[acc_i].clone();
+        for (accumulator, accumulator_value) in accumulators.iter().zip(&accumulator_values) {
+            let elem_ty = accumulator.scratch_type.clone();
             let arr_ty =
                 crate::types::view_array_with_size(&elem_ty, Type::Variable(0), crate::types::no_buffer());
             let partials_view =
-                graph_ops::intern_resource_view(&mut entry.graph, partial_resources[acc_i], arr_ty, None);
+                graph_ops::intern_resource_view(&mut entry.graph, accumulator.partial, arr_ty, None);
             graph_ops::emit_storage_store(
                 &mut entry.graph,
                 block_id,
                 partials_view,
                 chunked.tid,
-                accumulator_values[acc_i],
+                *accumulator_value,
                 elem_ty,
                 self.effect_ids,
                 None,
             );
             // Clear the moved output bindings from phase 1; register partials.
-            for (resource, _, _) in &acc_output_decls[acc_i] {
+            for (resource, _, _) in &accumulator.outputs {
                 let logical = self.resources.get(*resource)?;
                 if let Some(binding) = logical.host_binding() {
                     for output in &mut entry.outputs {
@@ -348,16 +369,19 @@ impl KernelPlanBuilder<'_, '_> {
                 }
             }
             entry.resource_declarations.push(SemanticResourceDecl {
-                resource: SemanticResourceRef(partial_resources[acc_i]),
+                resource: SemanticResourceRef(accumulator.partial),
                 role: crate::interface::StorageRole::Intermediate,
-                elem_ty: elem_tys[acc_i].clone(),
-                size: self.resources.get(partial_resources[acc_i])?.size.clone(),
+                elem_ty: accumulator.scratch_type.clone(),
+                size: self.resources.get(accumulator.partial)?.size.clone(),
             });
         }
         // A moved output binding may also carry an Output storage declaration (e.g. a
         // hoisted prepass result). Phase 1 no longer writes it; phase 2 owns it.
-        let moved: std::collections::HashSet<ResourceId> =
-            acc_output_decls.iter().flatten().map(|(b, _, _)| *b).collect();
+        let moved: std::collections::HashSet<ResourceId> = accumulators
+            .iter()
+            .flat_map(|accumulator| &accumulator.outputs)
+            .map(|(resource, _, _)| *resource)
+            .collect();
         entry.resource_declarations.retain(|declaration| {
             declaration.role != crate::interface::StorageRole::Output
                 || !moved.contains(&declaration.resource.0)
@@ -366,7 +390,9 @@ impl KernelPlanBuilder<'_, '_> {
         // 6. Synthesize one phase 2 entry per accumulator. Dropping the phase-1
         // stores leaves their pure place/value subgraphs available for projection.
         let mut phase2s = Vec::with_capacity(n_accs);
-        for acc_i in 0..n_accs {
+        for (acc_i, (accumulator, accumulator_value)) in
+            accumulators.iter().zip(accumulator_values).enumerate()
+        {
             let phase2_name = if n_accs == 1 {
                 format!("{}_phase2_combine", entry.name)
             } else {
@@ -374,14 +400,14 @@ impl KernelPlanBuilder<'_, '_> {
             };
             let combine = ReduceCombineSpec {
                 name: phase2_name,
-                operator: reduce_funcs[acc_i].clone(),
-                elem_ty: elem_tys[acc_i].clone(),
+                operator: accumulator.operator.clone(),
+                elem_ty: accumulator.scratch_type.clone(),
                 source_graph: &entry.graph,
-                neutral: init_nids[acc_i],
-                partials: partial_resources[acc_i],
-                accumulator: accumulator_values[acc_i],
-                output_stores: &acc_stores[acc_i],
-                output_declarations: &acc_output_decls[acc_i],
+                neutral: accumulator.neutral,
+                partials: accumulator.partial,
+                accumulator: accumulator_value,
+                output_stores: &accumulator.stores,
+                output_declarations: &accumulator.outputs,
                 width: self.policy.reduce_phase2_width,
             };
             let phase2 = combine.build(self.effect_ids)?;

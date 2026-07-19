@@ -6,10 +6,6 @@
 //! lowering has finished; it is not mutated while an individual lowering is
 //! still speculative.
 
-// The schedule implementation predates the algorithm split and has
-// separately audited internal assertions. New recipe modules deny these lints.
-#![allow(clippy::expect_used, clippy::unwrap_used)]
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -28,6 +24,7 @@ use crate::pipeline_descriptor::{
 use crate::{BindingRef, ResourceAccess, ResourceId};
 
 mod finalize;
+#[cfg(any(test, debug_assertions))]
 mod validation;
 
 #[cfg(test)]
@@ -42,9 +39,8 @@ pub(in crate::egir) struct KernelPlan {
     /// fully planned and physicalized but never published as host stages.
     unpublished: Vec<KernelPhase>,
     next_kernel_id: u32,
-    semantic_abi: HashMap<SemanticEntryId, SemanticAbi>,
+    entry_schedules: HashMap<SemanticEntryId, EntrySchedule>,
     source_publications: Vec<PlannedPublication>,
-    unresolved_stages: Vec<String>,
     /// Callable helpers synthesized by target planning. They are not admitted
     /// to semantic EGIR; physical construction publishes them only after the
     /// schedule has validated.
@@ -59,27 +55,42 @@ pub(in crate::egir) struct KernelPlan {
 /// diagnostic remains on the plan and is reported during validation.
 #[derive(Clone, Debug)]
 pub(super) struct SeededKernels {
-    by_entry: Vec<Option<KernelId>>,
+    by_entry: Vec<KernelId>,
 }
 
 impl SeededKernels {
-    pub(super) fn entry(&self, source: SemanticEntryId) -> Option<KernelId> {
-        self.by_entry.get(source.0 as usize).copied().flatten()
-    }
-
-    fn record(&mut self, source: SemanticEntryId, kernel: KernelId) {
-        if let Some(slot) = self.by_entry.get_mut(source.0 as usize) {
-            *slot = Some(kernel);
-        }
+    pub(super) fn entry(&self, source: SemanticEntryId) -> Result<KernelId, String> {
+        self.by_entry
+            .get(source.0 as usize)
+            .copied()
+            .ok_or_else(|| format!("semantic entry {source:?} has no seeded kernel"))
     }
 }
 
+fn record_seeded_kernel(
+    seeded: &mut [Option<KernelId>],
+    source: SemanticEntryId,
+    kernel: KernelId,
+    name: &str,
+) -> Result<(), String> {
+    let slot = seeded
+        .get_mut(source.0 as usize)
+        .ok_or_else(|| format!("semantic entry `{name}` has invalid id {source:?}"))?;
+    if let Some(existing) = slot.replace(kernel) {
+        return Err(format!(
+            "semantic entry `{name}` is assigned to kernels {existing:?} and {kernel:?}"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
-struct SemanticAbi {
+struct EntrySchedule {
     name: String,
     input_count: usize,
     output_count: usize,
-    routed_outputs: HashSet<OutputSlotId>,
+    primary: KernelId,
+    output_owners: HashMap<OutputSlotId, KernelId>,
 }
 
 impl KernelPlan {
@@ -134,8 +145,8 @@ impl KernelPlan {
                 .phases
                 .iter()
                 .map(|phase| ComputeStage {
-                    entry_point: phase.entry_point.clone(),
-                    workgroup_size: phase.workgroup_size,
+                    entry_point: phase.entry_point().to_owned(),
+                    workgroup_size: phase.workgroup_size(),
                     dispatch_size: DispatchSize::Fixed {
                         x: 1,
                         y: 1,
@@ -161,7 +172,7 @@ impl KernelPlan {
         for scheduled in &self.pipelines {
             let Some(Pipeline::Compute(compute)) = descriptor.pipelines.iter_mut().find(|pipeline| {
                 matches!(pipeline, Pipeline::Compute(candidate) if scheduled.phases.iter().any(|phase| {
-                    candidate.stages.iter().any(|stage| stage.entry_point == phase.entry_point)
+                    candidate.stages.iter().any(|stage| stage.entry_point == phase.entry_point())
                 }))
             }) else {
                 return Err("scheduled compute pipeline was not installed".into());
@@ -176,17 +187,17 @@ impl KernelPlan {
             for phase in &scheduled.phases {
                 let mut reads = Vec::new();
                 let mut writes = Vec::new();
-                for resource in &phase.resources {
+                for resource in phase.resources() {
                     let binding = physical_resources.binding(resource.resource).ok_or_else(|| {
                         format!(
                             "kernel `{}` references an unallocated resource",
-                            phase.entry_point
+                            phase.entry_point()
                         )
                     })?;
                     let index = *binding_index.get(&binding).ok_or_else(|| {
                         format!(
                             "kernel `{}` references unpublished storage {binding}",
-                            phase.entry_point
+                            phase.entry_point()
                         )
                     })?;
                     if resource.access.reads() && !reads.contains(&index) {
@@ -205,11 +216,14 @@ impl KernelPlan {
                     },
                     KernelDomain::Elements(len) => DispatchSize::DerivedFrom {
                         len: len.clone(),
-                        workgroup_size: phase.workgroup_size.0,
+                        workgroup_size: phase.workgroup_size().0,
                     },
                     KernelDomain::ResourceElements { resource, elem_bytes } => {
                         let binding = physical_resources.binding(*resource).ok_or_else(|| {
-                            format!("kernel `{}` has unresolved dispatch resource", phase.entry_point)
+                            format!(
+                                "kernel `{}` has unresolved dispatch resource",
+                                phase.entry_point()
+                            )
                         })?;
                         DispatchSize::DerivedFrom {
                             len: DispatchLen::InputBinding {
@@ -217,13 +231,13 @@ impl KernelPlan {
                                 binding: binding.binding,
                                 elem_bytes: *elem_bytes,
                             },
-                            workgroup_size: phase.workgroup_size.0,
+                            workgroup_size: phase.workgroup_size().0,
                         }
                     }
                 };
                 stages.push(ComputeStage {
-                    entry_point: phase.entry_point.clone(),
-                    workgroup_size: phase.workgroup_size,
+                    entry_point: phase.entry_point().to_owned(),
+                    workgroup_size: phase.workgroup_size(),
                     dispatch_size,
                     reads,
                     writes,
@@ -244,6 +258,10 @@ pub struct KernelId(pub u32);
 pub(super) enum KernelMutationError {
     UnknownKernel(KernelId),
     InvalidKernel(String),
+    DependencyCycle {
+        reader: KernelId,
+        writer: KernelId,
+    },
 }
 
 impl std::fmt::Display for KernelMutationError {
@@ -251,6 +269,10 @@ impl std::fmt::Display for KernelMutationError {
         match self {
             Self::UnknownKernel(kernel) => write!(formatter, "no planned kernel with id {kernel:?}"),
             Self::InvalidKernel(error) => formatter.write_str(error),
+            Self::DependencyCycle { reader, writer } => write!(
+                formatter,
+                "adding resource dependency {reader:?} -> {writer:?} would create a cycle"
+            ),
         }
     }
 }
@@ -264,7 +286,6 @@ impl std::error::Error for KernelMutationError {}
 pub enum KernelKind {
     GraphicsPassthrough,
     SerialCompute,
-    OutputDomainProjection,
     SharedArrayMaterialization,
     ScalarPrepass,
     GatherPrepass,
@@ -279,18 +300,38 @@ pub enum KernelKind {
     ScanApplyOffsets,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum RecipeKind {
+    GraphicsPassthrough,
+    Compute(ComputeKernelKind),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ComputeKernelKind(KernelKind);
+
+impl ComputeKernelKind {
+    fn from_public(kind: KernelKind) -> Option<Self> {
+        (kind != KernelKind::GraphicsPassthrough).then_some(Self(kind))
+    }
+
+    fn public(self) -> KernelKind {
+        self.0
+    }
+}
+
 /// Closed construction recipe: a classified reason paired with the only
 /// retained planned-entry projection. There is no open or absent recipe state.
 #[derive(Clone, Debug)]
 struct KernelRecipe {
-    kind: KernelKind,
+    kind: RecipeKind,
     entry: Arc<PlannedEntry<Scheduled>>,
+    resources: Vec<ScheduledResource>,
 }
 
 pub(super) struct KernelRecipeSpec {
     body: PlannedEntry,
     kind: KernelKind,
-    filter_plan: Option<filter::Plan<SemanticResourceRef>>,
+    filter_plan: Option<super::prepare::ParallelFilterPlan>,
 }
 
 impl KernelRecipeSpec {
@@ -305,12 +346,13 @@ impl KernelRecipeSpec {
     pub(super) fn filter(
         body: PlannedEntry,
         kind: KernelKind,
-        plan: filter::Plan<SemanticResourceRef>,
+        stage: filter::ParallelStage,
+        config: filter::ParallelConfig<SemanticResourceRef>,
     ) -> Self {
         Self {
             body,
             kind,
-            filter_plan: Some(plan),
+            filter_plan: Some(super::prepare::ParallelFilterPlan::new(stage, config)),
         }
     }
 }
@@ -332,32 +374,86 @@ impl PhaseSpec {
         body: PlannedEntry,
         domain: DomainSelection,
         kind: KernelKind,
-        plan: filter::Plan<SemanticResourceRef>,
+        stage: filter::ParallelStage,
+        config: filter::ParallelConfig<SemanticResourceRef>,
     ) -> Self {
         Self {
-            recipe: KernelRecipeSpec::filter(body, kind, plan),
+            recipe: KernelRecipeSpec::filter(body, kind, stage, config),
             domain,
         }
     }
 }
 
+/// A complete, transactionally installed phase chain. The existing kernel id
+/// is retained by `anchor`; phases before and after it receive fresh ids only
+/// after every recipe has closed successfully.
+pub(super) struct KernelChainSpec {
+    before: Vec<PhaseSpec>,
+    anchor: KernelRecipeSpec,
+    after: Vec<PhaseSpec>,
+}
+
+impl KernelChainSpec {
+    pub(super) fn new(anchor: KernelRecipeSpec) -> Self {
+        Self {
+            before: Vec::new(),
+            anchor,
+            after: Vec::new(),
+        }
+    }
+
+    pub(super) fn with_before(mut self, before: Vec<PhaseSpec>) -> Self {
+        self.before = before;
+        self
+    }
+
+    pub(super) fn with_after(mut self, after: Vec<PhaseSpec>) -> Self {
+        self.after = after;
+        self
+    }
+}
+
 impl KernelRecipe {
-    fn close(spec: KernelRecipeSpec) -> Self {
+    fn close(spec: KernelRecipeSpec) -> Result<Self, String> {
         let KernelRecipeSpec {
             body,
             kind,
             filter_plan,
         } = spec;
-        let entry = super::prepare::entry(body, filter_plan)
-            .expect("kernel recipe must have valid scheduled SOAC states");
-        Self {
+        let entry = super::prepare::entry(body, filter_plan)?;
+        Self::from_scheduled(kind, entry)
+    }
+
+    fn from_scheduled(kind: KernelKind, entry: PlannedEntry<Scheduled>) -> Result<Self, String> {
+        let kind = match (&entry.execution_model, kind) {
+            (ExecutionModel::Vertex | ExecutionModel::Fragment, KernelKind::GraphicsPassthrough) => {
+                RecipeKind::GraphicsPassthrough
+            }
+            (ExecutionModel::Compute { .. }, kind) => {
+                RecipeKind::Compute(ComputeKernelKind::from_public(kind).ok_or_else(|| {
+                    format!("compute entry `{}` cannot use a graphics recipe", entry.name)
+                })?)
+            }
+            (ExecutionModel::Vertex | ExecutionModel::Fragment, kind) => {
+                return Err(format!(
+                    "graphics entry `{}` cannot use compute recipe {kind:?}",
+                    entry.name
+                ));
+            }
+        };
+        let resources = planned_resources(&entry);
+        Ok(Self {
             kind,
             entry: Arc::new(entry),
-        }
+            resources,
+        })
     }
 
     fn kind(&self) -> KernelKind {
-        self.kind
+        match self.kind {
+            RecipeKind::GraphicsPassthrough => KernelKind::GraphicsPassthrough,
+            RecipeKind::Compute(kind) => kind.public(),
+        }
     }
 
     fn entry(&self) -> &PlannedEntry<Scheduled> {
@@ -378,6 +474,12 @@ pub struct EntryAbiProjection {
 pub struct OutputRouteProjection {
     pub semantic_slot: OutputSlotId,
     pub physical_slot: OutputSlotId,
+}
+
+#[derive(Clone, Debug)]
+struct KernelAbi {
+    source_entry: Option<SemanticEntryId>,
+    output_routes: Vec<OutputRouteProjection>,
 }
 
 /// Ordered phases that share one host binding table.
@@ -404,29 +506,49 @@ struct KernelPhase {
     /// from the projected source ABI because generated requirements have no
     /// semantic entry ABI of their own.
     flow_source: Option<CompilerFlowEndpoint>,
-    entry_point: String,
     recipe: KernelRecipe,
-    abi: EntryAbiProjection,
-    workgroup_size: (u32, u32, u32),
+    abi: KernelAbi,
     domain: KernelDomain,
     /// The authoritative selection request. Inferred selections retain their
     /// descriptor baseline while the recipe establishes its final domain.
     domain_selection: DomainSelection,
-    resources: Vec<ScheduledResource>,
+    /// Additional accesses introduced by compiler resource-flow binding.
+    flow_resources: Vec<ScheduledResource>,
     /// Stable kernel identities that must complete first.
     dependencies: Vec<KernelId>,
 }
 
 impl KernelPhase {
+    fn entry_point(&self) -> &str {
+        &self.recipe.entry().name
+    }
+
+    fn workgroup_size(&self) -> (u32, u32, u32) {
+        execution_workgroup(&self.recipe.entry().execution_model)
+    }
+
+    fn resources(&self) -> Vec<ScheduledResource> {
+        let mut resources = self.recipe.resources.clone();
+        for resource in &self.flow_resources {
+            merge_scheduled_resource(&mut resources, resource.resource, resource.access);
+        }
+        resources.sort_by_key(|resource| resource.resource);
+        resources
+    }
+
+    fn abi_projection(&self) -> EntryAbiProjection {
+        EntryAbiProjection {
+            source_entry: self.abi.source_entry,
+            inputs: (0..self.recipe.entry().inputs.len()).map(InputSlotId).collect(),
+            output_routes: self.abi.output_routes.clone(),
+        }
+    }
+
     fn refresh_phase_facts(&mut self) {
         let entry = Arc::clone(&self.recipe.entry);
-        self.entry_point.clone_from(&entry.name);
-        self.workgroup_size = execution_workgroup(&entry.execution_model);
         if let DomainSelection::Inferred(baseline) = &self.domain_selection {
             self.domain = inferred_body_domain(&entry, baseline.clone());
         }
-        self.resources = planned_resources(&entry);
-        self.abi.inputs = (0..entry.inputs.len()).map(InputSlotId).collect();
         self.abi.output_routes = output_projection(&entry.output_routes);
     }
 }
@@ -499,12 +621,12 @@ impl KernelPhaseSummary {
         Self {
             id: phase.id,
             placement,
-            entry_point: phase.entry_point.clone(),
+            entry_point: phase.entry_point().to_owned(),
             kind: phase.recipe.kind(),
-            abi: phase.abi.clone(),
-            workgroup_size: phase.workgroup_size,
+            abi: phase.abi_projection(),
+            workgroup_size: phase.workgroup_size(),
             domain: phase.domain.clone(),
-            resources: phase.resources.clone(),
+            resources: phase.resources(),
             dependencies: phase.dependencies.clone(),
         }
     }
@@ -552,10 +674,6 @@ impl KernelPlan {
         self.region_interner.resolve(id)
     }
 
-    pub(super) fn callable_names(&self, ids: impl IntoIterator<Item = RegionId>) -> Vec<String> {
-        self.region_interner.resolve_cloned(ids)
-    }
-
     pub(super) fn define_callable(&mut self, function: SemanticFunc) -> RegionId {
         assert!(
             self.region_interner.get(&function.name).is_none(),
@@ -576,7 +694,7 @@ impl KernelPlan {
     }
 
     fn contains_entry(&self, entry_point: &str) -> bool {
-        self.phases().any(|phase| phase.entry_point == entry_point)
+        self.phases().any(|phase| phase.entry_point() == entry_point)
     }
 
     pub(super) fn contains_flow_source(&self, source: CompilerFlowEndpoint) -> bool {
@@ -595,13 +713,14 @@ impl KernelPlan {
     ) -> impl Iterator<Item = &KernelPhase> {
         self.phases().filter(move |phase| {
             phase.flow_source == Some(source)
-                && phase.resources.iter().any(|item| {
+                && phase.resources().iter().any(|item| {
                     item.resource == resource
                         && if writes { item.access.writes() } else { item.access.reads() }
                 })
         })
     }
 
+    #[cfg(any(test, debug_assertions))]
     fn validate_for_finalization(
         &self,
         resources: &[LogicalResource],
@@ -616,33 +735,17 @@ impl KernelPlan {
         entries: &[SemanticEntry],
         resources: &[LogicalResource],
         region_interner: &RegionInterner,
-    ) -> (Self, SeededKernels) {
+    ) -> Result<(Self, SeededKernels), String> {
         let host_resources = crate::egir::program::host_resource_map(resources);
-        let semantic_abi = entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| {
-                (
-                    SemanticEntryId(index as u32),
-                    SemanticAbi {
-                        name: entry.name.clone(),
-                        input_count: entry.inputs.len(),
-                        output_count: entry.outputs.len(),
-                        routed_outputs: entry.output_routes.iter().map(|route| route.slot).collect(),
-                    },
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let mut unresolved_stages = Vec::new();
-        let mut seeded = SeededKernels {
-            by_entry: vec![None; entries.len()],
-        };
+        let mut seeded = vec![None; entries.len()];
         let source_publications = entries.iter().map(PlannedPublication::from_semantic).collect();
-        let by_name = entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| (entry.name.as_str(), (SemanticEntryId(index as u32), entry)))
-            .collect::<HashMap<_, _>>();
+        let mut by_name = HashMap::new();
+        for (index, entry) in entries.iter().enumerate() {
+            let source = SemanticEntryId(index as u32);
+            if by_name.insert(entry.name.as_str(), (source, entry)).is_some() {
+                return Err(format!("duplicate semantic entry `{}`", entry.name));
+            }
+        }
         let mut next_kernel_id = 0;
         let mut pipelines = Vec::new();
         for (order, pipeline) in descriptor.pipelines.iter().enumerate() {
@@ -653,24 +756,13 @@ impl KernelPlan {
             for stage in &template.stages {
                 let id = KernelId(next_kernel_id);
                 next_kernel_id += 1;
-                let selection = domain_selection_from_stage(stage, &host_resources);
-                let phase = if let Some((source, entry)) = by_name.get(stage.entry_point.as_str()) {
-                    phase_from_entry(id, Some(*source), entry, selection, source_kind(entry))
-                } else {
-                    Err(format!(
-                        "descriptor stage `{}` has no semantic entry",
-                        stage.entry_point
-                    ))
-                };
-                match phase {
-                    Ok(phase) => {
-                        if let Some(source) = phase.abi.source_entry {
-                            seeded.record(source, phase.id);
-                        }
-                        phases.push(phase);
-                    }
-                    Err(error) => unresolved_stages.push(error),
-                }
+                let selection = domain_selection_from_stage(stage, &host_resources)?;
+                let (source, entry) = by_name.get(stage.entry_point.as_str()).ok_or_else(|| {
+                    format!("descriptor stage `{}` has no semantic entry", stage.entry_point)
+                })?;
+                let phase = phase_from_entry(id, Some(*source), entry, selection, source_kind(entry))?;
+                record_seeded_kernel(&mut seeded, *source, phase.id, &entry.name)?;
+                phases.push(phase);
             }
             pipelines.push(ScheduledPipeline {
                 order,
@@ -686,19 +778,12 @@ impl KernelPlan {
             for stage in &graphics.stages {
                 let id = KernelId(next_kernel_id);
                 next_kernel_id += 1;
-                let phase = by_name
-                    .get(stage.entry_point.as_str())
-                    .ok_or_else(|| format!("graphics stage `{}` has no semantic entry", stage.entry_point))
-                    .and_then(|(source, entry)| graphics_passthrough_phase(id, *source, entry));
-                match phase {
-                    Ok(phase) => {
-                        if let Some(source) = phase.abi.source_entry {
-                            seeded.record(source, phase.id);
-                        }
-                        graphics_passthroughs.push(phase);
-                    }
-                    Err(error) => unresolved_stages.push(error),
-                }
+                let (source, entry) = by_name.get(stage.entry_point.as_str()).ok_or_else(|| {
+                    format!("graphics stage `{}` has no semantic entry", stage.entry_point)
+                })?;
+                let phase = graphics_passthrough_phase(id, *source, entry)?;
+                record_seeded_kernel(&mut seeded, *source, phase.id, &entry.name)?;
+                graphics_passthroughs.push(phase);
             }
         }
         let published_names = descriptor
@@ -731,32 +816,61 @@ impl KernelPlan {
             } else {
                 graphics_passthrough_phase(id, SemanticEntryId(index as u32), entry)
             };
-            match result {
-                Ok(phase) => {
-                    seeded.record(SemanticEntryId(index as u32), phase.id);
-                    unpublished.push(phase);
-                }
-                Err(error) => unresolved_stages.push(error),
-            }
+            let phase = result?;
+            record_seeded_kernel(&mut seeded, SemanticEntryId(index as u32), phase.id, &entry.name)?;
+            unpublished.push(phase);
         }
-        (
+        let seeded = SeededKernels {
+            by_entry: seeded
+                .into_iter()
+                .enumerate()
+                .map(|(index, kernel)| {
+                    kernel.ok_or_else(|| format!("semantic entry {} has no seeded kernel", index))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        let entry_schedules = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let source = SemanticEntryId(index as u32);
+                let primary = seeded.entry(source)?;
+                Ok((
+                    source,
+                    EntrySchedule {
+                        name: entry.name.clone(),
+                        input_count: entry.inputs.len(),
+                        output_count: entry.outputs.len(),
+                        primary,
+                        output_owners: entry
+                            .output_routes
+                            .iter()
+                            .map(|route| (route.slot, primary))
+                            .collect(),
+                    },
+                ))
+            })
+            .collect::<Result<HashMap<_, _>, String>>()?;
+        Ok((
             Self {
                 pipelines,
                 graphics_passthroughs,
                 unpublished,
                 next_kernel_id,
-                semantic_abi,
+                entry_schedules,
                 source_publications,
-                unresolved_stages,
                 generated_callables: Vec::new(),
                 region_interner: region_interner.clone(),
             },
             seeded,
-        )
+        ))
     }
 
-    pub(super) fn domain_of(&self, kernel: KernelId) -> Option<KernelDomain> {
-        self.phases().find(|phase| phase.id == kernel).map(|phase| phase.domain.clone())
+    pub(super) fn domain_of(&self, kernel: KernelId) -> Result<KernelDomain, KernelMutationError> {
+        self.phases()
+            .find(|phase| phase.id == kernel)
+            .map(|phase| phase.domain.clone())
+            .ok_or(KernelMutationError::UnknownKernel(kernel))
     }
 
     fn locate(&self, kernel: KernelId) -> Option<(PhaseListId, usize)> {
@@ -796,58 +910,6 @@ impl KernelPlan {
         let id = KernelId(self.next_kernel_id);
         self.next_kernel_id += 1;
         id
-    }
-
-    pub(super) fn add_phase_after(
-        &mut self,
-        parent: KernelId,
-        spec: PhaseSpec,
-    ) -> Result<KernelId, KernelMutationError> {
-        let (list_id, index) = self.locate(parent).ok_or(KernelMutationError::UnknownKernel(parent))?;
-        let (parent_id, source_entry, flow_source) = {
-            let parent = &self.list(list_id)[index];
-            (parent.id, parent.abi.source_entry, parent.flow_source)
-        };
-        let id = self.allocate_kernel_id();
-        let mut phase = phase_from_body(id, flow_source, source_entry, spec)
-            .map_err(KernelMutationError::InvalidKernel)?;
-        phase.dependencies.push(parent_id);
-        let list = self.list_mut(list_id);
-        for dependent in list.iter_mut().skip(index + 1) {
-            for dependency in &mut dependent.dependencies {
-                if *dependency == parent_id {
-                    *dependency = id;
-                }
-            }
-            dependent.dependencies.sort_unstable();
-            dependent.dependencies.dedup();
-        }
-        list.insert(index + 1, phase);
-        Ok(id)
-    }
-
-    pub(super) fn add_phase_before(
-        &mut self,
-        consumer: KernelId,
-        spec: PhaseSpec,
-    ) -> Result<KernelId, KernelMutationError> {
-        let (list_id, index) = self.locate(consumer).ok_or(KernelMutationError::UnknownKernel(consumer))?;
-        let (dependencies, source_entry, flow_source) = {
-            let consumer = &self.list(list_id)[index];
-            (
-                consumer.dependencies.clone(),
-                consumer.abi.source_entry,
-                consumer.flow_source,
-            )
-        };
-        let id = self.allocate_kernel_id();
-        let mut phase = phase_from_body(id, flow_source, source_entry, spec)
-            .map_err(KernelMutationError::InvalidKernel)?;
-        phase.dependencies = dependencies;
-        let list = self.list_mut(list_id);
-        list.insert(index, phase);
-        list[index + 1].dependencies = vec![id];
-        Ok(id)
     }
 
     pub(super) fn add_materialization_before(
@@ -892,7 +954,7 @@ impl KernelPlan {
         Ok(id)
     }
 
-    pub(super) fn select_sequential_recipes(&mut self) {
+    pub(super) fn select_sequential_recipes(&mut self) -> Result<(), KernelMutationError> {
         for phase in self
             .pipelines
             .iter_mut()
@@ -905,10 +967,8 @@ impl KernelPlan {
                 KernelKind::ReducePhase1 | KernelKind::ScanPhase1 => KernelKind::SerialCompute,
                 kind => kind,
             };
-            phase.recipe = KernelRecipe {
-                kind,
-                entry: Arc::new(entry),
-            };
+            phase.recipe =
+                KernelRecipe::from_scheduled(kind, entry).map_err(KernelMutationError::InvalidKernel)?;
             phase.refresh_phase_facts();
             if matches!(
                 kind,
@@ -922,6 +982,7 @@ impl KernelPlan {
                 phase.domain_selection = DomainSelection::Explicit(domain);
             }
         }
+        Ok(())
     }
 
     pub(super) fn set_output_projection(
@@ -930,6 +991,23 @@ impl KernelPlan {
         outputs: Vec<OutputSlotId>,
     ) -> Result<(), KernelMutationError> {
         let (list, index) = self.locate(kernel).ok_or(KernelMutationError::UnknownKernel(kernel))?;
+        let source_entry = self.list(list)[index].abi.source_entry;
+        if let Some(source) = source_entry {
+            let entry = self.entry_schedules.get_mut(&source).ok_or_else(|| {
+                KernelMutationError::InvalidKernel(format!(
+                    "kernel {kernel:?} references missing semantic entry {source:?}"
+                ))
+            })?;
+            let mut unique = HashSet::new();
+            for output in &outputs {
+                if output.0 >= entry.output_count || !unique.insert(*output) {
+                    return Err(KernelMutationError::InvalidKernel(format!(
+                        "kernel {kernel:?} has invalid output slot {output:?}"
+                    )));
+                }
+                entry.output_owners.insert(*output, kernel);
+            }
+        }
         self.list_mut(list)[index].abi.output_routes = outputs
             .into_iter()
             .enumerate()
@@ -948,9 +1026,70 @@ impl KernelPlan {
     ) -> Result<KernelId, KernelMutationError> {
         let (list, index) = self.locate(kernel).ok_or(KernelMutationError::UnknownKernel(kernel))?;
         let phase = &mut self.list_mut(list)[index];
-        phase.recipe = KernelRecipe::close(spec);
+        phase.recipe = KernelRecipe::close(spec).map_err(KernelMutationError::InvalidKernel)?;
         phase.refresh_phase_facts();
         Ok(kernel)
+    }
+
+    pub(super) fn install_chain(
+        &mut self,
+        kernel: KernelId,
+        spec: KernelChainSpec,
+    ) -> Result<(), KernelMutationError> {
+        let (list_id, index) = self.locate(kernel).ok_or(KernelMutationError::UnknownKernel(kernel))?;
+        let original = self.list(list_id)[index].clone();
+        let KernelChainSpec {
+            before,
+            anchor,
+            after,
+        } = spec;
+        let fresh_count = before.len() + after.len();
+        let mut next_fresh = self.next_kernel_id;
+        let mut fresh_id = || {
+            let id = KernelId(next_fresh);
+            next_fresh += 1;
+            id
+        };
+        let source_entry = original.abi.source_entry;
+        let flow_source = original.flow_source;
+        let mut chain = Vec::with_capacity(fresh_count + 1);
+        for phase in before {
+            chain.push(
+                phase_from_body(fresh_id(), flow_source, source_entry, phase)
+                    .map_err(KernelMutationError::InvalidKernel)?,
+            );
+        }
+        let mut anchor_phase = original.clone();
+        anchor_phase.recipe = KernelRecipe::close(anchor).map_err(KernelMutationError::InvalidKernel)?;
+        anchor_phase.refresh_phase_facts();
+        chain.push(anchor_phase);
+        for phase in after {
+            chain.push(
+                phase_from_body(fresh_id(), flow_source, source_entry, phase)
+                    .map_err(KernelMutationError::InvalidKernel)?,
+            );
+        }
+
+        let mut predecessor = None;
+        for phase in &mut chain {
+            phase.dependencies =
+                predecessor.map_or_else(|| original.dependencies.clone(), |predecessor| vec![predecessor]);
+            predecessor = Some(phase.id);
+        }
+        let tail = predecessor.unwrap_or(kernel);
+        let list = self.list_mut(list_id);
+        for dependent in list.iter_mut().skip(index + 1) {
+            for dependency in &mut dependent.dependencies {
+                if *dependency == kernel {
+                    *dependency = tail;
+                }
+            }
+            dependent.dependencies.sort_unstable();
+            dependent.dependencies.dedup();
+        }
+        list.splice(index..=index, chain);
+        self.next_kernel_id = next_fresh;
+        Ok(())
     }
 
     pub(in crate::egir) fn check_explicit_dispatch_coverage(
@@ -962,7 +1101,7 @@ impl KernelPlan {
             let DomainSelection::Explicit(KernelDomain::Fixed { x, y, z }) = phase.domain_selection else {
                 continue;
             };
-            let Some(entry) = by_name.get(phase.entry_point.as_str()) else {
+            let Some(entry) = by_name.get(phase.entry_point()) else {
                 continue;
             };
             let Some(KernelDomain::Elements(DispatchLen::Fixed { count })) = segmented_domain(entry) else {
@@ -978,7 +1117,7 @@ impl KernelPlan {
             if total < count {
                 return Err(format!(
                     "#[dispatch({x}, {y}, {z})] launches {total} threads but entry `{}` requires {count}; {} elements would be dropped",
-                    phase.entry_point,
+                    phase.entry_point(),
                     count - total,
                 ));
             }
@@ -986,12 +1125,21 @@ impl KernelPlan {
         Ok(())
     }
 
-    pub(super) fn coalesce_resource_flows(&mut self, flows: &[(ResourceId, CompilerResourceFlow)]) {
-        self.complete_resource_flows(flows);
-        self.merge_connected_pipelines();
+    pub(super) fn coalesce_resource_flows(
+        &mut self,
+        flows: &[(ResourceId, CompilerResourceFlow)],
+    ) -> Result<(), KernelMutationError> {
+        let mut updated = self.clone();
+        updated.complete_resource_flows(flows)?;
+        updated.merge_connected_pipelines()?;
+        *self = updated;
+        Ok(())
     }
 
-    fn complete_resource_flows(&mut self, flows: &[(ResourceId, CompilerResourceFlow)]) {
+    fn complete_resource_flows(
+        &mut self,
+        flows: &[(ResourceId, CompilerResourceFlow)],
+    ) -> Result<(), KernelMutationError> {
         for (resource, flow) in flows {
             let mut writers = self
                 .flow_resource_phases(flow.producer, *resource, true)
@@ -1004,11 +1152,8 @@ impl KernelPlan {
                     .map(|phase| phase.id)
                     .last()
                 {
-                    merge_scheduled_resource(
-                        &mut self.phase_mut(writer).unwrap().resources,
-                        *resource,
-                        ResourceAccess::Write,
-                    );
+                    let phase = self.phase_mut(writer).ok_or(KernelMutationError::UnknownKernel(writer))?;
+                    merge_scheduled_resource(&mut phase.flow_resources, *resource, ResourceAccess::Write);
                     writers.push(writer);
                 }
             }
@@ -1023,8 +1168,10 @@ impl KernelPlan {
                         .find(|phase| phase.flow_source == Some(*consumer))
                         .map(|phase| phase.id);
                     if let Some(reader) = reader {
+                        let phase =
+                            self.phase_mut(reader).ok_or(KernelMutationError::UnknownKernel(reader))?;
                         merge_scheduled_resource(
-                            &mut self.phase_mut(reader).unwrap().resources,
+                            &mut phase.flow_resources,
                             *resource,
                             ResourceAccess::Read,
                         );
@@ -1032,13 +1179,17 @@ impl KernelPlan {
                     }
                 }
                 for reader in readers {
-                    let phase = self.phase_mut(reader).unwrap();
-                    phase.dependencies.extend(writers.iter().copied().filter(|writer| *writer != reader));
-                    phase.dependencies.sort_unstable();
-                    phase.dependencies.dedup();
+                    for writer in writers.iter().copied().filter(|writer| *writer != reader) {
+                        self.add_dependency(reader, writer)?;
+                    }
                 }
             }
         }
+        Ok(())
+    }
+
+    fn phase(&self, id: KernelId) -> Option<&KernelPhase> {
+        self.phases().find(|phase| phase.id == id)
     }
 
     fn phase_mut(&mut self, id: KernelId) -> Option<&mut KernelPhase> {
@@ -1050,7 +1201,40 @@ impl KernelPlan {
             .find(|phase| phase.id == id)
     }
 
-    fn merge_connected_pipelines(&mut self) {
+    fn add_dependency(&mut self, reader: KernelId, writer: KernelId) -> Result<(), KernelMutationError> {
+        let reader_phase = self.phase(reader).ok_or(KernelMutationError::UnknownKernel(reader))?;
+        if reader_phase.dependencies.contains(&writer) {
+            return Ok(());
+        }
+        self.phase(writer).ok_or(KernelMutationError::UnknownKernel(writer))?;
+        if self.depends_on(writer, reader)? {
+            return Err(KernelMutationError::DependencyCycle { reader, writer });
+        }
+        let phase = self.phase_mut(reader).ok_or(KernelMutationError::UnknownKernel(reader))?;
+        phase.dependencies.push(writer);
+        phase.dependencies.sort_unstable();
+        Ok(())
+    }
+
+    fn depends_on(&self, start: KernelId, target: KernelId) -> Result<bool, KernelMutationError> {
+        let mut pending = vec![start];
+        let mut visited = HashSet::new();
+        while let Some(kernel) = pending.pop() {
+            if !visited.insert(kernel) {
+                continue;
+            }
+            let phase = self.phase(kernel).ok_or(KernelMutationError::UnknownKernel(kernel))?;
+            for dependency in &phase.dependencies {
+                if *dependency == target {
+                    return Ok(true);
+                }
+                pending.push(*dependency);
+            }
+        }
+        Ok(false)
+    }
+
+    fn merge_connected_pipelines(&mut self) -> Result<(), KernelMutationError> {
         let mut owner = HashMap::new();
         for (pipeline, planned) in self.pipelines.iter().enumerate() {
             for phase in &planned.phases {
@@ -1072,19 +1256,30 @@ impl KernelPlan {
         }
         let mut slots = std::mem::take(&mut self.pipelines).into_iter().map(Some).collect::<Vec<_>>();
         for mut group in components.into_values() {
-            group.sort_by_key(|index| slots[*index].as_ref().unwrap().order);
-            let mut merged = slots[group[0]].take().unwrap();
-            for index in group.into_iter().skip(1) {
-                let mut pipeline = slots[index].take().unwrap();
+            group.sort_by_key(|index| slots.get(*index).and_then(Option::as_ref).map(|slot| slot.order));
+            let Some((first, rest)) = group.split_first() else {
+                continue;
+            };
+            let mut merged = slots.get_mut(*first).and_then(Option::take).ok_or_else(|| {
+                KernelMutationError::InvalidKernel("pipeline component lost its first member".into())
+            })?;
+            for index in rest {
+                let mut pipeline = slots.get_mut(*index).and_then(Option::take).ok_or_else(|| {
+                    KernelMutationError::InvalidKernel(
+                        "pipeline component contains a duplicate member".into(),
+                    )
+                })?;
                 merge_bindings(&mut merged.template.bindings, pipeline.template.bindings);
                 merged.phases.append(&mut pipeline.phases);
                 merged.order = merged.order.min(pipeline.order);
             }
-            merged.phases = topologically_order_phases(merged.phases)
-                .unwrap_or_else(|stable_remainder| stable_remainder);
+            merged.phases = topologically_order_phases(merged.phases).map_err(|_| {
+                KernelMutationError::InvalidKernel("kernel dependency graph contains a cycle".into())
+            })?;
             self.pipelines.push(merged);
         }
         self.pipelines.sort_by_key(|pipeline| pipeline.order);
+        Ok(())
     }
 }
 
@@ -1117,21 +1312,17 @@ fn phase_from_body(
     let domain = match &selection {
         DomainSelection::Inferred(baseline) | DomainSelection::Explicit(baseline) => baseline.clone(),
     };
-    let entry_point = recipe.body.name.clone();
     let mut phase = KernelPhase {
         id,
         flow_source,
-        entry_point,
-        recipe: KernelRecipe::close(recipe),
-        abi: EntryAbiProjection {
+        recipe: KernelRecipe::close(recipe)?,
+        abi: KernelAbi {
             source_entry,
-            inputs: Vec::new(),
             output_routes: Vec::new(),
         },
-        workgroup_size: (1, 1, 1),
         domain,
         domain_selection: selection,
-        resources: Vec::new(),
+        flow_resources: Vec::new(),
         dependencies: Vec::new(),
     };
     phase.refresh_phase_facts();
@@ -1201,7 +1392,7 @@ fn source_kind(entry: &SemanticEntry) -> KernelKind {
     if !matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
         return KernelKind::GraphicsPassthrough;
     }
-    match super::parallel_recipe_effect(entry).map(|located| &located.effect.kind) {
+    match super::parallel_recipe_effect(entry).map(|effect| &effect.kind) {
         Some(SideEffectKind::Soac(SoacEffect(_, Soac::Screma(screma::Op::Reduce { .. })))) => {
             KernelKind::ReducePhase1
         }
@@ -1249,8 +1440,8 @@ fn execution_workgroup(model: &ExecutionModel) -> (u32, u32, u32) {
 fn domain_from_dispatch(
     dispatch: &DispatchSize,
     host_resources: &HashMap<BindingRef, ResourceId>,
-) -> KernelDomain {
-    match dispatch {
+) -> Result<KernelDomain, String> {
+    Ok(match dispatch {
         DispatchSize::Fixed { x, y, z, .. } => KernelDomain::Fixed { x: *x, y: *y, z: *z },
         DispatchSize::DerivedFrom {
             len:
@@ -1261,28 +1452,28 @@ fn domain_from_dispatch(
                 },
             ..
         } => KernelDomain::ResourceElements {
-            resource: *host_resources
-                .get(&BindingRef::new(*set, *binding))
-                .expect("descriptor dispatch binding must be in the resource manifest"),
+            resource: *host_resources.get(&BindingRef::new(*set, *binding)).ok_or_else(|| {
+                format!("descriptor dispatch binding {set}:{binding} is absent from the resource manifest")
+            })?,
             elem_bytes: *elem_bytes,
         },
         DispatchSize::DerivedFrom { len, .. } => KernelDomain::Elements(len.clone()),
-    }
+    })
 }
 
 fn domain_selection_from_stage(
     stage: &ComputeStage,
     host_resources: &HashMap<BindingRef, ResourceId>,
-) -> DomainSelection {
-    let domain = domain_from_dispatch(&stage.dispatch_size, host_resources);
-    match stage.dispatch_size {
+) -> Result<DomainSelection, String> {
+    let domain = domain_from_dispatch(&stage.dispatch_size, host_resources)?;
+    Ok(match stage.dispatch_size {
         // Honor the source's explicit intent: a user-pinned `#[dispatch]` grid
         // (including `1x1x1`) stays `Explicit` and is never re-inferred. Only
         // the unpinned default `1x1x1` placeholder is `Inferred`.
         DispatchSize::Fixed { explicit: true, .. } => DomainSelection::Explicit(domain),
         DispatchSize::Fixed { explicit: false, .. } => DomainSelection::Inferred(domain),
         DispatchSize::DerivedFrom { .. } => DomainSelection::Inferred(domain),
-    }
+    })
 }
 
 fn segmented_domain(entry: &SemanticEntry) -> Option<KernelDomain> {
@@ -1294,7 +1485,7 @@ fn materialization_domain(requirement: &MaterializationRequirement) -> Option<Ke
 }
 
 fn semantic_domain_entry(entry: &SemanticEntry) -> Option<KernelDomain> {
-    match &super::parallel_recipe_effect(entry)?.effect.kind {
+    match &super::parallel_recipe_effect(entry)?.kind {
         SideEffectKind::Soac(SoacEffect(
             _,
             Soac::Screma(
@@ -1569,7 +1760,10 @@ fn topologically_order_phases(phases: Vec<KernelPhase>) -> Result<Vec<KernelPhas
             ordered.extend(remaining.into_iter().flatten());
             return Err(ordered);
         };
-        let phase = remaining[index].take().expect("ready phase exists");
+        let Some(phase) = remaining[index].take() else {
+            ordered.extend(remaining.into_iter().flatten());
+            return Err(ordered);
+        };
         emitted.insert(phase.id);
         ordered.push(phase);
     }

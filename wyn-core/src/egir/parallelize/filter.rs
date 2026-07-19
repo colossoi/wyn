@@ -3,85 +3,14 @@
 use super::*;
 use crate::egir::soac::filter as filter_soac;
 
-pub(super) enum FilterLowering {
-    NotSelected,
-    Lowered(Vec<(schedule::KernelId, crate::egir::program::PlannedEntry, Vec<usize>)>),
-}
-
 impl KernelPlanBuilder<'_, '_> {
-    pub(super) fn lower_filter_if_selected(
+    pub(super) fn lower_parallel_filter(
         &mut self,
-        entry: &SemanticEntry,
+        body: crate::egir::program::PlannedEntry,
         kernel: schedule::KernelId,
-        split_outputs: bool,
-    ) -> error::Result<FilterLowering> {
-        use schedule::KernelDomain;
-        let selections = analyze_filter_candidates(entry)?;
-        let [(semantic_id, selection)] = selections.as_slice() else {
-            return Ok(FilterLowering::NotSelected);
-        };
-        let semantic_id = *semantic_id;
-        if matches!(self.candidates.filter(semantic_id)?, RecipeSelection::Serial(_)) {
-            return Ok(FilterLowering::NotSelected);
-        }
-        let candidate = match selection.clone() {
-            RecipeSelection::Parallel(candidate) => candidate,
-            RecipeSelection::Serial(reason) => {
-                return Err(error::ParallelizeError::Invalid(format!(
-                    "preflight filter candidate {semantic_id:?} changed before emission: {reason:?}"
-                )));
-            }
-        };
-        let recipe = BoundFilter::bind(candidate, &self.resources)?;
-        if !split_outputs {
-            let body = crate::egir::program::PlannedEntry::project(entry)?;
-            self.lower_bound_filter(body, kernel, recipe)?;
-            return Ok(FilterLowering::Lowered(Vec::new()));
-        }
-        let projected = crate::egir::program::PlannedEntry::project(entry)?;
-        let groups = if let Some(split) = split_multidomain_seg_maps(&projected)? {
-            let mut groups = vec![SplitEntry {
-                entry: split.primary,
-                semantic_slots: split.primary_slots,
-                semantic_ops: split.primary_semantic_ops,
-            }];
-            groups.extend(split.entries);
-            groups
-        } else {
-            vec![SplitEntry {
-                entry: projected,
-                semantic_slots: (0..entry.outputs.len()).collect(),
-                semantic_ops: [semantic_id].into_iter().collect(),
-            }]
-        };
-        let mut filter_group = None;
-        let mut deferred = Vec::new();
-        for group in groups {
-            let kernel = if group.entry.name == entry.name {
-                kernel
-            } else {
-                let phase = schedule::PhaseSpec::new(
-                    group.entry.clone(),
-                    schedule::DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                    schedule::KernelKind::SerialCompute,
-                );
-                self.schedule.add_sibling(kernel, phase)?
-            };
-            if group.semantic_ops.contains(&semantic_id) {
-                filter_group = Some((kernel, group.entry, group.semantic_slots));
-            } else {
-                deferred.push((kernel, group.entry, group.semantic_slots));
-            }
-        }
-        let Some((kernel, filter_entry, filter_slots)) = filter_group else {
-            return Err(format!("runtime filter {semantic_id:?} was lost during output splitting").into());
-        };
-        self.lower_bound_filter(filter_entry, kernel, recipe)?;
-        self.schedule.set_output_projection(
-            kernel,
-            filter_slots.iter().copied().map(crate::egir::program::OutputSlotId).collect(),
-        )?;
-        Ok(FilterLowering::Lowered(deferred))
+        recipe: BoundFilter,
+    ) -> error::Result<()> {
+        self.lower_bound_filter(body, kernel, recipe)
     }
 
     fn lower_bound_filter(
@@ -281,22 +210,22 @@ impl FilterKernelFamily {
         let scatter = schedule::KernelRecipeSpec::filter(
             scatter,
             schedule::KernelKind::FilterScatter,
-            filter_soac::Plan::Scatter(filter_soac::ParallelConfig {
+            filter_soac::ParallelStage::Scatter,
+            filter_soac::ParallelConfig {
                 buffers: work,
                 scan_workgroup_width,
-            }),
+            },
         );
-        schedule.commit_kernel(kernel, scatter)?;
         let flags = schedule::PhaseSpec::filter(
             flags,
             schedule::DomainSelection::Explicit(domain.clone()),
             schedule::KernelKind::FilterFlags,
-            filter_soac::Plan::Flags(filter_soac::ParallelConfig {
+            filter_soac::ParallelStage::Flags,
+            filter_soac::ParallelConfig {
                 buffers: work,
                 scan_workgroup_width,
-            }),
+            },
         );
-        schedule.add_phase_before(kernel, flags)?;
         // The scan runs a fixed worker grid so each worker scans a large chunk;
         // flags and scatter remain one-thread-per-input-element.
         let scan = schedule::PhaseSpec::filter(
@@ -307,24 +236,26 @@ impl FilterKernelFamily {
                 z: 1,
             }),
             schedule::KernelKind::FilterScan,
-            filter_soac::Plan::Scan(filter_soac::ParallelConfig {
+            filter_soac::ParallelStage::Scan,
+            filter_soac::ParallelConfig {
                 buffers: work,
                 scan_workgroup_width,
-            }),
+            },
         );
-        schedule.add_phase_before(kernel, scan)?;
         let combine = schedule::PhaseSpec::new(
             combine,
             schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
             schedule::KernelKind::FilterCombine,
         );
-        schedule.add_phase_before(kernel, combine)?;
         let apply_offsets = schedule::PhaseSpec::new(
             apply_offsets,
             schedule::DomainSelection::Explicit(domain),
             schedule::KernelKind::FilterScan,
         );
-        schedule.add_phase_before(kernel, apply_offsets)?;
+        schedule.install_chain(
+            kernel,
+            schedule::KernelChainSpec::new(scatter).with_before(vec![flags, scan, combine, apply_offsets]),
+        )?;
         Ok(())
     }
 }
@@ -353,7 +284,7 @@ pub(super) struct FilterCandidate {
     pub len_out: SemanticResourceRef,
 }
 
-struct BoundFilter {
+pub(super) struct BoundFilter {
     candidate: FilterCandidate,
     work: filter_soac::WorkBuffers,
 }
@@ -399,7 +330,10 @@ pub(super) fn analyze_filter_candidates(
 }
 
 impl BoundFilter {
-    fn bind(candidate: FilterCandidate, resources: &model::ResourceIndex<'_>) -> error::Result<Self> {
+    pub(super) fn bind(
+        candidate: FilterCandidate,
+        resources: &model::ResourceIndex<'_>,
+    ) -> error::Result<Self> {
         let owner = candidate.semantic_id;
         let resource_id = |kind, slot| {
             resources.exactly_one_at(owner, kind, slot).map(|resource| SemanticResourceRef(resource.id))

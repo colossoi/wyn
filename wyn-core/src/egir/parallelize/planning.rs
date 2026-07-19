@@ -13,121 +13,101 @@ use crate::egir::program::{
     AllocatedProgram, CompilerFlowEndpoint, CompilerResource, CompilerResourceKind, LogicalSize,
     ResourceOrigin, SemanticOpId,
 };
-use crate::egir::types::SegExtent;
+use crate::egir::types::{SegExtent, SideEffectSite};
 
-/// A graph-local segmented recipe paired with the projected body from which
-/// its node handles were derived. Emission consumes the pair before mutating
-/// the body, so those handles never cross a graph projection boundary.
-pub(super) enum PreparedSegmented {
-    Reduce {
-        body: crate::egir::program::PlannedEntry,
-        candidate: super::reduce::ReduceCandidate,
-    },
-    Scan {
-        body: crate::egir::program::PlannedEntry,
-        candidate: super::scan::ScanCandidate,
-    },
+/// The target recipe selected for one projected physical kernel. Parallel
+/// variants own the exact graph-local analysis payload consumed by emission;
+/// lowering never re-runs candidate recognition.
+enum AnalyzedRecipe {
+    Filter(super::filter::FilterCandidate),
+    Reduce(super::reduce::ReduceCandidate),
+    Scan(super::scan::ScanCandidate),
+    Map,
+    Serial(SideEffectSite),
+    Unchanged,
 }
 
-/// Authoritative record of the recipes selected during immutable preflight.
-/// Parallel reduce and scan recipes retain their owning projected bodies;
-/// emission consumes those prepared units rather than repeating analysis.
-pub(super) struct CandidateIndex {
-    filters: HashMap<SemanticOpId, RecipeSelection<()>>,
-    reduces: HashMap<SemanticOpId, RecipeSelection<()>>,
-    scans: HashMap<SemanticOpId, RecipeSelection<()>>,
-    prepared_segmented: HashMap<CompilerFlowEndpoint, PreparedSegmented>,
-    default_fallback: Option<FallbackReason>,
+pub(super) enum PlannedRecipe {
+    Filter(super::filter::BoundFilter),
+    Reduce(super::reduce::BoundReduce),
+    Scan(super::scan::BoundScan),
+    Map,
+    Serial(SideEffectSite),
+    Unchanged,
+}
+
+/// One projected physical kernel and its ownership of semantic output slots.
+pub(super) struct PlannedKernel<R = PlannedRecipe> {
+    pub body: crate::egir::program::PlannedEntry,
+    pub semantic_slots: Vec<usize>,
+    pub recipe: R,
+}
+
+/// A non-empty endpoint plan. `primary` always reuses the seeded kernel;
+/// siblings are installed beside it only when output-domain projection split
+/// the source entry.
+pub(super) struct EndpointPlan<R = PlannedRecipe> {
+    pub split_outputs: bool,
+    pub primary: PlannedKernel<R>,
+    pub siblings: Vec<PlannedKernel<R>>,
+}
+
+/// Authoritative target recipes indexed by the endpoint that owns the seeded
+/// kernel. Sequential policy deliberately carries no parallel recipe state.
+pub(super) struct CandidateIndex<R = PlannedRecipe> {
+    endpoints: HashMap<CompilerFlowEndpoint, EndpointPlan<R>>,
+    fallbacks: Vec<FallbackReason>,
+    sequential: bool,
+}
+
+impl CandidateIndex<AnalyzedRecipe> {
+    fn parallel() -> Self {
+        Self {
+            endpoints: HashMap::new(),
+            fallbacks: Vec::new(),
+            sequential: false,
+        }
+    }
+
+    fn insert(&mut self, endpoint: CompilerFlowEndpoint, plan: EndpointPlan<AnalyzedRecipe>) -> Result<()> {
+        if self.endpoints.insert(endpoint, plan).is_some() {
+            return Err(ParallelizeError::Invalid(format!(
+                "flow endpoint {endpoint:?} has multiple target recipes"
+            )));
+        }
+        Ok(())
+    }
+
+    fn bind(self, resources: &ResourceIndex<'_>) -> Result<CandidateIndex> {
+        let endpoints = self
+            .endpoints
+            .into_iter()
+            .map(|(endpoint, plan)| Ok((endpoint, bind_endpoint(plan, resources)?)))
+            .collect::<Result<HashMap<_, _>>>()?;
+        Ok(CandidateIndex {
+            endpoints,
+            fallbacks: self.fallbacks,
+            sequential: false,
+        })
+    }
 }
 
 impl CandidateIndex {
-    fn preflight() -> Self {
-        Self {
-            filters: HashMap::new(),
-            reduces: HashMap::new(),
-            scans: HashMap::new(),
-            prepared_segmented: HashMap::new(),
-            default_fallback: None,
-        }
-    }
-
     pub(super) fn sequential() -> Self {
         Self {
-            default_fallback: Some(FallbackReason::SequentialPolicy),
-            ..Self::preflight()
+            endpoints: HashMap::new(),
+            fallbacks: Vec::new(),
+            sequential: true,
         }
     }
 
-    pub(super) fn filter(&self, owner: SemanticOpId) -> Result<RecipeSelection<()>> {
-        self.selection(&self.filters, owner, "filter")
-    }
-
-    pub(super) fn reduce(&self, owner: SemanticOpId) -> Result<RecipeSelection<()>> {
-        self.selection(&self.reduces, owner, "reduce")
-    }
-
-    pub(super) fn scan(&self, owner: SemanticOpId) -> Result<RecipeSelection<()>> {
-        self.selection(&self.scans, owner, "scan")
-    }
-
-    pub(super) fn take_prepared(&mut self, endpoint: CompilerFlowEndpoint) -> Option<PreparedSegmented> {
-        self.prepared_segmented.remove(&endpoint)
-    }
-
-    fn selection(
-        &self,
-        selections: &HashMap<SemanticOpId, RecipeSelection<()>>,
-        owner: SemanticOpId,
-        family: &str,
-    ) -> Result<RecipeSelection<()>> {
-        if let Some(selection) = selections.get(&owner) {
-            return Ok(selection.clone());
+    pub(super) fn take_endpoint(&mut self, endpoint: CompilerFlowEndpoint) -> Result<Option<EndpointPlan>> {
+        if self.sequential {
+            return Ok(None);
         }
-        if let Some(reason) = self.default_fallback {
-            return Ok(RecipeSelection::Serial(reason));
-        }
-        Err(ParallelizeError::Invalid(format!(
-            "semantic operation {owner:?} has no preflight {family} selection"
-        )))
-    }
-
-    fn record_filter<T>(&mut self, owner: SemanticOpId, selection: &RecipeSelection<T>) -> Result<()> {
-        Self::record(&mut self.filters, owner, selection, "filter")
-    }
-
-    fn record_reduce<T>(&mut self, owner: SemanticOpId, selection: &RecipeSelection<T>) -> Result<()> {
-        Self::record(&mut self.reduces, owner, selection, "reduce")
-    }
-
-    fn record_scan<T>(&mut self, owner: SemanticOpId, selection: &RecipeSelection<T>) -> Result<()> {
-        Self::record(&mut self.scans, owner, selection, "scan")
-    }
-
-    fn prepare_segmented(
-        &mut self,
-        endpoint: CompilerFlowEndpoint,
-        prepared: PreparedSegmented,
-    ) -> Result<()> {
-        if self.prepared_segmented.insert(endpoint, prepared).is_some() {
-            return Err(ParallelizeError::Invalid(format!(
-                "flow endpoint {endpoint:?} has multiple prepared segmented recipes"
-            )));
-        }
-        Ok(())
-    }
-
-    fn record<T>(
-        selections: &mut HashMap<SemanticOpId, RecipeSelection<()>>,
-        owner: SemanticOpId,
-        selection: &RecipeSelection<T>,
-        family: &str,
-    ) -> Result<()> {
-        if selections.insert(owner, selection.without_payload()).is_some() {
-            return Err(ParallelizeError::Invalid(format!(
-                "semantic operation {owner:?} has duplicate {family} preflight selections"
-            )));
-        }
-        Ok(())
+        self.endpoints.remove(&endpoint).map(Some).ok_or_else(|| {
+            ParallelizeError::Invalid(format!("flow endpoint {endpoint:?} has no target recipe"))
+        })
     }
 }
 
@@ -139,7 +119,7 @@ struct ScratchRequest {
 }
 
 pub(super) struct ParallelPlan {
-    candidates: CandidateIndex,
+    candidates: CandidateIndex<AnalyzedRecipe>,
     requests: Vec<ScratchRequest>,
 }
 
@@ -177,119 +157,169 @@ impl ParallelPlan {
             }
             inner.alloc_compiler_resource(request.compiler, request.elem_ty, request.size);
         }
-        Ok(self.candidates)
+        let resources = ResourceIndex::new(&inner.resources)?;
+        self.candidates.bind(&resources)
     }
 }
 
-/// Analyze all candidate operations and produce owned scratch requests without
-/// mutating the program. Graph-local reduce and scan handles stay paired with
-/// the projected body that owns them until emission consumes the pair.
+fn bind_endpoint(
+    plan: EndpointPlan<AnalyzedRecipe>,
+    resources: &ResourceIndex<'_>,
+) -> Result<EndpointPlan> {
+    Ok(EndpointPlan {
+        split_outputs: plan.split_outputs,
+        primary: bind_kernel(plan.primary, resources)?,
+        siblings: plan
+            .siblings
+            .into_iter()
+            .map(|kernel| bind_kernel(kernel, resources))
+            .collect::<Result<Vec<_>>>()?,
+    })
+}
+
+fn bind_kernel(
+    kernel: PlannedKernel<AnalyzedRecipe>,
+    resources: &ResourceIndex<'_>,
+) -> Result<PlannedKernel> {
+    let recipe = match kernel.recipe {
+        AnalyzedRecipe::Filter(candidate) => {
+            PlannedRecipe::Filter(super::filter::BoundFilter::bind(candidate, resources)?)
+        }
+        AnalyzedRecipe::Reduce(candidate) => {
+            PlannedRecipe::Reduce(super::reduce::BoundReduce::bind(candidate, resources)?)
+        }
+        AnalyzedRecipe::Scan(candidate) => {
+            PlannedRecipe::Scan(super::scan::BoundScan::bind(candidate, resources)?)
+        }
+        AnalyzedRecipe::Map => PlannedRecipe::Map,
+        AnalyzedRecipe::Serial(site) => PlannedRecipe::Serial(site),
+        AnalyzedRecipe::Unchanged => PlannedRecipe::Unchanged,
+    };
+    Ok(PlannedKernel {
+        body: kernel.body,
+        semantic_slots: kernel.semantic_slots,
+        recipe,
+    })
+}
+
+/// Analyze every projected endpoint once. Recipes retain their projected body
+/// and graph-local handles until emission consumes the endpoint plan.
 pub(super) fn analyze(inner: &AllocatedProgram, policy: ParallelPolicy) -> Result<ParallelPlan> {
-    let resource_index = ResourceIndex::new(&inner.resources)?;
-    let mut candidates = CandidateIndex::preflight();
-    let mut requests = filter_requests(inner, policy, &mut candidates)?;
-    requests.extend(segmented_requests(inner, &resource_index, &mut candidates)?);
+    let resources = ResourceIndex::new(&inner.resources)?;
+    let mut candidates = CandidateIndex::parallel();
+    let mut requests = Vec::new();
+    for (endpoint, entry) in inner.entries_with_endpoints() {
+        let plan = analyze_endpoint(
+            entry,
+            endpoint,
+            policy,
+            &resources,
+            &mut requests,
+            &mut candidates.fallbacks,
+        )?;
+        candidates.insert(endpoint, plan)?;
+    }
     Ok(ParallelPlan { candidates, requests })
 }
 
 #[cfg(test)]
 pub(super) fn preflight_fallback_reasons(inner: &AllocatedProgram) -> Result<Vec<FallbackReason>> {
     let plan = analyze(inner, ParallelPolicy::default())?;
-    let mut reasons = plan
-        .candidates
-        .filters
-        .values()
-        .chain(plan.candidates.reduces.values())
-        .chain(plan.candidates.scans.values())
-        .filter_map(|selection| match selection {
-            RecipeSelection::Parallel(()) => None,
-            RecipeSelection::Serial(reason) => Some(*reason),
-        })
-        .collect::<Vec<_>>();
+    let mut reasons = plan.candidates.fallbacks;
     reasons.sort_by_key(|reason| *reason as u8);
     Ok(reasons)
 }
 
-fn filter_requests(
-    inner: &AllocatedProgram,
+fn analyze_endpoint(
+    entry: &crate::egir::program::SemanticEntry,
+    endpoint: CompilerFlowEndpoint,
     policy: ParallelPolicy,
-    candidates: &mut CandidateIndex,
-) -> Result<Vec<ScratchRequest>> {
-    let mut requests = Vec::new();
-    for (endpoint, entry) in inner.entries_with_endpoints() {
-        for (owner, selection) in super::analyze_filter_candidates(entry)? {
-            candidates.record_filter(owner, &selection)?;
-            let RecipeSelection::Parallel(candidate) = selection else {
-                continue;
-            };
-            let element_count_size = match candidate.space.dims.first() {
-                Some(SegExtent::Fixed(count)) if candidate.space.dims.len() == 1 => {
-                    LogicalSize::FixedBytes(*count as u64 * 4)
-                }
-                Some(SegExtent::ResourceLength {
-                    resource, elem_bytes, ..
-                }) if candidate.space.dims.len() == 1 => LogicalSize::LikeResource {
-                    resource: resource.0,
-                    elem_bytes: 4,
-                    src_elem_bytes: *elem_bytes,
-                },
-                _ => LogicalSize::SameAsDispatch { elem_bytes: 4 },
-            };
-            let worker_count_size = LogicalSize::FixedBytes(
-                (policy.filter_scan_groups * policy.reduce_phase1_width) as u64 * 4,
-            );
-            for (slot, (kind, size)) in [
-                (CompilerResourceKind::FilterFlags, element_count_size.clone()),
-                (CompilerResourceKind::FilterOffsets, element_count_size.clone()),
-                (
-                    CompilerResourceKind::FilterScanBlockSums,
-                    worker_count_size.clone(),
-                ),
-                (
-                    CompilerResourceKind::FilterScanBlockOffsets,
-                    worker_count_size.clone(),
-                ),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                requests.push(ScratchRequest {
-                    endpoint,
-                    compiler: CompilerResource::new(kind, Some(candidate.semantic_id), slot),
-                    elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
-                    size,
-                });
-            }
+    resources: &ResourceIndex<'_>,
+    requests: &mut Vec<ScratchRequest>,
+    fallbacks: &mut Vec<FallbackReason>,
+) -> Result<EndpointPlan<AnalyzedRecipe>> {
+    let projected = crate::egir::program::PlannedEntry::project(entry)?;
+    if matches!(endpoint, CompilerFlowEndpoint::Entry(_)) {
+        if let Some(split) = super::split_multidomain_seg_maps(&projected)? {
+            let primary = analyze_projected_kernel(
+                split.primary.entry,
+                split.primary.semantic_slots,
+                endpoint,
+                policy,
+                resources,
+                requests,
+                fallbacks,
+            )?;
+            let siblings = split
+                .siblings
+                .into_iter()
+                .map(|split| {
+                    analyze_projected_kernel(
+                        split.entry,
+                        split.semantic_slots,
+                        endpoint,
+                        policy,
+                        resources,
+                        requests,
+                        fallbacks,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(EndpointPlan {
+                split_outputs: true,
+                primary,
+                siblings,
+            });
         }
     }
-    Ok(requests)
+
+    let slots = (0..projected.outputs.len()).collect();
+    let primary =
+        analyze_projected_kernel(projected, slots, endpoint, policy, resources, requests, fallbacks)?;
+    Ok(EndpointPlan {
+        split_outputs: false,
+        primary,
+        siblings: Vec::new(),
+    })
 }
 
-fn segmented_requests(
-    inner: &AllocatedProgram,
+#[allow(clippy::too_many_arguments)]
+fn analyze_projected_kernel(
+    body: crate::egir::program::PlannedEntry,
+    semantic_slots: Vec<usize>,
+    endpoint: CompilerFlowEndpoint,
+    policy: ParallelPolicy,
     resources: &ResourceIndex<'_>,
-    candidates: &mut CandidateIndex,
-) -> Result<Vec<ScratchRequest>> {
-    let mut requests = Vec::new();
-    for (endpoint, entry) in inner.entries_with_endpoints() {
-        let projected = crate::egir::program::PlannedEntry::project(entry)?;
-        let Some(located) = super::segmented_recipe_effect(&projected) else {
-            continue;
-        };
-        let Some(owner) = located.effect.kind.soac_id().copied() else {
-            return Err(ParallelizeError::Invalid(
-                "segmented recipe effect has no semantic operation id".into(),
-            ));
-        };
-        let Ok(family) = super::seg_recipe_family(located.effect) else {
-            continue;
-        };
-        match family {
-            super::SegScratchFamily::Reduce => {
-                let selection = super::analyze_reduce_candidate(&projected, resources)?;
-                candidates.record_reduce(owner, &selection)?;
-                if let RecipeSelection::Parallel(candidate) = selection {
-                    for (slot, elem_ty) in candidate.scratch_types.iter().cloned().enumerate() {
+    requests: &mut Vec<ScratchRequest>,
+    fallbacks: &mut Vec<FallbackReason>,
+) -> Result<PlannedKernel<AnalyzedRecipe>> {
+    let mut filters = super::analyze_filter_candidates(&body)?;
+    if filters.len() == 1 {
+        let (_, selection) = filters.remove(0);
+        match selection {
+            RecipeSelection::Parallel(candidate) => {
+                requests.extend(filter_scratch_requests(endpoint, policy, &candidate));
+                return Ok(PlannedKernel {
+                    body,
+                    semantic_slots,
+                    recipe: AnalyzedRecipe::Filter(candidate),
+                });
+            }
+            RecipeSelection::Serial(reason) => fallbacks.push(reason),
+        }
+    } else {
+        fallbacks.extend(filters.into_iter().filter_map(|(_, selection)| match selection {
+            RecipeSelection::Parallel(_) => None,
+            RecipeSelection::Serial(reason) => Some(reason),
+        }));
+    }
+
+    let recipe = match super::segmented_recipe(&body) {
+        Some(super::SegmentedRecipe::Reduce(located)) => {
+            let site = located.site;
+            match super::analyze_reduce_candidate(&body, located, resources)? {
+                RecipeSelection::Parallel(candidate) => {
+                    for (slot, elem_ty) in candidate.scratch_types().cloned().enumerate() {
                         requests.push(scratch_request(
                             endpoint,
                             candidate.owner,
@@ -298,19 +328,18 @@ fn segmented_requests(
                             elem_ty,
                         )?);
                     }
-                    candidates.prepare_segmented(
-                        endpoint,
-                        PreparedSegmented::Reduce {
-                            body: projected,
-                            candidate,
-                        },
-                    )?;
+                    AnalyzedRecipe::Reduce(candidate)
+                }
+                RecipeSelection::Serial(reason) => {
+                    fallbacks.push(reason);
+                    AnalyzedRecipe::Serial(site)
                 }
             }
-            super::SegScratchFamily::Scan => {
-                let selection = super::analyze_scan_candidate(&projected)?;
-                candidates.record_scan(owner, &selection)?;
-                if let RecipeSelection::Parallel(candidate) = selection {
+        }
+        Some(super::SegmentedRecipe::Scan(located)) => {
+            let site = located.site;
+            match super::analyze_scan_candidate(&body, located)? {
+                RecipeSelection::Parallel(candidate) => {
                     for (slot, kind) in [
                         CompilerResourceKind::ScanBlockSums,
                         CompilerResourceKind::ScanBlockOffsets,
@@ -326,18 +355,63 @@ fn segmented_requests(
                             candidate.scratch_type.clone(),
                         )?);
                     }
-                    candidates.prepare_segmented(
-                        endpoint,
-                        PreparedSegmented::Scan {
-                            body: projected,
-                            candidate,
-                        },
-                    )?;
+                    AnalyzedRecipe::Scan(candidate)
+                }
+                RecipeSelection::Serial(reason) => {
+                    fallbacks.push(reason);
+                    AnalyzedRecipe::Serial(site)
                 }
             }
         }
-    }
-    Ok(requests)
+        Some(super::SegmentedRecipe::Map) => AnalyzedRecipe::Map,
+        Some(super::SegmentedRecipe::Composite(site)) => AnalyzedRecipe::Serial(site),
+        _ => AnalyzedRecipe::Unchanged,
+    };
+    Ok(PlannedKernel {
+        body,
+        semantic_slots,
+        recipe,
+    })
+}
+
+fn filter_scratch_requests(
+    endpoint: CompilerFlowEndpoint,
+    policy: ParallelPolicy,
+    candidate: &super::filter::FilterCandidate,
+) -> Vec<ScratchRequest> {
+    let element_count_size = match candidate.space.dims.first() {
+        Some(SegExtent::Fixed(count)) if candidate.space.dims.len() == 1 => {
+            LogicalSize::FixedBytes(*count as u64 * 4)
+        }
+        Some(SegExtent::ResourceLength {
+            resource, elem_bytes, ..
+        }) if candidate.space.dims.len() == 1 => LogicalSize::LikeResource {
+            resource: resource.0,
+            elem_bytes: 4,
+            src_elem_bytes: *elem_bytes,
+        },
+        _ => LogicalSize::SameAsDispatch { elem_bytes: 4 },
+    };
+    let worker_count_size =
+        LogicalSize::FixedBytes((policy.filter_scan_groups * policy.reduce_phase1_width) as u64 * 4);
+    [
+        (CompilerResourceKind::FilterFlags, element_count_size.clone()),
+        (CompilerResourceKind::FilterOffsets, element_count_size),
+        (
+            CompilerResourceKind::FilterScanBlockSums,
+            worker_count_size.clone(),
+        ),
+        (CompilerResourceKind::FilterScanBlockOffsets, worker_count_size),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(slot, (kind, size))| ScratchRequest {
+        endpoint,
+        compiler: CompilerResource::new(kind, Some(candidate.semantic_id), slot),
+        elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
+        size,
+    })
+    .collect()
 }
 
 fn scratch_request(

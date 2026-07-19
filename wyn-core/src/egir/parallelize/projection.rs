@@ -36,7 +36,6 @@ impl UnionFind {
 struct ProjectionMetadata {
     parameters: crate::SortedSet<usize>,
     resources: HashSet<ResourceId>,
-    semantic_ops: HashSet<SemanticOpId>,
     selected_effects: HashSet<SideEffectSite>,
 }
 
@@ -170,25 +169,9 @@ fn projection_metadata(
         }
     }
 
-    let semantic_ops = selected_effects
-        .iter()
-        .map(|site| {
-            source.graph.skeleton.get_effect(*site).ok_or_else(|| {
-                format!(
-                    "projection selected stale side-effect site {:?}/{}",
-                    site.block, site.index
-                )
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter_map(|effect| effect.kind.soac_id().copied())
-        .collect();
-
     Ok(ProjectionMetadata {
         parameters,
         resources,
-        semantic_ops,
         selected_effects,
     })
 }
@@ -344,14 +327,17 @@ fn is_write_effectful(effect: &SideEffect) -> bool {
 pub(super) struct SplitEntry {
     pub(super) entry: program::PlannedEntry,
     pub(super) semantic_slots: Vec<usize>,
-    pub(super) semantic_ops: HashSet<SemanticOpId>,
 }
 
 pub(super) struct EntrySplit {
-    pub(super) primary: program::PlannedEntry,
-    pub(super) primary_slots: Vec<usize>,
-    pub(super) primary_semantic_ops: HashSet<SemanticOpId>,
-    pub(super) entries: Vec<SplitEntry>,
+    pub(super) primary: SplitEntry,
+    pub(super) siblings: Vec<SplitEntry>,
+}
+
+struct OutputGroup {
+    root: usize,
+    slots: Vec<usize>,
+    first_slot: usize,
 }
 
 /// Split a multi-output entry into one projected kernel per output domain.
@@ -410,15 +396,22 @@ pub(super) fn split_multidomain_seg_maps(
         return Ok(None);
     }
 
-    let mut groups = group_slots.into_iter().collect::<Vec<_>>();
-    for (_, slots) in &mut groups {
-        slots.sort_unstable();
-    }
-    groups.sort_by_key(|(_, slots)| slots.first().copied().unwrap_or(usize::MAX));
+    let mut groups = group_slots
+        .into_iter()
+        .filter_map(|(root, mut slots)| {
+            slots.sort_unstable();
+            slots.first().copied().map(|first_slot| OutputGroup {
+                root,
+                slots,
+                first_slot,
+            })
+        })
+        .collect::<Vec<_>>();
+    groups.sort_by_key(|group| group.first_slot);
 
     let host_root = groups
         .iter()
-        .map(|(root, _)| *root)
+        .map(|group| group.root)
         .find(|root| parallel_groups.contains(root))
         .ok_or_else(|| "multi-domain split has no parallel host group".to_string())?;
     for (block_id, block) in &entry.graph.skeleton.blocks {
@@ -464,32 +457,28 @@ pub(super) fn split_multidomain_seg_maps(
         let spec = ProjectionSpec::selected_outputs(entry, name, outputs, routes);
         let projected = project_kernel_body_effects(entry, selected, spec)?;
         debug_assert_eq!(projected.metadata.selected_effects.len(), selected_count);
-        Ok((projected.entry, projected.metadata.semantic_ops))
+        Ok(projected.entry)
     };
 
-    let Some((primary_root, primary_slots)) = groups.first() else {
-        return Err("multi-domain split produced no output groups".into());
+    let Some((primary_group, sibling_groups)) = groups.split_first() else {
+        return Ok(None);
     };
     let mut siblings = Vec::new();
-    for (root, slots) in groups.iter().skip(1) {
-        let suffix = slots
-            .first()
-            .copied()
-            .ok_or_else(|| "multi-domain split produced an empty output group".to_string())?;
-        let (projected, semantic_ops) =
-            project_group(*root, slots, format!("{base_name}_dispatch_{suffix}"))?;
+    for group in sibling_groups {
+        let projected = project_group(
+            group.root,
+            &group.slots,
+            format!("{base_name}_dispatch_{}", group.first_slot),
+        )?;
         siblings.push(SplitEntry {
             entry: projected,
-            semantic_slots: slots.clone(),
-            semantic_ops,
+            semantic_slots: group.slots.clone(),
         });
     }
 
-    let (primary, primary_semantic_ops) = project_group(*primary_root, primary_slots, entry.name.clone())?;
-    Ok(Some(EntrySplit {
-        primary,
-        primary_slots: primary_slots.clone(),
-        primary_semantic_ops,
-        entries: siblings,
-    }))
+    let primary = SplitEntry {
+        entry: project_group(primary_group.root, &primary_group.slots, entry.name.clone())?,
+        semantic_slots: primary_group.slots.clone(),
+    };
+    Ok(Some(EntrySplit { primary, siblings }))
 }

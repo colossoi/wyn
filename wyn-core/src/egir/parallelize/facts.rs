@@ -6,28 +6,56 @@
 
 use super::*;
 
-pub(super) struct LocatedEffect<'a> {
+pub(super) struct LocatedScrema<'a> {
     pub site: SideEffectSite,
     pub effect: &'a SideEffect,
+    pub owner: SemanticOpId,
+    pub op: &'a screma::Op<crate::egir::types::Semantic>,
 }
 
-fn segmented_screma_effect(graph: &EGraph) -> Option<LocatedEffect<'_>> {
+pub(super) struct LocatedReduce<'a> {
+    pub site: SideEffectSite,
+    pub effect: &'a SideEffect,
+    pub owner: SemanticOpId,
+    pub lanes: &'a screma::Lanes,
+    pub operators: &'a screma::NonEmpty<screma::Operator>,
+    op: &'a screma::Op<crate::egir::types::Semantic>,
+}
+
+pub(super) struct LocatedScan<'a> {
+    pub site: SideEffectSite,
+    pub effect: &'a SideEffect,
+    pub owner: SemanticOpId,
+    pub lanes: &'a screma::Lanes,
+    pub operators: &'a screma::NonEmpty<screma::Operator>,
+    op: &'a screma::Op<crate::egir::types::Semantic>,
+}
+
+pub(super) enum SegmentedRecipe<'a> {
+    Reduce(LocatedReduce<'a>),
+    Scan(LocatedScan<'a>),
+    Map,
+    Composite(SideEffectSite),
+}
+
+fn segmented_screma_effect(graph: &EGraph) -> Option<LocatedScrema<'_>> {
     graph.skeleton.blocks.iter().find_map(|(block, contents)| {
         contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
+            let SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) = &effect.kind else {
+                return None;
+            };
             matches!(
-                &effect.kind,
-                SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
-                    if matches!(
-                        op.semantic_state(),
-                        screma::SemanticState::Segmented {
-                            placement: screma::Placement::Kernel,
-                            ..
-                        }
-                    )
+                op.semantic_state(),
+                screma::SemanticState::Segmented {
+                    placement: screma::Placement::Kernel,
+                    ..
+                }
             )
-            .then_some(LocatedEffect {
+            .then_some(LocatedScrema {
                 site: SideEffectSite { block, index },
                 effect,
+                owner: *owner,
+                op,
             })
         })
     })
@@ -35,7 +63,7 @@ fn segmented_screma_effect(graph: &EGraph) -> Option<LocatedEffect<'_>> {
 
 pub(super) fn segmented_recipe_effect(
     entry: &crate::egir::program::PlannedEntry,
-) -> Option<LocatedEffect<'_>> {
+) -> Option<LocatedScrema<'_>> {
     if let Some(effect) = segmented_screma_effect(&entry.graph) {
         return Some(effect);
     }
@@ -45,7 +73,7 @@ pub(super) fn segmented_recipe_effect(
     let mut promoted = None;
     for (block, contents) in &entry.graph.skeleton.blocks {
         for (index, effect) in contents.side_effects.iter().enumerate() {
-            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) = &effect.kind else {
                 continue;
             };
             if matches!(
@@ -60,9 +88,11 @@ pub(super) fn segmented_recipe_effect(
                 if promoted.is_some() {
                     return None;
                 }
-                promoted = Some(LocatedEffect {
+                promoted = Some(LocatedScrema {
                     site: SideEffectSite { block, index },
                     effect,
+                    owner: *owner,
+                    op,
                 });
             }
         }
@@ -70,19 +100,37 @@ pub(super) fn segmented_recipe_effect(
     promoted
 }
 
-pub(super) fn parallel_recipe_effect(
-    entry: &crate::egir::program::PlannedEntry,
-) -> Option<LocatedEffect<'_>> {
-    segmented_recipe_effect(entry).or_else(|| {
-        entry.graph.skeleton.blocks.iter().find_map(|(block, contents)| {
-            contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
-                matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Filter(_)))).then_some(
-                    LocatedEffect {
-                        site: SideEffectSite { block, index },
-                        effect,
-                    },
-                )
-            })
+pub(super) fn segmented_recipe(entry: &crate::egir::program::PlannedEntry) -> Option<SegmentedRecipe<'_>> {
+    let located = segmented_recipe_effect(entry)?;
+    Some(match located.op {
+        screma::Op::Reduce { lanes, operators, .. } => SegmentedRecipe::Reduce(LocatedReduce {
+            site: located.site,
+            effect: located.effect,
+            owner: located.owner,
+            lanes,
+            operators,
+            op: located.op,
+        }),
+        screma::Op::Scan { lanes, operators, .. } => SegmentedRecipe::Scan(LocatedScan {
+            site: located.site,
+            effect: located.effect,
+            owner: located.owner,
+            lanes,
+            operators,
+            op: located.op,
+        }),
+        screma::Op::Map { .. } => SegmentedRecipe::Map,
+        screma::Op::Composite { .. } => SegmentedRecipe::Composite(located.site),
+    })
+}
+
+pub(super) fn parallel_recipe_effect(entry: &crate::egir::program::PlannedEntry) -> Option<&SideEffect> {
+    segmented_recipe_effect(entry).map(|located| located.effect).or_else(|| {
+        entry.graph.skeleton.blocks.values().find_map(|contents| {
+            contents
+                .side_effects
+                .iter()
+                .find(|effect| matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Filter(_)))))
         })
     })
 }
@@ -130,17 +178,7 @@ pub(super) fn semantic_node_type(graph: &EGraph, node: NodeId) -> error::Result<
         .ok_or_else(|| error::ParallelizeError::Invalid(format!("semantic node {node:?} has no type")))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum SegScratchFamily {
-    Reduce,
-    Scan,
-}
-
-/// Classify the eligibility gates shared by candidate selection and lowering.
-pub(super) fn seg_recipe_family(se: &SideEffect) -> std::result::Result<SegScratchFamily, FallbackReason> {
-    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &se.kind else {
-        return Err(FallbackReason::UnsupportedOperationShape);
-    };
+fn valid_recipe_placement(op: &screma::Op<crate::egir::types::Semantic>) -> bool {
     let valid_placement = match op.semantic_state() {
         screma::SemanticState::Segmented {
             placement: screma::Placement::Kernel,
@@ -153,39 +191,43 @@ pub(super) fn seg_recipe_family(se: &SideEffect) -> std::result::Result<SegScrat
         } => !output_slots.is_empty() && matches!(op, screma::Op::Reduce { .. } | screma::Op::Scan { .. }),
         screma::SemanticState::Serial => false,
     };
-    if !valid_placement {
+    valid_placement
+}
+
+pub(super) fn reduce_recipe_eligibility(
+    recipe: &LocatedReduce<'_>,
+) -> std::result::Result<(), FallbackReason> {
+    if !valid_recipe_placement(recipe.op) {
         return Err(FallbackReason::UnsupportedPlacement);
     }
-    let lanes = op.lanes();
-    let operators = op.operators();
-    let maps_are_output_views = lanes.maps.iter().all(|map| map.destination.is_output_view());
-    match op {
-        screma::Op::Reduce { .. } => {
-            if operators.iter().any(|op| !op.combine.captures.is_empty()) {
-                return Err(FallbackReason::UnsupportedCaptures);
-            }
-            if lanes.inputs.is_empty() {
-                return Err(FallbackReason::UnsupportedOperationShape);
-            }
-            if !maps_are_output_views || !operators.iter().all(|op| op.destination.is_unplaced_fresh()) {
-                return Err(FallbackReason::UnsupportedDestination);
-            }
-            Ok(SegScratchFamily::Reduce)
-        }
-        screma::Op::Scan { .. } => {
-            if operators.len() != 1 || lanes.inputs.len() != 1 {
-                return Err(FallbackReason::UnsupportedOperationShape);
-            }
-            if !operators[0].combine.captures.is_empty() {
-                return Err(FallbackReason::UnsupportedCaptures);
-            }
-            if !maps_are_output_views || !operators.iter().all(|op| op.destination.is_output_view()) {
-                return Err(FallbackReason::UnsupportedDestination);
-            }
-            Ok(SegScratchFamily::Scan)
-        }
-        screma::Op::Map { .. } | screma::Op::Composite { .. } => {
-            Err(FallbackReason::UnsupportedOperationShape)
-        }
+    if recipe.operators.iter().any(|op| !op.combine.captures.is_empty()) {
+        return Err(FallbackReason::UnsupportedCaptures);
     }
+    if recipe.lanes.inputs.is_empty() {
+        return Err(FallbackReason::UnsupportedOperationShape);
+    }
+    if !recipe.lanes.maps.iter().all(|map| map.destination.is_output_view())
+        || !recipe.operators.iter().all(|op| op.destination.is_unplaced_fresh())
+    {
+        return Err(FallbackReason::UnsupportedDestination);
+    }
+    Ok(())
+}
+
+pub(super) fn scan_recipe_eligibility(recipe: &LocatedScan<'_>) -> std::result::Result<(), FallbackReason> {
+    if !valid_recipe_placement(recipe.op) {
+        return Err(FallbackReason::UnsupportedPlacement);
+    }
+    if !recipe.operators.rest.is_empty() || recipe.lanes.inputs.len() != 1 {
+        return Err(FallbackReason::UnsupportedOperationShape);
+    }
+    if !recipe.operators.first.combine.captures.is_empty() {
+        return Err(FallbackReason::UnsupportedCaptures);
+    }
+    if !recipe.lanes.maps.iter().all(|map| map.destination.is_output_view())
+        || !recipe.operators.iter().all(|op| op.destination.is_output_view())
+    {
+        return Err(FallbackReason::UnsupportedDestination);
+    }
+    Ok(())
 }

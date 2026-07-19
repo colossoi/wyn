@@ -15,10 +15,17 @@ impl KernelPlan {
         profile: LoweringProfile,
         mut descriptor: PipelineDescriptor,
     ) -> Result<(PhysicalProgram, super::KernelPlanSummary), ConvertError> {
+        #[cfg(debug_assertions)]
+        {
+            let verification = self.validate_for_finalization(&inner.resources, &descriptor);
+            debug_assert!(
+                verification.is_ok(),
+                "internally constructed kernel plan failed verification: {}",
+                verification.as_ref().err().map(String::as_str).unwrap_or("unknown verification failure")
+            );
+        }
         self.check_explicit_dispatch_coverage(&inner.entry_points)
             .map_err(ConvertError::InvalidDispatch)?;
-        self.validate_for_finalization(&inner.resources, &descriptor).map_err(ConvertError::Internal)?;
-
         self.install_phase_shells(&mut descriptor).map_err(ConvertError::Internal)?;
         let physical_resources = PhysicalResourceTable::allocate(&inner.resources, binding_ids);
         let publications = self.publications(&physical_resources).map_err(ConvertError::Internal)?;

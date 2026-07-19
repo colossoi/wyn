@@ -18,7 +18,7 @@ pub(super) struct ScanCandidate {
     scan_output_view_type: Type<TypeName>,
 }
 
-struct BoundScan {
+pub(super) struct BoundScan {
     candidate: ScanCandidate,
     block_sums: ResourceId,
     block_offsets: ResourceId,
@@ -26,29 +26,15 @@ struct BoundScan {
 
 pub(super) fn analyze_scan_candidate(
     entry: &crate::egir::program::PlannedEntry,
+    located: LocatedScan<'_>,
 ) -> error::Result<RecipeSelection<ScanCandidate>> {
-    let located = segmented_recipe_effect(entry).ok_or_else(|| {
-        error::ParallelizeError::Invalid("scan analysis has no selected segmented effect".into())
-    })?;
     let site = located.site;
     let side_effect = located.effect;
-    match seg_recipe_family(side_effect) {
-        Ok(SegScratchFamily::Scan) => {}
-        Ok(SegScratchFamily::Reduce) => {
-            return Err(error::ParallelizeError::Invalid(
-                "scan analysis received a reduce operation".into(),
-            ));
-        }
-        Err(reason) => return Ok(RecipeSelection::Serial(reason)),
+    if let Err(reason) = scan_recipe_eligibility(&located) {
+        return Ok(RecipeSelection::Serial(reason));
     }
-    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(screma::Op::Scan { lanes, operators, .. }))) =
-        &side_effect.kind
-    else {
-        return Err(error::ParallelizeError::Invalid(
-            "selected scan effect changed operation kind during analysis".into(),
-        ));
-    };
-    let operator = &operators.first;
+    let lanes = located.lanes;
+    let operator = &located.operators.first;
     if !can_clone_pure_subgraph(&entry.graph, operator.neutral, &[]) {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedCaptures));
     }
@@ -75,9 +61,7 @@ pub(super) fn analyze_scan_candidate(
     else {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedDestination));
     };
-    let owner = side_effect.kind.soac_id().copied().ok_or_else(|| {
-        error::ParallelizeError::Invalid("selected scan effect has no semantic operation id".into())
-    })?;
+    let owner = located.owner;
     let scratch_type = semantic_node_type(&entry.graph, operator.neutral)?;
     if crate::ssa::layout::type_byte_size(&scratch_type).is_none() {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedScratchLayout));
@@ -102,7 +86,10 @@ pub(super) fn analyze_scan_candidate(
 }
 
 impl BoundScan {
-    fn bind(candidate: ScanCandidate, resources: &model::ResourceIndex<'_>) -> error::Result<Self> {
+    pub(super) fn bind(
+        candidate: ScanCandidate,
+        resources: &model::ResourceIndex<'_>,
+    ) -> error::Result<Self> {
         let block_sums =
             resources.exactly_one_at(candidate.owner, CompilerResourceKind::ScanBlockSums, 0)?.id;
         let block_offsets =
@@ -119,9 +106,8 @@ impl KernelPlanBuilder<'_, '_> {
     pub(super) fn emit_scan_entry(
         &mut self,
         entry: &mut crate::egir::program::PlannedEntry,
-        candidate: ScanCandidate,
+        analysis: BoundScan,
     ) -> error::Result<Vec<crate::egir::program::PlannedEntry>> {
-        let analysis = BoundScan::bind(candidate, &self.resources)?;
         debug_assert_eq!(
             segmented_recipe_effect(entry).map(|located| located.site),
             Some(analysis.candidate.site)

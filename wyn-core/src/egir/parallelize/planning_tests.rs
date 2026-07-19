@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
-use crate::egir::program::LogicalResource;
+use crate::egir::program::{LogicalResource, SemanticEntryId};
 
 fn resource(id: u32, owner: u32, kind: CompilerResourceKind, slot: usize) -> LogicalResource {
     LogicalResource {
@@ -60,27 +60,10 @@ fn resource_index_checks_density_and_exact_cardinality() {
 }
 
 #[test]
-fn candidate_index_preserves_parallel_and_serial_decisions() {
-    let owner = SemanticOpId(11);
-    let mut candidates = CandidateIndex::preflight();
-    candidates
-        .record_reduce(
-            owner,
-            &RecipeSelection::<()>::Serial(FallbackReason::UnsupportedViewShape),
-        )
-        .expect("record serial selection");
-    assert_eq!(
-        candidates.reduce(owner).expect("recorded reduce selection"),
-        RecipeSelection::Serial(FallbackReason::UnsupportedViewShape)
-    );
-    assert!(
-        candidates.scan(owner).is_err(),
-        "parallel preflight must reject a missing decision"
-    );
-
-    let sequential = CandidateIndex::sequential();
-    assert_eq!(
-        sequential.scan(owner).expect("sequential default selection"),
-        RecipeSelection::Serial(FallbackReason::SequentialPolicy)
-    );
+fn sequential_candidate_index_carries_no_parallel_recipe_state() {
+    let mut sequential = CandidateIndex::sequential();
+    assert!(sequential
+        .take_endpoint(CompilerFlowEndpoint::Entry(SemanticEntryId(0)))
+        .expect("sequential endpoint lookup")
+        .is_none());
 }

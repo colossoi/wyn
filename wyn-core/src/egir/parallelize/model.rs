@@ -56,7 +56,6 @@ pub(super) type Result<T> = std::result::Result<T, ParallelizeError>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Why a valid semantic operation selected serial fallback.
 pub(super) enum FallbackReason {
-    SequentialPolicy,
     UnsupportedPlacement,
     UnsupportedCaptures,
     UnsupportedViewShape,
@@ -72,24 +71,15 @@ pub(super) enum RecipeSelection<T> {
     Serial(FallbackReason),
 }
 
-impl<T> RecipeSelection<T> {
-    pub(super) fn without_payload(&self) -> RecipeSelection<()> {
-        match self {
-            Self::Parallel(_) => RecipeSelection::Parallel(()),
-            Self::Serial(reason) => RecipeSelection::Serial(*reason),
-        }
-    }
-}
-
 /// Checked view of resources grouped by semantic owner, kind, and slot.
 pub(super) struct ResourceIndex<'a> {
     resources: &'a [LogicalResource],
-    owned: HashMap<(SemanticOpId, CompilerResourceKind), Vec<&'a LogicalResource>>,
+    owned: HashMap<(SemanticOpId, CompilerResourceKind), BTreeMap<usize, &'a LogicalResource>>,
 }
 
 impl<'a> ResourceIndex<'a> {
     pub(super) fn new(resources: &'a [LogicalResource]) -> Result<Self> {
-        let mut owned: HashMap<_, Vec<_>> = HashMap::new();
+        let mut owned: HashMap<_, BTreeMap<_, _>> = HashMap::new();
         for (index, resource) in resources.iter().enumerate() {
             if resource.id.0 as usize != index {
                 return Err(ParallelizeError::Invalid(format!(
@@ -101,26 +91,11 @@ impl<'a> ResourceIndex<'a> {
                 continue;
             };
             if let Some(owner) = compiler.owner {
-                owned.entry((owner, compiler.kind)).or_default().push(resource);
-            }
-        }
-        for values in owned.values_mut() {
-            values.sort_by_key(|resource| match &resource.origin {
-                ResourceOrigin::Compiler(compiler) => compiler.slot,
-                ResourceOrigin::Host(_) => usize::MAX,
-            });
-            for pair in values.windows(2) {
-                let slots = pair.iter().map(|resource| match &resource.origin {
-                    ResourceOrigin::Compiler(compiler) => Ok(compiler.slot),
-                    ResourceOrigin::Host(_) => Err(ParallelizeError::Invalid(
-                        "host resource appeared in compiler ownership index".into(),
-                    )),
-                });
-                let slots = slots.collect::<Result<Vec<_>>>()?;
-                if slots[0] == slots[1] {
+                let slots = owned.entry((owner, compiler.kind)).or_default();
+                if slots.insert(compiler.slot, resource).is_some() {
                     return Err(ParallelizeError::Invalid(format!(
                         "compiler resource ownership bucket has duplicate slot {}",
-                        slots[0]
+                        compiler.slot
                     )));
                 }
             }
@@ -135,21 +110,31 @@ impl<'a> ResourceIndex<'a> {
             .ok_or_else(|| ParallelizeError::Invalid(format!("missing logical resource {id:?}")))
     }
 
-    pub(super) fn owned(&self, owner: SemanticOpId, kind: CompilerResourceKind) -> &[&'a LogicalResource] {
-        self.owned.get(&(owner, kind)).map(Vec::as_slice).unwrap_or(&[])
+    #[cfg(test)]
+    pub(super) fn owned(
+        &self,
+        owner: SemanticOpId,
+        kind: CompilerResourceKind,
+    ) -> Vec<&'a LogicalResource> {
+        self.owned
+            .get(&(owner, kind))
+            .into_iter()
+            .flat_map(|resources| resources.values().copied())
+            .collect()
     }
 
+    #[cfg(test)]
     pub(super) fn exactly_one(
         &self,
         owner: SemanticOpId,
         kind: CompilerResourceKind,
     ) -> Result<&'a LogicalResource> {
-        let resources = self.owned(owner, kind);
-        match resources {
-            [resource] => Ok(*resource),
+        let resources = self.owned.get(&(owner, kind));
+        match resources.map(|resources| resources.values().copied().collect::<Vec<_>>()) {
+            Some(resources) if resources.len() == 1 => Ok(resources[0]),
             _ => Err(ParallelizeError::Invalid(format!(
                 "semantic operation {owner:?} requires exactly one {kind:?} resource, found {}",
-                resources.len()
+                resources.map_or(0, BTreeMap::len)
             ))),
         }
     }
@@ -160,19 +145,15 @@ impl<'a> ResourceIndex<'a> {
         kind: CompilerResourceKind,
         slot: usize,
     ) -> Result<&'a LogicalResource> {
-        let resource = self.exactly_one(owner, kind)?;
-        let ResourceOrigin::Compiler(compiler) = &resource.origin else {
-            return Err(ParallelizeError::Invalid(
-                "host resource appeared in compiler ownership index".into(),
-            ));
-        };
-        if compiler.slot != slot {
-            return Err(ParallelizeError::Invalid(format!(
-                "semantic operation {owner:?} requires {kind:?} at slot {slot}, found slot {}",
-                compiler.slot
-            )));
+        let resources = self.owned.get(&(owner, kind));
+        let resource = resources.and_then(|resources| resources.get(&slot)).copied();
+        match (resources.map(BTreeMap::len), resource) {
+            (Some(1), Some(resource)) => Ok(resource),
+            (count, _) => Err(ParallelizeError::Invalid(format!(
+                "semantic operation {owner:?} requires exactly one {kind:?} resource at slot {slot}, found {}",
+                count.unwrap_or(0)
+            ))),
         }
-        Ok(resource)
     }
 
     pub(super) fn ordered_slots(
@@ -181,29 +162,28 @@ impl<'a> ResourceIndex<'a> {
         kind: CompilerResourceKind,
         first_slot: usize,
         count: usize,
-    ) -> Result<&[&'a LogicalResource]> {
-        let resources = self.owned(owner, kind);
-        if resources.len() != count {
+    ) -> Result<Vec<&'a LogicalResource>> {
+        let resources = self.owned.get(&(owner, kind));
+        if resources.map_or(0, BTreeMap::len) != count {
             return Err(ParallelizeError::Invalid(format!(
                 "semantic operation {owner:?} requires {count} {kind:?} resources, found {}",
-                resources.len()
+                resources.map_or(0, BTreeMap::len)
             )));
         }
-        for (offset, resource) in resources.iter().enumerate() {
-            let ResourceOrigin::Compiler(compiler) = &resource.origin else {
-                return Err(ParallelizeError::Invalid(
-                    "host resource appeared in compiler ownership index".into(),
-                ));
-            };
+        let Some(resources) = resources else {
+            return Ok(Vec::new());
+        };
+        let mut ordered = Vec::with_capacity(count);
+        for offset in 0..count {
             let expected = first_slot + offset;
-            if compiler.slot != expected {
-                return Err(ParallelizeError::Invalid(format!(
-                    "semantic operation {owner:?} requires {kind:?} slot {expected}, found {}",
-                    compiler.slot
-                )));
-            }
+            let resource = resources.get(&expected).copied().ok_or_else(|| {
+                ParallelizeError::Invalid(format!(
+                    "semantic operation {owner:?} requires {kind:?} slot {expected}"
+                ))
+            })?;
+            ordered.push(resource);
         }
-        Ok(resources)
+        Ok(ordered)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -212,10 +192,10 @@ impl<'a> ResourceIndex<'a> {
         owner: SemanticOpId,
         kind: CompilerResourceKind,
     ) -> Result<Option<&'a LogicalResource>> {
-        match self.owned(owner, kind) {
-            [] => Ok(None),
-            [resource] => Ok(Some(*resource)),
-            resources => Err(ParallelizeError::Invalid(format!(
+        match self.owned.get(&(owner, kind)) {
+            None => Ok(None),
+            Some(resources) if resources.len() == 1 => Ok(resources.values().next().copied()),
+            Some(resources) => Err(ParallelizeError::Invalid(format!(
                 "semantic operation {owner:?} has {} optional {kind:?} resources",
                 resources.len()
             ))),
