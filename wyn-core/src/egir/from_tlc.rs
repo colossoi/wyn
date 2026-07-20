@@ -31,6 +31,7 @@ use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 use std::collections::HashMap;
+use thiserror::Error;
 
 use super::program::{
     CompilerResource, CompilerResourceKind, ConstantDef, LogicalResourceArena, LogicalSize, RawEntry,
@@ -57,39 +58,38 @@ pub const AUTO_STORAGE_SET: u32 = 0;
 // Error type
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ConvertError {
     /// Error during EGraph construction.
+    #[error("EGraph conversion error: {0}")]
     GraphError(String),
     /// Unsupported TLC construct (todo).
+    #[error("Unsupported: {0}")]
     Unsupported(String),
     /// Compiler invariant violated — a downstream pass should have made
     /// this state unreachable. Surfaces as a propagated error rather than
     /// a panic so the caller can label it as an internal compiler error
     /// in user-facing output.
+    #[error("internal compiler error: {0}")]
     Internal(String),
     /// A source `#[dispatch(...)]` grid is incompatible with the entry — e.g.
     /// it launches fewer threads than the entry's data-parallel domain has
     /// elements, silently dropping the tail. A user error, not internal.
+    #[error("{0}")]
     InvalidDispatch(String),
     /// Two declared descriptor resources claim the same `(set, binding)` with
     /// incompatible descriptor classes or layout-relevant properties.
-    DescriptorLayout(String),
+    #[error("{0}")]
+    DescriptorLayout(#[from] super::publish::DescriptorError),
 }
 
-impl std::fmt::Display for ConvertError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConvertError::GraphError(msg) => write!(f, "EGraph conversion error: {}", msg),
-            ConvertError::Unsupported(msg) => write!(f, "Unsupported: {}", msg),
-            ConvertError::Internal(msg) => write!(f, "internal compiler error: {}", msg),
-            ConvertError::InvalidDispatch(msg) => write!(f, "{}", msg),
-            ConvertError::DescriptorLayout(msg) => write!(f, "{}", msg),
-        }
+/// Untyped downstream diagnostics are compiler-internal by default. User
+/// errors use explicit variants at their classification boundary.
+impl From<String> for ConvertError {
+    fn from(error: String) -> Self {
+        Self::Internal(error)
     }
 }
-
-impl std::error::Error for ConvertError {}
 
 /// Look up `sym`'s source name in `symbols`, returning a propagated
 /// `ConvertError::Internal` if the symbol isn't in the table. The

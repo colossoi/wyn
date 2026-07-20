@@ -64,8 +64,7 @@ pub(super) fn analyze_reduce_candidate(
     let n_accs = operators.len();
     let n_maps = lanes.maps.len();
     let operands =
-        screma::ScremaOperands::decode(located.op, &side_effect.operand_nodes, side_effect.result)
-            .map_err(error::ParallelizeError::Invalid)?;
+        screma::ScremaOperands::decode(located.op, &side_effect.operand_nodes, side_effect.result)?;
     for input in operands.inputs() {
         if !can_chunk_view(&entry.graph, input.node, ChunkInputKind::StorageOrRange) {
             return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedViewShape));

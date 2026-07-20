@@ -41,8 +41,7 @@ pub(super) fn analyze_scan_candidate(
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedCaptures));
     }
     let operands =
-        screma::ScremaOperands::decode(located.op, &side_effect.operand_nodes, side_effect.result)
-            .map_err(error::ParallelizeError::Invalid)?;
+        screma::ScremaOperands::decode(located.op, &side_effect.operand_nodes, side_effect.result)?;
     let input = operands.input(0).node;
     if !can_chunk_view(&entry.graph, input, ChunkInputKind::StorageOrRange) {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedViewShape));

@@ -97,6 +97,12 @@ use crate::flow::{BlockId, ControlHeader, ExecutionModel};
 use crate::types::TypeExt;
 use crate::{IdSource, LoweringProfile, SchedulePolicy};
 
+impl From<error::ParallelizeError> for ConvertError {
+    fn from(error: error::ParallelizeError) -> Self {
+        Self::Internal(error.to_string())
+    }
+}
+
 pub(crate) fn plan(
     mut inner: AllocatedProgram,
     binding_ids: &mut IdSource<u32>,
@@ -108,8 +114,7 @@ pub(crate) fn plan(
         build_parallel_plan(&mut inner, effect_ids)
     } else {
         build_sequential_plan(&inner, effect_ids)
-    }
-    .map_err(|error| ConvertError::Internal(error.to_string()))?;
+    }?;
 
     kernel_plan.finalize(inner, binding_ids, profile, descriptor)
 }

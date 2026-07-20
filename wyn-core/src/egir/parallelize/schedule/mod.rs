@@ -262,30 +262,24 @@ impl From<u32> for KernelId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub(super) enum KernelMutationError {
+    #[error("no planned kernel with id {0:?}")]
     UnknownKernel(KernelId),
+    #[error("{0}")]
     InvalidKernel(String),
+    #[error("adding resource dependency {reader:?} -> {writer:?} would create a cycle")]
     DependencyCycle {
         reader: KernelId,
         writer: KernelId,
     },
 }
 
-impl std::fmt::Display for KernelMutationError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnknownKernel(kernel) => write!(formatter, "no planned kernel with id {kernel:?}"),
-            Self::InvalidKernel(error) => formatter.write_str(error),
-            Self::DependencyCycle { reader, writer } => write!(
-                formatter,
-                "adding resource dependency {reader:?} -> {writer:?} would create a cycle"
-            ),
-        }
+impl From<String> for KernelMutationError {
+    fn from(error: String) -> Self {
+        Self::InvalidKernel(error)
     }
 }
-
-impl std::error::Error for KernelMutationError {}
 
 /// Closed construction recipe retained by a planned kernel. The payload is a
 /// graph-only projection; ABI, publication, dispatch and resources remain
@@ -967,16 +961,14 @@ impl KernelPlan {
         let (list_id, index) = self.location(consumer)?;
         if list_id == PhaseListId::Graphics {
             let id = self.allocate_kernel_id();
-            let phase = phase_from_materialization(requirement_id, requirement, Vec::new())
-                .map_err(KernelMutationError::InvalidKernel)?;
+            let phase = phase_from_materialization(requirement_id, requirement, Vec::new())?;
             self.insert_phase(id, phase, PhaseListId::Unpublished);
             self.unpublished.push(id);
             return Ok(id);
         }
         let dependencies = self.phase(consumer).dependencies.clone();
         let id = self.allocate_kernel_id();
-        let phase = phase_from_materialization(requirement_id, requirement, dependencies)
-            .map_err(KernelMutationError::InvalidKernel)?;
+        let phase = phase_from_materialization(requirement_id, requirement, dependencies)?;
         self.insert_phase(id, phase, list_id);
         let list = self.list_mut(list_id);
         list.insert(index, id);
@@ -998,8 +990,7 @@ impl KernelPlan {
             (parent.abi.source_entry, parent.flow_source)
         };
         let id = self.allocate_kernel_id();
-        let phase =
-            phase_from_body(flow_source, source_entry, spec).map_err(KernelMutationError::InvalidKernel)?;
+        let phase = phase_from_body(flow_source, source_entry, spec)?;
         self.insert_phase(id, phase, list_id);
         self.list_mut(list_id).push(id);
         Ok(id)
@@ -1020,8 +1011,7 @@ impl KernelPlan {
                 KernelKind::ReducePhase1 | KernelKind::ScanPhase1 => KernelKind::SerialCompute,
                 kind => kind,
             };
-            phase.recipe =
-                KernelRecipe::from_scheduled(kind, entry).map_err(KernelMutationError::InvalidKernel)?;
+            phase.recipe = KernelRecipe::from_scheduled(kind, entry)?;
             phase.refresh_phase_facts();
             if matches!(
                 kind,
@@ -1079,7 +1069,7 @@ impl KernelPlan {
     ) -> Result<KernelId, KernelMutationError> {
         self.location(kernel)?;
         let phase = self.phase_mut(kernel);
-        phase.recipe = KernelRecipe::close(spec).map_err(KernelMutationError::InvalidKernel)?;
+        phase.recipe = KernelRecipe::close(spec)?;
         phase.refresh_phase_facts();
         Ok(kernel)
     }
@@ -1106,23 +1096,21 @@ impl KernelPlan {
         let mut dependencies = original.dependencies.clone();
         for spec in before {
             let id = self.allocate_kernel_id();
-            let mut phase = phase_from_body(flow_source, source_entry, spec)
-                .map_err(KernelMutationError::InvalidKernel)?;
+            let mut phase = phase_from_body(flow_source, source_entry, spec)?;
             phase.dependencies = dependencies;
             dependencies = vec![id];
             chain.push(id);
             additions.push((id, phase));
         }
         let mut anchor_phase = original.clone();
-        anchor_phase.recipe = KernelRecipe::close(anchor).map_err(KernelMutationError::InvalidKernel)?;
+        anchor_phase.recipe = KernelRecipe::close(anchor)?;
         anchor_phase.refresh_phase_facts();
         anchor_phase.dependencies = dependencies;
         dependencies = vec![kernel];
         chain.push(kernel);
         for spec in after {
             let id = self.allocate_kernel_id();
-            let mut phase = phase_from_body(flow_source, source_entry, spec)
-                .map_err(KernelMutationError::InvalidKernel)?;
+            let mut phase = phase_from_body(flow_source, source_entry, spec)?;
             phase.dependencies = dependencies;
             dependencies = vec![id];
             chain.push(id);

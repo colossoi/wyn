@@ -31,6 +31,10 @@ use crate::pipeline_descriptor::{
     SamplerBindingType, TextureSampleType, TextureViewDimension, VertexAttribute,
 };
 
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct DescriptorError(String);
+
 pub trait PipelineDescriptorPublish {
     /// Append `Binding::StorageBuffer` / `Uniform` / `PushConstant` /
     /// `Texture` / `Sampler` entries to the descriptor's per-pipeline
@@ -38,7 +42,7 @@ pub trait PipelineDescriptorPublish {
     /// `EntryInput`s, `EntryOutput`s, and `storage_bindings` (gather
     /// intermediates). Bindings already present (e.g. those a
     /// `MultiCompute` parallelization path pre-populated) are skipped.
-    fn publish_implicit_bindings(&mut self, entries: &[&EntryPublication]) -> Result<(), String>;
+    fn publish_implicit_bindings(&mut self, entries: &[&EntryPublication]) -> Result<(), DescriptorError>;
 
     /// Populate `vertex_inputs` and `fragment_outputs` on graphics
     /// pipelines from a vertex entry's `#[vertex_slot(n)]` inputs and a
@@ -90,7 +94,7 @@ fn storage_access_bindings(
 }
 
 impl PipelineDescriptorPublish for PipelineDescriptor {
-    fn publish_implicit_bindings(&mut self, entries: &[&EntryPublication]) -> Result<(), String> {
+    fn publish_implicit_bindings(&mut self, entries: &[&EntryPublication]) -> Result<(), DescriptorError> {
         // SPIR-V `NonWritable` is a module-level decoration on
         // `OpVariable`, not per-entry-point. The SPIR-V backend (see
         // `spirv/mod.rs` `written_bindings`) only emits `NonWritable`
@@ -462,7 +466,7 @@ struct DescriptorLayout {
 }
 
 impl DescriptorLayout {
-    fn from_pipeline(pipeline: &PipelineDescriptor) -> Result<Self, String> {
+    fn from_pipeline(pipeline: &PipelineDescriptor) -> Result<Self, DescriptorError> {
         let mut layout = Self {
             slots: LookupMap::new(),
         };
@@ -478,7 +482,7 @@ impl DescriptorLayout {
         Ok(layout)
     }
 
-    fn reserve(&mut self, binding: &Binding) -> Result<bool, String> {
+    fn reserve(&mut self, binding: &Binding) -> Result<bool, DescriptorError> {
         let Some(slot) = binding_slot(binding) else {
             return Ok(true);
         };
@@ -487,11 +491,11 @@ impl DescriptorLayout {
         };
         match self.slots.get(&slot) {
             Some(existing) if existing == &shape => Ok(false),
-            Some(existing) => Err(format!(
+            Some(existing) => Err(DescriptorError(format!(
                 "descriptor binding collision at {slot}: existing {} conflicts with {}",
                 existing.label(),
                 shape.label()
-            )),
+            ))),
             None => {
                 self.slots.insert(slot, shape);
                 Ok(true)

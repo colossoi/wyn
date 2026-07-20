@@ -26,13 +26,13 @@ impl KernelPlan {
         }
         self.check_explicit_dispatch_coverage(&inner.entry_points)
             .map_err(ConvertError::InvalidDispatch)?;
-        self.install_phase_shells(&mut descriptor).map_err(ConvertError::Internal)?;
+        self.install_phase_shells(&mut descriptor)?;
         let physical_resources = PhysicalResourceTable::allocate(&inner.resources, binding_ids);
-        let publications = self.publications(&physical_resources).map_err(ConvertError::Internal)?;
+        let publications = self.publications(&physical_resources)?;
         let publication_refs = publications.iter().collect::<Vec<_>>();
-        descriptor.publish_implicit_bindings(&publication_refs).map_err(ConvertError::DescriptorLayout)?;
+        descriptor.publish_implicit_bindings(&publication_refs)?;
         descriptor.publish_graphics_io(&publication_refs);
-        self.publish(&mut descriptor, &physical_resources).map_err(ConvertError::Internal)?;
+        self.publish(&mut descriptor, &physical_resources)?;
         descriptor.relabel_input_storage_names(&inner.input_names);
         descriptor.rebuild_frame_graph();
 
@@ -43,10 +43,8 @@ impl KernelPlan {
             &physical_resources,
             profile.schedule == SchedulePolicy::SingleStage,
             descriptor,
-        )
-        .map_err(ConvertError::Internal)?;
-        crate::egir::verify_physical::check(&physical, &physical_resources)
-            .map_err(ConvertError::Internal)?;
+        )?;
+        crate::egir::verify_physical::check(&physical, &physical_resources)?;
         Ok((physical, summary))
     }
 }

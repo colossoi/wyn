@@ -320,8 +320,7 @@ pub(crate) fn retarget_array_projection(
             )));
         };
 
-        let operands = screma::ScremaOperands::decode(op, &se.operand_nodes, se.result)
-            .map_err(ConvertError::Internal)?;
+        let operands = screma::ScremaOperands::decode(op, &se.operand_nodes, se.result)?;
         let base_len = operands.input_count();
         let mut views =
             operands.outputs().map(|operand| operand.map(|operand| operand.node)).collect::<Vec<_>>();
