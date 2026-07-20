@@ -261,23 +261,29 @@ pub(super) enum PlannedRecipe {
 /// One projected physical kernel and its ownership of semantic output slots.
 pub(super) struct PlannedKernel<R = PlannedRecipe> {
     body: crate::egir::program::PlannedEntry,
-    semantic_slots: Vec<usize>,
+    /// Maps this kernel's projected output slots back to the source entry.
+    /// Unsplit kernels retain the source interface and need no mapping.
+    output_projection: Option<Vec<usize>>,
     recipe: R,
 }
 
 impl<R> PlannedKernel<R> {
-    fn new(body: crate::egir::program::PlannedEntry, semantic_slots: Vec<usize>, recipe: R) -> Self {
+    fn new(
+        body: crate::egir::program::PlannedEntry,
+        output_projection: Option<Vec<usize>>,
+        recipe: R,
+    ) -> Self {
         Self {
             body,
-            semantic_slots,
+            output_projection,
             recipe,
         }
     }
 
     /// The selected recipe and every graph-local handle it contains stay
     /// coupled to this body until lowering consumes the pair.
-    pub(super) fn into_parts(self) -> (crate::egir::program::PlannedEntry, Vec<usize>, R) {
-        (self.body, self.semantic_slots, self.recipe)
+    pub(super) fn into_parts(self) -> (crate::egir::program::PlannedEntry, Option<Vec<usize>>, R) {
+        (self.body, self.output_projection, self.recipe)
     }
 
     pub(super) fn seed_body(&self) -> crate::egir::program::PlannedEntry {
@@ -289,22 +295,17 @@ impl<R> PlannedKernel<R> {
 /// siblings are installed beside it only when output-domain projection split
 /// the source entry.
 pub(super) struct EndpointPlan<R = PlannedRecipe> {
-    split_outputs: bool,
     primary: PlannedKernel<R>,
     siblings: Vec<PlannedKernel<R>>,
 }
 
 impl<R> EndpointPlan<R> {
-    fn new(split_outputs: bool, primary: PlannedKernel<R>, siblings: Vec<PlannedKernel<R>>) -> Self {
-        Self {
-            split_outputs,
-            primary,
-            siblings,
-        }
+    fn new(primary: PlannedKernel<R>, siblings: Vec<PlannedKernel<R>>) -> Self {
+        Self { primary, siblings }
     }
 
-    pub(super) fn into_parts(self) -> (bool, PlannedKernel<R>, Vec<PlannedKernel<R>>) {
-        (self.split_outputs, self.primary, self.siblings)
+    pub(super) fn into_parts(self) -> (PlannedKernel<R>, Vec<PlannedKernel<R>>) {
+        (self.primary, self.siblings)
     }
 }
 
@@ -344,11 +345,10 @@ impl RecipeIndex<AnalyzedRecipe> {
                 endpoints
                     .into_iter()
                     .map(|(endpoint, plan)| {
-                        let (split_outputs, primary, siblings) = plan.into_parts();
+                        let (primary, siblings) = plan.into_parts();
                         (
                             endpoint,
                             EndpointPlan::new(
-                                split_outputs,
                                 bind_kernel(primary, resources),
                                 siblings.into_iter().map(|kernel| bind_kernel(kernel, resources)).collect(),
                             ),
@@ -429,7 +429,7 @@ impl AnalyzedPlan {
 }
 
 fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBindings) -> PlannedKernel {
-    let (body, semantic_slots, recipe) = kernel.into_parts();
+    let (body, output_projection, recipe) = kernel.into_parts();
     let recipe = match recipe {
         AnalyzedRecipe::Filter(candidate) => {
             PlannedRecipe::Filter(super::filter::BoundFilter::bind(candidate, resources))
@@ -444,7 +444,7 @@ fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBinding
         AnalyzedRecipe::Serial(site) => PlannedRecipe::Serial(site),
         AnalyzedRecipe::Unchanged => PlannedRecipe::Unchanged,
     };
-    PlannedKernel::new(body, semantic_slots, recipe)
+    PlannedKernel::new(body, output_projection, recipe)
 }
 
 /// Analyze every projected endpoint once. Recipes retain their projected body
@@ -453,8 +453,9 @@ pub(super) fn analyze(inner: &AllocatedProgram) -> Result<AnalyzedPlan> {
     let mut recipes = RecipeIndex::parallel();
     let mut requests = Vec::new();
     for (endpoint, entry) in inner.entries_with_endpoints() {
-        let plan = analyze_endpoint(entry, endpoint, &inner.resources, &mut requests)?;
+        let (plan, endpoint_requests) = analyze_endpoint(entry, endpoint, &inner.resources)?;
         recipes.insert(endpoint, plan)?;
+        requests.extend(endpoint_requests);
     }
     Ok(AnalyzedPlan { recipes, requests })
 }
@@ -463,61 +464,44 @@ fn analyze_endpoint(
     entry: &crate::egir::program::SemanticEntry,
     endpoint: CompilerFlowEndpoint,
     resources: &LogicalResourceArena,
-    requests: &mut Vec<ScratchRequest>,
-) -> Result<EndpointPlan<AnalyzedRecipe>> {
+) -> Result<(EndpointPlan<AnalyzedRecipe>, Vec<ScratchRequest>)> {
     let projected = crate::egir::program::PlannedEntry::project(entry)?;
-    if matches!(endpoint, CompilerFlowEndpoint::Entry(_)) {
-        if let Some(split) = super::split_multidomain_seg_maps(&projected)? {
-            let primary = analyze_projected_kernel(
-                split.primary.entry,
-                split.primary.semantic_slots,
-                endpoint,
-                resources,
-                requests,
-            )?;
-            let siblings = split
-                .siblings
-                .into_iter()
-                .map(|split| {
-                    analyze_projected_kernel(
-                        split.entry,
-                        split.semantic_slots,
-                        endpoint,
-                        resources,
-                        requests,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?;
-            return Ok(EndpointPlan::new(true, primary, siblings));
-        }
-    }
+    let split = match endpoint {
+        CompilerFlowEndpoint::Entry(_) => super::split_multidomain_seg_maps(&projected)?,
+        CompilerFlowEndpoint::Materialization(_) => None,
+    };
+    let Some(split) = split else {
+        let (primary, requests) = analyze_projected_kernel(projected, None, endpoint, resources)?;
+        return Ok((EndpointPlan::new(primary, Vec::new()), requests));
+    };
 
-    let slots = (0..projected.outputs.len()).collect();
-    let primary = analyze_projected_kernel(projected, slots, endpoint, resources, requests)?;
-    Ok(EndpointPlan::new(false, primary, Vec::new()))
+    let (primary, mut requests) = analyze_projected_kernel(
+        split.primary.entry,
+        Some(split.primary.semantic_slots),
+        endpoint,
+        resources,
+    )?;
+    let mut siblings = Vec::with_capacity(split.siblings.len());
+    for sibling in split.siblings {
+        let (sibling, sibling_requests) =
+            analyze_projected_kernel(sibling.entry, Some(sibling.semantic_slots), endpoint, resources)?;
+        siblings.push(sibling);
+        requests.extend(sibling_requests);
+    }
+    Ok((EndpointPlan::new(primary, siblings), requests))
 }
 
 fn analyze_projected_kernel(
     body: crate::egir::program::PlannedEntry,
-    semantic_slots: Vec<usize>,
+    output_projection: Option<Vec<usize>>,
     endpoint: CompilerFlowEndpoint,
     resources: &LogicalResourceArena,
-    requests: &mut Vec<ScratchRequest>,
-) -> Result<PlannedKernel<AnalyzedRecipe>> {
-    let mut filters = super::analyze_filter_candidates(&body)?;
-    if filters.len() == 1 {
-        let (_, selection) = filters.remove(0);
-        match selection {
-            CandidateSelection::Selected(candidate) => {
-                requests.extend(filter_scratch_requests(endpoint, &candidate));
-                return Ok(PlannedKernel::new(
-                    body,
-                    semantic_slots,
-                    AnalyzedRecipe::Filter(candidate),
-                ));
-            }
-            CandidateSelection::Fallback => {}
-        }
+) -> Result<(PlannedKernel<AnalyzedRecipe>, Vec<ScratchRequest>)> {
+    let mut requests = Vec::new();
+    if let Some(CandidateSelection::Selected(candidate)) = super::analyze_filter_candidate(&body) {
+        requests.extend(filter_scratch_requests(endpoint, &candidate));
+        let kernel = PlannedKernel::new(body, output_projection, AnalyzedRecipe::Filter(candidate));
+        return Ok((kernel, requests));
     }
 
     let recipe = match segmented_recipe(&body) {
@@ -568,7 +552,7 @@ fn analyze_projected_kernel(
         Some(SegmentedRecipe::Composite(located)) => AnalyzedRecipe::Serial(located.serial_recipe()),
         _ => AnalyzedRecipe::Unchanged,
     };
-    Ok(PlannedKernel::new(body, semantic_slots, recipe))
+    Ok((PlannedKernel::new(body, output_projection, recipe), requests))
 }
 
 fn filter_scratch_requests(

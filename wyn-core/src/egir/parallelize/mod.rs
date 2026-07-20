@@ -38,7 +38,7 @@ mod reduce;
 mod scan;
 mod schedule;
 
-use filter::analyze_filter_candidates;
+use filter::analyze_filter_candidate;
 use kernel::{
     apply_manifest_resource_sizes, can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs,
     chunk_view_like, dispatch_worker_logical_size, emit_chunk_arithmetic, synthesize_swap_wrapper,
@@ -142,9 +142,8 @@ impl planning::PlannedKernel {
         self,
         lowering: &mut KernelPlanBuilder<'_, '_>,
         kernel: schedule::KernelId,
-        split_outputs: bool,
     ) -> error::Result<()> {
-        let (body, semantic_slots, recipe) = self.into_parts();
+        let (body, output_projection, recipe) = self.into_parts();
         match recipe {
             planning::PlannedRecipe::Filter(candidate) => {
                 lowering.lower_parallel_filter(body, kernel, candidate)?
@@ -164,7 +163,7 @@ impl planning::PlannedKernel {
             planning::PlannedRecipe::Serial(recipe) => {
                 lowering.commit_serial_kernel(body, kernel, recipe)?
             }
-            planning::PlannedRecipe::Unchanged if split_outputs => {
+            planning::PlannedRecipe::Unchanged if output_projection.is_some() => {
                 lowering.schedule.commit_kernel(
                     kernel,
                     schedule::KernelRecipeSpec::compute(body, schedule::ComputeKernelKind::Serial),
@@ -172,10 +171,10 @@ impl planning::PlannedKernel {
             }
             planning::PlannedRecipe::Unchanged => {}
         }
-        if split_outputs {
+        if let Some(output_projection) = output_projection {
             lowering.schedule.set_output_projection(
                 kernel,
-                semantic_slots.into_iter().map(super::program::OutputSlotId).collect(),
+                output_projection.into_iter().map(super::program::OutputSlotId).collect(),
             )?;
         }
         Ok(())
@@ -277,8 +276,8 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         let Some(plan) = self.recipes.take_endpoint(endpoint)? else {
             return Ok(());
         };
-        let (split_outputs, primary, siblings) = plan.into_parts();
-        primary.lower(self, kernel, split_outputs)?;
+        let (primary, siblings) = plan.into_parts();
+        primary.lower(self, kernel)?;
         for sibling in siblings {
             let phase = schedule::PhaseSpec::compute(
                 sibling.seed_body(),
@@ -286,7 +285,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
                 schedule::ComputeKernelKind::Serial,
             );
             let sibling_kernel = self.schedule.add_sibling(kernel, phase)?;
-            sibling.lower(self, sibling_kernel, split_outputs)?;
+            sibling.lower(self, sibling_kernel)?;
         }
         Ok(())
     }

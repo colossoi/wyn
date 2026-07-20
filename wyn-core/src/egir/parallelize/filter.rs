@@ -299,10 +299,10 @@ pub(super) struct BoundFilter {
     work: filter_soac::WorkBuffers,
 }
 
-pub(super) fn analyze_filter_candidates(
+pub(super) fn analyze_filter_candidate(
     entry: &SemanticEntry,
-) -> error::Result<Vec<(SemanticOpId, CandidateSelection<FilterCandidate>)>> {
-    let mut analysis = Vec::new();
+) -> Option<CandidateSelection<FilterCandidate>> {
+    let mut candidate = None;
     for effect in entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects) {
         let SideEffectKind::Soac(SoacEffect(
             semantic_id,
@@ -318,6 +318,9 @@ pub(super) fn analyze_filter_candidates(
         else {
             continue;
         };
+        if candidate.is_some() {
+            return Some(CandidateSelection::Fallback);
+        }
         let semantic_id = *semantic_id;
         let selection = match length {
             filter_soac::RuntimeLength::Stored(len_out) => CandidateSelection::Selected(FilterCandidate {
@@ -332,14 +335,9 @@ pub(super) fn analyze_filter_candidates(
             }),
             filter_soac::RuntimeLength::ViewOnly => CandidateSelection::Fallback,
         };
-        analysis.push((semantic_id, selection));
+        candidate = Some(selection);
     }
-    if analysis.len() > 1 {
-        for (_, selection) in &mut analysis {
-            *selection = CandidateSelection::Fallback;
-        }
-    }
-    Ok(analysis)
+    candidate
 }
 
 impl BoundFilter {
