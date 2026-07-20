@@ -9,7 +9,7 @@ use crate::egir::soac::screma;
 use crate::egir::types::{EGraph, SideEffect, SideEffectKind, SideEffectSite, Soac, SoacEffect};
 use crate::flow::ExecutionModel;
 
-use super::model::{FallbackReason, ParallelizeError, RecipeSelection, Result};
+use super::model::{CandidateSelection, ParallelizeError, Result};
 use crate::egir::program::{
     AllocatedProgram, CompilerFlowEndpoint, CompilerResource, CompilerResourceKey, CompilerResourceKind,
     LogicalResourceArena, LogicalSize, SemanticOpId,
@@ -58,19 +58,19 @@ impl<'a> ParallelReduce<'a> {
         located: LocatedScrema<'a>,
         lanes: &'a screma::Lanes,
         operators: &'a screma::NonEmpty<screma::Operator>,
-    ) -> RecipeSelection<Self> {
+    ) -> CandidateSelection<Self> {
         if operators.iter().any(|operator| !operator.combine.captures.is_empty()) {
-            return RecipeSelection::Serial(FallbackReason::UnsupportedCaptures);
+            return CandidateSelection::Fallback;
         }
         if lanes.inputs.is_empty() {
-            return RecipeSelection::Serial(FallbackReason::UnsupportedOperationShape);
+            return CandidateSelection::Fallback;
         }
         if !lanes.maps.iter().all(|map| map.destination.is_output_view())
             || !operators.iter().all(|operator| operator.destination.is_unplaced_fresh())
         {
-            return RecipeSelection::Serial(FallbackReason::UnsupportedDestination);
+            return CandidateSelection::Fallback;
         }
-        RecipeSelection::Parallel(Self {
+        CandidateSelection::Selected(Self {
             located,
             lanes,
             operators,
@@ -97,19 +97,19 @@ impl<'a> ParallelScan<'a> {
         located: LocatedScrema<'a>,
         lanes: &'a screma::Lanes,
         operators: &'a screma::NonEmpty<screma::Operator>,
-    ) -> RecipeSelection<Self> {
+    ) -> CandidateSelection<Self> {
         if !operators.rest.is_empty() || lanes.inputs.len() != 1 {
-            return RecipeSelection::Serial(FallbackReason::UnsupportedOperationShape);
+            return CandidateSelection::Fallback;
         }
         if !operators.first.combine.captures.is_empty() {
-            return RecipeSelection::Serial(FallbackReason::UnsupportedCaptures);
+            return CandidateSelection::Fallback;
         }
         if !lanes.maps.iter().all(|map| map.destination.is_output_view())
             || !operators.iter().all(|operator| operator.destination.is_output_view())
         {
-            return RecipeSelection::Serial(FallbackReason::UnsupportedDestination);
+            return CandidateSelection::Fallback;
         }
-        RecipeSelection::Parallel(Self {
+        CandidateSelection::Selected(Self {
             located,
             lanes,
             operators,
@@ -204,14 +204,14 @@ fn segmented_recipe(entry: &crate::egir::program::PlannedEntry) -> Option<Segmen
     Some(match located.op {
         screma::Op::Reduce { lanes, operators, .. } => {
             match ParallelReduce::recognize(located, lanes, operators) {
-                RecipeSelection::Parallel(recipe) => SegmentedRecipe::Reduce(recipe),
-                RecipeSelection::Serial(_) => SegmentedRecipe::Serial(located.serial_recipe()),
+                CandidateSelection::Selected(recipe) => SegmentedRecipe::Reduce(recipe),
+                CandidateSelection::Fallback => SegmentedRecipe::Serial(located.serial_recipe()),
             }
         }
         screma::Op::Scan { lanes, operators, .. } => {
             match ParallelScan::recognize(located, lanes, operators) {
-                RecipeSelection::Parallel(recipe) => SegmentedRecipe::Scan(recipe),
-                RecipeSelection::Serial(_) => SegmentedRecipe::Serial(located.serial_recipe()),
+                CandidateSelection::Selected(recipe) => SegmentedRecipe::Scan(recipe),
+                CandidateSelection::Fallback => SegmentedRecipe::Serial(located.serial_recipe()),
             }
         }
         screma::Op::Map { .. } => SegmentedRecipe::Map,
@@ -308,22 +308,23 @@ impl<R> EndpointPlan<R> {
     }
 }
 
-/// Authoritative target recipes indexed by the endpoint that owns the seeded
-/// kernel. Sequential policy deliberately carries no parallel recipe state.
-pub(super) enum RecipeIndex<R = PlannedRecipe> {
-    Sequential,
-    Parallel(HashMap<CompilerFlowEndpoint, EndpointPlan<R>>),
+/// Authoritative parallel recipes indexed by the endpoint that owns the
+/// seeded kernel. Serial policy carries no recipe map.
+pub(super) struct RecipeIndex<R = PlannedRecipe> {
+    plans: Option<HashMap<CompilerFlowEndpoint, EndpointPlan<R>>>,
 }
 
 impl RecipeIndex<AnalyzedRecipe> {
     fn parallel() -> Self {
-        Self::Parallel(HashMap::new())
+        Self {
+            plans: Some(HashMap::new()),
+        }
     }
 
     fn insert(&mut self, endpoint: CompilerFlowEndpoint, plan: EndpointPlan<AnalyzedRecipe>) -> Result<()> {
-        let Self::Parallel(endpoints) = self else {
+        let Some(endpoints) = &mut self.plans else {
             return Err(ParallelizeError::Invalid(
-                "cannot add a parallel recipe to a sequential recipe index".into(),
+                "cannot add a parallel recipe to a serial recipe index".into(),
             ));
         };
         if endpoints.insert(endpoint, plan).is_some() {
@@ -335,37 +336,39 @@ impl RecipeIndex<AnalyzedRecipe> {
     }
 
     fn bind_scratch(self, resources: &ScratchBindings) -> RecipeIndex {
-        let Self::Parallel(endpoints) = self else {
-            return RecipeIndex::sequential();
+        let Some(endpoints) = self.plans else {
+            return RecipeIndex::serial();
         };
-        RecipeIndex::Parallel(
-            endpoints
-                .into_iter()
-                .map(|(endpoint, plan)| {
-                    let (split_outputs, primary, siblings) = plan.into_parts();
-                    (
-                        endpoint,
-                        EndpointPlan::new(
-                            split_outputs,
-                            bind_kernel(primary, resources),
-                            siblings.into_iter().map(|kernel| bind_kernel(kernel, resources)).collect(),
-                        ),
-                    )
-                })
-                .collect(),
-        )
+        RecipeIndex {
+            plans: Some(
+                endpoints
+                    .into_iter()
+                    .map(|(endpoint, plan)| {
+                        let (split_outputs, primary, siblings) = plan.into_parts();
+                        (
+                            endpoint,
+                            EndpointPlan::new(
+                                split_outputs,
+                                bind_kernel(primary, resources),
+                                siblings.into_iter().map(|kernel| bind_kernel(kernel, resources)).collect(),
+                            ),
+                        )
+                    })
+                    .collect(),
+            ),
+        }
     }
 }
 
 impl RecipeIndex {
-    pub(super) fn sequential() -> Self {
-        Self::Sequential
+    pub(super) fn serial() -> Self {
+        Self { plans: None }
     }
 
     pub(super) fn take_endpoint(&mut self, endpoint: CompilerFlowEndpoint) -> Result<Option<EndpointPlan>> {
-        match self {
-            Self::Sequential => Ok(None),
-            Self::Parallel(endpoints) => endpoints.remove(&endpoint).map(Some).ok_or_else(|| {
+        match &mut self.plans {
+            None => Ok(None),
+            Some(endpoints) => endpoints.remove(&endpoint).map(Some).ok_or_else(|| {
                 ParallelizeError::Invalid(format!("flow endpoint {endpoint:?} has no target recipe"))
             }),
         }
@@ -494,7 +497,6 @@ fn analyze_endpoint(
     Ok(EndpointPlan::new(false, primary, Vec::new()))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn analyze_projected_kernel(
     body: crate::egir::program::PlannedEntry,
     semantic_slots: Vec<usize>,
@@ -506,7 +508,7 @@ fn analyze_projected_kernel(
     if filters.len() == 1 {
         let (_, selection) = filters.remove(0);
         match selection {
-            RecipeSelection::Parallel(candidate) => {
+            CandidateSelection::Selected(candidate) => {
                 requests.extend(filter_scratch_requests(endpoint, &candidate));
                 return Ok(PlannedKernel::new(
                     body,
@@ -514,7 +516,7 @@ fn analyze_projected_kernel(
                     AnalyzedRecipe::Filter(candidate),
                 ));
             }
-            RecipeSelection::Serial(_) => {}
+            CandidateSelection::Fallback => {}
         }
     }
 
@@ -522,7 +524,7 @@ fn analyze_projected_kernel(
         Some(SegmentedRecipe::Reduce(located)) => {
             let serial = located.serial_recipe();
             match super::analyze_reduce_candidate(&body, located, resources)? {
-                RecipeSelection::Parallel(candidate) => {
+                CandidateSelection::Selected(candidate) => {
                     for (slot, elem_ty) in candidate.scratch_types().cloned().enumerate() {
                         requests.push(scratch_request(
                             endpoint,
@@ -534,13 +536,13 @@ fn analyze_projected_kernel(
                     }
                     AnalyzedRecipe::Reduce(candidate)
                 }
-                RecipeSelection::Serial(_) => AnalyzedRecipe::Serial(serial),
+                CandidateSelection::Fallback => AnalyzedRecipe::Serial(serial),
             }
         }
         Some(SegmentedRecipe::Scan(located)) => {
             let serial = located.serial_recipe();
             match super::analyze_scan_candidate(&body, located)? {
-                RecipeSelection::Parallel(candidate) => {
+                CandidateSelection::Selected(candidate) => {
                     for (slot, kind) in [
                         CompilerResourceKind::ScanBlockSums,
                         CompilerResourceKind::ScanBlockOffsets,
@@ -558,7 +560,7 @@ fn analyze_projected_kernel(
                     }
                     AnalyzedRecipe::Scan(candidate)
                 }
-                RecipeSelection::Serial(_) => AnalyzedRecipe::Serial(serial),
+                CandidateSelection::Fallback => AnalyzedRecipe::Serial(serial),
             }
         }
         Some(SegmentedRecipe::Serial(serial)) => AnalyzedRecipe::Serial(serial),

@@ -45,7 +45,7 @@ use kernel::{
     synthesize_u32_add_function, ChunkInputKind,
 };
 use model as error;
-use model::{FallbackReason, RecipeSelection};
+use model::CandidateSelection;
 use planning::{
     make_screma_serial, parallel_recipe_effect, ParallelReduce, ParallelScan, SerialScremaRecipe,
 };
@@ -96,7 +96,7 @@ pub(crate) fn plan(
 ) -> Result<(PhysicalProgram, KernelPlanSummary), ConvertError> {
     let kernel_plan = match profile.schedule {
         SchedulePolicy::Parallel => build_parallel_plan(&mut inner, effect_ids),
-        SchedulePolicy::SingleStage => build_sequential_plan(&inner, effect_ids),
+        SchedulePolicy::Serial => build_serial_plan(&inner, effect_ids),
     }?;
 
     kernel_plan.finalize(inner, binding_ids, profile)
@@ -116,13 +116,13 @@ fn build_parallel_plan(
 
 /// Build a kernel plan that selects serial recipes without allocating
 /// algorithm-specific parallel scratch resources.
-fn build_sequential_plan(
+fn build_serial_plan(
     inner: &AllocatedProgram,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> error::Result<schedule::KernelPlan> {
-    let recipes = planning::RecipeIndex::sequential();
+    let recipes = planning::RecipeIndex::serial();
     let builder = KernelPlanBuilder::new(inner, recipes, effect_ids)?;
-    builder.build_sequential_schedule(inner)
+    builder.build_serial_schedule(inner)
 }
 
 struct KernelPlanBuilder<'resources, 'effects> {
@@ -211,12 +211,12 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         Ok(self.schedule)
     }
 
-    fn build_sequential_schedule(
+    fn build_serial_schedule(
         mut self,
         inner: &'resources AllocatedProgram,
     ) -> error::Result<schedule::KernelPlan> {
         self.attach_materializations(inner)?;
-        self.schedule.select_sequential_recipes()?;
+        self.schedule.select_serial_recipes()?;
         self.schedule.coalesce_resource_flows(self.flows.flows())?;
         Ok(self.schedule)
     }

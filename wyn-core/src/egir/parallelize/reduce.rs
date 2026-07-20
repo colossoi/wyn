@@ -55,7 +55,7 @@ pub(super) fn analyze_reduce_candidate(
     entry: &crate::egir::program::PlannedEntry,
     located: ParallelReduce<'_>,
     resources: &crate::egir::program::LogicalResourceArena,
-) -> error::Result<RecipeSelection<ReduceCandidate>> {
+) -> error::Result<CandidateSelection<ReduceCandidate>> {
     let serial = located.serial_recipe();
     let (located, lanes, operators) = located.into_parts();
     let site = located.site;
@@ -67,28 +67,28 @@ pub(super) fn analyze_reduce_candidate(
         screma::ScremaOperands::decode(located.op, &side_effect.operand_nodes, side_effect.result)?;
     for input in operands.inputs() {
         if !can_chunk_view(&entry.graph, input.node, ChunkInputKind::StorageOrRange) {
-            return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedViewShape));
+            return Ok(CandidateSelection::Fallback);
         }
     }
     let mut map_output_view_operands = Vec::with_capacity(n_maps);
     for index in 0..n_maps {
         let Some(output) = operands.output(index) else {
-            return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedDestination));
+            return Ok(CandidateSelection::Fallback);
         };
         if !can_chunk_view(&entry.graph, output.node, ChunkInputKind::StorageOnly) {
-            return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedViewShape));
+            return Ok(CandidateSelection::Fallback);
         }
         map_output_view_operands.push(output.slot);
     }
     let result = operands.result();
     let owner = located.owner;
     if operators.iter().any(|operator| !can_clone_pure_subgraph(&entry.graph, operator.neutral, &[])) {
-        return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedCaptures));
+        return Ok(CandidateSelection::Fallback);
     }
     let scratch_types =
         operators.iter().map(|operator| entry.graph.types[&operator.neutral].clone()).collect::<Vec<_>>();
     if scratch_types.iter().any(|ty| crate::ssa::layout::type_byte_size(ty).is_none()) {
-        return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedScratchLayout));
+        return Ok(CandidateSelection::Fallback);
     }
     let input_views =
         operands.inputs().map(|input| (input.node, entry.graph.types[&input.node].clone())).collect();
@@ -117,7 +117,7 @@ pub(super) fn analyze_reduce_candidate(
             if !can_clone_pure_subgraph(&entry.graph, place, &[])
                 || !can_clone_pure_subgraph(&entry.graph, value, &[result])
             {
-                return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedCaptures));
+                return Ok(CandidateSelection::Fallback);
             }
             stores[accumulator].push(ReduceOutputStore {
                 location: (block_id, effect_index),
@@ -142,7 +142,7 @@ pub(super) fn analyze_reduce_candidate(
         }
     }
     if !(0..n_accs).all(|index| !stores[index].is_empty() && !outputs[index].is_empty()) {
-        return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedDestination));
+        return Ok(CandidateSelection::Fallback);
     }
     let accumulators = operators
         .into_iter()
@@ -159,7 +159,7 @@ pub(super) fn analyze_reduce_candidate(
             },
         )
         .collect();
-    Ok(RecipeSelection::Parallel(ReduceCandidate {
+    Ok(CandidateSelection::Selected(ReduceCandidate {
         site,
         owner,
         serial,

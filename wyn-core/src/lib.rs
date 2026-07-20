@@ -1190,8 +1190,8 @@ pub enum CodegenTarget {
 /// terminal scheduling decision changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedulePolicy {
+    Serial,
     Parallel,
-    SingleStage,
 }
 
 /// Target and scheduling policy for the semantic-EGIR-to-SSA boundary.
@@ -1585,7 +1585,7 @@ pub fn compile_thru_spirv_single_stage(
 ) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
     Ok(ssa_from_reachable(
         compile_thru_tlc(source)?,
-        LoweringProfile::new(CodegenTarget::Spirv, SchedulePolicy::SingleStage),
+        LoweringProfile::new(CodegenTarget::Spirv, SchedulePolicy::Serial),
     )?
     .lower()?)
 }

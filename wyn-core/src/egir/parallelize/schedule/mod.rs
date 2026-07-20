@@ -946,7 +946,7 @@ impl KernelPlan {
         Ok(id)
     }
 
-    pub(super) fn select_sequential_recipes(&mut self) -> Result<(), KernelMutationError> {
+    pub(super) fn select_serial_recipes(&mut self) -> Result<(), KernelMutationError> {
         let kernels = self
             .pipelines
             .iter()
@@ -1519,7 +1519,7 @@ fn scheduled_domain_graph(graph: &crate::egir::types::EGraph<Scheduled>) -> Opti
         SideEffectKind::Soac(SoacEffect(
             _,
             Soac::Filter(filter::Op {
-                state: filter::ScheduledState::Parallel { space, plan, .. },
+                state: filter::ScheduledState::Pipeline { space, plan, .. },
                 ..
             }),
         )) if matches!(
@@ -1594,7 +1594,7 @@ fn segmented_graph_resources(
     if let SideEffectKind::Soac(SoacEffect(
         _,
         Soac::Filter(filter::Op {
-            state: filter::ScheduledState::Parallel { storage, plan, .. },
+            state: filter::ScheduledState::Pipeline { storage, plan, .. },
             ..
         }),
     )) = &side_effect.kind

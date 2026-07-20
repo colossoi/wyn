@@ -87,12 +87,12 @@ fn schedule_soac_with_mode(
         Soac::Filter(filter::Op { body, state }) => {
             let filter::SemanticState { space, storage } = state;
             let state = match filter_plan {
-                None => filter::ScheduledState::Serial { space, storage },
+                None => filter::ScheduledState::Loop { space, storage },
                 Some(ParallelFilterPlan {
                     stage,
                     config,
                     storage,
-                }) => filter::ScheduledState::Parallel {
+                }) => filter::ScheduledState::Pipeline {
                     space,
                     storage,
                     plan: filter::ParallelPlan {
@@ -185,7 +185,7 @@ pub(super) fn parallel_effect(
                 )) | SideEffectKind::Soac(SoacEffect(
                     _,
                     Soac::Filter(filter::Op {
-                        state: filter::ScheduledState::Parallel { .. },
+                        state: filter::ScheduledState::Pipeline { .. },
                         ..
                     })
                 ))

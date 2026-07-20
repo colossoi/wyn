@@ -822,7 +822,7 @@ entry add_sum(xs: []i32) []i32 =
     )
     .plan(crate::LoweringProfile::new(
         crate::CodegenTarget::Portable,
-        crate::SchedulePolicy::SingleStage,
+        crate::SchedulePolicy::Serial,
     ))
     .expect("plan sequential reduction");
     assert!(
@@ -1742,7 +1742,7 @@ entry e() [4]i32 =
 
     let single = lower_semantic_egir(
         compile_to_semantic_egir(reduce_then_map),
-        crate::LoweringProfile::new(crate::CodegenTarget::Portable, crate::SchedulePolicy::SingleStage),
+        crate::LoweringProfile::new(crate::CodegenTarget::Portable, crate::SchedulePolicy::Serial),
     );
     let single_phases: Vec<_> = single.kernel_plan.phases().collect();
     assert_eq!(
@@ -1820,7 +1820,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
     assert!(allocated.semantic_ir().contains("SegRed"));
     let lowered = lower_semantic_egir(
         allocated,
-        crate::LoweringProfile::new(crate::CodegenTarget::Portable, crate::SchedulePolicy::SingleStage),
+        crate::LoweringProfile::new(crate::CodegenTarget::Portable, crate::SchedulePolicy::Serial),
     );
     assert_eq!(lowered.kernel_plan.phases().count(), 1);
     assert!(!lowered.ssa.entry_points.iter().any(|entry| entry.name.contains("phase2")));

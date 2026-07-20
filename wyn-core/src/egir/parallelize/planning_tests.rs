@@ -49,10 +49,10 @@ fn resource_arena_interns_compiler_ownership_keys() {
 }
 
 #[test]
-fn sequential_recipe_index_carries_no_parallel_recipe_state() {
-    let mut sequential = RecipeIndex::sequential();
-    assert!(sequential
+fn serial_recipe_index_carries_no_parallel_recipe_state() {
+    let mut serial = RecipeIndex::serial();
+    assert!(serial
         .take_endpoint(CompilerFlowEndpoint::Entry(SemanticEntryId::for_test(0)))
-        .expect("sequential endpoint lookup")
+        .expect("serial endpoint lookup")
         .is_none());
 }

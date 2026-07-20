@@ -44,7 +44,7 @@ pub enum RuntimeLength<R = SemanticResourceRef> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plan<R = SemanticResourceRef> {
-    Serial,
+    Loop,
     Flags(ParallelConfig<R>),
     Scan(ParallelConfig<R>),
     Scatter(ParallelConfig<R>),
@@ -160,11 +160,11 @@ pub struct ParallelPlan<R> {
 
 #[derive(Clone, Debug)]
 pub enum ScheduledState<R> {
-    Serial {
+    Loop {
         space: SegSpace<R>,
         storage: Output<R>,
     },
-    Parallel {
+    Pipeline {
         space: SegSpace<R>,
         storage: RuntimeStorage<R>,
         plan: ParallelPlan<R>,
@@ -173,7 +173,7 @@ pub enum ScheduledState<R> {
 
 impl<R> ScheduledState<R> {
     pub(crate) fn for_each_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
-        if let Self::Serial {
+        if let Self::Loop {
             storage: Output::Local { capacity, .. },
             ..
         } = self

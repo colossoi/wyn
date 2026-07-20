@@ -1105,18 +1105,18 @@ fn physicalize_soac(
             }
             body.predicate = seg_body(body.predicate, nodes);
             let state = match state {
-                filter::ScheduledState::Serial {
+                filter::ScheduledState::Loop {
                     space: iteration_space,
                     storage,
-                } => filter::ScheduledState::Serial {
+                } => filter::ScheduledState::Loop {
                     space: space(iteration_space, nodes, bindings)?,
                     storage: filter_output(storage, bindings)?,
                 },
-                filter::ScheduledState::Parallel {
+                filter::ScheduledState::Pipeline {
                     space: iteration_space,
                     storage,
                     plan,
-                } => filter::ScheduledState::Parallel {
+                } => filter::ScheduledState::Pipeline {
                     space: space(iteration_space, nodes, bindings)?,
                     storage: filter::RuntimeStorage {
                         scratch: binding(storage.scratch, bindings),

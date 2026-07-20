@@ -530,8 +530,8 @@ fn expand_one(
             let arr_ty = input.array.clone();
             let elem_ty = input.element();
             let (output, plan) = match &op.state {
-                filter::ScheduledState::Serial { storage, .. } => (storage.clone(), filter::Plan::Serial),
-                filter::ScheduledState::Parallel { storage, plan, .. } => {
+                filter::ScheduledState::Loop { storage, .. } => (storage.clone(), filter::Plan::Loop),
+                filter::ScheduledState::Pipeline { storage, plan, .. } => {
                     let output = filter::Output::Runtime {
                         scratch: storage.scratch,
                         length: storage.length,
@@ -596,7 +596,7 @@ fn expand_one(
                     config.buffers,
                     next_effect,
                 ),
-                filter::Plan::Serial => {
+                filter::Plan::Loop => {
                     build_filter_loop(graph, control_headers, bid, idx, spec, next_effect)
                 }
             }

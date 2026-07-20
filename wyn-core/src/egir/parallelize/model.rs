@@ -35,21 +35,11 @@ impl From<&str> for ParallelizeError {
 
 pub(super) type Result<T> = std::result::Result<T, ParallelizeError>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Why a valid semantic operation selected serial fallback.
-pub(super) enum FallbackReason {
-    UnsupportedCaptures,
-    UnsupportedViewShape,
-    UnsupportedDestination,
-    UnsupportedScratchLayout,
-    UnsupportedOperationShape,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-/// Immutable analysis outcome; only parallel variants may request scratch.
-pub(super) enum RecipeSelection<T> {
-    Parallel(T),
-    Serial(FallbackReason),
+/// Candidate analysis either selects a target recipe or explains why the
+/// operation must use fallback lowering.
+pub(super) enum CandidateSelection<T> {
+    Selected(T),
+    Fallback,
 }
 
 /// Canonical compiler-flow edges shared by attachment and coalescing.

@@ -246,46 +246,46 @@ pub(super) struct BoundScan {
 pub(super) fn analyze_scan_candidate(
     entry: &crate::egir::program::PlannedEntry,
     located: ParallelScan<'_>,
-) -> error::Result<RecipeSelection<ScanCandidate>> {
+) -> error::Result<CandidateSelection<ScanCandidate>> {
     let serial = located.serial_recipe();
     let (located, lanes, operators) = located.into_parts();
     let site = located.site;
     let side_effect = located.effect;
     let operator = &operators.first;
     if !can_clone_pure_subgraph(&entry.graph, operator.neutral, &[]) {
-        return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedCaptures));
+        return Ok(CandidateSelection::Fallback);
     }
     let operands =
         screma::ScremaOperands::decode(located.op, &side_effect.operand_nodes, side_effect.result)?;
     let input = operands.input(0).node;
     if !can_chunk_view(&entry.graph, input, ChunkInputKind::StorageOrRange) {
-        return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedViewShape));
+        return Ok(CandidateSelection::Fallback);
     }
     let mut map_output_view_operands = Vec::with_capacity(lanes.maps.len());
     for index in 0..lanes.maps.len() {
         let Some(output) = operands.output(index) else {
-            return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedDestination));
+            return Ok(CandidateSelection::Fallback);
         };
         if !can_chunk_view(&entry.graph, output.node, ChunkInputKind::StorageOnly) {
-            return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedViewShape));
+            return Ok(CandidateSelection::Fallback);
         }
         map_output_view_operands.push(output.slot);
     }
     let Some(scan_output) = operands.output(lanes.maps.len()) else {
-        return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedDestination));
+        return Ok(CandidateSelection::Fallback);
     };
     let Some(scan_output_storage) = graph_ops::extract_storage_view_source(&entry.graph, scan_output.node)
     else {
-        return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedDestination));
+        return Ok(CandidateSelection::Fallback);
     };
     let owner = located.owner;
     let scratch_type = entry.graph.types[&operator.neutral].clone();
     if crate::ssa::layout::type_byte_size(&scratch_type).is_none() {
-        return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedScratchLayout));
+        return Ok(CandidateSelection::Fallback);
     }
     let input_view_type = entry.graph.types[&input].clone();
     let scan_output_view_type = entry.graph.types[&scan_output.node].clone();
-    Ok(RecipeSelection::Parallel(ScanCandidate {
+    Ok(CandidateSelection::Selected(ScanCandidate {
         site,
         owner,
         scratch_type,

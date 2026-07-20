@@ -301,7 +301,7 @@ pub(super) struct BoundFilter {
 
 pub(super) fn analyze_filter_candidates(
     entry: &SemanticEntry,
-) -> error::Result<Vec<(SemanticOpId, RecipeSelection<FilterCandidate>)>> {
+) -> error::Result<Vec<(SemanticOpId, CandidateSelection<FilterCandidate>)>> {
     let mut analysis = Vec::new();
     for effect in entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects) {
         let SideEffectKind::Soac(SoacEffect(
@@ -320,7 +320,7 @@ pub(super) fn analyze_filter_candidates(
         };
         let semantic_id = *semantic_id;
         let selection = match length {
-            filter_soac::RuntimeLength::Stored(len_out) => RecipeSelection::Parallel(FilterCandidate {
+            filter_soac::RuntimeLength::Stored(len_out) => CandidateSelection::Selected(FilterCandidate {
                 semantic_id,
                 space: space.clone(),
                 storage: StoredFilterStorage {
@@ -330,15 +330,13 @@ pub(super) fn analyze_filter_candidates(
                 scan_workgroup_width: REDUCE_PHASE1_WIDTH,
                 scan_groups: FILTER_SCAN_GROUPS,
             }),
-            filter_soac::RuntimeLength::ViewOnly => {
-                RecipeSelection::Serial(FallbackReason::UnsupportedDestination)
-            }
+            filter_soac::RuntimeLength::ViewOnly => CandidateSelection::Fallback,
         };
         analysis.push((semantic_id, selection));
     }
     if analysis.len() > 1 {
         for (_, selection) in &mut analysis {
-            *selection = RecipeSelection::Serial(FallbackReason::UnsupportedOperationShape);
+            *selection = CandidateSelection::Fallback;
         }
     }
     Ok(analysis)

@@ -41,7 +41,7 @@ impl KernelPlan {
             inner,
             &self,
             &physical_resources,
-            profile.schedule == SchedulePolicy::SingleStage,
+            profile.schedule == SchedulePolicy::Serial,
             descriptor,
         )?;
         crate::egir::verify_physical::check(&physical, &physical_resources)?;
