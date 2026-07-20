@@ -6,7 +6,7 @@
 
 use crate::flow::BlockId;
 
-use super::super::program::{remap_control_headers, PlannedEntry, SemanticResourceRef};
+use super::super::program::{PlannedEntry, SemanticResourceRef};
 use super::super::soac::{filter, hist, screma};
 use super::super::types::{EGraph, Scheduled, Semantic, SideEffect, SideEffectKind, Soac, SoacEffect};
 
@@ -35,39 +35,7 @@ pub(super) fn entry(
     entry: PlannedEntry<Semantic>,
     filter_plan: Option<ParallelFilterPlan>,
 ) -> Result<PlannedEntry<Scheduled>, String> {
-    let PlannedEntry {
-        name,
-        span,
-        execution_model,
-        inputs,
-        outputs,
-        resource_declarations,
-        params,
-        return_ty,
-        graph,
-        control_headers,
-        aliases,
-        mut output_routes,
-    } = entry;
-    let (graph, block_map) =
-        graph.try_map_phase(|_, _, id, soac| schedule_soac(soac, filter_plan).map(|soac| (id, soac)))?;
-    for route in &mut output_routes {
-        route.source.block = block_map[&route.source.block];
-    }
-    Ok(PlannedEntry {
-        name,
-        span,
-        execution_model,
-        inputs,
-        outputs,
-        resource_declarations,
-        params,
-        return_ty,
-        graph,
-        control_headers: remap_control_headers(&control_headers, |block| block_map[&block]),
-        aliases,
-        output_routes,
-    })
+    entry.try_map_phase(|_, _, id, soac| schedule_soac(soac, filter_plan).map(|soac| (id, soac)))
 }
 
 pub(in crate::egir) fn graph(

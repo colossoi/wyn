@@ -15,8 +15,8 @@ use crate::LookupMap;
 
 use super::graph_ops;
 use super::program::{
-    ConstantDef, Entry, Func, OutputRoute, OutputSlotId, OutputWriter, Program, RawEntry, RawProgram,
-    SemanticOpId, SemanticProgram, SemanticResourceRef,
+    ConstantDef, Entry, Func, OutputSlotId, OutputWriter, Program, RawEntry, RawProgram, SemanticOpId,
+    SemanticProgram, SemanticResourceRef,
 };
 use super::soac::{filter, hist, screma};
 use super::types::{
@@ -118,35 +118,15 @@ fn reify_func(function: Func<Raw>, next_semantic_id: &mut u32) -> Func<Semantic>
 }
 
 fn reify_entry(entry: Entry<Raw>, next_semantic_id: &mut u32) -> Entry<Semantic> {
-    let facts = entry_facts(&entry);
-    let Entry {
-        name,
-        span,
-        execution_model,
-        inputs,
-        outputs,
-        resource_declarations,
-        params,
-        return_ty,
-        graph,
-        control_headers,
-        aliases,
-        output_routes,
-    } = entry;
-    let (graph, blocks) = map_graph(graph, facts, next_semantic_id);
-    Entry {
-        name,
-        span,
-        execution_model,
-        inputs,
-        outputs,
-        resource_declarations,
-        params,
-        return_ty,
-        graph,
-        control_headers: remap_headers(control_headers, &blocks),
-        aliases,
-        output_routes: remap_routes(output_routes, &blocks),
+    let mut facts = entry_facts(&entry);
+    match entry.try_map_phase(|block, index, (), soac| {
+        let facts = facts.remove(&(block, index)).expect("every raw SOAC must have semantic facts");
+        let id = SemanticOpId(*next_semantic_id);
+        *next_semantic_id += 1;
+        Ok::<_, Infallible>((id, reify_soac(soac, facts)))
+    }) {
+        Ok(entry) => entry,
+        Err(never) => match never {},
     }
 }
 
@@ -548,11 +528,4 @@ fn remap_headers(
         .into_iter()
         .map(|(block, header)| (blocks[&block], header.remap(&|target| blocks[&target])))
         .collect()
-}
-
-fn remap_routes(mut routes: Vec<OutputRoute>, blocks: &LookupMap<BlockId, BlockId>) -> Vec<OutputRoute> {
-    for route in &mut routes {
-        route.source.block = blocks[&route.source.block];
-    }
-    routes
 }

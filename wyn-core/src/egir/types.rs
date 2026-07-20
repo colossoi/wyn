@@ -411,6 +411,53 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
     }
 }
 
+impl<P: WynSoacPhase> super::ir::Entry<P, WynLanguage> {
+    /// Change an entry's SOAC phase while preserving its interface and
+    /// remapping every block-bearing piece of entry metadata with the graph.
+    pub(crate) fn try_map_phase<Q, E>(
+        self,
+        map_soac: impl FnMut(BlockId, usize, P::SoacId, Soac<P>) -> Result<(Q::SoacId, Soac<Q>), E>,
+    ) -> Result<super::ir::Entry<Q, WynLanguage>, E>
+    where
+        Q: WynSoacPhase<Resource = P::Resource, ResourceDecl = P::ResourceDecl>,
+    {
+        let super::ir::Entry {
+            name,
+            span,
+            execution_model,
+            inputs,
+            outputs,
+            resource_declarations,
+            params,
+            return_ty,
+            graph,
+            control_headers,
+            aliases,
+            mut output_routes,
+        } = self;
+        let (graph, blocks) = graph.try_map_phase(map_soac)?;
+        for route in &mut output_routes {
+            route.source.block = blocks[&route.source.block];
+        }
+        Ok(super::ir::Entry {
+            name,
+            span,
+            execution_model,
+            inputs,
+            outputs,
+            resource_declarations,
+            params,
+            return_ty,
+            graph,
+            control_headers: super::program::remap_control_headers(&control_headers, |block| {
+                blocks[&block]
+            }),
+            aliases,
+            output_routes,
+        })
+    }
+}
+
 impl From<SoacOwnership> for SoacDestination {
     fn from(ownership: SoacOwnership) -> Self {
         Self {
