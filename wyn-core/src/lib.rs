@@ -25,6 +25,7 @@ pub mod name_registry;
 pub mod tlc;
 
 pub mod egir;
+pub use egir::program::ResourceId;
 /// Re-export of the pipeline descriptor format. Lives in its own
 /// crate so host runtimes (e.g. `extra/viz`) can deserialize the
 /// JSON without pulling in the whole compiler.
@@ -245,12 +246,6 @@ impl std::fmt::Display for BindingRef {
         write!(f, "set={},binding={}", self.set, self.binding)
     }
 }
-
-/// Target-independent identity of a semantic storage resource. Unlike
-/// `BindingRef`, compiler-created resources receive this identity before any
-/// descriptor set or binding is allocated.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ResourceId(pub u32);
 
 /// Conservative read/write access to a compiler-internal resource.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

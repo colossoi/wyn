@@ -41,25 +41,24 @@ fn empty_entry(name: &str) -> SemanticEntry {
     )
 }
 
-fn allocated_program(reference: SemanticResourceRef, size: LogicalSize) -> AllocatedProgram {
+fn allocated_program(size: LogicalSize) -> AllocatedProgram {
     let binding = crate::BindingRef::new(0, 7);
-    let mut entry = empty_entry("main");
-    entry.resource_declarations.push(SemanticResourceDecl {
-        resource: reference,
-        role: crate::interface::StorageRole::Input,
-        elem_ty: unit_ty(),
-        size: size.clone(),
-    });
     let mut program = SemanticProgram::new(
         vec![],
         vec![],
-        vec![entry],
+        vec![empty_entry("main")],
         vec![],
         PipelineDescriptor::default(),
         RegionInterner::default(),
     );
     let resource = program.resources.allocate(ResourceOrigin::Host(binding), unit_ty(), size);
-    assert_eq!(resource, reference.0);
+    let resource_size = program.resources[resource].size.clone();
+    program.entry_points[0].resource_declarations.push(SemanticResourceDecl {
+        resource: SemanticResourceRef(resource),
+        role: crate::interface::StorageRole::Input,
+        elem_ty: unit_ty(),
+        size: resource_size,
+    });
     AllocatedProgram {
         semantic: program,
         materializations: crate::IdArena::new(),
@@ -90,14 +89,20 @@ fn logical_allocation_introduces_the_allocated_sidecar() {
 
 #[test]
 fn allocated_resource_verifier_accepts_resource_only_program() {
-    let program = allocated_program(SemanticResourceRef(ResourceId(0)), LogicalSize::Unspecified);
+    let program = allocated_program(LogicalSize::Unspecified);
     verify_allocated_resources(&program).expect("resource-normalized program");
 }
 
 #[test]
 fn semantic_resource_ref_has_no_binding_constructor() {
-    let reference = SemanticResourceRef(ResourceId(0));
-    assert_eq!(reference.0, ResourceId(0));
+    let mut resources = LogicalResourceArena::default();
+    let resource = resources.allocate(
+        ResourceOrigin::Host(crate::BindingRef::new(0, 0)),
+        unit_ty(),
+        LogicalSize::Unspecified,
+    );
+    let reference = SemanticResourceRef(resource);
+    assert_eq!(reference.0, resource);
 }
 
 #[test]
@@ -118,17 +123,17 @@ fn logical_resource_arena_owns_dense_identity_assignment() {
         LogicalSize::FixedBytes(4),
     );
 
-    assert_eq!(first, ResourceId(0));
-    assert_eq!(second, ResourceId(1));
-    assert_eq!(resources.get(first).map(LogicalResource::id), Some(first));
-    assert_eq!(resources.get(second).map(LogicalResource::id), Some(second));
+    assert_eq!(first.index(), 0);
+    assert_eq!(second.index(), 1);
+    assert_eq!(resources[first].id(), first);
+    assert_eq!(resources[second].id(), second);
 }
 
 #[test]
 fn physicalization_rebuilds_resource_nodes_as_binding_nodes() {
     let binding = crate::BindingRef::new(3, 5);
     let mut resources = LogicalResourceArena::default();
-    resources.allocate(
+    let resource = resources.allocate(
         ResourceOrigin::Host(binding),
         Type::Constructed(TypeName::UInt(32), vec![]),
         LogicalSize::Unspecified,
@@ -137,7 +142,7 @@ fn physicalization_rebuilds_resource_nodes_as_binding_nodes() {
     let mut graph = EGraph::new();
     let view = crate::egir::graph_ops::intern_resource_view(
         &mut graph,
-        ResourceId(0),
+        resource,
         Type::Constructed(TypeName::UInt(32), vec![]),
         None,
     );
@@ -163,14 +168,11 @@ fn physicalization_rebuilds_resource_nodes_as_binding_nodes() {
 
 #[test]
 fn allocated_resource_verifier_rejects_missing_size_source() {
-    let program = allocated_program(
-        SemanticResourceRef(ResourceId(0)),
-        LogicalSize::LikeResource {
-            resource: ResourceId(1),
-            elem_bytes: 4,
-            src_elem_bytes: 4,
-        },
-    );
+    let program = allocated_program(LogicalSize::LikeResource {
+        resource: ResourceId::for_test(1),
+        elem_bytes: 4,
+        src_elem_bytes: 4,
+    });
     let error = verify_allocated_resources(&program).expect_err("missing size source must be rejected");
     assert!(error.contains("missing source"), "{error}");
 }

@@ -186,12 +186,7 @@ impl KernelPlan {
                 let mut reads = Vec::new();
                 let mut writes = Vec::new();
                 for resource in phase.resources() {
-                    let binding = physical_resources.binding(resource.resource).ok_or_else(|| {
-                        format!(
-                            "kernel `{}` references an unallocated resource",
-                            phase.entry_point()
-                        )
-                    })?;
+                    let binding = physical_resources.binding(resource.resource);
                     let index = *binding_index.get(&binding).ok_or_else(|| {
                         format!(
                             "kernel `{}` references unpublished storage {binding}",
@@ -217,12 +212,7 @@ impl KernelPlan {
                         workgroup_size: phase.workgroup_size().0,
                     },
                     KernelDomain::ResourceElements { resource, elem_bytes } => {
-                        let binding = physical_resources.binding(*resource).ok_or_else(|| {
-                            format!(
-                                "kernel `{}` has unresolved dispatch resource",
-                                phase.entry_point()
-                            )
-                        })?;
+                        let binding = physical_resources.binding(*resource);
                         DispatchSize::DerivedFrom {
                             len: DispatchLen::InputBinding {
                                 set: binding.set,

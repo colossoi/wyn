@@ -82,7 +82,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             .filter(|declaration| declaration.role == StorageRole::Input)
             .cloned()
             .collect::<Vec<_>>();
-        storage.push(self.declaration(self.work.flags, StorageRole::Output)?);
+        storage.push(self.declaration(self.work.flags, StorageRole::Output));
         let spec = ProjectionSpec::unit(
             format!("{}_filter_flags", self.entry.name),
             self.entry.execution_model.clone(),
@@ -101,7 +101,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         ]
         .into_iter()
         .map(|(resource, role)| self.declaration(resource, role))
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect();
         let spec = ProjectionSpec::unit(
             format!("{}_filter_scan", self.entry.name),
             ExecutionModel::Compute {
@@ -142,7 +142,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
                 self.entry.name
             )
         })?;
-        apply_manifest_resource_sizes(&mut combine, &self.lowering.resources)?;
+        apply_manifest_resource_sizes(&mut combine, self.lowering.resources);
         let swap_wrapper_name = format!("{}_filter_scan_add_offsets", self.entry.name);
         let swap_wrapper =
             synthesize_swap_wrapper(swap_wrapper_name, add_name, self.elem_ty.clone(), self.entry.span);
@@ -156,7 +156,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             width: self.lowering.policy.reduce_phase1_width,
         };
         let mut apply_offsets = apply_offsets.build(self.lowering.effect_ids)?;
-        apply_manifest_resource_sizes(&mut apply_offsets, &self.lowering.resources)?;
+        apply_manifest_resource_sizes(&mut apply_offsets, self.lowering.resources);
         Ok((combine, apply_offsets))
     }
 
@@ -169,9 +169,9 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
                 declaration.role = StorageRole::Input;
             }
         }
-        resources.push(self.declaration(self.work.flags, StorageRole::Input)?);
-        resources.push(self.declaration(self.work.offsets, StorageRole::Input)?);
-        resources.push(self.declaration(self.work.block_offsets, StorageRole::Input)?);
+        resources.push(self.declaration(self.work.flags, StorageRole::Input));
+        resources.push(self.declaration(self.work.offsets, StorageRole::Input));
+        resources.push(self.declaration(self.work.block_offsets, StorageRole::Input));
         let spec = ProjectionSpec::preserving_interface(&self.entry, resources);
         Ok(project_kernel_body(&self.entry, spec)?)
     }
@@ -180,14 +180,14 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         &self,
         resource: SemanticResourceRef,
         role: crate::interface::StorageRole,
-    ) -> error::Result<SemanticResourceDecl> {
-        let logical = self.lowering.resources.get(resource.0)?;
-        Ok(SemanticResourceDecl {
+    ) -> SemanticResourceDecl {
+        let logical = &self.lowering.resources[resource.0];
+        SemanticResourceDecl {
             resource,
             role,
             elem_ty: self.elem_ty.clone(),
             size: logical.size.clone(),
-        })
+        }
     }
 }
 

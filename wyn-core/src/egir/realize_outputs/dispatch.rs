@@ -633,10 +633,8 @@ pub fn retarget_filter_output(
             break;
         }
     }
-    if let Some(resource) = resources.get_mut(scratch) {
-        resource.elem_ty = u32_ty;
-        resource.size = crate::egir::program::LogicalSize::FixedBytes(4);
-    }
+    resources[scratch].elem_ty = u32_ty;
+    resources[scratch].size = crate::egir::program::LogicalSize::FixedBytes(4);
 
     // Size the output buffer to the input's element count (capacity n). The
     // input region is concrete after `pin_entry_buffers`; if it isn't (no
@@ -645,10 +643,7 @@ pub fn retarget_filter_output(
         let Type::Constructed(TypeName::Resource(input_resource), _) = region else {
             return None;
         };
-        let in_binding = resources
-            .get(*input_resource)
-            .filter(|resource| resource.id() == *input_resource)
-            .and_then(crate::egir::program::LogicalResource::host_binding)?;
+        let in_binding = resources[*input_resource].host_binding()?;
         let src_elem_bytes = crate::ssa::layout::storage_elem_stride(&input_elem_ty)?;
         let elem_bytes = crate::ssa::layout::storage_elem_stride(&output_elem_ty)?;
         Some(BufferLen::LikeInput {

@@ -5,12 +5,7 @@ use crate::ast::TypeName;
 use super::program::{visit_type_names_mut, PhysicalEGraph, PhysicalProgram, PhysicalResourceTable};
 use super::types::{SideEffectKind, SoacEffect};
 
-pub fn check(program: &PhysicalProgram, physical_resources: &PhysicalResourceTable) -> Result<(), String> {
-    for resource in program.logical_resources() {
-        if physical_resources.binding(resource.id()).is_none() {
-            return Err(format!("resource {:?} has no physical binding", resource.id()));
-        }
-    }
+pub fn check(program: &PhysicalProgram, _physical_resources: &PhysicalResourceTable) -> Result<(), String> {
     for entry in &program.entry_points {
         for input in &entry.inputs {
             physical_type(&input.ty, &entry.name)?;

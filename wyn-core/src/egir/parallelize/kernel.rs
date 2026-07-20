@@ -3,14 +3,13 @@
 use super::*;
 pub(super) fn apply_manifest_resource_sizes(
     entry: &mut crate::egir::program::PlannedEntry,
-    resources: &model::ResourceIndex<'_>,
-) -> error::Result<()> {
+    resources: &crate::egir::program::LogicalResourceArena,
+) {
     for declaration in &mut entry.resource_declarations {
         let resource = declaration.resource.0;
-        let logical = resources.get(resource)?;
+        let logical = &resources[resource];
         declaration.size = logical.size.clone();
     }
-    Ok(())
 }
 
 /// Emit the chunk-arithmetic preamble (`tid`, `chunk_start`,

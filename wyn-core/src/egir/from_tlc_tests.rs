@@ -2,8 +2,9 @@
 // Tests
 // ============================================================================
 
-use super::{run, Converter, ResourceRegistry};
+use super::{run, Converter};
 use crate::ast::TypeName;
+use crate::egir::program::LogicalResourceArenaBuilder;
 use crate::ssa::types::{FuncBody, InstKind, Program};
 use crate::tlc::VarRef;
 use crate::tlc::{Term, TermKind};
@@ -97,7 +98,7 @@ fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> Fu
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
-    let resources = std::cell::RefCell::new(ResourceRegistry::default());
+    let resources = std::cell::RefCell::new(LogicalResourceArenaBuilder::default());
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
@@ -156,7 +157,7 @@ fn test_add_roundtrip() {
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
-    let resources = std::cell::RefCell::new(ResourceRegistry::default());
+    let resources = std::cell::RefCell::new(LogicalResourceArenaBuilder::default());
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
@@ -233,7 +234,7 @@ fn test_gvn_via_let() {
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
-    let resources = std::cell::RefCell::new(ResourceRegistry::default());
+    let resources = std::cell::RefCell::new(LogicalResourceArenaBuilder::default());
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
@@ -335,7 +336,7 @@ fn test_if_else_roundtrip() {
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
-    let resources = std::cell::RefCell::new(ResourceRegistry::default());
+    let resources = std::cell::RefCell::new(LogicalResourceArenaBuilder::default());
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,

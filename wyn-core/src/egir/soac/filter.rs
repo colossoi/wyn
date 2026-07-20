@@ -5,8 +5,8 @@ use polytype::Type;
 use crate::ast::TypeName;
 
 use super::super::program::{
-    AllocatedProgram, CompilerResource, CompilerResourceKind, LogicalResource, LogicalSize,
-    PhysicalResourceRef, ResourceId, SemanticResourceRef,
+    AllocatedProgram, CompilerResource, CompilerResourceKind, LogicalSize, PhysicalResourceRef, ResourceId,
+    SemanticResourceRef,
 };
 use super::super::types::{
     GraphResource, NodeId, SegBody, SegExtent, SegSpace, Semantic, SideEffectKind, Soac, SoacDestination,
@@ -253,14 +253,14 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut AllocatedProgram) {
                         resource,
                         elem_bytes,
                         src_elem_bytes,
-                    } => inner.resources.get(*resource).and_then(LogicalResource::host_binding).map(
-                        |binding| crate::pipeline_descriptor::BufferLen::LikeInput {
+                    } => inner.resources[*resource].host_binding().map(|binding| {
+                        crate::pipeline_descriptor::BufferLen::LikeInput {
                             set: binding.set,
                             binding: binding.binding,
                             elem_bytes: *elem_bytes,
                             src_elem_bytes: *src_elem_bytes,
-                        },
-                    ),
+                        }
+                    }),
                     LogicalSize::SameAsDispatch { elem_bytes } => {
                         Some(crate::pipeline_descriptor::BufferLen::SameAsDispatch {
                             elem_bytes: *elem_bytes,
@@ -273,9 +273,7 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut AllocatedProgram) {
         }
     }
     for (resource, size, output_len) in resolved {
-        if let Some(logical) = inner.resources.get_mut(resource) {
-            logical.size = size.clone();
-        }
+        inner.resources[resource].size = size.clone();
         let AllocatedProgram {
             semantic,
             materializations,

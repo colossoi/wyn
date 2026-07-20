@@ -51,7 +51,7 @@ impl ReduceCandidate {
 pub(super) fn analyze_reduce_candidate(
     entry: &crate::egir::program::PlannedEntry,
     located: ParallelReduce<'_>,
-    resources: &model::ResourceIndex<'_>,
+    resources: &crate::egir::program::LogicalResourceArena,
 ) -> error::Result<RecipeSelection<ReduceCandidate>> {
     let serial = located.serial_recipe();
     let (located, lanes, operators) = located.into_parts();
@@ -125,7 +125,7 @@ pub(super) fn analyze_reduce_candidate(
             if let Some(resource) =
                 graph_ops::storage_resource_under(&entry.graph, place).map(|resource| resource.0)
             {
-                let logical = resources.get(resource)?;
+                let logical = &resources[resource];
                 let output = entry.resource_declarations.iter().find(|declaration| {
                     declaration.role == crate::interface::StorageRole::Output
                         && declaration.resource.0 == resource
@@ -299,7 +299,7 @@ impl KernelPlanBuilder<'_, '_> {
             );
             // Clear the moved output bindings from phase 1; register partials.
             for (resource, _, _) in &accumulator.outputs {
-                let logical = self.resources.get(*resource)?;
+                let logical = &self.resources[*resource];
                 if let Some(binding) = logical.host_binding() {
                     for output in &mut entry.outputs {
                         if output.storage_binding() == Some(binding) {
@@ -312,7 +312,7 @@ impl KernelPlanBuilder<'_, '_> {
                 resource: SemanticResourceRef(accumulator.partial),
                 role: crate::interface::StorageRole::Intermediate,
                 elem_ty: accumulator.scratch_type.clone(),
-                size: self.resources.get(accumulator.partial)?.size.clone(),
+                size: self.resources[accumulator.partial].size.clone(),
             });
         }
         // A moved output binding may also carry an Output storage declaration (e.g. a

@@ -30,12 +30,11 @@ use crate::types::{extract_function_signature, TypeExt};
 use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
-use std::collections::HashMap;
 use thiserror::Error;
 
 use super::program::{
-    CompilerResource, CompilerResourceKind, ConstantDef, LogicalResourceArena, LogicalSize, RawEntry,
-    RawFunc, RawProgram, ResourceOrigin, SemanticResourceDecl, SemanticResourceRef,
+    CompilerResource, CompilerResourceKind, ConstantDef, LogicalResourceArenaBuilder, LogicalSize,
+    RawEntry, RawFunc, RawProgram, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::publish::PipelineDescriptorPublish;
 use super::soac::{filter, hist, screma};
@@ -114,7 +113,7 @@ struct GlobalContext<'a> {
     constants_by_name: &'a LookupMap<String, SymbolId>,
     symbols: &'a SymbolTable,
     region_interner: &'a std::cell::RefCell<crate::egir::program::RegionInterner>,
-    resources: &'a std::cell::RefCell<ResourceRegistry>,
+    resources: &'a std::cell::RefCell<LogicalResourceArenaBuilder>,
 }
 
 impl<'a> GlobalContext<'a> {
@@ -134,92 +133,6 @@ impl<'a> GlobalContext<'a> {
             self.region_interner,
             self.resources,
         )
-    }
-}
-
-/// Dense semantic resource arena built as TLC is converted. Host bindings are
-/// interned only as ABI constraints; every executable reference receives its
-/// `ResourceId` immediately. Compiler resources bypass the binding namespace
-/// entirely.
-#[derive(Default)]
-struct ResourceRegistry {
-    by_binding: HashMap<BindingRef, crate::ResourceId>,
-    resources: Vec<Option<LogicalResourceDraft>>,
-}
-
-struct LogicalResourceDraft {
-    origin: ResourceOrigin,
-    elem_ty: Type<TypeName>,
-    size: LogicalSize,
-}
-
-impl ResourceRegistry {
-    fn host_id(&mut self, binding: BindingRef) -> crate::ResourceId {
-        if let Some(resource) = self.by_binding.get(&binding) {
-            return *resource;
-        }
-        let resource = crate::ResourceId(self.resources.len() as u32);
-        self.by_binding.insert(binding, resource);
-        self.resources.push(None);
-        resource
-    }
-
-    fn declare_host(
-        &mut self,
-        binding: BindingRef,
-        elem_ty: Type<TypeName>,
-        size: LogicalSize,
-    ) -> crate::ResourceId {
-        let resource = self.host_id(binding);
-        let slot = &mut self.resources[resource.0 as usize];
-        match slot {
-            Some(existing) => {
-                if matches!(existing.size, LogicalSize::Unspecified)
-                    && !matches!(size, LogicalSize::Unspecified)
-                {
-                    existing.size = size;
-                }
-            }
-            None => {
-                *slot = Some(LogicalResourceDraft {
-                    origin: ResourceOrigin::Host(binding),
-                    elem_ty,
-                    size,
-                });
-            }
-        }
-        resource
-    }
-
-    fn allocate_compiler(
-        &mut self,
-        compiler: CompilerResource,
-        elem_ty: Type<TypeName>,
-        size: LogicalSize,
-    ) -> crate::ResourceId {
-        let resource = crate::ResourceId(self.resources.len() as u32);
-        self.resources.push(Some(LogicalResourceDraft {
-            origin: ResourceOrigin::Compiler(compiler),
-            elem_ty,
-            size,
-        }));
-        resource
-    }
-
-    fn finish(
-        self,
-    ) -> Result<(HashMap<BindingRef, crate::ResourceId>, LogicalResourceArena), ConvertError> {
-        let mut arena = LogicalResourceArena::default();
-        for (index, resource) in self.resources.into_iter().enumerate() {
-            let resource = resource.ok_or_else(|| {
-                ConvertError::Internal(format!(
-                    "semantic resource {:?} was referenced but never declared",
-                    crate::ResourceId(index as u32)
-                ))
-            })?;
-            arena.allocate(resource.origin, resource.elem_ty, resource.size);
-        }
-        Ok((self.by_binding, arena))
     }
 }
 
@@ -247,7 +160,7 @@ pub fn run(
     // Region interner shared by every converter, then handed to `SemanticProgram` so
     // the function arena keys agree with the SegBody indices built here.
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
-    let resource_registry = std::cell::RefCell::new(ResourceRegistry::default());
+    let resource_registry = std::cell::RefCell::new(LogicalResourceArenaBuilder::default());
 
     let ctx = GlobalContext {
         top_level: &top_level,
@@ -340,7 +253,11 @@ pub fn run(
         region_interner.into_inner(),
     );
     semantic.input_names = seed.input_names;
-    let (by_binding, resources) = resource_registry.into_inner().finish()?;
+    let (by_binding, resources) = resource_registry.into_inner().finish().map_err(|resource| {
+        ConvertError::Internal(format!(
+            "semantic resource {resource:?} was referenced but never declared"
+        ))
+    })?;
     super::program::finalize_converted_resources(&mut semantic, resources, &by_binding);
     Ok(semantic)
 }
@@ -425,7 +342,7 @@ fn convert_function<'a>(
 
 /// Translate descriptor sizing metadata into stable logical-resource sizes.
 fn logical_size(
-    resources: &std::cell::RefCell<ResourceRegistry>,
+    resources: &std::cell::RefCell<LogicalResourceArenaBuilder>,
     length: Option<&BufferLen>,
 ) -> LogicalSize {
     match length {
@@ -465,7 +382,7 @@ fn literal_binding(args: &[Term], intrinsic: &str) -> Result<BindingRef, Convert
 fn entry_resource_declarations(
     inputs: &[EntryInput],
     outputs: &[EntryOutput],
-    resources: &std::cell::RefCell<ResourceRegistry>,
+    resources: &std::cell::RefCell<LogicalResourceArenaBuilder>,
 ) -> Vec<SemanticResourceDecl> {
     let mut declarations = Vec::new();
     let mut declare =
@@ -861,7 +778,7 @@ struct Converter<'a, 'b> {
     /// Program-wide region interner, shared across every converter so SegBody
     /// region indices agree with the final function arena.
     region_interner: &'a std::cell::RefCell<crate::egir::program::RegionInterner>,
-    resources: &'a std::cell::RefCell<ResourceRegistry>,
+    resources: &'a std::cell::RefCell<LogicalResourceArenaBuilder>,
 }
 
 impl<'a, 'b> Converter<'a, 'b> {
@@ -873,7 +790,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         binding_ids: &'b mut crate::IdSource<u32>,
         effect_ids: &'b mut crate::IdSource<EffectToken>,
         region_interner: &'a std::cell::RefCell<crate::egir::program::RegionInterner>,
-        resources: &'a std::cell::RefCell<ResourceRegistry>,
+        resources: &'a std::cell::RefCell<LogicalResourceArenaBuilder>,
     ) -> Self {
         let graph = EGraph::new();
         let entry = graph.skeleton.entry;

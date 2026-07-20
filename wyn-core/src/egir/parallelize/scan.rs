@@ -463,7 +463,7 @@ impl KernelPlanBuilder<'_, '_> {
                 resource: SemanticResourceRef(resource),
                 role: crate::interface::StorageRole::Intermediate,
                 elem_ty: elem_ty.clone(),
-                size: self.resources.get(resource)?.size.clone(),
+                size: self.resources[resource].size.clone(),
             });
         }
 
@@ -481,7 +481,7 @@ impl KernelPlanBuilder<'_, '_> {
             total_out: None,
         };
         let mut phase2 = phase2.build(self.effect_ids)?;
-        apply_manifest_resource_sizes(&mut phase2, &self.resources)?;
+        apply_manifest_resource_sizes(&mut phase2, self.resources);
         let swap_wrapper_name = format!("{}_scan_op_swap", entry.name);
         let swap_wrapper = synthesize_swap_wrapper(
             swap_wrapper_name.clone(),
@@ -499,7 +499,7 @@ impl KernelPlanBuilder<'_, '_> {
             width: total_threads,
         };
         let mut phase3 = phase3.build(self.effect_ids)?;
-        apply_manifest_resource_sizes(&mut phase3, &self.resources)?;
+        apply_manifest_resource_sizes(&mut phase3, self.resources);
 
         // Phase 1 is now a per-invocation Screma scan over the thread's chunk plus
         // the appended block-sum reduce; `soac_expand` lowers both.

@@ -175,8 +175,8 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
     let elem_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let mut phase1 = EGraph::new();
     let neutral = phase1.intern_pure(PureOp::Int("0".into()), smallvec![], elem_ty.clone(), None);
-    let sums = ResourceId(40);
-    let offsets = ResourceId(41);
+    let sums = ResourceId::for_test(40);
+    let offsets = ResourceId::for_test(41);
     let mut effect_ids = crate::IdSource::new();
     let phase2 = ScanPhase2Spec {
         entry_name: "prefix".into(),

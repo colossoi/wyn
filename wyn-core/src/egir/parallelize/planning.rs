@@ -9,12 +9,10 @@ use crate::egir::soac::screma;
 use crate::egir::types::{EGraph, SideEffect, SideEffectKind, SideEffectSite, Soac, SoacEffect};
 use crate::flow::ExecutionModel;
 
-use super::model::{
-    FallbackReason, ParallelPolicy, ParallelizeError, RecipeSelection, ResourceIndex, Result,
-};
+use super::model::{FallbackReason, ParallelPolicy, ParallelizeError, RecipeSelection, Result};
 use crate::egir::program::{
     AllocatedProgram, CompilerFlowEndpoint, CompilerResource, CompilerResourceKey, CompilerResourceKind,
-    LogicalSize, SemanticOpId,
+    LogicalResourceArena, LogicalSize, SemanticOpId,
 };
 use crate::egir::types::SegExtent;
 
@@ -449,7 +447,7 @@ fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBinding
 /// Analyze every projected endpoint once. Recipes retain their projected body
 /// and graph-local handles until emission consumes the endpoint plan.
 pub(super) fn analyze(inner: &AllocatedProgram, policy: ParallelPolicy) -> Result<AnalyzedPlan> {
-    let resources = ResourceIndex::new(&inner.resources);
+    let resources = &inner.resources;
     let mut recipes = RecipeIndex::parallel();
     let mut requests = Vec::new();
     for (endpoint, entry) in inner.entries_with_endpoints() {
@@ -463,7 +461,7 @@ fn analyze_endpoint(
     entry: &crate::egir::program::SemanticEntry,
     endpoint: CompilerFlowEndpoint,
     policy: ParallelPolicy,
-    resources: &ResourceIndex<'_>,
+    resources: &LogicalResourceArena,
     requests: &mut Vec<ScratchRequest>,
 ) -> Result<EndpointPlan<AnalyzedRecipe>> {
     let projected = crate::egir::program::PlannedEntry::project(entry)?;
@@ -506,7 +504,7 @@ fn analyze_projected_kernel(
     semantic_slots: Vec<usize>,
     endpoint: CompilerFlowEndpoint,
     policy: ParallelPolicy,
-    resources: &ResourceIndex<'_>,
+    resources: &LogicalResourceArena,
     requests: &mut Vec<ScratchRequest>,
 ) -> Result<PlannedKernel<AnalyzedRecipe>> {
     let mut filters = super::analyze_filter_candidates(&body)?;

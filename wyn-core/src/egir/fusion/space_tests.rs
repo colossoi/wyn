@@ -33,7 +33,7 @@ fn resource_length_compares_by_resource_and_stride_ignoring_node() {
     let (a, b) = two_nodes();
     let mk = |node: NodeId, resource: u32, elem_bytes: u32| SegExtent::ResourceLength {
         node,
-        resource: SemanticResourceRef(ResourceId(resource)),
+        resource: SemanticResourceRef(ResourceId::for_test(resource)),
         elem_bytes,
     };
     assert!(seg_extent_fusable(&mk(a, 1, 4), &mk(b, 1, 4)));

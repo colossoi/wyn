@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use super::schedule::KernelMutationError;
 use crate::egir::program::{
-    CompilerFlowEndpoint, CompilerResourceFlow, LogicalResource, LogicalResourceArena, ResourceOrigin,
+    CompilerFlowEndpoint, CompilerResourceFlow, LogicalResourceArena, ResourceOrigin,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,24 +69,6 @@ pub(super) enum RecipeSelection<T> {
     Serial(FallbackReason),
 }
 
-/// Read-only resource lookup used while recognizing semantic views. Dense ids
-/// and compiler ownership uniqueness are invariants of `LogicalResourceArena`.
-pub(super) struct ResourceIndex<'a> {
-    resources: &'a LogicalResourceArena,
-}
-
-impl<'a> ResourceIndex<'a> {
-    pub(super) fn new(resources: &'a LogicalResourceArena) -> Self {
-        Self { resources }
-    }
-
-    pub(super) fn get(&self, id: crate::ResourceId) -> Result<&'a LogicalResource> {
-        self.resources
-            .get(id)
-            .ok_or_else(|| ParallelizeError::Invalid(format!("missing logical resource {id:?}")))
-    }
-}
-
 /// Canonical compiler-flow edges shared by attachment and coalescing.
 pub(super) struct ResourceFlowIndex {
     flows: Vec<(crate::ResourceId, CompilerResourceFlow)>,
@@ -104,7 +86,7 @@ impl ResourceFlowIndex {
                 ResourceOrigin::Host(_) => None,
             })
             .collect::<Vec<_>>();
-        flows.sort_by_key(|(resource, _)| resource.0);
+        flows.sort_by_key(|(resource, _)| *resource);
         let mut incoming = BTreeMap::<_, Vec<_>>::new();
         for (_, flow) in &flows {
             for consumer in &flow.consumers {

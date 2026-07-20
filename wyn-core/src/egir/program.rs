@@ -20,7 +20,7 @@ use crate::interface::{self, EntryInput, EntryOutput};
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::types::TypeExt;
 use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
+use std::ops::{Deref, DerefMut, Index, IndexMut};
 
 use super::parallelize::KernelPlan;
 use super::soac::{filter, hist, screma};
@@ -75,7 +75,22 @@ pub struct SemanticDependency {
     pub kind: SemanticDependencyKind,
 }
 
-pub use crate::ResourceId;
+/// Target-independent identity of a semantic storage resource. Identities are
+/// issued only by the logical-resource arena and its conversion-time builder;
+/// callers can observe an id's dense index but cannot manufacture one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ResourceId(u32);
+
+impl ResourceId {
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(index: u32) -> Self {
+        Self(index)
+    }
+}
 
 /// Stable identity of an entry while the program is still semantic EGIR.
 /// Textual entry names are publication metadata and are deliberately not used
@@ -278,6 +293,116 @@ pub struct LogicalResourceArena {
     compiler: HashMap<CompilerResourceKey, ResourceId>,
 }
 
+/// Conversion-time resource arena. Host resources may be referenced before
+/// their declarations are encountered, so this builder reserves their stable
+/// identities and requires every reservation to be defined before `finish`.
+#[derive(Default)]
+pub(crate) struct LogicalResourceArenaBuilder {
+    by_binding: HashMap<crate::BindingRef, ResourceId>,
+    compiler: HashMap<CompilerResourceKey, ResourceId>,
+    resources: Vec<Option<LogicalResourceDraft>>,
+}
+
+struct LogicalResourceDraft {
+    origin: ResourceOrigin,
+    elem_ty: Type<TypeName>,
+    size: LogicalSize,
+}
+
+impl LogicalResourceArenaBuilder {
+    pub(crate) fn host_id(&mut self, binding: crate::BindingRef) -> ResourceId {
+        if let Some(resource) = self.by_binding.get(&binding) {
+            return *resource;
+        }
+        let resource = ResourceId(self.resources.len() as u32);
+        self.by_binding.insert(binding, resource);
+        self.resources.push(None);
+        resource
+    }
+
+    pub(crate) fn declare_host(
+        &mut self,
+        binding: crate::BindingRef,
+        elem_ty: Type<TypeName>,
+        size: LogicalSize,
+    ) -> ResourceId {
+        let resource = self.host_id(binding);
+        let slot = &mut self.resources[resource.index()];
+        match slot {
+            Some(existing) => {
+                if matches!(existing.size, LogicalSize::Unspecified)
+                    && !matches!(size, LogicalSize::Unspecified)
+                {
+                    existing.size = size;
+                }
+            }
+            None => {
+                *slot = Some(LogicalResourceDraft {
+                    origin: ResourceOrigin::Host(binding),
+                    elem_ty,
+                    size,
+                });
+            }
+        }
+        resource
+    }
+
+    pub(crate) fn allocate_compiler(
+        &mut self,
+        compiler: CompilerResource,
+        elem_ty: Type<TypeName>,
+        size: LogicalSize,
+    ) -> ResourceId {
+        if let Some(resource) = compiler.key().and_then(|key| self.compiler.get(&key).copied()) {
+            return resource;
+        }
+        let resource = ResourceId(self.resources.len() as u32);
+        if let Some(key) = compiler.key() {
+            self.compiler.insert(key, resource);
+        }
+        self.resources.push(Some(LogicalResourceDraft {
+            origin: ResourceOrigin::Compiler(compiler),
+            elem_ty,
+            size,
+        }));
+        resource
+    }
+
+    pub(crate) fn finish(
+        self,
+    ) -> Result<(HashMap<crate::BindingRef, ResourceId>, LogicalResourceArena), ResourceId> {
+        let Self {
+            by_binding,
+            compiler,
+            resources,
+        } = self;
+        let resources = resources
+            .into_iter()
+            .enumerate()
+            .map(|(index, resource)| {
+                let id = ResourceId(index as u32);
+                resource
+                    .map(|resource| LogicalResource {
+                        id,
+                        origin: resource.origin,
+                        elem_ty: resource.elem_ty,
+                        size: resource.size,
+                    })
+                    .ok_or(id)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let host = by_binding.clone();
+        Ok((
+            by_binding,
+            LogicalResourceArena {
+                resources,
+                host,
+                compiler,
+            },
+        ))
+    }
+}
+
 impl LogicalResourceArena {
     pub(crate) fn allocate(
         &mut self,
@@ -325,9 +450,7 @@ impl LogicalResourceArena {
     }
 
     pub(crate) fn reclassify_as_compiler(&mut self, id: ResourceId, compiler: CompilerResource) {
-        let Some(resource) = self.resources.get_mut(id.0 as usize) else {
-            return;
-        };
+        let resource = &mut self.resources[id.index()];
         if let ResourceOrigin::Host(binding) = resource.origin {
             self.host.remove(&binding);
         }
@@ -337,16 +460,8 @@ impl LogicalResourceArena {
         resource.origin = ResourceOrigin::Compiler(compiler);
     }
 
-    pub fn get(&self, id: ResourceId) -> Option<&LogicalResource> {
-        self.resources.get(id.0 as usize)
-    }
-
-    pub(crate) fn get_mut(&mut self, id: ResourceId) -> Option<&mut LogicalResource> {
-        self.resources.get_mut(id.0 as usize)
-    }
-
     pub(crate) fn contains(&self, id: ResourceId) -> bool {
-        self.get(id).is_some()
+        id.index() < self.resources.len()
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, LogicalResource> {
@@ -359,6 +474,28 @@ impl LogicalResourceArena {
 
     pub fn is_empty(&self) -> bool {
         self.resources.is_empty()
+    }
+}
+
+impl Index<ResourceId> for LogicalResourceArena {
+    type Output = LogicalResource;
+
+    fn index(&self, id: ResourceId) -> &Self::Output {
+        &self.resources[id.index()]
+    }
+}
+
+impl IndexMut<ResourceId> for LogicalResourceArena {
+    fn index_mut(&mut self, id: ResourceId) -> &mut Self::Output {
+        &mut self.resources[id.index()]
+    }
+}
+
+impl Index<usize> for LogicalResourceArena {
+    type Output = LogicalResource;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.resources[index]
     }
 }
 
@@ -705,13 +842,8 @@ fn physicalize_soac(
     nodes: &LookupMap<NodeId, NodeId>,
     bindings: &PhysicalResourceTable,
 ) -> Result<Soac<Physical>, String> {
-    fn binding(
-        reference: SemanticResourceRef,
-        bindings: &PhysicalResourceTable,
-    ) -> Result<PhysicalResourceRef, String> {
-        bindings
-            .binding(reference.0)
-            .ok_or_else(|| format!("semantic resource {:?} has no physical binding", reference.0))
+    fn binding(reference: SemanticResourceRef, bindings: &PhysicalResourceTable) -> PhysicalResourceRef {
+        bindings.binding(reference.0)
     }
 
     fn seg_body(mut body: SegBody, nodes: &LookupMap<NodeId, NodeId>) -> SegBody {
@@ -743,7 +875,7 @@ fn physicalize_soac(
                             elem_bytes,
                         } => SegExtent::ResourceLength {
                             node: nodes[&node],
-                            resource: binding(resource, bindings)?,
+                            resource: binding(resource, bindings),
                             elem_bytes,
                         },
                         SegExtent::Value(node) => SegExtent::Value(nodes[&node]),
@@ -811,7 +943,7 @@ fn physicalize_soac(
                 .into_iter()
                 .map(|resource| {
                     Ok(super::types::SegResourceAccess {
-                        resource: binding(resource.resource, bindings)?,
+                        resource: binding(resource.resource, bindings),
                         access: resource.access,
                     })
                 })
@@ -832,11 +964,11 @@ fn physicalize_soac(
                 destination,
             },
             filter::Output::Runtime { scratch, length } => filter::Output::Runtime {
-                scratch: binding(scratch, bindings)?,
+                scratch: binding(scratch, bindings),
                 length: match length {
                     filter::RuntimeLength::ViewOnly => filter::RuntimeLength::ViewOnly,
                     filter::RuntimeLength::Stored(resource) => {
-                        filter::RuntimeLength::Stored(binding(resource, bindings)?)
+                        filter::RuntimeLength::Stored(binding(resource, bindings))
                     }
                 },
             },
@@ -848,10 +980,10 @@ fn physicalize_soac(
         bindings: &PhysicalResourceTable,
     ) -> Result<PhysicalFilterWorkBuffers, String> {
         Ok(filter::WorkBuffers {
-            flags: binding(buffers.flags, bindings)?,
-            offsets: binding(buffers.offsets, bindings)?,
-            block_sums: binding(buffers.block_sums, bindings)?,
-            block_offsets: binding(buffers.block_offsets, bindings)?,
+            flags: binding(buffers.flags, bindings),
+            offsets: binding(buffers.offsets, bindings),
+            block_sums: binding(buffers.block_sums, bindings),
+            block_offsets: binding(buffers.block_offsets, bindings),
         })
     }
 
@@ -938,11 +1070,11 @@ fn physicalize_soac(
                 } => filter::ScheduledState::Parallel {
                     space: space(iteration_space, nodes, bindings)?,
                     storage: filter::RuntimeStorage {
-                        scratch: binding(storage.scratch, bindings)?,
+                        scratch: binding(storage.scratch, bindings),
                         length: match storage.length {
                             filter::RuntimeLength::ViewOnly => filter::RuntimeLength::ViewOnly,
                             filter::RuntimeLength::Stored(resource) => {
-                                filter::RuntimeLength::Stored(binding(resource, bindings)?)
+                                filter::RuntimeLength::Stored(binding(resource, bindings))
                             }
                         },
                     },
@@ -982,9 +1114,7 @@ pub(crate) fn physicalize_graph_resources(
     let (mut graph, node_map, block_map) = graph.try_map_resources_and_phase(
         |reference| {
             let resource = reference.0;
-            bindings
-                .binding(resource)
-                .ok_or_else(|| format!("semantic resource {:?} has no physical binding", resource))
+            Ok::<_, String>(bindings.binding(resource))
         },
         |id, soac, nodes| physicalize_soac(soac, nodes, bindings).map(|soac| (id, soac)),
     )?;
@@ -1018,9 +1148,7 @@ pub(crate) fn physicalize_graph_resources(
 pub(crate) fn physicalize_type_resources(ty: &mut Type<TypeName>, bindings: &PhysicalResourceTable) {
     visit_type_names_mut(ty, |name| {
         if let TypeName::Resource(resource) = *name {
-            *name = TypeName::Buffer(
-                bindings.binding(resource).expect("semantic type resource must have a physical binding"),
-            );
+            *name = TypeName::Buffer(bindings.binding(resource));
         }
     });
 }
@@ -1043,8 +1171,7 @@ pub fn buffer_len(
             elem_bytes,
             src_elem_bytes,
         } => {
-            let binding =
-                resources.binding(*resource).expect("size source resource must have a physical binding");
+            let binding = resources.binding(*resource);
             Some(BufferLen::LikeInput {
                 set: binding.set,
                 binding: binding.binding,
@@ -1195,18 +1322,13 @@ fn publish_entry(
     let storage_bindings = declarations
         .iter()
         .filter(|declaration| resources.is_compiler(declaration.resource.0))
-        .map(|declaration| {
-            let binding = resources
-                .binding(declaration.resource.0)
-                .ok_or_else(|| format!("entry `{name}` references an unallocated resource"))?;
-            Ok(interface::StorageBindingDecl {
-                binding,
-                role: declaration.role.clone(),
-                elem_ty: declaration.elem_ty.clone(),
-                length: buffer_len(&declaration.size, resources),
-            })
+        .map(|declaration| interface::StorageBindingDecl {
+            binding: resources.binding(declaration.resource.0),
+            role: declaration.role.clone(),
+            elem_ty: declaration.elem_ty.clone(),
+            length: buffer_len(&declaration.size, resources),
         })
-        .collect::<Result<_, String>>()?;
+        .collect();
     Ok(EntryPublication {
         name: name.to_string(),
         execution_model: execution_model.clone(),
@@ -1291,12 +1413,12 @@ impl PhysicalResourceTable {
         }
     }
 
-    pub fn binding(&self, resource: ResourceId) -> Option<crate::BindingRef> {
-        self.bindings.get(resource.0 as usize).copied()
+    pub fn binding(&self, resource: ResourceId) -> crate::BindingRef {
+        self.bindings[resource.index()]
     }
 
     pub fn is_compiler(&self, resource: ResourceId) -> bool {
-        self.compiler_owned.get(resource.0 as usize).copied().unwrap_or(false)
+        self.compiler_owned[resource.index()]
     }
 }
 
@@ -1512,40 +1634,26 @@ fn physicalize_entry(
         .cloned()
         .map(|mut input| {
             physicalize_type_resources(&mut input.ty, resources);
-            let resource = input
-                .resource
-                .map(|resource| {
-                    resources
-                        .binding(resource.0)
-                        .ok_or_else(|| format!("entry `{}` references an unallocated resource", entry.name))
-                })
-                .transpose()?;
-            Ok(super::ir::EntryInput {
+            let resource = input.resource.map(|resource| resources.binding(resource.0));
+            super::ir::EntryInput {
                 inner: input.inner,
                 resource,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect();
     let outputs = entry
         .outputs
         .iter()
         .cloned()
         .map(|mut output| {
             physicalize_type_resources(&mut output.ty, resources);
-            let resource = output
-                .resource
-                .map(|resource| {
-                    resources
-                        .binding(resource.0)
-                        .ok_or_else(|| format!("entry `{}` references an unallocated resource", entry.name))
-                })
-                .transpose()?;
-            Ok(super::ir::EntryOutput {
+            let resource = output.resource.map(|resource| resources.binding(resource.0));
+            super::ir::EntryOutput {
                 inner: output.inner,
                 resource,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect();
     let mut declarations = entry.resource_declarations.clone();
     let mut params = entry.params.clone();
     let mut return_ty = entry.return_ty.clone();
@@ -1559,18 +1667,13 @@ fn physicalize_entry(
     }
     let resource_declarations = declarations
         .into_iter()
-        .map(|declaration| {
-            let binding = resources
-                .binding(declaration.resource.0)
-                .ok_or_else(|| format!("entry `{}` references an unallocated resource", entry.name))?;
-            Ok(interface::StorageBindingDecl {
-                binding,
-                role: declaration.role,
-                elem_ty: declaration.elem_ty,
-                length: buffer_len(&declaration.size, resources),
-            })
+        .map(|declaration| interface::StorageBindingDecl {
+            binding: resources.binding(declaration.resource.0),
+            role: declaration.role,
+            elem_ty: declaration.elem_ty,
+            length: buffer_len(&declaration.size, resources),
         })
-        .collect::<Result<_, String>>()?;
+        .collect();
     let output_routes = super::graph_projector::remap_output_routes(
         entry.output_routes.clone(),
         |node| nodes.get(&node).copied(),

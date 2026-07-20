@@ -74,9 +74,9 @@ use smallvec::smallvec;
 use super::from_tlc::ConvertError;
 use super::graph_ops;
 use super::program::{
-    AllocatedProgram, CompilerFlowEndpoint, CompilerResourceKind, OutputWriter, PhysicalProgram,
-    ResourceId, SemanticEntry, SemanticEntryId, SemanticFunc, SemanticOpId, SemanticResourceDecl,
-    SemanticResourceRef,
+    AllocatedProgram, CompilerFlowEndpoint, CompilerResourceKind, LogicalResourceArena, OutputWriter,
+    PhysicalProgram, ResourceId, SemanticEntry, SemanticEntryId, SemanticFunc, SemanticOpId,
+    SemanticResourceDecl, SemanticResourceRef,
 };
 use super::soac::screma;
 use super::types::{
@@ -137,7 +137,7 @@ fn build_sequential_plan(
 struct KernelPlanBuilder<'resources, 'effects> {
     schedule: schedule::KernelPlan,
     seeded: schedule::SeededKernels,
-    resources: model::ResourceIndex<'resources>,
+    resources: &'resources LogicalResourceArena,
     flows: model::ResourceFlowIndex,
     recipes: planning::RecipeIndex,
     policy: ParallelPolicy,
@@ -199,7 +199,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         policy: ParallelPolicy,
         effect_ids: &'effects mut crate::IdSource<EffectToken>,
     ) -> error::Result<Self> {
-        let resources = model::ResourceIndex::new(&inner.resources);
+        let resources = &inner.resources;
         let flows = model::ResourceFlowIndex::new(&inner.resources);
         let (schedule, seeded) = schedule::KernelPlan::seed(
             &inner.pipeline,

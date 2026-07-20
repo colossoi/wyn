@@ -82,7 +82,7 @@ fn compute_slot_source_rejects_unsized_array_without_soac() {
         source,
         0,
         &unsized_arr_ty,
-        crate::ResourceId(0),
+        crate::ResourceId::for_test(0),
         false,
     )
     .expect_err("runtime-sized array without a producing SOAC must be rejected");
@@ -157,7 +157,8 @@ fn rewrite_sibling_index_consumers_rejects_map_output_view_operand() {
     let source = graph.alloc_side_effect_result(arr_ty.clone());
 
     // The output view we'd retarget to.
-    let view = graph_ops::intern_resource_view(&mut graph, crate::ResourceId(1), elem.clone(), None);
+    let view =
+        graph_ops::intern_resource_view(&mut graph, crate::ResourceId::for_test(1), elem.clone(), None);
 
     // A downstream Screma with one input. The input operand is a distinct
     // dummy; `source` is placed at operand index 1, past the single input
@@ -220,7 +221,8 @@ fn rewrite_sibling_index_consumers_rejects_scatter_dest_position() {
     let arr_ty = composite_arr_ty(elem.clone(), 4);
 
     let source = graph.alloc_side_effect_result(arr_ty.clone());
-    let view = graph_ops::intern_resource_view(&mut graph, crate::ResourceId(1), elem.clone(), None);
+    let view =
+        graph_ops::intern_resource_view(&mut graph, crate::ResourceId::for_test(1), elem.clone(), None);
 
     // Scatter with `source` placed at the dest_view operand (index 0)
     // instead of the legitimate input region (`1..1+inputs.len()`).
@@ -280,7 +282,8 @@ fn rewrite_sibling_index_consumers_rejects_scatter_capture_position() {
     let arr_ty = composite_arr_ty(elem.clone(), 4);
 
     let source = graph.alloc_side_effect_result(arr_ty.clone());
-    let view = graph_ops::intern_resource_view(&mut graph, crate::ResourceId(1), elem.clone(), None);
+    let view =
+        graph_ops::intern_resource_view(&mut graph, crate::ResourceId::for_test(1), elem.clone(), None);
 
     // Scatter with one input + one capture. The capture slot (index 2,
     // past `1+inputs.len()=2`) is where `source` lives.
@@ -342,7 +345,8 @@ fn rewrite_sibling_index_consumers_rejects_accumulator_output_view_operand() {
     let arr_ty = composite_arr_ty(elem.clone(), 4);
 
     let source = graph.alloc_side_effect_result(arr_ty.clone());
-    let view = graph_ops::intern_resource_view(&mut graph, crate::ResourceId(1), elem.clone(), None);
+    let view =
+        graph_ops::intern_resource_view(&mut graph, crate::ResourceId::for_test(1), elem.clone(), None);
 
     // Screma with one input + one Reduce accumulator. `source` at the
     // init_acc slot (operand index 1, past the input region at index 0).
