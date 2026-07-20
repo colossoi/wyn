@@ -2,28 +2,24 @@
 
 use super::*;
 use crate::egir::builder::EntryBuilder;
-use crate::egir::program::MaterializationId;
 
 fn body(name: &str) -> PlannedEntry {
     let mut effect_ids = crate::IdSource::new();
     EntryBuilder::new_compute(name.to_string(), (1, 1, 1), &mut effect_ids).build()
 }
 
-fn phase(name: &str, kind: ComputeKernelKind) -> KernelPhase {
-    let spec = PhaseSpec::compute(
+fn phase(name: &str, label: &'static str) -> KernelPhase {
+    let spec = NewPhaseSpec::compute(
         body(name),
-        DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-        kind,
+        PhaseDomain::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+        label,
     );
     phase_from_body(None, None, spec).unwrap()
 }
 
 fn plan(phases: Vec<KernelPhase>) -> KernelPlan {
     let mut arena = crate::IdArena::new();
-    let unpublished = phases
-        .into_iter()
-        .map(|phase| arena.alloc(PlacedPhase(PhaseListId::Unpublished, phase)))
-        .collect::<Vec<_>>();
+    let unpublished = phases.into_iter().map(|phase| arena.alloc(phase)).collect::<Vec<_>>();
     KernelPlan {
         phases: arena,
         unpublished,
@@ -32,58 +28,40 @@ fn plan(phases: Vec<KernelPhase>) -> KernelPlan {
 }
 
 #[test]
-fn every_kernel_kind_closes_over_a_complete_planned_entry() {
-    let kinds = [
-        (KernelKind::SerialCompute, ComputeKernelKind::Serial),
-        (
-            KernelKind::SharedArrayMaterialization,
-            ComputeKernelKind::SharedArrayMaterialization,
-        ),
-        (KernelKind::ScalarPrepass, ComputeKernelKind::ScalarPrepass),
-        (KernelKind::GatherPrepass, ComputeKernelKind::GatherPrepass),
-        (KernelKind::FilterScan, ComputeKernelKind::FilterScan),
-        (KernelKind::FilterCombine, ComputeKernelKind::FilterCombine),
-        (KernelKind::ReducePhase1, ComputeKernelKind::ReducePhase1),
-        (KernelKind::ReduceCombine, ComputeKernelKind::ReduceCombine),
-        (KernelKind::ScanPhase1, ComputeKernelKind::ScanPhase1),
-        (KernelKind::ScanBlock, ComputeKernelKind::ScanBlock),
-        (KernelKind::ScanApplyOffsets, ComputeKernelKind::ScanApplyOffsets),
-    ];
-    for (index, (kind, internal_kind)) in kinds.into_iter().enumerate() {
-        let entry = body(&format!("kernel_{index}"));
-        let recipe =
-            KernelRecipe::close(KernelRecipeSpec::compute(entry, internal_kind)).expect("close recipe");
-        assert_eq!(recipe.kind(), kind);
-        assert_eq!(recipe.entry().name, format!("kernel_{index}"));
-    }
+fn body_preparation_retains_diagnostic_labels() {
+    let (label, entry, _) =
+        prepare_body(KernelBodySpec::compute(body("kernel"), "diagnostic_label")).unwrap();
+    assert_eq!(label, "diagnostic_label");
+    assert_eq!(entry.name, "kernel");
 
     let mut graphics = body("graphics");
     graphics.execution_model = ExecutionModel::Vertex;
-    let recipe = KernelRecipe::close(KernelRecipeSpec::graphics(graphics)).expect("close graphics");
-    assert_eq!(recipe.kind(), KernelKind::GraphicsPassthrough);
+    let (label, entry, _) = prepare_body(KernelBodySpec::graphics(graphics)).unwrap();
+    assert_eq!(label, "graphics_passthrough");
+    assert_eq!(entry.name, "graphics");
 }
 
 #[test]
-fn closed_recipe_type_rejects_compute_graphics_mismatches() {
-    assert!(KernelRecipe::close(KernelRecipeSpec::graphics(body("compute"))).is_err());
+fn body_preparation_rejects_compute_graphics_mismatches() {
+    assert!(prepare_body(KernelBodySpec::graphics(body("compute"))).is_err());
 
     let mut graphics = body("graphics");
     graphics.execution_model = ExecutionModel::Fragment;
-    assert!(KernelRecipe::close(KernelRecipeSpec::compute(graphics, ComputeKernelKind::Serial)).is_err());
+    assert!(prepare_body(KernelBodySpec::compute(graphics, "compute")).is_err());
 }
 
 #[test]
 fn validator_rejects_duplicate_names_and_dependency_cycles() {
     let error = plan(vec![
-        phase("same", ComputeKernelKind::Serial),
-        phase("same", ComputeKernelKind::Serial),
+        phase("same", "serial_compute"),
+        phase("same", "serial_compute"),
     ])
     .validate()
     .unwrap_err();
     assert!(error.contains("duplicate physical entry"));
 
-    let mut first = phase("first", ComputeKernelKind::Serial);
-    let mut second = phase("second", ComputeKernelKind::Serial);
+    let mut first = phase("first", "serial_compute");
+    let mut second = phase("second", "serial_compute");
     first.dependencies.push(KernelId(1));
     second.dependencies.push(KernelId(0));
     assert!(plan(vec![first, second]).validate().unwrap_err().contains("cycle"));
@@ -94,8 +72,8 @@ fn checked_dependency_insertion_preserves_the_dag() {
     let first = KernelId(0);
     let second = KernelId(1);
     let mut plan = plan(vec![
-        phase("first", ComputeKernelKind::Serial),
-        phase("second", ComputeKernelKind::Serial),
+        phase("first", "serial_compute"),
+        phase("second", "serial_compute"),
     ]);
 
     plan.add_dependency(first, second).expect("first dependency");
@@ -110,33 +88,24 @@ fn checked_dependency_insertion_preserves_the_dag() {
 }
 
 #[test]
-fn validator_rejects_incomplete_phase_families() {
-    let mut head = phase("reduce", ComputeKernelKind::ReducePhase1);
-    head.flow_source = Some(CompilerFlowEndpoint::Materialization(MaterializationId(0)));
-    let resources = LogicalResourceArena::default();
-    let error = plan(vec![head]).validate_program(&resources, &PipelineDescriptor::default()).unwrap_err();
-    assert!(error.contains("incomplete phase family"));
-}
-
-#[test]
 fn mutation_handles_survive_entry_point_changes_and_chain_insertions() {
     let root = KernelId(0);
-    let mut plan = plan(vec![phase("seeded", ComputeKernelKind::Serial)]);
+    let mut plan = plan(vec![phase("seeded", "serial_compute")]);
 
     plan.install_chain(
         root,
         Vec::new(),
-        KernelRecipeSpec::compute(body("renamed"), ComputeKernelKind::Serial),
+        KernelBodySpec::compute(body("renamed"), "serial_compute"),
         vec![
-            PhaseSpec::compute(
+            NewPhaseSpec::compute(
                 body("child"),
-                DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                ComputeKernelKind::ReduceCombine,
+                PhaseDomain::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                "reduce_combine",
             ),
-            PhaseSpec::compute(
+            NewPhaseSpec::compute(
                 body("grandchild"),
-                DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                ComputeKernelKind::ReduceCombine,
+                PhaseDomain::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                "reduce_combine",
             ),
         ],
     )
@@ -155,14 +124,11 @@ fn mutation_handles_survive_entry_point_changes_and_chain_insertions() {
 
 #[test]
 fn mutation_apis_report_unknown_kernel_ids() {
-    let mut plan = plan(vec![phase("seeded", ComputeKernelKind::Serial)]);
+    let mut plan = plan(vec![phase("seeded", "serial_compute")]);
     let unknown = KernelId(99);
 
     assert_eq!(
-        plan.commit_kernel(
-            unknown,
-            KernelRecipeSpec::compute(body("seeded"), ComputeKernelKind::Serial),
-        ),
+        plan.commit_kernel(unknown, KernelBodySpec::compute(body("seeded"), "serial_compute"),),
         Err(KernelMutationError::UnknownKernel(unknown))
     );
     assert_eq!(

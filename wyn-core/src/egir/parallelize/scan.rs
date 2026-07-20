@@ -330,7 +330,7 @@ impl KernelPlanBuilder<'_, '_> {
         &mut self,
         entry: &mut crate::egir::program::PlannedEntry,
         analysis: BoundScan,
-    ) -> error::Result<Vec<crate::egir::program::PlannedEntry>> {
+    ) -> error::Result<[crate::egir::program::PlannedEntry; 2]> {
         let ScanCandidate {
             site,
             owner,
@@ -506,6 +506,6 @@ impl KernelPlanBuilder<'_, '_> {
         // Phase 1 is now a per-invocation Screma scan over the thread's chunk plus
         // the appended block-sum reduce; `soac_expand` lowers both.
         make_screma_serial(&mut entry.graph, serial);
-        Ok(vec![phase2, phase3])
+        Ok([phase2, phase3])
     }
 }

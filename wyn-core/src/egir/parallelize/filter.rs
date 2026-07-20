@@ -208,7 +208,7 @@ impl FilterKernelFamily {
             scan_workgroup_width,
             scan_groups,
         } = self;
-        let scatter = schedule::KernelRecipeSpec::filter(
+        let scatter = schedule::KernelBodySpec::filter(
             scatter,
             filter_soac::ParallelStage::Scatter,
             filter_soac::ParallelConfig {
@@ -217,9 +217,9 @@ impl FilterKernelFamily {
             },
             storage,
         );
-        let flags = schedule::PhaseSpec::filter(
+        let flags = schedule::NewPhaseSpec::filter(
             flags,
-            schedule::DomainSelection::Explicit(domain.clone()),
+            schedule::PhaseDomain::explicit(domain.clone()),
             filter_soac::ParallelStage::Flags,
             filter_soac::ParallelConfig {
                 buffers: work,
@@ -229,9 +229,9 @@ impl FilterKernelFamily {
         );
         // The scan runs a fixed worker grid so each worker scans a large chunk;
         // flags and scatter remain one-thread-per-input-element.
-        let scan = schedule::PhaseSpec::filter(
+        let scan = schedule::NewPhaseSpec::filter(
             scan,
-            schedule::DomainSelection::Explicit(KernelDomain::Fixed {
+            schedule::PhaseDomain::explicit(KernelDomain::Fixed {
                 x: scan_groups,
                 y: 1,
                 z: 1,
@@ -243,22 +243,17 @@ impl FilterKernelFamily {
             },
             storage,
         );
-        let combine = schedule::PhaseSpec::compute(
+        let combine = schedule::NewPhaseSpec::compute(
             combine,
-            schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-            schedule::ComputeKernelKind::FilterCombine,
+            schedule::PhaseDomain::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+            "filter_combine",
         );
-        let apply_offsets = schedule::PhaseSpec::compute(
+        let apply_offsets = schedule::NewPhaseSpec::compute(
             apply_offsets,
-            schedule::DomainSelection::Explicit(domain),
-            schedule::ComputeKernelKind::FilterScan,
+            schedule::PhaseDomain::explicit(domain),
+            "filter_apply_offsets",
         );
-        schedule.install_chain(
-            kernel,
-            vec![flags, scan, combine, apply_offsets],
-            scatter,
-            Vec::new(),
-        )?;
+        schedule.install_filter(kernel, flags, scan, combine, apply_offsets, scatter)?;
         Ok(())
     }
 }

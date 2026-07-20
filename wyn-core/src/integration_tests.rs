@@ -840,8 +840,8 @@ entry add_sum(xs: []i32) []i32 =
         "a reduction rejected before mutation must not retain speculative scratch"
     );
     assert_eq!(
-        fallback.kernel_plan().phases().map(|phase| phase.kind).collect::<Vec<_>>(),
-        [crate::egir::parallelize::KernelKind::SerialCompute],
+        fallback.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        ["serial_compute"],
         "an unsupported parallel recipe must preserve serial execution"
     );
 }
@@ -905,12 +905,8 @@ entry sums() (i32, i32) =
     let scratch = planned_scratch(multi_reduce.logical_resources());
     assert_eq!(scratch.len(), 2);
     assert_eq!(
-        multi_reduce.kernel_plan().phases().map(|phase| phase.kind).collect::<Vec<_>>(),
-        [
-            crate::egir::parallelize::KernelKind::ReducePhase1,
-            crate::egir::parallelize::KernelKind::ReduceCombine,
-            crate::egir::parallelize::KernelKind::ReduceCombine,
-        ]
+        multi_reduce.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        ["reduce_phase1", "reduce_combine", "reduce_combine"]
     );
     let owner = scratch[0].1.expect("scratch has an operation owner");
     assert_eq!(
@@ -989,7 +985,7 @@ entry sums() (i32, i32) =
 
 #[test]
 fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
-    use crate::egir::parallelize::{KernelDomain, KernelKind};
+    use crate::egir::parallelize::KernelDomain;
 
     let reduce = crate::compile_thru_ssa(
         "#[compute] entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)",
@@ -997,8 +993,8 @@ fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
     .expect("parallel reduction reaches SSA");
     let phases = reduce.kernel_plan.phases().collect::<Vec<_>>();
     assert_eq!(
-        phases.iter().map(|phase| phase.kind).collect::<Vec<_>>(),
-        [KernelKind::ReducePhase1, KernelKind::ReduceCombine]
+        phases.iter().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        ["reduce_phase1", "reduce_combine"]
     );
     assert_eq!(phases[0].workgroup_size, (64, 1, 1));
     assert_eq!(phases[1].workgroup_size, (256, 1, 1));
@@ -1013,12 +1009,8 @@ fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
     .expect("parallel scan reaches SSA");
     let phases = scan.kernel_plan.phases().collect::<Vec<_>>();
     assert_eq!(
-        phases.iter().map(|phase| phase.kind).collect::<Vec<_>>(),
-        [
-            KernelKind::ScanPhase1,
-            KernelKind::ScanBlock,
-            KernelKind::ScanApplyOffsets
-        ]
+        phases.iter().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        ["scan_phase1", "scan_block", "scan_apply_offsets"]
     );
     assert_eq!(
         phases.iter().map(|phase| phase.workgroup_size).collect::<Vec<_>>(),
@@ -1032,31 +1024,29 @@ fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
 
 #[test]
 fn chunked_recipes_accept_empty_small_uneven_and_unsigned_ranges() {
-    use crate::egir::parallelize::KernelKind;
-
     let cases = [
         (
             "#[compute] entry empty() i32 = reduce(|a: i32, b: i32| a + b, 0, 0i32 ..< 0)",
-            KernelKind::ReducePhase1,
+            "reduce_phase1",
         ),
         (
             "#[compute] entry small() []i32 = scan(|a: i32, b: i32| a + b, 0, 0i32 ..< 7)",
-            KernelKind::ScanPhase1,
+            "scan_phase1",
         ),
         (
             "#[compute] entry uneven() i32 = reduce(|a: i32, b: i32| a + b, 0, 0i32 ..< 70)",
-            KernelKind::ReducePhase1,
+            "reduce_phase1",
         ),
         (
             "#[compute] entry unsigned() u32 = reduce(|a: u32, b: u32| a + b, 0u32, 0u32 ..< 70u32)",
-            KernelKind::ReducePhase1,
+            "reduce_phase1",
         ),
     ];
 
     for (source, expected) in cases {
         let lowered = crate::compile_thru_ssa(source).expect("edge-domain recipe reaches SSA");
         assert_eq!(
-            lowered.kernel_plan.phases().next().map(|phase| phase.kind),
+            lowered.kernel_plan.phases().next().map(|phase| phase.label.as_str()),
             Some(expected),
             "edge-domain shape must retain its selected parallel recipe"
         );
@@ -1065,8 +1055,6 @@ fn chunked_recipes_accept_empty_small_uneven_and_unsigned_ranges() {
 
 #[test]
 fn associative_noncommutative_reduce_and_scan_keep_parallel_ordered_recipes() {
-    use crate::egir::parallelize::KernelKind;
-
     // Dihedral-group composition encoded as `rotation + 3 * reflected`.
     // It is associative with identity 0, but reflections and rotations do not
     // commute, making it a useful ordering characterization in one scalar.
@@ -1110,8 +1098,8 @@ entry compose_all(xs: []i32) i32 =
     )
     .expect("ordered tuple reduction reaches SSA");
     assert_eq!(
-        reduce.kernel_plan.phases().map(|phase| phase.kind).collect::<Vec<_>>(),
-        [KernelKind::ReducePhase1, KernelKind::ReduceCombine]
+        reduce.kernel_plan.phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        ["reduce_phase1", "reduce_combine"]
     );
 
     let scan = crate::compile_thru_ssa(
@@ -1134,12 +1122,8 @@ entry compose_prefix(xs: []i32) []i32 =
     )
     .expect("ordered tuple scan reaches SSA");
     assert_eq!(
-        scan.kernel_plan.phases().map(|phase| phase.kind).collect::<Vec<_>>(),
-        [
-            KernelKind::ScanPhase1,
-            KernelKind::ScanBlock,
-            KernelKind::ScanApplyOffsets,
-        ]
+        scan.kernel_plan.phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        ["scan_phase1", "scan_block", "scan_apply_offsets"]
     );
 }
 
@@ -1234,7 +1218,7 @@ entry r(xs: []u32) (?k. [k]u32, [1]u32) =
 
 #[test]
 fn mixed_map_filter_outputs_keep_complete_phase_family() {
-    use crate::egir::parallelize::{KernelKind, OutputRouteProjection};
+    use crate::egir::parallelize::OutputRouteProjection;
     use crate::egir::program::OutputSlotId;
 
     let source = r#"
@@ -1247,25 +1231,25 @@ entry mixed() ([]i32, []i32) =
     let converted = crate::compile_thru_ssa(source).expect("mixed map/filter reaches SSA");
     let phases = converted.kernel_plan.phases().collect::<Vec<_>>();
     assert_eq!(
-        phases.iter().map(|phase| phase.kind).collect::<Vec<_>>(),
+        phases.iter().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         [
-            KernelKind::SerialCompute,
-            KernelKind::FilterFlags,
-            KernelKind::FilterScan,
-            KernelKind::FilterCombine,
-            KernelKind::FilterScan,
-            KernelKind::FilterScatter,
+            "serial_compute",
+            "filter_flags",
+            "filter_scan",
+            "filter_combine",
+            "filter_apply_offsets",
+            "filter_scatter",
         ]
     );
     assert_eq!(
-        phases[0].abi.output_routes,
+        phases[0].output_routes,
         [OutputRouteProjection {
             semantic_slot: OutputSlotId(0),
             physical_slot: OutputSlotId(0),
         }]
     );
     assert_eq!(
-        phases[5].abi.output_routes,
+        phases[5].output_routes,
         [OutputRouteProjection {
             semantic_slot: OutputSlotId(1),
             physical_slot: OutputSlotId(0),

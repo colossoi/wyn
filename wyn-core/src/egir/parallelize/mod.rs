@@ -52,8 +52,7 @@ use reduce::{analyze_reduce_candidate, BoundReduce};
 use scan::{analyze_scan_candidate, BoundScan, ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
 pub(super) use schedule::KernelPlan;
 pub use schedule::{
-    EntryAbiProjection, KernelDomain, KernelId, KernelKind, KernelPhaseSummary, KernelPlacement,
-    KernelPlanSummary, OutputRouteProjection, ScheduledResource,
+    KernelDomain, KernelId, KernelPhaseSummary, KernelPlanSummary, OutputRouteProjection, ScheduledResource,
 };
 use std::collections::HashSet;
 
@@ -125,7 +124,6 @@ fn build_serial_plan(
 
 struct KernelPlanBuilder<'resources, 'effects> {
     schedule: schedule::KernelPlan,
-    seeded: schedule::SeededKernels,
     resources: &'resources LogicalResourceArena,
     flows: model::ResourceFlowIndex,
     recipes: planning::RecipeIndex,
@@ -153,19 +151,17 @@ impl planning::PlannedKernel {
                 lowering.lower_parallel_scan(body, kernel, candidate)?
             }
             planning::PlannedRecipe::Map => {
-                lowering.schedule.commit_kernel(
-                    kernel,
-                    schedule::KernelRecipeSpec::compute(body, schedule::ComputeKernelKind::Serial),
-                )?;
+                lowering
+                    .schedule
+                    .commit_kernel(kernel, schedule::KernelBodySpec::compute(body, "serial_compute"))?;
             }
             planning::PlannedRecipe::Serial(recipe) => {
                 lowering.commit_serial_kernel(body, kernel, recipe)?
             }
             planning::PlannedRecipe::Unchanged if output_projection.is_some() => {
-                lowering.schedule.commit_kernel(
-                    kernel,
-                    schedule::KernelRecipeSpec::compute(body, schedule::ComputeKernelKind::Serial),
-                )?;
+                lowering
+                    .schedule
+                    .commit_kernel(kernel, schedule::KernelBodySpec::compute(body, "serial_compute"))?;
             }
             planning::PlannedRecipe::Unchanged => {}
         }
@@ -187,10 +183,9 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
     ) -> error::Result<Self> {
         let resources = &inner.resources;
         let flows = model::ResourceFlowIndex::new(&inner.resources);
-        let (schedule, seeded) = schedule::KernelPlan::seed(&inner.pipeline, &inner.semantic)?;
+        let schedule = schedule::KernelPlan::seed(&inner.pipeline, &inner.semantic)?;
         Ok(Self {
             schedule,
-            seeded,
             resources,
             flows,
             recipes,
@@ -213,14 +208,14 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         inner: &'resources AllocatedProgram,
     ) -> error::Result<schedule::KernelPlan> {
         self.attach_materializations(inner)?;
-        self.schedule.select_serial_recipes()?;
+        self.schedule.make_serial()?;
         self.schedule.coalesce_resource_flows(self.flows.flows())?;
         Ok(self.schedule)
     }
 
     fn schedule_entries(&mut self, inner: &'resources AllocatedProgram) -> error::Result<()> {
         for source in inner.semantic.entry_ids() {
-            let kernel = self.seeded.entry(source);
+            let kernel = self.schedule.primary_kernel(source);
             self.lower_endpoint(CompilerFlowEndpoint::Entry(source), kernel)?;
         }
         Ok(())
@@ -277,10 +272,10 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         let (primary, siblings) = plan.into_parts();
         primary.lower(self, kernel)?;
         for sibling in siblings {
-            let phase = schedule::PhaseSpec::compute(
+            let phase = schedule::NewPhaseSpec::compute(
                 sibling.seed_body(),
-                schedule::DomainSelection::Inferred(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                schedule::ComputeKernelKind::Serial,
+                schedule::PhaseDomain::inferred(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                "serial_compute",
             );
             let sibling_kernel = self.schedule.add_sibling(kernel, phase)?;
             sibling.lower(self, sibling_kernel)?;
@@ -297,18 +292,18 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         use schedule::KernelDomain;
 
         let phases = self.emit_reduce_entry(&mut body, candidate)?;
-        let recipe = schedule::KernelRecipeSpec::compute(body, schedule::ComputeKernelKind::ReducePhase1);
+        let recipe = schedule::KernelBodySpec::compute(body, "reduce_phase1");
         let after = phases
             .into_iter()
             .map(|phase| {
-                schedule::PhaseSpec::compute(
+                schedule::NewPhaseSpec::compute(
                     phase,
-                    schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                    schedule::ComputeKernelKind::ReduceCombine,
+                    schedule::PhaseDomain::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                    "reduce_combine",
                 )
             })
             .collect();
-        self.schedule.install_chain(kernel, Vec::new(), recipe, after)?;
+        self.schedule.install_reduce(kernel, recipe, after)?;
         Ok(())
     }
 
@@ -320,29 +315,20 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
     ) -> error::Result<()> {
         use schedule::KernelDomain;
 
-        let phases = self.emit_scan_entry(&mut body, candidate)?;
+        let [block_scan, apply_offsets] = self.emit_scan_entry(&mut body, candidate)?;
         let phase1_domain = self.schedule.domain_of(kernel)?;
-        let recipe = schedule::KernelRecipeSpec::compute(body, schedule::ComputeKernelKind::ScanPhase1);
-        let after = phases
-            .into_iter()
-            .enumerate()
-            .map(|(phase_index, phase)| {
-                schedule::PhaseSpec::compute(
-                    phase,
-                    schedule::DomainSelection::Explicit(if phase_index == 0 {
-                        KernelDomain::Fixed { x: 1, y: 1, z: 1 }
-                    } else {
-                        phase1_domain.clone()
-                    }),
-                    if phase_index == 0 {
-                        schedule::ComputeKernelKind::ScanBlock
-                    } else {
-                        schedule::ComputeKernelKind::ScanApplyOffsets
-                    },
-                )
-            })
-            .collect();
-        self.schedule.install_chain(kernel, Vec::new(), recipe, after)?;
+        let recipe = schedule::KernelBodySpec::compute(body, "scan_phase1");
+        let block_scan = schedule::NewPhaseSpec::compute(
+            block_scan,
+            schedule::PhaseDomain::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+            "scan_block",
+        );
+        let apply_offsets = schedule::NewPhaseSpec::compute(
+            apply_offsets,
+            schedule::PhaseDomain::explicit(phase1_domain),
+            "scan_apply_offsets",
+        );
+        self.schedule.install_scan(kernel, recipe, block_scan, apply_offsets)?;
         Ok(())
     }
 
@@ -353,7 +339,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         recipe: SerialScremaRecipe,
     ) -> error::Result<()> {
         make_screma_serial(&mut body.graph, recipe);
-        let recipe = schedule::KernelRecipeSpec::compute(body, schedule::ComputeKernelKind::Serial);
+        let recipe = schedule::KernelBodySpec::compute(body, "serial_compute");
         self.schedule.commit_kernel(kernel, recipe)?;
         Ok(())
     }

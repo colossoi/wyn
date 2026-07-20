@@ -13,7 +13,7 @@ impl KernelPlan {
             if phase.dependencies.iter().any(|dependency| dependency == id) {
                 return Err(format!("kernel `{}` depends on itself", phase.entry_point()));
             }
-            validate_entry(phase.recipe.entry())?;
+            validate_entry(&phase.entry)?;
         }
         for (_, phase) in &phases {
             for dependency in &phase.dependencies {
@@ -54,11 +54,10 @@ impl KernelPlan {
         let mut output_owners = HashMap::new();
         let mut primary = HashMap::<SemanticEntryId, usize>::new();
         let mut projected = HashMap::<SemanticEntryId, HashSet<OutputSlotId>>::new();
-        let mut family = HashMap::<CompilerFlowEndpoint, HashSet<KernelKind>>::new();
         for (phase_id, phase) in self.phases_with_ids() {
-            let entry = phase.recipe.entry();
+            let entry = phase.entry.as_ref();
             let resources = phase.resources();
-            for scheduled in &resources {
+            for scheduled in resources {
                 if !resource_ids.contains(&scheduled.resource) {
                     return Err(format!(
                         "kernel `{}` references missing resource {:?}",
@@ -85,36 +84,32 @@ impl KernelPlan {
                     ));
                 }
             }
-            if let Some(flow) = phase.flow_source {
-                family.entry(flow).or_default().insert(phase.recipe.kind());
-            }
-            let projection = phase.abi_projection();
-            let Some(source) = projection.source_entry else {
+            let Some(source) = phase.source_entry else {
                 continue;
             };
             let abi = self
-                .entry_schedules
-                .get(&source)
+                .source_entries
+                .get(source.index())
                 .ok_or_else(|| format!("kernel `{}` has invalid source id", phase.entry_point()))?;
             if phase_id == abi.primary {
                 *primary.entry(source).or_default() += 1;
-                if phase.entry_point() != abi.name {
+                if phase.entry_point() != abi.publication.name {
                     return Err(format!(
                         "semantic entry `{}` has primary kernel `{}`",
-                        abi.name,
+                        abi.publication.name,
                         phase.entry_point()
                     ));
                 }
             }
-            if projection.inputs.iter().any(|slot| slot.0 >= abi.input_count) {
+            if entry.inputs.len() > abi.publication.inputs.len() {
                 return Err(format!(
                     "kernel `{}` has an invalid input projection",
                     phase.entry_point()
                 ));
             }
             let mut physical_slots = HashSet::new();
-            for route in &projection.output_routes {
-                if route.semantic_slot.0 >= abi.output_count
+            for route in &phase.output_routes {
+                if route.semantic_slot.0 >= abi.publication.outputs.len()
                     || route.physical_slot.0 >= entry.outputs.len()
                     || !physical_slots.insert(route.physical_slot)
                 {
@@ -140,19 +135,24 @@ impl KernelPlan {
                 projected.entry(source).or_default().insert(route.semantic_slot);
             }
         }
-        for (&source, abi) in &self.entry_schedules {
+        for abi in &self.source_entries {
+            let source = self.phase(abi.primary).source_entry.ok_or_else(|| {
+                format!("semantic entry `{}` has no source identity", abi.publication.name)
+            })?;
             if primary.get(&source).copied().unwrap_or(0) != 1 {
                 return Err(format!(
                     "semantic entry `{}` has no unique primary kernel",
-                    abi.name
+                    abi.publication.name
                 ));
             }
             let routed = projected.get(&source).cloned().unwrap_or_default();
             if !abi.output_owners.keys().all(|output| routed.contains(output)) {
-                return Err(format!("semantic entry `{}` has unpublished outputs", abi.name));
+                return Err(format!(
+                    "semantic entry `{}` has unpublished outputs",
+                    abi.publication.name
+                ));
             }
         }
-        validate_families(&family)?;
         validate_resource_flows(self, resources)?;
         for pipeline in &descriptor.pipelines {
             if let Pipeline::Compute(compute) = pipeline {
@@ -219,30 +219,6 @@ fn validate_acyclic(phases: &[(KernelId, &KernelPhase)]) -> Result<(), String> {
     }
     if emitted.len() != phases.len() {
         return Err("kernel dependency graph contains a cycle".into());
-    }
-    Ok(())
-}
-
-fn validate_families(families: &HashMap<CompilerFlowEndpoint, HashSet<KernelKind>>) -> Result<(), String> {
-    for (flow, kinds) in families {
-        let requires = |head, tail: &[KernelKind]| {
-            !kinds.contains(&head) || tail.iter().all(|kind| kinds.contains(kind))
-        };
-        if !requires(
-            KernelKind::FilterFlags,
-            &[
-                KernelKind::FilterScan,
-                KernelKind::FilterCombine,
-                KernelKind::FilterScatter,
-            ],
-        ) || !requires(KernelKind::ReducePhase1, &[KernelKind::ReduceCombine])
-            || !requires(
-                KernelKind::ScanPhase1,
-                &[KernelKind::ScanBlock, KernelKind::ScanApplyOffsets],
-            )
-        {
-            return Err(format!("compiler flow {flow:?} has an incomplete phase family"));
-        }
     }
     Ok(())
 }
