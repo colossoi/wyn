@@ -1701,7 +1701,7 @@ entry e() [4]i32 =
             crate::egir::program::CompilerFlowEndpoint::Materialization(_)
         )
     }));
-    assert_eq!(allocated.inner.entry_points[consumer.0 as usize].name, "e");
+    assert_eq!(allocated.inner.entry_points[consumer.index()].name, "e");
     let lowered = lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE);
     let mir = crate::ssa::print::format_program(&lowered.ssa);
     assert_eq!(
@@ -2826,7 +2826,7 @@ entry add_sum(xs: []i32) []i32 =
     assert_eq!(flow.consumers.len(), 1);
     assert_eq!(
         allocated.inner.entry_points[match flow.consumers[0] {
-            crate::egir::program::CompilerFlowEndpoint::Entry(id) => id.0 as usize,
+            crate::egir::program::CompilerFlowEndpoint::Entry(id) => id.index(),
             crate::egir::program::CompilerFlowEndpoint::Materialization(_) => {
                 panic!("scalar materialization consumer must be a semantic entry")
             }

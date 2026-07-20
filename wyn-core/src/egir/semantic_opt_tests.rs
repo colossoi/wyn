@@ -16,7 +16,7 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
         graph.intern_pure(PureOp::Project { index: 0 }, smallvec![result], int.clone(), None);
     graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(
-            SemanticOpId(0),
+            SemanticOpId::for_test(0),
             Soac::Screma(screma::Op::Map {
                 lanes: screma::Lanes {
                     inputs: Vec::<SoacInputType>::new(),

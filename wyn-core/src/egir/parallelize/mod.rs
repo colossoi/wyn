@@ -75,8 +75,8 @@ use super::from_tlc::ConvertError;
 use super::graph_ops;
 use super::program::{
     AllocatedProgram, CompilerFlowEndpoint, CompilerResourceKind, LogicalResourceArena, OutputWriter,
-    PhysicalProgram, ResourceId, SemanticEntry, SemanticEntryId, SemanticFunc, SemanticOpId,
-    SemanticResourceDecl, SemanticResourceRef,
+    PhysicalProgram, ResourceId, SemanticEntry, SemanticFunc, SemanticOpId, SemanticResourceDecl,
+    SemanticResourceRef,
 };
 use super::soac::screma;
 use super::types::{
@@ -197,12 +197,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
     ) -> error::Result<Self> {
         let resources = &inner.resources;
         let flows = model::ResourceFlowIndex::new(&inner.resources);
-        let (schedule, seeded) = schedule::KernelPlan::seed(
-            &inner.pipeline,
-            &inner.entry_points,
-            &inner.resources,
-            &inner.region_interner,
-        )?;
+        let (schedule, seeded) = schedule::KernelPlan::seed(&inner.pipeline, &inner.semantic)?;
         Ok(Self {
             schedule,
             seeded,
@@ -234,9 +229,8 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
     }
 
     fn schedule_entries(&mut self, inner: &'resources AllocatedProgram) -> error::Result<()> {
-        for (index, _) in inner.entry_points.iter().enumerate() {
-            let source = SemanticEntryId(index as u32);
-            let kernel = self.seeded.entry(source)?;
+        for source in inner.semantic.entry_ids() {
+            let kernel = self.seeded.entry(source);
             self.lower_endpoint(CompilerFlowEndpoint::Entry(source), kernel)?;
         }
         Ok(())

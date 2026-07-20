@@ -710,7 +710,7 @@ mod tests {
         let producer_result = graph.alloc_side_effect_result(tuple.clone());
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
             kind: SideEffectKind::Soac(SoacEffect(
-                SemanticOpId(0),
+                SemanticOpId::for_test(0),
                 Soac::Screma(screma::Op::Map {
                     lanes: screma::Lanes {
                         inputs: vec![SoacInputType { array: array.clone() }],
@@ -754,14 +754,14 @@ mod tests {
         let SideEffectKind::Soac(SoacEffect(id, _)) = &mut unrelated.kind else {
             unreachable!();
         };
-        *id = SemanticOpId(1);
+        *id = SemanticOpId::for_test(1);
         unrelated.result = Some(unrelated_result);
         unrelated.effects = None;
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(unrelated);
         let consumer_result = graph.alloc_side_effect_result(tuple.clone());
         graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
             kind: SideEffectKind::Soac(SoacEffect(
-                SemanticOpId(2),
+                SemanticOpId::for_test(2),
                 Soac::Screma(screma::Op::Map {
                     lanes: screma::Lanes {
                         inputs: vec![SoacInputType { array: array.clone() }],
@@ -837,7 +837,7 @@ mod tests {
         };
         assert_eq!(
             *id,
-            SemanticOpId(2),
+            SemanticOpId::for_test(2),
             "fusion keeps the consumer's semantic identity"
         );
         let executor = RegionExecutor::new(&inner);

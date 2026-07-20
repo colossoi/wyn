@@ -59,7 +59,41 @@ impl<P: EgirPhase<ResourceDecl = SemanticResourceDecl>> Entry<P> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SemanticOpId(pub u32);
+pub struct SemanticOpId {
+    source: u32,
+    implementation: Option<u32>,
+}
+
+impl SemanticOpId {
+    #[cfg(test)]
+    pub(crate) const fn for_test(index: u32) -> Self {
+        Self {
+            source: index,
+            implementation: None,
+        }
+    }
+
+    /// Identify a compiler-created operation by the semantic operation whose
+    /// implementation requires it. The slot distinguishes multiple helpers
+    /// without reopening or reconstructing the source ID sequence.
+    pub(crate) const fn implementation(self, slot: u32) -> Self {
+        Self {
+            source: self.source,
+            implementation: Some(slot),
+        }
+    }
+}
+
+impl From<u32> for SemanticOpId {
+    fn from(index: u32) -> Self {
+        Self {
+            source: index,
+            implementation: None,
+        }
+    }
+}
+
+pub(crate) type SemanticOpIdSource = crate::IdSource<SemanticOpId>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SemanticDependencyKind {
@@ -92,11 +126,22 @@ impl ResourceId {
     }
 }
 
-/// Stable identity of an entry while the program is still semantic EGIR.
-/// Textual entry names are publication metadata and are deliberately not used
-/// to connect plans back to their source entries.
+/// Opaque index into the fixed semantic-entry table. Textual entry names are
+/// publication metadata and are deliberately not used to connect plans back
+/// to their source entries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SemanticEntryId(pub u32);
+pub struct SemanticEntryId(usize);
+
+impl SemanticEntryId {
+    pub(crate) const fn index(self) -> usize {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(index: usize) -> Self {
+        Self(index)
+    }
+}
 
 /// Stable identity of a semantic requirement to materialize a shared value.
 /// It is deliberately distinct from `SemanticEntryId`: a requirement is not
@@ -466,6 +511,10 @@ impl LogicalResourceArena {
 
     pub fn iter(&self) -> std::slice::Iter<'_, LogicalResource> {
         self.resources.iter()
+    }
+
+    pub fn ids(&self) -> impl Iterator<Item = ResourceId> + '_ {
+        self.resources.iter().map(LogicalResource::id)
     }
 
     pub fn len(&self) -> usize {
@@ -1496,6 +1545,18 @@ impl SemanticProgram {
             semantic_dependencies: Vec::new(),
         }
     }
+
+    pub(crate) fn entry_ids(&self) -> impl Iterator<Item = SemanticEntryId> + '_ {
+        (0..self.ir.entry_points.len()).map(SemanticEntryId)
+    }
+}
+
+impl Index<SemanticEntryId> for SemanticProgram {
+    type Output = SemanticEntry;
+
+    fn index(&self, id: SemanticEntryId) -> &Self::Output {
+        &self.ir.entry_points[id.index()]
+    }
 }
 
 impl Deref for SemanticProgram {
@@ -1793,16 +1854,13 @@ impl AllocatedProgram {
     pub(crate) fn entries_with_endpoints(
         &self,
     ) -> impl Iterator<Item = (CompilerFlowEndpoint, &SemanticEntry)> {
-        self.semantic
-            .ir
-            .entry_points
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| (CompilerFlowEndpoint::Entry(SemanticEntryId(index as u32)), entry))
-            .chain(
-                self.materializations.iter().map(|(id, requirement)| {
-                    (CompilerFlowEndpoint::Materialization(*id), &requirement.entry)
-                }),
-            )
+        self.semantic.entry_ids().map(|id| (CompilerFlowEndpoint::Entry(id), &self.semantic[id])).chain(
+            self.materializations.ids().map(|id| {
+                (
+                    CompilerFlowEndpoint::Materialization(id),
+                    &self.materializations[id].entry,
+                )
+            }),
+        )
     }
 }

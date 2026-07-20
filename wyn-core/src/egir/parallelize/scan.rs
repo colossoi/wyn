@@ -324,6 +324,7 @@ impl KernelPlanBuilder<'_, '_> {
     ) -> error::Result<Vec<crate::egir::program::PlannedEntry>> {
         let ScanCandidate {
             site,
+            owner,
             scratch_type: elem_ty,
             serial,
             step_region,
@@ -337,7 +338,6 @@ impl KernelPlanBuilder<'_, '_> {
             scan_output_storage,
             scan_output_view_type: orig_scan_output_view_ty,
             phase1_width: total_threads,
-            ..
         } = analysis.candidate;
         let block_id = site.block;
         let (block_sums_resource, block_offsets_resource) = (analysis.block_sums, analysis.block_offsets);
@@ -387,16 +387,6 @@ impl KernelPlanBuilder<'_, '_> {
         // Append a chunked reduce over the same input that stores each thread's
         // final accumulator to `block_sums[tid]`.
         {
-            let next_semantic_op = entry
-                .graph
-                .skeleton
-                .blocks
-                .iter()
-                .flat_map(|(_, block)| &block.side_effects)
-                .filter_map(|effect| effect.kind.soac_id())
-                .map(|id| id.0)
-                .max()
-                .map_or(0, |id| id + 1);
             // The neutral is owned by `Operator::neutral`; effect operands
             // contain only the input view.
             let reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![chunked_input_nid];
@@ -404,7 +394,7 @@ impl KernelPlanBuilder<'_, '_> {
             let screma_nid = graph_ops::emit_pending_soac(
                 &mut entry.graph,
                 block_id,
-                SemanticOpId(next_semantic_op),
+                owner.implementation(0),
                 Soac::Screma(screma::Op::Reduce {
                     lanes: screma::Lanes {
                         inputs: vec![crate::egir::types::SoacInputType { array: input_view_ty }],

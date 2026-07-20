@@ -96,7 +96,7 @@ fn scatter_handleability_checks_every_input() {
     let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
     let bad_input_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty.clone(), f32_ty.clone()]);
     let kind: PhysicalSideEffectKind = PhysicalSideEffectKind::Soac(SoacEffect(
-        SemanticOpId(0),
+        SemanticOpId::for_test(0),
         Soac::<Physical>::Hist(hist::Op {
             body: hist::Body {
                 body: crate::egir::types::SegBody {

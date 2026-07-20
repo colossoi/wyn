@@ -15,8 +15,8 @@ use crate::LookupMap;
 
 use super::graph_ops;
 use super::program::{
-    ConstantDef, Entry, Func, OutputSlotId, OutputWriter, Program, RawEntry, RawProgram, SemanticOpId,
-    SemanticProgram, SemanticResourceRef,
+    ConstantDef, Entry, Func, OutputSlotId, OutputWriter, Program, RawEntry, RawProgram,
+    SemanticOpIdSource, SemanticProgram, SemanticResourceRef,
 };
 use super::soac::{filter, hist, screma};
 use super::types::{
@@ -45,13 +45,12 @@ pub fn run(raw: RawProgram) -> SemanticProgram {
         region_interner,
     } = ir;
 
-    let mut next_semantic_id = 0;
+    let mut semantic_ids = SemanticOpIdSource::default();
     let entry_points =
-        entry_points.into_iter().map(|entry| reify_entry(entry, &mut next_semantic_id)).collect();
-    let functions =
-        functions.into_iter().map(|function| reify_func(function, &mut next_semantic_id)).collect();
+        entry_points.into_iter().map(|entry| reify_entry(entry, &mut semantic_ids)).collect();
+    let functions = functions.into_iter().map(|function| reify_func(function, &mut semantic_ids)).collect();
     let constants =
-        constants.into_iter().map(|constant| reify_constant(constant, &mut next_semantic_id)).collect();
+        constants.into_iter().map(|constant| reify_constant(constant, &mut semantic_ids)).collect();
 
     let mut semantic = SemanticProgram {
         ir: Program {
@@ -71,7 +70,10 @@ pub fn run(raw: RawProgram) -> SemanticProgram {
     semantic
 }
 
-fn reify_constant(constant: ConstantDef<Raw>, next_semantic_id: &mut u32) -> ConstantDef<Semantic> {
+fn reify_constant(
+    constant: ConstantDef<Raw>,
+    semantic_ids: &mut SemanticOpIdSource,
+) -> ConstantDef<Semantic> {
     let facts = function_facts(&constant.graph);
     let ConstantDef {
         name,
@@ -81,7 +83,7 @@ fn reify_constant(constant: ConstantDef<Raw>, next_semantic_id: &mut u32) -> Con
         control_headers,
         aliases,
     } = constant;
-    let (graph, blocks) = map_graph(graph, facts, next_semantic_id);
+    let (graph, blocks) = map_graph(graph, facts, semantic_ids);
     ConstantDef {
         name,
         span,
@@ -92,7 +94,7 @@ fn reify_constant(constant: ConstantDef<Raw>, next_semantic_id: &mut u32) -> Con
     }
 }
 
-fn reify_func(function: Func<Raw>, next_semantic_id: &mut u32) -> Func<Semantic> {
+fn reify_func(function: Func<Raw>, semantic_ids: &mut SemanticOpIdSource) -> Func<Semantic> {
     let facts = function_facts(&function.graph);
     let Func {
         name,
@@ -104,7 +106,7 @@ fn reify_func(function: Func<Raw>, next_semantic_id: &mut u32) -> Func<Semantic>
         control_headers,
         aliases,
     } = function;
-    let (graph, blocks) = map_graph(graph, facts, next_semantic_id);
+    let (graph, blocks) = map_graph(graph, facts, semantic_ids);
     Func {
         name,
         span,
@@ -117,12 +119,11 @@ fn reify_func(function: Func<Raw>, next_semantic_id: &mut u32) -> Func<Semantic>
     }
 }
 
-fn reify_entry(entry: Entry<Raw>, next_semantic_id: &mut u32) -> Entry<Semantic> {
+fn reify_entry(entry: Entry<Raw>, semantic_ids: &mut SemanticOpIdSource) -> Entry<Semantic> {
     let mut facts = entry_facts(&entry);
     match entry.try_map_phase(|block, index, (), soac| {
         let facts = facts.remove(&(block, index)).expect("every raw SOAC must have semantic facts");
-        let id = SemanticOpId(*next_semantic_id);
-        *next_semantic_id += 1;
+        let id = semantic_ids.next_id();
         Ok::<_, Infallible>((id, reify_soac(soac, facts)))
     }) {
         Ok(entry) => entry,
@@ -133,12 +134,11 @@ fn reify_entry(entry: Entry<Raw>, next_semantic_id: &mut u32) -> Entry<Semantic>
 fn map_graph(
     graph: EGraph<Raw>,
     mut facts: HashMap<(BlockId, usize), Facts>,
-    next_semantic_id: &mut u32,
+    semantic_ids: &mut SemanticOpIdSource,
 ) -> (EGraph<Semantic>, LookupMap<BlockId, BlockId>) {
     match graph.try_map_phase(|block, index, (), soac| {
         let facts = facts.remove(&(block, index)).expect("every raw SOAC must have semantic facts");
-        let id = SemanticOpId(*next_semantic_id);
-        *next_semantic_id += 1;
+        let id = semantic_ids.next_id();
         Ok::<_, Infallible>((id, reify_soac(soac, facts)))
     }) {
         Ok(mapped) => mapped,
@@ -220,6 +220,7 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::egir::program::SemanticOpId;
     use crate::egir::types::EffectOp;
     use smallvec::SmallVec;
 
@@ -266,11 +267,14 @@ mod tests {
         });
         graph.skeleton.blocks[block].side_effects.push(raw_map());
 
-        let mut next = 7;
+        let mut semantic_ids = SemanticOpIdSource::default();
+        for _ in 0..7 {
+            semantic_ids.next_id();
+        }
         let (graph, _) = map_graph(
             graph,
             HashMap::from([((block, 0), facts()), ((block, 2), facts())]),
-            &mut next,
+            &mut semantic_ids,
         );
         let ids: Vec<_> = graph.skeleton.blocks[graph.skeleton.entry]
             .side_effects
@@ -278,8 +282,15 @@ mod tests {
             .map(|effect| effect.kind.soac_id().copied())
             .collect();
 
-        assert_eq!(ids, vec![Some(SemanticOpId(7)), None, Some(SemanticOpId(8))]);
-        assert_eq!(next, 9);
+        assert_eq!(
+            ids,
+            vec![
+                Some(SemanticOpId::for_test(7)),
+                None,
+                Some(SemanticOpId::for_test(8))
+            ]
+        );
+        assert_eq!(semantic_ids.next_id(), SemanticOpId::for_test(9));
     }
 }
 

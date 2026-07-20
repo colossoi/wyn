@@ -353,6 +353,11 @@ impl<Id: From<u32> + Copy + Eq + Hash, T> IdArena<Id, T> {
         self.items.iter()
     }
 
+    /// Iterate over the IDs that currently name stored items.
+    pub fn ids(&self) -> impl Iterator<Item = Id> + '_ {
+        self.items.keys().copied()
+    }
+
     /// Iterate over all items (without IDs).
     pub fn values(&self) -> impl Iterator<Item = &T> {
         self.items.values()

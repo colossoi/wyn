@@ -13,7 +13,7 @@ use crate::egir::program::{
     CompilerFlowEndpoint, CompilerResourceFlow, EntryPublication, InputSlotId, LogicalResourceArena,
     MaterializationId, MaterializationKind, MaterializationRequirement, OutputSlotId,
     PhysicalResourceTable, PlannedEntry, PlannedPublication, RegionInterner, ResourceOrigin, SemanticEntry,
-    SemanticEntryId, SemanticFunc, SemanticResourceDecl, SemanticResourceRef,
+    SemanticEntryId, SemanticFunc, SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
 };
 use crate::egir::soac::{filter, screma};
 use crate::egir::types::{EgirPhase, RegionId, Scheduled, SegExtent, SideEffectKind, Soac, SoacEffect};
@@ -59,11 +59,8 @@ pub(super) struct SeededKernels {
 }
 
 impl SeededKernels {
-    pub(super) fn entry(&self, source: SemanticEntryId) -> Result<KernelId, String> {
-        self.by_entry
-            .get(source.0 as usize)
-            .copied()
-            .ok_or_else(|| format!("semantic entry {source:?} has no seeded kernel"))
+    pub(super) fn entry(&self, source: SemanticEntryId) -> KernelId {
+        self.by_entry[source.index()]
     }
 }
 
@@ -73,9 +70,7 @@ fn record_seeded_kernel(
     kernel: KernelId,
     name: &str,
 ) -> Result<(), String> {
-    let slot = seeded
-        .get_mut(source.0 as usize)
-        .ok_or_else(|| format!("semantic entry `{name}` has invalid id {source:?}"))?;
+    let slot = &mut seeded[source.index()];
     if let Some(existing) = slot.replace(kernel) {
         return Err(format!(
             "semantic entry `{name}` is assigned to kernels {existing:?} and {kernel:?}"
@@ -726,16 +721,19 @@ impl KernelPlan {
 
     pub(super) fn seed(
         descriptor: &PipelineDescriptor,
-        entries: &[SemanticEntry],
-        resources: &LogicalResourceArena,
-        region_interner: &RegionInterner,
+        semantic: &SemanticProgram,
     ) -> Result<(Self, SeededKernels), String> {
+        let resources = &semantic.resources;
+        let region_interner = &semantic.region_interner;
         let host_resources = crate::egir::program::host_resource_map(resources);
-        let mut seeded = vec![None; entries.len()];
-        let source_publications = entries.iter().map(PlannedPublication::from_semantic).collect();
+        let mut seeded = vec![None; semantic.entry_points.len()];
+        let source_publications = semantic
+            .entry_ids()
+            .map(|source| PlannedPublication::from_semantic(&semantic[source]))
+            .collect();
         let mut by_name = HashMap::new();
-        for (index, entry) in entries.iter().enumerate() {
-            let source = SemanticEntryId(index as u32);
+        for source in semantic.entry_ids() {
+            let entry = &semantic[source];
             if by_name.insert(entry.name.as_str(), (source, entry)).is_some() {
                 return Err(format!("duplicate semantic entry `{}`", entry.name));
             }
@@ -793,23 +791,24 @@ impl KernelPlan {
             })
             .collect::<HashSet<_>>();
         let mut unpublished = Vec::new();
-        for (index, entry) in entries.iter().enumerate() {
+        for source in semantic.entry_ids() {
+            let entry = &semantic[source];
             if published_names.contains(entry.name.as_str()) {
                 continue;
             }
             let id = phase_arena.alloc_id();
             let result = if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
                 phase_from_entry(
-                    Some(SemanticEntryId(index as u32)),
+                    Some(source),
                     entry,
                     DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
                     source_kind(entry),
                 )
             } else {
-                graphics_passthrough_phase(SemanticEntryId(index as u32), entry)
+                graphics_passthrough_phase(source, entry)
             };
             let phase = result?;
-            record_seeded_kernel(&mut seeded, SemanticEntryId(index as u32), id, &entry.name)?;
+            record_seeded_kernel(&mut seeded, source, id, &entry.name)?;
             phase_arena.insert(id, PlacedPhase(PhaseListId::Unpublished, phase));
             unpublished.push(id);
         }
@@ -822,13 +821,12 @@ impl KernelPlan {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         };
-        let entry_schedules = entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| {
-                let source = SemanticEntryId(index as u32);
-                let primary = seeded.entry(source)?;
-                Ok((
+        let entry_schedules = semantic
+            .entry_ids()
+            .map(|source| {
+                let entry = &semantic[source];
+                let primary = seeded.entry(source);
+                (
                     source,
                     EntrySchedule {
                         name: entry.name.clone(),
@@ -841,9 +839,9 @@ impl KernelPlan {
                             .map(|route| (route.slot, primary))
                             .collect(),
                     },
-                ))
+                )
             })
-            .collect::<Result<HashMap<_, _>, String>>()?;
+            .collect::<HashMap<_, _>>();
         Ok((
             Self {
                 phases: phase_arena,

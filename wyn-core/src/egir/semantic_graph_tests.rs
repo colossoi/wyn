@@ -6,7 +6,7 @@ use polytype::Type;
 use smallvec::smallvec;
 
 fn op(id: u32) -> SemanticOpId {
-    SemanticOpId(id)
+    SemanticOpId::for_test(id)
 }
 
 fn dep(

@@ -88,6 +88,41 @@ fn logical_allocation_introduces_the_allocated_sidecar() {
 }
 
 #[test]
+fn semantic_entry_identity_is_stable_and_reused_by_flow_endpoints() {
+    let mut program = SemanticProgram::new(
+        vec![],
+        vec![],
+        vec![empty_entry("first"), empty_entry("second")],
+        vec![],
+        PipelineDescriptor::default(),
+        RegionInterner::default(),
+    );
+
+    let before = program.entry_ids().collect::<Vec<_>>();
+    program.entry_points[0].name = "renamed".into();
+    let after = program.entry_ids().collect::<Vec<_>>();
+    assert_ne!(before[0], before[1]);
+    assert_eq!(
+        after, before,
+        "entry optimization must not remint semantic identity"
+    );
+    let allocated = AllocatedProgram {
+        semantic: program,
+        materializations: crate::IdArena::new(),
+    };
+    let entries = allocated
+        .entries_with_endpoints()
+        .map(|(endpoint, entry)| {
+            let CompilerFlowEndpoint::Entry(id) = endpoint else {
+                unreachable!("program has no materializations")
+            };
+            (id, entry.name.as_str())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(entries, vec![(before[0], "renamed"), (before[1], "second")]);
+}
+
+#[test]
 fn allocated_resource_verifier_accepts_resource_only_program() {
     let program = allocated_program(LogicalSize::Unspecified);
     verify_allocated_resources(&program).expect("resource-normalized program");
@@ -116,7 +151,7 @@ fn logical_resource_arena_owns_dense_identity_assignment() {
     let second = resources.allocate(
         ResourceOrigin::Compiler(CompilerResource::new(
             CompilerResourceKind::ReducePartial,
-            Some(SemanticOpId(7)),
+            Some(SemanticOpId::for_test(7)),
             0,
         )),
         unit_ty(),

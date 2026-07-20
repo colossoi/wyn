@@ -8,7 +8,9 @@ use polytype::Type;
 use smallvec::smallvec;
 
 use super::graph_ops;
-use super::program::{LogicalSize, PlannedEntry, SemanticOpId, SemanticResourceDecl, SemanticResourceRef};
+use super::program::{
+    LogicalSize, PlannedEntry, SemanticOpIdSource, SemanticResourceDecl, SemanticResourceRef,
+};
 use super::soac::screma;
 use super::types::{
     EGraph, EffectToken, NodeId, SkeletonTerminator, Soac, SoacDestination, SoacInputType, SoacPlacement,
@@ -26,7 +28,7 @@ pub struct EntryBuilder<'a> {
     resource_declarations: Vec<SemanticResourceDecl>,
     params: Vec<(Type<TypeName>, String)>,
     return_ty: Type<TypeName>,
-    next_semantic_op: u32,
+    semantic_ids: SemanticOpIdSource,
     effect_ids: &'a mut crate::IdSource<EffectToken>,
 }
 
@@ -50,7 +52,7 @@ impl<'a> EntryBuilder<'a> {
             resource_declarations: Vec::new(),
             params: Vec::new(),
             return_ty: Type::Constructed(TypeName::Unit, vec![]),
-            next_semantic_op: 0,
+            semantic_ids: SemanticOpIdSource::default(),
             effect_ids,
         }
     }
@@ -130,8 +132,7 @@ impl<'a> EntryBuilder<'a> {
         output_view_ty: Type<TypeName>,
     ) -> NodeId {
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![output_view_ty.clone()]);
-        let id = SemanticOpId(self.next_semantic_op);
-        self.next_semantic_op += 1;
+        let id = self.semantic_ids.next_id();
         graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
