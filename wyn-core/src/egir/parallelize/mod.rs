@@ -47,7 +47,7 @@ use kernel::{
     synthesize_u32_add_function, ChunkInputKind,
 };
 use model as error;
-use model::{FallbackReason, ParallelPolicy, RecipeSelection};
+use model::{FallbackReason, RecipeSelection};
 use planning::{
     make_screma_serial, parallel_recipe_effect, ParallelReduce, ParallelScan, SerialScremaRecipe,
 };
@@ -115,10 +115,9 @@ fn build_parallel_plan(
     inner: &mut AllocatedProgram,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> error::Result<schedule::KernelPlan> {
-    let policy = ParallelPolicy::default();
-    let analysis = planning::analyze(inner, policy)?;
+    let analysis = planning::analyze(inner)?;
     let recipes = analysis.allocate_scratch(inner)?;
-    let builder = KernelPlanBuilder::new(inner, recipes, policy, effect_ids)?;
+    let builder = KernelPlanBuilder::new(inner, recipes, effect_ids)?;
     builder.build_parallel_schedule(inner)
 }
 
@@ -128,9 +127,8 @@ fn build_sequential_plan(
     inner: &AllocatedProgram,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> error::Result<schedule::KernelPlan> {
-    let policy = ParallelPolicy::default();
     let recipes = planning::RecipeIndex::sequential();
-    let builder = KernelPlanBuilder::new(inner, recipes, policy, effect_ids)?;
+    let builder = KernelPlanBuilder::new(inner, recipes, effect_ids)?;
     builder.build_sequential_schedule(inner)
 }
 
@@ -140,7 +138,6 @@ struct KernelPlanBuilder<'resources, 'effects> {
     resources: &'resources LogicalResourceArena,
     flows: model::ResourceFlowIndex,
     recipes: planning::RecipeIndex,
-    policy: ParallelPolicy,
     effect_ids: &'effects mut crate::IdSource<EffectToken>,
 }
 
@@ -196,7 +193,6 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
     fn new(
         inner: &'resources AllocatedProgram,
         recipes: planning::RecipeIndex,
-        policy: ParallelPolicy,
         effect_ids: &'effects mut crate::IdSource<EffectToken>,
     ) -> error::Result<Self> {
         let resources = &inner.resources;
@@ -213,7 +209,6 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
             resources,
             flows,
             recipes,
-            policy,
             effect_ids,
         })
     }

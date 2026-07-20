@@ -1,5 +1,6 @@
 //! Runtime-filter candidate analysis and five-phase kernel emission.
 
+use super::model::{FILTER_SCAN_GROUPS, REDUCE_PHASE1_WIDTH};
 use super::*;
 use crate::egir::soac::filter as filter_soac;
 
@@ -67,8 +68,8 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             combine,
             apply_offsets,
             scatter,
-            scan_workgroup_width: self.lowering.policy.reduce_phase1_width,
-            scan_groups: self.lowering.policy.filter_scan_groups,
+            scan_workgroup_width: self.candidate.scan_workgroup_width,
+            scan_groups: self.candidate.scan_groups,
         })
     }
 
@@ -105,7 +106,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         let spec = ProjectionSpec::unit(
             format!("{}_filter_scan", self.entry.name),
             ExecutionModel::Compute {
-                local_size: (self.lowering.policy.reduce_phase1_width, 1, 1),
+                local_size: (self.candidate.scan_workgroup_width, 1, 1),
             },
             storage,
         );
@@ -153,7 +154,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             elem_ty: self.elem_ty.clone(),
             output_resource: self.work.offsets.0,
             block_offsets: self.work.block_offsets.0,
-            width: self.lowering.policy.reduce_phase1_width,
+            width: self.candidate.scan_workgroup_width,
         };
         let mut apply_offsets = apply_offsets.build(self.lowering.effect_ids)?;
         apply_manifest_resource_sizes(&mut apply_offsets, self.lowering.resources);
@@ -268,6 +269,14 @@ pub(super) struct FilterCandidate {
     pub semantic_id: SemanticOpId,
     pub space: SegSpace,
     storage: StoredFilterStorage,
+    scan_workgroup_width: u32,
+    scan_groups: u32,
+}
+
+impl FilterCandidate {
+    pub(super) fn scan_worker_count(&self) -> u32 {
+        self.scan_workgroup_width * self.scan_groups
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -318,6 +327,8 @@ pub(super) fn analyze_filter_candidates(
                     scratch: *scratch,
                     length: *len_out,
                 },
+                scan_workgroup_width: REDUCE_PHASE1_WIDTH,
+                scan_groups: FILTER_SCAN_GROUPS,
             }),
             filter_soac::RuntimeLength::ViewOnly => {
                 RecipeSelection::Serial(FallbackReason::UnsupportedDestination)

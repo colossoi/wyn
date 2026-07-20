@@ -2,9 +2,8 @@
 // Tests
 // ============================================================================
 
-use super::{run, Converter};
+use super::{run, ConversionArenas, Converter};
 use crate::ast::TypeName;
-use crate::egir::program::LogicalResourceArenaBuilder;
 use crate::ssa::types::{FuncBody, InstKind, Program};
 use crate::tlc::VarRef;
 use crate::tlc::{Term, TermKind};
@@ -97,8 +96,7 @@ fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> Fu
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
-    let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
-    let resources = std::cell::RefCell::new(LogicalResourceArenaBuilder::default());
+    let mut arenas = ConversionArenas::default();
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
@@ -106,8 +104,7 @@ fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> Fu
         pure_constants,
         &mut binding_ids,
         &mut effect_ids,
-        &region_interner,
-        &resources,
+        &mut arenas,
     );
     for (i, (sym, ty)) in params.iter().enumerate() {
         let nid = converter.graph.add_func_param(i, ty.clone());
@@ -156,8 +153,7 @@ fn test_add_roundtrip() {
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
-    let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
-    let resources = std::cell::RefCell::new(LogicalResourceArenaBuilder::default());
+    let mut arenas = ConversionArenas::default();
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
@@ -165,8 +161,7 @@ fn test_add_roundtrip() {
         pure_constants,
         &mut binding_ids,
         &mut effect_ids,
-        &region_interner,
-        &resources,
+        &mut arenas,
     );
     let a_nid = converter.graph.add_func_param(0, i32_ty());
     converter.locals.insert(a_sym, a_nid);
@@ -233,8 +228,7 @@ fn test_gvn_via_let() {
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
-    let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
-    let resources = std::cell::RefCell::new(LogicalResourceArenaBuilder::default());
+    let mut arenas = ConversionArenas::default();
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
@@ -242,8 +236,7 @@ fn test_gvn_via_let() {
         pure_constants,
         &mut binding_ids,
         &mut effect_ids,
-        &region_interner,
-        &resources,
+        &mut arenas,
     );
     let result = converter.convert_term(&outer_let).expect("conversion failed");
     converter.set_return(Some(result));
@@ -335,8 +328,7 @@ fn test_if_else_roundtrip() {
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
-    let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
-    let resources = std::cell::RefCell::new(LogicalResourceArenaBuilder::default());
+    let mut arenas = ConversionArenas::default();
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
@@ -344,8 +336,7 @@ fn test_if_else_roundtrip() {
         pure_constants,
         &mut binding_ids,
         &mut effect_ids,
-        &region_interner,
-        &resources,
+        &mut arenas,
     );
     let c_nid = converter.graph.add_func_param(0, bool_ty);
     converter.locals.insert(c_sym, c_nid);

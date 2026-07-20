@@ -221,11 +221,6 @@ pub struct TypeChecker<'a> {
     /// Built once before type-check by `name_resolution::build_name_resolution`.
     /// Identifiers absent from this table are resolved via scope/module lookup.
     name_resolution: NameResolution,
-    /// First type-alias cycle error encountered during alias resolution.
-    /// Recorded under `&self` via interior mutability; surfaced as a fatal
-    /// error at the next public entry point (check_program /
-    /// check_module_functions / check_prelude_functions).
-    pending_cycle_error: std::cell::RefCell<Option<CompilerError>>,
     /// Side table for constructor-call dispatch (`i32(x)`, `f32(true)`,
     /// …). Maps the callee identifier's NodeId to the list of catalog
     /// `BuiltinId`s that were registered as overload candidates, in the
@@ -600,26 +595,9 @@ impl<'a> TypeChecker<'a> {
     /// - Qualified names (containing '.') are looked up as-is
     /// - Unqualified names are qualified with current_module if provided
     /// - Recursively resolves nested aliases
-    fn resolve_type_aliases_scoped(&self, ty: &Type, current_module: Option<&str>) -> Type {
+    fn resolve_type_aliases_scoped(&self, ty: &Type, current_module: Option<&str>) -> Result<Type> {
         let mut visited = Vec::new();
-        self.resolve_type_aliases_impl(ty, current_module, &mut visited).unwrap_or_else(|cycle_err| {
-            // Stash the first cycle error; the next public entry point
-            // (check_program / check_module_functions /
-            // check_prelude_functions) drains it and bails. Returning the
-            // unresolved type lets local checking continue without
-            // cascading panics.
-            let mut slot = self.pending_cycle_error.borrow_mut();
-            if slot.is_none() {
-                *slot = Some(cycle_err);
-            }
-            ty.clone()
-        })
-    }
-
-    /// Drain the pending type-alias-cycle error, if any. Public entry
-    /// points must call this and surface the error before returning Ok.
-    fn take_pending_cycle_error(&self) -> Option<CompilerError> {
-        self.pending_cycle_error.borrow_mut().take()
+        self.resolve_type_aliases_impl(ty, current_module, &mut visited)
     }
 
     fn resolve_type_aliases_impl(
@@ -1027,7 +1005,6 @@ impl<'a> TypeChecker<'a> {
             skolem_ids: crate::IdSource::new(),
             current_module: None,
             name_resolution: NameResolution::default(),
-            pending_cycle_error: std::cell::RefCell::new(None),
             constructor_call_catalog_ids: LookupMap::new(),
         }
     }
@@ -1161,7 +1138,7 @@ impl<'a> TypeChecker<'a> {
 
     /// Resolve type aliases in a type annotation. SizeVar/UserVar
     /// substitution is handled upstream by `resolve_placeholders`.
-    pub(super) fn normalize_annotation_type(&self, ty: &Type, module: Option<&str>) -> Type {
+    pub(super) fn normalize_annotation_type(&self, ty: &Type, module: Option<&str>) -> Result<Type> {
         self.resolve_type_aliases_scoped(ty, module)
     }
 
@@ -1180,9 +1157,9 @@ impl<'a> TypeChecker<'a> {
     /// — each `[]` slot gets an independent var — because a record/tuple of
     /// arrays (`{ points: [], items: [] }`) generally spans distinct domains and
     /// must not be forced to a single length.
-    pub(super) fn instantiate_annotation_type(&mut self, ty: &Type, module: Option<&str>) -> Type {
-        let expanded = self.resolve_type_aliases_scoped(ty, module);
-        self.freshen_placeholders(&expanded)
+    pub(super) fn instantiate_annotation_type(&mut self, ty: &Type, module: Option<&str>) -> Result<Type> {
+        let expanded = self.resolve_type_aliases_scoped(ty, module)?;
+        Ok(self.freshen_placeholders(&expanded))
     }
 
     /// Structural walk replacing each residual array `AddressPlaceholder` /
@@ -1346,13 +1323,13 @@ impl<'a> TypeChecker<'a> {
         for (i, param) in lambda.params.iter().enumerate() {
             let param_type = if let Some(annotated_type) = param.pattern_type() {
                 // Explicit annotation takes precedence
-                self.normalize_annotation_type(annotated_type, self.current_module.as_deref())
+                self.normalize_annotation_type(annotated_type, self.current_module.as_deref())?
             } else if let Some(ref expected_params) = expected_param_types {
                 // Use expected type from bidirectional checking
                 expected_params[i].clone()
             } else {
                 // No annotation and no expected type - create fresh type variable
-                self.fresh_type_for_pattern(param)
+                self.fresh_type_for_pattern(param)?
             };
 
             param_types.push(param_type.clone());
@@ -1579,7 +1556,7 @@ impl<'a> TypeChecker<'a> {
         // `globals.user_file_defs` so module function bodies can close
         // over them. No `scope_stack.push_scope()` needed — `GlobalEnv`
         // is keyed independently of the local-scope stack.
-        self.forward_declare_ascribed_file_scope(program);
+        self.forward_declare_ascribed_file_scope(program)?;
 
         // Type-check module functions first to populate the module_schemes cache.
         // This must happen before prelude functions since they may reference module functions.
@@ -1591,10 +1568,6 @@ impl<'a> TypeChecker<'a> {
         // Process user declarations
         for decl in &program.declarations {
             self.check_declaration(decl)?;
-        }
-
-        if let Some(err) = self.take_pending_cycle_error() {
-            return Err(err);
         }
 
         self.check_resource_binding_consistency(program)?;
@@ -1653,7 +1626,8 @@ impl<'a> TypeChecker<'a> {
                     continue;
                 };
 
-                let ty = param.pattern_type().map(|t| self.normalize_annotation_type(t, None));
+                let ty =
+                    param.pattern_type().map(|t| self.normalize_annotation_type(t, None)).transpose()?;
 
                 // A uniform must have a block layout: a 32-bit scalar, a
                 // vec2/3/4 of them, or a flat record/tuple of those
@@ -1767,7 +1741,7 @@ impl<'a> TypeChecker<'a> {
         let mut param_types: Vec<Type> = Vec::with_capacity(params.len());
         for p in params {
             let ty = p.pattern_type().cloned().unwrap_or_else(|| self.context.new_variable());
-            param_types.push(self.instantiate_annotation_type(&ty, module_name));
+            param_types.push(self.instantiate_annotation_type(&ty, module_name)?);
         }
 
         // For entry point parameters, constrain array address spaces to Storage
@@ -1912,14 +1886,15 @@ impl<'a> TypeChecker<'a> {
     /// `globals.user_file_defs`. Idempotent with the main
     /// `check_program` walk, which re-inserts the same scheme. Defs
     /// without full ascription are deferred to the main loop.
-    fn forward_declare_ascribed_file_scope(&mut self, program: &Program) {
+    fn forward_declare_ascribed_file_scope(&mut self, program: &Program) -> Result<()> {
         for decl in &program.declarations {
             if let Declaration::Decl(d) = decl {
-                if let Some(scheme) = self.ascription_to_scheme(d) {
+                if let Some(scheme) = self.ascription_to_scheme(d)? {
                     self.globals.user_file_defs.insert(d.name.clone(), scheme);
                 }
             }
         }
+        Ok(())
     }
 
     /// Phase-1 dual-write hook, Phase-2 reading `current_context`.
@@ -1951,20 +1926,22 @@ impl<'a> TypeChecker<'a> {
     /// parameter type isn't statically determined (parameter without
     /// `Pattern::Typed`, missing return-type annotation, etc.) — the
     /// main type-check loop handles those.
-    fn ascription_to_scheme(&self, decl: &Decl) -> Option<TypeScheme> {
-        let return_ty = decl.ty.as_ref()?;
-        let resolved_return = self.resolve_type_aliases_scoped(return_ty, None);
+    fn ascription_to_scheme(&self, decl: &Decl) -> Result<Option<TypeScheme>> {
+        let Some(return_ty) = decl.ty.as_ref() else {
+            return Ok(None);
+        };
+        let resolved_return = self.resolve_type_aliases_scoped(return_ty, None)?;
         let mut param_types = Vec::with_capacity(decl.params.len());
         for param in &decl.params {
             let ty = match &param.kind {
                 PatternKind::Typed(_, ty) => ty.clone(),
-                _ => return None,
+                _ => return Ok(None),
             };
-            param_types.push(self.resolve_type_aliases_scoped(&ty, None));
+            param_types.push(self.resolve_type_aliases_scoped(&ty, None)?);
         }
         let func_ty =
             param_types.into_iter().rev().fold(resolved_return, |acc, p| crate::types::function(p, acc));
-        Some(self.generalize(&func_ty))
+        Ok(Some(self.generalize(&func_ty)))
     }
 
     /// Type-check function bodies from modules (e.g., rand.init, rand.int, f32.pi)
@@ -1990,9 +1967,6 @@ impl<'a> TypeChecker<'a> {
             self.check_decl_as_in_module(&decl, &qualified_name, Some(&module_name))?;
         }
 
-        if let Some(err) = self.take_pending_cycle_error() {
-            return Err(err);
-        }
         Ok(())
     }
 
@@ -2014,9 +1988,6 @@ impl<'a> TypeChecker<'a> {
         self.current_context = saved_context;
         result?;
 
-        if let Some(err) = self.take_pending_cycle_error() {
-            return Err(err);
-        }
         Ok(())
     }
 
@@ -2114,7 +2085,7 @@ impl<'a> TypeChecker<'a> {
                 // Resolve type aliases (e.g., rand.state -> f32) and instantiate
                 // residual array placeholders so an alias return like `world`
                 // unifies against the body's concrete `view`/`composite` arrays.
-                let expected_type = self.instantiate_annotation_type(&expected_type, None);
+                let expected_type = self.instantiate_annotation_type(&expected_type, None)?;
 
                 // An existential return (`?k. T`) is *packed*: instantiate the
                 // declared bound size vars — and any existential the body
@@ -2220,7 +2191,7 @@ impl<'a> TypeChecker<'a> {
             // Variable or entry point declaration: let/def name: type = value or let/def name = value
             // Resolve type aliases in declared type (e.g., rand.state -> f32)
             let resolved_declared_type =
-                decl.ty.as_ref().map(|ty| self.resolve_type_aliases_scoped(ty, module_name));
+                decl.ty.as_ref().map(|ty| self.resolve_type_aliases_scoped(ty, module_name)).transpose()?;
 
             let expr_type = if let Some(ref declared_type) = resolved_declared_type {
                 // Use bidirectional checking when type annotation is present
@@ -2274,7 +2245,8 @@ impl<'a> TypeChecker<'a> {
             // directly. Whether the body satisfies a `*` return is verified
             // by tlc::ownership from the diet.
             let return_type = if let Some(declared_type) = &decl.ty {
-                let normalized_return_type = self.instantiate_annotation_type(declared_type, module_name);
+                let normalized_return_type =
+                    self.instantiate_annotation_type(declared_type, module_name)?;
                 let ctx = if !decl.params.is_empty() {
                     format!("Function return type mismatch for '{}'", decl.name)
                 } else {
@@ -2707,7 +2679,8 @@ impl<'a> TypeChecker<'a> {
                 let resolved_annotation = let_in
                     .ty
                     .as_ref()
-                    .map(|ty| self.normalize_annotation_type(ty, self.current_module.as_deref()));
+                    .map(|ty| self.normalize_annotation_type(ty, self.current_module.as_deref()))
+                    .transpose()?;
                 if let Some(declared_type) = &resolved_annotation {
                     self.unify_or_err_weakening(
                         &value_type,
@@ -3187,7 +3160,7 @@ impl<'a> TypeChecker<'a> {
                 // Type ascription: check the inner expression against the ascribed type
                 // This allows integer literals to take on the ascribed type (e.g., 42u32)
                 let normalized =
-                    self.normalize_annotation_type(ascribed_ty, self.current_module.as_deref());
+                    self.normalize_annotation_type(ascribed_ty, self.current_module.as_deref())?;
                 self.check_expression(inner, &normalized)?;
                 Ok(normalized)
             }

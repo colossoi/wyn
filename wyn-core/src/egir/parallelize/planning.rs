@@ -9,7 +9,7 @@ use crate::egir::soac::screma;
 use crate::egir::types::{EGraph, SideEffect, SideEffectKind, SideEffectSite, Soac, SoacEffect};
 use crate::flow::ExecutionModel;
 
-use super::model::{FallbackReason, ParallelPolicy, ParallelizeError, RecipeSelection, Result};
+use super::model::{FallbackReason, ParallelizeError, RecipeSelection, Result};
 use crate::egir::program::{
     AllocatedProgram, CompilerFlowEndpoint, CompilerResource, CompilerResourceKey, CompilerResourceKind,
     LogicalResourceArena, LogicalSize, SemanticOpId,
@@ -446,12 +446,11 @@ fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBinding
 
 /// Analyze every projected endpoint once. Recipes retain their projected body
 /// and graph-local handles until emission consumes the endpoint plan.
-pub(super) fn analyze(inner: &AllocatedProgram, policy: ParallelPolicy) -> Result<AnalyzedPlan> {
-    let resources = &inner.resources;
+pub(super) fn analyze(inner: &AllocatedProgram) -> Result<AnalyzedPlan> {
     let mut recipes = RecipeIndex::parallel();
     let mut requests = Vec::new();
     for (endpoint, entry) in inner.entries_with_endpoints() {
-        let plan = analyze_endpoint(entry, endpoint, policy, &resources, &mut requests)?;
+        let plan = analyze_endpoint(entry, endpoint, &inner.resources, &mut requests)?;
         recipes.insert(endpoint, plan)?;
     }
     Ok(AnalyzedPlan { recipes, requests })
@@ -460,7 +459,6 @@ pub(super) fn analyze(inner: &AllocatedProgram, policy: ParallelPolicy) -> Resul
 fn analyze_endpoint(
     entry: &crate::egir::program::SemanticEntry,
     endpoint: CompilerFlowEndpoint,
-    policy: ParallelPolicy,
     resources: &LogicalResourceArena,
     requests: &mut Vec<ScratchRequest>,
 ) -> Result<EndpointPlan<AnalyzedRecipe>> {
@@ -471,7 +469,6 @@ fn analyze_endpoint(
                 split.primary.entry,
                 split.primary.semantic_slots,
                 endpoint,
-                policy,
                 resources,
                 requests,
             )?;
@@ -483,7 +480,6 @@ fn analyze_endpoint(
                         split.entry,
                         split.semantic_slots,
                         endpoint,
-                        policy,
                         resources,
                         requests,
                     )
@@ -494,7 +490,7 @@ fn analyze_endpoint(
     }
 
     let slots = (0..projected.outputs.len()).collect();
-    let primary = analyze_projected_kernel(projected, slots, endpoint, policy, resources, requests)?;
+    let primary = analyze_projected_kernel(projected, slots, endpoint, resources, requests)?;
     Ok(EndpointPlan::new(false, primary, Vec::new()))
 }
 
@@ -503,7 +499,6 @@ fn analyze_projected_kernel(
     body: crate::egir::program::PlannedEntry,
     semantic_slots: Vec<usize>,
     endpoint: CompilerFlowEndpoint,
-    policy: ParallelPolicy,
     resources: &LogicalResourceArena,
     requests: &mut Vec<ScratchRequest>,
 ) -> Result<PlannedKernel<AnalyzedRecipe>> {
@@ -512,7 +507,7 @@ fn analyze_projected_kernel(
         let (_, selection) = filters.remove(0);
         match selection {
             RecipeSelection::Parallel(candidate) => {
-                requests.extend(filter_scratch_requests(endpoint, policy, &candidate));
+                requests.extend(filter_scratch_requests(endpoint, &candidate));
                 return Ok(PlannedKernel::new(
                     body,
                     semantic_slots,
@@ -576,7 +571,6 @@ fn analyze_projected_kernel(
 
 fn filter_scratch_requests(
     endpoint: CompilerFlowEndpoint,
-    policy: ParallelPolicy,
     candidate: &super::filter::FilterCandidate,
 ) -> Vec<ScratchRequest> {
     let element_count_size = match candidate.space.dims.first() {
@@ -592,8 +586,7 @@ fn filter_scratch_requests(
         },
         _ => LogicalSize::SameAsDispatch { elem_bytes: 4 },
     };
-    let worker_count_size =
-        LogicalSize::FixedBytes((policy.filter_scan_groups * policy.reduce_phase1_width) as u64 * 4);
+    let worker_count_size = LogicalSize::FixedBytes(candidate.scan_worker_count() as u64 * 4);
     [
         (CompilerResourceKind::FilterFlags, element_count_size.clone()),
         (CompilerResourceKind::FilterOffsets, element_count_size),

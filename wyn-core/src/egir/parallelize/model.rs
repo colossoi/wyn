@@ -9,25 +9,8 @@ use crate::egir::program::{
     CompilerFlowEndpoint, CompilerResourceFlow, LogicalResourceArena, ResourceOrigin,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct ParallelPolicy {
-    pub(super) reduce_phase1_width: u32,
-    pub(super) reduce_phase2_width: u32,
-    pub(super) filter_scan_groups: u32,
-}
-
-impl Default for ParallelPolicy {
-    fn default() -> Self {
-        Self {
-            reduce_phase1_width: REDUCE_PHASE1_WIDTH,
-            reduce_phase2_width: REDUCE_PHASE2_WIDTH,
-            filter_scan_groups: FILTER_SCAN_GROUPS,
-        }
-    }
-}
-
 pub(super) const REDUCE_PHASE1_WIDTH: u32 = 64;
-const REDUCE_PHASE2_WIDTH: u32 = 256;
+pub(super) const REDUCE_PHASE2_WIDTH: u32 = 256;
 pub(super) const FILTER_SCAN_GROUPS: u32 = 4;
 
 #[derive(Debug, Error)]

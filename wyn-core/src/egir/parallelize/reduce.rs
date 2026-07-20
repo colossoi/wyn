@@ -1,5 +1,6 @@
 //! Parallel reduction candidate analysis, binding, and phase emission.
 
+use super::model::{REDUCE_PHASE1_WIDTH, REDUCE_PHASE2_WIDTH};
 use super::*;
 /// Complete graph-local reduction recipe, consumed before entry mutation.
 pub(super) struct ReduceCandidate {
@@ -11,6 +12,8 @@ pub(super) struct ReduceCandidate {
     map_count: usize,
     result: NodeId,
     accumulators: Vec<ReduceAccumulator>,
+    phase1_width: u32,
+    phase2_width: u32,
 }
 
 struct ReduceAccumulator {
@@ -165,6 +168,8 @@ pub(super) fn analyze_reduce_candidate(
         map_count: n_maps,
         result,
         accumulators,
+        phase1_width: REDUCE_PHASE1_WIDTH,
+        phase2_width: REDUCE_PHASE2_WIDTH,
     }))
 }
 
@@ -195,10 +200,12 @@ impl KernelPlanBuilder<'_, '_> {
             map_count: n_maps,
             result: screma_result_nid,
             accumulators,
+            phase1_width,
+            phase2_width,
             ..
         } = candidate;
         let block_id = site.block;
-        let total_threads = self.policy.reduce_phase1_width;
+        let total_threads = phase1_width;
         let n_accs = accumulators.len();
         let mut drop_locations = Vec::new();
         let mut dropped_writers = std::collections::HashSet::new();
@@ -348,7 +355,7 @@ impl KernelPlanBuilder<'_, '_> {
                 accumulator: accumulator_value,
                 output_stores: &accumulator.stores,
                 output_declarations: &accumulator.outputs,
-                width: self.policy.reduce_phase2_width,
+                width: phase2_width,
             };
             let phase2 = combine.build(self.effect_ids)?;
             phase2s.push(phase2);

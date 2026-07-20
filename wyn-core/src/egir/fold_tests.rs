@@ -1,15 +1,13 @@
 //! Tests for algebraic folding at the TLC-to-EGIR construction boundary.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use polytype::Type;
 use smallvec::smallvec;
 
-use super::Converter;
+use super::{ConversionArenas, Converter};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
-use crate::egir::program::LogicalResourceArenaBuilder;
 use crate::egir::types::{ENode, PureOp};
 use crate::ssa::types::ConstantValue;
 use crate::SymbolTable;
@@ -21,8 +19,7 @@ fn with_converter<T>(test: impl FnOnce(&mut Converter<'_, '_>) -> T) -> T {
     let pure_constants = HashSet::new();
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
-    let region_interner = RefCell::new(crate::egir::program::RegionInterner::default());
-    let resources = RefCell::new(LogicalResourceArenaBuilder::default());
+    let mut arenas = ConversionArenas::default();
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
@@ -30,8 +27,7 @@ fn with_converter<T>(test: impl FnOnce(&mut Converter<'_, '_>) -> T) -> T {
         pure_constants,
         &mut binding_ids,
         &mut effect_ids,
-        &region_interner,
-        &resources,
+        &mut arenas,
     );
     test(&mut converter)
 }

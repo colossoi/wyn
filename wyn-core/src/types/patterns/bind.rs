@@ -17,12 +17,12 @@ impl<'a> TypeChecker<'a> {
     /// Tuple patterns produce a tuple of fresh variables; everything
     /// else produces a single fresh variable (or the annotation, if
     /// the pattern is `Typed`).
-    pub(crate) fn fresh_type_for_pattern(&mut self, pattern: &Pattern) -> Type {
-        match &pattern.kind {
+    pub(crate) fn fresh_type_for_pattern(&mut self, pattern: &Pattern) -> Result<Type> {
+        Ok(match &pattern.kind {
             PatternKind::Tuple(patterns) => {
-                let elem_types: Vec<Type> =
+                let elem_types: Result<Vec<Type>> =
                     patterns.iter().map(|p| self.fresh_type_for_pattern(p)).collect();
-                tuple(elem_types)
+                tuple(elem_types?)
             }
             PatternKind::Vec(patterns) => {
                 // All sub-patterns share the same scalar element type;
@@ -31,11 +31,11 @@ impl<'a> TypeChecker<'a> {
                 vec(patterns.len(), elem)
             }
             PatternKind::Typed(_, annotated_type) => {
-                self.normalize_annotation_type(annotated_type, self.current_module.as_deref())
+                self.normalize_annotation_type(annotated_type, self.current_module.as_deref())?
             }
-            PatternKind::Attributed(_, inner_pattern) => self.fresh_type_for_pattern(inner_pattern),
+            PatternKind::Attributed(_, inner_pattern) => self.fresh_type_for_pattern(inner_pattern)?,
             _ => self.context.new_variable(),
-        }
+        })
     }
 
     /// Bind a pattern that must be irrefutable against `expected_type`.
@@ -147,7 +147,7 @@ impl<'a> TypeChecker<'a> {
             }
             PatternKind::Typed(inner_pattern, annotated_type) => {
                 let normalized =
-                    self.normalize_annotation_type(annotated_type, self.current_module.as_deref());
+                    self.normalize_annotation_type(annotated_type, self.current_module.as_deref())?;
                 self.context.unify(&normalized, expected_type).map_err(|_| {
                     err_type_at!(
                         pattern.h.span,

@@ -1,5 +1,6 @@
 //! Parallel scan candidate analysis, binding, and phase emission.
 
+use super::model::REDUCE_PHASE1_WIDTH;
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -233,6 +234,7 @@ pub(super) struct ScanCandidate {
     scan_output_view_operand: usize,
     scan_output_storage: SemanticResourceRef,
     scan_output_view_type: Type<TypeName>,
+    phase1_width: u32,
 }
 
 pub(super) struct BoundScan {
@@ -298,6 +300,7 @@ pub(super) fn analyze_scan_candidate(
         scan_output_view_operand: scan_output.slot,
         scan_output_storage,
         scan_output_view_type,
+        phase1_width: REDUCE_PHASE1_WIDTH,
     }))
 }
 
@@ -319,7 +322,6 @@ impl KernelPlanBuilder<'_, '_> {
         entry: &mut crate::egir::program::PlannedEntry,
         analysis: BoundScan,
     ) -> error::Result<Vec<crate::egir::program::PlannedEntry>> {
-        let total_threads = self.policy.reduce_phase1_width;
         let ScanCandidate {
             site,
             scratch_type: elem_ty,
@@ -334,6 +336,7 @@ impl KernelPlanBuilder<'_, '_> {
             scan_output_view_operand: scan_output_view_op,
             scan_output_storage,
             scan_output_view_type: orig_scan_output_view_ty,
+            phase1_width: total_threads,
             ..
         } = analysis.candidate;
         let block_id = site.block;

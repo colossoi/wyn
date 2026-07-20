@@ -112,8 +112,12 @@ struct GlobalContext<'a> {
     top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
     constants_by_name: &'a LookupMap<String, SymbolId>,
     symbols: &'a SymbolTable,
-    region_interner: &'a std::cell::RefCell<crate::egir::program::RegionInterner>,
-    resources: &'a std::cell::RefCell<LogicalResourceArenaBuilder>,
+}
+
+#[derive(Default)]
+struct ConversionArenas {
+    regions: crate::egir::program::RegionInterner,
+    resources: LogicalResourceArenaBuilder,
 }
 
 impl<'a> GlobalContext<'a> {
@@ -122,6 +126,7 @@ impl<'a> GlobalContext<'a> {
         pure_constants: &LookupSet<String>,
         binding_ids: &'b mut crate::IdSource<u32>,
         effect_ids: &'b mut crate::IdSource<EffectToken>,
+        arenas: &'b mut ConversionArenas,
     ) -> Converter<'a, 'b> {
         Converter::new(
             self.top_level,
@@ -130,8 +135,7 @@ impl<'a> GlobalContext<'a> {
             pure_constants.clone(),
             binding_ids,
             effect_ids,
-            self.region_interner,
-            self.resources,
+            arenas,
         )
     }
 }
@@ -157,17 +161,14 @@ pub fn run(
 
     let constants_by_name = program.value_defs_by_name();
 
-    // Region interner shared by every converter, then handed to `SemanticProgram` so
-    // the function arena keys agree with the SegBody indices built here.
-    let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
-    let resource_registry = std::cell::RefCell::new(LogicalResourceArenaBuilder::default());
+    // Program-level arenas are borrowed by one converter at a time, then
+    // handed intact to the semantic program.
+    let mut arenas = ConversionArenas::default();
 
     let ctx = GlobalContext {
         top_level: &top_level,
         constants_by_name: &constants_by_name,
         symbols,
-        region_interner: &region_interner,
-        resources: &resource_registry,
     };
 
     // Phase 1: detect pure constants. We elaborate each arity-0 def's body
@@ -186,7 +187,7 @@ pub fn run(
         }
         let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
 
-        let mut converter = ctx.new_converter(&pure_constant_names, binding_ids, effect_ids);
+        let mut converter = ctx.new_converter(&pure_constant_names, binding_ids, effect_ids, &mut arenas);
         if let Ok(result_nid) = converter.convert_term(&def.body) {
             converter.set_return(Some(result_nid));
             let (mut graph, control_headers) = converter.into_graph_parts();
@@ -218,7 +219,14 @@ pub fn run(
                 if pure_constant_names.contains(def_name) {
                     continue;
                 }
-                match convert_function(def, &ctx, &pure_constant_names, binding_ids, effect_ids)? {
+                match convert_function(
+                    def,
+                    &ctx,
+                    &pure_constant_names,
+                    binding_ids,
+                    effect_ids,
+                    &mut arenas,
+                )? {
                     ConvertedFunc::Extern(f) => externs.push(f),
                     ConvertedFunc::Regular(fe) => functions.push(fe),
                 }
@@ -236,24 +244,17 @@ pub fn run(
                     entry_input_bounds,
                     binding_ids,
                     effect_ids,
+                    &mut arenas,
                 )?;
                 entry_points.push(ep);
             }
         }
     }
 
-    // Converters are done borrowing the interner; reclaim it for the arena.
-    drop(ctx);
-    let mut semantic = RawProgram::new(
-        functions,
-        externs,
-        entry_points,
-        constants,
-        pipeline,
-        region_interner.into_inner(),
-    );
+    let ConversionArenas { regions, resources } = arenas;
+    let mut semantic = RawProgram::new(functions, externs, entry_points, constants, pipeline, regions);
     semantic.input_names = seed.input_names;
-    let (by_binding, resources) = resource_registry.into_inner().finish().map_err(|resource| {
+    let (by_binding, resources) = resources.finish().map_err(|resource| {
         ConvertError::Internal(format!(
             "semantic resource {resource:?} was referenced but never declared"
         ))
@@ -277,6 +278,7 @@ fn convert_function<'a>(
     pure_constants: &LookupSet<String>,
     binding_ids: &'a mut crate::IdSource<u32>,
     effect_ids: &'a mut crate::IdSource<EffectToken>,
+    arenas: &'a mut ConversionArenas,
 ) -> Result<ConvertedFunc, ConvertError> {
     let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?.to_string();
@@ -304,7 +306,7 @@ fn convert_function<'a>(
         .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))
         .collect::<Result<_, ConvertError>>()?;
 
-    let mut converter = ctx.new_converter(pure_constants, binding_ids, effect_ids);
+    let mut converter = ctx.new_converter(pure_constants, binding_ids, effect_ids, arenas);
     for (i, (sym, ty)) in params.iter().enumerate() {
         let nid = converter.graph.add_func_param(i, ty.clone());
         converter.locals.insert(*sym, nid);
@@ -341,10 +343,7 @@ fn convert_function<'a>(
 }
 
 /// Translate descriptor sizing metadata into stable logical-resource sizes.
-fn logical_size(
-    resources: &std::cell::RefCell<LogicalResourceArenaBuilder>,
-    length: Option<&BufferLen>,
-) -> LogicalSize {
+fn logical_size(resources: &mut LogicalResourceArenaBuilder, length: Option<&BufferLen>) -> LogicalSize {
     match length {
         Some(BufferLen::Fixed { bytes }) => LogicalSize::FixedBytes(*bytes),
         Some(BufferLen::LikeInput {
@@ -353,7 +352,7 @@ fn logical_size(
             elem_bytes,
             src_elem_bytes,
         }) => LogicalSize::LikeResource {
-            resource: resources.borrow_mut().host_id(BindingRef::new(*set, *binding)),
+            resource: resources.host_id(BindingRef::new(*set, *binding)),
             elem_bytes: *elem_bytes,
             src_elem_bytes: *src_elem_bytes,
         },
@@ -382,24 +381,27 @@ fn literal_binding(args: &[Term], intrinsic: &str) -> Result<BindingRef, Convert
 fn entry_resource_declarations(
     inputs: &[EntryInput],
     outputs: &[EntryOutput],
-    resources: &std::cell::RefCell<LogicalResourceArenaBuilder>,
+    resources: &mut LogicalResourceArenaBuilder,
 ) -> Vec<SemanticResourceDecl> {
     let mut declarations = Vec::new();
-    let mut declare =
-        |binding: BindingRef, role: interface::StorageRole, elem_ty: Type<TypeName>, size: LogicalSize| {
-            let resource = resources.borrow_mut().declare_host(binding, elem_ty.clone(), size.clone());
-            if !declarations
-                .iter()
-                .any(|item: &SemanticResourceDecl| item.resource == SemanticResourceRef(resource))
-            {
-                declarations.push(SemanticResourceDecl {
-                    resource: SemanticResourceRef(resource),
-                    role,
-                    elem_ty,
-                    size,
-                });
-            }
-        };
+    let mut declare = |resources: &mut LogicalResourceArenaBuilder,
+                       binding: BindingRef,
+                       role: interface::StorageRole,
+                       elem_ty: Type<TypeName>,
+                       size: LogicalSize| {
+        let resource = resources.declare_host(binding, elem_ty.clone(), size.clone());
+        if !declarations
+            .iter()
+            .any(|item: &SemanticResourceDecl| item.resource == SemanticResourceRef(resource))
+        {
+            declarations.push(SemanticResourceDecl {
+                resource: SemanticResourceRef(resource),
+                role,
+                elem_ty,
+                size,
+            });
+        }
+    };
     for input in inputs {
         match &input.kind {
             EntryInputKind::Storage {
@@ -409,10 +411,10 @@ fn entry_resource_declarations(
             } => {
                 let size = logical_size(resources, length.as_ref());
                 let elem_ty = input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone());
-                declare(*binding, interface::StorageRole::Input, elem_ty, size);
+                declare(resources, *binding, interface::StorageRole::Input, elem_ty, size);
             }
             EntryInputKind::StorageImage { binding, .. } => {
-                resources.borrow_mut().declare_host(*binding, input.ty.clone(), LogicalSize::Unspecified);
+                resources.declare_host(*binding, input.ty.clone(), LogicalSize::Unspecified);
             }
             _ => {}
         }
@@ -427,7 +429,7 @@ fn entry_resource_declarations(
         };
         let size = logical_size(resources, length.as_ref());
         let elem_ty = output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone());
-        declare(*binding, interface::StorageRole::Output, elem_ty, size);
+        declare(resources, *binding, interface::StorageRole::Output, elem_ty, size);
     }
     declarations
 }
@@ -442,6 +444,7 @@ fn convert_entry_point(
     input_slice_bounds_for_entry: Option<&LookupMap<SymbolId, BufferLen>>,
     binding_ids: &mut crate::IdSource<u32>,
     effect_ids: &mut crate::IdSource<EffectToken>,
+    arenas: &mut ConversionArenas,
 ) -> Result<RawEntry, ConvertError> {
     use crate::flow::ExecutionModel;
 
@@ -458,7 +461,7 @@ fn convert_entry_point(
         .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))
         .collect::<Result<_, ConvertError>>()?;
 
-    let mut converter = ctx.new_converter(pure_constants, binding_ids, effect_ids);
+    let mut converter = ctx.new_converter(pure_constants, binding_ids, effect_ids, arenas);
 
     // Build entry inputs alongside the symbol → NodeId bindings. A compute
     // entry param that's a tuple-of-unsized-arrays gets one storage binding
@@ -678,7 +681,8 @@ fn convert_entry_point(
     };
 
     let slot_sources = std::mem::take(&mut converter.output_sources);
-    let mut resource_declarations = entry_resource_declarations(&inputs, &outputs, ctx.resources);
+    let mut resource_declarations =
+        entry_resource_declarations(&inputs, &outputs, &mut converter.arenas.resources);
     resource_declarations.extend(std::mem::take(&mut converter.extra_resource_declarations));
     let (graph, control_headers) = converter.into_graph_parts();
     let output_count = outputs.len();
@@ -775,10 +779,8 @@ struct Converter<'a, 'b> {
     /// Compiler-introduced logical resource declarations accumulated during
     /// body conversion (runtime `filter` scratch buffers).
     extra_resource_declarations: Vec<SemanticResourceDecl>,
-    /// Program-wide region interner, shared across every converter so SegBody
-    /// region indices agree with the final function arena.
-    region_interner: &'a std::cell::RefCell<crate::egir::program::RegionInterner>,
-    resources: &'a std::cell::RefCell<LogicalResourceArenaBuilder>,
+    /// Program-wide arenas borrowed exclusively for this conversion.
+    arenas: &'b mut ConversionArenas,
 }
 
 impl<'a, 'b> Converter<'a, 'b> {
@@ -789,8 +791,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         pure_constants: LookupSet<String>,
         binding_ids: &'b mut crate::IdSource<u32>,
         effect_ids: &'b mut crate::IdSource<EffectToken>,
-        region_interner: &'a std::cell::RefCell<crate::egir::program::RegionInterner>,
-        resources: &'a std::cell::RefCell<LogicalResourceArenaBuilder>,
+        arenas: &'b mut ConversionArenas,
     ) -> Self {
         let graph = EGraph::new();
         let entry = graph.skeleton.entry;
@@ -809,14 +810,13 @@ impl<'a, 'b> Converter<'a, 'b> {
             output_sources: Vec::new(),
             binding_ids,
             extra_resource_declarations: Vec::new(),
-            region_interner,
-            resources,
+            arenas,
         }
     }
 
     /// Resolve a callable name to its region index, interning it on first use.
-    fn region(&self, name: impl AsRef<str>) -> RegionId {
-        self.region_interner.borrow_mut().intern(name.as_ref())
+    fn region(&mut self, name: impl AsRef<str>) -> RegionId {
+        self.arenas.regions.intern(name.as_ref())
     }
 
     /// Intern a pure node, attaching the current term's span (if any).
@@ -841,7 +841,7 @@ impl<'a, 'b> Converter<'a, 'b> {
 
     fn emit_storage_view(&mut self, binding: BindingRef, view_ty: Type<TypeName>) -> NodeId {
         let elem_ty = view_ty.elem_type().cloned().unwrap_or_else(|| view_ty.clone());
-        let resource = self.resources.borrow_mut().declare_host(binding, elem_ty, LogicalSize::Unspecified);
+        let resource = self.arenas.resources.declare_host(binding, elem_ty, LogicalSize::Unspecified);
         super::graph_ops::intern_resource_view(&mut self.graph, resource, view_ty, self.current_span)
     }
 
@@ -1214,9 +1214,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     self.lower_storage_store(args)
                 } else if *id == known.storage_len && args.len() == 2 {
                     let binding = literal_binding(args, "storage_len").ok();
-                    if let Some(resource) =
-                        binding.map(|binding| self.resources.borrow_mut().host_id(binding))
-                    {
+                    if let Some(resource) = binding.map(|binding| self.arenas.resources.host_id(binding)) {
                         Ok(self.intern_pure(
                             PureOp::ResourceLen(SemanticResourceRef(resource)),
                             smallvec![],
@@ -1243,7 +1241,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                                 .into(),
                         )
                     })?;
-                    let resource = SemanticResourceRef(self.resources.borrow_mut().host_id(binding));
+                    let resource = SemanticResourceRef(self.arenas.resources.host_id(binding));
                     let coord = self.convert_term(&args[1])?;
                     Ok(self.intern_pure(PureOp::StorageImageLoad(resource), smallvec![coord], ty))
                 } else {
@@ -1371,7 +1369,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     .into(),
             )
         })?;
-        let resource = SemanticResourceRef(self.resources.borrow_mut().host_id(binding));
+        let resource = SemanticResourceRef(self.arenas.resources.host_id(binding));
         let arg_nids: SmallVec<[NodeId; 4]> =
             args[1..].iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
@@ -2095,13 +2093,14 @@ impl<'a, 'b> Converter<'a, 'b> {
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
         // Singleton map: its one lane reads every input.
         let map_input_indices = vec![(0..input_arr_types.len()).map(screma::InputId).collect::<Vec<_>>()];
+        let map_region = self.region(f_name);
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op::Map {
                 lanes: screma::Lanes {
                     inputs: input_arr_types.into_iter().map(|array| SoacInputType { array }).collect(),
                     maps: vec![screma::Map {
                         body: SegBody {
-                            region: self.region(f_name),
+                            region: map_region,
                             captures: capture_nids,
                         },
                         input_indices: map_input_indices.into_iter().next().unwrap_or_default(),
@@ -2158,12 +2157,13 @@ impl<'a, 'b> Converter<'a, 'b> {
         // `[dest_view, inputs..]` — captures live on the `SegBody`.
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![dest_view];
         operands.extend_from_slice(&input_nids);
+        let body_region = self.region(func);
 
         Ok(self.emit_soac(
             Soac::Hist(hist::Op {
                 body: hist::Body {
                     body: SegBody {
-                        region: self.region(func),
+                        region: body_region,
                         captures: capture_nids,
                     },
                     inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
@@ -2198,6 +2198,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         // reduce_op (phase 2 combiner).
         let operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
+        let op_region = self.region(op_name);
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op::Reduce {
                 lanes: screma::Lanes {
@@ -2207,11 +2208,11 @@ impl<'a, 'b> Converter<'a, 'b> {
                 operators: screma::NonEmpty {
                     first: screma::Operator {
                         step: SegBody {
-                            region: self.region(op_name.clone()),
+                            region: op_region,
                             captures: capture_nids,
                         },
                         combine: SegBody {
-                            region: self.region(op_name),
+                            region: op_region,
                             captures: vec![],
                         },
                         input_indices: vec![screma::InputId(0)],
@@ -2269,6 +2270,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 .unwrap_or_else(|| result_ty.clone())
         };
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
+        let op_region = self.region(op_name);
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op::Scan {
                 lanes: screma::Lanes {
@@ -2278,11 +2280,11 @@ impl<'a, 'b> Converter<'a, 'b> {
                 operators: screma::NonEmpty {
                     first: screma::Operator {
                         step: SegBody {
-                            region: self.region(op_name.clone()),
+                            region: op_region,
                             captures: capture_nids,
                         },
                         combine: SegBody {
-                            region: self.region(op_name),
+                            region: op_region,
                             captures: vec![],
                         },
                         input_indices: vec![screma::InputId(0)],
@@ -2389,12 +2391,12 @@ impl<'a, 'b> Converter<'a, 'b> {
         // after producer fusion exposes the actual input resource/domain.
         let scratch_size = input_binding
             .map(|binding| LogicalSize::LikeResource {
-                resource: self.resources.borrow_mut().host_id(binding),
+                resource: self.arenas.resources.host_id(binding),
                 elem_bytes: output_elem_bytes,
                 src_elem_bytes: input_elem_bytes,
             })
             .unwrap_or(LogicalSize::Unspecified);
-        let scratch_out = self.resources.borrow_mut().allocate_compiler(
+        let scratch_out = self.arenas.resources.allocate_compiler(
             CompilerResource::new(CompilerResourceKind::FilterScratch, None, 0),
             output_elem_ty.clone(),
             scratch_size.clone(),
