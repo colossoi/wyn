@@ -312,12 +312,12 @@ impl<R> EndpointPlan<R> {
 
 /// Authoritative target recipes indexed by the endpoint that owns the seeded
 /// kernel. Sequential policy deliberately carries no parallel recipe state.
-pub(super) enum CandidateIndex<R = PlannedRecipe> {
+pub(super) enum RecipeIndex<R = PlannedRecipe> {
     Sequential,
     Parallel(HashMap<CompilerFlowEndpoint, EndpointPlan<R>>),
 }
 
-impl CandidateIndex<AnalyzedRecipe> {
+impl RecipeIndex<AnalyzedRecipe> {
     fn parallel() -> Self {
         Self::Parallel(HashMap::new())
     }
@@ -325,7 +325,7 @@ impl CandidateIndex<AnalyzedRecipe> {
     fn insert(&mut self, endpoint: CompilerFlowEndpoint, plan: EndpointPlan<AnalyzedRecipe>) -> Result<()> {
         let Self::Parallel(endpoints) = self else {
             return Err(ParallelizeError::Invalid(
-                "cannot add a parallel recipe to a sequential candidate index".into(),
+                "cannot add a parallel recipe to a sequential recipe index".into(),
             ));
         };
         if endpoints.insert(endpoint, plan).is_some() {
@@ -336,11 +336,11 @@ impl CandidateIndex<AnalyzedRecipe> {
         Ok(())
     }
 
-    fn bind(self, resources: &ScratchBindings) -> CandidateIndex {
+    fn bind_scratch(self, resources: &ScratchBindings) -> RecipeIndex {
         let Self::Parallel(endpoints) = self else {
-            return CandidateIndex::sequential();
+            return RecipeIndex::sequential();
         };
-        CandidateIndex::Parallel(
+        RecipeIndex::Parallel(
             endpoints
                 .into_iter()
                 .map(|(endpoint, plan)| {
@@ -359,7 +359,7 @@ impl CandidateIndex<AnalyzedRecipe> {
     }
 }
 
-impl CandidateIndex {
+impl RecipeIndex {
     pub(super) fn sequential() -> Self {
         Self::Sequential
     }
@@ -396,15 +396,15 @@ impl ScratchBindings {
     }
 }
 
-pub(super) struct ParallelPlan {
-    candidates: CandidateIndex<AnalyzedRecipe>,
+pub(super) struct AnalyzedPlan {
+    recipes: RecipeIndex<AnalyzedRecipe>,
     requests: Vec<ScratchRequest>,
 }
 
-impl ParallelPlan {
+impl AnalyzedPlan {
     /// Allocate exactly the scratch requested by successfully selected recipes.
     /// This is the first mutation after immutable analysis has completed.
-    pub(super) fn allocate(mut self, inner: &mut AllocatedProgram) -> Result<CandidateIndex> {
+    pub(super) fn allocate_scratch(mut self, inner: &mut AllocatedProgram) -> Result<RecipeIndex> {
         self.requests.sort_by_key(|request| {
             (
                 request.endpoint,
@@ -423,7 +423,7 @@ impl ParallelPlan {
             );
             bindings.ids.insert(request.key, id);
         }
-        Ok(self.candidates.bind(&bindings))
+        Ok(self.recipes.bind_scratch(&bindings))
     }
 }
 
@@ -448,15 +448,15 @@ fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBinding
 
 /// Analyze every projected endpoint once. Recipes retain their projected body
 /// and graph-local handles until emission consumes the endpoint plan.
-pub(super) fn analyze(inner: &AllocatedProgram, policy: ParallelPolicy) -> Result<ParallelPlan> {
+pub(super) fn analyze(inner: &AllocatedProgram, policy: ParallelPolicy) -> Result<AnalyzedPlan> {
     let resources = ResourceIndex::new(&inner.resources);
-    let mut candidates = CandidateIndex::parallel();
+    let mut recipes = RecipeIndex::parallel();
     let mut requests = Vec::new();
     for (endpoint, entry) in inner.entries_with_endpoints() {
         let plan = analyze_endpoint(entry, endpoint, policy, &resources, &mut requests)?;
-        candidates.insert(endpoint, plan)?;
+        recipes.insert(endpoint, plan)?;
     }
-    Ok(ParallelPlan { candidates, requests })
+    Ok(AnalyzedPlan { recipes, requests })
 }
 
 fn analyze_endpoint(

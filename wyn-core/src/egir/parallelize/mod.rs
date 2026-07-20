@@ -101,14 +101,12 @@ pub(crate) fn plan(
     effect_ids: &mut IdSource<EffectToken>,
     profile: LoweringProfile,
 ) -> Result<(PhysicalProgram, KernelPlanSummary), ConvertError> {
-    let descriptor = inner.pipeline.clone();
-    let kernel_plan = if profile.schedule == SchedulePolicy::Parallel {
-        build_parallel_plan(&mut inner, effect_ids)
-    } else {
-        build_sequential_plan(&inner, effect_ids)
+    let kernel_plan = match profile.schedule {
+        SchedulePolicy::Parallel => build_parallel_plan(&mut inner, effect_ids),
+        SchedulePolicy::SingleStage => build_sequential_plan(&inner, effect_ids),
     }?;
 
-    kernel_plan.finalize(inner, binding_ids, profile, descriptor)
+    kernel_plan.finalize(inner, binding_ids, profile)
 }
 
 /// Analyze target recipes, allocate their scratch resources, and build the
@@ -118,9 +116,9 @@ fn build_parallel_plan(
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> error::Result<schedule::KernelPlan> {
     let policy = ParallelPolicy::default();
-    let plan = planning::analyze(inner, policy)?;
-    let candidates = plan.allocate(inner)?;
-    let builder = KernelPlanBuilder::new(inner, candidates, policy, effect_ids)?;
+    let analysis = planning::analyze(inner, policy)?;
+    let recipes = analysis.allocate_scratch(inner)?;
+    let builder = KernelPlanBuilder::new(inner, recipes, policy, effect_ids)?;
     builder.build_parallel_schedule(inner)
 }
 
@@ -131,8 +129,8 @@ fn build_sequential_plan(
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> error::Result<schedule::KernelPlan> {
     let policy = ParallelPolicy::default();
-    let candidates = planning::CandidateIndex::sequential();
-    let builder = KernelPlanBuilder::new(inner, candidates, policy, effect_ids)?;
+    let recipes = planning::RecipeIndex::sequential();
+    let builder = KernelPlanBuilder::new(inner, recipes, policy, effect_ids)?;
     builder.build_sequential_schedule(inner)
 }
 
@@ -141,7 +139,7 @@ struct KernelPlanBuilder<'resources, 'effects> {
     seeded: schedule::SeededKernels,
     resources: model::ResourceIndex<'resources>,
     flows: model::ResourceFlowIndex,
-    candidates: planning::CandidateIndex,
+    recipes: planning::RecipeIndex,
     policy: ParallelPolicy,
     effect_ids: &'effects mut crate::IdSource<EffectToken>,
 }
@@ -197,7 +195,7 @@ impl planning::PlannedKernel {
 impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
     fn new(
         inner: &'resources AllocatedProgram,
-        candidates: planning::CandidateIndex,
+        recipes: planning::RecipeIndex,
         policy: ParallelPolicy,
         effect_ids: &'effects mut crate::IdSource<EffectToken>,
     ) -> error::Result<Self> {
@@ -214,7 +212,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
             seeded,
             resources,
             flows,
-            candidates,
+            recipes,
             policy,
             effect_ids,
         })
@@ -294,7 +292,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         endpoint: CompilerFlowEndpoint,
         kernel: schedule::KernelId,
     ) -> error::Result<()> {
-        let Some(plan) = self.candidates.take_endpoint(endpoint)? else {
+        let Some(plan) = self.recipes.take_endpoint(endpoint)? else {
             return Ok(());
         };
         let (split_outputs, primary, siblings) = plan.into_parts();
@@ -331,7 +329,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
                 )
             })
             .collect();
-        self.schedule.install_chain(kernel, schedule::KernelChainSpec::new(recipe).with_after(after))?;
+        self.schedule.install_chain(kernel, Vec::new(), recipe, after)?;
         Ok(())
     }
 
@@ -365,7 +363,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
                 )
             })
             .collect();
-        self.schedule.install_chain(kernel, schedule::KernelChainSpec::new(recipe).with_after(after))?;
+        self.schedule.install_chain(kernel, Vec::new(), recipe, after)?;
         Ok(())
     }
 

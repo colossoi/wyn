@@ -4,7 +4,6 @@ use super::KernelPlan;
 use crate::egir::from_tlc::ConvertError;
 use crate::egir::program::{AllocatedProgram, PhysicalProgram, PhysicalResourceTable};
 use crate::egir::publish::PipelineDescriptorPublish;
-use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::{IdSource, LoweringProfile, SchedulePolicy};
 
 impl KernelPlan {
@@ -13,8 +12,9 @@ impl KernelPlan {
         inner: AllocatedProgram,
         binding_ids: &mut IdSource<u32>,
         profile: LoweringProfile,
-        mut descriptor: PipelineDescriptor,
     ) -> Result<(PhysicalProgram, super::KernelPlanSummary), ConvertError> {
+        let mut inner = inner;
+        let mut descriptor = std::mem::take(&mut inner.pipeline);
         #[cfg(debug_assertions)]
         {
             let verification = self.validate_for_finalization(&inner.resources, &descriptor);

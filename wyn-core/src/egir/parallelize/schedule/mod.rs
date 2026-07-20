@@ -410,35 +410,6 @@ impl PhaseSpec {
     }
 }
 
-/// A complete, transactionally installed phase chain. The existing kernel id
-/// is retained by `anchor`; phases before and after it receive fresh ids only
-/// after every recipe has closed successfully.
-pub(super) struct KernelChainSpec {
-    before: Vec<PhaseSpec>,
-    anchor: KernelRecipeSpec,
-    after: Vec<PhaseSpec>,
-}
-
-impl KernelChainSpec {
-    pub(super) fn new(anchor: KernelRecipeSpec) -> Self {
-        Self {
-            before: Vec::new(),
-            anchor,
-            after: Vec::new(),
-        }
-    }
-
-    pub(super) fn with_before(mut self, before: Vec<PhaseSpec>) -> Self {
-        self.before = before;
-        self
-    }
-
-    pub(super) fn with_after(mut self, after: Vec<PhaseSpec>) -> Self {
-        self.after = after;
-        self
-    }
-}
-
 impl KernelRecipe {
     fn close(spec: KernelRecipeSpec) -> Result<Self, String> {
         let (body, kind, filter_plan) = match spec {
@@ -1065,21 +1036,21 @@ impl KernelPlan {
         Ok(kernel)
     }
 
+    /// Install a complete phase chain transactionally. `kernel` remains the
+    /// anchor identity; surrounding phases receive ids only after their
+    /// recipes close successfully.
     pub(super) fn install_chain(
         &mut self,
         kernel: KernelId,
-        spec: KernelChainSpec,
+        before: Vec<PhaseSpec>,
+        anchor: KernelRecipeSpec,
+        after: Vec<PhaseSpec>,
     ) -> Result<(), KernelMutationError> {
         let (list_id, index) = self.location(kernel)?;
         if list_id == PhaseListId::Graphics {
             return Err(KernelMutationError::UnknownKernel(kernel));
         }
         let original = self.phase(kernel).clone();
-        let KernelChainSpec {
-            before,
-            anchor,
-            after,
-        } = spec;
         let source_entry = original.source_entry;
         let flow_source = original.flow_source;
         let mut chain = Vec::with_capacity(before.len() + after.len() + 1);

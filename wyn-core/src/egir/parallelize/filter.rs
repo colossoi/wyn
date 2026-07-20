@@ -254,7 +254,9 @@ impl FilterKernelFamily {
         );
         schedule.install_chain(
             kernel,
-            schedule::KernelChainSpec::new(scatter).with_before(vec![flags, scan, combine, apply_offsets]),
+            vec![flags, scan, combine, apply_offsets],
+            scatter,
+            Vec::new(),
         )?;
         Ok(())
     }

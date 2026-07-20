@@ -125,11 +125,9 @@ fn mutation_handles_survive_entry_point_changes_and_chain_insertions() {
 
     plan.install_chain(
         root,
-        KernelChainSpec::new(KernelRecipeSpec::compute(
-            body("renamed"),
-            ComputeKernelKind::Serial,
-        ))
-        .with_after(vec![
+        Vec::new(),
+        KernelRecipeSpec::compute(body("renamed"), ComputeKernelKind::Serial),
+        vec![
             PhaseSpec::compute(
                 body("child"),
                 DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
@@ -140,7 +138,7 @@ fn mutation_handles_survive_entry_point_changes_and_chain_insertions() {
                 DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
                 ComputeKernelKind::ReduceCombine,
             ),
-        ]),
+        ],
     )
     .unwrap();
     plan.set_output_projection(root, Vec::new()).unwrap();
