@@ -1169,14 +1169,14 @@ entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
     assert!(matches!(
         phases[1].domain,
         KernelDomain::Fixed {
-            x: crate::egir::parallelize::FILTER_SCAN_GROUPS,
+            x: crate::egir::parallelize::tests::FILTER_SCAN_GROUPS,
             y: 1,
             z: 1
         }
     ));
     assert_eq!(
         phases[1].workgroup_size,
-        (crate::egir::parallelize::REDUCE_PHASE1_WIDTH, 1, 1)
+        (crate::egir::parallelize::tests::REDUCE_PHASE1_WIDTH, 1, 1)
     );
     assert!(matches!(
         phases[2].domain,
@@ -1846,9 +1846,11 @@ fn terminal_scan_helpers_are_complete_region_arena_members() {
         !allocated.inner.functions.iter().any(|function| function.name.ends_with("_scan_op_swap")),
         "planner-generated scan helper leaked into semantic EGIR"
     );
-    let planned_callables =
-        crate::egir::parallelize::planned_callable_names(&mut allocated.inner, &mut allocated.effect_ids)
-            .expect("parallel schedule");
+    let planned_callables = crate::egir::parallelize::tests::planned_callable_names(
+        &mut allocated.inner,
+        &mut allocated.effect_ids,
+    )
+    .expect("parallel schedule");
     assert!(
         planned_callables.iter().any(|name| name.ends_with("_scan_op_swap")),
         "scan helper must be owned by the kernel plan"
@@ -10620,7 +10622,7 @@ entry cull(xs: []u32,
         matches!(
             scan.domain,
             KernelDomain::Fixed {
-                x: crate::egir::parallelize::FILTER_SCAN_GROUPS,
+                x: crate::egir::parallelize::tests::FILTER_SCAN_GROUPS,
                 y: 1,
                 z: 1
             }
@@ -10630,7 +10632,7 @@ entry cull(xs: []u32,
     );
     assert_eq!(
         scan.workgroup_size,
-        (crate::egir::parallelize::REDUCE_PHASE1_WIDTH, 1, 1)
+        (crate::egir::parallelize::tests::REDUCE_PHASE1_WIDTH, 1, 1)
     );
 
     let lowered = crate::compile_thru_spirv(src).expect("image-reading filter emits SPIR-V");

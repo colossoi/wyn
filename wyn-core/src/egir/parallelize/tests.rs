@@ -1,11 +1,23 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use super::projection::side_effect_output_slots_from_routes;
 use super::*;
 use crate::ast::Span;
 use crate::egir::program::{OutputRoute, OutputSlotId, SlotSource};
 use crate::egir::soac::screma;
 use crate::egir::types::{EffectOp, EffectToken, Semantic};
 use crate::flow::ExecutionModel;
+
+pub(crate) const FILTER_SCAN_GROUPS: u32 = model::FILTER_SCAN_GROUPS;
+pub(crate) const REDUCE_PHASE1_WIDTH: u32 = model::REDUCE_PHASE1_WIDTH;
+
+pub(crate) fn planned_callable_names(
+    inner: &mut AllocatedProgram,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) -> std::result::Result<Vec<String>, String> {
+    let plan = build_parallel_plan(inner, effect_ids).map_err(|error| error.to_string())?;
+    Ok(plan.generated_callables().map(|function| function.name.clone()).collect())
+}
 
 /// Region indices used by the operator fixtures below: step is region 0,
 /// combine is region 1. Opaque indices stand in for the named regions a

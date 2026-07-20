@@ -37,8 +37,6 @@ mod projection;
 mod reduce;
 mod scan;
 mod schedule;
-#[cfg(test)]
-mod test_support;
 
 use filter::analyze_filter_candidates;
 use kernel::{
@@ -51,8 +49,6 @@ use model::{FallbackReason, RecipeSelection};
 use planning::{
     make_screma_serial, parallel_recipe_effect, ParallelReduce, ParallelScan, SerialScremaRecipe,
 };
-#[cfg(test)]
-use projection::side_effect_output_slots_from_routes;
 use projection::{project_kernel_body, split_multidomain_seg_maps, ProjectionSpec, UnionFind};
 use reduce::{analyze_reduce_candidate, BoundReduce};
 use scan::{analyze_scan_candidate, BoundScan, ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
@@ -61,9 +57,6 @@ pub use schedule::{
     EntryAbiProjection, KernelDomain, KernelId, KernelKind, KernelPhaseSummary, KernelPlacement,
     KernelPlanSummary, OutputRouteProjection, ScheduledResource,
 };
-#[cfg(test)]
-pub(crate) use test_support::{planned_callable_names, FILTER_SCAN_GROUPS, REDUCE_PHASE1_WIDTH};
-
 use std::collections::HashSet;
 
 use crate::LookupMap;
@@ -370,5 +363,4 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
 }
 
 #[cfg(test)]
-#[path = "../parallelize_tests.rs"]
-mod parallelize_tests;
+pub(crate) mod tests;
