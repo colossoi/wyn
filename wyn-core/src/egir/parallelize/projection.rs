@@ -36,12 +36,6 @@ impl UnionFind {
 struct ProjectionMetadata {
     parameters: crate::SortedSet<usize>,
     resources: HashSet<ResourceId>,
-    selected_effects: HashSet<SideEffectSite>,
-}
-
-struct ProjectedEntry {
-    entry: program::PlannedEntry,
-    metadata: ProjectionMetadata,
 }
 
 pub(super) struct ProjectionSpec {
@@ -104,7 +98,6 @@ fn projection_metadata(
     source: &program::PlannedEntry,
     projection: &graph_projector::GraphProjection,
     output_routes: &[program::OutputRoute],
-    selected_effects: HashSet<SideEffectSite>,
 ) -> Result<ProjectionMetadata, String> {
     let mut roots = projection
         .graph
@@ -172,7 +165,6 @@ fn projection_metadata(
     Ok(ProjectionMetadata {
         parameters,
         resources,
-        selected_effects,
     })
 }
 
@@ -210,7 +202,7 @@ fn project_kernel_body_effects(
     source: &program::PlannedEntry,
     selected: HashSet<SideEffectSite>,
     spec: ProjectionSpec,
-) -> Result<ProjectedEntry, String> {
+) -> Result<program::PlannedEntry, String> {
     let ProjectionSpec {
         name,
         execution_model,
@@ -222,7 +214,7 @@ fn project_kernel_body_effects(
     let route_values = output_routes.iter().map(|route| route.source.value).collect();
     let projection = graph_projector::GraphProjector::new(&source.graph, &source.control_headers)
         .selected_with_values(selected.clone(), route_values)?;
-    let metadata = projection_metadata(source, &projection, &output_routes, selected)?;
+    let metadata = projection_metadata(source, &projection, &output_routes)?;
     let mut entry = program::PlannedEntry::from_projection(
         projection,
         name,
@@ -237,7 +229,7 @@ fn project_kernel_body_effects(
         output_routes,
     )?;
     compact_projected_entry_interface(&mut entry, &metadata);
-    Ok(ProjectedEntry { entry, metadata })
+    Ok(entry)
 }
 
 fn compact_projected_entry_interface(entry: &mut program::PlannedEntry, metadata: &ProjectionMetadata) {
@@ -279,7 +271,7 @@ fn side_effect_output_slots(entry: &program::PlannedEntry, effect: &SideEffect) 
     side_effect_output_slots_from_routes(&entry.output_routes, effect)
 }
 
-fn is_seg_map(effect: &SideEffect) -> bool {
+fn is_parallel_output(effect: &SideEffect) -> bool {
     matches!(
         &effect.kind,
         SideEffectKind::Soac(SoacEffect(
@@ -289,24 +281,19 @@ fn is_seg_map(effect: &SideEffect) -> bool {
                 ..
             })
         ))
-    )
-}
-
-fn is_parallel_output(effect: &SideEffect) -> bool {
-    is_seg_map(effect)
-        || matches!(
-            &effect.kind,
-            SideEffectKind::Soac(SoacEffect(
-                _,
-                Soac::Filter(filter_soac::Op {
-                    state: filter_soac::SemanticState {
-                        storage: filter_soac::Output::Runtime { .. },
-                        ..
-                    },
+    ) || matches!(
+        &effect.kind,
+        SideEffectKind::Soac(SoacEffect(
+            _,
+            Soac::Filter(filter_soac::Op {
+                state: filter_soac::SemanticState {
+                    storage: filter_soac::Output::Runtime { .. },
                     ..
-                })
-            ))
-        )
+                },
+                ..
+            })
+        ))
+    )
 }
 
 fn is_write_effectful(effect: &SideEffect) -> bool {
@@ -430,7 +417,6 @@ pub(super) fn split_multidomain_seg_maps(
                 (group == root).then_some(SideEffectSite { block, index })
             })
             .collect::<HashSet<_>>();
-        let selected_count = selected.len();
         let outputs = slots
             .iter()
             .map(|slot| {
@@ -455,9 +441,7 @@ pub(super) fn split_multidomain_seg_maps(
             route.slot = program::OutputSlotId(projected_slot);
         }
         let spec = ProjectionSpec::selected_outputs(entry, name, outputs, routes);
-        let projected = project_kernel_body_effects(entry, selected, spec)?;
-        debug_assert_eq!(projected.metadata.selected_effects.len(), selected_count);
-        Ok(projected.entry)
+        project_kernel_body_effects(entry, selected, spec)
     };
 
     let Some((primary_group, sibling_groups)) = groups.split_first() else {

@@ -94,10 +94,6 @@ struct EntrySchedule {
 }
 
 impl KernelPlan {
-    fn summary(&self) -> KernelPlanSummary {
-        KernelPlanSummary::from(self)
-    }
-
     /// Entry ABI records in deterministic descriptor-publication order. The
     /// kernel plan, rather than physical graphs, is the sole authority for
     /// backend-visible entry metadata.
@@ -510,12 +506,6 @@ pub struct OutputRouteProjection {
     pub physical_slot: OutputSlotId,
 }
 
-#[derive(Clone, Debug)]
-struct KernelAbi {
-    source_entry: Option<SemanticEntryId>,
-    output_routes: Vec<OutputRouteProjection>,
-}
-
 /// Ordered phases that share one host binding table.
 #[derive(Clone, Debug)]
 struct ScheduledPipeline {
@@ -541,7 +531,8 @@ struct KernelPhase {
     /// semantic entry ABI of their own.
     flow_source: Option<CompilerFlowEndpoint>,
     recipe: KernelRecipe,
-    abi: KernelAbi,
+    source_entry: Option<SemanticEntryId>,
+    output_routes: Vec<OutputRouteProjection>,
     domain: KernelDomain,
     /// The authoritative selection request. Inferred selections retain their
     /// descriptor baseline while the recipe establishes its final domain.
@@ -575,9 +566,9 @@ impl KernelPhase {
 
     fn abi_projection(&self) -> EntryAbiProjection {
         EntryAbiProjection {
-            source_entry: self.abi.source_entry,
+            source_entry: self.source_entry,
             inputs: (0..self.recipe.entry().inputs.len()).map(InputSlotId).collect(),
-            output_routes: self.abi.output_routes.clone(),
+            output_routes: self.output_routes.clone(),
         }
     }
 
@@ -586,7 +577,7 @@ impl KernelPhase {
         if let DomainSelection::Inferred(baseline) = &self.domain_selection {
             self.domain = inferred_body_domain(&entry, baseline.clone());
         }
-        self.abi.output_routes = output_projection(&entry.output_routes);
+        self.output_routes = output_projection(&entry.output_routes);
     }
 }
 
@@ -987,7 +978,7 @@ impl KernelPlan {
         }
         let (source_entry, flow_source) = {
             let parent = self.phase(parent);
-            (parent.abi.source_entry, parent.flow_source)
+            (parent.source_entry, parent.flow_source)
         };
         let id = self.allocate_kernel_id();
         let phase = phase_from_body(flow_source, source_entry, spec)?;
@@ -1034,7 +1025,7 @@ impl KernelPlan {
         outputs: Vec<OutputSlotId>,
     ) -> Result<(), KernelMutationError> {
         self.location(kernel)?;
-        let source_entry = self.phase(kernel).abi.source_entry;
+        let source_entry = self.phase(kernel).source_entry;
         if let Some(source) = source_entry {
             let entry = self.entry_schedules.get_mut(&source).ok_or_else(|| {
                 KernelMutationError::InvalidKernel(format!(
@@ -1051,7 +1042,7 @@ impl KernelPlan {
                 entry.output_owners.insert(*output, kernel);
             }
         }
-        self.phase_mut(kernel).abi.output_routes = outputs
+        self.phase_mut(kernel).output_routes = outputs
             .into_iter()
             .enumerate()
             .map(|(physical, semantic_slot)| OutputRouteProjection {
@@ -1089,7 +1080,7 @@ impl KernelPlan {
             anchor,
             after,
         } = spec;
-        let source_entry = original.abi.source_entry;
+        let source_entry = original.source_entry;
         let flow_source = original.flow_source;
         let mut chain = Vec::with_capacity(before.len() + after.len() + 1);
         let mut additions = Vec::with_capacity(before.len() + after.len());
@@ -1150,7 +1141,8 @@ impl KernelPlan {
             let Some(entry) = by_name.get(phase.entry_point()) else {
                 continue;
             };
-            let Some(KernelDomain::Elements(DispatchLen::Fixed { count })) = segmented_domain(entry) else {
+            let Some(KernelDomain::Elements(DispatchLen::Fixed { count })) = semantic_domain_entry(entry)
+            else {
                 continue;
             };
             let (wx, wy, wz) = execution_workgroup(&entry.execution_model);
@@ -1359,10 +1351,8 @@ fn phase_from_body(
     let mut phase = KernelPhase {
         flow_source,
         recipe: KernelRecipe::close(recipe)?,
-        abi: KernelAbi {
-            source_entry,
-            output_routes: Vec::new(),
-        },
+        source_entry,
+        output_routes: Vec::new(),
         domain,
         domain_selection: selection,
         flow_resources: Vec::new(),
@@ -1377,7 +1367,8 @@ fn phase_from_materialization(
     requirement: &MaterializationRequirement,
     dependencies: Vec<KernelId>,
 ) -> Result<KernelPhase, String> {
-    let domain = materialization_domain(requirement).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+    let domain =
+        semantic_domain_entry(&requirement.entry).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
     let spec = PhaseSpec::compute(
         PlannedEntry::project(&requirement.entry)?,
         DomainSelection::Explicit(domain),
@@ -1507,14 +1498,6 @@ fn domain_selection_from_stage(
         DispatchSize::Fixed { explicit: false, .. } => DomainSelection::Inferred(domain),
         DispatchSize::DerivedFrom { .. } => DomainSelection::Inferred(domain),
     })
-}
-
-fn segmented_domain(entry: &SemanticEntry) -> Option<KernelDomain> {
-    semantic_domain_entry(entry)
-}
-
-fn materialization_domain(requirement: &MaterializationRequirement) -> Option<KernelDomain> {
-    semantic_domain_entry(&requirement.entry)
 }
 
 fn semantic_domain_entry(entry: &SemanticEntry) -> Option<KernelDomain> {

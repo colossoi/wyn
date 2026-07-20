@@ -36,7 +36,7 @@ impl KernelPlan {
         descriptor.relabel_input_storage_names(&inner.input_names);
         descriptor.rebuild_frame_graph();
 
-        let summary = self.summary();
+        let summary = super::KernelPlanSummary::from(&self);
         let physical = PhysicalProgram::from_plan(
             inner,
             &self,

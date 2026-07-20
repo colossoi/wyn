@@ -35,7 +35,9 @@ pub(super) fn entry(
     entry: PlannedEntry<Semantic>,
     filter_plan: Option<ParallelFilterPlan>,
 ) -> Result<PlannedEntry<Scheduled>, String> {
-    entry.try_map_phase(|_, _, id, soac| schedule_soac(soac, filter_plan).map(|soac| (id, soac)))
+    entry.try_map_phase(|_, _, id, soac| {
+        schedule_soac_with_mode(soac, filter_plan, false).map(|soac| (id, soac))
+    })
 }
 
 pub(in crate::egir) fn graph(
@@ -43,13 +45,6 @@ pub(in crate::egir) fn graph(
     serial: bool,
 ) -> Result<(EGraph<Scheduled>, crate::LookupMap<BlockId, BlockId>), String> {
     graph.try_map_phase(|_, _, id, soac| schedule_soac_with_mode(soac, None, serial).map(|soac| (id, soac)))
-}
-
-fn schedule_soac(
-    soac: Soac<Semantic>,
-    filter_plan: Option<ParallelFilterPlan>,
-) -> Result<Soac<Scheduled>, String> {
-    schedule_soac_with_mode(soac, filter_plan, false)
 }
 
 fn schedule_soac_with_mode(

@@ -10,16 +10,7 @@ impl KernelPlanBuilder<'_, '_> {
         kernel: schedule::KernelId,
         recipe: BoundFilter,
     ) -> error::Result<()> {
-        self.lower_bound_filter(body, kernel, recipe)
-    }
-
-    fn lower_bound_filter(
-        &mut self,
-        filter_entry: crate::egir::program::PlannedEntry,
-        kernel: schedule::KernelId,
-        recipe: BoundFilter,
-    ) -> error::Result<()> {
-        let family = FilterKernelFamilyBuilder::new(self, filter_entry, recipe).build()?;
+        let family = FilterKernelFamilyBuilder::new(self, body, recipe).build()?;
         family.install(kernel, &mut self.schedule)
     }
 }
@@ -190,7 +181,13 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         resource: SemanticResourceRef,
         role: crate::interface::StorageRole,
     ) -> error::Result<SemanticResourceDecl> {
-        filter_resource_declaration(&self.lowering.resources, resource, role, &self.elem_ty)
+        let logical = self.lowering.resources.get(resource.0)?;
+        Ok(SemanticResourceDecl {
+            resource,
+            role,
+            elem_ty: self.elem_ty.clone(),
+            size: logical.size.clone(),
+        })
     }
 }
 
@@ -261,22 +258,6 @@ impl FilterKernelFamily {
         )?;
         Ok(())
     }
-}
-
-fn filter_resource_declaration(
-    resources: &model::ResourceIndex<'_>,
-    reference: SemanticResourceRef,
-    role: crate::interface::StorageRole,
-    elem_ty: &Type<TypeName>,
-) -> error::Result<SemanticResourceDecl> {
-    let resource = reference.0;
-    let logical = resources.get(resource)?;
-    Ok(SemanticResourceDecl {
-        resource: reference,
-        role,
-        elem_ty: elem_ty.clone(),
-        size: logical.size.clone(),
-    })
 }
 
 #[derive(Clone)]

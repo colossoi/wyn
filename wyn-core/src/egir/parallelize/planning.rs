@@ -5,6 +5,9 @@ use std::collections::HashMap;
 use polytype::Type;
 
 use crate::ast::TypeName;
+use crate::egir::soac::screma;
+use crate::egir::types::{EGraph, SideEffect, SideEffectKind, SideEffectSite, Soac, SoacEffect};
+use crate::flow::ExecutionModel;
 
 use super::model::{
     FallbackReason, ParallelPolicy, ParallelizeError, RecipeSelection, ResourceIndex, Result,
@@ -15,6 +18,227 @@ use crate::egir::program::{
 };
 use crate::egir::types::SegExtent;
 
+#[derive(Clone, Copy)]
+pub(super) struct LocatedScrema<'a> {
+    pub site: SideEffectSite,
+    pub effect: &'a SideEffect,
+    pub owner: SemanticOpId,
+    pub op: &'a screma::Op<crate::egir::types::Semantic>,
+}
+
+pub(super) struct ParallelReduce<'a> {
+    located: LocatedScrema<'a>,
+    lanes: &'a screma::Lanes,
+    operators: &'a screma::NonEmpty<screma::Operator>,
+}
+
+pub(super) struct ParallelScan<'a> {
+    located: LocatedScrema<'a>,
+    lanes: &'a screma::Lanes,
+    operators: &'a screma::NonEmpty<screma::Operator>,
+}
+
+#[derive(Clone)]
+pub(super) struct SerialScremaRecipe {
+    site: SideEffectSite,
+    owner: SemanticOpId,
+    op: screma::Op<crate::egir::types::Semantic>,
+}
+
+impl LocatedScrema<'_> {
+    pub(super) fn serial_recipe(&self) -> SerialScremaRecipe {
+        SerialScremaRecipe {
+            site: self.site,
+            owner: self.owner,
+            op: self.op.clone(),
+        }
+    }
+}
+
+impl<'a> ParallelReduce<'a> {
+    fn recognize(
+        located: LocatedScrema<'a>,
+        lanes: &'a screma::Lanes,
+        operators: &'a screma::NonEmpty<screma::Operator>,
+    ) -> RecipeSelection<Self> {
+        if operators.iter().any(|operator| !operator.combine.captures.is_empty()) {
+            return RecipeSelection::Serial(FallbackReason::UnsupportedCaptures);
+        }
+        if lanes.inputs.is_empty() {
+            return RecipeSelection::Serial(FallbackReason::UnsupportedOperationShape);
+        }
+        if !lanes.maps.iter().all(|map| map.destination.is_output_view())
+            || !operators.iter().all(|operator| operator.destination.is_unplaced_fresh())
+        {
+            return RecipeSelection::Serial(FallbackReason::UnsupportedDestination);
+        }
+        RecipeSelection::Parallel(Self {
+            located,
+            lanes,
+            operators,
+        })
+    }
+
+    pub(super) fn serial_recipe(&self) -> SerialScremaRecipe {
+        self.located.serial_recipe()
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        LocatedScrema<'a>,
+        &'a screma::Lanes,
+        &'a screma::NonEmpty<screma::Operator>,
+    ) {
+        (self.located, self.lanes, self.operators)
+    }
+}
+
+impl<'a> ParallelScan<'a> {
+    fn recognize(
+        located: LocatedScrema<'a>,
+        lanes: &'a screma::Lanes,
+        operators: &'a screma::NonEmpty<screma::Operator>,
+    ) -> RecipeSelection<Self> {
+        if !operators.rest.is_empty() || lanes.inputs.len() != 1 {
+            return RecipeSelection::Serial(FallbackReason::UnsupportedOperationShape);
+        }
+        if !operators.first.combine.captures.is_empty() {
+            return RecipeSelection::Serial(FallbackReason::UnsupportedCaptures);
+        }
+        if !lanes.maps.iter().all(|map| map.destination.is_output_view())
+            || !operators.iter().all(|operator| operator.destination.is_output_view())
+        {
+            return RecipeSelection::Serial(FallbackReason::UnsupportedDestination);
+        }
+        RecipeSelection::Parallel(Self {
+            located,
+            lanes,
+            operators,
+        })
+    }
+
+    pub(super) fn serial_recipe(&self) -> SerialScremaRecipe {
+        self.located.serial_recipe()
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        LocatedScrema<'a>,
+        &'a screma::Lanes,
+        &'a screma::NonEmpty<screma::Operator>,
+    ) {
+        (self.located, self.lanes, self.operators)
+    }
+}
+
+enum SegmentedRecipe<'a> {
+    Reduce(ParallelReduce<'a>),
+    Scan(ParallelScan<'a>),
+    Serial(SerialScremaRecipe),
+    Map,
+    Composite(LocatedScrema<'a>),
+}
+
+fn segmented_screma_effect(graph: &EGraph) -> Option<LocatedScrema<'_>> {
+    graph.skeleton.blocks.iter().find_map(|(block, contents)| {
+        contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
+            let SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) = &effect.kind else {
+                return None;
+            };
+            matches!(
+                op.semantic_state(),
+                screma::SemanticState::Segmented {
+                    placement: screma::Placement::Kernel,
+                    ..
+                }
+            )
+            .then_some(LocatedScrema {
+                site: SideEffectSite { block, index },
+                effect,
+                owner: *owner,
+                op,
+            })
+        })
+    })
+}
+
+fn segmented_recipe_effect(entry: &crate::egir::program::PlannedEntry) -> Option<LocatedScrema<'_>> {
+    if let Some(effect) = segmented_screma_effect(&entry.graph) {
+        return Some(effect);
+    }
+    if !matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
+        return None;
+    }
+    let mut promoted = None;
+    for (block, contents) in &entry.graph.skeleton.blocks {
+        for (index, effect) in contents.side_effects.iter().enumerate() {
+            let SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) = &effect.kind else {
+                continue;
+            };
+            if matches!(
+                op.semantic_state(),
+                screma::SemanticState::Segmented {
+                    placement: screma::Placement::LaneLocal,
+                    output_slots,
+                    ..
+                } if !output_slots.is_empty()
+            ) && matches!(op, screma::Op::Reduce { .. } | screma::Op::Scan { .. })
+            {
+                if promoted.is_some() {
+                    return None;
+                }
+                promoted = Some(LocatedScrema {
+                    site: SideEffectSite { block, index },
+                    effect,
+                    owner: *owner,
+                    op,
+                });
+            }
+        }
+    }
+    promoted
+}
+
+fn segmented_recipe(entry: &crate::egir::program::PlannedEntry) -> Option<SegmentedRecipe<'_>> {
+    let located = segmented_recipe_effect(entry)?;
+    Some(match located.op {
+        screma::Op::Reduce { lanes, operators, .. } => {
+            match ParallelReduce::recognize(located, lanes, operators) {
+                RecipeSelection::Parallel(recipe) => SegmentedRecipe::Reduce(recipe),
+                RecipeSelection::Serial(_) => SegmentedRecipe::Serial(located.serial_recipe()),
+            }
+        }
+        screma::Op::Scan { lanes, operators, .. } => {
+            match ParallelScan::recognize(located, lanes, operators) {
+                RecipeSelection::Parallel(recipe) => SegmentedRecipe::Scan(recipe),
+                RecipeSelection::Serial(_) => SegmentedRecipe::Serial(located.serial_recipe()),
+            }
+        }
+        screma::Op::Map { .. } => SegmentedRecipe::Map,
+        screma::Op::Composite { .. } => SegmentedRecipe::Composite(located),
+    })
+}
+
+pub(super) fn parallel_recipe_effect(entry: &crate::egir::program::PlannedEntry) -> Option<&SideEffect> {
+    segmented_recipe_effect(entry).map(|located| located.effect).or_else(|| {
+        entry.graph.skeleton.blocks.values().find_map(|contents| {
+            contents
+                .side_effects
+                .iter()
+                .find(|effect| matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Filter(_)))))
+        })
+    })
+}
+
+pub(super) fn make_screma_serial(graph: &mut EGraph, recipe: SerialScremaRecipe) {
+    let mut op = recipe.op;
+    *op.semantic_state_mut() = screma::SemanticState::Serial;
+    graph.skeleton.effect_mut(recipe.site).kind =
+        SideEffectKind::Soac(SoacEffect(recipe.owner, Soac::Screma(op)));
+}
+
 /// The target recipe selected for one projected physical kernel. Parallel
 /// variants own the exact graph-local analysis payload consumed by emission;
 /// lowering never re-runs candidate recognition.
@@ -23,7 +247,7 @@ enum AnalyzedRecipe {
     Reduce(super::reduce::ReduceCandidate),
     Scan(super::scan::ScanCandidate),
     Map,
-    Serial(super::recognize::SerialScremaRecipe),
+    Serial(SerialScremaRecipe),
     Unchanged,
 }
 
@@ -32,7 +256,7 @@ pub(super) enum PlannedRecipe {
     Reduce(super::reduce::BoundReduce),
     Scan(super::scan::BoundScan),
     Map,
-    Serial(super::recognize::SerialScremaRecipe),
+    Serial(SerialScremaRecipe),
     Unchanged,
 }
 
@@ -54,58 +278,12 @@ impl<R> PlannedKernel<R> {
 
     /// The selected recipe and every graph-local handle it contains stay
     /// coupled to this body until lowering consumes the pair.
-    fn into_parts(self) -> (crate::egir::program::PlannedEntry, Vec<usize>, R) {
+    pub(super) fn into_parts(self) -> (crate::egir::program::PlannedEntry, Vec<usize>, R) {
         (self.body, self.semantic_slots, self.recipe)
     }
 
     pub(super) fn seed_body(&self) -> crate::egir::program::PlannedEntry {
         self.body.clone()
-    }
-}
-
-impl PlannedKernel {
-    /// Consume the selected body and its graph-local recipe as one operation.
-    /// No caller can retain a recipe handle while independently mutating the
-    /// graph it addresses.
-    pub(super) fn lower(
-        self,
-        lowering: &mut super::KernelPlanBuilder<'_, '_>,
-        kernel: super::schedule::KernelId,
-        split_outputs: bool,
-    ) -> Result<()> {
-        let (body, semantic_slots, recipe) = self.into_parts();
-        match recipe {
-            PlannedRecipe::Filter(candidate) => lowering.lower_parallel_filter(body, kernel, candidate)?,
-            PlannedRecipe::Reduce(candidate) => lowering.lower_parallel_reduce(body, kernel, candidate)?,
-            PlannedRecipe::Scan(candidate) => lowering.lower_parallel_scan(body, kernel, candidate)?,
-            PlannedRecipe::Map => {
-                lowering.schedule.commit_kernel(
-                    kernel,
-                    super::schedule::KernelRecipeSpec::compute(
-                        body,
-                        super::schedule::ComputeKernelKind::Serial,
-                    ),
-                )?;
-            }
-            PlannedRecipe::Serial(recipe) => lowering.commit_serial_kernel(body, kernel, recipe)?,
-            PlannedRecipe::Unchanged if split_outputs => {
-                lowering.schedule.commit_kernel(
-                    kernel,
-                    super::schedule::KernelRecipeSpec::compute(
-                        body,
-                        super::schedule::ComputeKernelKind::Serial,
-                    ),
-                )?;
-            }
-            PlannedRecipe::Unchanged => {}
-        }
-        if split_outputs {
-            lowering.schedule.set_output_projection(
-                kernel,
-                semantic_slots.into_iter().map(crate::egir::program::OutputSlotId).collect(),
-            )?;
-        }
-        Ok(())
     }
 }
 
@@ -134,23 +312,23 @@ impl<R> EndpointPlan<R> {
 
 /// Authoritative target recipes indexed by the endpoint that owns the seeded
 /// kernel. Sequential policy deliberately carries no parallel recipe state.
-pub(super) struct CandidateIndex<R = PlannedRecipe> {
-    endpoints: HashMap<CompilerFlowEndpoint, EndpointPlan<R>>,
-    fallbacks: Vec<FallbackReason>,
-    sequential: bool,
+pub(super) enum CandidateIndex<R = PlannedRecipe> {
+    Sequential,
+    Parallel(HashMap<CompilerFlowEndpoint, EndpointPlan<R>>),
 }
 
 impl CandidateIndex<AnalyzedRecipe> {
     fn parallel() -> Self {
-        Self {
-            endpoints: HashMap::new(),
-            fallbacks: Vec::new(),
-            sequential: false,
-        }
+        Self::Parallel(HashMap::new())
     }
 
     fn insert(&mut self, endpoint: CompilerFlowEndpoint, plan: EndpointPlan<AnalyzedRecipe>) -> Result<()> {
-        if self.endpoints.insert(endpoint, plan).is_some() {
+        let Self::Parallel(endpoints) = self else {
+            return Err(ParallelizeError::Invalid(
+                "cannot add a parallel recipe to a sequential candidate index".into(),
+            ));
+        };
+        if endpoints.insert(endpoint, plan).is_some() {
             return Err(ParallelizeError::Invalid(format!(
                 "flow endpoint {endpoint:?} has multiple target recipes"
             )));
@@ -159,35 +337,40 @@ impl CandidateIndex<AnalyzedRecipe> {
     }
 
     fn bind(self, resources: &ScratchBindings) -> CandidateIndex {
-        let endpoints = self
-            .endpoints
-            .into_iter()
-            .map(|(endpoint, plan)| (endpoint, bind_endpoint(plan, resources)))
-            .collect();
-        CandidateIndex {
-            endpoints,
-            fallbacks: self.fallbacks,
-            sequential: false,
-        }
+        let Self::Parallel(endpoints) = self else {
+            return CandidateIndex::sequential();
+        };
+        CandidateIndex::Parallel(
+            endpoints
+                .into_iter()
+                .map(|(endpoint, plan)| {
+                    let (split_outputs, primary, siblings) = plan.into_parts();
+                    (
+                        endpoint,
+                        EndpointPlan::new(
+                            split_outputs,
+                            bind_kernel(primary, resources),
+                            siblings.into_iter().map(|kernel| bind_kernel(kernel, resources)).collect(),
+                        ),
+                    )
+                })
+                .collect(),
+        )
     }
 }
 
 impl CandidateIndex {
     pub(super) fn sequential() -> Self {
-        Self {
-            endpoints: HashMap::new(),
-            fallbacks: Vec::new(),
-            sequential: true,
-        }
+        Self::Sequential
     }
 
     pub(super) fn take_endpoint(&mut self, endpoint: CompilerFlowEndpoint) -> Result<Option<EndpointPlan>> {
-        if self.sequential {
-            return Ok(None);
+        match self {
+            Self::Sequential => Ok(None),
+            Self::Parallel(endpoints) => endpoints.remove(&endpoint).map(Some).ok_or_else(|| {
+                ParallelizeError::Invalid(format!("flow endpoint {endpoint:?} has no target recipe"))
+            }),
         }
-        self.endpoints.remove(&endpoint).map(Some).ok_or_else(|| {
-            ParallelizeError::Invalid(format!("flow endpoint {endpoint:?} has no target recipe"))
-        })
     }
 }
 
@@ -244,15 +427,6 @@ impl ParallelPlan {
     }
 }
 
-fn bind_endpoint(plan: EndpointPlan<AnalyzedRecipe>, resources: &ScratchBindings) -> EndpointPlan {
-    let (split_outputs, primary, siblings) = plan.into_parts();
-    EndpointPlan::new(
-        split_outputs,
-        bind_kernel(primary, resources),
-        siblings.into_iter().map(|kernel| bind_kernel(kernel, resources)).collect(),
-    )
-}
-
 fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBindings) -> PlannedKernel {
     let (body, semantic_slots, recipe) = kernel.into_parts();
     let recipe = match recipe {
@@ -279,25 +453,10 @@ pub(super) fn analyze(inner: &AllocatedProgram, policy: ParallelPolicy) -> Resul
     let mut candidates = CandidateIndex::parallel();
     let mut requests = Vec::new();
     for (endpoint, entry) in inner.entries_with_endpoints() {
-        let plan = analyze_endpoint(
-            entry,
-            endpoint,
-            policy,
-            &resources,
-            &mut requests,
-            &mut candidates.fallbacks,
-        )?;
+        let plan = analyze_endpoint(entry, endpoint, policy, &resources, &mut requests)?;
         candidates.insert(endpoint, plan)?;
     }
     Ok(ParallelPlan { candidates, requests })
-}
-
-#[cfg(test)]
-pub(super) fn preflight_fallback_reasons(inner: &AllocatedProgram) -> Result<Vec<FallbackReason>> {
-    let plan = analyze(inner, ParallelPolicy::default())?;
-    let mut reasons = plan.candidates.fallbacks;
-    reasons.sort_by_key(|reason| *reason as u8);
-    Ok(reasons)
 }
 
 fn analyze_endpoint(
@@ -306,7 +465,6 @@ fn analyze_endpoint(
     policy: ParallelPolicy,
     resources: &ResourceIndex<'_>,
     requests: &mut Vec<ScratchRequest>,
-    fallbacks: &mut Vec<FallbackReason>,
 ) -> Result<EndpointPlan<AnalyzedRecipe>> {
     let projected = crate::egir::program::PlannedEntry::project(entry)?;
     if matches!(endpoint, CompilerFlowEndpoint::Entry(_)) {
@@ -318,7 +476,6 @@ fn analyze_endpoint(
                 policy,
                 resources,
                 requests,
-                fallbacks,
             )?;
             let siblings = split
                 .siblings
@@ -331,7 +488,6 @@ fn analyze_endpoint(
                         policy,
                         resources,
                         requests,
-                        fallbacks,
                     )
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -340,8 +496,7 @@ fn analyze_endpoint(
     }
 
     let slots = (0..projected.outputs.len()).collect();
-    let primary =
-        analyze_projected_kernel(projected, slots, endpoint, policy, resources, requests, fallbacks)?;
+    let primary = analyze_projected_kernel(projected, slots, endpoint, policy, resources, requests)?;
     Ok(EndpointPlan::new(false, primary, Vec::new()))
 }
 
@@ -353,7 +508,6 @@ fn analyze_projected_kernel(
     policy: ParallelPolicy,
     resources: &ResourceIndex<'_>,
     requests: &mut Vec<ScratchRequest>,
-    fallbacks: &mut Vec<FallbackReason>,
 ) -> Result<PlannedKernel<AnalyzedRecipe>> {
     let mut filters = super::analyze_filter_candidates(&body)?;
     if filters.len() == 1 {
@@ -367,17 +521,12 @@ fn analyze_projected_kernel(
                     AnalyzedRecipe::Filter(candidate),
                 ));
             }
-            RecipeSelection::Serial(reason) => fallbacks.push(reason),
+            RecipeSelection::Serial(_) => {}
         }
-    } else {
-        fallbacks.extend(filters.into_iter().filter_map(|(_, selection)| match selection {
-            RecipeSelection::Parallel(_) => None,
-            RecipeSelection::Serial(reason) => Some(reason),
-        }));
     }
 
-    let recipe = match super::segmented_recipe(&body) {
-        Some(super::SegmentedRecipe::Reduce(located)) => {
+    let recipe = match segmented_recipe(&body) {
+        Some(SegmentedRecipe::Reduce(located)) => {
             let serial = located.serial_recipe();
             match super::analyze_reduce_candidate(&body, located, resources)? {
                 RecipeSelection::Parallel(candidate) => {
@@ -392,13 +541,10 @@ fn analyze_projected_kernel(
                     }
                     AnalyzedRecipe::Reduce(candidate)
                 }
-                RecipeSelection::Serial(reason) => {
-                    fallbacks.push(reason);
-                    AnalyzedRecipe::Serial(serial)
-                }
+                RecipeSelection::Serial(_) => AnalyzedRecipe::Serial(serial),
             }
         }
-        Some(super::SegmentedRecipe::Scan(located)) => {
+        Some(SegmentedRecipe::Scan(located)) => {
             let serial = located.serial_recipe();
             match super::analyze_scan_candidate(&body, located)? {
                 RecipeSelection::Parallel(candidate) => {
@@ -419,18 +565,12 @@ fn analyze_projected_kernel(
                     }
                     AnalyzedRecipe::Scan(candidate)
                 }
-                RecipeSelection::Serial(reason) => {
-                    fallbacks.push(reason);
-                    AnalyzedRecipe::Serial(serial)
-                }
+                RecipeSelection::Serial(_) => AnalyzedRecipe::Serial(serial),
             }
         }
-        Some(super::SegmentedRecipe::Serial(serial, reason)) => {
-            fallbacks.push(reason);
-            AnalyzedRecipe::Serial(serial)
-        }
-        Some(super::SegmentedRecipe::Map) => AnalyzedRecipe::Map,
-        Some(super::SegmentedRecipe::Composite(located)) => AnalyzedRecipe::Serial(located.serial_recipe()),
+        Some(SegmentedRecipe::Serial(serial)) => AnalyzedRecipe::Serial(serial),
+        Some(SegmentedRecipe::Map) => AnalyzedRecipe::Map,
+        Some(SegmentedRecipe::Composite(located)) => AnalyzedRecipe::Serial(located.serial_recipe()),
         _ => AnalyzedRecipe::Unchanged,
     };
     Ok(PlannedKernel::new(body, semantic_slots, recipe))

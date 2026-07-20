@@ -5,7 +5,7 @@ use super::*;
 pub(super) struct ReduceCandidate {
     pub site: SideEffectSite,
     pub owner: SemanticOpId,
-    serial: recognize::SerialScremaRecipe,
+    serial: SerialScremaRecipe,
     input_views: Vec<(NodeId, Type<TypeName>)>,
     map_output_view_operands: Vec<usize>,
     map_count: usize,
@@ -82,15 +82,13 @@ pub(super) fn analyze_reduce_candidate(
     if operators.iter().any(|operator| !can_clone_pure_subgraph(&entry.graph, operator.neutral, &[])) {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedCaptures));
     }
-    let scratch_types = operators
-        .iter()
-        .map(|operator| semantic_node_type(&entry.graph, operator.neutral))
-        .collect::<Vec<_>>();
+    let scratch_types =
+        operators.iter().map(|operator| entry.graph.types[&operator.neutral].clone()).collect::<Vec<_>>();
     if scratch_types.iter().any(|ty| crate::ssa::layout::type_byte_size(ty).is_none()) {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedScratchLayout));
     }
     let input_views =
-        operands.inputs().map(|input| (input.node, semantic_node_type(&entry.graph, input.node))).collect();
+        operands.inputs().map(|input| (input.node, entry.graph.types[&input.node].clone())).collect();
     let mut stores = (0..n_accs).map(|_| Vec::new()).collect::<Vec<_>>();
     let mut outputs: Vec<Vec<(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)>> =
         vec![Vec::new(); n_accs];
@@ -236,14 +234,14 @@ impl KernelPlanBuilder<'_, '_> {
         let chunk_start = chunked.chunk_start;
         let chunk_len = chunked.chunk_len;
         {
-            let se = semantic_effect_mut(&mut entry.graph, site);
+            let se = entry.graph.skeleton.effect_mut(site);
             for (i, &new_view) in chunked.views.iter().enumerate() {
                 se.operand_nodes[i] = new_view;
             }
         }
         for (map_index, operand_index) in map_output_view_operands.iter().enumerate() {
-            let orig_view = semantic_effect(&entry.graph, site).operand_nodes[*operand_index];
-            let view_ty = semantic_node_type(&entry.graph, orig_view);
+            let orig_view = entry.graph.skeleton.effect(site).operand_nodes[*operand_index];
+            let view_ty = entry.graph.types[&orig_view].clone();
             let chunked_view = chunk_view_like(
                 &mut entry.graph,
                 orig_view,
@@ -253,7 +251,7 @@ impl KernelPlanBuilder<'_, '_> {
                 ChunkInputKind::StorageOnly,
                 &format!("SegRed map output {map_index}"),
             )?;
-            semantic_effect_mut(&mut entry.graph, site).operand_nodes[*operand_index] = chunked_view;
+            entry.graph.skeleton.effect_mut(site).operand_nodes[*operand_index] = chunked_view;
         }
 
         // 5. Phase 1 stores each thread's whole accumulator value to `partials[tid]`

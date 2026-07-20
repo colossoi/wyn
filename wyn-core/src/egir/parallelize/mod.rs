@@ -18,14 +18,13 @@
 //!   renumbers or replaces them.
 //!
 //! Organization follows ownership rather than pass chronology: `model` owns
-//! policy, checked errors, and immutable indexes; `planning` owns recipe
-//! analysis and scratch assignment; `facts` owns short-lived graph
-//! observations; `projection` owns entry and route projection; `kernel` owns
-//! shared graph-building utilities; `prefix_scan` owns builders shared by scan
-//! and filter recipes; `reduce`, `scan`, and `filter` own their algorithms;
-//! `prepare` converts selected semantic operations to scheduled form; and
-//! `schedule` owns phase ordering, validation, publication, and physical
-//! construction.
+//! policy, checked errors, and immutable indexes; `planning` recognizes
+//! graph-local recipes, selects them, and assigns scratch; `projection` owns
+//! entry and route projection; `kernel` owns shared graph-building utilities;
+//! `reduce`, `scan`, and `filter` own their algorithms (including scan-phase
+//! builders shared by scan and filter); `prepare` converts selected semantic
+//! operations to scheduled form; and `schedule` owns phase ordering,
+//! publication, and physical construction.
 
 #![deny(clippy::expect_used, clippy::unwrap_used)]
 
@@ -33,10 +32,8 @@ mod filter;
 mod kernel;
 mod model;
 mod planning;
-mod prefix_scan;
 pub(super) mod prepare;
 mod projection;
-mod recognize;
 mod reduce;
 mod scan;
 mod schedule;
@@ -51,25 +48,21 @@ use kernel::{
 };
 use model as error;
 use model::{FallbackReason, ParallelPolicy, RecipeSelection};
-use prefix_scan::{ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
+use planning::{
+    make_screma_serial, parallel_recipe_effect, ParallelReduce, ParallelScan, SerialScremaRecipe,
+};
 #[cfg(test)]
 use projection::side_effect_output_slots_from_routes;
 use projection::{project_kernel_body, split_multidomain_seg_maps, ProjectionSpec, UnionFind};
-use recognize::{
-    make_screma_serial, parallel_recipe_effect, segmented_recipe, semantic_effect, semantic_effect_mut,
-    semantic_node_type, ParallelReduce, ParallelScan, SegmentedRecipe,
-};
 use reduce::{analyze_reduce_candidate, BoundReduce};
-use scan::{analyze_scan_candidate, BoundScan};
+use scan::{analyze_scan_candidate, BoundScan, ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
 pub(super) use schedule::KernelPlan;
 pub use schedule::{
     EntryAbiProjection, KernelDomain, KernelId, KernelKind, KernelPhaseSummary, KernelPlacement,
     KernelPlanSummary, OutputRouteProjection, ScheduledResource,
 };
 #[cfg(test)]
-pub(crate) use test_support::{
-    planned_callable_names, preflight_fallback_reasons, FILTER_SCAN_GROUPS, REDUCE_PHASE1_WIDTH,
-};
+pub(crate) use test_support::{planned_callable_names, FILTER_SCAN_GROUPS, REDUCE_PHASE1_WIDTH};
 
 use std::collections::HashSet;
 
@@ -151,6 +144,54 @@ struct KernelPlanBuilder<'resources, 'effects> {
     candidates: planning::CandidateIndex,
     policy: ParallelPolicy,
     effect_ids: &'effects mut crate::IdSource<EffectToken>,
+}
+
+impl planning::PlannedKernel {
+    /// Consume the selected body and its graph-local recipe as one operation.
+    /// No caller can retain a recipe handle while independently mutating the
+    /// graph it addresses.
+    fn lower(
+        self,
+        lowering: &mut KernelPlanBuilder<'_, '_>,
+        kernel: schedule::KernelId,
+        split_outputs: bool,
+    ) -> error::Result<()> {
+        let (body, semantic_slots, recipe) = self.into_parts();
+        match recipe {
+            planning::PlannedRecipe::Filter(candidate) => {
+                lowering.lower_parallel_filter(body, kernel, candidate)?
+            }
+            planning::PlannedRecipe::Reduce(candidate) => {
+                lowering.lower_parallel_reduce(body, kernel, candidate)?
+            }
+            planning::PlannedRecipe::Scan(candidate) => {
+                lowering.lower_parallel_scan(body, kernel, candidate)?
+            }
+            planning::PlannedRecipe::Map => {
+                lowering.schedule.commit_kernel(
+                    kernel,
+                    schedule::KernelRecipeSpec::compute(body, schedule::ComputeKernelKind::Serial),
+                )?;
+            }
+            planning::PlannedRecipe::Serial(recipe) => {
+                lowering.commit_serial_kernel(body, kernel, recipe)?
+            }
+            planning::PlannedRecipe::Unchanged if split_outputs => {
+                lowering.schedule.commit_kernel(
+                    kernel,
+                    schedule::KernelRecipeSpec::compute(body, schedule::ComputeKernelKind::Serial),
+                )?;
+            }
+            planning::PlannedRecipe::Unchanged => {}
+        }
+        if split_outputs {
+            lowering.schedule.set_output_projection(
+                kernel,
+                semantic_slots.into_iter().map(super::program::OutputSlotId).collect(),
+            )?;
+        }
+        Ok(())
+    }
 }
 
 impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
@@ -332,7 +373,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         &mut self,
         mut body: super::program::PlannedEntry,
         kernel: schedule::KernelId,
-        recipe: recognize::SerialScremaRecipe,
+        recipe: SerialScremaRecipe,
     ) -> error::Result<()> {
         make_screma_serial(&mut body.graph, recipe);
         let recipe = schedule::KernelRecipeSpec::compute(body, schedule::ComputeKernelKind::Serial);
