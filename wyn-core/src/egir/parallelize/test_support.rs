@@ -21,7 +21,6 @@ pub(crate) fn planned_callable_names(
 
 fn fallback_name(reason: FallbackReason) -> &'static str {
     match reason {
-        FallbackReason::UnsupportedPlacement => "unsupported placement",
         FallbackReason::UnsupportedCaptures => "unsupported captures",
         FallbackReason::UnsupportedViewShape => "unsupported view shape",
         FallbackReason::UnsupportedDestination => "unsupported destination",

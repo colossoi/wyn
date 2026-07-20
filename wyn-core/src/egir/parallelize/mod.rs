@@ -29,7 +29,6 @@
 
 #![deny(clippy::expect_used, clippy::unwrap_used)]
 
-mod facts;
 mod filter;
 mod kernel;
 mod model;
@@ -37,17 +36,13 @@ mod planning;
 mod prefix_scan;
 pub(super) mod prepare;
 mod projection;
+mod recognize;
 mod reduce;
 mod scan;
 mod schedule;
 #[cfg(test)]
 mod test_support;
 
-use facts::{
-    make_screma_serial, parallel_recipe_effect, reduce_recipe_eligibility, scan_recipe_eligibility,
-    segmented_recipe, semantic_effect, semantic_effect_mut, semantic_node_type, LocatedReduce, LocatedScan,
-    SegmentedRecipe,
-};
 use filter::analyze_filter_candidates;
 use kernel::{
     apply_manifest_resource_sizes, can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs,
@@ -60,6 +55,10 @@ use prefix_scan::{ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
 #[cfg(test)]
 use projection::side_effect_output_slots_from_routes;
 use projection::{project_kernel_body, split_multidomain_seg_maps, ProjectionSpec, UnionFind};
+use recognize::{
+    make_screma_serial, parallel_recipe_effect, segmented_recipe, semantic_effect, semantic_effect_mut,
+    semantic_node_type, ParallelReduce, ParallelScan, SegmentedRecipe,
+};
 use reduce::{analyze_reduce_candidate, BoundReduce};
 use scan::{analyze_scan_candidate, BoundScan};
 pub(super) use schedule::KernelPlan;
@@ -333,7 +332,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         &mut self,
         mut body: super::program::PlannedEntry,
         kernel: schedule::KernelId,
-        recipe: facts::SerialScremaRecipe,
+        recipe: recognize::SerialScremaRecipe,
     ) -> error::Result<()> {
         make_screma_serial(&mut body.graph, recipe);
         let recipe = schedule::KernelRecipeSpec::compute(body, schedule::ComputeKernelKind::Serial);

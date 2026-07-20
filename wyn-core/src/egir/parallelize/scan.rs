@@ -6,7 +6,7 @@ pub(super) struct ScanCandidate {
     pub site: SideEffectSite,
     pub owner: SemanticOpId,
     pub scratch_type: Type<TypeName>,
-    serial: facts::SerialScremaRecipe,
+    serial: recognize::SerialScremaRecipe,
     step_region: RegionId,
     combine_region: RegionId,
     step_captures: Vec<NodeId>,
@@ -27,16 +27,13 @@ pub(super) struct BoundScan {
 
 pub(super) fn analyze_scan_candidate(
     entry: &crate::egir::program::PlannedEntry,
-    located: LocatedScan<'_>,
+    located: ParallelScan<'_>,
 ) -> error::Result<RecipeSelection<ScanCandidate>> {
     let serial = located.serial_recipe();
+    let (located, lanes, operators) = located.into_parts();
     let site = located.site;
     let side_effect = located.effect;
-    if let Err(reason) = scan_recipe_eligibility(&located) {
-        return Ok(RecipeSelection::Serial(reason));
-    }
-    let lanes = located.lanes;
-    let operator = &located.operators.first;
+    let operator = &operators.first;
     if !can_clone_pure_subgraph(&entry.graph, operator.neutral, &[]) {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedCaptures));
     }

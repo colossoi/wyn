@@ -5,7 +5,7 @@ use super::*;
 pub(super) struct ReduceCandidate {
     pub site: SideEffectSite,
     pub owner: SemanticOpId,
-    serial: facts::SerialScremaRecipe,
+    serial: recognize::SerialScremaRecipe,
     input_views: Vec<(NodeId, Type<TypeName>)>,
     map_output_view_operands: Vec<usize>,
     map_count: usize,
@@ -50,17 +50,14 @@ impl ReduceCandidate {
 
 pub(super) fn analyze_reduce_candidate(
     entry: &crate::egir::program::PlannedEntry,
-    located: LocatedReduce<'_>,
+    located: ParallelReduce<'_>,
     resources: &model::ResourceIndex<'_>,
 ) -> error::Result<RecipeSelection<ReduceCandidate>> {
     let serial = located.serial_recipe();
+    let (located, lanes, operators) = located.into_parts();
     let site = located.site;
     let side_effect = located.effect;
-    if let Err(reason) = reduce_recipe_eligibility(&located) {
-        return Ok(RecipeSelection::Serial(reason));
-    }
-    let lanes = located.lanes;
-    let operators = located.operators.iter().collect::<Vec<_>>();
+    let operators = operators.iter().collect::<Vec<_>>();
     let n_accs = operators.len();
     let n_maps = lanes.maps.len();
     let operands =

@@ -55,7 +55,6 @@ pub(super) type Result<T> = std::result::Result<T, ParallelizeError>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Why a valid semantic operation selected serial fallback.
 pub(super) enum FallbackReason {
-    UnsupportedPlacement,
     UnsupportedCaptures,
     UnsupportedViewShape,
     UnsupportedDestination,

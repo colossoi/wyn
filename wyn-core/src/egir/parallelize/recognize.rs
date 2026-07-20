@@ -1,4 +1,4 @@
-//! Checked entry facts and semantic-operation eligibility classification.
+//! One-pass recognition of target-supported recipes in a projected entry.
 //!
 //! Facts in this module are graph-local and short-lived: analysis rebuilds
 //! them for a projected entry and emission consumes them before mutating that
@@ -6,6 +6,7 @@
 
 use super::*;
 
+#[derive(Clone, Copy)]
 pub(super) struct LocatedScrema<'a> {
     pub site: SideEffectSite,
     pub effect: &'a SideEffect,
@@ -13,22 +14,16 @@ pub(super) struct LocatedScrema<'a> {
     pub op: &'a screma::Op<crate::egir::types::Semantic>,
 }
 
-pub(super) struct LocatedReduce<'a> {
-    pub site: SideEffectSite,
-    pub effect: &'a SideEffect,
-    pub owner: SemanticOpId,
-    pub lanes: &'a screma::Lanes,
-    pub operators: &'a screma::NonEmpty<screma::Operator>,
-    pub op: &'a screma::Op<crate::egir::types::Semantic>,
+pub(super) struct ParallelReduce<'a> {
+    located: LocatedScrema<'a>,
+    lanes: &'a screma::Lanes,
+    operators: &'a screma::NonEmpty<screma::Operator>,
 }
 
-pub(super) struct LocatedScan<'a> {
-    pub site: SideEffectSite,
-    pub effect: &'a SideEffect,
-    pub owner: SemanticOpId,
-    pub lanes: &'a screma::Lanes,
-    pub operators: &'a screma::NonEmpty<screma::Operator>,
-    pub op: &'a screma::Op<crate::egir::types::Semantic>,
+pub(super) struct ParallelScan<'a> {
+    located: LocatedScrema<'a>,
+    lanes: &'a screma::Lanes,
+    operators: &'a screma::NonEmpty<screma::Operator>,
 }
 
 #[derive(Clone)]
@@ -48,29 +43,88 @@ impl LocatedScrema<'_> {
     }
 }
 
-impl LocatedReduce<'_> {
-    pub(super) fn serial_recipe(&self) -> SerialScremaRecipe {
-        SerialScremaRecipe {
-            site: self.site,
-            owner: self.owner,
-            op: self.op.clone(),
+impl<'a> ParallelReduce<'a> {
+    fn recognize(
+        located: LocatedScrema<'a>,
+        lanes: &'a screma::Lanes,
+        operators: &'a screma::NonEmpty<screma::Operator>,
+    ) -> RecipeSelection<Self> {
+        if operators.iter().any(|operator| !operator.combine.captures.is_empty()) {
+            return RecipeSelection::Serial(FallbackReason::UnsupportedCaptures);
         }
+        if lanes.inputs.is_empty() {
+            return RecipeSelection::Serial(FallbackReason::UnsupportedOperationShape);
+        }
+        if !lanes.maps.iter().all(|map| map.destination.is_output_view())
+            || !operators.iter().all(|operator| operator.destination.is_unplaced_fresh())
+        {
+            return RecipeSelection::Serial(FallbackReason::UnsupportedDestination);
+        }
+        RecipeSelection::Parallel(Self {
+            located,
+            lanes,
+            operators,
+        })
+    }
+
+    pub(super) fn serial_recipe(&self) -> SerialScremaRecipe {
+        self.located.serial_recipe()
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        LocatedScrema<'a>,
+        &'a screma::Lanes,
+        &'a screma::NonEmpty<screma::Operator>,
+    ) {
+        (self.located, self.lanes, self.operators)
     }
 }
 
-impl LocatedScan<'_> {
-    pub(super) fn serial_recipe(&self) -> SerialScremaRecipe {
-        SerialScremaRecipe {
-            site: self.site,
-            owner: self.owner,
-            op: self.op.clone(),
+impl<'a> ParallelScan<'a> {
+    fn recognize(
+        located: LocatedScrema<'a>,
+        lanes: &'a screma::Lanes,
+        operators: &'a screma::NonEmpty<screma::Operator>,
+    ) -> RecipeSelection<Self> {
+        if !operators.rest.is_empty() || lanes.inputs.len() != 1 {
+            return RecipeSelection::Serial(FallbackReason::UnsupportedOperationShape);
         }
+        if !operators.first.combine.captures.is_empty() {
+            return RecipeSelection::Serial(FallbackReason::UnsupportedCaptures);
+        }
+        if !lanes.maps.iter().all(|map| map.destination.is_output_view())
+            || !operators.iter().all(|operator| operator.destination.is_output_view())
+        {
+            return RecipeSelection::Serial(FallbackReason::UnsupportedDestination);
+        }
+        RecipeSelection::Parallel(Self {
+            located,
+            lanes,
+            operators,
+        })
+    }
+
+    pub(super) fn serial_recipe(&self) -> SerialScremaRecipe {
+        self.located.serial_recipe()
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        LocatedScrema<'a>,
+        &'a screma::Lanes,
+        &'a screma::NonEmpty<screma::Operator>,
+    ) {
+        (self.located, self.lanes, self.operators)
     }
 }
 
 pub(super) enum SegmentedRecipe<'a> {
-    Reduce(LocatedReduce<'a>),
-    Scan(LocatedScan<'a>),
+    Reduce(ParallelReduce<'a>),
+    Scan(ParallelScan<'a>),
+    Serial(SerialScremaRecipe, FallbackReason),
     Map,
     Composite(LocatedScrema<'a>),
 }
@@ -140,22 +194,18 @@ pub(super) fn segmented_recipe_effect(
 pub(super) fn segmented_recipe(entry: &crate::egir::program::PlannedEntry) -> Option<SegmentedRecipe<'_>> {
     let located = segmented_recipe_effect(entry)?;
     Some(match located.op {
-        screma::Op::Reduce { lanes, operators, .. } => SegmentedRecipe::Reduce(LocatedReduce {
-            site: located.site,
-            effect: located.effect,
-            owner: located.owner,
-            lanes,
-            operators,
-            op: located.op,
-        }),
-        screma::Op::Scan { lanes, operators, .. } => SegmentedRecipe::Scan(LocatedScan {
-            site: located.site,
-            effect: located.effect,
-            owner: located.owner,
-            lanes,
-            operators,
-            op: located.op,
-        }),
+        screma::Op::Reduce { lanes, operators, .. } => {
+            match ParallelReduce::recognize(located, lanes, operators) {
+                RecipeSelection::Parallel(recipe) => SegmentedRecipe::Reduce(recipe),
+                RecipeSelection::Serial(reason) => SegmentedRecipe::Serial(located.serial_recipe(), reason),
+            }
+        }
+        screma::Op::Scan { lanes, operators, .. } => {
+            match ParallelScan::recognize(located, lanes, operators) {
+                RecipeSelection::Parallel(recipe) => SegmentedRecipe::Scan(recipe),
+                RecipeSelection::Serial(reason) => SegmentedRecipe::Serial(located.serial_recipe(), reason),
+            }
+        }
         screma::Op::Map { .. } => SegmentedRecipe::Map,
         screma::Op::Composite { .. } => SegmentedRecipe::Composite(located),
     })
@@ -189,58 +239,4 @@ pub(super) fn semantic_effect_mut(graph: &mut EGraph, site: SideEffectSite) -> &
 
 pub(super) fn semantic_node_type(graph: &EGraph, node: NodeId) -> Type<TypeName> {
     graph.types[&node].clone()
-}
-
-fn valid_recipe_placement(op: &screma::Op<crate::egir::types::Semantic>) -> bool {
-    let valid_placement = match op.semantic_state() {
-        screma::SemanticState::Segmented {
-            placement: screma::Placement::Kernel,
-            ..
-        } => true,
-        screma::SemanticState::Segmented {
-            placement: screma::Placement::LaneLocal,
-            output_slots,
-            ..
-        } => !output_slots.is_empty() && matches!(op, screma::Op::Reduce { .. } | screma::Op::Scan { .. }),
-        screma::SemanticState::Serial => false,
-    };
-    valid_placement
-}
-
-pub(super) fn reduce_recipe_eligibility(
-    recipe: &LocatedReduce<'_>,
-) -> std::result::Result<(), FallbackReason> {
-    if !valid_recipe_placement(recipe.op) {
-        return Err(FallbackReason::UnsupportedPlacement);
-    }
-    if recipe.operators.iter().any(|op| !op.combine.captures.is_empty()) {
-        return Err(FallbackReason::UnsupportedCaptures);
-    }
-    if recipe.lanes.inputs.is_empty() {
-        return Err(FallbackReason::UnsupportedOperationShape);
-    }
-    if !recipe.lanes.maps.iter().all(|map| map.destination.is_output_view())
-        || !recipe.operators.iter().all(|op| op.destination.is_unplaced_fresh())
-    {
-        return Err(FallbackReason::UnsupportedDestination);
-    }
-    Ok(())
-}
-
-pub(super) fn scan_recipe_eligibility(recipe: &LocatedScan<'_>) -> std::result::Result<(), FallbackReason> {
-    if !valid_recipe_placement(recipe.op) {
-        return Err(FallbackReason::UnsupportedPlacement);
-    }
-    if !recipe.operators.rest.is_empty() || recipe.lanes.inputs.len() != 1 {
-        return Err(FallbackReason::UnsupportedOperationShape);
-    }
-    if !recipe.operators.first.combine.captures.is_empty() {
-        return Err(FallbackReason::UnsupportedCaptures);
-    }
-    if !recipe.lanes.maps.iter().all(|map| map.destination.is_output_view())
-        || !recipe.operators.iter().all(|op| op.destination.is_output_view())
-    {
-        return Err(FallbackReason::UnsupportedDestination);
-    }
-    Ok(())
 }

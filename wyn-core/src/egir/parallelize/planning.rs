@@ -23,7 +23,7 @@ enum AnalyzedRecipe {
     Reduce(super::reduce::ReduceCandidate),
     Scan(super::scan::ScanCandidate),
     Map,
-    Serial(super::facts::SerialScremaRecipe),
+    Serial(super::recognize::SerialScremaRecipe),
     Unchanged,
 }
 
@@ -32,7 +32,7 @@ pub(super) enum PlannedRecipe {
     Reduce(super::reduce::BoundReduce),
     Scan(super::scan::BoundScan),
     Map,
-    Serial(super::facts::SerialScremaRecipe),
+    Serial(super::recognize::SerialScremaRecipe),
     Unchanged,
 }
 
@@ -424,6 +424,10 @@ fn analyze_projected_kernel(
                     AnalyzedRecipe::Serial(serial)
                 }
             }
+        }
+        Some(super::SegmentedRecipe::Serial(serial, reason)) => {
+            fallbacks.push(reason);
+            AnalyzedRecipe::Serial(serial)
         }
         Some(super::SegmentedRecipe::Map) => AnalyzedRecipe::Map,
         Some(super::SegmentedRecipe::Composite(located)) => AnalyzedRecipe::Serial(located.serial_recipe()),
