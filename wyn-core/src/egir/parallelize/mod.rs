@@ -156,7 +156,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         policy: ParallelPolicy,
         effect_ids: &'effects mut crate::IdSource<EffectToken>,
     ) -> error::Result<Self> {
-        let resources = model::ResourceIndex::new(&inner.resources)?;
+        let resources = model::ResourceIndex::new(&inner.resources);
         let flows = model::ResourceFlowIndex::new(&inner.resources);
         let (schedule, seeded) = schedule::KernelPlan::seed(
             &inner.pipeline,
@@ -230,17 +230,13 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
                     "typed entry/prepass producer was omitted while seeding the kernel plan".into(),
                 ));
             };
-            let requirement = inner
-                .materializations
-                .get(id.0 as usize)
-                .filter(|requirement| requirement.id == id)
-                .ok_or_else(|| {
-                    error::ParallelizeError::Invalid(format!(
-                        "materialization flow references missing requirement {id:?}"
-                    ))
-                })?;
-            let kernel = self.schedule.add_materialization_before(consumer, requirement)?;
-            self.lower_endpoint(CompilerFlowEndpoint::Materialization(requirement.id), kernel)?;
+            let requirement = inner.materializations.get(id).ok_or_else(|| {
+                error::ParallelizeError::Invalid(format!(
+                    "materialization flow references missing requirement {id:?}"
+                ))
+            })?;
+            let kernel = self.schedule.add_materialization_before(consumer, id, requirement)?;
+            self.lower_endpoint(CompilerFlowEndpoint::Materialization(id), kernel)?;
             for upstream in self.flows.incoming(producer_id) {
                 ready.insert((*upstream, producer_id));
             }
@@ -259,10 +255,10 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         let (split_outputs, primary, siblings) = plan.into_parts();
         primary.lower(self, kernel, split_outputs)?;
         for sibling in siblings {
-            let phase = schedule::PhaseSpec::new(
+            let phase = schedule::PhaseSpec::compute(
                 sibling.seed_body(),
                 schedule::DomainSelection::Inferred(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                schedule::KernelKind::SerialCompute,
+                schedule::ComputeKernelKind::Serial,
             );
             let sibling_kernel = self.schedule.add_sibling(kernel, phase)?;
             sibling.lower(self, sibling_kernel, split_outputs)?;
@@ -279,14 +275,14 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         use schedule::KernelDomain;
 
         let phases = self.emit_reduce_entry(&mut body, candidate)?;
-        let recipe = schedule::KernelRecipeSpec::new(body, schedule::KernelKind::ReducePhase1);
+        let recipe = schedule::KernelRecipeSpec::compute(body, schedule::ComputeKernelKind::ReducePhase1);
         let after = phases
             .into_iter()
             .map(|phase| {
-                schedule::PhaseSpec::new(
+                schedule::PhaseSpec::compute(
                     phase,
                     schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                    schedule::KernelKind::ReduceCombine,
+                    schedule::ComputeKernelKind::ReduceCombine,
                 )
             })
             .collect();
@@ -304,12 +300,12 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
 
         let phases = self.emit_scan_entry(&mut body, candidate)?;
         let phase1_domain = self.schedule.domain_of(kernel)?;
-        let recipe = schedule::KernelRecipeSpec::new(body, schedule::KernelKind::ScanPhase1);
+        let recipe = schedule::KernelRecipeSpec::compute(body, schedule::ComputeKernelKind::ScanPhase1);
         let after = phases
             .into_iter()
             .enumerate()
             .map(|(phase_index, phase)| {
-                schedule::PhaseSpec::new(
+                schedule::PhaseSpec::compute(
                     phase,
                     schedule::DomainSelection::Explicit(if phase_index == 0 {
                         KernelDomain::Fixed { x: 1, y: 1, z: 1 }
@@ -317,9 +313,9 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
                         phase1_domain.clone()
                     }),
                     if phase_index == 0 {
-                        schedule::KernelKind::ScanBlock
+                        schedule::ComputeKernelKind::ScanBlock
                     } else {
-                        schedule::KernelKind::ScanApplyOffsets
+                        schedule::ComputeKernelKind::ScanApplyOffsets
                     },
                 )
             })
@@ -335,7 +331,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         recipe: facts::SerialScremaRecipe,
     ) -> error::Result<()> {
         make_screma_serial(&mut body.graph, recipe);
-        let recipe = schedule::KernelRecipeSpec::new(body, schedule::KernelKind::SerialCompute);
+        let recipe = schedule::KernelRecipeSpec::compute(body, schedule::ComputeKernelKind::Serial);
         self.schedule.commit_kernel(kernel, recipe)?;
         Ok(())
     }

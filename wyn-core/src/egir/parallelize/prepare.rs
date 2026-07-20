@@ -12,7 +12,7 @@ use super::super::types::{EGraph, Scheduled, Semantic, SideEffect, SideEffectKin
 
 #[derive(Clone, Copy)]
 pub(super) struct ParallelFilterPlan {
-    stage: filter::ParallelStage,
+    pub(super) stage: filter::ParallelStage,
     config: filter::ParallelConfig<SemanticResourceRef>,
     storage: filter::RuntimeStorage<SemanticResourceRef>,
 }

@@ -1,13 +1,12 @@
 //! Shared target-planning policy, decisions, errors, and immutable indexes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use thiserror::Error;
 
 use super::schedule::KernelMutationError;
 use crate::egir::program::{
-    CompilerFlowEndpoint, CompilerResourceFlow, CompilerResourceKind, LogicalResource,
-    LogicalResourceArena, ResourceOrigin, SemanticOpId,
+    CompilerFlowEndpoint, CompilerResourceFlow, LogicalResource, LogicalResourceArena, ResourceOrigin,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,128 +70,21 @@ pub(super) enum RecipeSelection<T> {
     Serial(FallbackReason),
 }
 
-/// Checked view of resources grouped by semantic owner, kind, and slot.
+/// Read-only resource lookup used while recognizing semantic views. Dense ids
+/// and compiler ownership uniqueness are invariants of `LogicalResourceArena`.
 pub(super) struct ResourceIndex<'a> {
     resources: &'a LogicalResourceArena,
-    owned: HashMap<(SemanticOpId, CompilerResourceKind), BTreeMap<usize, &'a LogicalResource>>,
 }
 
 impl<'a> ResourceIndex<'a> {
-    pub(super) fn new(resources: &'a LogicalResourceArena) -> Result<Self> {
-        let mut owned: HashMap<_, BTreeMap<_, _>> = HashMap::new();
-        for resource in resources {
-            let ResourceOrigin::Compiler(compiler) = &resource.origin else {
-                continue;
-            };
-            if let Some(owner) = compiler.owner {
-                let slots = owned.entry((owner, compiler.kind)).or_default();
-                if slots.insert(compiler.slot, resource).is_some() {
-                    return Err(ParallelizeError::Invalid(format!(
-                        "compiler resource ownership bucket has duplicate slot {}",
-                        compiler.slot
-                    )));
-                }
-            }
-        }
-        Ok(Self { resources, owned })
+    pub(super) fn new(resources: &'a LogicalResourceArena) -> Self {
+        Self { resources }
     }
 
     pub(super) fn get(&self, id: crate::ResourceId) -> Result<&'a LogicalResource> {
         self.resources
             .get(id)
             .ok_or_else(|| ParallelizeError::Invalid(format!("missing logical resource {id:?}")))
-    }
-
-    #[cfg(test)]
-    pub(super) fn owned(
-        &self,
-        owner: SemanticOpId,
-        kind: CompilerResourceKind,
-    ) -> Vec<&'a LogicalResource> {
-        self.owned
-            .get(&(owner, kind))
-            .into_iter()
-            .flat_map(|resources| resources.values().copied())
-            .collect()
-    }
-
-    #[cfg(test)]
-    pub(super) fn exactly_one(
-        &self,
-        owner: SemanticOpId,
-        kind: CompilerResourceKind,
-    ) -> Result<&'a LogicalResource> {
-        let resources = self.owned.get(&(owner, kind));
-        match resources.map(|resources| resources.values().copied().collect::<Vec<_>>()) {
-            Some(resources) if resources.len() == 1 => Ok(resources[0]),
-            _ => Err(ParallelizeError::Invalid(format!(
-                "semantic operation {owner:?} requires exactly one {kind:?} resource, found {}",
-                resources.map_or(0, BTreeMap::len)
-            ))),
-        }
-    }
-
-    pub(super) fn exactly_one_at(
-        &self,
-        owner: SemanticOpId,
-        kind: CompilerResourceKind,
-        slot: usize,
-    ) -> Result<&'a LogicalResource> {
-        let resources = self.owned.get(&(owner, kind));
-        let resource = resources.and_then(|resources| resources.get(&slot)).copied();
-        match (resources.map(BTreeMap::len), resource) {
-            (Some(1), Some(resource)) => Ok(resource),
-            (count, _) => Err(ParallelizeError::Invalid(format!(
-                "semantic operation {owner:?} requires exactly one {kind:?} resource at slot {slot}, found {}",
-                count.unwrap_or(0)
-            ))),
-        }
-    }
-
-    pub(super) fn ordered_slots(
-        &self,
-        owner: SemanticOpId,
-        kind: CompilerResourceKind,
-        first_slot: usize,
-        count: usize,
-    ) -> Result<Vec<&'a LogicalResource>> {
-        let resources = self.owned.get(&(owner, kind));
-        if resources.map_or(0, BTreeMap::len) != count {
-            return Err(ParallelizeError::Invalid(format!(
-                "semantic operation {owner:?} requires {count} {kind:?} resources, found {}",
-                resources.map_or(0, BTreeMap::len)
-            )));
-        }
-        let Some(resources) = resources else {
-            return Ok(Vec::new());
-        };
-        let mut ordered = Vec::with_capacity(count);
-        for offset in 0..count {
-            let expected = first_slot + offset;
-            let resource = resources.get(&expected).copied().ok_or_else(|| {
-                ParallelizeError::Invalid(format!(
-                    "semantic operation {owner:?} requires {kind:?} slot {expected}"
-                ))
-            })?;
-            ordered.push(resource);
-        }
-        Ok(ordered)
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn optional(
-        &self,
-        owner: SemanticOpId,
-        kind: CompilerResourceKind,
-    ) -> Result<Option<&'a LogicalResource>> {
-        match self.owned.get(&(owner, kind)) {
-            None => Ok(None),
-            Some(resources) if resources.len() == 1 => Ok(resources.values().next().copied()),
-            Some(resources) => Err(ParallelizeError::Invalid(format!(
-                "semantic operation {owner:?} has {} optional {kind:?} resources",
-                resources.len()
-            ))),
-        }
     }
 }
 

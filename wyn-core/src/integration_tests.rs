@@ -1676,7 +1676,7 @@ entry e() [4]i32 =
     let shared_requirements = allocated
         .inner
         .materializations
-        .iter()
+        .values()
         .filter(|requirement| requirement.kind == crate::egir::program::MaterializationKind::SharedArray)
         .collect::<Vec<_>>();
     assert_eq!(
@@ -2823,7 +2823,11 @@ entry add_sum(xs: []i32) []i32 =
     let crate::egir::program::CompilerFlowEndpoint::Materialization(producer_id) = flow.producer else {
         panic!("scalar producer must be a typed materialization requirement")
     };
-    let producer = &allocated.inner.materializations[producer_id.0 as usize];
+    let producer = allocated
+        .inner
+        .materializations
+        .get(producer_id)
+        .expect("materialization flow producer is arena-owned");
     assert!(producer.entry.name.contains("prepass_scalar"));
     assert_eq!(flow.consumers.len(), 1);
     assert_eq!(

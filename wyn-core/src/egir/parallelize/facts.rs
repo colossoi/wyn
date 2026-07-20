@@ -19,7 +19,7 @@ pub(super) struct LocatedReduce<'a> {
     pub owner: SemanticOpId,
     pub lanes: &'a screma::Lanes,
     pub operators: &'a screma::NonEmpty<screma::Operator>,
-    op: &'a screma::Op<crate::egir::types::Semantic>,
+    pub op: &'a screma::Op<crate::egir::types::Semantic>,
 }
 
 pub(super) struct LocatedScan<'a> {
@@ -28,7 +28,7 @@ pub(super) struct LocatedScan<'a> {
     pub owner: SemanticOpId,
     pub lanes: &'a screma::Lanes,
     pub operators: &'a screma::NonEmpty<screma::Operator>,
-    op: &'a screma::Op<crate::egir::types::Semantic>,
+    pub op: &'a screma::Op<crate::egir::types::Semantic>,
 }
 
 #[derive(Clone)]

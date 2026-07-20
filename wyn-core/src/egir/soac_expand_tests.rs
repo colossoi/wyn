@@ -44,7 +44,7 @@ fn compile_to_expanded_egraph(input: &str) -> PhysicalEGraph {
         crate::LoweringProfile::PORTABLE,
     )
     .expect("terminal schedule");
-    crate::egir::soac_expand::run(&mut physical, &mut effect_ids);
+    crate::egir::soac_expand::run(&mut physical, &mut effect_ids).expect("physical SOAC expansion");
     let inner = &physical;
     assert_eq!(
         inner.entry_points.len(),

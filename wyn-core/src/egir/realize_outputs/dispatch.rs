@@ -24,7 +24,7 @@ use crate::ResourceId;
 use super::super::from_tlc::ConvertError;
 use super::super::graph_ops;
 use super::super::program::OutputWriter;
-use super::super::soac::filter;
+use super::super::soac::{filter, screma};
 use super::super::types::{
     EGraph, ENode, EffectToken, NodeId, PureOp, Raw, SideEffectIndex, SideEffectKind, SkeletonTerminator,
     Soac, SoacDestination, SoacEffect, SoacPlacement,
@@ -99,8 +99,9 @@ pub fn compute_slot_source(
 ) -> Result<Vec<OutputWriter>, ConvertError> {
     // 1. Consuming Scan: nothing to emit.
     if result_soac_is_consuming_scan(graph, effect_index, source) {
-        let writer = projected_effect_result(graph, effect_index, source)
-            .expect("consuming scan projection must name its producing effect");
+        let writer = projected_effect_result(graph, effect_index, source).ok_or_else(|| {
+            ConvertError::Internal("consuming scan projection lost its producing effect".into())
+        })?;
         return Ok(vec![OutputWriter::Value(writer)]);
     }
 
@@ -118,7 +119,7 @@ pub fn compute_slot_source(
                 graph, aliases, block, effect_ids, source, view, elem_ty, slot_index,
             )?;
         }
-        retarget_array_projection(graph, effect_index, screma_result, field_idx, view);
+        retarget_array_projection(graph, effect_index, screma_result, field_idx, view)?;
         // The Project node operationally produces the view at runtime
         // (the Screma's loop body wrote field 0 through the view).
         // Update its type to match so verify_no_abstract doesn't flag
@@ -311,49 +312,42 @@ pub(crate) fn retarget_array_projection(
     target_result: NodeId,
     field_idx: usize,
     output_view: NodeId,
-) {
+) -> Result<(), ConvertError> {
     if let Some(se) = effect_index.effect_mut(graph, target_result) {
         let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut se.kind else {
-            panic!(
-                "retarget_array_projection: side effect for \
-                     target_result={:?} is not Screma: {:?}",
-                target_result, se.kind
-            );
+            return Err(ConvertError::Internal(format!(
+                "output target {target_result:?} is not produced by a Screma"
+            )));
         };
 
-        // Operand layout is `[inputs.., output_views..]`; neutrals and
-        // captures are explicit in the Screma body.
-        let base_len = op.lanes().inputs.len();
-        let mut cursor = base_len;
-        let mut views = Vec::with_capacity(op.result_count());
-        for field in 0..op.result_count() {
-            if op.destination(field).is_some_and(SoacDestination::is_output_view) {
-                views.push(Some(
-                    *se.operand_nodes.get(cursor).expect("Screma output view operand missing"),
-                ));
-                cursor += 1;
-            } else {
-                views.push(None);
-            }
-        }
+        let operands = screma::ScremaOperands::decode(op, &se.operand_nodes, se.result)
+            .map_err(ConvertError::Internal)?;
+        let base_len = operands.input_count();
+        let mut views =
+            operands.outputs().map(|operand| operand.map(|operand| operand.node)).collect::<Vec<_>>();
 
         let operator_index = field_idx.checked_sub(op.lanes().maps.len());
         if operator_index.is_some_and(|index| !op.is_scan(index)) {
-            panic!("retarget_array_projection: unsupported Screma field {field_idx}");
+            return Err(ConvertError::Internal(format!(
+                "cannot retarget non-scan Screma field {field_idx}"
+            )));
         }
-        assert!(op.place_destination(field_idx, SoacPlacement::OutputView));
+        if !op.place_destination(field_idx, SoacPlacement::OutputView) {
+            return Err(ConvertError::Internal(format!(
+                "Screma has no retargetable field {field_idx}"
+            )));
+        }
         views[field_idx] = Some(output_view);
 
         se.operand_nodes.truncate(base_len);
         for view in views.into_iter().flatten() {
             se.operand_nodes.push(view);
         }
-        return;
+        return Ok(());
     }
-    panic!(
-        "retarget_array_projection: no side effect produced target_result={:?}",
-        target_result
-    );
+    Err(ConvertError::Internal(format!(
+        "no side effect produced output target {target_result:?}"
+    )))
 }
 
 /// For each `Index(source, k)` consumer in the graph, synthesize a

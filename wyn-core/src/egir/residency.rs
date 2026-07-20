@@ -13,8 +13,8 @@ use polytype::Type;
 
 use super::graph_ops;
 use super::program::{
-    AllocatedProgram, CompilerResource, CompilerResourceKind, LogicalSize, MaterializationId,
-    MaterializationKind, MaterializationRequirement, MaterializationSubstitution, OutputWriter, ResourceId,
+    AllocatedProgram, CompilerResource, CompilerResourceKind, LogicalSize, MaterializationKind,
+    MaterializationRequirement, MaterializationSubstitution, OutputWriter, ResourceId,
     SemanticDependencyKind, SemanticOpId, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::soac::{filter, screma};
@@ -1077,7 +1077,6 @@ fn materialize_operation_result(
         projection,
     );
     let mut producer = MaterializationRequirement {
-        id: MaterializationId(inner.materializations.len() as u32),
         kind,
         producer: Some(producer_id),
         entry: producer_entry,
@@ -1126,7 +1125,7 @@ fn materialize_operation_result(
         &output_specs,
         effect_ids,
     );
-    inner.materializations.push(producer);
+    inner.materializations.alloc(producer);
 }
 
 fn materialize_runtime_array_result(
@@ -1171,7 +1170,6 @@ fn materialize_runtime_array_result(
         producer_storage,
         projection,
     );
-    let id = MaterializationId(inner.materializations.len() as u32);
     let length = inner.alloc_compiler_resource(
         CompilerResource::new(CompilerResourceKind::FilterLenCell, Some(producer_id), 1),
         Type::Constructed(TypeName::UInt(32), vec![]),
@@ -1185,7 +1183,6 @@ fn materialize_runtime_array_result(
         size,
     };
     let mut producer = MaterializationRequirement {
-        id,
         kind: MaterializationKind::RuntimeArray,
         producer: Some(producer_id),
         entry: producer_entry,
@@ -1235,7 +1232,7 @@ fn materialize_runtime_array_result(
         &handoff,
         effect_ids,
     );
-    inner.materializations.push(producer);
+    inner.materializations.alloc(producer);
 }
 
 fn rewrite_runtime_array_source(
@@ -1566,14 +1563,12 @@ fn materialize_parallel_prelude(
             projection,
         )
     };
-    let id = MaterializationId(inner.materializations.len() as u32);
     let resource = inner.alloc_compiler_resource(
         CompilerResource::new(CompilerResourceKind::ScalarHandoff, None, 0),
         elem_ty.clone(),
         size.clone(),
     );
     let mut producer = MaterializationRequirement {
-        id,
         kind: MaterializationKind::Scalar,
         producer: None,
         entry: producer_entry,
@@ -1614,7 +1609,7 @@ fn materialize_parallel_prelude(
     refresh_resource_reads_for_values(&mut entry.graph, &[loaded]);
     super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph);
 
-    inner.materializations.push(producer);
+    inner.materializations.alloc(producer);
 }
 
 fn projected_materialization_entry(
@@ -2174,7 +2169,7 @@ fn size_for_space(space: &super::types::SegSpace, elem_ty: &Type<TypeName>) -> L
 fn fresh_entry_name(inner: &AllocatedProgram, base: &str) -> String {
     let available = |name: &str| {
         inner.entry_points.iter().all(|entry| entry.name != name)
-            && inner.materializations.iter().all(|requirement| requirement.entry.name != name)
+            && inner.materializations.values().all(|requirement| requirement.entry.name != name)
     };
     if available(base) {
         return base.to_string();

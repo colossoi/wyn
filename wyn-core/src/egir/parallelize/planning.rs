@@ -10,8 +10,8 @@ use super::model::{
     FallbackReason, ParallelPolicy, ParallelizeError, RecipeSelection, ResourceIndex, Result,
 };
 use crate::egir::program::{
-    AllocatedProgram, CompilerFlowEndpoint, CompilerResource, CompilerResourceKind, LogicalSize,
-    ResourceOrigin, SemanticOpId,
+    AllocatedProgram, CompilerFlowEndpoint, CompilerResource, CompilerResourceKey, CompilerResourceKind,
+    LogicalSize, SemanticOpId,
 };
 use crate::egir::types::SegExtent;
 
@@ -81,9 +81,9 @@ impl PlannedKernel {
             PlannedRecipe::Map => {
                 lowering.schedule.commit_kernel(
                     kernel,
-                    super::schedule::KernelRecipeSpec::new(
+                    super::schedule::KernelRecipeSpec::compute(
                         body,
-                        super::schedule::KernelKind::SerialCompute,
+                        super::schedule::ComputeKernelKind::Serial,
                     ),
                 )?;
             }
@@ -91,9 +91,9 @@ impl PlannedKernel {
             PlannedRecipe::Unchanged if split_outputs => {
                 lowering.schedule.commit_kernel(
                     kernel,
-                    super::schedule::KernelRecipeSpec::new(
+                    super::schedule::KernelRecipeSpec::compute(
                         body,
-                        super::schedule::KernelKind::SerialCompute,
+                        super::schedule::ComputeKernelKind::Serial,
                     ),
                 )?;
             }
@@ -158,17 +158,17 @@ impl CandidateIndex<AnalyzedRecipe> {
         Ok(())
     }
 
-    fn bind(self, resources: &ResourceIndex<'_>) -> Result<CandidateIndex> {
+    fn bind(self, resources: &ScratchBindings) -> CandidateIndex {
         let endpoints = self
             .endpoints
             .into_iter()
-            .map(|(endpoint, plan)| Ok((endpoint, bind_endpoint(plan, resources)?)))
-            .collect::<Result<HashMap<_, _>>>()?;
-        Ok(CandidateIndex {
+            .map(|(endpoint, plan)| (endpoint, bind_endpoint(plan, resources)))
+            .collect();
+        CandidateIndex {
             endpoints,
             fallbacks: self.fallbacks,
             sequential: false,
-        })
+        }
     }
 }
 
@@ -193,9 +193,24 @@ impl CandidateIndex {
 
 struct ScratchRequest {
     endpoint: CompilerFlowEndpoint,
-    compiler: CompilerResource,
+    key: CompilerResourceKey,
     elem_ty: Type<TypeName>,
     size: LogicalSize,
+}
+
+pub(super) struct ScratchBindings {
+    ids: HashMap<CompilerResourceKey, crate::ResourceId>,
+}
+
+impl ScratchBindings {
+    pub(super) fn id(
+        &self,
+        owner: SemanticOpId,
+        kind: CompilerResourceKind,
+        slot: usize,
+    ) -> crate::ResourceId {
+        self.ids[&CompilerResourceKey { owner, kind, slot }]
+    }
 }
 
 pub(super) struct ParallelPlan {
@@ -210,76 +225,57 @@ impl ParallelPlan {
         self.requests.sort_by_key(|request| {
             (
                 request.endpoint,
-                request.compiler.owner,
-                request.compiler.kind,
-                request.compiler.slot,
+                request.key.owner,
+                request.key.kind,
+                request.key.slot,
             )
         });
 
+        let mut bindings = ScratchBindings { ids: HashMap::new() };
         for request in self.requests {
-            let existing = inner.resources.iter().find(|resource| {
-                matches!(
-                    &resource.origin,
-                    ResourceOrigin::Compiler(existing)
-                        if existing.kind == request.compiler.kind
-                            && existing.owner == request.compiler.owner
-                            && existing.slot == request.compiler.slot
-                )
-            });
-            if let Some(existing) = existing {
-                if existing.elem_ty != request.elem_ty || existing.size != request.size {
-                    return Err(ParallelizeError::Invalid(format!(
-                        "planned scratch {:?} for {:?} slot {} changed layout",
-                        request.compiler.kind, request.compiler.owner, request.compiler.slot
-                    )));
-                }
-                continue;
-            }
-            inner.alloc_compiler_resource(request.compiler, request.elem_ty, request.size);
+            let id = inner.alloc_compiler_resource(
+                CompilerResource::new(request.key.kind, Some(request.key.owner), request.key.slot),
+                request.elem_ty,
+                request.size,
+            );
+            bindings.ids.insert(request.key, id);
         }
-        let resources = ResourceIndex::new(&inner.resources)?;
-        self.candidates.bind(&resources)
+        Ok(self.candidates.bind(&bindings))
     }
 }
 
-fn bind_endpoint(
-    plan: EndpointPlan<AnalyzedRecipe>,
-    resources: &ResourceIndex<'_>,
-) -> Result<EndpointPlan> {
+fn bind_endpoint(plan: EndpointPlan<AnalyzedRecipe>, resources: &ScratchBindings) -> EndpointPlan {
     let (split_outputs, primary, siblings) = plan.into_parts();
-    Ok(EndpointPlan::new(
+    EndpointPlan::new(
         split_outputs,
-        bind_kernel(primary, resources)?,
-        siblings.into_iter().map(|kernel| bind_kernel(kernel, resources)).collect::<Result<Vec<_>>>()?,
-    ))
+        bind_kernel(primary, resources),
+        siblings.into_iter().map(|kernel| bind_kernel(kernel, resources)).collect(),
+    )
 }
 
-fn bind_kernel(
-    kernel: PlannedKernel<AnalyzedRecipe>,
-    resources: &ResourceIndex<'_>,
-) -> Result<PlannedKernel> {
+fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBindings) -> PlannedKernel {
     let (body, semantic_slots, recipe) = kernel.into_parts();
     let recipe = match recipe {
         AnalyzedRecipe::Filter(candidate) => {
-            PlannedRecipe::Filter(super::filter::BoundFilter::bind(candidate, resources)?)
+            PlannedRecipe::Filter(super::filter::BoundFilter::bind(candidate, resources))
         }
         AnalyzedRecipe::Reduce(candidate) => {
-            PlannedRecipe::Reduce(super::reduce::BoundReduce::bind(candidate, resources)?)
+            PlannedRecipe::Reduce(super::reduce::BoundReduce::bind(candidate, resources))
         }
         AnalyzedRecipe::Scan(candidate) => {
-            PlannedRecipe::Scan(super::scan::BoundScan::bind(candidate, resources)?)
+            PlannedRecipe::Scan(super::scan::BoundScan::bind(candidate, resources))
         }
         AnalyzedRecipe::Map => PlannedRecipe::Map,
         AnalyzedRecipe::Serial(site) => PlannedRecipe::Serial(site),
         AnalyzedRecipe::Unchanged => PlannedRecipe::Unchanged,
     };
-    Ok(PlannedKernel::new(body, semantic_slots, recipe))
+    PlannedKernel::new(body, semantic_slots, recipe)
 }
 
 /// Analyze every projected endpoint once. Recipes retain their projected body
 /// and graph-local handles until emission consumes the endpoint plan.
 pub(super) fn analyze(inner: &AllocatedProgram, policy: ParallelPolicy) -> Result<ParallelPlan> {
-    let resources = ResourceIndex::new(&inner.resources)?;
+    let resources = ResourceIndex::new(&inner.resources);
     let mut candidates = CandidateIndex::parallel();
     let mut requests = Vec::new();
     for (endpoint, entry) in inner.entries_with_endpoints() {
@@ -469,7 +465,11 @@ fn filter_scratch_requests(
     .enumerate()
     .map(|(slot, (kind, size))| ScratchRequest {
         endpoint,
-        compiler: CompilerResource::new(kind, Some(candidate.semantic_id), slot),
+        key: CompilerResourceKey {
+            owner: candidate.semantic_id,
+            kind,
+            slot,
+        },
         elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
         size,
     })
@@ -490,7 +490,7 @@ fn scratch_request(
     })?;
     Ok(ScratchRequest {
         endpoint,
-        compiler: CompilerResource::new(kind, Some(owner), slot),
+        key: CompilerResourceKey { owner, kind, slot },
         elem_ty,
         size: LogicalSize::SameAsDispatch { elem_bytes },
     })

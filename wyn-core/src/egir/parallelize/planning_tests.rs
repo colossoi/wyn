@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
-use crate::egir::program::{LogicalResourceArena, SemanticEntryId};
+use crate::egir::program::{LogicalResourceArena, ResourceOrigin, SemanticEntryId};
 
 fn resource(
     resources: &mut LogicalResourceArena,
@@ -17,46 +17,31 @@ fn resource(
 }
 
 #[test]
-fn resource_index_checks_exact_cardinality_and_slot_order() {
-    let mut missing_slot = LogicalResourceArena::default();
-    resource(&mut missing_slot, 7, CompilerResourceKind::ReducePartial, 1);
-    let missing_slot = ResourceIndex::new(&missing_slot).expect("valid arena manifest");
-    assert!(missing_slot
-        .ordered_slots(SemanticOpId(7), CompilerResourceKind::ReducePartial, 0, 1)
-        .is_err());
-
-    let mut duplicate_slot = LogicalResourceArena::default();
-    resource(&mut duplicate_slot, 7, CompilerResourceKind::ReducePartial, 0);
-    resource(&mut duplicate_slot, 7, CompilerResourceKind::ReducePartial, 0);
-    assert!(ResourceIndex::new(&duplicate_slot).is_err());
-
+fn resource_arena_interns_compiler_ownership_keys() {
     let mut resources = LogicalResourceArena::default();
-    resource(&mut resources, 7, CompilerResourceKind::ReducePartial, 1);
-    resource(&mut resources, 7, CompilerResourceKind::ReducePartial, 0);
-    resource(&mut resources, 8, CompilerResourceKind::ScanBlockSums, 0);
-    let index = ResourceIndex::new(&resources).expect("valid test manifest");
-    let ordered = index.owned(SemanticOpId(7), CompilerResourceKind::ReducePartial);
+    let slot_one = resource(&mut resources, 7, CompilerResourceKind::ReducePartial, 1);
+    let slot_zero = resource(&mut resources, 7, CompilerResourceKind::ReducePartial, 0);
+    let duplicate = resource(&mut resources, 7, CompilerResourceKind::ReducePartial, 0);
+    let scan = resource(&mut resources, 8, CompilerResourceKind::ScanBlockSums, 0);
+
+    assert_eq!(duplicate, slot_zero);
+    assert_eq!(resources.len(), 3);
     assert_eq!(
-        ordered.iter().map(|resource| resource.id().0).collect::<Vec<_>>(),
-        [1, 0]
+        resources.compiler_resource(SemanticOpId(7), CompilerResourceKind::ReducePartial, 0),
+        Some(slot_zero)
     );
-    assert!(index.ordered_slots(SemanticOpId(7), CompilerResourceKind::ReducePartial, 0, 2).is_ok());
-    assert!(index.exactly_one(SemanticOpId(7), CompilerResourceKind::ReducePartial).is_err());
     assert_eq!(
-        index
-            .exactly_one(SemanticOpId(8), CompilerResourceKind::ScanBlockSums)
-            .expect("one scan-sum resource")
-            .id(),
-        crate::ResourceId(2)
+        resources.compiler_resource(SemanticOpId(7), CompilerResourceKind::ReducePartial, 1),
+        Some(slot_one)
     );
-    assert!(index.exactly_one_at(SemanticOpId(8), CompilerResourceKind::ScanBlockSums, 0).is_ok());
-    assert!(index.exactly_one(SemanticOpId(9), CompilerResourceKind::ScanBlockSums).is_err());
-    assert!(index.exactly_one(SemanticOpId(7), CompilerResourceKind::ScanBlockSums).is_err());
-    assert!(index
-        .optional(SemanticOpId(9), CompilerResourceKind::ScanBlockSums)
-        .expect("missing optional resource is valid")
-        .is_none());
-    assert!(index.optional(SemanticOpId(7), CompilerResourceKind::ReducePartial).is_err());
+    assert_eq!(
+        resources.compiler_resource(SemanticOpId(8), CompilerResourceKind::ScanBlockSums, 0),
+        Some(scan)
+    );
+    assert_eq!(
+        resources.compiler_resource(SemanticOpId(9), CompilerResourceKind::ScanBlockSums, 0),
+        None
+    );
 }
 
 #[test]

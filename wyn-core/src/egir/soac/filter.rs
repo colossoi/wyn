@@ -284,7 +284,7 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut AllocatedProgram) {
             .ir
             .entry_points
             .iter_mut()
-            .chain(materializations.iter_mut().map(|requirement| &mut requirement.entry))
+            .chain(materializations.into_iter().map(|(_, requirement)| &mut requirement.entry))
         {
             if let Some(declaration) = entry
                 .resource_declarations

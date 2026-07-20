@@ -40,26 +40,27 @@ pub(super) fn analyze_scan_candidate(
     if !can_clone_pure_subgraph(&entry.graph, operator.neutral, &[]) {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedCaptures));
     }
-    let input = *side_effect.operand_nodes.first().ok_or_else(|| {
-        error::ParallelizeError::Invalid("selected scan effect has no input operand".into())
-    })?;
+    let operands =
+        screma::ScremaOperands::decode(located.op, &side_effect.operand_nodes, side_effect.result)
+            .map_err(error::ParallelizeError::Invalid)?;
+    let input = operands.input(0).node;
     if !can_chunk_view(&entry.graph, input, ChunkInputKind::StorageOrRange) {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedViewShape));
     }
-    let output_base = lanes.inputs.len();
+    let mut map_output_view_operands = Vec::with_capacity(lanes.maps.len());
     for index in 0..lanes.maps.len() {
-        let view = *side_effect.operand_nodes.get(output_base + index).ok_or_else(|| {
-            error::ParallelizeError::Invalid(format!("scan recipe is missing map output operand {index}"))
-        })?;
-        if !can_chunk_view(&entry.graph, view, ChunkInputKind::StorageOnly) {
+        let Some(output) = operands.output(index) else {
+            return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedDestination));
+        };
+        if !can_chunk_view(&entry.graph, output.node, ChunkInputKind::StorageOnly) {
             return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedViewShape));
         }
+        map_output_view_operands.push(output.slot);
     }
-    let scan_output_view_operand = output_base + lanes.maps.len();
-    let scan_output = *side_effect.operand_nodes.get(scan_output_view_operand).ok_or_else(|| {
-        error::ParallelizeError::Invalid("scan recipe is missing its output-view operand".into())
-    })?;
-    let Some(scan_output_storage) = graph_ops::extract_storage_view_source(&entry.graph, scan_output)
+    let Some(scan_output) = operands.output(lanes.maps.len()) else {
+        return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedDestination));
+    };
+    let Some(scan_output_storage) = graph_ops::extract_storage_view_source(&entry.graph, scan_output.node)
     else {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedDestination));
     };
@@ -69,7 +70,7 @@ pub(super) fn analyze_scan_candidate(
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedScratchLayout));
     }
     let input_view_type = semantic_node_type(&entry.graph, input);
-    let scan_output_view_type = semantic_node_type(&entry.graph, scan_output);
+    let scan_output_view_type = semantic_node_type(&entry.graph, scan_output.node);
     Ok(RecipeSelection::Parallel(ScanCandidate {
         site,
         owner,
@@ -81,27 +82,22 @@ pub(super) fn analyze_scan_candidate(
         neutral: operator.neutral,
         input_view: input,
         input_view_type,
-        map_output_view_operands: (0..lanes.maps.len()).map(|index| output_base + index).collect(),
-        scan_output_view_operand,
+        map_output_view_operands,
+        scan_output_view_operand: scan_output.slot,
         scan_output_storage,
         scan_output_view_type,
     }))
 }
 
 impl BoundScan {
-    pub(super) fn bind(
-        candidate: ScanCandidate,
-        resources: &model::ResourceIndex<'_>,
-    ) -> error::Result<Self> {
-        let block_sums =
-            resources.exactly_one_at(candidate.owner, CompilerResourceKind::ScanBlockSums, 0)?.id();
-        let block_offsets =
-            resources.exactly_one_at(candidate.owner, CompilerResourceKind::ScanBlockOffsets, 1)?.id();
-        Ok(Self {
+    pub(super) fn bind(candidate: ScanCandidate, resources: &super::planning::ScratchBindings) -> Self {
+        let block_sums = resources.id(candidate.owner, CompilerResourceKind::ScanBlockSums, 0);
+        let block_offsets = resources.id(candidate.owner, CompilerResourceKind::ScanBlockOffsets, 1);
+        Self {
             candidate,
             block_sums,
             block_offsets,
-        })
+        }
     }
 }
 
@@ -187,8 +183,9 @@ impl KernelPlanBuilder<'_, '_> {
                 .map(|id| id.0)
                 .max()
                 .map_or(0, |id| id + 1);
-            // `[chunked_input, init]` — the step captures live on the SegBody below.
-            let reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![chunked_input_nid, init_nid];
+            // The neutral is owned by `Operator::neutral`; effect operands
+            // contain only the input view.
+            let reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![chunked_input_nid];
             let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![elem_ty.clone()]);
             let screma_nid = graph_ops::emit_pending_soac(
                 &mut entry.graph,

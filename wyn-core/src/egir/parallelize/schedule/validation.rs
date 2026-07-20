@@ -2,22 +2,20 @@ use super::*;
 
 impl KernelPlan {
     pub(super) fn validate(&self) -> Result<(), String> {
-        let phases = self.phases().collect::<Vec<_>>();
+        let phases = self.phases_with_ids().collect::<Vec<_>>();
         let mut ids = HashSet::new();
         let mut names = HashSet::new();
-        for phase in &phases {
-            if !ids.insert(phase.id) {
-                return Err(format!("duplicate kernel id {:?}", phase.id));
-            }
+        for (id, phase) in &phases {
+            ids.insert(*id);
             if !names.insert(phase.entry_point()) {
                 return Err(format!("duplicate physical entry `{}`", phase.entry_point()));
             }
-            if phase.dependencies.iter().any(|dependency| *dependency == phase.id) {
+            if phase.dependencies.iter().any(|dependency| dependency == id) {
                 return Err(format!("kernel `{}` depends on itself", phase.entry_point()));
             }
             validate_entry(phase.recipe.entry())?;
         }
-        for phase in &phases {
+        for (_, phase) in &phases {
             for dependency in &phase.dependencies {
                 if !ids.contains(dependency) {
                     return Err(format!(
@@ -57,7 +55,7 @@ impl KernelPlan {
         let mut primary = HashMap::<SemanticEntryId, usize>::new();
         let mut projected = HashMap::<SemanticEntryId, HashSet<OutputSlotId>>::new();
         let mut family = HashMap::<CompilerFlowEndpoint, HashSet<KernelKind>>::new();
-        for phase in self.phases() {
+        for (phase_id, phase) in self.phases_with_ids() {
             let entry = phase.recipe.entry();
             let resources = phase.resources();
             for scheduled in &resources {
@@ -98,7 +96,7 @@ impl KernelPlan {
                 .entry_schedules
                 .get(&source)
                 .ok_or_else(|| format!("kernel `{}` has invalid source id", phase.entry_point()))?;
-            if phase.id == abi.primary {
+            if phase_id == abi.primary {
                 *primary.entry(source).or_default() += 1;
                 if phase.entry_point() != abi.name {
                     return Err(format!(
@@ -125,7 +123,7 @@ impl KernelPlan {
                         phase.entry_point()
                     ));
                 }
-                if abi.output_owners.get(&route.semantic_slot) != Some(&phase.id) {
+                if abi.output_owners.get(&route.semantic_slot) != Some(&phase_id) {
                     return Err(format!(
                         "kernel `{}` does not own semantic output {:?}/{}",
                         phase.entry_point(),
@@ -133,10 +131,10 @@ impl KernelPlan {
                         route.semantic_slot.0
                     ));
                 }
-                if let Some(owner) = output_owners.insert((source, route.semantic_slot), phase.id) {
+                if let Some(owner) = output_owners.insert((source, route.semantic_slot), phase_id) {
                     return Err(format!(
                         "semantic output {:?}/{} is owned by {:?} and {:?}",
-                        source, route.semantic_slot.0, owner, phase.id
+                        source, route.semantic_slot.0, owner, phase_id
                     ));
                 }
                 projected.entry(source).or_default().insert(route.semantic_slot);
@@ -203,8 +201,23 @@ fn validate_entry<P: crate::egir::types::EgirPhase>(entry: &PlannedEntry<P>) -> 
     Ok(())
 }
 
-fn validate_acyclic(phases: &[&KernelPhase]) -> Result<(), String> {
-    if super::topologically_order_phases(phases.iter().map(|phase| (*phase).clone()).collect()).is_err() {
+fn validate_acyclic(phases: &[(KernelId, &KernelPhase)]) -> Result<(), String> {
+    let phase_ids = phases.iter().map(|(id, _)| *id).collect::<HashSet<_>>();
+    let mut emitted = HashSet::new();
+    while emitted.len() < phases.len() {
+        let ready = phases.iter().find(|(id, phase)| {
+            !emitted.contains(id)
+                && phase
+                    .dependencies
+                    .iter()
+                    .all(|dependency| !phase_ids.contains(dependency) || emitted.contains(dependency))
+        });
+        let Some(phase) = ready else {
+            return Err("kernel dependency graph contains a cycle".into());
+        };
+        emitted.insert(phase.0);
+    }
+    if emitted.len() != phases.len() {
         return Err("kernel dependency graph contains a cycle".into());
     }
     Ok(())
@@ -244,13 +257,13 @@ fn validate_resource_flows(plan: &KernelPlan, resources: &LogicalResourceArena) 
         };
         let writers = plan
             .flow_resource_phases(flow.producer, resource.id(), true)
-            .map(|phase| phase.id)
+            .map(|(id, _)| id)
             .collect::<HashSet<_>>();
         if writers.is_empty() {
             return Err(format!("resource {:?} has no producer", resource.id()));
         }
         for consumer in &flow.consumers {
-            for reader in plan.flow_resource_phases(*consumer, resource.id(), false) {
+            for (_, reader) in plan.flow_resource_phases(*consumer, resource.id(), false) {
                 if !reader.dependencies.iter().any(|dependency| writers.contains(dependency)) {
                     return Err(format!(
                         "kernel `{}` reads {:?} without a producer dependency",

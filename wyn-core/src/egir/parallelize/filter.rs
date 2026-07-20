@@ -212,7 +212,6 @@ impl FilterKernelFamily {
         } = self;
         let scatter = schedule::KernelRecipeSpec::filter(
             scatter,
-            schedule::KernelKind::FilterScatter,
             filter_soac::ParallelStage::Scatter,
             filter_soac::ParallelConfig {
                 buffers: work,
@@ -223,7 +222,6 @@ impl FilterKernelFamily {
         let flags = schedule::PhaseSpec::filter(
             flags,
             schedule::DomainSelection::Explicit(domain.clone()),
-            schedule::KernelKind::FilterFlags,
             filter_soac::ParallelStage::Flags,
             filter_soac::ParallelConfig {
                 buffers: work,
@@ -240,7 +238,6 @@ impl FilterKernelFamily {
                 y: 1,
                 z: 1,
             }),
-            schedule::KernelKind::FilterScan,
             filter_soac::ParallelStage::Scan,
             filter_soac::ParallelConfig {
                 buffers: work,
@@ -248,15 +245,15 @@ impl FilterKernelFamily {
             },
             storage,
         );
-        let combine = schedule::PhaseSpec::new(
+        let combine = schedule::PhaseSpec::compute(
             combine,
             schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-            schedule::KernelKind::FilterCombine,
+            schedule::ComputeKernelKind::FilterCombine,
         );
-        let apply_offsets = schedule::PhaseSpec::new(
+        let apply_offsets = schedule::PhaseSpec::compute(
             apply_offsets,
             schedule::DomainSelection::Explicit(domain),
-            schedule::KernelKind::FilterScan,
+            schedule::ComputeKernelKind::FilterScan,
         );
         schedule.install_chain(
             kernel,
@@ -354,20 +351,15 @@ pub(super) fn analyze_filter_candidates(
 }
 
 impl BoundFilter {
-    pub(super) fn bind(
-        candidate: FilterCandidate,
-        resources: &model::ResourceIndex<'_>,
-    ) -> error::Result<Self> {
+    pub(super) fn bind(candidate: FilterCandidate, resources: &super::planning::ScratchBindings) -> Self {
         let owner = candidate.semantic_id;
-        let resource_id = |kind, slot| {
-            resources.exactly_one_at(owner, kind, slot).map(|resource| SemanticResourceRef(resource.id()))
-        };
+        let resource_id = |kind, slot| SemanticResourceRef(resources.id(owner, kind, slot));
         let work = filter_soac::WorkBuffers {
-            flags: resource_id(CompilerResourceKind::FilterFlags, 0)?,
-            offsets: resource_id(CompilerResourceKind::FilterOffsets, 1)?,
-            block_sums: resource_id(CompilerResourceKind::FilterScanBlockSums, 2)?,
-            block_offsets: resource_id(CompilerResourceKind::FilterScanBlockOffsets, 3)?,
+            flags: resource_id(CompilerResourceKind::FilterFlags, 0),
+            offsets: resource_id(CompilerResourceKind::FilterOffsets, 1),
+            block_sums: resource_id(CompilerResourceKind::FilterScanBlockSums, 2),
+            block_offsets: resource_id(CompilerResourceKind::FilterScanBlockOffsets, 3),
         };
-        Ok(Self { candidate, work })
+        Self { candidate, work }
     }
 }

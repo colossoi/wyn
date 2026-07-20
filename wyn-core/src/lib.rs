@@ -380,6 +380,20 @@ impl<Id: From<u32> + Copy + Eq + Hash, T> Default for IdArena<Id, T> {
     }
 }
 
+impl<Id: From<u32> + Copy + Eq + Hash, T> std::ops::Index<Id> for IdArena<Id, T> {
+    type Output = T;
+
+    fn index(&self, id: Id) -> &Self::Output {
+        &self.items[&id]
+    }
+}
+
+impl<Id: From<u32> + Copy + Eq + Hash, T> std::ops::IndexMut<Id> for IdArena<Id, T> {
+    fn index_mut(&mut self, id: Id) -> &mut Self::Output {
+        &mut self.items[&id]
+    }
+}
+
 impl<Id: From<u32> + Copy + Eq + Hash, T> IntoIterator for IdArena<Id, T> {
     type Item = (Id, T);
     type IntoIter = indexmap::map::IntoIter<Id, T>;
@@ -1388,7 +1402,7 @@ impl EgirPlanned {
     /// Expand and elaborate the validated physical plan into SSA.
     pub fn lower_to_ssa(mut self) -> std::result::Result<SsaConverted, ConvertError> {
         let plan = self.kernel_plan;
-        egir::soac_expand::run(&mut self.physical, &mut self.effect_ids);
+        egir::soac_expand::run(&mut self.physical, &mut self.effect_ids).map_err(ConvertError::Internal)?;
         egir::materialize::run(&mut self.physical);
         egir::rewrite::run(&mut self.physical);
         egir::skel_opt::run(&mut self.physical);

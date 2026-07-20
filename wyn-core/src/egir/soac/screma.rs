@@ -8,6 +8,79 @@ use super::super::types::{
     WynSoacPhase,
 };
 
+/// One position in a Screma side effect's compact operand list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Operand {
+    pub node: NodeId,
+    pub slot: usize,
+}
+
+/// A validated view of a Screma side effect's operands. The view borrows the
+/// compact IR representation, so decoding adds no allocation or copied state.
+#[derive(Clone, Copy, Debug)]
+pub struct ScremaOperands<'a, P: WynSoacPhase> {
+    op: &'a Op<P>,
+    nodes: &'a [NodeId],
+    result: NodeId,
+}
+
+impl<'a, P: WynSoacPhase> ScremaOperands<'a, P> {
+    pub fn decode(op: &'a Op<P>, nodes: &'a [NodeId], result: Option<NodeId>) -> Result<Self, String> {
+        let input_count = op.lanes().inputs.len();
+        let output_count = (0..op.result_count())
+            .filter(|&field| op.destination(field).is_some_and(SoacDestination::is_output_view))
+            .count();
+        let expected = input_count + output_count;
+        if nodes.len() != expected {
+            return Err(format!(
+                "Screma requires {expected} typed input and output-view operands, found {}",
+                nodes.len()
+            ));
+        }
+        let result = result.ok_or_else(|| "Screma has no result node".to_owned())?;
+        Ok(Self { op, nodes, result })
+    }
+
+    pub fn inputs(&self) -> impl Iterator<Item = Operand> + '_ {
+        self.nodes[..self.input_count()]
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(slot, node)| Operand { node, slot })
+    }
+
+    pub fn input(&self, slot: usize) -> Operand {
+        Operand {
+            node: self.nodes[slot],
+            slot,
+        }
+    }
+
+    pub fn input_count(&self) -> usize {
+        self.op.lanes().inputs.len()
+    }
+
+    pub fn output(&self, field: usize) -> Option<Operand> {
+        self.op.destination(field).filter(|destination| destination.is_output_view())?;
+        let slot = self.input_count()
+            + (0..field)
+                .filter(|&field| self.op.destination(field).is_some_and(SoacDestination::is_output_view))
+                .count();
+        Some(Operand {
+            node: self.nodes[slot],
+            slot,
+        })
+    }
+
+    pub fn outputs(&self) -> impl Iterator<Item = Option<Operand>> + '_ {
+        (0..self.op.result_count()).map(|field| self.output(field))
+    }
+
+    pub fn result(&self) -> NodeId {
+        self.result
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {
     Kernel,

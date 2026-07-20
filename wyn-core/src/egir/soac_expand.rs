@@ -29,7 +29,10 @@ use super::types::{
 };
 
 /// Run `run_one_body` on every function and entry point in the program.
-pub fn run(inner: &mut PhysicalProgram, effect_ids: &mut crate::IdSource<EffectToken>) {
+pub fn run(
+    inner: &mut PhysicalProgram,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) -> Result<(), String> {
     // Borrow the region interner disjointly from the bodies being expanded; it
     // is read-only here (recovering the SSA `Call` name for each region).
     let super::ir::Program {
@@ -39,11 +42,12 @@ pub fn run(inner: &mut PhysicalProgram, effect_ids: &mut crate::IdSource<EffectT
         ..
     } = inner.ir_mut();
     for f in functions.iter_mut() {
-        run_one_body(&mut f.graph, &mut f.control_headers, region_interner, effect_ids);
+        run_one_body(&mut f.graph, &mut f.control_headers, region_interner, effect_ids)?;
     }
     for e in entry_points.iter_mut() {
-        run_one_body(&mut e.graph, &mut e.control_headers, region_interner, effect_ids);
+        run_one_body(&mut e.graph, &mut e.control_headers, region_interner, effect_ids)?;
     }
+    Ok(())
 }
 
 /// Expand every physical SOAC in the skeleton.
@@ -52,7 +56,7 @@ pub fn run_one_body(
     control_headers: &mut LookupMap<BlockId, ControlHeader>,
     regions: &RegionInterner,
     effect_ids: &mut crate::IdSource<EffectToken>,
-) {
+) -> Result<(), String> {
     // Collect (block, index) of every handleable Soac in a stable order.
     // Process back-to-front within each block so earlier indices stay valid.
     let mut targets: Vec<(BlockId, usize)> = Vec::new();
@@ -68,8 +72,9 @@ pub fn run_one_body(
     targets.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
 
     for (bid, idx) in targets {
-        expand_one(graph, control_headers, bid, idx, effect_ids, regions);
+        expand_one(graph, control_headers, bid, idx, effect_ids, regions)?;
     }
+    Ok(())
 }
 
 /// Does this SOAC kind have a TLC→EGIR expansion implemented here?
@@ -150,10 +155,11 @@ fn expand_one(
     idx: usize,
     next_effect: &mut crate::IdSource<EffectToken>,
     regions: &RegionInterner,
-) {
+) -> Result<(), String> {
     let se = graph.skeleton.blocks[bid].side_effects.remove(idx);
     match &se.kind {
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if op.is_serial() => {
+            let operands = screma::ScremaOperands::decode(op, &se.operand_nodes, se.result)?;
             let lanes = op.lanes();
             let map_input_indices =
                 lanes.maps.iter().map(|map| map.input_indices.clone()).collect::<Vec<_>>();
@@ -176,13 +182,11 @@ fn expand_one(
                 acc_specs.iter().map(|operator| operator.destination).collect::<Vec<_>>();
             let n_maps = map_funcs.len();
             let n_accs = acc_specs.len();
-            let n_inputs = arr_tys.len();
-            let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
+            let input_nids = operands.inputs().map(|operand| operand.node).collect::<Vec<_>>();
             let init_acc_nids = acc_specs.iter().map(|operator| operator.neutral).collect::<Vec<_>>();
             // Operand layout is `[inputs.., output_views..]`; accumulator
             // neutrals and callable captures are explicit in the body.
-            let cursor = n_inputs;
-            let result_nid = se.result.expect("Screma has a result");
+            let result_nid = operands.result();
             let result_ty = graph.types[&result_nid].clone();
             let Type::Constructed(TypeName::Tuple(_), result_fields) = &result_ty else {
                 panic!("Screma result must be a tuple");
@@ -193,7 +197,6 @@ fn expand_one(
                 "Screma result is (mapped..., accumulator...)"
             );
 
-            let mut view_cursor = cursor;
             let mut map_output_views = Vec::with_capacity(n_maps);
             let mut map_input_buffer_inits = Vec::with_capacity(n_maps);
             for (map_idx, dest) in map_destinations.iter().enumerate() {
@@ -206,11 +209,10 @@ fn expand_one(
                         map_input_buffer_inits.push(None);
                     }
                     (_, Some(SoacPlacement::OutputView)) => {
-                        let view = *se
-                            .operand_nodes
-                            .get(view_cursor)
-                            .expect("Screma[OutputView] has mapped output_view operand");
-                        view_cursor += 1;
+                        let view =
+                            operands.output(map_idx).map(|operand| operand.node).ok_or_else(|| {
+                                format!("Screma map result {map_idx} has no output-view operand")
+                            })?;
                         map_output_views.push(Some(view));
                         map_input_buffer_inits.push(None);
                     }
@@ -228,7 +230,7 @@ fn expand_one(
             }
             let mut acc_output_views = Vec::with_capacity(n_accs);
             let mut acc_input_buffer_inits = Vec::with_capacity(n_accs);
-            for dest in &acc_destinations {
+            for (acc_idx, dest) in acc_destinations.iter().enumerate() {
                 match (dest.ownership, dest.placement) {
                     (SoacOwnership::UniqueInput, None) => {
                         panic!("unresolved UniqueInput destination reached physical expansion")
@@ -238,11 +240,10 @@ fn expand_one(
                         acc_input_buffer_inits.push(None);
                     }
                     (_, Some(SoacPlacement::OutputView)) => {
-                        let view = *se
-                            .operand_nodes
-                            .get(view_cursor)
-                            .expect("Screma[OutputView] has accumulator output_view operand");
-                        view_cursor += 1;
+                        let field = n_maps + acc_idx;
+                        let view = operands.output(field).map(|operand| operand.node).ok_or_else(|| {
+                            format!("Screma accumulator result {acc_idx} has no output-view operand")
+                        })?;
                         acc_output_views.push(Some(view));
                         acc_input_buffer_inits.push(None);
                     }
@@ -639,23 +640,30 @@ fn expand_one(
         )) => {
             // SegRed/SegScan are consumed by `egir::parallelize::lower`
             // before expansion. This arm is therefore semantically map-only.
-            let n_inputs = inputs.len();
-            let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
-            // `[inputs.., output_views..]`: views start right after the inputs.
-            let cursor = n_inputs;
+            let operands = screma::ScremaOperands::decode(
+                match &se.kind {
+                    SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => op,
+                    _ => return Err("segmented map lost its Screma operation".into()),
+                },
+                &se.operand_nodes,
+                se.result,
+            )?;
+            let input_nids = operands.inputs().map(|operand| operand.node).collect::<Vec<_>>();
             let map_captures: Vec<Vec<NodeId>> = maps.iter().map(|map| map.body.captures.clone()).collect();
             let map_funcs = regions.resolve_cloned(maps.iter().map(|map| map.body.region));
             let output_views = if maps.iter().all(|map| map.destination.is_input_buffer()) {
                 vec![input_nids[0]; map_funcs.len()]
             } else {
-                se.operand_nodes[cursor..].to_vec()
+                (0..maps.len())
+                    .map(|field| {
+                        operands
+                            .output(field)
+                            .map(|operand| operand.node)
+                            .ok_or_else(|| format!("segmented map result {field} has no output view"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
             };
-            assert_eq!(
-                output_views.len(),
-                map_funcs.len(),
-                "Seg map has one output view per map"
-            );
-            let result_nid = se.result.expect("Seg has a result");
+            let result_nid = operands.result();
             let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
                 .iter()
                 .zip(inputs.iter())
@@ -682,8 +690,9 @@ fn expand_one(
             );
         }
 
-        _ => unreachable!("is_handleable_soac filtered to supported variants"),
+        _ => return Err("SOAC expansion target changed after selection".into()),
     }
+    Ok(())
 }
 
 /// Emit a real loop via `build_loop_skeleton`, invoking `emit_body` in the

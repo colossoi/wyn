@@ -61,32 +61,27 @@ pub(super) fn analyze_reduce_candidate(
     }
     let lanes = located.lanes;
     let operators = located.operators.iter().collect::<Vec<_>>();
-    let n_inputs = lanes.inputs.len();
     let n_accs = operators.len();
     let n_maps = lanes.maps.len();
-    let operand = |index| {
-        side_effect.operand_nodes.get(index).copied().ok_or_else(|| {
-            error::ParallelizeError::Invalid(format!("reduce recipe is missing operand {index}"))
-        })
-    };
-    for index in 0..n_inputs {
-        if !can_chunk_view(&entry.graph, operand(index)?, ChunkInputKind::StorageOrRange) {
+    let operands =
+        screma::ScremaOperands::decode(located.op, &side_effect.operand_nodes, side_effect.result)
+            .map_err(error::ParallelizeError::Invalid)?;
+    for input in operands.inputs() {
+        if !can_chunk_view(&entry.graph, input.node, ChunkInputKind::StorageOrRange) {
             return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedViewShape));
         }
     }
-    let map_base = n_inputs;
+    let mut map_output_view_operands = Vec::with_capacity(n_maps);
     for index in 0..n_maps {
-        if !can_chunk_view(
-            &entry.graph,
-            operand(map_base + index)?,
-            ChunkInputKind::StorageOnly,
-        ) {
+        let Some(output) = operands.output(index) else {
+            return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedDestination));
+        };
+        if !can_chunk_view(&entry.graph, output.node, ChunkInputKind::StorageOnly) {
             return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedViewShape));
         }
+        map_output_view_operands.push(output.slot);
     }
-    let result = side_effect.result.ok_or_else(|| {
-        error::ParallelizeError::Invalid("selected reduce effect has no result node".into())
-    })?;
+    let result = operands.result();
     let owner = located.owner;
     if operators.iter().any(|operator| !can_clone_pure_subgraph(&entry.graph, operator.neutral, &[])) {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedCaptures));
@@ -98,13 +93,8 @@ pub(super) fn analyze_reduce_candidate(
     if scratch_types.iter().any(|ty| crate::ssa::layout::type_byte_size(ty).is_none()) {
         return Ok(RecipeSelection::Serial(FallbackReason::UnsupportedScratchLayout));
     }
-    let input_views = (0..n_inputs)
-        .map(|index| {
-            let view = operand(index)?;
-            Ok((view, semantic_node_type(&entry.graph, view)))
-        })
-        .collect::<error::Result<Vec<_>>>()?;
-    let map_output_view_operands = (0..n_maps).map(|index| map_base + index).collect();
+    let input_views =
+        operands.inputs().map(|input| (input.node, semantic_node_type(&entry.graph, input.node))).collect();
     let mut stores = (0..n_accs).map(|_| Vec::new()).collect::<Vec<_>>();
     let mut outputs: Vec<Vec<(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)>> =
         vec![Vec::new(); n_accs];
@@ -185,21 +175,11 @@ pub(super) fn analyze_reduce_candidate(
 }
 
 impl BoundReduce {
-    pub(super) fn bind(
-        candidate: ReduceCandidate,
-        resources: &model::ResourceIndex<'_>,
-    ) -> error::Result<Self> {
-        let partials = resources
-            .ordered_slots(
-                candidate.owner,
-                CompilerResourceKind::ReducePartial,
-                0,
-                candidate.accumulators.len(),
-            )?
-            .iter()
-            .map(|resource| resource.id())
+    pub(super) fn bind(candidate: ReduceCandidate, resources: &super::planning::ScratchBindings) -> Self {
+        let partials = (0..candidate.accumulators.len())
+            .map(|slot| resources.id(candidate.owner, CompilerResourceKind::ReducePartial, slot))
             .collect();
-        Ok(Self { candidate, partials })
+        Self { candidate, partials }
     }
 }
 

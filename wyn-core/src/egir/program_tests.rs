@@ -62,7 +62,7 @@ fn allocated_program(reference: SemanticResourceRef, size: LogicalSize) -> Alloc
     assert_eq!(resource, reference.0);
     AllocatedProgram {
         semantic: program,
-        materializations: Vec::new(),
+        materializations: crate::IdArena::new(),
     }
 }
 

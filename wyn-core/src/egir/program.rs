@@ -89,6 +89,12 @@ pub struct SemanticEntryId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MaterializationId(pub u32);
 
+impl From<u32> for MaterializationId {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
 /// Stable identity of an entry input position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InputSlotId(pub usize);
@@ -191,6 +197,16 @@ pub struct CompilerResource {
     pub flow: Option<CompilerResourceFlow>,
 }
 
+/// Arena key for an operation-owned compiler resource. The arena assigns at
+/// most one logical resource to each key, so target recipes can retain the
+/// returned id instead of rediscovering it from the manifest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct CompilerResourceKey {
+    pub(crate) owner: SemanticOpId,
+    pub(crate) kind: CompilerResourceKind,
+    pub(crate) slot: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompilerResourceFlow {
     pub producer: CompilerFlowEndpoint,
@@ -212,6 +228,14 @@ impl CompilerResource {
             slot,
             flow: None,
         }
+    }
+
+    pub(crate) fn key(&self) -> Option<CompilerResourceKey> {
+        Some(CompilerResourceKey {
+            owner: self.owner?,
+            kind: self.kind,
+            slot: self.slot,
+        })
     }
 }
 
@@ -250,6 +274,8 @@ impl LogicalResource {
 #[derive(Clone, Debug, Default)]
 pub struct LogicalResourceArena {
     resources: Vec<LogicalResource>,
+    host: HashMap<crate::BindingRef, ResourceId>,
+    compiler: HashMap<CompilerResourceKey, ResourceId>,
 }
 
 impl LogicalResourceArena {
@@ -259,7 +285,26 @@ impl LogicalResourceArena {
         elem_ty: Type<TypeName>,
         size: LogicalSize,
     ) -> ResourceId {
+        let existing = match &origin {
+            ResourceOrigin::Host(binding) => self.host.get(binding).copied(),
+            ResourceOrigin::Compiler(compiler) => {
+                compiler.key().and_then(|key| self.compiler.get(&key).copied())
+            }
+        };
+        if let Some(id) = existing {
+            return id;
+        }
         let id = ResourceId(self.resources.len() as u32);
+        match &origin {
+            ResourceOrigin::Host(binding) => {
+                self.host.insert(*binding, id);
+            }
+            ResourceOrigin::Compiler(compiler) => {
+                if let Some(key) = compiler.key() {
+                    self.compiler.insert(key, id);
+                }
+            }
+        }
         self.resources.push(LogicalResource {
             id,
             origin,
@@ -267,6 +312,29 @@ impl LogicalResourceArena {
             size,
         });
         id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compiler_resource(
+        &self,
+        owner: SemanticOpId,
+        kind: CompilerResourceKind,
+        slot: usize,
+    ) -> Option<ResourceId> {
+        self.compiler.get(&CompilerResourceKey { owner, kind, slot }).copied()
+    }
+
+    pub(crate) fn reclassify_as_compiler(&mut self, id: ResourceId, compiler: CompilerResource) {
+        let Some(resource) = self.resources.get_mut(id.0 as usize) else {
+            return;
+        };
+        if let ResourceOrigin::Host(binding) = resource.origin {
+            self.host.remove(&binding);
+        }
+        if let Some(key) = compiler.key() {
+            self.compiler.insert(key, id);
+        }
+        resource.origin = ResourceOrigin::Compiler(compiler);
     }
 
     pub fn get(&self, id: ResourceId) -> Option<&LogicalResource> {
@@ -333,7 +401,7 @@ pub fn plan_logical_resources(
 ) -> AllocatedProgram {
     let mut allocated = AllocatedProgram {
         semantic: inner,
-        materializations: Vec::new(),
+        materializations: crate::IdArena::new(),
     };
     classify_existing_compiler_resources(&mut allocated);
     super::residency::run(&mut allocated, effect_ids);
@@ -393,11 +461,7 @@ fn classify_existing_compiler_resources(inner: &mut AllocatedProgram) {
             .filter(|(resource, _)| !source_outputs.contains(resource)),
     );
     for (resource, compiler) in classifications {
-        let logical = inner
-            .resources
-            .get_mut(resource)
-            .expect("compiler classification references a missing resource");
-        logical.origin = ResourceOrigin::Compiler(compiler);
+        inner.resources.reclassify_as_compiler(resource, compiler);
     }
 }
 
@@ -453,7 +517,7 @@ fn record_compiler_resource_flows(inner: &mut AllocatedProgram) {
             ResourceOrigin::Host(_) => None,
         })
         .collect::<HashMap<_, _>>();
-    for requirement in &mut inner.materializations {
+    for (_, requirement) in &mut inner.materializations {
         for substitution in &mut requirement.substitutions {
             let resource = substitution.resource.0;
             substitution.consumers = flows.get(&resource).cloned().unwrap_or_default();
@@ -534,7 +598,7 @@ fn strip_compiler_abi(inner: &mut AllocatedProgram) {
     for entry in &mut inner.entry_points {
         strip(&mut entry.inputs, &mut entry.outputs, &mut entry.output_routes);
     }
-    for requirement in &mut inner.materializations {
+    for (_, requirement) in &mut inner.materializations {
         strip(
             &mut requirement.entry.inputs,
             &mut requirement.entry.outputs,
@@ -1166,7 +1230,6 @@ pub enum MaterializationKind {
 }
 
 pub struct MaterializationRequirement {
-    pub id: MaterializationId,
     pub kind: MaterializationKind,
     /// SOAC provenance when the source is a semantic operation. Captured
     /// parallel preludes intentionally do not receive synthetic operation ids.
@@ -1331,7 +1394,7 @@ impl DerefMut for SemanticProgram {
 /// materialization requirement.
 pub struct AllocatedProgram {
     pub semantic: SemanticProgram,
-    pub materializations: Vec<MaterializationRequirement>,
+    pub materializations: crate::IdArena<MaterializationId, MaterializationRequirement>,
 }
 
 impl Deref for AllocatedProgram {
@@ -1633,11 +1696,10 @@ impl AllocatedProgram {
             .iter()
             .enumerate()
             .map(|(index, entry)| (CompilerFlowEndpoint::Entry(SemanticEntryId(index as u32)), entry))
-            .chain(self.materializations.iter().map(|requirement| {
-                (
-                    CompilerFlowEndpoint::Materialization(requirement.id),
-                    &requirement.entry,
-                )
-            }))
+            .chain(
+                self.materializations.iter().map(|(id, requirement)| {
+                    (CompilerFlowEndpoint::Materialization(*id), &requirement.entry)
+                }),
+            )
     }
 }
