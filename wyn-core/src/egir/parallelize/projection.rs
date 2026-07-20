@@ -4,36 +4,10 @@ use super::*;
 use crate::egir::soac::filter as filter_soac;
 use crate::egir::{graph_projector, program, semantic_graph};
 
-pub(super) struct UnionFind {
-    parents: Vec<usize>,
-}
-
-impl UnionFind {
-    pub(super) fn new(len: usize) -> Self {
-        Self {
-            parents: (0..len).collect(),
-        }
-    }
-
-    pub(super) fn find(&mut self, index: usize) -> usize {
-        if self.parents[index] != index {
-            self.parents[index] = self.find(self.parents[index]);
-        }
-        self.parents[index]
-    }
-
-    pub(super) fn union(&mut self, left: usize, right: usize) {
-        let (left, right) = (self.find(left), self.find(right));
-        if left != right {
-            self.parents[right] = left;
-        }
-    }
-}
-
 /// Retained-interface facts owned by one projection result. Interface
 /// compaction consumes them immediately; graph-local ids never outlive the
 /// projected entry they describe.
-struct ProjectionMetadata {
+struct RetainedInterface {
     parameters: crate::SortedSet<usize>,
     resources: HashSet<ResourceId>,
 }
@@ -76,29 +50,12 @@ impl ProjectionSpec {
             return_ty: source.return_ty.clone(),
         }
     }
-
-    fn selected_outputs(
-        source: &program::PlannedEntry,
-        name: String,
-        outputs: Vec<crate::interface::EntryOutput>,
-        output_routes: Vec<program::OutputRoute>,
-    ) -> Self {
-        Self {
-            name,
-            execution_model: source.execution_model.clone(),
-            outputs,
-            output_routes,
-            resource_declarations: source.resource_declarations.clone(),
-            return_ty: source.return_ty.clone(),
-        }
-    }
 }
 
-fn projection_metadata(
-    source: &program::PlannedEntry,
+fn reachable_projection_nodes(
     projection: &graph_projector::GraphProjection,
     output_routes: &[program::OutputRoute],
-) -> Result<ProjectionMetadata, String> {
+) -> HashSet<NodeId> {
     let mut roots = projection
         .graph
         .skeleton
@@ -121,35 +78,21 @@ fn projection_metadata(
             OutputWriter::Effect(_) => None,
         }));
     }
-    let reachable = graph_ops::execution_value_producer_closure(&projection.graph, roots).nodes;
-    let mut parameters = reachable
-        .iter()
-        .filter_map(|node| match projection.graph.nodes.get(*node) {
-            Some(ENode::FuncParam { index }) => Some(index).copied(),
-            _ => None,
-        })
-        .collect::<crate::SortedSet<_>>();
+
+    graph_ops::execution_value_producer_closure(&projection.graph, roots).nodes
+}
+
+fn retained_resources(graph: &EGraph, reachable: &HashSet<NodeId>) -> HashSet<ResourceId> {
     let mut resources = reachable
         .iter()
-        .filter_map(|node| graph_ops::extract_storage_view_source(&projection.graph, *node))
+        .filter_map(|node| graph_ops::extract_storage_view_source(graph, *node))
         .map(|resource| resource.0)
         .collect::<HashSet<_>>();
 
-    for (index, input) in source.inputs.iter().enumerate() {
-        let Some(Type::Constructed(TypeName::Resource(resource), _)) = input.ty.array_buffer() else {
-            continue;
-        };
-        if resources.contains(resource) {
-            parameters.insert(index);
-        }
-    }
-
-    for (_, block) in &projection.graph.skeleton.blocks {
+    for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {
             resources.extend(
-                semantic_graph::read_resources(&projection.graph, effect)
-                    .into_iter()
-                    .map(|access| access.resource.0),
+                semantic_graph::read_resources(graph, effect).into_iter().map(|access| access.resource.0),
             );
             if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind {
                 if let screma::SemanticState::Segmented {
@@ -162,10 +105,48 @@ fn projection_metadata(
         }
     }
 
-    Ok(ProjectionMetadata {
+    resources
+}
+
+fn retained_parameters(
+    source: &program::PlannedEntry,
+    graph: &EGraph,
+    reachable: &HashSet<NodeId>,
+    resources: &HashSet<ResourceId>,
+) -> crate::SortedSet<usize> {
+    let mut parameters = reachable
+        .iter()
+        .filter_map(|node| match graph.nodes.get(*node) {
+            Some(ENode::FuncParam { index }) => Some(index).copied(),
+            _ => None,
+        })
+        .collect::<crate::SortedSet<_>>();
+
+    for (index, input) in source.inputs.iter().enumerate() {
+        let Some(Type::Constructed(TypeName::Resource(resource), _)) = input.ty.array_buffer() else {
+            continue;
+        };
+        if resources.contains(resource) {
+            parameters.insert(index);
+        }
+    }
+
+    parameters
+}
+
+fn retained_interface(
+    source: &program::PlannedEntry,
+    projection: &graph_projector::GraphProjection,
+    output_routes: &[program::OutputRoute],
+) -> RetainedInterface {
+    let reachable = reachable_projection_nodes(projection, output_routes);
+    let resources = retained_resources(&projection.graph, &reachable);
+    let parameters = retained_parameters(source, &projection.graph, &reachable, &resources);
+
+    RetainedInterface {
         parameters,
         resources,
-    })
+    }
 }
 
 pub(super) fn project_kernel_body(
@@ -213,8 +194,8 @@ fn project_kernel_body_effects(
     } = spec;
     let route_values = output_routes.iter().map(|route| route.source.value).collect();
     let projection = graph_projector::GraphProjector::new(&source.graph, &source.control_headers)
-        .selected_with_values(selected.clone(), route_values)?;
-    let metadata = projection_metadata(source, &projection, &output_routes)?;
+        .selected_with_values(selected, route_values)?;
+    let retained = retained_interface(source, &projection, &output_routes);
     let mut entry = program::PlannedEntry::from_projection(
         projection,
         name,
@@ -228,23 +209,16 @@ fn project_kernel_body_effects(
         &source.aliases,
         output_routes,
     )?;
-    compact_projected_entry_interface(&mut entry, &metadata);
+    entry.retain_parameter_indices(&retained.parameters);
+    entry.resource_declarations.retain(|declaration| {
+        declaration.role != crate::interface::StorageRole::Input
+            || retained.resources.contains(&declaration.resource.0)
+    });
     Ok(entry)
 }
 
-fn compact_projected_entry_interface(entry: &mut program::PlannedEntry, metadata: &ProjectionMetadata) {
-    entry.retain_parameter_indices(&metadata.parameters);
-    entry.resource_declarations.retain(|declaration| {
-        declaration.role != crate::interface::StorageRole::Input
-            || metadata.resources.contains(&declaration.resource.0)
-    });
-}
-
 /// Resolve side-effect ownership from explicit output routes.
-pub(super) fn side_effect_output_slots_from_routes(
-    routes: &[program::OutputRoute],
-    effect: &SideEffect,
-) -> Vec<usize> {
+pub(super) fn side_effect_output_slots(entry: &program::PlannedEntry, effect: &SideEffect) -> Vec<usize> {
     if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind {
         if let screma::SemanticState::Segmented { output_slots, .. } = op.semantic_state() {
             return output_slots.iter().map(|slot| slot.0).collect();
@@ -252,7 +226,8 @@ pub(super) fn side_effect_output_slots_from_routes(
     }
     let value_writer = effect.result.map(OutputWriter::Value);
     let effect_writer = effect.effects.map(|(_, output)| OutputWriter::Effect(output));
-    let mut slots = routes
+    let mut slots = entry
+        .output_routes
         .iter()
         .filter(|route| {
             route
@@ -267,11 +242,7 @@ pub(super) fn side_effect_output_slots_from_routes(
     slots
 }
 
-fn side_effect_output_slots(entry: &program::PlannedEntry, effect: &SideEffect) -> Vec<usize> {
-    side_effect_output_slots_from_routes(&entry.output_routes, effect)
-}
-
-fn is_parallel_output(effect: &SideEffect) -> bool {
+fn starts_parallel_output_domain(effect: &SideEffect) -> bool {
     matches!(
         &effect.kind,
         SideEffectKind::Soac(SoacEffect(
@@ -296,7 +267,7 @@ fn is_parallel_output(effect: &SideEffect) -> bool {
     )
 }
 
-fn is_write_effectful(effect: &SideEffect) -> bool {
+fn requires_unrouted_owner(effect: &SideEffect) -> bool {
     match &effect.kind {
         SideEffectKind::Soac(SoacEffect(_, Soac::Hist(_) | Soac::Filter(_))) => true,
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => op
@@ -325,144 +296,224 @@ struct OutputGroup {
     root: usize,
     slots: Vec<usize>,
     first_slot: usize,
+    starts_parallel_domain: bool,
 }
 
-/// Split a multi-output entry into one projected kernel per output domain.
-/// Output routes remain the authority for effect ownership, and projection
-/// metadata carries semantic-operation ownership into the resulting entries.
-pub(super) fn split_multidomain_seg_maps(
-    entry: &program::PlannedEntry,
-) -> Result<Option<EntrySplit>, String> {
-    let output_count = entry.outputs.len();
-    if output_count <= 1 {
-        return Ok(None);
+impl OutputGroup {
+    fn new(root: usize, first_slot: usize) -> Self {
+        Self {
+            root,
+            slots: Vec::new(),
+            first_slot,
+            starts_parallel_domain: false,
+        }
     }
 
-    let mut union = UnionFind::new(output_count);
-    let mut producers = Vec::<((BlockId, usize), Vec<usize>, bool)>::new();
+    fn include(&mut self, producer: OutputProducer) {
+        self.first_slot = self.first_slot.min(producer.first_slot);
+        self.starts_parallel_domain |= producer.starts_parallel_domain;
+        for slot in producer.slots {
+            if !self.slots.contains(&slot) {
+                self.slots.push(slot);
+            }
+        }
+    }
+}
+
+struct OutputProducer {
+    site: SideEffectSite,
+    slots: Vec<usize>,
+    first_slot: usize,
+    starts_parallel_domain: bool,
+}
+
+struct OutputPartition {
+    primary: OutputGroup,
+    siblings: Vec<OutputGroup>,
+    effect_groups: LookupMap<SideEffectSite, usize>,
+    unrouted_host: usize,
+}
+
+impl OutputPartition {
+    fn from_producers(output_count: usize, producers: Vec<OutputProducer>) -> Option<Self> {
+        let mut output_domains = DisjointSets::new(output_count);
+        for producer in &producers {
+            for slot in producer.slots.iter().copied().skip(1) {
+                output_domains.merge(producer.first_slot, slot);
+            }
+        }
+
+        let mut effect_groups = LookupMap::new();
+        let mut groups = LookupMap::<usize, OutputGroup>::new();
+        for producer in producers {
+            let root = output_domains.representative(producer.first_slot);
+            effect_groups.insert(producer.site, root);
+            groups
+                .entry(root)
+                .or_insert_with(|| OutputGroup::new(root, producer.first_slot))
+                .include(producer);
+        }
+
+        let mut groups = groups.into_iter().map(|(_, group)| group).collect::<Vec<_>>();
+        for group in &mut groups {
+            group.slots.sort_unstable();
+        }
+        groups.sort_by_key(|group| group.first_slot);
+
+        let unrouted_host = {
+            let mut parallel_groups = groups.iter().filter(|group| group.starts_parallel_domain);
+            let host = parallel_groups.next()?.root;
+            parallel_groups.next()?;
+            host
+        };
+        let mut groups = groups.into_iter();
+        Some(Self {
+            primary: groups.next()?,
+            siblings: groups.collect(),
+            effect_groups,
+            unrouted_host,
+        })
+    }
+
+    fn claim_unrouted_effects(&mut self, entry: &program::PlannedEntry) {
+        for (block_id, block) in &entry.graph.skeleton.blocks {
+            for (index, effect) in block.side_effects.iter().enumerate() {
+                if side_effect_output_slots(entry, effect).is_empty() && requires_unrouted_owner(effect) {
+                    self.effect_groups.insert(
+                        SideEffectSite {
+                            block: block_id,
+                            index,
+                        },
+                        self.unrouted_host,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn output_producers(entry: &program::PlannedEntry) -> Result<Vec<OutputProducer>, String> {
+    let output_count = entry.outputs.len();
+    let mut producers = Vec::new();
     for (block_id, block) in &entry.graph.skeleton.blocks {
         for (index, effect) in block.side_effects.iter().enumerate() {
             let slots = side_effect_output_slots(entry, effect);
-            if slots.is_empty() {
+            let Some(first_slot) = slots.first().copied() else {
                 continue;
-            }
+            };
             if slots.iter().any(|slot| *slot >= output_count) {
                 return Err(format!(
                     "entry `{}` has an output route outside its interface",
                     entry.name
                 ));
             }
-            let first = slots[0];
-            for slot in slots.iter().copied().skip(1) {
-                union.union(first, slot);
-            }
-            producers.push(((block_id, index), slots, is_parallel_output(effect)));
-        }
-    }
-
-    let mut group_of = LookupMap::<(BlockId, usize), usize>::new();
-    let mut group_slots = LookupMap::<usize, Vec<usize>>::new();
-    let mut parallel_groups = HashSet::<usize>::new();
-    for (location, slots, is_parallel) in &producers {
-        let Some(first) = slots.first().copied() else {
-            continue;
-        };
-        let root = union.find(first);
-        group_of.insert(*location, root);
-        let entry_slots = group_slots.entry(root).or_default();
-        for slot in slots {
-            if !entry_slots.contains(slot) {
-                entry_slots.push(*slot);
-            }
-        }
-        if *is_parallel {
-            parallel_groups.insert(root);
-        }
-    }
-    if parallel_groups.len() < 2 {
-        return Ok(None);
-    }
-
-    let mut groups = group_slots
-        .into_iter()
-        .filter_map(|(root, mut slots)| {
-            slots.sort_unstable();
-            slots.first().copied().map(|first_slot| OutputGroup {
-                root,
+            producers.push(OutputProducer {
+                site: SideEffectSite {
+                    block: block_id,
+                    index,
+                },
                 slots,
                 first_slot,
-            })
-        })
-        .collect::<Vec<_>>();
-    groups.sort_by_key(|group| group.first_slot);
-
-    let host_root = groups
-        .iter()
-        .map(|group| group.root)
-        .find(|root| parallel_groups.contains(root))
-        .ok_or_else(|| "multi-domain split has no parallel host group".to_string())?;
-    for (block_id, block) in &entry.graph.skeleton.blocks {
-        for (index, effect) in block.side_effects.iter().enumerate() {
-            if side_effect_output_slots(entry, effect).is_empty() && is_write_effectful(effect) {
-                group_of.insert((block_id, index), host_root);
-            }
+                starts_parallel_domain: starts_parallel_output_domain(effect),
+            });
         }
     }
+    Ok(producers)
+}
 
-    let base_name = entry.name.clone();
-    let project_group = |root: usize, slots: &[usize], name: String| -> Result<_, String> {
-        let selected = group_of
-            .iter()
-            .filter_map(|(&(block, index), &group)| {
-                (group == root).then_some(SideEffectSite { block, index })
-            })
-            .collect::<HashSet<_>>();
-        let outputs = slots
-            .iter()
-            .map(|slot| {
-                entry
-                    .outputs
-                    .get(*slot)
-                    .map(|output| output.inner.clone())
-                    .ok_or_else(|| format!("split output slot {slot} is out of bounds"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut routes = entry
-            .output_routes
-            .iter()
-            .filter(|route| slots.contains(&route.slot.0))
-            .cloned()
-            .collect::<Vec<_>>();
-        for route in &mut routes {
-            let projected_slot = slots
-                .iter()
-                .position(|slot| *slot == route.slot.0)
-                .ok_or_else(|| format!("selected route {} is absent from split group", route.slot.0))?;
-            route.slot = program::OutputSlotId(projected_slot);
-        }
-        let spec = ProjectionSpec::selected_outputs(entry, name, outputs, routes);
-        project_kernel_body_effects(entry, selected, spec)
-    };
+fn output_partition(entry: &program::PlannedEntry) -> Result<Option<OutputPartition>, String> {
+    if entry.outputs.len() <= 1 {
+        return Ok(None);
+    }
 
-    let Some((primary_group, sibling_groups)) = groups.split_first() else {
+    let Some(mut partition) =
+        OutputPartition::from_producers(entry.outputs.len(), output_producers(entry)?)
+    else {
         return Ok(None);
     };
-    let mut siblings = Vec::new();
-    for group in sibling_groups {
-        let projected = project_group(
-            group.root,
-            &group.slots,
-            format!("{base_name}_dispatch_{}", group.first_slot),
-        )?;
-        siblings.push(SplitEntry {
-            entry: projected,
-            semantic_slots: group.slots.clone(),
-        });
-    }
+    partition.claim_unrouted_effects(entry);
+    Ok(Some(partition))
+}
 
-    let primary = SplitEntry {
-        entry: project_group(primary_group.root, &primary_group.slots, entry.name.clone())?,
-        semantic_slots: primary_group.slots.clone(),
+fn project_output_group(
+    entry: &program::PlannedEntry,
+    group: &OutputGroup,
+    effect_groups: &LookupMap<SideEffectSite, usize>,
+    name: String,
+) -> Result<SplitEntry, String> {
+    let selected = effect_groups
+        .iter()
+        .filter_map(|(&site, &root)| (root == group.root).then_some(site))
+        .collect::<HashSet<_>>();
+    let outputs = group
+        .slots
+        .iter()
+        .map(|slot| {
+            entry
+                .outputs
+                .get(*slot)
+                .map(|output| output.inner.clone())
+                .ok_or_else(|| format!("split output slot {slot} is out of bounds"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let projected_slots = group
+        .slots
+        .iter()
+        .enumerate()
+        .map(|(projected, semantic)| (*semantic, projected))
+        .collect::<LookupMap<_, _>>();
+    let output_routes = entry
+        .output_routes
+        .iter()
+        .filter_map(|route| {
+            let projected_slot = projected_slots.get(&route.slot.0)?;
+            let mut route = route.clone();
+            route.slot = program::OutputSlotId(*projected_slot);
+            Some(route)
+        })
+        .collect();
+    let spec = ProjectionSpec {
+        name,
+        execution_model: entry.execution_model.clone(),
+        outputs,
+        output_routes,
+        resource_declarations: entry.resource_declarations.clone(),
+        return_ty: entry.return_ty.clone(),
     };
+
+    Ok(SplitEntry {
+        entry: project_kernel_body_effects(entry, selected, spec)?,
+        semantic_slots: group.slots.clone(),
+    })
+}
+
+/// Split a multi-output entry into one projected kernel per output domain.
+/// Output routes remain the authority for effect ownership, and retained
+/// interface facts carry semantic-operation ownership into each projection.
+pub(super) fn split_multidomain_seg_maps(
+    entry: &program::PlannedEntry,
+) -> Result<Option<EntrySplit>, String> {
+    let Some(partition) = output_partition(entry)? else {
+        return Ok(None);
+    };
+    let OutputPartition {
+        primary: primary_group,
+        siblings: sibling_groups,
+        effect_groups,
+        ..
+    } = partition;
+
+    let primary = project_output_group(entry, &primary_group, &effect_groups, entry.name.clone())?;
+    let siblings = sibling_groups
+        .iter()
+        .map(|group| {
+            project_output_group(
+                entry,
+                group,
+                &effect_groups,
+                format!("{}_dispatch_{}", entry.name, group.first_slot),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(EntrySplit { primary, siblings }))
 }

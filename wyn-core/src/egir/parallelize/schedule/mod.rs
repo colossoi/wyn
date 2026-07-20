@@ -1234,17 +1234,17 @@ impl KernelPlan {
                 owner.insert(*phase, pipeline);
             }
         }
-        let mut union = super::UnionFind::new(self.pipelines.len());
+        let mut pipeline_components = super::DisjointSets::new(self.pipelines.len());
         for (pipeline, planned) in self.pipelines.iter().enumerate() {
             for dependency in planned.phases.iter().flat_map(|phase| &self.phase(*phase).dependencies) {
                 if let Some(&other) = owner.get(dependency) {
-                    union.union(pipeline, other);
+                    pipeline_components.merge(pipeline, other);
                 }
             }
         }
         let mut components = BTreeMap::<usize, Vec<usize>>::new();
         for pipeline in 0..self.pipelines.len() {
-            let root = union.find(pipeline);
+            let root = pipeline_components.representative(pipeline);
             components.entry(root).or_default().push(pipeline);
         }
         let mut slots = std::mem::take(&mut self.pipelines).into_iter().map(Some).collect::<Vec<_>>();

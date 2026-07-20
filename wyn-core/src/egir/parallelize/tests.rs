@@ -1,6 +1,6 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use super::projection::side_effect_output_slots_from_routes;
+use super::projection::side_effect_output_slots;
 use super::*;
 use crate::ast::Span;
 use crate::egir::program::{OutputRoute, OutputSlotId, SlotSource};
@@ -85,13 +85,28 @@ fn output_ownership_comes_from_explicit_route_writer() {
         writers: vec![OutputWriter::Effect(writer)],
     });
 
-    assert_eq!(
-        side_effect_output_slots_from_routes(
-            &entry.output_routes,
-            &entry.graph.skeleton.blocks[block].side_effects[0],
-        ),
-        vec![3]
-    );
+    let entry = crate::egir::program::PlannedEntry::project(&entry).expect("project route fixture");
+    let effect = entry
+        .graph
+        .skeleton
+        .blocks
+        .values()
+        .flat_map(|block| &block.side_effects)
+        .next()
+        .expect("projected store effect");
+    assert_eq!(side_effect_output_slots(&entry, effect), vec![3]);
+}
+
+#[test]
+fn disjoint_sets_merge_transitive_components() {
+    let mut sets = DisjointSets::new(5);
+    sets.merge(0, 1);
+    sets.merge(1, 3);
+    sets.merge(2, 4);
+
+    assert_eq!(sets.representative(0), sets.representative(3));
+    assert_eq!(sets.representative(2), sets.representative(4));
+    assert_ne!(sets.representative(0), sets.representative(2));
 }
 
 #[test]

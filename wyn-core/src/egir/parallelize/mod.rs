@@ -45,9 +45,9 @@ use kernel::{
     synthesize_u32_add_function, ChunkInputKind,
 };
 use model as error;
-use model::CandidateSelection;
+use model::{CandidateSelection, DisjointSets};
 use planning::{make_screma_serial, parallel_recipe_effect, LocatedScrema, SerialScremaRecipe};
-use projection::{project_kernel_body, split_multidomain_seg_maps, ProjectionSpec, UnionFind};
+use projection::{project_kernel_body, split_multidomain_seg_maps, ProjectionSpec};
 use reduce::{analyze_reduce_candidate, BoundReduce};
 use scan::{analyze_scan_candidate, BoundScan, ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
 pub(super) use schedule::KernelPlan;
