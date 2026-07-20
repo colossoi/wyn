@@ -53,11 +53,19 @@ impl ReduceCandidate {
 
 pub(super) fn analyze_reduce_candidate(
     entry: &crate::egir::program::PlannedEntry,
-    located: ParallelReduce<'_>,
+    located: LocatedScrema<'_>,
+    lanes: &screma::Lanes,
+    operators: &screma::NonEmpty<screma::Operator>,
     resources: &crate::egir::program::LogicalResourceArena,
-) -> error::Result<CandidateSelection<ReduceCandidate>> {
+) -> error::Result<Option<ReduceCandidate>> {
     let serial = located.serial_recipe();
-    let (located, lanes, operators) = located.into_parts();
+    if operators.iter().any(|operator| !operator.combine.captures.is_empty())
+        || lanes.inputs.is_empty()
+        || !lanes.maps.iter().all(|map| map.destination.is_output_view())
+        || !operators.iter().all(|operator| operator.destination.is_unplaced_fresh())
+    {
+        return Ok(None);
+    }
     let site = located.site;
     let side_effect = located.effect;
     let operators = operators.iter().collect::<Vec<_>>();
@@ -67,28 +75,28 @@ pub(super) fn analyze_reduce_candidate(
         screma::ScremaOperands::decode(located.op, &side_effect.operand_nodes, side_effect.result)?;
     for input in operands.inputs() {
         if !can_chunk_view(&entry.graph, input.node, ChunkInputKind::StorageOrRange) {
-            return Ok(CandidateSelection::Fallback);
+            return Ok(None);
         }
     }
     let mut map_output_view_operands = Vec::with_capacity(n_maps);
     for index in 0..n_maps {
         let Some(output) = operands.output(index) else {
-            return Ok(CandidateSelection::Fallback);
+            return Ok(None);
         };
         if !can_chunk_view(&entry.graph, output.node, ChunkInputKind::StorageOnly) {
-            return Ok(CandidateSelection::Fallback);
+            return Ok(None);
         }
         map_output_view_operands.push(output.slot);
     }
     let result = operands.result();
     let owner = located.owner;
     if operators.iter().any(|operator| !can_clone_pure_subgraph(&entry.graph, operator.neutral, &[])) {
-        return Ok(CandidateSelection::Fallback);
+        return Ok(None);
     }
     let scratch_types =
         operators.iter().map(|operator| entry.graph.types[&operator.neutral].clone()).collect::<Vec<_>>();
     if scratch_types.iter().any(|ty| crate::ssa::layout::type_byte_size(ty).is_none()) {
-        return Ok(CandidateSelection::Fallback);
+        return Ok(None);
     }
     let input_views =
         operands.inputs().map(|input| (input.node, entry.graph.types[&input.node].clone())).collect();
@@ -117,7 +125,7 @@ pub(super) fn analyze_reduce_candidate(
             if !can_clone_pure_subgraph(&entry.graph, place, &[])
                 || !can_clone_pure_subgraph(&entry.graph, value, &[result])
             {
-                return Ok(CandidateSelection::Fallback);
+                return Ok(None);
             }
             stores[accumulator].push(ReduceOutputStore {
                 location: (block_id, effect_index),
@@ -142,7 +150,7 @@ pub(super) fn analyze_reduce_candidate(
         }
     }
     if !(0..n_accs).all(|index| !stores[index].is_empty() && !outputs[index].is_empty()) {
-        return Ok(CandidateSelection::Fallback);
+        return Ok(None);
     }
     let accumulators = operators
         .into_iter()
@@ -159,7 +167,7 @@ pub(super) fn analyze_reduce_candidate(
             },
         )
         .collect();
-    Ok(CandidateSelection::Selected(ReduceCandidate {
+    Ok(Some(ReduceCandidate {
         site,
         owner,
         serial,

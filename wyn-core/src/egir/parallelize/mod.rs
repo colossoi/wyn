@@ -18,8 +18,8 @@
 //!   renumbers or replaces them.
 //!
 //! Organization follows ownership rather than pass chronology: `model` owns
-//! policy, checked errors, and immutable indexes; `planning` recognizes
-//! graph-local recipes, selects them, and assigns scratch; `projection` owns
+//! policy, checked errors, and immutable indexes; `planning` constructs
+//! graph-local recipes directly and assigns scratch; `projection` owns
 //! entry and route projection; `kernel` owns shared graph-building utilities;
 //! `reduce`, `scan`, and `filter` own their algorithms (including scan-phase
 //! builders shared by scan and filter); `prepare` converts selected semantic
@@ -46,9 +46,7 @@ use kernel::{
 };
 use model as error;
 use model::CandidateSelection;
-use planning::{
-    make_screma_serial, parallel_recipe_effect, ParallelReduce, ParallelScan, SerialScremaRecipe,
-};
+use planning::{make_screma_serial, parallel_recipe_effect, LocatedScrema, SerialScremaRecipe};
 use projection::{project_kernel_body, split_multidomain_seg_maps, ProjectionSpec, UnionFind};
 use reduce::{analyze_reduce_candidate, BoundReduce};
 use scan::{analyze_scan_candidate, BoundScan, ScanPhase2Spec, ScanPhase3Spec, ScanScratch};

@@ -199,17 +199,16 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
 
     let mut operators = p.operators.clone();
     for operator in &mut operators {
-        for input in &mut operator.input_indices {
+        for input in &mut operator.operator_mut().input_indices {
             *input = screma::InputId(input_remap[input.index()]);
         }
     }
     operators.extend(q.operators.iter().cloned().map(|mut operator| {
-        for input in &mut operator.input_indices {
+        for input in &mut operator.operator_mut().input_indices {
             *input = screma::InputId(input_remap[base + input.index()]);
         }
         operator
     }));
-    let has_scan = p.has_scan || q.has_scan;
 
     let p_result_types = p.result_types();
     let q_result_types = q.result_types();
@@ -255,19 +254,7 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
         inputs: input_types,
         maps,
     };
-    let fused = Soac::Screma(match screma::NonEmpty::from_vec(operators) {
-        None => screma::Op::Map { lanes, state },
-        Some(operators) if has_scan => screma::Op::Scan {
-            lanes,
-            operators,
-            state,
-        },
-        Some(operators) => screma::Op::Reduce {
-            lanes,
-            operators,
-            state,
-        },
-    });
+    let fused = Soac::Screma(rebuild_screma(lanes, operators, state));
 
     let block = &mut graph.skeleton.blocks[block_id];
     // Splice the effect chain: the fused op spans from P's input token to Q's
@@ -288,8 +275,7 @@ struct SegParts {
     space: crate::egir::types::SegSpace,
     placement: screma::Placement,
     lanes: screma::Lanes,
-    operators: Vec<screma::Operator>,
-    has_scan: bool,
+    operators: Vec<screma::CompositeOperator>,
     output_slots: Vec<OutputSlotId>,
     resources: Vec<SegResourceAccess>,
     result: NodeId,
@@ -303,7 +289,7 @@ impl SegParts {
             .maps
             .iter()
             .map(|map| map.result_type.clone())
-            .chain(self.operators.iter().map(|operator| operator.result_type.clone()))
+            .chain(self.operators.iter().map(|operator| operator.operator().result_type.clone()))
             .collect()
     }
 }
@@ -330,13 +316,55 @@ fn extract_seg(graph: &EGraph, block_id: BlockId, idx: usize) -> SegParts {
         space: space.clone(),
         placement: *placement,
         lanes: op.lanes().clone(),
-        operators: op.operators().into_iter().cloned().collect(),
-        has_scan: (0..op.operators().len()).any(|index| op.is_scan(index)),
+        operators: tagged_operators(op),
         output_slots: output_slots.clone(),
         resources: resources.clone(),
         result: effect.result.expect("fusable Seg has a result"),
         inputs,
         output_views,
+    }
+}
+
+fn tagged_operators(op: &screma::Op<crate::egir::types::Semantic>) -> Vec<screma::CompositeOperator> {
+    match op {
+        screma::Op::Map { .. } => Vec::new(),
+        screma::Op::Reduce { operators, .. } => {
+            operators.iter().cloned().map(screma::CompositeOperator::Reduce).collect()
+        }
+        screma::Op::Scan { operators, .. } => {
+            operators.iter().cloned().map(screma::CompositeOperator::Scan).collect()
+        }
+        screma::Op::Composite { operators, .. } => operators.iter().cloned().collect(),
+    }
+}
+
+fn rebuild_screma(
+    lanes: screma::Lanes,
+    operators: Vec<screma::CompositeOperator>,
+    state: screma::SemanticState<crate::egir::program::SemanticResourceRef>,
+) -> screma::Op<crate::egir::types::Semantic> {
+    let Some(operators) = screma::NonEmpty::from_vec(operators) else {
+        return screma::Op::Map { lanes, state };
+    };
+    let scans = operators.iter().filter(|operator| operator.is_scan()).count();
+    if scans == 0 {
+        return screma::Op::Reduce {
+            lanes,
+            operators: operators.map(screma::CompositeOperator::into_operator),
+            state,
+        };
+    }
+    if scans == 1 + operators.rest.len() {
+        return screma::Op::Scan {
+            lanes,
+            operators: operators.map(screma::CompositeOperator::into_operator),
+            state,
+        };
+    }
+    screma::Op::Composite {
+        lanes,
+        operators,
+        state,
     }
 }
 

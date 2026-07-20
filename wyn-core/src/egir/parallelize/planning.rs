@@ -24,18 +24,6 @@ pub(super) struct LocatedScrema<'a> {
     pub op: &'a screma::Op<crate::egir::types::Semantic>,
 }
 
-pub(super) struct ParallelReduce<'a> {
-    located: LocatedScrema<'a>,
-    lanes: &'a screma::Lanes,
-    operators: &'a screma::NonEmpty<screma::Operator>,
-}
-
-pub(super) struct ParallelScan<'a> {
-    located: LocatedScrema<'a>,
-    lanes: &'a screma::Lanes,
-    operators: &'a screma::NonEmpty<screma::Operator>,
-}
-
 #[derive(Clone)]
 pub(super) struct SerialScremaRecipe {
     site: SideEffectSite,
@@ -53,113 +41,30 @@ impl LocatedScrema<'_> {
     }
 }
 
-impl<'a> ParallelReduce<'a> {
-    fn recognize(
-        located: LocatedScrema<'a>,
-        lanes: &'a screma::Lanes,
-        operators: &'a screma::NonEmpty<screma::Operator>,
-    ) -> CandidateSelection<Self> {
-        if operators.iter().any(|operator| !operator.combine.captures.is_empty()) {
-            return CandidateSelection::Fallback;
-        }
-        if lanes.inputs.is_empty() {
-            return CandidateSelection::Fallback;
-        }
-        if !lanes.maps.iter().all(|map| map.destination.is_output_view())
-            || !operators.iter().all(|operator| operator.destination.is_unplaced_fresh())
-        {
-            return CandidateSelection::Fallback;
-        }
-        CandidateSelection::Selected(Self {
-            located,
-            lanes,
-            operators,
-        })
-    }
-
-    pub(super) fn serial_recipe(&self) -> SerialScremaRecipe {
-        self.located.serial_recipe()
-    }
-
-    pub(super) fn into_parts(
-        self,
-    ) -> (
-        LocatedScrema<'a>,
-        &'a screma::Lanes,
-        &'a screma::NonEmpty<screma::Operator>,
-    ) {
-        (self.located, self.lanes, self.operators)
-    }
-}
-
-impl<'a> ParallelScan<'a> {
-    fn recognize(
-        located: LocatedScrema<'a>,
-        lanes: &'a screma::Lanes,
-        operators: &'a screma::NonEmpty<screma::Operator>,
-    ) -> CandidateSelection<Self> {
-        if !operators.rest.is_empty() || lanes.inputs.len() != 1 {
-            return CandidateSelection::Fallback;
-        }
-        if !operators.first.combine.captures.is_empty() {
-            return CandidateSelection::Fallback;
-        }
-        if !lanes.maps.iter().all(|map| map.destination.is_output_view())
-            || !operators.iter().all(|operator| operator.destination.is_output_view())
-        {
-            return CandidateSelection::Fallback;
-        }
-        CandidateSelection::Selected(Self {
-            located,
-            lanes,
-            operators,
-        })
-    }
-
-    pub(super) fn serial_recipe(&self) -> SerialScremaRecipe {
-        self.located.serial_recipe()
-    }
-
-    pub(super) fn into_parts(
-        self,
-    ) -> (
-        LocatedScrema<'a>,
-        &'a screma::Lanes,
-        &'a screma::NonEmpty<screma::Operator>,
-    ) {
-        (self.located, self.lanes, self.operators)
-    }
-}
-
-enum SegmentedRecipe<'a> {
-    Reduce(ParallelReduce<'a>),
-    Scan(ParallelScan<'a>),
-    Serial(SerialScremaRecipe),
-    Map,
-    Composite(LocatedScrema<'a>),
-}
-
 fn segmented_screma_effect(graph: &EGraph) -> Option<LocatedScrema<'_>> {
-    graph.skeleton.blocks.iter().find_map(|(block, contents)| {
-        contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
+    for (block, contents) in &graph.skeleton.blocks {
+        for (index, effect) in contents.side_effects.iter().enumerate() {
             let SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) = &effect.kind else {
-                return None;
+                continue;
             };
-            matches!(
+            if !matches!(
                 op.semantic_state(),
                 screma::SemanticState::Segmented {
                     placement: screma::Placement::Kernel,
                     ..
                 }
-            )
-            .then_some(LocatedScrema {
+            ) {
+                continue;
+            }
+            return Some(LocatedScrema {
                 site: SideEffectSite { block, index },
                 effect,
                 owner: *owner,
                 op,
-            })
-        })
-    })
+            });
+        }
+    }
+    None
 }
 
 fn segmented_recipe_effect(entry: &crate::egir::program::PlannedEntry) -> Option<LocatedScrema<'_>> {
@@ -175,48 +80,30 @@ fn segmented_recipe_effect(entry: &crate::egir::program::PlannedEntry) -> Option
             let SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) = &effect.kind else {
                 continue;
             };
-            if matches!(
-                op.semantic_state(),
-                screma::SemanticState::Segmented {
-                    placement: screma::Placement::LaneLocal,
-                    output_slots,
-                    ..
-                } if !output_slots.is_empty()
-            ) && matches!(op, screma::Op::Reduce { .. } | screma::Op::Scan { .. })
-            {
-                if promoted.is_some() {
-                    return None;
-                }
-                promoted = Some(LocatedScrema {
-                    site: SideEffectSite { block, index },
-                    effect,
-                    owner: *owner,
-                    op,
-                });
+            let externally_visible_lane_local_fold =
+                matches!(
+                    op.semantic_state(),
+                    screma::SemanticState::Segmented {
+                        placement: screma::Placement::LaneLocal,
+                        output_slots,
+                        ..
+                    } if !output_slots.is_empty()
+                ) && matches!(op, screma::Op::Reduce { .. } | screma::Op::Scan { .. });
+            if !externally_visible_lane_local_fold {
+                continue;
             }
+            if promoted.is_some() {
+                return None;
+            }
+            promoted = Some(LocatedScrema {
+                site: SideEffectSite { block, index },
+                effect,
+                owner: *owner,
+                op,
+            });
         }
     }
     promoted
-}
-
-fn segmented_recipe(entry: &crate::egir::program::PlannedEntry) -> Option<SegmentedRecipe<'_>> {
-    let located = segmented_recipe_effect(entry)?;
-    Some(match located.op {
-        screma::Op::Reduce { lanes, operators, .. } => {
-            match ParallelReduce::recognize(located, lanes, operators) {
-                CandidateSelection::Selected(recipe) => SegmentedRecipe::Reduce(recipe),
-                CandidateSelection::Fallback => SegmentedRecipe::Serial(located.serial_recipe()),
-            }
-        }
-        screma::Op::Scan { lanes, operators, .. } => {
-            match ParallelScan::recognize(located, lanes, operators) {
-                CandidateSelection::Selected(recipe) => SegmentedRecipe::Scan(recipe),
-                CandidateSelection::Fallback => SegmentedRecipe::Serial(located.serial_recipe()),
-            }
-        }
-        screma::Op::Map { .. } => SegmentedRecipe::Map,
-        screma::Op::Composite { .. } => SegmentedRecipe::Composite(located),
-    })
 }
 
 pub(super) fn parallel_recipe_effect(entry: &crate::egir::program::PlannedEntry) -> Option<&SideEffect> {
@@ -237,26 +124,22 @@ pub(super) fn make_screma_serial(graph: &mut EGraph, recipe: SerialScremaRecipe)
         SideEffectKind::Soac(SoacEffect(recipe.owner, Soac::Screma(op)));
 }
 
-/// The target recipe selected for one projected physical kernel. Parallel
-/// variants own the exact graph-local analysis payload consumed by emission;
-/// lowering never re-runs candidate recognition.
-enum AnalyzedRecipe {
-    Filter(super::filter::FilterCandidate),
-    Reduce(super::reduce::ReduceCandidate),
-    Scan(super::scan::ScanCandidate),
+/// The target recipe selected for one projected physical kernel. Algorithm
+/// payloads change type when scratch ids are bound; the recipe shape does not.
+pub(super) enum Recipe<Filter, Reduce, Scan> {
+    Filter(Filter),
+    Reduce(Reduce),
+    Scan(Scan),
     Map,
     Serial(SerialScremaRecipe),
     Unchanged,
 }
 
-pub(super) enum PlannedRecipe {
-    Filter(super::filter::BoundFilter),
-    Reduce(super::reduce::BoundReduce),
-    Scan(super::scan::BoundScan),
-    Map,
-    Serial(SerialScremaRecipe),
-    Unchanged,
-}
+type AnalyzedRecipe =
+    Recipe<super::filter::FilterCandidate, super::reduce::ReduceCandidate, super::scan::ScanCandidate>;
+
+pub(super) type PlannedRecipe =
+    Recipe<super::filter::BoundFilter, super::reduce::BoundReduce, super::scan::BoundScan>;
 
 /// One projected physical kernel and its ownership of semantic output slots.
 pub(super) struct PlannedKernel<R = PlannedRecipe> {
@@ -366,12 +249,12 @@ impl RecipeIndex {
     }
 
     pub(super) fn take_endpoint(&mut self, endpoint: CompilerFlowEndpoint) -> Result<Option<EndpointPlan>> {
-        match &mut self.plans {
-            None => Ok(None),
-            Some(endpoints) => endpoints.remove(&endpoint).map(Some).ok_or_else(|| {
-                ParallelizeError::Invalid(format!("flow endpoint {endpoint:?} has no target recipe"))
-            }),
-        }
+        let Some(endpoints) = &mut self.plans else {
+            return Ok(None);
+        };
+        endpoints.remove(&endpoint).map(Some).ok_or_else(|| {
+            ParallelizeError::Invalid(format!("flow endpoint {endpoint:?} has no target recipe"))
+        })
     }
 }
 
@@ -474,7 +357,6 @@ fn analyze_endpoint(
         let (primary, requests) = analyze_projected_kernel(projected, None, endpoint, resources)?;
         return Ok((EndpointPlan::new(primary, Vec::new()), requests));
     };
-
     let (primary, mut requests) = analyze_projected_kernel(
         split.primary.entry,
         Some(split.primary.semantic_slots),
@@ -491,66 +373,90 @@ fn analyze_endpoint(
     Ok((EndpointPlan::new(primary, siblings), requests))
 }
 
+fn analyze_reduce_recipe(
+    body: &crate::egir::program::PlannedEntry,
+    endpoint: CompilerFlowEndpoint,
+    resources: &LogicalResourceArena,
+    located: LocatedScrema<'_>,
+    lanes: &screma::Lanes,
+    operators: &screma::NonEmpty<screma::Operator>,
+) -> Result<(AnalyzedRecipe, Vec<ScratchRequest>)> {
+    let serial = located.serial_recipe();
+    let Some(candidate) = super::analyze_reduce_candidate(body, located, lanes, operators, resources)?
+    else {
+        return Ok((AnalyzedRecipe::Serial(serial), Vec::new()));
+    };
+    let requests = candidate
+        .scratch_types()
+        .cloned()
+        .enumerate()
+        .map(|(slot, elem_ty)| {
+            scratch_request(
+                endpoint,
+                candidate.owner,
+                slot,
+                CompilerResourceKind::ReducePartial,
+                elem_ty,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((AnalyzedRecipe::Reduce(candidate), requests))
+}
+
+fn analyze_scan_recipe(
+    body: &crate::egir::program::PlannedEntry,
+    endpoint: CompilerFlowEndpoint,
+    located: LocatedScrema<'_>,
+    lanes: &screma::Lanes,
+    operators: &screma::NonEmpty<screma::Operator>,
+) -> Result<(AnalyzedRecipe, Vec<ScratchRequest>)> {
+    let serial = located.serial_recipe();
+    let Some(candidate) = super::analyze_scan_candidate(body, located, lanes, operators)? else {
+        return Ok((AnalyzedRecipe::Serial(serial), Vec::new()));
+    };
+    let requests = [
+        CompilerResourceKind::ScanBlockSums,
+        CompilerResourceKind::ScanBlockOffsets,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(slot, kind)| {
+        scratch_request(
+            endpoint,
+            candidate.owner,
+            slot,
+            kind,
+            candidate.scratch_type.clone(),
+        )
+    })
+    .collect::<Result<Vec<_>>>()?;
+    Ok((AnalyzedRecipe::Scan(candidate), requests))
+}
+
 fn analyze_projected_kernel(
     body: crate::egir::program::PlannedEntry,
     output_projection: Option<Vec<usize>>,
     endpoint: CompilerFlowEndpoint,
     resources: &LogicalResourceArena,
 ) -> Result<(PlannedKernel<AnalyzedRecipe>, Vec<ScratchRequest>)> {
-    let mut requests = Vec::new();
     if let Some(CandidateSelection::Selected(candidate)) = super::analyze_filter_candidate(&body) {
-        requests.extend(filter_scratch_requests(endpoint, &candidate));
+        let requests = filter_scratch_requests(endpoint, &candidate);
         let kernel = PlannedKernel::new(body, output_projection, AnalyzedRecipe::Filter(candidate));
         return Ok((kernel, requests));
     }
 
-    let recipe = match segmented_recipe(&body) {
-        Some(SegmentedRecipe::Reduce(located)) => {
-            let serial = located.serial_recipe();
-            match super::analyze_reduce_candidate(&body, located, resources)? {
-                CandidateSelection::Selected(candidate) => {
-                    for (slot, elem_ty) in candidate.scratch_types().cloned().enumerate() {
-                        requests.push(scratch_request(
-                            endpoint,
-                            candidate.owner,
-                            slot,
-                            CompilerResourceKind::ReducePartial,
-                            elem_ty,
-                        )?);
-                    }
-                    AnalyzedRecipe::Reduce(candidate)
-                }
-                CandidateSelection::Fallback => AnalyzedRecipe::Serial(serial),
+    let (recipe, requests) = match segmented_recipe_effect(&body) {
+        Some(located) => match located.op {
+            screma::Op::Reduce { lanes, operators, .. } => {
+                analyze_reduce_recipe(&body, endpoint, resources, located, lanes, operators)?
             }
-        }
-        Some(SegmentedRecipe::Scan(located)) => {
-            let serial = located.serial_recipe();
-            match super::analyze_scan_candidate(&body, located)? {
-                CandidateSelection::Selected(candidate) => {
-                    for (slot, kind) in [
-                        CompilerResourceKind::ScanBlockSums,
-                        CompilerResourceKind::ScanBlockOffsets,
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    {
-                        requests.push(scratch_request(
-                            endpoint,
-                            candidate.owner,
-                            slot,
-                            kind,
-                            candidate.scratch_type.clone(),
-                        )?);
-                    }
-                    AnalyzedRecipe::Scan(candidate)
-                }
-                CandidateSelection::Fallback => AnalyzedRecipe::Serial(serial),
+            screma::Op::Scan { lanes, operators, .. } => {
+                analyze_scan_recipe(&body, endpoint, located, lanes, operators)?
             }
-        }
-        Some(SegmentedRecipe::Serial(serial)) => AnalyzedRecipe::Serial(serial),
-        Some(SegmentedRecipe::Map) => AnalyzedRecipe::Map,
-        Some(SegmentedRecipe::Composite(located)) => AnalyzedRecipe::Serial(located.serial_recipe()),
-        _ => AnalyzedRecipe::Unchanged,
+            screma::Op::Map { .. } => (AnalyzedRecipe::Map, Vec::new()),
+            screma::Op::Composite { .. } => (AnalyzedRecipe::Serial(located.serial_recipe()), Vec::new()),
+        },
+        None => (AnalyzedRecipe::Unchanged, Vec::new()),
     };
     Ok((PlannedKernel::new(body, output_projection, recipe), requests))
 }

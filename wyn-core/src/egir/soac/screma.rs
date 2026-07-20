@@ -109,6 +109,13 @@ impl<T> NonEmpty<T> {
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
         std::iter::once(&mut self.first).chain(&mut self.rest)
     }
+
+    pub fn map<U>(self, mut map: impl FnMut(T) -> U) -> NonEmpty<U> {
+        NonEmpty {
+            first: map(self.first),
+            rest: self.rest.into_iter().map(map).collect(),
+        }
+    }
 }
 
 /// An index into `Body::inputs` used by a map or accumulator lane.
@@ -146,6 +153,30 @@ pub struct Operator {
 pub enum CompositeOperator {
     Reduce(Operator),
     Scan(Operator),
+}
+
+impl CompositeOperator {
+    pub fn operator(&self) -> &Operator {
+        match self {
+            Self::Reduce(operator) | Self::Scan(operator) => operator,
+        }
+    }
+
+    pub fn operator_mut(&mut self) -> &mut Operator {
+        match self {
+            Self::Reduce(operator) | Self::Scan(operator) => operator,
+        }
+    }
+
+    pub fn into_operator(self) -> Operator {
+        match self {
+            Self::Reduce(operator) | Self::Scan(operator) => operator,
+        }
+    }
+
+    pub fn is_scan(&self) -> bool {
+        matches!(self, Self::Scan(_))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -259,12 +290,9 @@ impl<P: WynSoacPhase> Op<P> {
         match self {
             Self::Map { .. } => Vec::new(),
             Self::Reduce { operators, .. } | Self::Scan { operators, .. } => operators.iter().collect(),
-            Self::Composite { operators, .. } => operators
-                .iter()
-                .map(|operator| match operator {
-                    CompositeOperator::Reduce(operator) | CompositeOperator::Scan(operator) => operator,
-                })
-                .collect(),
+            Self::Composite { operators, .. } => {
+                operators.iter().map(CompositeOperator::operator).collect()
+            }
         }
     }
 
@@ -272,22 +300,19 @@ impl<P: WynSoacPhase> Op<P> {
         match self {
             Self::Map { .. } => Vec::new(),
             Self::Reduce { operators, .. } | Self::Scan { operators, .. } => operators.iter_mut().collect(),
-            Self::Composite { operators, .. } => operators
-                .iter_mut()
-                .map(|operator| match operator {
-                    CompositeOperator::Reduce(operator) | CompositeOperator::Scan(operator) => operator,
-                })
-                .collect(),
+            Self::Composite { operators, .. } => {
+                operators.iter_mut().map(CompositeOperator::operator_mut).collect()
+            }
         }
     }
 
     pub fn is_scan(&self, index: usize) -> bool {
         match self {
             Self::Scan { operators, .. } => index < 1 + operators.rest.len(),
-            Self::Composite { operators, .. } => matches!(
-                if index == 0 { Some(&operators.first) } else { operators.rest.get(index - 1) },
-                Some(CompositeOperator::Scan(_))
-            ),
+            Self::Composite { operators, .. } => {
+                (if index == 0 { Some(&operators.first) } else { operators.rest.get(index - 1) })
+                    .is_some_and(CompositeOperator::is_scan)
+            }
             Self::Map { .. } | Self::Reduce { .. } => false,
         }
     }
@@ -356,11 +381,7 @@ impl<P: WynSoacPhase> Op<P> {
             Self::Composite { lanes, operators, .. } => {
                 lanes.for_each_type_mut(visit);
                 for operator in operators.iter_mut() {
-                    match operator {
-                        CompositeOperator::Reduce(operator) | CompositeOperator::Scan(operator) => {
-                            visit(&mut operator.result_type)
-                        }
-                    }
+                    visit(&mut operator.operator_mut().result_type)
                 }
             }
         }

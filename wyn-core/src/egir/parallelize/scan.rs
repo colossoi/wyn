@@ -245,47 +245,56 @@ pub(super) struct BoundScan {
 
 pub(super) fn analyze_scan_candidate(
     entry: &crate::egir::program::PlannedEntry,
-    located: ParallelScan<'_>,
-) -> error::Result<CandidateSelection<ScanCandidate>> {
+    located: LocatedScrema<'_>,
+    lanes: &screma::Lanes,
+    operators: &screma::NonEmpty<screma::Operator>,
+) -> error::Result<Option<ScanCandidate>> {
     let serial = located.serial_recipe();
-    let (located, lanes, operators) = located.into_parts();
+    if !operators.rest.is_empty()
+        || lanes.inputs.len() != 1
+        || !operators.first.combine.captures.is_empty()
+        || !lanes.maps.iter().all(|map| map.destination.is_output_view())
+        || !operators.iter().all(|operator| operator.destination.is_output_view())
+    {
+        return Ok(None);
+    }
     let site = located.site;
     let side_effect = located.effect;
     let operator = &operators.first;
     if !can_clone_pure_subgraph(&entry.graph, operator.neutral, &[]) {
-        return Ok(CandidateSelection::Fallback);
+        return Ok(None);
     }
     let operands =
         screma::ScremaOperands::decode(located.op, &side_effect.operand_nodes, side_effect.result)?;
     let input = operands.input(0).node;
     if !can_chunk_view(&entry.graph, input, ChunkInputKind::StorageOrRange) {
-        return Ok(CandidateSelection::Fallback);
+        return Ok(None);
     }
     let mut map_output_view_operands = Vec::with_capacity(lanes.maps.len());
     for index in 0..lanes.maps.len() {
         let Some(output) = operands.output(index) else {
-            return Ok(CandidateSelection::Fallback);
+            return Ok(None);
         };
         if !can_chunk_view(&entry.graph, output.node, ChunkInputKind::StorageOnly) {
-            return Ok(CandidateSelection::Fallback);
+            return Ok(None);
         }
         map_output_view_operands.push(output.slot);
     }
     let Some(scan_output) = operands.output(lanes.maps.len()) else {
-        return Ok(CandidateSelection::Fallback);
+        return Ok(None);
     };
     let Some(scan_output_storage) = graph_ops::extract_storage_view_source(&entry.graph, scan_output.node)
     else {
-        return Ok(CandidateSelection::Fallback);
+        return Ok(None);
     };
     let owner = located.owner;
     let scratch_type = entry.graph.types[&operator.neutral].clone();
     if crate::ssa::layout::type_byte_size(&scratch_type).is_none() {
-        return Ok(CandidateSelection::Fallback);
+        return Ok(None);
     }
     let input_view_type = entry.graph.types[&input].clone();
     let scan_output_view_type = entry.graph.types[&scan_output.node].clone();
-    Ok(CandidateSelection::Selected(ScanCandidate {
+    Ok(Some(ScanCandidate {
         site,
         owner,
         scratch_type,
