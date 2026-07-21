@@ -91,6 +91,52 @@ fn make_bool(ids: &mut TermIdSource, b: bool) -> Term {
     }
 }
 
+fn float_ty() -> Type<TypeName> {
+    Type::Constructed(TypeName::Float(32), vec![])
+}
+
+fn make_float(ids: &mut TermIdSource, value: f32) -> Term {
+    Term {
+        id: ids.next_id(),
+        ty: float_ty(),
+        span: make_span(),
+        kind: TermKind::FloatLit(value),
+    }
+}
+
+fn make_float_builtin_call(ids: &mut TermIdSource, name: &str, args: &[f32]) -> Term {
+    let builtin = crate::builtins::catalog()
+        .lookup_by_surface_name(name)
+        .unwrap_or_else(|| panic!("missing test builtin `{name}`"));
+    let func_ty = args.iter().fold(float_ty(), |result, _| arrow_ty(float_ty(), result));
+    Term {
+        id: ids.next_id(),
+        ty: float_ty(),
+        span: make_span(),
+        kind: TermKind::App {
+            func: Box::new(Term {
+                id: ids.next_id(),
+                ty: func_ty,
+                span: make_span(),
+                kind: TermKind::Var(VarRef::Builtin {
+                    id: builtin.id,
+                    overload_idx: 0,
+                }),
+            }),
+            args: args.iter().map(|value| make_float(ids, *value)).collect(),
+        },
+    }
+}
+
+fn eval_float_builtin(name: &str, args: &[f32]) -> Term {
+    let mut b = TestBuilder::new();
+    let test_sym = b.sym("test");
+    let body = make_float_builtin_call(&mut b.ids, name, args);
+    let mut program = make_program(test_sym, body, b.finish());
+    partial_eval(&mut program);
+    program.defs.pop().expect("test definition disappeared").body
+}
+
 fn make_binop(ids: &mut TermIdSource, op: &str, lhs: Term, rhs: Term) -> Term {
     let result_ty = lhs.ty.clone();
     let partial_ty = Type::Constructed(TypeName::Arrow, vec![result_ty.clone(), result_ty.clone()]);
@@ -150,6 +196,103 @@ fn test_constant_folding_mul() {
     match &result.defs[0].body.kind {
         TermKind::IntLit(s) => assert_eq!(s, "28"),
         other => panic!("Expected IntLit(28), got {:?}", other),
+    }
+}
+
+#[test]
+fn scalar_glsl_math_builtins_constant_fold() {
+    let cases = [
+        ("f32.sin", vec![0.0], 0.0),
+        ("f32.cos", vec![0.0], 1.0),
+        ("f32.tan", vec![0.0], 0.0),
+        ("f32.asin", vec![0.0], 0.0),
+        ("f32.acos", vec![1.0], 0.0),
+        ("f32.atan", vec![0.0], 0.0),
+        ("f32.sinh", vec![0.0], 0.0),
+        ("f32.cosh", vec![0.0], 1.0),
+        ("f32.tanh", vec![0.0], 0.0),
+        ("f32.asinh", vec![0.0], 0.0),
+        ("f32.acosh", vec![1.0], 0.0),
+        ("f32.atanh", vec![0.0], 0.0),
+        ("f32.atan2", vec![1.0, 0.0], std::f32::consts::FRAC_PI_2),
+        ("f32.pow", vec![2.0, 3.0], 8.0),
+        ("f32.exp", vec![0.0], 1.0),
+        ("f32.log", vec![1.0], 0.0),
+        ("f32.exp2", vec![3.0], 8.0),
+        ("f32.log2", vec![8.0], 3.0),
+        ("f32.sqrt", vec![9.0], 3.0),
+        ("f32.rsqrt", vec![4.0], 0.5),
+        ("f32.radians", vec![180.0], std::f32::consts::PI),
+        ("f32.degrees", vec![std::f32::consts::PI], 180.0),
+        ("f32.floor", vec![1.75], 1.0),
+        ("f32.ceil", vec![1.25], 2.0),
+    ];
+
+    for (name, args, expected) in cases {
+        match eval_float_builtin(name, &args).kind {
+            TermKind::FloatLit(actual) => {
+                let tolerance = 1.0e-5 * expected.abs().max(1.0);
+                assert!(
+                    (actual - expected).abs() <= tolerance,
+                    "{name}{args:?}: expected {expected}, got {actual}"
+                );
+            }
+            other => panic!("{name}{args:?}: expected folded FloatLit, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn scalar_glsl_math_keeps_poison_and_non_finite_results_residual() {
+    for (name, args) in [
+        ("f32.atan2", vec![0.0, 0.0]),
+        ("f32.pow", vec![-2.0, 2.0]),
+        ("f32.log", vec![0.0]),
+        ("f32.sqrt", vec![-1.0]),
+        ("f32.exp", vec![100.0]),
+    ] {
+        assert!(
+            matches!(eval_float_builtin(name, &args).kind, TermKind::App { .. }),
+            "{name}{args:?} must remain a runtime call"
+        );
+    }
+}
+
+#[test]
+fn scalar_glsl_math_folds_inside_lambda_body() {
+    let mut b = TestBuilder::new();
+    let test_sym = b.sym("test");
+    let ignored_sym = b.sym("ignored");
+    let body = make_float_builtin_call(&mut b.ids, "f32.cos", &[0.0]);
+    let lambda_ty = arrow_ty(float_ty(), float_ty());
+    let lambda = Term {
+        id: b.next_id(),
+        ty: lambda_ty.clone(),
+        span: b.span(),
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(ignored_sym, float_ty())],
+            body: Box::new(body),
+            ret_ty: float_ty(),
+        }),
+    };
+    let mut program = Program {
+        defs: vec![Def {
+            name: test_sym,
+            ty: lambda_ty,
+            body: lambda,
+            meta: DefMeta::Function,
+            arity: 1,
+            param_diets: vec![crate::types::Diet::observing()],
+            return_diet: crate::types::Diet::observing(),
+        }],
+        symbols: b.finish(),
+        def_syms: HashMap::new(),
+    };
+
+    partial_eval(&mut program);
+    match &program.defs[0].body.kind {
+        TermKind::Lambda(lam) => assert!(matches!(&lam.body.kind, TermKind::FloatLit(1.0))),
+        other => panic!("expected Lambda, got {other:?}"),
     }
 }
 

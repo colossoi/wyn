@@ -13,6 +13,7 @@ use crate::LookupMap;
 use crate::LookupSet;
 use crate::SymbolId;
 use polytype::Type;
+use spirv::GLOp;
 
 // =============================================================================
 // Values
@@ -558,14 +559,7 @@ impl<'a> PartialEvaluator<'a> {
             return None;
         }
         match &def.overloads().get(overload_idx)?.lowering {
-            BuiltinLowering::PrimOp(PrimOp::GlslExt(8)) => match &args.first()?.0 {
-                Value::Float(v) => Some(Value::Float(v.floor())),
-                _ => None,
-            },
-            BuiltinLowering::PrimOp(PrimOp::GlslExt(9)) => match &args.first()?.0 {
-                Value::Float(v) => Some(Value::Float(v.ceil())),
-                _ => None,
-            },
+            BuiltinLowering::PrimOp(PrimOp::GlslExt(op)) => fold_scalar_glsl_ext(*op, args, result_ty),
             BuiltinLowering::PrimOp(prim) => fold_scalar_conversion(prim, args, result_ty),
             _ => None,
         }
@@ -579,16 +573,21 @@ impl<'a> PartialEvaluator<'a> {
     /// (like `1.0 / 2.2` → `0.4545`) without changing the Let/Var structure.
     fn fold_in_body(&mut self, term: &Term) -> Term {
         match &term.kind {
-            // Constant sub-expression: App of BinOp/UnOp on literals
-            TermKind::App { func, args } if matches!(func.kind, TermKind::BinOp(_) | TermKind::UnOp(_)) => {
+            // Constant operator or catalog-builtin application.
+            TermKind::App { func, args } => {
+                let func = self.fold_in_body(func);
                 let folded_args: Vec<Term> = args.iter().map(|a| self.fold_in_body(a)).collect();
-                // Try to evaluate if all args are literals
-                let arg_vals: Vec<(Value, Type<TypeName>)> =
-                    folded_args.iter().map(|a| (self.try_literal_value(a), a.ty.clone())).collect();
-                if arg_vals.iter().all(|(v, _)| !matches!(v, Value::Unknown(_))) {
-                    let result = self.apply(func, arg_vals, term);
-                    if !matches!(result, Value::Unknown(_)) {
-                        return self.reify(result, &term.ty, term.span);
+                if matches!(
+                    &func.kind,
+                    TermKind::BinOp(_) | TermKind::UnOp(_) | TermKind::Var(VarRef::Builtin { .. })
+                ) {
+                    let arg_vals: Vec<(Value, Type<TypeName>)> =
+                        folded_args.iter().map(|a| (self.try_literal_value(a), a.ty.clone())).collect();
+                    if arg_vals.iter().all(|(v, _)| v.is_known()) {
+                        let result = self.apply(&func, arg_vals, term);
+                        if !matches!(result, Value::Unknown(_)) {
+                            return self.reify(result, &term.ty, term.span);
+                        }
                     }
                 }
                 // Couldn't fold — rebuild with folded children
@@ -596,7 +595,7 @@ impl<'a> PartialEvaluator<'a> {
                     term.ty.clone(),
                     term.span,
                     TermKind::App {
-                        func: func.clone(),
+                        func: Box::new(func),
                         args: folded_args,
                     },
                 )
@@ -637,19 +636,6 @@ impl<'a> PartialEvaluator<'a> {
                         cond: Box::new(cond),
                         then_branch: Box::new(then_branch),
                         else_branch: Box::new(else_branch),
-                    },
-                )
-            }
-            // Recurse into App (non-operator)
-            TermKind::App { func, args } => {
-                let func = self.fold_in_body(func);
-                let args = args.iter().map(|a| self.fold_in_body(a)).collect();
-                self.mk_term(
-                    term.ty.clone(),
-                    term.span,
-                    TermKind::App {
-                        func: Box::new(func),
-                        args,
                     },
                 )
             }
@@ -943,6 +929,68 @@ fn is_duplicable(v: &Value) -> bool {
         Value::Unknown(t) => matches!(t.kind, TermKind::Var(_) | TermKind::UnitLit | TermKind::Lambda(_)),
         Value::Tuple(es) | Value::Array(es) | Value::Vector(es) => es.iter().all(is_duplicable),
     }
+}
+
+/// Fold the scalar floating-point portion of GLSL.std.450. Keeping the
+/// dispatch on `GLOp` makes the catalog's lowering metadata the single source
+/// of builtin identity instead of repeating surface names here.
+fn fold_scalar_glsl_ext(
+    op: u32,
+    args: &[(Value, Type<TypeName>)],
+    result_ty: &Type<TypeName>,
+) -> Option<Value> {
+    if !matches!(result_ty, Type::Constructed(TypeName::Float(_), _)) {
+        return None;
+    }
+
+    let arg = |index: usize| match &args.get(index)?.0 {
+        Value::Float(value) => Some(*value as f32),
+        _ => None,
+    };
+    let a = arg(0)?;
+    let result = match GLOp::from_u32(op)? {
+        GLOp::Floor => a.floor(),
+        GLOp::Ceil => a.ceil(),
+        GLOp::Radians => a.to_radians(),
+        GLOp::Degrees => a.to_degrees(),
+        GLOp::Sin => a.sin(),
+        GLOp::Cos => a.cos(),
+        GLOp::Tan => a.tan(),
+        GLOp::Asin => a.asin(),
+        GLOp::Acos => a.acos(),
+        GLOp::Atan => a.atan(),
+        GLOp::Sinh => a.sinh(),
+        GLOp::Cosh => a.cosh(),
+        GLOp::Tanh => a.tanh(),
+        GLOp::Asinh => a.asinh(),
+        GLOp::Acosh => a.acosh(),
+        GLOp::Atanh => a.atanh(),
+        GLOp::Atan2 => {
+            let b = arg(1)?;
+            if a == 0.0 && b == 0.0 {
+                return None;
+            }
+            a.atan2(b)
+        }
+        GLOp::Pow => {
+            let b = arg(1)?;
+            if a < 0.0 || (a == 0.0 && b <= 0.0) {
+                return None;
+            }
+            a.powf(b)
+        }
+        GLOp::Exp => a.exp(),
+        GLOp::Log => a.ln(),
+        GLOp::Exp2 => a.exp2(),
+        GLOp::Log2 => a.log2(),
+        GLOp::Sqrt => a.sqrt(),
+        GLOp::InverseSqrt => a.sqrt().recip(),
+        _ => return None,
+    };
+
+    // WGSL cannot spell non-finite literals, and GLSL.std.450 leaves some
+    // domain errors poison. Preserve the runtime call in either case.
+    result.is_finite().then(|| Value::Float(result as f64))
 }
 
 fn fold_scalar_conversion(
