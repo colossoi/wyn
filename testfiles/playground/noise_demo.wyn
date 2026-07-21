@@ -1,0 +1,47 @@
+-- Visual smoke test for `lib/noise.wyn` — drives `fhnoise.fbm_perlin` over
+-- screen UV with `iTime` advancing the noise origin, mapped through a
+-- two-color ramp so the structure is visible. If the lib is wired up
+-- correctly you should see smooth, slowly-drifting cloud-like detail with
+-- pixel-grain octaves layered in.
+
+import "../../lib/noise"
+
+open f32
+
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[ 3.0, -1.0, 0.0, 1.0],
+   @[-1.0,  3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 =
+  verts[vertex_id]
+
+#[fragment]
+entry fragment_main(
+  #[uniform(set=1, binding=0)] iResolution: vec3f32,
+  #[uniform(set=1, binding=1)] iTime: f32,
+  #[builtin(position)] fragCoord: vec4f32
+) #[target(screen)] vec4f32 =
+  -- UV in [0, 1]². The fragCoord -> uv mapping leaves cells roughly square
+  -- when we scale by iResolution.xy below.
+  let uv = fragCoord.xy / iResolution.xy in
+  -- Scale into noise space: ~3 cells across the short axis. iTime drifts
+  -- the origin so the pattern flows; the y-only drift keeps the visual
+  -- "wind direction" obvious for QA.
+  let scale = 3.0f32 in
+  let p: vec2f32 = @[uv.x * scale, uv.y * scale + iTime * 0.15] in
+  -- 5-octave fbm_perlin, classic 1/f knobs.
+  let k = fasthash.seed(0x9e3779b9u32) in
+  let n = fhnoise.fbm_perlin(k, p, 5i32, 2.0f32, 0.5f32) in
+  -- The sum of 5 octaves at gain 0.5 with each base in roughly [-1, 1] has
+  -- worst-case magnitude 1 + 0.5 + 0.25 + 0.125 + 0.0625 = 1.9375, so map
+  -- [-1.9375, +1.9375] -> [0, 1] for the color ramp. Typical values use
+  -- a smaller slice of that range; you'll see most pixels fall around the
+  -- middle of the ramp.
+  let t = (n + 1.9375f32) / 3.875f32 in
+  -- Sky-blue -> warm-sand ramp, so low noise reads as deep, high as bright.
+  let r = 0.1 + (0.9 - 0.1) * t in
+  let g = 0.2 + (0.8 - 0.2) * t in
+  let b = 0.4 + (0.5 - 0.4) * t in
+  @[r, g, b, 1.0]
