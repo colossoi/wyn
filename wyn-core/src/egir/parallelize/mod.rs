@@ -47,7 +47,7 @@ use kernel::{
 use model as error;
 use model::{CandidateSelection, DisjointSets};
 use planning::{make_screma_serial, LocatedScrema, SerialScremaRecipe};
-use projection::{project_kernel_body, split_multidomain_seg_maps, ProjectionSpec};
+use projection::{partition_entry_output_domains, project_kernel_body, ProjectionSpec};
 use reduce::{analyze_reduce_candidate, BoundReduce};
 use scan::{analyze_scan_candidate, BoundScan, ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
 pub(super) use schedule::KernelPlan;

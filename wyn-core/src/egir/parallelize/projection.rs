@@ -1,7 +1,6 @@
 //! Physical-entry projection, interface compaction, and output-domain split.
 
 use super::*;
-use crate::egir::soac::filter as filter_soac;
 use crate::egir::{graph_projector, program, semantic_graph};
 
 /// Retained-interface facts owned by one projection result. Interface
@@ -163,7 +162,7 @@ fn project_kernel_body_effects(
     } = spec;
     let route_values = output_routes.iter().map(|route| route.source.value).collect();
     let projection = graph_projector::GraphProjector::new(&source.graph, &source.control_headers)
-        .selected_with_values(selected, route_values)?;
+        .selected_component_with_values(selected, route_values)?;
     let effect_sites = projection
         .source_effects()
         .iter()
@@ -184,9 +183,11 @@ fn project_kernel_body_effects(
         output_routes,
     )?;
     entry.retain_parameter_indices(&retained.parameters);
-    entry.resource_declarations.retain(|declaration| {
-        declaration.role != crate::interface::StorageRole::Input
-            || retained.resources.contains(&declaration.resource.0)
+    entry.resource_declarations.retain(|declaration| match declaration.role {
+        crate::interface::StorageRole::Input | crate::interface::StorageRole::Output => {
+            retained.resources.contains(&declaration.resource.0)
+        }
+        crate::interface::StorageRole::Intermediate => true,
     });
     Ok((entry, effect_sites))
 }
@@ -216,29 +217,33 @@ pub(super) fn side_effect_output_slots(entry: &program::PlannedEntry, effect: &S
     slots
 }
 
-fn starts_parallel_output_domain(effect: &SideEffect) -> bool {
-    matches!(
-        &effect.kind,
-        SideEffectKind::Soac(SoacEffect(
-            _,
-            Soac::Screma(screma::Op::Map {
-                state: screma::SemanticState::Segmented { .. },
-                ..
-            })
-        ))
-    ) || matches!(
-        &effect.kind,
-        SideEffectKind::Soac(SoacEffect(
-            _,
-            Soac::Filter(filter_soac::Op {
-                state: filter_soac::SemanticState {
-                    storage: filter_soac::Output::Runtime { .. },
-                    ..
-                },
-                ..
-            })
-        ))
-    )
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputExecutionDomain {
+    Singleton,
+    ScheduledParallel,
+}
+
+impl OutputExecutionDomain {
+    fn join(self, other: Self) -> Self {
+        if self == Self::ScheduledParallel || other == Self::ScheduledParallel {
+            Self::ScheduledParallel
+        } else {
+            Self::Singleton
+        }
+    }
+
+    fn is_scheduled_parallel(self) -> bool {
+        self == Self::ScheduledParallel
+    }
+}
+
+fn output_execution_domain(effect: &SideEffect) -> OutputExecutionDomain {
+    match &effect.kind {
+        SideEffectKind::Soac(SoacEffect(_, soac)) if soac.scheduling_space().is_some() => {
+            OutputExecutionDomain::ScheduledParallel
+        }
+        _ => OutputExecutionDomain::Singleton,
+    }
 }
 
 fn requires_unrouted_owner(effect: &SideEffect) -> bool {
@@ -271,7 +276,7 @@ struct OutputGroup {
     root: usize,
     slots: Vec<usize>,
     first_slot: usize,
-    starts_parallel_domain: bool,
+    domain: OutputExecutionDomain,
 }
 
 impl OutputGroup {
@@ -280,13 +285,13 @@ impl OutputGroup {
             root,
             slots: Vec::new(),
             first_slot,
-            starts_parallel_domain: false,
+            domain: OutputExecutionDomain::Singleton,
         }
     }
 
     fn include(&mut self, producer: OutputProducer) {
         self.first_slot = self.first_slot.min(producer.first_slot);
-        self.starts_parallel_domain |= producer.starts_parallel_domain;
+        self.domain = self.domain.join(producer.domain);
         for slot in producer.slots {
             if !self.slots.contains(&slot) {
                 self.slots.push(slot);
@@ -299,7 +304,7 @@ struct OutputProducer {
     site: SideEffectSite,
     slots: Vec<usize>,
     first_slot: usize,
-    starts_parallel_domain: bool,
+    domain: OutputExecutionDomain,
 }
 
 struct OutputPartition {
@@ -335,12 +340,10 @@ impl OutputPartition {
         }
         groups.sort_by_key(|group| group.first_slot);
 
-        let unrouted_host = {
-            let mut parallel_groups = groups.iter().filter(|group| group.starts_parallel_domain);
-            let host = parallel_groups.next()?.root;
-            parallel_groups.next()?;
-            host
-        };
+        if groups.len() < 2 {
+            return None;
+        }
+        let unrouted_host = groups.iter().find(|group| group.domain.is_scheduled_parallel())?.root;
         let mut groups = groups.into_iter();
         Some(Self {
             primary: groups.next()?,
@@ -389,7 +392,7 @@ fn output_producers(entry: &program::PlannedEntry) -> Result<Vec<OutputProducer>
                 },
                 slots,
                 first_slot,
-                starts_parallel_domain: starts_parallel_output_domain(effect),
+                domain: output_execution_domain(effect),
             });
         }
     }
@@ -401,9 +404,8 @@ fn output_partition(entry: &program::PlannedEntry) -> Result<Option<OutputPartit
         return Ok(None);
     }
 
-    let Some(mut partition) =
-        OutputPartition::from_producers(entry.outputs.len(), output_producers(entry)?)
-    else {
+    let producers = output_producers(entry)?;
+    let Some(mut partition) = OutputPartition::from_producers(entry.outputs.len(), producers) else {
         return Ok(None);
     };
     partition.claim_unrouted_effects(entry);
@@ -447,9 +449,15 @@ fn project_output_group(
             Some(route)
         })
         .collect();
+    let execution_model = match (&entry.execution_model, group.domain) {
+        (ExecutionModel::Compute { .. }, OutputExecutionDomain::Singleton) => ExecutionModel::Compute {
+            local_size: (1, 1, 1),
+        },
+        _ => entry.execution_model.clone(),
+    };
     let spec = ProjectionSpec {
         name,
-        execution_model: entry.execution_model.clone(),
+        execution_model,
         outputs,
         output_routes,
         resource_declarations: entry.resource_declarations.clone(),
@@ -464,10 +472,13 @@ fn project_output_group(
     })
 }
 
-/// Split a multi-output entry into one projected kernel per output domain.
-/// Output routes remain the authority for effect ownership, and retained
-/// interface facts carry semantic-operation ownership into each projection.
-pub(super) fn split_multidomain_seg_maps(
+/// Partition a multi-output entry into one projected kernel per independently
+/// owned output component whenever at least one component has a scheduled
+/// parallel domain. Singleton outputs therefore do not inherit a sibling
+/// operation's per-invocation execution frequency. Output routes remain the
+/// authority for effect ownership, and retained interface facts carry
+/// semantic-operation ownership into each projection.
+pub(super) fn partition_entry_output_domains(
     entry: &program::PlannedEntry,
 ) -> Result<Option<EntrySplit>, String> {
     let Some(partition) = output_partition(entry)? else {

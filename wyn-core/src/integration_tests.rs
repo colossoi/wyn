@@ -1477,7 +1477,6 @@ entry filter_after_serial_prefix(xs: []i32) ([1]i32, []i32, i32) =
 }
 
 #[test]
-#[ignore = "fixed-output serial prefixes are not yet split from parallel output stages"]
 fn fixed_output_serial_prefix_is_not_cloned_into_parallel_output_stage() {
     use crate::pipeline_descriptor::{Binding, BufferUsage};
 
@@ -1510,6 +1509,39 @@ entry filter_after_serial_prefix(xs: []i32) ([1]i32, []i32, i32) =
             .then_some(index)
         })
         .collect::<std::collections::HashSet<_>>();
+    let input_bindings = pipeline
+        .bindings
+        .iter()
+        .enumerate()
+        .filter_map(|(index, binding)| {
+            matches!(
+                binding,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Input,
+                    ..
+                }
+            )
+            .then_some(index)
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let prefix_stages = pipeline
+        .stages
+        .iter()
+        .filter(|stage| stage.reads.iter().any(|binding| input_bindings.contains(binding)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        prefix_stages.len(),
+        1,
+        "the independent prefix input must be read by exactly one stage"
+    );
+    assert!(
+        is_singleton_stage(prefix_stages[0]),
+        "the stage computing the fixed-output prefix must execute once"
+    );
+    assert!(
+        spirv_entry_reaches_loop(&lowered.spirv, &prefix_stages[0].entry_point),
+        "the singleton fixed-output stage retains the prefix loop"
+    );
     let parallel_output_stages = pipeline
         .stages
         .iter()
@@ -6241,15 +6273,73 @@ fn entry_loads_global_invocation_id(spirv: &[u32], entry_name: &str) -> bool {
 /// planner used to treat only output slot 0 as the parallelizable tail, so
 /// `([2]u32, []u32)` (fixed first) lowered serial while `([]u32, [2]u32)`
 /// sharded.
+fn assert_fixed_output_and_streamed_map_partition(source: &str, output_count: usize) {
+    use crate::pipeline_descriptor::{Binding, BufferUsage, DispatchSize, Pipeline};
+
+    let lowered = crate::compile_thru_spirv(source).expect("fixed output and streamed map compile");
+    let compute = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) => Some(compute),
+            Pipeline::Graphics(_) => None,
+        })
+        .expect("one compute pipeline");
+    assert_eq!(
+        compute.stages.len(),
+        2,
+        "the singleton output and streamed map require separate execution domains"
+    );
+    let singleton = compute
+        .stages
+        .iter()
+        .find(|stage| is_singleton_stage(stage))
+        .expect("the fixed output has a singleton writer");
+    let parallel = compute
+        .stages
+        .iter()
+        .find(|stage| matches!(stage.dispatch_size, DispatchSize::DerivedFrom { .. }))
+        .expect("the map retains its streamed dispatch domain");
+    assert!(
+        !entry_loads_global_invocation_id(&lowered.spirv, &singleton.entry_point),
+        "the singleton output writer is invocation-independent"
+    );
+    assert!(
+        entry_loads_global_invocation_id(&lowered.spirv, &parallel.entry_point),
+        "the map stage shards with GlobalInvocationID"
+    );
+
+    let output_bindings = compute
+        .bindings
+        .iter()
+        .enumerate()
+        .filter_map(|(index, binding)| {
+            matches!(
+                binding,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Output,
+                    ..
+                }
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(output_bindings.len(), output_count);
+    for binding in output_bindings {
+        assert_eq!(
+            compute.stages.iter().filter(|stage| stage.writes.contains(&binding)).count(),
+            1,
+            "each output binding has exactly one execution-domain owner"
+        );
+    }
+}
+
 #[test]
 fn fixed_output_before_streamed_map_still_shards() {
-    let spirv = compile_to_spirv(
+    assert_fixed_output_and_streamed_map_partition(
         "#[compute]\nentry r(a: []u32) ([2]u32, []u32) = ([7u32, 9u32], map(|x| x + 1u32, a))\n",
-    )
-    .expect("fixed-then-map compute compiles");
-    assert!(
-        entry_loads_global_invocation_id(&spirv, "r"),
-        "a map after a fixed output must still shard (load gl_GlobalInvocationID)"
+        2,
     );
 }
 
@@ -6274,16 +6364,15 @@ entry r(a: []u32, b: []u32) ([2]u32, []u32, []u32) =
 /// even when a fixed output occupies the first slot.
 #[test]
 fn fixed_output_before_let_bound_map_still_shards() {
-    let spirv = compile_to_spirv(
+    assert_fixed_output_and_streamed_map_partition(
         r#"
 #[compute]
 entry r(a: []u32) ([2]u32, []u32) =
   let m = map(|x| x + 1u32, a) in
   ([1u32, 2u32], m)
 "#,
-    )
-    .expect("fixed output + let-bound map compiles");
-    assert!(entry_loads_global_invocation_id(&spirv, "r"));
+        2,
+    );
 }
 
 /// Canonical resolved slots must also reach the per-domain stage splitter;
@@ -6308,7 +6397,7 @@ entry r(a: []u32, b: []u32) ([2]u32, []u32, []u32) =
 /// the same resolved-slot path as syntactically inline maps.
 #[test]
 fn let_bound_complex_same_domain_maps_shard() {
-    let spirv = compile_to_spirv(
+    assert_fixed_output_and_streamed_map_partition(
         r#"
 #[compute]
 entry r(tidx: []u32, src: []vec4f32, st: []f32) ([2]f32, []vec4f32, []vec4f32) =
@@ -6318,9 +6407,8 @@ entry r(tidx: []u32, src: []vec4f32, st: []f32) ([2]f32, []vec4f32, []vec4f32) =
   let m2 = map(|s| let i = i32(s) in let it = src[i % 4] in @[0.0, 1.0, 0.0, it.w], tidx) in
   (o0, m1, m2)
 "#,
-    )
-    .expect("let-bound complex same-domain maps compile");
-    assert!(entry_loads_global_invocation_id(&spirv, "r"));
+        3,
+    );
 }
 
 /// A fixed-size output alongside several *different-domain* maps: the fixed

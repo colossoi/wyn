@@ -319,6 +319,85 @@ fn selected_operation_recipe_rejects_a_continuation_parameter_dependency() {
 }
 
 #[test]
+fn selected_component_detaches_an_independent_continuation_value() {
+    let mut graph = EGraph::new();
+    let entry = graph.skeleton.entry;
+    let continuation = graph.skeleton.create_block();
+    let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    let _prefix_result = graph.add_block_param(continuation, u32_ty());
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
+        target: continuation,
+        args: vec![zero],
+    };
+    let produced = graph.alloc_side_effect_result(u32_ty());
+    graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::Load),
+        operand_nodes: smallvec![zero],
+        result: Some(produced),
+        effects: Some((EffectToken::from(0), EffectToken::from(1))),
+        span: None,
+    });
+    graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
+
+    let projected = GraphProjector::new(&graph, &LookupMap::new())
+        .selected_component_with_values(
+            HashSet::from([SideEffectSite {
+                block: continuation,
+                index: 0,
+            }]),
+            vec![produced],
+        )
+        .expect("independent output component");
+    assert_eq!(projected.graph.skeleton.blocks.len(), 1);
+    assert_eq!(
+        projected.block(continuation),
+        Some(projected.graph.skeleton.entry)
+    );
+    assert!(projected.block(entry).is_none());
+    assert!(projected.node(produced).is_some());
+}
+
+#[test]
+fn selected_component_retains_cfg_for_a_continuation_parameter_dependency() {
+    let mut graph = EGraph::new();
+    let entry = graph.skeleton.entry;
+    let continuation = graph.skeleton.create_block();
+    let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    let prefix_result = graph.add_block_param(continuation, u32_ty());
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
+        target: continuation,
+        args: vec![zero],
+    };
+    let produced = graph.alloc_side_effect_result(u32_ty());
+    graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::Load),
+        operand_nodes: smallvec![prefix_result],
+        result: Some(produced),
+        effects: Some((EffectToken::from(0), EffectToken::from(1))),
+        span: None,
+    });
+    graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
+
+    let projected = GraphProjector::new(&graph, &LookupMap::new())
+        .selected_component_with_values(
+            HashSet::from([SideEffectSite {
+                block: continuation,
+                index: 0,
+            }]),
+            vec![produced],
+        )
+        .expect("dependent output component retains its control prefix");
+    assert_eq!(projected.graph.skeleton.blocks.len(), 2);
+    assert!(projected.block(entry).is_some());
+    let projected_continuation = projected.block(continuation).expect("projected continuation");
+    assert_eq!(
+        projected.graph.skeleton.blocks[projected_continuation].params.len(),
+        1
+    );
+    assert!(projected.node(prefix_result).is_some());
+}
+
+#[test]
 fn projection_does_not_resurrect_eliminated_block_parameters() {
     let mut graph = EGraph::new();
     let entry = graph.skeleton.entry;

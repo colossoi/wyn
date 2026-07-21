@@ -274,6 +274,43 @@ impl<'a> GraphProjector<'a> {
         self.project(roots, extra_values, ProjectionMode::Complete)
     }
 
+    /// Project one independently scheduled component. A component whose
+    /// selected effects and complete value-producer closure are local to one
+    /// block can use that block as a fresh entry, dropping unrelated control
+    /// prefixes. Components that consume a block parameter or otherwise need
+    /// the surrounding CFG conservatively retain the complete graph.
+    pub fn selected_component_with_values(
+        &self,
+        roots: HashSet<SideEffectSite>,
+        extra_values: Vec<NodeId>,
+    ) -> Result<GraphProjection, String> {
+        let mut blocks = roots.iter().map(|site| site.block);
+        if let Some(block) = blocks.next() {
+            if blocks.all(|other| other == block)
+                && self.component_is_block_local(&roots, &extra_values, block)?
+            {
+                return self.project(roots, extra_values, ProjectionMode::DetachedRecipe { block });
+            }
+        }
+        self.project(roots, extra_values, ProjectionMode::Complete)
+    }
+
+    fn component_is_block_local(
+        &self,
+        roots: &HashSet<SideEffectSite>,
+        extra_values: &[NodeId],
+        block: BlockId,
+    ) -> Result<bool, String> {
+        let mut selected = roots.clone();
+        let mut values = extra_values.to_vec();
+        for site in roots {
+            values.extend(self.effect_at(*site)?.referenced_nodes());
+        }
+        let values = self.close_producers(&mut selected, &mut values, &self.source.side_effect_index())?;
+        Ok(selected.iter().all(|site| site.block == block)
+            && values.iter().all(|node| !matches!(self.source.nodes[*node], ENode::BlockParam { .. })))
+    }
+
     fn project(
         &self,
         selected: HashSet<SideEffectSite>,

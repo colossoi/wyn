@@ -878,11 +878,13 @@ impl KernelPlan {
                     .flow_resource_phases(*consumer, *resource, false)
                     .map(|(id, _)| id)
                     .collect::<Vec<_>>();
+                // Allocation records endpoint-level consumers before output-domain
+                // projection. Projection may prove one result of a multi-result
+                // materialization dead in every physical kernel for that endpoint.
+                // The phase-owned resource facts are authoritative here: connect
+                // every surviving reader, but do not resurrect a pruned edge.
                 if readers.is_empty() {
-                    return Err(KernelMutationError::InvalidKernel(format!(
-                        "flow consumer {consumer:?} does not declare a reader for {:?}",
-                        resource
-                    )));
+                    continue;
                 }
                 for reader in readers {
                     for writer in writers.iter().copied().filter(|writer| *writer != reader) {

@@ -393,7 +393,7 @@ fn analyze_endpoint(
     let targets = RecipeTargets::collect(&projected);
     let required_elements = fixed_required_elements(&projected, &targets);
     let split = match endpoint {
-        CompilerFlowEndpoint::Entry(_) => super::split_multidomain_seg_maps(&projected)?,
+        CompilerFlowEndpoint::Entry(_) => super::partition_entry_output_domains(&projected)?,
         CompilerFlowEndpoint::Materialization(_) => None,
     };
     let Some(split) = split else {
