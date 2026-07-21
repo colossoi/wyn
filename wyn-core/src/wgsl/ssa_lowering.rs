@@ -536,18 +536,11 @@ fn wgsl_place(id: crate::ssa::types::PlaceId) -> String {
     format!("p{}_{}", idx, ver)
 }
 
-/// True if `ty` is a view-variant unsized array (i.e. backed by a
-/// storage buffer, accessed through a `@group @binding` global rather
-/// than a function parameter).
+/// True if `ty` is a view-variant array. Its runtime value is an
+/// `(offset, len)` function value while its elements live in the static
+/// `@group @binding` storage buffer recorded by the type's region.
 fn is_view_array_ty(ty: &polytype::Type<TypeName>) -> bool {
-    let polytype::Type::Constructed(TypeName::Array, args) = ty else {
-        return false;
-    };
-    if args.len() != 3 {
-        return false;
-    }
-    // args = [elem, variant, size]
-    crate::types::is_array_variant_view(&args[1])
+    ty.array_variant().is_some_and(crate::types::is_array_variant_view)
 }
 
 struct LowerCtx<'a> {
@@ -663,6 +656,18 @@ impl<'a> LowerCtx<'a> {
         // Emit entry points.
         for entry in &self.program.entry_points {
             self.lower_entry_point(entry, &mut code)?;
+        }
+
+        // Module-scope resource declarations are emitted after the generated
+        // tuple/record structs below. Pre-register uniform types now so a
+        // record used only as an entry resource cannot introduce a `Tn` name
+        // after the struct-declaration snapshot has already been written.
+        for entry in &self.program.entry_points {
+            for input in &entry.inputs {
+                if input.uniform_binding().is_some() {
+                    self.type_emitter.type_to_wgsl(&input.ty)?;
+                }
+            }
         }
 
         let mut output = String::new();
@@ -1040,32 +1045,34 @@ impl<'a> LowerCtx<'a> {
         let body = &func.body;
         let name = self.mangle_tracked(&func.name)?;
         let ret_ty = self.type_emitter.type_to_wgsl(&body.return_ty)?;
-        // Skip params whose type is a view-array (`[?]T`). WGSL function
-        // signatures can't take bare `array<T>` — they'd need
-        // `ptr<storage, array<T>, read>`. In practice these params are
-        // dead: buffer_specialize either rewrote them into explicit
-        // (offset, len) tuples upstream, or the body was rewritten to
-        // reach the buffer through its `@group @binding` global and
-        // ignore the param entirely (e.g. a `map` lambda after
-        // partial-evaluation). If the body *did* reference it, a
-        // later name-lookup error at the reference site surfaces the
-        // bug cleanly.
-        let params: Result<Vec<String>> = body
-            .params
-            .iter()
-            .filter(|(_, ty, _)| !is_view_array_ty(ty))
-            .map(|(_, ty, pname)| {
-                let ty_str = self.type_emitter.type_to_wgsl(ty)?;
-                let pname = self.mangle_tracked(pname)?;
-                Ok(format!("{}: {}", pname, ty_str))
-            })
-            .collect();
-        let params = params?;
+        // View-array params are runtime `(offset, len)` handles, emitted as
+        // `vec2<u32>`. Their backing binding is static in the array type's
+        // trailing region argument, so indexing resolves the module-scope
+        // buffer from the parameter type.
+        let mut params = Vec::with_capacity(body.params.len());
+        let mut param_names = Vec::with_capacity(body.params.len());
+        let mut used_param_names = LookupSet::new();
+        for (value_id, ty, pname) in &body.params {
+            let ty_str = self.type_emitter.type_to_wgsl(ty)?;
+            let base_name = self.mangle_tracked(pname)?;
+            let mut emitted_name = base_name.clone();
+            let mut suffix = 1usize;
+            while used_param_names.contains(&emitted_name) {
+                emitted_name = format!("{}__p{}", base_name, suffix);
+                suffix += 1;
+            }
+            used_param_names.insert(emitted_name.clone());
+            params.push(format!("{}: {}", emitted_name, ty_str));
+            param_names.push((*value_id, emitted_name));
+        }
 
         writeln!(output, "fn {}({}) -> {} {{", name, params.join(", "), ret_ty).unwrap();
         self.indent += 1;
 
         let mut body_ctx = BodyLowerCtx::new(self, body, func.span);
+        for (value_id, emitted_name) in param_names {
+            body_ctx.value_map.insert(value_id, ValueBinding::Alias(emitted_name));
+        }
         let result = body_ctx.lower(output)?;
         writeln!(output, "{}return {};", self.indent_str(), result).unwrap();
 
@@ -2029,15 +2036,16 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 crate::err_wgsl_at!(self.blame_span(), "{} must have a result", func_name)
                             })?;
                             if is_inplace {
-                                writeln!(
-                                    output,
-                                    "{}{}[{}] = {};",
-                                    self.ctx.indent_str(),
-                                    arr_src,
-                                    idx,
-                                    val
-                                )
-                                .unwrap();
+                                let target = match operands[0].as_ssa() {
+                                    Some(array_id)
+                                        if is_view_array_ty(self.body.get_value_type(array_id)) =>
+                                    {
+                                        let buffer_name = self.view_buffer_name(array_id)?;
+                                        format!("{}[(i32(({}).x)) + (i32({}))]", buffer_name, arr_src, idx)
+                                    }
+                                    _ => format!("{}[{}]", arr_src, idx),
+                                };
+                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), target, val).unwrap();
                                 // Alias-only: the result is the
                                 // (now-mutated) source array.
                                 self.value_map.insert(result_id, ValueBinding::Alias(arr_src));
@@ -2442,6 +2450,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             // contract as Composite).
                             return Ok(format!("{}.f0[{}]", base_val, index_val));
                         }
+                        if is_view_array_ty(base_ty) {
+                            let buffer_name = self.view_buffer_name(id)?;
+                            return Ok(format!(
+                                "{}[(i32(({}).x)) + (i32({}))]",
+                                buffer_name, base_val, index_val
+                            ));
+                        }
                     }
                     Ok(format!("{}[{}]", base_val, index_val))
                 }
@@ -2485,24 +2500,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             return Ok(lowered);
                         }
                     }
-                    // Mirror `lower_function`: drop arguments whose parameter
-                    // slot on the callee is a view-array. The callee's
-                    // signature has those params filtered out, so we skip
-                    // the corresponding args here too.
-                    let arg_strs: Vec<String> = match callee {
-                        Some(f) => args
-                            .iter()
-                            .zip(f.body.params.iter())
-                            .filter_map(|(arg, (_, pty, _))| {
-                                if is_view_array_ty(pty) {
-                                    None
-                                } else {
-                                    Some(self.get_value(*arg))
-                                }
-                            })
-                            .collect::<Result<Vec<_>>>()?,
-                        None => raw_strs,
-                    };
+                    let arg_strs = raw_strs;
                     let mangled = self.ctx.mangle_tracked(func)?;
                     Ok(format!("{}({})", mangled, arg_strs.join(", ")))
                 }

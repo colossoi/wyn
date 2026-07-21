@@ -706,6 +706,8 @@ entry gen(bh: []vec4f32) []i32 =
     )
     .expect("gather program must lower to WGSL");
 
+    validate_wgsl(&wgsl);
+
     assert!(
         wgsl.contains("@group(0) @binding(2)") && wgsl.contains("var<storage"),
         "the gather buffer must be declared as a storage binding:\n{wgsl}"
@@ -769,6 +771,27 @@ entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
     assert!(
         wgsl.contains("_buf_2_1["),
         "scatter must emit indexed stores into the framebuffer:\n{wgsl}"
+    );
+}
+
+#[test]
+fn wgsl_map_over_unique_storage_view_updates_backing_buffer() {
+    let wgsl = compile_to_wgsl(
+        r#"
+#[compute]
+entry draw(#[storage(set=2, binding=1, access=write)] fb: *[]vec4f32) () =
+  let cleared = map(|_p: vec4f32| @[0.0, 0.0, 0.0, 1.0], fb) in
+  let idxs = map(|i: i32| i, 0i32 ..< 4i32) in
+  let vals = map(|_i: i32| @[1.0, 1.0, 1.0, 1.0], 0i32 ..< 4i32) in
+  let _ = scatter(cleared, idxs, vals) in ()
+"#,
+    )
+    .expect("map/scatter over a unique storage view must lower");
+
+    validate_wgsl(&wgsl);
+    assert!(
+        wgsl.contains("_buf_2_1[") && wgsl.contains("] ="),
+        "in-place view updates must target the backing storage buffer:\n{wgsl}"
     );
 }
 
@@ -846,5 +869,53 @@ entry fragment_main(#[builtin(position)] pos: vec4f32,
         wgsl.matches("var<uniform> w_c:").count(),
         1,
         "same (set, binding) uniform must dedupe to one declaration"
+    );
+}
+
+#[test]
+fn wgsl_direct_record_uniform_registers_struct_before_bindings() {
+    let wgsl = compile_to_wgsl(
+        r#"
+type block = { tint: vec2f32 }
+
+#[compute]
+entry paint(#[storage_image(set=1, binding=1, format=rgba8unorm, access=write_only)] img: *storage_image,
+            #[uniform(set=1, binding=4)] c: block,
+            #[builtin(global_invocation_id)] gid: vec3u32) () =
+  img with [@[i32.u32(gid.x), i32.u32(gid.y)]] = @[c.tint.x, c.tint.y, 0.0, 1.0]
+"#,
+    )
+    .expect("directly used record uniform must lower");
+
+    validate_wgsl(&wgsl);
+    let struct_pos = wgsl.find("struct T0").expect("record struct declaration");
+    let uniform_pos = wgsl.find("var<uniform> w_c: T0").expect("record uniform declaration");
+    assert!(
+        struct_pos < uniform_pos,
+        "record struct must precede the uniform that uses it:\n{wgsl}"
+    );
+}
+
+#[test]
+fn wgsl_duplicate_source_parameter_names_are_uniquified() {
+    let wgsl = compile_to_wgsl(
+        r#"
+def advance(p: i32, i: i32, t: f32) i32 = p + i + i32.f32(t)
+
+#[compute]
+entry tick(prev: []i32, #[uniform(set=1, binding=0)] t: f32) []i32 =
+  if t < 0.1 then
+    map(|i: i32| i, 0i32 ..< 16i32)
+  else
+    let ps = prev[0i32..16i32] in
+    map(|i: i32| advance(ps[i], i, t), 0i32 ..< 16i32)
+"#,
+    )
+    .expect("conditional map envelope must lower");
+
+    validate_wgsl(&wgsl);
+    assert!(
+        wgsl.contains("w_i__p1: i32"),
+        "duplicate source parameter names must be uniquified:\n{wgsl}"
     );
 }

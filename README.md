@@ -294,8 +294,10 @@ A view array (`[]T`) is a window into a storage buffer: a runtime
 `{offset, len}` pair plus a **static** descriptor `(set, binding)` — Vulkan
 can't pick a descriptor by a runtime value, so the binding *must* be a
 compile-time constant at every consumer. Wyn makes the binding a property
-of the type: the `Array` type's trailing **buffer** slot holds
-`Buffer(set, binding)`.
+of the type: the `Array` type's trailing **buffer/region** slot (always the
+last type argument) holds `Buffer(set, binding)`. Thus a rank-one view has
+four type arguments, `[elem, ArrayVariantView, dim_0, buffer]`; the runtime
+`{offset, len}` value is separate from this static type-level buffer slot.
 
 - **Born at entry params.** `pin_entry_buffers` (the first TLC pass)
   computes each storage entry-param's binding (auto-allocated `set 0,
@@ -359,7 +361,7 @@ schema is the canonical mapping. Helpers in `wyn-core/src/types/mod.rs`
 `extract_function_signature`) centralize the position queries so passes
 don't pattern-match on args indices directly.
 
-| Variant | args[0] | args[1] | args[2] | Notes |
+| Variant | args[0] | args[1] | args[2…] | Notes |
 |---|---|---|---|---|
 | `Bool`, `Float(n)`, `UInt(n)`, `Int(n)` | — | — | — | Nullary scalars |
 | `Unit` | — | — | — | The `()` value |
@@ -368,7 +370,7 @@ don't pattern-match on args indices directly.
 | `Tuple(n)` | t₁ | t₂ | … | n elements; arity in the variant tag |
 | `Vec` | elem | `Size(n)` | — | n-component vector |
 | `Mat` | elem | `Size(cols)` | `Size(rows)` | Column-major |
-| `Array` | elem | variant | dim_0 (… dim_{rank-1}), buffer | Layout `[elem, variant, dim_0…dim_{rank-1}, buffer]`; rank is implicit (`args.len() - 3`), all arrays rank-1 today. Each dim is `Size(n)` \| `SizeVar(name)` \| `SizePlaceholder` \| `Variable`; variant is `ArrayVariantView` \| `Composite` \| `Virtual` \| `Bounded`. The trailing **buffer** is `Buffer(set, binding)` (a storage view), `NoBuffer` (a non-view array), or a variable (buffer-polymorphic) — making a view's buffer a static type property (see View Buffer Provenance) |
+| `Array` | elem | variant | dim_0 … dim_{rank-1}, then buffer/region | Exact layout: `[elem, variant, dim_0…dim_{rank-1}, buffer]`, so `args.len() == rank + 3`. All arrays are rank-one today and therefore have **four** arguments: `args[0]` elem, `args[1]` variant, `args[2]` dimension, and `args[3]` buffer. Do not identify arrays or views with an `args.len() == 3` check; use `array_elem`, `array_variant`, `array_size`, and `array_view_buffer`. Each dim is `Size(n)` \| `SizeVar(name)` \| `SizePlaceholder` \| `Variable`; variant is `ArrayVariantView` \| `Composite` \| `Virtual` \| `Bounded`. The trailing **buffer/region** is `Buffer(set, binding)` (a storage view), `NoBuffer` (a non-view array), or a variable (buffer-polymorphic) — making a view's buffer a static type property (see View Buffer Provenance) |
 | `Pointer` | pointee | addrspace | — | addrspace is one of `PointerFunction` / `PointerInput` / `PointerOutput` / `PointerStorage` |
 | `Unique` | inner | — | — | `*T` uniqueness marker (consumed by ownership) |
 | `Record(fields)` | t₁ | t₂ | … | Field names in the variant payload (declared order); per-field types in args |

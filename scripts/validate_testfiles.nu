@@ -127,4 +127,7 @@ def main [
 
     print ""
     print $"Results: ($pass) passed, ($fail) failed, ($skip) skipped"
+    if $fail > 0 {
+        exit 1
+    }
 }
