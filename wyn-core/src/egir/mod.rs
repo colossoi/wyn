@@ -13,9 +13,11 @@
 pub(crate) mod elaborate;
 mod extract;
 mod fold;
+pub(crate) mod inlining;
 pub mod ir;
 mod loop_analysis;
 pub(crate) mod materialize;
+pub(crate) mod partial_inline;
 pub mod program;
 pub mod publish;
 pub(crate) mod residency;

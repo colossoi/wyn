@@ -11325,3 +11325,127 @@ entry e(xs: []u32,
     assert_eq!(members.len(), 1);
     assert_eq!((members[0].offset, members[0].size), (0, 4));
 }
+
+/// A pure call with both loop-varying and loop-invariant arguments must expose
+/// its callee DAG so ordinary EGIR LICM can hoist the invariant camera work.
+/// Distilled from Tinyporto's `world_to_clip` loop.
+#[test]
+fn mixed_variance_world_to_clip_call_exposes_camera_work_to_licm() {
+    use crate::flow::ControlHeader;
+    use crate::op::OpTag;
+    use crate::ssa::types::InstKind;
+
+    let source = r#"
+def FOV: f32 = 20.0
+def CLIP_NEAR: f32 = 0.1
+def CLIP_FAR: f32 = 1000.0
+type orbit = { target: vec3f32, az: f32, elev: f32, dist: f32 }
+type frame_globals = {
+  resolution: vec3f32,
+  mods: u32,
+  cam_target: vec3f32,
+  cam_az: f32,
+  cam_elev: f32,
+  cam_dist: f32,
+  time: f32,
+}
+def cam(f: frame_globals) orbit =
+  { target = f.cam_target, az = f.cam_az, elev = f.cam_elev, dist = f.cam_dist }
+def rotation(angle: vec2f32) mat3f32 =
+  let c = @[f32.cos(angle.x), f32.cos(angle.y)]
+  let s = @[f32.sin(angle.x), f32.sin(angle.y)] in
+  @[[c.y,       0.0,       0.0 - s.y],
+    [s.y * s.x, c.x,       c.y * s.x],
+    [s.y * c.x, 0.0 - s.x, c.y * c.x]]
+def cam_eye(o: orbit) vec3f32 =
+  o.target + rotation(@[o.elev, o.az]) * @[0.0, 0.0, o.dist]
+def perspective(fovy_deg: f32, aspect: f32, near: f32, far: f32) mat4f32 =
+  let f = 1.0 / f32.tan(f32.radians(fovy_deg) * 0.5)
+  let nf = 1.0 / (near - far) in
+  @[[f / aspect, 0.0, 0.0,         0.0],
+    [0.0,        f,   0.0,         0.0],
+    [0.0,        0.0, far * nf,    0.0 - 1.0],
+    [0.0,        0.0, far * near * nf, 0.0]]
+def look_at(eye: vec3f32, center: vec3f32, up: vec3f32) mat4f32 =
+  let f = normalize(center - eye)
+  let s = normalize(cross(f, up))
+  let u = cross(s, f) in
+  @[[s.x,                u.x,                0.0 - f.x,     0.0],
+    [s.y,                u.y,                0.0 - f.y,     0.0],
+    [s.z,                u.z,                0.0 - f.z,     0.0],
+    [0.0 - dot(s, eye),  0.0 - dot(u, eye),  dot(f, eye),   1.0]]
+def world_to_clip(p: vec3f32, resolution: vec3f32, o: orbit) vec4f32 =
+  let aspect = resolution.x / resolution.y
+  let eye = cam_eye(o)
+  let vm = look_at(eye, o.target, @[0.0, 1.0, 0.0])
+  let proj = perspective(FOV, aspect, CLIP_NEAR, CLIP_FAR) in
+  proj * (vm * @[p.x, p.y, p.z, 1.0])
+def project_twenty_samples(base: vec3f32, resolution: vec3f32, o: orbit) vec4f32 =
+  loop total = @[0.0, 0.0, 0.0, 0.0] for k < 20 do
+    let fk = f32(k)
+    let p = base + @[fk * 0.05, fk * 0.01, fk * 0.03] in
+    total + world_to_clip(p, resolution, o)
+#[compute]
+entry world_to_clip_loop_invariant(
+    points: []vec4f32,
+    #[uniform(set=1, binding=0)] frame: frame_globals) []vec4f32 =
+  let o = cam(frame) in
+  map(|i| project_twenty_samples(points[i].xyz, frame.resolution, o), iota(1024))
+"#;
+
+    let converted = crate::compile_thru_ssa(source).expect("camera LICM repro compiles to SSA");
+    let project = converted
+        .ssa
+        .functions
+        .iter()
+        .find(|function| function.name == "project_twenty_samples")
+        .expect("project helper remains as an SSA function");
+    let (loop_header, continue_block) = project
+        .body
+        .control_headers
+        .iter()
+        .find_map(|(header, control)| match control {
+            ControlHeader::Loop { continue_block, .. } => Some((*header, *continue_block)),
+            ControlHeader::Selection { .. } => None,
+        })
+        .expect("project helper contains its source loop");
+    let preheader = project.body.entry_block();
+    assert_ne!(loop_header, preheader);
+
+    let calls = project
+        .body
+        .inner
+        .insts
+        .values()
+        .filter_map(|inst| match &inst.data {
+            InstKind::Op {
+                tag: OpTag::Call(name),
+                ..
+            } => Some((name.as_str(), inst.parent)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        calls.iter().all(|(name, _)| *name != "world_to_clip"),
+        "mixed call should be expanded, got {calls:?}"
+    );
+    for camera_call in ["rotation", "look_at", "perspective"] {
+        assert_eq!(
+            calls.iter().filter(|(name, _)| *name == camera_call).copied().collect::<Vec<_>>(),
+            vec![(camera_call, preheader)],
+            "`{camera_call}` should execute once in the loop preheader; calls: {calls:?}"
+        );
+    }
+    assert!(
+        project.body.inner.blocks[continue_block].insts.iter().all(|inst| !matches!(
+            project.body.inner.insts[*inst].data,
+            InstKind::Op {
+                tag: OpTag::Call(_),
+                ..
+            }
+        )),
+        "the loop body should contain no residual function calls"
+    );
+
+    converted.lower().expect("optimized camera repro lowers to valid SPIR-V");
+}

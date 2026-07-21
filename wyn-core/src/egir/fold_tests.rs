@@ -25,6 +25,7 @@ fn with_converter<T>(test: impl FnOnce(&mut Converter<'_, '_>) -> T) -> T {
         &constants_by_name,
         &symbols,
         pure_constants,
+        HashSet::new(),
         &mut binding_ids,
         &mut effect_ids,
         &mut arenas,

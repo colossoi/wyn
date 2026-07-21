@@ -34,7 +34,9 @@ The mid-end is an **acyclic e-graph**: a sea of hash-consed pure nodes
 plus a skeleton CFG of effectful instructions. Purity is
 **blacklisted**, not whitelisted — only `Alloca` / `Load` / `Store`
 stay in the skeleton; everything else (calls, intrinsics, storage
-views, projections, indexing) is hash-consed in the pure sea.
+views, projections, indexing) is hash-consed in the pure sea. Named
+user calls are classified from the complete TLC call graph and enter EGIR in
+the pure sea only when their definitions are proven effect-free.
 
 Most optimizations fall out of the data structure without dedicated
 passes:
@@ -48,6 +50,9 @@ passes:
   dominator regions; siblings never share.
 - **LICM** — pure nodes float to the outermost loop where all their
   operands are available.
+- **Partial inlining** — a bounded policy fixpoint uses the generic EGIR
+  inliner for profitable explicit-loop calls with both invariant and varying
+  arguments, after which ordinary LICM hoists invariant-only subgraphs.
 - **Branch folding + redundant-phi elimination** — the skeleton CFG
   is rewritten before elaboration.
 
@@ -128,7 +133,7 @@ Each notes how it's enforced; when you move a pass, check it here.
 | **EgirOptimized** | `egir::semantic_opt`, `egir::fusion` | Conflict-aware sibling and producer/consumer fusion, filter/envelope fusion, indexed-demand scalarization, and dead-SegOp elimination; SegOps remain semantic |
 | **EgirAllocated** | `egir::program`, `egir::residency` | Resolve uniqueness candidates from post-fusion liveness and build the target-independent residency manifest for scalar handoffs, gather/shared arrays, filter capacity/length cells, and outputs. Algorithm work buffers, physical bindings, and entry splitting remain deferred |
 | **EgirPlanned** | `egir::target_lowering` | Given a `LoweringProfile`, choose algorithms and dispatches, add only the selected reduce/scan/filter work buffers, split physical entries, allocate physical bindings, validate the `KernelPlan`, and publish the final descriptor as one transaction |
-| **SsaConverted** | `egir::soac_expand` → `egir::materialize` → `egir::rewrite` → `egir::skel_opt` → `egir::resource_erasure` → `egir::elaborate` | Expand only the validated physical plan, materialize its graph, propose cost-arbitrated alternatives as union nodes (e.g. `x ** k` vs a multiply chain — extraction picks during elaboration), simplify the skeleton, erase compile-time resource handles, and elaborate the result to SSA |
+| **SsaConverted** | `egir::soac_expand` → `egir::materialize` → `egir::partial_inline` → `egir::rewrite` → `egir::skel_opt` → `egir::resource_erasure` → `egir::elaborate` | Expand only the validated physical plan, materialize its graph, partially inline profitable mixed-variance calls in explicit loops, propose cost-arbitrated alternatives as union nodes (e.g. `x ** k` vs a multiply chain — extraction picks during elaboration), simplify the skeleton, erase compile-time resource handles, and elaborate the result to SSA |
 
 The EGIR order is also load-bearing:
 

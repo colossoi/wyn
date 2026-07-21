@@ -590,9 +590,10 @@ impl<'a> Elaborator<'a> {
         // resulting placement is the LCA of the node's uses, which by
         // construction dominates every use site.
         for frame in active.iter() {
-            let any_inside =
-                operand_blocks.iter().any(|&(_, b)| self.loop_analysis.is_in_loop(b, frame.header));
-            if any_inside {
+            if !self
+                .loop_analysis
+                .operands_are_invariant(frame.header, operand_blocks.iter().map(|&(_, block)| block))
+            {
                 break;
             }
             candidate = frame.hoist_block;

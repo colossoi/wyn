@@ -1404,6 +1404,7 @@ impl EgirPlanned {
         let plan = self.kernel_plan;
         egir::soac_expand::run(&mut self.physical, &mut self.effect_ids)?;
         egir::materialize::run(&mut self.physical);
+        egir::partial_inline::run(&mut self.physical).map_err(ConvertError::Internal)?;
         egir::rewrite::run(&mut self.physical);
         egir::skel_opt::run(&mut self.physical);
         egir::resource_erasure::run(&mut self.physical)?;

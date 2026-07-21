@@ -5,7 +5,7 @@
 //! are hash-consed (giving GVN for free), and the result is elaborated
 //! back to `FuncBody` via demand-driven scheduling (giving DCE for free).
 
-use crate::builtins::catalog;
+use crate::builtins::{catalog, Purity};
 use crate::tlc::{SoacBody, VarRef};
 use crate::{LookupMap, LookupSet};
 
@@ -103,6 +103,109 @@ fn symbol_name(symbols: &SymbolTable, sym: SymbolId) -> Result<&str, ConvertErro
         .ok_or_else(|| ConvertError::Internal(format!("symbol {sym:?} not in symbol table")))
 }
 
+#[derive(Default)]
+struct DefinitionEffects {
+    direct_effect: bool,
+    calls: LookupSet<SymbolId>,
+}
+
+/// Infer callable purity from the complete, post-defunctionalization TLC
+/// program before constructing any EGIR bodies. Starting with every locally
+/// effect-free definition and removing callers of non-candidates propagates
+/// impurity transitively through the call graph.
+///
+/// Pure calls are currently limited to copy-value ABIs. Array and resource
+/// consumers remain anchored because semantic EGIR uses skeleton effects to
+/// represent their producer/consumer dependencies before residency is fixed.
+fn infer_pure_definitions(program: &TlcProgram) -> LookupSet<SymbolId> {
+    let top_level: LookupMap<SymbolId, &TlcDef> = program.defs.iter().map(|def| (def.name, def)).collect();
+    let summaries: LookupMap<SymbolId, DefinitionEffects> = program
+        .defs
+        .iter()
+        .filter(|def| matches!(def.meta, DefMeta::Function | DefMeta::LiftedLambda))
+        .filter(|def| !matches!(def.body.kind, TermKind::Extern(_)))
+        .filter(|def| {
+            let (params, result) = extract_function_signature(&def.ty);
+            params.iter().all(crate::types::is_copy) && crate::types::is_copy(&result)
+        })
+        .map(|def| {
+            let mut summary = DefinitionEffects::default();
+            summarize_definition_effects(&def.body, &top_level, &mut summary);
+            (def.name, summary)
+        })
+        .collect();
+
+    let mut pure = summaries
+        .iter()
+        .filter_map(|(&definition, summary)| (!summary.direct_effect).then_some(definition))
+        .collect::<LookupSet<_>>();
+    loop {
+        let rejected = pure
+            .iter()
+            .copied()
+            .filter(|definition| summaries[definition].calls.iter().any(|callee| !pure.contains(callee)))
+            .collect::<Vec<_>>();
+        if rejected.is_empty() {
+            return pure;
+        }
+        for definition in rejected {
+            pure.remove(&definition);
+        }
+    }
+}
+
+fn summarize_definition_effects(
+    term: &Term,
+    top_level: &LookupMap<SymbolId, &TlcDef>,
+    summary: &mut DefinitionEffects,
+) {
+    match &term.kind {
+        TermKind::App { func, args } => {
+            for arg in args {
+                summarize_definition_effects(arg, top_level, summary);
+            }
+            match &func.kind {
+                TermKind::BinOp(_) | TermKind::UnOp(_) => {}
+                TermKind::Var(VarRef::Builtin { id, .. }) => {
+                    // `storage_index` is surface-pure but EGIR models the
+                    // backing-buffer read as an ordered Load.
+                    if *id == catalog().known().storage_index
+                        || crate::builtins::by_id(*id).raw.purity == Purity::Effectful
+                    {
+                        summary.direct_effect = true;
+                    }
+                }
+                TermKind::Var(VarRef::Symbol(callee)) if top_level.contains_key(callee) => {
+                    summary.calls.insert(*callee);
+                }
+                // General/indirect application is not representable as a pure
+                // EGIR call at this construction boundary.
+                _ => summary.direct_effect = true,
+            }
+        }
+        TermKind::Var(VarRef::Symbol(definition)) => {
+            // Arity-zero definitions are evaluated by `convert_var`, which
+            // inlines their bodies at the reference site.
+            if top_level.get(definition).is_some_and(|def| def.arity == 0) {
+                summary.calls.insert(*definition);
+            }
+        }
+        TermKind::Index { array, index } => {
+            summarize_definition_effects(array, top_level, summary);
+            summarize_definition_effects(index, top_level, summary);
+            if array.ty.array_variant().is_some_and(crate::types::is_array_variant_view) {
+                summary.direct_effect = true;
+            }
+        }
+        // SOACs remain anchored semantic operations during EGIR construction,
+        // even when their element function is pure.
+        TermKind::Soac(_) | TermKind::Extern(_) | TermKind::Coerce { .. } => {
+            summary.direct_effect = true;
+        }
+        _ => term.for_each_child(&mut |child| summarize_definition_effects(child, top_level, summary)),
+    }
+}
+
 /// Read-only state shared across every converter built during a single
 /// `run` — the top-level def index, the arity-0 name → symbol map, and
 /// the symbol table. Acts as a factory: `new_converter` snapshots the
@@ -112,6 +215,7 @@ struct GlobalContext<'a> {
     top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
     constants_by_name: &'a LookupMap<String, SymbolId>,
     symbols: &'a SymbolTable,
+    pure_definitions: &'a LookupSet<SymbolId>,
 }
 
 #[derive(Default)]
@@ -133,6 +237,7 @@ impl<'a> GlobalContext<'a> {
             self.constants_by_name,
             self.symbols,
             pure_constants.clone(),
+            self.pure_definitions.clone(),
             binding_ids,
             effect_ids,
             arenas,
@@ -158,6 +263,7 @@ pub fn run(
     let pipeline = seed.pipeline;
     let top_level: LookupMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
+    let pure_definitions = infer_pure_definitions(program);
 
     let constants_by_name = program.value_defs_by_name();
 
@@ -169,6 +275,7 @@ pub fn run(
         top_level: &top_level,
         constants_by_name: &constants_by_name,
         symbols,
+        pure_definitions: &pure_definitions,
     };
 
     // Phase 1: detect pure constants. We elaborate each arity-0 def's body
@@ -757,6 +864,8 @@ struct Converter<'a, 'b> {
     inlined_constants: LookupMap<String, NodeId>,
     /// Names of hoisted pure constants.
     pure_constants: LookupSet<String>,
+    /// User definitions proven pure before EGIR construction.
+    pure_definitions: LookupSet<SymbolId>,
     /// Control headers for structured control flow (SPIR-V).
     control_headers: LookupMap<BlockId, ControlHeader>,
     /// Program-wide identity source for effect-chain endpoints.
@@ -789,6 +898,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         constants_by_name: &'a LookupMap<String, SymbolId>,
         symbols: &'a SymbolTable,
         pure_constants: LookupSet<String>,
+        pure_definitions: LookupSet<SymbolId>,
         binding_ids: &'b mut crate::IdSource<u32>,
         effect_ids: &'b mut crate::IdSource<EffectToken>,
         arenas: &'b mut ConversionArenas,
@@ -804,6 +914,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             symbols,
             inlined_constants: LookupMap::new(),
             pure_constants,
+            pure_definitions,
             control_headers: LookupMap::new(),
             effect_ids,
             current_span: None,
@@ -1282,19 +1393,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     if def.arity == args.len() {
                         let arg_nids: SmallVec<[NodeId; 4]> =
                             args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                        let result_nid = self.graph.alloc_side_effect_result(ty.clone());
-                        let effect_in = self.alloc_effect();
-                        let effect_out = self.alloc_effect();
-                        self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                            kind: SideEffectKind::Effect(EffectOp::Op {
-                                tag: crate::op::OpTag::Call(name.to_string()),
-                            }),
-                            operand_nodes: arg_nids,
-                            result: Some(result_nid),
-                            effects: Some((effect_in, effect_out)),
-                            span: self.current_span,
-                        });
-                        return Ok(result_nid);
+                        return Ok(self.emit_named_call(name, sym, arg_nids, ty));
                     }
                 }
                 // Arity-0 constant applied to args? Inline the body.
@@ -1304,19 +1403,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 {
                     let arg_nids: SmallVec<[NodeId; 4]> =
                         args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                    let result_nid = self.graph.alloc_side_effect_result(ty);
-                    let effect_in = self.alloc_effect();
-                    let effect_out = self.alloc_effect();
-                    self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                        kind: SideEffectKind::Effect(EffectOp::Op {
-                            tag: crate::op::OpTag::Call(name.to_string()),
-                        }),
-                        operand_nodes: arg_nids,
-                        result: Some(result_nid),
-                        effects: Some((effect_in, effect_out)),
-                        span: self.current_span,
-                    });
-                    Ok(result_nid)
+                    Ok(self.emit_named_call(name, sym, arg_nids, ty))
                 } else {
                     Err(ConvertError::Unsupported(format!(
                         "application of non-function: {}",
@@ -1325,6 +1412,32 @@ impl<'a, 'b> Converter<'a, 'b> {
                 }
             }
         }
+    }
+
+    fn emit_named_call(
+        &mut self,
+        name: &str,
+        symbol: SymbolId,
+        operands: SmallVec<[NodeId; 4]>,
+        ty: Type<TypeName>,
+    ) -> NodeId {
+        if self.pure_definitions.contains(&symbol) {
+            return self.intern_pure(PureOp::Call(name.to_string()), operands, ty);
+        }
+
+        let result = self.graph.alloc_side_effect_result(ty);
+        let effect_in = self.alloc_effect();
+        let effect_out = self.alloc_effect();
+        self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+            kind: SideEffectKind::Effect(EffectOp::Op {
+                tag: crate::op::OpTag::Call(name.to_string()),
+            }),
+            operand_nodes: operands,
+            result: Some(result),
+            effects: Some((effect_in, effect_out)),
+            span: self.current_span,
+        });
+        result
     }
 
     // ========================================================================

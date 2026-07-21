@@ -102,6 +102,7 @@ fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> Fu
         &constants_by_name,
         &symbols,
         pure_constants,
+        HashSet::new(),
         &mut binding_ids,
         &mut effect_ids,
         &mut arenas,
@@ -159,6 +160,7 @@ fn test_add_roundtrip() {
         &constants_by_name,
         &symbols,
         pure_constants,
+        HashSet::new(),
         &mut binding_ids,
         &mut effect_ids,
         &mut arenas,
@@ -234,6 +236,7 @@ fn test_gvn_via_let() {
         &constants_by_name,
         &symbols,
         pure_constants,
+        HashSet::new(),
         &mut binding_ids,
         &mut effect_ids,
         &mut arenas,
@@ -334,6 +337,7 @@ fn test_if_else_roundtrip() {
         &constants_by_name,
         &symbols,
         pure_constants,
+        HashSet::new(),
         &mut binding_ids,
         &mut effect_ids,
         &mut arenas,
@@ -593,6 +597,125 @@ fn texture_and_sampler_params_surface_bindings() {
         )),
         "sampler `samp` should surface as a Sampler binding, got {:?}",
         fs.bindings
+    );
+}
+
+#[test]
+fn pure_user_calls_enter_egir_as_pure_nodes_during_construction() {
+    use crate::egir::types::{ENode, EffectOp, PureOp, SideEffectKind};
+
+    let source = r#"
+def choose(x: i32) i32 =
+  if x > 0 then x + 1 else x - 1
+
+def wrapper(x: i32) i32 =
+  if x > 0 then choose(x) else choose(0 - x)
+
+#[compute]
+entry e(xs: []i32) []i32 = map(wrapper, xs)
+"#;
+    let tlc = crate::test_pipeline::compile_to_reachable(source);
+    let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc.tlc);
+    let mut binding_ids = crate::IdSource::<u32>::new();
+    let mut effect_ids = crate::IdSource::new();
+    let raw = run(&tlc.tlc, &bounds, &mut binding_ids, &mut effect_ids)
+        .expect("TLC-to-EGIR construction succeeds");
+    let wrapper = raw.functions.iter().find(|function| function.name == "wrapper").unwrap();
+
+    assert!(wrapper.graph.nodes.values().any(|node| matches!(
+        node,
+        ENode::Pure {
+            op: PureOp::Call(callee),
+            ..
+        } if callee == "choose"
+    )));
+    assert!(
+        wrapper.graph.skeleton.blocks.values().all(|block| block.side_effects.iter().all(
+            |effect| !matches!(
+                &effect.kind,
+                SideEffectKind::Effect(EffectOp::Op { tag: PureOp::Call(_) })
+            )
+        ))
+    );
+}
+
+#[test]
+fn construction_purity_propagates_effectful_builtin_calls() {
+    use crate::tlc::{Def, DefMeta};
+
+    let mut symbols = SymbolTable::new();
+    let pure_leaf = symbols.alloc("pure_leaf".into());
+    let reads_storage = symbols.alloc("reads_storage".into());
+    let calls_reader = symbols.alloc("calls_reader".into());
+    let array_consumer = symbols.alloc("array_consumer".into());
+    let ty = i32_ty();
+    let definition = |name, body| Def {
+        name,
+        ty: ty.clone(),
+        body,
+        meta: DefMeta::Function,
+        arity: 1,
+        param_diets: vec![crate::types::Diet::observing()],
+        return_diet: crate::types::Diet::observing(),
+    };
+    let direct_call = |callee| {
+        mk_term(
+            ty.clone(),
+            TermKind::App {
+                func: Box::new(mk_term(ty.clone(), TermKind::Var(VarRef::Symbol(callee)))),
+                args: vec![],
+            },
+        )
+    };
+    let storage_read = mk_term(
+        ty.clone(),
+        TermKind::App {
+            func: Box::new(mk_term(
+                ty.clone(),
+                TermKind::Var(VarRef::Builtin {
+                    id: crate::builtins::catalog().known().storage_index,
+                    overload_idx: 0,
+                }),
+            )),
+            args: vec![],
+        },
+    );
+    let program = crate::tlc::Program {
+        defs: vec![
+            definition(pure_leaf, mk_term(ty.clone(), TermKind::IntLit("1".into()))),
+            definition(reads_storage, storage_read),
+            definition(calls_reader, direct_call(reads_storage)),
+            Def {
+                name: array_consumer,
+                ty: Type::Constructed(
+                    TypeName::Arrow,
+                    vec![Type::Constructed(TypeName::Array, vec![]), ty.clone()],
+                ),
+                body: mk_term(ty.clone(), TermKind::IntLit("1".into())),
+                meta: DefMeta::Function,
+                arity: 1,
+                param_diets: vec![crate::types::Diet::observing()],
+                return_diet: crate::types::Diet::observing(),
+            },
+        ],
+        symbols,
+        def_syms: [
+            ("pure_leaf".into(), pure_leaf),
+            ("reads_storage".into(), reads_storage),
+            ("calls_reader".into(), calls_reader),
+            ("array_consumer".into(), array_consumer),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let pure = super::infer_pure_definitions(&program);
+    assert!(pure.contains(&pure_leaf));
+    assert!(!pure.contains(&reads_storage));
+    assert!(!pure.contains(&calls_reader));
+    assert!(
+        !pure.contains(&array_consumer),
+        "non-copy ABIs remain anchored until semantic array dependencies no longer rely on effects"
     );
 }
 
