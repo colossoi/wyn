@@ -15,8 +15,13 @@ pub(crate) fn planned_callable_names(
     inner: &mut AllocatedProgram,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> std::result::Result<Vec<String>, String> {
-    let plan = build_parallel_plan(inner, effect_ids).map_err(|error| error.to_string())?;
-    Ok(plan.generated_callables().map(|function| function.name.clone()).collect())
+    let existing = inner.functions.len();
+    let regions = inner.region_interner.clone();
+    build_parallel_plan(inner, effect_ids).map_err(|error| error.to_string())?;
+    let names = inner.functions[existing..].iter().map(|function| function.name.clone()).collect();
+    inner.functions.truncate(existing);
+    inner.region_interner = regions;
+    Ok(names)
 }
 
 /// Region indices used by the operator fixtures below: step is region 0,
@@ -221,6 +226,7 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
     .expect("phase2 synthesis");
 
     let stored_value = phase2
+        .body
         .graph
         .skeleton
         .blocks
@@ -231,12 +237,13 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
                 return None;
             }
             let place = *effect.operand_nodes.first()?;
-            (graph_ops::storage_resource_under(&phase2.graph, place) == Some(SemanticResourceRef(offsets)))
-                .then(|| effect.operand_nodes[1])
+            (graph_ops::storage_resource_under(&phase2.body.graph, place)
+                == Some(SemanticResourceRef(offsets)))
+            .then(|| effect.operand_nodes[1])
         })
         .expect("block-offset store");
     assert!(matches!(
-        phase2.graph.nodes[stored_value],
+        phase2.body.graph.nodes[stored_value],
         super::super::types::ENode::BlockParam { .. }
     ));
 }

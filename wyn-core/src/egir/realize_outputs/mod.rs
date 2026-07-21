@@ -68,7 +68,7 @@ fn realize_entry(
     if entry.outputs.is_empty() {
         return Ok(());
     }
-    if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
+    if entry.execution_model.is_compute() {
         if entry.output_routes.is_empty() {
             synthesize_compute_routes(entry);
         }

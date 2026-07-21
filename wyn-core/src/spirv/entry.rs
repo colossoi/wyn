@@ -10,7 +10,7 @@ pub(super) fn lower_ssa_entry_point(
     written_bindings: &LookupSet<BindingRef>,
 ) -> Result<()> {
     let body = &entry.body;
-    let is_compute = matches!(entry.execution_model, ExecutionModel::Compute { .. });
+    let is_compute = entry.execution_model.is_compute();
 
     // Create I/O variables for entry point
     let mut interfaces = Vec::new();

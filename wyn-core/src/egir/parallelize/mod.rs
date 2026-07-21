@@ -46,7 +46,7 @@ use kernel::{
 };
 use model as error;
 use model::{CandidateSelection, DisjointSets};
-use planning::{make_screma_serial, parallel_recipe_effect, LocatedScrema, SerialScremaRecipe};
+use planning::{make_screma_serial, LocatedScrema, SerialScremaRecipe};
 use projection::{project_kernel_body, split_multidomain_seg_maps, ProjectionSpec};
 use reduce::{analyze_reduce_candidate, BoundReduce};
 use scan::{analyze_scan_candidate, BoundScan, ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
@@ -54,7 +54,7 @@ pub(super) use schedule::KernelPlan;
 pub use schedule::{
     KernelDomain, KernelId, KernelPhaseSummary, KernelPlanSummary, OutputRouteProjection, ScheduledResource,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::LookupMap;
 
@@ -79,6 +79,51 @@ use crate::flow::{BlockId, ControlHeader, ExecutionModel};
 use crate::types::TypeExt;
 use crate::{IdSource, LoweringProfile, SchedulePolicy};
 
+/// A generated body kept together with the exact accesses established while
+/// that body was built. Scheduling consumes this pair without inspecting the
+/// graph or repairing missing facts.
+struct BuiltPhase {
+    body: super::program::PlannedEntry,
+    resources: Vec<schedule::ScheduledResource>,
+}
+
+impl BuiltPhase {
+    fn from_declarations(body: super::program::PlannedEntry) -> Self {
+        let resources = declared_resources(&body.resource_declarations);
+        Self { body, resources }
+    }
+
+    fn new(body: super::program::PlannedEntry, resources: Vec<schedule::ScheduledResource>) -> Self {
+        Self { body, resources }
+    }
+
+    fn for_segment(
+        body: super::program::PlannedEntry,
+        segment: &screma::Segmented<SemanticResourceRef>,
+    ) -> Self {
+        let resources = merge_scheduled_resources(
+            &declared_input_resources(&body.resource_declarations),
+            &segmented_resources(segment),
+        );
+        Self { body, resources }
+    }
+
+    fn compute(self, dispatch: schedule::KernelDispatch, label: &'static str) -> schedule::PhaseSpec {
+        schedule::PhaseSpec::compute(self.body, dispatch, label).with_resources(self.resources)
+    }
+
+    fn filter(
+        self,
+        dispatch: schedule::KernelDispatch,
+        stage: super::soac::filter::ParallelStage,
+        config: super::soac::filter::ParallelConfig<SemanticResourceRef>,
+        storage: super::soac::filter::RuntimeStorage<SemanticResourceRef>,
+    ) -> schedule::PhaseSpec {
+        schedule::PhaseSpec::filter(self.body, dispatch, stage, config, storage)
+            .with_resources(self.resources)
+    }
+}
+
 impl From<error::ParallelizeError> for ConvertError {
     fn from(error: error::ParallelizeError) -> Self {
         Self::Internal(error.to_string())
@@ -93,7 +138,7 @@ pub(crate) fn plan(
 ) -> Result<(PhysicalProgram, KernelPlanSummary), ConvertError> {
     let kernel_plan = match profile.schedule {
         SchedulePolicy::Parallel => build_parallel_plan(&mut inner, effect_ids),
-        SchedulePolicy::Serial => build_serial_plan(&inner, effect_ids),
+        SchedulePolicy::Serial => build_serial_plan(&mut inner, effect_ids),
     }?;
 
     kernel_plan.finalize(inner, binding_ids, profile)
@@ -107,19 +152,25 @@ fn build_parallel_plan(
 ) -> error::Result<schedule::KernelPlan> {
     let analysis = planning::analyze(inner)?;
     let recipes = analysis.allocate_scratch(inner)?;
-    let builder = KernelPlanBuilder::new(inner, recipes, effect_ids)?;
-    builder.build_parallel_schedule(inner)
+    let built = KernelPlanBuilder::new(inner, recipes, effect_ids)?.build_parallel_schedule(inner)?;
+    let (schedule, generated_callables, region_interner) = built.into_plan();
+    inner.functions.extend(generated_callables);
+    inner.region_interner = region_interner;
+    Ok(schedule)
 }
 
 /// Build a kernel plan that selects serial recipes without allocating
 /// algorithm-specific parallel scratch resources.
 fn build_serial_plan(
-    inner: &AllocatedProgram,
+    inner: &mut AllocatedProgram,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> error::Result<schedule::KernelPlan> {
-    let recipes = planning::RecipeIndex::serial();
-    let builder = KernelPlanBuilder::new(inner, recipes, effect_ids)?;
-    builder.build_serial_schedule(inner)
+    let recipes = planning::analyze(inner)?.serial_recipes();
+    let built = KernelPlanBuilder::new(inner, recipes, effect_ids)?.build_serial_schedule(inner)?;
+    let (schedule, generated_callables, region_interner) = built.into_plan();
+    inner.functions.extend(generated_callables);
+    inner.region_interner = region_interner;
+    Ok(schedule)
 }
 
 struct KernelPlanBuilder<'resources, 'effects> {
@@ -128,7 +179,15 @@ struct KernelPlanBuilder<'resources, 'effects> {
     flows: model::ResourceFlowIndex,
     recipes: planning::RecipeIndex,
     effect_ids: &'effects mut crate::IdSource<EffectToken>,
+    generated_callables: Vec<SemanticFunc>,
+    region_interner: super::program::RegionInterner,
 }
+
+type BuiltPlan = (
+    schedule::KernelPlan,
+    Vec<SemanticFunc>,
+    super::program::RegionInterner,
+);
 
 impl planning::PlannedKernel {
     /// Consume the selected body and its graph-local recipe as one operation.
@@ -142,40 +201,71 @@ impl planning::PlannedKernel {
         let (body, output_projection, recipe) = self.into_parts();
         match recipe {
             planning::PlannedRecipe::Filter(candidate) => {
-                lowering.lower_parallel_filter(body, kernel, candidate)?
+                lowering.lower_parallel_filter(body, kernel, candidate, output_projection)?
             }
             planning::PlannedRecipe::Reduce(candidate) => {
-                lowering.lower_parallel_reduce(body, kernel, candidate)?
+                lowering.lower_parallel_reduce(body, kernel, candidate, output_projection)?
             }
             planning::PlannedRecipe::Scan(candidate) => {
-                lowering.lower_parallel_scan(body, kernel, candidate)?
+                lowering.lower_parallel_scan(body, kernel, candidate, output_projection)?
             }
-            planning::PlannedRecipe::Map => {
-                lowering
-                    .schedule
-                    .commit_kernel(kernel, schedule::KernelBodySpec::compute(body, "serial_compute"))?;
+            planning::PlannedRecipe::Map(segment) => {
+                let domain = schedule::domain_from_space(&segment.space)
+                    .unwrap_or(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+                let phase = BuiltPhase::for_segment(body, &segment)
+                    .compute(schedule::KernelDispatch::inferred(domain), "serial_compute")
+                    .with_output_projection(output_projection);
+                lowering.schedule.commit_kernel(kernel, phase)?;
             }
             planning::PlannedRecipe::Serial(recipe) => {
-                lowering.commit_serial_kernel(body, kernel, recipe)?
+                lowering.commit_serial_kernel(body, kernel, recipe, output_projection)?
             }
             planning::PlannedRecipe::Unchanged if output_projection.is_some() => {
-                lowering
-                    .schedule
-                    .commit_kernel(kernel, schedule::KernelBodySpec::compute(body, "serial_compute"))?;
+                lowering.schedule.commit_kernel(
+                    kernel,
+                    schedule::PhaseSpec::compute(
+                        body,
+                        schedule::KernelDispatch::inferred(schedule::KernelDomain::Fixed {
+                            x: 1,
+                            y: 1,
+                            z: 1,
+                        }),
+                        "serial_compute",
+                    )
+                    .with_output_projection(output_projection),
+                )?;
             }
             planning::PlannedRecipe::Unchanged => {}
-        }
-        if let Some(output_projection) = output_projection {
-            lowering.schedule.set_output_projection(
-                kernel,
-                output_projection.into_iter().map(super::program::OutputSlotId).collect(),
-            )?;
         }
         Ok(())
     }
 }
 
 impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
+    fn into_plan(self) -> BuiltPlan {
+        (self.schedule, self.generated_callables, self.region_interner)
+    }
+
+    fn intern_callable(&mut self, name: impl AsRef<str>) -> RegionId {
+        self.region_interner.intern(name.as_ref())
+    }
+
+    fn callable_name(&self, id: RegionId) -> &str {
+        self.region_interner.resolve(id)
+    }
+
+    fn define_callable(&mut self, function: SemanticFunc) -> error::Result<RegionId> {
+        if self.region_interner.get(&function.name).is_some() {
+            return Err(error::ParallelizeError::Invalid(format!(
+                "planner-generated callable `{}` collides with an existing callable",
+                function.name
+            )));
+        }
+        let id = self.region_interner.intern(&function.name);
+        self.generated_callables.push(function);
+        Ok(id)
+    }
+
     fn new(
         inner: &'resources AllocatedProgram,
         recipes: planning::RecipeIndex,
@@ -183,34 +273,36 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
     ) -> error::Result<Self> {
         let resources = &inner.resources;
         let flows = model::ResourceFlowIndex::new(&inner.resources);
-        let schedule = schedule::KernelPlan::seed(&inner.pipeline, &inner.semantic)?;
+        let mut schedule = schedule::KernelPlan::from_descriptor(&inner.pipeline, &inner.semantic)?;
+        for source in inner.semantic.entry_ids() {
+            let endpoint = CompilerFlowEndpoint::Entry(source);
+            if let Some(count) = recipes.required_elements(endpoint) {
+                schedule.set_required_elements(endpoint, count);
+            }
+        }
         Ok(Self {
             schedule,
             resources,
             flows,
             recipes,
             effect_ids,
+            generated_callables: Vec::new(),
+            region_interner: inner.region_interner.clone(),
         })
     }
 
-    fn build_parallel_schedule(
-        mut self,
-        inner: &'resources AllocatedProgram,
-    ) -> error::Result<schedule::KernelPlan> {
+    fn build_parallel_schedule(mut self, inner: &'resources AllocatedProgram) -> error::Result<Self> {
         self.attach_materializations(inner)?;
         self.schedule_entries(inner)?;
         self.schedule.coalesce_resource_flows(self.flows.flows())?;
-        Ok(self.schedule)
+        Ok(self)
     }
 
-    fn build_serial_schedule(
-        mut self,
-        inner: &'resources AllocatedProgram,
-    ) -> error::Result<schedule::KernelPlan> {
+    fn build_serial_schedule(mut self, inner: &'resources AllocatedProgram) -> error::Result<Self> {
         self.attach_materializations(inner)?;
         self.schedule.make_serial()?;
         self.schedule.coalesce_resource_flows(self.flows.flows())?;
-        Ok(self.schedule)
+        Ok(self)
     }
 
     fn schedule_entries(&mut self, inner: &'resources AllocatedProgram) -> error::Result<()> {
@@ -272,9 +364,9 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         let (primary, siblings) = plan.into_parts();
         primary.lower(self, kernel)?;
         for sibling in siblings {
-            let phase = schedule::NewPhaseSpec::compute(
+            let phase = schedule::PhaseSpec::compute(
                 sibling.seed_body(),
-                schedule::PhaseDomain::inferred(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                schedule::KernelDispatch::inferred(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
                 "serial_compute",
             );
             let sibling_kernel = self.schedule.add_sibling(kernel, phase)?;
@@ -285,50 +377,59 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
 
     fn lower_parallel_reduce(
         &mut self,
-        mut body: super::program::PlannedEntry,
+        body: super::program::PlannedEntry,
         kernel: schedule::KernelId,
         candidate: BoundReduce,
+        output_projection: Option<Vec<usize>>,
     ) -> error::Result<()> {
         use schedule::KernelDomain;
 
-        let phases = self.emit_reduce_entry(&mut body, candidate)?;
-        let recipe = schedule::KernelBodySpec::compute(body, "reduce_phase1");
+        let domain = schedule::domain_from_space(&candidate.segment().space)
+            .unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+        let (phase1, phases) = self.emit_reduce_entry(body, candidate)?;
+        let recipe = phase1
+            .compute(schedule::KernelDispatch::inferred(domain), "reduce_phase1")
+            .with_output_projection(output_projection);
         let after = phases
             .into_iter()
             .map(|phase| {
-                schedule::NewPhaseSpec::compute(
-                    phase,
-                    schedule::PhaseDomain::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                phase.compute(
+                    schedule::KernelDispatch::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
                     "reduce_combine",
                 )
             })
             .collect();
-        self.schedule.install_reduce(kernel, recipe, after)?;
+        self.schedule.replace_chain(kernel, Vec::new(), recipe, after)?;
         Ok(())
     }
 
     fn lower_parallel_scan(
         &mut self,
-        mut body: super::program::PlannedEntry,
+        body: super::program::PlannedEntry,
         kernel: schedule::KernelId,
         candidate: BoundScan,
+        output_projection: Option<Vec<usize>>,
     ) -> error::Result<()> {
         use schedule::KernelDomain;
 
-        let [block_scan, apply_offsets] = self.emit_scan_entry(&mut body, candidate)?;
-        let phase1_domain = self.schedule.domain_of(kernel)?;
-        let recipe = schedule::KernelBodySpec::compute(body, "scan_phase1");
-        let block_scan = schedule::NewPhaseSpec::compute(
-            block_scan,
-            schedule::PhaseDomain::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+        let phase1_domain = schedule::domain_from_space(&candidate.segment().space)
+            .unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+        let [phase1, block_scan, apply_offsets] = self.emit_scan_entry(body, candidate)?;
+        let recipe = phase1
+            .compute(
+                schedule::KernelDispatch::inferred(phase1_domain.clone()),
+                "scan_phase1",
+            )
+            .with_output_projection(output_projection);
+        let block_scan = block_scan.compute(
+            schedule::KernelDispatch::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
             "scan_block",
         );
-        let apply_offsets = schedule::NewPhaseSpec::compute(
-            apply_offsets,
-            schedule::PhaseDomain::explicit(phase1_domain),
+        let apply_offsets = apply_offsets.compute(
+            schedule::KernelDispatch::explicit(phase1_domain),
             "scan_apply_offsets",
         );
-        self.schedule.install_scan(kernel, recipe, block_scan, apply_offsets)?;
+        self.schedule.replace_chain(kernel, Vec::new(), recipe, vec![block_scan, apply_offsets])?;
         Ok(())
     }
 
@@ -337,12 +438,68 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         mut body: super::program::PlannedEntry,
         kernel: schedule::KernelId,
         recipe: SerialScremaRecipe,
+        output_projection: Option<Vec<usize>>,
     ) -> error::Result<()> {
         make_screma_serial(&mut body.graph, recipe);
-        let recipe = schedule::KernelBodySpec::compute(body, "serial_compute");
+        let recipe = schedule::PhaseSpec::compute(
+            body,
+            schedule::KernelDispatch::inferred(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+            "serial_compute",
+        )
+        .with_output_projection(output_projection);
         self.schedule.commit_kernel(kernel, recipe)?;
         Ok(())
     }
+}
+
+fn merge_scheduled_resources(
+    left: &[schedule::ScheduledResource],
+    right: &[schedule::ScheduledResource],
+) -> Vec<schedule::ScheduledResource> {
+    crate::egir::ir::SegResourceAccess::merge(left, right)
+}
+
+fn segmented_resources(
+    segment: &screma::Segmented<SemanticResourceRef>,
+) -> Vec<schedule::ScheduledResource> {
+    segment
+        .resources
+        .iter()
+        .map(|resource| schedule::ScheduledResource {
+            resource: resource.resource.0,
+            access: resource.access,
+        })
+        .collect()
+}
+
+fn declared_resources(declarations: &[SemanticResourceDecl]) -> Vec<schedule::ScheduledResource> {
+    let mut accesses: HashMap<ResourceId, crate::ResourceAccess> = HashMap::new();
+    for declaration in declarations {
+        let access = match declaration.role {
+            crate::interface::StorageRole::Input => crate::ResourceAccess::Read,
+            crate::interface::StorageRole::Output => crate::ResourceAccess::Write,
+            crate::interface::StorageRole::Intermediate => crate::ResourceAccess::ReadWrite,
+        };
+        accesses.entry(declaration.resource.0).and_modify(|old| *old = old.merge(access)).or_insert(access);
+    }
+
+    let mut resources = accesses
+        .into_iter()
+        .map(|(resource, access)| schedule::ScheduledResource { resource, access })
+        .collect::<Vec<_>>();
+    resources.sort_by_key(|resource| resource.resource);
+    resources
+}
+
+fn declared_input_resources(declarations: &[SemanticResourceDecl]) -> Vec<schedule::ScheduledResource> {
+    declarations
+        .iter()
+        .filter(|declaration| declaration.role == crate::interface::StorageRole::Input)
+        .map(|declaration| schedule::ScheduledResource {
+            resource: declaration.resource.0,
+            access: crate::ResourceAccess::Read,
+        })
+        .collect()
 }
 
 #[cfg(test)]

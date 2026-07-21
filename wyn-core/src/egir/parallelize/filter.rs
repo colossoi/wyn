@@ -10,9 +10,10 @@ impl KernelPlanBuilder<'_, '_> {
         body: crate::egir::program::PlannedEntry,
         kernel: schedule::KernelId,
         recipe: BoundFilter,
+        output_projection: Option<Vec<usize>>,
     ) -> error::Result<()> {
         let family = FilterKernelFamilyBuilder::new(self, body, recipe).build()?;
-        family.install(kernel, &mut self.schedule)
+        family.install(kernel, &mut self.schedule, output_projection)
     }
 }
 
@@ -20,11 +21,11 @@ struct FilterKernelFamily {
     domain: schedule::KernelDomain,
     work: filter_soac::WorkBuffers,
     storage: filter_soac::RuntimeStorage<SemanticResourceRef>,
-    flags: crate::egir::program::PlannedEntry,
-    scan: crate::egir::program::PlannedEntry,
-    combine: crate::egir::program::PlannedEntry,
-    apply_offsets: crate::egir::program::PlannedEntry,
-    scatter: crate::egir::program::PlannedEntry,
+    flags: BuiltPhase,
+    scan: BuiltPhase,
+    combine: BuiltPhase,
+    apply_offsets: BuiltPhase,
+    scatter: BuiltPhase,
     scan_workgroup_width: u32,
     scan_groups: u32,
 }
@@ -73,7 +74,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         })
     }
 
-    fn build_flags(&self) -> error::Result<crate::egir::program::PlannedEntry> {
+    fn build_flags(&self) -> error::Result<BuiltPhase> {
         use crate::interface::StorageRole;
 
         let mut storage = self
@@ -89,10 +90,13 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             self.entry.execution_model.clone(),
             storage,
         );
-        Ok(project_kernel_body(&self.entry, spec)?)
+        Ok(BuiltPhase::from_declarations(project_kernel_body(
+            &self.entry,
+            spec,
+        )?))
     }
 
-    fn build_scan(&self) -> error::Result<crate::egir::program::PlannedEntry> {
+    fn build_scan(&self) -> error::Result<BuiltPhase> {
         use crate::interface::StorageRole;
 
         let storage = [
@@ -110,29 +114,26 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             },
             storage,
         );
-        Ok(project_kernel_body(&self.entry, spec)?)
+        Ok(BuiltPhase::from_declarations(project_kernel_body(
+            &self.entry,
+            spec,
+        )?))
     }
 
-    fn build_scan_tail(
-        &mut self,
-        scan: &mut crate::egir::program::PlannedEntry,
-    ) -> error::Result<(
-        crate::egir::program::PlannedEntry,
-        crate::egir::program::PlannedEntry,
-    )> {
-        let zero = graph_ops::intern_u32(&mut scan.graph, 0, None);
+    fn build_scan_tail(&mut self, scan: &mut BuiltPhase) -> error::Result<(BuiltPhase, BuiltPhase)> {
+        let zero = graph_ops::intern_u32(&mut scan.body.graph, 0, None);
         let add_name = format!("{}_filter_scan_add", self.entry.name);
         let add_fn = synthesize_u32_add_function(add_name.clone(), self.entry.span);
-        self.lowering.schedule.define_callable(add_fn);
+        self.lowering.define_callable(add_fn)?;
         let scan_scratch = ScanScratch {
             block_sums: self.work.block_sums.0,
             block_offsets: self.work.block_offsets.0,
         };
         let combine = ScanPhase2Spec {
-            entry_name: scan.name.clone(),
+            entry_name: scan.body.name.clone(),
             operator: add_name.clone(),
             elem_ty: self.elem_ty.clone(),
-            source_graph: &scan.graph,
+            source_graph: &scan.body.graph,
             neutral: zero,
             scratch: scan_scratch,
             total_out: Some(self.candidate.storage.length.0),
@@ -143,13 +144,13 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
                 self.entry.name
             )
         })?;
-        apply_manifest_resource_sizes(&mut combine, self.lowering.resources);
+        apply_manifest_resource_sizes(&mut combine.body, self.lowering.resources);
         let swap_wrapper_name = format!("{}_filter_scan_add_offsets", self.entry.name);
         let swap_wrapper =
             synthesize_swap_wrapper(swap_wrapper_name, add_name, self.elem_ty.clone(), self.entry.span);
-        let swap_region = self.lowering.schedule.define_callable(swap_wrapper);
+        let swap_region = self.lowering.define_callable(swap_wrapper)?;
         let apply_offsets = ScanPhase3Spec {
-            entry_name: scan.name.clone(),
+            entry_name: scan.body.name.clone(),
             swap_region,
             elem_ty: self.elem_ty.clone(),
             output_resource: self.work.offsets.0,
@@ -157,11 +158,11 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             width: self.candidate.scan_workgroup_width,
         };
         let mut apply_offsets = apply_offsets.build(self.lowering.effect_ids)?;
-        apply_manifest_resource_sizes(&mut apply_offsets, self.lowering.resources);
+        apply_manifest_resource_sizes(&mut apply_offsets.body, self.lowering.resources);
         Ok((combine, apply_offsets))
     }
 
-    fn build_scatter(&self) -> error::Result<crate::egir::program::PlannedEntry> {
+    fn build_scatter(&self) -> error::Result<BuiltPhase> {
         use crate::interface::StorageRole;
 
         let mut resources = self.entry.resource_declarations.clone();
@@ -174,7 +175,10 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         resources.push(self.declaration(self.work.offsets, StorageRole::Input));
         resources.push(self.declaration(self.work.block_offsets, StorageRole::Input));
         let spec = ProjectionSpec::preserving_interface(&self.entry, resources);
-        Ok(project_kernel_body(&self.entry, spec)?)
+        Ok(BuiltPhase::from_declarations(project_kernel_body(
+            &self.entry,
+            spec,
+        )?))
     }
 
     fn declaration(
@@ -193,7 +197,12 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
 }
 
 impl FilterKernelFamily {
-    fn install(self, kernel: schedule::KernelId, schedule: &mut schedule::KernelPlan) -> error::Result<()> {
+    fn install(
+        self,
+        kernel: schedule::KernelId,
+        schedule: &mut schedule::KernelPlan,
+        output_projection: Option<Vec<usize>>,
+    ) -> error::Result<()> {
         use schedule::KernelDomain;
 
         let FilterKernelFamily {
@@ -208,18 +217,19 @@ impl FilterKernelFamily {
             scan_workgroup_width,
             scan_groups,
         } = self;
-        let scatter = schedule::KernelBodySpec::filter(
-            scatter,
-            filter_soac::ParallelStage::Scatter,
-            filter_soac::ParallelConfig {
-                buffers: work,
-                scan_workgroup_width,
-            },
-            storage,
-        );
-        let flags = schedule::NewPhaseSpec::filter(
-            flags,
-            schedule::PhaseDomain::explicit(domain.clone()),
+        let scatter = scatter
+            .filter(
+                schedule::KernelDispatch::inferred(domain.clone()),
+                filter_soac::ParallelStage::Scatter,
+                filter_soac::ParallelConfig {
+                    buffers: work,
+                    scan_workgroup_width,
+                },
+                storage,
+            )
+            .with_output_projection(output_projection);
+        let flags = flags.filter(
+            schedule::KernelDispatch::explicit(domain.clone()),
             filter_soac::ParallelStage::Flags,
             filter_soac::ParallelConfig {
                 buffers: work,
@@ -229,9 +239,8 @@ impl FilterKernelFamily {
         );
         // The scan runs a fixed worker grid so each worker scans a large chunk;
         // flags and scatter remain one-thread-per-input-element.
-        let scan = schedule::NewPhaseSpec::filter(
-            scan,
-            schedule::PhaseDomain::explicit(KernelDomain::Fixed {
+        let scan = scan.filter(
+            schedule::KernelDispatch::explicit(KernelDomain::Fixed {
                 x: scan_groups,
                 y: 1,
                 z: 1,
@@ -243,17 +252,18 @@ impl FilterKernelFamily {
             },
             storage,
         );
-        let combine = schedule::NewPhaseSpec::compute(
-            combine,
-            schedule::PhaseDomain::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+        let combine = combine.compute(
+            schedule::KernelDispatch::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
             "filter_combine",
         );
-        let apply_offsets = schedule::NewPhaseSpec::compute(
-            apply_offsets,
-            schedule::PhaseDomain::explicit(domain),
-            "filter_apply_offsets",
-        );
-        schedule.install_filter(kernel, flags, scan, combine, apply_offsets, scatter)?;
+        let apply_offsets =
+            apply_offsets.compute(schedule::KernelDispatch::explicit(domain), "filter_apply_offsets");
+        schedule.replace_chain(
+            kernel,
+            vec![flags, scan, combine, apply_offsets],
+            scatter,
+            Vec::new(),
+        )?;
         Ok(())
     }
 }
@@ -296,43 +306,35 @@ pub(super) struct BoundFilter {
 
 pub(super) fn analyze_filter_candidate(
     entry: &SemanticEntry,
+    site: SideEffectSite,
 ) -> Option<CandidateSelection<FilterCandidate>> {
-    let mut candidate = None;
-    for effect in entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects) {
-        let SideEffectKind::Soac(SoacEffect(
-            semantic_id,
-            Soac::Filter(filter_soac::Op {
-                state:
-                    filter_soac::SemanticState {
-                        space,
-                        storage: filter_soac::Output::Runtime { scratch, length },
-                    },
-                ..
-            }),
-        )) = &effect.kind
-        else {
-            continue;
-        };
-        if candidate.is_some() {
-            return Some(CandidateSelection::Fallback);
-        }
-        let semantic_id = *semantic_id;
-        let selection = match length {
-            filter_soac::RuntimeLength::Stored(len_out) => CandidateSelection::Selected(FilterCandidate {
-                semantic_id,
-                space: space.clone(),
-                storage: StoredFilterStorage {
-                    scratch: *scratch,
-                    length: *len_out,
+    let SideEffectKind::Soac(SoacEffect(
+        semantic_id,
+        Soac::Filter(filter_soac::Op {
+            state:
+                filter_soac::SemanticState {
+                    space,
+                    storage: filter_soac::Output::Runtime { scratch, length },
                 },
-                scan_workgroup_width: REDUCE_PHASE1_WIDTH,
-                scan_groups: FILTER_SCAN_GROUPS,
-            }),
-            filter_soac::RuntimeLength::ViewOnly => CandidateSelection::Fallback,
-        };
-        candidate = Some(selection);
-    }
-    candidate
+            ..
+        }),
+    )) = &entry.graph.skeleton.effect(site).kind
+    else {
+        return None;
+    };
+    Some(match length {
+        filter_soac::RuntimeLength::Stored(len_out) => CandidateSelection::Selected(FilterCandidate {
+            semantic_id: *semantic_id,
+            space: space.clone(),
+            storage: StoredFilterStorage {
+                scratch: *scratch,
+                length: *len_out,
+            },
+            scan_workgroup_width: REDUCE_PHASE1_WIDTH,
+            scan_groups: FILTER_SCAN_GROUPS,
+        }),
+        filter_soac::RuntimeLength::ViewOnly => CandidateSelection::Fallback,
+    })
 }
 
 impl BoundFilter {

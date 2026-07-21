@@ -8,72 +8,123 @@ fn body(name: &str) -> PlannedEntry {
     EntryBuilder::new_compute(name.to_string(), (1, 1, 1), &mut effect_ids).build()
 }
 
-fn phase(name: &str, label: &'static str) -> KernelPhase {
-    let spec = NewPhaseSpec::compute(
+fn spec(name: &str, label: &'static str) -> PhaseSpec {
+    PhaseSpec::compute(
         body(name),
-        PhaseDomain::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+        KernelDispatch::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
         label,
-    );
-    phase_from_body(None, None, spec).unwrap()
+    )
 }
 
-fn plan(phases: Vec<KernelPhase>) -> KernelPlan {
-    let mut arena = crate::IdArena::new();
-    let unpublished = phases.into_iter().map(|phase| arena.alloc(phase)).collect::<Vec<_>>();
+fn phase(name: &str, label: &'static str, order: usize) -> KernelPhase {
+    phase_from_body(
+        None,
+        None,
+        PhasePlacement {
+            group: PhaseGroup::Unpublished,
+            order,
+        },
+        spec(name, label),
+    )
+    .unwrap()
+}
+
+fn plan(mut phases: Vec<KernelPhase>) -> KernelPlan {
+    for (order, phase) in phases.iter_mut().enumerate() {
+        phase.placement = PhasePlacement {
+            group: PhaseGroup::Unpublished,
+            order,
+        };
+    }
     KernelPlan {
-        phases: arena,
-        unpublished,
+        phases,
         ..KernelPlan::default()
     }
 }
 
 #[test]
-fn body_preparation_retains_diagnostic_labels() {
-    let (label, entry, _) =
-        prepare_body(KernelBodySpec::compute(body("kernel"), "diagnostic_label")).unwrap();
-    assert_eq!(label, "diagnostic_label");
-    assert_eq!(entry.name, "kernel");
+fn body_preparation_retains_creator_supplied_facts() {
+    let prepared = spec("kernel", "diagnostic_label").prepare().unwrap();
+    assert_eq!(prepared.label, "diagnostic_label");
+    assert_eq!(prepared.entry.name, "kernel");
+    assert_eq!(
+        prepared.dispatch,
+        KernelDispatch::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 })
+    );
 
     let mut graphics = body("graphics");
     graphics.execution_model = ExecutionModel::Vertex;
-    let (label, entry, _) = prepare_body(KernelBodySpec::graphics(graphics)).unwrap();
-    assert_eq!(label, "graphics_passthrough");
-    assert_eq!(entry.name, "graphics");
+    let prepared = PhaseSpec::graphics(
+        graphics,
+        KernelDispatch::inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+    )
+    .prepare()
+    .unwrap();
+    assert_eq!(prepared.label, "graphics_passthrough");
+    assert_eq!(prepared.entry.name, "graphics");
 }
 
 #[test]
 fn body_preparation_rejects_compute_graphics_mismatches() {
-    assert!(prepare_body(KernelBodySpec::graphics(body("compute"))).is_err());
+    assert!(PhaseSpec::graphics(
+        body("compute"),
+        KernelDispatch::inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 })
+    )
+    .prepare()
+    .is_err());
 
     let mut graphics = body("graphics");
     graphics.execution_model = ExecutionModel::Fragment;
-    assert!(prepare_body(KernelBodySpec::compute(graphics, "compute")).is_err());
+    assert!(PhaseSpec::compute(
+        graphics,
+        KernelDispatch::inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+        "compute"
+    )
+    .prepare()
+    .is_err());
 }
 
 #[test]
 fn validator_rejects_duplicate_names_and_dependency_cycles() {
     let error = plan(vec![
-        phase("same", "serial_compute"),
-        phase("same", "serial_compute"),
+        phase("same", "serial_compute", 0),
+        phase("same", "serial_compute", 1),
     ])
     .validate()
     .unwrap_err();
     assert!(error.contains("duplicate physical entry"));
 
-    let mut first = phase("first", "serial_compute");
-    let mut second = phase("second", "serial_compute");
-    first.dependencies.push(KernelId(1));
-    second.dependencies.push(KernelId(0));
+    let mut first = phase("first", "serial_compute", 0);
+    let mut second = phase("second", "serial_compute", 1);
+    first.dependencies.push(KernelId::for_test(1));
+    second.dependencies.push(KernelId::for_test(0));
     assert!(plan(vec![first, second]).validate().unwrap_err().contains("cycle"));
 }
 
 #[test]
+fn validator_rejects_duplicate_and_gapped_placements() {
+    let mut duplicate = plan(vec![
+        phase("first", "serial_compute", 0),
+        phase("second", "serial_compute", 1),
+    ]);
+    duplicate.phases[1].placement.order = 0;
+    assert!(duplicate.validate().unwrap_err().contains("duplicates placement"));
+
+    let mut gapped = plan(vec![
+        phase("first", "serial_compute", 0),
+        phase("second", "serial_compute", 1),
+    ]);
+    gapped.phases[1].placement.order = 2;
+    assert!(gapped.validate().unwrap_err().contains("has a gap"));
+}
+
+#[test]
 fn checked_dependency_insertion_preserves_the_dag() {
-    let first = KernelId(0);
-    let second = KernelId(1);
+    let first = KernelId::for_test(0);
+    let second = KernelId::for_test(1);
     let mut plan = plan(vec![
-        phase("first", "serial_compute"),
-        phase("second", "serial_compute"),
+        phase("first", "serial_compute", 0),
+        phase("second", "serial_compute", 1),
     ]);
 
     plan.add_dependency(first, second).expect("first dependency");
@@ -88,51 +139,34 @@ fn checked_dependency_insertion_preserves_the_dag() {
 }
 
 #[test]
-fn mutation_handles_survive_entry_point_changes_and_chain_insertions() {
-    let root = KernelId(0);
-    let mut plan = plan(vec![phase("seeded", "serial_compute")]);
+fn dense_handles_survive_entry_changes_and_chain_insertions() {
+    let root = KernelId::for_test(0);
+    let mut plan = plan(vec![phase("seeded", "serial_compute", 0)]);
 
-    plan.install_chain(
+    plan.replace_chain(
         root,
         Vec::new(),
-        KernelBodySpec::compute(body("renamed"), "serial_compute"),
+        spec("renamed", "serial_compute").with_output_projection(Some(Vec::new())),
         vec![
-            NewPhaseSpec::compute(
-                body("child"),
-                PhaseDomain::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                "reduce_combine",
-            ),
-            NewPhaseSpec::compute(
-                body("grandchild"),
-                PhaseDomain::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                "reduce_combine",
-            ),
+            spec("child", "reduce_combine"),
+            spec("grandchild", "reduce_combine"),
         ],
     )
     .unwrap();
-    plan.set_output_projection(root, Vec::new()).unwrap();
 
     let phases = plan.phases().collect::<Vec<_>>();
     assert_eq!(
         phases.iter().map(|phase| phase.entry_point()).collect::<Vec<_>>(),
-        ["renamed", "child", "grandchild",]
+        ["renamed", "child", "grandchild"]
     );
-    let child = KernelId(1);
     assert_eq!(phases[1].dependencies, vec![root]);
-    assert_eq!(phases[2].dependencies, vec![child]);
-}
-
-#[test]
-fn mutation_apis_report_unknown_kernel_ids() {
-    let mut plan = plan(vec![phase("seeded", "serial_compute")]);
-    let unknown = KernelId(99);
-
+    assert_eq!(phases[2].dependencies, vec![KernelId::for_test(1)]);
     assert_eq!(
-        plan.commit_kernel(unknown, KernelBodySpec::compute(body("seeded"), "serial_compute"),),
-        Err(KernelMutationError::UnknownKernel(unknown))
-    );
-    assert_eq!(
-        plan.set_output_projection(unknown, Vec::new()),
-        Err(KernelMutationError::UnknownKernel(unknown))
+        plan.phases_with_ids().map(|(id, _)| id).collect::<Vec<_>>(),
+        [
+            KernelId::for_test(0),
+            KernelId::for_test(1),
+            KernelId::for_test(2)
+        ]
     );
 }

@@ -166,3 +166,9 @@ pub enum ExecutionModel {
         local_size: (u32, u32, u32),
     },
 }
+
+impl ExecutionModel {
+    pub fn is_compute(&self) -> bool {
+        matches!(self, Self::Compute { .. })
+    }
+}

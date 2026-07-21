@@ -7,7 +7,6 @@ use polytype::Type;
 use crate::ast::TypeName;
 use crate::egir::soac::screma;
 use crate::egir::types::{EGraph, SideEffect, SideEffectKind, SideEffectSite, Soac, SoacEffect};
-use crate::flow::ExecutionModel;
 
 use super::model::{CandidateSelection, ParallelizeError, Result};
 use crate::egir::program::{
@@ -39,81 +38,101 @@ impl LocatedScrema<'_> {
             op: self.op.clone(),
         }
     }
-}
 
-fn segmented_screma_effect(graph: &EGraph) -> Option<LocatedScrema<'_>> {
-    for (block, contents) in &graph.skeleton.blocks {
-        for (index, effect) in contents.side_effects.iter().enumerate() {
-            let SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) = &effect.kind else {
-                continue;
-            };
-            if !matches!(
-                op.semantic_state(),
-                screma::SemanticState::Segmented {
-                    placement: screma::Placement::Kernel,
-                    ..
-                }
-            ) {
-                continue;
-            }
-            return Some(LocatedScrema {
-                site: SideEffectSite { block, index },
-                effect,
-                owner: *owner,
-                op,
-            });
-        }
-    }
-    None
-}
-
-fn segmented_recipe_effect(entry: &crate::egir::program::PlannedEntry) -> Option<LocatedScrema<'_>> {
-    if let Some(effect) = segmented_screma_effect(&entry.graph) {
-        return Some(effect);
-    }
-    if !matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
-        return None;
-    }
-    let mut promoted = None;
-    for (block, contents) in &entry.graph.skeleton.blocks {
-        for (index, effect) in contents.side_effects.iter().enumerate() {
-            let SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) = &effect.kind else {
-                continue;
-            };
-            let externally_visible_lane_local_fold =
-                matches!(
-                    op.semantic_state(),
-                    screma::SemanticState::Segmented {
-                        placement: screma::Placement::LaneLocal,
-                        output_slots,
-                        ..
-                    } if !output_slots.is_empty()
-                ) && matches!(op, screma::Op::Reduce { .. } | screma::Op::Scan { .. });
-            if !externally_visible_lane_local_fold {
-                continue;
-            }
-            if promoted.is_some() {
-                return None;
-            }
-            promoted = Some(LocatedScrema {
-                site: SideEffectSite { block, index },
-                effect,
-                owner: *owner,
-                op,
-            });
-        }
-    }
-    promoted
-}
-
-pub(super) fn parallel_recipe_effect(entry: &crate::egir::program::PlannedEntry) -> Option<&SideEffect> {
-    segmented_recipe_effect(entry).map(|located| located.effect).or_else(|| {
-        entry.graph.skeleton.blocks.values().find_map(|contents| {
-            contents
-                .side_effects
-                .iter()
-                .find(|effect| matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Filter(_)))))
+    pub(super) fn segmented(&self) -> Result<screma::Segmented<crate::egir::program::SemanticResourceRef>> {
+        let screma::SemanticState::Segmented {
+            space,
+            output_slots,
+            resources,
+            ..
+        } = self.op.semantic_state()
+        else {
+            return Err(ParallelizeError::Invalid(
+                "selected parallel Screma lost its segmented semantic facts".into(),
+            ));
+        };
+        Ok(screma::Segmented {
+            space: space.clone(),
+            output_slots: output_slots.clone(),
+            resources: resources.clone(),
         })
+    }
+}
+
+#[derive(Default)]
+struct RecipeTargets {
+    filters: Vec<SideEffectSite>,
+    kernel_scremas: Vec<SideEffectSite>,
+    promoted_folds: Vec<SideEffectSite>,
+}
+
+impl RecipeTargets {
+    /// Target-relevant sites are classified once on the endpoint projection.
+    /// Later output projection only remaps these handles.
+    fn collect(entry: &crate::egir::program::PlannedEntry) -> Self {
+        let mut targets = Self::default();
+        for (block, contents) in &entry.graph.skeleton.blocks {
+            for (index, effect) in contents.side_effects.iter().enumerate() {
+                let site = SideEffectSite { block, index };
+                match &effect.kind {
+                    SideEffectKind::Soac(SoacEffect(_, Soac::Filter(_))) => targets.filters.push(site),
+                    SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => match op.semantic_state() {
+                        screma::SemanticState::Segmented {
+                            placement: screma::Placement::Kernel,
+                            ..
+                        } => targets.kernel_scremas.push(site),
+                        screma::SemanticState::Segmented {
+                            placement: screma::Placement::LaneLocal,
+                            output_slots,
+                            ..
+                        } if !output_slots.is_empty()
+                            && matches!(op, screma::Op::Reduce { .. } | screma::Op::Scan { .. })
+                            && entry.execution_model.is_compute() =>
+                        {
+                            targets.promoted_folds.push(site);
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+        targets
+    }
+
+    fn remap(&self, sites: &crate::LookupMap<SideEffectSite, SideEffectSite>) -> Self {
+        let remap =
+            |source: &[SideEffectSite]| source.iter().filter_map(|site| sites.get(site).copied()).collect();
+        Self {
+            filters: remap(&self.filters),
+            kernel_scremas: remap(&self.kernel_scremas),
+            promoted_folds: remap(&self.promoted_folds),
+        }
+    }
+
+    fn screma_site(&self) -> Option<SideEffectSite> {
+        self.kernel_scremas.first().copied().or_else(|| match self.promoted_folds.as_slice() {
+            [site] => Some(*site),
+            _ => None,
+        })
+    }
+}
+
+fn located_screma(
+    entry: &crate::egir::program::PlannedEntry,
+    site: SideEffectSite,
+) -> Result<LocatedScrema<'_>> {
+    let effect = entry.graph.skeleton.effect(site);
+    let SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) = &effect.kind else {
+        return Err(ParallelizeError::Invalid(format!(
+            "selected Screma site {site:?} no longer contains a Screma operation"
+        )));
+    };
+    Ok(LocatedScrema {
+        site,
+        effect,
+        owner: *owner,
+        op,
     })
 }
 
@@ -130,7 +149,7 @@ pub(super) enum Recipe<Filter, Reduce, Scan> {
     Filter(Filter),
     Reduce(Reduce),
     Scan(Scan),
-    Map,
+    Map(screma::Segmented<crate::egir::program::SemanticResourceRef>),
     Serial(SerialScremaRecipe),
     Unchanged,
 }
@@ -196,12 +215,14 @@ impl<R> EndpointPlan<R> {
 /// seeded kernel. Serial policy carries no recipe map.
 pub(super) struct RecipeIndex<R = PlannedRecipe> {
     plans: Option<HashMap<CompilerFlowEndpoint, EndpointPlan<R>>>,
+    required_elements: HashMap<CompilerFlowEndpoint, u32>,
 }
 
 impl RecipeIndex<AnalyzedRecipe> {
     fn parallel() -> Self {
         Self {
             plans: Some(HashMap::new()),
+            required_elements: HashMap::new(),
         }
     }
 
@@ -220,8 +241,12 @@ impl RecipeIndex<AnalyzedRecipe> {
     }
 
     fn bind_scratch(self, resources: &ScratchBindings) -> RecipeIndex {
-        let Some(endpoints) = self.plans else {
-            return RecipeIndex::serial();
+        let Self {
+            plans,
+            required_elements,
+        } = self;
+        let Some(endpoints) = plans else {
+            return RecipeIndex::serial(required_elements);
         };
         RecipeIndex {
             plans: Some(
@@ -239,13 +264,21 @@ impl RecipeIndex<AnalyzedRecipe> {
                     })
                     .collect(),
             ),
+            required_elements,
         }
     }
 }
 
 impl RecipeIndex {
-    pub(super) fn serial() -> Self {
-        Self { plans: None }
+    fn serial(required_elements: HashMap<CompilerFlowEndpoint, u32>) -> Self {
+        Self {
+            plans: None,
+            required_elements,
+        }
+    }
+
+    pub(super) fn required_elements(&self, endpoint: CompilerFlowEndpoint) -> Option<u32> {
+        self.required_elements.get(&endpoint).copied()
     }
 
     pub(super) fn take_endpoint(&mut self, endpoint: CompilerFlowEndpoint) -> Result<Option<EndpointPlan>> {
@@ -309,6 +342,10 @@ impl AnalyzedPlan {
         }
         Ok(self.recipes.bind_scratch(&bindings))
     }
+
+    pub(super) fn serial_recipes(self) -> RecipeIndex {
+        RecipeIndex::serial(self.recipes.required_elements)
+    }
 }
 
 fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBindings) -> PlannedKernel {
@@ -323,7 +360,7 @@ fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBinding
         AnalyzedRecipe::Scan(candidate) => {
             PlannedRecipe::Scan(super::scan::BoundScan::bind(candidate, resources))
         }
-        AnalyzedRecipe::Map => PlannedRecipe::Map,
+        AnalyzedRecipe::Map(segment) => PlannedRecipe::Map(segment),
         AnalyzedRecipe::Serial(site) => PlannedRecipe::Serial(site),
         AnalyzedRecipe::Unchanged => PlannedRecipe::Unchanged,
     };
@@ -336,8 +373,12 @@ pub(super) fn analyze(inner: &AllocatedProgram) -> Result<AnalyzedPlan> {
     let mut recipes = RecipeIndex::parallel();
     let mut requests = Vec::new();
     for (endpoint, entry) in inner.entries_with_endpoints() {
-        let (plan, endpoint_requests) = analyze_endpoint(entry, endpoint, &inner.resources)?;
+        let (plan, endpoint_requests, required_elements) =
+            analyze_endpoint(entry, endpoint, &inner.resources)?;
         recipes.insert(endpoint, plan)?;
+        if let Some(count) = required_elements {
+            recipes.required_elements.insert(endpoint, count);
+        }
         requests.extend(endpoint_requests);
     }
     Ok(AnalyzedPlan { recipes, requests })
@@ -347,30 +388,72 @@ fn analyze_endpoint(
     entry: &crate::egir::program::SemanticEntry,
     endpoint: CompilerFlowEndpoint,
     resources: &LogicalResourceArena,
-) -> Result<(EndpointPlan<AnalyzedRecipe>, Vec<ScratchRequest>)> {
+) -> Result<(EndpointPlan<AnalyzedRecipe>, Vec<ScratchRequest>, Option<u32>)> {
     let projected = crate::egir::program::PlannedEntry::project(entry)?;
+    let targets = RecipeTargets::collect(&projected);
+    let required_elements = fixed_required_elements(&projected, &targets);
     let split = match endpoint {
         CompilerFlowEndpoint::Entry(_) => super::split_multidomain_seg_maps(&projected)?,
         CompilerFlowEndpoint::Materialization(_) => None,
     };
     let Some(split) = split else {
-        let (primary, requests) = analyze_projected_kernel(projected, None, endpoint, resources)?;
-        return Ok((EndpointPlan::new(primary, Vec::new()), requests));
+        let (primary, requests) = analyze_projected_kernel(projected, None, endpoint, resources, targets)?;
+        return Ok((
+            EndpointPlan::new(primary, Vec::new()),
+            requests,
+            required_elements,
+        ));
     };
+    let primary_targets = targets.remap(&split.primary.effect_sites);
     let (primary, mut requests) = analyze_projected_kernel(
         split.primary.entry,
         Some(split.primary.semantic_slots),
         endpoint,
         resources,
+        primary_targets,
     )?;
     let mut siblings = Vec::with_capacity(split.siblings.len());
     for sibling in split.siblings {
-        let (sibling, sibling_requests) =
-            analyze_projected_kernel(sibling.entry, Some(sibling.semantic_slots), endpoint, resources)?;
+        let sibling_targets = targets.remap(&sibling.effect_sites);
+        let (sibling, sibling_requests) = analyze_projected_kernel(
+            sibling.entry,
+            Some(sibling.semantic_slots),
+            endpoint,
+            resources,
+            sibling_targets,
+        )?;
         siblings.push(sibling);
         requests.extend(sibling_requests);
     }
-    Ok((EndpointPlan::new(primary, siblings), requests))
+    Ok((EndpointPlan::new(primary, siblings), requests, required_elements))
+}
+
+fn fixed_required_elements(
+    entry: &crate::egir::program::PlannedEntry,
+    targets: &RecipeTargets,
+) -> Option<u32> {
+    let space = if targets.filters.len() == 1 {
+        let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) =
+            &entry.graph.skeleton.effect(targets.filters[0]).kind
+        else {
+            return None;
+        };
+        &op.state.space
+    } else {
+        let site = targets.screma_site()?;
+        let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &entry.graph.skeleton.effect(site).kind
+        else {
+            return None;
+        };
+        let screma::SemanticState::Segmented { space, .. } = op.semantic_state() else {
+            return None;
+        };
+        space
+    };
+    space.dims.iter().try_fold(1u32, |count, extent| match extent {
+        SegExtent::Fixed(size) => count.checked_mul(*size),
+        _ => None,
+    })
 }
 
 fn analyze_reduce_recipe(
@@ -438,24 +521,34 @@ fn analyze_projected_kernel(
     output_projection: Option<Vec<usize>>,
     endpoint: CompilerFlowEndpoint,
     resources: &LogicalResourceArena,
+    targets: RecipeTargets,
 ) -> Result<(PlannedKernel<AnalyzedRecipe>, Vec<ScratchRequest>)> {
-    if let Some(CandidateSelection::Selected(candidate)) = super::analyze_filter_candidate(&body) {
-        let requests = filter_scratch_requests(endpoint, &candidate);
-        let kernel = PlannedKernel::new(body, output_projection, AnalyzedRecipe::Filter(candidate));
-        return Ok((kernel, requests));
+    if targets.filters.len() == 1 {
+        if let Some(CandidateSelection::Selected(candidate)) =
+            super::analyze_filter_candidate(&body, targets.filters[0])
+        {
+            let requests = filter_scratch_requests(endpoint, &candidate);
+            let kernel = PlannedKernel::new(body, output_projection, AnalyzedRecipe::Filter(candidate));
+            return Ok((kernel, requests));
+        }
     }
 
-    let (recipe, requests) = match segmented_recipe_effect(&body) {
-        Some(located) => match located.op {
-            screma::Op::Reduce { lanes, operators, .. } => {
-                analyze_reduce_recipe(&body, endpoint, resources, located, lanes, operators)?
+    let (recipe, requests) = match targets.screma_site() {
+        Some(site) => {
+            let located = located_screma(&body, site)?;
+            match located.op {
+                screma::Op::Reduce { lanes, operators, .. } => {
+                    analyze_reduce_recipe(&body, endpoint, resources, located, lanes, operators)?
+                }
+                screma::Op::Scan { lanes, operators, .. } => {
+                    analyze_scan_recipe(&body, endpoint, located, lanes, operators)?
+                }
+                screma::Op::Map { .. } => (AnalyzedRecipe::Map(located.segmented()?), Vec::new()),
+                screma::Op::Composite { .. } => {
+                    (AnalyzedRecipe::Serial(located.serial_recipe()), Vec::new())
+                }
             }
-            screma::Op::Scan { lanes, operators, .. } => {
-                analyze_scan_recipe(&body, endpoint, located, lanes, operators)?
-            }
-            screma::Op::Map { .. } => (AnalyzedRecipe::Map, Vec::new()),
-            screma::Op::Composite { .. } => (AnalyzedRecipe::Serial(located.serial_recipe()), Vec::new()),
-        },
+        }
         None => (AnalyzedRecipe::Unchanged, Vec::new()),
     };
     Ok((PlannedKernel::new(body, output_projection, recipe), requests))

@@ -8,7 +8,7 @@ use crate::flow::BlockId;
 
 use super::super::program::{PlannedEntry, SemanticResourceRef};
 use super::super::soac::{filter, hist, screma};
-use super::super::types::{EGraph, Scheduled, Semantic, SideEffect, SideEffectKind, Soac, SoacEffect};
+use super::super::types::{EGraph, Scheduled, Semantic, SideEffectKind, Soac, SoacEffect};
 
 #[derive(Clone, Copy)]
 pub(super) struct ParallelFilterPlan {
@@ -156,41 +156,4 @@ pub(super) fn force_serial(graph: &mut EGraph<Scheduled>) {
             }
         }
     }
-}
-
-pub(super) fn parallel_effect(
-    graph: &EGraph<Scheduled>,
-) -> Option<(BlockId, usize, &SideEffect<Scheduled>)> {
-    graph.skeleton.blocks.iter().find_map(|(block, contents)| {
-        contents.side_effects.iter().enumerate().find_map(|(index, effect)| {
-            matches!(
-                &effect.kind,
-                SideEffectKind::Soac(SoacEffect(
-                    _,
-                    Soac::Screma(
-                        screma::Op::Map {
-                            state: screma::ScheduledState::Segmented(_),
-                            ..
-                        } | screma::Op::Reduce {
-                            state: screma::ScheduledState::Segmented(_),
-                            ..
-                        } | screma::Op::Scan {
-                            state: screma::ScheduledState::Segmented(_),
-                            ..
-                        } | screma::Op::Composite {
-                            state: screma::ScheduledState::Segmented(_),
-                            ..
-                        }
-                    )
-                )) | SideEffectKind::Soac(SoacEffect(
-                    _,
-                    Soac::Filter(filter::Op {
-                        state: filter::ScheduledState::Pipeline { .. },
-                        ..
-                    })
-                ))
-            )
-            .then_some((block, index, effect))
-        })
-    })
 }

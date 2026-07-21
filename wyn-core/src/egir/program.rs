@@ -1405,6 +1405,10 @@ pub struct MaterializationRequirement {
     /// SOAC provenance when the source is a semantic operation. Captured
     /// parallel preludes intentionally do not receive synthetic operation ids.
     pub producer: Option<SemanticOpId>,
+    /// Iteration space captured when residency creates the producer. Target
+    /// planning consumes this directly instead of rediscovering a segmented
+    /// operation in the projected materialization graph.
+    pub space: super::types::SegSpace<SemanticResourceRef>,
     pub entry: SemanticEntry,
     pub substitutions: Vec<MaterializationSubstitution>,
 }
@@ -1784,28 +1788,20 @@ impl PhysicalProgram {
             pipeline: _,
             input_names,
             regions,
-            region_interner: _,
+            region_interner,
         } = ir;
         let entry_points = plan
             .physical_entries()
             .map(|entry| physicalize_entry(entry, physical_resources))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut functions = functions
+        let functions = functions
             .into_iter()
             .map(|function| physicalize_function(function, physical_resources, serial))
             .collect::<Result<Vec<_>, _>>()?;
-        for generated in plan.generated_callables() {
-            functions.push(physicalize_function(
-                generated.clone(),
-                physical_resources,
-                serial,
-            )?);
-        }
         let constants = constants
             .into_iter()
             .map(|constant| physicalize_constant(constant, physical_resources))
             .collect::<Result<Vec<_>, _>>()?;
-        let region_interner = plan.region_interner().clone();
         let mut regions = regions;
         for (index, function) in functions.iter().enumerate() {
             let id = region_interner

@@ -21,6 +21,8 @@ pub struct GraphProjection {
     blocks: HashMap<BlockId, BlockId>,
     effects: HashSet<EffectToken>,
     source_effects: HashSet<SideEffectSite>,
+    source_values: HashSet<NodeId>,
+    effect_sites: HashMap<SideEffectSite, SideEffectSite>,
 }
 
 /// A projected producer recipe together with the projected identity of the
@@ -58,6 +60,17 @@ impl GraphProjection {
 
     pub fn source_effects(&self) -> &HashSet<SideEffectSite> {
         &self.source_effects
+    }
+
+    /// Source values retained by this projection. The projector owns this
+    /// reachability decision; consumers should not rediscover it by walking
+    /// the completed graph.
+    pub fn source_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.source_values.iter().copied()
+    }
+
+    pub fn effect_site(&self, source: SideEffectSite) -> Option<SideEffectSite> {
+        self.effect_sites.get(&source).copied()
     }
 
     pub fn remap_aliases(&self, aliases: &LookupMap<NodeId, NodeId>) -> LookupMap<NodeId, NodeId> {
@@ -279,7 +292,7 @@ impl<'a> GraphProjector<'a> {
                 true,
             )?;
         }
-        let effects = self.clone_effects(&selection, &mut shell)?;
+        let (effects, effect_sites) = self.clone_effects(&selection, &mut shell)?;
         self.project_terminators(mode, &selection.blocks, &mut shell)?;
         let control_headers = if matches!(
             mode,
@@ -298,6 +311,8 @@ impl<'a> GraphProjector<'a> {
             blocks: shell.blocks,
             effects,
             source_effects: selection.effects,
+            source_values: selection.values,
+            effect_sites,
         })
     }
 
@@ -398,8 +413,9 @@ impl<'a> GraphProjector<'a> {
         &self,
         selection: &ProjectionSelection,
         shell: &mut ProjectionShell,
-    ) -> Result<HashSet<EffectToken>, String> {
+    ) -> Result<(HashSet<EffectToken>, HashMap<SideEffectSite, SideEffectSite>), String> {
         let mut effects = HashSet::new();
+        let mut effect_sites = HashMap::new();
         for (source_block, body) in &self.source.skeleton.blocks {
             let Some(&target_block) = shell.blocks.get(&source_block) else {
                 continue;
@@ -411,6 +427,15 @@ impl<'a> GraphProjector<'a> {
                 }) {
                     continue;
                 }
+                let source_site = SideEffectSite {
+                    block: source_block,
+                    index,
+                };
+                let target_site = SideEffectSite {
+                    block: target_block,
+                    index: shell.graph.skeleton.blocks[target_block].side_effects.len(),
+                };
+                effect_sites.insert(source_site, target_site);
                 let mut projected = effect.clone();
                 for node in projected.referenced_node_slots() {
                     *node = shell.nodes[node];
@@ -422,7 +447,7 @@ impl<'a> GraphProjector<'a> {
                 shell.graph.skeleton.blocks[target_block].side_effects.push(projected);
             }
         }
-        Ok(effects)
+        Ok((effects, effect_sites))
     }
 
     fn project_terminators(

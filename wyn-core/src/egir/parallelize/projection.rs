@@ -52,55 +52,27 @@ impl ProjectionSpec {
     }
 }
 
-fn reachable_projection_nodes(
+fn retained_resources(
+    source: &EGraph,
     projection: &graph_projector::GraphProjection,
-    output_routes: &[program::OutputRoute],
-) -> HashSet<NodeId> {
-    let mut roots = projection
-        .graph
-        .skeleton
-        .blocks
-        .iter()
-        .flat_map(|(_, block)| {
-            block
-                .side_effects
-                .iter()
-                .flat_map(|effect| effect.referenced_nodes())
-                .chain(block.term.referenced_nodes())
-        })
-        .collect::<Vec<_>>();
-    for route in output_routes {
-        if let Some(value) = projection.node(route.source.value) {
-            roots.push(value);
-        }
-        roots.extend(route.writers.iter().filter_map(|writer| match writer {
-            OutputWriter::Value(value) => projection.node(*value),
-            OutputWriter::Effect(_) => None,
-        }));
-    }
-
-    graph_ops::execution_value_producer_closure(&projection.graph, roots).nodes
-}
-
-fn retained_resources(graph: &EGraph, reachable: &HashSet<NodeId>) -> HashSet<ResourceId> {
-    let mut resources = reachable
-        .iter()
-        .filter_map(|node| graph_ops::extract_storage_view_source(graph, *node))
+) -> HashSet<ResourceId> {
+    let mut resources = projection
+        .source_nodes()
+        .filter_map(|node| graph_ops::extract_storage_view_source(source, node))
         .map(|resource| resource.0)
         .collect::<HashSet<_>>();
 
-    for (_, block) in &graph.skeleton.blocks {
-        for effect in &block.side_effects {
-            resources.extend(
-                semantic_graph::read_resources(graph, effect).into_iter().map(|access| access.resource.0),
-            );
-            if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind {
-                if let screma::SemanticState::Segmented {
-                    resources: accesses, ..
-                } = op.semantic_state()
-                {
-                    resources.extend(accesses.iter().map(|access| access.resource.0));
-                }
+    for site in projection.source_effects() {
+        let effect = source.skeleton.effect(*site);
+        resources.extend(
+            semantic_graph::read_resources(source, effect).into_iter().map(|access| access.resource.0),
+        );
+        if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind {
+            if let screma::SemanticState::Segmented {
+                resources: accesses, ..
+            } = op.semantic_state()
+            {
+                resources.extend(accesses.iter().map(|access| access.resource.0));
             }
         }
     }
@@ -110,13 +82,12 @@ fn retained_resources(graph: &EGraph, reachable: &HashSet<NodeId>) -> HashSet<Re
 
 fn retained_parameters(
     source: &program::PlannedEntry,
-    graph: &EGraph,
-    reachable: &HashSet<NodeId>,
+    projection: &graph_projector::GraphProjection,
     resources: &HashSet<ResourceId>,
 ) -> crate::SortedSet<usize> {
-    let mut parameters = reachable
-        .iter()
-        .filter_map(|node| match graph.nodes.get(*node) {
+    let mut parameters = projection
+        .source_nodes()
+        .filter_map(|node| match source.graph.nodes.get(node) {
             Some(ENode::FuncParam { index }) => Some(index).copied(),
             _ => None,
         })
@@ -137,11 +108,9 @@ fn retained_parameters(
 fn retained_interface(
     source: &program::PlannedEntry,
     projection: &graph_projector::GraphProjection,
-    output_routes: &[program::OutputRoute],
 ) -> RetainedInterface {
-    let reachable = reachable_projection_nodes(projection, output_routes);
-    let resources = retained_resources(&projection.graph, &reachable);
-    let parameters = retained_parameters(source, &projection.graph, &reachable, &resources);
+    let resources = retained_resources(&source.graph, projection);
+    let parameters = retained_parameters(source, projection, &resources);
 
     RetainedInterface {
         parameters,
@@ -183,7 +152,7 @@ fn project_kernel_body_effects(
     source: &program::PlannedEntry,
     selected: HashSet<SideEffectSite>,
     spec: ProjectionSpec,
-) -> Result<program::PlannedEntry, String> {
+) -> Result<(program::PlannedEntry, LookupMap<SideEffectSite, SideEffectSite>), String> {
     let ProjectionSpec {
         name,
         execution_model,
@@ -195,7 +164,12 @@ fn project_kernel_body_effects(
     let route_values = output_routes.iter().map(|route| route.source.value).collect();
     let projection = graph_projector::GraphProjector::new(&source.graph, &source.control_headers)
         .selected_with_values(selected, route_values)?;
-    let retained = retained_interface(source, &projection, &output_routes);
+    let effect_sites = projection
+        .source_effects()
+        .iter()
+        .filter_map(|source| Some((*source, projection.effect_site(*source)?)))
+        .collect();
+    let retained = retained_interface(source, &projection);
     let mut entry = program::PlannedEntry::from_projection(
         projection,
         name,
@@ -214,7 +188,7 @@ fn project_kernel_body_effects(
         declaration.role != crate::interface::StorageRole::Input
             || retained.resources.contains(&declaration.resource.0)
     });
-    Ok(entry)
+    Ok((entry, effect_sites))
 }
 
 /// Resolve side-effect ownership from explicit output routes.
@@ -285,6 +259,7 @@ fn requires_unrouted_owner(effect: &SideEffect) -> bool {
 pub(super) struct SplitEntry {
     pub(super) entry: program::PlannedEntry,
     pub(super) semantic_slots: Vec<usize>,
+    pub(super) effect_sites: LookupMap<SideEffectSite, SideEffectSite>,
 }
 
 pub(super) struct EntrySplit {
@@ -481,9 +456,11 @@ fn project_output_group(
         return_ty: entry.return_ty.clone(),
     };
 
+    let (entry, effect_sites) = project_kernel_body_effects(entry, selected, spec)?;
     Ok(SplitEntry {
-        entry: project_kernel_body_effects(entry, selected, spec)?,
+        entry,
         semantic_slots: group.slots.clone(),
+        effect_sites,
     })
 }
 

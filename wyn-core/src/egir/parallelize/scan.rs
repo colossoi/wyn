@@ -21,11 +21,25 @@ pub(super) struct ScanPhase2Spec<'a> {
 }
 
 impl ScanPhase2Spec<'_> {
-    pub(super) fn build(
-        self,
-        effect_ids: &mut crate::IdSource<EffectToken>,
-    ) -> Result<crate::egir::program::PlannedEntry, String> {
+    pub(super) fn build(self, effect_ids: &mut crate::IdSource<EffectToken>) -> Result<BuiltPhase, String> {
         use crate::egir::builder::EntryBuilder;
+
+        let mut accesses = vec![
+            schedule::ScheduledResource {
+                resource: self.scratch.block_sums,
+                access: crate::ResourceAccess::Read,
+            },
+            schedule::ScheduledResource {
+                resource: self.scratch.block_offsets,
+                access: crate::ResourceAccess::Write,
+            },
+        ];
+        if let Some(resource) = self.total_out {
+            accesses.push(schedule::ScheduledResource {
+                resource,
+                access: crate::ResourceAccess::Write,
+            });
+        }
 
         let mut builder = EntryBuilder::new_compute(
             format!("{}_phase2_scan_sums", self.entry_name),
@@ -67,7 +81,7 @@ impl ScanPhase2Spec<'_> {
                 None,
             );
         }
-        Ok(builder.build())
+        Ok(BuiltPhase::new(builder.build(), accesses))
     }
 
     fn emit_loop(
@@ -165,11 +179,19 @@ pub(super) struct ScanPhase3Spec {
 }
 
 impl ScanPhase3Spec {
-    pub(super) fn build(
-        self,
-        effect_ids: &mut crate::IdSource<EffectToken>,
-    ) -> Result<crate::egir::program::PlannedEntry, String> {
+    pub(super) fn build(self, effect_ids: &mut crate::IdSource<EffectToken>) -> Result<BuiltPhase, String> {
         use crate::egir::builder::EntryBuilder;
+
+        let resources = vec![
+            schedule::ScheduledResource {
+                resource: self.output_resource,
+                access: crate::ResourceAccess::ReadWrite,
+            },
+            schedule::ScheduledResource {
+                resource: self.block_offsets,
+                access: crate::ResourceAccess::Read,
+            },
+        ];
 
         let mut builder = EntryBuilder::new_compute(
             format!("{}_phase3_add_offsets", self.entry_name),
@@ -214,7 +236,7 @@ impl ScanPhase3Spec {
             chunked_output,
             arr_ty,
         );
-        Ok(builder.build())
+        Ok(BuiltPhase::new(builder.build(), resources))
     }
 }
 
@@ -235,6 +257,7 @@ pub(super) struct ScanCandidate {
     scan_output_storage: SemanticResourceRef,
     scan_output_view_type: Type<TypeName>,
     phase1_width: u32,
+    segment: screma::Segmented<SemanticResourceRef>,
 }
 
 pub(super) struct BoundScan {
@@ -249,6 +272,7 @@ pub(super) fn analyze_scan_candidate(
     lanes: &screma::Lanes,
     operators: &screma::NonEmpty<screma::Operator>,
 ) -> error::Result<Option<ScanCandidate>> {
+    let segment = located.segmented()?;
     let serial = located.serial_recipe();
     if !operators.rest.is_empty()
         || lanes.inputs.len() != 1
@@ -310,10 +334,15 @@ pub(super) fn analyze_scan_candidate(
         scan_output_storage,
         scan_output_view_type,
         phase1_width: REDUCE_PHASE1_WIDTH,
+        segment,
     }))
 }
 
 impl BoundScan {
+    pub(super) fn segment(&self) -> &screma::Segmented<SemanticResourceRef> {
+        &self.candidate.segment
+    }
+
     pub(super) fn bind(candidate: ScanCandidate, resources: &super::planning::ScratchBindings) -> Self {
         let block_sums = resources.id(candidate.owner, CompilerResourceKind::ScanBlockSums, 0);
         let block_offsets = resources.id(candidate.owner, CompilerResourceKind::ScanBlockOffsets, 1);
@@ -328,9 +357,9 @@ impl BoundScan {
 impl KernelPlanBuilder<'_, '_> {
     pub(super) fn emit_scan_entry(
         &mut self,
-        entry: &mut crate::egir::program::PlannedEntry,
+        mut entry: crate::egir::program::PlannedEntry,
         analysis: BoundScan,
-    ) -> error::Result<[crate::egir::program::PlannedEntry; 2]> {
+    ) -> error::Result<[BuiltPhase; 3]> {
         let ScanCandidate {
             site,
             owner,
@@ -347,11 +376,16 @@ impl KernelPlanBuilder<'_, '_> {
             scan_output_storage,
             scan_output_view_type: orig_scan_output_view_ty,
             phase1_width: total_threads,
+            segment,
         } = analysis.candidate;
+        let mut phase1_resources = merge_scheduled_resources(
+            &declared_input_resources(&entry.resource_declarations),
+            &segmented_resources(&segment),
+        );
         let block_id = site.block;
         let (block_sums_resource, block_offsets_resource) = (analysis.block_sums, analysis.block_offsets);
-        let op_func = self.schedule.callable_name(step_region).to_string();
-        let reduce_func = self.schedule.callable_name(combine_region).to_string();
+        let op_func = self.callable_name(step_region).to_string();
+        let reduce_func = self.callable_name(combine_region).to_string();
 
         // Chunk the input and the scan output view; swap them into the operand list.
         let chunked = chunk_soac_inputs(
@@ -412,11 +446,11 @@ impl KernelPlanBuilder<'_, '_> {
                     operators: screma::NonEmpty {
                         first: screma::Operator {
                             step: SegBody {
-                                region: self.schedule.intern_callable(&op_func),
+                                region: self.intern_callable(&op_func),
                                 captures: step_capture_nodes,
                             },
                             combine: SegBody {
-                                region: self.schedule.intern_callable(&op_func),
+                                region: self.intern_callable(&op_func),
                                 captures: vec![],
                             },
                             input_indices: vec![screma::InputId(0)],
@@ -483,7 +517,7 @@ impl KernelPlanBuilder<'_, '_> {
             total_out: None,
         };
         let mut phase2 = phase2.build(self.effect_ids)?;
-        apply_manifest_resource_sizes(&mut phase2, self.resources);
+        apply_manifest_resource_sizes(&mut phase2.body, self.resources);
         let swap_wrapper_name = format!("{}_scan_op_swap", entry.name);
         let swap_wrapper = synthesize_swap_wrapper(
             swap_wrapper_name.clone(),
@@ -491,7 +525,7 @@ impl KernelPlanBuilder<'_, '_> {
             elem_ty.clone(),
             entry.span,
         );
-        let swap_region = self.schedule.define_callable(swap_wrapper);
+        let swap_region = self.define_callable(swap_wrapper)?;
         let phase3 = ScanPhase3Spec {
             entry_name: entry.name.clone(),
             swap_region,
@@ -501,11 +535,16 @@ impl KernelPlanBuilder<'_, '_> {
             width: total_threads,
         };
         let mut phase3 = phase3.build(self.effect_ids)?;
-        apply_manifest_resource_sizes(&mut phase3, self.resources);
+        apply_manifest_resource_sizes(&mut phase3.body, self.resources);
 
         // Phase 1 is now a per-invocation Screma scan over the thread's chunk plus
         // the appended block-sum reduce; `soac_expand` lowers both.
         make_screma_serial(&mut entry.graph, serial);
-        Ok([phase2, phase3])
+        phase1_resources.push(schedule::ScheduledResource {
+            resource: block_sums_resource,
+            access: crate::ResourceAccess::Write,
+        });
+        phase1_resources.sort_by_key(|resource| resource.resource);
+        Ok([BuiltPhase::new(entry, phase1_resources), phase2, phase3])
     }
 }

@@ -50,7 +50,7 @@ fn resource_arena_interns_compiler_ownership_keys() {
 
 #[test]
 fn serial_recipe_index_carries_no_parallel_recipe_state() {
-    let mut serial = RecipeIndex::serial();
+    let mut serial = RecipeIndex::serial(std::collections::HashMap::new());
     assert!(serial
         .take_endpoint(CompilerFlowEndpoint::Entry(SemanticEntryId::for_test(0)))
         .expect("serial endpoint lookup")

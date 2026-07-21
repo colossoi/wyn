@@ -1301,7 +1301,7 @@ impl<'a> LowerCtx<'a> {
         // entry, and the intrinsic dispatch can read from the user's
         // param via the alias added below.
         self.wgsl_gid_alias = None;
-        if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
+        if entry.execution_model.is_compute() {
             let user_gid = entry.inputs.iter().find(|i| {
                 matches!(
                     i.decoration(),

@@ -14,6 +14,7 @@ pub(super) struct ReduceCandidate {
     accumulators: Vec<ReduceAccumulator>,
     phase1_width: u32,
     phase2_width: u32,
+    segment: screma::Segmented<SemanticResourceRef>,
 }
 
 struct ReduceAccumulator {
@@ -58,6 +59,7 @@ pub(super) fn analyze_reduce_candidate(
     operators: &screma::NonEmpty<screma::Operator>,
     resources: &crate::egir::program::LogicalResourceArena,
 ) -> error::Result<Option<ReduceCandidate>> {
+    let segment = located.segmented()?;
     let serial = located.serial_recipe();
     if operators.iter().any(|operator| !operator.combine.captures.is_empty())
         || lanes.inputs.is_empty()
@@ -178,10 +180,15 @@ pub(super) fn analyze_reduce_candidate(
         accumulators,
         phase1_width: REDUCE_PHASE1_WIDTH,
         phase2_width: REDUCE_PHASE2_WIDTH,
+        segment,
     }))
 }
 
 impl BoundReduce {
+    pub(super) fn segment(&self) -> &screma::Segmented<SemanticResourceRef> {
+        &self.candidate.segment
+    }
+
     pub(super) fn bind(candidate: ReduceCandidate, resources: &super::planning::ScratchBindings) -> Self {
         let partials = (0..candidate.accumulators.len())
             .map(|slot| resources.id(candidate.owner, CompilerResourceKind::ReducePartial, slot))
@@ -193,9 +200,9 @@ impl BoundReduce {
 impl KernelPlanBuilder<'_, '_> {
     pub(super) fn emit_reduce_entry(
         &mut self,
-        entry: &mut crate::egir::program::PlannedEntry,
+        mut entry: crate::egir::program::PlannedEntry,
         bound: BoundReduce,
-    ) -> error::Result<Vec<crate::egir::program::PlannedEntry>> {
+    ) -> error::Result<(BuiltPhase, Vec<BuiltPhase>)> {
         let BoundReduce {
             candidate,
             partials: partial_resources,
@@ -210,8 +217,13 @@ impl KernelPlanBuilder<'_, '_> {
             accumulators,
             phase1_width,
             phase2_width,
+            segment,
             ..
         } = candidate;
+        let mut phase1_resources = merge_scheduled_resources(
+            &declared_input_resources(&entry.resource_declarations),
+            &segmented_resources(&segment),
+        );
         let block_id = site.block;
         let total_threads = phase1_width;
         let n_accs = accumulators.len();
@@ -229,7 +241,7 @@ impl KernelPlanBuilder<'_, '_> {
                 }
                 EmissionAccumulator {
                     scratch_type: accumulator.scratch_type,
-                    operator: self.schedule.callable_name(accumulator.combine_region).to_string(),
+                    operator: self.callable_name(accumulator.combine_region).to_string(),
                     neutral: accumulator.neutral,
                     stores,
                     outputs: accumulator.outputs,
@@ -372,7 +384,27 @@ impl KernelPlanBuilder<'_, '_> {
         // per-invocation Screma over the thread's chunk; `soac_expand` lowers that
         // local loop while the synthesized phase-2 entries combine its partials.
         make_screma_serial(&mut entry.graph, serial);
-        Ok(phase2s)
+        phase1_resources.retain_mut(|access| {
+            if !moved.contains(&access.resource) {
+                return true;
+            }
+            match access.access {
+                crate::ResourceAccess::Read => true,
+                crate::ResourceAccess::Write => false,
+                crate::ResourceAccess::ReadWrite => {
+                    access.access = crate::ResourceAccess::Read;
+                    true
+                }
+            }
+        });
+        phase1_resources.extend(
+            accumulators.iter().map(|accumulator| schedule::ScheduledResource {
+                resource: accumulator.partial,
+                access: crate::ResourceAccess::Write,
+            }),
+        );
+        phase1_resources.sort_by_key(|resource| resource.resource);
+        Ok((BuiltPhase::new(entry, phase1_resources), phase2s))
     }
 }
 
@@ -681,11 +713,19 @@ impl ReduceCombineSpec<'_> {
 /// declares the output bindings this entry writes. Screma's multi-accumulator
 /// path passes a `_phase2_combine_{i}` `full_name` per combiner.
 impl ReduceCombineSpec<'_> {
-    fn build(
-        self,
-        effect_ids: &mut crate::IdSource<EffectToken>,
-    ) -> Result<crate::egir::program::PlannedEntry, String> {
+    fn build(self, effect_ids: &mut crate::IdSource<EffectToken>) -> Result<BuiltPhase, String> {
         use crate::egir::builder::EntryBuilder;
+        let mut resources = vec![schedule::ScheduledResource {
+            resource: self.partials,
+            access: crate::ResourceAccess::Read,
+        }];
+        resources.extend(self.output_declarations.iter().map(|(resource, _, _)| {
+            schedule::ScheduledResource {
+                resource: *resource,
+                access: crate::ResourceAccess::Write,
+            }
+        }));
+        resources.sort_by_key(|resource| resource.resource);
         let mut b = EntryBuilder::new_compute(self.name.clone(), (self.width, 1, 1), effect_ids);
         b.declare_intermediate_storage_sized(
             self.partials,
@@ -698,6 +738,6 @@ impl ReduceCombineSpec<'_> {
 
         let init_nid = graph_ops::clone_pure_subgraph(self.source_graph, b.graph_mut(), self.neutral)?;
         self.emit_tree(&mut b, init_nid)?;
-        Ok(b.build())
+        Ok(BuiltPhase::new(b.build(), resources))
     }
 }

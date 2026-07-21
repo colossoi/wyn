@@ -9,7 +9,7 @@ use std::convert::Infallible;
 use polytype::Type;
 
 use crate::ast::TypeName;
-use crate::flow::{BlockId, ControlHeader, ExecutionModel};
+use crate::flow::{BlockId, ControlHeader};
 use crate::types::TypeExt;
 use crate::LookupMap;
 
@@ -310,7 +310,7 @@ fn function_facts(graph: &EGraph<Raw>) -> HashMap<(BlockId, usize), Facts> {
 
 fn entry_facts(entry: &RawEntry) -> HashMap<(BlockId, usize), Facts> {
     let consumed = soac_consumed_nodes(&entry.graph);
-    let kernel_scope = matches!(entry.execution_model, ExecutionModel::Compute { .. });
+    let kernel_scope = entry.execution_model.is_compute();
     let mut facts_by_location = HashMap::new();
     for (block, contents) in &entry.graph.skeleton.blocks {
         for (index, effect) in contents.side_effects.iter().enumerate() {

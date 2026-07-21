@@ -19,7 +19,7 @@ use super::program::{
 };
 use super::soac::{filter, screma};
 use super::types::{
-    EGraph, ENode, EffectToken, NodeId, PureOp, ResourceAccess, SegExtent, SegResourceAccess,
+    EGraph, ENode, EffectToken, NodeId, PureOp, ResourceAccess, SegExtent, SegResourceAccess, SegSpace,
     SideEffectKind, SideEffectSite, Soac, SoacDestination, SoacEffect, SoacPlacement,
 };
 use crate::ast::TypeName;
@@ -45,6 +45,7 @@ struct OperationResultMaterialization {
     projected_site: SideEffectSite,
     projected_result: NodeId,
     projection: super::graph_projector::GraphProjection,
+    space: SegSpace<SemanticResourceRef>,
     layout: MaterializedValueLayout,
 }
 
@@ -579,6 +580,7 @@ fn filter_runtime_array_plan(
             projected_site,
             projected_result,
             projection,
+            space: space.clone(),
             layout: MaterializedValueLayout::RuntimeArray {
                 scratch: scratch.0,
                 size: size_for_space(space, &elem_ty),
@@ -634,7 +636,7 @@ fn operation_result_residency(
         screma::Op::Reduce { operators, .. }
             if operators.rest.is_empty()
                 && (has_segmented_screma_consumer(entry, consumers)
-                    || !matches!(entry.execution_model, ExecutionModel::Compute { .. }))
+                    || !entry.execution_model.is_compute())
                 && scalar_result_is_used(&entry.graph, result, site.block, site.index)
                 && invocation_invariant(entry, site.block, &dependencies) =>
         {
@@ -689,6 +691,7 @@ fn operation_result_plan(
             projected_site,
             projected_result,
             projection,
+            space: space.clone(),
             layout: MaterializedValueLayout::FixedArity(output_specs),
         }),
     })
@@ -976,7 +979,7 @@ fn invocation_invariant(
     block_id: BlockId,
     effects: &HashSet<usize>,
 ) -> bool {
-    if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
+    if entry.execution_model.is_compute() {
         return true;
     }
     if entry.params.len() != entry.inputs.len() {
@@ -1040,6 +1043,7 @@ fn materialize_operation_result(
         projected_site,
         projected_result,
         projection,
+        space,
         layout,
     } = operation;
     let MaterializedValueLayout::FixedArity(output_specs) = layout else {
@@ -1067,7 +1071,7 @@ fn materialize_operation_result(
             unreachable!("runtime arrays use their layout-specific materialization path")
         }
     };
-    let compact_inputs = !matches!(entry.execution_model, ExecutionModel::Compute { .. });
+    let compact_inputs = !entry.execution_model.is_compute();
     let producer_entry = projected_materialization_entry(
         inner,
         entry,
@@ -1079,6 +1083,7 @@ fn materialize_operation_result(
     let mut producer = MaterializationRequirement {
         kind,
         producer: Some(producer_id),
+        space,
         entry: producer_entry,
         substitutions: Vec::new(),
     };
@@ -1140,6 +1145,7 @@ fn materialize_runtime_array_result(
         source_site,
         projected_site,
         projection,
+        space,
         layout,
         ..
     } = operation;
@@ -1185,6 +1191,7 @@ fn materialize_runtime_array_result(
     let mut producer = MaterializationRequirement {
         kind: MaterializationKind::RuntimeArray,
         producer: Some(producer_id),
+        space,
         entry: producer_entry,
         substitutions: [handoff.data, handoff.length]
             .into_iter()
@@ -1571,6 +1578,9 @@ fn materialize_parallel_prelude(
     let mut producer = MaterializationRequirement {
         kind: MaterializationKind::Scalar,
         producer: None,
+        space: SegSpace {
+            dims: vec![SegExtent::Fixed(1)],
+        },
         entry: producer_entry,
         substitutions: vec![MaterializationSubstitution {
             resource: SemanticResourceRef(resource),
@@ -2053,6 +2063,7 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
             match &mut effect.kind {
                 SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                     let mut new_resources = Vec::new();
+                    let mut domain_input = None;
                     for (input, input_type) in op.lanes_mut().inputs.iter_mut().enumerate() {
                         if let Some(replacement) = replacements
                             .iter()
@@ -2060,6 +2071,11 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                         {
                             input_type.array = replacement.view_ty.clone();
                             new_resources.push(replacement.resource);
+                            if input == 0 {
+                                let elem_bytes = crate::ssa::layout::type_byte_size(&input_type.element())
+                                    .unwrap_or(1) as u32;
+                                domain_input = Some((replacement.view, replacement.resource, elem_bytes));
+                            }
                         }
                     }
                     {
@@ -2069,6 +2085,9 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                             continue;
                         };
                         replace_space_nodes(space, replacements);
+                        if let Some((view, resource, elem_bytes)) = domain_input {
+                            retarget_storage_space(space, view, resource, elem_bytes);
+                        }
                         for resource in new_resources {
                             if !resources.iter().any(|access| access.resource.0 == resource) {
                                 resources.push(SegResourceAccess {
@@ -2099,6 +2118,7 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                     }
                 }
                 SideEffectKind::Soac(SoacEffect(_, Soac::Filter(filter::Op { body, state }))) => {
+                    let mut domain_input = None;
                     if let Some(replacement) = replacements
                         .iter()
                         .find(|replacement| effect.operand_nodes[0] == replacement.project)
@@ -2107,8 +2127,14 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                             filter::Input::Plain(input) | filter::Input::Mapped { input, .. } => input,
                         };
                         input.array = replacement.view_ty.clone();
+                        let elem_bytes =
+                            crate::ssa::layout::type_byte_size(&input.element()).unwrap_or(1) as u32;
+                        domain_input = Some((replacement.view, replacement.resource, elem_bytes));
                     }
                     replace_space_nodes(&mut state.space, replacements);
+                    if let Some((view, resource, elem_bytes)) = domain_input {
+                        retarget_storage_space(&mut state.space, view, resource, elem_bytes);
+                    }
                 }
                 _ => {}
             }
@@ -2124,6 +2150,24 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
             _ => Type::Constructed(TypeName::Tuple(result_types.len()), result_types),
         };
         graph.retype_node(result, retyped);
+    }
+}
+
+fn retarget_storage_space(
+    space: &mut SegSpace<SemanticResourceRef>,
+    view: NodeId,
+    resource: ResourceId,
+    elem_bytes: u32,
+) {
+    let [extent] = space.dims.as_mut_slice() else {
+        return;
+    };
+    if matches!(extent, SegExtent::Value(_) | SegExtent::ResourceLength { .. }) {
+        *extent = SegExtent::ResourceLength {
+            node: view,
+            resource: SemanticResourceRef(resource),
+            elem_bytes,
+        };
     }
 }
 
