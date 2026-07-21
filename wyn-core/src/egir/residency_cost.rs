@@ -29,14 +29,32 @@ const LOOP_SETUP_COST: u64 = 1;
 const UNKNOWN_LOOP_COST: u64 = 4096;
 pub(crate) const SINGLETON_LAUNCH_COST: u64 = 256;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreludeMaterializationPolicy {
+    /// The structured prefix represents input-dependent serial work whose
+    /// evaluation count must not be multiplied by parallel consumers.
+    Required,
+    /// Pure recomputation is legal, so residency is an optimization choice.
+    CostBased,
+}
+
 #[derive(Debug)]
 pub(crate) struct PreludeAnalysis {
-    pub(crate) cost: u64,
+    cost: u64,
+    policy: PreludeMaterializationPolicy,
+}
+
+impl PreludeAnalysis {
+    pub(crate) fn should_materialize(&self, invocations: u64) -> bool {
+        self.policy == PreludeMaterializationPolicy::Required
+            || materialization_is_profitable(self.cost, invocations)
+    }
 }
 
 /// Summarize one projected parallel-prefix recipe. The same structured path
-/// analysis prices straight-line values, selections, and loops; the source
-/// construct is not part of the residency decision.
+/// analysis prices straight-line values, selections, and loops. Residency
+/// policy separately preserves single evaluation for structured storage
+/// prefixes; all other recipes remain cost-based.
 pub(crate) fn analyze_prelude(
     program: &SemanticProgram,
     entry: &SemanticEntry,
@@ -61,7 +79,35 @@ pub(crate) fn analyze_prelude(
         None,
         &mut HashSet::new(),
     )?;
-    Some(PreludeAnalysis { cost })
+    Some(PreludeAnalysis {
+        cost,
+        policy: prelude_materialization_policy(recipe),
+    })
+}
+
+fn prelude_materialization_policy(
+    recipe: &super::graph_projector::ProjectedValueRecipe,
+) -> PreludeMaterializationPolicy {
+    let structured = matches!(
+        &recipe.source,
+        super::graph_projector::ValueRecipeSource::StructuredPrefix { .. }
+    );
+    let reads_storage =
+        recipe.projection.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects).any(
+            |effect| {
+                matches!(effect.kind, SideEffectKind::Effect(EffectOp::Load))
+                    && !graph_ops::read_storage_resources(
+                        &recipe.projection.graph,
+                        effect.referenced_nodes(),
+                    )
+                    .is_empty()
+            },
+        );
+    if structured && reads_storage {
+        PreludeMaterializationPolicy::Required
+    } else {
+        PreludeMaterializationPolicy::CostBased
+    }
 }
 
 /// Compare repeated evaluation with a one-thread producer and one handoff load

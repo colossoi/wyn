@@ -1,11 +1,16 @@
 use super::*;
 use crate::ast::TypeName;
-use crate::egir::types::PureOp;
+use crate::egir::graph_projector::GraphProjector;
+use crate::egir::types::{EffectToken, PureOp, SideEffectSite};
 use polytype::Type;
 use smallvec::smallvec;
 
 fn i32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Int(32), vec![])
+}
+
+fn u32_ty() -> Type<TypeName> {
+    Type::Constructed(TypeName::UInt(32), vec![])
 }
 
 #[test]
@@ -20,6 +25,44 @@ fn profitability_includes_launch_loads_and_margin() {
     assert_eq!(
         materialization_is_profitable(cost, invocations),
         4 * recompute >= 5 * handoff
+    );
+}
+
+#[test]
+fn structured_storage_prefix_requires_materialization() {
+    let mut graph = EGraph::new();
+    let entry = graph.skeleton.entry;
+    let continuation = graph.skeleton.create_block();
+    let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    let view = graph_ops::intern_resource_view(&mut graph, crate::ResourceId::for_test(1), i32_ty(), None);
+    let place = graph.intern_pure(PureOp::ViewIndex, smallvec![view, zero], i32_ty(), None);
+    let loaded = graph.alloc_side_effect_result(i32_ty());
+    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::Load),
+        operand_nodes: smallvec![place],
+        result: Some(loaded),
+        effects: Some((EffectToken::from(0), EffectToken::from(1))),
+        span: None,
+    });
+    let result = graph.add_block_param(continuation, i32_ty());
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
+        target: continuation,
+        args: vec![loaded],
+    };
+    graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
+
+    let recipe = GraphProjector::new(&graph, &LookupMap::new())
+        .captured_value_recipe(
+            result,
+            SideEffectSite {
+                block: continuation,
+                index: 0,
+            },
+        )
+        .expect("structured storage recipe");
+    assert_eq!(
+        prelude_materialization_policy(&recipe),
+        PreludeMaterializationPolicy::Required
     );
 }
 

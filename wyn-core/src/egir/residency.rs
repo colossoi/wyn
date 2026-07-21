@@ -82,6 +82,14 @@ struct ParallelPreludeMaterialization {
     recipe: super::graph_projector::ProjectedValueRecipe,
     elem_ty: Type<TypeName>,
     size: LogicalSize,
+    live_outs: Vec<ParallelPreludeLiveOut>,
+}
+
+struct ParallelPreludeLiveOut {
+    source: NodeId,
+    projected: NodeId,
+    elem_ty: Type<TypeName>,
+    size: LogicalSize,
 }
 
 #[derive(Clone)]
@@ -723,7 +731,7 @@ fn plan_parallel_prelude(inner: &AllocatedProgram) -> Option<MaterializationPlan
                 continue;
             }
             let consumer_site_set = consumer_sites.iter().copied().collect::<HashSet<_>>();
-            if !source_is_observed_only_by(entry, prelude.root, &consumer_site_set) {
+            if !source_is_observed_only_by_consumers_or_outputs(entry, prelude.root, &consumer_site_set) {
                 continue;
             }
             let Some(insertion_site) = consumer_sites.iter().min_by_key(|site| site.index).copied() else {
@@ -735,11 +743,14 @@ fn plan_parallel_prelude(inner: &AllocatedProgram) -> Option<MaterializationPlan
             else {
                 continue;
             };
+            let Some(live_outs) = parallel_prelude_live_outs(entry, prelude.root, &recipe) else {
+                continue;
+            };
             let Some(analysis) = super::residency_cost::analyze_prelude(inner, entry, &recipe) else {
                 continue;
             };
             let invocations = launched_consumer_invocations(entry, &dependencies, &prelude.consumers);
-            if !super::residency_cost::materialization_is_profitable(analysis.cost, invocations) {
+            if !analysis.should_materialize(invocations) {
                 continue;
             }
             return Some(MaterializationPlan {
@@ -751,11 +762,106 @@ fn plan_parallel_prelude(inner: &AllocatedProgram) -> Option<MaterializationPlan
                     recipe,
                     elem_ty: ty.clone(),
                     size: LogicalSize::FixedBytes(u64::from(stride)),
+                    live_outs,
                 }),
             });
         }
     }
     None
+}
+
+/// Values produced by effects that move into a prepass may also feed retained
+/// consumers without being dependencies of the primary captured boundary.
+/// Publish those live-outs beside the primary handoff before removing their
+/// source effects.
+fn parallel_prelude_live_outs(
+    entry: &super::program::SemanticEntry,
+    root: NodeId,
+    recipe: &super::graph_projector::ProjectedValueRecipe,
+) -> Option<Vec<ParallelPreludeLiveOut>> {
+    let producer_effects = recipe.projection.source_effects();
+    let retained_terminators = retained_prelude_terminator_blocks(entry, &recipe.source);
+    let mut candidates = Vec::new();
+    for (block_id, block) in &entry.graph.skeleton.blocks {
+        for (index, effect) in block.side_effects.iter().enumerate() {
+            if producer_effects.contains(&SideEffectSite {
+                block: block_id,
+                index,
+            }) {
+                candidates.extend(effect.result);
+            }
+        }
+        candidates.extend(
+            block
+                .params
+                .iter()
+                .copied()
+                .filter(|value| *value != root && recipe.projection.node(*value).is_some()),
+        );
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let mut live_outs = Vec::new();
+    for source in candidates {
+        if source == root
+            || !value_is_observed_outside(entry, source, producer_effects, &retained_terminators)
+        {
+            continue;
+        }
+        let elem_ty = entry.graph.types[&source].clone();
+        let stride = crate::ssa::layout::storage_elem_stride(&elem_ty)?;
+        live_outs.push(ParallelPreludeLiveOut {
+            source,
+            projected: recipe.projection.node(source)?,
+            elem_ty,
+            size: LogicalSize::FixedBytes(u64::from(stride)),
+        });
+    }
+    Some(live_outs)
+}
+
+fn value_is_observed_outside(
+    entry: &super::program::SemanticEntry,
+    value: NodeId,
+    producer_effects: &HashSet<SideEffectSite>,
+    retained_terminators: &HashSet<BlockId>,
+) -> bool {
+    entry.graph.skeleton.blocks.iter().any(|(block_id, block)| {
+        block.side_effects.iter().enumerate().any(|(index, effect)| {
+            !producer_effects.contains(&SideEffectSite {
+                block: block_id,
+                index,
+            }) && effect.referenced_nodes().any(|reference| pure_depends_on(&entry.graph, reference, value))
+        }) || retained_terminators.contains(&block_id)
+            && block
+                .term
+                .referenced_nodes()
+                .into_iter()
+                .any(|reference| pure_depends_on(&entry.graph, reference, value))
+    }) || entry.output_routes.iter().any(|route| pure_depends_on(&entry.graph, route.source.value, value))
+}
+
+fn retained_prelude_terminator_blocks(
+    entry: &super::program::SemanticEntry,
+    source: &super::graph_projector::ValueRecipeSource,
+) -> HashSet<BlockId> {
+    match source {
+        super::graph_projector::ValueRecipeSource::EntryBlock => {
+            entry.graph.skeleton.blocks.keys().collect()
+        }
+        super::graph_projector::ValueRecipeSource::StructuredPrefix { continuation } => {
+            let mut retained = HashSet::new();
+            let mut pending = vec![*continuation];
+            while let Some(block) = pending.pop() {
+                if !retained.insert(block) {
+                    continue;
+                }
+                pending.extend(entry.graph.skeleton.blocks[block].term.successors());
+            }
+            retained
+        }
+    }
 }
 
 fn parallel_preludes(
@@ -774,9 +880,12 @@ fn parallel_preludes(
         if soac.scheduling_space().is_none() {
             continue;
         }
-        for root in dependencies.operation_captures(&operation) {
+        for capture in dependencies.operation_captures(&operation) {
+            let root = parallel_prelude_boundary_root(entry, site, capture);
             if let Some(index) = by_root.get(&root).copied() {
-                preludes[index].consumers.push(operation);
+                if !preludes[index].consumers.contains(&operation) {
+                    preludes[index].consumers.push(operation);
+                }
             } else {
                 by_root.insert(root, preludes.len());
                 preludes.push(ParallelPrelude {
@@ -787,6 +896,23 @@ fn parallel_preludes(
         }
     }
     preludes
+}
+
+/// Captures in a structured continuation commonly project fields from its one
+/// boundary value.  Schedule that value as a unit: the projector can then
+/// detach the complete prefix once, while consumers keep using their existing
+/// field projections after the boundary value is replaced by a handoff load.
+fn parallel_prelude_boundary_root(
+    entry: &super::program::SemanticEntry,
+    consumer: SideEffectSite,
+    capture: NodeId,
+) -> NodeId {
+    let params = &entry.graph.skeleton.blocks[consumer.block].params;
+    let mut roots = params.iter().copied().filter(|param| pure_depends_on(&entry.graph, capture, *param));
+    match (roots.next(), roots.next()) {
+        (Some(root), None) => root,
+        _ => capture,
+    }
 }
 
 fn operation_sites(
@@ -806,11 +932,23 @@ fn supports_parallel_prefix_consumer(entry: &super::program::SemanticEntry, site
     )
 }
 
-fn source_is_observed_only_by(
+fn source_is_observed_only_by_consumers_or_outputs(
     entry: &super::program::SemanticEntry,
     root: NodeId,
     consumers: &HashSet<SideEffectSite>,
 ) -> bool {
+    // Realized output stores are valid additional observers: residency
+    // rewrites their value dependencies to the same handoff load. Other
+    // serial effects and terminators still keep the prefix in place.
+    let output_effects = entry
+        .output_routes
+        .iter()
+        .flat_map(|route| &route.writers)
+        .filter_map(|writer| match writer {
+            OutputWriter::Effect(effect) => Some(*effect),
+            OutputWriter::Value(_) => None,
+        })
+        .collect::<HashSet<_>>();
     for (block_id, block) in &entry.graph.skeleton.blocks {
         for (index, effect) in block.side_effects.iter().enumerate() {
             if effect.referenced_nodes().any(|reference| pure_depends_on(&entry.graph, reference, root))
@@ -818,6 +956,7 @@ fn source_is_observed_only_by(
                     block: block_id,
                     index,
                 })
+                && !effect.effects.is_some_and(|(_, output)| output_effects.contains(&output))
             {
                 return false;
             }
@@ -1548,6 +1687,7 @@ fn materialize_parallel_prelude(
         recipe,
         elem_ty,
         size,
+        live_outs,
     } = prelude;
     let root = prelude.root;
     let super::graph_projector::ProjectedValueRecipe {
@@ -1557,6 +1697,9 @@ fn materialize_parallel_prelude(
         source,
     } = recipe;
     let producer_effects = projection.source_effects().clone();
+    let producer_values = std::iter::once(projected_root)
+        .chain(live_outs.iter().map(|live_out| live_out.projected))
+        .collect::<Vec<_>>();
     let producer_entry = {
         let entry = &inner.entry_points[entry_index];
         projected_materialization_entry(
@@ -1566,15 +1709,30 @@ fn materialize_parallel_prelude(
             ExecutionModel::Compute {
                 local_size: (1, 1, 1),
             },
-            producer_resources_for_graph(entry, &projection.graph, projected_root),
+            producer_resources_for_graph(entry, &projection.graph, producer_values.iter().copied()),
             projection,
         )
     };
-    let resource = inner.alloc_compiler_resource(
-        CompilerResource::new(CompilerResourceKind::ScalarHandoff, None, 0),
-        elem_ty.clone(),
-        size.clone(),
-    );
+    let values = std::iter::once(ParallelPreludeLiveOut {
+        source: root,
+        projected: projected_root,
+        elem_ty,
+        size,
+    })
+    .chain(live_outs)
+    .collect::<Vec<_>>();
+    let handoffs = values
+        .into_iter()
+        .enumerate()
+        .map(|(slot, value)| {
+            let resource = inner.alloc_compiler_resource(
+                CompilerResource::new(CompilerResourceKind::ScalarHandoff, None, slot),
+                value.elem_ty.clone(),
+                value.size.clone(),
+            );
+            (resource, value)
+        })
+        .collect::<Vec<_>>();
     let mut producer = MaterializationRequirement {
         kind: MaterializationKind::Scalar,
         producer: None,
@@ -1582,41 +1740,60 @@ fn materialize_parallel_prelude(
             dims: vec![SegExtent::Fixed(1)],
         },
         entry: producer_entry,
-        substitutions: vec![MaterializationSubstitution {
-            resource: SemanticResourceRef(resource),
-            consumers: Vec::new(),
-        }],
+        substitutions: handoffs
+            .iter()
+            .map(|(resource, _)| MaterializationSubstitution {
+                resource: SemanticResourceRef(*resource),
+                consumers: Vec::new(),
+            })
+            .collect(),
     };
-    let output_view = declare_resource_view(
-        &mut producer.entry,
-        resource,
-        StorageRole::Output,
-        &elem_ty,
-        &size,
-    );
-    emit_scalar_handoff_store(
-        &mut producer.entry.graph,
-        result_block,
-        output_view,
-        projected_root,
-        &elem_ty,
-        effect_ids,
-    );
+    for (resource, value) in &handoffs {
+        let output_view = declare_resource_view(
+            &mut producer.entry,
+            *resource,
+            StorageRole::Output,
+            &value.elem_ty,
+            &value.size,
+        );
+        emit_scalar_handoff_store(
+            &mut producer.entry.graph,
+            result_block,
+            output_view,
+            value.projected,
+            &value.elem_ty,
+            effect_ids,
+        );
+    }
     compact_entry_interface(&mut producer.entry);
 
     let entry = &mut inner.entry_points[entry_index];
-    let view = declare_resource_view(entry, resource, StorageRole::Input, &elem_ty, &size);
-    let (loaded, load_effect) = detached_scalar_handoff_load(&mut entry.graph, view, &elem_ty, effect_ids);
-    graph_ops::replace_all_references(&mut entry.graph, root, loaded);
+    let mut loaded_values = Vec::new();
+    let mut load_effects = Vec::new();
+    for (resource, value) in &handoffs {
+        let view = declare_resource_view(entry, *resource, StorageRole::Input, &value.elem_ty, &value.size);
+        let (loaded, load_effect) =
+            detached_scalar_handoff_load(&mut entry.graph, view, &value.elem_ty, effect_ids);
+        graph_ops::replace_all_references(&mut entry.graph, value.source, loaded);
+        loaded_values.push(loaded);
+        load_effects.push(load_effect);
+    }
+    let loaded_root = loaded_values[0];
     match source {
         super::graph_projector::ValueRecipeSource::EntryBlock => {
-            replace_prelude_effects_with_load(entry, &producer_effects, insertion_site, load_effect);
+            replace_prelude_effects_with_load(entry, &producer_effects, insertion_site, load_effects);
         }
         super::graph_projector::ValueRecipeSource::StructuredPrefix { continuation } => {
-            replace_structured_prefix_with_load(entry, &producer_effects, continuation, loaded, load_effect)
+            replace_structured_prefix_with_load(
+                entry,
+                &producer_effects,
+                continuation,
+                loaded_root,
+                load_effects,
+            )
         }
     }
-    refresh_resource_reads_for_values(&mut entry.graph, &[loaded]);
+    refresh_resource_reads_for_values(&mut entry.graph, &loaded_values);
     super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph);
 
     inner.materializations.alloc(producer);
@@ -1650,9 +1827,9 @@ fn projected_materialization_entry(
 fn producer_resources_for_graph(
     entry: &super::program::SemanticEntry,
     graph: &EGraph,
-    result: NodeId,
+    results: impl IntoIterator<Item = NodeId>,
 ) -> Vec<SemanticResourceDecl> {
-    let reachable = graph_ops::execution_value_producer_closure(graph, [result]).nodes;
+    let reachable = graph_ops::execution_value_producer_closure(graph, results).nodes;
     let resources = resources_referenced_by_nodes(entry, graph, reachable);
     resource_declarations_for(entry, &resources)
 }
@@ -1764,7 +1941,7 @@ fn replace_prelude_effects_with_load(
     entry: &mut super::program::SemanticEntry,
     producer_effects: &HashSet<SideEffectSite>,
     insertion_site: SideEffectSite,
-    load_effect: super::types::SideEffect,
+    load_effects: Vec<super::types::SideEffect>,
 ) {
     let mut removed = producer_effects.iter().map(|site| site.index).collect::<Vec<_>>();
     removed.sort_unstable();
@@ -1773,9 +1950,12 @@ fn replace_prelude_effects_with_load(
     for index in removed.iter().rev() {
         entry.graph.skeleton.blocks[insertion_site.block].side_effects.remove(*index);
     }
-    entry.graph.skeleton.blocks[insertion_site.block]
-        .side_effects
-        .insert(insertion_site.index - removed_before_consumer, load_effect);
+    let insertion_index = insertion_site.index - removed_before_consumer;
+    for (offset, load_effect) in load_effects.into_iter().enumerate() {
+        entry.graph.skeleton.blocks[insertion_site.block]
+            .side_effects
+            .insert(insertion_index + offset, load_effect);
+    }
 }
 
 fn replace_structured_prefix_with_load(
@@ -1783,11 +1963,11 @@ fn replace_structured_prefix_with_load(
     producer_effects: &HashSet<SideEffectSite>,
     continuation: BlockId,
     loaded: NodeId,
-    load_effect: super::types::SideEffect,
+    load_effects: Vec<super::types::SideEffect>,
 ) {
     remove_effect_sites(&mut entry.graph, producer_effects);
     let source_entry = entry.graph.skeleton.entry;
-    entry.graph.skeleton.blocks[source_entry].side_effects.push(load_effect);
+    entry.graph.skeleton.blocks[source_entry].side_effects.extend(load_effects);
     entry.graph.skeleton.blocks[source_entry].term = super::types::SkeletonTerminator::Branch {
         target: continuation,
         args: vec![loaded],
@@ -2226,3 +2406,7 @@ fn fresh_entry_name(inner: &AllocatedProgram, base: &str) -> String {
     }
     unreachable!()
 }
+
+#[cfg(test)]
+#[path = "residency_tests.rs"]
+mod residency_tests;

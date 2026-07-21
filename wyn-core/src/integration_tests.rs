@@ -2757,6 +2757,307 @@ entry direct_loop_prefix(xs: []u32, ys: []u32, events: []u32) ([]u32, []u32) =
 }
 
 #[test]
+fn composite_serial_prefix_is_one_singleton_feeding_two_map_domains() {
+    use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize};
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+def serial_prefix(events: []i32) (i32, [1]i32) =
+  loop (sum, last) = (0, [0]) for k < 32 do
+    (sum + events[k], [events[k]])
+
+#[compute]
+entry serial_prefix_composite_two_maps(events: []i32) ([]i32, []i32) =
+  let (sum, last) = serial_prefix(events) in
+  (map(|i| i + sum + last[0], iota(1024)),
+   map(|i| i + sum, iota(128)))
+"#,
+    )
+    .expect("composite serial prefix compiles");
+    let pipeline = scalar_prelude_pipeline(&lowered, "serial_prefix_composite_two_maps");
+    assert_eq!(pipeline.stages.len(), 3, "one singleton plus two map stages");
+    let singleton = pipeline
+        .stages
+        .iter()
+        .find(|stage| is_singleton_stage(stage))
+        .expect("the composite prefix runs in a singleton stage");
+    let maps = pipeline.stages.iter().filter(|stage| !is_singleton_stage(stage)).collect::<Vec<_>>();
+    assert_eq!(maps.len(), 2);
+    assert!(maps.iter().any(|stage| matches!(
+        stage.dispatch_size,
+        DispatchSize::DerivedFrom {
+            len: DispatchLen::Fixed { count: 1024 },
+            ..
+        }
+    )));
+    assert!(maps.iter().any(|stage| matches!(
+        stage.dispatch_size,
+        DispatchSize::DerivedFrom {
+            len: DispatchLen::Fixed { count: 128 },
+            ..
+        }
+    )));
+    assert_eq!(
+        singleton
+            .writes
+            .iter()
+            .filter(|binding| maps.iter().all(|map| map.reads.contains(binding)))
+            .count(),
+        1,
+        "one materialized composite feeds both maps"
+    );
+    let events = pipeline
+        .bindings
+        .iter()
+        .position(|binding| matches!(binding, Binding::StorageBuffer { name, .. } if name == "events"))
+        .expect("the source events input remains published");
+    assert!(singleton.reads.contains(&events));
+    assert!(
+        maps.iter().all(|map| !map.reads.contains(&events)),
+        "parallel consumers do not retain the prefix input"
+    );
+    assert!(spirv_entry_reaches_loop(&lowered.spirv, &singleton.entry_point));
+    assert!(
+        maps.iter().all(|map| !spirv_entry_reaches_loop(&lowered.spirv, &map.entry_point)),
+        "the serial fold is not cloned into either parallel map"
+    );
+}
+
+#[test]
+fn composite_serial_prefix_is_shared_by_fixed_outputs_and_parallel_maps() {
+    use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize};
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+def serial_prefix(events: []i32) (i32, [1]i32) =
+  loop (sum, last) = (0, [0]) for k < 32 do
+    (sum + events[k], [events[k]])
+
+#[compute]
+entry serial_prefix_mixed_consumers(events: []i32)
+  ([1]i32, []i32, []i32, [1]i32) =
+  let (sum, last) = serial_prefix(events) in
+  ([sum],
+   map(|i| i + sum + last[0], iota(1024)),
+   map(|i| i + sum, iota(128)),
+   last)
+"#,
+    )
+    .expect("mixed composite-prefix consumers compile");
+    let pipeline = scalar_prelude_pipeline(&lowered, "serial_prefix_mixed_consumers");
+    let events = pipeline
+        .bindings
+        .iter()
+        .position(|binding| matches!(binding, Binding::StorageBuffer { name, .. } if name == "events"))
+        .expect("the source events input remains published");
+    let prefix_stages =
+        pipeline.stages.iter().filter(|stage| stage.reads.contains(&events)).collect::<Vec<_>>();
+    assert_eq!(prefix_stages.len(), 1, "the serial input is read by one producer");
+    let prefix = prefix_stages[0];
+    assert!(
+        is_singleton_stage(prefix),
+        "the serial prefix producer executes once"
+    );
+    assert!(spirv_entry_reaches_loop(&lowered.spirv, &prefix.entry_point));
+
+    let consumers =
+        pipeline.stages.iter().filter(|stage| stage.entry_point != prefix.entry_point).collect::<Vec<_>>();
+    assert!(
+        consumers.iter().all(|stage| !spirv_entry_reaches_loop(&lowered.spirv, &stage.entry_point)),
+        "neither fixed-output writers nor parallel maps replay the prefix loop"
+    );
+    assert_eq!(
+        prefix
+            .writes
+            .iter()
+            .filter(|binding| consumers.iter().all(|stage| stage.reads.contains(binding)))
+            .count(),
+        1,
+        "one composite handoff feeds every fixed and parallel consumer"
+    );
+    let maps = consumers.iter().filter(|stage| !is_singleton_stage(stage)).copied().collect::<Vec<_>>();
+    assert_eq!(maps.len(), 2);
+    assert!(maps.iter().any(|stage| matches!(
+        stage.dispatch_size,
+        DispatchSize::DerivedFrom {
+            len: DispatchLen::Fixed { count: 1024 },
+            ..
+        }
+    )));
+    assert!(maps.iter().any(|stage| matches!(
+        stage.dispatch_size,
+        DispatchSize::DerivedFrom {
+            len: DispatchLen::Fixed { count: 128 },
+            ..
+        }
+    )));
+}
+
+#[test]
+fn mixed_fixed_parallel_output_preserves_independent_load_and_serial_prepass() {
+    use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize};
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry mixed_fixed_parallel_prefix_ice(events: []i32) ([1]i32, []i32) =
+  let sum = loop total = 0 for k < 1 do total + events[k] in
+  ([events[0]], map(|i| i + sum, iota(1)))
+"#,
+    )
+    .expect("independent fixed output and serial-prefix map compile");
+    let pipeline = scalar_prelude_pipeline(&lowered, "mixed_fixed_parallel_prefix_ice");
+    assert_eq!(pipeline.stages.len(), 3, "fixed output, serial prepass, and map");
+    let events = pipeline
+        .bindings
+        .iter()
+        .position(|binding| matches!(binding, Binding::StorageBuffer { name, .. } if name == "events"))
+        .expect("the source events input remains published");
+    let loop_stages = pipeline
+        .stages
+        .iter()
+        .filter(|stage| spirv_entry_reaches_loop(&lowered.spirv, &stage.entry_point))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        loop_stages.len(),
+        1,
+        "the serial producer remains present exactly once"
+    );
+    let prepass = loop_stages[0];
+    assert!(is_singleton_stage(prepass));
+    assert!(prepass.reads.contains(&events));
+
+    let map = pipeline.stages.iter().find(|stage| !is_singleton_stage(stage)).expect("parallel map stage");
+    assert!(matches!(
+        map.dispatch_size,
+        DispatchSize::DerivedFrom {
+            len: DispatchLen::Fixed { count: 1 },
+            ..
+        }
+    ));
+    assert!(
+        !map.reads.contains(&events),
+        "the map reads the handoff, not the prefix input"
+    );
+    assert_eq!(
+        prepass.writes.iter().filter(|binding| map.reads.contains(binding)).count(),
+        1,
+        "the serial prepass dominates the map through one handoff"
+    );
+
+    let fixed = pipeline
+        .stages
+        .iter()
+        .find(|stage| stage.entry_point != prepass.entry_point && is_singleton_stage(stage))
+        .expect("independent fixed-output stage");
+    assert!(
+        fixed.reads.contains(&events),
+        "the fixed output retains its own input load"
+    );
+    assert!(!spirv_entry_reaches_loop(&lowered.spirv, &fixed.entry_point));
+}
+
+#[test]
+fn conditional_state_prefix_publishes_all_live_outs_to_mixed_consumers() {
+    use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize};
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+type ui_state = { tool: i32 }
+type stroke_head = { count: i32 }
+type state_update = { ui: ui_state, head: stroke_head, emit_count: i32 }
+
+def fold_ui(ui_in: []i32, events: []i32) i32 =
+  loop tool = ui_in[0] for k < 2 do tool + events[k]
+
+def next_state(ui_in: []i32, head_in: []i32, events: []i32)
+  (state_update, [2]i32) =
+  let tool = fold_ui(ui_in, events)
+  let (count, emitted) = loop (n, out) = (head_in[0], [0, 0]) for k < 2 do
+    if events[k] > 0 then
+      if n < 2 then (n + 1, out with [n] = events[k]) else (n, out)
+    else (n, out) in
+  ({ ui = { tool = tool }, head = { count = count }, emit_count = count }, emitted)
+
+def update_points(points_in: []i32, update: state_update, emitted: [2]i32)
+  []i32 =
+  map(|i| points_in[i] + update.emit_count + emitted[i % 2], iota(1024))
+
+def update_items(items_in: []i32, update: state_update) []i32 =
+  map(|i| items_in[i] + update.emit_count, iota(128))
+
+#[compute]
+entry mixed_fixed_parallel_prefix_ice(ui_in: []i32, points_in: []i32,
+                                      items_in: []i32, head_in: []i32,
+                                      events: []i32)
+  ([1]i32, []i32, []i32, [1]i32) =
+  let (update, emitted) = next_state(ui_in, head_in, events) in
+  ([update.ui.tool], update_points(points_in, update, emitted),
+   update_items(items_in, update), [update.head.count])
+"#,
+    )
+    .expect("conditional state prefix compiles");
+    let pipeline = scalar_prelude_pipeline(&lowered, "mixed_fixed_parallel_prefix_ice");
+    let prefix_inputs = pipeline
+        .bindings
+        .iter()
+        .enumerate()
+        .filter_map(|(index, binding)| {
+            matches!(binding, Binding::StorageBuffer { name, .. }
+                if name == "ui_in" || name == "head_in" || name == "events")
+            .then_some(index)
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(prefix_inputs.len(), 3);
+    let loop_stages = pipeline
+        .stages
+        .iter()
+        .filter(|stage| spirv_entry_reaches_loop(&lowered.spirv, &stage.entry_point))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        loop_stages.len(),
+        1,
+        "both ordered folds remain in one producer stage"
+    );
+    let prepass = loop_stages[0];
+    assert!(is_singleton_stage(prepass));
+    assert!(prefix_inputs.iter().all(|binding| prepass.reads.contains(binding)));
+
+    let consumers =
+        pipeline.stages.iter().filter(|stage| stage.entry_point != prepass.entry_point).collect::<Vec<_>>();
+    assert!(
+        consumers.iter().all(|stage| prefix_inputs.iter().all(|binding| !stage.reads.contains(binding))),
+        "fixed and parallel consumers read handoffs instead of rebuilding the state prefix"
+    );
+    assert!(consumers.iter().all(|stage| !spirv_entry_reaches_loop(&lowered.spirv, &stage.entry_point)));
+    let maps = consumers.iter().filter(|stage| !is_singleton_stage(stage)).copied().collect::<Vec<_>>();
+    assert_eq!(maps.len(), 2);
+    assert!(maps.iter().any(|stage| matches!(
+        stage.dispatch_size,
+        DispatchSize::DerivedFrom {
+            len: DispatchLen::Fixed { count: 1024 },
+            ..
+        }
+    )));
+    assert!(maps.iter().any(|stage| matches!(
+        stage.dispatch_size,
+        DispatchSize::DerivedFrom {
+            len: DispatchLen::Fixed { count: 128 },
+            ..
+        }
+    )));
+    assert_eq!(
+        prepass
+            .writes
+            .iter()
+            .filter(|binding| maps.iter().all(|stage| stage.reads.contains(binding)))
+            .count(),
+        2,
+        "the stroke tuple and earlier tool result both cross the prepass boundary"
+    );
+}
+
+#[test]
 fn conditional_scalar_prefix_uses_the_general_residency_policy() {
     let source = format!(
         "{SCALAR_PRELUDE_FOLD}\n\

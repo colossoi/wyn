@@ -248,6 +248,63 @@ fn captured_value_recipe_projects_a_structured_selection_prefix() {
 }
 
 #[test]
+fn structured_value_recipe_leaves_independent_continuation_effect_in_source() {
+    let mut graph = EGraph::new();
+    let entry = graph.skeleton.entry;
+    let continuation = graph.skeleton.create_block();
+    let place = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    let prefix_value = graph.alloc_side_effect_result(u32_ty());
+    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::Load),
+        operand_nodes: smallvec![place],
+        result: Some(prefix_value),
+        effects: Some((EffectToken::from(0), EffectToken::from(1))),
+        span: None,
+    });
+    let result = graph.add_block_param(continuation, u32_ty());
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
+        target: continuation,
+        args: vec![prefix_value],
+    };
+    let independent = graph.alloc_side_effect_result(u32_ty());
+    graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::Load),
+        operand_nodes: smallvec![place],
+        result: Some(independent),
+        effects: Some((EffectToken::from(1), EffectToken::from(2))),
+        span: None,
+    });
+    graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::Store),
+        operand_nodes: smallvec![place, result],
+        result: None,
+        effects: Some((EffectToken::from(2), EffectToken::from(3))),
+        span: None,
+    });
+    graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
+
+    let recipe = GraphProjector::new(&graph, &LookupMap::new())
+        .captured_value_recipe(
+            result,
+            SideEffectSite {
+                block: continuation,
+                index: 1,
+            },
+        )
+        .expect("structured recipe");
+    assert!(recipe.projection.source_effects().contains(&SideEffectSite {
+        block: entry,
+        index: 0,
+    }));
+    assert!(!recipe.projection.source_effects().contains(&SideEffectSite {
+        block: continuation,
+        index: 0,
+    }));
+    assert!(recipe.projection.node(prefix_value).is_some());
+    assert!(recipe.projection.node(independent).is_none());
+}
+
+#[test]
 fn selected_operation_recipe_detaches_an_independent_continuation_effect() {
     let mut graph = EGraph::new();
     let entry = graph.skeleton.entry;

@@ -361,8 +361,8 @@ impl<'a> GraphProjector<'a> {
     ) -> Result<ProjectionSelection, String> {
         let blocks = self.projected_blocks(mode)?;
         let allowed_effects = self.allowed_effects(mode, &blocks);
-        if matches!(mode, ProjectionMode::StructuredPrefix { .. }) {
-            selected.extend(allowed_effects.iter().copied());
+        if let ProjectionMode::StructuredPrefix { continuation, .. } = mode {
+            selected.extend(allowed_effects.iter().filter(|site| site.block != continuation).copied());
         }
         let mut roots = self.projected_terminator_values(mode, &blocks);
         roots.extend(extra_values);
