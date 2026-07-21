@@ -1147,9 +1147,10 @@ entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
     assert_eq!(phases[3].entry_point, "r_filter_scan_phase3_add_offsets");
     assert_eq!(phases[4].entry_point, "r");
     assert!(matches!(phases[0].domain, KernelDomain::ResourceElements { .. }));
-    // The scan runs a fixed worker grid so each worker scans a large chunk;
-    // dispatching it per-element (Elements) would collapse the chunk to 1 and
-    // leave phase-2 an O(len) serial scan.
+    // Scan phases 1 and 3 run the same fixed worker grid: phase 1 records one
+    // block sum per worker, and phase 3 uses that same worker id to load and
+    // apply the block's exclusive offset. Dispatching either phase per element
+    // would give the two phases different chunk ownership.
     assert!(matches!(
         phases[1].domain,
         KernelDomain::Fixed {
@@ -1166,7 +1167,8 @@ entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
         phases[2].domain,
         KernelDomain::Fixed { x: 1, y: 1, z: 1 }
     ));
-    assert!(matches!(phases[3].domain, KernelDomain::ResourceElements { .. }));
+    assert_eq!(phases[3].domain, phases[1].domain);
+    assert_eq!(phases[3].workgroup_size, phases[1].workgroup_size);
     assert!(matches!(phases[4].domain, KernelDomain::ResourceElements { .. }));
 
     let thread_id = catalog().known().thread_id;
@@ -1214,6 +1216,8 @@ entry r(xs: []u32) (?k. [k]u32, [1]u32) =
     assert_eq!(compute.stages[1].entry_point, "r_filter_scan");
     assert_eq!(compute.stages[2].entry_point, "r_filter_scan_phase2_scan_sums");
     assert_eq!(compute.stages[3].entry_point, "r_filter_scan_phase3_add_offsets");
+    assert_eq!(compute.stages[3].dispatch_size, compute.stages[1].dispatch_size);
+    assert_eq!(compute.stages[3].workgroup_size, compute.stages[1].workgroup_size);
 }
 
 #[test]
@@ -1287,6 +1291,51 @@ entry compact_i32() []i32 =
     )
     .expect("filter over iota emits SPIR-V");
     assert_naga_accepts_spirv(&lowered.spirv);
+}
+
+#[test]
+fn filter_iota_scan_apply_offsets_reuses_phase1_worker_grid() {
+    use crate::pipeline_descriptor::{DispatchSize, Pipeline};
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry compact_iota() []i32 =
+  filter(|i| i % 2 == 0, iota(39592))
+"#,
+    )
+    .expect("large filter over iota emits SPIR-V");
+    let compute = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) => Some(compute),
+            _ => None,
+        })
+        .expect("filter compute pipeline");
+    let phase1 = compute
+        .stages
+        .iter()
+        .find(|stage| stage.entry_point == "compact_iota_filter_scan")
+        .expect("filter scan phase 1");
+    let phase3 = compute
+        .stages
+        .iter()
+        .find(|stage| stage.entry_point == "compact_iota_filter_scan_phase3_add_offsets")
+        .expect("filter scan phase 3");
+
+    assert_eq!(phase3.workgroup_size, phase1.workgroup_size);
+    assert_eq!(phase3.dispatch_size, phase1.dispatch_size);
+    assert!(matches!(
+        phase1.dispatch_size,
+        DispatchSize::Fixed {
+            x: crate::egir::parallelize::tests::FILTER_SCAN_GROUPS,
+            y: 1,
+            z: 1,
+            explicit: true,
+        }
+    ));
 }
 
 #[test]

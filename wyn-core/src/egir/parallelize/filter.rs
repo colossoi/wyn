@@ -26,8 +26,7 @@ struct FilterKernelFamily {
     combine: BuiltPhase,
     apply_offsets: BuiltPhase,
     scatter: BuiltPhase,
-    scan_workgroup_width: u32,
-    scan_groups: u32,
+    scan_grid: FilterScanGrid,
 }
 
 struct FilterKernelFamilyBuilder<'lowering, 'resources, 'effects> {
@@ -69,8 +68,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             combine,
             apply_offsets,
             scatter,
-            scan_workgroup_width: self.candidate.scan_workgroup_width,
-            scan_groups: self.candidate.scan_groups,
+            scan_grid: self.candidate.scan_grid,
         })
     }
 
@@ -110,7 +108,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         let spec = ProjectionSpec::unit(
             format!("{}_filter_scan", self.entry.name),
             ExecutionModel::Compute {
-                local_size: (self.candidate.scan_workgroup_width, 1, 1),
+                local_size: self.candidate.scan_grid.local_size(),
             },
             storage,
         );
@@ -155,7 +153,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             elem_ty: self.elem_ty.clone(),
             output_resource: self.work.offsets.0,
             block_offsets: self.work.block_offsets.0,
-            width: self.candidate.scan_workgroup_width,
+            width: self.candidate.scan_grid.workgroup_width(),
         };
         let mut apply_offsets = apply_offsets.build(self.lowering.effect_ids)?;
         apply_manifest_resource_sizes(&mut apply_offsets.body, self.lowering.resources);
@@ -214,9 +212,10 @@ impl FilterKernelFamily {
             combine,
             apply_offsets,
             scatter,
-            scan_workgroup_width,
-            scan_groups,
+            scan_grid,
         } = self;
+        let scan_workgroup_width = scan_grid.workgroup_width();
+        let scan_dispatch = schedule::KernelDispatch::explicit(scan_grid.domain());
         let scatter = scatter
             .filter(
                 schedule::KernelDispatch::inferred(domain.clone()),
@@ -240,11 +239,7 @@ impl FilterKernelFamily {
         // The scan runs a fixed worker grid so each worker scans a large chunk;
         // flags and scatter remain one-thread-per-input-element.
         let scan = scan.filter(
-            schedule::KernelDispatch::explicit(KernelDomain::Fixed {
-                x: scan_groups,
-                y: 1,
-                z: 1,
-            }),
+            scan_dispatch.clone(),
             filter_soac::ParallelStage::Scan,
             filter_soac::ParallelConfig {
                 buffers: work,
@@ -256,8 +251,7 @@ impl FilterKernelFamily {
             schedule::KernelDispatch::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
             "filter_combine",
         );
-        let apply_offsets =
-            apply_offsets.compute(schedule::KernelDispatch::explicit(domain), "filter_apply_offsets");
+        let apply_offsets = apply_offsets.compute(scan_dispatch, "filter_apply_offsets");
         schedule.replace_chain(
             kernel,
             vec![flags, scan, combine, apply_offsets],
@@ -268,19 +262,46 @@ impl FilterKernelFamily {
     }
 }
 
+#[derive(Clone, Copy)]
+struct FilterScanGrid {
+    workgroup_width: u32,
+    workgroups_x: u32,
+}
+
+impl FilterScanGrid {
+    fn workgroup_width(self) -> u32 {
+        self.workgroup_width
+    }
+
+    fn worker_count(self) -> u32 {
+        self.workgroup_width * self.workgroups_x
+    }
+
+    fn local_size(self) -> (u32, u32, u32) {
+        (self.workgroup_width, 1, 1)
+    }
+
+    fn domain(self) -> schedule::KernelDomain {
+        schedule::KernelDomain::Fixed {
+            x: self.workgroups_x,
+            y: 1,
+            z: 1,
+        }
+    }
+}
+
 #[derive(Clone)]
 /// Complete graph-local runtime-filter recipe, consumed before entry mutation.
 pub(super) struct FilterCandidate {
     pub semantic_id: SemanticOpId,
     pub space: SegSpace,
     storage: StoredFilterStorage,
-    scan_workgroup_width: u32,
-    scan_groups: u32,
+    scan_grid: FilterScanGrid,
 }
 
 impl FilterCandidate {
     pub(super) fn scan_worker_count(&self) -> u32 {
-        self.scan_workgroup_width * self.scan_groups
+        self.scan_grid.worker_count()
     }
 }
 
@@ -330,8 +351,10 @@ pub(super) fn analyze_filter_candidate(
                 scratch: *scratch,
                 length: *len_out,
             },
-            scan_workgroup_width: REDUCE_PHASE1_WIDTH,
-            scan_groups: FILTER_SCAN_GROUPS,
+            scan_grid: FilterScanGrid {
+                workgroup_width: REDUCE_PHASE1_WIDTH,
+                workgroups_x: FILTER_SCAN_GROUPS,
+            },
         }),
         filter_soac::RuntimeLength::ViewOnly => CandidateSelection::Fallback,
     })
