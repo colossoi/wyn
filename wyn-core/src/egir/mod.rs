@@ -41,6 +41,9 @@ pub mod realize_outputs;
 pub mod reify;
 pub(crate) mod semantic_graph;
 pub(crate) mod semantic_opt;
+// The analysis API intentionally lands before its scheduling consumer.
+#[allow(dead_code)]
+pub(crate) mod stage_variance;
 pub mod verify_no_abstract;
 pub(crate) mod verify_physical;
 
