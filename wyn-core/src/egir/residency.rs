@@ -31,15 +31,28 @@ enum MaterializationPlan {
     FixedOperation {
         entry: usize,
         kind: FixedMaterializationKind,
-        operation: FixedOperationMaterialization,
+        operation: ProjectedOperation,
+        projected_result: NodeId,
+        outputs: Vec<OutputSpec>,
     },
     RuntimeArray {
         entry: usize,
-        operation: RuntimeArrayMaterialization,
+        operation: ProjectedOperation,
+        /// Variable-cardinality array represented by capacity storage plus a
+        /// separately stored logical length.
+        scratch: ResourceId,
+        elem_ty: Type<TypeName>,
+        result_ty: Type<TypeName>,
+        size: LogicalSize,
     },
     StagePrelude {
         entry: usize,
-        prelude: StagePreludeMaterialization,
+        root: NodeId,
+        insertion_site: Option<SideEffectSite>,
+        recipe: super::graph_projector::ProjectedValueRecipe,
+        elem_ty: Type<TypeName>,
+        size: LogicalSize,
+        live_outs: Vec<ParallelPreludeLiveOut>,
     },
 }
 
@@ -56,30 +69,13 @@ impl FixedMaterializationKind {
     }
 }
 
-struct FixedOperationMaterialization {
-    result: NodeId,
-    producer: SemanticOpId,
-    source_site: SideEffectSite,
-    projected_site: SideEffectSite,
-    projected_result: NodeId,
-    projection: super::graph_projector::GraphProjection,
-    space: SegSpace<SemanticResourceRef>,
-    outputs: Vec<OutputSpec>,
-}
-
-struct RuntimeArrayMaterialization {
+struct ProjectedOperation {
     result: NodeId,
     producer: SemanticOpId,
     source_site: SideEffectSite,
     projected_site: SideEffectSite,
     projection: super::graph_projector::GraphProjection,
     space: SegSpace<SemanticResourceRef>,
-    /// Variable-cardinality array represented by capacity storage plus a
-    /// separately stored logical length.
-    scratch: ResourceId,
-    elem_ty: Type<TypeName>,
-    result_ty: Type<TypeName>,
-    size: LogicalSize,
 }
 
 struct RuntimeArrayHandoff {
@@ -93,15 +89,6 @@ struct RuntimeArrayHandoff {
 struct ParallelPrelude {
     root: NodeId,
     consumers: Vec<SemanticOpId>,
-}
-
-struct StagePreludeMaterialization {
-    root: NodeId,
-    insertion_site: Option<SideEffectSite>,
-    recipe: super::graph_projector::ProjectedValueRecipe,
-    elem_ty: Type<TypeName>,
-    size: LogicalSize,
-    live_outs: Vec<ParallelPreludeLiveOut>,
 }
 
 struct ParallelPreludeLiveOut {
@@ -162,14 +149,51 @@ fn apply_materialization(
             entry,
             kind,
             operation,
+            projected_result,
+            outputs,
         } => {
-            materialize_operation_result(program, entry, kind, operation, effect_ids)?;
+            materialize_operation_result(
+                program,
+                entry,
+                kind,
+                operation,
+                projected_result,
+                outputs,
+                effect_ids,
+            )?;
         }
-        MaterializationPlan::RuntimeArray { entry, operation } => {
-            materialize_runtime_array_result(program, entry, operation, effect_ids)?;
+        MaterializationPlan::RuntimeArray {
+            entry,
+            operation,
+            scratch,
+            elem_ty,
+            result_ty,
+            size,
+        } => {
+            materialize_runtime_array_result(
+                program, entry, operation, scratch, elem_ty, result_ty, size, effect_ids,
+            )?;
         }
-        MaterializationPlan::StagePrelude { entry, prelude } => {
-            materialize_stage_prelude(program, entry, prelude, effect_ids);
+        MaterializationPlan::StagePrelude {
+            entry,
+            root,
+            insertion_site,
+            recipe,
+            elem_ty,
+            size,
+            live_outs,
+        } => {
+            materialize_stage_prelude(
+                program,
+                entry,
+                root,
+                insertion_site,
+                recipe,
+                elem_ty,
+                size,
+                live_outs,
+                effect_ids,
+            );
         }
     }
     Ok(())
@@ -272,18 +296,18 @@ fn filter_runtime_array_plan(
         .ok_or_else(|| format!("runtime-array producer {producer:?} has no legal logical storage size"))?;
     Ok(Some(MaterializationPlan::RuntimeArray {
         entry: entry_index,
-        operation: RuntimeArrayMaterialization {
+        operation: ProjectedOperation {
             result,
             producer,
             source_site,
             projected_site,
             projection,
             space: space.clone(),
-            scratch: scratch.0,
-            size,
-            elem_ty,
-            result_ty,
         },
+        scratch: scratch.0,
+        size,
+        elem_ty,
+        result_ty,
     }))
 }
 
@@ -384,16 +408,16 @@ fn operation_result_plan(
     Ok(Some(MaterializationPlan::FixedOperation {
         entry: entry_index,
         kind,
-        operation: FixedOperationMaterialization {
+        operation: ProjectedOperation {
             result,
             producer,
             source_site,
             projected_site,
-            projected_result,
             projection,
             space: space.clone(),
-            outputs: output_specs,
         },
+        projected_result,
+        outputs: output_specs,
     }))
 }
 
@@ -455,14 +479,12 @@ fn plan_parallel_prelude(program: &AllocatedProgram) -> Option<MaterializationPl
             }
             return Some(MaterializationPlan::StagePrelude {
                 entry: entry_index,
-                prelude: StagePreludeMaterialization {
-                    root: prelude.root,
-                    insertion_site: Some(insertion_site),
-                    recipe,
-                    elem_ty: ty.clone(),
-                    size: LogicalSize::FixedBytes(u64::from(stride)),
-                    live_outs,
-                },
+                root: prelude.root,
+                insertion_site: Some(insertion_site),
+                recipe,
+                elem_ty: ty.clone(),
+                size: LogicalSize::FixedBytes(u64::from(stride)),
+                live_outs,
             });
         }
     }
@@ -510,14 +532,12 @@ fn plan_direct_stage_prelude(program: &AllocatedProgram) -> Option<Materializati
             }
             return Some(MaterializationPlan::StagePrelude {
                 entry: entry_index,
-                prelude: StagePreludeMaterialization {
-                    root,
-                    insertion_site: None,
-                    recipe,
-                    elem_ty: ty.clone(),
-                    size: LogicalSize::FixedBytes(u64::from(stride)),
-                    live_outs,
-                },
+                root,
+                insertion_site: None,
+                recipe,
+                elem_ty: ty.clone(),
+                size: LogicalSize::FixedBytes(u64::from(stride)),
+                live_outs,
             });
         }
     }
@@ -792,18 +812,18 @@ fn materialize_operation_result(
     program: &mut AllocatedProgram,
     entry_index: usize,
     kind: FixedMaterializationKind,
-    operation: FixedOperationMaterialization,
+    operation: ProjectedOperation,
+    projected_result: NodeId,
+    output_specs: Vec<OutputSpec>,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), String> {
-    let FixedOperationMaterialization {
+    let ProjectedOperation {
         result,
         producer: producer_id,
         source_site,
         projected_site,
-        projected_result,
         projection,
         space,
-        outputs: output_specs,
     } = operation;
     let materialization = program.materializations.alloc_id();
     let entry = &program.entry_points[entry_index];
@@ -891,20 +911,20 @@ fn materialize_operation_result(
 fn materialize_runtime_array_result(
     program: &mut AllocatedProgram,
     entry_index: usize,
-    operation: RuntimeArrayMaterialization,
+    operation: ProjectedOperation,
+    scratch: ResourceId,
+    elem_ty: Type<TypeName>,
+    result_ty: Type<TypeName>,
+    size: LogicalSize,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), String> {
-    let RuntimeArrayMaterialization {
+    let ProjectedOperation {
         result,
         producer: producer_id,
         source_site,
         projected_site,
         projection,
         space,
-        scratch,
-        elem_ty,
-        result_ty,
-        size,
     } = operation;
     let materialization = program.materializations.alloc_id();
     let entry = &program.entry_points[entry_index];
@@ -1255,17 +1275,14 @@ fn rewrite_materialized_operation_source(
 fn materialize_stage_prelude(
     program: &mut AllocatedProgram,
     entry_index: usize,
-    prelude: StagePreludeMaterialization,
+    root: NodeId,
+    insertion_site: Option<SideEffectSite>,
+    recipe: super::graph_projector::ProjectedValueRecipe,
+    elem_ty: Type<TypeName>,
+    size: LogicalSize,
+    live_outs: Vec<ParallelPreludeLiveOut>,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
-    let StagePreludeMaterialization {
-        root,
-        insertion_site,
-        recipe,
-        elem_ty,
-        size,
-        live_outs,
-    } = prelude;
     let super::graph_projector::ProjectedValueRecipe {
         projection,
         value: projected_root,
