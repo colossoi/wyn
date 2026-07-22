@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::builtins::{catalog, Purity};
 use crate::flow::{BlockId, ControlHeader};
-use crate::interface::StorageAccess;
+use crate::interface::{EntryInputKind, StorageAccess};
 use crate::op::OpTag;
 use crate::ssa::types::ConstantValue;
 use crate::LookupMap;
@@ -61,10 +61,18 @@ pub(crate) fn analyze_prelude(
     recipe: &super::graph_projector::ProjectedValueRecipe,
 ) -> Option<PreludeAnalysis> {
     let graph = &recipe.projection.graph;
+    let dependence = super::stage_variance::StageDependenceAnalysis::for_entry_graph(
+        entry,
+        graph,
+        &recipe.projection.control_headers,
+    )
+    .ok()?;
     let reachable = graph_ops::execution_value_producer_closure(graph, [recipe.value]).nodes;
     for node in reachable {
         if let ENode::FuncParam { index } = graph.nodes[node] {
-            if !entry_input_is_invariant(entry, index) {
+            if !dependence.dependence(node).is_stage_invariant()
+                || !entry_parameter_is_scalar_relocatable(entry, index)
+            {
                 return None;
             }
         }
@@ -120,25 +128,18 @@ pub(crate) fn materialization_is_profitable(producer_cost: u64, invocations: u64
     recompute.saturating_mul(4) >= handoff.saturating_mul(5)
 }
 
-fn entry_input_is_invariant(entry: &SemanticEntry, index: usize) -> bool {
-    let Some(input) = entry.inputs.get(index) else {
-        return false;
-    };
-    if input.storage_image_binding().is_some()
-        || input.texture_binding().is_some()
-        || input.sampler_binding().is_some()
-        || input.decoration().is_some()
-    {
-        return false;
-    }
-    if input.uniform_binding().is_some() || input.push_constant().is_some() {
-        return true;
-    }
-    input.storage_binding().is_some()
-        && !matches!(
-            input.storage_access(),
-            Some(StorageAccess::WriteOnly | StorageAccess::ReadWrite)
+pub(crate) fn entry_parameter_is_scalar_relocatable(entry: &SemanticEntry, index: usize) -> bool {
+    match super::stage_variance::entry_parameter_input_kind(entry, index) {
+        Some(EntryInputKind::Uniform { .. } | EntryInputKind::PushConstant { .. }) => true,
+        Some(EntryInputKind::Storage { access, .. }) => *access == StorageAccess::ReadOnly,
+        Some(
+            EntryInputKind::Value { .. }
+            | EntryInputKind::Texture { .. }
+            | EntryInputKind::Sampler { .. }
+            | EntryInputKind::StorageImage { .. },
         )
+        | None => false,
+    }
 }
 
 fn effect_cost(

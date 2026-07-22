@@ -125,10 +125,38 @@ pub(crate) fn execution_value_producer_closure<P: ValueProducerPhase>(
     graph: &EGraph<P>,
     result_roots: impl IntoIterator<Item = NodeId>,
 ) -> ValueProducerClosure {
-    let execution_roots = graph.skeleton.blocks.iter().flat_map(|(_, block)| {
-        block.side_effects.iter().flat_map(P::effect_value_inputs).chain(block.term.referenced_nodes())
-    });
-    value_producer_closure(graph, execution_roots.chain(result_roots))
+    value_producer_closure(
+        graph,
+        execution_value_roots(graph).into_iter().chain(result_roots),
+    )
+}
+
+/// Values referenced directly by executable effects and terminators.
+///
+/// The phase adapter includes SOAC captures and other producer metadata that
+/// the phase-agnostic IR cannot see through `P::Soac`.
+pub(crate) fn execution_value_roots<P: ValueProducerPhase>(graph: &EGraph<P>) -> Vec<NodeId> {
+    graph
+        .skeleton
+        .blocks
+        .iter()
+        .flat_map(|(_, block)| {
+            block.side_effects.iter().flat_map(P::effect_value_inputs).chain(block.term.referenced_nodes())
+        })
+        .collect()
+}
+
+/// Pure-graph reachability from every executable effect and terminator.
+pub(crate) fn reachable_execution_values<P: ValueProducerPhase>(graph: &EGraph<P>) -> Vec<NodeId> {
+    wyn_graph::reachable_from_ordered(
+        execution_value_roots(graph),
+        wyn_graph::WalkOrder::DepthFirst,
+        |node, out| {
+            if let Some(definition) = graph.nodes.get(node) {
+                out.extend(definition.children());
+            }
+        },
+    )
 }
 
 /// Storage resources read by the complete producer closure behind `roots`.

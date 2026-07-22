@@ -140,16 +140,7 @@ fn find_in_graph(
 }
 
 fn live_nodes(graph: &EGraph) -> HashSet<NodeId> {
-    let roots = graph.skeleton.blocks.iter().flat_map(|(_, block)| {
-        block
-            .side_effects
-            .iter()
-            .flat_map(SideEffect::referenced_nodes)
-            .chain(block.term.referenced_nodes())
-    });
-    wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
-        out.extend(graph.nodes[node].children());
-    })
+    graph_ops::reachable_execution_values(graph).into_iter().collect()
 }
 
 fn is_length_of(graph: &EGraph, node: NodeId, filter_result: NodeId) -> bool {

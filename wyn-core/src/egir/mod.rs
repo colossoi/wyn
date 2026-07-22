@@ -41,7 +41,9 @@ pub mod realize_outputs;
 pub mod reify;
 pub(crate) mod semantic_graph;
 pub(crate) mod semantic_opt;
-// The analysis API intentionally lands before its scheduling consumer.
+pub(crate) mod stage_lift;
+// Keep the complete query surface available to later scheduling consumers;
+// lifting and residency currently use only a subset of the recorded facts.
 #[allow(dead_code)]
 pub(crate) mod stage_variance;
 pub mod verify_no_abstract;

@@ -3089,6 +3089,48 @@ fn expensive_scalar_source_is_profitable_for_one_map() {
     assert_eq!(stages.iter().filter(|stage| is_singleton_stage(stage)).count(), 1);
 }
 
+#[test]
+fn mixed_stage_call_lifts_its_uniform_subgraph_into_a_scalar_prepass() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+type frame_globals = { factor: i32 }
+
+def mix_lane_with_frame(x: i32, frame: frame_globals) i32 =
+  let a0 = frame.factor * 1664525 + 1013904223
+  let a1 = a0 * 1664525 + 1013904223
+  let a2 = a1 * 1664525 + 1013904223
+  let a3 = a2 * 1664525 + 1013904223
+  let a4 = a3 * 1664525 + 1013904223
+  let a5 = a4 * 1664525 + 1013904223
+  let a6 = a5 * 1664525 + 1013904223
+  let a7 = a6 * 1664525 + 1013904223
+  let a8 = a7 * 1664525 + 1013904223
+  let a9 = a8 * 1664525 + 1013904223
+  let a10 = a9 * 1664525 + 1013904223
+  let a11 = a10 * 1664525 + 1013904223 in
+  x ^ a11
+
+#[compute]
+entry mixed_stage_uniform_call(
+    #[uniform(set=1, binding=0)] frame: frame_globals) []i32 =
+  map(|i| mix_lane_with_frame(i, frame), iota(1024))
+"#,
+    )
+    .expect("mixed-stage pure call compiles");
+    let pipeline = scalar_prelude_pipeline(&lowered, "mixed_stage_uniform_call");
+    let stages = &pipeline.stages;
+    assert_eq!(stages.len(), 2, "one uniform producer and one map stage");
+    assert_eq!(stages.iter().filter(|stage| is_singleton_stage(stage)).count(), 1);
+    assert!(pipeline.bindings.iter().any(|binding| {
+        matches!(binding, crate::pipeline_descriptor::Binding::Uniform { name, .. } if name == "frame")
+    }));
+    let map = stages.iter().find(|stage| !is_singleton_stage(stage)).unwrap();
+    assert!(
+        !spirv_entry_interface_has_storage_binding(&lowered.spirv, &map.entry_point, 1, 0),
+        "the consumer interface contains only the scalar handoff, not the original uniform"
+    );
+}
+
 fn assert_scalar_prefix_emits_valid_wgsl(source: &str) {
     let wgsl = lower_semantic_egir(
         compile_to_semantic_egir(source),

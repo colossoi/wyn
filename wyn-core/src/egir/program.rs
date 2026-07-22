@@ -25,8 +25,8 @@ use std::ops::{Deref, DerefMut, Index, IndexMut};
 use super::parallelize::KernelPlan;
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, EgirPhase, NodeId, Physical, Raw, Scheduled, SegBody, SegExtent, SegSpace, Semantic, Soac,
-    SoacEffect, WynLanguage,
+    EGraph, EgirPhase, NodeId, Physical, Raw, Scheduled, SegBody, SegExtent, SegSpace, Semantic,
+    SideEffectSite, Soac, SoacEffect, WynLanguage,
 };
 
 pub use super::ir::{OutputRoute, OutputSlotId, OutputWriter, RegionInterner, SlotSource};
@@ -1552,6 +1552,16 @@ impl SemanticProgram {
 
     pub(crate) fn entry_ids(&self) -> impl Iterator<Item = SemanticEntryId> + '_ {
         (0..self.ir.entry_points.len()).map(SemanticEntryId)
+    }
+
+    /// Mutably select one segmented body inside an entry-point effect.
+    pub(crate) fn entry_seg_body_mut(
+        &mut self,
+        entry: usize,
+        effect: SideEffectSite,
+        body: usize,
+    ) -> Option<&mut SegBody> {
+        self.ir.entry_points.get_mut(entry)?.graph.skeleton.get_effect_mut(effect)?.seg_body_mut(body)
     }
 }
 

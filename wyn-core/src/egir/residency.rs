@@ -1118,12 +1118,9 @@ fn invocation_invariant(
     block_id: BlockId,
     effects: &HashSet<usize>,
 ) -> bool {
-    if entry.execution_model.is_compute() {
-        return true;
-    }
-    if entry.params.len() != entry.inputs.len() {
+    let Ok(dependence) = super::stage_variance::StageDependenceAnalysis::for_entry(entry) else {
         return false;
-    }
+    };
     let block = &entry.graph.skeleton.blocks[block_id];
     let mut roots = Vec::new();
     for &index in effects {
@@ -1134,11 +1131,8 @@ fn invocation_invariant(
         let Some(ENode::FuncParam { index }) = entry.graph.nodes.get(node) else {
             return true;
         };
-        entry.inputs.get(*index).is_some_and(|input| {
-            input.storage_binding().is_some()
-                || input.uniform_binding().is_some()
-                || input.push_constant().is_some()
-        })
+        dependence.dependence(node).is_stage_invariant()
+            && super::residency_cost::entry_parameter_is_scalar_relocatable(entry, *index)
     })
 }
 
@@ -1795,6 +1789,7 @@ fn materialize_parallel_prelude(
     }
     refresh_resource_reads_for_values(&mut entry.graph, &loaded_values);
     super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph);
+    compact_entry_interface(entry);
 
     inner.materializations.alloc(producer);
 }

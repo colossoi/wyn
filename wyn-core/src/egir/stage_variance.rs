@@ -14,7 +14,7 @@ use smallvec::SmallVec;
 
 use crate::builtins::catalog;
 use crate::flow::{BlockId, ControlHeader, Terminator};
-use crate::interface::EntryInputKind;
+use crate::interface::{EntryInputKind, IoDecoration};
 use crate::{LookupMap, LookupSet};
 
 use super::loop_analysis::LoopAnalysis;
@@ -276,18 +276,18 @@ impl StageDependenceAnalysis {
 
     /// Analyze an entry using its declared interface as parameter seeds.
     pub(crate) fn for_entry(entry: &SemanticEntry) -> Result<Self, String> {
-        let parameter_dependences = entry
-            .params
-            .iter()
-            .map(|(_, name)| {
-                entry
-                    .inputs
-                    .iter()
-                    .find(|input| input.name == *name)
-                    .map_or_else(unknown_dependence, |input| entry_input_dependence(&input.kind))
-            })
-            .collect::<Vec<_>>();
-        Self::for_graph(&entry.graph, &entry.control_headers, &parameter_dependences)
+        Self::for_entry_graph(entry, &entry.graph, &entry.control_headers)
+    }
+
+    /// Analyze a graph projected from `entry`. Function-parameter indices are
+    /// preserved by graph projection, so the source entry remains the
+    /// authority for their stage dependence.
+    pub(crate) fn for_entry_graph<P: EgirPhase>(
+        entry: &SemanticEntry,
+        graph: &EGraph<P>,
+        control_headers: &LookupMap<BlockId, ControlHeader>,
+    ) -> Result<Self, String> {
+        Self::for_graph(graph, control_headers, &entry_parameter_dependences(entry))
     }
 
     /// Analyze one use of a repeated region.
@@ -303,23 +303,16 @@ impl StageDependenceAnalysis {
         let region = program
             .region(body.region)
             .ok_or_else(|| format!("stage-dependence analysis cannot resolve region {}", body.region))?;
-        let leading = region.params.len().checked_sub(body.captures.len()).ok_or_else(|| {
-            format!(
-                "region `{}` has {} parameters but {} captures",
-                region.name,
-                region.params.len(),
-                body.captures.len()
-            )
-        })?;
-        let mut parameter_dependences = vec![
-            StageDependence::from_source(
-                Uniformity::InvocationVarying,
-                DependenceSource::RepeatedRegionInput,
-            );
-            leading
-        ];
-        parameter_dependences.extend(body.captures.iter().map(|capture| enclosing.dependence(*capture)));
+        let parameter_dependences = seg_body_parameter_dependences(region.params.len(), enclosing, body)?;
         Self::for_graph(&region.graph, &region.control_headers, &parameter_dependences)
+    }
+
+    pub(crate) fn seg_body_parameter_dependences(
+        parameter_count: usize,
+        enclosing: &Self,
+        body: &SegBody,
+    ) -> Result<Vec<StageDependence>, String> {
+        seg_body_parameter_dependences(parameter_count, enclosing, body)
     }
 
     pub(crate) fn dependence(&self, node: NodeId) -> StageDependence {
@@ -345,10 +338,48 @@ impl StageDependenceAnalysis {
     }
 }
 
+fn seg_body_parameter_dependences(
+    parameter_count: usize,
+    enclosing: &StageDependenceAnalysis,
+    body: &SegBody,
+) -> Result<Vec<StageDependence>, String> {
+    let leading = parameter_count.checked_sub(body.captures.len()).ok_or_else(|| {
+        format!(
+            "repeated region has {parameter_count} parameters but {} captures",
+            body.captures.len()
+        )
+    })?;
+    let mut parameter_dependences = vec![
+        StageDependence::from_source(
+            Uniformity::InvocationVarying,
+            DependenceSource::RepeatedRegionInput,
+        );
+        leading
+    ];
+    parameter_dependences.extend(body.captures.iter().map(|capture| enclosing.dependence(*capture)));
+    Ok(parameter_dependences)
+}
+
+pub(crate) fn entry_parameter_input_kind(entry: &SemanticEntry, index: usize) -> Option<&EntryInputKind> {
+    let name = &entry.params.get(index)?.1;
+    entry.inputs.iter().find(|input| input.name == *name).map(|input| &input.kind)
+}
+
+fn entry_parameter_dependences(entry: &SemanticEntry) -> Vec<StageDependence> {
+    (0..entry.params.len())
+        .map(|index| {
+            entry_parameter_input_kind(entry, index).map_or_else(unknown_dependence, entry_input_dependence)
+        })
+        .collect()
+}
+
 fn entry_input_dependence(kind: &EntryInputKind) -> StageDependence {
     let (uniformity, source) = match kind {
         EntryInputKind::Uniform { .. } => (Uniformity::StageUniform, DependenceSource::Uniform),
         EntryInputKind::PushConstant { .. } => (Uniformity::StageUniform, DependenceSource::PushConstant),
+        EntryInputKind::Value {
+            decoration: Some(IoDecoration::BuiltIn(spirv::BuiltIn::NumWorkgroups)),
+        } => (Uniformity::StageUniform, DependenceSource::DispatchBuiltin),
         EntryInputKind::Value { .. } => (Uniformity::InvocationVarying, DependenceSource::StageInput),
         EntryInputKind::Storage { .. } => (Uniformity::StageUniform, DependenceSource::Storage),
         EntryInputKind::Texture { .. } => (Uniformity::StageUniform, DependenceSource::Texture),

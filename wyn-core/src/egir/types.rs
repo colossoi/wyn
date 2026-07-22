@@ -74,6 +74,28 @@ impl<P: WynSoacPhase> Soac<P> {
             Self::Hist(op) => vec![&op.body.body],
         }
     }
+
+    pub(crate) fn seg_body_mut(&mut self, index: usize) -> Option<&mut SegBody> {
+        match self {
+            Self::Screma(op) => {
+                let map_count = op.lanes().maps.len();
+                if index < map_count {
+                    return Some(&mut op.lanes_mut().maps[index].body);
+                }
+                let operator_slot = index - map_count;
+                let operator = op.operators_mut().into_iter().nth(operator_slot / 2)?;
+                Some(if operator_slot % 2 == 0 { &mut operator.step } else { &mut operator.combine })
+            }
+            Self::Filter(op) => match (&mut op.body.input, index) {
+                (filter::Input::Mapped { body, .. }, 0) => Some(body),
+                (filter::Input::Mapped { .. }, 1) | (filter::Input::Plain(_), 0) => {
+                    Some(&mut op.body.predicate)
+                }
+                _ => None,
+            },
+            Self::Hist(op) => (index == 0).then_some(&mut op.body.body),
+        }
+    }
 }
 
 impl<P: WynSoacPhase> super::ir::SideEffectKind<P, WynLanguage> {
@@ -558,6 +580,15 @@ impl<R: GraphResource> super::ir::SideEffect<Semantic<R>, WynLanguage> {
             slots.extend(soac.referenced_node_slots());
         }
         slots
+    }
+
+    /// Select a segmented body using the same stable ordering as
+    /// [`Soac::seg_bodies`].
+    pub(crate) fn seg_body_mut(&mut self, index: usize) -> Option<&mut SegBody> {
+        let SideEffectKind::Soac(SoacEffect(_, soac)) = &mut self.kind else {
+            return None;
+        };
+        soac.seg_body_mut(index)
     }
 }
 

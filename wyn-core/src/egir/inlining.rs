@@ -34,6 +34,18 @@ pub(crate) fn inlineable_return_root<P: EgirPhase>(function: &Func<P, WynLanguag
     }
 }
 
+/// Number of callee nodes cloned by [`inline_pure_call`] before caller-side
+/// hash-consing. Returns `None` for bodies the generic inliner cannot clone.
+pub(crate) fn inlineable_node_count<P: EgirPhase>(function: &Func<P, WynLanguage>) -> Option<usize> {
+    let root = inlineable_return_root(function)?;
+    Some(
+        wyn_graph::reachable_from_ordered([root], wyn_graph::WalkOrder::DepthFirst, |node, out| {
+            out.extend(function.graph.nodes[node].children())
+        })
+        .len(),
+    )
+}
+
 /// Inline one pure call by cloning the callee's value DAG into the caller and
 /// substituting each `FuncParam` with the corresponding call operand.
 ///
@@ -80,7 +92,12 @@ pub(crate) fn inline_pure_call<P: EgirPhase>(
     let root = inlineable_return_root(callee)
         .ok_or_else(|| format!("inline_pure_call: `{called_name}` is not a pure single-block value DAG"))?;
     let mut memo = LookupMap::new();
-    for (node, definition) in &callee.graph.nodes {
+    let reachable =
+        wyn_graph::reachable_from_ordered([root], wyn_graph::WalkOrder::DepthFirst, |node, out| {
+            out.extend(callee.graph.nodes[node].children())
+        });
+    for node in reachable {
+        let definition = &callee.graph.nodes[node];
         if let ENode::FuncParam { index } = definition {
             let replacement = operands.get(*index).copied().ok_or_else(|| {
                 format!("inline_pure_call: `{called_name}` contains out-of-range FuncParam {index}")

@@ -1,7 +1,10 @@
 use super::*;
-use crate::ast::TypeName;
+use crate::ast::{Span, TypeName};
 use crate::egir::graph_projector::GraphProjector;
 use crate::egir::types::{EffectToken, PureOp, SideEffectSite};
+use crate::flow::ExecutionModel;
+use crate::interface::{BindingExposure, EntryInput, IoDecoration};
+use crate::BindingRef;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -11,6 +14,76 @@ fn i32_ty() -> Type<TypeName> {
 
 fn u32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::UInt(32), vec![])
+}
+
+#[test]
+fn stage_invariance_and_scalar_relocation_legality_remain_separate() {
+    let ty = u32_ty();
+    let mut graph = EGraph::new();
+    let params = (0..4).map(|index| graph.add_func_param(index, ty.clone())).collect::<Vec<_>>();
+    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(params[0]));
+    let inputs = vec![
+        EntryInput {
+            name: "uniform".into(),
+            ty: ty.clone(),
+            size_hint: None,
+            kind: EntryInputKind::Uniform {
+                binding: BindingRef::new(1, 0),
+            },
+        },
+        EntryInput {
+            name: "read_only".into(),
+            ty: ty.clone(),
+            size_hint: None,
+            kind: EntryInputKind::Storage {
+                exposure: BindingExposure::Host(BindingRef::new(1, 1)),
+                access: StorageAccess::ReadOnly,
+                length: None,
+            },
+        },
+        EntryInput {
+            name: "read_write".into(),
+            ty: ty.clone(),
+            size_hint: None,
+            kind: EntryInputKind::Storage {
+                exposure: BindingExposure::Host(BindingRef::new(1, 2)),
+                access: StorageAccess::ReadWrite,
+                length: None,
+            },
+        },
+        EntryInput {
+            name: "dispatch_size".into(),
+            ty: ty.clone(),
+            size_hint: None,
+            kind: EntryInputKind::Value {
+                decoration: Some(IoDecoration::BuiltIn(spirv::BuiltIn::NumWorkgroups)),
+            },
+        },
+    ];
+    let entry = SemanticEntry::new_with_resources(
+        "compute".into(),
+        Span::dummy(),
+        ExecutionModel::Compute {
+            local_size: (1, 1, 1),
+        },
+        inputs,
+        vec![],
+        vec![],
+        ["uniform", "read_only", "read_write", "dispatch_size"]
+            .into_iter()
+            .map(|name| (ty.clone(), name.into()))
+            .collect(),
+        ty,
+        graph,
+        LookupMap::new(),
+    );
+
+    let dependence = super::super::stage_variance::StageDependenceAnalysis::for_entry(&entry).unwrap();
+    assert!(params.iter().all(|parameter| dependence.dependence(*parameter).is_stage_invariant()));
+    assert!(entry_parameter_is_scalar_relocatable(&entry, 0));
+    assert!(entry_parameter_is_scalar_relocatable(&entry, 1));
+    assert!(!entry_parameter_is_scalar_relocatable(&entry, 2));
+    assert!(!entry_parameter_is_scalar_relocatable(&entry, 3));
 }
 
 #[test]

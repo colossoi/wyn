@@ -150,7 +150,7 @@ fn find_candidate(
                 {
                     continue;
                 }
-                let Some(callee_nodes) = inlineable_node_count(callee) else {
+                let Some(callee_nodes) = inlining::inlineable_node_count(callee) else {
                     continue;
                 };
                 if callee_nodes > MAX_CALLEE_NODES || callee_nodes > remaining_budget {
@@ -165,15 +165,4 @@ fn find_candidate(
         }
     }
     None
-}
-
-/// Return the size charged to the caller's inlining budget when this callee is
-/// a pure value DAG supported by the generic inliner.
-fn inlineable_node_count(callee: &PhysicalFunc) -> Option<usize> {
-    let root = inlining::inlineable_return_root(callee)?;
-    let reachable =
-        wyn_graph::reachable_from_ordered([root], wyn_graph::WalkOrder::DepthFirst, |node, out| {
-            out.extend(callee.graph.nodes[node].children())
-        });
-    Some(reachable.len())
 }

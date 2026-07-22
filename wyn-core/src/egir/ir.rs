@@ -364,6 +364,51 @@ pub struct SegBody {
     pub captures: Vec<NodeId>,
 }
 
+impl SegBody {
+    /// Number of non-capture parameters in this body's region ABI.
+    ///
+    /// Segment bodies bind their lane/element parameters first and append one
+    /// function parameter for each capture.
+    pub(crate) fn leading_parameter_count<P: EgirPhase, Lang: Language>(
+        &self,
+        function: &Func<P, Lang>,
+    ) -> Result<usize, String> {
+        function.params.len().checked_sub(self.captures.len()).ok_or_else(|| {
+            format!(
+                "region `{}` has {} parameters but {} captures",
+                function.name,
+                function.params.len(),
+                self.captures.len()
+            )
+        })
+    }
+
+    /// Map this body's capture parameters to their enclosing graph values.
+    pub(crate) fn capture_bindings<P: EgirPhase, Lang: Language>(
+        &self,
+        function: &Func<P, Lang>,
+    ) -> Result<LookupMap<NodeId, NodeId>, String> {
+        let leading = self.leading_parameter_count(function)?;
+        let mut bindings = LookupMap::new();
+        for (node, definition) in &function.graph.nodes {
+            let ENode::FuncParam { index } = definition else {
+                continue;
+            };
+            if *index < leading || *index >= function.params.len() {
+                continue;
+            }
+            let capture = self.captures.get(*index - leading).copied().ok_or_else(|| {
+                format!(
+                    "region `{}` has out-of-range capture parameter {index}",
+                    function.name
+                )
+            })?;
+            bindings.insert(node, capture);
+        }
+        Ok(bindings)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SegResourceAccess<R> {
     pub resource: R,
@@ -1077,6 +1122,91 @@ impl<P: EgirPhase, Lang: Language> Func<P, Lang> {
             control_headers,
             aliases: LookupMap::new(),
         }
+    }
+
+    /// Append one value to both sides of a segmented-body capture ABI.
+    pub(crate) fn push_seg_body_capture(
+        &mut self,
+        body: &mut SegBody,
+        capture: NodeId,
+        ty: Lang::Ty,
+        name: String,
+    ) -> NodeId {
+        let index = self.params.len();
+        let parameter = self.graph.add_func_param(index, ty.clone());
+        self.params.push((ty, name));
+        body.captures.push(capture);
+        parameter
+    }
+
+    /// Retain selected capture slots and compact both sides of the ABI.
+    ///
+    /// Leading lane/element parameters are always retained. Removed parameter
+    /// nodes remain as unique out-of-ABI tombstones because dead pure arena
+    /// nodes can still refer to them until demand-driven extraction.
+    pub(crate) fn retain_seg_body_captures(
+        &mut self,
+        body: &mut SegBody,
+        retained_captures: &SortedSet<usize>,
+    ) -> Result<(), String> {
+        let leading = body.leading_parameter_count(self)?;
+        let parameter_count = self.params.len();
+        if let Some(index) = retained_captures.iter().find(|index| **index >= body.captures.len()) {
+            return Err(format!(
+                "region `{}` cannot retain missing capture {index}",
+                self.name
+            ));
+        }
+
+        let mut retained = vec![false; parameter_count];
+        retained[..leading].fill(true);
+        for &capture in retained_captures {
+            retained[leading + capture] = true;
+        }
+
+        let mut next_index = 0;
+        let remapped = retained
+            .iter()
+            .map(|retain| {
+                retain.then(|| {
+                    let index = next_index;
+                    next_index += 1;
+                    index
+                })
+            })
+            .collect::<Vec<_>>();
+        let parameter_nodes = self
+            .graph
+            .nodes
+            .iter()
+            .filter_map(|(node, definition)| match definition {
+                ENode::FuncParam { index } => Some((node, *index)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut tombstone_index = next_index;
+        for (node, old_index) in parameter_nodes {
+            if let Some(new_index) = remapped.get(old_index).copied().flatten() {
+                self.graph.nodes[node] = ENode::FuncParam { index: new_index };
+            } else {
+                self.graph.nodes[node] = ENode::FuncParam {
+                    index: tombstone_index,
+                };
+                tombstone_index += 1;
+            }
+        }
+
+        self.params = std::mem::take(&mut self.params)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, parameter)| retained[index].then_some(parameter))
+            .collect();
+        body.captures = std::mem::take(&mut body.captures)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, capture)| retained[leading + index].then_some(capture))
+            .collect();
+        Ok(())
     }
 }
 

@@ -51,6 +51,8 @@ pub fn run(inner: &mut SemanticProgram) {
         }
     }
 
+    super::stage_lift::run(inner).expect("stage-uniform region lifting must preserve semantic EGIR");
+
     super::semantic_graph::rebuild_dependencies(inner);
     if cfg!(debug_assertions) {
         if let Err(error) = super::semantic_graph::verify(inner) {
