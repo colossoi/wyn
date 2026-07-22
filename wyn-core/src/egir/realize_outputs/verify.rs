@@ -27,6 +27,7 @@ use crate::LookupSet;
 use polytype::Type;
 
 use crate::ast::TypeName;
+use crate::types::TypeExt;
 
 use super::super::from_tlc::ConvertError;
 use super::super::program::{AllocatedProgram, Entry};
@@ -110,7 +111,7 @@ fn check_entry<P: EgirPhase>(entry_name: &str, graph: &EGraph<P>) -> Result<(), 
             continue;
         };
         if let Some(ty) = node_type(graph, nid) {
-            if is_runtime_sized_composite_array(ty) {
+            if ty.contains_runtime_sized_composite_array() {
                 return Err(ConvertError::Internal(format!(
                     "realize_outputs verifier: entry `{}` leaks a \
                      runtime-sized Composite array at NodeId {:?} \
@@ -125,27 +126,6 @@ fn check_entry<P: EgirPhase>(entry_name: &str, graph: &EGraph<P>) -> Result<(), 
         work.extend(operands.iter().copied());
     }
     Ok(())
-}
-
-/// True iff `ty` is `Array(elem, ArrayVariantComposite, size)` where
-/// `size` is a free variable or `SizePlaceholder` (runtime-sized).
-/// `Array` with `ArrayVariantView` is fine — view-arrays are
-/// storage-buffer-backed, not in-register composites.
-fn is_runtime_sized_composite_array(ty: &Type<TypeName>) -> bool {
-    let Type::Constructed(TypeName::Array, args) = ty else {
-        return false;
-    };
-    if args.len() < 3 {
-        return false;
-    }
-    let variant = &args[1];
-    let size = &args[2];
-    let is_composite = matches!(variant, Type::Constructed(TypeName::ArrayVariantComposite, _));
-    let is_runtime = matches!(
-        size,
-        Type::Variable(_) | Type::Constructed(TypeName::SizePlaceholder, _)
-    );
-    is_composite && is_runtime
 }
 
 /// Look up the Pure result type for `nid`. ENode::Pure carries its

@@ -622,7 +622,8 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
     let profile = LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel);
     let ssa = match raw
         .realize_outputs()
-        .and_then(|realized| realized.segment().optimize().allocate().plan(profile))
+        .and_then(|realized| realized.segment().optimize().allocate())
+        .and_then(|allocated| allocated.plan(profile))
         .and_then(wyn_core::EgirPlanned::lower_to_ssa)
     {
         Ok(s) => s,

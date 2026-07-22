@@ -450,7 +450,7 @@ fn fixed_required_elements(
         };
         space
     };
-    space.dims.iter().try_fold(1u32, |count, extent| match extent {
+    space.dims().iter().try_fold(1u32, |count, extent| match extent {
         SegExtent::Fixed(size) => count.checked_mul(*size),
         _ => None,
     })
@@ -558,13 +558,13 @@ fn filter_scratch_requests(
     endpoint: CompilerFlowEndpoint,
     candidate: &super::filter::FilterCandidate,
 ) -> Vec<ScratchRequest> {
-    let element_count_size = match candidate.space.dims.first() {
-        Some(SegExtent::Fixed(count)) if candidate.space.dims.len() == 1 => {
+    let element_count_size = match candidate.space.dims().first() {
+        Some(SegExtent::Fixed(count)) if candidate.space.dims().len() == 1 => {
             LogicalSize::FixedBytes(*count as u64 * 4)
         }
         Some(SegExtent::ResourceLength {
             resource, elem_bytes, ..
-        }) if candidate.space.dims.len() == 1 => LogicalSize::LikeResource {
+        }) if candidate.space.dims().len() == 1 => LogicalSize::LikeResource {
             resource: resource.0,
             elem_bytes: 4,
             src_elem_bytes: *elem_bytes,

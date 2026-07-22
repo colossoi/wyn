@@ -1087,15 +1087,13 @@ fn phase_from_materialization(
     dependencies: Vec<KernelId>,
     placement: PhasePlacement,
 ) -> Result<KernelPhase, String> {
-    let domain = if requirement.kind == MaterializationKind::Scalar {
-        KernelDomain::Fixed { x: 1, y: 1, z: 1 }
-    } else {
-        domain_from_space(&requirement.space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 })
-    };
+    let kind = requirement.kind();
+    let domain =
+        requirement.space().and_then(domain_from_space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
     let spec = PhaseSpec::compute(
-        PlannedEntry::project(&requirement.entry)?,
+        PlannedEntry::project(requirement.entry())?,
         KernelDispatch::explicit(domain),
-        match requirement.kind {
+        match kind {
             MaterializationKind::SharedArray => "shared_array_materialization",
             MaterializationKind::Gather => "gather_prepass",
             MaterializationKind::Scalar => "scalar_prepass",
@@ -1212,14 +1210,14 @@ fn domain_selection_from_stage(
 }
 
 pub(super) fn domain_from_space(space: &crate::egir::types::SegSpace) -> Option<KernelDomain> {
-    if space.dims.iter().all(|extent| matches!(extent, SegExtent::Fixed(_))) {
-        let count = space.dims.iter().try_fold(1u32, |product, extent| match extent {
+    if space.dims().iter().all(|extent| matches!(extent, SegExtent::Fixed(_))) {
+        let count = space.dims().iter().try_fold(1u32, |product, extent| match extent {
             SegExtent::Fixed(n) => product.checked_mul(*n),
             _ => None,
         })?;
         return Some(KernelDomain::Elements(DispatchLen::Fixed { count }));
     }
-    match space.dims.as_slice() {
+    match space.dims() {
         [SegExtent::PushConstant { offset, .. }] => {
             Some(KernelDomain::Elements(DispatchLen::PushConstant {
                 offset: *offset,

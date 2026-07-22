@@ -46,6 +46,7 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
         .segment()
         .optimize()
         .allocate()
+        .expect("semantic EGIR allocation failed")
         .plan(wyn_core::LoweringProfile::new(
             wyn_core::CodegenTarget::Wgsl,
             wyn_core::SchedulePolicy::Parallel,

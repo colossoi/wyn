@@ -31,7 +31,12 @@ fn compile_to_semantic_egir(input: &str) -> crate::EgirAllocated {
         .infer_input_slice_bounds()
         .to_egraph()
         .expect("convert to raw semantic EGIR");
-    raw.realize_outputs().expect("realize semantic EGIR outputs").segment().optimize().allocate()
+    raw.realize_outputs()
+        .expect("realize semantic EGIR outputs")
+        .segment()
+        .optimize()
+        .allocate()
+        .expect("allocate semantic EGIR resources")
 }
 
 fn lower_semantic_egir(
@@ -521,10 +526,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         })
         .expect("SegRed remains present before target lowering");
     assert_eq!(seg.1, screma::Flavor::Reduce);
-    assert!(matches!(
-        seg.0.dims.as_slice(),
-        [SegExtent::ResourceLength { .. }]
-    ));
+    assert!(matches!(seg.0.dims(), [SegExtent::ResourceLength { .. }]));
     assert!(
         allocated.inner.resources.len() >= 2,
         "input and output resources are planned logically"
@@ -1736,7 +1738,7 @@ entry e() [4]i32 =
         .inner
         .materializations
         .values()
-        .filter(|requirement| requirement.kind == crate::egir::program::MaterializationKind::SharedArray)
+        .filter(|requirement| requirement.kind() == crate::egir::program::MaterializationKind::SharedArray)
         .collect::<Vec<_>>();
     assert_eq!(
         shared_requirements.len(),
@@ -1748,24 +1750,24 @@ entry e() [4]i32 =
         "materialization must not be synthesized into the semantic entry arena"
     );
     let requirement = shared_requirements[0];
-    assert_eq!(requirement.entry.name, "e_materialize_shared");
-    assert_eq!(requirement.substitutions.len(), 1);
-    assert_eq!(requirement.substitutions[0].resource.0, shared_resource);
-    assert_eq!(requirement.substitutions[0].consumers.len(), 2);
-    let consumer = requirement.substitutions[0]
+    assert_eq!(requirement.entry().name, "e_materialize_shared");
+    let ResourceOrigin::Compiler(shared_compiler) = &shared[0].origin else {
+        unreachable!("shared resource must be compiler-owned")
+    };
+    let flow = shared_compiler.flow.as_ref().expect("shared resource has an allocated flow");
+    assert!(matches!(
+        flow.producer,
+        crate::egir::program::CompilerFlowEndpoint::Materialization(_)
+    ));
+    let consumer = flow
         .consumers
         .iter()
+        .copied()
         .find_map(|consumer| match consumer {
-            crate::egir::program::CompilerFlowEndpoint::Entry(id) => Some(*id),
+            crate::egir::program::CompilerFlowEndpoint::Entry(id) => Some(id),
             crate::egir::program::CompilerFlowEndpoint::Materialization(_) => None,
         })
         .expect("shared array remains an input of the source entry");
-    assert!(requirement.substitutions[0].consumers.iter().any(|consumer| {
-        matches!(
-            consumer,
-            crate::egir::program::CompilerFlowEndpoint::Materialization(_)
-        )
-    }));
     assert_eq!(allocated.inner.entry_points[consumer.index()].name, "e");
     let lowered = lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE);
     let mir = crate::ssa::print::format_program(&lowered.ssa);
@@ -3320,7 +3322,7 @@ entry add_sum(xs: []i32) []i32 =
         .materializations
         .get(producer_id)
         .expect("materialization flow producer is arena-owned");
-    assert!(producer.entry.name.contains("prepass_scalar"));
+    assert!(producer.entry().name.contains("prepass_scalar"));
     assert_eq!(flow.consumers.len(), 1);
     assert_eq!(
         allocated.inner.entry_points[match flow.consumers[0] {

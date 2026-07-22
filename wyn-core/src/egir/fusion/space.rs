@@ -13,7 +13,7 @@ use crate::egir::types::{SegExtent, SegSpace};
 
 /// True iff two iteration spaces are provably the same for fusion purposes.
 pub fn seg_space_fusable(a: &SegSpace, b: &SegSpace) -> bool {
-    a.dims.len() == b.dims.len() && a.dims.iter().zip(&b.dims).all(|(x, y)| seg_extent_fusable(x, y))
+    a.dims().len() == b.dims().len() && a.dims().iter().zip(b.dims()).all(|(x, y)| seg_extent_fusable(x, y))
 }
 
 /// True iff two extents denote the same dispatch dimension.

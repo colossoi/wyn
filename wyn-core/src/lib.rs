@@ -468,7 +468,7 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //       .realize_outputs()                         -> EgirOutputsRealized
 //       .segment()                                 -> EgirSegmented
 //       .optimize()                                -> EgirOptimized
-//       .allocate()                                -> EgirAllocated
+//       .allocate()?                               -> EgirAllocated
 //       .plan(profile)                             -> EgirPlanned
 //       .lower_to_ssa()                            -> SsaConverted
 //
@@ -1335,7 +1335,7 @@ impl EgirOptimized {
     /// Plan logical resources without choosing physical descriptor bindings.
     /// The carried allocator lets terminal lowering allocate scratch
     /// transactionally without mutating upstream TLC state.
-    pub fn allocate(self) -> EgirAllocated {
+    pub fn allocate(self) -> std::result::Result<EgirAllocated, ConvertError> {
         let EgirOptimized {
             inner,
             binding_ids,
@@ -1344,12 +1344,12 @@ impl EgirOptimized {
         if cfg!(debug_assertions) {
             egir::semantic_graph::verify(&inner).expect("invalid optimized semantic EGIR");
         }
-        let inner = egir::program::plan_logical_resources(inner, &mut effect_ids);
-        EgirAllocated {
+        let inner = egir::program::plan_logical_resources(inner, &mut effect_ids)?;
+        Ok(EgirAllocated {
             inner,
             binding_ids,
             effect_ids,
-        }
+        })
     }
 }
 
@@ -1554,7 +1554,7 @@ fn ssa_from_reachable(
     profile: LoweringProfile,
 ) -> std::result::Result<SsaConverted, Box<dyn std::error::Error>> {
     let raw = tlc.infer_input_slice_bounds().to_egraph()?;
-    let allocated = raw.realize_outputs()?.segment().optimize().allocate();
+    let allocated = raw.realize_outputs()?.segment().optimize().allocate()?;
     let planned = allocated.plan(profile)?;
     Ok(planned.lower_to_ssa()?)
 }

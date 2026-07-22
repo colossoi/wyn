@@ -108,14 +108,10 @@ fn scheduled_operations_expose_shared_prelude_inputs() {
     append_capturing_map(&mut egir, 11, vec![source]);
 
     let graph = SemanticGraph::with_operation_captures(&[], &egir);
-    assert_eq!(graph.operations().collect::<Vec<_>>(), vec![op(10), op(11)]);
+    assert_eq!(graph.captured_values().collect::<Vec<_>>(), vec![source]);
     assert_eq!(
-        graph.operation_captures(&op(10)).collect::<Vec<_>>(),
-        vec![source]
-    );
-    assert_eq!(
-        graph.operation_captures(&op(11)).collect::<Vec<_>>(),
-        vec![source]
+        graph.capture_consumers(source).collect::<Vec<_>>(),
+        vec![op(10), op(11)]
     );
     assert_eq!(graph.operation_site(&op(10)).map(|site| site.index), Some(0));
     assert_eq!(graph.operation_site(&op(11)).map(|site| site.index), Some(1));

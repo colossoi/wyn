@@ -10,9 +10,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::types::TypeExt;
+
 use super::graph_ops;
 use super::program::{SemanticDependency, SemanticDependencyKind, SemanticOpId, SemanticProgram};
-use super::soac::{filter, hist, screma};
+use super::soac::{filter, screma};
 use super::types::{
     EGraph, NodeId, ResourceAccess, SegResourceAccess, SideEffect, SideEffectKind, SideEffectSite, Soac,
     SoacEffect,
@@ -21,6 +23,57 @@ use super::types::{
 /// Rebuild the semantic dependency DAG stored on `inner`.
 pub(crate) fn rebuild_dependencies(inner: &mut SemanticProgram) {
     inner.semantic_dependencies = dependencies(inner);
+    inner.array_residency_demands = array_residency_demands(inner);
+}
+
+/// Record runtime-composite array values whose use requires a storage-backed
+/// representation. This runs at the same semantic snapshot boundary as the
+/// dependency builder, when producer identity and use shape are both direct.
+fn array_residency_demands(inner: &SemanticProgram) -> HashSet<SemanticOpId> {
+    let mut demands = HashSet::new();
+    for entry in &inner.entry_points {
+        let graph = &entry.graph;
+        for (producer_block, block) in &graph.skeleton.blocks {
+            for (producer_index, effect) in block.side_effects.iter().enumerate() {
+                let SideEffectKind::Soac(SoacEffect(id, _)) = &effect.kind else {
+                    continue;
+                };
+                let Some(result) = effect.result else {
+                    continue;
+                };
+                if !graph.types.get(&result).is_some_and(TypeExt::contains_runtime_sized_composite_array) {
+                    continue;
+                }
+                let indexed = graph.nodes.iter().any(|(_, node)| {
+                    matches!(
+                        node,
+                        super::types::ENode::Pure {
+                            op: super::types::PureOp::Index,
+                            operands,
+                        } if operands.first().is_some_and(|base| {
+                            graph_ops::value_depends_on(graph, *base, result)
+                        })
+                    )
+                });
+                let captured = graph.skeleton.blocks.iter().any(|(consumer_block, block)| {
+                    block.side_effects.iter().enumerate().any(|(consumer_index, effect)| {
+                        if consumer_block == producer_block && consumer_index == producer_index {
+                            return false;
+                        }
+                        let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
+                            return false;
+                        };
+                        soac.capture_nodes()
+                            .any(|capture| graph_ops::value_depends_on(graph, capture, result))
+                    })
+                });
+                if indexed || captured {
+                    demands.insert(*id);
+                }
+            }
+        }
+    }
+    demands
 }
 
 /// Build semantic value/effect/resource dependencies for every semantic SOAC in
@@ -188,11 +241,6 @@ pub(crate) fn verify(inner: &SemanticProgram) -> Result<(), String> {
         };
         match soac {
             Soac::Screma(op) => {
-                if let screma::SemanticState::Segmented { space, .. } = op.semantic_state() {
-                    if space.dims.is_empty() {
-                        return Err(format!("{scope}: semantic Screma has no concrete dimensions"));
-                    }
-                }
                 for map in &op.lanes().maps {
                     verify_body("map", &map.body)?;
                 }
@@ -202,20 +250,12 @@ pub(crate) fn verify(inner: &SemanticProgram) -> Result<(), String> {
                 }
             }
             Soac::Filter(op) => {
-                if op.state.space.dims.is_empty() {
-                    return Err(format!("{scope}: semantic filter has no concrete dimensions"));
-                }
                 if let filter::Input::Mapped { body, .. } = &op.body.input {
                     verify_body("filter map", body)?;
                 }
                 verify_body("filter predicate", &op.body.predicate)?;
             }
             Soac::Hist(op) => {
-                if let hist::State::Segmented(space) = &op.state {
-                    if space.dims.is_empty() {
-                        return Err(format!("{scope}: semantic histogram has no concrete dimensions"));
-                    }
-                }
                 if !inner.contains_region(op.body.body.region) {
                     return Err(format!(
                         "{scope}: histogram region `{}` is absent",
@@ -307,10 +347,11 @@ pub struct SemanticGraph {
     value_succ: Vec<Vec<usize>>,
     /// Unordered resource/effect reordering conflicts, stored both ways.
     conflict: HashSet<(usize, usize)>,
-    /// Graph-local scalar/aggregate values captured by each semantic
-    /// operation, stored in the same dense operation index as the ordinary
-    /// semantic DAG.
-    capture_pred: Vec<Vec<NodeId>>,
+    /// Reverse capture edges, built when captures are first recorded so
+    /// residency does not have to rediscover shared captured values by
+    /// scanning every operation.
+    capture_succ: HashMap<NodeId, Vec<usize>>,
+    capture_sources: Vec<NodeId>,
     /// Stable-for-this-snapshot operation locations. Fusion does not require
     /// these; scheduling policies use them to inspect and rewrite consumers.
     operation_sites: Vec<Option<SideEffectSite>>,
@@ -323,7 +364,8 @@ impl SemanticGraph {
             operations: Vec::new(),
             value_succ: Vec::new(),
             conflict: HashSet::new(),
-            capture_pred: Vec::new(),
+            capture_succ: HashMap::new(),
+            capture_sources: Vec::new(),
             operation_sites: Vec::new(),
         };
         for dep in deps {
@@ -360,8 +402,13 @@ impl SemanticGraph {
                     index: effect_index,
                 });
                 let mut seen = HashSet::new();
-                graph.capture_pred[operation]
-                    .extend(soac.capture_nodes().filter(|source| seen.insert(*source)));
+                for source in soac.capture_nodes().filter(|source| seen.insert(*source)) {
+                    let consumers = graph.capture_succ.entry(source).or_insert_with(|| {
+                        graph.capture_sources.push(source);
+                        Vec::new()
+                    });
+                    consumers.push(operation);
+                }
             }
         }
         graph
@@ -375,19 +422,22 @@ impl SemanticGraph {
         self.index.insert(operation, index);
         self.operations.push(operation);
         self.value_succ.push(Vec::new());
-        self.capture_pred.push(Vec::new());
         self.operation_sites.push(None);
         index
     }
 
-    /// Semantic operations in deterministic dependency/source order.
-    pub(crate) fn operations(&self) -> impl Iterator<Item = SemanticOpId> + '_ {
-        self.operations.iter().copied()
+    /// Graph-local values captured by at least one semantic operation, in
+    /// source discovery order.
+    pub(crate) fn captured_values(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.capture_sources.iter().copied()
     }
 
-    /// Graph-local values directly captured by `operation`.
-    pub(crate) fn operation_captures(&self, operation: &SemanticOpId) -> impl Iterator<Item = NodeId> + '_ {
-        self.index.get(operation).into_iter().flat_map(|index| self.capture_pred[*index].iter().copied())
+    /// Semantic operations directly capturing `source`.
+    pub(crate) fn capture_consumers(&self, source: NodeId) -> impl Iterator<Item = SemanticOpId> + '_ {
+        self.capture_succ
+            .get(&source)
+            .into_iter()
+            .flat_map(|consumers| consumers.iter().map(|&consumer| self.operations[consumer]))
     }
 
     /// Locate an operation in the EGIR snapshot used to add capture sources.
@@ -422,6 +472,21 @@ impl SemanticGraph {
     /// operation-granular.
     pub fn value_consumer_count(&self, producer: &SemanticOpId) -> usize {
         self.index.get(producer).map(|&index| self.value_succ[index].len()).unwrap_or(0)
+    }
+
+    /// Semantic operations that directly consume `producer`'s result.
+    ///
+    /// This is the canonical read-side view of value-successor edges; callers
+    /// should not rebuild their own producer-to-consumer maps from the raw
+    /// dependency list.
+    pub(crate) fn value_consumers(
+        &self,
+        producer: &SemanticOpId,
+    ) -> impl Iterator<Item = SemanticOpId> + '_ {
+        self.index
+            .get(producer)
+            .into_iter()
+            .flat_map(|&index| self.value_succ[index].iter().map(|&consumer| self.operations[consumer]))
     }
 }
 

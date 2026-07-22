@@ -174,7 +174,8 @@ fn find_in_graph(
                 if producer_output >= maps.len()
                     || projected.iter().any(|&(_, output)| output != producer_output)
                     || consumer.referenced_nodes().any(|root| {
-                        reaches(graph, root, producer_result) && !projected_roots.contains(&root)
+                        graph_ops::pure_depends_on(graph, root, producer_result)
+                            && !projected_roots.contains(&root)
                     })
                     || !producer_is_used_only_by(
                         graph,
@@ -200,12 +201,6 @@ fn find_in_graph(
     None
 }
 
-pub(super) fn reaches(graph: &EGraph, start: NodeId, target: NodeId) -> bool {
-    wyn_graph::reaches_ordered(start, target, wyn_graph::WalkOrder::DepthFirst, |node, out| {
-        out.extend(graph.nodes[node].children());
-    })
-}
-
 pub(super) fn producer_is_used_only_by(
     graph: &EGraph,
     producer_block: BlockId,
@@ -218,11 +213,19 @@ pub(super) fn producer_is_used_only_by(
             if block_id == producer_block && (index == producer_index || index == consumer_index) {
                 continue;
             }
-            if effect.referenced_nodes().any(|node| reaches(graph, node, producer_result)) {
+            if effect
+                .referenced_nodes()
+                .any(|node| graph_ops::pure_depends_on(graph, node, producer_result))
+            {
                 return false;
             }
         }
-        if block.term.referenced_nodes().into_iter().any(|root| reaches(graph, root, producer_result)) {
+        if block
+            .term
+            .referenced_nodes()
+            .into_iter()
+            .any(|root| graph_ops::pure_depends_on(graph, root, producer_result))
+        {
             return false;
         }
     }
@@ -726,9 +729,7 @@ mod tests {
                         }],
                     },
                     state: screma::SemanticState::Segmented {
-                        space: SegSpace {
-                            dims: vec![SegExtent::Fixed(8)],
-                        },
+                        space: SegSpace::new(SegExtent::Fixed(8)),
                         placement: screma::Placement::LaneLocal,
                         output_slots: vec![],
                         resources: vec![],
@@ -777,9 +778,7 @@ mod tests {
                         }],
                     },
                     state: screma::SemanticState::Segmented {
-                        space: SegSpace {
-                            dims: vec![SegExtent::Fixed(8)],
-                        },
+                        space: SegSpace::new(SegExtent::Fixed(8)),
                         placement: screma::Placement::LaneLocal,
                         output_slots: vec![],
                         resources: vec![],

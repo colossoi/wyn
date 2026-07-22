@@ -554,6 +554,13 @@ pub trait TypeExt {
     /// Array. For a View this is `Region(set,binding)` (or a buffer variable);
     /// for non-view arrays it is `NoBuffer`.
     fn array_buffer(&self) -> Option<&Type>;
+
+    /// Whether this is an array whose first dimension is not statically known.
+    fn is_runtime_sized_array(&self) -> bool;
+
+    /// Whether this type contains an in-register composite array with a
+    /// runtime-sized first dimension.
+    fn contains_runtime_sized_composite_array(&self) -> bool;
 }
 
 impl TypeExt for Type {
@@ -759,6 +766,24 @@ impl TypeExt for Type {
             return args.last();
         }
         None
+    }
+
+    fn is_runtime_sized_array(&self) -> bool {
+        self.array_size().is_some_and(|size| !matches!(size, Type::Constructed(TypeName::Size(_), _)))
+    }
+
+    fn contains_runtime_sized_composite_array(&self) -> bool {
+        match self {
+            Type::Constructed(TypeName::Array, args) => {
+                let this_array = self.is_runtime_sized_array()
+                    && self.array_variant().is_some_and(|variant| {
+                        matches!(variant, Type::Constructed(TypeName::ArrayVariantComposite, _))
+                    });
+                this_array || args.iter().any(TypeExt::contains_runtime_sized_composite_array)
+            }
+            Type::Constructed(_, args) => args.iter().any(TypeExt::contains_runtime_sized_composite_array),
+            Type::Variable(_) => false,
+        }
     }
 }
 

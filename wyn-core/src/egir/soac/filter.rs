@@ -232,7 +232,7 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut AllocatedProgram) {
                 };
                 let elem_bytes =
                     crate::ssa::layout::storage_elem_stride(&body.output_element_type()).unwrap_or(1);
-                let size = match space.dims.as_slice() {
+                let size = match space.dims() {
                     [SegExtent::Fixed(count)] => LogicalSize::FixedBytes(*count as u64 * elem_bytes as u64),
                     [SegExtent::ResourceLength {
                         resource,
@@ -282,7 +282,7 @@ pub(crate) fn resolve_scratch_sizes(inner: &mut AllocatedProgram) {
             .ir
             .entry_points
             .iter_mut()
-            .chain(materializations.into_iter().map(|(_, requirement)| &mut requirement.entry))
+            .chain(materializations.into_iter().map(|(_, requirement)| requirement.entry_mut()))
         {
             if let Some(declaration) = entry
                 .resource_declarations

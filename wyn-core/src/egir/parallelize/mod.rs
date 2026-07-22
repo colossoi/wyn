@@ -76,7 +76,6 @@ use super::types::{
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
-use crate::types::TypeExt;
 use crate::{IdSource, LoweringProfile, SchedulePolicy};
 
 /// A generated body kept together with the exact accesses established while

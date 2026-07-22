@@ -452,14 +452,7 @@ fn is_liftable_array_producer(term: &Term) -> bool {
 }
 
 fn is_runtime_sized_array(ty: &Type<TypeName>) -> bool {
-    crate::types::array_size(ty)
-        .map(|s| {
-            matches!(
-                s,
-                Type::Variable(_) | Type::Constructed(TypeName::SizePlaceholder, _)
-            )
-        })
-        .unwrap_or(false)
+    crate::types::TypeExt::is_runtime_sized_array(ty)
 }
 
 fn is_int_lit(term: &Term) -> bool {

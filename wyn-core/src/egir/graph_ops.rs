@@ -79,6 +79,12 @@ pub(crate) struct ValueProducerClosure {
     pub(crate) effects: HashSet<SideEffectSite>,
 }
 
+impl ValueProducerClosure {
+    pub(crate) fn contains_node(&self, node: NodeId) -> bool {
+        self.nodes.contains(&node)
+    }
+}
+
 /// Follow pure tails, value-producing effects, and CFG block arguments to the
 /// values that can contribute to `roots`.
 pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
@@ -157,6 +163,27 @@ pub(crate) fn reachable_execution_values<P: ValueProducerPhase>(graph: &EGraph<P
             }
         },
     )
+}
+
+/// Whether `target` is reachable from `root` through floating pure/union
+/// operands only. This is the common dependency predicate for use-site and
+/// fusion analyses that deliberately stop at effect results and CFG params.
+pub(crate) fn pure_depends_on<P: EgirPhase>(graph: &EGraph<P>, root: NodeId, target: NodeId) -> bool {
+    wyn_graph::reaches_ordered(root, target, wyn_graph::WalkOrder::DepthFirst, |node, out| {
+        if let Some(definition) = graph.nodes.get(node) {
+            out.extend(definition.children());
+        }
+    })
+}
+
+/// Whether the complete value-producing closure behind `root` contains
+/// `target`, crossing effect results and incoming block arguments as needed.
+pub(crate) fn value_depends_on<P: ValueProducerPhase>(
+    graph: &EGraph<P>,
+    root: NodeId,
+    target: NodeId,
+) -> bool {
+    value_producer_closure(graph, [root]).contains_node(target)
 }
 
 /// Maximal movable values at the boundary of executable graph structure.

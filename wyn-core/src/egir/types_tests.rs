@@ -41,11 +41,11 @@ impl EgirPhase for TestPhase {
 }
 
 #[test]
-fn soac_placement_preserves_logical_ownership() {
+fn soac_placement_resolves_unique_input_candidate() {
     let mut destination = SoacDestination::unique_input();
     destination.place(SoacPlacement::OutputView);
 
-    assert_eq!(destination.ownership, SoacOwnership::UniqueInput);
+    assert_eq!(destination, SoacDestination::OutputView);
     assert!(destination.is_output_view());
     assert!(!destination.is_unplaced_unique_input());
 }

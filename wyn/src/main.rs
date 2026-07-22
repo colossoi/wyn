@@ -342,7 +342,7 @@ fn compile_file(
     let outputs_realized = time("egir_realize_outputs", verbose, || raw.realize_outputs())?;
     let segmented = time("egir_segment", verbose, || outputs_realized.segment());
     let optimized = time("egir_optimize", verbose, || segmented.optimize());
-    let allocated = time("egir_allocate", verbose, || optimized.allocate());
+    let allocated = time("egir_allocate", verbose, || optimized.allocate())?;
     let profile = LoweringProfile::new(
         match target {
             Target::Spirv => CodegenTarget::Spirv,

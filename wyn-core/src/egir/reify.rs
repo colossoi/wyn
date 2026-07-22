@@ -65,6 +65,7 @@ pub fn run(raw: RawProgram) -> SemanticProgram {
         },
         resources,
         semantic_dependencies: Vec::new(),
+        array_residency_demands: HashSet::new(),
     };
     super::semantic_graph::rebuild_dependencies(&mut semantic);
     semantic
@@ -245,7 +246,7 @@ mod tests {
 
     fn facts() -> Facts {
         Facts {
-            space: SegSpace { dims: vec![] },
+            space: SegSpace::new(SegExtent::Fixed(1)),
             placement: screma::Placement::LaneLocal,
             output_slots: vec![],
             resources: vec![],
@@ -405,8 +406,8 @@ fn space(
     let extent = effect.operand_nodes.get(operand_index).copied().map(|node| {
         if let Some(resource) = graph_ops::extract_storage_view_source(graph, node) {
             let elem_bytes = input
-                .and_then(|input| crate::ssa::layout::type_byte_size(&input.element()))
-                .unwrap_or(1) as u32;
+                .and_then(|input| crate::ssa::layout::storage_elem_stride(&input.element()))
+                .expect("resource-backed SOAC input must have a storable element type");
             return SegExtent::ResourceLength {
                 node,
                 resource,
@@ -423,9 +424,7 @@ fn space(
         }
         SegExtent::Value(node)
     });
-    SegSpace {
-        dims: extent.into_iter().collect(),
-    }
+    SegSpace::new(extent.expect("semantic SOAC must have a domain operand"))
 }
 
 fn extent_from_node(

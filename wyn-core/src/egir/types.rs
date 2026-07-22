@@ -482,9 +482,9 @@ impl<P: WynSoacPhase> super::ir::Entry<P, WynLanguage> {
 
 impl From<SoacOwnership> for SoacDestination {
     fn from(ownership: SoacOwnership) -> Self {
-        Self {
-            ownership,
-            placement: None,
+        match ownership {
+            SoacOwnership::Fresh => Self::fresh(),
+            SoacOwnership::UniqueInput => Self::unique_input(),
         }
     }
 }

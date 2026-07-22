@@ -33,6 +33,7 @@ fn compile_via_egir(src: &str) -> Program {
     .segment()
     .optimize()
     .allocate()
+    .expect("semantic EGIR allocation failed")
     .plan(crate::LoweringProfile::PORTABLE)
     .expect("semantic EGIR planning failed")
     .lower_to_ssa()

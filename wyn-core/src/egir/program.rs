@@ -19,14 +19,14 @@ use crate::flow::{BlockId, ControlHeader, ExecutionModel};
 use crate::interface::{self, EntryInput, EntryOutput};
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::types::TypeExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
 use super::parallelize::KernelPlan;
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, EgirPhase, NodeId, Physical, Raw, Scheduled, SegBody, SegExtent, SegSpace, Semantic,
-    SideEffectSite, Soac, SoacEffect, WynLanguage,
+    EGraph, ENode, EgirPhase, NodeId, Physical, Raw, Scheduled, SegBody, SegExtent, SegSpace, Semantic,
+    SideEffectKind, SideEffectSite, Soac, SoacEffect, WynLanguage,
 };
 
 pub use super::ir::{OutputRoute, OutputSlotId, OutputWriter, RegionInterner, SlotSource};
@@ -173,6 +173,35 @@ pub enum LogicalSize {
     Unspecified,
 }
 
+impl LogicalSize {
+    /// Size storage for one value per point in a semantic segmented space.
+    /// Returns `None` when the element has no legal storage layout.
+    pub(crate) fn for_space(
+        space: &SegSpace<SemanticResourceRef>,
+        elem_ty: &Type<TypeName>,
+    ) -> Option<Self> {
+        let elem_bytes = crate::ssa::layout::storage_elem_stride(elem_ty)?;
+        if let Some(count) = space.dims().iter().try_fold(1u64, |count, extent| match extent {
+            SegExtent::Fixed(length) => count.checked_mul(u64::from(*length)),
+            _ => None,
+        }) {
+            return Some(Self::FixedBytes(count.saturating_mul(u64::from(elem_bytes))));
+        }
+        Some(match space.dims() {
+            [SegExtent::ResourceLength {
+                resource,
+                elem_bytes: source_elem_bytes,
+                ..
+            }] => Self::LikeResource {
+                resource: resource.0,
+                elem_bytes,
+                src_elem_bytes: *source_elem_bytes,
+            },
+            _ => Self::SameAsDispatch { elem_bytes },
+        })
+    }
+}
+
 /// A semantic storage identity. It cannot represent a backend binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SemanticResourceRef(pub ResourceId);
@@ -228,23 +257,9 @@ pub enum CompilerResourceKind {
     MultiConsumerArray,
 }
 
-impl CompilerResourceKind {
-    /// The physical storage role a resource of this kind lowers to.
-    pub fn role(self) -> interface::StorageRole {
-        match self {
-            CompilerResourceKind::FilterScratch
-            | CompilerResourceKind::GatherHandoff
-            | CompilerResourceKind::ScalarHandoff
-            | CompilerResourceKind::MultiConsumerArray => interface::StorageRole::Output,
-            _ => interface::StorageRole::Intermediate,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompilerResource {
     pub kind: CompilerResourceKind,
-    pub role: interface::StorageRole,
     /// Semantic operation that owns the resource. Generic staging resources
     /// introduced before segmentation have no single owner.
     pub owner: Option<SemanticOpId>,
@@ -282,7 +297,6 @@ pub enum CompilerFlowEndpoint {
 impl CompilerResource {
     pub fn new(kind: CompilerResourceKind, owner: Option<SemanticOpId>, slot: usize) -> Self {
         Self {
-            role: kind.role(),
             kind,
             owner,
             slot,
@@ -584,20 +598,20 @@ pub(crate) fn host_resource_map(resources: &[LogicalResource]) -> HashMap<crate:
 pub fn plan_logical_resources(
     inner: SemanticProgram,
     effect_ids: &mut crate::IdSource<super::types::EffectToken>,
-) -> AllocatedProgram {
+) -> Result<AllocatedProgram, String> {
     let mut allocated = AllocatedProgram {
         semantic: inner,
         materializations: crate::IdArena::new(),
     };
     classify_existing_compiler_resources(&mut allocated);
-    super::residency::run(&mut allocated, effect_ids);
+    super::residency::run(&mut allocated, effect_ids)?;
     super::soac::filter::resolve_scratch_sizes(&mut allocated);
     strip_compiler_abi(&mut allocated);
     record_compiler_resource_flows(&mut allocated);
     if cfg!(debug_assertions) {
         verify_allocated_resources(&allocated).expect("invalid allocated semantic resources");
     }
-    allocated
+    Ok(allocated)
 }
 
 pub(crate) fn verify_allocated_resources(inner: &AllocatedProgram) -> Result<(), String> {
@@ -693,22 +707,6 @@ fn record_compiler_resource_flows(inner: &mut AllocatedProgram) {
             consumers: resource_consumers,
         });
     }
-    let flows = inner
-        .resources
-        .iter()
-        .filter_map(|resource| match &resource.origin {
-            ResourceOrigin::Compiler(compiler) => {
-                compiler.flow.as_ref().map(|flow| (resource.id, flow.consumers.clone()))
-            }
-            ResourceOrigin::Host(_) => None,
-        })
-        .collect::<HashMap<_, _>>();
-    for (_, requirement) in &mut inner.materializations {
-        for substitution in &mut requirement.substitutions {
-            let resource = substitution.resource.0;
-            substitution.consumers = flows.get(&resource).cloned().unwrap_or_default();
-        }
-    }
 }
 
 /// Finish the TLC conversion boundary by installing its authoritative
@@ -785,11 +783,8 @@ fn strip_compiler_abi(inner: &mut AllocatedProgram) {
         strip(&mut entry.inputs, &mut entry.outputs, &mut entry.output_routes);
     }
     for (_, requirement) in &mut inner.materializations {
-        strip(
-            &mut requirement.entry.inputs,
-            &mut requirement.entry.outputs,
-            &mut requirement.entry.output_routes,
-        );
+        let entry = requirement.entry_mut();
+        strip(&mut entry.inputs, &mut entry.outputs, &mut entry.output_routes);
     }
 }
 
@@ -907,31 +902,30 @@ fn physicalize_soac(
         nodes: &LookupMap<NodeId, NodeId>,
         bindings: &PhysicalResourceTable,
     ) -> Result<PhysicalSegSpace, String> {
-        Ok(SegSpace {
-            dims: space
-                .dims
-                .into_iter()
-                .map(|extent| {
-                    Ok(match extent {
-                        SegExtent::Fixed(value) => SegExtent::Fixed(value),
-                        SegExtent::PushConstant { node, offset } => SegExtent::PushConstant {
-                            node: nodes[&node],
-                            offset,
-                        },
-                        SegExtent::ResourceLength {
-                            node,
-                            resource,
-                            elem_bytes,
-                        } => SegExtent::ResourceLength {
-                            node: nodes[&node],
-                            resource: binding(resource, bindings),
-                            elem_bytes,
-                        },
-                        SegExtent::Value(node) => SegExtent::Value(nodes[&node]),
-                    })
+        let dims = space
+            .into_dims()
+            .into_iter()
+            .map(|extent| {
+                Ok(match extent {
+                    SegExtent::Fixed(value) => SegExtent::Fixed(value),
+                    SegExtent::PushConstant { node, offset } => SegExtent::PushConstant {
+                        node: nodes[&node],
+                        offset,
+                    },
+                    SegExtent::ResourceLength {
+                        node,
+                        resource,
+                        elem_bytes,
+                    } => SegExtent::ResourceLength {
+                        node: nodes[&node],
+                        resource: binding(resource, bindings),
+                        elem_bytes,
+                    },
+                    SegExtent::Value(node) => SegExtent::Value(nodes[&node]),
                 })
-                .collect::<Result<_, String>>()?,
-        })
+            })
+            .collect::<Result<_, String>>()?;
+        SegSpace::from_dims(dims).ok_or_else(|| "physicalized segmented space was empty".to_string())
     }
 
     fn operator(mut operator: screma::Operator, nodes: &LookupMap<NodeId, NodeId>) -> screma::Operator {
@@ -1244,6 +1238,196 @@ pub type RawEntry = Entry<Raw>;
 pub type SemanticEntry = Entry<Semantic>;
 pub type ScheduledEntry = Entry<Scheduled>;
 
+impl SemanticEntry {
+    /// Resource identities referenced by a set of values in `graph`, including
+    /// resource-backed entry parameters whose identity is carried by the
+    /// interface rather than by a storage-view node.
+    pub(crate) fn resources_referenced_by_nodes(
+        &self,
+        graph: &EGraph,
+        nodes: impl IntoIterator<Item = NodeId>,
+    ) -> HashSet<ResourceId> {
+        let mut resources = HashSet::new();
+        for node in nodes {
+            if let Some(resource) = super::graph_ops::extract_storage_view_source(graph, node) {
+                resources.insert(resource.0);
+            }
+            if let Some(ENode::FuncParam { index }) = graph.nodes.get(node) {
+                resources.extend(
+                    self.inputs
+                        .get(*index)
+                        .and_then(|input| input.resource.or_else(|| semantic_type_resource(&input.ty)))
+                        .map(|resource| resource.0),
+                );
+            }
+        }
+        resources
+    }
+
+    /// Resource identities retained by a graph projection. The projection is
+    /// the authority for which source values and effects survived, so callers
+    /// do not need to rediscover that boundary from the projected graph.
+    pub(crate) fn resources_referenced_by_projection(
+        &self,
+        projection: &super::graph_projector::GraphProjection,
+    ) -> HashSet<ResourceId> {
+        let mut resources = self.resources_referenced_by_nodes(&self.graph, projection.source_nodes());
+        for site in projection.source_effects() {
+            let effect = self.graph.skeleton.effect(*site);
+            resources.extend(
+                super::semantic_graph::read_resources(&self.graph, effect)
+                    .into_iter()
+                    .map(|access| access.resource.0),
+            );
+            if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind {
+                if let screma::SemanticState::Segmented {
+                    resources: accesses, ..
+                } = op.semantic_state()
+                {
+                    resources.extend(accesses.iter().map(|access| access.resource.0));
+                }
+            }
+        }
+        resources
+    }
+
+    pub(crate) fn parameter_indices_referenced_by_projection(
+        &self,
+        projection: &super::graph_projector::GraphProjection,
+        resources: &HashSet<ResourceId>,
+    ) -> crate::SortedSet<usize> {
+        let mut parameters = projection
+            .source_nodes()
+            .filter_map(|node| match self.graph.nodes.get(node) {
+                Some(ENode::FuncParam { index }) => Some(*index),
+                _ => None,
+            })
+            .collect::<crate::SortedSet<_>>();
+        for (index, input) in self.inputs.iter().enumerate() {
+            if input
+                .resource
+                .or_else(|| semantic_type_resource(&input.ty))
+                .is_some_and(|resource| resources.contains(&resource.0))
+            {
+                parameters.insert(index);
+            }
+        }
+        parameters
+    }
+
+    pub(crate) fn resource_declarations_for(
+        &self,
+        resources: &HashSet<ResourceId>,
+    ) -> Vec<SemanticResourceDecl> {
+        self.resource_declarations
+            .iter()
+            .filter(|declaration| resources.contains(&declaration.resource.0))
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn set_resource_declaration(
+        &mut self,
+        resource: ResourceId,
+        role: interface::StorageRole,
+        elem_ty: &Type<TypeName>,
+        size: &LogicalSize,
+    ) {
+        if let Some(declaration) =
+            self.resource_declarations.iter_mut().find(|declaration| declaration.resource.0 == resource)
+        {
+            declaration.role = role;
+            declaration.elem_ty = elem_ty.clone();
+            declaration.size = size.clone();
+        } else {
+            self.resource_declarations.push(SemanticResourceDecl {
+                resource: SemanticResourceRef(resource),
+                role,
+                elem_ty: elem_ty.clone(),
+                size: size.clone(),
+            });
+        }
+    }
+
+    pub(crate) fn declare_resource_view(
+        &mut self,
+        resource: ResourceId,
+        role: interface::StorageRole,
+        elem_ty: &Type<TypeName>,
+        size: &LogicalSize,
+    ) -> NodeId {
+        let view = super::graph_ops::intern_resource_view(&mut self.graph, resource, elem_ty.clone(), None);
+        self.set_resource_declaration(resource, role, elem_ty, size);
+        view
+    }
+
+    /// Remove entry parameters and input resource declarations that the graph
+    /// and output routes cannot observe.
+    pub(crate) fn compact_interface(&mut self) {
+        let mut roots = self
+            .graph
+            .skeleton
+            .blocks
+            .iter()
+            .flat_map(|(_, block)| {
+                block
+                    .side_effects
+                    .iter()
+                    .flat_map(|effect| effect.referenced_nodes())
+                    .chain(block.term.referenced_nodes())
+            })
+            .collect::<Vec<_>>();
+        for route in &self.output_routes {
+            roots.push(route.source.value);
+            roots.extend(route.writers.iter().filter_map(|writer| match writer {
+                OutputWriter::Value(value) => Some(*value),
+                OutputWriter::Effect(_) => None,
+            }));
+        }
+        let reachable = super::graph_ops::execution_value_producer_closure(&self.graph, roots).nodes;
+        let reachable_resources =
+            self.resources_referenced_by_nodes(&self.graph, reachable.iter().copied());
+        let mut kept_indices = reachable
+            .iter()
+            .filter_map(|node| match self.graph.nodes.get(*node) {
+                Some(ENode::FuncParam { index }) => Some(*index),
+                _ => None,
+            })
+            .collect::<crate::SortedSet<_>>();
+        for (index, input) in self.inputs.iter().enumerate() {
+            if input.resource.is_some_and(|resource| reachable_resources.contains(&resource.0)) {
+                kept_indices.insert(index);
+            }
+        }
+        self.retain_parameter_indices(&kept_indices);
+
+        let mut used_resources = self
+            .inputs
+            .iter()
+            .filter_map(|input| input.resource.map(|resource| resource.0))
+            .chain(self.outputs.iter().filter_map(|output| output.resource.map(|resource| resource.0)))
+            .collect::<HashSet<_>>();
+        for (_, block) in &self.graph.skeleton.blocks {
+            for effect in &block.side_effects {
+                used_resources.extend(
+                    super::semantic_graph::read_resources(&self.graph, effect)
+                        .into_iter()
+                        .map(|access| access.resource.0),
+                );
+                if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind {
+                    if let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() {
+                        used_resources.extend(resources.iter().map(|access| access.resource.0));
+                    }
+                }
+            }
+        }
+        self.resource_declarations.retain(|declaration| {
+            declaration.role != interface::StorageRole::Input
+                || used_resources.contains(&declaration.resource.0)
+        });
+    }
+}
+
 /// A complete, fresh entry projection owned by a kernel recipe.
 pub type PlannedEntry<P = Semantic> = super::ir::Entry<P, WynLanguage>;
 
@@ -1400,23 +1584,60 @@ pub enum MaterializationKind {
     RuntimeArray,
 }
 
-pub struct MaterializationRequirement {
-    pub kind: MaterializationKind,
-    /// SOAC provenance when the source is a semantic operation. Captured
-    /// parallel preludes intentionally do not receive synthetic operation ids.
-    pub producer: Option<SemanticOpId>,
-    /// Iteration space captured when residency creates the producer. Target
-    /// planning consumes this directly instead of rediscovering a segmented
-    /// operation in the projected materialization graph.
-    pub space: super::types::SegSpace<SemanticResourceRef>,
-    pub entry: SemanticEntry,
-    pub substitutions: Vec<MaterializationSubstitution>,
+pub enum MaterializationRequirement {
+    SharedArray {
+        space: SegSpace<SemanticResourceRef>,
+        entry: SemanticEntry,
+    },
+    Gather {
+        space: SegSpace<SemanticResourceRef>,
+        entry: SemanticEntry,
+    },
+    RuntimeArray {
+        space: SegSpace<SemanticResourceRef>,
+        entry: SemanticEntry,
+    },
+    Scalar {
+        entry: SemanticEntry,
+    },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MaterializationSubstitution {
-    pub resource: SemanticResourceRef,
-    pub consumers: Vec<CompilerFlowEndpoint>,
+impl MaterializationRequirement {
+    pub fn kind(&self) -> MaterializationKind {
+        match self {
+            Self::SharedArray { .. } => MaterializationKind::SharedArray,
+            Self::Gather { .. } => MaterializationKind::Gather,
+            Self::RuntimeArray { .. } => MaterializationKind::RuntimeArray,
+            Self::Scalar { .. } => MaterializationKind::Scalar,
+        }
+    }
+
+    pub fn space(&self) -> Option<&SegSpace<SemanticResourceRef>> {
+        match self {
+            Self::SharedArray { space, .. }
+            | Self::Gather { space, .. }
+            | Self::RuntimeArray { space, .. } => Some(space),
+            Self::Scalar { .. } => None,
+        }
+    }
+
+    pub fn entry(&self) -> &SemanticEntry {
+        match self {
+            Self::SharedArray { entry, .. }
+            | Self::Gather { entry, .. }
+            | Self::RuntimeArray { entry, .. }
+            | Self::Scalar { entry } => entry,
+        }
+    }
+
+    pub fn entry_mut(&mut self) -> &mut SemanticEntry {
+        match self {
+            Self::SharedArray { entry, .. }
+            | Self::Gather { entry, .. }
+            | Self::RuntimeArray { entry, .. }
+            | Self::Scalar { entry } => entry,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1525,6 +1746,10 @@ pub struct SemanticProgram {
     pub ir: Program<Semantic>,
     pub resources: LogicalResourceArena,
     pub semantic_dependencies: Vec<SemanticDependency>,
+    /// Array-producing operations whose values cross an indexing or captured
+    /// execution boundary. Rebuilt beside semantic dependencies so residency
+    /// consumes construction-time graph facts instead of rescanning patterns.
+    pub(crate) array_residency_demands: HashSet<SemanticOpId>,
 }
 
 impl SemanticProgram {
@@ -1547,6 +1772,7 @@ impl SemanticProgram {
             ),
             resources: LogicalResourceArena::default(),
             semantic_dependencies: Vec::new(),
+            array_residency_demands: HashSet::new(),
         }
     }
 
@@ -1789,6 +2015,7 @@ impl PhysicalProgram {
             ir,
             resources,
             semantic_dependencies: _,
+            array_residency_demands: _,
         } = semantic;
         let Program {
             functions,
@@ -1864,7 +2091,7 @@ impl AllocatedProgram {
             self.materializations.ids().map(|id| {
                 (
                     CompilerFlowEndpoint::Materialization(id),
-                    &self.materializations[id].entry,
+                    self.materializations[id].entry(),
                 )
             }),
         )

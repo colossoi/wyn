@@ -62,7 +62,7 @@ fn mismatched_variants_never_fuse() {
 
 #[test]
 fn spaces_fuse_dimensionwise() {
-    let space = |dims| SegSpace { dims };
+    let space = |dims| SegSpace::from_dims(dims).unwrap();
     assert!(seg_space_fusable(
         &space(vec![SegExtent::Fixed(8)]),
         &space(vec![SegExtent::Fixed(8)]),

@@ -246,39 +246,35 @@ pub enum SoacPlacement {
     OutputView,
 }
 
-/// Logical ownership plus any external placement selected during lowering.
-/// An unplaced result is function-local; `InputBuffer` aliases an input and
-/// `OutputView` consumes an explicit output-view operand.
+/// Complete lowering state for a SOAC result destination. Keeping candidate
+/// ownership and resolved placement in one enum prevents combinations whose
+/// ownership no longer has meaning after a concrete destination is selected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SoacDestination {
-    pub ownership: SoacOwnership,
-    pub placement: Option<SoacPlacement>,
+pub enum SoacDestination {
+    Fresh,
+    UniqueInput,
+    InputBuffer,
+    OutputView,
 }
 
 impl SoacDestination {
     pub const fn fresh() -> Self {
-        Self {
-            ownership: SoacOwnership::Fresh,
-            placement: None,
-        }
+        Self::Fresh
     }
 
     pub const fn unique_input() -> Self {
-        Self {
-            ownership: SoacOwnership::UniqueInput,
-            placement: None,
-        }
+        Self::UniqueInput
     }
 
     pub const fn placed(self, placement: SoacPlacement) -> Self {
-        Self {
-            placement: Some(placement),
-            ..self
+        match placement {
+            SoacPlacement::InputBuffer => Self::InputBuffer,
+            SoacPlacement::OutputView => Self::OutputView,
         }
     }
 
     pub fn place(&mut self, placement: SoacPlacement) {
-        self.placement = Some(placement);
+        *self = self.placed(placement);
     }
 
     pub fn make_fresh(&mut self) {
@@ -286,23 +282,23 @@ impl SoacDestination {
     }
 
     pub const fn is_unplaced_fresh(self) -> bool {
-        matches!(self.ownership, SoacOwnership::Fresh) && self.placement.is_none()
+        matches!(self, Self::Fresh)
     }
 
     pub const fn is_unplaced(self) -> bool {
-        self.placement.is_none()
+        matches!(self, Self::Fresh | Self::UniqueInput)
     }
 
     pub const fn is_unplaced_unique_input(self) -> bool {
-        matches!(self.ownership, SoacOwnership::UniqueInput) && self.placement.is_none()
+        matches!(self, Self::UniqueInput)
     }
 
     pub const fn is_input_buffer(self) -> bool {
-        matches!(self.placement, Some(SoacPlacement::InputBuffer))
+        matches!(self, Self::InputBuffer)
     }
 
     pub const fn is_output_view(self) -> bool {
-        matches!(self.placement, Some(SoacPlacement::OutputView))
+        matches!(self, Self::OutputView)
     }
 }
 
@@ -330,10 +326,26 @@ pub enum SegExtent<R> {
 /// node-construction time.
 #[derive(Clone, Debug)]
 pub struct SegSpace<R> {
-    pub dims: Vec<SegExtent<R>>,
+    dims: Vec<SegExtent<R>>,
 }
 
 impl<R> SegSpace<R> {
+    pub(crate) fn new(extent: SegExtent<R>) -> Self {
+        Self { dims: vec![extent] }
+    }
+
+    pub(crate) fn from_dims(dims: Vec<SegExtent<R>>) -> Option<Self> {
+        (!dims.is_empty()).then_some(Self { dims })
+    }
+
+    pub(crate) fn dims(&self) -> &[SegExtent<R>] {
+        &self.dims
+    }
+
+    pub(crate) fn into_dims(self) -> Vec<SegExtent<R>> {
+        self.dims
+    }
+
     pub(crate) fn referenced_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.dims.iter().filter_map(|extent| match extent {
             SegExtent::PushConstant { node, .. }
@@ -353,6 +365,52 @@ impl<R> SegSpace<R> {
                 SegExtent::Fixed(_) => None,
             })
             .collect()
+    }
+}
+
+impl<R: Copy> SegSpace<R> {
+    /// Rewrite one referenced graph value and, for a resource-length extent,
+    /// keep its resource identity synchronized with the replacement view.
+    pub(crate) fn replace_reference(&mut self, old: NodeId, new: NodeId, resource: R) {
+        for extent in &mut self.dims {
+            match extent {
+                SegExtent::PushConstant { node, .. } | SegExtent::Value(node) if *node == old => {
+                    *node = new;
+                }
+                SegExtent::ResourceLength {
+                    node,
+                    resource: extent_resource,
+                    ..
+                } if *node == old => {
+                    *node = new;
+                    *extent_resource = resource;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Retarget a one-dimensional dynamic domain to the length of a concrete
+    /// resource view. Returns false when the current space is not the supported
+    /// one-dimensional dynamic shape.
+    pub(crate) fn retarget_single_resource_length(
+        &mut self,
+        view: NodeId,
+        resource: R,
+        elem_bytes: u32,
+    ) -> bool {
+        let [extent] = self.dims.as_mut_slice() else {
+            return false;
+        };
+        if !matches!(extent, SegExtent::Value(_) | SegExtent::ResourceLength { .. }) {
+            return false;
+        }
+        *extent = SegExtent::ResourceLength {
+            node: view,
+            resource,
+            elem_bytes,
+        };
+        true
     }
 }
 
@@ -496,6 +554,22 @@ impl<P: EgirPhase, Lang: Language> Skeleton<P, Lang> {
 
     pub fn get_effect_mut(&mut self, site: SideEffectSite) -> Option<&mut SideEffect<P, Lang>> {
         self.blocks.get_mut(site.block)?.side_effects.get_mut(site.index)
+    }
+
+    /// Remove a snapshot-stable set of side-effect sites without invalidating
+    /// any site before it has been consumed. Duplicate sites are harmless.
+    pub fn remove_effect_sites(&mut self, effects: impl IntoIterator<Item = SideEffectSite>) {
+        let mut by_block = std::collections::HashMap::<BlockId, Vec<usize>>::new();
+        for site in effects {
+            by_block.entry(site.block).or_default().push(site.index);
+        }
+        for (block, mut indices) in by_block {
+            indices.sort_unstable();
+            indices.dedup();
+            for index in indices.into_iter().rev() {
+                self.blocks[block].side_effects.remove(index);
+            }
+        }
     }
 
     /// Split a block immediately before one of its side effects.
@@ -1386,6 +1460,26 @@ impl<P: EgirPhase, Lang: Language> Entry<P, Lang> {
                 *index = new_index;
             }
         }
+    }
+
+    /// Drop structured-control metadata whose header or required target block
+    /// was removed by CFG simplification.
+    pub fn retain_live_control_headers(&mut self) {
+        let blocks = &self.graph.skeleton.blocks;
+        self.control_headers.retain(|header, control| {
+            if !blocks.contains_key(*header)
+                || !matches!(blocks[*header].term, SkeletonTerminator::CondBranch { .. })
+            {
+                return false;
+            }
+            match control {
+                ControlHeader::Loop {
+                    merge,
+                    continue_block,
+                } => blocks.contains_key(*merge) && blocks.contains_key(*continue_block),
+                ControlHeader::Selection { merge } => blocks.contains_key(*merge),
+            }
+        });
     }
 }
 

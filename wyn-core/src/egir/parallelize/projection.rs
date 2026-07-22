@@ -1,15 +1,7 @@
 //! Physical-entry projection, interface compaction, and output-domain split.
 
 use super::*;
-use crate::egir::{graph_projector, program, semantic_graph};
-
-/// Retained-interface facts owned by one projection result. Interface
-/// compaction consumes them immediately; graph-local ids never outlive the
-/// projected entry they describe.
-struct RetainedInterface {
-    parameters: crate::SortedSet<usize>,
-    resources: HashSet<ResourceId>,
-}
+use crate::egir::{graph_projector, program};
 
 pub(super) struct ProjectionSpec {
     name: String,
@@ -48,72 +40,6 @@ impl ProjectionSpec {
             resource_declarations,
             return_ty: source.return_ty.clone(),
         }
-    }
-}
-
-fn retained_resources(
-    source: &EGraph,
-    projection: &graph_projector::GraphProjection,
-) -> HashSet<ResourceId> {
-    let mut resources = projection
-        .source_nodes()
-        .filter_map(|node| graph_ops::extract_storage_view_source(source, node))
-        .map(|resource| resource.0)
-        .collect::<HashSet<_>>();
-
-    for site in projection.source_effects() {
-        let effect = source.skeleton.effect(*site);
-        resources.extend(
-            semantic_graph::read_resources(source, effect).into_iter().map(|access| access.resource.0),
-        );
-        if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind {
-            if let screma::SemanticState::Segmented {
-                resources: accesses, ..
-            } = op.semantic_state()
-            {
-                resources.extend(accesses.iter().map(|access| access.resource.0));
-            }
-        }
-    }
-
-    resources
-}
-
-fn retained_parameters(
-    source: &program::PlannedEntry,
-    projection: &graph_projector::GraphProjection,
-    resources: &HashSet<ResourceId>,
-) -> crate::SortedSet<usize> {
-    let mut parameters = projection
-        .source_nodes()
-        .filter_map(|node| match source.graph.nodes.get(node) {
-            Some(ENode::FuncParam { index }) => Some(index).copied(),
-            _ => None,
-        })
-        .collect::<crate::SortedSet<_>>();
-
-    for (index, input) in source.inputs.iter().enumerate() {
-        let Some(Type::Constructed(TypeName::Resource(resource), _)) = input.ty.array_buffer() else {
-            continue;
-        };
-        if resources.contains(resource) {
-            parameters.insert(index);
-        }
-    }
-
-    parameters
-}
-
-fn retained_interface(
-    source: &program::PlannedEntry,
-    projection: &graph_projector::GraphProjection,
-) -> RetainedInterface {
-    let resources = retained_resources(&source.graph, projection);
-    let parameters = retained_parameters(source, projection, &resources);
-
-    RetainedInterface {
-        parameters,
-        resources,
     }
 }
 
@@ -168,7 +94,9 @@ fn project_kernel_body_effects(
         .iter()
         .filter_map(|source| Some((*source, projection.effect_site(*source)?)))
         .collect();
-    let retained = retained_interface(source, &projection);
+    let retained_resources = source.resources_referenced_by_projection(&projection);
+    let retained_parameters =
+        source.parameter_indices_referenced_by_projection(&projection, &retained_resources);
     let mut entry = program::PlannedEntry::from_projection(
         projection,
         name,
@@ -182,10 +110,10 @@ fn project_kernel_body_effects(
         &source.aliases,
         output_routes,
     )?;
-    entry.retain_parameter_indices(&retained.parameters);
+    entry.retain_parameter_indices(&retained_parameters);
     entry.resource_declarations.retain(|declaration| match declaration.role {
         crate::interface::StorageRole::Input | crate::interface::StorageRole::Output => {
-            retained.resources.contains(&declaration.resource.0)
+            retained_resources.contains(&declaration.resource.0)
         }
         crate::interface::StorageRole::Intermediate => true,
     });

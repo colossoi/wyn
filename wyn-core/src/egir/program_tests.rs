@@ -79,7 +79,7 @@ fn logical_allocation_introduces_the_allocated_sidecar() {
     semantic.resources.allocate(ResourceOrigin::Host(binding), unit_ty(), LogicalSize::Unspecified);
 
     let mut effect_ids = crate::IdSource::new();
-    let allocated = plan_logical_resources(semantic, &mut effect_ids);
+    let allocated = plan_logical_resources(semantic, &mut effect_ids).expect("logical resource planning");
 
     assert!(allocated.materializations.is_empty());
     assert_eq!(allocated.resources.len(), 1);

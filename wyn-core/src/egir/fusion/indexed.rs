@@ -144,12 +144,6 @@ fn is_static_index(graph: &EGraph, node: NodeId) -> bool {
     }
 }
 
-fn reaches(graph: &EGraph, start: NodeId, target: NodeId) -> bool {
-    wyn_graph::reaches_ordered(start, target, wyn_graph::WalkOrder::DepthFirst, |node, out| {
-        out.extend(graph.nodes[node].children());
-    })
-}
-
 fn used_only_through(
     graph: &EGraph,
     producer_block: BlockId,
@@ -164,20 +158,26 @@ fn used_only_through(
                 continue;
             }
             for root in effect.referenced_nodes() {
-                if reaches(graph, root, result) && !reaches(graph, root, demand) {
+                if graph_ops::pure_depends_on(graph, root, result)
+                    && !graph_ops::pure_depends_on(graph, root, demand)
+                {
                     return false;
                 }
             }
         }
         for root in block.term.referenced_nodes() {
-            if reaches(graph, root, result) && !reaches(graph, root, demand) {
+            if graph_ops::pure_depends_on(graph, root, result)
+                && !graph_ops::pure_depends_on(graph, root, demand)
+            {
                 return false;
             }
         }
     }
     for route in output_routes {
         let root = route.source.value;
-        if reaches(graph, root, result) && !reaches(graph, root, demand) {
+        if graph_ops::pure_depends_on(graph, root, result)
+            && !graph_ops::pure_depends_on(graph, root, demand)
+        {
             return false;
         }
     }

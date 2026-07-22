@@ -25,7 +25,7 @@ use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
 use super::types::{
     as_soa_tuple, soac_element_type, ENode, EffectOp, EffectToken, NodeId, PureOp, SkeletonTerminator,
-    SoacEffect, SoacOwnership, SoacPlacement,
+    SoacDestination, SoacEffect,
 };
 
 /// Run `run_one_body` on every function and entry point in the program.
@@ -200,15 +200,15 @@ fn expand_one(
             let mut map_output_views = Vec::with_capacity(n_maps);
             let mut map_input_buffer_inits = Vec::with_capacity(n_maps);
             for (map_idx, dest) in map_destinations.iter().enumerate() {
-                match (dest.ownership, dest.placement) {
-                    (SoacOwnership::UniqueInput, None) => {
+                match dest {
+                    SoacDestination::UniqueInput => {
                         panic!("unresolved UniqueInput destination reached physical expansion")
                     }
-                    (SoacOwnership::Fresh, None) => {
+                    SoacDestination::Fresh => {
                         map_output_views.push(None);
                         map_input_buffer_inits.push(None);
                     }
-                    (_, Some(SoacPlacement::OutputView)) => {
+                    SoacDestination::OutputView => {
                         let view =
                             operands.output(map_idx).map(|operand| operand.node).ok_or_else(|| {
                                 format!("Screma map result {map_idx} has no output-view operand")
@@ -216,7 +216,7 @@ fn expand_one(
                         map_output_views.push(Some(view));
                         map_input_buffer_inits.push(None);
                     }
-                    (_, Some(SoacPlacement::InputBuffer)) => {
+                    SoacDestination::InputBuffer => {
                         // Consuming map: loop carries `inputs[map_idx]`
                         // (or `inputs[0]` for single-input Screma) as the
                         // initial output, so the result aliases the input
@@ -231,15 +231,15 @@ fn expand_one(
             let mut acc_output_views = Vec::with_capacity(n_accs);
             let mut acc_input_buffer_inits = Vec::with_capacity(n_accs);
             for (acc_idx, dest) in acc_destinations.iter().enumerate() {
-                match (dest.ownership, dest.placement) {
-                    (SoacOwnership::UniqueInput, None) => {
+                match dest {
+                    SoacDestination::UniqueInput => {
                         panic!("unresolved UniqueInput destination reached physical expansion")
                     }
-                    (SoacOwnership::Fresh, None) => {
+                    SoacDestination::Fresh => {
                         acc_output_views.push(None);
                         acc_input_buffer_inits.push(None);
                     }
-                    (_, Some(SoacPlacement::OutputView)) => {
+                    SoacDestination::OutputView => {
                         let field = n_maps + acc_idx;
                         let view = operands.output(field).map(|operand| operand.node).ok_or_else(|| {
                             format!("Screma accumulator result {acc_idx} has no output-view operand")
@@ -247,7 +247,7 @@ fn expand_one(
                         acc_output_views.push(Some(view));
                         acc_input_buffer_inits.push(None);
                     }
-                    (_, Some(SoacPlacement::InputBuffer)) => {
+                    SoacDestination::InputBuffer => {
                         // Consuming Scan accumulator: writes back to the
                         // input buffer in-place. Loop carries inputs[0]
                         // as the initial scan-output value.
@@ -994,8 +994,8 @@ fn emit_seg_space_len(
 ) -> NodeId {
     use crate::egir::types::SegExtent;
 
-    let mut dimensions = Vec::with_capacity(space.dims.len());
-    for extent in &space.dims {
+    let mut dimensions = Vec::with_capacity(space.dims().len());
+    for extent in space.dims() {
         let dimension = match extent {
             SegExtent::Fixed(count) => {
                 graph.intern_pure(PureOp::Int(count.to_string()), smallvec![], i32_ty.clone(), None)
