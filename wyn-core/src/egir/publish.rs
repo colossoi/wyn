@@ -28,7 +28,7 @@ use crate::flow::ExecutionModel;
 use crate::interface::{IoDecoration, TextureSource};
 use crate::pipeline_descriptor::{
     Access, BackingRef, Binding, BufferUsage, FragmentOutput, Pipeline, PipelineDescriptor,
-    SamplerBindingType, TextureSampleType, TextureViewDimension, VertexAttribute,
+    SamplerBindingType, StageBindingUses, TextureSampleType, TextureViewDimension, VertexAttribute,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -43,6 +43,10 @@ pub trait PipelineDescriptorPublish {
     /// intermediates). Bindings already present (e.g. those a
     /// `MultiCompute` parallelization path pre-populated) are skipped.
     fn publish_implicit_bindings(&mut self, entries: &[&EntryPublication]) -> Result<(), DescriptorError>;
+
+    /// Record storage-buffer access on the stage that performs it and
+    /// reconcile each pipeline layout from its own stages.
+    fn publish_stage_binding_uses(&mut self, entries: &[&EntryPublication]);
 
     /// Populate `vertex_inputs` and `fragment_outputs` on graphics
     /// pipelines from a vertex entry's `#[vertex_slot(n)]` inputs and a
@@ -64,78 +68,101 @@ pub trait PipelineDescriptorPublish {
     fn relabel_input_storage_names(&mut self, names: &LookupMap<(u32, u32), String>);
 }
 
-fn storage_access_bindings(
-    entries: &[&EntryPublication],
-    include_outputs: bool,
-    input_matches: impl Fn(Option<crate::interface::StorageAccess>) -> bool,
-    declaration_matches: impl Fn(&crate::interface::StorageRole) -> bool,
-) -> LookupSet<(u32, u32)> {
-    let mut bindings = LookupSet::new();
-    for entry in entries {
-        if include_outputs {
-            bindings.extend(
-                entry
-                    .outputs
-                    .iter()
-                    .filter_map(|output| output.storage_binding())
-                    .map(|binding| (binding.set, binding.binding)),
+fn entry_stage_binding_uses(entry: &EntryPublication, bindings: &[Binding]) -> StageBindingUses {
+    let indices = bindings
+        .iter()
+        .enumerate()
+        .filter_map(|(index, binding)| binding_slot(binding).map(|slot| (slot, index)))
+        .collect::<LookupMap<_, _>>();
+    let mut uses = StageBindingUses::default();
+    let mut record = |binding: BindingRef, access: Access| {
+        if let Some(&index) = indices.get(&binding) {
+            uses.record(index, access);
+        }
+    };
+
+    for input in &entry.inputs {
+        let Some(binding) = input.storage_binding() else {
+            continue;
+        };
+        let access = match input.storage_access() {
+            Some(crate::interface::StorageAccess::WriteOnly) => Access::WriteOnly,
+            Some(crate::interface::StorageAccess::ReadWrite) => Access::ReadWrite,
+            Some(crate::interface::StorageAccess::ReadOnly) | None => Access::ReadOnly,
+        };
+        record(binding, access);
+    }
+    for output in &entry.outputs {
+        if let Some(binding) = output.storage_binding() {
+            record(binding, Access::WriteOnly);
+        }
+    }
+    for declaration in &entry.storage_bindings {
+        let access = match declaration.role {
+            crate::interface::StorageRole::Input => Access::ReadOnly,
+            crate::interface::StorageRole::Output => Access::WriteOnly,
+            crate::interface::StorageRole::Intermediate => Access::ReadWrite,
+        };
+        record(declaration.binding, access);
+    }
+    uses
+}
+
+fn reconcile_storage_binding_access<'a>(
+    bindings: &mut [Binding],
+    stages: impl IntoIterator<Item = &'a StageBindingUses>,
+) {
+    let stages = stages.into_iter().collect::<Vec<_>>();
+    for (index, binding) in bindings.iter_mut().enumerate() {
+        let Binding::StorageBuffer { access, .. } = binding else {
+            continue;
+        };
+        let reads = stages.iter().any(|stage| stage.reads.contains(&index));
+        let writes = stages.iter().any(|stage| stage.writes.contains(&index));
+        if reads || writes {
+            *access = match (reads, writes) {
+                (true, true) => Access::ReadWrite,
+                (true, false) => Access::ReadOnly,
+                (false, true) => Access::WriteOnly,
+                (false, false) => unreachable!(),
+            };
+        }
+    }
+}
+
+fn publish_pipeline_stage_uses(pipeline: &mut Pipeline, entries: &[&EntryPublication]) {
+    match pipeline {
+        Pipeline::Compute(compute) => {
+            for stage in &mut compute.stages {
+                if stage.uses.is_empty() {
+                    if let Some(entry) = entries.iter().find(|entry| entry.name == stage.entry_point) {
+                        stage.uses = entry_stage_binding_uses(entry, &compute.bindings);
+                    }
+                }
+            }
+            reconcile_storage_binding_access(
+                &mut compute.bindings,
+                compute.stages.iter().map(|stage| &stage.uses),
             );
         }
-        bindings.extend(entry.inputs.iter().filter_map(|input| {
-            let binding = input.storage_binding()?;
-            input_matches(input.storage_access()).then_some((binding.set, binding.binding))
-        }));
-        bindings.extend(entry.storage_bindings.iter().filter_map(|declaration| {
-            declaration_matches(&declaration.role)
-                .then_some((declaration.binding.set, declaration.binding.binding))
-        }));
+        Pipeline::Graphics(graphics) => {
+            for stage in &mut graphics.stages {
+                if stage.uses.is_empty() {
+                    if let Some(entry) = entries.iter().find(|entry| entry.name == stage.entry_point) {
+                        stage.uses = entry_stage_binding_uses(entry, &graphics.bindings);
+                    }
+                }
+            }
+            reconcile_storage_binding_access(
+                &mut graphics.bindings,
+                graphics.stages.iter().map(|stage| &stage.uses),
+            );
+        }
     }
-    bindings
 }
 
 impl PipelineDescriptorPublish for PipelineDescriptor {
     fn publish_implicit_bindings(&mut self, entries: &[&EntryPublication]) -> Result<(), DescriptorError> {
-        // SPIR-V `NonWritable` is a module-level decoration on
-        // `OpVariable`, not per-entry-point. The SPIR-V backend (see
-        // `spirv/mod.rs` `written_bindings`) only emits `NonWritable`
-        // when no entry writes the binding. Naga / wgpu reads that
-        // module-level access as the binding's class: any binding
-        // written by some entry becomes `read_write`. The descriptor
-        // must agree, otherwise wgpu rejects pipeline creation with
-        // `Storage class Storage{LOAD} doesn't match shader Storage{LOAD
-        // | STORE}`. Compute the set of module-writable bindings here
-        // and promote `ReadOnly → ReadWrite` in a final post-pass below.
-        let written_bindings = storage_access_bindings(
-            entries,
-            true,
-            |access| {
-                matches!(
-                    access,
-                    Some(
-                        crate::interface::StorageAccess::WriteOnly
-                            | crate::interface::StorageAccess::ReadWrite
-                    )
-                )
-            },
-            |role| {
-                matches!(
-                    role,
-                    crate::interface::StorageRole::Output | crate::interface::StorageRole::Intermediate
-                )
-            },
-        );
-        let read_bindings = storage_access_bindings(
-            entries,
-            false,
-            |access| !matches!(access, Some(crate::interface::StorageAccess::WriteOnly)),
-            |role| {
-                matches!(
-                    role,
-                    crate::interface::StorageRole::Input | crate::interface::StorageRole::Intermediate
-                )
-            },
-        );
-
         let mut layout = DescriptorLayout::from_pipeline(self)?;
 
         for entry in entries {
@@ -188,6 +215,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         access: Access::ReadOnly,
                         usage: BufferUsage::Input,
                         name: input.name.clone(),
+                        resource: None,
                         length: input.storage_length().cloned(),
                     };
                     let Some(slot) = binding_slot(&binding) else {
@@ -306,6 +334,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                     } else {
                         format!("{}_intermediate_b{}", entry.name, decl.binding.binding)
                     },
+                    resource: decl.logical_resource.clone(),
                     length: decl.length.clone(),
                 };
                 let Some(slot) = binding_slot(&binding) else {
@@ -341,6 +370,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                     access: Access::WriteOnly,
                     usage: BufferUsage::Output,
                     name,
+                    resource: None,
                     length: output.storage_length().cloned(),
                 };
                 let Some(slot) = binding_slot(&binding) else {
@@ -354,32 +384,13 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
             }
         }
 
-        // Promote any `ReadOnly` storage binding whose `(set, binding)`
-        // is written by some entry in the module — see comment at the
-        // top of this function for why. Monotonic: only widens. Existing
-        // `ReadWrite` / `WriteOnly` are left as-is (`WriteOnly` already
-        // maps to `read_only=false` at the wgpu layer).
-        for pipeline in self.pipelines.iter_mut() {
-            let bindings: &mut Vec<Binding> = match pipeline {
-                Pipeline::Compute(cp) => &mut cp.bindings,
-                Pipeline::Graphics(gp) => &mut gp.bindings,
-            };
-            for b in bindings.iter_mut() {
-                if let Binding::StorageBuffer {
-                    set, binding, access, ..
-                } = b
-                {
-                    let slot = (*set, *binding);
-                    if written_bindings.contains(&slot)
-                        && (*access == Access::ReadOnly || read_bindings.contains(&slot))
-                    {
-                        *access = Access::ReadWrite;
-                    }
-                }
-            }
-        }
-
         Ok(())
+    }
+
+    fn publish_stage_binding_uses(&mut self, entries: &[&EntryPublication]) {
+        for pipeline in &mut self.pipelines {
+            publish_pipeline_stage_uses(pipeline, entries);
+        }
     }
 
     fn publish_graphics_io(&mut self, entries: &[&EntryPublication]) {

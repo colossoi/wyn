@@ -9,16 +9,15 @@ impl Constructor {
     /// Get or assign a sequential buffer_id for a (set, binding) pair.
     /// Also registers the buffer_var in buffer_vars for later lookup.
     pub(super) fn get_or_assign_buffer_id(&mut self, set: u32, binding: u32) -> u32 {
-        if let Some(&id) = self.buffer_id_map.get(&BindingRef::new(set, binding)) {
+        let use_key = self.storage_use(BindingRef::new(set, binding));
+        if let Some(&id) = self.buffer_id_map.get(&use_key) {
             return id;
         }
         let id = self.buffer_vars.len() as u32;
-        let &(buffer_var, elem_ty, _) = self
-            .storage_buffers
-            .get(&BindingRef::new(set, binding))
-            .expect("get_or_assign_buffer_id: storage buffer must exist");
+        let &(buffer_var, elem_ty, _) =
+            self.storage_buffers.get(&use_key).expect("get_or_assign_buffer_id: storage buffer must exist");
         self.buffer_vars.push((buffer_var, elem_ty));
-        self.buffer_id_map.insert(BindingRef::new(set, binding), id);
+        self.buffer_id_map.insert(use_key, id);
         id
     }
 
@@ -104,9 +103,14 @@ impl Constructor {
         array_ty: &PolyType<TypeName>,
         set: u32,
         binding: u32,
+        writable: bool,
     ) -> spirv::Word {
+        let use_key = StorageBufferUse {
+            binding: BindingRef::new(set, binding),
+            writable,
+        };
         // Return existing if already created
-        if let Some(&(var_id, _, _)) = self.storage_buffers.get(&BindingRef::new(set, binding)) {
+        if let Some(&(var_id, _, _)) = self.storage_buffers.get(&use_key) {
             return var_id;
         }
         // Storage buffers can be either an array-shaped view (`[]T` → elem is
@@ -188,9 +192,12 @@ impl Constructor {
             spirv::Decoration::Binding,
             [Operand::LiteralBit32(binding)],
         );
+        if !writable {
+            self.builder.decorate_nonwritable_once(builder::VarId::new(var_id));
+        }
 
         // Store for later lookup (ptr_type used for StorageView struct construction)
-        self.storage_buffers.insert(BindingRef::new(set, binding), (var_id, block_struct, ptr_type));
+        self.storage_buffers.insert(use_key, (var_id, block_struct, ptr_type));
 
         var_id
     }

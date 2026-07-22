@@ -4,11 +4,7 @@
 use super::*;
 
 /// Lower an SSA entry point to SPIR-V.
-pub(super) fn lower_ssa_entry_point(
-    constructor: &mut Constructor,
-    entry: &EntryPoint,
-    written_bindings: &LookupSet<BindingRef>,
-) -> Result<()> {
+pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &EntryPoint) -> Result<()> {
     let body = &entry.body;
     let is_compute = entry.execution_model.is_compute();
 
@@ -255,7 +251,9 @@ pub(super) fn lower_ssa_entry_point(
             constructor.env.insert(input.name.clone(), var_id);
             interfaces.push(var_id);
         } else if let Some(br) = input.storage_binding() {
-            let var_id = constructor.create_storage_buffer(&input.ty, br.set, br.binding);
+            let storage_use = constructor.storage_use(br);
+            let var_id =
+                constructor.create_storage_buffer(&input.ty, br.set, br.binding, storage_use.writable);
             // Mark input storage buffers as non-writable ONLY if no other
             // entry point writes to the same binding. In multi-entry modules
             // (e.g., reduce phase1 + phase2), the partials buffer is written
@@ -265,9 +263,6 @@ pub(super) fn lower_ssa_entry_point(
             // binding, so guard the decoration to fire once per var — two
             // entries reading the same never-written input would otherwise
             // decorate it `NonWritable` twice (spirv-val rejects).
-            if !written_bindings.contains(&br) {
-                constructor.builder.decorate_nonwritable_once(builder::VarId::new(var_id));
-            }
             interfaces.push(var_id);
         } else {
             // Regular input with location
@@ -296,7 +291,9 @@ pub(super) fn lower_ssa_entry_point(
     let mut output_location = 0u32;
     for output in &entry.outputs {
         if let Some(br) = output.storage_binding() {
-            let var_id = constructor.create_storage_buffer(&output.ty, br.set, br.binding);
+            let storage_use = constructor.storage_use(br);
+            let var_id =
+                constructor.create_storage_buffer(&output.ty, br.set, br.binding, storage_use.writable);
             interfaces.push(var_id);
             // Don't add to output_vars - storage buffers are accessed differently
         } else if let Some(IoDecoration::BuiltIn(builtin)) = output.decoration() {
@@ -378,6 +375,19 @@ pub(super) fn lower_ssa_entry_point(
             let var = constructor.builder.variable(ptr_ty, None, spirv::StorageClass::Workgroup, None);
             constructor.workgroup_vars.insert(*id, (var, elem_spirv));
             interfaces.push(var);
+        }
+    }
+
+    for declaration in &entry.storage_bindings {
+        let storage_use = constructor.storage_use(declaration.binding);
+        let var_id = constructor.create_storage_buffer(
+            &declaration.elem_ty,
+            declaration.binding.set,
+            declaration.binding.binding,
+            storage_use.writable,
+        );
+        if !interfaces.contains(&var_id) {
+            interfaces.push(var_id);
         }
     }
 

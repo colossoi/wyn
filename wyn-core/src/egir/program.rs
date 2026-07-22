@@ -157,11 +157,11 @@ impl From<u32> for MaterializationId {
 
 impl MaterializationId {
     /// Backend-visible name for the synthetic entry owned by this
-    /// materialization. The compiler-reserved `_w_` namespace keeps generated
-    /// entries distinct from source declarations, while the arena identity
-    /// makes names unique without searching every existing name.
+    /// materialization. Keeping the authored owner as the prefix preserves a
+    /// useful naming convention for existing tooling; explicit stage-owner
+    /// metadata remains the authoritative relationship.
     pub(crate) fn entry_name(self, source: &str, role: &str) -> String {
-        format!("_w_materialization_{}_{source}_{role}", self.0)
+        format!("{source}_{role}__w_materialization_{}", self.0)
     }
 }
 
@@ -1586,6 +1586,7 @@ fn publish_entry(
         .map(|declaration| interface::StorageBindingDecl {
             binding: resources.binding(declaration.resource.0),
             role: declaration.role.clone(),
+            logical_resource: resources.logical_name(declaration.resource.0),
             elem_ty: declaration.elem_ty.clone(),
             length: buffer_len(&declaration.size, resources),
         })
@@ -1732,6 +1733,12 @@ impl PhysicalResourceTable {
 
     pub fn is_compiler(&self, resource: ResourceId) -> bool {
         self.compiler_owned[resource.index()]
+    }
+
+    /// Descriptor-stable identity for one compiler-owned logical resource.
+    /// Physical descriptor slots and entry-local names are access paths.
+    pub fn logical_name(&self, resource: ResourceId) -> Option<String> {
+        self.is_compiler(resource).then(|| format!("_w_resource_{}", resource.index()))
     }
 }
 
@@ -2010,6 +2017,7 @@ fn physicalize_entry(
         .map(|declaration| interface::StorageBindingDecl {
             binding: resources.binding(declaration.resource.0),
             role: declaration.role,
+            logical_resource: resources.logical_name(declaration.resource.0),
             elem_ty: declaration.elem_ty,
             length: buffer_len(&declaration.size, resources),
         })

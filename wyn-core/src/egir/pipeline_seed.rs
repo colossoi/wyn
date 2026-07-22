@@ -121,11 +121,11 @@ pub(super) fn run(program: &Program) -> PipelineSeed {
             pipelines.push(Pipeline::Compute(ComputePipeline {
                 bindings: Vec::new(),
                 stages: vec![ComputeStage {
-                    entry_point: name,
+                    entry_point: name.clone(),
+                    owner: name,
                     workgroup_size: (64, 1, 1),
                     dispatch_size,
-                    reads: Vec::new(),
-                    writes: Vec::new(),
+                    uses: StageBindingUses::default(),
                 }],
                 default_total_threads: None,
                 feedback,
@@ -138,8 +138,10 @@ pub(super) fn run(program: &Program) -> PipelineSeed {
             };
             pipelines.push(Pipeline::Graphics(GraphicsPipeline {
                 stages: vec![GraphicsStage {
-                    entry_point: name,
+                    entry_point: name.clone(),
+                    owner: name,
                     stage,
+                    uses: StageBindingUses::default(),
                 }],
                 bindings: Vec::new(),
                 vertex_inputs: Vec::new(),

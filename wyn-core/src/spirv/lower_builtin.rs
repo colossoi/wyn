@@ -394,8 +394,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             .get_const_u32_value(arg_ids[1])
                             .ok_or_else(|| err_spirv!("_w_storage_len: binding must be a u32 constant"))?,
                     };
-                    let &(buffer_var, _, _) =
-                        self.constructor.storage_buffers.get(&BindingRef::new(set, binding)).ok_or_else(
+                    let (buffer_var, _, _) =
+                        self.constructor.storage_buffer(BindingRef::new(set, binding)).ok_or_else(
                             || err_spirv!("Storage buffer not found for set={}, binding={}", set, binding),
                         )?;
                     let len_u32 = self.constructor.builder.array_length(

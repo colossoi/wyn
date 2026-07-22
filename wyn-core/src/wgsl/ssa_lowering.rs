@@ -19,6 +19,7 @@ use crate::ast::{Span, TypeName};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::error::Result;
 use crate::interface::IoDecoration;
+use crate::ssa::storage_function_variants::StorageFunctionVariants;
 use crate::ssa::types::{
     EntryPoint, ExecutionModel, FuncBody, Function, InstKind, Program, ValueId, ValueRef, WynInstNode,
 };
@@ -528,6 +529,17 @@ fn storage_image_global_name(binding: BindingRef) -> String {
     format!("_img_{}_{}", binding.set, binding.binding)
 }
 
+fn storage_buffer_name(binding: BindingRef, writable: bool, mixed: bool) -> String {
+    let base = format!("_buf_{}_{}", binding.set, binding.binding);
+    if !mixed {
+        base
+    } else if writable {
+        format!("{base}_read_write")
+    } else {
+        format!("{base}_read")
+    }
+}
+
 fn wgsl_place(id: crate::ssa::types::PlaceId) -> String {
     use crate::ssa::framework::Key;
     let ffi = id.data().as_ffi();
@@ -545,6 +557,10 @@ fn is_view_array_ty(ty: &polytype::Type<TypeName>) -> bool {
 
 struct LowerCtx<'a> {
     program: &'a Program,
+    function_variants: StorageFunctionVariants,
+    current_function_names: LookupMap<String, String>,
+    current_storage_accesses: LookupMap<BindingRef, crate::ResourceAccess>,
+    storage_access_variants: LookupMap<BindingRef, (bool, bool)>,
     type_emitter: TypeEmitter,
     lowered: LookupSet<String>,
     indent: usize,
@@ -592,8 +608,29 @@ struct PcBlock {
 
 impl<'a> LowerCtx<'a> {
     fn new(program: &'a Program) -> Self {
+        let function_variants = StorageFunctionVariants::new(program);
+        let mut current_storage_accesses = LookupMap::new();
+        let mut storage_access_variants = LookupMap::new();
+        for entry in &program.entry_points {
+            for (binding, access) in entry.storage_accesses() {
+                current_storage_accesses
+                    .entry(binding)
+                    .and_modify(|current: &mut crate::ResourceAccess| *current = current.merge(access))
+                    .or_insert(access);
+                let variants = storage_access_variants.entry(binding).or_insert((false, false));
+                if access.writes() {
+                    variants.1 = true;
+                } else {
+                    variants.0 = true;
+                }
+            }
+        }
         Self {
             program,
+            function_variants,
+            current_function_names: LookupMap::new(),
+            current_storage_accesses,
+            storage_access_variants,
             type_emitter: TypeEmitter::new(),
             lowered: LookupSet::new(),
             indent: 0,
@@ -648,13 +685,25 @@ impl<'a> LowerCtx<'a> {
         // prepend accumulated tuple struct declarations and bindings.
         let mut code = String::new();
 
-        // Emit all non-extern functions first (entry points reference them).
-        for func in &self.program.functions {
-            self.lower_function(func, &mut code)?;
+        // Emit storage-dependent helpers once per distinct entry access
+        // signature; ordinary helpers still have exactly one emission.
+        for emission in self.function_variants.emissions().to_vec() {
+            self.current_storage_accesses =
+                self.function_variants.accesses_for(self.program, emission.entry_context);
+            self.current_function_names = emission
+                .entry_context
+                .map(|entry| self.function_variants.names_for_entry(entry).clone())
+                .unwrap_or_default();
+            self.lower_function(
+                &self.program.functions[emission.function],
+                &emission.name,
+                &mut code,
+            )?;
         }
 
         // Emit entry points.
-        for entry in &self.program.entry_points {
+        for (entry_index, entry) in self.program.entry_points.iter().enumerate() {
+            self.current_function_names = self.function_variants.names_for_entry(entry_index).clone();
             self.lower_entry_point(entry, &mut code)?;
         }
 
@@ -769,29 +818,15 @@ impl<'a> LowerCtx<'a> {
         // backed I/O. WGSL needs these at module scope; dedupe by
         // (set, binding) and coalesce access modes so an (in, out) pair
         // on the same slot becomes `read_write`.
-        let mut synth: LookupMap<BindingRef, (String, String, bool, bool)> = LookupMap::new();
+        let mut synth: LookupMap<(BindingRef, bool), String> = LookupMap::new();
         // Key → (elem_ty_str, module_name, has_read, has_write).
-        let is_declared = |_: BindingRef| false;
         for entry in &self.program.entry_points {
+            let accesses = entry.storage_accesses();
             // Explicit compiler-inserted bindings (e.g. parallelize's
             // partial-sum buffer).
             for sb in &entry.storage_bindings {
-                if is_declared(sb.binding) {
-                    continue;
-                }
                 let ty_str = self.type_emitter.type_to_wgsl(&sb.elem_ty)?;
-                let entry_ref = synth.entry(sb.binding).or_insert_with(|| {
-                    let name = format!("_buf_{}_{}", sb.binding.set, sb.binding.binding);
-                    (ty_str.clone(), name, false, false)
-                });
-                match sb.role {
-                    crate::interface::StorageRole::Input => entry_ref.2 = true,
-                    crate::interface::StorageRole::Output => entry_ref.3 = true,
-                    crate::interface::StorageRole::Intermediate => {
-                        entry_ref.2 = true;
-                        entry_ref.3 = true;
-                    }
-                }
+                synth.entry((sb.binding, accesses[&sb.binding].writes())).or_insert(ty_str);
             }
             // Entry inputs marked with storage_binding — compute shader
             // runtime-sized array parameters. The element type is the
@@ -799,9 +834,6 @@ impl<'a> LowerCtx<'a> {
             // `array<T>`.
             for input in &entry.inputs {
                 if let Some(br) = input.storage_binding() {
-                    if is_declared(br) {
-                        continue;
-                    }
                     let elem_ty = input
                         .ty
                         .elem_type()
@@ -810,22 +842,7 @@ impl<'a> LowerCtx<'a> {
                         })?
                         .clone();
                     let ty_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
-                    let entry_ref = synth.entry(br).or_insert_with(|| {
-                        let name = format!("_buf_{}_{}", br.set, br.binding);
-                        (ty_str.clone(), name, false, false)
-                    });
-                    // Entry inputs are read by convention.
-                    entry_ref.2 = true;
-                    // A `#[storage(..., access=write/readwrite)]` input is
-                    // written in place (e.g. a `scatter` destination); WGSL
-                    // needs `read_write` for the Store.
-                    if matches!(
-                        input.storage_access(),
-                        Some(crate::interface::StorageAccess::WriteOnly)
-                            | Some(crate::interface::StorageAccess::ReadWrite)
-                    ) {
-                        entry_ref.3 = true;
-                    }
+                    synth.entry((br, accesses[&br].writes())).or_insert(ty_str);
                 }
             }
             // Entry outputs likewise. For scalar-valued compute outputs
@@ -835,9 +852,6 @@ impl<'a> LowerCtx<'a> {
             // the result into a single-element slot.
             for out in &entry.outputs {
                 if let Some(br) = out.storage_binding() {
-                    if is_declared(br) {
-                        continue;
-                    }
                     // Array-shaped output (`[]T`) → elem is `T`; scalar / vec /
                     // struct-valued compute output (e.g. reduce → f32) packs
                     // into a single-element `[]T` binding where `out.ty` IS
@@ -847,25 +861,21 @@ impl<'a> LowerCtx<'a> {
                         None => out.ty.clone(),
                     };
                     let ty_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
-                    let entry_ref = synth.entry(br).or_insert_with(|| {
-                        let name = format!("_buf_{}_{}", br.set, br.binding);
-                        (ty_str.clone(), name, false, false)
-                    });
-                    entry_ref.3 = true;
+                    synth.entry((br, accesses[&br].writes())).or_insert(ty_str);
                 }
             }
         }
         // Sort for determinism.
         let mut synth_sorted: Vec<_> = synth.into_iter().collect();
-        synth_sorted.sort_by_key(|(br, _)| (br.set, br.binding));
-        for (br, (elem_ty, name, has_in, has_out)) in synth_sorted {
+        synth_sorted.sort_by_key(|((br, writable), _)| (br.set, br.binding, *writable));
+        for ((br, writable), elem_ty) in synth_sorted {
             let (set, binding) = (br.set, br.binding);
-            let access = match (has_in, has_out) {
-                (true, true) => "read_write",
-                (true, false) => "read",
-                (false, true) => "read_write", // write-only + WGSL needs read_write for Store
-                (false, false) => "read",
-            };
+            let access = if writable { "read_write" } else { "read" };
+            let mixed = self
+                .storage_access_variants
+                .get(&br)
+                .is_some_and(|(read_only, read_write)| *read_only && *read_write);
+            let name = storage_buffer_name(br, writable, mixed);
             writeln!(
                 output,
                 "@group({}) @binding({}) var<storage, {}> {}: array<{}>;",
@@ -1030,20 +1040,20 @@ impl<'a> LowerCtx<'a> {
         Ok(output)
     }
 
-    fn lower_function(&mut self, func: &Function, output: &mut String) -> Result<()> {
+    fn lower_function(&mut self, func: &Function, emitted_name: &str, output: &mut String) -> Result<()> {
         if func.linkage_name.is_some() {
             // Extern functions cross-reference another shader language; we
             // can't emit them from SSA. Skip — the Wyn frontend should have
             // warned already.
             return Ok(());
         }
-        if self.lowered.contains(&func.name) {
+        if self.lowered.contains(emitted_name) {
             return Ok(());
         }
-        self.lowered.insert(func.name.clone());
+        self.lowered.insert(emitted_name.to_string());
 
         let body = &func.body;
-        let name = self.mangle_tracked(&func.name)?;
+        let name = self.mangle_tracked(emitted_name)?;
         let ret_ty = self.type_emitter.type_to_wgsl(&body.return_ty)?;
         // View-array params are runtime `(offset, len)` handles, emitted as
         // `vec2<u32>`. Their backing binding is static in the array type's
@@ -1083,6 +1093,7 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn lower_entry_point(&mut self, entry: &EntryPoint, output: &mut String) -> Result<()> {
+        self.current_storage_accesses = entry.storage_accesses();
         let body = &entry.body;
 
         // Build the entry attribute (`@vertex`, `@fragment`, `@compute ...`).
@@ -1725,7 +1736,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 || entry.inputs.iter().any(|i| i.storage_binding() == Some(br))
                 || entry.outputs.iter().any(|o| o.storage_binding() == Some(br))
             {
-                return Ok(format!("_buf_{}_{}", set, binding));
+                let writable =
+                    self.ctx.current_storage_accesses.get(&br).is_none_or(|access| access.writes());
+                let mixed = self
+                    .ctx
+                    .storage_access_variants
+                    .get(&br)
+                    .is_some_and(|(read_only, read_write)| *read_only && *read_write);
+                return Ok(storage_buffer_name(br, writable, mixed));
             }
         }
         Err(crate::err_wgsl_at!(
@@ -2501,7 +2519,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         }
                     }
                     let arg_strs = raw_strs;
-                    let mangled = self.ctx.mangle_tracked(func)?;
+                    let emitted =
+                        self.ctx.current_function_names.get(func).cloned().unwrap_or_else(|| func.clone());
+                    let mangled = self.ctx.mangle_tracked(&emitted)?;
                     Ok(format!("{}({})", mangled, arg_strs.join(", ")))
                 }
 

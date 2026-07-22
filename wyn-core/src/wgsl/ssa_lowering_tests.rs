@@ -714,7 +714,7 @@ entry gen(bh: []vec4f32) []i32 =
     );
     // The consumer indexes the gather buffer (binding 2).
     assert!(
-        wgsl.contains("_buf_0_2["),
+        wgsl.contains("_buf_0_2_read["),
         "consumer must read the gather buffer by index:\n{wgsl}"
     );
 }

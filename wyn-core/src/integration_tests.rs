@@ -2514,6 +2514,14 @@ entry add_sum(xs: []i32) []i32 =
     assert!(stages[0].entry_point.contains("add_sum_prepass_"));
     assert!(stages[1].entry_point.contains("phase2"));
     assert_eq!(stages[2].entry_point, "add_sum");
+    assert!(
+        stages.iter().all(|stage| stage.owner == "add_sum"),
+        "all phases in the generated pipeline retain the authored owner"
+    );
+    assert!(
+        stages[..2].iter().all(|stage| stage.entry_point.starts_with("add_sum_")),
+        "generated phase names retain the authored-entry prefix"
+    );
     let handoff = stages[1]
         .writes
         .iter()
@@ -2608,12 +2616,7 @@ fn spirv_entry_reaches_loop(spirv: &[u32], entry_name: &str) -> bool {
     reachable.iter().any(|function| loops.contains(function))
 }
 
-fn spirv_entry_interface_has_storage_binding(
-    spirv: &[u32],
-    entry_name: &str,
-    set: u32,
-    binding: u32,
-) -> bool {
+fn spirv_entry_interface_has_binding(spirv: &[u32], entry_name: &str, set: u32, binding: u32) -> bool {
     use std::collections::HashMap;
     use wspirv::binary::parse_words;
     use wspirv::dr::{Loader, Operand};
@@ -2641,18 +2644,80 @@ fn spirv_entry_interface_has_storage_binding(
             _ => {}
         }
     }
-    let Some(variable) = sets.iter().find_map(|(variable, value)| {
-        (*value == set && bindings.get(variable) == Some(&binding)).then_some(*variable)
+    let Some(entry) = module.entry_points.iter().find(|instruction| {
+        matches!(instruction.operands.get(2), Some(Operand::LiteralString(name)) if name == entry_name)
     }) else {
         return false;
     };
-    module.entry_points.iter().any(|instruction| {
+    entry.operands.iter().skip(3).any(|operand| {
+        let Operand::IdRef(variable) = operand else {
+            return false;
+        };
+        sets.get(variable) == Some(&set) && bindings.get(variable) == Some(&binding)
+    })
+}
+
+fn spirv_entry_storage_binding_is_writable(
+    spirv: &[u32],
+    entry_name: &str,
+    set: u32,
+    binding: u32,
+) -> Option<bool> {
+    use std::collections::HashMap;
+    use std::collections::HashSet;
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::{Decoration, Op};
+
+    let mut loader = Loader::new();
+    parse_words(spirv, &mut loader).expect("parse generated SPIR-V");
+    let module = loader.module();
+    let storage_variables = module
+        .types_global_values
+        .iter()
+        .filter_map(|instruction| {
+            (instruction.class.opcode == Op::Variable
+                && matches!(
+                    instruction.operands.first(),
+                    Some(Operand::StorageClass(wspirv::spirv::StorageClass::StorageBuffer))
+                ))
+            .then_some(instruction.result_id?)
+        })
+        .collect::<HashSet<_>>();
+    let mut sets = HashMap::new();
+    let mut bindings = HashMap::new();
+    let mut nonwritable = HashSet::new();
+    for instruction in &module.annotations {
+        if instruction.class.opcode != Op::Decorate {
+            continue;
+        }
+        let Some(Operand::IdRef(target)) = instruction.operands.first() else {
+            continue;
+        };
+        match (instruction.operands.get(1), instruction.operands.get(2)) {
+            (Some(Operand::Decoration(Decoration::DescriptorSet)), Some(Operand::LiteralBit32(value))) => {
+                sets.insert(*target, *value);
+            }
+            (Some(Operand::Decoration(Decoration::Binding)), Some(Operand::LiteralBit32(value))) => {
+                bindings.insert(*target, *value);
+            }
+            (Some(Operand::Decoration(Decoration::NonWritable)), None) => {
+                nonwritable.insert(*target);
+            }
+            _ => {}
+        }
+    }
+    let entry = module.entry_points.iter().find(|instruction| {
         matches!(instruction.operands.get(2), Some(Operand::LiteralString(name)) if name == entry_name)
-            && instruction
-                .operands
-                .iter()
-                .skip(3)
-                .any(|operand| matches!(operand, Operand::IdRef(id) if *id == variable))
+    })?;
+    entry.operands.iter().skip(3).find_map(|operand| {
+        let Operand::IdRef(variable) = operand else {
+            return None;
+        };
+        (storage_variables.contains(variable)
+            && sets.get(variable) == Some(&set)
+            && bindings.get(variable) == Some(&binding))
+        .then(|| !nonwritable.contains(variable))
     })
 }
 
@@ -2709,12 +2774,7 @@ fn assert_expensive_scalar_prefix_pipeline(lowered: &crate::Lowered, source_entr
     );
     assert!(
         maps.iter().all(|map| {
-            !spirv_entry_interface_has_storage_binding(
-                &lowered.spirv,
-                &map.entry_point,
-                events_set,
-                events_binding,
-            )
+            !spirv_entry_interface_has_binding(&lowered.spirv, &map.entry_point, events_set, events_binding)
         }),
         "materialized consumers do not retain the producer-only SPIR-V interface binding"
     );
@@ -3131,7 +3191,7 @@ entry mixed_stage_uniform_call(
     }));
     let map = stages.iter().find(|stage| !is_singleton_stage(stage)).unwrap();
     assert!(
-        !spirv_entry_interface_has_storage_binding(&lowered.spirv, &map.entry_point, 1, 0),
+        !spirv_entry_interface_has_binding(&lowered.spirv, &map.entry_point, 1, 0),
         "the consumer interface contains only the scalar handoff, not the original uniform"
     );
 }
@@ -3184,14 +3244,14 @@ entry compute_main(
         .find(|stage| is_singleton_stage(stage))
         .expect("direct compute uniform work has a singleton prepass");
     assert!(prepass.entry_point.contains("compute_main_prepass_scalar"));
-    assert!(spirv_entry_interface_has_storage_binding(
+    assert!(spirv_entry_interface_has_binding(
         &lowered.spirv,
         &prepass.entry_point,
         1,
         0
     ));
     assert!(
-        !spirv_entry_interface_has_storage_binding(&lowered.spirv, "compute_main", 1, 0),
+        !spirv_entry_interface_has_binding(&lowered.spirv, "compute_main", 1, 0),
         "the compute stage receives only the scalar handoff"
     );
     assert_scalar_prefix_emits_valid_wgsl(source);
@@ -3220,7 +3280,7 @@ entry compute_main(
 
     let pipeline = scalar_prelude_pipeline(&lowered, "compute_main");
     assert_eq!(pipeline.stages.len(), 1, "cheap work must not create a prepass");
-    assert!(spirv_entry_interface_has_storage_binding(
+    assert!(spirv_entry_interface_has_binding(
         &lowered.spirv,
         "compute_main",
         1,
@@ -3229,11 +3289,53 @@ entry compute_main(
 }
 
 #[test]
-fn fragment_mixed_stage_call_uses_a_generated_scalar_prepass() {
-    use crate::pipeline_descriptor::Pipeline;
-
+fn known_direct_compute_dispatch_makes_a_moderate_uniform_prefix_profitable() {
     let lowered = crate::compile_thru_spirv(
         r#"
+type frame_globals = { factor: f32 }
+
+def mix_compute_with_frame(gid: vec3u32, frame: frame_globals) vec4f32 =
+  let a0 = frame.factor * 1.01 + 0.01
+  let a1 = a0 * 1.01 + 0.01
+  let a2 = a1 * 1.01 + 0.01
+  let a3 = a2 * 1.01 + 0.01 in
+  @[a3 + f32(gid.x), f32(gid.y), 0.0, 1.0]
+
+resource compute_out: image2d {
+  format = rgba32float
+  size = window
+  usages = [storage_write]
+}
+
+#[compute]
+#[dispatch(8, 8)]
+entry compute_main(
+    #[builtin(global_invocation_id)] gid: vec3u32,
+    #[uniform(set=1, binding=0)] frame: frame_globals,
+    #[view(compute_out, storage_write)] output: *storage_image) () =
+  let xy = @[i32(gid.x), i32(gid.y)] in
+  output with [xy] = mix_compute_with_frame(gid, frame)
+"#,
+    )
+    .expect("known-dispatch direct compute call compiles");
+
+    let pipeline = scalar_prelude_pipeline(&lowered, "compute_main");
+    assert_eq!(
+        pipeline.stages.len(),
+        2,
+        "the known 8x8 workgroup grid should make the moderate prefix profitable"
+    );
+    assert_eq!(
+        pipeline.stages.iter().filter(|stage| is_singleton_stage(stage)).count(),
+        1
+    );
+}
+
+#[test]
+fn fragment_mixed_stage_call_uses_a_generated_scalar_prepass() {
+    use crate::pipeline_descriptor::{Access, Binding, BufferUsage, Pipeline};
+
+    let source = r#"
 type frame_globals = { factor: f32 }
 
 def mix_fragment_with_frame(pos: vec4f32, frame: frame_globals) vec4f32 =
@@ -3262,11 +3364,25 @@ entry fragment_main(
     #[uniform(set=1, binding=0)] frame: frame_globals,
     #[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
   mix_fragment_with_frame(pos, frame)
-"#,
-    )
-    .expect("mixed-stage fragment call compiles");
+"#;
+    let converted = crate::compile_thru_ssa(source).expect("mixed-stage fragment call compiles");
+    let prepass_phase = converted
+        .kernel_plan
+        .phases()
+        .find(|phase| phase.entry_point.contains("fragment_main_prepass_scalar"))
+        .expect("kernel plan contains the fragment scalar prepass");
+    let consumer_phase = converted
+        .kernel_plan
+        .phases()
+        .find(|phase| phase.entry_point == "fragment_main")
+        .expect("kernel plan contains the fragment consumer");
+    assert!(
+        consumer_phase.dependencies.contains(&prepass_phase.id),
+        "graphics consumer explicitly depends on its standalone compute prepass"
+    );
+    let lowered = converted.lower().expect("mixed-stage fragment SSA lowers to SPIR-V");
 
-    let prepass = lowered
+    let (prepass_pipeline, prepass) = lowered
         .pipeline
         .pipelines
         .iter()
@@ -3274,20 +3390,135 @@ entry fragment_main(
             Pipeline::Compute(compute) => compute
                 .stages
                 .iter()
-                .find(|stage| stage.entry_point.contains("fragment_main_prepass_scalar")),
+                .find(|stage| stage.entry_point.contains("fragment_main_prepass_scalar"))
+                .map(|stage| (compute, stage)),
             Pipeline::Graphics(_) => None,
         })
         .expect("fragment uniform work has a generated compute prepass");
-    assert!(spirv_entry_interface_has_storage_binding(
-        &lowered.spirv,
-        &prepass.entry_point,
-        1,
-        0
-    ));
+    assert_eq!(prepass.owner, "fragment_main");
+    assert!(prepass.entry_point.starts_with("fragment_main_"));
+    let graphics = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Graphics(graphics)
+                if graphics.stages.iter().any(|stage| stage.entry_point == "fragment_main") =>
+            {
+                Some(graphics)
+            }
+            _ => None,
+        })
+        .expect("fragment graphics pipeline");
+    let (handoff_index, handoff_set, handoff_binding, handoff_name, handoff_resource) = graphics
+        .bindings
+        .iter()
+        .enumerate()
+        .find_map(|(index, binding)| match binding {
+            Binding::StorageBuffer {
+                set,
+                binding,
+                usage: BufferUsage::Intermediate,
+                access: Access::ReadOnly,
+                name,
+                resource,
+                ..
+            } => Some((index, *set, *binding, name.clone(), resource.clone())),
+            _ => None,
+        })
+        .expect("graphics pipeline has a read-only scalar handoff");
+    let fragment_stage =
+        graphics.stages.iter().find(|stage| stage.entry_point == "fragment_main").expect("fragment stage");
+    assert_eq!(fragment_stage.owner, "fragment_main");
+    assert!(fragment_stage.reads.contains(&handoff_index));
+    assert!(!fragment_stage.writes.contains(&handoff_index));
+
+    let (producer_name, producer_resource) = prepass_pipeline
+        .bindings
+        .iter()
+        .find_map(|binding| match binding {
+            Binding::StorageBuffer {
+                set,
+                binding,
+                usage: BufferUsage::Intermediate,
+                name,
+                resource,
+                ..
+            } if (*set, *binding) == (handoff_set, handoff_binding) => Some((name, resource)),
+            _ => None,
+        })
+        .expect("prepass publishes the scalar handoff");
+    assert_ne!(producer_name, &handoff_name, "bindings retain entry-local names");
     assert!(
-        !spirv_entry_interface_has_storage_binding(&lowered.spirv, "fragment_main", 1, 0),
-        "the fragment interface receives only the scalar handoff"
+        handoff_resource.is_some(),
+        "compiler handoff has a logical resource"
     );
+    assert_eq!(
+        producer_resource, &handoff_resource,
+        "producer and consumer share one resource"
+    );
+
+    let frame_graph = &lowered.pipeline.frame_graph;
+    let producer_pass = frame_graph
+        .passes
+        .iter()
+        .position(|pass| pass.name == prepass.entry_point)
+        .expect("prepass is published as a frame-graph pass");
+    let consumer_pass = frame_graph
+        .passes
+        .iter()
+        .position(|pass| pass.name == "fragment_main")
+        .expect("fragment is published as a frame-graph pass");
+    assert!(
+        frame_graph.passes[consumer_pass].depends_on.contains(&producer_pass),
+        "graphics consumer must depend on its scalar prepass"
+    );
+    let order = frame_graph.topological_order().expect("prepass/graphics frame graph is acyclic");
+    assert!(
+        order.iter().position(|pass| *pass == producer_pass)
+            < order.iter().position(|pass| *pass == consumer_pass),
+        "the producer must execute before the graphics consumer"
+    );
+
+    assert_eq!(
+        spirv_entry_storage_binding_is_writable(
+            &lowered.spirv,
+            &prepass.entry_point,
+            handoff_set,
+            handoff_binding,
+        ),
+        Some(true),
+        "the compute prepass must use the writable handoff variable"
+    );
+    assert_eq!(
+        spirv_entry_storage_binding_is_writable(
+            &lowered.spirv,
+            "fragment_main",
+            handoff_set,
+            handoff_binding,
+        ),
+        Some(false),
+        "the fragment entry must use a distinct NonWritable variable"
+    );
+
+    let wgsl = lower_semantic_egir(
+        compile_to_semantic_egir(source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    )
+    .lower_wgsl()
+    .expect("mixed-stage fragment call lowers to WGSL");
+    let read_name = format!("_buf_{handoff_set}_{handoff_binding}_read");
+    let write_name = format!("_buf_{handoff_set}_{handoff_binding}_read_write");
+    assert!(wgsl.contains(&format!("var<storage, read> {read_name}:")));
+    assert!(wgsl.contains(&format!("var<storage, read_write> {write_name}:")));
+    let module = naga::front::wgsl::parse_str(&wgsl)
+        .unwrap_or_else(|error| panic!("Naga rejected generated WGSL: {error:?}\n{wgsl}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("Naga validation failed: {error:?}\n{wgsl}"));
 }
 
 #[test]
@@ -3308,7 +3539,7 @@ entry fragment_main(
         !matches!(pipeline, Pipeline::Compute(compute)
             if compute.stages.iter().any(|stage| stage.entry_point.contains("prepass_scalar")))
     }));
-    assert!(spirv_entry_interface_has_storage_binding(
+    assert!(spirv_entry_interface_has_binding(
         &lowered.spirv,
         "fragment_main",
         1,
@@ -7326,9 +7557,8 @@ entry gen(bh: []vec4f32) []i32 =
         .reads
         .contains(&gather_index));
 
-    // The consumer reads that same binding as an Intermediate. Access is
-    // `ReadWrite` because of the module-level promotion described above —
-    // not because the consumer itself writes (it doesn't).
+    // The producer and consumer share this pipeline's binding table, so its
+    // layout access is their union even though stage uses retain direction.
     let reads_gather = consumer_bufs.iter().any(|b| {
         matches!(b, Binding::StorageBuffer { binding, usage: BufferUsage::Intermediate, access: Access::ReadWrite, .. } if binding == gather_binding)
     });
@@ -8174,21 +8404,11 @@ entry gen(xs: []i32) []vec4f32 =
     assert_spirv_storage_access_chain_pointee_types_match(&spirv);
 }
 
-/// The descriptor for a compiler-allocated residency intermediate
-/// must agree with the SPIR-V module's per-binding writability. SPIR-V's
-/// `NonWritable` decoration is module-level, so when a sibling entry in
-/// the same module writes the gather buffer, the consumer pipeline's
-/// `OpVariable` has no `NonWritable` and Naga reports the storage as
-/// `read_write`. Previously the descriptor reported `read_only` based on
-/// the consumer's `StorageBindingDecl.role` alone, causing wgpu to fail
-/// pipeline creation with `Storage class Storage{LOAD} doesn't match
-/// shader Storage{LOAD | STORE}`. The fix promotes any intermediate
-/// binding whose `(set, binding)` is also an entry-output target to
-/// `Access::ReadWrite`.
+/// A pipeline layout's storage access must be exactly the union of its stage
+/// uses. Accesses in unrelated pipelines do not promote this layout.
 #[test]
 fn intermediate_buffer_descriptor_access_repro() {
-    use crate::pipeline_descriptor::{Access, Binding, BufferUsage, Pipeline};
-    use std::collections::HashSet;
+    use crate::pipeline_descriptor::{Access, Binding, Pipeline};
 
     let lowered = crate::compile_thru_spirv(
         "\
@@ -8202,61 +8422,29 @@ entry gen(xs: []i32) ([]i32, [1]i32) =
     )
     .expect("compile to SPIR-V");
 
-    // Collect every (set, binding) any pipeline writes to anywhere in
-    // the module. A read-only declaration of one of these in a sibling
-    // pipeline is a descriptor↔shader mismatch.
-    let written: HashSet<(u32, u32)> = lowered
-        .pipeline
-        .pipelines
-        .iter()
-        .flat_map(|p| match p {
-            Pipeline::Compute(cp) => cp.bindings.iter().collect::<Vec<_>>(),
-            Pipeline::Graphics(gp) => gp.bindings.iter().collect::<Vec<_>>(),
-        })
-        .filter_map(|b| match b {
-            Binding::StorageBuffer {
-                set, binding, access, ..
-            } if matches!(access, Access::WriteOnly | Access::ReadWrite) => Some((*set, *binding)),
-            _ => None,
-        })
-        .collect();
-
-    let mut violations: Vec<String> = Vec::new();
     for p in &lowered.pipeline.pipelines {
-        let (label, bindings): (String, &[Binding]) = match p {
-            Pipeline::Compute(cp) => {
-                let names: Vec<&str> = cp.stages.iter().map(|s| s.entry_point.as_str()).collect();
-                (format!("compute[{}]", names.join(",")), &cp.bindings)
-            }
-            Pipeline::Graphics(gp) => {
-                let names: Vec<&str> = gp.stages.iter().map(|s| s.entry_point.as_str()).collect();
-                (format!("graphics[{}]", names.join(",")), &gp.bindings)
-            }
+        let (bindings, stages): (&[Binding], Vec<_>) = match p {
+            Pipeline::Compute(cp) => (&cp.bindings, cp.stages.iter().map(|stage| &stage.uses).collect()),
+            Pipeline::Graphics(gp) => (&gp.bindings, gp.stages.iter().map(|stage| &stage.uses).collect()),
         };
-        for b in bindings {
-            if let Binding::StorageBuffer {
-                set,
-                binding,
-                access: Access::ReadOnly,
-                usage: BufferUsage::Intermediate,
-                name,
-                ..
-            } = b
-            {
-                if written.contains(&(*set, *binding)) {
-                    violations.push(format!(
-                        "pipeline {label}: intermediate binding {set}.{binding} ({name}) \
-                         declared read_only but written by another entry in the module"
-                    ));
-                }
-            }
+        for (index, binding) in bindings.iter().enumerate() {
+            let Binding::StorageBuffer { access, .. } = binding else {
+                continue;
+            };
+            let reads = stages.iter().any(|stage| stage.reads.contains(&index));
+            let writes = stages.iter().any(|stage| stage.writes.contains(&index));
+            let expected = match (reads, writes) {
+                (true, true) => Access::ReadWrite,
+                (true, false) => Access::ReadOnly,
+                (false, true) => Access::WriteOnly,
+                (false, false) => continue,
+            };
+            assert_eq!(
+                *access, expected,
+                "pipeline storage layout disagrees with stage uses"
+            );
         }
     }
-    assert!(
-        violations.is_empty(),
-        "descriptor↔shader access mismatch on residency intermediates:\n  {}",
-        violations.join("\n  ")
-    );
 }
 
 /// A `scan` producer gathers the same way a `map` does: it's lifted into its
@@ -8279,9 +8467,8 @@ entry g(xs: []i32) []i32 =
 
     // The consumer reads the gather buffer as an Intermediate sized
     // LikeInput of `xs` (scan preserves element count and type: i32 → i32).
-    // Access is `ReadWrite`: `publish` promotes any binding written by a
-    // sibling entry in the module so the descriptor matches the SPIR-V's
-    // module-level access.
+    // Producer and consumer stages share one compute-pipeline layout, whose
+    // access is the union of the stage-local write and read.
     let consumer_bufs = compute_storage_buffers(&lowered.pipeline, "g");
     let gather = consumer_bufs
         .iter()
@@ -9076,17 +9263,21 @@ fn assert_storage_descriptor_is_accessed(spirv_words: &[u32], set: u32, binding:
         }
     }
 
-    let target_var = sets
+    let target_vars = sets
         .iter()
-        .find(|(id, s)| **s == set && binds.get(id) == Some(&binding))
+        .filter(|(id, s)| **s == set && binds.get(id) == Some(&binding))
         .map(|(id, _)| *id)
-        .unwrap_or_else(|| panic!("no StorageBuffer variable decorated (set={set}, binding={binding})"));
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        !target_vars.is_empty(),
+        "no StorageBuffer variable decorated (set={set}, binding={binding})"
+    );
 
     let accessed = module.functions.iter().any(|f| {
         f.blocks.iter().any(|b| {
             b.instructions.iter().any(|inst| {
                 inst.class.opcode == Op::AccessChain
-                    && matches!(inst.operands.first(), Some(Operand::IdRef(base)) if *base == target_var)
+                    && matches!(inst.operands.first(), Some(Operand::IdRef(base)) if target_vars.contains(base))
             })
         })
     });
@@ -9221,17 +9412,21 @@ fn assert_array_length_queried_on_descriptor(spirv_words: &[u32], set: u32, bind
         }
     }
 
-    let target_var = sets
+    let target_vars = sets
         .iter()
-        .find(|(id, s)| **s == set && binds.get(id) == Some(&binding))
+        .filter(|(id, s)| **s == set && binds.get(id) == Some(&binding))
         .map(|(id, _)| *id)
-        .unwrap_or_else(|| panic!("no StorageBuffer variable decorated (set={set}, binding={binding})"));
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        !target_vars.is_empty(),
+        "no StorageBuffer variable decorated (set={set}, binding={binding})"
+    );
 
     let queried = module.functions.iter().any(|f| {
         f.blocks.iter().any(|b| {
             b.instructions.iter().any(|inst| {
                 inst.class.opcode == Op::ArrayLength
-                    && matches!(inst.operands.first(), Some(Operand::IdRef(s)) if *s == target_var)
+                    && matches!(inst.operands.first(), Some(Operand::IdRef(s)) if target_vars.contains(s))
             })
         })
     });

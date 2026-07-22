@@ -685,16 +685,16 @@ impl KernelPlan {
             }
         };
         let dependencies = self.phase(consumer).dependencies.clone();
-        let phase = phase_from_materialization(requirement_id, requirement, dependencies, placement)?;
+        let source_entry = self.phase(consumer).source_entry;
+        let phase =
+            phase_from_materialization(requirement_id, requirement, source_entry, dependencies, placement)?;
         if let Some((_, pipeline)) = generated_pipeline {
             self.next_pipeline_order += 1;
             self.pipelines.push(pipeline);
         }
         let id = self.push_phase(phase);
         self.flow_sources.insert(CompilerFlowEndpoint::Materialization(requirement_id), id);
-        if !consumer_placement.group.is_graphics() {
-            self.phase_mut(consumer).dependencies = vec![id];
-        }
+        self.phase_mut(consumer).dependencies = vec![id];
         Ok(id)
     }
 
@@ -1084,6 +1084,7 @@ fn phase_from_body(
 fn phase_from_materialization(
     requirement_id: MaterializationId,
     requirement: &MaterializationRequirement,
+    source_entry: Option<SemanticEntryId>,
     dependencies: Vec<KernelId>,
     placement: PhasePlacement,
 ) -> Result<KernelPhase, String> {
@@ -1102,7 +1103,7 @@ fn phase_from_materialization(
     );
     let mut phase = phase_from_body(
         Some(CompilerFlowEndpoint::Materialization(requirement_id)),
-        None,
+        source_entry,
         placement,
         spec,
     )?;

@@ -365,7 +365,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     // identifiers — but plain names like `step` can, and
                     // checking the user table first lets the user's `def
                     // step` win the resolution.
-                    if let Some(func_id) = self.constructor.builder.get_function(func) {
+                    let emitted = self.constructor.emitted_function_name(func).to_string();
+                    if let Some(func_id) = self.constructor.builder.get_function(&emitted) {
                         self.constructor.builder.function_call(result_ty, None, *func_id, arg_ids)?
                     } else if let Some(def) = catalog().lookup_by_any_name(func) {
                         let builtin_impl = &def.overloads()[0].lowering;
@@ -478,11 +479,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             // buffer var from there. Validate the binding is a
                             // declared storage buffer and build the {offset,len}
                             // struct.
-                            if self
-                                .constructor
-                                .storage_buffers
-                                .contains_key(&BindingRef::new(*set, *binding))
-                            {
+                            if self.constructor.storage_buffer(BindingRef::new(*set, *binding)).is_some() {
                                 let u32_ty = self.constructor.u32_type;
                                 let view_struct_type =
                                     self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty]);

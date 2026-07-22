@@ -25,6 +25,7 @@ use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::error::Result;
 use crate::interface::IoDecoration;
 use crate::ssa::layout::{buffer_array_strides, std430_alignment};
+use crate::ssa::storage_function_variants::StorageFunctionVariants;
 use crate::ssa::types::{
     BlockId, ConstantValue, ControlHeader, EntryPoint, ExecutionModel, FuncBody, Function, InstKind,
     Program, Terminator, ValueId, ValueRef, WynInstNode,
@@ -57,6 +58,12 @@ enum InterfaceBlockKind {
     /// A record-typed `#[uniform]` block: the record's fields are the
     /// block's members, laid out std140.
     Uniform,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct StorageBufferUse {
+    binding: BindingRef,
+    writable: bool,
 }
 
 /// - Block management with implicit branch from variables block to code
@@ -95,8 +102,11 @@ struct Constructor {
     // Entry point interface tracking
     entry_point_interfaces: LookupMap<String, Vec<spirv::Word>>,
 
-    /// Storage buffers for compute shaders: (set, binding) -> (buffer_var, elem_type_id, buffer_ptr_type)
-    storage_buffers: LookupMap<BindingRef, (spirv::Word, spirv::Word, spirv::Word)>,
+    /// Access-qualified storage-buffer globals. The same descriptor slot can
+    /// be writable in a compute prepass and read-only in a graphics entry.
+    storage_buffers: LookupMap<StorageBufferUse, (spirv::Word, spirv::Word, spirv::Word)>,
+    current_storage_accesses: LookupMap<BindingRef, crate::ResourceAccess>,
+    current_function_names: LookupMap<String, String>,
 
     /// Storage-image globals: (set, binding) -> (image `OpVariable`, image type).
     /// Predeclared from entry resource metadata before function bodies are
@@ -133,7 +143,7 @@ struct Constructor {
     /// from a view's type via `array_view_buffer` → `get_or_assign_buffer_id`.
     buffer_vars: Vec<(spirv::Word, spirv::Word)>,
     /// (set, binding) → buffer_id, for deduplication in get_or_assign_buffer_id.
-    buffer_id_map: LookupMap<BindingRef, u32>,
+    buffer_id_map: LookupMap<StorageBufferUse, u32>,
     /// Workgroup-shared arrays: id → (workgroup `OpVariable`, element type).
     /// Created in `lower_ssa_entry_point` by pre-scanning the body for
     /// `StorageView(Workgroup{id, count})` ops, so the var exists (and is in
@@ -165,6 +175,8 @@ impl Constructor {
             interface_block_cache: LookupMap::new(),
             entry_point_interfaces: LookupMap::new(),
             storage_buffers: LookupMap::new(),
+            current_storage_accesses: LookupMap::new(),
+            current_function_names: LookupMap::new(),
             storage_images: LookupMap::new(),
             global_invocation_id: None,
             local_invocation_id: None,
@@ -177,6 +189,29 @@ impl Constructor {
             workgroup_vars: LookupMap::new(),
             buffer_id_map: LookupMap::new(),
         }
+    }
+
+    fn select_storage_accesses(&mut self, accesses: &LookupMap<BindingRef, crate::ResourceAccess>) {
+        self.current_storage_accesses.clone_from(accesses);
+    }
+
+    fn storage_use(&self, binding: BindingRef) -> StorageBufferUse {
+        StorageBufferUse {
+            binding,
+            writable: self.current_storage_accesses.get(&binding).is_none_or(|access| access.writes()),
+        }
+    }
+
+    fn storage_buffer(&self, binding: BindingRef) -> Option<(spirv::Word, spirv::Word, spirv::Word)> {
+        self.storage_buffers.get(&self.storage_use(binding)).copied()
+    }
+
+    fn select_function_names(&mut self, names: &LookupMap<String, String>) {
+        self.current_function_names.clone_from(names);
+    }
+
+    fn emitted_function_name<'a>(&'a self, source_name: &'a str) -> &'a str {
+        self.current_function_names.get(source_name).map(String::as_str).unwrap_or(source_name)
     }
 
     /// Forward-declare a function (reserve ID without emitting body).
@@ -386,12 +421,14 @@ pub fn lower_ssa_program(program: &Program) -> Result<Vec<u32>> {
 
 fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     let mut constructor = Constructor::new();
+    let function_variants = StorageFunctionVariants::new(program);
 
     // Collect entry point info for later
     let mut entry_info: Vec<(String, spirv::ExecutionModel, Option<(u32, u32, u32)>)> = Vec::new();
 
     // Forward-declare all functions first (so they can call each other in any order)
-    for func in &program.functions {
+    for emission in function_variants.emissions() {
+        let func = &program.functions[emission.function];
         if func.linkage_name.is_some() {
             continue;
         }
@@ -399,7 +436,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         let param_types: Vec<spirv::Word> =
             body.params.iter().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
         let return_type = constructor.polytype_to_spirv(&body.return_ty);
-        constructor.forward_declare_function(&func.name, &param_types, return_type);
+        constructor.forward_declare_function(&emission.name, &param_types, return_type);
     }
 
     // Forward-declare program-level constants too. Each is a zero-arg
@@ -441,18 +478,18 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     // buffer-specialized functions (which reference set/binding directly) can
     // resolve them during lowering, even though they're lowered before entry points.
     for entry in &program.entry_points {
+        let accesses = entry.storage_accesses();
         for input in &entry.inputs {
             if let Some(br) = input.storage_binding() {
-                if !constructor.storage_buffers.contains_key(&br) {
-                    constructor.create_storage_buffer(&input.ty, br.set, br.binding);
+                constructor.create_storage_buffer(&input.ty, br.set, br.binding, true);
+                if !accesses[&br].writes() {
+                    constructor.create_storage_buffer(&input.ty, br.set, br.binding, false);
                 }
             }
         }
         for output in &entry.outputs {
             if let Some(br) = output.storage_binding() {
-                if !constructor.storage_buffers.contains_key(&br) {
-                    constructor.create_storage_buffer(&output.ty, br.set, br.binding);
-                }
+                constructor.create_storage_buffer(&output.ty, br.set, br.binding, true);
             }
         }
     }
@@ -461,9 +498,11 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     // typed list of compiler-introduced bindings (e.g. parallelize's
     // partials/result intermediates) that aren't user-visible outputs.
     for entry in &program.entry_points {
+        let accesses = entry.storage_accesses();
         for sb in &entry.storage_bindings {
-            if !constructor.storage_buffers.contains_key(&sb.binding) {
-                constructor.create_storage_buffer(&sb.elem_ty, sb.binding.set, sb.binding.binding);
+            constructor.create_storage_buffer(&sb.elem_ty, sb.binding.set, sb.binding.binding, true);
+            if !accesses[&sb.binding].writes() {
+                constructor.create_storage_buffer(&sb.elem_ty, sb.binding.set, sb.binding.binding, false);
             }
         }
     }
@@ -497,8 +536,9 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         }
     }
 
-    // Now lower all function bodies
-    for func in &program.functions {
+    // Now lower all function bodies.
+    for emission in function_variants.emissions() {
+        let func = &program.functions[emission.function];
         if func.linkage_name.is_some() {
             // Extern functions have no local body; the Import-linkage
             // declaration emitted above is the full handling, and
@@ -507,13 +547,23 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
             continue;
         }
 
-        lower_ssa_function(&mut constructor, func)?;
+        constructor
+            .select_storage_accesses(&function_variants.accesses_for(program, emission.entry_context));
+        let names = emission
+            .entry_context
+            .map(|entry| function_variants.names_for_entry(entry))
+            .cloned()
+            .unwrap_or_default();
+        constructor.select_function_names(&names);
+        lower_ssa_function(&mut constructor, func, &emission.name)?;
     }
 
     // Lower program-level constants as zero-arg functions. Their
     // forward-declared IDs are already in `Constructor.functions`
     // (the loop above ran before any body lowering); now emit the
     // body so calls to `Global(name)` from other functions resolve.
+    constructor.select_storage_accesses(&function_variants.accesses_for(program, None));
+    constructor.select_function_names(&LookupMap::new());
     for constant in &program.constants {
         let return_type = constructor.polytype_to_spirv(&constant.body.return_ty);
         let (_, param_ids, first_code_block) =
@@ -531,32 +581,10 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         constructor.end_function()?;
     }
 
-    // Lower all entry points
-    // Collect all bindings that ANY entry point writes to: storage outputs,
-    // plus `#[storage(access=write/readwrite)]` inputs written in place (e.g. a
-    // `scatter` destination). These must not be marked `NonWritable` in any
-    // entry — including entries that only read the binding — so the shader's
-    // declared access stays consistent across the module and matches the
-    // descriptor's promoted `ReadWrite` (mirrors `egir::publish` written_bindings).
-    let written_bindings: LookupSet<BindingRef> = program
-        .entry_points
-        .iter()
-        .flat_map(|e| e.outputs.iter().filter_map(|o| o.storage_binding()))
-        .chain(program.entry_points.iter().flat_map(|e| {
-            e.inputs.iter().filter_map(|i| {
-                let br = i.storage_binding()?;
-                match i.storage_access() {
-                    Some(
-                        crate::interface::StorageAccess::WriteOnly
-                        | crate::interface::StorageAccess::ReadWrite,
-                    ) => Some(br),
-                    _ => None,
-                }
-            })
-        }))
-        .collect();
-
-    for entry in &program.entry_points {
+    // Lower each entry under its own storage-access map. When entries use the
+    // same slot with different access, they reference distinct module globals
+    // and storage-dependent helper variants selected above.
+    for (entry_index, entry) in program.entry_points.iter().enumerate() {
         let (spirv_model, local_size) = match &entry.execution_model {
             ExecutionModel::Vertex => (spirv::ExecutionModel::Vertex, None),
             ExecutionModel::Fragment => (spirv::ExecutionModel::Fragment, None),
@@ -564,7 +592,9 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         };
 
         entry_info.push((entry.name.clone(), spirv_model, local_size));
-        entry::lower_ssa_entry_point(&mut constructor, entry, &written_bindings)?;
+        constructor.select_storage_accesses(&entry.storage_accesses());
+        constructor.select_function_names(function_variants.names_for_entry(entry_index));
+        entry::lower_ssa_entry_point(&mut constructor, entry)?;
     }
 
     // Hoisted constant `Private` globals must be listed in each entry's
@@ -590,9 +620,10 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
             // (via its inputs/outputs). Don't add ALL storage vars — other
             // entry points may have buffers this one doesn't reference.
             if let Some(entry) = program.entry_points.iter().find(|e| e.name == *name) {
+                constructor.select_storage_accesses(&entry.storage_accesses());
                 for input in &entry.inputs {
                     if let Some(br) = input.storage_binding() {
-                        if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&br) {
+                        if let Some((var_id, _, _)) = constructor.storage_buffer(br) {
                             if !interfaces.contains(&var_id) {
                                 interfaces.push(var_id);
                             }
@@ -601,7 +632,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
                 }
                 for output in &entry.outputs {
                     if let Some(br) = output.storage_binding() {
-                        if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&br) {
+                        if let Some((var_id, _, _)) = constructor.storage_buffer(br) {
                             if !interfaces.contains(&var_id) {
                                 interfaces.push(var_id);
                             }
@@ -612,7 +643,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
                 // the entry's typed `storage_bindings` list (e.g.
                 // parallelize's partials/result intermediates).
                 for sb in &entry.storage_bindings {
-                    if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&sb.binding) {
+                    if let Some((var_id, _, _)) = constructor.storage_buffer(sb.binding) {
                         if !interfaces.contains(&var_id) {
                             interfaces.push(var_id);
                         }
@@ -644,7 +675,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
 }
 
 /// Lower an SSA function to SPIR-V.
-fn lower_ssa_function(constructor: &mut Constructor, func: &Function) -> Result<()> {
+fn lower_ssa_function(constructor: &mut Constructor, func: &Function, emitted_name: &str) -> Result<()> {
     let body = &func.body;
 
     // Extract parameter types and names, converting types to SPIR-V
@@ -655,7 +686,7 @@ fn lower_ssa_function(constructor: &mut Constructor, func: &Function) -> Result<
     let return_type = constructor.polytype_to_spirv(&body.return_ty);
 
     let (_, param_ids, first_code_block) =
-        constructor.begin_function(&func.name, &param_names, &param_types, return_type)?;
+        constructor.begin_function(emitted_name, &param_names, &param_types, return_type)?;
     lower::LowerCtx::new(constructor, body, false, func.span, param_ids, first_code_block)
         .lower()
         .map_err(|e| err_spirv!("in function '{}': {}", func.name, e))?;

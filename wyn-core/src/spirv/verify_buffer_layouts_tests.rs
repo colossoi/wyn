@@ -146,6 +146,7 @@ fn rejects_compiler_introduced_binding_with_runtime_elem() {
     e.storage_bindings.push(StorageBindingDecl {
         binding: BindingRef::new(3, 4),
         role: StorageRole::Output,
+        logical_resource: None,
         elem_ty: runtime_u32_array(), // runtime array as the leaf elem
         length: None,
     });

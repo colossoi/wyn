@@ -137,23 +137,6 @@ impl FrameGraph {
                 }
                 Pipeline::Graphics(graphics) => {
                     let feedback_reads = feedback_read_slots(&graphics.feedback);
-                    // The descriptor's graphics binding table is flat — it does
-                    // not record which stage (vertex vs fragment) uses each
-                    // binding — so every stage is attributed the whole table's
-                    // declared accesses. This is a conservative over-
-                    // approximation: intra-pipeline `depends_on` edges between a
-                    // pipeline's own stages may be spurious. It is sound (no real
-                    // dependency is missed) and currently has no consumer; a
-                    // precise split would need per-binding stage visibility.
-                    // Computed once and shared, since the accesses are identical.
-                    let accesses = builder.binding_table_accesses(
-                        pipeline_index,
-                        &graphics.bindings,
-                        None,
-                        None,
-                        &feedback_reads,
-                    );
-                    let (reads, writes) = (accesses.reads, accesses.writes);
                     // Each `#[target(name)]` fragment output writes a render
                     // resource, keyed by name as a texture so it shares identity
                     // with any downstream pass that samples it. Attributed to the
@@ -167,7 +150,13 @@ impl FrameGraph {
                         })
                         .collect();
                     for (stage_index, stage) in graphics.stages.iter().enumerate() {
-                        let mut stage_writes = writes.clone();
+                        let accesses = builder.stage_accesses(
+                            pipeline_index,
+                            &graphics.bindings,
+                            &stage.uses,
+                            &feedback_reads,
+                        );
+                        let mut stage_writes = accesses.writes;
                         if matches!(stage.stage, ShaderStage::Fragment) {
                             stage_writes.extend(target_writes.iter().cloned());
                         }
@@ -176,9 +165,9 @@ impl FrameGraph {
                             stage.entry_point.clone(),
                             pipeline_index,
                             stage_index,
-                            reads.clone(),
+                            accesses.reads,
                             stage_writes,
-                            accesses.produces.clone(),
+                            accesses.produces,
                             &mut last_writer,
                             &mut last_readers,
                         );
@@ -390,21 +379,68 @@ pub struct BackingRef {
     pub binding: u32,
 }
 
+/// Per-stage uses of a pipeline's binding table. Binding declarations describe
+/// slots and their attached resources; this records how one shader entry point
+/// accesses those slots. Indices address the parent pipeline's `bindings`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StageBindingUses {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reads: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writes: Vec<usize>,
+}
+
+impl StageBindingUses {
+    pub fn record(&mut self, binding: usize, access: Access) {
+        if matches!(access, Access::ReadOnly | Access::ReadWrite) && !self.reads.contains(&binding) {
+            self.reads.push(binding);
+        }
+        if matches!(access, Access::WriteOnly | Access::ReadWrite) && !self.writes.contains(&binding) {
+            self.writes.push(binding);
+        }
+    }
+
+    pub fn access(&self, binding: usize) -> Option<Access> {
+        match (self.reads.contains(&binding), self.writes.contains(&binding)) {
+            (true, true) => Some(Access::ReadWrite),
+            (true, false) => Some(Access::ReadOnly),
+            (false, true) => Some(Access::WriteOnly),
+            (false, false) => None,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.reads.is_empty() && self.writes.is_empty()
+    }
+}
+
 /// A single dispatch stage within a `ComputePipeline`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputeStage {
     pub entry_point: String,
+    /// Authored entry whose execution this stage implements. Generated stages
+    /// retain their source owner instead of asking runtimes to infer it from
+    /// the backend entry-point name.
+    #[serde(default)]
+    pub owner: String,
     pub workgroup_size: (u32, u32, u32),
     pub dispatch_size: DispatchSize,
-    /// Indices into the parent pipeline's `bindings` that this stage
-    /// reads. Empty when the host derives access from `Binding.access`
-    /// (the single-stage case has historically left this empty).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub reads: Vec<usize>,
-    /// Indices into the parent pipeline's `bindings` that this stage
-    /// writes.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub writes: Vec<usize>,
+    #[serde(flatten)]
+    pub uses: StageBindingUses,
+}
+
+impl std::ops::Deref for ComputeStage {
+    type Target = StageBindingUses;
+
+    fn deref(&self) -> &Self::Target {
+        &self.uses
+    }
+}
+
+impl std::ops::DerefMut for ComputeStage {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.uses
+    }
 }
 
 /// Graphics pipeline (vertex + fragment stages).
@@ -423,7 +459,26 @@ pub struct GraphicsPipeline {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphicsStage {
     pub entry_point: String,
+    /// Authored entry whose execution this stage implements.
+    #[serde(default)]
+    pub owner: String,
     pub stage: ShaderStage,
+    #[serde(flatten)]
+    pub uses: StageBindingUses,
+}
+
+impl std::ops::Deref for GraphicsStage {
+    type Target = StageBindingUses;
+
+    fn deref(&self) -> &Self::Target {
+        &self.uses
+    }
+}
+
+impl std::ops::DerefMut for GraphicsStage {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.uses
+    }
 }
 
 /// Shader stage type.
@@ -519,7 +574,12 @@ pub enum Binding {
         binding: u32,
         access: Access,
         usage: BufferUsage,
+        /// Entry-local binding name used for diagnostics and host handles.
         name: String,
+        /// Logical frame-graph resource viewed through this binding. Producer
+        /// and consumer bindings may have different local names and slots.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<String>,
         /// Sizing policy for compiler-managed buffers whose length isn't a
         /// host-supplied input (e.g. a gather intermediate). `None` for
         /// host inputs (sized from the supplied data) and ordinary outputs.
@@ -879,11 +939,21 @@ impl FrameGraphBuilder {
         stage: &ComputeStage,
         feedback_reads: &BTreeSet<(u32, u32)>,
     ) -> StageAccesses {
-        let explicit_reads = (!stage.reads.is_empty()).then_some(stage.reads.as_slice());
-        let explicit_writes = (!stage.writes.is_empty()).then_some(stage.writes.as_slice());
+        self.stage_accesses(pipeline_index, &compute.bindings, &stage.uses, feedback_reads)
+    }
+
+    fn stage_accesses(
+        &mut self,
+        pipeline_index: usize,
+        bindings: &[Binding],
+        uses: &StageBindingUses,
+        feedback_reads: &BTreeSet<(u32, u32)>,
+    ) -> StageAccesses {
+        let explicit_reads = (!uses.reads.is_empty()).then_some(uses.reads.as_slice());
+        let explicit_writes = (!uses.writes.is_empty()).then_some(uses.writes.as_slice());
         self.binding_table_accesses(
             pipeline_index,
-            &compute.bindings,
+            bindings,
             explicit_reads,
             explicit_writes,
             feedback_reads,
@@ -1106,9 +1176,9 @@ fn resource_key(pipeline_index: usize, binding: &Binding) -> ResourceKey {
     match binding {
         // A storage buffer is one logical resource across every pipeline that
         // binds it, regardless of each pipeline's `(set, binding)` slot.
-        Binding::StorageBuffer { name, .. } => ResourceKey::Named {
+        Binding::StorageBuffer { name, resource, .. } => ResourceKey::Named {
             kind: FrameResourceKind::StorageBuffer,
-            name: name.clone(),
+            name: resource.clone().unwrap_or_else(|| name.clone()),
         },
         Binding::Uniform { set, binding, .. } => ResourceKey::Descriptor {
             kind: FrameResourceKind::Uniform,
@@ -1211,7 +1281,11 @@ fn binding_name(binding: &Binding) -> &str {
 /// param name. Everything else reports its own name.
 fn resource_name(binding: &Binding) -> &str {
     match binding {
-        Binding::Texture {
+        Binding::StorageBuffer {
+            resource: Some(resource),
+            ..
+        }
+        | Binding::Texture {
             resource: Some(resource),
             ..
         }
@@ -1644,13 +1718,13 @@ mod tests {
                     }],
                     stages: vec![ComputeStage {
                         entry_point: "paint".to_string(),
+                        owner: "paint".to_string(),
                         workgroup_size: (8, 8, 1),
                         dispatch_size: DispatchSize::DerivedFrom {
                             len: DispatchLen::StorageImage { set: 1, binding: 0 },
                             workgroup_size: 8,
                         },
-                        reads: vec![],
-                        writes: vec![],
+                        uses: StageBindingUses::default(),
                     }],
                     default_total_threads: None,
                     feedback: vec![],
@@ -1658,7 +1732,9 @@ mod tests {
                 Pipeline::Graphics(GraphicsPipeline {
                     stages: vec![GraphicsStage {
                         entry_point: "shade".to_string(),
+                        owner: "shade".to_string(),
                         stage: ShaderStage::Fragment,
+                        uses: StageBindingUses::default(),
                     }],
                     bindings: vec![Binding::Texture {
                         set: 2,
@@ -1706,7 +1782,9 @@ mod tests {
                 Pipeline::Graphics(GraphicsPipeline {
                     stages: vec![GraphicsStage {
                         entry_point: "scene_fragment".to_string(),
+                        owner: "scene_fragment".to_string(),
                         stage: ShaderStage::Fragment,
+                        uses: StageBindingUses::default(),
                     }],
                     bindings: vec![],
                     vertex_inputs: vec![],
@@ -1729,6 +1807,7 @@ mod tests {
                     }],
                     stages: vec![ComputeStage {
                         entry_point: "occ_reduce".to_string(),
+                        owner: "occ_reduce".to_string(),
                         workgroup_size: (8, 8, 1),
                         dispatch_size: DispatchSize::Fixed {
                             x: 1,
@@ -1736,8 +1815,7 @@ mod tests {
                             z: 1,
                             explicit: false,
                         },
-                        reads: vec![],
-                        writes: vec![],
+                        uses: StageBindingUses::default(),
                     }],
                     default_total_threads: None,
                     feedback: vec![],
@@ -1769,16 +1847,18 @@ mod tests {
     /// entry output, `consumer` reads it as an input. The edge follows the
     /// bindings, so it is the same whichever order the passes are declared in.
     fn producer_consumer_descriptor(producer_first: bool) -> PipelineDescriptor {
-        let buffer = |access: Access, usage: BufferUsage| Binding::StorageBuffer {
+        let buffer = |name: &str, access: Access, usage: BufferUsage| Binding::StorageBuffer {
             set: 0,
             binding: 0,
             access,
             usage,
-            name: "inst".to_string(),
+            name: name.to_string(),
+            resource: Some("inst".to_string()),
             length: None,
         };
         let stage = |entry: &str| ComputeStage {
             entry_point: entry.to_string(),
+            owner: entry.to_string(),
             workgroup_size: (64, 1, 1),
             dispatch_size: DispatchSize::Fixed {
                 x: 1,
@@ -1786,12 +1866,11 @@ mod tests {
                 z: 1,
                 explicit: false,
             },
-            reads: vec![],
-            writes: vec![],
+            uses: StageBindingUses::default(),
         };
         let pipeline = |entry: &str, access, usage| {
             Pipeline::Compute(ComputePipeline {
-                bindings: vec![buffer(access, usage)],
+                bindings: vec![buffer(&format!("{entry}_binding"), access, usage)],
                 stages: vec![stage(entry)],
                 default_total_threads: None,
                 feedback: vec![],
@@ -1843,6 +1922,7 @@ mod tests {
             access,
             usage,
             name: "inst".to_string(),
+            resource: None,
             length: None,
         };
         let occ = |access| Binding::StorageTexture {
@@ -1856,6 +1936,7 @@ mod tests {
         };
         let stage = |entry: &str| ComputeStage {
             entry_point: entry.to_string(),
+            owner: entry.to_string(),
             workgroup_size: (64, 1, 1),
             dispatch_size: DispatchSize::Fixed {
                 x: 1,
@@ -1863,8 +1944,7 @@ mod tests {
                 z: 1,
                 explicit: false,
             },
-            reads: vec![],
-            writes: vec![],
+            uses: StageBindingUses::default(),
         };
         // `reduce` consumes `inst` and overwrites `occ`; `cull` produces `inst`
         // and reads `occ`. Declared reduce-first, so the hazard sweep also wants
@@ -1909,7 +1989,9 @@ mod tests {
                 Pipeline::Graphics(GraphicsPipeline {
                     stages: vec![GraphicsStage {
                         entry_point: "frag".to_string(),
+                        owner: "frag".to_string(),
                         stage: ShaderStage::Fragment,
+                        uses: StageBindingUses::default(),
                     }],
                     bindings: vec![],
                     vertex_inputs: vec![],
@@ -1931,6 +2013,7 @@ mod tests {
                     }],
                     stages: vec![ComputeStage {
                         entry_point: "reduce".to_string(),
+                        owner: "reduce".to_string(),
                         workgroup_size: (8, 8, 1),
                         dispatch_size: DispatchSize::Fixed {
                             x: 1,
@@ -1938,8 +2021,7 @@ mod tests {
                             z: 1,
                             explicit: false,
                         },
-                        reads: vec![],
-                        writes: vec![],
+                        uses: StageBindingUses::default(),
                     }],
                     default_total_threads: None,
                     feedback: vec![],
@@ -1991,13 +2073,13 @@ mod tests {
                 ],
                 stages: vec![ComputeStage {
                     entry_point: "step".to_string(),
+                    owner: "step".to_string(),
                     workgroup_size: (8, 8, 1),
                     dispatch_size: DispatchSize::DerivedFrom {
                         len: DispatchLen::StorageImage { set: 1, binding: 0 },
                         workgroup_size: 8,
                     },
-                    reads: vec![],
-                    writes: vec![],
+                    uses: StageBindingUses::default(),
                 }],
                 default_total_threads: None,
                 feedback: vec![FeedbackPair {

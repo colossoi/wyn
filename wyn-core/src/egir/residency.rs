@@ -25,6 +25,7 @@ use super::types::{
 use crate::ast::TypeName;
 use crate::flow::{BlockId, ExecutionModel};
 use crate::interface::StorageRole;
+use crate::pipeline_descriptor::{DispatchSize, Pipeline, StorageTextureSize};
 use crate::types::TypeExt;
 
 enum MaterializationPlan {
@@ -472,10 +473,10 @@ fn plan_parallel_prelude(program: &AllocatedProgram) -> Option<MaterializationPl
     None
 }
 
-/// Direct entry invocation counts are selected by draw or dispatch state,
-/// outside the shader module. Price direct stage lifting against one modest
-/// batch so only substantial uniform work clears the singleton-launch overhead.
-const DIRECT_STAGE_INVOCATIONS: u64 = 64;
+/// Dynamic draw and dispatch sizes are unavailable during shader compilation.
+/// Price those direct stages against one modest batch so only substantial
+/// uniform work clears the singleton-launch overhead.
+const DIRECT_STAGE_INVOCATION_FALLBACK: u64 = 64;
 
 fn plan_direct_stage_prelude(program: &AllocatedProgram) -> Option<MaterializationPlan> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
@@ -502,7 +503,7 @@ fn plan_direct_stage_prelude(program: &AllocatedProgram) -> Option<Materializati
         let Some(analysis) = super::residency_cost::analyze_prelude(program, entry, &recipe) else {
             continue;
         };
-        if !analysis.should_materialize(DIRECT_STAGE_INVOCATIONS) {
+        if !analysis.should_materialize(direct_stage_invocations(program, entry)) {
             continue;
         }
         return Some(MaterializationPlan::StagePrelude {
@@ -513,6 +514,63 @@ fn plan_direct_stage_prelude(program: &AllocatedProgram) -> Option<Materializati
         });
     }
     None
+}
+
+fn direct_stage_invocations(program: &AllocatedProgram, entry: &super::program::SemanticEntry) -> u64 {
+    let ExecutionModel::Compute { local_size } = entry.execution_model else {
+        return DIRECT_STAGE_INVOCATION_FALLBACK;
+    };
+    let workgroup = u64::from(local_size.0.max(1))
+        .saturating_mul(u64::from(local_size.1.max(1)))
+        .saturating_mul(u64::from(local_size.2.max(1)));
+    let dispatch = program.pipeline.pipelines.iter().find_map(|pipeline| match pipeline {
+        Pipeline::Compute(compute) => compute
+            .stages
+            .iter()
+            .find(|stage| stage.entry_point == entry.name)
+            .map(|stage| &stage.dispatch_size),
+        Pipeline::Graphics(_) => None,
+    });
+    if let Some(DispatchSize::Fixed {
+        x,
+        y,
+        z,
+        explicit: true,
+    }) = dispatch
+    {
+        return u64::from(*x)
+            .saturating_mul(u64::from(*y))
+            .saturating_mul(u64::from(*z))
+            .saturating_mul(workgroup);
+    }
+
+    let image_domain_is_inferred = matches!(
+        dispatch,
+        Some(DispatchSize::Fixed {
+            x: 1,
+            y: 1,
+            z: 1,
+            explicit: false
+        })
+    );
+    let fixed_image = if image_domain_is_inferred {
+        entry.inputs.iter().find_map(|input| {
+            let (_, _, _, size) = input.storage_image_binding()?;
+            match size {
+                StorageTextureSize::Fixed { width, height } => Some((width, height)),
+                StorageTextureSize::SameAsWindow => None,
+            }
+        })
+    } else {
+        None
+    };
+    if let Some((width, height)) = fixed_image {
+        let groups_x = u64::from(width).div_ceil(u64::from(local_size.0.max(1)));
+        let groups_y = u64::from(height).div_ceil(u64::from(local_size.1.max(1)));
+        return groups_x.saturating_mul(groups_y).saturating_mul(workgroup);
+    }
+
+    DIRECT_STAGE_INVOCATION_FALLBACK
 }
 
 fn direct_stage_value_is_liftable(

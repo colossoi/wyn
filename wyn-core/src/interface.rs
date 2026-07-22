@@ -693,6 +693,9 @@ pub enum StorageRole {
 pub struct StorageBindingDecl {
     pub binding: BindingRef,
     pub role: StorageRole,
+    /// Stable identity of a compiler-managed logical resource. Entry-local
+    /// binding names and descriptor slots are access paths, not identity.
+    pub logical_resource: Option<String>,
     /// The element type stored at each index of the buffer.
     pub elem_ty: Type,
     /// Sizing policy for a compiler-managed buffer whose length isn't a

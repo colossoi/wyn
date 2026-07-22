@@ -19,6 +19,7 @@ pub mod builder;
 pub mod framework;
 pub mod layout;
 pub mod print;
+pub(crate) mod storage_function_variants;
 pub mod types;
 
 #[cfg(test)]

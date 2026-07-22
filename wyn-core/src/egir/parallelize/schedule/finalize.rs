@@ -8,7 +8,9 @@ use crate::egir::program::{
     AllocatedProgram, EntryPublication, PhysicalProgram, PhysicalResourceTable, SemanticEntry,
 };
 use crate::egir::publish::PipelineDescriptorPublish;
-use crate::pipeline_descriptor::{ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor};
+use crate::pipeline_descriptor::{
+    ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor, StageBindingUses,
+};
 use crate::{BindingRef, IdSource, LoweringProfile, SchedulePolicy};
 
 impl KernelPlan {
@@ -55,6 +57,7 @@ impl KernelPlan {
         descriptor.publish_implicit_bindings(&publication_refs)?;
         descriptor.publish_graphics_io(&publication_refs);
         self.publish(&mut descriptor, &physical_resources)?;
+        descriptor.publish_stage_binding_uses(&publication_refs);
         descriptor.relabel_input_storage_names(&inner.input_names);
         descriptor.rebuild_frame_graph();
 
@@ -107,6 +110,7 @@ impl KernelPlan {
                 .map(|id| self.phase(*id))
                 .map(|phase| ComputeStage {
                     entry_point: phase.entry_point().to_owned(),
+                    owner: self.phase_owner(phase),
                     workgroup_size: phase.workgroup_size(),
                     dispatch_size: DispatchSize::Fixed {
                         x: 1,
@@ -114,8 +118,7 @@ impl KernelPlan {
                         z: 1,
                         explicit: false,
                     },
-                    reads: Vec::new(),
-                    writes: Vec::new(),
+                    uses: StageBindingUses::default(),
                 })
                 .collect();
             rebuilt.push((scheduled.order, Pipeline::Compute(compute)));
@@ -190,15 +193,23 @@ impl KernelPlan {
                 };
                 stages.push(ComputeStage {
                     entry_point: phase.entry_point().to_owned(),
+                    owner: self.phase_owner(phase),
                     workgroup_size: phase.workgroup_size(),
                     dispatch_size,
-                    reads,
-                    writes,
+                    uses: StageBindingUses { reads, writes },
                 });
             }
             compute.stages = stages;
         }
         Ok(())
+    }
+
+    fn phase_owner(&self, phase: &super::KernelPhase) -> String {
+        phase
+            .source_entry
+            .and_then(|source| self.source_entries.get(source.index()))
+            .map(|source| source.publication.name.clone())
+            .unwrap_or_else(|| phase.entry_point().to_owned())
     }
 
     fn check_explicit_dispatch_coverage(&self, entries: &[SemanticEntry]) -> Result<(), String> {

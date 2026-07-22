@@ -490,3 +490,43 @@ pub struct EntryPoint {
     pub storage_bindings: Vec<interface::StorageBindingDecl>,
     pub span: Span,
 }
+
+impl EntryPoint {
+    /// Access each storage-buffer slot has in this entry. This folds existing
+    /// interface metadata; it does not inspect or re-analyze the SSA body.
+    pub(crate) fn storage_accesses(&self) -> LookupMap<crate::BindingRef, crate::ResourceAccess> {
+        let mut accesses: LookupMap<crate::BindingRef, crate::ResourceAccess> = LookupMap::new();
+        let mut record = |binding, access| {
+            accesses
+                .entry(binding)
+                .and_modify(|current| *current = current.merge(access))
+                .or_insert(access);
+        };
+
+        for input in &self.inputs {
+            let Some(binding) = input.storage_binding() else {
+                continue;
+            };
+            let access = match input.storage_access() {
+                Some(interface::StorageAccess::WriteOnly) => crate::ResourceAccess::Write,
+                Some(interface::StorageAccess::ReadWrite) => crate::ResourceAccess::ReadWrite,
+                Some(interface::StorageAccess::ReadOnly) | None => crate::ResourceAccess::Read,
+            };
+            record(binding, access);
+        }
+        for output in &self.outputs {
+            if let Some(binding) = output.storage_binding() {
+                record(binding, crate::ResourceAccess::Write);
+            }
+        }
+        for declaration in &self.storage_bindings {
+            let access = match declaration.role {
+                interface::StorageRole::Input => crate::ResourceAccess::Read,
+                interface::StorageRole::Output => crate::ResourceAccess::Write,
+                interface::StorageRole::Intermediate => crate::ResourceAccess::ReadWrite,
+            };
+            record(declaration.binding, access);
+        }
+        accesses
+    }
+}
