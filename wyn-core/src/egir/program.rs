@@ -161,7 +161,7 @@ impl MaterializationId {
     /// useful naming convention for existing tooling; explicit stage-owner
     /// metadata remains the authoritative relationship.
     pub(crate) fn entry_name(self, source: &str, role: &str) -> String {
-        format!("{source}_{role}__w_materialization_{}", self.0)
+        format!("{source}_{role}_{}", self.0)
     }
 }
 
