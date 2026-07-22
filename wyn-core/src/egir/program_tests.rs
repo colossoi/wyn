@@ -325,3 +325,13 @@ fn define_region_records_the_body_under_the_reserved_index() {
         "the region is callable"
     );
 }
+
+/// Materialization IDs make `{source}_{role}_{id}` unique among generated
+/// materializations, but an authored entry can still use that exact spelling.
+/// Replace this marker with a real collision test when entry-name allocation
+/// either reserves a compiler namespace or checks all authored/generated names.
+#[test]
+#[ignore = "generated materialization names can still collide with authored entry names"]
+fn generated_materialization_names_cannot_collide_with_authored_entries() {
+    assert!(false);
+}
