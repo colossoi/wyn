@@ -102,7 +102,7 @@ fn vertex_format_rejects_aggregates() {
 
 // ---- block_layout ---------------------------------------------------------
 
-use super::{block_layout, std430_alignment, BlockLayout};
+use super::{block_layout, std430_alignment, std430_matrix_stride, storage_elem_stride, BlockLayout};
 use crate::interface::StorageLayout;
 use crate::types::RecordFields;
 
@@ -121,6 +121,27 @@ fn f32t() -> Type {
 
 fn vecn(n: usize) -> Type {
     vec(TypeName::Float(32), n)
+}
+
+fn mat(cols: usize, rows: usize) -> Type {
+    Type::Constructed(
+        TypeName::Mat,
+        vec![
+            f32t(),
+            Type::Constructed(TypeName::Size(cols), vec![]),
+            Type::Constructed(TypeName::Size(rows), vec![]),
+        ],
+    )
+}
+
+#[test]
+fn std430_matrix_layout_pads_columns_and_the_outer_array() {
+    assert_eq!(std430_matrix_stride(&mat(2, 2)), Some(8));
+    assert_eq!(storage_elem_stride(&mat(2, 2)), Some(16));
+    assert_eq!(std430_matrix_stride(&mat(3, 3)), Some(16));
+    assert_eq!(storage_elem_stride(&mat(3, 3)), Some(48));
+    assert_eq!(std430_matrix_stride(&mat(4, 3)), Some(16));
+    assert_eq!(storage_elem_stride(&mat(4, 3)), Some(64));
 }
 
 #[test]

@@ -24,7 +24,7 @@ use crate::ast::{Span, TypeName};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::error::Result;
 use crate::interface::IoDecoration;
-use crate::ssa::layout::{buffer_array_strides, std430_alignment, type_byte_size};
+use crate::ssa::layout::{buffer_array_strides, std430_alignment};
 use crate::ssa::types::{
     BlockId, ConstantValue, ControlHeader, EntryPoint, ExecutionModel, FuncBody, Function, InstKind,
     Program, Terminator, ValueId, ValueRef, WynInstNode,

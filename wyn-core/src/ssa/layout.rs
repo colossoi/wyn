@@ -132,6 +132,23 @@ pub fn std430_alignment(ty: &Type) -> Option<u32> {
     }
 }
 
+/// Byte stride between adjacent columns of a column-major matrix in a
+/// std430 interface block. SPIR-V requires this value to be published as a
+/// `MatrixStride` member decoration whenever a block contains a matrix (or an
+/// array of matrices).
+pub fn std430_matrix_stride(ty: &Type) -> Option<u32> {
+    if !ty.is_mat() {
+        return None;
+    }
+    let rows = ty.mat_rows()? as u32;
+    let elem = ty.elem_type()?;
+    let elem_size = type_byte_size(elem)?;
+    let column_size = rows * elem_size;
+    let column_alignment =
+        if rows == 2 { 2 * std430_alignment(elem)? } else { 4 * std430_alignment(elem)? };
+    Some(column_size.div_ceil(column_alignment) * column_alignment)
+}
+
 /// Calculate std140 alignment for a type.
 /// std140 has stricter alignment requirements than std430.
 pub fn std140_alignment(ty: &Type) -> Option<u32> {
@@ -281,6 +298,7 @@ pub fn storage_elem_stride(ty: &Type) -> Option<u32> {
         Type::Constructed(TypeName::Tuple(_), _) | Type::Constructed(TypeName::Record(_), _) => {
             block_layout(ty, StorageLayout::Std430).map(|l| l.size)
         }
+        _ if ty.is_mat() => Some(ty.mat_cols()? as u32 * std430_matrix_stride(ty)?),
         _ => type_byte_size(ty),
     }
 }

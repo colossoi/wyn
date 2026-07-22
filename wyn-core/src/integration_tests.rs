@@ -3131,6 +3131,94 @@ entry mixed_stage_uniform_call(
     );
 }
 
+#[test]
+fn fragment_mixed_stage_call_uses_a_generated_scalar_prepass() {
+    use crate::pipeline_descriptor::Pipeline;
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+type frame_globals = { factor: f32 }
+
+def mix_fragment_with_frame(pos: vec4f32, frame: frame_globals) vec4f32 =
+  let a0 = frame.factor * 1.01 + 0.01
+  let a1 = a0 * 1.01 + 0.01
+  let a2 = a1 * 1.01 + 0.01
+  let a3 = a2 * 1.01 + 0.01
+  let a4 = a3 * 1.01 + 0.01
+  let a5 = a4 * 1.01 + 0.01
+  let a6 = a5 * 1.01 + 0.01
+  let a7 = a6 * 1.01 + 0.01
+  let a8 = a7 * 1.01 + 0.01
+  let a9 = a8 * 1.01 + 0.01
+  let a10 = a9 * 1.01 + 0.01
+  let a11 = a10 * 1.01 + 0.01 in
+  pos + @[a11, a11, a11, 0.0]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+  if vid == 0 then @[-1.0, -1.0, 0.0, 1.0]
+  else if vid == 1 then @[3.0, -1.0, 0.0, 1.0]
+  else @[-1.0, 3.0, 0.0, 1.0]
+
+#[fragment]
+entry fragment_main(
+    #[uniform(set=1, binding=0)] frame: frame_globals,
+    #[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
+  mix_fragment_with_frame(pos, frame)
+"#,
+    )
+    .expect("mixed-stage fragment call compiles");
+
+    let prepass = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) => compute
+                .stages
+                .iter()
+                .find(|stage| stage.entry_point.contains("fragment_main_prepass_scalar")),
+            Pipeline::Graphics(_) => None,
+        })
+        .expect("fragment uniform work has a generated compute prepass");
+    assert!(spirv_entry_interface_has_storage_binding(
+        &lowered.spirv,
+        &prepass.entry_point,
+        1,
+        0
+    ));
+    assert!(
+        !spirv_entry_interface_has_storage_binding(&lowered.spirv, "fragment_main", 1, 0),
+        "the fragment interface receives only the scalar handoff"
+    );
+}
+
+#[test]
+fn cheap_fragment_uniform_expression_stays_in_the_fragment_stage() {
+    use crate::pipeline_descriptor::Pipeline;
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[fragment]
+entry fragment_main(
+    #[uniform(set=1, binding=0)] factor: f32,
+    #[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
+  pos + @[factor, factor, factor, 0.0]
+"#,
+    )
+    .expect("cheap uniform fragment expression compiles");
+    assert!(lowered.pipeline.pipelines.iter().all(|pipeline| {
+        !matches!(pipeline, Pipeline::Compute(compute)
+            if compute.stages.iter().any(|stage| stage.entry_point.contains("prepass_scalar")))
+    }));
+    assert!(spirv_entry_interface_has_storage_binding(
+        &lowered.spirv,
+        "fragment_main",
+        1,
+        0
+    ));
+}
+
 fn assert_scalar_prefix_emits_valid_wgsl(source: &str) {
     let wgsl = lower_semantic_egir(
         compile_to_semantic_egir(source),
@@ -11251,6 +11339,69 @@ entry fragment_main(#[builtin(position)] pos: vec4f32,
 "#,
     )
     .expect("stages sharing a record uniform block should lower");
+}
+
+/// Matrices stored in a runtime-array buffer need both the outer array stride
+/// and the matrix column layout on the containing block member. Scalar
+/// prepasses use exactly this representation when they hand a lifted camera
+/// matrix back to a graphics stage.
+#[test]
+fn storage_matrix_elements_publish_std430_matrix_layout() {
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::{Decoration, Op};
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry copy_matrix(
+    #[storage(set=2, binding=0, access=read)] input: []mat3f32,
+    #[storage(set=2, binding=1, access=write)] output: *[]mat3f32) () =
+  let _ = scatter(output, [0i32], [input[0]]) in ()
+"#,
+    )
+    .expect("matrix storage elements lower");
+
+    let mut loader = Loader::new();
+    parse_words(&lowered.spirv, &mut loader).expect("parse spirv");
+    let module = loader.module();
+
+    let mut matrix_stride_members = Vec::new();
+    let mut column_major_members = Vec::new();
+    let mut array_strides = Vec::new();
+    for inst in &module.annotations {
+        match inst.class.opcode {
+            Op::MemberDecorate if inst.operands[2] == Operand::Decoration(Decoration::MatrixStride) => {
+                matrix_stride_members.push((
+                    inst.operands[0].unwrap_id_ref(),
+                    inst.operands[1].unwrap_literal_bit32(),
+                    inst.operands[3].unwrap_literal_bit32(),
+                ));
+            }
+            Op::MemberDecorate if inst.operands[2] == Operand::Decoration(Decoration::ColMajor) => {
+                column_major_members.push((
+                    inst.operands[0].unwrap_id_ref(),
+                    inst.operands[1].unwrap_literal_bit32(),
+                ));
+            }
+            Op::Decorate if inst.operands[1] == Operand::Decoration(Decoration::ArrayStride) => {
+                array_strides.push(inst.operands[2].unwrap_literal_bit32());
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        matrix_stride_members
+            .iter()
+            .any(|&(block, member, stride)| stride == 16
+                && column_major_members.contains(&(block, member))),
+        "the matrix block member needs MatrixStride 16 and ColMajor; got {matrix_stride_members:?}"
+    );
+    assert!(
+        array_strides.contains(&48),
+        "a std430 runtime array of mat3f32 needs ArrayStride 48; got {array_strides:?}"
+    );
 }
 
 /// Storage-buffer struct elements get std430 member offsets and an

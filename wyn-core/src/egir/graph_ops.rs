@@ -15,7 +15,7 @@
 use crate::LookupMap;
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};
@@ -157,6 +157,37 @@ pub(crate) fn reachable_execution_values<P: ValueProducerPhase>(graph: &EGraph<P
             }
         },
     )
+}
+
+/// Maximal movable values at the boundary of executable graph structure.
+///
+/// A value belongs to the frontier when it is movable and is either used
+/// directly by an effect/terminator or consumed by a non-movable value. The
+/// predicate owns the meaning of "movable" (loop invariant, stage invariant,
+/// cloneable, and so on), while this helper owns the shared graph boundary
+/// calculation.
+pub(crate) fn maximal_execution_frontier<P: ValueProducerPhase>(
+    graph: &EGraph<P>,
+    mut movable: impl FnMut(NodeId) -> bool,
+) -> Vec<NodeId> {
+    let reachable = reachable_execution_values(graph);
+    let reachable_set = reachable.iter().copied().collect::<HashSet<_>>();
+    let movable = reachable.iter().map(|node| (*node, movable(*node))).collect::<HashMap<_, _>>();
+    let mut boundary = execution_value_roots(graph).into_iter().collect::<HashSet<_>>();
+    for node in &reachable {
+        if movable[node] {
+            continue;
+        }
+        if let Some(definition) = graph.nodes.get(*node) {
+            boundary
+                .extend(definition.children().into_iter().filter(|child| reachable_set.contains(child)));
+        }
+    }
+    let mut frontier =
+        reachable.into_iter().filter(|node| boundary.contains(node) && movable[node]).collect::<Vec<_>>();
+    frontier.sort_unstable();
+    frontier.dedup();
+    frontier
 }
 
 /// Storage resources read by the complete producer closure behind `roots`.

@@ -87,8 +87,9 @@ impl Constructor {
     pub(super) fn get_or_create_buffer_block_type(
         &mut self,
         runtime_array_type: spirv::Word,
+        matrix_stride: Option<u32>,
     ) -> spirv::Word {
-        *self.builder.buffer_block_type(builder::TypeId::new(runtime_array_type))
+        *self.builder.buffer_block_type(builder::TypeId::new(runtime_array_type), matrix_stride)
     }
 
     pub(super) fn get_or_create_uniform_block_type(&mut self, value_type: spirv::Word) -> spirv::Word {
@@ -131,8 +132,8 @@ impl Constructor {
         let stride = match &layout {
             Some(l) => l.size,
             None => {
-                let elem_size =
-                    type_byte_size(&elem_ty).expect("storage buffer element type must have known size");
+                let elem_size = crate::ssa::layout::storage_elem_stride(&elem_ty)
+                    .expect("storage buffer element type must have known size");
                 let elem_align = std430_alignment(&elem_ty).unwrap_or(elem_size.max(1));
                 elem_size.div_ceil(elem_align) * elem_align
             }
@@ -171,7 +172,8 @@ impl Constructor {
         let runtime_array = self.get_or_create_runtime_array_type(elem_spirv, stride);
 
         // Create block struct (cached)
-        let block_struct = self.get_or_create_buffer_block_type(runtime_array);
+        let matrix_stride = crate::ssa::layout::std430_matrix_stride(&elem_ty);
+        let block_struct = self.get_or_create_buffer_block_type(runtime_array, matrix_stride);
 
         let ptr_type = self.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, block_struct);
         let var_id = self.builder.variable(ptr_type, None, spirv::StorageClass::StorageBuffer, None);

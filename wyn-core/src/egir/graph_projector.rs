@@ -266,6 +266,31 @@ impl<'a> GraphProjector<'a> {
         })
     }
 
+    /// Project a value computed in the entry block as a standalone recipe.
+    ///
+    /// Unlike [`Self::captured_value_recipe`], this has no effect consumer
+    /// boundary: direct vertex/fragment expressions can feed terminators and
+    /// output effects throughout the entry. Producer closure still selects
+    /// only effects required by `value`.
+    pub fn entry_value_recipe(&self, value: NodeId) -> Result<ProjectedValueRecipe, String> {
+        let projection = self.project(
+            HashSet::new(),
+            vec![value],
+            ProjectionMode::EntryRecipe { effect_limit: None },
+        )?;
+        let projected =
+            projection.node(value).ok_or_else(|| "entry value projection omitted its root".to_string())?;
+        let result_block = projection
+            .block(self.source.skeleton.entry)
+            .ok_or_else(|| "entry value projection omitted its result block".to_string())?;
+        Ok(ProjectedValueRecipe {
+            projection,
+            value: projected,
+            result_block,
+            source: ValueRecipeSource::EntryBlock,
+        })
+    }
+
     pub fn selected_with_values(
         &self,
         roots: HashSet<SideEffectSite>,

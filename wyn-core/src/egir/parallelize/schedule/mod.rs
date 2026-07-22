@@ -36,6 +36,7 @@ mod tests;
 pub(in crate::egir) struct KernelPlan {
     phases: Vec<KernelPhase>,
     pipelines: Vec<ScheduledPipeline>,
+    next_pipeline_order: usize,
     flow_sources: HashMap<CompilerFlowEndpoint, KernelId>,
     source_entries: Vec<SourceEntryPlan>,
 }
@@ -611,6 +612,7 @@ impl KernelPlan {
         Ok(Self {
             phases,
             pipelines,
+            next_pipeline_order: descriptor.pipelines.len(),
             flow_sources,
             source_entries,
         })
@@ -656,10 +658,24 @@ impl KernelPlan {
         requirement: &MaterializationRequirement,
     ) -> Result<KernelId, KernelMutationError> {
         let consumer_placement = self.phase(consumer).placement;
-        let placement = if consumer_placement.group.is_graphics() {
+        let generated_pipeline = consumer_placement.group.is_graphics().then(|| {
+            let id = PipelineId(self.pipelines.len() as u32);
+            let pipeline = ScheduledPipeline {
+                id,
+                order: self.next_pipeline_order,
+                template: ComputePipeline {
+                    bindings: Vec::new(),
+                    stages: Vec::new(),
+                    default_total_threads: None,
+                    feedback: Vec::new(),
+                },
+            };
+            (id, pipeline)
+        });
+        let placement = if let Some((pipeline, _)) = &generated_pipeline {
             PhasePlacement {
-                group: PhaseGroup::Unpublished,
-                order: self.next_order(PhaseGroup::Unpublished),
+                group: PhaseGroup::Pipeline(*pipeline),
+                order: 0,
             }
         } else {
             self.shift_orders_from(consumer_placement.group, consumer_placement.order, 1);
@@ -670,6 +686,10 @@ impl KernelPlan {
         };
         let dependencies = self.phase(consumer).dependencies.clone();
         let phase = phase_from_materialization(requirement_id, requirement, dependencies, placement)?;
+        if let Some((_, pipeline)) = generated_pipeline {
+            self.next_pipeline_order += 1;
+            self.pipelines.push(pipeline);
+        }
         let id = self.push_phase(phase);
         self.flow_sources.insert(CompilerFlowEndpoint::Materialization(requirement_id), id);
         if !consumer_placement.group.is_graphics() {

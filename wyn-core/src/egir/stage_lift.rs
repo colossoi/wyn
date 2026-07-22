@@ -11,12 +11,13 @@ use polytype::Type;
 use smallvec::smallvec;
 
 use crate::ast::TypeName;
+use crate::flow::{BlockId, ControlHeader, ExecutionModel};
 use crate::{LookupSet, SortedSet};
 
 use super::graph_ops::{self, ConstantCopy};
 use super::inlining;
 use super::program::{SemanticFunc, SemanticProgram};
-use super::stage_variance::{StageDependence, StageDependenceAnalysis};
+use super::stage_variance::{entry_parameter_dependences, StageDependence, StageDependenceAnalysis};
 use super::types::{
     EGraph, ENode, NodeId, PureOp, RegionId, SegBody, SideEffectKind, SideEffectSite, SoacEffect,
 };
@@ -75,6 +76,7 @@ struct StageLiftCandidate {
 
 pub(crate) fn run(program: &mut SemanticProgram) -> Result<StageLiftStats> {
     let mut stats = StageLiftStats::default();
+    stats.calls_inlined += inline_direct_entry_calls(program)?;
     loop {
         let Some((site, prepared)) = find_next_candidate(program)? else {
             break;
@@ -103,6 +105,39 @@ pub(crate) fn run(program: &mut SemanticProgram) -> Result<StageLiftStats> {
         stats.values_lifted += frontier_count;
     }
     Ok(stats)
+}
+
+/// Expose invariant subgraphs hidden inside mixed-stage calls made directly
+/// by vertex and fragment entries. Scalar residency subsequently decides
+/// whether those exposed values are worth a separate stage invocation.
+fn inline_direct_entry_calls(program: &mut SemanticProgram) -> Result<usize> {
+    let mut total = 0;
+    for entry_index in 0..program.entry_points.len() {
+        let (mut graph, control_headers, parameter_dependences, scope) = {
+            let entry = &program.entry_points[entry_index];
+            if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
+                continue;
+            }
+            (
+                entry.graph.clone(),
+                entry.control_headers.clone(),
+                entry_parameter_dependences(entry),
+                entry.name.clone(),
+            )
+        };
+        let calls = inline_mixed_calls_in_graph(
+            program,
+            &mut graph,
+            &control_headers,
+            &parameter_dependences,
+            &scope,
+        )?;
+        if calls != 0 {
+            program.entry_points[entry_index].graph = graph;
+            total += calls;
+        }
+    }
+    Ok(total)
 }
 
 fn find_next_candidate(program: &SemanticProgram) -> Result<Option<(BodySite, StageLiftCandidate)>> {
@@ -188,38 +223,49 @@ fn inline_mixed_calls(
     function: &mut SemanticFunc,
     parameter_dependences: &[StageDependence],
 ) -> Result<usize> {
+    inline_mixed_calls_in_graph(
+        program,
+        &mut function.graph,
+        &function.control_headers,
+        parameter_dependences,
+        &function.name,
+    )
+}
+
+fn inline_mixed_calls_in_graph(
+    program: &SemanticProgram,
+    graph: &mut EGraph,
+    control_headers: &crate::LookupMap<BlockId, ControlHeader>,
+    parameter_dependences: &[StageDependence],
+    scope: &str,
+) -> Result<usize> {
     let mut calls_inlined = 0;
     let mut node_budget = 0;
     while node_budget < MAX_INLINED_NODES {
-        let analysis = StageDependenceAnalysis::for_graph(
-            &function.graph,
-            &function.control_headers,
-            parameter_dependences,
-        )
-        .map_err(|reason| StageLiftError::Analysis {
-            scope: function.name.clone(),
-            reason,
-        })?;
+        let analysis = StageDependenceAnalysis::for_graph(graph, control_headers, parameter_dependences)
+            .map_err(|reason| StageLiftError::Analysis {
+                scope: scope.to_string(),
+                reason,
+            })?;
         let remaining = MAX_INLINED_NODES - node_budget;
-        let candidate =
-            graph_ops::reachable_execution_values(&function.graph).into_iter().find_map(|node| {
-                let call = analysis.call_arguments(&function.graph, node)?;
-                if !call.has_mixed_stage_variance() {
-                    return None;
-                }
-                let region = program.region_interner.get(&call.callee)?;
-                let callee = program.region(region)?;
-                if callee.params.len() != call.arguments.len() {
-                    return None;
-                }
-                let nodes = inlining::inlineable_node_count(callee)?;
-                (nodes <= remaining).then_some((node, region, nodes))
-            });
+        let candidate = graph_ops::reachable_execution_values(graph).into_iter().find_map(|node| {
+            let call = analysis.call_arguments(graph, node)?;
+            if !call.has_mixed_stage_variance() {
+                return None;
+            }
+            let region = program.region_interner.get(&call.callee)?;
+            let callee = program.region(region)?;
+            if callee.params.len() != call.arguments.len() {
+                return None;
+            }
+            let nodes = inlining::inlineable_node_count(callee)?;
+            (nodes <= remaining).then_some((node, region, nodes))
+        });
         let Some((call, region, nodes)) = candidate else {
             break;
         };
         let callee = program.region(region).ok_or(StageLiftError::MissingInlineRegion(region))?;
-        inlining::inline_pure_call(&mut function.graph, call, callee)?;
+        inlining::inline_pure_call(graph, call, callee)?;
         calls_inlined += 1;
         node_budget += nodes;
     }
@@ -233,29 +279,11 @@ fn invariant_frontier(
     capture_count: usize,
     exposed_by_mixed_call: bool,
 ) -> Vec<NodeId> {
-    let reachable = graph_ops::reachable_execution_values(graph);
-    let reachable_set = reachable.iter().copied().collect::<LookupSet<_>>();
-    let roots = graph_ops::execution_value_roots(graph).into_iter().collect::<LookupSet<_>>();
     let leading = parameter_count.saturating_sub(capture_count);
-    let mut boundary = roots;
-    for node in &reachable {
-        let node_is_liftable = is_liftable(graph, analysis, *node, leading);
-        if let Some(definition) = graph.nodes.get(*node) {
-            for child in definition.children() {
-                if reachable_set.contains(&child) && !node_is_liftable {
-                    boundary.insert(child);
-                }
-            }
-        }
-    }
-    let mut frontier = reachable
+    graph_ops::maximal_execution_frontier(graph, |node| is_liftable(graph, analysis, node, leading))
         .into_iter()
-        .filter(|node| boundary.contains(node) && is_liftable(graph, analysis, *node, leading))
         .filter(|node| exposed_by_mixed_call || subgraph_contains_call(graph, *node))
-        .collect::<Vec<_>>();
-    frontier.sort_unstable();
-    frontier.dedup();
-    frontier
+        .collect()
 }
 
 fn is_liftable(

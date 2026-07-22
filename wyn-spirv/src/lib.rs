@@ -562,12 +562,26 @@ impl SpirvBuilder {
     /// offset 0 — the Vulkan storage-buffer block shape. Cached per
     /// `runtime_array` so two storage buffers of the same shape share
     /// one block-wrapped struct id.
-    pub fn buffer_block_type(&mut self, runtime_array: TypeId) -> TypeId {
+    pub fn buffer_block_type(&mut self, runtime_array: TypeId, matrix_stride: Option<u32>) -> TypeId {
         if let Some(&ty) = self.buffer_block_cache.get(&runtime_array) {
             return ty;
         }
         let ty = self.type_struct(vec![runtime_array]);
         self.decorate_block_once(ty, &[0]);
+        if let Some(stride) = matrix_stride {
+            self.inner.member_decorate(
+                *ty,
+                0,
+                spirv::Decoration::MatrixStride,
+                [rspirv::dr::Operand::LiteralBit32(stride)],
+            );
+            self.inner.member_decorate(
+                *ty,
+                0,
+                spirv::Decoration::ColMajor,
+                std::iter::empty::<rspirv::dr::Operand>(),
+            );
+        }
         self.buffer_block_cache.insert(runtime_array, ty);
         ty
     }

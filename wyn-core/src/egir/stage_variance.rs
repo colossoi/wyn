@@ -365,7 +365,7 @@ pub(crate) fn entry_parameter_input_kind(entry: &SemanticEntry, index: usize) ->
     entry.inputs.iter().find(|input| input.name == *name).map(|input| &input.kind)
 }
 
-fn entry_parameter_dependences(entry: &SemanticEntry) -> Vec<StageDependence> {
+pub(crate) fn entry_parameter_dependences(entry: &SemanticEntry) -> Vec<StageDependence> {
     (0..entry.params.len())
         .map(|index| {
             entry_parameter_input_kind(entry, index).map_or_else(unknown_dependence, entry_input_dependence)

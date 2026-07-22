@@ -35,7 +35,7 @@ struct MaterializationPlan {
 
 enum MaterializationSource {
     OperationResult(OperationResultMaterialization),
-    ParallelPrelude(ParallelPreludeMaterialization),
+    StagePrelude(StagePreludeMaterialization),
 }
 
 struct OperationResultMaterialization {
@@ -76,9 +76,9 @@ struct ParallelPrelude {
     consumers: Vec<SemanticOpId>,
 }
 
-struct ParallelPreludeMaterialization {
-    prelude: ParallelPrelude,
-    insertion_site: SideEffectSite,
+struct StagePreludeMaterialization {
+    root: NodeId,
+    insertion_site: Option<SideEffectSite>,
     recipe: super::graph_projector::ProjectedValueRecipe,
     elem_ty: Type<TypeName>,
     size: LogicalSize,
@@ -479,7 +479,9 @@ fn verify_residency_requirements_satisfied(inner: &AllocatedProgram) {
 }
 
 fn next_materialization_plan(inner: &AllocatedProgram) -> Option<MaterializationPlan> {
-    plan_operation_result(inner).or_else(|| plan_parallel_prelude(inner))
+    plan_operation_result(inner)
+        .or_else(|| plan_parallel_prelude(inner))
+        .or_else(|| plan_direct_stage_prelude(inner))
 }
 
 fn apply_materialization(
@@ -491,8 +493,8 @@ fn apply_materialization(
         MaterializationSource::OperationResult(operation) => {
             materialize_operation_result(inner, plan.entry, plan.kind, operation, effect_ids);
         }
-        MaterializationSource::ParallelPrelude(prelude) => {
-            materialize_parallel_prelude(inner, plan.entry, prelude, effect_ids);
+        MaterializationSource::StagePrelude(prelude) => {
+            materialize_stage_prelude(inner, plan.entry, prelude, effect_ids);
         }
     }
 }
@@ -756,9 +758,9 @@ fn plan_parallel_prelude(inner: &AllocatedProgram) -> Option<MaterializationPlan
             return Some(MaterializationPlan {
                 entry: entry_index,
                 kind: MaterializationKind::Scalar,
-                source: MaterializationSource::ParallelPrelude(ParallelPreludeMaterialization {
-                    prelude,
-                    insertion_site,
+                source: MaterializationSource::StagePrelude(StagePreludeMaterialization {
+                    root: prelude.root,
+                    insertion_site: Some(insertion_site),
                     recipe,
                     elem_ty: ty.clone(),
                     size: LogicalSize::FixedBytes(u64::from(stride)),
@@ -768,6 +770,84 @@ fn plan_parallel_prelude(inner: &AllocatedProgram) -> Option<MaterializationPlan
         }
     }
     None
+}
+
+/// Vertex and fragment invocation counts are selected by draw state, outside
+/// the shader module. Price direct stage lifting against one modest batch so
+/// only substantial uniform work clears the singleton-launch overhead.
+const DIRECT_GRAPHICS_INVOCATIONS: u64 = 64;
+
+fn plan_direct_stage_prelude(inner: &AllocatedProgram) -> Option<MaterializationPlan> {
+    for (entry_index, entry) in inner.entry_points.iter().enumerate() {
+        if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
+            continue;
+        }
+        let Ok(analysis) = super::stage_variance::StageDependenceAnalysis::for_entry(entry) else {
+            continue;
+        };
+        let frontier = graph_ops::maximal_execution_frontier(&entry.graph, |node| {
+            direct_stage_value_is_liftable(entry, &analysis, node)
+        });
+        for root in frontier {
+            let ty = &entry.graph.types[&root];
+            let Some(stride) = crate::ssa::layout::storage_elem_stride(ty) else {
+                continue;
+            };
+            let Ok(recipe) =
+                super::graph_projector::GraphProjector::new(&entry.graph, &entry.control_headers)
+                    .entry_value_recipe(root)
+            else {
+                continue;
+            };
+            let Some(live_outs) = parallel_prelude_live_outs(entry, root, &recipe) else {
+                continue;
+            };
+            let Some(analysis) = super::residency_cost::analyze_prelude(inner, entry, &recipe) else {
+                continue;
+            };
+            if !analysis.should_materialize(DIRECT_GRAPHICS_INVOCATIONS) {
+                continue;
+            }
+            return Some(MaterializationPlan {
+                entry: entry_index,
+                kind: MaterializationKind::Scalar,
+                source: MaterializationSource::StagePrelude(StagePreludeMaterialization {
+                    root,
+                    insertion_site: None,
+                    recipe,
+                    elem_ty: ty.clone(),
+                    size: LogicalSize::FixedBytes(u64::from(stride)),
+                    live_outs,
+                }),
+            });
+        }
+    }
+    None
+}
+
+fn direct_stage_value_is_liftable(
+    entry: &super::program::SemanticEntry,
+    analysis: &super::stage_variance::StageDependenceAnalysis,
+    node: NodeId,
+) -> bool {
+    let Some(ENode::Pure { op, .. }) = entry.graph.nodes.get(node) else {
+        return false;
+    };
+    if matches!(
+        op,
+        PureOp::Project { .. } | PureOp::ViewIndex | PureOp::PlaceIndex | PureOp::OutputSlot { .. }
+    ) {
+        return false;
+    }
+    let dependence = analysis.dependence(node);
+    let Some(ty) = entry.graph.types.get(&node) else {
+        return false;
+    };
+    dependence.is_stage_invariant()
+        && !dependence.is_compile_time_constant()
+        && dependence.loop_dependencies().is_empty()
+        && !ty.is_array()
+        && crate::ssa::layout::storage_elem_stride(ty).is_some()
 }
 
 /// Values produced by effects that move into a prepass may also feed retained
@@ -1669,21 +1749,20 @@ fn rewrite_materialized_operation_source(
     super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph);
 }
 
-fn materialize_parallel_prelude(
+fn materialize_stage_prelude(
     inner: &mut AllocatedProgram,
     entry_index: usize,
-    prelude: ParallelPreludeMaterialization,
+    prelude: StagePreludeMaterialization,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
-    let ParallelPreludeMaterialization {
-        prelude,
+    let StagePreludeMaterialization {
+        root,
         insertion_site,
         recipe,
         elem_ty,
         size,
         live_outs,
     } = prelude;
-    let root = prelude.root;
     let super::graph_projector::ProjectedValueRecipe {
         projection,
         value: projected_root,
@@ -1775,7 +1854,11 @@ fn materialize_parallel_prelude(
     let loaded_root = loaded_values[0];
     match source {
         super::graph_projector::ValueRecipeSource::EntryBlock => {
-            replace_prelude_effects_with_load(entry, &producer_effects, insertion_site, load_effects);
+            if let Some(insertion_site) = insertion_site {
+                replace_prelude_effects_with_load(entry, &producer_effects, insertion_site, load_effects);
+            } else {
+                replace_entry_prelude_with_load(entry, &producer_effects, load_effects);
+            }
         }
         super::graph_projector::ValueRecipeSource::StructuredPrefix { continuation } => {
             replace_structured_prefix_with_load(
@@ -1950,6 +2033,18 @@ fn replace_prelude_effects_with_load(
         entry.graph.skeleton.blocks[insertion_site.block]
             .side_effects
             .insert(insertion_index + offset, load_effect);
+    }
+}
+
+fn replace_entry_prelude_with_load(
+    entry: &mut super::program::SemanticEntry,
+    producer_effects: &HashSet<SideEffectSite>,
+    load_effects: Vec<super::types::SideEffect>,
+) {
+    remove_effect_sites(&mut entry.graph, producer_effects);
+    let block = &mut entry.graph.skeleton.blocks[entry.graph.skeleton.entry];
+    for (index, load) in load_effects.into_iter().enumerate() {
+        block.side_effects.insert(index, load);
     }
 }
 
