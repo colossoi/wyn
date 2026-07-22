@@ -202,6 +202,38 @@ fn physicalization_rebuilds_resource_nodes_as_binding_nodes() {
 }
 
 #[test]
+fn compiler_binding_allocation_avoids_non_resource_descriptor_slots() {
+    let mut resources = LogicalResourceArena::default();
+    let first = resources.allocate(
+        ResourceOrigin::Compiler(CompilerResource::new(
+            CompilerResourceKind::ScalarHandoff,
+            None,
+            0,
+        )),
+        unit_ty(),
+        LogicalSize::FixedBytes(4),
+    );
+    let second = resources.allocate(
+        ResourceOrigin::Compiler(CompilerResource::new(
+            CompilerResourceKind::ScalarHandoff,
+            None,
+            1,
+        )),
+        unit_ty(),
+        LogicalSize::FixedBytes(4),
+    );
+    let mut ids = crate::IdSource::new();
+    let table = PhysicalResourceTable::allocate_avoiding(
+        &resources,
+        &mut ids,
+        [crate::BindingRef::new(0, 0), crate::BindingRef::new(0, 2)],
+    );
+
+    assert_eq!(table.binding(first), crate::BindingRef::new(0, 1));
+    assert_eq!(table.binding(second), crate::BindingRef::new(0, 3));
+}
+
+#[test]
 fn allocated_resource_verifier_rejects_missing_size_source() {
     let program = allocated_program(LogicalSize::LikeResource {
         resource: ResourceId::for_test(1),

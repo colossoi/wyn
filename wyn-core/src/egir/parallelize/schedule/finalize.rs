@@ -32,7 +32,24 @@ impl KernelPlan {
         self.check_explicit_dispatch_coverage(&inner.entry_points)
             .map_err(ConvertError::InvalidDispatch)?;
         self.install_phase_shells(&mut descriptor)?;
-        let physical_resources = PhysicalResourceTable::allocate(&inner.resources, binding_ids);
+        let mut reserved_bindings = descriptor
+            .pipelines
+            .iter()
+            .flat_map(|pipeline| match pipeline {
+                Pipeline::Compute(compute) => compute.bindings.iter(),
+                Pipeline::Graphics(graphics) => graphics.bindings.iter(),
+            })
+            .filter_map(binding_ref)
+            .collect::<HashSet<_>>();
+        reserved_bindings.extend(
+            inner
+                .entry_points
+                .iter()
+                .flat_map(|entry| &entry.inputs)
+                .filter_map(|input| input.descriptor_binding()),
+        );
+        let physical_resources =
+            PhysicalResourceTable::allocate_avoiding(&inner.resources, binding_ids, reserved_bindings);
         let publications = self.publications(&physical_resources)?;
         let publication_refs = publications.iter().collect::<Vec<_>>();
         descriptor.publish_implicit_bindings(&publication_refs)?;
@@ -222,11 +239,5 @@ impl KernelPlan {
 }
 
 fn binding_ref(binding: &crate::pipeline_descriptor::Binding) -> Option<BindingRef> {
-    use crate::pipeline_descriptor::Binding;
-    match binding {
-        Binding::StorageBuffer { set, binding, .. } | Binding::Uniform { set, binding, .. } => {
-            Some(BindingRef::new(*set, *binding))
-        }
-        _ => None,
-    }
+    binding.slot().map(|(set, binding)| BindingRef::new(set, binding))
 }

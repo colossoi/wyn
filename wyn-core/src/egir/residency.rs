@@ -47,12 +47,9 @@ enum MaterializationPlan {
     },
     StagePrelude {
         entry: usize,
-        root: NodeId,
         insertion_site: Option<SideEffectSite>,
         recipe: super::graph_projector::ProjectedValueRecipe,
-        elem_ty: Type<TypeName>,
-        size: LogicalSize,
-        live_outs: Vec<ParallelPreludeLiveOut>,
+        outputs: Vec<StagePreludeOutput>,
     },
 }
 
@@ -91,7 +88,7 @@ struct ParallelPrelude {
     consumers: Vec<SemanticOpId>,
 }
 
-struct ParallelPreludeLiveOut {
+struct StagePreludeOutput {
     source: NodeId,
     projected: NodeId,
     elem_ty: Type<TypeName>,
@@ -176,24 +173,11 @@ fn apply_materialization(
         }
         MaterializationPlan::StagePrelude {
             entry,
-            root,
             insertion_site,
             recipe,
-            elem_ty,
-            size,
-            live_outs,
+            outputs,
         } => {
-            materialize_stage_prelude(
-                program,
-                entry,
-                root,
-                insertion_site,
-                recipe,
-                elem_ty,
-                size,
-                live_outs,
-                effect_ids,
-            );
+            materialize_stage_prelude(program, entry, insertion_site, recipe, outputs, effect_ids);
         }
     }
     Ok(())
@@ -429,9 +413,9 @@ fn plan_parallel_prelude(program: &AllocatedProgram) -> Option<MaterializationPl
         );
         for prelude in parallel_preludes(entry, &dependencies) {
             let ty = &entry.graph.types[&prelude.root];
-            let Some(stride) = crate::ssa::layout::storage_elem_stride(ty) else {
+            if crate::ssa::layout::storage_elem_stride(ty).is_none() {
                 continue;
-            };
+            }
             if ty.is_array() {
                 continue;
             }
@@ -467,7 +451,7 @@ fn plan_parallel_prelude(program: &AllocatedProgram) -> Option<MaterializationPl
             ) else {
                 continue;
             };
-            let Some(live_outs) = parallel_prelude_live_outs(entry, &recipe) else {
+            let Some(outputs) = stage_prelude_outputs(entry, [prelude.root], &recipe) else {
                 continue;
             };
             let Some(analysis) = super::residency_cost::analyze_prelude(program, entry, &recipe) else {
@@ -479,12 +463,9 @@ fn plan_parallel_prelude(program: &AllocatedProgram) -> Option<MaterializationPl
             }
             return Some(MaterializationPlan::StagePrelude {
                 entry: entry_index,
-                root: prelude.root,
                 insertion_site: Some(insertion_site),
                 recipe,
-                elem_ty: ty.clone(),
-                size: LogicalSize::FixedBytes(u64::from(stride)),
-                live_outs,
+                outputs,
             });
         }
     }
@@ -507,39 +488,32 @@ fn plan_direct_stage_prelude(program: &AllocatedProgram) -> Option<Materializati
         let frontier = graph_ops::maximal_execution_frontier(&entry.graph, |node| {
             direct_stage_value_is_liftable(entry, &analysis, node)
         });
-        for root in frontier {
-            let ty = &entry.graph.types[&root];
-            let Some(stride) = crate::ssa::layout::storage_elem_stride(ty) else {
-                continue;
-            };
-            let Ok(recipe) =
-                super::graph_projector::GraphProjector::new(&entry.graph, &entry.control_headers)
-                    .entry_value_recipe_with_retained_values(
-                        root,
-                        entry.output_routes.iter().map(|route| route.source.value),
-                    )
-            else {
-                continue;
-            };
-            let Some(live_outs) = parallel_prelude_live_outs(entry, &recipe) else {
-                continue;
-            };
-            let Some(analysis) = super::residency_cost::analyze_prelude(program, entry, &recipe) else {
-                continue;
-            };
-            if !analysis.should_materialize(DIRECT_GRAPHICS_INVOCATIONS) {
-                continue;
-            }
-            return Some(MaterializationPlan::StagePrelude {
-                entry: entry_index,
-                root,
-                insertion_site: None,
-                recipe,
-                elem_ty: ty.clone(),
-                size: LogicalSize::FixedBytes(u64::from(stride)),
-                live_outs,
-            });
+        if frontier.is_empty() {
+            continue;
         }
+        let Ok(recipe) = super::graph_projector::GraphProjector::new(&entry.graph, &entry.control_headers)
+            .entry_values_recipe_with_retained_values(
+                frontier.iter().copied(),
+                entry.output_routes.iter().map(|route| route.source.value),
+            )
+        else {
+            continue;
+        };
+        let Some(outputs) = stage_prelude_outputs(entry, frontier, &recipe) else {
+            continue;
+        };
+        let Some(analysis) = super::residency_cost::analyze_prelude(program, entry, &recipe) else {
+            continue;
+        };
+        if !analysis.should_materialize(DIRECT_GRAPHICS_INVOCATIONS) {
+            continue;
+        }
+        return Some(MaterializationPlan::StagePrelude {
+            entry: entry_index,
+            insertion_site: None,
+            recipe,
+            outputs,
+        });
     }
     None
 }
@@ -573,22 +547,27 @@ fn direct_stage_value_is_liftable(
 /// consumers without being dependencies of the primary captured boundary.
 /// Publish those live-outs beside the primary handoff before removing their
 /// source effects.
-fn parallel_prelude_live_outs(
+fn stage_prelude_outputs(
     entry: &super::program::SemanticEntry,
+    roots: impl IntoIterator<Item = NodeId>,
     recipe: &super::graph_projector::ProjectedValueRecipe,
-) -> Option<Vec<ParallelPreludeLiveOut>> {
-    let mut live_outs = Vec::new();
-    for source in recipe.live_outs() {
+) -> Option<Vec<StagePreludeOutput>> {
+    let mut sources = roots.into_iter().collect::<Vec<_>>();
+    sources.extend(recipe.live_outs());
+    let mut seen = HashSet::new();
+    sources.retain(|source| seen.insert(*source));
+    let mut outputs = Vec::with_capacity(sources.len());
+    for source in sources {
         let elem_ty = entry.graph.types[&source].clone();
         let stride = crate::ssa::layout::storage_elem_stride(&elem_ty)?;
-        live_outs.push(ParallelPreludeLiveOut {
+        outputs.push(StagePreludeOutput {
             source,
             projected: recipe.projection.node(source)?,
             elem_ty,
             size: LogicalSize::FixedBytes(u64::from(stride)),
         });
     }
-    Some(live_outs)
+    Some(outputs)
 }
 
 fn parallel_preludes(
@@ -1275,17 +1254,16 @@ fn rewrite_materialized_operation_source(
 fn materialize_stage_prelude(
     program: &mut AllocatedProgram,
     entry_index: usize,
-    root: NodeId,
     insertion_site: Option<SideEffectSite>,
     recipe: super::graph_projector::ProjectedValueRecipe,
-    elem_ty: Type<TypeName>,
-    size: LogicalSize,
-    live_outs: Vec<ParallelPreludeLiveOut>,
+    outputs: Vec<StagePreludeOutput>,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
+    if outputs.is_empty() {
+        return;
+    }
     let super::graph_projector::ProjectedValueRecipe {
         projection,
-        value: projected_root,
         result_block,
         source,
         ..
@@ -1306,23 +1284,12 @@ fn materialize_stage_prelude(
             projection,
         )
     };
-    let root_value = ParallelPreludeLiveOut {
-        source: root,
-        projected: projected_root,
-        elem_ty,
-        size,
-    };
-    let root_resource = program.alloc_compiler_resource(
-        CompilerResource::new(CompilerResourceKind::ScalarHandoff, None, 0),
-        root_value.elem_ty.clone(),
-        root_value.size.clone(),
-    );
-    let live_out_handoffs = live_outs
+    let handoffs = outputs
         .into_iter()
         .enumerate()
         .map(|(slot, value)| {
             let resource = program.alloc_compiler_resource(
-                CompilerResource::new(CompilerResourceKind::ScalarHandoff, None, slot + 1),
+                CompilerResource::new(CompilerResourceKind::ScalarHandoff, None, slot),
                 value.elem_ty.clone(),
                 value.size.clone(),
             );
@@ -1330,9 +1297,7 @@ fn materialize_stage_prelude(
         })
         .collect::<Vec<_>>();
     let mut producer_entry = producer_entry;
-    for (resource, value) in std::iter::once((&root_resource, &root_value))
-        .chain(live_out_handoffs.iter().map(|(resource, value)| (resource, value)))
-    {
+    for (resource, value) in &handoffs {
         let output_view = producer_entry.declare_resource_view(
             *resource,
             StorageRole::Output,
@@ -1351,18 +1316,9 @@ fn materialize_stage_prelude(
     producer_entry.compact_interface();
 
     let entry = &mut program.entry_points[entry_index];
-    let root_view = entry.declare_resource_view(
-        root_resource,
-        StorageRole::Input,
-        &root_value.elem_ty,
-        &root_value.size,
-    );
-    let (loaded_root, root_load) =
-        detached_scalar_handoff_load(&mut entry.graph, root_view, &root_value.elem_ty, effect_ids);
-    graph_ops::replace_all_references(&mut entry.graph, root_value.source, loaded_root);
-    let mut loaded_values = vec![loaded_root];
-    let mut load_effects = vec![root_load];
-    for (resource, value) in &live_out_handoffs {
+    let mut loaded_values = Vec::with_capacity(handoffs.len());
+    let mut load_effects = Vec::with_capacity(handoffs.len());
+    for (resource, value) in &handoffs {
         let view = entry.declare_resource_view(*resource, StorageRole::Input, &value.elem_ty, &value.size);
         let (loaded, load_effect) =
             detached_scalar_handoff_load(&mut entry.graph, view, &value.elem_ty, effect_ids);
@@ -1370,6 +1326,7 @@ fn materialize_stage_prelude(
         loaded_values.push(loaded);
         load_effects.push(load_effect);
     }
+    let loaded_primary = loaded_values[0];
     match source {
         super::graph_projector::ValueRecipeSource::EntryBlock => {
             if let Some(insertion_site) = insertion_site {
@@ -1383,7 +1340,7 @@ fn materialize_stage_prelude(
                 entry,
                 &producer_effects,
                 continuation,
-                loaded_root,
+                loaded_primary,
                 load_effects,
             )
         }

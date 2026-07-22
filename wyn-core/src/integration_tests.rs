@@ -3224,6 +3224,72 @@ entry fragment_main(
     ));
 }
 
+#[test]
+fn sibling_fragment_uniform_roots_share_one_generated_prepass() {
+    use crate::pipeline_descriptor::Pipeline;
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+type frame_globals = { first: f32, second: f32 }
+
+def shade(pos: vec4f32, frame: frame_globals) vec4f32 =
+  let a0 = frame.first * 1.01 + 0.01
+  let a1 = a0 * 1.01 + 0.01
+  let a2 = a1 * 1.01 + 0.01
+  let a3 = a2 * 1.01 + 0.01
+  let a4 = a3 * 1.01 + 0.01
+  let a5 = a4 * 1.01 + 0.01
+  let a6 = a5 * 1.01 + 0.01
+  let a7 = a6 * 1.01 + 0.01
+  let b0 = frame.second * 1.02 + 0.02
+  let b1 = b0 * 1.02 + 0.02
+  let b2 = b1 * 1.02 + 0.02
+  let b3 = b2 * 1.02 + 0.02
+  let b4 = b3 * 1.02 + 0.02
+  let b5 = b4 * 1.02 + 0.02
+  let b6 = b5 * 1.02 + 0.02
+  let b7 = b6 * 1.02 + 0.02 in
+  @[pos.x * a7, pos.y * b7, pos.z, 1.0]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+  if vid == 0 then @[-1.0, -1.0, 0.0, 1.0]
+  else if vid == 1 then @[3.0, -1.0, 0.0, 1.0]
+  else @[-1.0, 3.0, 0.0, 1.0]
+
+#[fragment]
+entry fragment_main(
+    #[uniform(set=1, binding=0)] frame: frame_globals,
+    #[builtin(position)] pos: vec4f32,
+    #[texture(set=0, binding=0)] tex: texture2d,
+    #[sampler(set=0, binding=1)] samp: sampler) #[target(screen)] vec4f32 =
+  shade(pos, frame) + texture_sample(tex, samp, @[pos.x / 1024.0, pos.y / 1024.0], 0.0)
+"#,
+    )
+    .expect("fragment with sibling uniform roots compiles");
+
+    let prepasses = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .flat_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) => compute.stages.iter().collect::<Vec<_>>(),
+            Pipeline::Graphics(_) => Vec::new(),
+        })
+        .filter(|stage| stage.entry_point.contains("fragment_main_prepass_scalar"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        prepasses.len(),
+        1,
+        "sibling roots should share one singleton launch"
+    );
+    assert_eq!(
+        prepasses[0].writes.len(),
+        2,
+        "the shared prepass publishes both roots"
+    );
+}
+
 fn assert_scalar_prefix_emits_valid_wgsl(source: &str) {
     let wgsl = lower_semantic_egir(
         compile_to_semantic_egir(source),

@@ -1675,7 +1675,18 @@ impl PhysicalResourceTable {
     /// declared ABI identities; only compiler-owned resources draw automatic
     /// bindings from `ids`.
     pub fn allocate(resources: &LogicalResourceArena, ids: &mut crate::IdSource<u32>) -> Self {
+        Self::allocate_avoiding(resources, ids, std::iter::empty())
+    }
+
+    /// Assign bindings while also reserving descriptor slots occupied by
+    /// non-resource interfaces such as textures and samplers.
+    pub fn allocate_avoiding(
+        resources: &LogicalResourceArena,
+        ids: &mut crate::IdSource<u32>,
+        reserved: impl IntoIterator<Item = crate::BindingRef>,
+    ) -> Self {
         let mut used = host_resource_map(resources).into_keys().collect::<std::collections::HashSet<_>>();
+        used.extend(reserved);
         let mut bindings = Vec::with_capacity(resources.len());
         let mut compiler_owned = Vec::with_capacity(resources.len());
         for resource in resources {

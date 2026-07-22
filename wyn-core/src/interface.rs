@@ -276,6 +276,27 @@ pub enum EntryInputKind {
 }
 
 impl<Ty> EntryInput<Ty> {
+    /// Descriptor slot occupied by this input, if it has one. Push constants
+    /// and shader I/O values do not consume descriptor bindings.
+    pub fn descriptor_binding(&self) -> Option<BindingRef> {
+        match self.kind {
+            EntryInputKind::Storage {
+                exposure: BindingExposure::Host(binding),
+                ..
+            }
+            | EntryInputKind::Uniform { binding }
+            | EntryInputKind::Texture { binding, .. }
+            | EntryInputKind::Sampler { binding }
+            | EntryInputKind::StorageImage { binding, .. } => Some(binding),
+            EntryInputKind::Storage {
+                exposure: BindingExposure::Internal,
+                ..
+            }
+            | EntryInputKind::Value { .. }
+            | EntryInputKind::PushConstant { .. } => None,
+        }
+    }
+
     pub fn decoration(&self) -> Option<IoDecoration> {
         match self.kind {
             EntryInputKind::Value { decoration } => decoration,

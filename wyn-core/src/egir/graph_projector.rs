@@ -26,11 +26,11 @@ pub struct GraphProjection {
     effect_sites: HashMap<SideEffectSite, SideEffectSite>,
 }
 
-/// A projected producer recipe together with the projected identity of the
-/// value requested by the caller.
+/// A projected producer recipe together with the projected identities of the
+/// values requested by the caller.
 pub struct ProjectedValueRecipe {
     pub projection: GraphProjection,
-    pub value: NodeId,
+    pub values: Vec<NodeId>,
     pub result_block: BlockId,
     pub source: ValueRecipeSource,
     live_outs: Vec<NodeId>,
@@ -50,7 +50,8 @@ pub enum ValueRecipeSource {
 
 impl ProjectedValueRecipe {
     /// Additional projected values observed by graph structure retained after
-    /// this recipe is detached. The requested value itself is not included.
+    /// this recipe is detached. The requested values themselves are not
+    /// included.
     pub fn live_outs(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.live_outs.iter().copied()
     }
@@ -287,10 +288,10 @@ impl<'a> GraphProjector<'a> {
         let result_block = projection
             .block(consumer.block)
             .ok_or_else(|| "captured value projection omitted its result block".to_string())?;
-        let live_outs = self.recipe_live_outs(value, &projection, source, retained_values);
+        let live_outs = self.recipe_live_outs(&[value], &projection, source, retained_values);
         Ok(ProjectedValueRecipe {
             projection,
-            value: projected,
+            values: vec![projected],
             result_block,
             source,
             live_outs,
@@ -314,21 +315,52 @@ impl<'a> GraphProjector<'a> {
         value: NodeId,
         retained_values: impl IntoIterator<Item = NodeId>,
     ) -> Result<ProjectedValueRecipe, String> {
+        self.entry_values_recipe_with_retained_values([value], retained_values)
+    }
+
+    /// Project several entry-block values as one standalone recipe. Their
+    /// order is preserved in [`ProjectedValueRecipe::values`].
+    pub fn entry_values_recipe(
+        &self,
+        values: impl IntoIterator<Item = NodeId>,
+    ) -> Result<ProjectedValueRecipe, String> {
+        self.entry_values_recipe_with_retained_values(values, Vec::new())
+    }
+
+    /// Project several entry-block values while treating caller-owned values
+    /// as retained observers outside the graph.
+    pub fn entry_values_recipe_with_retained_values(
+        &self,
+        values: impl IntoIterator<Item = NodeId>,
+        retained_values: impl IntoIterator<Item = NodeId>,
+    ) -> Result<ProjectedValueRecipe, String> {
+        let mut requested = values.into_iter().collect::<Vec<_>>();
+        let mut seen = HashSet::new();
+        requested.retain(|value| seen.insert(*value));
+        if requested.is_empty() {
+            return Err("entry value recipe requires at least one value".into());
+        }
         let projection = self.project(
             HashSet::new(),
-            vec![value],
+            requested.clone(),
             ProjectionMode::EntryRecipe { effect_limit: None },
         )?;
-        let projected =
-            projection.node(value).ok_or_else(|| "entry value projection omitted its root".to_string())?;
+        let projected = requested
+            .iter()
+            .map(|value| {
+                projection
+                    .node(*value)
+                    .ok_or_else(|| "entry value projection omitted a requested root".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let result_block = projection
             .block(self.source.skeleton.entry)
             .ok_or_else(|| "entry value projection omitted its result block".to_string())?;
         let source = ValueRecipeSource::EntryBlock;
-        let live_outs = self.recipe_live_outs(value, &projection, source, retained_values);
+        let live_outs = self.recipe_live_outs(&requested, &projection, source, retained_values);
         Ok(ProjectedValueRecipe {
             projection,
-            value: projected,
+            values: projected,
             result_block,
             source,
             live_outs,
@@ -337,7 +369,7 @@ impl<'a> GraphProjector<'a> {
 
     fn recipe_live_outs(
         &self,
-        root: NodeId,
+        roots: &[NodeId],
         projection: &GraphProjection,
         source: ValueRecipeSource,
         retained_values: impl IntoIterator<Item = NodeId>,
@@ -350,12 +382,16 @@ impl<'a> GraphProjector<'a> {
             .filter_map(|site| self.source.skeleton.effect(*site).result)
             .collect::<Vec<_>>();
         candidates.extend(self.source.skeleton.blocks.iter().flat_map(|(_, block)| {
-            block.params.iter().copied().filter(|value| *value != root && projection.node(*value).is_some())
+            block
+                .params
+                .iter()
+                .copied()
+                .filter(|value| !roots.contains(value) && projection.node(*value).is_some())
         }));
         candidates.sort_unstable();
         candidates.dedup();
         candidates.retain(|candidate| {
-            if *candidate == root || projection.node(*candidate).is_none() {
+            if roots.contains(candidate) || projection.node(*candidate).is_none() {
                 return false;
             }
             let observers = self.uses.pure_observers(*candidate);

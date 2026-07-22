@@ -41,13 +41,14 @@ enum PreludeMaterializationPolicy {
 #[derive(Debug)]
 pub(crate) struct PreludeAnalysis {
     cost: u64,
+    output_count: u64,
     policy: PreludeMaterializationPolicy,
 }
 
 impl PreludeAnalysis {
     pub(crate) fn should_materialize(&self, invocations: u64) -> bool {
         self.policy == PreludeMaterializationPolicy::Required
-            || materialization_is_profitable(self.cost, invocations)
+            || materialization_is_profitable(self.cost, invocations, self.output_count)
     }
 }
 
@@ -67,7 +68,7 @@ pub(crate) fn analyze_prelude(
         &recipe.projection.control_headers,
     )
     .ok()?;
-    let reachable = graph_ops::execution_value_producer_closure(graph, [recipe.value]).nodes;
+    let reachable = graph_ops::execution_value_producer_closure(graph, recipe.values.iter().copied()).nodes;
     for node in reachable {
         if let ENode::FuncParam { index } = graph.nodes[node] {
             if !dependence.dependence(node).is_stage_invariant()
@@ -80,7 +81,7 @@ pub(crate) fn analyze_prelude(
 
     let mut summaries = HashMap::new();
     let mut visiting = HashSet::new();
-    let extra_roots = HashMap::from([(recipe.result_block, vec![recipe.value])]);
+    let extra_roots = HashMap::from([(recipe.result_block, recipe.values.clone())]);
     let block_costs = graph_block_costs(program, graph, &extra_roots, &mut summaries, &mut visiting)?;
     let cost = StructuredCost::new(graph, &recipe.projection.control_headers, &block_costs).path_cost(
         graph.skeleton.entry,
@@ -89,6 +90,7 @@ pub(crate) fn analyze_prelude(
     )?;
     Some(PreludeAnalysis {
         cost,
+        output_count: (recipe.values.len() + recipe.live_outs().count()) as u64,
         policy: prelude_materialization_policy(recipe),
     })
 }
@@ -120,11 +122,15 @@ fn prelude_materialization_policy(
 
 /// Compare repeated evaluation with a one-thread producer and one handoff load
 /// per launched consumer invocation. Materialization must win by 25%.
-pub(crate) fn materialization_is_profitable(producer_cost: u64, invocations: u64) -> bool {
+pub(crate) fn materialization_is_profitable(
+    producer_cost: u64,
+    invocations: u64,
+    output_count: u64,
+) -> bool {
     let recompute = producer_cost.saturating_mul(invocations);
     let handoff = SINGLETON_LAUNCH_COST
         .saturating_add(producer_cost)
-        .saturating_add(STORAGE_LOAD_COST.saturating_mul(invocations));
+        .saturating_add(STORAGE_LOAD_COST.saturating_mul(output_count).saturating_mul(invocations));
     recompute.saturating_mul(4) >= handoff.saturating_mul(5)
 }
 

@@ -88,16 +88,22 @@ fn stage_invariance_and_scalar_relocation_legality_remain_separate() {
 
 #[test]
 fn profitability_includes_launch_loads_and_margin() {
-    assert!(!materialization_is_profitable(1, 128));
-    assert!(materialization_is_profitable(256, 64));
+    assert!(!materialization_is_profitable(1, 128, 1));
+    assert!(materialization_is_profitable(256, 64, 1));
 
     let cost = 20;
     let invocations = 64;
     let recompute = cost * invocations;
     let handoff = SINGLETON_LAUNCH_COST + cost + STORAGE_LOAD_COST * invocations;
     assert_eq!(
-        materialization_is_profitable(cost, invocations),
+        materialization_is_profitable(cost, invocations, 1),
         4 * recompute >= 5 * handoff
+    );
+
+    let two_output_handoff = SINGLETON_LAUNCH_COST + cost + 2 * STORAGE_LOAD_COST * invocations;
+    assert_eq!(
+        materialization_is_profitable(cost, invocations, 2),
+        4 * recompute >= 5 * two_output_handoff
     );
 }
 

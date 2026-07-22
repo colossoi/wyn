@@ -343,6 +343,41 @@ fn entry_recipe_reports_selected_effect_result_used_by_external_value() {
 }
 
 #[test]
+fn entry_recipe_projects_multiple_requested_values_as_one_component() {
+    let mut graph = EGraph::new();
+    let entry = graph.skeleton.entry;
+    let parameter = graph.add_func_param(0, u32_ty());
+    let one = graph.intern_constant(ConstantValue::U32(1), u32_ty());
+    let first = graph.intern_pure(
+        PureOp::BinOp("+".into()),
+        smallvec![parameter, one],
+        u32_ty(),
+        None,
+    );
+    let second = graph.intern_pure(
+        PureOp::BinOp("*".into()),
+        smallvec![parameter, first],
+        u32_ty(),
+        None,
+    );
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(None);
+
+    let recipe = GraphProjector::new(&graph, &LookupMap::new())
+        .entry_values_recipe([first, second, first])
+        .expect("multi-value entry recipe");
+
+    assert_eq!(
+        recipe.values,
+        vec![
+            recipe.projection.node(first).unwrap(),
+            recipe.projection.node(second).unwrap()
+        ]
+    );
+    assert_eq!(recipe.projection.graph.skeleton.blocks.len(), 1);
+    recipe.projection.graph.verify_hash_cons().expect("projected recipe hash-conses");
+}
+
+#[test]
 fn structured_value_recipe_leaves_independent_continuation_effect_in_source() {
     let mut graph = EGraph::new();
     let entry = graph.skeleton.entry;
