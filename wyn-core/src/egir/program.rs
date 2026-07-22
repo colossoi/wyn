@@ -155,6 +155,16 @@ impl From<u32> for MaterializationId {
     }
 }
 
+impl MaterializationId {
+    /// Backend-visible name for the synthetic entry owned by this
+    /// materialization. The compiler-reserved `_w_` namespace keeps generated
+    /// entries distinct from source declarations, while the arena identity
+    /// makes names unique without searching every existing name.
+    pub(crate) fn entry_name(self, source: &str, role: &str) -> String {
+        format!("_w_materialization_{}_{source}_{role}", self.0)
+    }
+}
+
 /// Stable identity of an entry input position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InputSlotId(pub usize);
@@ -604,6 +614,7 @@ pub fn plan_logical_resources(
         materializations: crate::IdArena::new(),
     };
     classify_existing_compiler_resources(&mut allocated);
+    super::in_place::resolve_destinations(&mut allocated);
     super::residency::run(&mut allocated, effect_ids)?;
     super::soac::filter::resolve_scratch_sizes(&mut allocated);
     strip_compiler_abi(&mut allocated);

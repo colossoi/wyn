@@ -1737,20 +1737,23 @@ entry e() [4]i32 =
     let shared_requirements = allocated
         .inner
         .materializations
-        .values()
-        .filter(|requirement| requirement.kind() == crate::egir::program::MaterializationKind::SharedArray)
+        .iter()
+        .filter(|(_, requirement)| {
+            requirement.kind() == crate::egir::program::MaterializationKind::SharedArray
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         shared_requirements.len(),
         1,
         "shared producer is represented by one typed requirement"
     );
+    let (&requirement_id, requirement) = shared_requirements[0];
+    let requirement_name = requirement_id.entry_name("e", "materialize_shared");
     assert!(
-        allocated.inner.entry_points.iter().all(|entry| entry.name != "e_materialize_shared"),
+        allocated.inner.entry_points.iter().all(|entry| entry.name != requirement_name),
         "materialization must not be synthesized into the semantic entry arena"
     );
-    let requirement = shared_requirements[0];
-    assert_eq!(requirement.entry().name, "e_materialize_shared");
+    assert_eq!(requirement.entry().name, requirement_name);
     let ResourceOrigin::Compiler(shared_compiler) = &shared[0].origin else {
         unreachable!("shared resource must be compiler-owned")
     };
@@ -1777,7 +1780,7 @@ entry e() [4]i32 =
         "consumers read the shared storage prepass rather than copying a composite per consumer"
     );
     let stages: Vec<_> = lowered.kernel_plan.phases().map(|phase| phase.entry_point.as_str()).collect();
-    assert_eq!(stages.first(), Some(&"e_materialize_shared"));
+    assert_eq!(stages.first(), Some(&requirement_name.as_str()));
     assert_eq!(stages.last(), Some(&"e"));
     assert!(stages.iter().any(|stage| stage.contains("prepass_scalar")));
     let phases: Vec<_> = lowered.kernel_plan.phases().collect();
@@ -2489,7 +2492,7 @@ entry add_sum(xs: []i32) []i32 =
         .filter_map(|pipeline| match pipeline {
             Pipeline::Compute(compute)
                 if compute.stages.iter().any(|stage| {
-                    stage.entry_point == "add_sum" || stage.entry_point.starts_with("add_sum_prepass_")
+                    stage.entry_point == "add_sum" || stage.entry_point.contains("add_sum_prepass_")
                 }) =>
             {
                 Some(compute)
@@ -2508,7 +2511,7 @@ entry add_sum(xs: []i32) []i32 =
         3,
         "two reduction phases followed by the map consumer: {stages:?}"
     );
-    assert!(stages[0].entry_point.starts_with("add_sum_prepass_"));
+    assert!(stages[0].entry_point.contains("add_sum_prepass_"));
     assert!(stages[1].entry_point.contains("phase2"));
     assert_eq!(stages[2].entry_point, "add_sum");
     let handoff = stages[1]
@@ -3584,11 +3587,10 @@ entry frag() #[target(screen)] vec4f32 =
 
 #[test]
 fn consuming_map_compiles_end_to_end() {
-    // `*[N]T` map whose input is dead-after: the ownership pass
-    // sets `destination = SoacDestination::InputBuffer`, EGIR
-    // conversion threads it through, and `soac_expand` emits the
-    // in-place loop. Compiling end-to-end through SSA exercises
-    // every layer.
+    // `*[N]T` map whose input is dead-after: TLC ownership grants a
+    // `UniqueInput` capability, EGIR resolves it to `InputBuffer` from the
+    // final use graph, and `soac_expand` emits the in-place loop. Compiling
+    // end-to-end through SSA exercises every layer.
     let _ssa = compile_to_ssa(
         r#"
 def f(a: *[8]i32) [8]i32 = map(|x: i32| x + 1, a)
@@ -3633,11 +3635,10 @@ fn count_uninit_in_program(ssa: &Program) -> usize {
 
 #[test]
 fn consuming_map_skips_fresh_allocation() {
-    // The underlying ownership-pass invariant: when a SOAC's input
-    // is unique-and-dead-after, the loop's carried buffer reuses
-    // the input — no `_w_intrinsic_uninit`. When the input is
-    // still live after the SOAC (an alias), the SOAC falls back to
-    // a fresh allocation.
+    // The ownership/resolution invariant: TLC grants a reuse capability to a
+    // unique input, and EGIR reuses its buffer only when it is dead after the
+    // SOAC — no `_w_intrinsic_uninit`. A later observer makes resolution fall
+    // back to a fresh allocation.
     //
     // The previous shape (consuming `*[N]T` vs borrowing `[N]T`
     // helper) is now collapsed by `force_inline_soac_helpers`: both
@@ -3681,10 +3682,9 @@ entry frag(c: vec4f32) #[target(screen)] vec4f32 =
 #[test]
 fn consuming_scan_compiles_end_to_end() {
     // Parallel of `consuming_map_compiles_end_to_end` for Scan: `*[N]T`
-    // input that's dead-after; ownership sets
-    // `destination = SoacDestination::InputBuffer`, EGIR threads it through,
-    // and `soac_expand` runs the destination-passing loop. Pre-S4 this hit a
-    // panic.
+    // input that's dead-after; ownership grants `UniqueInput`, EGIR resolves
+    // it to `InputBuffer`, and `soac_expand` runs the destination-passing
+    // loop. Pre-S4 this hit a panic.
     let _ssa = compile_to_ssa(
         r#"
 def cumsum(a: *[8]i32) [8]i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
@@ -3819,10 +3819,9 @@ entry parallel_scan(a: []i32) []i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
 
 #[test]
 fn consuming_filter_compiles_end_to_end() {
-    // `*[N]T` filter whose input is dead-after: ownership sets
-    // `destination = SoacDestination::InputBuffer`, EGIR threads it
-    // through, and `build_filter_loop` carries the input array as the
-    // destination buffer.
+    // `*[N]T` filter whose input is dead-after: ownership grants
+    // `UniqueInput`, EGIR resolves it to `InputBuffer`, and
+    // `build_filter_loop` carries the input array as the destination buffer.
     let _ssa = compile_to_ssa(
         r#"
 def keep_pos(a: *[8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)

@@ -248,6 +248,101 @@ fn captured_value_recipe_projects_a_structured_selection_prefix() {
 }
 
 #[test]
+fn captured_recipe_reports_selected_effect_result_used_by_retained_terminator() {
+    let mut graph = EGraph::new();
+    let entry = graph.skeleton.entry;
+    let continuation = graph.skeleton.create_block();
+    let then_block = graph.skeleton.create_block();
+    let else_block = graph.skeleton.create_block();
+    let place = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    let live_out = graph.alloc_side_effect_result(bool_ty());
+    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::Load),
+        operand_nodes: smallvec![place],
+        result: Some(live_out),
+        effects: Some((EffectToken::from(0), EffectToken::from(1))),
+        span: None,
+    });
+    let boundary_source = graph.alloc_side_effect_result(u32_ty());
+    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::Load),
+        operand_nodes: smallvec![place],
+        result: Some(boundary_source),
+        effects: Some((EffectToken::from(1), EffectToken::from(2))),
+        span: None,
+    });
+    let boundary = graph.add_block_param(continuation, u32_ty());
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
+        target: continuation,
+        args: vec![boundary_source],
+    };
+    graph.skeleton.blocks[continuation].term = SkeletonTerminator::CondBranch {
+        cond: live_out,
+        then_target: then_block,
+        then_args: vec![],
+        else_target: else_block,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[then_block].term = SkeletonTerminator::Return(None);
+    graph.skeleton.blocks[else_block].term = SkeletonTerminator::Return(None);
+
+    let recipe = GraphProjector::new(&graph, &LookupMap::new())
+        .captured_value_recipe(
+            boundary,
+            SideEffectSite {
+                block: continuation,
+                index: 0,
+            },
+        )
+        .expect("structured value recipe");
+
+    assert_eq!(recipe.live_outs().collect::<Vec<_>>(), vec![live_out]);
+}
+
+#[test]
+fn entry_recipe_reports_selected_effect_result_used_by_external_value() {
+    let mut graph = EGraph::new();
+    let entry = graph.skeleton.entry;
+    let place = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    let live_out = graph.alloc_side_effect_result(u32_ty());
+    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::Load),
+        operand_nodes: smallvec![place],
+        result: Some(live_out),
+        effects: Some((EffectToken::from(0), EffectToken::from(1))),
+        span: None,
+    });
+    let root = graph.alloc_side_effect_result(u32_ty());
+    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::Load),
+        operand_nodes: smallvec![live_out],
+        result: Some(root),
+        effects: Some((EffectToken::from(1), EffectToken::from(2))),
+        span: None,
+    });
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(None);
+    let external = graph.intern_pure(
+        PureOp::BinOp("+".into()),
+        smallvec![live_out, place],
+        u32_ty(),
+        None,
+    );
+    let headers = LookupMap::new();
+    let projector = GraphProjector::new(&graph, &headers);
+
+    let internal_only = projector.entry_value_recipe(root).expect("entry value recipe");
+    assert!(internal_only.live_outs().next().is_none());
+
+    let externally_observed = projector
+        .entry_value_recipe_with_retained_values(root, [external])
+        .expect("entry recipe with external observer");
+    assert_eq!(
+        externally_observed.live_outs().collect::<Vec<_>>(),
+        vec![live_out]
+    );
+}
+
+#[test]
 fn structured_value_recipe_leaves_independent_continuation_effect_in_source() {
     let mut graph = EGraph::new();
     let entry = graph.skeleton.entry;

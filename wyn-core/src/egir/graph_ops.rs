@@ -85,6 +85,168 @@ impl ValueProducerClosure {
     }
 }
 
+/// Executable graph locations whose values depend on a source value.
+///
+/// Locations are stable only for the graph snapshot used to build the
+/// corresponding [`ValueUseIndex`].
+#[derive(Debug, Default)]
+pub(crate) struct ValueObservers {
+    effects: HashSet<SideEffectSite>,
+    terminators: HashSet<BlockId>,
+}
+
+impl ValueObservers {
+    pub(crate) fn effect_sites(&self) -> impl Iterator<Item = SideEffectSite> + '_ {
+        self.effects.iter().copied()
+    }
+
+    pub(crate) fn terminator_blocks(&self) -> impl Iterator<Item = BlockId> + '_ {
+        self.terminators.iter().copied()
+    }
+}
+
+/// Reverse value-flow and executable-use index for one immutable graph
+/// snapshot.
+///
+/// Pure successors follow only floating pure/union operands. Value successors
+/// additionally cross side-effect results and CFG block arguments, mirroring
+/// [`value_producer_closure`] in the opposite direction. This lets passes ask
+/// centralized observer and liveness questions instead of repeatedly scanning
+/// every effect and terminator with a producer-reachability query.
+///
+/// Rebuild the index after inserting, removing, reordering, or rewriting graph
+/// structure. In particular, the [`SideEffectSite`] values it returns must not
+/// survive a skeleton mutation.
+pub(crate) struct ValueUseIndex {
+    pure_successors: LookupMap<NodeId, Vec<NodeId>>,
+    value_successors: LookupMap<NodeId, Vec<NodeId>>,
+    effect_observers: LookupMap<NodeId, Vec<SideEffectSite>>,
+    terminator_observers: LookupMap<NodeId, Vec<BlockId>>,
+}
+
+impl ValueUseIndex {
+    pub(crate) fn build<P: ValueProducerPhase>(graph: &EGraph<P>) -> Self {
+        let mut index = Self {
+            pure_successors: LookupMap::new(),
+            value_successors: LookupMap::new(),
+            effect_observers: LookupMap::new(),
+            terminator_observers: LookupMap::new(),
+        };
+
+        for (user, definition) in &graph.nodes {
+            for source in definition.children() {
+                index.pure_successors.entry(source).or_default().push(user);
+                index.value_successors.entry(source).or_default().push(user);
+            }
+        }
+
+        for (block, body) in &graph.skeleton.blocks {
+            for (effect_index, effect) in body.side_effects.iter().enumerate() {
+                let site = SideEffectSite {
+                    block,
+                    index: effect_index,
+                };
+                for source in P::effect_value_inputs(effect) {
+                    index.effect_observers.entry(source).or_default().push(site);
+                    if let Some(result) = effect.result {
+                        index.value_successors.entry(source).or_default().push(result);
+                    }
+                }
+            }
+            for source in body.term.referenced_nodes() {
+                index.terminator_observers.entry(source).or_default().push(block);
+            }
+            index_block_argument_successors(graph, &mut index.value_successors, &body.term);
+        }
+
+        index
+    }
+
+    /// Effects and terminators reached through floating pure/union users.
+    pub(crate) fn pure_observers(&self, source: NodeId) -> ValueObservers {
+        self.observers(source, &self.pure_successors)
+    }
+
+    /// Effects and terminators reached through complete value flow, including
+    /// effect results and incoming CFG block arguments.
+    pub(crate) fn value_observers(&self, source: NodeId) -> ValueObservers {
+        self.observers(source, &self.value_successors)
+    }
+
+    /// Whether `user` consumes `source` through floating pure/union nodes.
+    pub(crate) fn pure_reaches(&self, source: NodeId, user: NodeId) -> bool {
+        self.reaches(source, user, &self.pure_successors)
+    }
+
+    fn observers(&self, source: NodeId, successors: &LookupMap<NodeId, Vec<NodeId>>) -> ValueObservers {
+        let mut observers = ValueObservers::default();
+        self.walk_users(source, successors, |user| {
+            observers.effects.extend(self.effect_observers.get(&user).into_iter().flatten().copied());
+            observers
+                .terminators
+                .extend(self.terminator_observers.get(&user).into_iter().flatten().copied());
+            false
+        });
+        observers
+    }
+
+    fn reaches(&self, source: NodeId, target: NodeId, successors: &LookupMap<NodeId, Vec<NodeId>>) -> bool {
+        self.walk_users(source, successors, |user| user == target)
+    }
+
+    fn walk_users(
+        &self,
+        source: NodeId,
+        successors: &LookupMap<NodeId, Vec<NodeId>>,
+        mut visit: impl FnMut(NodeId) -> bool,
+    ) -> bool {
+        let mut seen = HashSet::new();
+        let mut pending = vec![source];
+        while let Some(user) = pending.pop() {
+            if !seen.insert(user) {
+                continue;
+            }
+            if visit(user) {
+                return true;
+            }
+            pending.extend(successors.get(&user).into_iter().flatten().copied());
+        }
+        false
+    }
+}
+
+fn index_block_argument_successors<P: EgirPhase>(
+    graph: &EGraph<P>,
+    successors: &mut LookupMap<NodeId, Vec<NodeId>>,
+    term: &SkeletonTerminator,
+) {
+    let mut add_edge = |target: BlockId, args: &[NodeId], condition: Option<NodeId>| {
+        let Some(target_block) = graph.skeleton.blocks.get(target) else {
+            return;
+        };
+        for (&argument, &parameter) in args.iter().zip(&target_block.params) {
+            successors.entry(argument).or_default().push(parameter);
+            if let Some(condition) = condition {
+                successors.entry(condition).or_default().push(parameter);
+            }
+        }
+    };
+    match term {
+        SkeletonTerminator::Branch { target, args } => add_edge(*target, args, None),
+        SkeletonTerminator::CondBranch {
+            cond,
+            then_target,
+            then_args,
+            else_target,
+            else_args,
+        } => {
+            add_edge(*then_target, then_args, Some(*cond));
+            add_edge(*else_target, else_args, Some(*cond));
+        }
+        SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
+    }
+}
+
 /// Follow pure tails, value-producing effects, and CFG block arguments to the
 /// values that can contribute to `roots`.
 pub(crate) fn value_producer_closure<P: ValueProducerPhase>(

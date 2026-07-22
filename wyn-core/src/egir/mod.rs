@@ -13,6 +13,7 @@
 pub(crate) mod elaborate;
 mod extract;
 mod fold;
+pub(crate) mod in_place;
 pub(crate) mod inlining;
 pub mod ir;
 mod loop_analysis;

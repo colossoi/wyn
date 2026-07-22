@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use crate::flow::{BlockId, ControlHeader};
 use crate::LookupMap;
 
+use super::graph_ops::ValueUseIndex;
 use super::program::{OutputRoute, OutputWriter};
 use super::types::{
     EGraph, ENode, EffectToken, NodeId, Semantic, SideEffect, SideEffectIndex, SideEffectSite,
@@ -32,17 +33,27 @@ pub struct ProjectedValueRecipe {
     pub value: NodeId,
     pub result_block: BlockId,
     pub source: ValueRecipeSource,
+    live_outs: Vec<NodeId>,
 }
 
 /// How a projected value recipe is removed from its source entry after its
 /// result has been replaced by a handoff load. This describes a prefix
 /// boundary, not the control construct inside it: selections, loops, and
 /// nested structured regions all use the same continuation form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueRecipeSource {
     EntryBlock,
     StructuredPrefix {
         continuation: BlockId,
     },
+}
+
+impl ProjectedValueRecipe {
+    /// Additional projected values observed by graph structure retained after
+    /// this recipe is detached. The requested value itself is not included.
+    pub fn live_outs(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.live_outs.iter().copied()
+    }
 }
 
 impl GraphProjection {
@@ -130,6 +141,7 @@ pub(crate) fn remap_output_routes(
 pub struct GraphProjector<'a> {
     source: &'a EGraph<Semantic>,
     control_headers: &'a LookupMap<BlockId, ControlHeader>,
+    uses: ValueUseIndex,
 }
 
 #[derive(Clone, Copy)]
@@ -167,7 +179,12 @@ impl<'a> GraphProjector<'a> {
         Self {
             source,
             control_headers,
+            uses: ValueUseIndex::build(source),
         }
+    }
+
+    pub(crate) fn use_index(&self) -> &ValueUseIndex {
+        &self.uses
     }
 
     pub fn all(&self) -> Result<GraphProjection, String> {
@@ -224,6 +241,18 @@ impl<'a> GraphProjector<'a> {
         value: NodeId,
         consumer: SideEffectSite,
     ) -> Result<ProjectedValueRecipe, String> {
+        self.captured_value_recipe_with_retained_values(value, consumer, Vec::new())
+    }
+
+    /// Project a captured value recipe while treating caller-owned values as
+    /// additional retained observers. Entry output routes live outside the
+    /// `EGraph`, so their source values are supplied through this boundary.
+    pub fn captured_value_recipe_with_retained_values(
+        &self,
+        value: NodeId,
+        consumer: SideEffectSite,
+        retained_values: impl IntoIterator<Item = NodeId>,
+    ) -> Result<ProjectedValueRecipe, String> {
         let (mode, source) = if consumer.block == self.source.skeleton.entry {
             (
                 ProjectionMode::EntryRecipe {
@@ -258,11 +287,13 @@ impl<'a> GraphProjector<'a> {
         let result_block = projection
             .block(consumer.block)
             .ok_or_else(|| "captured value projection omitted its result block".to_string())?;
+        let live_outs = self.recipe_live_outs(value, &projection, source, retained_values);
         Ok(ProjectedValueRecipe {
             projection,
             value: projected,
             result_block,
             source,
+            live_outs,
         })
     }
 
@@ -273,6 +304,16 @@ impl<'a> GraphProjector<'a> {
     /// output effects throughout the entry. Producer closure still selects
     /// only effects required by `value`.
     pub fn entry_value_recipe(&self, value: NodeId) -> Result<ProjectedValueRecipe, String> {
+        self.entry_value_recipe_with_retained_values(value, Vec::new())
+    }
+
+    /// Project an entry value recipe with retained observers represented
+    /// outside the graph, such as entry output routes.
+    pub fn entry_value_recipe_with_retained_values(
+        &self,
+        value: NodeId,
+        retained_values: impl IntoIterator<Item = NodeId>,
+    ) -> Result<ProjectedValueRecipe, String> {
         let projection = self.project(
             HashSet::new(),
             vec![value],
@@ -283,12 +324,63 @@ impl<'a> GraphProjector<'a> {
         let result_block = projection
             .block(self.source.skeleton.entry)
             .ok_or_else(|| "entry value projection omitted its result block".to_string())?;
+        let source = ValueRecipeSource::EntryBlock;
+        let live_outs = self.recipe_live_outs(value, &projection, source, retained_values);
         Ok(ProjectedValueRecipe {
             projection,
             value: projected,
             result_block,
-            source: ValueRecipeSource::EntryBlock,
+            source,
+            live_outs,
         })
+    }
+
+    fn recipe_live_outs(
+        &self,
+        root: NodeId,
+        projection: &GraphProjection,
+        source: ValueRecipeSource,
+        retained_values: impl IntoIterator<Item = NodeId>,
+    ) -> Vec<NodeId> {
+        let retained_values = retained_values.into_iter().collect::<Vec<_>>();
+        let retained_terminators = self.retained_recipe_terminators(source);
+        let producer_effects = projection.source_effects();
+        let mut candidates = producer_effects
+            .iter()
+            .filter_map(|site| self.source.skeleton.effect(*site).result)
+            .collect::<Vec<_>>();
+        candidates.extend(self.source.skeleton.blocks.iter().flat_map(|(_, block)| {
+            block.params.iter().copied().filter(|value| *value != root && projection.node(*value).is_some())
+        }));
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates.retain(|candidate| {
+            if *candidate == root || projection.node(*candidate).is_none() {
+                return false;
+            }
+            let observers = self.uses.pure_observers(*candidate);
+            observers.effect_sites().any(|site| !producer_effects.contains(&site))
+                || observers.terminator_blocks().any(|block| retained_terminators.contains(&block))
+                || retained_values.iter().any(|value| self.uses.pure_reaches(*candidate, *value))
+        });
+        candidates
+    }
+
+    fn retained_recipe_terminators(&self, source: ValueRecipeSource) -> HashSet<BlockId> {
+        match source {
+            ValueRecipeSource::EntryBlock => self.source.skeleton.blocks.keys().collect(),
+            ValueRecipeSource::StructuredPrefix { continuation } => {
+                let mut retained = HashSet::new();
+                let mut pending = vec![continuation];
+                while let Some(block) = pending.pop() {
+                    if !retained.insert(block) {
+                        continue;
+                    }
+                    pending.extend(self.source.skeleton.blocks[block].term.successors());
+                }
+                retained
+            }
+        }
     }
 
     pub fn selected_with_values(

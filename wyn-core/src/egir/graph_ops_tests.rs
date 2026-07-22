@@ -68,4 +68,30 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
             "producer closure omitted {expected:?}"
         );
     }
+
+    let uses = ValueUseIndex::build(&graph);
+    let pure = uses.pure_observers(place);
+    assert_eq!(
+        pure.effect_sites().collect::<HashSet<_>>(),
+        HashSet::from([SideEffectSite {
+            block: entry,
+            index: 0,
+        }])
+    );
+    assert!(pure.terminator_blocks().next().is_none());
+
+    let flowing = uses.value_observers(place);
+    assert_eq!(
+        flowing.effect_sites().collect::<HashSet<_>>(),
+        HashSet::from([SideEffectSite {
+            block: entry,
+            index: 0,
+        }])
+    );
+    assert_eq!(
+        flowing.terminator_blocks().collect::<HashSet<_>>(),
+        HashSet::from([entry, header, exit])
+    );
+    assert!(uses.pure_reaches(current, next));
+    assert!(!uses.pure_reaches(place, produced));
 }
