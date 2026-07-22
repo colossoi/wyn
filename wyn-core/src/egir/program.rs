@@ -741,6 +741,7 @@ pub(crate) fn finalize_converted_resources(
         for input in &mut entry.inputs {
             input.resource = input
                 .storage_binding()
+                .or_else(|| input.storage_image_binding().map(|(binding, ..)| binding))
                 .and_then(|binding| by_binding.get(&binding).copied())
                 .map(SemanticResourceRef)
                 .or_else(|| semantic_type_resource(&input.ty));
@@ -1260,8 +1261,10 @@ impl SemanticEntry {
     ) -> HashSet<ResourceId> {
         let mut resources = HashSet::new();
         for node in nodes {
-            if let Some(resource) = super::graph_ops::extract_storage_view_source(graph, node) {
-                resources.insert(resource.0);
+            if let Some(ENode::Pure { op, .. }) = graph.nodes.get(node) {
+                if let Some(resource) = op.referenced_resource() {
+                    resources.insert(resource.0);
+                }
             }
             if let Some(ENode::FuncParam { index }) = graph.nodes.get(node) {
                 resources.extend(
@@ -1285,6 +1288,11 @@ impl SemanticEntry {
         let mut resources = self.resources_referenced_by_nodes(&self.graph, projection.source_nodes());
         for site in projection.source_effects() {
             let effect = self.graph.skeleton.effect(*site);
+            if let SideEffectKind::Effect(operation) = &effect.kind {
+                if let Some(resource) = operation.referenced_resource() {
+                    resources.insert(resource.0);
+                }
+            }
             resources.extend(
                 super::semantic_graph::read_resources(&self.graph, effect)
                     .into_iter()
@@ -1396,8 +1404,17 @@ impl SemanticEntry {
             }));
         }
         let reachable = super::graph_ops::execution_value_producer_closure(&self.graph, roots).nodes;
-        let reachable_resources =
+        let mut reachable_resources =
             self.resources_referenced_by_nodes(&self.graph, reachable.iter().copied());
+        for (_, block) in &self.graph.skeleton.blocks {
+            for effect in &block.side_effects {
+                if let SideEffectKind::Effect(operation) = &effect.kind {
+                    if let Some(resource) = operation.referenced_resource() {
+                        reachable_resources.insert(resource.0);
+                    }
+                }
+            }
+        }
         let mut kept_indices = reachable
             .iter()
             .filter_map(|node| match self.graph.nodes.get(*node) {

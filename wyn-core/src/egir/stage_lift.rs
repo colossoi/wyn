@@ -11,7 +11,7 @@ use polytype::Type;
 use smallvec::smallvec;
 
 use crate::ast::TypeName;
-use crate::flow::{BlockId, ControlHeader, ExecutionModel};
+use crate::flow::{BlockId, ControlHeader};
 use crate::{LookupSet, SortedSet};
 
 use super::graph_ops::{self, ConstantCopy};
@@ -108,16 +108,13 @@ pub(crate) fn run(program: &mut SemanticProgram) -> Result<StageLiftStats> {
 }
 
 /// Expose invariant subgraphs hidden inside mixed-stage calls made directly
-/// by vertex and fragment entries. Scalar residency subsequently decides
-/// whether those exposed values are worth a separate stage invocation.
+/// by shader entries. Scalar residency subsequently decides whether those
+/// exposed values are worth a separate stage invocation.
 fn inline_direct_entry_calls(program: &mut SemanticProgram) -> Result<usize> {
     let mut total = 0;
     for entry_index in 0..program.entry_points.len() {
         let (mut graph, control_headers, parameter_dependences, scope) = {
             let entry = &program.entry_points[entry_index];
-            if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
-                continue;
-            }
             (
                 entry.graph.clone(),
                 entry.control_headers.clone(),

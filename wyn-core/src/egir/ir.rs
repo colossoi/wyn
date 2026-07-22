@@ -214,6 +214,14 @@ pub enum EffectOp<R, Ty> {
 }
 
 impl<R, Ty> EffectOp<R, Ty> {
+    /// Resource identity carried directly by the operation tag, if any.
+    pub fn referenced_resource(&self) -> Option<&R> {
+        match self {
+            Self::Op { tag } => tag.referenced_resource(),
+            Self::Alloca { .. } | Self::Load | Self::Store | Self::ControlBarrier => None,
+        }
+    }
+
     pub fn try_map_resource<S, E>(
         self,
         map: &mut impl FnMut(R) -> Result<S, E>,

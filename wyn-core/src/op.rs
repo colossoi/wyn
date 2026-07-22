@@ -131,6 +131,18 @@ impl<R> PureViewSource<R> {
 }
 
 impl<R> OpTag<R> {
+    /// Resource identity carried directly by this operator, excluding
+    /// resource handles represented by ordinary operands.
+    pub fn referenced_resource(&self) -> Option<&R> {
+        match self {
+            OpTag::StorageImageLoad(resource)
+            | OpTag::StorageImageStore(resource)
+            | OpTag::ResourceLen(resource)
+            | OpTag::StorageView(PureViewSource::Storage(resource)) => Some(resource),
+            _ => None,
+        }
+    }
+
     pub fn try_map_resource<S, E>(self, map: &mut impl FnMut(R) -> Result<S, E>) -> Result<OpTag<S>, E> {
         Ok(match self {
             OpTag::Int(value) => OpTag::Int(value),

@@ -472,16 +472,13 @@ fn plan_parallel_prelude(program: &AllocatedProgram) -> Option<MaterializationPl
     None
 }
 
-/// Vertex and fragment invocation counts are selected by draw state, outside
-/// the shader module. Price direct stage lifting against one modest batch so
-/// only substantial uniform work clears the singleton-launch overhead.
-const DIRECT_GRAPHICS_INVOCATIONS: u64 = 64;
+/// Direct entry invocation counts are selected by draw or dispatch state,
+/// outside the shader module. Price direct stage lifting against one modest
+/// batch so only substantial uniform work clears the singleton-launch overhead.
+const DIRECT_STAGE_INVOCATIONS: u64 = 64;
 
 fn plan_direct_stage_prelude(program: &AllocatedProgram) -> Option<MaterializationPlan> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
-        if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
-            continue;
-        }
         let Ok(analysis) = super::stage_variance::StageDependenceAnalysis::for_entry(entry) else {
             continue;
         };
@@ -505,7 +502,7 @@ fn plan_direct_stage_prelude(program: &AllocatedProgram) -> Option<Materializati
         let Some(analysis) = super::residency_cost::analyze_prelude(program, entry, &recipe) else {
             continue;
         };
-        if !analysis.should_materialize(DIRECT_GRAPHICS_INVOCATIONS) {
+        if !analysis.should_materialize(DIRECT_STAGE_INVOCATIONS) {
             continue;
         }
         return Some(MaterializationPlan::StagePrelude {

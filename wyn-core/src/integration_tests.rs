@@ -3137,6 +3137,98 @@ entry mixed_stage_uniform_call(
 }
 
 #[test]
+fn direct_compute_mixed_stage_call_uses_a_generated_scalar_prepass() {
+    let source = r#"
+type frame_globals = { factor: f32 }
+
+def mix_compute_with_frame(gid: vec3u32, frame: frame_globals) vec4f32 =
+  let a0 = frame.factor * 1.01 + 0.01
+  let a1 = a0 * 1.01 + 0.01
+  let a2 = a1 * 1.01 + 0.01
+  let a3 = a2 * 1.01 + 0.01
+  let a4 = a3 * 1.01 + 0.01
+  let a5 = a4 * 1.01 + 0.01
+  let a6 = a5 * 1.01 + 0.01
+  let a7 = a6 * 1.01 + 0.01
+  let a8 = a7 * 1.01 + 0.01
+  let a9 = a8 * 1.01 + 0.01
+  let a10 = a9 * 1.01 + 0.01
+  let a11 = a10 * 1.01 + 0.01 in
+  @[a11 + f32(gid.x), f32(gid.y), 0.0, 1.0]
+
+resource compute_out: image2d {
+  format = rgba32float
+  size = 64x64
+  usages = [storage_write]
+}
+
+#[compute]
+entry compute_main(
+    #[builtin(global_invocation_id)] gid: vec3u32,
+    #[uniform(set=1, binding=0)] frame: frame_globals,
+    #[view(compute_out, storage_write)] output: *storage_image) () =
+  let xy = @[i32(gid.x), i32(gid.y)] in
+  output with [xy] = mix_compute_with_frame(gid, frame)
+"#;
+    let lowered = crate::compile_thru_spirv(source).expect("mixed-stage direct compute call compiles");
+
+    let pipeline = scalar_prelude_pipeline(&lowered, "compute_main");
+    assert_eq!(
+        pipeline.stages.len(),
+        2,
+        "one uniform producer and one compute stage"
+    );
+    let prepass = pipeline
+        .stages
+        .iter()
+        .find(|stage| is_singleton_stage(stage))
+        .expect("direct compute uniform work has a singleton prepass");
+    assert!(prepass.entry_point.contains("compute_main_prepass_scalar"));
+    assert!(spirv_entry_interface_has_storage_binding(
+        &lowered.spirv,
+        &prepass.entry_point,
+        1,
+        0
+    ));
+    assert!(
+        !spirv_entry_interface_has_storage_binding(&lowered.spirv, "compute_main", 1, 0),
+        "the compute stage receives only the scalar handoff"
+    );
+    assert_scalar_prefix_emits_valid_wgsl(source);
+}
+
+#[test]
+fn cheap_direct_compute_uniform_expression_stays_in_the_compute_stage() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+resource compute_out: image2d {
+  format = rgba32float
+  size = 64x64
+  usages = [storage_write]
+}
+
+#[compute]
+entry compute_main(
+    #[builtin(global_invocation_id)] gid: vec3u32,
+    #[uniform(set=1, binding=0)] factor: f32,
+    #[view(compute_out, storage_write)] output: *storage_image) () =
+  let xy = @[i32(gid.x), i32(gid.y)] in
+  output with [xy] = @[f32(gid.x) + factor, f32(gid.y), 0.0, 1.0]
+"#,
+    )
+    .expect("cheap uniform direct compute expression compiles");
+
+    let pipeline = scalar_prelude_pipeline(&lowered, "compute_main");
+    assert_eq!(pipeline.stages.len(), 1, "cheap work must not create a prepass");
+    assert!(spirv_entry_interface_has_storage_binding(
+        &lowered.spirv,
+        "compute_main",
+        1,
+        0
+    ));
+}
+
+#[test]
 fn fragment_mixed_stage_call_uses_a_generated_scalar_prepass() {
     use crate::pipeline_descriptor::Pipeline;
 
