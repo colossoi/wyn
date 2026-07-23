@@ -186,13 +186,14 @@ fn float_term(
         }
         other => {
             let mut floats = Vec::new();
+            let fresh_id = ids.next_id();
             let mapped = Term {
                 id,
                 ty,
                 span,
                 kind: other,
             }
-            .map_children(&mut |child| {
+            .map_children(fresh_id, &mut |child| {
                 let (mut child_floats, child) = float_term(child, blocked, ids, symbols, true);
                 floats.append(&mut child_floats);
                 child

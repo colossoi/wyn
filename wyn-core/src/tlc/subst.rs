@@ -93,8 +93,12 @@ where
                 ..term
             }
         }
-        other => Term { kind: other, ..term }
-            .map_children(&mut |child| substitute_core(child, old, make_replacement, term_ids)),
+        other => {
+            let fresh_id = term_ids.next_id();
+            Term { kind: other, ..term }.map_children(fresh_id, &mut |child| {
+                substitute_core(child, old, make_replacement, term_ids)
+            })
+        }
     }
 }
 

@@ -4,6 +4,39 @@
 use super::*;
 use crate::Compiler;
 
+fn unit_test_term(ids: &mut TermIdSource, kind: TermKind) -> Term {
+    Term {
+        id: ids.next_id(),
+        ty: Type::Constructed(TypeName::Unit, vec![]),
+        span: Span::dummy(),
+        kind,
+    }
+}
+
+#[test]
+fn mapping_children_assigns_caller_provided_parent_id() {
+    let mut ids = TermIdSource::new();
+    let child = unit_test_term(&mut ids, TermKind::UnitLit);
+    let original_child_id = child.id;
+    let parent = unit_test_term(&mut ids, TermKind::Tuple(vec![child]));
+    let original_parent_id = parent.id;
+
+    let fresh_child_id = ids.next_id();
+    let fresh_parent_id = ids.next_id();
+    let rewritten = parent.map_children(fresh_parent_id, &mut |mut child| {
+        child.id = fresh_child_id;
+        child
+    });
+    let TermKind::Tuple(children) = rewritten.kind else {
+        panic!("expected tuple");
+    };
+
+    assert_eq!(children[0].id, fresh_child_id);
+    assert_eq!(rewritten.id, fresh_parent_id);
+    assert_ne!(children[0].id, original_child_id);
+    assert_ne!(rewritten.id, original_parent_id);
+}
+
 /// Compile a source string down to the raw TLC program produced by
 /// `to_tlc`, skipping every post-TLC pass so the Constructor lowering
 /// is observable verbatim.

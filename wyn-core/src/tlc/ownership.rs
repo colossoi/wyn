@@ -2140,7 +2140,7 @@ fn term_returns_owner_on_all_paths(
 
 struct Rewriter<'m> {
     model: &'m OwnershipModel,
-    program: &'m Program,
+    program: &'m mut Program,
     unique_input_soacs: &'m LookupSet<TermId>,
 }
 
@@ -2179,7 +2179,8 @@ impl<'m> Rewriter<'m> {
         // Recurse children first; any consuming-Map mark is a leaf
         // mutation on the SOAC node itself.
         let id = term.id;
-        let mut rewritten = term.map_children(&mut |child| self.rewrite(child));
+        let fresh_id = self.program.term_ids.next_id();
+        let mut rewritten = term.map_children(fresh_id, &mut |child| self.rewrite(child));
         if self.unique_input_soacs.contains(&id) {
             match &mut rewritten.kind {
                 TermKind::Soac(SoacOp::Map { destination, .. })

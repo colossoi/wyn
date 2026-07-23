@@ -920,7 +920,10 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
             _ => {}
         }
 
-        term.map_children(&mut |child| self.substitute_param(child, old_sym, new_params, tuple_ty, span))
+        let fresh_id = self.term_ids.next_id();
+        term.map_children(fresh_id, &mut |child| {
+            self.substitute_param(child, old_sym, new_params, tuple_ty, span)
+        })
     }
 
     /// Build `Tuple(Var(p0), Var(p1), ..., Var(pN))` matching the original tuple type.

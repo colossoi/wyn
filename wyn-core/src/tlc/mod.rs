@@ -707,14 +707,14 @@ impl Term {
         self.for_each_child(&mut |child| child.assert_flat_apps_in(def_name));
     }
 
-    /// Apply `f` to every immediate `Term` child, returning a new `Term` with
-    /// the same metadata but transformed children. Recurses into Lambda,
-    /// SoacOp, ArrayExpr, LoopKind, and Place sub-structures.
+    /// Apply `f` to every immediate `Term` child, returning a rebuilt `Term`
+    /// with the caller-provided fresh ID. Recurses into Lambda, SoacOp,
+    /// ArrayExpr, LoopKind, and Place sub-structures.
     ///
     /// This is the single place that knows the shape of TermKind — passes
     /// that need a uniform bottom-up or top-down walk can use this instead
     /// of hand-rolling a match over every variant.
-    pub fn map_children<F>(self, f: &mut F) -> Self
+    pub fn map_children<F>(self, fresh_id: TermId, f: &mut F) -> Self
     where
         F: FnMut(Term) -> Term,
     {
@@ -798,7 +798,11 @@ impl Term {
             TermKind::VecLit(parts) => TermKind::VecLit(parts.into_iter().map(&mut *f).collect()),
         };
 
-        Term { kind, ..self }
+        Term {
+            id: fresh_id,
+            kind,
+            ..self
+        }
     }
 
     /// Visit every immediate `Term` child by reference. This is the by-ref

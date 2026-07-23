@@ -21,7 +21,8 @@ pub fn run(program: &mut Program) {
 }
 
 fn normalize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Term {
-    let term = term.map_children(&mut |child| normalize_term(child, symbols, term_ids));
+    let fresh_id = term_ids.next_id();
+    let term = term.map_children(fresh_id, &mut |child| normalize_term(child, symbols, term_ids));
     if let TermKind::App { args, .. } = &term.kind {
         if args.iter().any(|arg| matches!(arg.kind, TermKind::Soac(_))) {
             let TermKind::App { func, args } = term.kind else {

@@ -29,7 +29,8 @@ pub fn run(program: &mut Program) {
 }
 
 fn rewrite_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Term {
-    let term = term.map_children(&mut |child| rewrite_term(child, symbols, term_ids));
+    let fresh_id = term_ids.next_id();
+    let term = term.map_children(fresh_id, &mut |child| rewrite_term(child, symbols, term_ids));
     rewrite_if_over_map(term, symbols, term_ids)
 }
 

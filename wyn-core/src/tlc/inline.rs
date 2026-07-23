@@ -267,13 +267,13 @@ pub fn run_small(program: &mut Program) {
     // the candidate into a call site, the inlined body doesn't carry stale
     // Var references to constants.
     for (_sym, candidate) in &mut small_candidates {
-        candidate.body = inline_constants(candidate.body.clone(), &all_constants);
+        candidate.body = inline_constants(candidate.body.clone(), &all_constants, &mut program.term_ids);
     }
 
     let term_ids = &mut program.term_ids;
     crate::map_in_place(&mut program.defs, |def| {
         // Constants are pure — inline them everywhere, including lambda bodies.
-        let body = inline_constants(def.body, &all_constants);
+        let body = inline_constants(def.body, &all_constants, term_ids);
         let body = inline_term(body, &small_candidates, term_ids);
         Def { body, ..def }
     });
@@ -407,8 +407,15 @@ fn has_control_flow(term: &Term) -> bool {
 }
 
 /// Replace `Var(sym)` references with the constant body when `sym` is a constant candidate.
-fn inline_constants(term: Term, constants: &LookupMap<SymbolId, Term>) -> Term {
-    let term = term.map_children(&mut |child| inline_constants(child, constants));
+fn inline_constants(
+    term: Term,
+    constants: &LookupMap<SymbolId, Term>,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    let fresh_id = term_ids.next_id();
+    let term = term.map_children(fresh_id, &mut |child| {
+        inline_constants(child, constants, term_ids)
+    });
 
     if let TermKind::Var(VarRef::Symbol(sym)) = &term.kind {
         if let Some(body) = constants.get(sym) {
@@ -458,7 +465,8 @@ fn find_inline_candidates(defs: &[Def], _symbols: &SymbolTable) -> LookupMap<Sym
 /// so recursing into them via map_children is harmless — the inline rewrite only
 /// fires on fully-saturated App nodes matching candidates.
 fn inline_term(term: Term, candidates: &LookupMap<SymbolId, InlineBody>, ids: &mut TermIdSource) -> Term {
-    let term = term.map_children(&mut |child| inline_term(child, candidates, ids));
+    let fresh_id = ids.next_id();
+    let term = term.map_children(fresh_id, &mut |child| inline_term(child, candidates, ids));
 
     // Only App nodes can be inline sites.
     let TermKind::App { ref func, ref args } = term.kind else {
@@ -608,7 +616,12 @@ fn substitute_sym_and_retype(
             }
         }
 
-        _ => term.map_children(&mut |child| substitute_sym_and_retype(child, old, new, new_ty, term_ids)),
+        _ => {
+            let fresh_id = term_ids.next_id();
+            term.map_children(fresh_id, &mut |child| {
+                substitute_sym_and_retype(child, old, new, new_ty, term_ids)
+            })
+        }
     }
 }
 

@@ -795,7 +795,8 @@ impl<'a> PartialEvaluator<'a> {
                     span,
                     kind: other,
                 };
-                outer.map_children(&mut |child| self.substitute_residual_vars(child, bound))
+                let fresh_id = self.term_ids.next_id();
+                outer.map_children(fresh_id, &mut |child| self.substitute_residual_vars(child, bound))
             }
         }
     }

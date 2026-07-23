@@ -980,16 +980,7 @@ fn assert_no_free_reference_to(term: &crate::tlc::Term, target_sym: SymbolId) {
                 walk(&lam.body, target, shadow);
             }
             _ => {
-                let cloned = crate::tlc::Term {
-                    id: t.id,
-                    ty: t.ty.clone(),
-                    span: t.span,
-                    kind: t.kind.clone(),
-                };
-                let _ = cloned.map_children(&mut |child| {
-                    walk(&child, target, false);
-                    child
-                });
+                t.for_each_child(&mut |child| walk(child, target, false));
             }
         }
     }
