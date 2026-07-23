@@ -102,7 +102,10 @@ fn vertex_format_rejects_aggregates() {
 
 // ---- block_layout ---------------------------------------------------------
 
-use super::{block_layout, std430_alignment, std430_matrix_stride, storage_elem_stride, BlockLayout};
+use super::{
+    block_layout, buffer_array_strides, std430_alignment, std430_matrix_stride, storage_elem_stride,
+    BlockLayout,
+};
 use crate::interface::StorageLayout;
 use crate::types::RecordFields;
 
@@ -142,6 +145,24 @@ fn std430_matrix_layout_pads_columns_and_the_outer_array() {
     assert_eq!(storage_elem_stride(&mat(3, 3)), Some(48));
     assert_eq!(std430_matrix_stride(&mat(4, 3)), Some(16));
     assert_eq!(storage_elem_stride(&mat(4, 3)), Some(64));
+}
+
+#[test]
+fn std430_storage_element_stride_pads_vec3() {
+    assert_eq!(super::type_byte_size(&vecn(3)), Some(12));
+    assert_eq!(storage_elem_stride(&vecn(3)), Some(16));
+
+    let array = Type::Constructed(
+        TypeName::Array,
+        vec![
+            vecn(3),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            Type::Constructed(TypeName::Size(4), vec![]),
+            Type::Constructed(TypeName::NoBuffer, vec![]),
+        ],
+    );
+    assert_eq!(storage_elem_stride(&array), Some(64));
+    assert_eq!(buffer_array_strides(&array), vec![16]);
 }
 
 #[test]

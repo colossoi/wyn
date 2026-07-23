@@ -4,7 +4,7 @@ use crate::error::CompilerError;
 use crate::flow::ExecutionModel;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{EntryPoint, Function, Program};
-use crate::types;
+use crate::{types, LookupMap};
 use polytype::Type;
 
 fn i32_ty() -> Type<TypeName> {
@@ -64,6 +64,7 @@ fn entry_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) 
         inputs: Vec::new(),
         outputs: Vec::new(),
         storage_bindings: Vec::new(),
+        pipeline_storage_accesses: LookupMap::new(),
         span: crate::ast::Span::dummy(),
     }
 }

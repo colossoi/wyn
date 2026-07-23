@@ -3333,25 +3333,25 @@ entry compute_main(
 
 #[test]
 fn fragment_mixed_stage_call_uses_a_generated_scalar_prepass() {
-    use crate::pipeline_descriptor::{Access, Binding, BufferUsage, Pipeline};
+    use crate::pipeline_descriptor::{Access, Binding, BufferLen, BufferUsage, Pipeline};
 
     let source = r#"
-type frame_globals = { factor: f32 }
+type frame_globals = { light: vec3f32 }
 
 def mix_fragment_with_frame(pos: vec4f32, frame: frame_globals) vec4f32 =
-  let a0 = frame.factor * 1.01 + 0.01
-  let a1 = a0 * 1.01 + 0.01
-  let a2 = a1 * 1.01 + 0.01
-  let a3 = a2 * 1.01 + 0.01
-  let a4 = a3 * 1.01 + 0.01
-  let a5 = a4 * 1.01 + 0.01
-  let a6 = a5 * 1.01 + 0.01
-  let a7 = a6 * 1.01 + 0.01
-  let a8 = a7 * 1.01 + 0.01
-  let a9 = a8 * 1.01 + 0.01
-  let a10 = a9 * 1.01 + 0.01
-  let a11 = a10 * 1.01 + 0.01 in
-  pos + @[a11, a11, a11, 0.0]
+  let a0 = frame.light * 1.01 + @[0.01, 0.01, 0.01]
+  let a1 = a0 * 1.01 + @[0.01, 0.01, 0.01]
+  let a2 = a1 * 1.01 + @[0.01, 0.01, 0.01]
+  let a3 = a2 * 1.01 + @[0.01, 0.01, 0.01]
+  let a4 = a3 * 1.01 + @[0.01, 0.01, 0.01]
+  let a5 = a4 * 1.01 + @[0.01, 0.01, 0.01]
+  let a6 = a5 * 1.01 + @[0.01, 0.01, 0.01]
+  let a7 = a6 * 1.01 + @[0.01, 0.01, 0.01]
+  let a8 = a7 * 1.01 + @[0.01, 0.01, 0.01]
+  let a9 = a8 * 1.01 + @[0.01, 0.01, 0.01]
+  let a10 = a9 * 1.01 + @[0.01, 0.01, 0.01]
+  let a11 = a10 * 1.01 + @[0.01, 0.01, 0.01] in
+  pos + @[a11.x, a11.y, a11.z, 0.0]
 
 #[vertex]
 entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
@@ -3422,6 +3422,7 @@ entry fragment_main(
                 access: Access::ReadOnly,
                 name,
                 resource,
+                length: Some(BufferLen::Fixed { bytes: 16 }),
                 ..
             } => Some((index, *set, *binding, name.clone(), resource.clone())),
             _ => None,
@@ -4793,10 +4794,6 @@ entry two(a: []f32, b: []f32) ([]f32, []f32) =
 #[test]
 fn multidomain_input_storage_keeps_nonwritable_decoration() {
     use crate::pipeline_descriptor::{Access, Binding, BufferUsage, Pipeline};
-    use std::collections::HashMap;
-    use wspirv::binary::parse_words;
-    use wspirv::dr::{Loader, Operand};
-    use wspirv::spirv::{Decoration, Op};
 
     let lowered = crate::compile_thru_spirv(
         r#"
@@ -4823,10 +4820,11 @@ entry gen(data: []f32) ([]f32, []f32) =
         2,
         "the two iota domains must split into two stages"
     );
-    let (data_set, data_binding) = compute
+    let (data_index, data_set, data_binding) = compute
         .bindings
         .iter()
-        .find_map(|binding| match binding {
+        .enumerate()
+        .find_map(|(index, binding)| match binding {
             Binding::StorageBuffer {
                 set,
                 binding,
@@ -4834,46 +4832,27 @@ entry gen(data: []f32) ([]f32, []f32) =
                 usage: BufferUsage::Input,
                 name,
                 ..
-            } if name == "data" => Some((*set, *binding)),
+            } if name == "data" => Some((index, *set, *binding)),
             _ => None,
         })
         .expect("data is published as a read-only input");
 
-    let mut loader = Loader::new();
-    parse_words(&lowered.spirv, &mut loader).expect("parse SPIR-V");
-    let module = loader.module();
-    let mut sets = HashMap::new();
-    let mut bindings = HashMap::new();
-    for annotation in &module.annotations {
-        match annotation.operands.as_slice() {
-            [Operand::IdRef(variable), Operand::Decoration(Decoration::DescriptorSet), Operand::LiteralBit32(set)] =>
-            {
-                sets.insert(*variable, *set);
-            }
-            [Operand::IdRef(variable), Operand::Decoration(Decoration::Binding), Operand::LiteralBit32(binding)] =>
-            {
-                bindings.insert(*variable, *binding);
-            }
-            _ => {}
-        }
+    let readers =
+        compute.stages.iter().filter(|stage| stage.reads.contains(&data_index)).collect::<Vec<_>>();
+    assert_eq!(readers.len(), 2, "both projected entries read `data`");
+    for stage in readers {
+        assert_eq!(
+            spirv_entry_storage_binding_is_writable(
+                &lowered.spirv,
+                &stage.entry_point,
+                data_set,
+                data_binding,
+            ),
+            Some(false),
+            "entry `{}` must use the pipeline's read-only variable",
+            stage.entry_point
+        );
     }
-    let data_variable = sets
-        .iter()
-        .find_map(|(variable, set)| {
-            (*set == data_set && bindings.get(variable) == Some(&data_binding)).then_some(*variable)
-        })
-        .expect("SPIR-V data storage variable");
-    assert!(
-        module.annotations.iter().any(|annotation| {
-            annotation.class.opcode == Op::Decorate
-                && annotation.operands.as_slice()
-                    == [
-                        Operand::IdRef(data_variable),
-                        Operand::Decoration(Decoration::NonWritable),
-                    ]
-        }),
-        "read-only multidomain input must carry NonWritable"
-    );
 }
 
 /// Sibling maps over *different* buffers that share one size var
@@ -8474,17 +8453,18 @@ entry g(xs: []i32) []i32 =
         .iter()
         .find_map(|b| match b {
             Binding::StorageBuffer {
+                set,
                 binding,
                 usage: BufferUsage::Intermediate,
                 access: Access::ReadWrite,
                 length: Some(len),
                 ..
-            } => Some((*binding, len.clone())),
+            } => Some((*set, *binding, len.clone())),
             _ => None,
         })
         .expect("consumer must read a sized gather intermediate");
     assert_eq!(
-        gather.1,
+        gather.2,
         BufferLen::LikeInput {
             set: 0,
             binding: 0,
@@ -8509,23 +8489,101 @@ entry g(xs: []i32) []i32 =
     let writes_gather = scan_pipeline
         .bindings
         .iter()
-        .any(|b| matches!(b, Binding::StorageBuffer { binding, .. } if *binding == gather.0));
+        .any(|b| matches!(b, Binding::StorageBuffer { set, binding, .. } if (*set, *binding) == (gather.0, gather.1)));
     assert!(
         writes_gather,
         "scan pre-pass must write the gather buffer (binding {})",
-        gather.0
+        gather.1
     );
     // No other binding in the scan pipeline collides with the gather output.
     let dup = scan_pipeline
         .bindings
         .iter()
-        .filter(|b| matches!(b, Binding::StorageBuffer { binding, .. } if *binding == gather.0))
+        .filter(|b| matches!(b, Binding::StorageBuffer { set, binding, .. } if (*set, *binding) == (gather.0, gather.1)))
         .count();
     assert_eq!(
         dup, 1,
         "exactly one scan binding is the gather buffer: {:?}",
         scan_pipeline.bindings
     );
+
+    // Every entry point sharing this physical pipeline must declare the
+    // pipeline-layout access, not its narrower stage-local use. In particular,
+    // the scan result reader must not select a second `NonWritable` variable
+    // for a slot whose descriptor layout is read_write.
+    let gather_index = scan_pipeline
+        .bindings
+        .iter()
+        .position(|binding| {
+            matches!(binding, Binding::StorageBuffer { set, binding, .. } if (*set, *binding) == (gather.0, gather.1))
+        })
+        .expect("scan gather binding index");
+    let users = scan_pipeline
+        .stages
+        .iter()
+        .filter(|stage| stage.reads.contains(&gather_index) || stage.writes.contains(&gather_index))
+        .collect::<Vec<_>>();
+    assert!(
+        users
+            .iter()
+            .any(|stage| stage.reads.contains(&gather_index) && !stage.writes.contains(&gather_index)),
+        "the regression requires a read-only stage use"
+    );
+    for stage in users {
+        assert_eq!(
+            spirv_entry_storage_binding_is_writable(&lowered.spirv, &stage.entry_point, gather.0, gather.1),
+            Some(true),
+            "entry `{}` must use the pipeline's read_write variable",
+            stage.entry_point
+        );
+    }
+
+    let converted = lower_semantic_egir(
+        compile_to_semantic_egir(src),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    );
+    let wgsl_slot = converted
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) => {
+                compute.bindings.iter().enumerate().find_map(|(index, binding)| {
+                    let Binding::StorageBuffer {
+                        set,
+                        binding,
+                        access: Access::ReadWrite,
+                        ..
+                    } = binding
+                    else {
+                        return None;
+                    };
+                    compute
+                        .stages
+                        .iter()
+                        .any(|stage| stage.reads.contains(&index) && !stage.writes.contains(&index))
+                        .then_some((*set, *binding))
+                })
+            }
+            Pipeline::Graphics(_) => None,
+        })
+        .expect("WGSL scan pipeline has a read-only use of a read_write layout slot");
+    let wgsl = converted.lower_wgsl().expect("scan gather lowers to WGSL");
+    assert!(
+        wgsl.contains(&format!(
+            "@group({}) @binding({}) var<storage, read_write>",
+            wgsl_slot.0, wgsl_slot.1
+        )),
+        "WGSL must declare the shared scan slot with pipeline-union access"
+    );
+    let module = naga::front::wgsl::parse_str(&wgsl)
+        .unwrap_or_else(|error| panic!("Naga rejected generated WGSL: {error:?}\n{wgsl}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("Naga validation failed: {error:?}\n{wgsl}"));
 }
 
 /// A helper's size variables are generalized, so one caller equating two of

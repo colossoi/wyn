@@ -59,7 +59,7 @@ impl StorageFunctionVariants {
         }
 
         let entry_accesses =
-            program.entry_points.iter().map(|entry| entry.storage_accesses()).collect::<Vec<_>>();
+            program.entry_points.iter().map(|entry| entry.shader_storage_accesses()).collect::<Vec<_>>();
         let mut module_accesses = LookupMap::new();
         for accesses in &entry_accesses {
             for (&binding, &access) in accesses {
@@ -143,7 +143,7 @@ impl StorageFunctionVariants {
         entry: Option<usize>,
     ) -> LookupMap<BindingRef, ResourceAccess> {
         entry
-            .map(|index| program.entry_points[index].storage_accesses())
+            .map(|index| program.entry_points[index].shader_storage_accesses())
             .unwrap_or_else(|| self.module_accesses.clone())
     }
 }

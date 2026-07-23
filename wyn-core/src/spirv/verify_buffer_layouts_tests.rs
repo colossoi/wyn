@@ -7,7 +7,7 @@ use crate::interface::{
 use crate::spirv::verify_buffer_layouts;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{EntryPoint, ExecutionModel, Program};
-use crate::{types, BindingRef};
+use crate::{types, BindingRef, LookupMap};
 use polytype::Type;
 
 fn u32_ty() -> Type<TypeName> {
@@ -63,6 +63,7 @@ fn entry(name: &str) -> EntryPoint {
         inputs: Vec::new(),
         outputs: Vec::new(),
         storage_bindings: Vec::new(),
+        pipeline_storage_accesses: LookupMap::new(),
         span: crate::ast::Span::dummy(),
     }
 }

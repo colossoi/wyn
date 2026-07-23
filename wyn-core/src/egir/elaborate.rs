@@ -43,6 +43,7 @@ pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
         pipeline,
         ..
     } = inner.into_ir();
+    let pipeline_storage_accesses = pipeline_storage_accesses(&pipeline);
     let functions: Vec<Function> = functions
         .into_iter()
         .map(|f| {
@@ -61,6 +62,8 @@ pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
         .into_iter()
         .map(|e| {
             let body = elaborate_one_body(e.graph, &e.control_headers, &e.aliases, &e.params, e.return_ty);
+            let entry_pipeline_accesses =
+                pipeline_storage_accesses.get(&e.name).cloned().unwrap_or_default();
             EntryPoint {
                 name: e.name,
                 body,
@@ -68,6 +71,7 @@ pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
                 inputs: e.inputs.into_iter().map(|input| input.inner).collect(),
                 outputs: e.outputs.into_iter().map(|output| output.inner).collect(),
                 storage_bindings: e.resource_declarations,
+                pipeline_storage_accesses: entry_pipeline_accesses,
                 span: e.span,
             }
         })
@@ -92,6 +96,57 @@ pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
         constants,
     };
     (program, pipeline)
+}
+
+/// The descriptor binding access is a physical pipeline-layout property: all
+/// stages in one pipeline share it even when an individual stage only reads or
+/// only writes the slot. Preserve that separately from per-entry usage before
+/// elaboration consumes the physical program.
+fn pipeline_storage_accesses(
+    descriptor: &PipelineDescriptor,
+) -> LookupMap<String, LookupMap<crate::BindingRef, crate::ResourceAccess>> {
+    use crate::pipeline_descriptor::{Access, Binding, Pipeline};
+
+    let mut entries = LookupMap::new();
+    for pipeline in &descriptor.pipelines {
+        let (bindings, stage_names): (&[Binding], Vec<&str>) = match pipeline {
+            Pipeline::Compute(compute) => (
+                &compute.bindings,
+                compute.stages.iter().map(|stage| stage.entry_point.as_str()).collect(),
+            ),
+            Pipeline::Graphics(graphics) => (
+                &graphics.bindings,
+                graphics.stages.iter().map(|stage| stage.entry_point.as_str()).collect(),
+            ),
+        };
+        let layout = bindings
+            .iter()
+            .filter_map(|binding| {
+                let Binding::StorageBuffer {
+                    set, binding, access, ..
+                } = binding
+                else {
+                    return None;
+                };
+                let access = match access {
+                    Access::ReadOnly => crate::ResourceAccess::Read,
+                    Access::WriteOnly => crate::ResourceAccess::Write,
+                    Access::ReadWrite => crate::ResourceAccess::ReadWrite,
+                };
+                Some((crate::BindingRef::new(*set, *binding), access))
+            })
+            .collect::<LookupMap<_, _>>();
+        for name in stage_names {
+            let entry = entries.entry(name.to_string()).or_insert_with(LookupMap::new);
+            for (&binding, &access) in &layout {
+                entry
+                    .entry(binding)
+                    .and_modify(|current: &mut crate::ResourceAccess| *current = current.merge(access))
+                    .or_insert(access);
+            }
+        }
+    }
+    entries
 }
 
 fn elaborate_extern(declaration: ExternDecl<Type<TypeName>>) -> Function {

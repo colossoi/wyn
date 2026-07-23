@@ -712,9 +712,11 @@ entry gen(bh: []vec4f32) []i32 =
         wgsl.contains("@group(0) @binding(2)") && wgsl.contains("var<storage"),
         "the gather buffer must be declared as a storage binding:\n{wgsl}"
     );
-    // The consumer indexes the gather buffer (binding 2).
+    // The producer and consumer share one physical pipeline, so the consumer
+    // indexes the same read_write global selected by that pipeline layout.
     assert!(
-        wgsl.contains("_buf_0_2_read["),
+        wgsl.contains("@group(0) @binding(2) var<storage, read_write> _buf_0_2:")
+            && wgsl.contains("_buf_0_2["),
         "consumer must read the gather buffer by index:\n{wgsl}"
     );
 }

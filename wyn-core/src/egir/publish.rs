@@ -140,9 +140,23 @@ fn publish_pipeline_stage_uses(pipeline: &mut Pipeline, entries: &[&EntryPublica
                     }
                 }
             }
+            // Stage uses remain scheduler-precise for the frame graph. The
+            // physical binding layout must additionally permit every access
+            // declared by an entry ABI, even when a projected stage narrows
+            // its actual reads/writes.
+            let declared_uses = compute
+                .stages
+                .iter()
+                .filter_map(|stage| {
+                    entries
+                        .iter()
+                        .find(|entry| entry.name == stage.entry_point)
+                        .map(|entry| entry_stage_binding_uses(entry, &compute.bindings))
+                })
+                .collect::<Vec<_>>();
             reconcile_storage_binding_access(
                 &mut compute.bindings,
-                compute.stages.iter().map(|stage| &stage.uses),
+                compute.stages.iter().map(|stage| &stage.uses).chain(declared_uses.iter()),
             );
         }
         Pipeline::Graphics(graphics) => {
@@ -153,9 +167,19 @@ fn publish_pipeline_stage_uses(pipeline: &mut Pipeline, entries: &[&EntryPublica
                     }
                 }
             }
+            let declared_uses = graphics
+                .stages
+                .iter()
+                .filter_map(|stage| {
+                    entries
+                        .iter()
+                        .find(|entry| entry.name == stage.entry_point)
+                        .map(|entry| entry_stage_binding_uses(entry, &graphics.bindings))
+                })
+                .collect::<Vec<_>>();
             reconcile_storage_binding_access(
                 &mut graphics.bindings,
-                graphics.stages.iter().map(|stage| &stage.uses),
+                graphics.stages.iter().map(|stage| &stage.uses).chain(declared_uses.iter()),
             );
         }
     }

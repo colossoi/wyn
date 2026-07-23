@@ -478,7 +478,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     // buffer-specialized functions (which reference set/binding directly) can
     // resolve them during lowering, even though they're lowered before entry points.
     for entry in &program.entry_points {
-        let accesses = entry.storage_accesses();
+        let accesses = entry.shader_storage_accesses();
         for input in &entry.inputs {
             if let Some(br) = input.storage_binding() {
                 constructor.create_storage_buffer(&input.ty, br.set, br.binding, true);
@@ -498,7 +498,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     // typed list of compiler-introduced bindings (e.g. parallelize's
     // partials/result intermediates) that aren't user-visible outputs.
     for entry in &program.entry_points {
-        let accesses = entry.storage_accesses();
+        let accesses = entry.shader_storage_accesses();
         for sb in &entry.storage_bindings {
             constructor.create_storage_buffer(&sb.elem_ty, sb.binding.set, sb.binding.binding, true);
             if !accesses[&sb.binding].writes() {
@@ -592,7 +592,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         };
 
         entry_info.push((entry.name.clone(), spirv_model, local_size));
-        constructor.select_storage_accesses(&entry.storage_accesses());
+        constructor.select_storage_accesses(&entry.shader_storage_accesses());
         constructor.select_function_names(function_variants.names_for_entry(entry_index));
         entry::lower_ssa_entry_point(&mut constructor, entry)?;
     }
@@ -620,7 +620,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
             // (via its inputs/outputs). Don't add ALL storage vars — other
             // entry points may have buffers this one doesn't reference.
             if let Some(entry) = program.entry_points.iter().find(|e| e.name == *name) {
-                constructor.select_storage_accesses(&entry.storage_accesses());
+                constructor.select_storage_accesses(&entry.shader_storage_accesses());
                 for input in &entry.inputs {
                     if let Some(br) = input.storage_binding() {
                         if let Some((var_id, _, _)) = constructor.storage_buffer(br) {

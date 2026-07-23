@@ -488,13 +488,17 @@ pub struct EntryPoint {
     /// by `parallelize`). Carried end-to-end so SPIR-V generation has a
     /// single source of truth for each entry's buffer interface.
     pub storage_bindings: Vec<interface::StorageBindingDecl>,
+    /// Storage access required by the physical pipeline layout containing
+    /// this entry. Unlike the entry-local interface above, this is unioned
+    /// across every stage that shares the pipeline's binding table.
+    pub pipeline_storage_accesses: LookupMap<crate::BindingRef, crate::ResourceAccess>,
     pub span: Span,
 }
 
 impl EntryPoint {
-    /// Access each storage-buffer slot has in this entry. This folds existing
-    /// interface metadata; it does not inspect or re-analyze the SSA body.
-    pub(crate) fn storage_accesses(&self) -> LookupMap<crate::BindingRef, crate::ResourceAccess> {
+    /// Access each storage-buffer slot has in this entry alone. This folds
+    /// existing interface metadata; it does not inspect the SSA body.
+    pub(crate) fn stage_storage_accesses(&self) -> LookupMap<crate::BindingRef, crate::ResourceAccess> {
         let mut accesses: LookupMap<crate::BindingRef, crate::ResourceAccess> = LookupMap::new();
         let mut record = |binding, access| {
             accesses
@@ -526,6 +530,21 @@ impl EntryPoint {
                 interface::StorageRole::Intermediate => crate::ResourceAccess::ReadWrite,
             };
             record(declaration.binding, access);
+        }
+        accesses
+    }
+
+    /// Access each storage-buffer slot must expose to shader code using this
+    /// entry. Descriptor-backed entries use the access union of their physical
+    /// pipeline; bindings absent from that descriptor retain their local
+    /// access as a conservative fallback for directly constructed SSA.
+    pub(crate) fn shader_storage_accesses(&self) -> LookupMap<crate::BindingRef, crate::ResourceAccess> {
+        let mut accesses = self.stage_storage_accesses();
+        for (&binding, &access) in &self.pipeline_storage_accesses {
+            accesses
+                .entry(binding)
+                .and_modify(|current| *current = current.merge(access))
+                .or_insert(access);
         }
         accesses
     }

@@ -612,7 +612,7 @@ impl<'a> LowerCtx<'a> {
         let mut current_storage_accesses = LookupMap::new();
         let mut storage_access_variants = LookupMap::new();
         for entry in &program.entry_points {
-            for (binding, access) in entry.storage_accesses() {
+            for (binding, access) in entry.shader_storage_accesses() {
                 current_storage_accesses
                     .entry(binding)
                     .and_modify(|current: &mut crate::ResourceAccess| *current = current.merge(access))
@@ -821,7 +821,7 @@ impl<'a> LowerCtx<'a> {
         let mut synth: LookupMap<(BindingRef, bool), String> = LookupMap::new();
         // Key → (elem_ty_str, module_name, has_read, has_write).
         for entry in &self.program.entry_points {
-            let accesses = entry.storage_accesses();
+            let accesses = entry.shader_storage_accesses();
             // Explicit compiler-inserted bindings (e.g. parallelize's
             // partial-sum buffer).
             for sb in &entry.storage_bindings {
@@ -1093,7 +1093,7 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn lower_entry_point(&mut self, entry: &EntryPoint, output: &mut String) -> Result<()> {
-        self.current_storage_accesses = entry.storage_accesses();
+        self.current_storage_accesses = entry.shader_storage_accesses();
         let body = &entry.body;
 
         // Build the entry attribute (`@vertex`, `@fragment`, `@compute ...`).

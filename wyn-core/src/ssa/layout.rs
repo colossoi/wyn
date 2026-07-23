@@ -191,8 +191,8 @@ fn collect_array_strides(ty: &Type, out: &mut Vec<u32>) {
         if is_composite {
             if let Type::Constructed(TypeName::Size(_), _) = ty.array_size().expect("Array has size") {
                 let elem = ty.elem_type().expect("Array has elem");
-                if let Some(elem_size) = type_byte_size(elem) {
-                    out.push(elem_size);
+                if let Some(elem_stride) = storage_elem_stride(elem) {
+                    out.push(elem_stride);
                 }
                 collect_array_strides(elem, out);
             }
@@ -289,16 +289,25 @@ pub fn block_layout(ty: &Type, rules: StorageLayout) -> Option<BlockLayout> {
 
 /// Host-facing byte stride of a storage-buffer ELEMENT: what hosts use
 /// to size and index the buffer, so it must match the `ArrayStride`
-/// the SPIR-V backend decorates. Struct elements use their aligned
-/// std430 size; scalars and vectors keep their tight `type_byte_size`.
-/// (vec3 is the known exception where the tight size 12 differs from
-/// the decorated stride 16 — long-standing behavior, kept as is.)
+/// the shader backend emits. Every element uses its aligned std430 size;
+/// notably, a three-component 32-bit vector occupies a 16-byte array slot.
 pub fn storage_elem_stride(ty: &Type) -> Option<u32> {
     match ty {
         Type::Constructed(TypeName::Tuple(_), _) | Type::Constructed(TypeName::Record(_), _) => {
             block_layout(ty, StorageLayout::Std430).map(|l| l.size)
         }
         _ if ty.is_mat() => Some(ty.mat_cols()? as u32 * std430_matrix_stride(ty)?),
-        _ => type_byte_size(ty),
+        _ if ty.is_array() => {
+            let count = match ty.array_size()? {
+                Type::Constructed(TypeName::Size(count), _) => *count as u32,
+                _ => return None,
+            };
+            Some(count * storage_elem_stride(ty.elem_type()?)?)
+        }
+        _ => {
+            let size = type_byte_size(ty)?;
+            let align = std430_alignment(ty)?;
+            Some(size.div_ceil(align) * align)
+        }
     }
 }
