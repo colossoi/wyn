@@ -30,7 +30,7 @@ impl<'a> Transformer<'a> {
 
         // Bind the scrutinee once so each arm reads it without
         // re-evaluating the source expression.
-        let scrut_id = self.term_ids.next_id().0;
+        let scrut_id = self.term_ids.next_id();
         let scrut_sym = self.define(&format!("_w_match_scrut_{}", scrut_id));
         let scrut_var = self.mk_term(scrut_ty.clone(), span, TermKind::Var(VarRef::Symbol(scrut_sym)));
 

@@ -79,11 +79,11 @@ fn filter_term(input: ArrayExpr, ids: &mut TermIdSource) -> Term {
     )
 }
 
-fn prog(body: Term) -> Program {
+fn prog(body: Term, ids: TermIdSource) -> Program {
     // The validator never reads `symbols` (it's a structural check), so an empty
     // table and a raw def id are fine.
-    Program {
-        defs: vec![Def {
+    Program::from_parts(
+        vec![Def {
             name: SymbolId::from(0),
             ty: arr_ty(),
             body,
@@ -92,9 +92,10 @@ fn prog(body: Term) -> Program {
             param_diets: vec![],
             return_diet: crate::types::Diet::observing(),
         }],
-        symbols: SymbolTable::new(),
-        def_syms: LookupMap::new(),
-    }
+        SymbolTable::new(),
+        LookupMap::new(),
+        ids,
+    )
 }
 
 #[test]
@@ -102,7 +103,7 @@ fn named_filter_input_is_anf() {
     // filter(p, ys) where ys is a bare name — the canonical ANF input.
     let mut ids = TermIdSource::new();
     let body = filter_term(arr_var(0), &mut ids);
-    assert!(check(&prog(body)).is_ok());
+    assert!(check(&prog(body, ids)).is_ok());
 }
 
 // An inline producer in a SOAC input — `filter(p, map(f, xs))` — is
@@ -124,7 +125,7 @@ fn inline_producer_in_index_is_rejected() {
         i32_ty(),
         &mut ids,
     );
-    let err = check(&prog(body)).unwrap_err();
+    let err = check(&prog(body, ids)).unwrap_err();
     assert!(err.contains("Index"), "{err}");
 }
 
@@ -145,7 +146,7 @@ fn let_bound_producer_then_named_consumer_is_anf() {
         arr_ty(),
         &mut ids,
     );
-    assert!(check(&prog(body)).is_ok());
+    assert!(check(&prog(body, ids)).is_ok());
 }
 
 // ---- Real-program checks (compile a source through the full TLC pipeline) ----

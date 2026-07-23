@@ -580,26 +580,27 @@ struct ClosureConverter<'a, 'ids> {
 
 impl<'a, 'ids> ClosureConverter<'a, 'ids> {
     fn run(
-        program: &mut Program,
+        defs: &mut Vec<Def>,
+        symbols: &'a mut SymbolTable,
+        def_syms: &LookupMap<String, SymbolId>,
         known_defs: &LookupSet<String>,
         term_ids: &'ids mut TermIdSource,
     ) -> ClosureInfo {
-        let top_level: LookupSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
-        let known_def_symbols: LookupSet<SymbolId> = program
-            .def_syms
+        let top_level: LookupSet<SymbolId> = defs.iter().map(|d| d.name).collect();
+        let known_def_symbols: LookupSet<SymbolId> = def_syms
             .iter()
             .filter_map(|(name, symbol)| known_defs.contains(name).then_some(*symbol))
             .collect();
 
         let mut callable_values = LookupMap::new();
-        for def in &program.defs {
+        for def in defs.iter() {
             if is_arrow_param(&def.ty) {
                 callable_values.insert(def.name, CallableValue::Direct(def.name));
             }
         }
 
         let mut cc = ClosureConverter {
-            symbols: &mut program.symbols,
+            symbols,
             top_level,
             known_def_symbols,
             lifted_defs: vec![],
@@ -608,11 +609,11 @@ impl<'a, 'ids> ClosureConverter<'a, 'ids> {
             term_ids,
         };
 
-        crate::map_in_place(&mut program.defs, |def| {
+        crate::map_in_place(defs, |def| {
             let body = cc.convert_def_body(def.body);
             Def { body, ..def }
         });
-        program.defs.extend(cc.lifted_defs);
+        defs.extend(cc.lifted_defs);
 
         ClosureInfo {
             callable_values: cc.callable_values,
@@ -1231,12 +1232,14 @@ fn collect_soac_bound_syms(soac: &SoacOp, out: &mut LookupSet<SymbolId>) {
 /// top-level def, substitutes let-aliased callable Vars away, and returns
 /// a side-table describing every callable symbol's captures (or lack
 /// thereof).
-pub fn run(
-    program: &mut Program,
-    known_defs: &LookupSet<String>,
-    term_ids: &mut TermIdSource,
-) -> ClosureInfo {
-    let info = ClosureConverter::run(program, known_defs, term_ids);
+pub fn run(program: &mut Program, known_defs: &LookupSet<String>) -> ClosureInfo {
+    let info = ClosureConverter::run(
+        &mut program.defs,
+        &mut program.symbols,
+        &program.def_syms,
+        known_defs,
+        &mut program.term_ids,
+    );
     verify_closure_converted(program)
         .unwrap_or_else(|e| panic!("closure-conversion verifier failed: {:?}", e));
     info

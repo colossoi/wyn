@@ -48,9 +48,9 @@ fn i32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Int(32), vec![])
 }
 
-fn mk_term(ty: Type<TypeName>, kind: TermKind) -> Term {
+fn mk_term(ids: &mut TermIdSource, ty: Type<TypeName>, kind: TermKind) -> Term {
     Term {
-        id: TermIdSource::new().next_id(),
+        id: ids.next_id(),
         ty,
         span: Span::dummy(),
         kind,
@@ -119,7 +119,8 @@ fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> Fu
 
 #[test]
 fn test_int_literal_roundtrip() {
-    let body = mk_term(i32_ty(), TermKind::IntLit("42".into()));
+    let mut term_ids = TermIdSource::new();
+    let body = mk_term(&mut term_ids, i32_ty(), TermKind::IntLit("42".into()));
     let func = convert_simple_def(body, vec![]);
     let entry = func.get_block(func.entry_block());
     // Should have one Int instruction.
@@ -131,17 +132,20 @@ fn test_int_literal_roundtrip() {
 #[test]
 fn test_add_roundtrip() {
     let mut symbols = SymbolTable::new();
+    let mut term_ids = TermIdSource::new();
     let a_sym = symbols.alloc("a".into());
     let b_sym = symbols.alloc("b".into());
 
     // Build: a + b
-    let a_var = mk_term(i32_ty(), TermKind::Var(VarRef::Symbol(a_sym)));
-    let b_var = mk_term(i32_ty(), TermKind::Var(VarRef::Symbol(b_sym)));
+    let a_var = mk_term(&mut term_ids, i32_ty(), TermKind::Var(VarRef::Symbol(a_sym)));
+    let b_var = mk_term(&mut term_ids, i32_ty(), TermKind::Var(VarRef::Symbol(b_sym)));
     let add_op = mk_term(
+        &mut term_ids,
         i32_ty(), // simplified — real type would be arrow
         TermKind::BinOp(crate::ast::BinaryOp { op: "+".into() }),
     );
     let app = mk_term(
+        &mut term_ids,
         i32_ty(),
         TermKind::App {
             func: Box::new(add_op),
@@ -193,20 +197,26 @@ fn test_gvn_via_let() {
     // GVN should deduplicate the two 42 constants into a single node.
     // (A `+` would be constant-folded to `84`, erasing the evidence.)
     use polytype::Type;
+    let mut term_ids = TermIdSource::new();
     let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty(), i32_ty()]);
 
-    let lit42 = mk_term(i32_ty(), TermKind::IntLit("42".into()));
-    let lit42b = mk_term(i32_ty(), TermKind::IntLit("42".into()));
+    let lit42 = mk_term(&mut term_ids, i32_ty(), TermKind::IntLit("42".into()));
+    let lit42b = mk_term(&mut term_ids, i32_ty(), TermKind::IntLit("42".into()));
 
     let mut symbols = SymbolTable::new();
     let x_sym = symbols.alloc("x".into());
     let y_sym = symbols.alloc("y".into());
 
-    let x_ref = mk_term(i32_ty(), TermKind::Var(VarRef::Symbol(x_sym)));
-    let y_ref = mk_term(i32_ty(), TermKind::Var(VarRef::Symbol(y_sym)));
-    let pair_app = mk_term(pair_ty.clone(), TermKind::Tuple(vec![x_ref, y_ref]));
+    let x_ref = mk_term(&mut term_ids, i32_ty(), TermKind::Var(VarRef::Symbol(x_sym)));
+    let y_ref = mk_term(&mut term_ids, i32_ty(), TermKind::Var(VarRef::Symbol(y_sym)));
+    let pair_app = mk_term(
+        &mut term_ids,
+        pair_ty.clone(),
+        TermKind::Tuple(vec![x_ref, y_ref]),
+    );
 
     let inner_let = mk_term(
+        &mut term_ids,
         pair_ty.clone(),
         TermKind::Let {
             name: y_sym,
@@ -216,6 +226,7 @@ fn test_gvn_via_let() {
         },
     );
     let outer_let = mk_term(
+        &mut term_ids,
         pair_ty.clone(),
         TermKind::Let {
             name: x_sym,
@@ -311,13 +322,19 @@ fn test_hash_cons_distinguishes_by_result_type() {
 fn test_if_else_roundtrip() {
     // if cond then 1 else 0
     let mut symbols = SymbolTable::new();
+    let mut term_ids = TermIdSource::new();
     let c_sym = symbols.alloc("c".into());
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
-    let cond = mk_term(bool_ty.clone(), TermKind::Var(VarRef::Symbol(c_sym)));
-    let then_br = mk_term(i32_ty(), TermKind::IntLit("1".into()));
-    let else_br = mk_term(i32_ty(), TermKind::IntLit("0".into()));
+    let cond = mk_term(
+        &mut term_ids,
+        bool_ty.clone(),
+        TermKind::Var(VarRef::Symbol(c_sym)),
+    );
+    let then_br = mk_term(&mut term_ids, i32_ty(), TermKind::IntLit("1".into()));
+    let else_br = mk_term(&mut term_ids, i32_ty(), TermKind::IntLit("0".into()));
     let if_term = mk_term(
+        &mut term_ids,
         i32_ty(),
         TermKind::If {
             cond: Box::new(cond),
@@ -645,6 +662,7 @@ fn construction_purity_propagates_effectful_builtin_calls() {
     use crate::tlc::{Def, DefMeta};
 
     let mut symbols = SymbolTable::new();
+    let mut term_ids = TermIdSource::new();
     let pure_leaf = symbols.alloc("pure_leaf".into());
     let reads_storage = symbols.alloc("reads_storage".into());
     let calls_reader = symbols.alloc("calls_reader".into());
@@ -659,40 +677,49 @@ fn construction_purity_propagates_effectful_builtin_calls() {
         param_diets: vec![crate::types::Diet::observing()],
         return_diet: crate::types::Diet::observing(),
     };
-    let direct_call = |callee| {
-        mk_term(
-            ty.clone(),
-            TermKind::App {
-                func: Box::new(mk_term(ty.clone(), TermKind::Var(VarRef::Symbol(callee)))),
-                args: vec![],
-            },
-        )
-    };
-    let storage_read = mk_term(
+    let reader_ref = mk_term(
+        &mut term_ids,
+        ty.clone(),
+        TermKind::Var(VarRef::Symbol(reads_storage)),
+    );
+    let direct_call = mk_term(
+        &mut term_ids,
         ty.clone(),
         TermKind::App {
-            func: Box::new(mk_term(
-                ty.clone(),
-                TermKind::Var(VarRef::Builtin {
-                    id: crate::builtins::catalog().known().storage_index,
-                    overload_idx: 0,
-                }),
-            )),
+            func: Box::new(reader_ref),
             args: vec![],
         },
     );
-    let program = crate::tlc::Program {
-        defs: vec![
-            definition(pure_leaf, mk_term(ty.clone(), TermKind::IntLit("1".into()))),
+    let storage_index = mk_term(
+        &mut term_ids,
+        ty.clone(),
+        TermKind::Var(VarRef::Builtin {
+            id: crate::builtins::catalog().known().storage_index,
+            overload_idx: 0,
+        }),
+    );
+    let storage_read = mk_term(
+        &mut term_ids,
+        ty.clone(),
+        TermKind::App {
+            func: Box::new(storage_index),
+            args: vec![],
+        },
+    );
+    let pure_body = mk_term(&mut term_ids, ty.clone(), TermKind::IntLit("1".into()));
+    let array_consumer_body = mk_term(&mut term_ids, ty.clone(), TermKind::IntLit("1".into()));
+    let program = crate::tlc::Program::from_parts(
+        vec![
+            definition(pure_leaf, pure_body),
             definition(reads_storage, storage_read),
-            definition(calls_reader, direct_call(reads_storage)),
+            definition(calls_reader, direct_call),
             Def {
                 name: array_consumer,
                 ty: Type::Constructed(
                     TypeName::Arrow,
                     vec![Type::Constructed(TypeName::Array, vec![]), ty.clone()],
                 ),
-                body: mk_term(ty.clone(), TermKind::IntLit("1".into())),
+                body: array_consumer_body,
                 meta: DefMeta::Function,
                 arity: 1,
                 param_diets: vec![crate::types::Diet::observing()],
@@ -700,7 +727,7 @@ fn construction_purity_propagates_effectful_builtin_calls() {
             },
         ],
         symbols,
-        def_syms: [
+        [
             ("pure_leaf".into(), pure_leaf),
             ("reads_storage".into(), reads_storage),
             ("calls_reader".into(), calls_reader),
@@ -708,7 +735,8 @@ fn construction_purity_propagates_effectful_builtin_calls() {
         ]
         .into_iter()
         .collect(),
-    };
+        term_ids,
+    );
 
     let pure = super::infer_pure_definitions(&program);
     assert!(pure.contains(&pure_leaf));

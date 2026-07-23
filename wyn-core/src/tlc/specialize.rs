@@ -13,7 +13,8 @@ use crate::SymbolTable;
 use polytype::Type;
 
 /// Specialize polymorphic intrinsics in a TLC program.
-pub fn run(program: &mut Program, term_ids: &mut TermIdSource) {
+pub fn run(program: &mut Program) {
+    let term_ids = &mut program.term_ids;
     for def in &mut program.defs {
         specialize_term(&mut def.body, &mut program.symbols, term_ids);
     }

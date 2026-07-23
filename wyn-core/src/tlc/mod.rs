@@ -34,6 +34,7 @@ use crate::name_resolution::{NameResolution, ResolvedValueRef, SoacKind};
 use crate::types::{SoacOwnership, TypeExt};
 use crate::{interface, LookupMap, SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
+use std::num::NonZeroU32;
 
 // =============================================================================
 // Helper functions
@@ -122,17 +123,67 @@ fn collect_place_ids_in_soacs(term: &Term, refs: &mut Vec<SymbolId>) {
 // =============================================================================
 
 /// A unique identifier for TLC terms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TermId(pub u32);
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TermId(Option<NonZeroU32>);
 
-impl From<u32> for TermId {
-    fn from(id: u32) -> Self {
-        TermId(id)
+impl TermId {
+    /// Ephemeral adapter term that is never stored in a TLC program.
+    pub const SYNTHETIC: Self = Self(None);
+
+    /// The allocated nonzero numeric ID, or `None` for a synthetic adapter
+    /// term.
+    pub fn as_u32(self) -> Option<u32> {
+        self.0.map(NonZeroU32::get)
+    }
+}
+
+impl std::fmt::Display for TermId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.as_u32() {
+            Some(id) => id.fmt(f),
+            None => f.write_str("synthetic"),
+        }
+    }
+}
+
+impl std::fmt::Debug for TermId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.as_u32() {
+            Some(id) => write!(f, "TermId({id})"),
+            None => f.write_str("TermId::SYNTHETIC"),
+        }
     }
 }
 
 /// The compiler-wide allocator for TLC term identifiers.
-pub type TermIdSource = crate::IdSource<TermId>;
+///
+/// The cursor uses the same niche representation as `TermId`: nonzero values
+/// are available IDs and `None` means that the finite ID space is exhausted.
+#[derive(Debug, Clone)]
+pub struct TermIdSource {
+    next: Option<NonZeroU32>,
+}
+
+impl TermIdSource {
+    pub fn new() -> Self {
+        Self {
+            next: Some(NonZeroU32::MIN),
+        }
+    }
+
+    pub fn next_id(&mut self) -> TermId {
+        let next = self.next.expect("TLC TermId space exhausted");
+        self.next = next.checked_add(1);
+        TermId(Some(next))
+    }
+}
+
+impl Default for TermIdSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// A typed term in the lambda calculus.
 #[derive(Debug, Clone)]
@@ -530,9 +581,31 @@ pub struct Program {
     /// Canonical function name → def SymbolId mapping.
     /// Used by fusion to resolve call-site SymbolIds to def SymbolIds.
     pub def_syms: LookupMap<String, SymbolId>,
+    /// The sole allocator for terms added to this program.
+    term_ids: TermIdSource,
 }
 
 impl Program {
+    /// Assemble a TLC program from nodes and the allocator that created them.
+    pub(crate) fn from_parts(
+        defs: Vec<Def>,
+        symbols: SymbolTable,
+        def_syms: LookupMap<String, SymbolId>,
+        term_ids: TermIdSource,
+    ) -> Self {
+        Self {
+            defs,
+            symbols,
+            def_syms,
+            term_ids,
+        }
+    }
+
+    /// Allocate a term ID from this program's unique ID domain.
+    pub fn next_term_id(&mut self) -> TermId {
+        self.term_ids.next_id()
+    }
+
     /// Assert no def body contains nested Apps.
     pub fn assert_flat_apps(&self) {
         for def in &self.defs {
@@ -564,23 +637,26 @@ pub struct ProgramParts {
 
 impl ProgramParts {
     /// Combine with a symbol table to create a complete Program.
-    pub fn with_symbols(self, symbols: SymbolTable, def_syms: LookupMap<String, SymbolId>) -> Program {
-        Program {
-            defs: self.defs,
-            symbols,
-            def_syms,
-        }
+    pub fn with_symbols(
+        self,
+        symbols: SymbolTable,
+        def_syms: LookupMap<String, SymbolId>,
+        term_ids: TermIdSource,
+    ) -> Program {
+        Program::from_parts(self.defs, symbols, def_syms, term_ids)
     }
 }
 
 impl Program {
     /// Rebuild a Program, carrying def_syms through.
     pub fn rebuild(self, defs: Vec<Def>, symbols: SymbolTable) -> Program {
-        Program {
+        let program = Program {
             defs,
             symbols,
             def_syms: self.def_syms,
-        }
+            term_ids: self.term_ids,
+        };
+        program
     }
 }
 
@@ -1180,7 +1256,7 @@ pub fn atom_var_term(vr: VarRef, ty: Type<TypeName>, term_ids: &mut TermIdSource
 
 pub(crate) fn synthetic_atom_var_term(vr: VarRef, ty: Type<TypeName>) -> Term {
     Term {
-        id: TermId(u32::MAX),
+        id: TermId::SYNTHETIC,
         ty,
         span: Span::new(0, 0, 0, 0),
         kind: TermKind::Var(vr),
@@ -1936,7 +2012,7 @@ impl<'a> Transformer<'a> {
 
                     let (base, wrap_let): (Term, Option<(SymbolId, Type<TypeName>, Term)>) = if needs_share
                     {
-                        let t_id = self.term_ids.next_id().0;
+                        let t_id = self.term_ids.next_id();
                         let t_sym = self.define(&format!("_w_swz_t_{}", t_id));
                         let t_ty = rec.ty.clone();
                         let var = self.mk_term(t_ty.clone(), span, TermKind::Var(VarRef::Symbol(t_sym)));
@@ -2786,7 +2862,7 @@ impl<'a> Transformer<'a> {
         }
 
         // For complex patterns, create a fresh loop_var and build projections
-        let loop_var_name = format!("_w_loop_{}", self.term_ids.next_id().0);
+        let loop_var_name = format!("_w_loop_{}", self.term_ids.next_id());
         let loop_var_sym = self.define(&loop_var_name);
         let paths = binding_paths(pattern);
 
@@ -2889,7 +2965,7 @@ impl<'a> Transformer<'a> {
 
         // Bind `_t = target` so each per-slot projection reads the
         // same evaluated value.
-        let t_id = self.term_ids.next_id().0;
+        let t_id = self.term_ids.next_id();
         let t_sym = self.define(&format!("_w_vw_t_{}", t_id));
         let t_var = self.mk_term(target_ty.clone(), span, TermKind::Var(VarRef::Symbol(t_sym)));
 
@@ -2917,7 +2993,7 @@ impl<'a> Transformer<'a> {
         };
 
         // Bind `_r = <rhs>` so per-slot reads share one evaluation.
-        let r_id = self.term_ids.next_id().0;
+        let r_id = self.term_ids.next_id();
         let r_sym = self.define(&format!("_w_vw_r_{}", r_id));
         let r_var = self.mk_term(rhs_term.ty.clone(), span, TermKind::Var(VarRef::Symbol(r_sym)));
 
@@ -2987,7 +3063,7 @@ impl<'a> Transformer<'a> {
         let record_ty = r_term.ty.clone();
         let new_value = self.transform_expr(value);
 
-        let r_id = self.term_ids.next_id().0;
+        let r_id = self.term_ids.next_id();
         let r_sym = self.define(&format!("_w_rw_r_{}", r_id));
         let r_var = self.mk_term(record_ty.clone(), span, TermKind::Var(VarRef::Symbol(r_sym)));
 
@@ -3027,7 +3103,7 @@ impl<'a> Transformer<'a> {
         } else {
             let inner_ty = field_types[idx].clone();
             let inner_proj = self.build_proj(target, idx, &inner_ty, span);
-            let inner_id = self.term_ids.next_id().0;
+            let inner_id = self.term_ids.next_id();
             let inner_sym = self.define(&format!("_w_rw_inner_{}", inner_id));
             let inner_var = self.mk_term(inner_ty.clone(), span, TermKind::Var(VarRef::Symbol(inner_sym)));
             let inner_body =

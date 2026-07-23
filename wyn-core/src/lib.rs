@@ -103,8 +103,9 @@ impl<Id: From<u32>> IdSource<Id> {
     }
 
     pub fn next_id(&mut self) -> Id {
-        let id = Id::from(self.next_id);
-        self.next_id += 1;
+        let raw = self.next_id;
+        self.next_id = self.next_id.checked_add(1).expect("compiler ID space exhausted");
+        let id = Id::from(raw);
         id
     }
 
@@ -696,7 +697,6 @@ impl TypeChecked {
             known_defs: out.known_defs,
             schemes: out.schemes,
             fill_hole_errors: out.fill_hole_errors,
-            term_ids: out.term_ids,
             auto_storage_binding_ids: IdSource::new(),
         })
     }
@@ -712,8 +712,6 @@ impl TypeChecked {
 /// them across group boundaries by value.
 pub struct TlcEarlyInner {
     pub tlc: tlc::Program,
-    /// One allocator shared by every TLC pass in this compilation.
-    pub term_ids: tlc::TermIdSource,
     pub type_table: TypeTable,
     /// Built-in names that should not be captured as free variables
     pub known_defs: LookupSet<String>,
@@ -794,7 +792,7 @@ impl TlcOwnershipValidated {
     /// Constant folding and algebraic simplifications.
     pub fn partial_eval(self) -> TlcPartialEvaled {
         let mut inner = self.0;
-        tlc::partial_eval::PartialEvaluator::partial_eval(&mut inner.tlc, &mut inner.term_ids);
+        tlc::partial_eval::PartialEvaluator::partial_eval(&mut inner.tlc);
         TlcPartialEvaled(inner)
     }
 }
@@ -841,7 +839,7 @@ impl TlcPartialEvaled {
     /// flatten Map+Zip into multi-input Map, and convert standalone Zip to tuple.
     pub fn normalize_soacs(self) -> TlcSoaNormalized {
         let mut inner = self.0;
-        tlc::soa::run(&mut inner.tlc, &mut inner.term_ids);
+        tlc::soa::run(&mut inner.tlc);
         TlcSoaNormalized(inner)
     }
 }
@@ -872,7 +870,7 @@ impl TlcSoacHelpersInlined {
     /// Re-run SoA normalization after inlining exposed tuple/zip/map structure.
     pub fn renormalize_inlined_soa(self) -> TlcInlinedSoaNormalized {
         let mut inner = self.0;
-        tlc::soa::run(&mut inner.tlc, &mut inner.term_ids);
+        tlc::soa::run(&mut inner.tlc);
         TlcInlinedSoaNormalized(inner)
     }
 }
@@ -891,7 +889,7 @@ impl TlcInlinedSoaNormalized {
     /// Turn eligible array-valued conditionals into one pointwise producer.
     pub fn canonicalize_conditional_producers(self) -> TlcConditionalProducersCanonicalized {
         let mut inner = self.0;
-        tlc::if_over_producer::run(&mut inner.tlc, &mut inner.term_ids);
+        tlc::if_over_producer::run(&mut inner.tlc);
         TlcConditionalProducersCanonicalized(inner)
     }
 }
@@ -911,7 +909,7 @@ impl TlcConditionalProducersCanonicalized {
     /// conversion records every semantic producer/consumer edge explicitly.
     pub fn normalize_soacs_to_anf(self) -> TlcSoacsAnfNormalized {
         let mut inner = self.0;
-        tlc::soac_anf::run(&mut inner.tlc, &mut inner.term_ids);
+        tlc::soac_anf::run(&mut inner.tlc);
         TlcSoacsAnfNormalized(inner)
     }
 }
@@ -932,7 +930,7 @@ impl TlcSoacsAnfNormalized {
     /// graph rewrites, where use edges and resource effects are explicit.
     pub fn float_runtime_index_nested_producers(self) -> TlcRuntimeIndexProducersFloated {
         let mut inner = self.0;
-        tlc::runtime_index_producers::run(&mut inner.tlc, &mut inner.term_ids);
+        tlc::runtime_index_producers::run(&mut inner.tlc);
         TlcRuntimeIndexProducersFloated(inner)
     }
 }
@@ -975,10 +973,9 @@ impl TlcRuntimeIndexProducersFloated {
     /// performs subsequent residency and physical-entry decisions.
     pub fn defunctionalize(self) -> TlcDefunctionalized {
         let mut inner = self.0;
-        let closure_info =
-            tlc::closure_convert::run(&mut inner.tlc, &inner.known_defs, &mut inner.term_ids);
-        tlc::hof_specialize::run(&mut inner.tlc, &closure_info, &mut inner.term_ids);
-        tlc::closure_calls_lower::run(&mut inner.tlc, &closure_info, &mut inner.term_ids);
+        let closure_info = tlc::closure_convert::run(&mut inner.tlc, &inner.known_defs);
+        tlc::hof_specialize::run(&mut inner.tlc, &closure_info);
+        tlc::closure_calls_lower::run(&mut inner.tlc, &closure_info);
         TlcDefunctionalized(inner)
     }
 }
@@ -1008,8 +1005,8 @@ impl TlcSoaNormalized {
     /// (region-specialized). After this no `Type::Variable` remains.
     pub fn monomorphize(self) -> TlcMonomorphized {
         let mut inner = self.0;
-        tlc::specialize::run(&mut inner.tlc, &mut inner.term_ids);
-        tlc::monomorphize::run(&mut inner.tlc, &inner.schemes, &mut inner.term_ids);
+        tlc::specialize::run(&mut inner.tlc);
+        tlc::monomorphize::run(&mut inner.tlc, &inner.schemes);
         TlcMonomorphized(inner)
     }
 }
@@ -1029,7 +1026,7 @@ impl TlcMonomorphized {
     /// only at the producer site, before helper inlining and EGIR conversion.
     pub fn rep_specialize(self) -> TlcRepSpecialized {
         let mut inner = self.0;
-        tlc::rep_specialize::run(&mut inner.tlc, &mut inner.term_ids);
+        tlc::rep_specialize::run(&mut inner.tlc);
         TlcRepSpecialized(inner)
     }
 }
@@ -1048,7 +1045,7 @@ impl TlcRepSpecialized {
     /// Inline small user functions and constants at their call/reference sites.
     pub fn inline_small(self) -> TlcSmallInlined {
         let mut inner = self.0;
-        tlc::inline::run_small(&mut inner.tlc, &mut inner.term_ids);
+        tlc::inline::run_small(&mut inner.tlc);
         TlcSmallInlined(inner)
     }
 }
@@ -1068,7 +1065,7 @@ impl TlcSmallInlined {
     /// already monomorphic, so EGIR receives explicit producer/consumer edges.
     pub fn force_inline_soac_helpers(self) -> TlcSoacHelpersInlined {
         let mut inner = self.0;
-        tlc::inline::run_force_soac_helpers(&mut inner.tlc, &mut inner.term_ids);
+        tlc::inline::run_force_soac_helpers(&mut inner.tlc);
         TlcSoacHelpersInlined(inner)
     }
 }
@@ -1093,7 +1090,7 @@ impl TlcDefunctionalized {
     /// then DCE. Runs after defunctionalize (which produces those lambdas).
     pub fn fold_generated_lambdas(self) -> TlcGeneratedLambdasFolded {
         let mut inner = self.0;
-        tlc::inline::run_large(&mut inner.tlc, &mut inner.term_ids);
+        tlc::inline::run_large(&mut inner.tlc);
         TlcGeneratedLambdasFolded(inner)
     }
 }

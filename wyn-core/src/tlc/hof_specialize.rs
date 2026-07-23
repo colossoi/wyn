@@ -1215,7 +1215,7 @@ impl<'a, 'ids> HofSpecializer<'a, 'ids> {
 /// Run HOF specialization in place. Takes the closure-converted program
 /// and the closure-info side-table; afterwards every reachable top-level
 /// def has zero function-typed parameters.
-pub fn run(program: &mut Program, closure_info: &ClosureInfo, term_ids: &mut TermIdSource) {
+pub fn run(program: &mut Program, closure_info: &ClosureInfo) {
     let hof_info = detect_hofs(&program.defs);
     let top_level: LookupSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
 
@@ -1229,7 +1229,7 @@ pub fn run(program: &mut Program, closure_info: &ClosureInfo, term_ids: &mut Ter
         closure_spec_cache: LookupMap::new(),
         defs_by_sym: LookupMap::new(),
         specialization_counter: 0,
-        term_ids,
+        term_ids: &mut program.term_ids,
     };
 
     for def in &mut program.defs {

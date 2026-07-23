@@ -68,9 +68,10 @@ pub struct PartialEvaluator<'a> {
 }
 
 impl<'a> PartialEvaluator<'a> {
-    pub fn partial_eval(program: &mut Program, term_ids: &'a mut TermIdSource) {
+    pub fn partial_eval(program: &mut Program) {
         program.assert_flat_apps();
-        let mut eval = Self {
+        let term_ids = &mut program.term_ids;
+        let mut eval = PartialEvaluator {
             defs: program.defs.iter().map(|d| (d.name, d.clone())).collect(),
             term_ids,
             env: LookupMap::new(),
@@ -83,6 +84,7 @@ impl<'a> PartialEvaluator<'a> {
             Def { body, ..def }
         });
 
+        drop(eval);
         program.assert_flat_apps();
     }
 

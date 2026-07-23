@@ -38,8 +38,13 @@ type Substitution = LookupMap<usize, Type<TypeName>>;
 ///
 /// This walks through all definitions starting from entry points, finds calls
 /// to polymorphic functions, and creates specialized versions with concrete types.
-pub fn run(program: &mut Program, schemes: &LookupMap<SymbolId, TypeScheme>, term_ids: &mut TermIdSource) {
-    let mono = Monomorphizer::new(&mut *program, schemes, term_ids);
+pub fn run(program: &mut Program, schemes: &LookupMap<SymbolId, TypeScheme>) {
+    let mono = Monomorphizer::new(
+        &mut program.symbols,
+        &program.defs,
+        schemes,
+        &mut program.term_ids,
+    );
     program.defs = mono.monomorphize();
     program.assert_flat_apps();
 }
@@ -319,7 +324,8 @@ fn split_function_type(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeNa
 
 impl<'a, 'ids> Monomorphizer<'a, 'ids> {
     fn new(
-        program: &'a mut Program,
+        symbols: &'a mut SymbolTable,
+        defs: &[Def],
         schemes: &'a LookupMap<SymbolId, TypeScheme>,
         term_ids: &'ids mut TermIdSource,
     ) -> Self {
@@ -327,7 +333,7 @@ impl<'a, 'ids> Monomorphizer<'a, 'ids> {
         let mut poly_functions = LookupMap::new();
         let mut entry_points = Vec::new();
 
-        for def in program.defs.iter() {
+        for def in defs {
             let sym = def.name;
 
             // For entry points, add to worklist
@@ -346,7 +352,7 @@ impl<'a, 'ids> Monomorphizer<'a, 'ids> {
         worklist.extend(entry_points);
 
         Monomorphizer {
-            symbols: &mut program.symbols,
+            symbols,
             poly_functions,
             mono_functions: Vec::new(),
             specializations: LookupMap::new(),

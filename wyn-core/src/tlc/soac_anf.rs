@@ -8,7 +8,8 @@
 use super::{Def, Program, Term, TermIdSource, TermKind, VarRef};
 use crate::SymbolTable;
 
-pub fn run(program: &mut Program, term_ids: &mut TermIdSource) {
+pub fn run(program: &mut Program) {
+    let term_ids = &mut program.term_ids;
     crate::map_in_place(&mut program.defs, |def| {
         let body = normalize_term(def.body, &mut program.symbols, term_ids);
         Def { body, ..def }

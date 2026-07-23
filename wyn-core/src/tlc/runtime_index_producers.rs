@@ -30,7 +30,8 @@ struct Binding {
     rhs: Term,
 }
 
-pub fn run(program: &mut Program, ids: &mut TermIdSource) {
+pub fn run(program: &mut Program) {
+    let ids = &mut program.term_ids;
     let blocked = LookupSet::new();
 
     for idx in 0..program.defs.len() {

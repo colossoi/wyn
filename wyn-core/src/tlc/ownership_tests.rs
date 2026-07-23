@@ -182,11 +182,7 @@ fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId)
         param_diets: vec![crate::types::Diet::Leaf(true)],
         return_diet: crate::types::Diet::observing(),
     };
-    let program = Program {
-        defs: vec![def],
-        symbols,
-        def_syms: Default::default(),
-    };
+    let program = Program::from_parts(vec![def], symbols, Default::default(), ids);
     let _ = lam_body_id; // silence unused (kept for documentation)
     (program, a_sym, b_sym)
 }
@@ -1733,11 +1729,7 @@ fn synth_program_with_with_through_index() -> Program {
         return_diet: crate::types::Diet::observing(),
     };
 
-    Program {
-        defs: vec![f_def],
-        symbols,
-        def_syms,
-    }
+    Program::from_parts(vec![f_def], symbols, def_syms, ids)
 }
 
 #[test]
@@ -2005,11 +1997,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
         return_diet: crate::types::Diet::observing(),
     };
 
-    Program {
-        defs: vec![consume_def, main_def],
-        symbols,
-        def_syms,
-    }
+    Program::from_parts(vec![consume_def, main_def], symbols, def_syms, ids)
 }
 
 #[test]
@@ -2171,11 +2159,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         return_diet: crate::types::Diet::observing(),
     };
 
-    let program = Program {
-        defs: vec![main_def],
-        symbols,
-        def_syms: std::collections::HashMap::new(),
-    };
+    let program = Program::from_parts(vec![main_def], symbols, std::collections::HashMap::new(), ids);
 
     let model = super::analyze(&program);
     assert!(

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::ast::{Span, TypeName};
-use crate::tlc::{Def, DefMeta, Lambda, Place, Program, SoacBody, SoacOp, Term, TermId, TermKind};
+use crate::tlc::{Def, DefMeta, Lambda, Place, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind};
 use crate::SymbolTable;
 use polytype::Type;
 use std::collections::HashMap;
@@ -26,16 +26,21 @@ fn unit_ty() -> Type<TypeName> {
 }
 
 fn empty_program() -> Program {
-    Program {
-        defs: vec![],
-        symbols: SymbolTable::new(),
-        def_syms: HashMap::new(),
+    Program::from_parts(vec![], SymbolTable::new(), HashMap::new(), TermIdSource::new())
+}
+
+fn term(program: &mut Program, kind: TermKind, ty: Type<TypeName>) -> Term {
+    Term {
+        id: program.next_term_id(),
+        ty,
+        span: span(),
+        kind,
     }
 }
 
-fn term(kind: TermKind, ty: Type<TypeName>) -> Term {
+fn term_with_ids(ids: &mut TermIdSource, kind: TermKind, ty: Type<TypeName>) -> Term {
     Term {
-        id: TermId(0),
+        id: ids.next_id(),
         ty,
         span: span(),
         kind,
@@ -52,10 +57,11 @@ fn empty_program_passes_verifier() {
 fn def_with_simple_body_passes_verifier() {
     let mut program = empty_program();
     let sym = program.symbols.alloc("f".to_string());
+    let body = term(&mut program, TermKind::IntLit("0".into()), unit_ty());
     program.defs.push(Def {
         name: sym,
         ty: unit_ty(),
-        body: term(TermKind::IntLit("0".into()), unit_ty()),
+        body,
         meta: DefMeta::Function,
         arity: 0,
         param_diets: vec![],
@@ -68,20 +74,25 @@ fn def_with_simple_body_passes_verifier() {
 fn unlifted_lambda_in_body_fails_verifier() {
     let mut program = empty_program();
     let sym = program.symbols.alloc("f".to_string());
+    let nested_body = term(&mut program, TermKind::IntLit("0".into()), unit_ty());
     let nested_lam = term(
+        &mut program,
         TermKind::Lambda(Lambda {
             params: vec![],
-            body: Box::new(term(TermKind::IntLit("0".into()), unit_ty())),
+            body: Box::new(nested_body),
             ret_ty: unit_ty(),
         }),
         unit_ty(),
     );
+    let let_body = term(&mut program, TermKind::IntLit("0".into()), unit_ty());
+    let name = program.symbols.alloc("x".to_string());
     let body = term(
+        &mut program,
         TermKind::Let {
-            name: program.symbols.alloc("x".to_string()),
+            name,
             name_ty: unit_ty(),
             rhs: Box::new(nested_lam),
-            body: Box::new(term(TermKind::IntLit("0".into()), unit_ty())),
+            body: Box::new(let_body),
         },
         unit_ty(),
     );
@@ -107,7 +118,7 @@ fn append_capture_params_extends_param_list() {
     let cap_a = symbols.alloc("a".into());
     let cap_b = symbols.alloc("b".into());
 
-    let inner_body = term(TermKind::Var(VarRef::Symbol(x)), unit_ty());
+    let inner_body = term_with_ids(&mut ids, TermKind::Var(VarRef::Symbol(x)), unit_ty());
     let lam_ty = Type::Constructed(TypeName::Arrow, vec![unit_ty(), unit_ty()]);
     let lam = Term {
         id: ids.next_id(),
@@ -139,8 +150,9 @@ fn param_spine_lambdas_are_skipped() {
     let mut program = empty_program();
     let sym = program.symbols.alloc("f".to_string());
     let p = program.symbols.alloc("p".to_string());
-    let inner = term(TermKind::Var(VarRef::Symbol(p)), unit_ty());
+    let inner = term(&mut program, TermKind::Var(VarRef::Symbol(p)), unit_ty());
     let body = term(
+        &mut program,
         TermKind::Lambda(Lambda {
             params: vec![(p, unit_ty())],
             body: Box::new(inner),
@@ -165,7 +177,9 @@ fn unlifted_scatter_envelope_fails_verifier() {
     let mut program = empty_program();
     let sym = program.symbols.alloc("f".to_string());
     let dest = program.symbols.alloc("dest".to_string());
+    let scatter_body = term(&mut program, TermKind::UnitLit, unit_ty());
     let scatter = term(
+        &mut program,
         TermKind::Soac(SoacOp::Scatter {
             dest: Place {
                 id: dest,
@@ -174,7 +188,7 @@ fn unlifted_scatter_envelope_fails_verifier() {
             lam: SoacBody {
                 lam: Lambda {
                     params: vec![],
-                    body: Box::new(term(TermKind::UnitLit, unit_ty())),
+                    body: Box::new(scatter_body),
                     ret_ty: unit_ty(),
                 },
                 captures: vec![],
@@ -215,7 +229,11 @@ fn scatter_envelope_params_count_as_bound_symbols() {
             lam: SoacBody {
                 lam: Lambda {
                     params: vec![(param, unit_ty())],
-                    body: Box::new(term(TermKind::Var(VarRef::Symbol(param)), unit_ty())),
+                    body: Box::new(term_with_ids(
+                        &mut ids,
+                        TermKind::Var(VarRef::Symbol(param)),
+                        unit_ty(),
+                    )),
                     ret_ty: unit_ty(),
                 },
                 captures: vec![],
@@ -258,17 +276,20 @@ fn reduce_with_operator(
     let g = program.symbols.alloc("g".to_string());
     let ga = program.symbols.alloc("ga".to_string());
     let gb = program.symbols.alloc("gb".to_string());
+    let g_lambda_body = term(&mut program, TermKind::Var(VarRef::Symbol(ga)), elem.clone());
+    let g_body = term(
+        &mut program,
+        TermKind::Lambda(Lambda {
+            params: vec![(ga, elem.clone()), (gb, elem.clone())],
+            body: Box::new(g_lambda_body),
+            ret_ty: elem.clone(),
+        }),
+        op_ty.clone(),
+    );
     program.defs.push(Def {
         name: g,
         ty: op_ty.clone(),
-        body: term(
-            TermKind::Lambda(Lambda {
-                params: vec![(ga, elem.clone()), (gb, elem.clone())],
-                body: Box::new(term(TermKind::Var(VarRef::Symbol(ga)), elem.clone())),
-                ret_ty: elem.clone(),
-            }),
-            op_ty.clone(),
-        ),
+        body: g_body,
         meta: DefMeta::Function,
         arity: 2,
         param_diets: vec![],
@@ -278,46 +299,53 @@ fn reduce_with_operator(
     let p0 = program.symbols.alloc("p0".to_string());
     let p1 = program.symbols.alloc("p1".to_string());
     let [a0, a1] = op_args(p0, p1);
+    let op_func = term(&mut program, TermKind::Var(VarRef::Symbol(g)), op_ty.clone());
+    let op_arg0 = term(&mut program, TermKind::Var(VarRef::Symbol(a0)), elem.clone());
+    let op_arg1 = term(&mut program, TermKind::Var(VarRef::Symbol(a1)), elem.clone());
+    let op_body = term(
+        &mut program,
+        TermKind::App {
+            func: Box::new(op_func),
+            args: vec![op_arg0, op_arg1],
+        },
+        elem.clone(),
+    );
     let op = crate::tlc::SoacBody {
         lam: Lambda {
             params: vec![(p0, elem.clone()), (p1, elem.clone())],
-            body: Box::new(term(
-                TermKind::App {
-                    func: Box::new(term(TermKind::Var(VarRef::Symbol(g)), op_ty.clone())),
-                    args: vec![
-                        term(TermKind::Var(VarRef::Symbol(a0)), elem.clone()),
-                        term(TermKind::Var(VarRef::Symbol(a1)), elem.clone()),
-                    ],
-                },
-                elem.clone(),
-            )),
+            body: Box::new(op_body),
             ret_ty: elem.clone(),
         },
         captures: vec![],
     };
 
     let arr = program.symbols.alloc("arr".to_string());
+    let ne = term(&mut program, TermKind::UnitLit, elem.clone());
+    let input = term(&mut program, TermKind::Var(VarRef::Symbol(arr)), elem.clone());
     let reduce = term(
+        &mut program,
         TermKind::Soac(SoacOp::Reduce {
             op,
-            ne: Box::new(term(TermKind::UnitLit, elem.clone())),
-            input: input_ae(Box::new(term(TermKind::Var(VarRef::Symbol(arr)), elem.clone()))),
+            ne: Box::new(ne),
+            input: input_ae(Box::new(input)),
         }),
         elem.clone(),
     );
     let main = program.symbols.alloc("main".to_string());
     let main_ty = Type::Constructed(TypeName::Arrow, vec![elem.clone(), elem.clone()]);
+    let main_body = term(
+        &mut program,
+        TermKind::Lambda(Lambda {
+            params: vec![(arr, elem.clone())],
+            body: Box::new(reduce),
+            ret_ty: elem.clone(),
+        }),
+        main_ty.clone(),
+    );
     program.defs.push(Def {
         name: main,
         ty: main_ty.clone(),
-        body: term(
-            TermKind::Lambda(Lambda {
-                params: vec![(arr, elem.clone())],
-                body: Box::new(reduce),
-                ret_ty: elem.clone(),
-            }),
-            main_ty,
-        ),
+        body: main_body,
         meta: DefMeta::Function,
         arity: 1,
         param_diets: vec![],
@@ -325,8 +353,7 @@ fn reduce_with_operator(
     });
 
     let mut result = program;
-    let mut term_ids = crate::tlc::TermIdSource::new();
-    let info = run(&mut result, &std::collections::HashSet::new(), &mut term_ids);
+    let info = run(&mut result, &std::collections::HashSet::new());
     (result, info, g, main)
 }
 

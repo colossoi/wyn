@@ -27,7 +27,6 @@ pub struct TlcOutput {
     pub known_defs: LookupSet<String>,
     pub schemes: LookupMap<SymbolId, TypeScheme<TypeName>>,
     pub fill_hole_errors: Vec<CompilerError>,
-    pub term_ids: TermIdSource,
 }
 
 pub fn run(
@@ -115,7 +114,7 @@ pub fn run(
         .filter_map(|(name, scheme)| top_level_symbols.get(name).map(|&sym| (sym, scheme.clone())))
         .collect();
 
-    let program = parts.with_symbols(symbols, top_level_symbols);
+    let program = parts.with_symbols(symbols, top_level_symbols, term_ids);
 
     TlcOutput {
         program,
@@ -123,6 +122,5 @@ pub fn run(
         known_defs: registry.name_set(),
         schemes: schemes_by_sym,
         fill_hole_errors,
-        term_ids,
     }
 }

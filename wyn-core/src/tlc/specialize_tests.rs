@@ -35,8 +35,8 @@ impl TestBuilder {
         Span::dummy()
     }
 
-    fn finish(self) -> SymbolTable {
-        self.symbols
+    fn finish(self) -> (SymbolTable, TermIdSource) {
+        (self.symbols, self.ids)
     }
 }
 
@@ -80,10 +80,10 @@ fn test_specialize_sign_f32() {
         },
     };
 
-    let symbols = b.finish();
+    let (symbols, term_ids) = b.finish();
 
-    let mut program = Program {
-        defs: vec![Def {
+    let mut program = Program::from_parts(
+        vec![Def {
             name: test_sym,
             ty: f32_ty.clone(),
             body: sign_call,
@@ -93,11 +93,11 @@ fn test_specialize_sign_f32() {
             return_diet: crate::types::Diet::observing(),
         }],
         symbols,
-        def_syms: HashMap::new(),
-    };
+        HashMap::new(),
+        term_ids,
+    );
 
-    let mut term_ids = TermIdSource::new();
-    run(&mut program, &mut term_ids);
+    run(&mut program);
 
     // Check that sign became f32.sign
     match &program.defs[0].body.kind {
@@ -164,10 +164,10 @@ fn test_specialize_min_i32() {
         },
     };
 
-    let symbols = b.finish();
+    let (symbols, term_ids) = b.finish();
 
-    let mut program = Program {
-        defs: vec![Def {
+    let mut program = Program::from_parts(
+        vec![Def {
             name: test_sym,
             ty: i32_ty.clone(),
             body: min_a_b,
@@ -177,11 +177,11 @@ fn test_specialize_min_i32() {
             return_diet: crate::types::Diet::observing(),
         }],
         symbols,
-        def_syms: HashMap::new(),
-    };
+        HashMap::new(),
+        term_ids,
+    );
 
-    let mut term_ids = TermIdSource::new();
-    run(&mut program, &mut term_ids);
+    run(&mut program);
 
     // Check that min became i32.min in the application
     match &program.defs[0].body.kind {

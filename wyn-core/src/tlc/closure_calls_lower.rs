@@ -501,8 +501,8 @@ pub fn thread_captures_in_term(
 
 /// Run closure-call lowering in place. Threads captures into call sites
 /// and runs the post-condition verifier.
-pub fn run(program: &mut Program, closure_info: &ClosureInfo, term_ids: &mut TermIdSource) {
-    let mut lowerer = CallLowerer::new(closure_info, term_ids);
+pub fn run(program: &mut Program, closure_info: &ClosureInfo) {
+    let mut lowerer = CallLowerer::new(closure_info, &mut program.term_ids);
     crate::map_in_place(&mut program.defs, |def| super::Def {
         body: lowerer.lower_def_body(def.body),
         ..def

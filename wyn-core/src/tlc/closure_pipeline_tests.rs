@@ -8,10 +8,9 @@ use std::collections::{HashMap, HashSet};
 /// End-to-end runner for the three-phase closure pipeline. Mirrors what
 /// `TlcOwnershipApplied::defunctionalize` does in production.
 fn defunctionalize(program: &mut Program, known_defs: &HashSet<String>) {
-    let mut term_ids = TermIdSource::new();
-    let closure_info = super::super::closure_convert::run(program, known_defs, &mut term_ids);
-    super::super::hof_specialize::run(program, &closure_info, &mut term_ids);
-    super::super::closure_calls_lower::run(program, &closure_info, &mut term_ids);
+    let closure_info = super::super::closure_convert::run(program, known_defs);
+    super::super::hof_specialize::run(program, &closure_info);
+    super::super::closure_calls_lower::run(program, &closure_info);
 }
 
 /// Test helper that manages symbol table and term ID generation.
@@ -40,8 +39,8 @@ impl TestBuilder {
         Span::dummy()
     }
 
-    fn finish(self) -> SymbolTable {
-        self.symbols
+    fn finish(self) -> (SymbolTable, TermIdSource) {
+        (self.symbols, self.ids)
     }
 }
 
@@ -202,8 +201,9 @@ fn test_defunc_simple_lambda_no_capture() {
         }),
     };
 
-    let program = Program {
-        defs: vec![Def {
+    let (symbols, term_ids) = b.finish();
+    let program = Program::from_parts(
+        vec![Def {
             name: f_sym,
             ty: lam.ty.clone(),
             body: lam,
@@ -212,9 +212,10 @@ fn test_defunc_simple_lambda_no_capture() {
             param_diets: vec![],
             return_diet: crate::types::Diet::observing(),
         }],
-        symbols: b.finish(),
-        def_syms: HashMap::new(),
-    };
+        symbols,
+        HashMap::new(),
+        term_ids,
+    );
 
     let known_defs = HashSet::new();
     let mut result = program;
@@ -296,10 +297,10 @@ fn test_defunc_lambda_with_capture() {
         }),
     };
 
-    let symbols = b.finish();
+    let (symbols, term_ids) = b.finish();
 
-    let program = Program {
-        defs: vec![Def {
+    let program = Program::from_parts(
+        vec![Def {
             name: f_sym,
             ty: outer_lam.ty.clone(),
             body: outer_lam,
@@ -309,8 +310,9 @@ fn test_defunc_lambda_with_capture() {
             return_diet: crate::types::Diet::observing(),
         }],
         symbols,
-        def_syms: HashMap::new(),
-    };
+        HashMap::new(),
+        term_ids,
+    );
 
     let known_defs = HashSet::new();
     let mut result = program;
@@ -501,10 +503,10 @@ fn test_nested_hof_passthrough() {
         }),
     };
 
-    let symbols = b.finish();
+    let (symbols, term_ids) = b.finish();
 
-    let program = Program {
-        defs: vec![
+    let program = Program::from_parts(
+        vec![
             Def {
                 name: hof_inner_sym,
                 ty: hof_inner.ty.clone(),
@@ -534,8 +536,9 @@ fn test_nested_hof_passthrough() {
             },
         ],
         symbols,
-        def_syms: HashMap::new(),
-    };
+        HashMap::new(),
+        term_ids,
+    );
 
     let known_defs = HashSet::new();
     let mut result = program;
@@ -685,9 +688,9 @@ fn specialized_hof_preserves_consuming_data_param_diet() {
         }),
     };
 
-    let symbols = b.finish();
-    let program = Program {
-        defs: vec![
+    let (symbols, term_ids) = b.finish();
+    let program = Program::from_parts(
+        vec![
             Def {
                 name: apply_sym,
                 ty: apply_ty,
@@ -708,8 +711,9 @@ fn specialized_hof_preserves_consuming_data_param_diet() {
             },
         ],
         symbols,
-        def_syms: HashMap::new(),
-    };
+        HashMap::new(),
+        term_ids,
+    );
 
     let mut result = program;
     defunctionalize(&mut result, &HashSet::new());

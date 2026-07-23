@@ -1046,8 +1046,8 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
 ///    that touch array-of-tuple types.
 /// 2. Flattens Map+Zip into multi-input Map with split lambda params.
 /// 3. Converts standalone Zip to tuple construction.
-pub fn run(program: &mut Program, term_ids: &mut TermIdSource) {
-    let mut transformer = SoaTransformer::new(&mut program.symbols, term_ids);
+pub fn run(program: &mut Program) {
+    let mut transformer = SoaTransformer::new(&mut program.symbols, &mut program.term_ids);
     for def in &mut program.defs {
         transformer.transform_def(def);
     }

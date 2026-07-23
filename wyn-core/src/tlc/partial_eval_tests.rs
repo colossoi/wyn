@@ -33,8 +33,8 @@ impl TestBuilder {
         Span::dummy()
     }
 
-    fn finish(self) -> SymbolTable {
-        self.symbols
+    fn finish(self) -> (SymbolTable, TermIdSource) {
+        (self.symbols, self.ids)
     }
 }
 
@@ -52,9 +52,13 @@ fn make_span() -> Span {
     Span::dummy()
 }
 
-fn make_program(name_sym: SymbolId, body: Term, symbols: SymbolTable) -> Program {
-    Program {
-        defs: vec![Def {
+fn make_program(
+    name_sym: SymbolId,
+    body: Term,
+    (symbols, term_ids): (SymbolTable, TermIdSource),
+) -> Program {
+    Program::from_parts(
+        vec![Def {
             name: name_sym,
             ty: body.ty.clone(),
             body,
@@ -64,13 +68,13 @@ fn make_program(name_sym: SymbolId, body: Term, symbols: SymbolTable) -> Program
             return_diet: crate::types::Diet::observing(),
         }],
         symbols,
-        def_syms: HashMap::new(),
-    }
+        HashMap::new(),
+        term_ids,
+    )
 }
 
 fn partial_eval(program: &mut Program) {
-    let mut term_ids = TermIdSource::new();
-    PartialEvaluator::partial_eval(program, &mut term_ids);
+    PartialEvaluator::partial_eval(program);
 }
 
 fn make_int(ids: &mut TermIdSource, n: i64) -> Term {
@@ -275,8 +279,9 @@ fn scalar_glsl_math_folds_inside_lambda_body() {
             ret_ty: float_ty(),
         }),
     };
-    let mut program = Program {
-        defs: vec![Def {
+    let (symbols, term_ids) = b.finish();
+    let mut program = Program::from_parts(
+        vec![Def {
             name: test_sym,
             ty: lambda_ty,
             body: lambda,
@@ -285,9 +290,10 @@ fn scalar_glsl_math_folds_inside_lambda_body() {
             param_diets: vec![crate::types::Diet::observing()],
             return_diet: crate::types::Diet::observing(),
         }],
-        symbols: b.finish(),
-        def_syms: HashMap::new(),
-    };
+        symbols,
+        HashMap::new(),
+        term_ids,
+    );
 
     partial_eval(&mut program);
     match &program.defs[0].body.kind {
@@ -551,10 +557,10 @@ fn test_function_inlining() {
         },
     };
 
-    let symbols = b.finish();
+    let (symbols, term_ids) = b.finish();
 
-    let program = Program {
-        defs: vec![
+    let program = Program::from_parts(
+        vec![
             Def {
                 name: foo_sym,
                 ty: foo_body.ty.clone(),
@@ -575,8 +581,9 @@ fn test_function_inlining() {
             },
         ],
         symbols,
-        def_syms: HashMap::new(),
-    };
+        HashMap::new(),
+        term_ids,
+    );
 
     let mut result = program;
     partial_eval(&mut result);
@@ -667,10 +674,10 @@ fn test_function_alias_inlining() {
         },
     };
 
-    let symbols = b.finish();
+    let (symbols, term_ids) = b.finish();
 
-    let program = Program {
-        defs: vec![
+    let program = Program::from_parts(
+        vec![
             Def {
                 name: g_sym,
                 ty: g_body.ty.clone(),
@@ -691,8 +698,9 @@ fn test_function_alias_inlining() {
             },
         ],
         symbols,
-        def_syms: HashMap::new(),
-    };
+        HashMap::new(),
+        term_ids,
+    );
 
     let mut result = program;
     partial_eval(&mut result);
@@ -787,10 +795,10 @@ fn test_function_alias_partial_application() {
         },
     };
 
-    let symbols = b.finish();
+    let (symbols, term_ids) = b.finish();
 
-    let program = Program {
-        defs: vec![
+    let program = Program::from_parts(
+        vec![
             Def {
                 name: g_sym,
                 ty: g_body.ty.clone(),
@@ -811,8 +819,9 @@ fn test_function_alias_partial_application() {
             },
         ],
         symbols,
-        def_syms: HashMap::new(),
-    };
+        HashMap::new(),
+        term_ids,
+    );
 
     let mut result = program;
     partial_eval(&mut result);
@@ -880,10 +889,10 @@ fn test_intrinsic_alias_inlining() {
         },
     };
 
-    let symbols = b.finish();
+    let (symbols, term_ids) = b.finish();
 
-    let program = Program {
-        defs: vec![Def {
+    let program = Program::from_parts(
+        vec![Def {
             name: main_sym,
             ty: float_ty.clone(),
             body: main_body,
@@ -893,8 +902,9 @@ fn test_intrinsic_alias_inlining() {
             return_diet: crate::types::Diet::observing(),
         }],
         symbols,
-        def_syms: HashMap::new(),
-    };
+        HashMap::new(),
+        term_ids,
+    );
 
     let mut result = program;
     partial_eval(&mut result);

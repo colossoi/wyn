@@ -2551,8 +2551,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     fn convert_array_expr(&mut self, ae: &ArrayExpr, ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
         match ae {
             ArrayExpr::Var(vr, var_ty) => {
-                let mut ids = crate::tlc::TermIdSource::new();
-                let t = crate::tlc::atom_var_term(*vr, var_ty.clone(), &mut ids);
+                let t = crate::tlc::synthetic_atom_var_term(*vr, var_ty.clone());
                 self.convert_term(&t)
             }
             // A `Zip` is the SoA form of a tuple-element array input: it lowers

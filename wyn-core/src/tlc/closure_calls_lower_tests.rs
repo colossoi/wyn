@@ -2,26 +2,22 @@
 
 use super::*;
 use crate::ast::{Span, TypeName};
-use crate::tlc::{Def, DefMeta, Program, Term, TermId, TermKind};
+use crate::tlc::{Def, DefMeta, Program, Term, TermIdSource, TermKind};
 use crate::SymbolTable;
 use polytype::Type;
 use std::collections::HashMap;
 
 fn empty_program() -> Program {
-    Program {
-        defs: vec![],
-        symbols: SymbolTable::new(),
-        def_syms: HashMap::new(),
-    }
+    Program::from_parts(vec![], SymbolTable::new(), HashMap::new(), TermIdSource::new())
 }
 
 fn unit_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Unit, vec![])
 }
 
-fn term(kind: TermKind) -> Term {
+fn term(program: &mut Program, kind: TermKind) -> Term {
     Term {
-        id: TermId(0),
+        id: program.next_term_id(),
         ty: unit_ty(),
         span: Span::dummy(),
         kind,
@@ -38,10 +34,15 @@ fn direct_call_passes() {
     let mut p = empty_program();
     let f = p.symbols.alloc("f".into());
     let g = p.symbols.alloc("g".into());
-    let body = term(TermKind::App {
-        func: Box::new(term(TermKind::Var(VarRef::Symbol(g)))),
-        args: vec![term(TermKind::IntLit("0".into()))],
-    });
+    let func = term(&mut p, TermKind::Var(VarRef::Symbol(g)));
+    let arg = term(&mut p, TermKind::IntLit("0".into()));
+    let body = term(
+        &mut p,
+        TermKind::App {
+            func: Box::new(func),
+            args: vec![arg],
+        },
+    );
     p.defs.push(Def {
         name: f,
         ty: unit_ty(),
@@ -60,20 +61,26 @@ fn arity_mismatch_fails() {
     let f = p.symbols.alloc("f".into());
     let g = p.symbols.alloc("g".into());
     // g is a defined function with arity 2.
+    let g_body = term(&mut p, TermKind::IntLit("0".into()));
     p.defs.push(Def {
         name: g,
         ty: unit_ty(),
-        body: term(TermKind::IntLit("0".into())),
+        body: g_body,
         meta: DefMeta::Function,
         arity: 2,
         param_diets: vec![],
         return_diet: crate::types::Diet::observing(),
     });
     // f calls g with only 1 arg — wrong.
-    let body = term(TermKind::App {
-        func: Box::new(term(TermKind::Var(VarRef::Symbol(g)))),
-        args: vec![term(TermKind::IntLit("0".into()))],
-    });
+    let func = term(&mut p, TermKind::Var(VarRef::Symbol(g)));
+    let arg = term(&mut p, TermKind::IntLit("0".into()));
+    let body = term(
+        &mut p,
+        TermKind::App {
+            func: Box::new(func),
+            args: vec![arg],
+        },
+    );
     p.defs.push(Def {
         name: f,
         ty: unit_ty(),
@@ -103,14 +110,21 @@ fn nested_app_in_func_position_fails() {
     let mut p = empty_program();
     let f = p.symbols.alloc("f".into());
     let g = p.symbols.alloc("g".into());
-    let nested = term(TermKind::App {
-        func: Box::new(term(TermKind::Var(VarRef::Symbol(g)))),
-        args: vec![],
-    });
-    let body = term(TermKind::App {
-        func: Box::new(nested),
-        args: vec![],
-    });
+    let nested_func = term(&mut p, TermKind::Var(VarRef::Symbol(g)));
+    let nested = term(
+        &mut p,
+        TermKind::App {
+            func: Box::new(nested_func),
+            args: vec![],
+        },
+    );
+    let body = term(
+        &mut p,
+        TermKind::App {
+            func: Box::new(nested),
+            args: vec![],
+        },
+    );
     p.defs.push(Def {
         name: f,
         ty: unit_ty(),

@@ -55,7 +55,7 @@ impl<'a> Transformer<'a> {
                 }
             }
             PatternKind::Wildcard => {
-                let fresh_name = format!("_w_wild_{}", self.term_ids.next_id().0);
+                let fresh_name = format!("_w_wild_{}", self.term_ids.next_id());
                 let sym = self.define(&fresh_name);
                 if is_top_level {
                     (sym, vec![])
@@ -72,7 +72,7 @@ impl<'a> Transformer<'a> {
                 self.compute_pattern_bindings_inner(inner, scrutinee, span, is_top_level)
             }
             PatternKind::Tuple(patterns) => {
-                let fresh_name = format!("_w_tup_{}", self.term_ids.next_id().0);
+                let fresh_name = format!("_w_tup_{}", self.term_ids.next_id());
                 let fresh_sym = self.define(&fresh_name);
                 let tuple_ty = scrutinee.ty.clone();
                 let component_types = self.extract_tuple_types(&tuple_ty, patterns.len());
@@ -101,7 +101,7 @@ impl<'a> Transformer<'a> {
                 // Bind the vec to a fresh symbol, then build .x/.y/.z/.w
                 // projections for each sub-pattern. All sub-patterns
                 // share the same element type (vec's element).
-                let fresh_name = format!("_w_vec_{}", self.term_ids.next_id().0);
+                let fresh_name = format!("_w_vec_{}", self.term_ids.next_id());
                 let fresh_sym = self.define(&fresh_name);
                 let vec_ty = scrutinee.ty.clone();
                 let elem_ty =
@@ -123,7 +123,7 @@ impl<'a> Transformer<'a> {
                 (fresh_sym, bindings)
             }
             PatternKind::Record(fields) => {
-                let fresh_name = format!("_w_rec_{}", self.term_ids.next_id().0);
+                let fresh_name = format!("_w_rec_{}", self.term_ids.next_id());
                 let fresh_sym = self.define(&fresh_name);
                 let record_ty = scrutinee.ty.clone();
                 let field_types = self.extract_record_types(&record_ty);
@@ -172,7 +172,7 @@ impl<'a> Transformer<'a> {
                 // Single-inhabitant type: bind a fresh symbol to the
                 // scrutinee so any downstream `Let` chain has somewhere
                 // to anchor. No sub-bindings.
-                let fresh_name = format!("_w_unit_{}", self.term_ids.next_id().0);
+                let fresh_name = format!("_w_unit_{}", self.term_ids.next_id());
                 let sym = self.define(&fresh_name);
                 if is_top_level {
                     (sym, vec![])
@@ -230,7 +230,7 @@ impl<'a> Transformer<'a> {
                     payload_types.len()
                 );
 
-                let fresh_name = format!("_w_ctor_{}", self.term_ids.next_id().0);
+                let fresh_name = format!("_w_ctor_{}", self.term_ids.next_id());
                 let fresh_sym = self.define(&fresh_name);
                 let mut bindings = vec![PendingBinding {
                     name: fresh_sym,
@@ -263,7 +263,7 @@ impl<'a> Transformer<'a> {
     pub(in crate::tlc) fn simple_pattern_name(&mut self, pattern: &ast::Pattern) -> Option<String> {
         match &pattern.kind {
             PatternKind::Name(name) => Some(name.clone()),
-            PatternKind::Wildcard => Some(format!("_w_wild_{}", self.term_ids.next_id().0)),
+            PatternKind::Wildcard => Some(format!("_w_wild_{}", self.term_ids.next_id())),
             PatternKind::Typed(inner, _) | PatternKind::Attributed(_, inner) => {
                 self.simple_pattern_name(inner)
             }

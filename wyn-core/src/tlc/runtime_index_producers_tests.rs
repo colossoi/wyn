@@ -143,8 +143,7 @@ entry e(j: i32) [1]f32 = [g(256)[j]]
 "#,
     );
     let mut floated = program;
-    let mut ids = TermIdSource::new();
-    run(&mut floated, &mut ids);
+    run(&mut floated);
     let body = entry_body(&floated);
     assert!(
         let_bound_runtime_gather(&floated, body),
@@ -238,8 +237,8 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
         runtime_array_ty(f32_ty()),
         &mut ids,
     );
-    let program = Program {
-        defs: vec![Def {
+    let program = Program::from_parts(
+        vec![Def {
             name: main,
             ty: unit_ty(),
             body: scatter,
@@ -249,11 +248,12 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
             return_diet: crate::types::Diet::observing(),
         }],
         symbols,
-        def_syms: std::collections::HashMap::new(),
-    };
+        std::collections::HashMap::new(),
+        ids,
+    );
 
     let mut floated = program;
-    run(&mut floated, &mut ids);
+    run(&mut floated);
     let body = &floated.defs[0].body;
     assert!(
         let_bound_runtime_gather(&floated, body),

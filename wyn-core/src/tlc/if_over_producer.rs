@@ -20,7 +20,8 @@ use polytype::Type;
 
 use super::subst::substitute_sym;
 
-pub fn run(program: &mut Program, term_ids: &mut TermIdSource) {
+pub fn run(program: &mut Program) {
+    let term_ids = &mut program.term_ids;
     for idx in 0..program.defs.len() {
         let body = program.defs[idx].body.clone();
         program.defs[idx].body = rewrite_term(body, &mut program.symbols, term_ids);

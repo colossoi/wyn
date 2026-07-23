@@ -106,13 +106,13 @@ struct RepSpecializer<'a, 'ids> {
 /// Entry point: rewrite every def's body in place to insert call-edge
 /// representation specializations, appending the new specialized defs
 /// to the program.
-pub fn run(program: &mut Program, term_ids: &mut TermIdSource) {
+pub fn run(program: &mut Program) {
     // Snapshot of the original defs: specialization clones a callee's
     // body while the defs themselves are being rewritten.
     let def_map: LookupMap<SymbolId, Def> = program.defs.iter().map(|d| (d.name, d.clone())).collect();
     let mut s = RepSpecializer {
         symbols: &mut program.symbols,
-        term_ids,
+        term_ids: &mut program.term_ids,
         def_map,
         specializations: LookupMap::new(),
         new_defs: Vec::new(),

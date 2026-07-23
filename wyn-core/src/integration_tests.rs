@@ -3910,8 +3910,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
     ) {
         match ae {
             ArrayExpr::Var(vr, ty) => {
-                let mut ids = crate::tlc::TermIdSource::new();
-                let t = crate::tlc::atom_var_term(*vr, ty.clone(), &mut ids);
+                let t = crate::tlc::synthetic_atom_var_term(*vr, ty.clone());
                 walk(&t, bound, symbols, stage, def_name);
             }
             ArrayExpr::Zip(arrs) => {
