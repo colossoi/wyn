@@ -5,7 +5,9 @@ use super::*;
 /// Compile a Wyn source through the same pipeline used by
 /// `compile_to_wgsl_impl` and return the SSA program so tests can inspect
 /// the interface shape without going through JSON serialization.
-fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
+fn compile_to_ssa(
+    source: &str,
+) -> wyn_core::ssa::Program<wyn_core::ssa::stage::Elaborated> {
     let (mut node_counter, mut module_manager) =
         wyn_core::init_compiler().expect("compiler initialization failed");
     let parsed = wyn_core::Compiler::parse(source, &mut node_counter).expect("parse failed");
@@ -50,7 +52,7 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
         .expect("semantic EGIR planning failed")
         .lower_to_ssa()
         .expect("planned EGIR lowering failed");
-    ssa.ssa
+    ssa
 }
 
 /// A fragment shader whose body contains a fragment-invariant reduce

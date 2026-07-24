@@ -29,7 +29,7 @@ use crate::BindingRef;
 /// Lower an SSA program to a WGSL module. The module contains all entry
 /// points (distinguished by `@vertex` / `@fragment` / `@compute`
 /// attributes), module-scope types, bindings, and helper functions.
-pub fn lower(program: &Program) -> Result<String> {
+pub fn lower(program: &Program<crate::ssa::stage::WgslReady>) -> Result<String> {
     let mut ctx = LowerCtx::new(program);
     ctx.lower_program()
 }
@@ -556,7 +556,7 @@ fn is_view_array_ty(ty: &polytype::Type<TypeName>) -> bool {
 }
 
 struct LowerCtx<'a> {
-    program: &'a Program,
+    program: &'a Program<crate::ssa::stage::WgslReady>,
     function_variants: StorageFunctionVariants,
     current_function_names: LookupMap<String, String>,
     current_storage_accesses: LookupMap<BindingRef, crate::ResourceAccess>,
@@ -607,7 +607,7 @@ struct PcBlock {
 }
 
 impl<'a> LowerCtx<'a> {
-    fn new(program: &'a Program) -> Self {
+    fn new(program: &'a Program<crate::ssa::stage::WgslReady>) -> Self {
         let function_variants = StorageFunctionVariants::new(program);
         let mut current_storage_accesses = LookupMap::new();
         let mut storage_access_variants = LookupMap::new();
@@ -1059,10 +1059,10 @@ impl<'a> LowerCtx<'a> {
         // `vec2<u32>`. Their backing binding is static in the array type's
         // trailing region argument, so indexing resolves the module-scope
         // buffer from the parameter type.
-        let mut params = Vec::with_capacity(body.params.len());
-        let mut param_names = Vec::with_capacity(body.params.len());
+        let mut params = Vec::with_capacity(body.params().len());
+        let mut param_names = Vec::with_capacity(body.params().len());
         let mut used_param_names = LookupSet::new();
-        for (value_id, ty, pname) in &body.params {
+        for (value_id, ty, pname) in body.params() {
             let ty_str = self.type_emitter.type_to_wgsl(ty)?;
             let base_name = self.mangle_tracked(pname)?;
             let mut emitted_name = base_name.clone();
@@ -1073,7 +1073,7 @@ impl<'a> LowerCtx<'a> {
             }
             used_param_names.insert(emitted_name.clone());
             params.push(format!("{}: {}", emitted_name, ty_str));
-            param_names.push((*value_id, emitted_name));
+            param_names.push((value_id, emitted_name));
         }
 
         writeln!(output, "fn {}({}) -> {} {{", name, params.join(", "), ret_ty).unwrap();
@@ -1137,7 +1137,7 @@ impl<'a> LowerCtx<'a> {
             let mut fields: Vec<(usize, String, String)> = Vec::new();
             for (i, inp) in &pc_inputs {
                 let raw_name =
-                    body.params.get(*i).map(|(_, _, n)| n.clone()).unwrap_or_else(|| inp.name.clone());
+                    body.param(*i).map(|(_, _, name)| name.to_owned()).unwrap_or_else(|| inp.name.clone());
                 // Mangle through the same pass the rest of the backend
                 // uses — raw user names may collide with WGSL reserved
                 // words like `target` or `loop`.
@@ -1184,7 +1184,7 @@ impl<'a> LowerCtx<'a> {
                 continue;
             }
             let param_name =
-                body.params.get(i).map(|(_, _, n)| n.clone()).unwrap_or_else(|| input.name.clone());
+                body.param(i).map(|(_, _, name)| name.to_owned()).unwrap_or_else(|| input.name.clone());
             let mangled_name = self.mangle_tracked(&param_name)?;
             let user_ty_str = self.type_emitter.type_to_wgsl(&input.ty)?;
             let (attr, param_ty_str, internal_name) = match input.decoration() {
@@ -1432,9 +1432,9 @@ impl<'a> LowerCtx<'a> {
         // WGSL; the body refers to them as `<pc_var>.<field>` instead.
         if let Some(pc) = &pc_block {
             for (input_idx, field_name, _) in &pc.fields {
-                if let Some((value_id, _, _)) = body.params.get(*input_idx) {
+                if let Some((value_id, _, _)) = body.param(*input_idx) {
                     let expr = format!("{}.{}", pc.var_name, field_name);
-                    body_ctx.value_map.insert(*value_id, ValueBinding::Alias(expr));
+                    body_ctx.value_map.insert(value_id, ValueBinding::Alias(expr));
                 }
             }
         }
@@ -1856,12 +1856,12 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         // through module-scope bindings (e.g. push-constant inputs →
         // `<block_var>.<field>`); skip those so the mangled name
         // doesn't clobber the override.
-        for (value_id, _, name) in &self.body.params {
-            if self.value_map.contains_key(value_id) {
+        for (value_id, _, name) in self.body.params() {
+            if self.value_map.contains_key(&value_id) {
                 continue;
             }
             let mangled = self.ctx.mangle_tracked(name)?;
-            self.value_map.insert(*value_id, ValueBinding::Alias(mangled.clone()));
+            self.value_map.insert(value_id, ValueBinding::Alias(mangled.clone()));
             self.declared.insert(mangled);
         }
 

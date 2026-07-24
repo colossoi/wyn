@@ -252,11 +252,19 @@ fn type_tuple_distinct_shapes_distinct_structs() {
 fn lower_empty_program_succeeds() {
     // Empty program: no functions, no entries — lower emits just the
     // header comment and returns a string.
-    let program = crate::ssa::types::Program {
-        functions: Vec::new(),
-        entry_points: Vec::new(),
-        constants: Vec::new(),
-    };
+    let program = crate::ssa::types::Program::<crate::ssa::stage::WgslReady>::from_parts(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        crate::ssa::context::BackendGlobal {
+            pipeline: Default::default(),
+            profile: crate::LoweringProfile::new(
+                crate::CodegenTarget::Wgsl,
+                crate::SchedulePolicy::Parallel,
+            ),
+            kernel_plan: Default::default(),
+        },
+    );
     let out = super::lower(&program).expect("empty program should lower");
     assert!(out.contains("WGSL backend"));
 }
@@ -281,7 +289,8 @@ fn validate_wgsl(source: &str) {
 
 /// Compile a Wyn source through the full pipeline to WGSL text.
 fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
-    crate::compile_thru_ssa(source).map_err(|e| crate::err_spirv!("{}", e))?.lower_wgsl()
+    let program = crate::compile_thru_ssa(source).map_err(|e| crate::err_spirv!("{}", e))?;
+    crate::lower_ssa_to_wgsl(program)
 }
 
 #[test]

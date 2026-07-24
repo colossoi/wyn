@@ -36,11 +36,7 @@ fn composite_array_ty() -> Type<TypeName> {
 }
 
 fn empty_program() -> Program {
-    Program {
-        functions: Vec::new(),
-        entry_points: Vec::new(),
-        constants: Vec::new(),
-    }
+    Program::bare(Vec::new(), Vec::new(), Vec::new())
 }
 
 fn function_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) -> Function {

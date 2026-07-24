@@ -17,6 +17,8 @@ new_key_type! {
 #[derive(Clone, Debug)]
 pub struct Function<I, T> {
     pub entry: BlockId,
+    /// Function parameters in signature order.
+    pub params: Vec<ValueId>,
     pub blocks: SlotMap<BlockId, BasicBlock>,
     pub insts: SlotMap<InstId, InstNode<I>>,
     pub values: SlotMap<ValueId, ValueInfo<T>>,
@@ -27,6 +29,8 @@ pub struct BasicBlock {
     pub params: Vec<ValueId>,
     pub insts: Vec<InstId>,
     pub term: Terminator,
+    /// Structured-control metadata intrinsically owned by this block.
+    pub control_header: Option<crate::flow::ControlHeader>,
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +48,8 @@ pub struct InstNode<I> {
 pub struct ValueInfo<T> {
     pub def: ValueDef,
     pub ty: T,
+    /// Source/debug name for function and named block parameters.
+    pub name: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,9 +80,11 @@ impl<I, T: Clone + Debug> Function<I, T> {
             params: Vec::new(),
             insts: Vec::new(),
             term: Terminator::Unreachable,
+            control_header: None,
         });
         Self {
             entry,
+            params: Vec::new(),
             blocks,
             insts: SlotMap::with_key(),
             values: SlotMap::with_key(),
@@ -88,21 +96,31 @@ impl<I, T: Clone + Debug> Function<I, T> {
             params: Vec::new(),
             insts: Vec::new(),
             term: Terminator::Unreachable,
+            control_header: None,
         })
     }
 
-    pub fn add_function_param(&mut self, index: usize, ty: T) -> ValueId {
-        self.values.insert(ValueInfo {
+    pub fn add_function_param(&mut self, ty: T, name: String) -> ValueId {
+        let index = self.params.len();
+        let value = self.values.insert(ValueInfo {
             def: ValueDef::FunctionParam { index },
             ty,
-        })
+            name: Some(name),
+        });
+        self.params.push(value);
+        value
     }
 
     pub fn add_block_param(&mut self, block: BlockId, ty: T) -> ValueId {
+        self.add_named_block_param(block, ty, None)
+    }
+
+    pub fn add_named_block_param(&mut self, block: BlockId, ty: T, name: Option<String>) -> ValueId {
         let index = self.blocks[block].params.len();
         let value = self.values.insert(ValueInfo {
             def: ValueDef::Param { block, index },
             ty,
+            name,
         });
         self.blocks[block].params.push(value);
         value
@@ -139,6 +157,7 @@ impl<I, T: Clone + Debug> Function<I, T> {
         let value = self.values.insert(ValueInfo {
             def: ValueDef::Param { block, index: 0 },
             ty,
+            name: None,
         });
         let inst = self.insts.insert(InstNode {
             data,
@@ -181,6 +200,7 @@ impl<I, T: Clone + Debug> Function<I, T> {
         let value = self.values.insert(ValueInfo {
             def: ValueDef::Param { block, index: 0 },
             ty,
+            name: None,
         });
         let inst = self.insts.insert(InstNode {
             data,

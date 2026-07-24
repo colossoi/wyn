@@ -23,7 +23,7 @@
 //! fix, rather than burying the problem in the backend.
 //!
 //! Plumbed in `lib.rs` between SSA construction and SPIR-V emission
-//! (`SsaConverted::lower`), right after `verify_no_abstract::run`.
+//! (`ssa::prepare_spirv`), right after `verify_no_abstract::run`.
 
 use crate::ast::TypeName;
 use crate::error::CompilerError;
@@ -35,7 +35,7 @@ use polytype::Type;
 
 pub type Result<T> = std::result::Result<T, CompilerError>;
 
-pub fn run(program: &Program) -> Result<()> {
+pub fn run<S: crate::ssa::Stage>(program: &Program<S>) -> Result<()> {
     for entry in &program.entry_points {
         check_entry(entry)?;
     }

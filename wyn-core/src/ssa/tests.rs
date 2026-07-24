@@ -28,8 +28,8 @@ fn test_func_body_params() {
 
     let body = builder.finish().unwrap();
 
-    assert_eq!(body.params.len(), 2);
-    assert_ne!(body.params[0].0, body.params[1].0);
+    assert_eq!(body.params().len(), 2);
+    assert_ne!(body.param(0).unwrap().0, body.param(1).unwrap().0);
     assert_eq!(body.num_blocks(), 1);
     assert_eq!(body.num_insts(), 1);
 }

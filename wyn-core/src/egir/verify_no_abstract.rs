@@ -17,8 +17,8 @@
 //! error message points at the function/value carrying the offending
 //! type so users have something concrete to act on.
 //!
-//! Plumbed in `lib.rs` between SSA construction and backend lowering
-//! (`SsaConverted::lower` / `SsaConverted::lower_wgsl`).
+//! Run by `ssa::prepare_spirv` and `ssa::prepare_wgsl` between SSA
+//! construction and backend lowering.
 
 use crate::ast::TypeName;
 use crate::error::CompilerError;
@@ -33,7 +33,7 @@ pub type Result<T> = std::result::Result<T, CompilerError>;
 /// _, _]`. The first offending value is returned as a `TypeError`; the
 /// message names the function/entry/constant and the value index so the
 /// user can locate the source span via `--output-mir`.
-pub fn run(program: &Program) -> Result<()> {
+pub fn run<S: crate::ssa::Stage>(program: &Program<S>) -> Result<()> {
     for func in &program.functions {
         check_body(&format!("function `{}`", func.name), &func.body)?;
     }
@@ -49,7 +49,7 @@ pub fn run(program: &Program) -> Result<()> {
 fn check_body(scope: &str, body: &FuncBody) -> Result<()> {
     // Params first — the most common failure surface (a non-inlined
     // size-poly helper carrying an Abstract param).
-    for (i, (_, ty, name)) in body.params.iter().enumerate() {
+    for (i, (_, ty, name)) in body.params().enumerate() {
         check_ty(ty, &format!("{} param #{} `{}`", scope, i, name))?;
     }
     check_ty(&body.return_ty, &format!("{} return type", scope))?;

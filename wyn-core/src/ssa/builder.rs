@@ -1,12 +1,9 @@
 //! SSA function builder.
 //!
-//! Thin wrapper around wyn-ssa's generic `FuncBuilder` that pairs it with
-//! the `FuncBody` side-map state (`control_headers`, `params`,
-//! `return_ty`, `dps_output`, `places`) and exposes exactly the surface
-//! the wyn-core elaborator needs.
+//! Thin wrapper around the generic SSA builder that adds Wyn return-type and
+//! place metadata and exposes exactly the surface the EGIR elaborator needs.
 
 use crate::ast::{Span, TypeName};
-use crate::LookupMap;
 use polytype::Type;
 
 use super::types::{
@@ -20,10 +17,7 @@ pub type BuilderError = crate::ssa::framework::BuilderError;
 /// Builder for constructing SSA functions.
 pub struct FuncBuilder {
     inner: crate::ssa::framework::FuncBuilder<InstKind, Type<TypeName>>,
-    control_headers: LookupMap<BlockId, ControlHeader>,
-    params: Vec<(ValueId, Type<TypeName>, String)>,
     return_ty: Type<TypeName>,
-    dps_output: Option<ValueId>,
     places: SlotMap<PlaceId, PlaceInfo>,
 }
 
@@ -33,35 +27,25 @@ impl FuncBuilder {
         let mut inner = crate::ssa::framework::FuncBuilder::new();
         let _entry = inner.entry();
 
-        let mut func_params = Vec::new();
-        for (i, (ty, name)) in params.into_iter().enumerate() {
-            let value = inner.func_mut().add_function_param(i, ty.clone());
-            func_params.push((value, ty, name));
+        for (ty, name) in params {
+            inner.func_mut().add_function_param(ty, name);
         }
 
         FuncBuilder {
             inner,
-            control_headers: LookupMap::new(),
-            params: func_params,
             return_ty,
-            dps_output: None,
             places: SlotMap::with_key(),
         }
     }
 
     /// Get the value for a function parameter by index.
     pub fn get_param(&self, index: usize) -> ValueId {
-        self.params[index].0
+        self.inner.func().params[index]
     }
 
     /// Get the number of function parameters.
     pub fn num_params(&self) -> usize {
-        self.params.len()
-    }
-
-    /// Set the DPS output parameter.
-    pub fn set_dps_output(&mut self, value: ValueId) {
-        self.dps_output = Some(value);
+        self.inner.func().params.len()
     }
 
     /// Get the entry block ID.
@@ -87,13 +71,17 @@ impl FuncBuilder {
         self.inner.add_block_param(block, ty)
     }
 
-    /// Create a new block with named parameters (names are discarded).
+    /// Create a new block with named parameters.
     pub fn create_block_with_named_params(
         &mut self,
         params: Vec<(Type<TypeName>, String)>,
     ) -> (BlockId, Vec<ValueId>) {
-        let types: Vec<Type<TypeName>> = params.into_iter().map(|(ty, _)| ty).collect();
-        self.inner.create_block_with_params(types)
+        let block = self.inner.create_block();
+        let values = params
+            .into_iter()
+            .map(|(ty, name)| self.inner.func_mut().add_named_block_param(block, ty, Some(name)))
+            .collect();
+        (block, values)
     }
 
     /// Switch to building in the specified block.
@@ -157,10 +145,7 @@ impl FuncBuilder {
         let func = self.inner.finish()?;
         Ok(FuncBody {
             inner: func,
-            control_headers: self.control_headers,
-            params: self.params,
             return_ty: self.return_ty,
-            dps_output: self.dps_output,
             places: self.places,
         })
     }
@@ -169,10 +154,7 @@ impl FuncBuilder {
     pub fn finish_unchecked(self) -> FuncBody {
         FuncBody {
             inner: self.inner.finish_unchecked(),
-            control_headers: self.control_headers,
-            params: self.params,
             return_ty: self.return_ty,
-            dps_output: self.dps_output,
             places: self.places,
         }
     }
@@ -196,6 +178,6 @@ impl FuncBuilder {
     }
 
     pub fn set_control_header(&mut self, block: BlockId, control: ControlHeader) {
-        self.control_headers.insert(block, control);
+        self.inner.func_mut().blocks[block].control_header = Some(control);
     }
 }

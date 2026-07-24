@@ -90,11 +90,7 @@ pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
             ),
         })
         .collect();
-    let program = Program {
-        functions,
-        entry_points,
-        constants,
-    };
+    let program = Program::bare(functions, entry_points, constants);
     (program, pipeline)
 }
 

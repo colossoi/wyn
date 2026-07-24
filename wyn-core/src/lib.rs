@@ -477,10 +477,10 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //       .optimize()                                -> EgirOptimized
 //       .allocate()?                               -> EgirAllocated
 //       .plan(profile)                             -> EgirPlanned
-//       .lower_to_ssa()                            -> SsaConverted
+//       .lower_to_ssa()                            -> ssa::Program<stage::Elaborated>
 //
 // Backend:
-//       .lower() | .lower_wgsl()
+//       lower_ssa_to_spirv(program) | lower_ssa_to_wgsl(program)
 //
 // Tests should prefer the `compile_thru_*` helpers below, which subsume
 // the chain up to a milestone and centralize updates as new passes land.
@@ -980,7 +980,9 @@ impl EgirPlanned {
     }
 
     /// Expand and elaborate the validated physical plan into SSA.
-    pub fn lower_to_ssa(mut self) -> std::result::Result<SsaConverted, ConvertError> {
+    pub fn lower_to_ssa(
+        mut self,
+    ) -> std::result::Result<ssa::Program<ssa::stage::Elaborated>, ConvertError> {
         let plan = self.kernel_plan;
         egir::soac_expand::run(&mut self.physical, &mut self.effect_ids)?;
         egir::materialize::run(&mut self.physical);
@@ -989,51 +991,30 @@ impl EgirPlanned {
         egir::skel_opt::run(&mut self.physical);
         egir::resource_erasure::run(&mut self.physical)?;
         let (ssa, pipeline) = egir::elaborate::run_program(self.physical);
-        Ok(SsaConverted {
-            ssa,
-            pipeline,
-            profile: self.profile,
-            kernel_plan: plan,
-        })
+        Ok(
+            ssa.with_context::<ssa::stage::Elaborated>(ssa::context::BackendGlobal {
+                pipeline,
+                profile: self.profile,
+                kernel_plan: plan,
+            }),
+        )
     }
 }
 
-/// TLC has been converted directly to SSA (via EGIR).
-pub struct SsaConverted {
-    pub ssa: ssa::types::Program,
-    pub pipeline: pipeline_descriptor::PipelineDescriptor,
-    pub profile: LoweringProfile,
-    pub kernel_plan: egir::parallelize::KernelPlanSummary,
+/// Validate and lower elaborated SSA to SPIR-V.
+pub fn lower_ssa_to_spirv(program: ssa::Program<ssa::stage::Elaborated>) -> error::Result<Lowered> {
+    let program = ssa::prepare_spirv(program)?;
+    let spirv = spirv::lower_ssa_program(&program)?;
+    Ok(Lowered {
+        spirv,
+        pipeline: program.global_context.pipeline,
+    })
 }
 
-impl SsaConverted {
-    /// Lower SSA to SPIR-V. Materialization (`Index` → `Materialize` +
-    /// `DynamicExtract`) was already done by the EGIR pipeline if `to_egir`
-    /// was called with `EgirOpts::for_spirv()`.
-    pub fn lower(self) -> error::Result<Lowered> {
-        if self.profile.target == CodegenTarget::Wgsl {
-            return Err(crate::err_spirv!(
-                "SSA was scheduled for WGSL and cannot be lowered as SPIR-V"
-            ));
-        }
-        egir::verify_no_abstract::run(&self.ssa)?;
-        spirv::verify_buffer_layouts::run(&self.ssa)?;
-        let spirv = spirv::lower_ssa_program(&self.ssa)?;
-        Ok(Lowered {
-            spirv,
-            pipeline: self.pipeline,
-        })
-    }
-
-    pub fn lower_wgsl(self) -> error::Result<String> {
-        if self.profile.target == CodegenTarget::Spirv {
-            return Err(crate::err_spirv!(
-                "SSA was scheduled for SPIR-V and cannot be lowered as WGSL"
-            ));
-        }
-        egir::verify_no_abstract::run(&self.ssa)?;
-        wgsl::lower(&self.ssa)
-    }
+/// Validate and lower elaborated SSA to WGSL.
+pub fn lower_ssa_to_wgsl(program: ssa::Program<ssa::stage::Elaborated>) -> error::Result<String> {
+    let program = ssa::prepare_wgsl(program)?;
+    wgsl::lower(&program)
 }
 
 /// Final SPIR-V output
@@ -1092,7 +1073,7 @@ pub fn cached_compiler_init() -> (NodeCounter, module_manager::ModuleManager) {
 //
 //   compile_thru_frontend  →  TypeChecked          (AST passes done)
 //   compile_thru_tlc       →  Program<Reachable>    (TLC pipeline done)
-//   compile_thru_ssa       →  SsaConverted         (EGIR + elaborate done)
+//   compile_thru_ssa       →  Program<Elaborated>  (EGIR + elaborate done)
 //   compile_thru_spirv     →  Lowered              (final SPIR-V binary)
 //
 // These exist so test files don't have to enumerate every pass — when a
@@ -1134,7 +1115,7 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::Program<tlc::stage::
 fn ssa_from_reachable(
     program: tlc::Program<tlc::stage::Reachable>,
     profile: LoweringProfile,
-) -> std::result::Result<SsaConverted, Box<dyn std::error::Error>> {
+) -> std::result::Result<ssa::Program<ssa::stage::Elaborated>, Box<dyn std::error::Error>> {
     let program = tlc::infer_input_slice_bounds(program);
     let raw = to_egraph(program)?;
     let allocated = raw.realize_outputs()?.segment().optimize().allocate()?;
@@ -1147,18 +1128,19 @@ fn ssa_from_reachable(
 /// `Result<_, dyn Error>` so callers see both compiler errors and EGIR
 /// conversion errors uniformly.
 #[cfg(test)]
-pub fn compile_thru_ssa(source: &str) -> std::result::Result<SsaConverted, Box<dyn std::error::Error>> {
+pub fn compile_thru_ssa(
+    source: &str,
+) -> std::result::Result<ssa::Program<ssa::stage::Elaborated>, Box<dyn std::error::Error>> {
     ssa_from_reachable(compile_thru_tlc(source)?, LoweringProfile::PORTABLE)
 }
 
 /// Run the full pipeline to a final SPIR-V binary.
 #[cfg(test)]
 pub fn compile_thru_spirv(source: &str) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
-    Ok(ssa_from_reachable(
+    Ok(lower_ssa_to_spirv(ssa_from_reachable(
         compile_thru_tlc(source)?,
         LoweringProfile::new(CodegenTarget::Spirv, SchedulePolicy::Parallel),
-    )?
-    .lower()?)
+    )?)?)
 }
 
 /// Single-stage equivalent of `compile_thru_spirv`: matches the CLI's
@@ -1167,9 +1149,8 @@ pub fn compile_thru_spirv(source: &str) -> std::result::Result<Lowered, Box<dyn 
 pub fn compile_thru_spirv_single_stage(
     source: &str,
 ) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
-    Ok(ssa_from_reachable(
+    Ok(lower_ssa_to_spirv(ssa_from_reachable(
         compile_thru_tlc(source)?,
         LoweringProfile::new(CodegenTarget::Spirv, SchedulePolicy::Serial),
-    )?
-    .lower()?)
+    )?)?)
 }

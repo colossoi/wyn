@@ -326,7 +326,7 @@ impl KernelPhase {
 }
 
 /// Graph-free schedule summary retained after physical EGIR has lowered to SSA.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct KernelPlanSummary {
     phases: Vec<KernelPhaseSummary>,
 }

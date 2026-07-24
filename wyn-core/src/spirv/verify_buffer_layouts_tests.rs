@@ -45,11 +45,7 @@ fn runtime_array_of_runtime_array() -> Type<TypeName> {
 }
 
 fn empty_program() -> Program {
-    Program {
-        functions: Vec::new(),
-        entry_points: Vec::new(),
-        constants: Vec::new(),
-    }
+    Program::bare(Vec::new(), Vec::new(), Vec::new())
 }
 
 fn entry(name: &str) -> EntryPoint {

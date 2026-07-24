@@ -101,14 +101,14 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         // For regular functions, use positional mapping (param_ids) to avoid
         // name collisions when two params share a string name.
         // For entry points (no param_ids), fall back to name-based env lookup.
-        if self.param_ids.len() == self.body.params.len() && !self.param_ids.is_empty() {
-            for (i, (value_id, _, _)) in self.body.params.iter().enumerate() {
-                self.value_map.insert(*value_id, self.param_ids[i]);
+        if self.param_ids.len() == self.body.params().len() && !self.param_ids.is_empty() {
+            for (i, (value_id, _, _)) in self.body.params().enumerate() {
+                self.value_map.insert(value_id, self.param_ids[i]);
             }
         } else {
-            for (value_id, _, name) in &self.body.params {
+            for (value_id, _, name) in self.body.params() {
                 if let Some(&spirv_id) = self.constructor.env.get(name) {
-                    self.value_map.insert(*value_id, spirv_id);
+                    self.value_map.insert(value_id, spirv_id);
                 }
             }
         }
@@ -193,7 +193,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             visited.insert(bid);
             order.push(bid);
 
-            let merge_bid = body.control_headers.get(&bid).map(|ctrl| match ctrl {
+            let merge_bid = block.control_header.as_ref().map(|ctrl| match ctrl {
                 ControlHeader::Loop { merge, .. } => *merge,
                 ControlHeader::Selection { merge } => *merge,
             });
@@ -794,7 +794,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
 
                 // Emit structured control flow merge instructions if this is a header block
-                if let Some(control) = self.body.control_headers.get(&_block_id) {
+                if let Some(control) = &self.body.inner.blocks[_block_id].control_header {
                     match control {
                         ControlHeader::Loop {
                             merge,

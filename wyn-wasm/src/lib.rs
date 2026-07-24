@@ -362,7 +362,9 @@ fn entry_binding_from_output(idx: usize, output: &wyn_core::interface::EntryOutp
     }
 }
 
-fn program_interface(program: &wyn_core::ssa::types::Program) -> ProgramInterface {
+fn program_interface<S: wyn_core::ssa::Stage>(
+    program: &wyn_core::ssa::Program<S>,
+) -> ProgramInterface {
     use wyn_core::flow::ExecutionModel;
     use wyn_core::types::TypeExt;
     let entries = program
@@ -630,10 +632,10 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         Ok(s) => s,
         Err(e) => return CompileResultWgsl::err_msg(format!("SSA lowering error: {:?}", e)),
     };
-    let mir = wyn_core::ssa::print::format_program(&ssa.ssa);
-    let interface = program_interface(&ssa.ssa);
+    let mir = wyn_core::ssa::print::format_program(&ssa);
+    let interface = program_interface(&ssa);
 
-    match ssa.lower_wgsl() {
+    match wyn_core::lower_ssa_to_wgsl(ssa) {
         Ok(wgsl) => CompileResultWgsl {
             success: true,
             wgsl: Some(wgsl),

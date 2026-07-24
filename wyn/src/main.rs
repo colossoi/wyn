@@ -371,7 +371,7 @@ fn compile_file(
 
     // Dump MIR if requested
     if let Some(ref path) = output_mir {
-        fs::write(path, wyn_core::ssa::print::format_program(&ssa.ssa))?;
+        fs::write(path, wyn_core::ssa::print::format_program(&ssa))?;
         if verbose {
             info!("Wrote MIR to {}", path.display());
         }
@@ -391,7 +391,7 @@ fn compile_file(
 
     match target {
         Target::Spirv => {
-            let lowered = time("lower", verbose, || soac_lowered.lower())?;
+            let lowered = time("lower", verbose, || wyn_core::lower_ssa_to_spirv(soac_lowered))?;
 
             // Write SPIR-V binary
             let mut file = fs::File::create(&output_path)?;
@@ -421,7 +421,9 @@ fn compile_file(
             }
         }
         Target::Wgsl => {
-            let wgsl = time("wgsl_lower", verbose, || wyn_core::wgsl::lower(&soac_lowered.ssa))?;
+            let wgsl = time("wgsl_lower", verbose, || {
+                wyn_core::lower_ssa_to_wgsl(soac_lowered)
+            })?;
 
             fs::write(&output_path, &wgsl)?;
 

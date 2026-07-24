@@ -13,8 +13,8 @@ use crate::Compiler;
 use crate::SymbolTable;
 
 /// Run source through the pipeline up to SSA.
-fn compile_to_ssa(input: &str) -> Program {
-    crate::compile_thru_ssa(input).expect("compile to SSA").ssa
+fn compile_to_ssa(input: &str) -> Program<crate::ssa::stage::Elaborated> {
+    crate::compile_thru_ssa(input).expect("compile to SSA")
 }
 
 /// Helper to check that code fails type checking (for testing error cases).
@@ -40,7 +40,7 @@ fn compile_to_semantic_egir(input: &str) -> crate::EgirAllocated {
 fn lower_semantic_egir(
     allocated: crate::EgirAllocated,
     profile: crate::LoweringProfile,
-) -> crate::SsaConverted {
+) -> Program<crate::ssa::stage::Elaborated> {
     allocated
         .plan(profile)
         .expect("plan semantic EGIR")
@@ -706,8 +706,7 @@ entry e() [2]i32 =
         operators[0].step.region, operators[1].step.region,
         "deduplicated inputs may share a column, but composed map bodies must remain distinct"
     );
-    lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE)
-        .lower()
+    crate::lower_ssa_to_spirv(lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE))
         .expect("distinct composed steps lower to SPIR-V");
     let base: Vec<i32> = (0..8).collect();
     let xs = crate::egir::semantic_exec::map(&base, |value| value + 1);
@@ -991,7 +990,7 @@ fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
         "#[compute] entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)",
     )
     .expect("parallel reduction reaches SSA");
-    let phases = reduce.kernel_plan.phases().collect::<Vec<_>>();
+    let phases = reduce.global_context.kernel_plan.phases().collect::<Vec<_>>();
     assert_eq!(
         phases.iter().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["reduce_phase1", "reduce_combine"]
@@ -1007,7 +1006,7 @@ fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
         "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
     )
     .expect("parallel scan reaches SSA");
-    let phases = scan.kernel_plan.phases().collect::<Vec<_>>();
+    let phases = scan.global_context.kernel_plan.phases().collect::<Vec<_>>();
     assert_eq!(
         phases.iter().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["scan_phase1", "scan_block", "scan_apply_offsets"]
@@ -1046,7 +1045,7 @@ fn chunked_recipes_accept_empty_small_uneven_and_unsigned_ranges() {
     for (source, expected) in cases {
         let lowered = crate::compile_thru_ssa(source).expect("edge-domain recipe reaches SSA");
         assert_eq!(
-            lowered.kernel_plan.phases().next().map(|phase| phase.label.as_str()),
+            lowered.global_context.kernel_plan.phases().next().map(|phase| phase.label.as_str()),
             Some(expected),
             "edge-domain shape must retain its selected parallel recipe"
         );
@@ -1098,7 +1097,7 @@ entry compose_all(xs: []i32) i32 =
     )
     .expect("ordered tuple reduction reaches SSA");
     assert_eq!(
-        reduce.kernel_plan.phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        reduce.global_context.kernel_plan.phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["reduce_phase1", "reduce_combine"]
     );
 
@@ -1122,7 +1121,7 @@ entry compose_prefix(xs: []i32) []i32 =
     )
     .expect("ordered tuple scan reaches SSA");
     assert_eq!(
-        scan.kernel_plan.phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        scan.global_context.kernel_plan.phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["scan_phase1", "scan_block", "scan_apply_offsets"]
     );
 }
@@ -1139,7 +1138,7 @@ fn runtime_filter_lowers_to_flag_scan_scatter_pipeline() {
 entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
 "#;
     let converted = crate::compile_thru_ssa(r4).expect("runtime filter reaches SSA");
-    let phases: Vec<_> = converted.kernel_plan.phases().collect();
+    let phases: Vec<_> = converted.global_context.kernel_plan.phases().collect();
     assert_eq!(phases.len(), 5);
     assert_eq!(phases[0].entry_point, "r_filter_flags");
     assert_eq!(phases[1].entry_point, "r_filter_scan");
@@ -1179,7 +1178,6 @@ entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
         "r",
     ] {
         let entry = converted
-            .ssa
             .entry_points
             .iter()
             .find(|entry| entry.name == name)
@@ -1233,7 +1231,7 @@ entry mixed() ([]i32, []i32) =
   (mapped, compacted)
 "#;
     let converted = crate::compile_thru_ssa(source).expect("mixed map/filter reaches SSA");
-    let phases = converted.kernel_plan.phases().collect::<Vec<_>>();
+    let phases = converted.global_context.kernel_plan.phases().collect::<Vec<_>>();
     assert_eq!(
         phases.iter().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         [
@@ -1771,17 +1769,18 @@ entry e() [4]i32 =
         .expect("shared array remains an input of the source entry");
     assert_eq!(allocated.inner.entry_points[consumer.index()].name, "e");
     let lowered = lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE);
-    let mir = crate::ssa::print::format_program(&lowered.ssa);
+    let mir = crate::ssa::print::format_program(&lowered);
     assert_eq!(
         mir.matches("materialize ").count(),
         0,
         "consumers read the shared storage prepass rather than copying a composite per consumer"
     );
-    let stages: Vec<_> = lowered.kernel_plan.phases().map(|phase| phase.entry_point.as_str()).collect();
+    let stages: Vec<_> =
+        lowered.global_context.kernel_plan.phases().map(|phase| phase.entry_point.as_str()).collect();
     assert_eq!(stages.first(), Some(&requirement_name.as_str()));
     assert_eq!(stages.last(), Some(&"e"));
     assert!(stages.iter().any(|stage| stage.contains("prepass_scalar")));
-    let phases: Vec<_> = lowered.kernel_plan.phases().collect();
+    let phases: Vec<_> = lowered.global_context.kernel_plan.phases().collect();
     assert!(phases[0].resources.iter().any(|resource| {
         resource.resource == shared_resource && resource.access == crate::ResourceAccess::Write
     }));
@@ -1797,8 +1796,8 @@ entry e() [4]i32 =
         crate::LoweringProfile::PORTABLE,
     );
     assert_eq!(
-        serde_json::to_string(&lowered.pipeline).unwrap(),
-        serde_json::to_string(&second.pipeline).unwrap(),
+        serde_json::to_string(&lowered.global_context.pipeline).unwrap(),
+        serde_json::to_string(&second.global_context.pipeline).unwrap(),
         "shared materialization descriptor is deterministic"
     );
     let ys: Vec<i32> = (0..8).map(|value| value + 1).collect();
@@ -1812,7 +1811,7 @@ entry e() [4]i32 =
         compile_to_semantic_egir(reduce_then_map),
         crate::LoweringProfile::new(crate::CodegenTarget::Portable, crate::SchedulePolicy::Serial),
     );
-    let single_phases: Vec<_> = single.kernel_plan.phases().collect();
+    let single_phases: Vec<_> = single.global_context.kernel_plan.phases().collect();
     assert_eq!(
         single_phases.len(),
         3,
@@ -1823,11 +1822,10 @@ entry e() [4]i32 =
         crate::egir::parallelize::KernelDomain::Fixed { x: 1, y: 1, z: 1 }
     ));
 
-    let wgsl = lower_semantic_egir(
+    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(reduce_then_map),
         crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
-    )
-    .lower_wgsl()
+    ))
     .expect("shared materialization lowers to WGSL");
     assert!(wgsl.contains("e_materialize_shared"));
 }
@@ -1865,15 +1863,15 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         }
     }
     let first = lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE);
-    let phases: Vec<_> = first.kernel_plan.phases().collect();
+    let phases: Vec<_> = first.global_context.kernel_plan.phases().collect();
     assert!(phases.len() >= 2, "parallel reduction owns at least two phases");
     assert!(phases.iter().skip(1).any(|phase| !phase.dependencies.is_empty()));
     assert!(phases.iter().all(|phase| !phase.resources.is_empty()));
 
     let second = crate::compile_thru_ssa(source).expect("second lowering");
     assert_eq!(
-        serde_json::to_string(&first.pipeline).unwrap(),
-        serde_json::to_string(&second.pipeline).unwrap(),
+        serde_json::to_string(&first.global_context.pipeline).unwrap(),
+        serde_json::to_string(&second.global_context.pipeline).unwrap(),
         "descriptor publication is deterministic"
     );
 }
@@ -1890,15 +1888,18 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         allocated,
         crate::LoweringProfile::new(crate::CodegenTarget::Portable, crate::SchedulePolicy::Serial),
     );
-    assert_eq!(lowered.kernel_plan.phases().count(), 1);
-    assert!(!lowered.ssa.entry_points.iter().any(|entry| entry.name.contains("phase2")));
+    assert_eq!(lowered.global_context.kernel_plan.phases().count(), 1);
+    assert!(!lowered.entry_points.iter().any(|entry| entry.name.contains("phase2")));
 }
 
 #[test]
 fn target_profiles_are_selected_before_ssa_lowering() {
     let portable = crate::compile_thru_ssa("#[compute] entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
         .expect("portable SSA");
-    assert_eq!(portable.profile.target, crate::CodegenTarget::Portable);
+    assert_eq!(
+        portable.global_context.profile.target,
+        crate::CodegenTarget::Portable
+    );
 
     let spirv = crate::compile_thru_spirv("#[compute] entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
         .expect("SPIR-V-targeted lowering");
@@ -2012,7 +2013,7 @@ fn assert_phase1_loop_depends_on_thread_id(src: &str) {
         .inner
         .blocks
         .iter()
-        .filter(|(bid, _)| matches!(body.control_headers.get(bid), Some(ControlHeader::Loop { .. })))
+        .filter(|(_, block)| matches!(block.control_header, Some(ControlHeader::Loop { .. })))
         .filter_map(|(_, block)| match &block.term {
             Terminator::CondBranch { cond, .. } => Some(*cond),
             _ => None,
@@ -3359,11 +3360,13 @@ entry fragment_main(
 "#;
     let converted = crate::compile_thru_ssa(source).expect("mixed-stage fragment call compiles");
     let prepass_phase = converted
+        .global_context
         .kernel_plan
         .phases()
         .find(|phase| phase.entry_point.contains("fragment_main_prepass_scalar"))
         .expect("kernel plan contains the fragment scalar prepass");
     let consumer_phase = converted
+        .global_context
         .kernel_plan
         .phases()
         .find(|phase| phase.entry_point == "fragment_main")
@@ -3372,7 +3375,7 @@ entry fragment_main(
         consumer_phase.dependencies.contains(&prepass_phase.id),
         "graphics consumer explicitly depends on its standalone compute prepass"
     );
-    let lowered = converted.lower().expect("mixed-stage fragment SSA lowers to SPIR-V");
+    let lowered = crate::lower_ssa_to_spirv(converted).expect("mixed-stage fragment SSA lowers to SPIR-V");
 
     let (prepass_pipeline, prepass) = lowered
         .pipeline
@@ -3494,11 +3497,10 @@ entry fragment_main(
         "the fragment entry must use a distinct NonWritable variable"
     );
 
-    let wgsl = lower_semantic_egir(
+    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(source),
         crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
-    )
-    .lower_wgsl()
+    ))
     .expect("mixed-stage fragment call lowers to WGSL");
     let read_name = format!("_buf_{handoff_set}_{handoff_binding}_read");
     let write_name = format!("_buf_{handoff_set}_{handoff_binding}_read_write");
@@ -3607,11 +3609,10 @@ entry fragment_main(
 }
 
 fn assert_scalar_prefix_emits_valid_wgsl(source: &str) {
-    let wgsl = lower_semantic_egir(
+    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(source),
         crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
-    )
-    .lower_wgsl()
+    ))
     .expect("scalar prepass lowers to WGSL");
     let module = naga::front::wgsl::parse_str(&wgsl)
         .unwrap_or_else(|error| panic!("Naga rejected generated WGSL: {error:?}\n{wgsl}"));
@@ -3992,7 +3993,7 @@ def f(a: *[8]i32) [8]i32 = map(|x: i32| x + 1, a)
 /// one per allocation; the `InputBuffer` destination should
 /// introduce zero. Aggregating across all bodies sidesteps
 /// inlining choices that move the map's body between functions.
-fn count_uninit_in_program(ssa: &Program) -> usize {
+fn count_uninit_in_program<S: crate::ssa::Stage>(ssa: &Program<S>) -> usize {
     let mut count = 0;
     let bodies = ssa
         .functions
@@ -4164,12 +4165,12 @@ entry parallel_scan(a: []i32) []i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
         .expect("parallel scan should synthesize a swap wrapper SemanticFunc");
 
     assert_eq!(
-        wrapper.body.params.len(),
+        wrapper.body.params().len(),
         2,
         "swap wrapper must take exactly two params"
     );
-    let a_id = wrapper.body.params[0].0;
-    let b_id = wrapper.body.params[1].0;
+    let a_id = wrapper.body.param(0).unwrap().0;
+    let b_id = wrapper.body.param(1).unwrap().0;
 
     let call = wrapper
         .body
@@ -4257,7 +4258,9 @@ entry frag(c: vec4f32) vec4f32 =
 /// in `ssa.functions` + `ssa.entry_points`. Used by structural-equivalence
 /// tests that need to compare two SSA programs while ignoring value-id
 /// renumbering, block-ordering, and other low-level details.
-fn inst_signature_multiset(ssa: &Program) -> std::collections::BTreeMap<String, usize> {
+fn inst_signature_multiset<S: crate::ssa::Stage>(
+    ssa: &Program<S>,
+) -> std::collections::BTreeMap<String, usize> {
     use crate::op::OpTag;
     use crate::ssa::types::InstKind;
     use std::collections::BTreeMap;
@@ -4597,11 +4600,10 @@ entry two(ids: []u32, params: []f32) ([]f32, []f32) =
   (lo, hi)
 "#;
 
-    let wgsl = lower_semantic_egir(
+    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(source),
         crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
-    )
-    .lower_wgsl()
+    ))
     .expect("WGSL lowering");
 
     assert!(
@@ -4705,7 +4707,14 @@ entry r(a: []u32, b: []u32, #[storage(set=2, binding=0, access=write)] fb: *[]u3
     let entries_with_loops = program
         .entry_points
         .iter()
-        .filter(|e| e.body.control_headers.values().any(|h| matches!(h, ControlHeader::Loop { .. })))
+        .filter(|entry| {
+            entry
+                .body
+                .inner
+                .blocks
+                .values()
+                .any(|block| matches!(block.control_header, Some(ControlHeader::Loop { .. })))
+        })
         .count();
     assert_eq!(
         entries_with_loops, 1,
@@ -5799,7 +5808,7 @@ entry compute_main(data: []i32) i32 =
     for f in &sum_versions {
         eprintln!("  {}", f.name);
         // Show param types
-        for (val, ty, name) in &f.body.params {
+        for (val, ty, name) in f.body.params() {
             eprintln!("    param {} ({:?}) :: {:?}", name, val, ty);
         }
         // Show all instructions that involve indexing or storage views
@@ -5847,8 +5856,8 @@ fn compile_to_spirv_single_stage(input: &str) -> Result<Vec<u32>, Box<dyn std::e
 }
 
 /// Compile module-bearing source through SSA using the shared frontend.
-fn compile_to_ssa_with_modules(input: &str) -> Program {
-    crate::compile_thru_ssa(input).expect("compile to SSA").ssa
+fn compile_to_ssa_with_modules(input: &str) -> Program<crate::ssa::stage::Elaborated> {
+    crate::compile_thru_ssa(input).expect("compile to SSA")
 }
 
 // =========================================================================
@@ -7246,7 +7255,12 @@ fn assert_compute_entry_has_no_ssa_loops(src: &str, entry_name: &str) {
         .find(|entry| entry.name == entry_name)
         .unwrap_or_else(|| panic!("entry {entry_name} present"));
     assert!(
-        entry.body.control_headers.values().all(|header| !matches!(header, ControlHeader::Loop { .. })),
+        entry
+            .body
+            .inner
+            .blocks
+            .values()
+            .all(|block| !matches!(block.control_header, Some(ControlHeader::Loop { .. }))),
         "entry {entry_name} should be a loop-free guarded lane kernel"
     );
 }
@@ -7283,7 +7297,11 @@ entry pair(xs: []f32) ([]f32, []f32) =
     });
     assert!(loads_thread_id, "pointwise Screma entry must read thread_id");
     assert!(
-        pair.body.control_headers.values().all(|header| !matches!(header, ControlHeader::Loop { .. })),
+        pair.body
+            .inner
+            .blocks
+            .values()
+            .all(|block| !matches!(block.control_header, Some(ControlHeader::Loop { .. }))),
         "pointwise Screma entry must be the loop-free guarded lane kernel"
     );
 
@@ -8420,6 +8438,7 @@ entry g(xs: []i32) []i32 =
         crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
     );
     let wgsl_slot = converted
+        .global_context
         .pipeline
         .pipelines
         .iter()
@@ -8445,7 +8464,7 @@ entry g(xs: []i32) []i32 =
             Pipeline::Graphics(_) => None,
         })
         .expect("WGSL scan pipeline has a read-only use of a read_write layout slot");
-    let wgsl = converted.lower_wgsl().expect("scan gather lowers to WGSL");
+    let wgsl = crate::lower_ssa_to_wgsl(converted).expect("scan gather lowers to WGSL");
     assert!(
         wgsl.contains(&format!(
             "@group({}) @binding({}) var<storage, read_write>",
@@ -9637,7 +9656,7 @@ entry e(#[storage(set=2, binding=0, access=write)] o: *[]i32) () =
   let _ = scatter(o, [0i32], [s]) in ()
 "#;
     let ssa = crate::compile_thru_ssa(src).expect("Range->Reduce should compile");
-    let mir = crate::ssa::print::format_program(&ssa.ssa);
+    let mir = crate::ssa::print::format_program(&ssa);
     let loops = mir.matches("loop merge").count();
     assert_eq!(
         loops, 1,
@@ -10228,7 +10247,7 @@ fn history_resource_feedback_pair_reaches_descriptor() {
     use crate::pipeline_descriptor::Pipeline;
 
     let lowered = crate::compile_thru_ssa(HISTORY_FEEDBACK_SOURCE).expect("history feedback compiles");
-    let has_feedback = lowered.pipeline.pipelines.iter().any(|pipeline| match pipeline {
+    let has_feedback = lowered.global_context.pipeline.pipelines.iter().any(|pipeline| match pipeline {
         Pipeline::Compute(compute) => !compute.feedback.is_empty(),
         Pipeline::Graphics(graphics) => !graphics.feedback.is_empty(),
     });
@@ -10248,7 +10267,7 @@ fn resource_dependencies_publish_frame_graph() {
     };
 
     let lowered = crate::compile_thru_ssa(HISTORY_FEEDBACK_SOURCE).expect("history feedback compiles");
-    let graph = &lowered.pipeline.frame_graph;
+    let graph = &lowered.global_context.pipeline.frame_graph;
     assert!(!graph.passes.is_empty(), "frame graph has no passes");
     assert!(!graph.resources.is_empty(), "frame graph has no resources");
     assert_eq!(graph.feedback.len(), 1, "history pair should reach frame graph");
@@ -10321,7 +10340,7 @@ entry consume(#[builtin(frag_coord)] fc: vec4f32,
   texture_load(t, @[i32(fc.x), i32(fc.y)], 0)
 ";
     let lowered = crate::compile_thru_ssa(src).expect("write-then-sample compiles");
-    let graph = &lowered.pipeline.frame_graph;
+    let graph = &lowered.global_context.pipeline.frame_graph;
 
     let named: Vec<usize> = graph
         .resources
@@ -10376,7 +10395,7 @@ fn history_resource_bindings_are_not_duplicated() {
     use crate::pipeline_descriptor::Pipeline;
 
     let lowered = crate::compile_thru_ssa(HISTORY_FEEDBACK_SOURCE).expect("history feedback compiles");
-    for pipeline in &lowered.pipeline.pipelines {
+    for pipeline in &lowered.global_context.pipeline.pipelines {
         let Pipeline::Compute(compute) = pipeline else {
             continue;
         };
@@ -10423,6 +10442,7 @@ entry step(#[view(acc, storage_write)] out_acc: *storage_image,
     for source in [HISTORY_FEEDBACK_SOURCE, with_buffer_input] {
         let lowered = crate::compile_thru_ssa(source).expect("per-texel image pass compiles");
         let stage = lowered
+            .global_context
             .pipeline
             .pipelines
             .iter()
@@ -10470,6 +10490,7 @@ entry paint(#[view(color, storage_write)] img: *storage_image,
     .expect("explicit-dispatch storage image pass compiles");
 
     let stage = lowered
+        .global_context
         .pipeline
         .pipelines
         .iter()
@@ -10514,6 +10535,7 @@ entry paint(#[view(color, storage_write)] img: *storage_image) () =
     .expect("explicit 1x1x1 storage image pass compiles");
 
     let stage = lowered
+        .global_context
         .pipeline
         .pipelines
         .iter()
@@ -10607,11 +10629,10 @@ entry r(#[storage_image(set=1, binding=0, format=r32float, access=write_only)] i
     let lowered = crate::compile_thru_spirv(source).expect("linear image update compiles");
     assert_no_runtime_storage_image_handles(&lowered.spirv);
 
-    let wgsl = lower_semantic_egir(
+    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(source),
         crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
-    )
-    .lower_wgsl()
+    ))
     .expect("WGSL lowering");
     assert!(
         wgsl.contains("textureStore("),
@@ -10687,11 +10708,10 @@ entry r(#[storage_image(set=1, binding=0, format=r32float, access=write_only)] i
     let lowered = crate::compile_thru_spirv(source).expect("linear image-update loop compiles");
     assert_no_runtime_storage_image_handles(&lowered.spirv);
 
-    let wgsl = lower_semantic_egir(
+    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(source),
         crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
-    )
-    .lower_wgsl()
+    ))
     .expect("WGSL lowering");
     assert!(
         wgsl.contains("textureStore("),
@@ -11414,6 +11434,7 @@ entry cull(xs: []u32,
 "#;
     let converted = crate::compile_thru_ssa(src).expect("image-reading filter reaches SSA");
     let scan = converted
+        .global_context
         .kernel_plan
         .phases()
         .find(|phase| phase.entry_point == "cull_filter_scan")
@@ -11469,7 +11490,7 @@ entry e(xs: []u32, #[uniform(set=1, binding=0)] c: block) []u32 =
 "#,
     )
     .expect("record uniform reaches SSA");
-    let entry = lowered.ssa.entry_points.iter().find(|e| e.name == "e").expect("entry `e`");
+    let entry = lowered.entry_points.iter().find(|e| e.name == "e").expect("entry `e`");
     let c: Vec<_> = entry.inputs.iter().filter(|i| i.name == "c").collect();
     assert_eq!(c.len(), 1, "record uniform must stay one input, got {:?}", c);
     assert!(
@@ -11833,18 +11854,18 @@ entry world_to_clip_loop_invariant(
 
     let converted = crate::compile_thru_ssa(source).expect("camera LICM repro compiles to SSA");
     let project = converted
-        .ssa
         .functions
         .iter()
         .find(|function| function.name == "project_twenty_samples")
         .expect("project helper remains as an SSA function");
     let (loop_header, continue_block) = project
         .body
-        .control_headers
+        .inner
+        .blocks
         .iter()
-        .find_map(|(header, control)| match control {
-            ControlHeader::Loop { continue_block, .. } => Some((*header, *continue_block)),
-            ControlHeader::Selection { .. } => None,
+        .find_map(|(header, block)| match &block.control_header {
+            Some(ControlHeader::Loop { continue_block, .. }) => Some((header, *continue_block)),
+            Some(ControlHeader::Selection { .. }) | None => None,
         })
         .expect("project helper contains its source loop");
     let preheader = project.body.entry_block();
@@ -11885,5 +11906,5 @@ entry world_to_clip_loop_invariant(
         "the loop body should contain no residual function calls"
     );
 
-    converted.lower().expect("optimized camera repro lowers to valid SPIR-V");
+    crate::lower_ssa_to_spirv(converted).expect("optimized camera repro lowers to valid SPIR-V");
 }

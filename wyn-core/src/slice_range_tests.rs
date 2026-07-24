@@ -13,8 +13,8 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
 }
 
 /// Helper to run pipeline through SSA.
-fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
-    crate::compile_thru_ssa(input).map(|s| s.ssa).map_err(|e| crate::err_spirv!("{}", e))
+fn compile_through_ssa(input: &str) -> Result<Program<crate::ssa::stage::Elaborated>, CompilerError> {
+    crate::compile_thru_ssa(input).map_err(|e| crate::err_spirv!("{}", e))
 }
 
 // =============================================================================

@@ -86,7 +86,7 @@ fn fmt_block(b: BlockId) -> String {
     format!("{:?}", b)
 }
 
-pub fn format_program(program: &Program) -> String {
+pub fn format_program<S: crate::ssa::Stage>(program: &Program<S>) -> String {
     let mut out = String::new();
 
     for func in &program.functions {
@@ -122,11 +122,8 @@ pub fn format_program(program: &Program) -> String {
 }
 
 fn format_function(out: &mut String, name: &str, body: &FuncBody) {
-    let params: Vec<String> = body
-        .params
-        .iter()
-        .map(|(val, ty, _name)| format!("{}: {}", fmt_val(*val), format_type(ty)))
-        .collect();
+    let params: Vec<String> =
+        body.params().map(|(val, ty, _name)| format!("{}: {}", fmt_val(val), format_type(ty))).collect();
     let ret = format_type(&body.return_ty);
     let _ = writeln!(out, "func @{name}({}) -> {ret} {{", params.join(", "));
 
@@ -149,7 +146,7 @@ fn format_function(out: &mut String, name: &str, body: &FuncBody) {
         }
 
         // Control header as comment
-        if let Some(ctrl) = body.control_headers.get(&bid) {
+        if let Some(ctrl) = &block.control_header {
             match ctrl {
                 ControlHeader::Loop {
                     merge,

@@ -30,7 +30,6 @@
 use crate::ast::{Span, TypeName};
 use crate::interface;
 use crate::op::OpTag;
-use crate::BindingRef;
 use crate::LookupMap;
 use polytype::Type;
 use slotmap::SlotMap;
@@ -334,18 +333,6 @@ pub struct PlaceInfo {
     pub elem_ty: Type<TypeName>,
 }
 
-/// Where a view array gets its data from.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ViewSource {
-    /// Backed by a storage buffer at `binding.set` / `binding.binding`.
-    Storage(BindingRef),
-    /// Inherited from another view value (e.g. a function parameter or a slice).
-    /// The SPIR-V backend follows this chain to find the underlying Storage source.
-    Inherited {
-        parent: ValueId,
-    },
-}
-
 // =============================================================================
 // Function Body
 // =============================================================================
@@ -361,17 +348,8 @@ pub struct FuncBody {
     /// The underlying generic SSA function.
     pub inner: WynFunction,
 
-    /// Structured control flow headers (for SPIR-V lowering).
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
-
-    /// Function parameters (value, type, name).
-    pub params: Vec<(ValueId, Type<TypeName>, String)>,
-
     /// Return type of the function.
     pub return_ty: Type<TypeName>,
-
-    /// DPS output parameter (if using destination-passing style).
-    pub dps_output: Option<ValueId>,
 
     /// Addressable places (`OutputSlot`, `ViewIndex`, `Alloca` results).
     pub places: SlotMap<PlaceId, PlaceInfo>,
@@ -418,6 +396,29 @@ impl FuncBody {
         self.inner.values.len()
     }
 
+    /// Function parameters in signature order.
+    pub fn params(&self) -> impl ExactSizeIterator<Item = (ValueId, &Type<TypeName>, &str)> {
+        self.inner.params.iter().copied().map(|value| {
+            let info = &self.inner.values[value];
+            (
+                value,
+                &info.ty,
+                info.name.as_deref().expect("function parameter is missing its name"),
+            )
+        })
+    }
+
+    /// Function parameter at `index`, if present.
+    pub fn param(&self, index: usize) -> Option<(ValueId, &Type<TypeName>, &str)> {
+        let value = *self.inner.params.get(index)?;
+        let info = &self.inner.values[value];
+        Some((
+            value,
+            &info.ty,
+            info.name.as_deref().expect("function parameter is missing its name"),
+        ))
+    }
+
     /// Element type of the place (what `Load` returns / `Store` writes).
     pub fn place_elem_ty(&self, place: PlaceId) -> &Type<TypeName> {
         &self.places[place].elem_ty
@@ -446,9 +447,60 @@ impl FuncBody {
 // Program-Level Types
 // =============================================================================
 
+/// Global data selected by an SSA program's top-level stage.
+pub trait Stage {
+    type GlobalContext: Clone + std::fmt::Debug;
+}
+
+pub mod context {
+    /// Pipeline and planning data carried alongside a backend-bound SSA tree.
+    #[derive(Clone, Debug)]
+    pub struct BackendGlobal {
+        pub pipeline: crate::pipeline_descriptor::PipelineDescriptor,
+        pub profile: crate::LoweringProfile,
+        pub kernel_plan: crate::egir::parallelize::KernelPlanSummary,
+    }
+}
+
+pub mod stage {
+    use super::{context::BackendGlobal, Stage};
+
+    /// Standalone SSA tree without compiler-pipeline context.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Bare;
+
+    impl Stage for Bare {
+        type GlobalContext = ();
+    }
+
+    /// SSA freshly elaborated from the final physical EGIR program.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Elaborated;
+
+    impl Stage for Elaborated {
+        type GlobalContext = BackendGlobal;
+    }
+
+    /// SSA validated for SPIR-V lowering.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct SpirvReady;
+
+    impl Stage for SpirvReady {
+        type GlobalContext = BackendGlobal;
+    }
+
+    /// SSA validated for WGSL lowering.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct WgslReady;
+
+    impl Stage for WgslReady {
+        type GlobalContext = BackendGlobal;
+    }
+}
+
 /// An SSA program — the result of converting TLC to SSA.
 #[derive(Debug, Clone)]
-pub struct Program {
+pub struct Program<S: Stage = stage::Bare> {
     /// Function definitions with their SSA bodies.
     pub functions: Vec<Function>,
     /// Entry point definitions.
@@ -456,6 +508,50 @@ pub struct Program {
     /// Program-level constant definitions (zero-arg defs with purely constant bodies).
     /// Emitted once at module scope; functions reference them via `InstKind::Global`.
     pub constants: Vec<Constant>,
+    /// Program-wide pipeline and planning data selected by `S`.
+    pub global_context: S::GlobalContext,
+    stage: std::marker::PhantomData<S>,
+}
+
+impl<S: Stage> Program<S> {
+    pub(crate) fn from_parts(
+        functions: Vec<Function>,
+        entry_points: Vec<EntryPoint>,
+        constants: Vec<Constant>,
+        global_context: S::GlobalContext,
+    ) -> Self {
+        Self {
+            functions,
+            entry_points,
+            constants,
+            global_context,
+            stage: std::marker::PhantomData,
+        }
+    }
+
+    /// Change only the top-level proof state while preserving the SSA tree and
+    /// its program-wide context.
+    pub(crate) fn into_stage<T>(self) -> Program<T>
+    where
+        T: Stage<GlobalContext = S::GlobalContext>,
+    {
+        Program::from_parts(
+            self.functions,
+            self.entry_points,
+            self.constants,
+            self.global_context,
+        )
+    }
+}
+
+impl Program<stage::Bare> {
+    pub fn bare(functions: Vec<Function>, entry_points: Vec<EntryPoint>, constants: Vec<Constant>) -> Self {
+        Self::from_parts(functions, entry_points, constants, ())
+    }
+
+    pub(crate) fn with_context<S: Stage>(self, global_context: S::GlobalContext) -> Program<S> {
+        Program::from_parts(self.functions, self.entry_points, self.constants, global_context)
+    }
 }
 
 /// A program-level constant definition.

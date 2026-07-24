@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 /// through the full EGIR chain (`from_tlc → expand_soacs → optimize_skeleton
 /// → elaborate`) to a `Program`. No `materialize` — tests don't exercise
 /// SPIR-V-specific dynamic-index rewrites.
-fn compile_via_egir(src: &str) -> Program {
+fn compile_via_egir(src: &str) -> Program<crate::ssa::stage::Elaborated> {
     let tlc = crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(src));
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
@@ -36,7 +36,6 @@ fn compile_via_egir(src: &str) -> Program {
     .expect("semantic EGIR planning failed")
     .lower_to_ssa()
     .expect("semantic EGIR lowering failed")
-    .ssa
 }
 
 use crate::ast::Span;
@@ -481,7 +480,7 @@ fn vertex_inputs_populated_from_vertex_slot_params() {
     let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
 
     let find = |name: &str| {
-        converted.pipeline.pipelines.iter().find_map(|p| match p {
+        converted.global_context.pipeline.pipelines.iter().find_map(|p| match p {
             Pipeline::Graphics(gp) if gp.stages.iter().any(|s| s.entry_point == name) => Some(gp),
             _ => None,
         })
@@ -519,6 +518,7 @@ fn fragment_outputs_populated_from_target_returns() {
     let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
 
     let fs = converted
+        .global_context
         .pipeline
         .pipelines
         .iter()
@@ -554,6 +554,7 @@ fn vertex_uniform_param_compiles_and_surfaces_binding() {
     let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
 
     let vs = converted
+        .global_context
         .pipeline
         .pipelines
         .iter()
@@ -595,6 +596,7 @@ fn texture_and_sampler_params_surface_bindings() {
     let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
 
     let fs = converted
+        .global_context
         .pipeline
         .pipelines
         .iter()

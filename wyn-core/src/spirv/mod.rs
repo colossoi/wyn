@@ -389,7 +389,7 @@ fn storage_image_format_to_spirv(f: crate::pipeline_descriptor::StorageImageForm
 /// Lower an SSA program directly to SPIR-V.
 ///
 /// This is the new direct path: TLC → SSA → SPIR-V, bypassing MIR.
-pub fn lower_ssa_program(program: &Program) -> Result<Vec<u32>> {
+pub fn lower_ssa_program(program: &Program<crate::ssa::stage::SpirvReady>) -> Result<Vec<u32>> {
     // Use a thread with larger stack size for complex shaders
     const STACK_SIZE: usize = 16 * 1024 * 1024; // 16MB
 
@@ -416,7 +416,7 @@ pub fn lower_ssa_program(program: &Program) -> Result<Vec<u32>> {
     }
 }
 
-fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
+fn lower_ssa_program_impl(program: &Program<crate::ssa::stage::SpirvReady>) -> Result<Vec<u32>> {
     let mut constructor = Constructor::new();
     let function_variants = StorageFunctionVariants::new(program);
 
@@ -431,7 +431,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         }
         let body = &func.body;
         let param_types: Vec<spirv::Word> =
-            body.params.iter().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
+            body.params().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
         let return_type = constructor.polytype_to_spirv(&body.return_ty);
         constructor.forward_declare_function(&emission.name, &param_types, return_type);
     }
@@ -453,7 +453,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         if let Some(linkage_name) = &func.linkage_name {
             let body = &func.body;
             let param_types: Vec<spirv::Word> =
-                body.params.iter().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
+                body.params().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
             let return_type = constructor.polytype_to_spirv(&body.return_ty);
             let func_id = constructor.forward_declare_linked_function(
                 &func.name,
@@ -676,9 +676,9 @@ fn lower_ssa_function(constructor: &mut Constructor, func: &Function, emitted_na
     let body = &func.body;
 
     // Extract parameter types and names, converting types to SPIR-V
-    let param_names: Vec<&str> = body.params.iter().map(|(_, _, name)| name.as_str()).collect();
+    let param_names: Vec<&str> = body.params().map(|(_, _, name)| name).collect();
     let param_types: Vec<spirv::Word> =
-        body.params.iter().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
+        body.params().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
 
     let return_type = constructor.polytype_to_spirv(&body.return_ty);
 

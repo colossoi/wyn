@@ -113,7 +113,7 @@ impl<'a> StructCtx<'a> {
                     if let Some(ControlHeader::Loop {
                         merge,
                         continue_block,
-                    }) = self.body.control_headers.get(target)
+                    }) = self.body.inner.blocks[*target].control_header.as_ref()
                     {
                         let merge = *merge;
                         let continue_block = *continue_block;
@@ -242,7 +242,7 @@ impl<'a> StructCtx<'a> {
                     if let Some(ControlHeader::Loop {
                         merge,
                         continue_block,
-                    }) = self.body.control_headers.get(target)
+                    }) = self.body.inner.blocks[*target].control_header.as_ref()
                     {
                         let merge = *merge;
                         let continue_block = *continue_block;
@@ -399,7 +399,9 @@ impl<'a> StructCtx<'a> {
         else_block: BlockId,
     ) -> Option<BlockId> {
         // Check annotated selection merge first
-        if let Some(ControlHeader::Selection { merge }) = self.body.control_headers.get(&source_block) {
+        if let Some(ControlHeader::Selection { merge }) =
+            self.body.inner.blocks[source_block].control_header.as_ref()
+        {
             return Some(*merge);
         }
         // Fallback: BFS for first common target
