@@ -24,7 +24,7 @@ pub struct ClosureConverted;
 
 impl Family for ClosureConverted {
     type DefinitionData = ();
-    type EntryData = ();
+    type EntryData = super::data::PinnedEntry;
     type ClosureData = super::data::ExplicitClosurePayload;
     type SoacBodyData = super::data::ExplicitCapturesPayload;
 }

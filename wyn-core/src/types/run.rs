@@ -1,92 +1,318 @@
 //! Top-level type-checking entry point.
-//!
-//! Orchestrates the three-step front-end-to-types boundary:
-//! 1. `resolve_placeholders` — turn type-spec placeholders into type variables
-//!    and a unification context.
-//! 2. `resolve_opens` — qualify bare names introduced by `open M` against the
-//!    union of module specs and the builtins catalog.
-//! 3. `TypeChecker` — load builtins, run inference, collect schemes/warnings.
 
-use crate::builtins::catalog;
-use crate::LookupMap;
-
-use polytype::TypeScheme;
-
-use crate::ast::{self, NodeId, TypeName};
+use crate::ast::{self, Declaration};
 use crate::error::Result;
-use crate::module_manager::ModuleManager;
-use crate::name_resolution::NameResolution;
-use crate::resolve_opens;
-use crate::resolve_placeholders;
+use crate::name_resolution::ResolvedValueRef;
 use crate::types::checker::{TypeChecker, TypeWarning};
 
-pub struct TypeCheckOutput {
-    pub type_table: LookupMap<NodeId, TypeScheme<TypeName>>,
-    pub schemes: LookupMap<String, TypeScheme<TypeName>>,
-    pub warnings: Vec<TypeWarning>,
-    pub builtin_names: Vec<String>,
-    pub name_resolution: NameResolution,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TypeCheckedFamily;
+
+impl ast::Family for TypeCheckedFamily {
+    type Tree = ast::TypedTree;
+    type DefinitionData = ast::TypedDefinition;
+    type EntryData = ast::TypedEntry;
+    type EntryParameterAttribute = crate::interface::ResolvedAttribute;
+    type ExternData = ast::TypedExtern;
+    type FrontendDeclaration = std::convert::Infallible;
 }
 
-pub fn run(ast: &mut ast::Program, module_manager: &mut ModuleManager) -> Result<TypeCheckOutput> {
-    let mut resolver = resolve_placeholders::PlaceholderResolver::new();
-    resolver.resolve(module_manager, ast);
-    let (context, spec_schemes) = resolver.into_parts();
+/// AST with all inferred types, declaration schemes, and identifier
+/// classifications stored on their owning tree nodes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TypeChecked;
 
-    // Build the open-resolver index once and reuse across the user
-    // `Program` and every elaborated prelude module body — the index
-    // is invariant across this whole run (spec_schemes + catalog
-    // don't change). User-defined modules don't go through
-    // `spec_schemes` (their bodies are `Decl`s, not `Sig` specs), so
-    // walk the elaborated-modules table here and inject each module's
-    // `Decl` member names directly — without this, `open base` for a
-    // user `module base = { def foo … }` finds `base` as an unknown
-    // module and bare `foo` references inside sibling module bodies
-    // never resolve.
-    let mut open_index = resolve_opens::build_index(&spec_schemes, catalog());
-    for (module_name, elaborated) in module_manager.get_elaborated_modules() {
-        for item in &elaborated.items {
-            if let crate::module_manager::ElaboratedItem::Decl(decl) = item {
-                open_index.add_member(module_name, &decl.name);
-            }
-        }
-    }
-    resolve_opens::run_with_index(ast, &open_index)?;
+impl ast::Stage for TypeChecked {
+    type Family = TypeCheckedFamily;
+    type GlobalContext = ast::TypedGlobal<ast::TypedDefinition, ast::TypedTree>;
+}
 
-    // Prelude module decl bodies don't go through `resolve_opens::run`
-    // (they aren't in the user `Program`), but their bodies reference
-    // sibling defs by unqualified name (e.g. `log10`'s body calls `log`,
-    // which is `f32.log` from outside). Qualify them here as if each
-    // body were inside an implicit `open <module_name>`.
-    let module_names: Vec<String> = module_manager.elaborated_modules_mut().keys().cloned().collect();
-    for module_name in module_names {
-        let elaborated =
-            module_manager.elaborated_modules_mut().get_mut(&module_name).expect("module exists");
-        for item in &mut elaborated.items {
-            if let crate::module_manager::ElaboratedItem::Decl(decl) = item {
-                resolve_opens::run_in_module_with_index(&mut decl.body, &module_name, &open_index)?;
-            }
-        }
-    }
+pub fn type_check(
+    program: ast::Program<crate::resolve_opens::OpensResolved>,
+) -> Result<ast::Program<TypeChecked>> {
+    let name_resolution = crate::name_resolution::build_name_resolution(
+        &program,
+        &program.global_context.module_manager,
+        crate::builtins::catalog(),
+    );
+    let ast::Program {
+        declarations,
+        node_ids,
+        global_context,
+    } = program;
+    let crate::resolve_placeholders::PlaceholdersResolvedGlobal {
+        module_manager,
+        context,
+        spec_schemes,
+    } = global_context;
 
-    let name_resolution = crate::name_resolution::build_name_resolution(ast, module_manager, catalog());
-
-    let mut checker = TypeChecker::with_context_and_schemes(module_manager, context, spec_schemes);
+    let mut checker = TypeChecker::with_context_and_schemes(&module_manager, context, spec_schemes);
     checker.set_name_resolution(name_resolution);
     checker.load_builtins()?;
-    let type_table = checker.check_program(ast)?;
+    let type_table = checker.check_program(&declarations)?;
     let schemes = checker.get_function_schemes();
     let builtin_names = checker.builtin_names();
     let warnings: Vec<_> = checker.warnings().to_vec();
-    // Read the NameResolution back: the checker may have written
-    // overload-index resolutions into it during inference.
     let name_resolution = checker.name_resolution().clone();
+    drop(checker);
 
-    Ok(TypeCheckOutput {
+    materialize(
+        declarations,
+        node_ids,
+        module_manager,
         type_table,
         schemes,
         warnings,
         builtin_names,
         name_resolution,
+    )
+}
+
+fn materialize(
+    declarations: Vec<Declaration<crate::resolve_opens::OpensResolvedFamily>>,
+    node_ids: ast::NodeCounter,
+    module_manager: crate::module_manager::ModuleManager,
+    mut type_table: crate::LookupMap<ast::NodeId, ast::TypeScheme>,
+    schemes: crate::LookupMap<String, ast::TypeScheme>,
+    warnings: Vec<TypeWarning>,
+    builtin_names: Vec<String>,
+    mut name_resolution: crate::name_resolution::NameResolution,
+) -> Result<ast::Program<TypeChecked>> {
+    let mut support_definitions = Vec::new();
+    for (module_name, definition) in module_manager.get_all_module_declarations() {
+        support_definitions.push(ast::SupportDefinition {
+            namespace: Some(module_name.to_string()),
+            definition: materialize_definition(
+                definition.clone(),
+                &format!("{}.{}", module_name, definition.name),
+                &mut type_table,
+                &schemes,
+                &mut name_resolution,
+            )?,
+        });
+    }
+    for definition in module_manager.get_prelude_function_declarations() {
+        support_definitions.push(ast::SupportDefinition {
+            namespace: None,
+            definition: materialize_definition(
+                definition.clone(),
+                &definition.name,
+                &mut type_table,
+                &schemes,
+                &mut name_resolution,
+            )?,
+        });
+    }
+
+    let mut typed_declarations = Vec::with_capacity(declarations.len());
+    for declaration in declarations {
+        let declaration = match declaration {
+            Declaration::Decl(definition) => Some(Declaration::Decl(materialize_definition(
+                definition,
+                "",
+                &mut type_table,
+                &schemes,
+                &mut name_resolution,
+            )?)),
+            Declaration::Entry(entry) => Some(Declaration::Entry(materialize_entry(
+                entry,
+                &mut type_table,
+                &schemes,
+                &mut name_resolution,
+            )?)),
+            Declaration::Extern(external) => {
+                Some(Declaration::Extern(materialize_external(external, &schemes)?))
+            }
+            Declaration::Frontend(_) => None,
+        };
+        if let Some(declaration) = declaration {
+            typed_declarations.push(declaration);
+        }
+    }
+
+    Ok(ast::Program {
+        declarations: typed_declarations,
+        node_ids,
+        global_context: ast::TypedGlobal {
+            support_definitions,
+            warnings,
+            builtin_names,
+        },
+    })
+}
+
+fn materialize_definition(
+    definition: ast::Decl,
+    qualified_name: &str,
+    type_table: &mut crate::LookupMap<ast::NodeId, ast::TypeScheme>,
+    schemes: &crate::LookupMap<String, ast::TypeScheme>,
+    name_resolution: &mut crate::name_resolution::NameResolution,
+) -> Result<ast::Decl<ast::TypedDefinition, ast::TypedTree>> {
+    let ast::Decl {
+        data,
+        name,
+        name_span,
+        size_params,
+        type_params,
+        params,
+        ty,
+        body,
+        param_diets,
+        return_diet,
+    } = definition;
+    let scheme_name = if qualified_name.is_empty() { name.as_str() } else { qualified_name };
+    let scheme = schemes.get(scheme_name).cloned().ok_or_else(|| {
+        crate::err_type_at!(
+            name_span,
+            "type checker did not produce a scheme for '{}'",
+            scheme_name
+        )
+    })?;
+    Ok(ast::Decl {
+        data: ast::TypedDefinition { syntax: data, scheme },
+        name,
+        name_span,
+        size_params,
+        type_params,
+        params: params
+            .into_iter()
+            .map(|pattern| materialize_pattern(pattern, type_table))
+            .collect::<Result<_>>()?,
+        ty,
+        body: materialize_expression(body, type_table, name_resolution)?,
+        param_diets,
+        return_diet,
+    })
+}
+
+fn materialize_entry(
+    entry: ast::EntryDecl<ast::ResolvedEntry, ast::SourceTree, crate::interface::ResolvedAttribute>,
+    type_table: &mut crate::LookupMap<ast::NodeId, ast::TypeScheme>,
+    schemes: &crate::LookupMap<String, ast::TypeScheme>,
+    name_resolution: &mut crate::name_resolution::NameResolution,
+) -> Result<ast::EntryDecl<ast::TypedEntry, ast::TypedTree, crate::interface::ResolvedAttribute>> {
+    let ast::EntryDecl {
+        data,
+        name,
+        name_span,
+        size_params,
+        type_params,
+        params,
+        body,
+    } = entry;
+    let scheme = schemes.get(&name).cloned().ok_or_else(|| {
+        crate::err_type_at!(
+            name_span,
+            "type checker did not produce a scheme for entry '{}'",
+            name
+        )
+    })?;
+    Ok(ast::EntryDecl {
+        data: ast::TypedEntry { source: data, scheme },
+        name,
+        name_span,
+        size_params,
+        type_params,
+        params: params
+            .into_iter()
+            .map(|pattern| materialize_pattern(pattern, type_table))
+            .collect::<Result<_>>()?,
+        body: materialize_expression(body, type_table, name_resolution)?,
+    })
+}
+
+fn materialize_external(
+    external: ast::ExternDecl,
+    schemes: &crate::LookupMap<String, ast::TypeScheme>,
+) -> Result<ast::ExternDecl<ast::TypedExtern>> {
+    let scheme = schemes.get(&external.name).cloned().ok_or_else(|| {
+        crate::err_type_at!(
+            external.data.span,
+            "type checker did not produce a scheme for '{}'",
+            external.name
+        )
+    })?;
+    Ok(ast::ExternDecl {
+        name: external.name,
+        data: ast::TypedExtern {
+            syntax: external.data,
+            scheme,
+        },
+    })
+}
+
+fn materialize_pattern<A>(
+    pattern: ast::Pattern<ast::Header, A>,
+    type_table: &mut crate::LookupMap<ast::NodeId, ast::TypeScheme>,
+) -> Result<ast::Pattern<ast::TypedHeader, A>> {
+    ast::rebuild::pattern(pattern, &mut |header| typed_header(header, type_table))
+}
+
+fn materialize_expression(
+    expression: ast::Expression,
+    type_table: &mut crate::LookupMap<ast::NodeId, ast::TypeScheme>,
+    name_resolution: &mut crate::name_resolution::NameResolution,
+) -> Result<ast::Expression<ast::TypedTree>> {
+    ast::rebuild::expression(
+        expression,
+        &mut |header| typed_header(header, type_table),
+        &mut |header, identifier| {
+            let resolution = match name_resolution.values.remove(&header.id) {
+                None => ast::IdentifierResolution::Ordinary,
+                Some(ResolvedValueRef::Builtin { id, overload_idx }) => {
+                    ast::IdentifierResolution::Builtin {
+                        id,
+                        overload_idx: overload_idx.ok_or_else(|| {
+                            crate::err_type_at!(
+                                header.span,
+                                "builtin '{}' has no selected overload",
+                                identifier.name
+                            )
+                        })?,
+                    }
+                }
+                Some(ResolvedValueRef::VecConstructor {
+                    target_name,
+                    arity,
+                    target_elem,
+                }) => ast::IdentifierResolution::VecConstructor {
+                    target_name,
+                    arity,
+                    target_elem,
+                },
+                Some(ResolvedValueRef::Soac(kind)) => ast::IdentifierResolution::Soac(match kind {
+                    crate::name_resolution::SoacKind::Map => ast::SoacKind::Map,
+                    crate::name_resolution::SoacKind::Reduce => ast::SoacKind::Reduce,
+                    crate::name_resolution::SoacKind::Scan => ast::SoacKind::Scan,
+                    crate::name_resolution::SoacKind::Filter => ast::SoacKind::Filter,
+                    crate::name_resolution::SoacKind::Zip => ast::SoacKind::Zip,
+                    crate::name_resolution::SoacKind::ReduceByIndex => ast::SoacKind::ReduceByIndex,
+                    crate::name_resolution::SoacKind::Scatter => ast::SoacKind::Scatter,
+                }),
+            };
+            Ok(ast::TypedIdentifier {
+                source: identifier,
+                resolution,
+            })
+        },
+        &mut |_header, hole| Ok(ast::ExprKind::TypeHole(hole)),
+    )
+}
+
+fn typed_header(
+    header: ast::Header,
+    type_table: &mut crate::LookupMap<ast::NodeId, ast::TypeScheme>,
+) -> Result<ast::TypedHeader> {
+    let ty = type_table.remove(&header.id).ok_or_else(|| {
+        crate::err_type_at!(
+            header.span,
+            "type checker did not record a type for AST node {:?}",
+            header.id
+        )
+    })?;
+    Ok(ast::TypedHeader {
+        id: header.id,
+        span: header.span,
+        ty,
     })
 }

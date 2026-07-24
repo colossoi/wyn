@@ -1,6 +1,8 @@
 use crate::ast::*;
 use crate::error::Result;
-use crate::interface::{AttrExt, Attribute, EntryDecl, EntryOutputDecl, StorageAccess, StorageLayout};
+use crate::interface::{
+    AttrExt, Attribute, EntryKind, EntryOutputDecl, StorageAccess, StorageLayout, ViewAttribute,
+};
 use crate::lexer::{LocatedToken, Token};
 use crate::types;
 use crate::LookupMap;
@@ -12,6 +14,46 @@ mod module;
 mod pattern;
 #[cfg(test)]
 mod tests;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ParsedFamily;
+
+impl Family for ParsedFamily {
+    type Tree = SourceTree;
+    type DefinitionData = DefinitionSyntax;
+    type EntryData = EntrySyntax;
+    type EntryParameterAttribute = Attribute;
+    type ExternData = ExternSyntax;
+    type FrontendDeclaration = ParsedFrontend<NestedDeclaration>;
+}
+
+/// AST produced directly by parsing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Parsed;
+
+impl Stage for Parsed {
+    type Family = ParsedFamily;
+    type GlobalContext = crate::module_manager::ModuleManager;
+}
+
+/// Parse source into the first phase-typed AST while transferring ownership of
+/// the sole node allocator and module state into the resulting program.
+pub fn parse(
+    source: &str,
+    mut node_ids: NodeCounter,
+    module_manager: crate::module_manager::ModuleManager,
+) -> Result<Program<Parsed>> {
+    let tokens = crate::lexer::tokenize(source).map_err(|error| err_parse!("{}", error))?;
+    let declarations = {
+        let mut parser = Parser::new(tokens, &mut node_ids);
+        parser.parse()?
+    };
+    Ok(Program {
+        declarations,
+        node_ids,
+        global_context: module_manager,
+    })
+}
 
 // Lazily initialized type constructor maps
 static VECTOR_TYPES: OnceLock<LookupMap<String, Type>> = OnceLock::new();
@@ -97,20 +139,26 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn parse(&mut self) -> Result<Program> {
+    pub fn parse(&mut self) -> Result<Vec<Declaration<ParsedFamily>>> {
         let mut declarations = Vec::new();
 
         while !self.is_at_end() {
             declarations.push(self.parse_declaration()?);
         }
 
-        Ok(Program { declarations })
+        Ok(declarations)
     }
 
-    fn parse_declaration(&mut self) -> Result<Declaration> {
+    fn parse_declaration(&mut self) -> Result<Declaration<ParsedFamily>> {
         trace!("parse_declaration: next token = {:?}", self.peek());
         // Parse optional attributes
         let attributes = self.parse_attributes()?;
+        if attributes.has_view() {
+            bail_parse_at!(
+                self.current_span(),
+                "#[view(...)] is only valid on entry-point parameters"
+            );
+        }
 
         match self.peek() {
             Some(Token::Let) => self.parse_decl("let", attributes),
@@ -119,11 +167,11 @@ impl<'a> Parser<'a> {
             Some(Token::Sig) => {
                 let mut decl = self.parse_sig_decl()?;
                 decl.attributes = attributes;
-                Ok(Declaration::Sig(decl))
+                Ok(Declaration::Frontend(ParsedFrontend::Sig(decl)))
             }
             Some(Token::Type) | Some(Token::TypeSizeLifted) | Some(Token::TypeFullyLifted) => {
                 let type_bind = self.parse_type_bind()?;
-                Ok(Declaration::TypeBind(type_bind))
+                Ok(Declaration::Frontend(ParsedFrontend::TypeBind(type_bind)))
             }
             Some(Token::Module) => {
                 // Check if it's "module type" or just "module"
@@ -133,32 +181,57 @@ impl<'a> Parser<'a> {
                     // module type declaration
                     self.current = saved_pos;
                     let mod_type_bind = self.parse_module_type_bind()?;
-                    Ok(Declaration::ModuleTypeBind(mod_type_bind))
+                    Ok(Declaration::Frontend(ParsedFrontend::ModuleTypeBind(
+                        mod_type_bind,
+                    )))
                 } else {
                     // module declaration
                     self.current = saved_pos;
-                    Ok(Declaration::Module(self.parse_module_decl()?))
+                    Ok(Declaration::Frontend(ParsedFrontend::Module(
+                        self.parse_module_decl()?,
+                    )))
                 }
             }
-            Some(Token::Functor) => Ok(Declaration::Module(self.parse_functor_decl()?)),
+            Some(Token::Functor) => Ok(Declaration::Frontend(ParsedFrontend::Module(
+                self.parse_functor_decl()?,
+            ))),
             Some(Token::Open) => {
                 self.advance();
                 let mod_exp = self.parse_module_expression()?;
-                Ok(Declaration::Open(mod_exp))
+                Ok(Declaration::Frontend(ParsedFrontend::Open(mod_exp)))
             }
             Some(Token::Import) => {
                 self.advance();
                 let path = self.expect_string_literal()?;
-                Ok(Declaration::Import(path))
+                Ok(Declaration::Frontend(ParsedFrontend::Import(path)))
             }
             Some(Token::Extern) => self.parse_extern_decl(attributes),
-            Some(Token::Resource) => Ok(Declaration::Resource(self.parse_resource_decl()?)),
+            Some(Token::Resource) => Ok(Declaration::Frontend(ParsedFrontend::Resource(
+                self.parse_resource_decl()?,
+            ))),
             _ => Err(err_parse_at!(
                 self.current_span(),
                 "Expected declaration, got {:?}",
                 self.peek()
             )),
         }
+    }
+
+    fn parse_nested_declaration(&mut self) -> Result<NestedDeclaration> {
+        Ok(match self.parse_declaration()? {
+            Declaration::Decl(decl) => NestedDeclaration::Decl(decl),
+            Declaration::Entry(entry) => NestedDeclaration::Entry(entry),
+            Declaration::Extern(extern_decl) => NestedDeclaration::Extern(extern_decl),
+            Declaration::Frontend(frontend) => match frontend {
+                ParsedFrontend::Sig(decl) => NestedDeclaration::Sig(decl),
+                ParsedFrontend::TypeBind(decl) => NestedDeclaration::TypeBind(decl),
+                ParsedFrontend::Module(decl) => NestedDeclaration::Module(decl),
+                ParsedFrontend::ModuleTypeBind(decl) => NestedDeclaration::ModuleTypeBind(decl),
+                ParsedFrontend::Open(expression) => NestedDeclaration::Open(expression),
+                ParsedFrontend::Import(path) => NestedDeclaration::Import(path),
+                ParsedFrontend::Resource(decl) => NestedDeclaration::Resource(decl),
+            },
+        })
     }
 
     fn expect_string_literal(&mut self) -> Result<String> {
@@ -172,7 +245,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_decl(&mut self, keyword: &'static str, attributes: Vec<Attribute>) -> Result<Declaration> {
+    fn parse_decl(
+        &mut self,
+        keyword: &'static str,
+        attributes: Vec<Attribute>,
+    ) -> Result<Declaration<ParsedFamily>> {
         trace!("parse_decl({}): next token = {:?}", keyword, self.peek());
 
         // Check for special attributes that require specific declaration types
@@ -297,8 +374,7 @@ impl<'a> Parser<'a> {
             let body = self.parse_expression()?;
 
             Ok(Declaration::Decl(Decl {
-                keyword,
-                attributes,
+                data: DefinitionSyntax { keyword, attributes },
                 name,
                 name_span,
                 size_params,
@@ -370,7 +446,7 @@ impl<'a> Parser<'a> {
 
     /// Parse an extern declaration for linked SPIR-V functions.
     /// Syntax: `#[linked("linkage_name")] extern name(param: Type, ...) ReturnType`
-    fn parse_extern_decl(&mut self, attributes: Vec<Attribute>) -> Result<Declaration> {
+    fn parse_extern_decl(&mut self, attributes: Vec<Attribute>) -> Result<Declaration<ParsedFamily>> {
         trace!("parse_extern_decl: next token = {:?}", self.peek());
         let start_span = self.current_span();
 
@@ -413,13 +489,15 @@ impl<'a> Parser<'a> {
 
         Ok(Declaration::Extern(ExternDecl {
             name,
-            linkage_name,
-            size_params,
-            type_params,
-            ty,
-            span: start_span.merge(&end_span),
-            param_diets,
-            return_diet,
+            data: ExternSyntax {
+                linkage_name,
+                size_params,
+                type_params,
+                ty,
+                span: start_span.merge(&end_span),
+                param_diets,
+                return_diet,
+            },
         }))
     }
 
@@ -452,19 +530,23 @@ impl<'a> Parser<'a> {
     /// Parse an entry point declaration.
     /// Entry points have restrictive syntax: only `id: type` parameters, not general patterns.
     /// Syntax: `#[vertex|fragment|compute] [#[dispatch(x,y,z)]] entry name(id: type, ...) return_type = body`
-    fn parse_entry_decl(&mut self, attributes: Vec<Attribute>) -> Result<Declaration> {
+    fn parse_entry_decl(&mut self, attributes: Vec<Attribute>) -> Result<Declaration<ParsedFamily>> {
         trace!("parse_entry_decl: next token = {:?}", self.peek());
 
         // Find the entry type attribute
-        let entry_type = attributes
+        let entry_kind = attributes
             .iter()
-            .find(|attr| matches!(attr, Attribute::Vertex | Attribute::Fragment | Attribute::Compute))
+            .find_map(|attr| match attr {
+                Attribute::Vertex => Some(EntryKind::Vertex),
+                Attribute::Fragment => Some(EntryKind::Fragment),
+                Attribute::Compute => Some(EntryKind::Compute),
+                _ => None,
+            })
             .ok_or_else(|| {
                 err_parse!(
                     "Entry declarations require #[vertex], #[fragment], or #[compute(...)] attribute"
                 )
-            })?
-            .clone();
+            })?;
         let dispatches: Vec<_> = attributes
             .iter()
             .filter_map(|attr| match attr {
@@ -479,7 +561,7 @@ impl<'a> Parser<'a> {
             );
         }
         let compute_dispatch = dispatches.first().copied();
-        if compute_dispatch.is_some() && !entry_type.is_compute() {
+        if compute_dispatch.is_some() && entry_kind != EntryKind::Compute {
             bail_parse_at!(
                 self.current_span(),
                 "#[dispatch(...)] can only be used with #[compute] entries"
@@ -540,19 +622,19 @@ impl<'a> Parser<'a> {
         let body = self.parse_expression()?;
 
         Ok(Declaration::Entry(EntryDecl {
-            entry_type,
-            compute_dispatch,
+            data: EntrySyntax {
+                entry_kind,
+                compute_dispatch,
+                outputs,
+                param_diets,
+                return_diet,
+            },
             name,
             name_span,
             size_params,
             type_params,
             params,
-            outputs,
-            param_bindings: Vec::new(),
-            feedback: Vec::new(),
             body,
-            param_diets,
-            return_diet,
         }))
     }
 
@@ -628,6 +710,12 @@ impl<'a> Parser<'a> {
                     let attr = if self.check(&Token::AttributeStart) {
                         self.advance(); // consume '#['
                         let attribute = self.parse_attribute()?;
+                        if matches!(attribute, Attribute::View(_)) {
+                            bail_parse_at!(
+                                self.current_span(),
+                                "#[view(...)] is only valid on entry-point parameters"
+                            );
+                        }
                         Some(attribute)
                     } else {
                         None
@@ -653,6 +741,12 @@ impl<'a> Parser<'a> {
             // Single attributed type: #[attribute] type
             self.advance(); // consume '#['
             let attribute = self.parse_attribute()?;
+            if matches!(attribute, Attribute::View(_)) {
+                bail_parse_at!(
+                    self.current_span(),
+                    "#[view(...)] is only valid on entry-point parameters"
+                );
+            }
             let (ty, diet) = self.parse_type()?;
 
             Ok((vec![ty], vec![Some(attribute)], vec![diet]))
@@ -1081,11 +1175,11 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(Token::RightParen)?;
                 self.expect(Token::RightBracket)?;
-                Ok(Attribute::View {
+                Ok(Attribute::View(ViewAttribute {
                     resource,
                     usage,
                     previous,
-                })
+                }))
             }
             "builtin" => {
                 self.expect(Token::LeftParen)?;
@@ -2418,7 +2512,7 @@ impl<'a> Parser<'a> {
             Some(Token::TypeHole) => {
                 let span = self.current_span();
                 self.advance();
-                Ok(self.node_counter.mk_node(ExprKind::TypeHole, span))
+                Ok(self.node_counter.mk_node(ExprKind::TypeHole(TypeHole), span))
             }
             Some(Token::IntLiteral(n)) => {
                 let n = n.clone();
@@ -2462,7 +2556,13 @@ impl<'a> Parser<'a> {
                 let name = name.clone();
                 let span = self.current_span();
                 self.advance();
-                Ok(self.node_counter.mk_node(ExprKind::Identifier(vec![], name), span))
+                Ok(self.node_counter.mk_node(
+                    ExprKind::Identifier(Identifier {
+                        qualifiers: vec![],
+                        name,
+                    }),
+                    span,
+                ))
             }
             Some(Token::Constructor(name)) => {
                 let name = name.clone();
@@ -2516,10 +2616,20 @@ impl<'a> Parser<'a> {
                     let y_pattern = self.node_counter.mk_node(PatternKind::Name("y".to_string()), span);
 
                     // Create identifier expressions for body: x, y
-                    let x_expr =
-                        self.node_counter.mk_node(ExprKind::Identifier(vec![], "x".to_string()), span);
-                    let y_expr =
-                        self.node_counter.mk_node(ExprKind::Identifier(vec![], "y".to_string()), span);
+                    let x_expr = self.node_counter.mk_node(
+                        ExprKind::Identifier(Identifier {
+                            qualifiers: vec![],
+                            name: "x".to_string(),
+                        }),
+                        span,
+                    );
+                    let y_expr = self.node_counter.mk_node(
+                        ExprKind::Identifier(Identifier {
+                            qualifiers: vec![],
+                            name: "y".to_string(),
+                        }),
+                        span,
+                    );
 
                     // Create body: x op y
                     let body = self.node_counter.mk_node(
@@ -2714,7 +2824,13 @@ impl<'a> Parser<'a> {
                 CurryArg::Placeholder => {
                     let name = format!("_{}_", param_idx);
                     param_idx += 1;
-                    self.node_counter.mk_node(ExprKind::Identifier(vec![], name), span)
+                    self.node_counter.mk_node(
+                        ExprKind::Identifier(Identifier {
+                            qualifiers: vec![],
+                            name,
+                        }),
+                        span,
+                    )
                 }
                 CurryArg::Expr(e) => e,
             })

@@ -18,11 +18,19 @@
 
 use crate::ast::UnaryOp;
 use crate::ast::{
-    Decl, Declaration, ExprKind, Expression, IfExpr, LetInExpr, LoopExpr, LoopForm, MatchExpr, Program,
-    RangeExpr, Type, TypeName,
+    Decl, Declaration, EntryDecl, ExprKind, Expression, IfExpr, LetInExpr, LoopExpr, LoopForm, MatchExpr,
+    Program, RangeExpr, Type, TypeName,
 };
-use crate::interface::EntryDecl;
 use crate::LookupMap;
+
+/// AST after integer constants needed by static-size inference are exposed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConstantsFolded;
+
+impl crate::ast::Stage for ConstantsFolded {
+    type Family = crate::resolve_resources::ResourcesResolvedFamily;
+    type GlobalContext = crate::module_manager::ModuleManager;
+}
 
 /// AST-level constant folder for integer constants.
 pub struct AstConstFolder {
@@ -56,7 +64,7 @@ impl AstConstFolder {
     /// Two passes:
     /// 1. Collect top-level constant definitions (parameterless defs with integer values)
     /// 2. Fold and inline in all expressions
-    pub fn fold_program(&mut self, program: &mut Program) {
+    pub fn fold_program(&mut self, program: &mut Program<crate::resolve_resources::ResourcesResolved>) {
         // First pass: collect top-level constant definitions
         for decl in &program.declarations {
             if let Declaration::Decl(d) = decl {
@@ -80,7 +88,10 @@ impl AstConstFolder {
         }
     }
 
-    fn fold_declaration(&mut self, decl: &mut Declaration) {
+    fn fold_declaration(
+        &mut self,
+        decl: &mut Declaration<crate::resolve_resources::ResourcesResolvedFamily>,
+    ) {
         match decl {
             Declaration::Decl(d) => self.fold_decl(d),
             Declaration::Entry(e) => self.fold_entry_decl(e),
@@ -93,7 +104,14 @@ impl AstConstFolder {
         self.fold_expr(&mut d.body);
     }
 
-    fn fold_entry_decl(&mut self, e: &mut EntryDecl) {
+    fn fold_entry_decl(
+        &mut self,
+        e: &mut EntryDecl<
+            crate::ast::ResolvedEntry,
+            crate::ast::SourceTree,
+            crate::interface::ResolvedAttribute,
+        >,
+    ) {
         self.fold_expr(&mut e.body);
     }
 
@@ -105,14 +123,14 @@ impl AstConstFolder {
             | ExprKind::FloatLiteral(_)
             | ExprKind::BoolLiteral(_)
             | ExprKind::Unit
-            | ExprKind::TypeHole => {
+            | ExprKind::TypeHole(_) => {
                 // Leaf nodes, nothing to fold
             }
 
-            ExprKind::Identifier(quals, name) => {
+            ExprKind::Identifier(identifier) => {
                 // Inline known constants (only for unqualified names)
-                if quals.is_empty() {
-                    if let Some(&val) = self.constants.get(name) {
+                if identifier.qualifiers.is_empty() {
+                    if let Some(&val) = self.constants.get(&identifier.name) {
                         expr.kind = ExprKind::IntLiteral(val.to_string().into());
                     }
                 }
@@ -327,7 +345,9 @@ impl AstConstFolder {
     fn try_eval_const(&self, expr: &Expression) -> Option<i64> {
         match &expr.kind {
             ExprKind::IntLiteral(n) => i64::try_from(n).ok(),
-            ExprKind::Identifier(quals, name) if quals.is_empty() => self.constants.get(name).copied(),
+            ExprKind::Identifier(identifier) if identifier.qualifiers.is_empty() => {
+                self.constants.get(&identifier.name).copied()
+            }
             ExprKind::BinaryOp(op, lhs, rhs) => {
                 let l = self.try_eval_const(lhs)?;
                 let r = self.try_eval_const(rhs)?;
@@ -466,10 +486,13 @@ impl AstConstFolder {
     }
 }
 
-/// Convenience function to fold constants in a program.
-pub fn run(program: &mut Program) {
+/// Expose literal integer bounds needed by static-size inference.
+pub fn fold_constants(
+    mut program: Program<crate::resolve_resources::ResourcesResolved>,
+) -> Program<ConstantsFolded> {
     let mut folder = AstConstFolder::new();
-    folder.fold_program(program);
+    folder.fold_program(&mut program);
+    program.into_stage()
 }
 
 #[cfg(test)]

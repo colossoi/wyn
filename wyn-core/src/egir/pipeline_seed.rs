@@ -3,7 +3,7 @@
 //! This conversion preserves source entry metadata without choosing generated
 //! entries, resources, output grouping, or dispatch phases.
 
-use crate::interface::Attribute;
+use crate::interface::EntryKind;
 use crate::pipeline_descriptor::*;
 use crate::tlc::{DefMeta as GenericDefMeta, Program as GenericProgram};
 
@@ -34,7 +34,7 @@ pub(super) fn run(program: &Program) -> PipelineSeed {
             })
             .collect();
 
-        if decl.entry_type.is_compute() {
+        if decl.entry_kind == EntryKind::Compute {
             let dispatch_size = decl
                 .compute_dispatch
                 .map(|grid| DispatchSize::Fixed {
@@ -62,7 +62,7 @@ pub(super) fn run(program: &Program) -> PipelineSeed {
                 feedback,
             }));
         } else {
-            let stage = if decl.entry_type == Attribute::Vertex {
+            let stage = if decl.entry_kind == EntryKind::Vertex {
                 ShaderStage::Vertex
             } else {
                 ShaderStage::Fragment

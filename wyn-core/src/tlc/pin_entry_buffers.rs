@@ -24,7 +24,10 @@ mod pin_entry_buffers_tests;
 
 use super::data::Empty;
 use super::run::Transformed;
-use super::{apply_type_substitution, extract_lambda_params_ref, DefMeta, Program, Term, TermKind, VarRef};
+use super::{
+    apply_type_substitution, data, extract_lambda_params_ref, Def, DefMeta, EntryPoint, Family, Program,
+    Term, TermIdSource, TermKind, VarRef,
+};
 use crate::ast::{Span, TypeName};
 use crate::binding_layout::{
     compute_entry_binding_layout, extract_storage_binding, extract_storage_image_binding,
@@ -36,57 +39,109 @@ use polytype::Type;
 
 /// TLC after entry-parameter buffer regions are pinned into their types.
 #[derive(Debug, Clone, Copy, Default)]
+pub struct Polymorphic;
+
+impl Family for Polymorphic {
+    type DefinitionData = data::PolymorphicDefinition;
+    type EntryData = data::PinnedEntry;
+    type ClosureData = Empty;
+    type SoacBodyData = Empty;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct BuffersPinned;
 
 impl super::Stage for BuffersPinned {
-    type Family = super::run::Polymorphic;
+    type Family = Polymorphic;
     type GlobalContext = super::context::RewriteGlobal;
 }
 
 /// Buffer-variable → concrete `Buffer(set, binding)` substitution.
 type BufferSubst = LookupMap<usize, Type<TypeName>>;
 
-pub fn pin_entry_buffers(
-    mut program: Program<Transformed>,
-) -> crate::error::Result<Program<BuffersPinned>> {
-    let (defs, term_ids, global_context) = (
-        &mut program.defs,
-        &mut program.term_ids,
-        &mut program.global_context,
-    );
-    for def in defs {
-        if !matches!(&def.meta, DefMeta::EntryPoint(_)) {
-            continue;
-        }
-        let span = def.body.span;
-        let (_, params) = extract_lambda_params_ref(&def.body);
+pub fn pin_entry_buffers(program: Program<Transformed>) -> crate::error::Result<Program<BuffersPinned>> {
+    let Program {
+        defs,
+        symbols,
+        def_syms,
+        mut term_ids,
+        global_context,
+    } = program;
+    let mut binding_ids = global_context.auto_storage_binding_ids;
+    let defs = defs
+        .into_iter()
+        .map(|def| pin_definition(def, &mut term_ids, &mut binding_ids))
+        .collect::<crate::error::Result<_>>()?;
+    Ok(Program::from_parts(
+        defs,
+        symbols,
+        def_syms,
+        term_ids,
+        super::context::RewriteGlobal {
+            known_defs: global_context.known_defs,
+            auto_storage_binding_ids: binding_ids,
+        },
+    ))
+}
 
-        let mut subst = BufferSubst::new();
-        let mut buffer_env = LookupMap::new();
-        if let DefMeta::EntryPoint(entry) = &mut def.meta {
+fn pin_definition(
+    def: Def<super::run::UnpinnedPolymorphic>,
+    term_ids: &mut TermIdSource,
+    binding_ids: &mut crate::IdSource<u32>,
+) -> crate::error::Result<Def<Polymorphic>> {
+    let Def {
+        data,
+        name,
+        mut ty,
+        mut body,
+        meta,
+        arity,
+        param_diets,
+        return_diet,
+    } = def;
+    let meta = match meta {
+        DefMeta::Function => DefMeta::Function,
+        DefMeta::LiftedLambda => DefMeta::LiftedLambda,
+        DefMeta::EntryPoint(entry) => {
+            let span = body.span;
+            let (_, params) = extract_lambda_params_ref(&body);
             let param_bindings = compute_entry_binding_layout(
                 &params,
                 &entry.declaration,
                 crate::egir::from_tlc::AUTO_STORAGE_SET,
-                &mut global_context.auto_storage_binding_ids,
+                binding_ids,
             );
-            entry.declaration.param_bindings = param_bindings;
-            collect_buffer_subst(&params, &entry.declaration, &mut subst, &mut buffer_env, span)?;
+            let mut subst = BufferSubst::new();
+            let mut buffer_env = LookupMap::new();
+            collect_buffer_subst(
+                &params,
+                &entry.declaration,
+                &param_bindings,
+                &mut subst,
+                &mut buffer_env,
+                span,
+            )?;
+            while collect_view_slice_buffer_subst(&body, &mut subst, &buffer_env)? {}
+            if !subst.is_empty() {
+                ty = apply_type_substitution(&ty, &subst);
+                body.rewrite_types(term_ids, &mut |ty| apply_type_substitution(ty, &subst));
+            }
+            DefMeta::EntryPoint(EntryPoint {
+                declaration: entry.declaration,
+                data: data::PinnedEntry { param_bindings },
+            })
         }
-
-        while collect_view_slice_buffer_subst(&def.body, &mut subst, &buffer_env)? {}
-
-        if !subst.is_empty() {
-            def.ty = apply_type_substitution(&def.ty, &subst);
-            def.body.rewrite_types(term_ids, &mut |ty| apply_type_substitution(ty, &subst));
-        }
-    }
-    Ok(
-        program.map_global_context(|global| super::context::RewriteGlobal {
-            known_defs: global.known_defs,
-            auto_storage_binding_ids: global.auto_storage_binding_ids,
-        }),
-    )
+    };
+    Ok(Def {
+        data,
+        name,
+        ty,
+        body,
+        meta,
+        arity,
+        param_diets,
+        return_diet,
+    })
 }
 
 /// Map each storage param's buffer variable to its concrete region. An
@@ -96,12 +151,11 @@ pub fn pin_entry_buffers(
 fn collect_buffer_subst(
     params: &[(SymbolId, Type<TypeName>)],
     entry: &EntryDecl,
+    layout: &[Option<crate::interface::EntryParamBinding>],
     subst: &mut BufferSubst,
     buffer_env: &mut LookupMap<SymbolId, Type<TypeName>>,
     span: Span,
 ) -> crate::error::Result<()> {
-    let layout = &entry.param_bindings;
-
     for (i, (_sym, ty)) in params.iter().enumerate() {
         let ty = ty;
 

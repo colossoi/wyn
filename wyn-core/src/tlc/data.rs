@@ -156,8 +156,16 @@ impl super::Payload for ExplicitCapturesPayload {
     }
 }
 
-/// Minimum required storage-input lengths attached directly to an entry.
+/// Buffer layout attached by `pin_entry_buffers`.
+#[derive(Debug, Clone, Default)]
+pub struct PinnedEntry {
+    pub param_bindings: Vec<Option<crate::interface::EntryParamBinding>>,
+}
+
+/// Buffer layout and minimum required storage-input lengths attached directly
+/// to an entry after input-bound inference.
 #[derive(Debug, Clone, Default)]
 pub struct EntryInputBounds {
+    pub param_bindings: Vec<Option<crate::interface::EntryParamBinding>>,
     pub by_symbol: LookupMap<SymbolId, BufferLen>,
 }

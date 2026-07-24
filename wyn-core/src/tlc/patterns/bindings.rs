@@ -21,9 +21,9 @@ impl<'a> Transformer<'a> {
     /// a scrutinee. Tuple/Record patterns produce a chain of
     /// projections; simple Name/Wildcard at top level produce no
     /// bindings (caller wraps with a `Let` directly).
-    pub(in crate::tlc) fn compute_pattern_bindings(
+    pub(in crate::tlc) fn compute_pattern_bindings<A>(
         &mut self,
-        pattern: &ast::Pattern,
+        pattern: &ast::Pattern<ast::TypedHeader, A>,
         scrutinee: Term,
         span: Span,
     ) -> (SymbolId, Vec<PendingBinding>) {
@@ -33,9 +33,9 @@ impl<'a> Transformer<'a> {
     /// Inner implementation tracking nesting depth.
     /// At top level, Name/Wildcard don't create bindings (caller handles).
     /// Nested Name/Wildcard DO create bindings (needed for component extraction).
-    pub(in crate::tlc) fn compute_pattern_bindings_inner(
+    pub(in crate::tlc) fn compute_pattern_bindings_inner<A>(
         &mut self,
-        pattern: &ast::Pattern,
+        pattern: &ast::Pattern<ast::TypedHeader, A>,
         scrutinee: Term,
         span: Span,
         is_top_level: bool,
@@ -202,8 +202,8 @@ impl<'a> Transformer<'a> {
                         // Scrutinee already lowered from a sum to a flat
                         // tuple. Recover the original variant list from
                         // the pattern's type-table entry.
-                        match self.lookup_type_raw(pattern.h.id) {
-                            Some(Type::Constructed(TypeName::Sum(v), _)) => v,
+                        match Self::raw_type(&pattern.h) {
+                            Type::Constructed(TypeName::Sum(v), _) => v,
                             _ => panic!(
                                 "BUG: Constructor pattern lacks Sum type in type table for NodeId {:?}",
                                 pattern.h.id
@@ -260,7 +260,10 @@ impl<'a> Transformer<'a> {
     /// wrapped versions), None for complex patterns that need
     /// destructuring. Used by `transform_expr`'s Let arm to fast-path
     /// `let x = …` without the full binding-list machinery.
-    pub(in crate::tlc) fn simple_pattern_name(&mut self, pattern: &ast::Pattern) -> Option<String> {
+    pub(in crate::tlc) fn simple_pattern_name<A>(
+        &mut self,
+        pattern: &ast::Pattern<ast::TypedHeader, A>,
+    ) -> Option<String> {
         match &pattern.kind {
             PatternKind::Name(name) => Some(name.clone()),
             PatternKind::Wildcard => Some(format!("_w_wild_{}", self.term_ids.next_id())),

@@ -15,7 +15,6 @@
 //! the type checker doesn't need to re-convert type parameters to variables.
 
 use crate::ast::{self, Declaration, Expression, Pattern, PatternKind, Program, TypeParam};
-use crate::interface::EntryDecl;
 use crate::types::TypeName;
 use crate::LookupMap;
 use crate::StableMap;
@@ -24,6 +23,47 @@ use polytype::{Context, Type, TypeScheme};
 #[cfg(test)]
 #[path = "resolve_placeholders_tests.rs"]
 mod tests;
+
+/// Type-inference state produced while source placeholders are replaced by
+/// fresh variables. It is program-wide rather than owned by one AST node.
+#[derive(Debug)]
+pub struct PlaceholdersResolvedGlobal {
+    pub module_manager: crate::module_manager::ModuleManager,
+    pub context: Context<TypeName>,
+    pub spec_schemes: LookupMap<String, TypeScheme<TypeName>>,
+}
+
+/// AST after every placeholder in annotations and module specs has a stable
+/// inference variable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TypePlaceholdersResolved;
+
+impl ast::Stage for TypePlaceholdersResolved {
+    type Family = crate::resolve_resources::ResourcesResolvedFamily;
+    type GlobalContext = PlaceholdersResolvedGlobal;
+}
+
+pub fn resolve_type_placeholders(
+    mut program: Program<crate::ast_const_fold::ConstantsFolded>,
+) -> Program<TypePlaceholdersResolved> {
+    let mut resolver = PlaceholderResolver::new();
+    resolver.resolve(&mut program.global_context, &mut program.declarations);
+    let (context, spec_schemes) = resolver.into_parts();
+    let Program {
+        declarations,
+        node_ids,
+        global_context: module_manager,
+    } = program;
+    Program {
+        declarations,
+        node_ids,
+        global_context: PlaceholdersResolvedGlobal {
+            module_manager,
+            context,
+            spec_schemes,
+        },
+    }
+}
 
 /// Resolver that transforms placeholder types into type variables.
 pub struct PlaceholderResolver {
@@ -75,16 +115,19 @@ impl PlaceholderResolver {
     pub fn resolve(
         &mut self,
         module_manager: &mut crate::module_manager::ModuleManager,
-        program: &mut Program,
+        declarations: &mut [Declaration<crate::resolve_resources::ResourcesResolvedFamily>],
     ) {
         self.resolve_prelude(module_manager.prelude_functions_mut());
         self.resolve_elaborated_modules(module_manager.elaborated_modules_mut());
-        self.resolve_program(program);
+        self.resolve_program(declarations);
     }
 
     /// Resolve all placeholders in a program.
-    fn resolve_program(&mut self, program: &mut Program) {
-        for decl in &mut program.declarations {
+    fn resolve_program(
+        &mut self,
+        declarations: &mut [Declaration<crate::resolve_resources::ResourcesResolvedFamily>],
+    ) {
+        for decl in declarations {
             self.resolve_declaration(decl);
         }
     }
@@ -192,23 +235,21 @@ impl PlaceholderResolver {
         result
     }
 
-    fn resolve_declaration(&mut self, decl: &mut Declaration) {
+    fn resolve_declaration(
+        &mut self,
+        decl: &mut Declaration<crate::resolve_resources::ResourcesResolvedFamily>,
+    ) {
         match decl {
             Declaration::Decl(d) => self.resolve_decl(d),
             Declaration::Entry(e) => self.resolve_entry(e),
-            Declaration::Sig(s) => {
-                s.ty = self.resolve_type(&s.ty);
-            }
-            Declaration::TypeBind(_)
-            | Declaration::Import(_)
-            | Declaration::Module(_)
-            | Declaration::ModuleTypeBind(_)
-            | Declaration::Open(_)
-            | Declaration::Resource(_) => {
-                // No type annotations to resolve
-            }
-            Declaration::Extern(e) => {
-                e.ty = self.resolve_type(&e.ty);
+            Declaration::Frontend(frontend) => match frontend {
+                ast::ResourcesResolvedFrontend::Sig(signature) => {
+                    signature.ty = self.resolve_type(&signature.ty);
+                }
+                ast::ResourcesResolvedFrontend::TypeBind(_) | ast::ResourcesResolvedFrontend::Open(_) => {}
+            },
+            Declaration::Extern(external) => {
+                external.data.ty = self.resolve_type(&external.data.ty);
             }
         }
     }
@@ -242,7 +283,14 @@ impl PlaceholderResolver {
         self.type_param_bindings.clear();
     }
 
-    fn resolve_entry(&mut self, entry: &mut EntryDecl) {
+    fn resolve_entry(
+        &mut self,
+        entry: &mut ast::EntryDecl<
+            ast::ResolvedEntry,
+            ast::SourceTree,
+            crate::interface::ResolvedAttribute,
+        >,
+    ) {
         // Set up bindings for named type parameters
         for size_param in &entry.size_params {
             let var = self.context.new_variable();
@@ -258,7 +306,7 @@ impl PlaceholderResolver {
         }
 
         // Resolve output types
-        for output in &mut entry.outputs {
+        for output in &mut entry.data.syntax.outputs {
             output.ty = self.resolve_type(&output.ty);
         }
 
@@ -269,7 +317,7 @@ impl PlaceholderResolver {
         self.type_param_bindings.clear();
     }
 
-    fn resolve_pattern(&mut self, pattern: &mut Pattern) {
+    fn resolve_pattern<A>(&mut self, pattern: &mut Pattern<ast::Header, A>) {
         match &mut pattern.kind {
             PatternKind::Typed(inner, ty) => {
                 self.resolve_pattern(inner);
@@ -433,12 +481,12 @@ impl PlaceholderResolver {
                 self.resolve_expression(&mut loop_expr.body);
             }
             // Leaf expressions with no nested types
-            ast::ExprKind::Identifier(_, _)
+            ast::ExprKind::Identifier(_)
             | ast::ExprKind::IntLiteral(_)
             | ast::ExprKind::FloatLiteral(_)
             | ast::ExprKind::BoolLiteral(_)
             | ast::ExprKind::Unit
-            | ast::ExprKind::TypeHole => {}
+            | ast::ExprKind::TypeHole(_) => {}
         }
     }
 

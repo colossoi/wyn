@@ -5,21 +5,14 @@
 //! than a dozen bespoke front-end-plus-chain copies.
 
 use crate::tlc::{self, Program};
-use crate::{cached_compiler_init, Compiler};
 
 /// Front-end (parse → resolve → type-check → to_tlc → pin_entry_buffers →
 /// validate_ownership) shared by every `compile_*` helper, so they differ only
 /// in how far down the canonical chain they run.
 fn front_end(src: &str) -> Program<tlc::stage::OwnershipValidated> {
-    let (mut node_counter, mut module_manager) = cached_compiler_init();
-    let type_checked = Compiler::parse(src, &mut node_counter)
-        .expect("parse")
-        .resolve(&module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-    let program = type_checked.to_tlc(&module_manager, false);
+    let type_checked = crate::compile_thru_frontend(src).expect("type_check");
+    let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
+    let program = tlc::lower_from_ast(program);
     let program = tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     tlc::validate_ownership(program).expect("validate_ownership")
 }

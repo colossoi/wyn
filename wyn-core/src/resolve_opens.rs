@@ -35,6 +35,60 @@ use polytype::TypeScheme;
 #[path = "resolve_opens_tests.rs"]
 mod tests;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OpensResolvedFamily;
+
+impl ast::Family for OpensResolvedFamily {
+    type Tree = ast::SourceTree;
+    type DefinitionData = ast::DefinitionSyntax;
+    type EntryData = ast::ResolvedEntry;
+    type EntryParameterAttribute = crate::interface::ResolvedAttribute;
+    type ExternData = ast::ExternSyntax;
+    type FrontendDeclaration = ast::OpensResolvedFrontend;
+}
+
+/// AST after `open` declarations have been consumed and affected identifiers
+/// have been qualified.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OpensResolved;
+
+impl ast::Stage for OpensResolved {
+    type Family = OpensResolvedFamily;
+    type GlobalContext = crate::resolve_placeholders::PlaceholdersResolvedGlobal;
+}
+
+pub fn resolve_opens(
+    mut program: Program<crate::resolve_placeholders::TypePlaceholdersResolved>,
+) -> Result<Program<OpensResolved>> {
+    let mut index = build_index(&program.global_context.spec_schemes, crate::builtins::catalog());
+    for (module_name, elaborated) in program.global_context.module_manager.get_elaborated_modules() {
+        for item in &elaborated.items {
+            if let crate::module_manager::ElaboratedItem::Decl(declaration) = item {
+                index.add_member(module_name, &declaration.name);
+            }
+        }
+    }
+    resolve_program_with_index(&mut program.declarations, &index)?;
+
+    let module_names: Vec<String> =
+        program.global_context.module_manager.elaborated_modules_mut().keys().cloned().collect();
+    for module_name in module_names {
+        let elaborated = program
+            .global_context
+            .module_manager
+            .elaborated_modules_mut()
+            .get_mut(&module_name)
+            .expect("module exists");
+        for item in &mut elaborated.items {
+            if let crate::module_manager::ElaboratedItem::Decl(declaration) = item {
+                run_in_module_with_index(&mut declaration.body, &module_name, &index)?;
+            }
+        }
+    }
+
+    materialize(program)
+}
+
 /// Member-source abstraction. Decouples the resolver from where module
 /// member info lives so later changes (real value exports, user
 /// modules, etc.) update only the index construction.
@@ -127,26 +181,34 @@ impl<'a> OpenResolver<'a> {
 
     /// Top-level entry: rewrite identifiers in every declaration of a
     /// program in source order.
-    pub fn resolve_program(&mut self, program: &mut Program) -> Result<()> {
+    pub fn resolve_program(
+        &mut self,
+        declarations: &mut [Declaration<crate::resolve_resources::ResourcesResolvedFamily>],
+    ) -> Result<()> {
         // Top-level `def` / `entry` / `extern` names are all visible
         // in each other's bodies (mutual recursion). Pre-load the
         // outermost `locals` frame with every top-level def/entry/sig
         // name so a top-level function never accidentally rewrites to
         // an opened module member.
-        for decl in &program.declarations {
+        for decl in declarations.iter() {
             if let Some(name) = top_level_name(decl) {
                 self.locals.last_mut().unwrap().insert(name);
             }
         }
-        for decl in &mut program.declarations {
+        for decl in declarations {
             self.resolve_declaration(decl)?;
         }
         Ok(())
     }
 
-    fn resolve_declaration(&mut self, decl: &mut Declaration) -> Result<()> {
+    fn resolve_declaration(
+        &mut self,
+        decl: &mut Declaration<crate::resolve_resources::ResourcesResolvedFamily>,
+    ) -> Result<()> {
         match decl {
-            Declaration::Open(mod_exp) => self.handle_open(mod_exp),
+            Declaration::Frontend(ast::ResourcesResolvedFrontend::Open(mod_exp)) => {
+                self.handle_open(mod_exp)
+            }
             Declaration::Decl(d) => {
                 self.locals.push(LookupSet::new());
                 for p in &d.params {
@@ -165,16 +227,10 @@ impl<'a> OpenResolver<'a> {
                 self.locals.pop();
                 Ok(())
             }
-            // Opens are only rewritten in expression position; module
-            // declarations and signatures don't contain expressions
-            // that reach the value namespace.
-            Declaration::Module(_)
-            | Declaration::ModuleTypeBind(_)
-            | Declaration::Sig(_)
-            | Declaration::TypeBind(_)
-            | Declaration::Extern(_)
-            | Declaration::Import(_)
-            | Declaration::Resource(_) => Ok(()),
+            Declaration::Frontend(
+                ast::ResourcesResolvedFrontend::Sig(_) | ast::ResourcesResolvedFrontend::TypeBind(_),
+            )
+            | Declaration::Extern(_) => Ok(()),
         }
     }
 
@@ -199,7 +255,7 @@ impl<'a> OpenResolver<'a> {
         }
     }
 
-    fn bind_pattern(&mut self, pat: &Pattern) {
+    fn bind_pattern<A>(&mut self, pat: &Pattern<ast::Header, A>) {
         let frame = self.locals.last_mut().unwrap();
         for n in pat.bound_names() {
             frame.insert(n);
@@ -212,9 +268,9 @@ impl<'a> OpenResolver<'a> {
 
     fn resolve_expression(&mut self, expr: &mut Expression) -> Result<()> {
         // Identifier rewrite — the whole point of the pass.
-        if let ExprKind::Identifier(quals, name) = &expr.kind {
+        if let ExprKind::Identifier(identifier) = &expr.kind {
             // Rule 1: already qualified.
-            if !quals.is_empty() {
+            if !identifier.qualifiers.is_empty() {
                 return Ok(());
             }
             // Rule 2: already in scope — a local binding, or a name
@@ -223,7 +279,7 @@ impl<'a> OpenResolver<'a> {
             // constructor per the spec). An open must not shadow
             // either: `open f32` exports `f32.u32` as a member, but
             // rewriting bare `u32` would hijack the constructor.
-            if self.locally_bound(name) || self.index.has_module(name) {
+            if self.locally_bound(&identifier.name) || self.index.has_module(&identifier.name) {
                 return Ok(());
             }
             // Rule 3: opened-module candidates. Dedupe by module name
@@ -236,7 +292,7 @@ impl<'a> OpenResolver<'a> {
                 .opens
                 .iter()
                 .rev()
-                .filter(|m| self.index.has_member(m, name))
+                .filter(|m| self.index.has_member(m, &identifier.name))
                 .filter(|m| seen.insert((*m).clone()))
                 .cloned()
                 .collect();
@@ -244,20 +300,20 @@ impl<'a> OpenResolver<'a> {
                 0 => {} // Rule 4: leave bare for downstream resolution.
                 1 => {
                     let m = candidates.into_iter().next().unwrap();
-                    if let ExprKind::Identifier(quals, _) = &mut expr.kind {
-                        quals.push(m);
+                    if let ExprKind::Identifier(identifier) = &mut expr.kind {
+                        identifier.qualifiers.push(m);
                     }
                 }
                 _ => {
                     let cand_list = candidates
                         .iter()
-                        .map(|m| format!("`{}.{}`", m, name))
+                        .map(|m| format!("`{}.{}`", m, identifier.name))
                         .collect::<Vec<_>>()
                         .join(", ");
                     return Err(crate::err_module_at!(
                         expr.h.span,
                         "ambiguous reference '{}'; opened modules provide: {}. Qualify the reference explicitly.",
-                        name,
+                        identifier.name,
                         cand_list
                     ));
                 }
@@ -391,12 +447,12 @@ impl<'a> OpenResolver<'a> {
                 self.locals.pop();
             }
             // Leaves — no expressions inside.
-            ExprKind::Identifier(_, _)
+            ExprKind::Identifier(_)
             | ExprKind::IntLiteral(_)
             | ExprKind::FloatLiteral(_)
             | ExprKind::BoolLiteral(_)
             | ExprKind::Unit
-            | ExprKind::TypeHole => {}
+            | ExprKind::TypeHole(_) => {}
         }
 
         Ok(())
@@ -430,24 +486,12 @@ pub fn build_index(
     OpenIndex::from_qualified_names(scheme_keys.chain(catalog_keys))
 }
 
-/// Top-level public entry point. Builds the open index from the union
-/// of `spec_schemes`'s keys and the builtins catalog, then rewrites
-/// every declaration body in `program`. Single-shot callers can use
-/// this; callers that resolve multiple bodies should build the index
-/// once with `build_index` and use `run_with_index`.
-pub fn run(
-    program: &mut Program,
-    spec_schemes: &LookupMap<String, TypeScheme<TypeName>>,
-    catalog: &BuiltinCatalog,
+fn resolve_program_with_index(
+    declarations: &mut [Declaration<crate::resolve_resources::ResourcesResolvedFamily>],
+    index: &OpenIndex,
 ) -> Result<()> {
-    let index = build_index(spec_schemes, catalog);
-    run_with_index(program, &index)
-}
-
-/// Like `run` but reuses a pre-built index.
-pub fn run_with_index(program: &mut Program, index: &OpenIndex) -> Result<()> {
     let mut r = OpenResolver::new(index);
-    r.resolve_program(program)
+    r.resolve_program(declarations)
 }
 
 /// Rewrite identifiers in a single expression as if it were inside
@@ -481,18 +525,46 @@ pub fn run_in_module_with_index(
     r.resolve_expression(expr)
 }
 
-fn top_level_name(decl: &Declaration) -> Option<String> {
+fn materialize(
+    program: Program<crate::resolve_placeholders::TypePlaceholdersResolved>,
+) -> Result<Program<OpensResolved>> {
+    let Program {
+        declarations,
+        node_ids,
+        global_context,
+    } = program;
+    let declarations = declarations
+        .into_iter()
+        .filter_map(|declaration| match declaration {
+            Declaration::Decl(definition) => Some(Declaration::Decl(definition)),
+            Declaration::Entry(entry) => Some(Declaration::Entry(entry)),
+            Declaration::Extern(external) => Some(Declaration::Extern(external)),
+            Declaration::Frontend(ast::ResourcesResolvedFrontend::Sig(signature)) => {
+                Some(Declaration::Frontend(ast::OpensResolvedFrontend::Sig(signature)))
+            }
+            Declaration::Frontend(ast::ResourcesResolvedFrontend::TypeBind(binding)) => Some(
+                Declaration::Frontend(ast::OpensResolvedFrontend::TypeBind(binding)),
+            ),
+            Declaration::Frontend(ast::ResourcesResolvedFrontend::Open(_)) => None,
+        })
+        .collect();
+    Ok(Program {
+        declarations,
+        node_ids,
+        global_context,
+    })
+}
+
+fn top_level_name(decl: &Declaration<crate::resolve_resources::ResourcesResolvedFamily>) -> Option<String> {
     match decl {
         Declaration::Decl(d) => Some(d.name.clone()),
         Declaration::Entry(e) => Some(e.name.clone()),
-        Declaration::Sig(s) => Some(s.name.clone()),
         Declaration::Extern(e) => Some(e.name.clone()),
-        // No value-namespace name to register.
-        Declaration::Module(_)
-        | Declaration::ModuleTypeBind(_)
-        | Declaration::TypeBind(_)
-        | Declaration::Open(_)
-        | Declaration::Import(_)
-        | Declaration::Resource(_) => None,
+        Declaration::Frontend(ast::ResourcesResolvedFrontend::Sig(signature)) => {
+            Some(signature.name.clone())
+        }
+        Declaration::Frontend(
+            ast::ResourcesResolvedFrontend::TypeBind(_) | ast::ResourcesResolvedFrontend::Open(_),
+        ) => None,
     }
 }

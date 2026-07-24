@@ -5,7 +5,7 @@
 
 use super::data::Empty;
 use super::ownership::OwnershipValidated;
-use super::run::Polymorphic;
+use super::pin_entry_buffers::Polymorphic;
 use super::{
     Def, Lambda, LoopKind, Program, RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter,
     VarRef,
@@ -24,7 +24,7 @@ use spirv::GLOp;
 pub struct PartialEvaled;
 
 impl super::Stage for PartialEvaled {
-    type Family = super::run::Polymorphic;
+    type Family = super::pin_entry_buffers::Polymorphic;
     type GlobalContext = super::context::RewriteGlobal;
 }
 

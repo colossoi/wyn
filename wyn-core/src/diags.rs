@@ -4,7 +4,7 @@
 //! something close to Wyn syntax.
 
 use crate::ast::*;
-use crate::interface::EntryDecl;
+use crate::parser::{Parsed, ParsedFamily};
 use crate::tlc::VarRef;
 use crate::types::TypeExt;
 use polytype::Type as PolyType;
@@ -204,7 +204,7 @@ impl AstFormatter {
     }
 
     /// Format a program and return the formatted string.
-    pub fn format_program(program: &Program) -> String {
+    pub fn format_program(program: &Program<Parsed>) -> String {
         let mut formatter = AstFormatter::new();
         for decl in &program.declarations {
             formatter.write_declaration(decl);
@@ -214,7 +214,7 @@ impl AstFormatter {
     }
 
     /// Format a program with node IDs and return the formatted string.
-    pub fn format_program_with_ids(program: &Program) -> String {
+    pub fn format_program_with_ids(program: &Program<Parsed>) -> String {
         let mut formatter = AstFormatter::with_node_ids();
         for decl in &program.declarations {
             formatter.write_declaration(decl);
@@ -232,11 +232,11 @@ impl AstFormatter {
         let _ = writeln!(self.output);
     }
 
-    fn write_declaration(&mut self, decl: &Declaration) {
+    fn write_declaration(&mut self, decl: &Declaration<ParsedFamily>) {
         match decl {
             Declaration::Decl(d) => self.write_decl(d),
             Declaration::Entry(e) => self.write_entry(e),
-            Declaration::Sig(v) => {
+            Declaration::Frontend(ParsedFrontend::Sig(v)) => {
                 let mut header = format!("sig {}", v.name);
                 // Rust-style generics: <[n], [m], A, B>
                 if !v.size_params.is_empty() || !v.type_params.is_empty() {
@@ -254,32 +254,32 @@ impl AstFormatter {
                 header.push_str(&format!(": {}", v.ty));
                 self.write_line(&header);
             }
-            Declaration::TypeBind(tb) => {
+            Declaration::Frontend(ParsedFrontend::TypeBind(tb)) => {
                 self.write_line(&format!("type {} = {}", tb.name, tb.definition));
             }
-            Declaration::Module(md) => {
+            Declaration::Frontend(ParsedFrontend::Module(md)) => {
                 let name = match md {
                     ModuleDecl::Module { name, .. } => name,
                     ModuleDecl::Functor { name, .. } => name,
                 };
                 self.write_line(&format!("module {} = ...", name));
             }
-            Declaration::ModuleTypeBind(mtb) => {
+            Declaration::Frontend(ParsedFrontend::ModuleTypeBind(mtb)) => {
                 self.write_line(&format!("module type {} = ...", mtb.name));
             }
-            Declaration::Open(_) => {
+            Declaration::Frontend(ParsedFrontend::Open(_)) => {
                 self.write_line("open ...");
             }
-            Declaration::Import(path) => {
+            Declaration::Frontend(ParsedFrontend::Import(path)) => {
                 self.write_line(&format!("import \"{}\"", path));
             }
             Declaration::Extern(e) => {
                 self.write_line(&format!(
                     "#[linked(\"{}\")]\nextern {}: {}",
-                    e.linkage_name, e.name, e.ty
+                    e.data.linkage_name, e.name, e.data.ty
                 ));
             }
-            Declaration::Resource(r) => {
+            Declaration::Frontend(ParsedFrontend::Resource(r)) => {
                 self.write_line(&format!(
                     "resource {}: {:?} {{ format = {:?}, usages = {:?} }}",
                     r.name, r.kind, r.format, r.usages
@@ -288,8 +288,8 @@ impl AstFormatter {
         }
     }
 
-    fn write_decl(&mut self, decl: &Decl) {
-        let mut header = format!("{} {}", decl.keyword, decl.name);
+    fn write_decl(&mut self, decl: &Decl<DefinitionSyntax, SourceTree>) {
+        let mut header = format!("{} {}", decl.data.keyword, decl.name);
 
         // Rust-style generics: <[n], [m], A, B>
         if !decl.size_params.is_empty() || !decl.type_params.is_empty() {
@@ -337,8 +337,12 @@ impl AstFormatter {
         }
     }
 
-    fn write_entry(&mut self, entry: &EntryDecl) {
-        let entry_kind = if entry.entry_type.is_vertex() { "vertex" } else { "fragment" };
+    fn write_entry(&mut self, entry: &EntryDecl<EntrySyntax, SourceTree>) {
+        let entry_kind = match entry.data.entry_kind {
+            crate::interface::EntryKind::Vertex => "vertex",
+            crate::interface::EntryKind::Fragment => "fragment",
+            crate::interface::EntryKind::Compute => "compute",
+        };
         let mut header = format!("{} {}", entry_kind, entry.name);
 
         for param in &entry.params {
@@ -370,9 +374,12 @@ impl AstFormatter {
             ExprKind::Unit => {
                 self.write_line("()");
             }
-            ExprKind::Identifier(quals, name) => {
-                let qn =
-                    if quals.is_empty() { name.clone() } else { format!("{}.{}", quals.join("."), name) };
+            ExprKind::Identifier(identifier) => {
+                let qn = if identifier.qualifiers.is_empty() {
+                    identifier.name.clone()
+                } else {
+                    format!("{}.{}", identifier.qualifiers.join("."), identifier.name)
+                };
                 self.write_line(&qn);
             }
             ExprKind::ArrayLiteral(elems) => {
@@ -578,7 +585,7 @@ impl AstFormatter {
                 let inner_str = self.format_simple_expr(inner);
                 self.write_line(&format!("{} :> {}", inner_str, ty));
             }
-            ExprKind::TypeHole => {
+            ExprKind::TypeHole(_) => {
                 self.write_line("???");
             }
         }
@@ -591,8 +598,8 @@ impl AstFormatter {
                 | ExprKind::FloatLiteral(_)
                 | ExprKind::BoolLiteral(_)
                 | ExprKind::Unit
-                | ExprKind::Identifier(_, _)
-                | ExprKind::TypeHole
+                | ExprKind::Identifier(_)
+                | ExprKind::TypeHole(_)
         )
     }
 
@@ -602,14 +609,14 @@ impl AstFormatter {
             ExprKind::FloatLiteral(f) => format!("{}", f),
             ExprKind::BoolLiteral(b) => b.to_string(),
             ExprKind::Unit => "()".to_string(),
-            ExprKind::Identifier(quals, name) => {
-                if quals.is_empty() {
-                    name.clone()
+            ExprKind::Identifier(identifier) => {
+                if identifier.qualifiers.is_empty() {
+                    identifier.name.clone()
                 } else {
-                    format!("{}.{}", quals.join("."), name)
+                    format!("{}.{}", identifier.qualifiers.join("."), identifier.name)
                 }
             }
-            ExprKind::TypeHole => "???".to_string(),
+            ExprKind::TypeHole(_) => "???".to_string(),
             ExprKind::Tuple(elems) => {
                 let items: Vec<String> = elems.iter().map(|e| self.format_simple_expr(e)).collect();
                 format!("({})", items.join(", "))

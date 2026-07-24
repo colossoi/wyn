@@ -5,21 +5,22 @@ use super::*;
 /// Compile a Wyn source through the same pipeline used by
 /// `compile_to_wgsl_impl` and return the SSA program so tests can inspect
 /// the interface shape without going through JSON serialization.
-fn compile_to_ssa(
-    source: &str,
-) -> wyn_core::ssa::Program<wyn_core::ssa::stage::Elaborated> {
-    let (mut node_counter, mut module_manager) =
-        wyn_core::init_compiler().expect("compiler initialization failed");
-    let parsed = wyn_core::Compiler::parse(source, &mut node_counter).expect("parse failed");
-    let parsed =
-        parsed.elaborate_modules(&mut module_manager, &mut node_counter).expect("elaborate_modules failed");
-    let type_checked = parsed
-        .resolve(&module_manager)
-        .expect("resolve failed")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check failed");
-    let program = type_checked.to_tlc(&module_manager, false);
+fn compile_to_ssa(source: &str) -> wyn_core::ssa::Program<wyn_core::ssa::stage::Elaborated> {
+    let (node_counter, module_manager) = wyn_core::init_compiler().expect("compiler initialization failed");
+    let program = wyn_core::parser::parse(source, node_counter, module_manager).expect("parse failed");
+    let program = wyn_core::resolve_imports::resolve_imports(program, std::path::Path::new("."))
+        .expect("resolve_imports failed");
+    let program =
+        wyn_core::elaborate_modules::elaborate_modules(program).expect("elaborate_modules failed");
+    let program = wyn_core::name_resolution::resolve_names(program);
+    let program =
+        wyn_core::resolve_resources::resolve_resources(program).expect("resolve_resources failed");
+    let program = wyn_core::ast_const_fold::fold_constants(program);
+    let program = wyn_core::resolve_placeholders::resolve_type_placeholders(program);
+    let program = wyn_core::resolve_opens::resolve_opens(program).expect("resolve_opens failed");
+    let program = wyn_core::types::run::type_check(program).expect("type_check failed");
+    let program = wyn_core::ast_type_holes::reject_type_holes(program).expect("type holes");
+    let program = wyn_core::tlc::lower_from_ast(program);
     let program = wyn_core::tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     let program = wyn_core::tlc::validate_ownership(program).expect("validate_ownership");
     let program = wyn_core::tlc::partial_eval(program);
@@ -38,18 +39,13 @@ fn compile_to_ssa(
     let program = wyn_core::tlc::filter_reachable(program);
     let program = wyn_core::tlc::infer_input_slice_bounds(program);
     let program = wyn_core::to_egraph(program).expect("to_egraph failed");
-    let program =
-        wyn_core::egir::realize_outputs(program).expect("realize_outputs failed");
+    let program = wyn_core::egir::realize_outputs(program).expect("realize_outputs failed");
     let program = wyn_core::egir::reify_soacs(program);
     let program = wyn_core::egir::optimize_semantics(program);
-    let program = wyn_core::egir::plan_logical_resources(program)
-        .expect("semantic EGIR allocation failed");
+    let program = wyn_core::egir::plan_logical_resources(program).expect("semantic EGIR allocation failed");
     let program = wyn_core::egir::plan(
         program,
-        wyn_core::LoweringProfile::new(
-            wyn_core::CodegenTarget::Wgsl,
-            wyn_core::SchedulePolicy::Parallel,
-        ),
+        wyn_core::LoweringProfile::new(wyn_core::CodegenTarget::Wgsl, wyn_core::SchedulePolicy::Parallel),
     )
     .expect("semantic EGIR planning failed");
     wyn_core::lower_egir_to_ssa(program).expect("planned EGIR lowering failed")

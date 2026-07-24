@@ -21,12 +21,24 @@ use crate::LookupMap;
 
 use crate::ast::{Declaration, ExprKind, Expression, NodeId, Program};
 use crate::builtins::{BuiltinCatalog, BuiltinId};
-use crate::error::Result;
 use crate::module_manager::ModuleManager;
 use crate::scope::{for_each_pattern_name, ScopeStack};
 
+/// AST after module-qualified value names have been resolved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NamesResolved;
+
+impl crate::ast::Stage for NamesResolved {
+    type Family = crate::elaborate_modules::ModulesElaboratedFamily;
+    type GlobalContext = ModuleManager;
+}
+
 /// Insert every name bound by `pattern` into `scope`.
-fn collect_pattern_bindings(pattern: &crate::ast::Pattern, scope: &mut ScopeStack<()>) {
+fn collect_pattern_bindings<H, A>(pattern: &crate::ast::Pattern<H, A>, scope: &mut ScopeStack<()>)
+where
+    H: Clone + std::fmt::Debug + PartialEq,
+    A: Clone + std::fmt::Debug + PartialEq,
+{
     for_each_pattern_name(pattern, &mut |name| {
         scope.insert(name.to_string(), ());
     });
@@ -66,157 +78,158 @@ pub trait ResolveContext {
     }
 }
 
-/// Walk `expr` in place, applying `ctx`'s rewrite policies. `scope` is
-/// the set of locally-bound names visible at `expr`. Callers typically
-/// start with an empty `scope` at each declaration boundary.
+/// Walk an expression in place using this pass's established scope-sensitive
+/// resolution rules.
 pub fn walk_expr<C: ResolveContext>(
-    expr: &mut Expression,
-    ctx: &C,
+    expression: &mut Expression,
+    context: &C,
     scope: &mut ScopeStack<()>,
-) -> Result<()> {
-    match &mut expr.kind {
-        ExprKind::Identifier(quals, name) => {
-            ctx.resolve_identifier(quals, name, scope);
+) -> crate::error::Result<()> {
+    match &mut expression.kind {
+        ExprKind::Identifier(identifier) => {
+            context.resolve_identifier(&mut identifier.qualifiers, &mut identifier.name, scope);
         }
-        ExprKind::FieldAccess(obj, field) => {
-            // Peek at obj to see if it's the `Identifier . name` shape the
-            // resolver hook wants to rewrite. If so, replace the whole
-            // expression; otherwise fall through and recurse into obj.
-            let rewrite = if let ExprKind::Identifier(obj_quals, obj_name) = &obj.kind {
-                ctx.resolve_field_access(obj_quals, obj_name, field, scope)
+        ExprKind::FieldAccess(object, field) => {
+            let replacement = if let ExprKind::Identifier(identifier) = &object.kind {
+                context.resolve_field_access(&identifier.qualifiers, &identifier.name, field, scope)
             } else {
                 None
             };
-            if let Some(new_kind) = rewrite {
-                expr.kind = new_kind;
+            if let Some(kind) = replacement {
+                expression.kind = kind;
             } else {
-                walk_expr(obj, ctx, scope)?;
+                walk_expr(object, context, scope)?;
             }
         }
-        ExprKind::Application(func, args) => {
-            walk_expr(func, ctx, scope)?;
-            for a in args {
-                walk_expr(a, ctx, scope)?;
+        ExprKind::Application(function, arguments) => {
+            walk_expr(function, context, scope)?;
+            for argument in arguments {
+                walk_expr(argument, context, scope)?;
             }
         }
         ExprKind::Lambda(lambda) => {
             scope.push_scope();
-            for p in &lambda.params {
-                collect_pattern_bindings(p, scope);
+            for pattern in &lambda.params {
+                collect_pattern_bindings(pattern, scope);
             }
-            walk_expr(&mut lambda.body, ctx, scope)?;
+            walk_expr(&mut lambda.body, context, scope)?;
             scope.pop_scope();
         }
         ExprKind::LetIn(let_in) => {
-            walk_expr(&mut let_in.value, ctx, scope)?;
+            walk_expr(&mut let_in.value, context, scope)?;
             scope.push_scope();
             collect_pattern_bindings(&let_in.pattern, scope);
-            walk_expr(&mut let_in.body, ctx, scope)?;
+            walk_expr(&mut let_in.body, context, scope)?;
             scope.pop_scope();
         }
         ExprKind::If(if_expr) => {
-            walk_expr(&mut if_expr.condition, ctx, scope)?;
-            walk_expr(&mut if_expr.then_branch, ctx, scope)?;
-            walk_expr(&mut if_expr.else_branch, ctx, scope)?;
+            walk_expr(&mut if_expr.condition, context, scope)?;
+            walk_expr(&mut if_expr.then_branch, context, scope)?;
+            walk_expr(&mut if_expr.else_branch, context, scope)?;
         }
-        ExprKind::BinaryOp(_, lhs, rhs) => {
-            walk_expr(lhs, ctx, scope)?;
-            walk_expr(rhs, ctx, scope)?;
+        ExprKind::BinaryOp(_, left, right) => {
+            walk_expr(left, context, scope)?;
+            walk_expr(right, context, scope)?;
         }
-        ExprKind::UnaryOp(_, operand) => {
-            walk_expr(operand, ctx, scope)?;
-        }
-        ExprKind::Tuple(exprs) | ExprKind::ArrayLiteral(exprs) | ExprKind::VecMatLiteral(exprs) => {
-            for e in exprs {
-                walk_expr(e, ctx, scope)?;
+        ExprKind::UnaryOp(_, value) => walk_expr(value, context, scope)?,
+        ExprKind::Tuple(values) | ExprKind::ArrayLiteral(values) | ExprKind::VecMatLiteral(values) => {
+            for value in values {
+                walk_expr(value, context, scope)?;
             }
         }
-        ExprKind::ArrayIndex(arr, idx) => {
-            walk_expr(arr, ctx, scope)?;
-            walk_expr(idx, ctx, scope)?;
+        ExprKind::ArrayIndex(array, index) => {
+            walk_expr(array, context, scope)?;
+            walk_expr(index, context, scope)?;
         }
-        ExprKind::ArrayWith {
-            array, index, value, ..
-        } => {
-            walk_expr(array, ctx, scope)?;
-            walk_expr(index, ctx, scope)?;
-            walk_expr(value, ctx, scope)?;
+        ExprKind::ArrayWith { array, index, value } => {
+            walk_expr(array, context, scope)?;
+            walk_expr(index, context, scope)?;
+            walk_expr(value, context, scope)?;
         }
         ExprKind::VecWith { target, value, .. } => {
-            walk_expr(target, ctx, scope)?;
-            walk_expr(value, ctx, scope)?;
+            walk_expr(target, context, scope)?;
+            walk_expr(value, context, scope)?;
         }
         ExprKind::RecordWith { record, value, .. } => {
-            walk_expr(record, ctx, scope)?;
-            walk_expr(value, ctx, scope)?;
+            walk_expr(record, context, scope)?;
+            walk_expr(value, context, scope)?;
         }
         ExprKind::RecordLiteral(fields) => {
-            for (_, e) in fields {
-                walk_expr(e, ctx, scope)?;
+            for (_, value) in fields {
+                walk_expr(value, context, scope)?;
             }
         }
         ExprKind::Loop(loop_expr) => {
             scope.push_scope();
             collect_pattern_bindings(&loop_expr.pattern, scope);
-            if let Some(ref mut init) = loop_expr.init {
-                walk_expr(init, ctx, scope)?;
+            if let Some(init) = &mut loop_expr.init {
+                walk_expr(init, context, scope)?;
             }
             match &mut loop_expr.form {
-                crate::ast::LoopForm::While(cond) => {
-                    walk_expr(cond, ctx, scope)?;
+                crate::ast::LoopForm::While(condition) => {
+                    walk_expr(condition, context, scope)?;
                 }
-                crate::ast::LoopForm::For(idx_var, bound) => {
-                    scope.insert(idx_var.clone(), ());
-                    walk_expr(bound, ctx, scope)?;
+                crate::ast::LoopForm::For(name, bound) => {
+                    scope.insert(name.clone(), ());
+                    walk_expr(bound, context, scope)?;
                 }
-                crate::ast::LoopForm::ForIn(elem_pat, iter) => {
-                    collect_pattern_bindings(elem_pat, scope);
-                    walk_expr(iter, ctx, scope)?;
+                crate::ast::LoopForm::ForIn(pattern, iterable) => {
+                    collect_pattern_bindings(pattern, scope);
+                    walk_expr(iterable, context, scope)?;
                 }
             }
-            walk_expr(&mut loop_expr.body, ctx, scope)?;
+            walk_expr(&mut loop_expr.body, context, scope)?;
             scope.pop_scope();
         }
         ExprKind::Match(match_expr) => {
-            walk_expr(&mut match_expr.scrutinee, ctx, scope)?;
+            walk_expr(&mut match_expr.scrutinee, context, scope)?;
             for case in &mut match_expr.cases {
                 scope.push_scope();
                 collect_pattern_bindings(&case.pattern, scope);
-                walk_expr(&mut case.body, ctx, scope)?;
+                walk_expr(&mut case.body, context, scope)?;
                 scope.pop_scope();
             }
         }
-        ExprKind::TypeAscription(e, _) | ExprKind::TypeCoercion(e, _) => {
-            walk_expr(e, ctx, scope)?;
+        ExprKind::TypeAscription(value, _) | ExprKind::TypeCoercion(value, _) => {
+            walk_expr(value, context, scope)?;
         }
         ExprKind::Range(range) => {
-            walk_expr(&mut range.start, ctx, scope)?;
-            walk_expr(&mut range.end, ctx, scope)?;
-            if let Some(ref mut step) = range.step {
-                walk_expr(step, ctx, scope)?;
+            walk_expr(&mut range.start, context, scope)?;
+            walk_expr(&mut range.end, context, scope)?;
+            if let Some(step) = &mut range.step {
+                walk_expr(step, context, scope)?;
             }
         }
         ExprKind::Slice(slice) => {
-            walk_expr(&mut slice.array, ctx, scope)?;
-            if let Some(ref mut start) = slice.start {
-                walk_expr(start, ctx, scope)?;
+            walk_expr(&mut slice.array, context, scope)?;
+            if let Some(start) = &mut slice.start {
+                walk_expr(start, context, scope)?;
             }
-            if let Some(ref mut end) = slice.end {
-                walk_expr(end, ctx, scope)?;
+            if let Some(end) = &mut slice.end {
+                walk_expr(end, context, scope)?;
             }
         }
-        ExprKind::Constructor(_, args) => {
-            for a in args {
-                walk_expr(a, ctx, scope)?;
+        ExprKind::Constructor(_, arguments) => {
+            for argument in arguments {
+                walk_expr(argument, context, scope)?;
             }
         }
         ExprKind::IntLiteral(_)
         | ExprKind::FloatLiteral(_)
         | ExprKind::BoolLiteral(_)
         | ExprKind::Unit
-        | ExprKind::TypeHole => {}
+        | ExprKind::TypeHole(_) => {}
     }
     Ok(())
+}
+
+pub fn rewrite_expr<C: ResolveContext>(
+    mut expression: Expression,
+    context: &C,
+    mut scope: ScopeStack<()>,
+) -> Expression {
+    walk_expr(&mut expression, context, &mut scope).expect("name resolution visitor is infallible");
+    expression
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +240,7 @@ pub fn walk_expr<C: ResolveContext>(
 /// `mod.name` to `Identifier([mod], name)` when `mod` is a registered
 /// module.
 struct ProgramResolver<'a> {
-    module_manager: &'a ModuleManager,
+    known_modules: &'a crate::LookupSet<String>,
 }
 
 impl<'a> ResolveContext for ProgramResolver<'a> {
@@ -238,41 +251,59 @@ impl<'a> ResolveContext for ProgramResolver<'a> {
         field: &str,
         _scope: &ScopeStack<()>,
     ) -> Option<ExprKind> {
-        if obj_quals.is_empty() && self.module_manager.is_known_module(obj_name) {
-            Some(ExprKind::Identifier(
-                vec![obj_name.to_string()],
-                field.to_string(),
-            ))
+        if obj_quals.is_empty() && self.known_modules.contains(obj_name) {
+            Some(ExprKind::Identifier(crate::ast::Identifier {
+                qualifiers: vec![obj_name.to_string()],
+                name: field.to_string(),
+            }))
         } else {
             None
         }
     }
 }
 
-/// Resolve names in a program by rewriting FieldAccess -> QualifiedName.
-pub fn run(program: &mut Program, module_manager: &ModuleManager) -> Result<()> {
-    for decl in &mut program.declarations {
-        resolve_declaration(decl, module_manager)?;
+/// Resolve qualified field accesses while consuming the old program stage.
+pub fn resolve_names(
+    program: Program<crate::elaborate_modules::ModulesElaborated>,
+) -> Program<NamesResolved> {
+    let Program {
+        mut declarations,
+        node_ids,
+        global_context,
+    } = program;
+    let context = ProgramResolver {
+        known_modules: global_context.known_module_names(),
+    };
+    for declaration in &mut declarations {
+        let mut scope = ScopeStack::new();
+        match declaration {
+            Declaration::Decl(decl) => {
+                walk_expr(&mut decl.body, &context, &mut scope)
+                    .expect("name resolution visitor is infallible");
+            }
+            Declaration::Entry(entry) => {
+                walk_expr(&mut entry.body, &context, &mut scope)
+                    .expect("name resolution visitor is infallible");
+            }
+            Declaration::Extern(_) | Declaration::Frontend(_) => {}
+        }
     }
-    Ok(())
+    Program {
+        declarations,
+        node_ids,
+        global_context,
+    }
 }
 
 /// Resolve names in a single Decl (for prelude functions).
-pub fn resolve_decl(decl: &mut crate::ast::Decl, module_manager: &ModuleManager) -> Result<()> {
-    let ctx = ProgramResolver { module_manager };
+pub fn resolve_decl(
+    mut decl: crate::ast::Decl,
+    known_modules: &crate::LookupSet<String>,
+) -> crate::ast::Decl {
+    let context = ProgramResolver { known_modules };
     let mut scope = ScopeStack::new();
-    walk_expr(&mut decl.body, &ctx, &mut scope)
-}
-
-fn resolve_declaration(decl: &mut Declaration, module_manager: &ModuleManager) -> Result<()> {
-    let ctx = ProgramResolver { module_manager };
-    let mut scope = ScopeStack::new();
-    match decl {
-        Declaration::Decl(d) => walk_expr(&mut d.body, &ctx, &mut scope),
-        Declaration::Entry(entry) => walk_expr(&mut entry.body, &ctx, &mut scope),
-        Declaration::Sig(_) => Ok(()),
-        _ => Ok(()),
-    }
+    walk_expr(&mut decl.body, &context, &mut scope).expect("name resolution visitor is infallible");
+    decl
 }
 
 // ---------------------------------------------------------------------------
@@ -397,7 +428,7 @@ impl NameResolution {
 /// `module_manager::elaborate_decl_signature`), so per-instance bodies
 /// have their own NodeId space and the previous collision risk is gone.
 pub fn build_name_resolution(
-    program: &Program,
+    program: &Program<crate::resolve_opens::OpensResolved>,
     module_manager: &ModuleManager,
     catalog: &BuiltinCatalog,
 ) -> NameResolution {
@@ -480,7 +511,7 @@ pub fn build_name_resolution(
 /// shadowing context (top-level user names, or surrounding module's
 /// scope plus its sibling decls).
 fn walk_decls(
-    decls: &[Declaration],
+    decls: &[Declaration<crate::resolve_opens::OpensResolvedFamily>],
     outer_scope: &ScopeStack<()>,
     catalog: &BuiltinCatalog,
     nr: &mut NameResolution,
@@ -511,37 +542,15 @@ fn walk_decls(
                 walk_resolution(&entry.body, catalog, &mut scope, nr);
                 scope.pop_scope();
             }
-            Declaration::Module(md) => match md {
-                crate::ast::ModuleDecl::Module { body, .. }
-                | crate::ast::ModuleDecl::Functor { body, .. } => {
-                    walk_module_expression(body, &sibling_scope, catalog, nr);
-                }
-            },
             _ => {}
         }
     }
 }
 
-fn walk_module_expression(
-    me: &crate::ast::ModuleExpression,
-    outer_scope: &ScopeStack<()>,
-    catalog: &BuiltinCatalog,
-    nr: &mut NameResolution,
+fn collect_top_level_names(
+    decls: &[Declaration<crate::resolve_opens::OpensResolvedFamily>],
+    scope: &mut ScopeStack<()>,
 ) {
-    use crate::ast::ModuleExpression;
-    match me {
-        ModuleExpression::Struct(decls) => walk_decls(decls, outer_scope, catalog, nr),
-        ModuleExpression::Ascription(inner, _) => walk_module_expression(inner, outer_scope, catalog, nr),
-        ModuleExpression::Lambda(_, _, body) => walk_module_expression(body, outer_scope, catalog, nr),
-        ModuleExpression::Application(f, a) => {
-            walk_module_expression(f, outer_scope, catalog, nr);
-            walk_module_expression(a, outer_scope, catalog, nr);
-        }
-        ModuleExpression::Name(_) | ModuleExpression::Import(_) => {}
-    }
-}
-
-fn collect_top_level_names(decls: &[Declaration], scope: &mut ScopeStack<()>) {
     for decl in decls {
         match decl {
             Declaration::Decl(d) => {
@@ -557,21 +566,30 @@ fn collect_top_level_names(decls: &[Declaration], scope: &mut ScopeStack<()>) {
 
 /// Walk an expression tree, recording catalog classifications for each
 /// `ExprKind::Identifier` whose surface name is not lexically shadowed.
-fn walk_resolution(
-    expr: &Expression,
+fn walk_resolution<T>(
+    expr: &Expression<T>,
     catalog: &BuiltinCatalog,
     scope: &mut ScopeStack<()>,
     nr: &mut NameResolution,
-) {
+) where
+    T: crate::ast::TreeFamily<
+        Header = crate::ast::Header,
+        Identifier = crate::ast::Identifier,
+        TypeHole = crate::ast::TypeHole,
+    >,
+{
     match &expr.kind {
-        ExprKind::Identifier(quals, name) => {
+        ExprKind::Identifier(identifier) => {
             // Unqualified name shadowed by a local? Skip — let the
             // checker resolve via scope.
-            if quals.is_empty() && scope.lookup(name).is_some() {
+            if identifier.qualifiers.is_empty() && scope.lookup(&identifier.name).is_some() {
                 return;
             }
-            let full_name =
-                if quals.is_empty() { name.clone() } else { format!("{}.{}", quals.join("."), name) };
+            let full_name = if identifier.qualifiers.is_empty() {
+                identifier.name.clone()
+            } else {
+                format!("{}.{}", identifier.qualifiers.join("."), identifier.name)
+            };
             if let Some(def) = catalog.lookup_by_surface_name(&full_name) {
                 let overload_idx = if def.overloads().len() == 1 { Some(0) } else { None };
                 nr.values.insert(
@@ -581,11 +599,11 @@ fn walk_resolution(
                         overload_idx,
                     },
                 );
-            } else if quals.is_empty() {
+            } else if identifier.qualifiers.is_empty() {
                 // SOACs (`map`/`reduce`/…) are not catalog surface names.
                 // Record the structural tag here, after the shadowing
                 // check above — so a user `def map` is never tagged.
-                if let Some(kind) = SoacKind::from_name(name) {
+                if let Some(kind) = SoacKind::from_name(&identifier.name) {
                     nr.values.insert(expr.h.id, ResolvedValueRef::Soac(kind));
                 }
             }
@@ -711,6 +729,6 @@ fn walk_resolution(
         | ExprKind::FloatLiteral(_)
         | ExprKind::BoolLiteral(_)
         | ExprKind::Unit
-        | ExprKind::TypeHole => {}
+        | ExprKind::TypeHole(_) => {}
     }
 }

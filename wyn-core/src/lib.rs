@@ -1,8 +1,10 @@
 pub mod ast;
 pub mod ast_renumber;
+pub mod ast_type_holes;
 pub mod binding_layout;
 pub mod builtins;
 pub mod diags;
+pub mod elaborate_modules;
 pub mod error;
 pub mod flow;
 pub mod interface;
@@ -430,22 +432,26 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 // Typestate Compiler Pipeline
 // =============================================================================
 //
-// The compiler uses typestate to enforce valid pass ordering. Frontend and
-// EGIR stages expose consuming methods; TLC stages are ordinary named
-// functions over `tlc::Program<S>`.
+// The compiler uses typestate to enforce valid pass ordering. Every phase is
+// driven by named functions that consume one generic program stage and return
+// the next.
 //
-//   let (mut node_counter, mut module_manager) = init_compiler();
-//   let parsed = Compiler::parse(source, &mut node_counter)?;
+//   let (node_ids, module_manager) = init_compiler();
 //
 // FrontEnd (AST) stages:
-//     parsed.resolve_imports(...)                  -> Parsed (CLI only)
-//       .elaborate_modules(...)                    -> Parsed
-//       .resolve(&module_manager)                  -> Resolved
-//       .fold_ast_constants()                      -> AstConstFoldedEarly
-//       .type_check(&mut module_manager)           -> TypeChecked
+//     let program = parser::parse(source, node_ids, module_manager)?;
+//     let program = resolve_imports::resolve_imports(program, ...)?;
+//     let program = elaborate_modules::elaborate_modules(program)?;
+//     let program = name_resolution::resolve_names(program);
+//     let program = resolve_resources::resolve_resources(program)?;
+//     let program = ast_const_fold::fold_constants(program);
+//     let program = resolve_placeholders::resolve_type_placeholders(program, ...);
+//     let program = resolve_opens::resolve_opens(program, ...)?;
+//     let program = types::run::type_check(program, ...)?;
+//     let program = ast_type_holes::reject_type_holes(program)?;
 //
 // TLC stages (typed AST → semantic input):
-//       .to_tlc(...)                    -> tlc::Program<stage::Transformed>
+//       tlc::lower_from_ast(program)    -> tlc::Program<stage::Transformed>
 //       tlc::pin_entry_buffers(...)      -> tlc::Program<stage::BuffersPinned>
 //       tlc::validate_ownership(...)     -> tlc::Program<stage::OwnershipValidated>
 //       tlc::partial_eval(...)           -> tlc::Program<stage::PartialEvaled>
@@ -504,199 +510,6 @@ pub fn init_compiler_from_prelude(
 ) -> (NodeCounter, module_manager::ModuleManager) {
     let module_manager = module_manager::ModuleManager::from_prelude(prelude);
     (node_counter, module_manager)
-}
-
-// =============================================================================
-// Compiler entry point
-// =============================================================================
-
-/// Entry point for the compiler. Use `Compiler::parse()` to start the pipeline.
-pub struct Compiler;
-
-impl Compiler {
-    /// Parse source code into an AST using the provided node counter.
-    /// This ensures NodeIds don't collide with prelude modules.
-    pub fn parse(source: &str, node_counter: &mut NodeCounter) -> Result<Parsed> {
-        let tokens = lexer::tokenize(source).map_err(|e| err_parse!("{}", e))?;
-        let mut parser = parser::Parser::new(tokens, node_counter);
-        let ast = parser.parse()?;
-        Ok(Parsed(FrontInner { ast }))
-    }
-}
-
-// =============================================================================
-// FrontEnd stages (AST-based)
-// =============================================================================
-
-/// Shared payload for the front-end AST states (`Parsed`, `Desugared`,
-/// `Resolved`, `AstConstFoldedEarly`). Each state is a newtype wrapping this
-/// inner; transitions within the group just unwrap / re-wrap.
-struct FrontInner {
-    ast: ast::Program,
-}
-
-/// Source has been parsed into an AST
-pub struct Parsed(FrontInner);
-
-impl Parsed {
-    /// Resolve `import "path"` declarations against the filesystem,
-    /// loading each referenced file relative to `base_dir`, parsing
-    /// it, recursively resolving its own imports, and prepending its
-    /// declarations into this program. The `Import` nodes themselves
-    /// are removed.
-    ///
-    /// Cycle / re-import safety: a file is loaded at most once per
-    /// compilation (keyed by canonical path). Diamond imports work
-    /// fine; cycles are silently broken (only the first encounter
-    /// loads decls).
-    ///
-    /// Path resolution: `import "foo"` looks for `<base_dir>/foo.wyn`.
-    /// Imports inside `foo.wyn` resolve relative to `foo.wyn`'s
-    /// directory.
-    pub fn resolve_imports(
-        mut self,
-        base_dir: &std::path::Path,
-        node_counter: &mut NodeCounter,
-    ) -> Result<Self> {
-        self.0.ast.declarations = resolve_imports::run(self.0.ast.declarations, base_dir, node_counter)?;
-        Ok(self)
-    }
-
-    /// Elaborate inline module declarations from the parsed program.
-    /// This registers modules with the module_manager so they're available during resolution,
-    /// then removes the Module declarations from the AST (they've been copied to module_manager).
-    /// Should be called before desugar() if the program contains module definitions.
-    pub fn elaborate_modules(
-        mut self,
-        module_manager: &mut module_manager::ModuleManager,
-        node_counter: &mut ast::NodeCounter,
-    ) -> Result<Self> {
-        module_manager.elaborate_modules(&self.0.ast, node_counter)?;
-        // Remove Module and ModuleTypeBind declarations - they've been elaborated
-        self.0.ast.declarations.retain(|decl| {
-            !matches!(
-                decl,
-                ast::Declaration::Module(_) | ast::Declaration::ModuleTypeBind(_)
-            )
-        });
-        Ok(self)
-    }
-
-    /// Resolve names: rewrite FieldAccess -> QualifiedName and load modules
-    pub fn resolve(mut self, module_manager: &module_manager::ModuleManager) -> Result<Resolved> {
-        name_resolution::run(&mut self.0.ast, module_manager)?;
-        resolve_resources::run(&mut self.0.ast)?;
-        Ok(Resolved(self.0))
-    }
-}
-
-/// Names have been resolved
-pub struct Resolved(FrontInner);
-
-impl Resolved {
-    /// Fold AST-level integer constants (required before type checking)
-    pub fn fold_ast_constants(mut self) -> AstConstFoldedEarly {
-        ast_const_fold::run(&mut self.0.ast);
-        AstConstFoldedEarly(self.0)
-    }
-}
-
-/// AST integer constants have been folded (before type checking)
-pub struct AstConstFoldedEarly(FrontInner);
-
-impl AstConstFoldedEarly {
-    /// Type check the program
-    pub fn type_check(mut self, module_manager: &mut module_manager::ModuleManager) -> Result<TypeChecked> {
-        let out = types::run::run(&mut self.0.ast, module_manager)?;
-        Ok(TypeChecked {
-            ast: self.0.ast,
-            type_table: out.type_table,
-            warnings: out.warnings,
-            checker_builtins: out.builtin_names,
-            schemes: out.schemes,
-            name_resolution: out.name_resolution,
-        })
-    }
-}
-
-/// Program has been type checked
-pub struct TypeChecked {
-    pub ast: ast::Program,
-    pub type_table: TypeTable,
-    pub warnings: Vec<type_checker::TypeWarning>,
-    pub checker_builtins: Vec<String>,
-    pub schemes: LookupMap<String, TypeScheme<TypeName>>,
-    pub name_resolution: name_resolution::NameResolution,
-}
-
-impl TypeChecked {
-    /// Print warnings to stderr (convenience method)
-    pub fn print_warnings(&self) {
-        for warning in &self.warnings {
-            eprintln!(
-                "Warning: {} at {:?}",
-                warning.message(&|t| types::format_type(t)),
-                warning.span()
-            );
-        }
-    }
-
-    /// Reject programs that still contain `???` type holes. Each hole
-    /// is listed with its inferred type and source location; the
-    /// caller (the driver) maps `CompilerError::TypeHole` to a
-    /// distinct exit code so tooling can tell hole-errors apart from
-    /// generic compilation failures. Holes are a development aid —
-    /// they're not expected to reach the backend, so this is the
-    /// right place to bail.
-    pub fn reject_type_holes(self) -> Result<Self> {
-        use std::fmt::Write;
-        let holes: Vec<_> = self
-            .warnings
-            .iter()
-            .filter_map(|w| match w {
-                type_checker::TypeWarning::TypeHoleFilled { inferred_type, span } => {
-                    Some((inferred_type, span))
-                }
-            })
-            .collect();
-        if holes.is_empty() {
-            return Ok(self);
-        }
-        let mut msg = String::from("type hole(s) in program:\n");
-        for (ty, span) in &holes {
-            let _ = writeln!(
-                &mut msg,
-                "  at {}:{} — inferred `{}`",
-                span.start_line,
-                span.start_col,
-                types::format_type(ty),
-            );
-        }
-        Err(err_type_hole!("{}", msg.trim_end()))
-    }
-
-    /// Transform AST to TLC. `module_manager` provides access to prelude
-    /// declarations. `fill_holes` makes `???` type-hole expressions lower
-    /// to a default value of the inferred type rather than panicking. The
-    /// driver should call `reject_type_holes` first when
-    /// `fill_holes = false`; unfillable hole types under
-    /// `fill_holes = true` land in the returned program's
-    /// `fill_hole_errors`.
-    pub fn to_tlc(
-        self,
-        module_manager: &module_manager::ModuleManager,
-        fill_holes: bool,
-    ) -> tlc::Program<tlc::stage::Transformed> {
-        tlc::run::run(
-            &self.ast,
-            self.type_table,
-            &self.schemes,
-            &self.checker_builtins,
-            &self.name_resolution,
-            module_manager,
-            fill_holes,
-        )
-    }
 }
 
 // =============================================================================
@@ -868,37 +681,37 @@ pub fn cached_compiler_init() -> (NodeCounter, module_manager::ModuleManager) {
 // `compile_thru_*` helpers run the pipeline up to a milestone and return
 // just the milestone value. Each subsumes the previous one:
 //
-//   compile_thru_frontend  →  TypeChecked          (AST passes done)
+//   compile_thru_frontend  →  ast::Program<types::run::TypeChecked>
 //   compile_thru_tlc       →  Program<Reachable>    (TLC pipeline done)
 //   compile_thru_ssa       →  Program<Elaborated>  (EGIR + elaborate done)
 //   compile_thru_spirv     →  Lowered              (final SPIR-V binary)
 //
 // These exist so test files don't have to enumerate every pass — when a
 // new pass lands, only the helper that owns its milestone needs updating.
-// Tests that need an off-milestone stop call the typestate methods directly.
+// Tests that need an off-milestone stop call the pass functions directly.
 
 /// Run AST passes through type checking. Uses the cached prelude.
 #[cfg(test)]
-pub fn compile_thru_frontend(source: &str) -> error::Result<TypeChecked> {
-    let (mut node_counter, mut module_manager) = cached_compiler_init();
-    Compiler::parse(source, &mut node_counter)?
-        .elaborate_modules(&mut module_manager, &mut node_counter)?
-        .resolve(&module_manager)?
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
+pub fn compile_thru_frontend(source: &str) -> error::Result<ast::Program<types::run::TypeChecked>> {
+    let (node_ids, module_manager) = cached_compiler_init();
+    let program = parser::parse(source, node_ids, module_manager)?;
+    let program = resolve_imports::resolve_imports(program, std::path::Path::new("."))?;
+    let program = elaborate_modules::elaborate_modules(program)?;
+    let program = name_resolution::resolve_names(program);
+    let program = resolve_resources::resolve_resources(program)?;
+    let program = ast_const_fold::fold_constants(program);
+    let program = resolve_placeholders::resolve_type_placeholders(program);
+    let program = resolve_opens::resolve_opens(program)?;
+    types::run::type_check(program)
 }
 
 /// Run the canonical TLC optimization pipeline (no physical scheduling or
 /// hole-filling) through `filter_reachable`.
 #[cfg(test)]
 pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::Program<tlc::stage::Reachable>> {
-    let (mut node_counter, mut module_manager) = cached_compiler_init();
-    let type_checked = Compiler::parse(source, &mut node_counter)?
-        .elaborate_modules(&mut module_manager, &mut node_counter)?
-        .resolve(&module_manager)?
-        .fold_ast_constants()
-        .type_check(&mut module_manager)?;
-    let program = type_checked.to_tlc(&module_manager, false);
+    let type_checked = compile_thru_frontend(source)?;
+    let program = ast_type_holes::reject_type_holes(type_checked)?;
+    let program = tlc::lower_from_ast(program);
     let program = tlc::pin_entry_buffers(program)?;
     let program = tlc::validate_ownership(program)?;
     Ok(optimize_tlc_for_test(program))

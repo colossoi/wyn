@@ -4,15 +4,13 @@
 //! lowering and the pattern-binding helpers that extend `Transformer`.
 
 use super::{
-    count_function_arity, data, defaults, peel_lets, run, ArrayExpr, Def, DefMeta, EntryPoint, Lambda,
-    LoopKind, Place, ProgramParts, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
+    count_function_arity, data, peel_lets, run, ArrayExpr, Def, DefMeta, EntryPoint, Lambda, LoopKind,
+    Place, ProgramParts, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
 };
-use crate::ast::{self, NodeId, Span, TypeName};
-use crate::builtins::{by_id, catalog, BuiltinId};
-use crate::error::CompilerError;
-use crate::name_resolution::{NameResolution, ResolvedValueRef, SoacKind};
+use crate::ast::{self, Span, TypeName};
+use crate::builtins::{catalog, BuiltinId};
 use crate::types::{SoacOwnership, TypeExt};
-use crate::{interface, LookupMap, SymbolId, SymbolTable, TypeTable};
+use crate::{interface, LookupMap, SymbolId, SymbolTable};
 use polytype::Type;
 
 // =============================================================================
@@ -42,7 +40,6 @@ pub(super) struct SumLayout {
 
 /// Context for transforming AST to TLC.
 pub(crate) struct Transformer<'a> {
-    type_table: &'a TypeTable,
     pub(super) term_ids: &'a mut TermIdSource,
     /// Shared symbol table: maps SymbolId to original name (for errors/debugging).
     symbols: &'a mut SymbolTable,
@@ -52,79 +49,45 @@ pub(crate) struct Transformer<'a> {
     /// This ensures function references use the same SymbolId as the Def.
     /// Shared across all transformers via mutable reference.
     top_level_symbols: &'a mut LookupMap<String, SymbolId>,
-    /// Side table from name resolution: AST NodeId → BuiltinId for
-    /// catalog-resolved identifiers. Lets `Var`-position idents be
-    /// classified as `VarRef::Builtin(id)` directly without round-
-    /// tripping through name strings.
-    name_resolution: &'a NameResolution,
     /// Optional namespace prefix for definition names (e.g., "f32" -> "f32.pi")
     namespace: Option<String>,
     /// Shared placeholder symbol for pattern matching scrutinees.
     /// Allocated once and reused to avoid polluting the symbol table.
     placeholder_sym: SymbolId,
-    /// When true, `ExprKind::TypeHole` nodes are replaced with a
-    /// default-valued term of the hole's inferred type. When false,
-    /// TypeHole nodes are invariant-rejected upstream at the
-    /// type-check boundary (`TypeChecked::reject_type_holes`), so
-    /// reaching one here is a bug — the arm panics.
-    fill_holes: bool,
-    /// Errors surfaced while defaulting `???` type holes. Populated
-    /// only when `fill_holes` is true and a hole's inferred type
-    /// can't be default-filled (e.g. a function type or an
-    /// unresolved type variable). Owned by the caller so errors
-    /// from every Transformer that runs during `to_tlc` accumulate
-    /// into one list.
-    pub(super) fill_hole_errors: &'a mut Vec<CompilerError>,
 }
 
 impl<'a> Transformer<'a> {
     pub fn new(
-        type_table: &'a TypeTable,
         symbols: &'a mut SymbolTable,
         top_level_symbols: &'a mut LookupMap<String, SymbolId>,
-        name_resolution: &'a NameResolution,
-        fill_holes: bool,
-        fill_hole_errors: &'a mut Vec<CompilerError>,
         term_ids: &'a mut TermIdSource,
     ) -> Self {
         let placeholder_sym = symbols.alloc("_w_placeholder".to_string());
         Self {
-            type_table,
             term_ids,
             symbols,
             scope: LookupMap::new(),
             top_level_symbols,
-            name_resolution,
             namespace: None,
             placeholder_sym,
-            fill_holes,
-            fill_hole_errors,
         }
     }
 
     /// Create a transformer with a namespace prefix for definition names.
     pub fn with_namespace(
-        type_table: &'a TypeTable,
         symbols: &'a mut SymbolTable,
         top_level_symbols: &'a mut LookupMap<String, SymbolId>,
-        name_resolution: &'a NameResolution,
         namespace: &str,
-        fill_holes: bool,
-        fill_hole_errors: &'a mut Vec<CompilerError>,
         term_ids: &'a mut TermIdSource,
     ) -> Self {
         let placeholder_sym = symbols.alloc("_w_placeholder".to_string());
         Self {
-            type_table,
             term_ids,
             symbols,
             scope: LookupMap::new(),
             top_level_symbols,
-            name_resolution,
             namespace: Some(namespace.to_string()),
             placeholder_sym,
-            fill_holes,
-            fill_hole_errors,
         }
     }
 
@@ -143,26 +106,29 @@ impl<'a> Transformer<'a> {
     }
 
     /// Resolve a name to its SymbolId.
-    /// Checks local scope, then top-level symbols. Compiler-internal names (`_w_*`)
-    /// are allocated on demand; all other names must be pre-registered via NameRegistry.
+    /// Checks local scope, then top-level symbols. A typed AST guarantees that
+    /// every remaining identifier has resolved successfully, so signature-only
+    /// module members and compiler intrinsics can be interned on first use even
+    /// when they have no body in `support_definitions`.
     fn resolve_or_define(&mut self, name: &str) -> SymbolId {
         if let Some(id) = self.resolve(name) {
             id
         } else if let Some(&id) = self.top_level_symbols.get(name) {
             id
-        } else if name.starts_with("_w_") {
+        } else {
             let id = self.symbols.alloc(name.to_string());
             self.top_level_symbols.insert(name.to_string(), id);
             id
-        } else {
-            panic!("ICE: unresolved name '{}' in TLC transform", name);
         }
     }
 
     /// Transform an AST program to TLC.
     /// Returns program parts without the symbol table - caller must combine with
     /// their owned symbol table using `ProgramParts::with_symbols`.
-    pub fn transform_program(&mut self, program: &ast::Program) -> ProgramParts<run::Polymorphic> {
+    pub fn transform_program(
+        &mut self,
+        program: &ast::Program<crate::ast_type_holes::HolesResolved>,
+    ) -> ProgramParts<run::UnpinnedPolymorphic> {
         // First pass: register all top-level function names so that
         // references within function bodies use the same SymbolId as
         // the Def. Only allocate when the name isn't already pre-
@@ -196,7 +162,7 @@ impl<'a> Transformer<'a> {
                         self.top_level_symbols.insert(e.name.clone(), sym);
                     }
                 }
-                _ => {}
+                ast::Declaration::Frontend(never) => match *never {},
             }
         }
 
@@ -219,36 +185,40 @@ impl<'a> Transformer<'a> {
                     // Use the pre-registered symbol
                     let name_sym =
                         *self.top_level_symbols.get(&e.name).expect("BUG: extern not pre-registered");
-                    let body = self.mk_term(e.ty.clone(), e.span, TermKind::Extern(e.linkage_name.clone()));
-                    let arity = count_function_arity(&e.ty);
+                    let ty = Self::lower_type(Self::extract_monotype(&e.data.scheme));
+                    let body = self.mk_term(
+                        ty.clone(),
+                        e.data.syntax.span,
+                        TermKind::Extern(e.data.syntax.linkage_name.clone()),
+                    );
+                    let arity = count_function_arity(&ty);
                     defs.push(Def {
-                        data: data::PolymorphicDefinition { scheme: None },
+                        data: data::PolymorphicDefinition {
+                            scheme: Some(e.data.scheme.clone()),
+                        },
                         name: name_sym,
-                        ty: e.ty.clone(),
+                        ty,
                         body,
                         meta: DefMeta::Function,
                         arity,
-                        param_diets: e.param_diets.clone(),
-                        return_diet: e.return_diet.clone(),
+                        param_diets: e.data.syntax.param_diets.clone(),
+                        return_diet: e.data.syntax.return_diet.clone(),
                     });
                 }
-                ast::Declaration::Sig(_)
-                | ast::Declaration::TypeBind(_)
-                | ast::Declaration::Module(_)
-                | ast::Declaration::ModuleTypeBind(_)
-                | ast::Declaration::Open(_)
-                | ast::Declaration::Import(_)
-                | ast::Declaration::Resource(_) => {}
+                ast::Declaration::Frontend(never) => match *never {},
             }
         }
 
         ProgramParts { defs }
     }
 
-    pub fn transform_decl(&mut self, decl: &ast::Decl) -> Option<Def<run::Polymorphic>> {
+    pub fn transform_decl(
+        &mut self,
+        decl: &ast::Decl<ast::TypedDefinition, ast::HolesResolvedTree>,
+    ) -> Option<Def<run::UnpinnedPolymorphic>> {
         // Clear scope for each definition to ensure fresh scope
         self.scope.clear();
-        let body_ty = self.lookup_type(decl.body.h.id)?;
+        let body_ty = Self::type_of(&decl.body.h);
         let full_ty = self.build_function_type(&decl.params, &body_ty);
         let body = self.transform_with_params(&decl.params, &decl.body, full_ty.clone());
 
@@ -269,7 +239,9 @@ impl<'a> Transformer<'a> {
         };
 
         Some(Def {
-            data: data::PolymorphicDefinition { scheme: None },
+            data: data::PolymorphicDefinition {
+                scheme: Some(decl.data.scheme.clone()),
+            },
             name: name_sym,
             ty: full_ty,
             body,
@@ -280,10 +252,13 @@ impl<'a> Transformer<'a> {
         })
     }
 
-    fn transform_entry(&mut self, entry: &interface::EntryDecl) -> Option<Def<run::Polymorphic>> {
+    fn transform_entry(
+        &mut self,
+        entry: &ast::EntryDecl<ast::TypedEntry, ast::HolesResolvedTree, interface::ResolvedAttribute>,
+    ) -> Option<Def<run::UnpinnedPolymorphic>> {
         // Clear scope for each entry to ensure fresh scope
         self.scope.clear();
-        let body_ty = self.lookup_type(entry.body.h.id)?;
+        let body_ty = Self::type_of(&entry.body.h);
         let full_ty = self.build_function_type(&entry.params, &body_ty);
         let body = self.transform_with_params(&entry.params, &entry.body, full_ty.clone());
 
@@ -297,21 +272,39 @@ impl<'a> Transformer<'a> {
         };
 
         Some(Def {
-            data: data::PolymorphicDefinition { scheme: None },
+            data: data::PolymorphicDefinition {
+                scheme: Some(entry.data.scheme.clone()),
+            },
             name: name_sym,
             ty: full_ty,
             body,
             meta: DefMeta::EntryPoint(EntryPoint {
-                declaration: Box::new(entry.clone()),
+                declaration: Box::new(interface::EntryDecl {
+                    entry_kind: entry.data.source.syntax.entry_kind,
+                    compute_dispatch: entry.data.source.syntax.compute_dispatch.clone(),
+                    name: entry.name.clone(),
+                    name_span: entry.name_span,
+                    size_params: entry.size_params.clone(),
+                    type_params: entry.type_params.clone(),
+                    params: entry.params.iter().map(Self::lower_entry_param).collect(),
+                    outputs: entry.data.source.syntax.outputs.clone(),
+                    feedback: entry.data.source.feedback.clone(),
+                    param_diets: entry.data.source.syntax.param_diets.clone(),
+                    return_diet: entry.data.source.syntax.return_diet.clone(),
+                }),
                 data: (),
             }),
             arity: entry.params.len(),
-            param_diets: entry.param_diets.clone(),
-            return_diet: entry.return_diet.clone(),
+            param_diets: entry.data.source.syntax.param_diets.clone(),
+            return_diet: entry.data.source.syntax.return_diet.clone(),
         })
     }
 
-    fn build_function_type(&self, params: &[ast::Pattern], ret_ty: &Type<TypeName>) -> Type<TypeName> {
+    fn build_function_type<A>(
+        &self,
+        params: &[ast::Pattern<ast::TypedHeader, A>],
+        ret_ty: &Type<TypeName>,
+    ) -> Type<TypeName> {
         let mut ty = ret_ty.clone();
 
         for param in params.iter().rev() {
@@ -322,20 +315,46 @@ impl<'a> Transformer<'a> {
         ty
     }
 
-    fn pattern_type(&self, pattern: &ast::Pattern) -> Type<TypeName> {
+    fn pattern_type<A>(&self, pattern: &ast::Pattern<ast::TypedHeader, A>) -> Type<TypeName> {
         match &pattern.kind {
             // For attributed patterns, recurse into the inner pattern
             ast::PatternKind::Attributed(_, inner) => self.pattern_type(inner),
-            // Always look up from type_table - the type checker has substituted UserVars
-            // with Type::Variables. Using the AST type directly would retain UserVars.
-            _ => self.lookup_type(pattern.h.id).expect("Pattern must have type in type table"),
+            _ => Self::type_of(&pattern.h),
         }
     }
 
-    fn transform_with_params(
+    fn lower_entry_param(
+        pattern: &ast::Pattern<ast::TypedHeader, interface::ResolvedAttribute>,
+    ) -> interface::EntryParamDecl {
+        fn metadata(
+            pattern: &ast::Pattern<ast::TypedHeader, interface::ResolvedAttribute>,
+            attributes: &mut Vec<interface::ResolvedAttribute>,
+        ) -> Option<String> {
+            match &pattern.kind {
+                ast::PatternKind::Name(name) => Some(name.clone()),
+                ast::PatternKind::Attributed(found, inner) => {
+                    attributes.extend(found.iter().cloned());
+                    metadata(inner, attributes)
+                }
+                ast::PatternKind::Typed(inner, _) => metadata(inner, attributes),
+                _ => None,
+            }
+        }
+
+        let mut attributes = Vec::new();
+        let name = metadata(pattern, &mut attributes).unwrap_or_else(|| "_".to_string());
+        interface::EntryParamDecl {
+            name,
+            span: pattern.h.span,
+            ty: Self::type_of(&pattern.h),
+            attributes,
+        }
+    }
+
+    fn transform_with_params<A>(
         &mut self,
-        params: &[ast::Pattern],
-        body: &ast::Expression,
+        params: &[ast::Pattern<ast::TypedHeader, A>],
+        body: &ast::Expression<ast::HolesResolvedTree>,
         full_ty: Type<TypeName>,
     ) -> Term {
         let span = params.first().map(|p| p.h.span).unwrap_or(body.h.span);
@@ -345,10 +364,10 @@ impl<'a> Transformer<'a> {
     /// Build a chain of nested lambdas from patterns, deferring all let-bindings
     /// until after all lambdas are created. This ensures no let-bindings appear
     /// between nested lambdas, which is important for consistent capture analysis.
-    fn build_lambda_chain(
+    fn build_lambda_chain<A>(
         &mut self,
-        params: &[ast::Pattern],
-        body: &ast::Expression,
+        params: &[ast::Pattern<ast::TypedHeader, A>],
+        body: &ast::Expression<ast::HolesResolvedTree>,
         full_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
@@ -470,13 +489,8 @@ impl<'a> Transformer<'a> {
     // simple_pattern_name, extract_tuple_types, resolve_field_index,
     // and extract_record_types live in tlc/patterns/bindings.rs.
 
-    pub(super) fn transform_expr(&mut self, expr: &ast::Expression) -> Term {
-        let ty = self.lookup_type(expr.h.id).unwrap_or_else(|| {
-            panic!(
-                "BUG: Expression must have type in type table. NodeId={:?}, kind={:?}, span={:?}",
-                expr.h.id, expr.kind, expr.h.span
-            )
-        });
+    pub(super) fn transform_expr(&mut self, expr: &ast::Expression<ast::HolesResolvedTree>) -> Term {
+        let ty = Self::type_of(&expr.h);
         let span = expr.h.span;
 
         match &expr.kind {
@@ -488,37 +502,18 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::Unit => self.mk_term(ty, span, TermKind::UnitLit),
 
-            ast::ExprKind::Identifier(qualifiers, name) => {
-                // First consult the NameResolution side table built at
-                // type-check time. If this NodeId was classified as a
-                // catalog builtin, emit `Var(Builtin(id))` directly —
-                // no SymbolId allocation, no surface→internal name
-                // rename, no later string-matching at the EGIR boundary.
-                if let Some(crate::name_resolution::ResolvedValueRef::Builtin { id, overload_idx }) =
-                    self.name_resolution.get(expr.h.id)
-                {
-                    let overload_idx = overload_idx.unwrap_or_else(|| {
-                        let def = by_id(*id);
-                        panic!(
-                            "BUG: builtin '{}' (id={:?}) reached TLC with unresolved overload — \
-                             type checker must call NameResolution::set_overload_idx after \
-                             overload resolution",
-                            def.raw.surface_name, id
-                        )
-                    });
-                    return self.mk_term(
-                        ty,
-                        span,
-                        TermKind::Var(VarRef::Builtin {
-                            id: *id,
-                            overload_idx,
-                        }),
-                    );
+            ast::ExprKind::Identifier(identifier) => {
+                if let ast::IdentifierResolution::Builtin { id, overload_idx } = identifier.resolution {
+                    return self.mk_term(ty, span, TermKind::Var(VarRef::Builtin { id, overload_idx }));
                 }
-                let resolved_name = if qualifiers.is_empty() {
-                    name.clone()
+                let resolved_name = if identifier.source.qualifiers.is_empty() {
+                    identifier.source.name.clone()
                 } else {
-                    format!("{}.{}", qualifiers.join("."), name)
+                    format!(
+                        "{}.{}",
+                        identifier.source.qualifiers.join("."),
+                        identifier.source.name
+                    )
                 };
                 let sym = self.resolve_or_define(&resolved_name);
                 self.mk_term(ty, span, TermKind::Var(VarRef::Symbol(sym)))
@@ -596,10 +591,10 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::RecordLiteral(fields) => {
                 // Records are tuples - reorder fields to match type's field order
-                let field_map: LookupMap<&str, &ast::Expression> =
+                let field_map: LookupMap<&str, &ast::Expression<ast::HolesResolvedTree>> =
                     fields.iter().map(|(name, expr)| (name.as_str(), expr)).collect();
 
-                let ordered_exprs: Vec<ast::Expression> = match &ty {
+                let ordered_exprs: Vec<ast::Expression<ast::HolesResolvedTree>> = match &ty {
                     Type::Constructed(TypeName::Record(type_fields), _) => type_fields
                         .iter()
                         .filter_map(|f| field_map.get(f.as_str()).map(|e| (*e).clone()))
@@ -760,9 +755,7 @@ impl<'a> Transformer<'a> {
                 // `(tag=k, slot_1, ..., slot_total-1)` where the active
                 // constructor's payload occupies slots [offset_k, offset_k+m)
                 // and dead slots get blank-filled.
-                let raw_sum_ty = self
-                    .lookup_type_raw(expr.h.id)
-                    .expect("BUG: Constructor expression must have type in type table");
+                let raw_sum_ty = Self::raw_type(&expr.h);
                 let variants = match &raw_sum_ty {
                     Type::Constructed(TypeName::Sum(v), _) => v.clone(),
                     _ => panic!("BUG: Constructor `#{}` has non-sum type {:?}", name, raw_sum_ty),
@@ -875,25 +868,14 @@ impl<'a> Transformer<'a> {
                 )
             }
 
-            ast::ExprKind::TypeHole => {
-                if !self.fill_holes {
-                    unreachable!(
-                        "TypeHole should be rejected at type-check when \
-                         --fill-holes is not set; see \
-                         TypeChecked::reject_type_holes"
-                    );
-                }
-                // `ty` is the table lookup at the top of this function (which
-                // already panics if missing) — no need to look it up again.
-                defaults::default_term_for_type(self, &ty, span)
-            }
+            ast::ExprKind::TypeHole(never) => match *never {},
         }
     }
 
     fn transform_lambda(
         &mut self,
-        params: &[ast::Pattern],
-        body: &ast::Expression,
+        params: &[ast::Pattern<ast::TypedHeader>],
+        body: &ast::Expression<ast::HolesResolvedTree>,
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
@@ -916,8 +898,8 @@ impl<'a> Transformer<'a> {
 
     fn transform_application(
         &mut self,
-        func: &ast::Expression,
-        args: &[ast::Expression],
+        func: &ast::Expression<ast::HolesResolvedTree>,
+        args: &[ast::Expression<ast::HolesResolvedTree>],
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
@@ -933,12 +915,10 @@ impl<'a> Transformer<'a> {
         // conversion calls — `vec2i32(v)` ⟶ `@[i32(v.x), i32(v.y)]`
         // with each `i32(…)` resolved to its concrete per-type catalog
         // entry by the source-component type.
-        if let ast::ExprKind::Identifier(_, _) = &func.kind {
-            if let Some(crate::name_resolution::ResolvedValueRef::VecConstructor {
-                arity,
-                target_elem,
-                ..
-            }) = self.name_resolution.get(func.h.id).cloned()
+        if let ast::ExprKind::Identifier(identifier) = &func.kind {
+            if let ast::IdentifierResolution::VecConstructor {
+                arity, target_elem, ..
+            } = &identifier.resolution
             {
                 debug_assert_eq!(
                     args.len(),
@@ -946,7 +926,7 @@ impl<'a> Transformer<'a> {
                     "BUG: vec constructor expected 1 arg, got {}",
                     args.len()
                 );
-                return self.transform_vec_constructor(&args[0], &target_elem, arity, ty, span);
+                return self.transform_vec_constructor(&args[0], target_elem, *arity, ty, span);
             }
         }
 
@@ -996,7 +976,7 @@ impl<'a> Transformer<'a> {
     /// read from `v`'s converted Term type.
     fn transform_vec_constructor(
         &mut self,
-        arg: &ast::Expression,
+        arg: &ast::Expression<ast::HolesResolvedTree>,
         target_elem: &str,
         arity: usize,
         result_ty: Type<TypeName>,
@@ -1085,9 +1065,12 @@ impl<'a> Transformer<'a> {
     /// `None` for everything else, including a user `def` (top-level or
     /// local) that shadows a SOAC name. Structural: no surface-name match
     /// or scope re-derivation here; the resolver already decided.
-    fn resolve_soac(&self, func: &ast::Expression) -> Option<SoacKind> {
-        match self.name_resolution.get(func.h.id) {
-            Some(ResolvedValueRef::Soac(kind)) => Some(*kind),
+    fn resolve_soac(&self, func: &ast::Expression<ast::HolesResolvedTree>) -> Option<ast::SoacKind> {
+        match &func.kind {
+            ast::ExprKind::Identifier(identifier) => match identifier.resolution {
+                ast::IdentifierResolution::Soac(kind) => Some(kind),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -1095,19 +1078,19 @@ impl<'a> Transformer<'a> {
     /// Dispatch SOAC call by structural kind.
     fn transform_soac_call(
         &mut self,
-        kind: SoacKind,
-        args: &[ast::Expression],
+        kind: ast::SoacKind,
+        args: &[ast::Expression<ast::HolesResolvedTree>],
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
         match kind {
-            SoacKind::Map => self.transform_soac_map(args, ty, span),
-            SoacKind::Reduce => self.transform_soac_reduce(args, ty, span),
-            SoacKind::Scan => self.transform_soac_scan(args, ty, span),
-            SoacKind::Filter => self.transform_soac_filter(args, ty, span),
-            SoacKind::Zip => self.transform_soac_zip(args, ty, span),
-            SoacKind::ReduceByIndex => self.transform_soac_reduce_by_index(args, ty, span),
-            SoacKind::Scatter => self.transform_soac_scatter(args, ty, span),
+            ast::SoacKind::Map => self.transform_soac_map(args, ty, span),
+            ast::SoacKind::Reduce => self.transform_soac_reduce(args, ty, span),
+            ast::SoacKind::Scan => self.transform_soac_scan(args, ty, span),
+            ast::SoacKind::Filter => self.transform_soac_filter(args, ty, span),
+            ast::SoacKind::Zip => self.transform_soac_zip(args, ty, span),
+            ast::SoacKind::ReduceByIndex => self.transform_soac_reduce_by_index(args, ty, span),
+            ast::SoacKind::Scatter => self.transform_soac_scatter(args, ty, span),
         }
     }
 
@@ -1159,7 +1142,12 @@ impl<'a> Transformer<'a> {
     }
 
     /// Transform `map(f, arr)` → `Soac(Map { lam, inputs })`.
-    fn transform_soac_map(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
+    fn transform_soac_map(
+        &mut self,
+        args: &[ast::Expression<ast::HolesResolvedTree>],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
         assert!(args.len() >= 2, "map requires at least 2 arguments");
         let func_term = self.transform_expr(&args[0]);
         let arr_term = self.transform_expr(&args[1]);
@@ -1190,7 +1178,12 @@ impl<'a> Transformer<'a> {
     }
 
     /// Transform `reduce(op, ne, arr)` → `Soac(Reduce { op, ne, input })`.
-    fn transform_soac_reduce(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
+    fn transform_soac_reduce(
+        &mut self,
+        args: &[ast::Expression<ast::HolesResolvedTree>],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
         assert!(args.len() >= 3, "reduce requires 3 arguments");
         let op_term = self.transform_expr(&args[0]);
         let ne_term = self.transform_expr(&args[1]);
@@ -1213,7 +1206,12 @@ impl<'a> Transformer<'a> {
     }
 
     /// Transform `scan(op, ne, arr)` → `Soac(Scan { op, ne, input })`.
-    fn transform_soac_scan(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
+    fn transform_soac_scan(
+        &mut self,
+        args: &[ast::Expression<ast::HolesResolvedTree>],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
         assert!(args.len() >= 3, "scan requires 3 arguments");
         let op_term = self.transform_expr(&args[0]);
         let ne_term = self.transform_expr(&args[1]);
@@ -1238,7 +1236,12 @@ impl<'a> Transformer<'a> {
     }
 
     /// Transform `filter(pred, arr)` → `Soac(Filter { pred, input })`.
-    fn transform_soac_filter(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
+    fn transform_soac_filter(
+        &mut self,
+        args: &[ast::Expression<ast::HolesResolvedTree>],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
         assert!(args.len() >= 2, "filter requires 2 arguments");
         let pred_term = self.transform_expr(&args[0]);
         let arr_term = self.transform_expr(&args[1]);
@@ -1263,7 +1266,12 @@ impl<'a> Transformer<'a> {
     /// Transform `zip(a, b, ...)` → `ArrayExpr(Zip(...))`. Each child becomes an
     /// ANF atom; any producer child is let-bound, the bindings wrapping the zip
     /// term (a consuming `map` peels them back off — see `transform_soac_map`).
-    fn transform_soac_zip(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
+    fn transform_soac_zip(
+        &mut self,
+        args: &[ast::Expression<ast::HolesResolvedTree>],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
         let mut binds = Vec::new();
         let mut exprs = Vec::with_capacity(args.len());
         for a in args {
@@ -1277,7 +1285,7 @@ impl<'a> Transformer<'a> {
     /// Transform `reduce_by_index(dest, op, ne, indices, values)`.
     fn transform_soac_reduce_by_index(
         &mut self,
-        args: &[ast::Expression],
+        args: &[ast::Expression<ast::HolesResolvedTree>],
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
@@ -1326,7 +1334,12 @@ impl<'a> Transformer<'a> {
     /// are ignored (Futhark semantics). The `dest` must be a Var (a `#[storage]`
     /// buffer param in the rasterizer use case) — its `Place`
     /// carries the symbol the EGIR conversion resolves to the dest's view.
-    fn transform_soac_scatter(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
+    fn transform_soac_scatter(
+        &mut self,
+        args: &[ast::Expression<ast::HolesResolvedTree>],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
         assert!(args.len() >= 3, "scatter requires 3 arguments");
         let dest_term = self.transform_expr(&args[0]);
         let indices_term = self.transform_expr(&args[1]);
@@ -1439,7 +1452,12 @@ impl<'a> Transformer<'a> {
         }
     }
 
-    fn transform_loop(&mut self, loop_expr: &ast::LoopExpr, ty: Type<TypeName>, span: Span) -> Term {
+    fn transform_loop(
+        &mut self,
+        loop_expr: &ast::LoopExpr<ast::HolesResolvedTree>,
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
         // Get the init expression and accumulator type
         let init_term = loop_expr.init.as_ref().map(|e| self.transform_expr(e)).unwrap_or_else(|| {
             // No accumulator - use unit
@@ -1530,7 +1548,7 @@ impl<'a> Transformer<'a> {
     /// Build loop variable name and init_bindings from a pattern.
     fn build_loop_var_and_bindings(
         &mut self,
-        pattern: &ast::Pattern,
+        pattern: &ast::Pattern<ast::TypedHeader>,
         acc_ty: &Type<TypeName>,
         span: Span,
     ) -> (SymbolId, Type<TypeName>, Vec<(SymbolId, Type<TypeName>, Term)>) {
@@ -1632,10 +1650,10 @@ impl<'a> Transformer<'a> {
     /// once even when they're arbitrary expressions.
     fn transform_vec_with(
         &mut self,
-        target: &ast::Expression,
+        target: &ast::Expression<ast::HolesResolvedTree>,
         components: &[u8],
         op: Option<&str>,
-        value: &ast::Expression,
+        value: &ast::Expression<ast::HolesResolvedTree>,
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
@@ -1734,9 +1752,9 @@ impl<'a> Transformer<'a> {
     /// inside the outer rebuild's replacement slot.
     fn transform_record_with(
         &mut self,
-        record: &ast::Expression,
+        record: &ast::Expression<ast::HolesResolvedTree>,
         path: &[String],
-        value: &ast::Expression,
+        value: &ast::Expression<ast::HolesResolvedTree>,
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
@@ -1846,7 +1864,12 @@ impl<'a> Transformer<'a> {
         self.mk_tuple_proj(target.clone(), idx, result_ty.clone(), span)
     }
 
-    fn transform_match(&mut self, match_expr: &ast::MatchExpr, ty: Type<TypeName>, span: Span) -> Term {
+    fn transform_match(
+        &mut self,
+        match_expr: &ast::MatchExpr<ast::HolesResolvedTree>,
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
         debug_assert!(
             !match_expr.cases.is_empty(),
             "checker rejects empty match upstream"
@@ -2046,15 +2069,15 @@ impl<'a> Transformer<'a> {
         self.mk_term(result_ty, span, TermKind::ArrayExpr(ArrayExpr::Literal(parts)))
     }
 
-    fn lookup_type(&self, node_id: NodeId) -> Option<Type<TypeName>> {
-        self.lookup_type_raw(node_id).map(Self::lower_type)
+    fn type_of(header: &ast::TypedHeader) -> Type<TypeName> {
+        Self::lower_type(Self::raw_type(header))
     }
 
     /// Like `lookup_type`, but returns the type *before* sum-type
     /// lowering — used by Constructor and Match transforms that need
     /// to inspect the original `Sum` variants for layout computation.
-    pub(super) fn lookup_type_raw(&self, node_id: NodeId) -> Option<Type<TypeName>> {
-        self.type_table.get(&node_id).map(|scheme| self.extract_monotype(scheme))
+    pub(super) fn raw_type(header: &ast::TypedHeader) -> Type<TypeName> {
+        Self::extract_monotype(&header.ty)
     }
 
     /// Recursively rewrite `Sum(variants)` types into a flattened tuple
@@ -2095,10 +2118,10 @@ impl<'a> Transformer<'a> {
         }
     }
 
-    fn extract_monotype(&self, scheme: &polytype::TypeScheme<TypeName>) -> Type<TypeName> {
+    fn extract_monotype(scheme: &polytype::TypeScheme<TypeName>) -> Type<TypeName> {
         match scheme {
             polytype::TypeScheme::Monotype(ty) => ty.clone(),
-            polytype::TypeScheme::Polytype { body, .. } => self.extract_monotype(body),
+            polytype::TypeScheme::Polytype { body, .. } => Self::extract_monotype(body),
         }
     }
 
@@ -2120,7 +2143,11 @@ impl<'a> Transformer<'a> {
     }
 
     /// Transform an expression as a vector, converting ArrayLiteral to a VecLit term.
-    fn transform_as_vector(&mut self, expr: &ast::Expression, vec_ty: Type<TypeName>) -> Term {
+    fn transform_as_vector(
+        &mut self,
+        expr: &ast::Expression<ast::HolesResolvedTree>,
+        vec_ty: Type<TypeName>,
+    ) -> Term {
         let span = expr.h.span;
         match &expr.kind {
             ast::ExprKind::ArrayLiteral(elements) => {

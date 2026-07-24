@@ -7,7 +7,6 @@ use crate::LookupSet;
 use std::collections::BTreeMap;
 
 use crate::ast;
-use crate::module_manager;
 
 /// Category of a registered name. Used for diagnostics only —
 /// resolution doesn't branch on this.
@@ -44,11 +43,7 @@ const MATH_BUILTINS: &[&str] = &[
 ];
 
 impl NameRegistry {
-    pub fn build(
-        ast: &ast::Program,
-        module_manager: &module_manager::ModuleManager,
-        checker_builtins: &[String],
-    ) -> Self {
+    pub fn build(ast: &ast::Program<crate::ast_type_holes::HolesResolved>) -> Self {
         let mut names = BTreeMap::new();
 
         // 1+2. All catalog entries: per-source-name, classify into
@@ -65,7 +60,7 @@ impl NameRegistry {
         }
 
         // 3. Type-checker builtins (map, reduce, sin, cos, etc.)
-        for name in checker_builtins {
+        for name in &ast.global_context.builtin_names {
             let kind = if MATH_BUILTINS.contains(&name.as_str()) {
                 NameKind::MathBuiltin
             } else {
@@ -74,24 +69,19 @@ impl NameRegistry {
             names.entry(name.clone()).or_insert(kind);
         }
 
-        // 4. Module items (specs + decls, namespaced)
-        for (module_name, elaborated) in module_manager.get_elaborated_modules() {
-            for item in &elaborated.items {
-                let item_name = match item {
-                    module_manager::ElaboratedItem::Spec(ast::Spec::Sig(n, _, _)) => Some(n.as_str()),
-                    module_manager::ElaboratedItem::Spec(ast::Spec::SigOp(op, _)) => Some(op.as_str()),
-                    module_manager::ElaboratedItem::Decl(decl) => Some(decl.name.as_str()),
-                    _ => None,
-                };
-                if let Some(name) = item_name {
-                    names.insert(format!("{}.{}", module_name, name), NameKind::ModuleItem);
+        // 4+5. Typed module and prelude definitions retained by the AST.
+        for support in &ast.global_context.support_definitions {
+            match &support.namespace {
+                Some(module) => {
+                    names.insert(
+                        format!("{}.{}", module, support.definition.name),
+                        NameKind::ModuleItem,
+                    );
+                }
+                None => {
+                    names.entry(support.definition.name.clone()).or_insert(NameKind::PreludeFunction);
                 }
             }
-        }
-
-        // 5. Prelude functions
-        for decl in module_manager.get_prelude_function_declarations() {
-            names.entry(decl.name.clone()).or_insert(NameKind::PreludeFunction);
         }
 
         // 6. User declarations
@@ -100,7 +90,7 @@ impl NameRegistry {
                 ast::Declaration::Decl(d) => Some(d.name.clone()),
                 ast::Declaration::Entry(e) => Some(e.name.clone()),
                 ast::Declaration::Extern(e) => Some(e.name.clone()),
-                _ => None,
+                ast::Declaration::Frontend(never) => match *never {},
             };
             if let Some(name) = name {
                 names.entry(name).or_insert(NameKind::UserDecl);

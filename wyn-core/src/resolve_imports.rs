@@ -8,9 +8,30 @@
 use crate::LookupSet;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{self, NodeCounter};
+use crate::ast::{self, ImportsResolvedFrontend, ParsedFrontend};
 use crate::error::Result;
 use crate::{err_module, err_parse, lexer, parser};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImportsResolvedFamily;
+
+impl ast::Family for ImportsResolvedFamily {
+    type Tree = ast::SourceTree;
+    type DefinitionData = ast::DefinitionSyntax;
+    type EntryData = ast::EntrySyntax;
+    type EntryParameterAttribute = crate::interface::Attribute;
+    type ExternData = ast::ExternSyntax;
+    type FrontendDeclaration = ast::ImportsResolvedFrontend<ast::NestedDeclaration>;
+}
+
+/// AST after every top-level file import has been expanded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImportsResolved;
+
+impl ast::Stage for ImportsResolved {
+    type Family = ImportsResolvedFamily;
+    type GlobalContext = crate::module_manager::ModuleManager;
+}
 
 /// Recursively expand every `Declaration::Import(path)` in `decls` by parsing
 /// the referenced file (relative to `base_dir`), resolving its own imports
@@ -22,26 +43,80 @@ use crate::{err_module, err_parse, lexer, parser};
 /// Cycle / re-import safety: each canonical path is loaded at most once per
 /// compilation. Diamond imports work; cycles are silently broken at the
 /// second encounter.
-pub fn run(
-    decls: Vec<ast::Declaration>,
+pub fn resolve_imports(
+    program: ast::Program<parser::Parsed>,
     base_dir: &Path,
-    node_counter: &mut NodeCounter,
-) -> Result<Vec<ast::Declaration>> {
+) -> Result<ast::Program<ImportsResolved>> {
+    let ast::Program {
+        declarations,
+        mut node_ids,
+        global_context,
+    } = program;
     let mut visited: LookupSet<PathBuf> = LookupSet::new();
-    expand(decls, base_dir, node_counter, &mut visited)
+    let declarations = expand(declarations, base_dir, &mut node_ids, &mut visited)?;
+    Ok(ast::Program {
+        declarations,
+        node_ids,
+        global_context,
+    })
 }
 
 fn expand(
-    decls: Vec<ast::Declaration>,
+    decls: Vec<ast::Declaration<parser::ParsedFamily>>,
     base_dir: &Path,
-    node_counter: &mut NodeCounter,
+    node_counter: &mut ast::NodeCounter,
     visited: &mut LookupSet<PathBuf>,
-) -> Result<Vec<ast::Declaration>> {
-    let mut out: Vec<ast::Declaration> = Vec::with_capacity(decls.len());
+) -> Result<Vec<ast::Declaration<ImportsResolvedFamily>>> {
+    let mut out = Vec::with_capacity(decls.len());
     for decl in decls {
-        let ast::Declaration::Import(rel_path) = decl else {
-            out.push(decl);
-            continue;
+        let rel_path = match decl {
+            ast::Declaration::Decl(decl) => {
+                out.push(ast::Declaration::Decl(decl));
+                continue;
+            }
+            ast::Declaration::Entry(entry) => {
+                out.push(ast::Declaration::Entry(entry));
+                continue;
+            }
+            ast::Declaration::Extern(ext) => {
+                out.push(ast::Declaration::Extern(ext));
+                continue;
+            }
+            ast::Declaration::Frontend(frontend) => match frontend {
+                ParsedFrontend::Sig(sig) => {
+                    out.push(ast::Declaration::Frontend(ImportsResolvedFrontend::Sig(sig)));
+                    continue;
+                }
+                ParsedFrontend::TypeBind(bind) => {
+                    out.push(ast::Declaration::Frontend(ImportsResolvedFrontend::TypeBind(
+                        bind,
+                    )));
+                    continue;
+                }
+                ParsedFrontend::Module(module) => {
+                    out.push(ast::Declaration::Frontend(ImportsResolvedFrontend::Module(
+                        module,
+                    )));
+                    continue;
+                }
+                ParsedFrontend::ModuleTypeBind(bind) => {
+                    out.push(ast::Declaration::Frontend(
+                        ImportsResolvedFrontend::ModuleTypeBind(bind),
+                    ));
+                    continue;
+                }
+                ParsedFrontend::Open(open) => {
+                    out.push(ast::Declaration::Frontend(ImportsResolvedFrontend::Open(open)));
+                    continue;
+                }
+                ParsedFrontend::Resource(resource) => {
+                    out.push(ast::Declaration::Frontend(ImportsResolvedFrontend::Resource(
+                        resource,
+                    )));
+                    continue;
+                }
+                ParsedFrontend::Import(path) => path,
+            },
         };
 
         let mut joined = base_dir.join(&rel_path);
@@ -64,9 +139,9 @@ fn expand(
             .map_err(|e| err_module!("import: failed to read `{}`: {}", canonical.display(), e))?;
         let tokens = lexer::tokenize(&source).map_err(|e| err_parse!("{}", e))?;
         let mut p = parser::Parser::new(tokens, node_counter);
-        let imported_program = p.parse()?;
+        let imported_declarations = p.parse()?;
         let imported_dir = canonical.parent().unwrap_or(base_dir);
-        let resolved = expand(imported_program.declarations, imported_dir, node_counter, visited)?;
+        let resolved = expand(imported_declarations, imported_dir, node_counter, visited)?;
         out.extend(resolved);
     }
     Ok(out)

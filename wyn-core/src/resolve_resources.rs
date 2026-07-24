@@ -10,11 +10,35 @@
 //! attributes or `resource` declarations affect later stages — the program
 //! looks exactly as if the bindings had been written inline.
 
-use crate::ast::{self, Declaration, Pattern, PatternKind};
+use crate::ast::{self, Declaration, Pattern};
 use crate::error::Result;
-use crate::interface::{Attribute, FeedbackPair, ResourceDecl, ResourceUsage, StorageAccess};
+use crate::interface::{
+    Attribute, FeedbackPair, ResolvedAttribute, ResourceDecl, ResourceUsage, StorageAccess,
+};
 use crate::types::{Type, TypeName};
 use crate::{bail_type_at, BindingRef, LookupMap, LookupSet};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResourcesResolvedFamily;
+
+impl ast::Family for ResourcesResolvedFamily {
+    type Tree = ast::SourceTree;
+    type DefinitionData = ast::DefinitionSyntax;
+    type EntryData = ast::ResolvedEntry;
+    type EntryParameterAttribute = ResolvedAttribute;
+    type ExternData = ast::ExternSyntax;
+    type FrontendDeclaration = ast::ResourcesResolvedFrontend<ast::NestedDeclaration>;
+}
+
+/// AST after resource declarations and source-only `#[view]` attributes have
+/// been consumed into concrete entry metadata.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResourcesResolved;
+
+impl ast::Stage for ResourcesResolved {
+    type Family = ResourcesResolvedFamily;
+    type GlobalContext = crate::module_manager::ModuleManager;
+}
 
 /// Default descriptor set for auto-assigned resource bindings. Set 0 is
 /// compiler-reserved; user resources live on set 1+.
@@ -37,32 +61,29 @@ struct ResolvedResource {
     previous_sampled: Option<BindingRef>,
 }
 
-pub fn run(program: &mut ast::Program) -> Result<()> {
+pub fn resolve_resources(
+    mut program: ast::Program<crate::name_resolution::NamesResolved>,
+) -> Result<ast::Program<ResourcesResolved>> {
     let decls: Vec<ResourceDecl> = program
         .declarations
         .iter()
         .filter_map(|d| match d {
-            Declaration::Resource(r) => Some(r.clone()),
+            Declaration::Frontend(ast::ModulesElaboratedFrontend::Resource(r)) => Some(r.clone()),
             _ => None,
         })
         .collect();
-    if decls.is_empty() && !any_view(program) {
-        return Ok(());
-    }
-
-    let table = derive_bindings(&decls, program)?;
-
-    for decl in &mut program.declarations {
-        let Declaration::Entry(entry) = decl else {
-            continue;
-        };
-        let mut feedback: Vec<FeedbackPair> = Vec::new();
-        for param in &mut entry.params {
-            rewrite_view_param(param, &table, &mut feedback)?;
+    let table = derive_bindings(&decls, &program)?;
+    let mut entry_feedback = std::collections::VecDeque::new();
+    for declaration in &mut program.declarations {
+        if let Declaration::Entry(entry) = declaration {
+            let mut feedback = Vec::new();
+            for param in &mut entry.params {
+                rewrite_view_param(param, &table, &mut feedback)?;
+            }
+            entry_feedback.push_back(feedback);
         }
-        entry.feedback.extend(feedback);
     }
-    Ok(())
+    materialize(program, entry_feedback)
 }
 
 /// Assign each resource its current (and, for history resources, previous)
@@ -70,7 +91,7 @@ pub fn run(program: &mut ast::Program) -> Result<()> {
 /// set, avoiding slots already taken by explicit param attributes or pins.
 fn derive_bindings(
     decls: &[ResourceDecl],
-    program: &ast::Program,
+    program: &ast::Program<crate::name_resolution::NamesResolved>,
 ) -> Result<LookupMap<String, ResolvedResource>> {
     let mut used: LookupSet<(u32, u32)> = collect_explicit_slots(program);
     for r in decls {
@@ -146,42 +167,37 @@ fn derive_bindings(
     Ok(table)
 }
 
-/// Rewrite a single param's `View` attribute, if any, into a concrete binding
-/// attribute. Pushes a `FeedbackPair` when the view is `previous`.
+/// Apply the established entry-parameter rewrite. The later materialization
+/// step changes only the AST's attribute type.
 fn rewrite_view_param(
     param: &mut Pattern,
     table: &LookupMap<String, ResolvedResource>,
     feedback: &mut Vec<FeedbackPair>,
 ) -> Result<()> {
-    if !param_attrs(param).iter().any(|a| matches!(a, Attribute::View { .. })) {
+    if !param.attributes().iter().any(|attribute| matches!(attribute, Attribute::View(_))) {
         return Ok(());
     }
     let span = param.h.span;
     let handle = param.pattern_type().and_then(type_name_of);
-    let attrs = param_attrs_mut(param)
+    let attributes = param
+        .attributes_mut()
         .ok_or_else(|| crate::err_type_at!(span, "view attribute on a param without an attribute list"))?;
-    for attr in attrs.iter_mut() {
-        let Attribute::View {
+    for attribute in attributes {
+        let Attribute::View(view) = attribute else {
+            continue;
+        };
+        let crate::interface::ViewAttribute {
             resource,
             usage,
             previous,
-        } = attr
-        else {
-            continue;
-        };
-        let res = table
-            .get(resource)
+        } = view.clone();
+        let resolved = table
+            .get(&resource)
             .ok_or_else(|| crate::err_type_at!(span, "unknown resource '{}' in view", resource))?;
-        if !res.decl.usages.contains(usage) {
+        if !resolved.decl.usages.contains(&usage) {
             bail_type_at!(span, "resource '{}' does not declare usage {:?}", resource, usage);
         }
-        // Lower each view to its own descriptor slot: storage and sampled
-        // views are distinct descriptor types of the same backing texture,
-        // never the same `(set, binding)`. Sampled views carry `backing` —
-        // the storage allocation they view — so the runtime aliases one
-        // allocation across both; a `previous` view also records the
-        // ping-pong feedback pair.
-        *attr = match usage {
+        *attribute = match usage {
             ResourceUsage::StorageWrite | ResourceUsage::StorageRead => {
                 if handle != Some(TypeName::StorageTexture) {
                     bail_type_at!(
@@ -191,19 +207,18 @@ fn rewrite_view_param(
                         resource
                     );
                 }
-                let binding = res.current_storage.expect("storage usage implies a storage slot");
-                let access = if matches!(usage, ResourceUsage::StorageWrite) {
-                    StorageAccess::WriteOnly
-                } else {
-                    StorageAccess::ReadOnly
-                };
+                let binding = resolved.current_storage.expect("storage usage implies a storage slot");
                 Attribute::StorageImage {
                     set: binding.set,
                     binding: binding.binding,
-                    format: res.decl.format,
-                    access,
-                    size: res.decl.size,
-                    resource: Some(resource.clone()),
+                    format: resolved.decl.format,
+                    access: if matches!(usage, ResourceUsage::StorageWrite) {
+                        StorageAccess::WriteOnly
+                    } else {
+                        StorageAccess::ReadOnly
+                    },
+                    size: resolved.decl.size,
+                    resource: Some(resource),
                 }
             }
             ResourceUsage::Sampled => {
@@ -214,30 +229,29 @@ fn rewrite_view_param(
                         resource
                     );
                 }
-                let binding = if *previous {
-                    let prev = res.previous_sampled.ok_or_else(|| {
+                let binding = if previous {
+                    let previous_binding = resolved.previous_sampled.ok_or_else(|| {
                         crate::err_type_at!(
                             span,
                             "view of '{}' uses `previous`, but the resource has no `history`",
                             resource
                         )
                     })?;
-                    if let Some(write) = res.current_storage {
-                        feedback.push(FeedbackPair { read: prev, write });
+                    if let Some(write) = resolved.current_storage {
+                        feedback.push(FeedbackPair {
+                            read: previous_binding,
+                            write,
+                        });
                     }
-                    prev
+                    previous_binding
                 } else {
-                    res.current_sampled.expect("sampled usage implies a sampled slot")
+                    resolved.current_sampled.expect("sampled usage implies a sampled slot")
                 };
                 Attribute::Texture {
                     set: binding.set,
                     binding: binding.binding,
-                    backing: res.current_storage,
-                    // A current-frame view carries the resource name as its
-                    // frame-graph identity, so all views of one resource — and a
-                    // fragment `#[target(name)]` write — coalesce. A `previous`
-                    // view is the distinct history buffer, so it stays unnamed.
-                    resource: (!*previous).then(|| resource.clone()),
+                    backing: resolved.current_storage,
+                    resource: (!previous).then_some(resource),
                 }
             }
         };
@@ -245,61 +259,107 @@ fn rewrite_view_param(
     Ok(())
 }
 
+fn materialize(
+    program: ast::Program<crate::name_resolution::NamesResolved>,
+    mut entry_feedback: std::collections::VecDeque<Vec<FeedbackPair>>,
+) -> Result<ast::Program<ResourcesResolved>> {
+    let ast::Program {
+        declarations,
+        node_ids,
+        global_context,
+    } = program;
+    let mut resolved = Vec::with_capacity(declarations.len());
+    for declaration in declarations {
+        let declaration = match declaration {
+            Declaration::Decl(definition) => Some(Declaration::Decl(definition)),
+            Declaration::Entry(entry) => Some(Declaration::Entry(materialize_entry(
+                entry,
+                entry_feedback.pop_front().expect("resource analysis records every entry"),
+            )?)),
+            Declaration::Extern(ext) => Some(Declaration::Extern(ext)),
+            Declaration::Frontend(frontend) => materialize_frontend(frontend).map(Declaration::Frontend),
+        };
+        if let Some(declaration) = declaration {
+            resolved.push(declaration);
+        }
+    }
+    debug_assert!(entry_feedback.is_empty());
+    Ok(ast::Program {
+        declarations: resolved,
+        node_ids,
+        global_context,
+    })
+}
+
+fn materialize_attribute(attribute: Attribute, span: ast::Span) -> Result<ResolvedAttribute> {
+    let Attribute::View(_) = attribute else {
+        return Ok(attribute.map_view(|_| unreachable!()));
+    };
+    bail_type_at!(span, "view attributes are only valid on entry parameters")
+}
+
+fn materialize_pattern(pattern: Pattern) -> Result<Pattern<ast::Header, ResolvedAttribute>> {
+    let span = pattern.h.span;
+    pattern.try_map_attributes(&mut |attribute| materialize_attribute(attribute, span))
+}
+
+fn materialize_entry(
+    entry: ast::EntryDecl,
+    feedback: Vec<FeedbackPair>,
+) -> Result<ast::EntryDecl<ast::ResolvedEntry, ast::SourceTree, ResolvedAttribute>> {
+    let ast::EntryDecl {
+        data,
+        name,
+        name_span,
+        size_params,
+        type_params,
+        params,
+        body,
+    } = entry;
+    let syntax = data.try_map_attributes(|attribute| materialize_attribute(attribute, name_span))?;
+    Ok(ast::EntryDecl {
+        data: ast::ResolvedEntry { syntax, feedback },
+        name,
+        name_span,
+        size_params,
+        type_params,
+        params: params.into_iter().map(materialize_pattern).collect::<Result<_>>()?,
+        body,
+    })
+}
+
+fn materialize_frontend(
+    declaration: ast::ModulesElaboratedFrontend<ast::NestedDeclaration>,
+) -> Option<ast::ResourcesResolvedFrontend<ast::NestedDeclaration>> {
+    match declaration {
+        ast::ModulesElaboratedFrontend::Sig(sig) => Some(ast::ResourcesResolvedFrontend::Sig(sig)),
+        ast::ModulesElaboratedFrontend::TypeBind(bind) => {
+            Some(ast::ResourcesResolvedFrontend::TypeBind(bind))
+        }
+        ast::ModulesElaboratedFrontend::Open(open) => Some(ast::ResourcesResolvedFrontend::Open(open)),
+        ast::ModulesElaboratedFrontend::Resource(_) => None,
+    }
+}
+
 /// Every `(set, binding)` already claimed by an explicit binding attribute on
 /// any entry param — so auto-assigned resources don't collide with them.
-fn collect_explicit_slots(program: &ast::Program) -> LookupSet<(u32, u32)> {
+fn collect_explicit_slots(
+    program: &ast::Program<crate::name_resolution::NamesResolved>,
+) -> LookupSet<(u32, u32)> {
     let mut used = LookupSet::new();
     for decl in &program.declarations {
         let Declaration::Entry(entry) = decl else {
             continue;
         };
         for param in &entry.params {
-            for attr in param_attrs(param) {
-                if let Some((s, b)) = explicit_slot(attr) {
+            for attr in param.attributes() {
+                if let Some((s, b)) = attr.binding_slot() {
                     used.insert((s, b));
                 }
             }
         }
     }
     used
-}
-
-fn explicit_slot(attr: &Attribute) -> Option<(u32, u32)> {
-    match attr {
-        Attribute::Storage { set, binding, .. }
-        | Attribute::Uniform { set, binding }
-        | Attribute::Texture { set, binding, .. }
-        | Attribute::Sampler { set, binding }
-        | Attribute::StorageImage { set, binding, .. } => Some((*set, *binding)),
-        _ => None,
-    }
-}
-
-fn any_view(program: &ast::Program) -> bool {
-    program.declarations.iter().any(|d| match d {
-        Declaration::Entry(e) => {
-            e.params.iter().any(|p| param_attrs(p).iter().any(|a| matches!(a, Attribute::View { .. })))
-        }
-        _ => false,
-    })
-}
-
-/// The attribute list on an entry param (`#[attr] name: ty`), peeling the
-/// `Attributed` layer.
-fn param_attrs(p: &Pattern) -> &[Attribute] {
-    match &p.kind {
-        PatternKind::Attributed(attrs, _) => attrs,
-        PatternKind::Typed(inner, _) => param_attrs(inner),
-        _ => &[],
-    }
-}
-
-fn param_attrs_mut(p: &mut Pattern) -> Option<&mut Vec<Attribute>> {
-    match &mut p.kind {
-        PatternKind::Attributed(attrs, _) => Some(attrs),
-        PatternKind::Typed(inner, _) => param_attrs_mut(inner),
-        _ => None,
-    }
 }
 
 fn type_name_of(ty: &Type) -> Option<TypeName> {

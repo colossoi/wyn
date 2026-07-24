@@ -6,9 +6,7 @@ use crate::interface::{AttrExt, Attribute};
 use crate::module_manager::ModuleManager;
 use crate::name_resolution::NameResolution;
 use crate::scope::{IdentifierKind, ScopeEntry, ScopeStack};
-use crate::{
-    bail_type_at, err_module, err_type, err_type_at, err_undef_at, LookupMap, LookupSet, StableMap,
-};
+use crate::{bail_type_at, err_type, err_type_at, err_undef_at, LookupMap, LookupSet, StableMap};
 use log::debug;
 use polytype::Context;
 use std::collections::BTreeSet;
@@ -1534,12 +1532,15 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    pub fn check_program(&mut self, program: &Program) -> Result<LookupMap<NodeId, TypeScheme>> {
+    pub fn check_program(
+        &mut self,
+        declarations: &[Declaration<crate::resolve_opens::OpensResolvedFamily>],
+    ) -> Result<LookupMap<NodeId, TypeScheme>> {
         // Forward-declare ascribed file-scope `def`s into
         // `globals.user_file_defs` so module function bodies can close
         // over them. No `scope_stack.push_scope()` needed — `GlobalEnv`
         // is keyed independently of the local-scope stack.
-        self.forward_declare_ascribed_file_scope(program)?;
+        self.forward_declare_ascribed_file_scope(declarations)?;
 
         // Type-check module functions first to populate the module_schemes cache.
         // This must happen before prelude functions since they may reference module functions.
@@ -1549,11 +1550,11 @@ impl<'a> TypeChecker<'a> {
         self.check_prelude_functions()?;
 
         // Process user declarations
-        for decl in &program.declarations {
+        for decl in declarations {
             self.check_declaration(decl)?;
         }
 
-        self.check_resource_binding_consistency(program)?;
+        self.check_resource_binding_consistency(declarations)?;
 
         // Emit warnings for all type holes now that types are fully inferred
         self.emit_hole_warnings();
@@ -1576,8 +1577,11 @@ impl<'a> TypeChecker<'a> {
     /// spirv-val and naga reject. Reject exactly that; the element comparison
     /// peels `*[…]` / array-view wrappers so the same buffer seen as a view in
     /// one entry and a pointer-to-array in another is not a conflict.
-    fn check_resource_binding_consistency(&self, program: &Program) -> Result<()> {
-        fn param_attrs(p: &Pattern) -> &[Attribute] {
+    fn check_resource_binding_consistency(
+        &self,
+        declarations: &[Declaration<crate::resolve_opens::OpensResolvedFamily>],
+    ) -> Result<()> {
+        fn param_attrs<V>(p: &Pattern<Header, Attribute<V>>) -> &[Attribute<V>] {
             match &p.kind {
                 PatternKind::Attributed(attrs, _) => attrs,
                 PatternKind::Typed(inner, _) => param_attrs(inner),
@@ -1593,7 +1597,7 @@ impl<'a> TypeChecker<'a> {
         }
         let mut seen: LookupMap<(u32, u32), BufferUse> = LookupMap::new();
 
-        for decl in &program.declarations {
+        for decl in declarations {
             let Declaration::Entry(entry) = decl else {
                 continue;
             };
@@ -1702,23 +1706,33 @@ impl<'a> TypeChecker<'a> {
 
     fn check_entry_with_params(
         &mut self,
-        params: &[Pattern],
+        params: &[Pattern<Header, crate::interface::ResolvedAttribute>],
         body: &Expression,
-        entry_type: &Attribute,
+        entry_kind: crate::interface::EntryKind,
     ) -> Result<(Vec<Type>, Type)> {
-        self.check_function_with_params_inner(params, body, None, true, Some(entry_type))
+        self.check_function_with_params_inner(params, body, None, true, Some(entry_kind))
     }
 
-    fn check_function_with_params_inner(
+    fn record_parameter_pattern_type<V>(&mut self, pattern: &Pattern<Header, Attribute<V>>, ty: &Type) {
+        match &pattern.kind {
+            PatternKind::Typed(inner, _) | PatternKind::Attributed(_, inner) => {
+                self.record_parameter_pattern_type(inner, ty);
+            }
+            _ => {}
+        }
+        self.type_table.insert(pattern.h.id, TypeScheme::Monotype(ty.clone()));
+    }
+
+    fn check_function_with_params_inner<V>(
         &mut self,
-        params: &[Pattern],
+        params: &[Pattern<Header, Attribute<V>>],
         body: &Expression,
         module_name: Option<&str>,
         is_entry: bool,
         // The entry's stage attribute (`Vertex` / `Fragment` / `Compute`)
         // when `is_entry`; `None` for ordinary functions. Drives
         // stage-specific parameter validation.
-        entry_stage: Option<&Attribute>,
+        entry_stage: Option<crate::interface::EntryKind>,
     ) -> Result<(Vec<Type>, Type)> {
         // Create type variables or use explicit types for parameters
         let mut param_types: Vec<Type> = Vec::with_capacity(params.len());
@@ -1751,10 +1765,10 @@ impl<'a> TypeChecker<'a> {
         // every non-builtin vertex param must have an explicit slot —
         // the pipeline descriptor needs a stable slot per attribute.
         // Fragment inputs are `#[varying(n)]` interpolants, validated below.
-        if matches!(entry_stage, Some(Attribute::Vertex)) {
+        if matches!(entry_stage, Some(crate::interface::EntryKind::Vertex)) {
             // `parse_entry_params` builds `Typed(Attributed([attrs], Name), ty)`
             // — `Typed` outermost — so peel through `Typed` to reach the attrs.
-            fn param_attrs(p: &Pattern) -> &[Attribute] {
+            fn param_attrs<V>(p: &Pattern<Header, Attribute<V>>) -> &[Attribute<V>] {
                 match &p.kind {
                     PatternKind::Attributed(attrs, _) => attrs,
                     PatternKind::Typed(inner, _) => param_attrs(inner),
@@ -1846,7 +1860,7 @@ impl<'a> TypeChecker<'a> {
                 })?
                 .to_string();
             let resolved_param_type = param_type.apply(&self.context);
-            self.type_table.insert(param.h.id, TypeScheme::Monotype(resolved_param_type.clone()));
+            self.record_parameter_pattern_type(param, &resolved_param_type);
             let type_scheme = TypeScheme::Monotype(resolved_param_type);
 
             debug!(
@@ -1869,8 +1883,11 @@ impl<'a> TypeChecker<'a> {
     /// `globals.user_file_defs`. Idempotent with the main
     /// `check_program` walk, which re-inserts the same scheme. Defs
     /// without full ascription are deferred to the main loop.
-    fn forward_declare_ascribed_file_scope(&mut self, program: &Program) -> Result<()> {
-        for decl in &program.declarations {
+    fn forward_declare_ascribed_file_scope(
+        &mut self,
+        declarations: &[Declaration<crate::resolve_opens::OpensResolvedFamily>],
+    ) -> Result<()> {
+        for decl in declarations {
             if let Declaration::Decl(d) = decl {
                 if let Some(scheme) = self.ascription_to_scheme(d)? {
                     self.globals.user_file_defs.insert(d.name.clone(), scheme);
@@ -2036,25 +2053,31 @@ impl<'a> TypeChecker<'a> {
         self.globals.module_schemes.get(qualified_name)
     }
 
-    fn check_declaration(&mut self, decl: &Declaration) -> Result<()> {
+    fn check_declaration(
+        &mut self,
+        decl: &Declaration<crate::resolve_opens::OpensResolvedFamily>,
+    ) -> Result<()> {
         match decl {
             Declaration::Decl(decl_node) => {
-                debug!("Checking {} declaration: {}", decl_node.keyword, decl_node.name);
+                debug!(
+                    "Checking {} declaration: {}",
+                    decl_node.data.keyword, decl_node.name
+                );
                 self.check_decl(decl_node)
             }
             Declaration::Entry(entry) => {
                 debug!("Checking entry point: {}", entry.name);
-                let (_param_types, body_type) =
-                    self.check_entry_with_params(&entry.params, &entry.body, &entry.entry_type)?;
+                let (param_types, body_type) =
+                    self.check_entry_with_params(&entry.params, &entry.body, entry.data.syntax.entry_kind)?;
                 debug!("Entry point '{}' body type: {:?}", entry.name, body_type);
 
                 // Build expected return type from declared outputs
-                let expected_type = match entry.outputs.len() {
+                let expected_type = match entry.data.syntax.outputs.len() {
                     0 => Type::Constructed(TypeName::Unit, vec![]),
-                    1 => entry.outputs[0].ty.clone(),
+                    1 => entry.data.syntax.outputs[0].ty.clone(),
                     n => Type::Constructed(
                         TypeName::Tuple(n),
-                        entry.outputs.iter().map(|o| o.ty.clone()).collect(),
+                        entry.data.syntax.outputs.iter().map(|o| o.ty.clone()).collect(),
                     ),
                 };
                 // Resolve type aliases (e.g., rand.state -> f32) and instantiate
@@ -2076,7 +2099,7 @@ impl<'a> TypeChecker<'a> {
                 // Validate the body's value shape against the declared
                 // outputs; any `*` on the output contract is a signature
                 // property forgotten for this shape check.
-                let storage_image_tail_sinks_to_unit = entry.outputs.is_empty()
+                let storage_image_tail_sinks_to_unit = entry.data.syntax.outputs.is_empty()
                     && matches!(expected_inner, Type::Constructed(TypeName::Unit, _))
                     && matches!(
                         body_inner.apply(&self.context),
@@ -2091,45 +2114,25 @@ impl<'a> TypeChecker<'a> {
                     )?;
                 }
 
-                Ok(())
-            }
-            Declaration::Sig(sig_decl) => {
-                debug!("Checking Sig declaration: {}", sig_decl.name);
-                self.check_sig_decl(sig_decl)
-            }
-            Declaration::TypeBind(type_bind) => {
-                debug!("Processing TypeBind: {}", type_bind.name);
-                // Type bindings are registered in the environment during elaboration
-                // For now, just skip them in type checking
-                Ok(())
-            }
-            Declaration::Module(_) => {
-                // Module/functor declarations should be elaborated away before type checking
-                // If we encounter one here, it means elaboration wasn't run or failed
-                Err(err_module!(
-                    "Module declarations should be elaborated before type checking"
-                ))
-            }
-            Declaration::ModuleTypeBind(_) => {
-                // Module type bindings are erased during elaboration
-                // If we see one, elaboration wasn't run
-                Ok(())
-            }
-            Declaration::Open(_) => {
-                // Open declarations should be elaborated away
-                Ok(())
-            }
-            Declaration::Import(_) => {
-                // Import declarations should be resolved during elaboration
+                let function_type = param_types
+                    .into_iter()
+                    .rev()
+                    .fold(expected_type, |result, parameter| function(parameter, result));
+                let scheme = self.generalize_function(&function_type);
+                self.register_global_decl(&entry.name, &scheme, None);
+
                 Ok(())
             }
             Declaration::Extern(extern_decl) => {
                 debug!("Checking Extern declaration: {}", extern_decl.name);
                 self.check_extern_decl(extern_decl)
             }
-            Declaration::Resource(_) => {
-                // Resources carry no body to check; views were rewritten to
-                // concrete binding attributes before type checking.
+            Declaration::Frontend(crate::ast::OpensResolvedFrontend::Sig(signature)) => {
+                debug!("Checking Sig declaration: {}", signature.name);
+                self.check_sig_decl(signature)
+            }
+            Declaration::Frontend(crate::ast::OpensResolvedFrontend::TypeBind(binding)) => {
+                debug!("Processing TypeBind: {}", binding.name);
                 Ok(())
             }
         }
@@ -2268,11 +2271,11 @@ impl<'a> TypeChecker<'a> {
     fn check_extern_decl(&mut self, decl: &ExternDecl) -> Result<()> {
         // Extern declarations register a type signature for a linked
         // SPIR-V function — same routing as Sig / Decl.
-        let type_scheme = TypeScheme::Monotype(decl.ty.clone());
+        let type_scheme = TypeScheme::Monotype(decl.data.ty.clone());
         self.register_global_decl(&decl.name, &type_scheme, None);
         debug!(
             "Registered extern function '{}' with linkage '{}'",
-            decl.name, decl.linkage_name
+            decl.name, decl.data.linkage_name
         );
         Ok(())
     }
@@ -2287,7 +2290,7 @@ impl<'a> TypeChecker<'a> {
                 }
                 Ok(record(field_types))
             }
-            ExprKind::TypeHole => {
+            ExprKind::TypeHole(_) => {
                 // Record this hole for warning emission after type inference completes
                 self.type_holes.push((expr.h.id, expr.h.span));
                 Ok(self.context.new_variable())
@@ -2296,13 +2299,17 @@ impl<'a> TypeChecker<'a> {
             ExprKind::FloatLiteral(_) => Ok(f32()),
             ExprKind::BoolLiteral(_) => Ok(bool_type()),
             ExprKind::Unit => Ok(unit()),
-            ExprKind::Identifier(quals, name) => {
-                let full_name = if quals.is_empty() {
-                    name.clone()
+            ExprKind::Identifier(identifier) => {
+                let full_name = if identifier.qualifiers.is_empty() {
+                    identifier.name.clone()
                 } else {
-                    format!("{}.{}", quals.join("."), name)
+                    format!(
+                        "{}.{}",
+                        identifier.qualifiers.join("."),
+                        identifier.name
+                    )
                 };
-                let is_qualified = !quals.is_empty();
+                let is_qualified = !identifier.qualifiers.is_empty();
 
                 debug!("Looking up identifier '{}'", full_name);
 
@@ -3156,10 +3163,13 @@ impl<'a> TypeChecker<'a> {
     /// For normal functions, returns a single candidate.
     fn resolve_callee_candidates(&mut self, func: &Expression) -> Result<CalleeCandidates> {
         match &func.kind {
-            ExprKind::Identifier(quals, name) => {
-                let full_name =
-                    if quals.is_empty() { name.clone() } else { format!("{}.{}", quals.join("."), name) };
-                let is_qualified = !quals.is_empty();
+            ExprKind::Identifier(identifier) => {
+                let full_name = if identifier.qualifiers.is_empty() {
+                    identifier.name.clone()
+                } else {
+                    format!("{}.{}", identifier.qualifiers.join("."), identifier.name)
+                };
+                let is_qualified = !identifier.qualifiers.is_empty();
 
                 if let Some(resolved) = self.resolve_value_name(&full_name, is_qualified, func.h.id) {
                     // For overloaded intrinsics, expand into multiple candidates
@@ -3187,8 +3197,9 @@ impl<'a> TypeChecker<'a> {
                 // The parser already accepts `Application(Identifier([], T), [v])`;
                 // we intercept here when the name isn't a known value but
                 // matches a type-constructor pattern.
-                if quals.is_empty() {
-                    if let Some(candidates) = self.try_resolve_constructor_call(name, func.h.id) {
+                if identifier.qualifiers.is_empty() {
+                    if let Some(candidates) = self.try_resolve_constructor_call(&identifier.name, func.h.id)
+                    {
                         return Ok(candidates);
                     }
                 }
@@ -3875,14 +3886,19 @@ impl<'a> TypeChecker<'a> {
         for (i, arg) in args.iter().enumerate() {
             // A consuming function may not be passed as a value: reject an
             // argument that names a top-level consuming function.
-            if let ExprKind::Identifier(path, name) = &arg.kind {
-                let qualified =
-                    if path.is_empty() { name.clone() } else { format!("{}.{}", path.join("."), name) };
-                if self.consuming_defs.contains(name) || self.consuming_defs.contains(&qualified) {
+            if let ExprKind::Identifier(identifier) = &arg.kind {
+                let qualified = if identifier.qualifiers.is_empty() {
+                    identifier.name.clone()
+                } else {
+                    format!("{}.{}", identifier.qualifiers.join("."), identifier.name)
+                };
+                if self.consuming_defs.contains(&identifier.name)
+                    || self.consuming_defs.contains(&qualified)
+                {
                     bail_type_at!(
                         arg.h.span,
                         "a consuming function may not be passed as a value: `{}` consumes its argument",
-                        name
+                        identifier.name
                     );
                 }
             }

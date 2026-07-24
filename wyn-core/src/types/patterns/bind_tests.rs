@@ -2,18 +2,8 @@
 //! `fresh_type_for_pattern`. We drive them through small wyn source
 //! programs and assert that type-check accepts / rejects as expected.
 
-use crate::Compiler;
-
 fn type_check_source(source: &str) -> std::result::Result<(), String> {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(source, &mut node_counter).map_err(|e| format!("parse: {}", e))?;
-    parsed
-        .resolve(&mut module_manager)
-        .map_err(|e| format!("resolve: {}", e))?
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .map(|_| ())
-        .map_err(|e| format!("type_check: {}", e))
+    crate::compile_thru_frontend(source).map(|_| ()).map_err(|e| format!("type_check: {}", e))
 }
 
 // ----- bind_pattern accepts every supported pattern variant -----

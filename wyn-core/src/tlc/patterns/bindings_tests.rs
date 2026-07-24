@@ -3,18 +3,11 @@
 //! programs and inspects the resulting Term structure.
 
 use crate::tlc::{self, Program, Term, TermKind};
-use crate::Compiler;
 
 fn compile_to_tlc_raw(source: &str) -> Program<tlc::stage::Transformed> {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-    type_checked.to_tlc(&module_manager, false)
+    let type_checked = crate::compile_thru_frontend(source).expect("type_check");
+    let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
+    tlc::lower_from_ast(program)
 }
 
 fn find_def_body<'a>(program: &'a Program<tlc::stage::Transformed>, name: &str) -> &'a Term {

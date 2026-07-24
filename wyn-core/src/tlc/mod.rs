@@ -6,7 +6,6 @@
 pub mod anf;
 pub mod data;
 mod dce;
-pub mod defaults;
 pub mod defunctionalize;
 mod from_ast;
 pub mod if_over_producer;
@@ -31,9 +30,8 @@ pub mod subst;
 
 use crate::ast::{self, Span, TypeName};
 use crate::builtins::BuiltinId;
-use crate::error::CompilerError;
 use crate::types::SoacOwnership;
-use crate::{interface, LookupMap, LookupSet, SymbolId, SymbolTable, TypeTable};
+use crate::{interface, LookupMap, LookupSet, SymbolId, SymbolTable};
 use polytype::Type;
 use std::num::NonZeroU32;
 
@@ -261,13 +259,11 @@ pub mod context {
 
     /// Global state immediately after AST-to-TLC conversion.
     ///
-    /// Diagnostics and the AST type table intentionally exist only at this
-    /// first checkpoint. Function schemes live on definitions instead.
+    /// AST types, identifier resolutions, and function schemes are read from
+    /// their owning typed AST nodes during conversion.
     #[derive(Debug)]
     pub struct TransformedGlobal {
-        pub type_table: TypeTable,
         pub known_defs: LookupSet<String>,
-        pub fill_hole_errors: Vec<CompilerError>,
         pub auto_storage_binding_ids: crate::IdSource<u32>,
     }
 
@@ -296,7 +292,7 @@ pub mod family {
     pub use super::defunctionalize::ClosureConverted;
     pub use super::input_slice_bounds::InputBounded;
     pub use super::monomorphize::Monomorphic;
-    pub use super::run::Polymorphic;
+    pub use super::pin_entry_buffers::Polymorphic;
 }
 
 /// Stable names for checkpoints defined by their producing passes.
@@ -329,6 +325,7 @@ pub use partial_eval::partial_eval;
 pub use pin_entry_buffers::pin_entry_buffers;
 pub use reachability::filter_reachable;
 pub use rep_specialize::rep_specialize;
+pub use run::lower_from_ast;
 pub use runtime_index_producers::float_runtime_index_nested_producers;
 pub use soa::{normalize_soacs, renormalize_inlined_soa};
 pub use soac_anf::normalize_soacs_to_anf;

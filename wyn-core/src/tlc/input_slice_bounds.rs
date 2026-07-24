@@ -90,15 +90,16 @@ pub fn infer_input_slice_bounds(program: Program<SourceStage>) -> Program<InputS
 fn analyze(program: &Program<SourceStage>) -> EntryPatches {
     let mut out = EntryPatches::new();
     for def in &program.defs {
-        if !matches!(def.meta, DefMeta::EntryPoint(_)) {
+        let DefMeta::EntryPoint(entry) = &def.meta else {
             continue;
-        }
+        };
         let (inner_body, params) = extract_lambda_params_ref(&def.body);
         let inputs: Vec<(SymbolId, Type<TypeName>)> =
             params.iter().map(|(sym, ty)| (*sym, ty.clone())).collect();
         let previous = out.insert(
             def.name,
             data::EntryInputBounds {
+                param_bindings: entry.data.param_bindings.clone(),
                 by_symbol: infer(inner_body, &inputs),
             },
         );

@@ -240,7 +240,7 @@ impl Parser<'_> {
                 let mut declarations = Vec::new();
 
                 while !self.check(&Token::RightBrace) {
-                    declarations.push(self.parse_declaration()?);
+                    declarations.push(self.parse_nested_declaration()?);
                 }
 
                 self.expect(Token::RightBrace)?;
@@ -301,7 +301,7 @@ impl Parser<'_> {
                 self.advance();
                 let mut declarations = Vec::new();
                 while !self.check(&Token::RightBrace) {
-                    declarations.push(self.parse_declaration()?);
+                    declarations.push(self.parse_nested_declaration()?);
                 }
                 self.expect(Token::RightBrace)?;
                 Ok(ModuleExpression::Struct(declarations))

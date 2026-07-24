@@ -6,14 +6,19 @@
 
 use super::*;
 use crate::ast::{self, Declaration, ExprKind, Expression, Program};
-use crate::lexer;
-use crate::parser;
 
-fn parse(src: &str) -> Program {
-    let mut nc: ast::NodeCounter = ast::NodeCounter::new();
-    let tokens = lexer::tokenize(src).expect("tokenize");
-    let mut parser = parser::Parser::new(tokens, &mut nc);
-    parser.parse().expect("parse")
+fn parse(src: &str) -> Program<crate::resolve_resources::ResourcesResolved> {
+    let program = crate::parser::parse(
+        src,
+        ast::NodeCounter::new(),
+        crate::module_manager::ModuleManager::new_empty(),
+    )
+    .expect("parse");
+    let program =
+        crate::resolve_imports::resolve_imports(program, std::path::Path::new(".")).expect("imports");
+    let program = crate::elaborate_modules::elaborate_modules(program).expect("modules");
+    let program = crate::name_resolution::resolve_names(program);
+    crate::resolve_resources::resolve_resources(program).expect("resources")
 }
 
 fn make_index(pairs: &[(&str, &str)]) -> OpenIndex {
@@ -25,7 +30,7 @@ fn make_index(pairs: &[(&str, &str)]) -> OpenIndex {
 }
 
 /// Pull the body expression of the first `def`/`let` declaration.
-fn first_decl_body(prog: &Program) -> &Expression {
+fn first_decl_body(prog: &Program<crate::resolve_resources::ResourcesResolved>) -> &Expression {
     for d in &prog.declarations {
         if let Declaration::Decl(d) = d {
             return &d.body;
@@ -39,7 +44,7 @@ fn first_decl_body(prog: &Program) -> &Expression {
 /// depending on application/argument structure.
 fn find_ident<'a>(expr: &'a Expression, target: &str) -> &'a Expression {
     fn walk<'a>(e: &'a Expression, target: &str) -> Option<&'a Expression> {
-        if let ExprKind::Identifier(_, name) = &e.kind {
+        if let ExprKind::Identifier(crate::ast::Identifier { name, .. }) = &e.kind {
             if name == target {
                 return Some(e);
             }
@@ -82,7 +87,9 @@ fn find_ident<'a>(expr: &'a Expression, target: &str) -> &'a Expression {
 
 fn ident_quals<'a>(expr: &'a Expression) -> &'a [String] {
     match &expr.kind {
-        ExprKind::Identifier(quals, _) => quals,
+        ExprKind::Identifier(crate::ast::Identifier {
+            qualifiers: quals, ..
+        }) => quals,
         _ => panic!("expected identifier"),
     }
 }
@@ -125,7 +132,7 @@ fn happy_path_rewrites_bare_to_qualified() {
     );
     let idx = make_index(&[("f32", "cos"), ("f32", "sin")]);
     let mut r = OpenResolver::new(&idx);
-    r.resolve_program(&mut prog).expect("resolve");
+    r.resolve_program(&mut prog.declarations).expect("resolve");
 
     let body = first_decl_body(&prog);
     let cos = find_ident(body, "cos");
@@ -144,7 +151,7 @@ fn local_binding_shadows_open() {
     );
     let idx = make_index(&[("f32", "cos")]);
     let mut r = OpenResolver::new(&idx);
-    r.resolve_program(&mut prog).expect("resolve");
+    r.resolve_program(&mut prog.declarations).expect("resolve");
 
     let body = first_decl_body(&prog);
     let cos = find_ident(body, "cos");
@@ -165,7 +172,7 @@ fn lambda_param_shadows_open() {
     );
     let idx = make_index(&[("f32", "cos")]);
     let mut r = OpenResolver::new(&idx);
-    r.resolve_program(&mut prog).expect("resolve");
+    r.resolve_program(&mut prog.declarations).expect("resolve");
 
     let body = first_decl_body(&prog);
     let cos = find_ident(body, "cos");
@@ -178,11 +185,8 @@ fn lambda_param_shadows_open() {
 
 #[test]
 fn already_qualified_left_alone() {
-    // `f32.sin(x)` parses as Application(FieldAccess(Identifier("f32"),
-    // "sin"), [x]). The pass must not crack open the FieldAccess
-    // wrapper or rewrite the inner `f32` to anything else just because
-    // `f32` is open. (Nothing in the index has a member literally named
-    // "f32", so the rewrite rule shouldn't fire.)
+    // Name resolution has already represented `f32.sin` as a qualified
+    // identifier. Opening `f32` must leave that qualification unchanged.
     let mut prog = parse(
         r#"
         open f32
@@ -191,29 +195,23 @@ fn already_qualified_left_alone() {
     );
     let idx = make_index(&[("f32", "sin")]);
     let mut r = OpenResolver::new(&idx);
-    r.resolve_program(&mut prog).expect("resolve");
+    r.resolve_program(&mut prog.declarations).expect("resolve");
 
     let body = first_decl_body(&prog);
-    // Body should still be Application(FieldAccess(Identifier(_, "f32"), "sin"), [x]).
     let func = match &body.kind {
         ExprKind::Application(f, _) => f.as_ref(),
         _ => panic!("expected Application, got {:?}", body.kind),
     };
-    let (inner, field) = match &func.kind {
-        ExprKind::FieldAccess(inner, field) => (inner.as_ref(), field),
-        _ => panic!("expected FieldAccess, got {:?}", func.kind),
-    };
-    assert_eq!(field, "sin", "field name should be unchanged");
-    let f32_ident = match &inner.kind {
-        ExprKind::Identifier(quals, name) => (quals, name),
-        _ => panic!("expected Identifier inside FieldAccess"),
-    };
-    assert!(
-        f32_ident.0.is_empty(),
-        "inner `f32` identifier should remain unqualified, got quals = {:?}",
-        f32_ident.0
-    );
-    assert_eq!(f32_ident.1, "f32");
+    match &func.kind {
+        ExprKind::Identifier(crate::ast::Identifier {
+            qualifiers: quals,
+            name,
+        }) => {
+            assert_eq!(quals, &["f32".to_string()]);
+            assert_eq!(name, "sin");
+        }
+        _ => panic!("expected qualified Identifier, got {:?}", func.kind),
+    }
 }
 
 #[test]
@@ -221,42 +219,31 @@ fn manually_qualified_identifier_left_alone() {
     // Construct an Identifier with a pre-existing qualifier directly
     // (the parser never produces this form, but downstream passes
     // might). Rule 1 should leave it untouched.
-    let mut nc: ast::NodeCounter = ast::NodeCounter::new();
-    use crate::ast::NodeCounterExt;
-    let span = ast::Span::dummy();
-    let ident = nc.mk_node(
-        ExprKind::Identifier(vec!["i32".to_string()], "abs".to_string()),
-        span,
-    );
-    let body = ident;
-    let decl = Declaration::Decl(ast::Decl {
-        keyword: "def",
-        attributes: vec![],
-        name: "f".to_string(),
-        name_span: span,
-        size_params: vec![],
-        type_params: vec![],
-        params: vec![],
-        ty: None,
-        body,
-        param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
-    });
-    let mut prog = Program {
-        declarations: vec![
-            Declaration::Open(ast::ModuleExpression::Name("f32".to_string())),
-            decl,
-        ],
+    let mut prog = parse("open f32 def f = abs");
+    let Declaration::Decl(decl) = prog
+        .declarations
+        .iter_mut()
+        .find(|declaration| matches!(declaration, Declaration::Decl(_)))
+        .expect("definition")
+    else {
+        unreachable!()
     };
+    decl.body.kind = ExprKind::Identifier(ast::Identifier {
+        qualifiers: vec!["i32".to_string()],
+        name: "abs".to_string(),
+    });
     // Both modules in index, both with `abs`. Without rule 1 this would
     // be ambiguous; rule 1 says: already qualified, do nothing.
     let idx = make_index(&[("f32", "abs"), ("i32", "abs")]);
     let mut r = OpenResolver::new(&idx);
-    r.resolve_program(&mut prog).expect("resolve");
+    r.resolve_program(&mut prog.declarations).expect("resolve");
 
     let body = first_decl_body(&prog);
     match &body.kind {
-        ExprKind::Identifier(quals, name) => {
+        ExprKind::Identifier(crate::ast::Identifier {
+            qualifiers: quals,
+            name,
+        }) => {
             assert_eq!(quals, &["i32".to_string()]);
             assert_eq!(name, "abs");
         }
@@ -278,7 +265,7 @@ fn function_param_shadows_open() {
     // Add a fake `f32.f` member to test the top-level shadow.
     let idx = make_index(&[("f32", "f")]);
     let mut r = OpenResolver::new(&idx);
-    r.resolve_program(&mut prog).expect("resolve");
+    r.resolve_program(&mut prog.declarations).expect("resolve");
 
     // Top-level `def f` registers `f` as a bound name, so any `f`
     // reference (in this test there isn't one, but the property holds)
@@ -298,7 +285,7 @@ fn unknown_module_errors_at_open_site() {
     );
     let idx = make_index(&[("f32", "cos")]);
     let mut r = OpenResolver::new(&idx);
-    let err = r.resolve_program(&mut prog).expect_err("should error");
+    let err = r.resolve_program(&mut prog.declarations).expect_err("should error");
     let msg = format!("{}", err);
     assert!(
         msg.contains("f23"),
@@ -320,7 +307,7 @@ fn ambiguous_bare_name_errors_with_candidates() {
     );
     let idx = make_index(&[("f32", "abs"), ("i32", "abs")]);
     let mut r = OpenResolver::new(&idx);
-    let err = r.resolve_program(&mut prog).expect_err("should error");
+    let err = r.resolve_program(&mut prog.declarations).expect_err("should error");
     let msg = format!("{}", err);
     assert!(
         msg.contains("ambiguous"),
@@ -346,7 +333,7 @@ fn no_op_when_no_bare_uses() {
     );
     let idx = make_index(&[("f32", "cos")]);
     let mut r = OpenResolver::new(&idx);
-    r.resolve_program(&mut prog).expect("resolve");
+    r.resolve_program(&mut prog.declarations).expect("resolve");
 }
 
 #[test]
@@ -361,7 +348,7 @@ fn bare_name_with_no_match_left_alone() {
     );
     let idx = make_index(&[("f32", "cos")]);
     let mut r = OpenResolver::new(&idx);
-    r.resolve_program(&mut prog).expect("resolve");
+    r.resolve_program(&mut prog.declarations).expect("resolve");
 
     let body = first_decl_body(&prog);
     let frob = find_ident(body, "frobnicate");
@@ -385,7 +372,7 @@ fn innermost_open_wins_when_unique() {
     );
     let idx = make_index(&[("f32", "cos"), ("i32", "abs")]);
     let mut r = OpenResolver::new(&idx);
-    r.resolve_program(&mut prog).expect("resolve");
+    r.resolve_program(&mut prog.declarations).expect("resolve");
 
     let body = first_decl_body(&prog);
     let cos = find_ident(body, "cos");
@@ -406,7 +393,7 @@ fn identical_open_does_not_cause_ambiguity() {
     );
     let idx = make_index(&[("f32", "clamp")]);
     let mut r = OpenResolver::new(&idx);
-    r.resolve_program(&mut prog).expect("resolve");
+    r.resolve_program(&mut prog.declarations).expect("resolve");
 
     let body = first_decl_body(&prog);
     let c = find_ident(body, "clamp");

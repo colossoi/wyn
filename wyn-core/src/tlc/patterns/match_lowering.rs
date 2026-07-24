@@ -8,7 +8,7 @@
 //! `If` terms. The last arm's condition is elided (exhaustiveness
 //! guarantees it's reachable when every prior arm fails).
 
-use crate::ast::{self, NodeId, PatternKind, PatternLiteral, Span, TypeName};
+use crate::ast::{self, PatternKind, PatternLiteral, Span, TypeName};
 use crate::tlc::{PendingBinding, Term, TermKind, Transformer, VarRef};
 use polytype::Type;
 
@@ -19,7 +19,7 @@ impl<'a> Transformer<'a> {
     /// `result_ty` is the type each arm body produces.
     pub(in crate::tlc) fn compile_match(
         &mut self,
-        match_expr: &ast::MatchExpr,
+        match_expr: &ast::MatchExpr<ast::HolesResolvedTree>,
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
@@ -76,7 +76,7 @@ impl<'a> Transformer<'a> {
     pub(super) fn compile_pattern_test(
         &mut self,
         scrut: &Term,
-        pattern: &ast::Pattern,
+        pattern: &ast::Pattern<ast::TypedHeader>,
     ) -> (Term, Vec<PendingBinding>) {
         let span = pattern.h.span;
         match &pattern.kind {
@@ -148,7 +148,7 @@ impl<'a> Transformer<'a> {
                         // raw type table — Constructor patterns carry
                         // their sum's raw shape via the pattern's
                         // type-table entry.
-                        self.lookup_sum_variants_for_pattern(pattern.h.id).unwrap_or_else(|| {
+                        self.lookup_sum_variants_for_pattern(&pattern.h).unwrap_or_else(|| {
                             panic!("BUG: Constructor pattern without sum-type entry in type table")
                         })
                     }
@@ -244,9 +244,9 @@ impl<'a> Transformer<'a> {
     /// has been rewritten to a flat tuple.
     fn lookup_sum_variants_for_pattern(
         &self,
-        pat_id: NodeId,
+        header: &ast::TypedHeader,
     ) -> Option<Vec<(String, Vec<Type<TypeName>>)>> {
-        let raw = self.lookup_type_raw(pat_id)?;
+        let raw = Self::raw_type(header);
         match raw {
             Type::Constructed(TypeName::Sum(v), _) => Some(v),
             _ => None,

@@ -1,8 +1,9 @@
 //! Module manager for lazy loading and caching module definitions
 
 use crate::ast::{
-    Decl, Declaration, ModuleExpression, ModuleTypeExpression, Node, NodeCounter, Pattern, PatternKind,
-    Program, Spec, Type, TypeBind, TypeLifting, TypeName,
+    Decl, Declaration, Identifier, ImportsResolvedFrontend, ModuleExpression, ModuleTypeExpression,
+    NestedDeclaration, Node, NodeCounter, ParsedFrontend, Pattern, PatternKind, Spec, Type, TypeBind,
+    TypeLifting, TypeName,
 };
 use crate::error::Result;
 use crate::lexer;
@@ -21,6 +22,19 @@ pub enum ElaboratedItem {
     Decl(Decl),
     /// A type alias from module body (e.g., `type state = f32`)
     TypeAlias(String, Type),
+}
+
+fn clone_items_fresh_ids(items: &[ElaboratedItem], node_counter: &mut NodeCounter) -> Vec<ElaboratedItem> {
+    items
+        .iter()
+        .map(|item| match item {
+            ElaboratedItem::Spec(spec) => ElaboratedItem::Spec(spec.clone()),
+            ElaboratedItem::Decl(decl) => {
+                ElaboratedItem::Decl(crate::ast_renumber::clone_decl_fresh_ids(decl, node_counter))
+            }
+            ElaboratedItem::TypeAlias(name, ty) => ElaboratedItem::TypeAlias(name.clone(), ty.clone()),
+        })
+        .collect()
 }
 
 /// Represents a fully elaborated module with all includes expanded, type substitutions applied,
@@ -47,7 +61,7 @@ pub struct FunctorModule {
 
 /// Pre-elaborated prelude data that can be shared across compilations (for test performance)
 /// Contains only parsed/elaborated ASTs - type-checking happens during user compilation.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PreElaboratedPrelude {
     /// Module type registry: type name -> ModuleTypeExpression
     pub module_type_registry: LookupMap<String, ModuleTypeExpression>,
@@ -68,6 +82,7 @@ pub struct PreElaboratedPrelude {
 }
 
 /// Manages lazy loading of module files
+#[derive(Debug)]
 pub struct ModuleManager {
     /// Module type registry: type name -> ModuleTypeExpression
     module_type_registry: LookupMap<String, ModuleTypeExpression>,
@@ -132,13 +147,13 @@ impl ModuleManager {
         self.load_str(include_str!("../../../prelude/soacs.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/compute.wyn"), node_counter)?;
 
-        // Resolve names in prelude functions (rewrite FieldAccess -> QualifiedName)
-        // Use std::mem::take to avoid borrow checker issues with &mut prelude_functions + &self
-        let mut funcs = std::mem::take(&mut self.prelude_functions);
-        for decl in funcs.values_mut() {
-            crate::name_resolution::resolve_decl(decl, self)?;
-        }
-        self.prelude_functions = funcs;
+        // Resolve names in prelude functions (rewrite FieldAccess -> QualifiedName).
+        let known_modules = &self.known_modules;
+        self.prelude_functions = self
+            .prelude_functions
+            .drain(..)
+            .map(|(name, decl)| (name, crate::name_resolution::resolve_decl(decl, known_modules)))
+            .collect();
 
         Ok(())
     }
@@ -180,6 +195,10 @@ impl ModuleManager {
         self.known_modules.contains(name)
     }
 
+    pub(crate) fn known_module_names(&self) -> &LookupSet<String> {
+        &self.known_modules
+    }
+
     /// Resolve a qualified type alias (e.g., "my_mod.state" -> underlying type)
     pub fn resolve_type_alias(&self, qualified_name: &str) -> Option<&Type> {
         self.type_aliases.get(qualified_name)
@@ -190,13 +209,13 @@ impl ModuleManager {
         // Parse the source
         let tokens = lexer::tokenize(source).map_err(|e| err_parse!("{}", e))?;
         let mut parser = Parser::new(tokens, node_counter);
-        let program = parser.parse()?;
+        let declarations = parser.parse()?;
 
         // Register module types first
-        self.register_module_types(&program)?;
+        self.register_parsed_module_types(&declarations)?;
 
         // Elaborate all modules from the program
-        self.elaborate_all_modules(&program, node_counter)?;
+        self.elaborate_all_modules(&declarations, node_counter)?;
 
         Ok(())
     }
@@ -298,13 +317,17 @@ impl ModuleManager {
 
     /// Elaborate all module bindings from a parsed program
     /// This is the public entry point for elaborating modules from any source
-    pub fn elaborate_modules(&mut self, program: &Program, node_counter: &mut NodeCounter) -> Result<()> {
+    pub fn elaborate_modules(
+        &mut self,
+        declarations: &[Declaration<crate::resolve_imports::ImportsResolvedFamily>],
+        node_counter: &mut NodeCounter,
+    ) -> Result<()> {
         // Register module types first
-        self.register_module_types(program)?;
+        self.register_imports_resolved_module_types(declarations)?;
 
-        for decl in &program.declarations {
+        for decl in declarations {
             match decl {
-                Declaration::Module(md) => {
+                Declaration::Frontend(ImportsResolvedFrontend::Module(md)) => {
                     let name = match md {
                         crate::ast::ModuleDecl::Module { name, .. } => name.clone(),
                         crate::ast::ModuleDecl::Functor { name, .. } => name.clone(),
@@ -312,7 +335,7 @@ impl ModuleManager {
                     self.user_module_names.insert(name);
                     self.elaborate_module_decl(md, node_counter)?;
                 }
-                Declaration::TypeBind(tb) => {
+                Declaration::Frontend(ImportsResolvedFrontend::TypeBind(tb)) => {
                     enforce_lifting_rule(tb)?;
                     if self.type_aliases.contains_key(&tb.name) {
                         bail_module!("Top-level type alias '{}' is already defined", tb.name);
@@ -326,15 +349,19 @@ impl ModuleManager {
     }
 
     /// Elaborate all module bindings and collect top-level declarations (for prelude files)
-    fn elaborate_all_modules(&mut self, program: &Program, node_counter: &mut NodeCounter) -> Result<()> {
-        for decl in &program.declarations {
+    fn elaborate_all_modules(
+        &mut self,
+        declarations: &[Declaration<crate::parser::ParsedFamily>],
+        node_counter: &mut NodeCounter,
+    ) -> Result<()> {
+        for decl in declarations {
             // Collect top-level function declarations for prelude
             if let Declaration::Decl(d) = decl {
                 self.prelude_functions.insert(d.name.clone(), d.clone());
                 continue;
             }
 
-            if let Declaration::Module(md) = decl {
+            if let Declaration::Frontend(ParsedFrontend::Module(md)) = decl {
                 self.elaborate_module_decl(md, node_counter)?;
             }
         }
@@ -357,9 +384,27 @@ impl ModuleManager {
     }
 
     /// Register all module type definitions from a parsed program
-    fn register_module_types(&mut self, program: &Program) -> Result<()> {
-        for decl in &program.declarations {
-            if let Declaration::ModuleTypeBind(mtb) = decl {
+    fn register_parsed_module_types(
+        &mut self,
+        declarations: &[Declaration<crate::parser::ParsedFamily>],
+    ) -> Result<()> {
+        for decl in declarations {
+            if let Declaration::Frontend(ParsedFrontend::ModuleTypeBind(mtb)) = decl {
+                if self.module_type_registry.contains_key(&mtb.name) {
+                    bail_module!("Module type '{}' is already defined", mtb.name);
+                }
+                self.module_type_registry.insert(mtb.name.clone(), mtb.definition.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn register_imports_resolved_module_types(
+        &mut self,
+        declarations: &[Declaration<crate::resolve_imports::ImportsResolvedFamily>],
+    ) -> Result<()> {
+        for decl in declarations {
+            if let Declaration::Frontend(ImportsResolvedFrontend::ModuleTypeBind(mtb)) = decl {
                 if self.module_type_registry.contains_key(&mtb.name) {
                     bail_module!("Module type '{}' is already defined", mtb.name);
                 }
@@ -584,8 +629,9 @@ impl ModuleManager {
     fn expr_uses_intrinsic(expr: &crate::ast::Expression) -> bool {
         use crate::ast::ExprKind;
         match &expr.kind {
-            ExprKind::Identifier(quals, name) => {
-                name.starts_with("_w_intrinsic_") || (quals.is_empty() && name.starts_with("_w_intrinsic_"))
+            ExprKind::Identifier(identifier) => {
+                identifier.name.starts_with("_w_intrinsic_")
+                    || (identifier.qualifiers.is_empty() && identifier.name.starts_with("_w_intrinsic_"))
             }
             ExprKind::Application(func, args) => {
                 Self::expr_uses_intrinsic(func) || args.iter().any(Self::expr_uses_intrinsic)
@@ -674,10 +720,10 @@ impl ModuleManager {
                 let mut module_functions: LookupSet<String> = LookupSet::new();
                 for decl in declarations {
                     match decl {
-                        Declaration::Decl(d) => {
+                        NestedDeclaration::Decl(d) => {
                             module_functions.insert(d.name.clone());
                         }
-                        Declaration::Sig(sig_decl) => {
+                        NestedDeclaration::Sig(sig_decl) => {
                             module_functions.insert(sig_decl.name.clone());
                         }
                         _ => {}
@@ -689,7 +735,7 @@ impl ModuleManager {
                 // Second pass: elaborate declarations with name resolution
                 for decl in declarations {
                     match decl {
-                        Declaration::Decl(d) => {
+                        NestedDeclaration::Decl(d) => {
                             // Apply type substitutions and resolve names
                             let elaborated_decl = self.elaborate_decl_signature(
                                 d,
@@ -701,7 +747,7 @@ impl ModuleManager {
                             );
                             items.push(ElaboratedItem::Decl(elaborated_decl));
                         }
-                        Declaration::Sig(sig_decl) => {
+                        NestedDeclaration::Sig(sig_decl) => {
                             // Apply type substitutions to sig declarations
                             let substituted_ty = self.substitute_in_type(&sig_decl.ty, substitutions);
 
@@ -718,7 +764,7 @@ impl ModuleManager {
                             let spec = Spec::Sig(sig_decl.name.clone(), type_params_vec, substituted_ty);
                             items.push(ElaboratedItem::Spec(spec));
                         }
-                        Declaration::Open(open_expr) => {
+                        NestedDeclaration::Open(open_expr) => {
                             // `open M` re-exports M's members as members of this
                             // module: resolve the opened expression to its
                             // elaborated items and splice them in at this point.
@@ -737,7 +783,7 @@ impl ModuleManager {
                             )?;
                             items.extend(opened_items);
                         }
-                        Declaration::TypeBind(type_bind) => {
+                        NestedDeclaration::TypeBind(type_bind) => {
                             // Handle type aliases, including those referencing parameters
                             // e.g., `type t = n.t` where n is a parameter
                             let substituted_ty =
@@ -755,11 +801,9 @@ impl ModuleManager {
             ModuleExpression::Name(name) => {
                 // Look up an existing elaborated module by name
                 if let Some(param_module) = param_bindings.get(name) {
-                    // It's a parameter reference - return its items
-                    Ok(param_module.items.clone())
+                    Ok(clone_items_fresh_ids(&param_module.items, node_counter))
                 } else if let Some(elaborated) = self.elaborated_modules.get(name) {
-                    // It's a known elaborated module
-                    Ok(elaborated.items.clone())
+                    Ok(clone_items_fresh_ids(&elaborated.items, node_counter))
                 } else {
                     Err(err_module!("Unknown module: '{}'", name))
                 }
@@ -877,9 +921,9 @@ impl ModuleManager {
         // Clone with fresh NodeIds — the same body shape may be elaborated
         // multiple times (functor instantiations), and each instantiation
         // needs its own NodeId space.
-        let mut new_body = clone_expr_fresh_ids(&decl.body, node_counter);
-        self.resolve_names_in_expr(
-            &mut new_body,
+        let new_body = clone_expr_fresh_ids(&decl.body, node_counter);
+        let new_body = self.resolve_names_in_expr(
+            new_body,
             module_name,
             module_functions,
             &param_names,
@@ -887,8 +931,7 @@ impl ModuleManager {
         );
 
         Decl {
-            keyword: decl.keyword,
-            attributes: decl.attributes.clone(),
+            data: decl.data.clone(),
             name: decl.name.clone(),
             name_span: decl.name_span,
             size_params: decl.size_params.clone(),
@@ -965,12 +1008,12 @@ impl ModuleManager {
     /// E.g., n.add -> my_f32_num.add when n is bound to my_f32_num
     fn resolve_names_in_expr(
         &self,
-        expr: &mut crate::ast::Expression,
+        expr: crate::ast::Expression,
         module_name: &str,
         module_functions: &LookupSet<String>,
         local_bindings: &LookupSet<String>,
         param_bindings: &LookupMap<String, ElaboratedModule>,
-    ) {
+    ) -> crate::ast::Expression {
         // Seed a ScopeStack from the caller-provided locals so the shared
         // walker sees them as "visible locals that should shadow intra-module
         // rewrites". All further pushes/pops happen inside the walker.
@@ -984,10 +1027,7 @@ impl ModuleManager {
             param_bindings,
             known_modules: &self.known_modules,
         };
-        // walk_expr's signature is fallible for interface symmetry with the
-        // program pass; the elaboration resolver never fails, so unwrap.
-        crate::name_resolution::walk_expr(expr, &ctx, &mut scope)
-            .expect("module-elaboration resolver is infallible");
+        crate::name_resolution::rewrite_expr(expr, &ctx, scope)
     }
 }
 
@@ -1026,17 +1066,17 @@ impl<'a> crate::name_resolution::ResolveContext for ModuleElaborationResolver<'a
         // Parameter-module reference: `n.add` where `n` is a functor param
         // bound to an elaborated module.
         if let Some(param_module) = self.param_bindings.get(obj_name) {
-            return Some(crate::ast::ExprKind::Identifier(
-                vec![param_module.name.clone()],
-                field.to_string(),
-            ));
+            return Some(crate::ast::ExprKind::Identifier(Identifier {
+                qualifiers: vec![param_module.name.clone()],
+                name: field.to_string(),
+            }));
         }
         // Known-module reference: `f32.sin`.
         if self.known_modules.contains(obj_name) {
-            return Some(crate::ast::ExprKind::Identifier(
-                vec![obj_name.to_string()],
-                field.to_string(),
-            ));
+            return Some(crate::ast::ExprKind::Identifier(Identifier {
+                qualifiers: vec![obj_name.to_string()],
+                name: field.to_string(),
+            }));
         }
         None
     }

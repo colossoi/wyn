@@ -775,7 +775,11 @@ entry vertex_main(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: 
         .find(|d| tlc_program.symbols.get(d.name).map(|n| n == "vertex_main").unwrap_or(false))
         .expect("vertex_main def");
     assert!(
-        matches!(&def.meta, DefMeta::EntryPoint(e) if !e.declaration.entry_type.is_compute()),
+        matches!(
+            &def.meta,
+            DefMeta::EntryPoint(e)
+                if e.declaration.entry_kind != crate::interface::EntryKind::Compute
+        ),
         "precondition: vertex_main is a graphics entry"
     );
     wrap_arrow_return_in_marker(&mut def.ty);

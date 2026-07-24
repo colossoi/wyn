@@ -1,28 +1,16 @@
 use super::{ElaboratedItem, ModuleManager};
-use crate::ast::{ModuleTypeExpression, NodeCounter, Program, Spec, TypeName};
-use crate::lexer::tokenize;
-use crate::parser::Parser;
-use crate::resolve_placeholders::PlaceholderResolver;
+use crate::ast::{ModuleTypeExpression, NodeCounter, Spec, TypeName};
 use crate::types::checker::TypeChecker;
 use polytype::Type;
 use std::collections::HashMap;
 
 use polytype::TypeScheme;
 
-/// Parse a source string into a Program
-fn parse_program(src: &str) -> (Program, NodeCounter) {
-    let mut nc = NodeCounter::new();
-    let tokens = tokenize(src).unwrap();
-    let prog = Parser::new(tokens, &mut nc).parse().unwrap();
-    (prog, nc)
-}
-
 /// Create a ModuleManager with the given source elaborated (no prelude)
 fn module_manager_with(src: &str) -> ModuleManager {
-    let (prog, mut nc) = parse_program(src);
-    let mut mm = ModuleManager::new_empty();
-    mm.elaborate_modules(&prog, &mut nc).unwrap();
-    mm
+    let program = crate::parser::parse(src, NodeCounter::new(), ModuleManager::new_empty()).unwrap();
+    let program = crate::resolve_imports::resolve_imports(program, std::path::Path::new(".")).unwrap();
+    crate::elaborate_modules::elaborate_modules(program).unwrap().global_context
 }
 
 /// Check if a type is f32 -> f32
@@ -52,7 +40,7 @@ fn get_monotype(scheme: &TypeScheme<TypeName>) -> &Type<TypeName> {
 #[test]
 fn test_query_f32_sin_from_math_prelude() {
     let mut node_counter = NodeCounter::new();
-    let mut manager = ModuleManager::new(&mut node_counter);
+    let manager = ModuleManager::new(&mut node_counter);
 
     // Prelude files are automatically loaded on creation
     println!(
@@ -62,10 +50,24 @@ fn test_query_f32_sin_from_math_prelude() {
 
     // Resolve placeholders in modules to build spec_schemes
     // (No program to resolve, just pass an empty one)
-    let mut empty_program = crate::ast::Program { declarations: vec![] };
-    let mut resolver = PlaceholderResolver::new();
-    resolver.resolve(&mut manager, &mut empty_program);
-    let (context, spec_schemes) = resolver.into_parts();
+    let program = crate::parser::parse("", node_counter, manager).unwrap();
+    let program = crate::resolve_imports::resolve_imports(program, std::path::Path::new(".")).unwrap();
+    let program = crate::elaborate_modules::elaborate_modules(program).unwrap();
+    let program = crate::name_resolution::resolve_names(program);
+    let program = crate::resolve_resources::resolve_resources(program).unwrap();
+    let program = crate::ast_const_fold::fold_constants(program);
+    let program = crate::resolve_placeholders::resolve_type_placeholders(program);
+    let program = crate::resolve_opens::resolve_opens(program).unwrap();
+    let nr = crate::name_resolution::build_name_resolution(
+        &program,
+        &program.global_context.module_manager,
+        crate::builtins::catalog(),
+    );
+    let crate::resolve_placeholders::PlaceholdersResolvedGlobal {
+        module_manager: manager,
+        context,
+        spec_schemes,
+    } = program.global_context;
 
     // Use TypeChecker to get the function type schemes
     let mut checker = TypeChecker::with_context_and_schemes(&manager, context, spec_schemes);
@@ -73,8 +75,6 @@ fn test_query_f32_sin_from_math_prelude() {
     // to have a `NameResolution::Builtin` entry. Build the side table
     // covering prelude module bodies — without it, bare references like
     // `fract` inside `rand.init` resolve to an `UndefinedVariable`.
-    let nr =
-        crate::name_resolution::build_name_resolution(&empty_program, &manager, crate::builtins::catalog());
     checker.set_name_resolution(nr);
     // Register the collection/SOAC builtins (`map`, `reduce`, ...) in scope, as
     // the real pipeline does (`types::run`). Prelude module bodies reference

@@ -362,9 +362,7 @@ fn entry_binding_from_output(idx: usize, output: &wyn_core::interface::EntryOutp
     }
 }
 
-fn program_interface<S: wyn_core::ssa::Stage>(
-    program: &wyn_core::ssa::Program<S>,
-) -> ProgramInterface {
+fn program_interface<S: wyn_core::ssa::Stage>(program: &wyn_core::ssa::Program<S>) -> ProgramInterface {
     use wyn_core::flow::ExecutionModel;
     use wyn_core::types::TypeExt;
     let entries = program
@@ -567,32 +565,46 @@ pub fn compile_to_wgsl(source: &str) -> JsValue {
 }
 
 fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
-    let (mut node_counter, mut module_manager) = match create_compiler_init() {
+    let (node_counter, module_manager) = match create_compiler_init() {
         Some(f) => f,
         None => return CompileResultWgsl::err_msg("Compiler not initialized".to_string()),
     };
 
     // Frontend pipeline: parse → elaborate → resolve → fold → type-check →
     // TLC → semantic EGIR → target-aware SSA lowering → WGSL.
-    let parsed = match wyn_core::Compiler::parse(source, &mut node_counter) {
+    let program = match wyn_core::parser::parse(source, node_counter, module_manager) {
         Ok(p) => p,
         Err(e) => return CompileResultWgsl::err(e),
     };
-    let parsed = match parsed.elaborate_modules(&mut module_manager, &mut node_counter) {
+    let program = match wyn_core::resolve_imports::resolve_imports(program, std::path::Path::new(".")) {
         Ok(p) => p,
         Err(e) => return CompileResultWgsl::err(e),
     };
-    let resolved = match parsed.resolve(&module_manager) {
-        Ok(r) => r,
+    let program = match wyn_core::elaborate_modules::elaborate_modules(program) {
+        Ok(p) => p,
         Err(e) => return CompileResultWgsl::err(e),
     };
-    let ast_folded = resolved.fold_ast_constants();
-    let type_checked = match ast_folded.type_check(&mut module_manager) {
-        Ok(t) => t,
+    let program = wyn_core::name_resolution::resolve_names(program);
+    let program = match wyn_core::resolve_resources::resolve_resources(program) {
+        Ok(p) => p,
+        Err(e) => return CompileResultWgsl::err(e),
+    };
+    let program = wyn_core::ast_const_fold::fold_constants(program);
+    let program = wyn_core::resolve_placeholders::resolve_type_placeholders(program);
+    let program = match wyn_core::resolve_opens::resolve_opens(program) {
+        Ok(p) => p,
+        Err(e) => return CompileResultWgsl::err(e),
+    };
+    let program = match wyn_core::types::run::type_check(program) {
+        Ok(p) => p,
+        Err(e) => return CompileResultWgsl::err(e),
+    };
+    let program = match wyn_core::ast_type_holes::reject_type_holes(program) {
+        Ok(p) => p,
         Err(e) => return CompileResultWgsl::err(e),
     };
 
-    let program = type_checked.to_tlc(&module_manager, false);
+    let program = wyn_core::tlc::lower_from_ast(program);
     let program = match wyn_core::tlc::pin_entry_buffers(program) {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err(e),

@@ -2,21 +2,14 @@ use super::*;
 use crate::ast::TypeName;
 use crate::tlc::{self, DefMeta};
 use crate::types::TypeExt;
-use crate::Compiler;
 use polytype::Type;
 
 /// Compile `src` through type-check → TLC → region-pinning and return the
 /// pinned program.
 fn pin(src: &str) -> Program<tlc::stage::BuffersPinned> {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let type_checked = Compiler::parse(src, &mut node_counter)
-        .expect("parse")
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-    let program = type_checked.to_tlc(&module_manager, false);
+    let type_checked = crate::compile_thru_frontend(src).expect("type_check");
+    let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
+    let program = tlc::lower_from_ast(program);
     tlc::pin_entry_buffers(program).expect("pin_entry_buffers")
 }
 

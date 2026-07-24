@@ -31,7 +31,7 @@ use polytype::Type;
 pub struct SoaNormalized;
 
 impl super::Stage for SoaNormalized {
-    type Family = super::run::Polymorphic;
+    type Family = super::pin_entry_buffers::Polymorphic;
     type GlobalContext = super::context::RewriteGlobal;
 }
 

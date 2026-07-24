@@ -3,7 +3,7 @@ use super::{analyze, build, eligible_unique_input_soacs, AnalysisState, Origin, 
 use crate::builtins::catalog;
 use crate::tlc::{self, Program, Term, TermKind};
 use crate::types::SoacOwnership;
-use crate::{Compiler, SymbolTable};
+use crate::SymbolTable;
 
 #[test]
 fn origin_mutability() {
@@ -27,15 +27,9 @@ fn empty_model_lookups() {
 }
 
 fn compile_to_tlc(source: &str) -> Program<tlc::stage::SoaNormalized> {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-    let program = type_checked.to_tlc(&module_manager, false);
+    let type_checked = crate::compile_thru_frontend(source).expect("type_check");
+    let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
+    let program = tlc::lower_from_ast(program);
     let program = tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     let program = tlc::validate_ownership(program).expect("validate_ownership");
     let program = tlc::partial_eval(program);
@@ -553,15 +547,9 @@ def f(a: [4]i32, n: i32) i32 =
 /// can be invoked, then return whether the program has a
 /// use-after-move violation.
 fn has_use_after_move(source: &str) -> bool {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-    let program = type_checked.to_tlc(&module_manager, false);
+    let type_checked = crate::compile_thru_frontend(source).expect("type_check");
+    let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
+    let program = tlc::lower_from_ast(program);
     let program = tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     super::check(&program).is_err()
 }

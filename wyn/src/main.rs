@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
-use wyn_core::{CodegenTarget, Compiler, LoweringProfile, SchedulePolicy};
+use wyn_core::{CodegenTarget, LoweringProfile, SchedulePolicy};
 
 /// Target output format
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -115,8 +115,7 @@ enum DriverError {
 }
 
 struct FrontendFile {
-    type_checked: wyn_core::TypeChecked,
-    module_manager: wyn_core::module_manager::ModuleManager,
+    program: wyn_core::ast::Program<wyn_core::ast_type_holes::HolesResolved>,
 }
 
 fn type_check_frontend_file(
@@ -125,32 +124,53 @@ fn type_check_frontend_file(
     verbose: bool,
 ) -> Result<FrontendFile, DriverError> {
     let source = fs::read_to_string(input)?;
-    let (mut node_counter, mut module_manager) = time("frontend", verbose, wyn_core::init_compiler)?;
-    let parsed = time("parse", verbose, || Compiler::parse(&source, &mut node_counter))?;
+    let (node_counter, module_manager) = time("frontend", verbose, wyn_core::init_compiler)?;
+    let program = time("parse", verbose, || {
+        wyn_core::parser::parse(&source, node_counter, module_manager)
+    })?;
     // Resolve `import "..."` against the entry file's directory so
     // user code can split across files. Imports are looked up
     // relative to the file containing the import statement.
     let base_dir = input.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
-    let parsed = time("resolve_imports", verbose, || {
-        parsed.resolve_imports(&base_dir, &mut node_counter)
+    let program = time("resolve_imports", verbose, || {
+        wyn_core::resolve_imports::resolve_imports(program, &base_dir)
     })?;
-    // Elaborate inline modules so they're available during resolution.
-    let parsed = time("elaborate_modules", verbose, || {
-        parsed.elaborate_modules(&mut module_manager, &mut node_counter)
+    let program = time("elaborate_modules", verbose, || {
+        wyn_core::elaborate_modules::elaborate_modules(program)
     })?;
-    let resolved = time("resolve", verbose, || parsed.resolve(&module_manager))?;
-    let ast_folded = time("fold_ast_constants", verbose, || resolved.fold_ast_constants());
-    let type_checked = time("type_check", verbose, || {
-        ast_folded.type_check(&mut module_manager)
+    let program = time("resolve_names", verbose, || {
+        wyn_core::name_resolution::resolve_names(program)
+    });
+    let program = time("resolve_resources", verbose, || {
+        wyn_core::resolve_resources::resolve_resources(program)
+    })?;
+    let program = time("fold_ast_constants", verbose, || {
+        wyn_core::ast_const_fold::fold_constants(program)
+    });
+    let program = time("resolve_type_placeholders", verbose, || {
+        wyn_core::resolve_placeholders::resolve_type_placeholders(program)
+    });
+    let program = time("resolve_opens", verbose, || {
+        wyn_core::resolve_opens::resolve_opens(program)
+    })?;
+    let program = time("type_check", verbose, || {
+        wyn_core::types::run::type_check(program)
     })?;
 
-    type_checked.print_warnings();
-    let type_checked = if reject_holes { type_checked.reject_type_holes()? } else { type_checked };
+    for warning in &program.global_context.warnings {
+        eprintln!(
+            "{}: warning: {}",
+            warning.span(),
+            warning.message(&wyn_core::types::format_type)
+        );
+    }
+    let program = if reject_holes {
+        wyn_core::ast_type_holes::reject_type_holes(program)?
+    } else {
+        wyn_core::ast_type_holes::fill_type_holes(program)?
+    };
 
-    Ok(FrontendFile {
-        type_checked,
-        module_manager,
-    })
+    Ok(FrontendFile { program })
 }
 
 fn main() -> ExitCode {
@@ -270,24 +290,9 @@ fn compile_file(
     // Wall-clock start for the always-printed timing summary below.
     let compile_start = Instant::now();
 
-    let FrontendFile {
-        type_checked,
-        module_manager,
-    } = type_check_frontend_file(&input, !fill_holes, verbose)?;
+    let FrontendFile { program } = type_check_frontend_file(&input, !fill_holes, verbose)?;
 
-    // Transform to TLC (including prelude code - transformed here for consistent type variables)
-    let mut program = time("to_tlc", verbose, || {
-        type_checked.to_tlc(&module_manager, fill_holes)
-    });
-
-    // Surface any hole-fill errors collected during TLC transform.
-    // Aggregate into one multi-line error so the exit-code branch in
-    // `main` prints them once with code 2.
-    if !program.global_context.fill_hole_errors.is_empty() {
-        let msgs: Vec<String> =
-            program.global_context.fill_hole_errors.drain(..).map(|e| format!("{e}")).collect();
-        return Err(wyn_core::err_type_hole!("{}", msgs.join("\n")).into());
-    }
+    let program = time("to_tlc", verbose, || wyn_core::tlc::lower_from_ast(program));
 
     // Output TLC if requested (before optimization)
     if let Some(ref tlc_path) = output_tlc {
@@ -460,12 +465,8 @@ fn check_file(input: PathBuf, verbose: bool) -> Result<(), DriverError> {
         info!("Checking {}...", input.display());
     }
 
-    let FrontendFile {
-        type_checked,
-        module_manager,
-    } = type_check_frontend_file(&input, true, verbose)?;
-
-    let program = type_checked.to_tlc(&module_manager, false);
+    let FrontendFile { program } = type_check_frontend_file(&input, true, verbose)?;
+    let program = wyn_core::tlc::lower_from_ast(program);
     let program = wyn_core::tlc::pin_entry_buffers(program)?;
     wyn_core::tlc::validate_ownership(program)?;
 

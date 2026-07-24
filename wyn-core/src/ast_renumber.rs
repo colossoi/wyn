@@ -12,8 +12,8 @@
 //! will appear alongside the original in the same compilation unit.
 
 use crate::ast::{
-    ExprKind, Expression, Header, IfExpr, LambdaExpr, LetInExpr, LoopExpr, LoopForm, MatchCase, MatchExpr,
-    Node, NodeCounter, Pattern, PatternKind, RangeExpr, SliceExpr,
+    Decl, ExprKind, Expression, Header, IfExpr, LambdaExpr, LetInExpr, LoopExpr, LoopForm, MatchCase,
+    MatchExpr, Node, NodeCounter, Pattern, PatternKind, RangeExpr, SliceExpr,
 };
 
 fn fresh_header(src: &Header, nc: &mut NodeCounter) -> Header {
@@ -33,8 +33,8 @@ pub fn clone_expr_fresh_ids(expr: &Expression, nc: &mut NodeCounter) -> Expressi
         ExprKind::FloatLiteral(f) => ExprKind::FloatLiteral(*f),
         ExprKind::BoolLiteral(b) => ExprKind::BoolLiteral(*b),
         ExprKind::Unit => ExprKind::Unit,
-        ExprKind::Identifier(quals, name) => ExprKind::Identifier(quals.clone(), name.clone()),
-        ExprKind::TypeHole => ExprKind::TypeHole,
+        ExprKind::Identifier(identifier) => ExprKind::Identifier(identifier.clone()),
+        ExprKind::TypeHole(hole) => ExprKind::TypeHole(*hole),
 
         ExprKind::ArrayLiteral(es) => {
             ExprKind::ArrayLiteral(es.iter().map(|e| clone_expr_fresh_ids(e, nc)).collect())
@@ -141,6 +141,21 @@ pub fn clone_expr_fresh_ids(expr: &Expression, nc: &mut NodeCounter) -> Expressi
         }
     };
     Node { h, kind }
+}
+
+pub fn clone_decl_fresh_ids(decl: &Decl, nc: &mut NodeCounter) -> Decl {
+    Decl {
+        data: decl.data.clone(),
+        name: decl.name.clone(),
+        name_span: decl.name_span,
+        size_params: decl.size_params.clone(),
+        type_params: decl.type_params.clone(),
+        params: decl.params.iter().map(|pattern| clone_pattern_fresh_ids(pattern, nc)).collect(),
+        ty: decl.ty.clone(),
+        body: clone_expr_fresh_ids(&decl.body, nc),
+        param_diets: decl.param_diets.clone(),
+        return_diet: decl.return_diet.clone(),
+    }
 }
 
 fn clone_loop_form(form: &LoopForm, nc: &mut NodeCounter) -> LoopForm {

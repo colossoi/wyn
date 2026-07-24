@@ -11,7 +11,7 @@
 //! phase entry point. Having a single typed home for these declarations
 //! gives backends one source of truth for the entry interface.
 
-use crate::ast::{Expression, Pattern, Span};
+use crate::ast::Span;
 use crate::types::Type;
 use crate::{BindingRef, SymbolId};
 
@@ -25,7 +25,7 @@ use crate::{BindingRef, SymbolId};
 /// bindings (`Storage`/`Uniform`), IO decorations (`BuiltIn`/`Location`),
 /// and compiler hints (`SizeHint`/`Linked`).
 #[derive(Debug, Clone, PartialEq)]
-pub enum Attribute {
+pub enum Attribute<V = ViewAttribute> {
     BuiltIn(spirv::BuiltIn),
     /// A fragment output routed to the named render-target resource. The color
     /// attachment slot is derived from the output's position in the return tuple.
@@ -95,13 +95,7 @@ pub enum Attribute {
     /// pass rewrites each `View` into the concrete `StorageImage` / `Texture`
     /// attribute (with the resource's derived `(set, binding)` and
     /// `format`/`size`) before type checking, so later passes never see it.
-    View {
-        resource: String,
-        usage: ResourceUsage,
-        /// `true` for `#[view(r, sampled, previous)]` — samples the prior
-        /// frame of a `history` resource (resolves to its previous binding).
-        previous: bool,
-    },
+    View(V),
     /// Hint for the expected size of a dynamic array (in elements).
     /// Used for parallelization decisions. Ignored on non-arrays or
     /// statically sized arrays. `NonZeroU32` encodes that
@@ -110,6 +104,22 @@ pub enum Attribute {
     /// Linked SPIR-V function - the string is the linkage name for spirv-link
     Linked(String),
 }
+
+/// Source-only payload for `#[view(resource, usage[, previous])]`.
+///
+/// Resource resolution consumes this payload and produces
+/// `Attribute<Infallible>`, making unresolved resource views
+/// unrepresentable in every later AST family.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewAttribute {
+    pub resource: String,
+    pub usage: ResourceUsage,
+    /// `true` for `#[view(r, sampled, previous)]` — samples the prior
+    /// frame of a `history` resource.
+    pub previous: bool,
+}
+
+pub type ResolvedAttribute = Attribute<std::convert::Infallible>;
 
 impl Attribute {
     pub fn is_vertex(&self) -> bool {
@@ -123,6 +133,76 @@ impl Attribute {
     }
 }
 
+impl<V> Attribute<V> {
+    pub fn binding_slot(&self) -> Option<(u32, u32)> {
+        match self {
+            Attribute::Storage { set, binding, .. }
+            | Attribute::Uniform { set, binding }
+            | Attribute::Texture { set, binding, .. }
+            | Attribute::Sampler { set, binding }
+            | Attribute::StorageImage { set, binding, .. } => Some((*set, *binding)),
+            _ => None,
+        }
+    }
+
+    /// Change only the source-only view payload while preserving every
+    /// phase-invariant attribute variant.
+    pub fn map_view<W>(self, map: impl FnOnce(V) -> Attribute<W>) -> Attribute<W> {
+        match self {
+            Attribute::BuiltIn(value) => Attribute::BuiltIn(value),
+            Attribute::Target(value) => Attribute::Target(value),
+            Attribute::VertexSlot(value) => Attribute::VertexSlot(value),
+            Attribute::Varying(value) => Attribute::Varying(value),
+            Attribute::Vertex => Attribute::Vertex,
+            Attribute::Fragment => Attribute::Fragment,
+            Attribute::Compute => Attribute::Compute,
+            Attribute::Dispatch(value) => Attribute::Dispatch(value),
+            Attribute::Uniform { set, binding } => Attribute::Uniform { set, binding },
+            Attribute::Storage {
+                set,
+                binding,
+                layout,
+                access,
+            } => Attribute::Storage {
+                set,
+                binding,
+                layout,
+                access,
+            },
+            Attribute::Texture {
+                set,
+                binding,
+                backing,
+                resource,
+            } => Attribute::Texture {
+                set,
+                binding,
+                backing,
+                resource,
+            },
+            Attribute::Sampler { set, binding } => Attribute::Sampler { set, binding },
+            Attribute::StorageImage {
+                set,
+                binding,
+                format,
+                access,
+                size,
+                resource,
+            } => Attribute::StorageImage {
+                set,
+                binding,
+                format,
+                access,
+                size,
+                resource,
+            },
+            Attribute::View(view) => map(view),
+            Attribute::SizeHint(value) => Attribute::SizeHint(value),
+            Attribute::Linked(value) => Attribute::Linked(value),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComputeDispatchGrid {
     pub x: u32,
@@ -130,8 +210,19 @@ pub struct ComputeDispatchGrid {
     pub z: u32,
 }
 
-pub trait AttrExt {
-    fn has<F: Fn(&Attribute) -> bool>(&self, pred: F) -> bool;
+/// The only three attributes that can classify an entry declaration.
+///
+/// Keeping this distinct from [`Attribute`] makes invalid entry kinds
+/// unrepresentable after parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    Vertex,
+    Fragment,
+    Compute,
+}
+
+pub trait AttrExt<V = ViewAttribute> {
+    fn has<F: Fn(&Attribute<V>) -> bool>(&self, pred: F) -> bool;
     fn first_builtin(&self) -> Option<spirv::BuiltIn>;
     /// The render-target resource name of a `#[target(name)]` output, if any.
     fn first_target(&self) -> Option<&str>;
@@ -151,8 +242,8 @@ pub trait AttrExt {
     fn has_dispatch(&self) -> bool;
 }
 
-impl AttrExt for [Attribute] {
-    fn has<F: Fn(&Attribute) -> bool>(&self, pred: F) -> bool {
+impl<V> AttrExt<V> for [Attribute<V>] {
+    fn has<F: Fn(&Attribute<V>) -> bool>(&self, pred: F) -> bool {
         self.iter().any(pred)
     }
     fn first_builtin(&self) -> Option<spirv::BuiltIn> {
@@ -189,7 +280,7 @@ impl AttrExt for [Attribute] {
         self.has(|a| matches!(a, Attribute::StorageImage { .. }))
     }
     fn has_view(&self) -> bool {
-        self.has(|a| matches!(a, Attribute::View { .. }))
+        self.has(|a| matches!(a, Attribute::View(_)))
     }
     fn has_dispatch(&self) -> bool {
         self.has(|a| matches!(a, Attribute::Dispatch(_)))
@@ -482,9 +573,38 @@ impl<Ty> EntryOutput<Ty> {
 
 /// Output field for entry point declarations.
 #[derive(Debug, Clone, PartialEq)]
-pub struct EntryOutputDecl {
+pub struct EntryOutputDecl<A = Attribute> {
     pub ty: Type,
-    pub attribute: Option<Attribute>,
+    pub attribute: Option<A>,
+}
+
+/// Flattened, type-checked source parameter metadata retained after the AST
+/// pattern itself has been lowered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryParamDecl {
+    pub name: String,
+    pub span: Span,
+    pub ty: Type,
+    pub attributes: Vec<ResolvedAttribute>,
+}
+
+/// Source interface metadata retained by TLC after the entry body has been
+/// transformed. The AST body and parameter patterns are deliberately absent:
+/// TLC owns the lowered body, and parameter binding allocation belongs to a
+/// later TLC stage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryDecl {
+    pub entry_kind: EntryKind,
+    pub compute_dispatch: Option<ComputeDispatchGrid>,
+    pub name: String,
+    pub name_span: Span,
+    pub size_params: Vec<String>,
+    pub type_params: Vec<String>,
+    pub params: Vec<EntryParamDecl>,
+    pub outputs: Vec<EntryOutputDecl<ResolvedAttribute>>,
+    pub feedback: Vec<FeedbackPair>,
+    pub param_diets: Vec<crate::types::Diet>,
+    pub return_diet: crate::types::Diet,
 }
 
 /// Auto-allocated storage-buffer binding(s) for a single compute-entry
@@ -561,40 +681,6 @@ impl EntryParamBinding {
             }
         }
     }
-}
-
-/// Entry point declaration (vertex/fragment/compute shader).
-#[derive(Debug, Clone, PartialEq)]
-pub struct EntryDecl {
-    pub entry_type: Attribute, // Attribute::Vertex, Attribute::Fragment, or Attribute::Compute
-    /// Optional source-authored compute launch grid. `None` means the compiler
-    /// infers the domain from SOACs, storage images, or the default serial shell.
-    pub compute_dispatch: Option<ComputeDispatchGrid>,
-    pub name: String,
-    pub name_span: Span,
-    pub size_params: Vec<String>,      // Size type parameters: <[n], [m]>
-    pub type_params: Vec<String>,      // Regular type parameters: <T, U>
-    pub params: Vec<Pattern>,          // Input parameters as patterns
-    pub outputs: Vec<EntryOutputDecl>, // Output fields with optional attributes
-    /// Auto-allocated bindings for this entry's view-typed params,
-    /// computed once and consulted by every pass that cares (buffer
-    /// specialization and EGIR conversion). Empty
-    /// for non-compute entries and for entries before the populate
-    /// pass has run.
-    /// Per-body-param auto-storage binding. Same length as the lambda
-    /// parameter list (one slot per body param, in declaration order);
-    /// `None` for params that don't take a storage buffer (scalars,
-    /// uniforms, push-constant routed values, builtins, etc.). Indexing
-    /// in lockstep with body params is the contract — consumers should
-    /// `zip` rather than rebuild a sym→binding map.
-    pub param_bindings: Vec<Option<EntryParamBinding>>,
-    /// Ping-pong feedback pairs derived from `history` resources viewed
-    /// `previous` in this entry. Empty unless the resource-resolution pass
-    /// found a previous-frame view. Flows to the pipeline descriptor.
-    pub feedback: Vec<FeedbackPair>,
-    pub body: Expression,
-    pub param_diets: Vec<crate::types::Diet>,
-    pub return_diet: crate::types::Diet,
 }
 
 // ---------------------------------------------------------------------------

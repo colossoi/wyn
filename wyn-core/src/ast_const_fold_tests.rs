@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOp, ExprKind, Expression, Header, NodeId, Span};
+use crate::ast::{BinaryOp, ExprKind, Expression, Header, Identifier, NodeId, Span};
 use crate::ast_const_fold::AstConstFolder;
 
 fn test_header() -> Header {
@@ -18,7 +18,10 @@ fn make_int(n: i32) -> Expression {
 fn make_ident(name: &str) -> Expression {
     Expression {
         h: test_header(),
-        kind: ExprKind::Identifier(vec![], name.to_string()),
+        kind: ExprKind::Identifier(Identifier {
+            qualifiers: vec![],
+            name: name.to_string(),
+        }),
     }
 }
 
@@ -101,7 +104,10 @@ fn test_division_by_zero_not_folded() {
 fn make_array_ident(name: &str) -> Expression {
     Expression {
         h: test_header(),
-        kind: ExprKind::Identifier(vec![], name.to_string()),
+        kind: ExprKind::Identifier(Identifier {
+            qualifiers: vec![],
+            name: name.to_string(),
+        }),
     }
 }
 
@@ -222,7 +228,7 @@ fn test_fold_slice_no_fold_with_variable() {
         let start = slice.start.as_ref().expect("start should exist");
         // Start should still be an identifier since n is not known
         assert!(
-            matches!(start.kind, ExprKind::Identifier(_, _)),
+            matches!(start.kind, ExprKind::Identifier(_)),
             "Start should remain identifier when not a constant"
         );
     } else {
@@ -244,7 +250,7 @@ fn test_zero_minus_float_becomes_negation() {
     if let ExprKind::UnaryOp(op, operand) = &expr.kind {
         assert_eq!(op.op, "-", "Should be negation operator");
         assert!(
-            matches!(operand.kind, ExprKind::Identifier(_, ref name) if name == "x"),
+            matches!(&operand.kind, ExprKind::Identifier(identifier) if identifier.name == "x"),
             "Operand should be x"
         );
     } else {
@@ -262,7 +268,7 @@ fn test_zero_minus_int_becomes_negation() {
     if let ExprKind::UnaryOp(op, operand) = &expr.kind {
         assert_eq!(op.op, "-", "Should be negation operator");
         assert!(
-            matches!(operand.kind, ExprKind::Identifier(_, ref name) if name == "y"),
+            matches!(&operand.kind, ExprKind::Identifier(identifier) if identifier.name == "y"),
             "Operand should be y"
         );
     } else {

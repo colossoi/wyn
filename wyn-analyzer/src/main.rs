@@ -6,12 +6,11 @@ use std::sync::{Arc, OnceLock, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use wyn_core::ast::{self, NodeCounter, NodeId, Span};
+use wyn_core::ast::{self, NodeCounter, Span};
 use wyn_core::interface;
 use wyn_core::lexer;
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
 use wyn_core::types::{format_scheme, Type, TypeName, TypeScheme};
-use wyn_core::TypeTable;
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
@@ -42,10 +41,7 @@ fn init_compiler_cached() -> (NodeCounter, ModuleManager) {
 
 /// Cached document state after successful type checking
 struct DocumentState {
-    ast: ast::Program,
-    type_table: TypeTable,
-    /// Top-level function type schemes (name -> scheme)
-    schemes: HashMap<String, TypeScheme>,
+    ast: ast::Program<wyn_core::types::run::TypeChecked>,
 }
 
 struct Backend {
@@ -159,7 +155,7 @@ impl LanguageServer for Backend {
         if let Some(doc) = doc {
             // First check if cursor is on a declaration name
             if let Some((name, kind)) = find_declaration_name_at(&doc.ast, line, col) {
-                if let Some(scheme) = doc.schemes.get(&name) {
+                if let Some(scheme) = definition_scheme(&doc.ast, &name) {
                     let type_str = format_scheme(scheme);
                     return Ok(Some(Hover {
                         contents: HoverContents::Markup(MarkupContent {
@@ -172,26 +168,24 @@ impl LanguageServer for Backend {
             }
 
             // Fall back to expression type lookup
-            if let Some((node_id, span)) = find_node_at_position(&doc.ast, line, col) {
-                if let Some(scheme) = doc.type_table.get(&node_id) {
-                    let type_str = format_scheme(scheme);
-                    return Ok(Some(Hover {
-                        contents: HoverContents::Markup(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value: format!("```wyn\n{}\n```", type_str),
-                        }),
-                        range: Some(Range {
-                            start: Position {
-                                line: span.start_line.saturating_sub(1) as u32,
-                                character: span.start_col.saturating_sub(1) as u32,
-                            },
-                            end: Position {
-                                line: span.end_line.saturating_sub(1) as u32,
-                                character: span.end_col.saturating_sub(1) as u32,
-                            },
-                        }),
-                    }));
-                }
+            if let Some((scheme, span)) = find_node_at_position(&doc.ast, line, col) {
+                let type_str = format_scheme(scheme);
+                return Ok(Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: format!("```wyn\n{}\n```", type_str),
+                    }),
+                    range: Some(Range {
+                        start: Position {
+                            line: span.start_line.saturating_sub(1) as u32,
+                            character: span.start_col.saturating_sub(1) as u32,
+                        },
+                        end: Position {
+                            line: span.end_line.saturating_sub(1) as u32,
+                            character: span.end_col.saturating_sub(1) as u32,
+                        },
+                    }),
+                }));
             }
         }
 
@@ -220,12 +214,10 @@ impl LanguageServer for Backend {
             let doc = docs.as_ref().and_then(|d| d.get(uri));
 
             if let Some(doc) = doc {
-                if let Some((node_id, _span)) = find_node_at_position(&doc.ast, line, col) {
-                    if let Some(scheme) = doc.type_table.get(&node_id) {
-                        let items = get_field_completions(scheme);
-                        if !items.is_empty() {
-                            return Ok(Some(CompletionResponse::Array(items)));
-                        }
+                if let Some((scheme, _span)) = find_node_at_position(&doc.ast, line, col) {
+                    let items = get_field_completions(scheme);
+                    if !items.is_empty() {
+                        return Ok(Some(CompletionResponse::Array(items)));
                     }
                 }
             }
@@ -355,7 +347,7 @@ impl LanguageServer for Backend {
 
         if let Some(doc) = doc {
             if let Some((func_name, arg_index)) = find_application_context(&doc.ast, line, col) {
-                if let Some(scheme) = doc.schemes.get(&func_name) {
+                if let Some(scheme) = definition_scheme(&doc.ast, &func_name) {
                     let label = format!("{}: {}", func_name, format_scheme(scheme));
                     return Ok(Some(SignatureHelp {
                         signatures: vec![SignatureInformation {
@@ -435,18 +427,22 @@ impl Backend {
     fn check_document(&self, text: &str) -> (Vec<Diagnostic>, Option<DocumentState>) {
         let mut diagnostics = Vec::new();
 
-        let (mut node_counter, mut module_manager) = init_compiler_cached();
-        let result = wyn_core::Compiler::parse(text, &mut node_counter).and_then(|parsed| {
-            parsed.resolve(&module_manager)?.fold_ast_constants().type_check(&mut module_manager)
-        });
+        let (node_counter, module_manager) = init_compiler_cached();
+        let result = wyn_core::parser::parse(text, node_counter, module_manager)
+            .and_then(|program| {
+                wyn_core::resolve_imports::resolve_imports(program, std::path::Path::new("."))
+            })
+            .and_then(wyn_core::elaborate_modules::elaborate_modules)
+            .map(wyn_core::name_resolution::resolve_names)
+            .and_then(wyn_core::resolve_resources::resolve_resources)
+            .map(wyn_core::ast_const_fold::fold_constants)
+            .map(wyn_core::resolve_placeholders::resolve_type_placeholders)
+            .and_then(wyn_core::resolve_opens::resolve_opens)
+            .and_then(wyn_core::types::run::type_check);
 
         match result {
             Ok(type_checked) => {
-                let state = DocumentState {
-                    ast: type_checked.ast,
-                    type_table: type_checked.type_table,
-                    schemes: type_checked.schemes,
-                };
+                let state = DocumentState { ast: type_checked };
                 (diagnostics, Some(state))
             }
             Err(e) => {
@@ -492,9 +488,26 @@ impl Backend {
     }
 }
 
+fn definition_scheme<'a>(
+    program: &'a ast::Program<wyn_core::types::run::TypeChecked>,
+    name: &str,
+) -> Option<&'a TypeScheme> {
+    program.declarations.iter().find_map(|declaration| match declaration {
+        ast::Declaration::Decl(definition) if definition.name == name => Some(&definition.data.scheme),
+        ast::Declaration::Entry(entry) if entry.name == name => Some(&entry.data.scheme),
+        ast::Declaration::Extern(external) if external.name == name => Some(&external.data.scheme),
+        ast::Declaration::Decl(_) | ast::Declaration::Entry(_) | ast::Declaration::Extern(_) => None,
+        ast::Declaration::Frontend(never) => match *never {},
+    })
+}
+
 /// Find the smallest AST node containing the given position
-fn find_node_at_position(ast: &ast::Program, line: usize, col: usize) -> Option<(NodeId, Span)> {
-    let mut best: Option<(NodeId, Span)> = None;
+fn find_node_at_position(
+    ast: &ast::Program<wyn_core::types::run::TypeChecked>,
+    line: usize,
+    col: usize,
+) -> Option<(&TypeScheme, Span)> {
+    let mut best: Option<(&TypeScheme, Span)> = None;
 
     for decl in &ast.declarations {
         find_in_declaration(decl, line, col, &mut best);
@@ -503,11 +516,11 @@ fn find_node_at_position(ast: &ast::Program, line: usize, col: usize) -> Option<
     best
 }
 
-fn find_in_declaration(
-    decl: &ast::Declaration,
+fn find_in_declaration<'a>(
+    decl: &'a ast::Declaration<wyn_core::types::run::TypeCheckedFamily>,
     line: usize,
     col: usize,
-    best: &mut Option<(NodeId, Span)>,
+    best: &mut Option<(&'a TypeScheme, Span)>,
 ) {
     match decl {
         ast::Declaration::Decl(def) => {
@@ -520,7 +533,12 @@ fn find_in_declaration(
     }
 }
 
-fn find_in_expr(expr: &ast::Expression, line: usize, col: usize, best: &mut Option<(NodeId, Span)>) {
+fn find_in_expr<'a>(
+    expr: &'a ast::Expression<ast::TypedTree>,
+    line: usize,
+    col: usize,
+    best: &mut Option<(&'a TypeScheme, Span)>,
+) {
     let span = expr.h.span;
 
     if !span.contains(line, col) {
@@ -529,13 +547,13 @@ fn find_in_expr(expr: &ast::Expression, line: usize, col: usize, best: &mut Opti
 
     let dominated = best.as_ref().is_none_or(|(_, best_span)| span.size() < best_span.size());
     if dominated {
-        *best = Some((expr.h.id, span));
+        *best = Some((&expr.h.ty, span));
     }
 
     use ast::ExprKind::*;
     match &expr.kind {
         IntLiteral(_) | FloatLiteral(_) | BoolLiteral(_) | Unit => {}
-        Identifier(_, _) | TypeHole => {}
+        Identifier(_) | TypeHole(_) => {}
         Application(func, args) => {
             find_in_expr(func, line, col, best);
             for arg in args {
@@ -633,7 +651,11 @@ fn find_in_expr(expr: &ast::Expression, line: usize, col: usize, best: &mut Opti
 }
 
 /// Find the application context at cursor position
-fn find_application_context(ast: &ast::Program, line: usize, col: usize) -> Option<(String, usize)> {
+fn find_application_context(
+    ast: &ast::Program<wyn_core::types::run::TypeChecked>,
+    line: usize,
+    col: usize,
+) -> Option<(String, usize)> {
     for decl in &ast.declarations {
         match decl {
             ast::Declaration::Decl(def) => {
@@ -652,7 +674,11 @@ fn find_application_context(ast: &ast::Program, line: usize, col: usize) -> Opti
     None
 }
 
-fn find_application_in_expr(expr: &ast::Expression, line: usize, col: usize) -> Option<(String, usize)> {
+fn find_application_in_expr(
+    expr: &ast::Expression<ast::TypedTree>,
+    line: usize,
+    col: usize,
+) -> Option<(String, usize)> {
     let span = expr.h.span;
     if !span.contains(line, col) {
         return None;
@@ -666,13 +692,13 @@ fn find_application_in_expr(expr: &ast::Expression, line: usize, col: usize) -> 
                     if let Some(result) = find_application_in_expr(arg, line, col) {
                         return Some(result);
                     }
-                    if let Identifier(_, name) = &func.kind {
-                        return Some((name.clone(), i));
+                    if let Identifier(identifier) = &func.kind {
+                        return Some((identifier.source.name.clone(), i));
                     }
                 }
             }
-            if let Identifier(_, name) = &func.kind {
-                return Some((name.clone(), args.len()));
+            if let Identifier(identifier) = &func.kind {
+                return Some((identifier.source.name.clone(), args.len()));
             }
         }
         Lambda(lambda) => {
@@ -818,26 +844,29 @@ fn get_field_completions(scheme: &TypeScheme) -> Vec<CompletionItem> {
 }
 
 /// Find if cursor is on a declaration name
-fn find_declaration_name_at(ast: &ast::Program, line: usize, col: usize) -> Option<(String, &'static str)> {
+fn find_declaration_name_at(
+    ast: &ast::Program<wyn_core::types::run::TypeChecked>,
+    line: usize,
+    col: usize,
+) -> Option<(String, &'static str)> {
     for decl in &ast.declarations {
         match decl {
             ast::Declaration::Decl(def) => {
                 let body_span = def.body.h.span;
                 if line == body_span.start_line && col < body_span.start_col {
-                    return Some((def.name.clone(), def.keyword));
+                    return Some((def.name.clone(), def.data.syntax.keyword));
                 }
                 if line < body_span.start_line && line >= body_span.start_line.saturating_sub(5) {
-                    return Some((def.name.clone(), def.keyword));
+                    return Some((def.name.clone(), def.data.syntax.keyword));
                 }
             }
             ast::Declaration::Entry(entry) => {
                 let body_span = entry.body.h.span;
                 if line == body_span.start_line && col < body_span.start_col {
-                    let kind = match &entry.entry_type {
-                        interface::Attribute::Vertex => "vertex",
-                        interface::Attribute::Fragment => "fragment",
-                        interface::Attribute::Compute => "compute",
-                        _ => "entry",
+                    let kind = match entry.data.source.syntax.entry_kind {
+                        interface::EntryKind::Vertex => "vertex",
+                        interface::EntryKind::Fragment => "fragment",
+                        interface::EntryKind::Compute => "compute",
                     };
                     return Some((entry.name.clone(), kind));
                 }
@@ -849,7 +878,11 @@ fn find_declaration_name_at(ast: &ast::Program, line: usize, col: usize) -> Opti
 }
 
 /// Find the name at cursor position (identifier or declaration name)
-fn find_name_at_position(ast: &ast::Program, line: usize, col: usize) -> Option<String> {
+fn find_name_at_position(
+    ast: &ast::Program<wyn_core::types::run::TypeChecked>,
+    line: usize,
+    col: usize,
+) -> Option<String> {
     // Check if on a declaration name first
     if let Some((name, _)) = find_declaration_name_at(ast, line, col) {
         return Some(name);
@@ -885,7 +918,11 @@ fn find_name_at_position(ast: &ast::Program, line: usize, col: usize) -> Option<
     None
 }
 
-fn find_name_in_pattern(pat: &ast::Pattern, line: usize, col: usize) -> Option<String> {
+fn find_name_in_pattern<A>(
+    pat: &ast::Pattern<ast::TypedHeader, A>,
+    line: usize,
+    col: usize,
+) -> Option<String> {
     if !pat.h.span.contains(line, col) {
         return None;
     }
@@ -911,16 +948,16 @@ fn find_name_in_pattern(pat: &ast::Pattern, line: usize, col: usize) -> Option<S
     }
 }
 
-fn find_name_in_expr(expr: &ast::Expression, line: usize, col: usize) -> Option<String> {
+fn find_name_in_expr(expr: &ast::Expression<ast::TypedTree>, line: usize, col: usize) -> Option<String> {
     if !expr.h.span.contains(line, col) {
         return None;
     }
 
     use ast::ExprKind::*;
     match &expr.kind {
-        Identifier(_, name) => {
+        Identifier(identifier) => {
             if expr.h.span.contains(line, col) {
-                return Some(name.clone());
+                return Some(identifier.source.name.clone());
             }
         }
         Application(func, args) => {
@@ -1041,7 +1078,11 @@ fn find_name_in_expr(expr: &ast::Expression, line: usize, col: usize) -> Option<
 }
 
 /// Find all references to a name in the AST
-fn find_all_references(ast: &ast::Program, target_name: &str, include_declaration: bool) -> Vec<Span> {
+fn find_all_references(
+    ast: &ast::Program<wyn_core::types::run::TypeChecked>,
+    target_name: &str,
+    include_declaration: bool,
+) -> Vec<Span> {
     let mut refs = Vec::new();
 
     for decl in &ast.declarations {
@@ -1072,7 +1113,7 @@ fn find_all_references(ast: &ast::Program, target_name: &str, include_declaratio
     refs
 }
 
-fn collect_refs_in_pattern(pat: &ast::Pattern, target: &str, refs: &mut Vec<Span>) {
+fn collect_refs_in_pattern<A>(pat: &ast::Pattern<ast::TypedHeader, A>, target: &str, refs: &mut Vec<Span>) {
     match &pat.kind {
         ast::PatternKind::Name(name) if name == target => {
             refs.push(pat.h.span);
@@ -1086,10 +1127,10 @@ fn collect_refs_in_pattern(pat: &ast::Pattern, target: &str, refs: &mut Vec<Span
     }
 }
 
-fn collect_refs_in_expr(expr: &ast::Expression, target: &str, refs: &mut Vec<Span>) {
+fn collect_refs_in_expr(expr: &ast::Expression<ast::TypedTree>, target: &str, refs: &mut Vec<Span>) {
     use ast::ExprKind::*;
     match &expr.kind {
-        Identifier(_, name) if name == target => {
+        Identifier(identifier) if identifier.source.name == target => {
             refs.push(expr.h.span);
         }
         Application(func, args) => {
@@ -1194,7 +1235,11 @@ fn collect_refs_in_expr(expr: &ast::Expression, target: &str, refs: &mut Vec<Spa
 }
 
 /// Find the definition site of an identifier at the given position
-fn find_definition(ast: &ast::Program, line: usize, col: usize) -> Option<Span> {
+fn find_definition(
+    ast: &ast::Program<wyn_core::types::run::TypeChecked>,
+    line: usize,
+    col: usize,
+) -> Option<Span> {
     let bindings: Vec<(String, Span)> = Vec::new();
 
     for decl in &ast.declarations {
@@ -1238,7 +1283,7 @@ fn find_definition(ast: &ast::Program, line: usize, col: usize) -> Option<Span> 
 }
 
 fn find_definition_in_expr(
-    expr: &ast::Expression,
+    expr: &ast::Expression<ast::TypedTree>,
     line: usize,
     col: usize,
     bindings: &mut Vec<(String, Span)>,
@@ -1250,10 +1295,10 @@ fn find_definition_in_expr(
 
     use ast::ExprKind::*;
     match &expr.kind {
-        Identifier(_qualifiers, name) => {
+        Identifier(identifier) => {
             if span.contains(line, col) && span.size() < 100 {
                 for (bound_name, bound_span) in bindings.iter().rev() {
-                    if bound_name == name {
+                    if bound_name == &identifier.source.name {
                         return Some(*bound_span);
                     }
                 }
@@ -1388,7 +1433,9 @@ fn find_definition_in_expr(
 
 /// Convert an AST declaration to a DocumentSymbol
 #[allow(deprecated)]
-fn declaration_to_symbol(decl: &ast::Declaration) -> Option<DocumentSymbol> {
+fn declaration_to_symbol(
+    decl: &ast::Declaration<wyn_core::types::run::TypeCheckedFamily>,
+) -> Option<DocumentSymbol> {
     fn span_to_range(span: Span) -> Range {
         Range {
             start: Position {
@@ -1408,7 +1455,9 @@ fn declaration_to_symbol(decl: &ast::Declaration) -> Option<DocumentSymbol> {
             let range = span_to_range(span);
             Some(DocumentSymbol {
                 name: def.name.clone(),
-                detail: Some(if def.keyword == "def" { "function" } else { "value" }.to_string()),
+                detail: Some(
+                    if def.data.syntax.keyword == "def" { "function" } else { "value" }.to_string(),
+                ),
                 kind: if def.params.is_empty() { SymbolKind::VARIABLE } else { SymbolKind::FUNCTION },
                 tags: None,
                 deprecated: None,
@@ -1420,11 +1469,10 @@ fn declaration_to_symbol(decl: &ast::Declaration) -> Option<DocumentSymbol> {
         ast::Declaration::Entry(entry) => {
             let span = entry.body.h.span;
             let range = span_to_range(span);
-            let kind_str = match &entry.entry_type {
-                interface::Attribute::Vertex => "vertex",
-                interface::Attribute::Fragment => "fragment",
-                interface::Attribute::Compute => "compute",
-                _ => "entry",
+            let kind_str = match entry.data.source.syntax.entry_kind {
+                interface::EntryKind::Vertex => "vertex",
+                interface::EntryKind::Fragment => "fragment",
+                interface::EntryKind::Compute => "compute",
             };
             Some(DocumentSymbol {
                 name: entry.name.clone(),
@@ -1437,50 +1485,8 @@ fn declaration_to_symbol(decl: &ast::Declaration) -> Option<DocumentSymbol> {
                 children: None,
             })
         }
-        ast::Declaration::Sig(sig) => {
-            let range = Range::default();
-            Some(DocumentSymbol {
-                name: sig.name.clone(),
-                detail: Some("signature".to_string()),
-                kind: SymbolKind::INTERFACE,
-                tags: None,
-                deprecated: None,
-                range,
-                selection_range: range,
-                children: None,
-            })
-        }
-        ast::Declaration::TypeBind(tb) => {
-            let range = Range::default();
-            Some(DocumentSymbol {
-                name: tb.name.clone(),
-                detail: Some("type".to_string()),
-                kind: SymbolKind::TYPE_PARAMETER,
-                tags: None,
-                deprecated: None,
-                range,
-                selection_range: range,
-                children: None,
-            })
-        }
-        ast::Declaration::Module(module) => {
-            let range = Range::default();
-            let (name, detail) = match module {
-                ast::ModuleDecl::Module { name, .. } => (name.clone(), "module"),
-                ast::ModuleDecl::Functor { name, .. } => (name.clone(), "functor"),
-            };
-            Some(DocumentSymbol {
-                name,
-                detail: Some(detail.to_string()),
-                kind: SymbolKind::MODULE,
-                tags: None,
-                deprecated: None,
-                range,
-                selection_range: range,
-                children: None,
-            })
-        }
-        _ => None,
+        ast::Declaration::Extern(_) => None,
+        ast::Declaration::Frontend(never) => match *never {},
     }
 }
 

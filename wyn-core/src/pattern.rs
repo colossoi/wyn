@@ -48,8 +48,8 @@ pub enum PatternError {
 /// // Value: (1, (2, 3))
 /// // Result: [("x", 1), ("y", 2), ("z", 3)]
 /// ```
-pub fn extract_bindings<T: PatternValue>(
-    pattern: &Pattern,
+pub fn extract_bindings<T: PatternValue, H, A>(
+    pattern: &Pattern<H, A>,
     value: T,
 ) -> Result<Vec<Binding<T>>, PatternError> {
     let mut bindings = Vec::new();
@@ -57,8 +57,8 @@ pub fn extract_bindings<T: PatternValue>(
     Ok(bindings)
 }
 
-fn extract_bindings_inner<T: PatternValue>(
-    pattern: &Pattern,
+fn extract_bindings_inner<T: PatternValue, H, A>(
+    pattern: &Pattern<H, A>,
     value: T,
     bindings: &mut Vec<Binding<T>>,
 ) -> Result<(), PatternError> {
@@ -121,7 +121,7 @@ fn extract_bindings_inner<T: PatternValue>(
 /// Get all names bound by a pattern (without values).
 ///
 /// Useful for checking what variables a pattern introduces.
-pub fn bound_names(pattern: &Pattern) -> Vec<String> {
+pub fn bound_names<H, A>(pattern: &Pattern<H, A>) -> Vec<String> {
     let mut names = Vec::new();
     collect_names(pattern, &mut names);
     names
@@ -154,13 +154,13 @@ pub struct BindingPath {
 /// //   BindingPath { name: "z", path: [1, 1] },
 /// // ]
 /// ```
-pub fn binding_paths(pattern: &Pattern) -> Vec<BindingPath> {
+pub fn binding_paths<H, A>(pattern: &Pattern<H, A>) -> Vec<BindingPath> {
     let mut bindings = Vec::new();
     collect_binding_paths(pattern, &[], &mut bindings);
     bindings
 }
 
-fn collect_binding_paths(pattern: &Pattern, path: &[usize], bindings: &mut Vec<BindingPath>) {
+fn collect_binding_paths<H, A>(pattern: &Pattern<H, A>, path: &[usize], bindings: &mut Vec<BindingPath>) {
     match &pattern.kind {
         PatternKind::Name(name) => {
             bindings.push(BindingPath {
@@ -211,7 +211,7 @@ fn collect_binding_paths(pattern: &Pattern, path: &[usize], bindings: &mut Vec<B
     }
 }
 
-fn collect_names(pattern: &Pattern, names: &mut Vec<String>) {
+fn collect_names<H, A>(pattern: &Pattern<H, A>, names: &mut Vec<String>) {
     match &pattern.kind {
         PatternKind::Name(name) => {
             names.push(name.clone());

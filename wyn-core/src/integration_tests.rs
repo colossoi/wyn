@@ -9,7 +9,6 @@
 use crate::ssa::types::Program;
 use crate::tlc::extract_lambda_params;
 use crate::tlc::VarRef;
-use crate::Compiler;
 use crate::SymbolTable;
 
 /// Run source through the pipeline up to SSA.
@@ -6446,19 +6445,12 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32
 // `--fill-holes`: type-hole default fill
 // ============================================================================
 
-/// Compile through TLC with `fill_holes = true`; return the resulting
-/// `Program<Transformed>` so tests can inspect `fill_hole_errors` and the
-/// program shape.
-fn compile_tlc_with_fill_holes(input: &str) -> crate::tlc::Program<crate::tlc::stage::Transformed> {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(input, &mut node_counter).expect("parse");
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-    type_checked.to_tlc(&module_manager, true)
+fn compile_tlc_with_fill_holes(
+    input: &str,
+) -> crate::error::Result<crate::tlc::Program<crate::tlc::stage::Transformed>> {
+    let typed = crate::compile_thru_frontend(input)?;
+    let filled = crate::ast_type_holes::fill_type_holes(typed)?;
+    Ok(crate::tlc::lower_from_ast(filled))
 }
 
 #[test]
@@ -6466,34 +6458,22 @@ fn fill_holes_numeric_scalars_compile_clean() {
     // Scalar holes (i32 / f32 / bool) default to 0 / 0.0 / false and
     // compile through with no fill-hole errors.
     for src in ["def x: i32 = ???", "def y: f32 = ???", "def z: bool = ???"] {
-        let tlc = compile_tlc_with_fill_holes(src);
-        assert!(
-            tlc.global_context.fill_hole_errors.is_empty(),
-            "scalar hole in `{}` should fill cleanly: {:?}",
-            src,
-            tlc.global_context.fill_hole_errors
-        );
+        compile_tlc_with_fill_holes(src)
+            .unwrap_or_else(|error| panic!("scalar hole in `{src}` should fill cleanly: {error}"));
     }
 }
 
 #[test]
 fn fill_holes_vec_compiles_clean() {
-    let tlc = compile_tlc_with_fill_holes("def v: vec3f32 = ???");
-    assert!(
-        tlc.global_context.fill_hole_errors.is_empty(),
-        "vec3 hole should fill cleanly: {:?}",
-        tlc.global_context.fill_hole_errors
-    );
+    compile_tlc_with_fill_holes("def v: vec3f32 = ???")
+        .unwrap_or_else(|error| panic!("vec3 hole should fill cleanly: {error}"));
 }
 
 #[test]
 fn fill_holes_rejects_function_type() {
-    let tlc = compile_tlc_with_fill_holes("def f: i32 -> i32 = ???");
-    assert!(
-        !tlc.global_context.fill_hole_errors.is_empty(),
-        "function-typed hole should surface a fill-hole error"
-    );
-    let msg = format!("{:?}", tlc.global_context.fill_hole_errors[0]);
+    let error = compile_tlc_with_fill_holes("def f: i32 -> i32 = ???")
+        .expect_err("function-typed hole should surface a fill-hole error");
+    let msg = error.to_string();
     assert!(
         msg.contains("function value") || msg.contains("Arrow"),
         "error should mention function type: {}",
@@ -6505,12 +6485,8 @@ fn fill_holes_rejects_function_type() {
 fn fill_holes_respects_inferred_type_from_context() {
     // Hole's type is inferred from the enclosing context (array
     // element type here). Default-fill fires at the inferred type.
-    let tlc = compile_tlc_with_fill_holes("def arr: [3]i32 = [1i32, ???, 3i32]");
-    assert!(
-        tlc.global_context.fill_hole_errors.is_empty(),
-        "hole in i32 array should fill as i32 cleanly: {:?}",
-        tlc.global_context.fill_hole_errors
-    );
+    compile_tlc_with_fill_holes("def arr: [3]i32 = [1i32, ???, 3i32]")
+        .unwrap_or_else(|error| panic!("hole in i32 array should fill cleanly: {error}"));
 }
 
 // =============================================================================

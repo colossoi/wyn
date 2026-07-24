@@ -211,7 +211,11 @@ impl<T: Clone> ScopeStack<ScopeEntry<T>> {
 /// constructors, typed/attributed wrappers) and reports every leaf
 /// `PatternKind::Name`, plus shorthand record fields (`{ name }` binds
 /// `name`). Wildcards, unit, and literal patterns contribute no names.
-pub fn for_each_pattern_name(pattern: &crate::ast::Pattern, f: &mut impl FnMut(&str)) {
+pub fn for_each_pattern_name<H, A>(pattern: &crate::ast::Pattern<H, A>, f: &mut impl FnMut(&str))
+where
+    H: Clone + std::fmt::Debug + PartialEq,
+    A: Clone + std::fmt::Debug + PartialEq,
+{
     use crate::ast::PatternKind;
     match &pattern.kind {
         PatternKind::Name(name) => f(name),
@@ -237,7 +241,11 @@ pub fn for_each_pattern_name(pattern: &crate::ast::Pattern, f: &mut impl FnMut(&
 }
 
 /// Collect all names bound by `pattern` into a fresh `Vec`.
-pub fn pattern_bound_names(pattern: &crate::ast::Pattern) -> Vec<String> {
+pub fn pattern_bound_names<H, A>(pattern: &crate::ast::Pattern<H, A>) -> Vec<String>
+where
+    H: Clone + std::fmt::Debug + PartialEq,
+    A: Clone + std::fmt::Debug + PartialEq,
+{
     let mut names = Vec::new();
     for_each_pattern_name(pattern, &mut |name| names.push(name.to_string()));
     names

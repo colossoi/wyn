@@ -4,15 +4,16 @@
 //! param, N per tuple-of-views param (one per field).
 //!
 //! Producer side only; the layout is computed once at the start of
-//! buffer specialization and cached on `EntryDecl::param_bindings` as
-//! a `Vec<Option<...>>` aligned to the body params, so consumers can
+//! buffer specialization and stored in the TLC entry payload as a
+//! `Vec<Option<...>>` aligned to the body params, so consumers can
 //! iterate them in lockstep instead of joining by symbol.
 
 use polytype::Type;
 
-use crate::ast::{Pattern, PatternKind, TypeName};
+use crate::ast::TypeName;
 use crate::interface::{
-    Attribute, EntryDecl, EntryParamBinding, EntryParamBindingKind, IoDecoration, TupleFieldBinding,
+    Attribute, EntryDecl, EntryParamBinding, EntryParamBindingKind, EntryParamDecl, IoDecoration,
+    TupleFieldBinding,
 };
 use crate::types::TypeExt;
 use crate::{BindingRef, SymbolId};
@@ -136,159 +137,82 @@ pub fn compute_entry_binding_layout(
 /// Extract a `#[builtin(...)]`, `#[vertex_slot(N)]`, or `#[varying(N)]`
 /// decoration from a param pattern. Recurses through `Attributed` / `Typed`
 /// wrappers.
-pub fn extract_io_decoration(pattern: &Pattern) -> Option<IoDecoration> {
-    match &pattern.kind {
-        PatternKind::Attributed(attrs, inner) => {
-            for attr in attrs {
-                match attr {
-                    Attribute::BuiltIn(builtin) => {
-                        return Some(IoDecoration::BuiltIn(*builtin));
-                    }
-                    Attribute::VertexSlot(n) | Attribute::Varying(n) => {
-                        return Some(IoDecoration::Location(*n));
-                    }
-                    _ => {}
-                }
-            }
-            extract_io_decoration(inner)
-        }
-        PatternKind::Typed(inner, _) => extract_io_decoration(inner),
+pub fn extract_io_decoration(param: &EntryParamDecl) -> Option<IoDecoration> {
+    param.attributes.iter().find_map(|attribute| match attribute {
+        Attribute::BuiltIn(builtin) => Some(IoDecoration::BuiltIn(*builtin)),
+        Attribute::VertexSlot(n) | Attribute::Varying(n) => Some(IoDecoration::Location(*n)),
         _ => None,
-    }
+    })
 }
 
 /// Extract a `#[uniform(set, binding)]` from a param pattern.
-pub fn extract_uniform_binding(pattern: &Pattern) -> Option<BindingRef> {
-    match &pattern.kind {
-        PatternKind::Attributed(attrs, inner) => {
-            for attr in attrs {
-                if let Attribute::Uniform { set, binding } = attr {
-                    return Some(BindingRef::new(*set, *binding));
-                }
-            }
-            extract_uniform_binding(inner)
-        }
-        PatternKind::Typed(inner, _) => extract_uniform_binding(inner),
+pub fn extract_uniform_binding(param: &EntryParamDecl) -> Option<BindingRef> {
+    param.attributes.iter().find_map(|attribute| match attribute {
+        Attribute::Uniform { set, binding } => Some(BindingRef::new(*set, *binding)),
         _ => None,
-    }
+    })
 }
 
 /// Extract a `#[storage(set, binding, ...)]` from a param pattern.
-pub fn extract_storage_binding(pattern: &Pattern) -> Option<BindingRef> {
-    match &pattern.kind {
-        PatternKind::Attributed(attrs, inner) => {
-            for attr in attrs {
-                if let Attribute::Storage { set, binding, .. } = attr {
-                    return Some(BindingRef::new(*set, *binding));
-                }
-            }
-            extract_storage_binding(inner)
-        }
-        PatternKind::Typed(inner, _) => extract_storage_binding(inner),
+pub fn extract_storage_binding(param: &EntryParamDecl) -> Option<BindingRef> {
+    param.attributes.iter().find_map(|attribute| match attribute {
+        Attribute::Storage { set, binding, .. } => Some(BindingRef::new(*set, *binding)),
         _ => None,
-    }
+    })
 }
 
 /// Extract the declared `access` of a `#[storage(...)]` param (so the backend
 /// knows whether the buffer is written in place, e.g. a `scatter` destination).
-pub fn extract_storage_access(pattern: &Pattern) -> Option<crate::interface::StorageAccess> {
-    match &pattern.kind {
-        PatternKind::Attributed(attrs, inner) => {
-            for attr in attrs {
-                if let Attribute::Storage { access, .. } = attr {
-                    return Some(*access);
-                }
-            }
-            extract_storage_access(inner)
-        }
-        PatternKind::Typed(inner, _) => extract_storage_access(inner),
+pub fn extract_storage_access(param: &EntryParamDecl) -> Option<crate::interface::StorageAccess> {
+    param.attributes.iter().find_map(|attribute| match attribute {
+        Attribute::Storage { access, .. } => Some(*access),
         _ => None,
-    }
+    })
 }
 
 /// Extract a `#[texture(set, binding)]` from a param pattern.
-pub fn extract_texture_binding(pattern: &Pattern) -> Option<BindingRef> {
-    match &pattern.kind {
-        PatternKind::Attributed(attrs, inner) => {
-            for attr in attrs {
-                if let Attribute::Texture { set, binding, .. } = attr {
-                    return Some(BindingRef::new(*set, *binding));
-                }
-            }
-            extract_texture_binding(inner)
-        }
-        PatternKind::Typed(inner, _) => extract_texture_binding(inner),
+pub fn extract_texture_binding(param: &EntryParamDecl) -> Option<BindingRef> {
+    param.attributes.iter().find_map(|attribute| match attribute {
+        Attribute::Texture { set, binding, .. } => Some(BindingRef::new(*set, *binding)),
         _ => None,
-    }
+    })
 }
 
 /// Extract the backing storage-image binding of a texture param, if the
 /// texture is a sampled view of a compiler-managed storage allocation
 /// (a `resource`'s `sampled` view). `None` for host/external textures.
-pub fn extract_texture_backing(pattern: &Pattern) -> Option<BindingRef> {
-    match &pattern.kind {
-        PatternKind::Attributed(attrs, inner) => {
-            for attr in attrs {
-                if let Attribute::Texture { backing, .. } = attr {
-                    return *backing;
-                }
-            }
-            extract_texture_backing(inner)
-        }
-        PatternKind::Typed(inner, _) => extract_texture_backing(inner),
+pub fn extract_texture_backing(param: &EntryParamDecl) -> Option<BindingRef> {
+    param.attributes.iter().find_map(|attribute| match attribute {
+        Attribute::Texture { backing, .. } => *backing,
         _ => None,
-    }
+    })
 }
 
 /// The render-target `resource` name a `#[view(name, sampled)]` texture samples,
 /// stamped by `resolve_resources`. `None` for a host texture or a storage view.
-pub fn extract_texture_resource(pattern: &Pattern) -> Option<String> {
-    match &pattern.kind {
-        PatternKind::Attributed(attrs, inner) => {
-            for attr in attrs {
-                if let Attribute::Texture { resource, .. } = attr {
-                    return resource.clone();
-                }
-            }
-            extract_texture_resource(inner)
-        }
-        PatternKind::Typed(inner, _) => extract_texture_resource(inner),
+pub fn extract_texture_resource(param: &EntryParamDecl) -> Option<String> {
+    param.attributes.iter().find_map(|attribute| match attribute {
+        Attribute::Texture { resource, .. } => resource.clone(),
         _ => None,
-    }
+    })
 }
 
 /// The `resource` name a `#[view(name, storage_read|storage_write)]` storage
 /// image accesses, stamped by `resolve_resources`. `None` for a bare
 /// `#[storage_image(...)]` param.
-pub fn extract_storage_image_resource(pattern: &Pattern) -> Option<String> {
-    match &pattern.kind {
-        PatternKind::Attributed(attrs, inner) => {
-            for attr in attrs {
-                if let Attribute::StorageImage { resource, .. } = attr {
-                    return resource.clone();
-                }
-            }
-            extract_storage_image_resource(inner)
-        }
-        PatternKind::Typed(inner, _) => extract_storage_image_resource(inner),
+pub fn extract_storage_image_resource(param: &EntryParamDecl) -> Option<String> {
+    param.attributes.iter().find_map(|attribute| match attribute {
+        Attribute::StorageImage { resource, .. } => resource.clone(),
         _ => None,
-    }
+    })
 }
 
 /// Extract a `#[sampler(set, binding)]` from a param pattern.
-pub fn extract_sampler_binding(pattern: &Pattern) -> Option<BindingRef> {
-    match &pattern.kind {
-        PatternKind::Attributed(attrs, inner) => {
-            for attr in attrs {
-                if let Attribute::Sampler { set, binding } = attr {
-                    return Some(BindingRef::new(*set, *binding));
-                }
-            }
-            extract_sampler_binding(inner)
-        }
-        PatternKind::Typed(inner, _) => extract_sampler_binding(inner),
+pub fn extract_sampler_binding(param: &EntryParamDecl) -> Option<BindingRef> {
+    param.attributes.iter().find_map(|attribute| match attribute {
+        Attribute::Sampler { set, binding } => Some(BindingRef::new(*set, *binding)),
         _ => None,
-    }
+    })
 }
 
 /// Extract a `#[storage_image(set, binding, format, access, size)]`
@@ -296,31 +220,22 @@ pub fn extract_sampler_binding(pattern: &Pattern) -> Option<BindingRef> {
 /// format / access / size attributes — pinned at shader-compile time
 /// and threaded into the descriptor + SPIR-V backend.
 pub fn extract_storage_image_binding(
-    pattern: &Pattern,
+    param: &EntryParamDecl,
 ) -> Option<(
     BindingRef,
     crate::pipeline_descriptor::StorageImageFormat,
     crate::interface::StorageAccess,
     crate::pipeline_descriptor::StorageTextureSize,
 )> {
-    match &pattern.kind {
-        PatternKind::Attributed(attrs, inner) => {
-            for attr in attrs {
-                if let Attribute::StorageImage {
-                    set,
-                    binding,
-                    format,
-                    access,
-                    size,
-                    ..
-                } = attr
-                {
-                    return Some((BindingRef::new(*set, *binding), *format, *access, *size));
-                }
-            }
-            extract_storage_image_binding(inner)
-        }
-        PatternKind::Typed(inner, _) => extract_storage_image_binding(inner),
+    param.attributes.iter().find_map(|attribute| match attribute {
+        Attribute::StorageImage {
+            set,
+            binding,
+            format,
+            access,
+            size,
+            ..
+        } => Some((BindingRef::new(*set, *binding), *format, *access, *size)),
         _ => None,
-    }
+    })
 }

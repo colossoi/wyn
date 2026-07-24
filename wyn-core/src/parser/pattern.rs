@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::error::Result;
+use crate::interface::AttrExt;
 use crate::lexer::Token;
 use crate::parser::Parser;
 use crate::{bail_parse, bail_parse_at, err_parse};
@@ -15,6 +16,12 @@ impl Parser<'_> {
 
         // Parse optional attributes
         let attributes = self.parse_attributes()?;
+        if attributes.has_view() {
+            bail_parse_at!(
+                self.current_span(),
+                "#[view(...)] is only valid on entry-point parameters"
+            );
+        }
 
         let pattern = if !attributes.is_empty() {
             // #[attr] pat
@@ -57,6 +64,12 @@ impl Parser<'_> {
 
         // Parse optional attributes
         let attributes = self.parse_attributes()?;
+        if attributes.has_view() {
+            bail_parse_at!(
+                self.current_span(),
+                "#[view(...)] is only valid on entry-point parameters"
+            );
+        }
 
         trace!("done parsing attributes: next token = {:?}", self.peek());
         let pattern = if !attributes.is_empty() {

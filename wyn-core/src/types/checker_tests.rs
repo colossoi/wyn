@@ -1,4 +1,4 @@
-use super::{TypeChecker, TypeWarning};
+use super::TypeWarning;
 use crate::error::CompilerError;
 use crate::types::{Type, TypeExt, TypeName, TypeScheme};
 
@@ -442,35 +442,12 @@ def test_mul(mat1: mat4f32, mat2: mat4f32) mat4f32 =
 
 /// Helper function to check a program with a type hole and return the inferred type
 fn check_type_hole(source: &str) -> Type {
-    use crate::lexer;
-    use crate::parser::Parser;
-    use crate::resolve_placeholders::PlaceholderResolver;
-
-    // Parse
-    let (mut module_manager, mut node_counter) = crate::cached_module_manager();
-    let tokens = lexer::tokenize(source).unwrap();
-    let mut parser = Parser::new(tokens, &mut node_counter);
-    let mut program = parser.parse().unwrap();
-
-    // Resolve placeholders (required before type checking)
-    let mut resolver = PlaceholderResolver::new();
-    resolver.resolve(&mut module_manager, &mut program);
-    let (context, spec_schemes) = resolver.into_parts();
-
-    // Type check with the context from resolve_placeholders
-    let mut checker = TypeChecker::with_context_and_schemes(&module_manager, context, spec_schemes);
-    checker.load_builtins().unwrap();
-    let _type_table = checker.check_program(&program).unwrap();
-
-    // Check warnings
-    let warnings = checker.warnings();
+    let checked = crate::compile_thru_frontend(source).unwrap();
+    let warnings = &checked.global_context.warnings;
     assert_eq!(warnings.len(), 1, "Expected exactly one type hole warning");
 
     match &warnings[0] {
-        TypeWarning::TypeHoleFilled { inferred_type, .. } => {
-            // Apply the context to normalize type variables
-            inferred_type.apply(checker.context())
-        }
+        TypeWarning::TypeHoleFilled { inferred_type, .. } => inferred_type.clone(),
     }
 }
 
@@ -2816,7 +2793,6 @@ entry e(data: []i32) i32 = length(data[0..4096])
     .expect("storage slice should typecheck");
 
     let entry = checked
-        .ast
         .declarations
         .iter()
         .find_map(|decl| match decl {
@@ -2833,11 +2809,7 @@ entry e(data: []i32) i32 = length(data[0..4096])
         other => panic!("expected length application, got {other:?}"),
     };
 
-    let ty = match checked
-        .type_table
-        .get(&slice_expr.h.id)
-        .expect("slice expression should have an inferred type")
-    {
+    let ty = match &slice_expr.h.ty {
         TypeScheme::Monotype(ty) => ty,
         TypeScheme::Polytype { .. } => panic!("slice expression should be monomorphic"),
     };

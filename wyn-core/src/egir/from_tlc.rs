@@ -375,6 +375,7 @@ pub fn run(
                 let ep = convert_entry_point(
                     def,
                     &entry.declaration,
+                    &entry.data.param_bindings,
                     &ctx,
                     &pure_constant_names,
                     workgroup,
@@ -590,6 +591,7 @@ fn entry_resource_declarations(
 fn convert_entry_point(
     def: &TlcDef,
     entry: &interface::EntryDecl,
+    param_bindings: &[Option<EntryParamBinding>],
     ctx: &GlobalContext,
     pure_constants: &LookupSet<String>,
     workgroup: (u32, u32, u32),
@@ -603,7 +605,7 @@ fn convert_entry_point(
     let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?;
     let (inner_body, params) = crate::tlc::extract_lambda_params_ref(&def.body);
-    let is_compute = matches!(entry.entry_type, interface::Attribute::Compute);
+    let is_compute = entry.entry_kind == interface::EntryKind::Compute;
 
     // The converted body carries the specialized return representation; use it
     // rather than the parse-time entry declaration.
@@ -626,8 +628,6 @@ fn convert_entry_point(
 
     // The auto-storage binding layout is dense — same length as `params`,
     // with `None` for non-storage params — so we walk them in lockstep.
-    let param_bindings: &[Option<EntryParamBinding>] = &entry.param_bindings;
-
     for (i, ((sym, ty), param_binding)) in params.iter().zip(param_bindings.iter()).enumerate() {
         let name = symbol_name(symbols, *sym)?;
         let decoration = entry.params.get(i).and_then(extract_io_decoration);
@@ -774,13 +774,12 @@ fn convert_entry_point(
             *length = Some(len);
         }
     }
-    let execution_model = match &entry.entry_type {
-        interface::Attribute::Vertex => ExecutionModel::Vertex,
-        interface::Attribute::Fragment => ExecutionModel::Fragment,
-        interface::Attribute::Compute => ExecutionModel::Compute {
+    let execution_model = match entry.entry_kind {
+        interface::EntryKind::Vertex => ExecutionModel::Vertex,
+        interface::EntryKind::Fragment => ExecutionModel::Fragment,
+        interface::EntryKind::Compute => ExecutionModel::Compute {
             local_size: workgroup,
         },
-        _ => panic!("Invalid entry type attribute: {:?}", entry.entry_type),
     };
 
     let is_unit_return = matches!(
@@ -2737,25 +2736,16 @@ fn is_constant_node(graph: &EGraph<Raw>, mut node: NodeId, memo: &mut LookupMap<
     result
 }
 
-/// Extract a `#[size_hint(N)]` attribute from a pattern.
-pub fn extract_size_hint(pattern: &crate::ast::Pattern) -> Option<std::num::NonZeroU32> {
-    use crate::ast;
-    match &pattern.kind {
-        ast::PatternKind::Attributed(attrs, inner) => {
-            for attr in attrs {
-                if let interface::Attribute::SizeHint(n) = attr {
-                    return Some(*n);
-                }
-            }
-            extract_size_hint(inner)
-        }
-        ast::PatternKind::Typed(inner, _) => extract_size_hint(inner),
+/// Extract a `#[size_hint(N)]` attribute from a lowered entry parameter.
+pub fn extract_size_hint(param: &interface::EntryParamDecl) -> Option<std::num::NonZeroU32> {
+    param.attributes.iter().find_map(|attribute| match attribute {
+        interface::Attribute::SizeHint(n) => Some(*n),
         _ => None,
-    }
+    })
 }
 
 /// Convert an AST attribute to an IO decoration.
-fn convert_to_io_decoration(attr: &interface::Attribute) -> Option<IoDecoration> {
+fn convert_to_io_decoration(attr: &interface::ResolvedAttribute) -> Option<IoDecoration> {
     use IoDecoration;
     match attr {
         interface::Attribute::BuiltIn(b) => Some(IoDecoration::BuiltIn(*b)),
@@ -2767,7 +2757,7 @@ fn convert_to_io_decoration(attr: &interface::Attribute) -> Option<IoDecoration>
 }
 
 /// The render-target resource name of a `#[target(name)]` output attribute.
-fn target_of(attr: Option<&interface::Attribute>) -> Option<String> {
+fn target_of(attr: Option<&interface::ResolvedAttribute>) -> Option<String> {
     match attr {
         Some(interface::Attribute::Target(name)) => Some(name.clone()),
         _ => None,

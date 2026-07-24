@@ -12,7 +12,7 @@
 //! the backend boundary.
 
 use super::data::Empty;
-use super::run::Polymorphic;
+use super::pin_entry_buffers::Polymorphic;
 use super::soa::SoaNormalized;
 use super::{
     apply_type_substitution, ArrayExpr, Def, DefMeta, Program, RewriteDecision, Term, TermId, TermIdSource,
@@ -31,7 +31,7 @@ pub struct Monomorphic;
 
 impl super::Family for Monomorphic {
     type DefinitionData = ();
-    type EntryData = ();
+    type EntryData = super::data::PinnedEntry;
     type ClosureData = Empty;
     type SoacBodyData = Empty;
 }
