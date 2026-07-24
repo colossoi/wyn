@@ -9,12 +9,14 @@ use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::{Program, RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter, VarRef};
 use crate::{LookupMap, SymbolId, SymbolTable};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ClosureCallsLowerError {
+    #[error("definition {def} still has an indirect {func_kind} call after closure-call lowering")]
     IndirectCall {
         def: SymbolId,
         func_kind: &'static str,
     },
+    #[error("definition {def} calls {target} with {actual} arguments; expected {expected}")]
     ArityMismatch {
         def: SymbolId,
         target: SymbolId,
@@ -147,7 +149,7 @@ pub(super) fn run(program: &mut Program<Defunctionalized>) {
         lowerer.rewrite_tracked(&mut def.body);
     }
     verify_closure_calls_lowered(program)
-        .unwrap_or_else(|error| panic!("closure-call lowering verifier failed: {error:?}"));
+        .unwrap_or_else(|error| panic!("closure-call lowering verifier failed: {error}"));
 }
 
 #[cfg(test)]

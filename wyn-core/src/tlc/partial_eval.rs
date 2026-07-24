@@ -13,7 +13,6 @@ use super::{
 use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::builtins::{by_id, Purity};
-use crate::types::TypeExt;
 use crate::LookupMap;
 use crate::LookupSet;
 use crate::SymbolId;
@@ -73,18 +72,12 @@ enum Value {
     Float(f64),
     Bool(bool),
 
-    /// Known aggregate (tuple, array, vector)
-    Tuple(Vec<Value>),
-    Array(Vec<Value>),
-    Vector(Vec<Value>),
-
     /// Partial application: function waiting for more args. Each
     /// accumulated arg carries its source type so the reifier can
     /// rebuild the App term without re-deriving types from the def.
     Partial {
         sym: SymbolId,
         args: Vec<(Value, Type<TypeName>)>,
-        remaining: usize,
     },
 
     /// Unknown at compile time - residual code
@@ -178,11 +171,7 @@ impl<'a> PartialEvaluator<'a> {
                         }
                     } else {
                         // Function - create partial application with 0 args applied
-                        Value::Partial {
-                            sym,
-                            args: vec![],
-                            remaining: def.arity,
-                        }
+                        Value::Partial { sym, args: vec![] }
                     }
                 } else {
                     // Unknown variable (intrinsic or undefined)
@@ -486,11 +475,7 @@ impl<'a> PartialEvaluator<'a> {
                 }
             } else if args_len < def.arity {
                 // Partial application
-                Value::Partial {
-                    sym,
-                    args,
-                    remaining: def.arity - args_len,
-                }
+                Value::Partial { sym, args }
             } else {
                 // Some unknown args or zero-arity - residualize
                 self.reify_call(sym, args, original)
@@ -650,9 +635,6 @@ impl<'a> PartialEvaluator<'a> {
             Value::Float(f) => self.mk_term(ty.clone(), span, TermKind::FloatLit(f as f32)),
             Value::Bool(b) => self.mk_term(ty.clone(), span, TermKind::BoolLit(b)),
             Value::Unknown(t) => t,
-            Value::Tuple(elems) => self.reify_tuple(elems, ty, span),
-            Value::Array(elems) => self.reify_array(elems, ty, span),
-            Value::Vector(elems) => self.reify_vector(elems, ty, span),
             Value::Partial { sym, args, .. } => self.reify_partial(sym, args, ty, span),
         }
     }
@@ -766,57 +748,6 @@ impl<'a> PartialEvaluator<'a> {
             term.id = self.term_ids.next_id();
         }
         changed
-    }
-
-    fn reify_tuple(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term<Empty, Empty> {
-        let component_types = match ty {
-            Type::Constructed(TypeName::Tuple(_), args) => args.as_slice(),
-            other => panic!(
-                "reify_tuple dispatched on non-tuple type {other:?} — \
-                 caller (`reify` for Value::Tuple) is responsible for the type shape",
-            ),
-        };
-        assert_eq!(
-            elems.len(),
-            component_types.len(),
-            "reify_tuple: element count {} does not match tuple type arity {}",
-            elems.len(),
-            component_types.len(),
-        );
-        let part_terms: Vec<Term<Empty, Empty>> = elems
-            .into_iter()
-            .zip(component_types.iter())
-            .map(|(elem, elem_ty)| self.reify(elem, elem_ty, span))
-            .collect();
-        self.mk_term(ty.clone(), span, TermKind::Tuple(part_terms))
-    }
-
-    fn reify_array(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term<Empty, Empty> {
-        let elem_ty = crate::types::array_elem(ty).cloned().unwrap_or_else(|| {
-            panic!(
-                "reify_array dispatched on non-array type {ty:?} — \
-                 caller (`reify` for Value::Array) is responsible for the type shape"
-            )
-        });
-        let part_terms: Vec<Term<Empty, Empty>> =
-            elems.into_iter().map(|elem| self.reify(elem, &elem_ty, span)).collect();
-        self.mk_term(
-            ty.clone(),
-            span,
-            TermKind::ArrayExpr(super::ArrayExpr::Literal(part_terms)),
-        )
-    }
-
-    fn reify_vector(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term<Empty, Empty> {
-        let elem_ty = ty.elem_type().cloned().unwrap_or_else(|| {
-            panic!(
-                "reify_vector dispatched on non-vec type {ty:?} — \
-                 caller (`reify` for Value::Vector) is responsible for the type shape"
-            )
-        });
-        let part_terms: Vec<Term<Empty, Empty>> =
-            elems.into_iter().map(|elem| self.reify(elem, &elem_ty, span)).collect();
-        self.mk_term(ty.clone(), span, TermKind::VecLit(part_terms))
     }
 
     fn reify_partial(
@@ -977,7 +908,6 @@ fn is_duplicable(v: &Value) -> bool {
         // see the lambda value in the env to apply it — binding the name to
         // `Var(name)` instead would make `apply_var` self-alias and recurse.
         Value::Unknown(t) => matches!(t.kind, TermKind::Var(_) | TermKind::UnitLit | TermKind::Lambda(_)),
-        Value::Tuple(es) | Value::Array(es) | Value::Vector(es) => es.iter().all(is_duplicable),
     }
 }
 

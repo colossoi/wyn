@@ -18,8 +18,9 @@ use polytype::Type;
 // Verifier and HOF detection
 // =============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum HofSpecializeError {
+    #[error("definition {def} parameter {param_index} still has a function type after HOF specialization")]
     FunctionTypedParam {
         def: SymbolId,
         param_index: usize,

@@ -50,12 +50,6 @@ use polytype::Type;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct OwnerId(u32);
 
-impl OwnerId {
-    pub(super) fn raw(self) -> u32 {
-        self.0
-    }
-}
-
 /// Component-sensitive alias information for aggregate values. Futhark tracks
 /// tuple/record aliases per field: consuming the whole aggregate flattens all
 /// fields, while a projection sees only the selected component.

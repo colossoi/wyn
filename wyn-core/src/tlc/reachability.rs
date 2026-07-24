@@ -29,7 +29,7 @@ pub fn run(program: Program<OwnershipApplied>) -> Program<Reachable> {
     super::dce::eliminate_unreachable_defs(&mut program.defs);
     super::defunctionalize::verify_hof_specialized(&program).unwrap_or_else(|error| {
         panic!(
-            "hof-specialization verifier failed after filter_reachable: {:?}",
+            "hof-specialization verifier failed after filter_reachable: {}",
             error
         )
     });

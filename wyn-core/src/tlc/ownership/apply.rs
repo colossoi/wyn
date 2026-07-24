@@ -193,6 +193,7 @@ fn array_with_is_promotable<C: Payload, S: Payload>(
 ///    later iterations' reads.
 /// Pure analysis. Does not mutate the program. The caller decides
 /// whether to act on the result.
+#[cfg(test)]
 pub(super) fn eligible_unique_input_soacs<St: crate::tlc::Stage>(
     program: &Program<St>,
     model: &AnalysisState,

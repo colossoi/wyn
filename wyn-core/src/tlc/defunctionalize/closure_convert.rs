@@ -276,11 +276,13 @@ fn collect_free_vars_array_expr<C, S>(
 // Verifier
 // =============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ClosureConvertError {
+    #[error("definition {def} still contains a nested lambda after closure conversion")]
     UnliftedLambda {
         def: SymbolId,
     },
+    #[error("definition {def} has a SOAC body that does not call a lifted definition")]
     SoacLambdaNotLifted {
         def: SymbolId,
     },
@@ -864,7 +866,7 @@ pub(super) fn run(
         },
     );
     verify_closure_converted(&program)
-        .unwrap_or_else(|error| panic!("closure-conversion verifier failed: {error:?}"));
+        .unwrap_or_else(|error| panic!("closure-conversion verifier failed: {error}"));
     program
 }
 
