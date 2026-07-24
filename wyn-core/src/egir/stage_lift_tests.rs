@@ -1,7 +1,10 @@
 use super::*;
 
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{RegionInterner, SemanticEntry, SemanticOpId};
+use crate::egir::program::{
+    semantic_program_for_test, Program, RegionInterner, SemanticEntry, SemanticOpId,
+};
+use crate::egir::reify::Segmented;
 use crate::egir::soac::screma;
 use crate::egir::types::{
     SegExtent, SegSpace, Semantic, SideEffect, SkeletonTerminator, Soac, SoacDestination, SoacEffect,
@@ -11,7 +14,7 @@ use crate::flow::ExecutionModel;
 use crate::interface::{BindingExposure, EntryInput, EntryInputKind, StorageAccess};
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::types::ConstantValue;
-use crate::{BindingRef, LookupMap};
+use crate::BindingRef;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -24,13 +27,13 @@ fn u32_ty() -> Type<TypeName> {
 fn semantic_function(name: &str, graph: EGraph<Semantic>, parameter_count: usize) -> SemanticFunc {
     let ty = u32_ty();
     SemanticFunc::new(
+        crate::egir::types::RegionId::from_index(0),
         name.into(),
         Span::dummy(),
         None,
         (0..parameter_count).map(|index| (ty.clone(), format!("p{index}"))).collect(),
         ty,
         graph,
-        LookupMap::new(),
     )
 }
 
@@ -67,7 +70,6 @@ fn enclosing_uniform(graph: &mut EGraph<Semantic>) -> NodeId {
 fn analyze_enclosing(graph: &EGraph<Semantic>) -> StageDependenceAnalysis {
     StageDependenceAnalysis::for_graph(
         graph,
-        &LookupMap::new(),
         &[StageDependence::from_source(
             Uniformity::StageUniform,
             DependenceSource::Uniform,
@@ -76,8 +78,8 @@ fn analyze_enclosing(graph: &EGraph<Semantic>) -> StageDependenceAnalysis {
     .unwrap()
 }
 
-fn empty_program(functions: Vec<SemanticFunc>) -> SemanticProgram {
-    SemanticProgram::new(
+fn empty_program(functions: Vec<SemanticFunc>) -> Program<Segmented> {
+    semantic_program_for_test(
         functions,
         vec![],
         vec![],
@@ -105,7 +107,7 @@ fn mixed_stage_call_uses_generic_inlining_then_lifts_its_uniform_subgraph() {
     let mut enclosing = EGraph::<Semantic>::new();
     let capture = enclosing_uniform(&mut enclosing);
     let body = SegBody {
-        region: program.region_interner.get("map_body").unwrap(),
+        region: program.data.region_interner.get("map_body").unwrap(),
         captures: vec![capture],
     };
     let enclosing_analysis = analyze_enclosing(&enclosing);
@@ -121,7 +123,7 @@ fn mixed_stage_call_uses_generic_inlining_then_lifts_its_uniform_subgraph() {
     assert_eq!(specialized_body.captures.len(), 1);
     let lifted = specialized_body.captures[0];
     assert!(matches!(
-        &enclosing.nodes[lifted],
+        &enclosing.nodes[lifted].kind,
         ENode::Pure {
             op: PureOp::BinOp(name),
             ..
@@ -129,7 +131,7 @@ fn mixed_stage_call_uses_generic_inlining_then_lifts_its_uniform_subgraph() {
     ));
     assert!(
         !graph_ops::reachable_execution_values(&specialized.graph).into_iter().any(|node| {
-            match &specialized.graph.nodes[node] {
+            match &specialized.graph.nodes[node].kind {
                 ENode::Pure {
                     op: PureOp::Call(_), ..
                 } => true,
@@ -145,7 +147,10 @@ fn mixed_stage_call_uses_generic_inlining_then_lifts_its_uniform_subgraph() {
     assert!(specialized.graph.verify_hash_cons().is_ok());
 
     specialized.name = "map_body_stage_lift".into();
-    specialized_body.region = program.define_region(specialized);
+    let specialized_region = program.data.region_interner.intern(&specialized.name);
+    specialized.region = specialized_region;
+    specialized_body.region = specialized_region;
+    program = program.extend_functions([specialized]);
     let enclosing_analysis = analyze_enclosing(&enclosing);
     assert!(
         prepare_lift(&program, &enclosing_analysis, &specialized_body).unwrap().is_none(),
@@ -196,7 +201,7 @@ fn multiple_uniform_frontier_values_share_one_aggregate_capture() {
     let mut enclosing = EGraph::<Semantic>::new();
     let capture = enclosing_uniform(&mut enclosing);
     let body = SegBody {
-        region: program.region_interner.get("map_body").unwrap(),
+        region: program.data.region_interner.get("map_body").unwrap(),
         captures: vec![capture],
     };
     let enclosing_analysis = analyze_enclosing(&enclosing);
@@ -209,7 +214,7 @@ fn multiple_uniform_frontier_values_share_one_aggregate_capture() {
     assert_eq!(specialized.params.len(), 2);
     assert_eq!(specialized_body.captures.len(), 1);
     assert!(matches!(
-        &enclosing.nodes[specialized_body.captures[0]],
+        &enclosing.nodes[specialized_body.captures[0]].kind,
         ENode::Pure {
             op: PureOp::Tuple(2),
             operands,
@@ -219,7 +224,7 @@ fn multiple_uniform_frontier_values_share_one_aggregate_capture() {
         graph_ops::reachable_execution_values(&specialized.graph)
             .into_iter()
             .filter(|node| matches!(
-                specialized.graph.nodes[*node],
+                specialized.graph.nodes[*node].kind,
                 ENode::Pure {
                     op: PureOp::Project { .. },
                     ..
@@ -230,7 +235,10 @@ fn multiple_uniform_frontier_values_share_one_aggregate_capture() {
     );
 
     specialized.name = "map_body_stage_lift".into();
-    specialized_body.region = program.define_region(specialized);
+    let specialized_region = program.data.region_interner.intern(&specialized.name);
+    specialized.region = specialized_region;
+    specialized_body.region = specialized_region;
+    program = program.extend_functions([specialized]);
     let enclosing_analysis = analyze_enclosing(&enclosing);
     assert!(
         prepare_lift(&program, &enclosing_analysis, &specialized_body).unwrap().is_none(),
@@ -249,7 +257,7 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
     let result = entry_graph.alloc_side_effect_result(result_ty.clone());
 
     let mut program = empty_program(vec![mixed_callee(), calling_body()]);
-    let original_region = program.region_interner.get("map_body").unwrap();
+    let original_region = program.data.region_interner.get("map_body").unwrap();
     let effect = SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(
             SemanticOpId::for_test(0),
@@ -316,11 +324,10 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
         vec![(input_ty, "points".into()), (element_ty, "frame".into())],
         result_ty,
         entry_graph,
-        LookupMap::new(),
     );
     program.entry_points.push(entry);
 
-    let stats = run(&mut program).unwrap();
+    let (program, stats) = run_with_stats(program).unwrap();
     assert_eq!(
         stats,
         StageLiftStats {
@@ -339,7 +346,7 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
     assert_ne!(body.region, original_region);
     assert_eq!(body.captures.len(), 1);
     assert!(matches!(
-        &entry.graph.nodes[body.captures[0]],
+        &entry.graph.nodes[body.captures[0]].kind,
         ENode::Pure {
             op: PureOp::BinOp(name),
             ..

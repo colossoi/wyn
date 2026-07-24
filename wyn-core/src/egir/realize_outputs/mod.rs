@@ -24,14 +24,27 @@
 //! Runs after `from_tlc::run`, before segmentation: the SOAC→OutputView
 //! rewrite must precede SOAC wrapping/expansion.
 
+/// EGIR whose entry outputs own their realized writer routes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OutputsRealized;
+
+impl super::ir::Stage for OutputsRealized {
+    type Family = super::types::Raw;
+    type ResourceDecl = super::program::SemanticResourceDecl;
+    type OutputRoute = super::ir::RealizedOutputRoute;
+    type ProgramData = super::program::CoreProgramData;
+    type GlobalContext = super::program::RewriteGlobal;
+}
+
 use crate::flow::{BlockId, ExecutionModel};
 #[allow(unused_imports)]
 use ExecutionModel as _;
 
 use super::from_tlc::ConvertError;
+use super::ir::{RealizedOutputRoute, UnrealizedOutputRoute};
 use super::program::{
-    host_resource_map, Entry, LogicalResourceArena, OutputRoute, OutputSlotId, OutputWriter, RawEntry,
-    RawProgram, SemanticResourceRef, SlotSource,
+    host_resource_map, Entry, LogicalResourceArena, OutputWriter, Program, RawEntry, SemanticResourceRef,
+    SlotSource,
 };
 use super::types::{EGraph, EffectToken, NodeId, Raw, SkeletonTerminator, SoacEffect};
 use crate::ResourceId;
@@ -43,46 +56,62 @@ pub mod verify;
 
 /// Realize every entry's outputs into side-effect stores. After this
 /// pass, `verify::check` confirms the invariant.
-pub fn run(
-    inner: &mut RawProgram,
-    effect_ids: &mut crate::IdSource<EffectToken>,
-) -> Result<(), ConvertError> {
-    let by_binding = host_resource_map(&inner.resources);
-    let RawProgram { ir, resources } = inner;
-    for entry in &mut ir.entry_points {
-        realize_entry(entry, &by_binding, resources, effect_ids)?;
-    }
+pub fn run(program: Program<super::from_tlc::Converted>) -> Result<Program<OutputsRealized>, ConvertError> {
+    let Program {
+        functions,
+        externs,
+        entry_points,
+        constants,
+        mut data,
+        mut global_context,
+    } = program;
+    let by_binding = host_resource_map(&data.resources);
+    let entry_points = entry_points
+        .into_iter()
+        .map(|entry| {
+            let entry = entry.map_output_routes(|UnrealizedOutputRoute { source }| RealizedOutputRoute {
+                source,
+                writers: Vec::new(),
+            });
+            realize_entry(
+                entry,
+                &by_binding,
+                &mut data.resources,
+                &mut global_context.effect_ids,
+            )
+        })
+        .collect::<Result<_, ConvertError>>()?;
+    let program = Program::from_parts(functions, externs, entry_points, constants, data, global_context);
     // Output retargeting can rewrite a captured `map` result from a Composite
     // array to a storage view; sync each capturing region's parameter type so
     // the region body lowers consistently.
-    reconcile::run(ir)?;
-    Ok(())
+    reconcile::run(program)
 }
 
 fn realize_entry(
-    entry: &mut RawEntry,
+    mut entry: RawEntry<RealizedOutputRoute>,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
     resources: &mut LogicalResourceArena,
     effect_ids: &mut crate::IdSource<EffectToken>,
-) -> Result<(), ConvertError> {
+) -> Result<RawEntry<RealizedOutputRoute>, ConvertError> {
     if entry.outputs.is_empty() {
-        return Ok(());
+        return Ok(entry);
     }
     if entry.execution_model.is_compute() {
-        if entry.output_routes.is_empty() {
-            synthesize_compute_routes(entry);
+        if entry.routes().next().is_none() {
+            synthesize_compute_routes(&mut entry);
         }
-        realize_compute_slots(entry, by_binding, resources, effect_ids)?;
-        clear_compute_returns(entry);
-        Ok(())
+        realize_compute_slots(&mut entry, by_binding, resources, effect_ids)?;
+        clear_compute_returns(&mut entry);
     } else {
-        realize_graphics_returns(entry, effect_ids)
+        realize_graphics_returns(&mut entry, effect_ids)?;
     }
+    Ok(entry)
 }
 
 /// Compute entry points publish exclusively through their output routes. Once
 /// those writers exist, no value may remain on an entry terminator.
-fn clear_compute_returns(entry: &mut RawEntry) {
+fn clear_compute_returns(entry: &mut RawEntry<RealizedOutputRoute>) {
     for (_, block) in &mut entry.graph.skeleton.blocks {
         if matches!(block.term, SkeletonTerminator::Return(Some(_))) {
             block.term = SkeletonTerminator::Return(None);
@@ -95,7 +124,7 @@ fn clear_compute_returns(entry: &mut RawEntry) {
 /// into the shared `OutputView`. Multi-source slots (`If`-forks etc.)
 /// share one view; runtime CFG picks which source's write fires.
 fn realize_compute_slots(
-    entry: &mut RawEntry,
+    entry: &mut RawEntry<RealizedOutputRoute>,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
     resources: &mut LogicalResourceArena,
     effect_ids: &mut crate::IdSource<EffectToken>,
@@ -103,8 +132,6 @@ fn realize_compute_slots(
     let Entry {
         graph,
         outputs,
-        aliases,
-        output_routes,
         resource_declarations,
         ..
     } = entry;
@@ -115,13 +142,7 @@ fn realize_compute_slots(
     for (slot_index, output) in outputs.iter_mut().enumerate() {
         let binding = output.storage_binding().expect("BUG: compute output without storage binding");
         let resource = *by_binding.get(&binding).expect("compute output must have a semantic resource");
-        let route_indices: Vec<usize> = output_routes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, route)| (route.slot == OutputSlotId(slot_index)).then_some(index))
-            .collect();
-        let sources: Vec<SlotSource> =
-            route_indices.iter().map(|&index| output_routes[index].source).collect();
+        let sources: Vec<SlotSource> = output.routes.iter().map(|route| route.source).collect();
         if sources.is_empty() {
             return Err(ConvertError::Unsupported(format!(
                 "compute output #{} has no source — TLC-to-EGIR conversion \
@@ -143,27 +164,27 @@ fn realize_compute_slots(
                 sources[0].value,
             )?
         {
-            output_routes[route_indices[0]].writers = vec![OutputWriter::Value(sources[0].value)];
+            output.routes[0].writers = vec![OutputWriter::Value(sources[0].value)];
             continue;
         }
 
         let multi_source = sources.len() > 1;
-        for (&route_index, src) in route_indices.iter().zip(&sources) {
+        let output_ty = output.ty.clone();
+        for (route, src) in output.routes.iter_mut().zip(&sources) {
             let mut writers = source_value_writers(graph, &effect_index, src.value);
             writers.extend(dispatch::compute_slot_source(
                 graph,
                 &effect_index,
-                aliases,
                 effect_ids,
                 src.block,
                 src.value,
                 slot_index,
-                &output.ty,
+                &output_ty,
                 resource,
                 multi_source,
             )?);
             dedup_output_writers(&mut writers);
-            output_routes[route_index].writers = writers;
+            route.writers = writers;
         }
     }
     Ok(())
@@ -177,25 +198,19 @@ fn realize_compute_slots(
 ///     vector / matrix written to `OutputSlot { index }` places.
 ///   * Generated compute entries — outputs are storage-buffer-bound; the
 ///     SOAC at the tail may need retargeting via `compute_slot_source`.
-fn synthesize_compute_routes(entry: &mut RawEntry) {
-    let Entry {
-        graph,
-        outputs,
-        output_routes,
-        ..
-    } = entry;
+fn synthesize_compute_routes(entry: &mut RawEntry<RealizedOutputRoute>) {
+    let Entry { graph, outputs, .. } = entry;
 
     let Some((return_block, result)) = unique_value_return(graph) else {
         return;
     };
     let sources = output_sources(graph, result, outputs);
     for (slot, source) in sources.into_iter().enumerate() {
-        output_routes.push(OutputRoute {
+        outputs[slot].routes.push(RealizedOutputRoute {
             source: SlotSource {
                 block: return_block,
                 value: source,
             },
-            slot: OutputSlotId(slot),
             writers: Vec::new(),
         });
     }
@@ -204,20 +219,16 @@ fn synthesize_compute_routes(entry: &mut RawEntry) {
 /// Graphics entries retain return values because their ABI is location-based
 /// IO, not storage output routes.
 fn realize_graphics_returns(
-    entry: &mut RawEntry,
+    entry: &mut RawEntry<RealizedOutputRoute>,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), ConvertError> {
-    let Entry {
-        graph,
-        outputs,
-        output_routes,
-        ..
-    } = entry;
+    let Entry { graph, outputs, .. } = entry;
     let Some((return_block, result)) = unique_value_return(graph) else {
         return Ok(());
     };
     let effect_index = graph.side_effect_index();
-    for (slot, (output, source)) in outputs.iter().zip(output_sources(graph, result, outputs)).enumerate() {
+    for (slot, source) in output_sources(graph, result, outputs).into_iter().enumerate() {
+        let output = &mut outputs[slot];
         let mut writers = source_value_writers(graph, &effect_index, source);
         writers.push(dispatch::graphics_slot_source(
             graph,
@@ -228,12 +239,11 @@ fn realize_graphics_returns(
             &output.ty,
         ));
         dedup_output_writers(&mut writers);
-        output_routes.push(OutputRoute {
+        output.routes.push(RealizedOutputRoute {
             source: SlotSource {
                 block: return_block,
                 value: source,
             },
-            slot: OutputSlotId(slot),
             writers,
         });
     }
@@ -268,7 +278,7 @@ fn source_value_writers(
         wyn_graph::WalkOrder::DepthFirst,
         |node, dependencies| {
             if effect_index.site(node).is_none() {
-                dependencies.extend(graph.nodes[node].children());
+                dependencies.extend(graph.nodes[node].kind.children());
             }
         },
         |node| {
@@ -283,13 +293,8 @@ fn source_value_writers(
 }
 
 fn dedup_output_writers(writers: &mut Vec<OutputWriter>) {
-    let mut unique = Vec::with_capacity(writers.len());
-    for writer in writers.drain(..) {
-        if !unique.contains(&writer) {
-            unique.push(writer);
-        }
-    }
-    *writers = unique;
+    let mut seen = crate::LookupSet::new();
+    writers.retain(|writer| seen.insert(*writer));
 }
 
 /// Per-output source nodes: the single result, the operands of a literal
@@ -297,7 +302,11 @@ fn dedup_output_writers(writers: &mut Vec<OutputWriter>) {
 fn output_sources(
     graph: &mut EGraph<Raw>,
     result: NodeId,
-    outputs: &[super::ir::EntryOutput<SemanticResourceRef, super::types::WynLanguage>],
+    outputs: &[super::ir::EntryOutput<
+        SemanticResourceRef,
+        RealizedOutputRoute,
+        super::types::WynLanguage,
+    >],
 ) -> Vec<NodeId> {
     use super::types::{ENode, PureOp};
     use smallvec::smallvec;
@@ -309,7 +318,7 @@ fn output_sources(
     if let ENode::Pure {
         op: PureOp::Tuple(k),
         operands,
-    } = &graph.nodes[result]
+    } = &graph.nodes[result].kind
     {
         if *k == n && operands.len() == n {
             return operands.to_vec();

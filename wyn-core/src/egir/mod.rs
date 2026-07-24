@@ -10,10 +10,10 @@
 //! (acyclic, GVN'd, side-effect skeleton, scoped elaboration as
 //! extraction): <https://cfallin.org/blog/2026/04/09/aegraph/>.
 
+pub(crate) mod allocation;
 pub(crate) mod elaborate;
 mod extract;
 mod fold;
-pub(crate) mod in_place;
 pub(crate) mod inlining;
 pub mod ir;
 mod loop_analysis;
@@ -21,8 +21,6 @@ pub(crate) mod materialize;
 pub(crate) mod partial_inline;
 pub mod program;
 pub mod publish;
-pub(crate) mod residency;
-pub(crate) mod residency_cost;
 pub(crate) mod resource_erasure;
 pub mod rewrite;
 mod scoped_map;
@@ -49,6 +47,19 @@ pub(crate) mod stage_lift;
 pub(crate) mod stage_variance;
 pub mod verify_no_abstract;
 pub(crate) mod verify_physical;
+
+pub use allocation::{plan_logical_resources, ResourcesAllocated};
+pub use elaborate::run as elaborate;
+pub use materialize::{run as materialize_dynamic_extracts, Materialized};
+pub use parallelize::plan;
+pub use partial_inline::{run as partially_inline_calls, PartiallyInlined};
+pub use realize_outputs::run as realize_outputs;
+pub use reify::run as reify_soacs;
+pub use resource_erasure::{run as erase_resources, ResourcesErased};
+pub use rewrite::run as rewrite;
+pub use semantic_opt::{run as optimize_semantics, Optimized};
+pub use skel_opt::{run as optimize_skeleton, SkeletonOptimized};
+pub use soac_expand::{run as expand_soacs, SoacsExpanded};
 
 #[cfg(test)]
 pub(crate) mod semantic_exec;

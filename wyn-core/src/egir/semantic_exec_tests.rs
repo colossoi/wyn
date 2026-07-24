@@ -1,6 +1,9 @@
 use super::*;
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{RegionInterner, SemanticFunc, SemanticProgram};
+use crate::egir::program::{
+    semantic_program_for_test, Program as EgirProgram, RegionInterner, SemanticFunc,
+};
+use crate::egir::reify::Segmented;
 use crate::egir::types::{EGraph, PureOp, SkeletonTerminator};
 use crate::pipeline_descriptor::PipelineDescriptor;
 use polytype::Type;
@@ -15,7 +18,7 @@ fn compose(left: &(i64, i64), right: &(i64, i64)) -> (i64, i64) {
     )
 }
 
-fn affine_program() -> (RegionId, SemanticProgram) {
+fn affine_program() -> (RegionId, EgirProgram<Segmented>) {
     let int = Type::Constructed(TypeName::Int(64), vec![]);
     let pair = Type::Constructed(TypeName::Tuple(2), vec![int.clone(), int.clone()]);
     let mut graph = EGraph::new();
@@ -35,24 +38,26 @@ fn affine_program() -> (RegionId, SemanticProgram) {
     );
     let result = graph.intern_pure(PureOp::Tuple(2), smallvec![out_a, out_b], pair.clone(), None);
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
+    let mut regions = RegionInterner::default();
+    let region = regions.intern("affine_compose");
     let function = SemanticFunc::new(
+        region,
         "affine_compose".to_string(),
         Span::dummy(),
         None,
         vec![(pair.clone(), "left".into()), (pair.clone(), "right".into())],
         pair,
         graph,
-        LookupMap::new(),
     );
-    let program = SemanticProgram::new(
+    let program = semantic_program_for_test(
         vec![function],
         vec![],
         vec![],
         vec![],
         PipelineDescriptor::default(),
-        RegionInterner::default(),
+        regions,
     );
-    let id = program.region_interner.get("affine_compose").unwrap();
+    let id = program.data.region_interner.get("affine_compose").unwrap();
     (id, program)
 }
 

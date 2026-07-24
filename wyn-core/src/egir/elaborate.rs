@@ -26,28 +26,32 @@ use smallvec::SmallVec;
 
 use super::extract;
 use super::loop_analysis::LoopAnalysis;
-use super::program::{PhysicalEGraph, PhysicalProgram, PhysicalPureOp, PhysicalSideEffect};
+use super::program::{
+    PhysicalEGraph, PhysicalPureOp, PhysicalSideEffect, PlannedGlobal, Program as EgirProgram,
+};
 use super::scoped_map::ScopedMap;
 use super::types::*;
 
 /// Lower the whole EGIR program to SSA. Each per-body EGraph is
 /// elaborated to a `FuncBody`, externs pass through, and the result is
-/// assembled into a single `ssa::types::Program`. The pipeline
-/// descriptor passes through unchanged.
-pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
+/// assembled into a backend-bound SSA program.
+pub fn run(
+    inner: EgirProgram<super::resource_erasure::ResourcesErased>,
+) -> crate::ssa::Program<crate::ssa::stage::Elaborated> {
     let super::ir::Program {
         functions,
         externs,
         entry_points,
         constants,
-        pipeline,
-        ..
-    } = inner.into_ir();
+        data,
+        global_context,
+    } = inner;
+    let pipeline = data.pipeline;
     let pipeline_storage_accesses = pipeline_storage_accesses(&pipeline);
     let functions: Vec<Function> = functions
         .into_iter()
         .map(|f| {
-            let body = elaborate_one_body(f.graph, &f.control_headers, &f.aliases, &f.params, f.return_ty);
+            let body = elaborate_one_body(f.graph, &f.params, f.return_ty);
             Function {
                 name: f.name,
                 body,
@@ -61,7 +65,7 @@ pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
     let entry_points: Vec<EntryPoint> = entry_points
         .into_iter()
         .map(|e| {
-            let body = elaborate_one_body(e.graph, &e.control_headers, &e.aliases, &e.params, e.return_ty);
+            let body = elaborate_one_body(e.graph, &e.params, e.return_ty);
             let entry_pipeline_accesses =
                 pipeline_storage_accesses.get(&e.name).cloned().unwrap_or_default();
             EntryPoint {
@@ -81,17 +85,21 @@ pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
         .into_iter()
         .map(|constant| Constant {
             name: constant.name,
-            body: elaborate_one_body(
-                constant.graph,
-                &constant.control_headers,
-                &constant.aliases,
-                &[],
-                constant.return_ty,
-            ),
+            body: elaborate_one_body(constant.graph, &[], constant.return_ty),
         })
         .collect();
     let program = Program::bare(functions, entry_points, constants);
-    (program, pipeline)
+    let PlannedGlobal {
+        kernel_plan,
+        profile,
+        effect_ids: _,
+        semantic_ids: _,
+    } = global_context;
+    program.with_context::<crate::ssa::stage::Elaborated>(crate::ssa::context::BackendGlobal {
+        pipeline,
+        profile,
+        kernel_plan,
+    })
 }
 
 /// The descriptor binding access is a physical pipeline-layout property: all
@@ -157,25 +165,14 @@ fn elaborate_extern(declaration: ExternDecl<Type<TypeName>>) -> Function {
 
 pub(super) fn elaborate_one_body(
     graph: PhysicalEGraph,
-    control_headers: &LookupMap<BlockId, ControlHeader>,
-    aliases: &LookupMap<NodeId, NodeId>,
     params: &[(Type<TypeName>, String)],
     return_ty: Type<TypeName>,
 ) -> FuncBody {
     let skel_domtree = skeleton_domtree(&graph.skeleton);
-    let identity_map: LookupMap<BlockId, BlockId> = graph.skeleton.blocks.keys().map(|b| (b, b)).collect();
-    run(
-        &graph,
-        &skel_domtree,
-        params,
-        return_ty,
-        control_headers,
-        &identity_map,
-        aliases,
-    )
+    elaborate_graph(&graph, &skel_domtree, params, return_ty)
 }
 
-pub(super) fn skeleton_domtree<P: super::types::EgirPhase>(
+pub(super) fn skeleton_domtree<P: super::types::Family>(
     skeleton: &Skeleton<P>,
 ) -> wyn_graph::DominatorTree<SkelBlockId> {
     wyn_graph::DominatorTree::build(skeleton.entry, |block, successors| {
@@ -193,32 +190,28 @@ pub(super) fn skeleton_domtree<P: super::types::EgirPhase>(
 
 /// Elaborate an EGraph back into a FuncBody.
 ///
-/// `aliases` maps block-param NodeIds that were stripped by skeleton
-/// rewrites (see `skel_opt`) to their replacement NodeIds. These are
-/// merged into the extraction's `best` map so any incidental demand of
-/// a stripped param — e.g., via a Pure node hash-consed with the param
-/// in its operands — transparently redirects to the replacement.
-pub fn run(
+/// Canonical aliases owned by graph nodes are merged into extraction's `best`
+/// map so incidental demands of stripped block parameters transparently
+/// redirect to their replacements.
+pub fn elaborate_graph(
     graph: &PhysicalEGraph,
     domtree: &wyn_graph::DominatorTree<SkelBlockId>,
     params: &[(Type<TypeName>, String)],
     return_ty: Type<TypeName>,
-    control_headers: &LookupMap<BlockId, ControlHeader>,
-    orig_block_map: &LookupMap<BlockId, SkelBlockId>,
-    aliases: &LookupMap<NodeId, NodeId>,
 ) -> FuncBody {
     // Phase 1: cost-based extraction.
     let mut best = extract::extract(graph);
-    // Merge skel_opt aliases into `best` preserving transitivity: if X is
-    // itself in `best`, follow through so resolve(param) lands on the
-    // final representative.
-    for (&k, &v) in aliases {
-        let target = best.get(&v).copied().unwrap_or(v);
-        best.insert(k, target);
+    // Preserve transitivity through any extraction winner already selected
+    // for the alias target.
+    for (node, definition) in &graph.nodes {
+        if let Some(alias) = definition.alias {
+            let target = best.get(&alias).copied().unwrap_or(alias);
+            best.insert(node, target);
+        }
     }
 
     // Loop analysis over the skeleton, used by LICM placement.
-    let loop_analysis = LoopAnalysis::build(&graph.skeleton, control_headers);
+    let loop_analysis = LoopAnalysis::build(&graph.skeleton);
 
     // Phase 2: set up elaborator.
     let mut elab = Elaborator {
@@ -240,7 +233,7 @@ pub fn run(
     for i in 0..elab.builder.num_params() {
         let vid = elab.builder.get_param(i);
         for (nid, node) in &graph.nodes {
-            if matches!(node, ENode::FuncParam { index } if *index == i) {
+            if matches!(&node.kind, ENode::FuncParam { index } if *index == i) {
                 let resolved = elab.resolve(nid);
                 elab.elaborated.insert(resolved, (vid, skel_entry));
                 break;
@@ -262,43 +255,30 @@ pub fn run(
     for (skel_bid, skel_block) in &graph.skeleton.blocks {
         let out_bid = elab.block_map[&skel_bid];
         for &param_nid in &skel_block.params {
-            let ty = graph.types[&param_nid].clone();
+            let ty = graph.nodes[param_nid].ty.clone();
             let vid = elab.builder.add_block_param(out_bid, ty);
             let resolved = elab.resolve(param_nid);
             elab.elaborated.insert(resolved, (vid, skel_bid));
         }
     }
 
-    // Map control headers from original blocks → output blocks.
+    // Map graph-owned control headers to output blocks.
     let skel_to_output = &elab.block_map;
-    let mut reverse_orig_map: LookupMap<SkelBlockId, BlockId> = LookupMap::new();
-    for (&orig, &skel) in orig_block_map {
-        reverse_orig_map.insert(skel, orig);
-    }
     for (&skel_bid, &out_bid) in skel_to_output.iter() {
-        if let Some(&orig_bid) = reverse_orig_map.get(&skel_bid) {
-            if let Some(ch) = control_headers.get(&orig_bid) {
-                let mapped = match ch {
-                    ControlHeader::Selection { merge } => {
-                        let skel_merge = orig_block_map[merge];
-                        ControlHeader::Selection {
-                            merge: skel_to_output[&skel_merge],
-                        }
-                    }
-                    ControlHeader::Loop {
-                        merge,
-                        continue_block,
-                    } => {
-                        let skel_merge = orig_block_map[merge];
-                        let skel_cont = orig_block_map[continue_block];
-                        ControlHeader::Loop {
-                            merge: skel_to_output[&skel_merge],
-                            continue_block: skel_to_output[&skel_cont],
-                        }
-                    }
-                };
-                elab.builder.set_control_header(out_bid, mapped);
-            }
+        if let Some(header) = &graph.skeleton.blocks[skel_bid].control_header {
+            let mapped = match header {
+                ControlHeader::Selection { merge } => ControlHeader::Selection {
+                    merge: skel_to_output[merge],
+                },
+                ControlHeader::Loop {
+                    merge,
+                    continue_block,
+                } => ControlHeader::Loop {
+                    merge: skel_to_output[merge],
+                    continue_block: skel_to_output[continue_block],
+                },
+            };
+            elab.builder.set_control_header(out_bid, mapped);
         }
     }
 
@@ -458,7 +438,7 @@ impl<'a> Elaborator<'a> {
         };
 
         if let Some(result_nid) = se.result {
-            let ty = self.graph.types[&result_nid].clone();
+            let ty = self.graph.nodes[result_nid].ty.clone();
             let vid = self.emit_at(skel_bid, kind, ty, se.span);
             // Insert under the resolved id so demand_placed's `self.resolve(nid)
             // → get(&resolved)` path finds it. Today extract maps every
@@ -487,7 +467,7 @@ impl<'a> Elaborator<'a> {
         }
 
         let node = self.graph.nodes[resolved].clone();
-        let ENode::Pure { op, operands } = &node else {
+        let ENode::Pure { op, operands } = &node.kind else {
             panic!(
                 "demand_place({:?}): expected a place-producing Pure node, got {:?}",
                 resolved, node
@@ -499,7 +479,7 @@ impl<'a> Elaborator<'a> {
                 let arg_placements: Vec<(ValueId, SkelBlockId)> =
                     operands.iter().map(|&op_nid| self.demand_placed(op_nid)).collect();
                 let args: Vec<ValueId> = arg_placements.iter().map(|&(v, _)| v).collect();
-                let elem_ty = self.graph.types[&resolved].clone();
+                let elem_ty = self.graph.nodes[resolved].ty.clone();
                 let place = self.builder.new_place(elem_ty);
                 let kind = InstKind::ViewIndex {
                     view: ValueRef::Ssa(args[0]),
@@ -514,7 +494,7 @@ impl<'a> Elaborator<'a> {
                 // operands[1] is the index value (resolved via demand_placed).
                 let parent_place = self.demand_place(operands[0]);
                 let (index_val, index_placed) = self.demand_placed(operands[1]);
-                let elem_ty = self.graph.types[&resolved].clone();
+                let elem_ty = self.graph.nodes[resolved].ty.clone();
                 let place = self.builder.new_place(elem_ty);
                 let kind = InstKind::PlaceIndex {
                     place: parent_place,
@@ -527,7 +507,7 @@ impl<'a> Elaborator<'a> {
                 (kind, placed)
             }
             PureOp::OutputSlot { index } => {
-                let elem_ty = self.graph.types[&resolved].clone();
+                let elem_ty = self.graph.nodes[resolved].ty.clone();
                 let place = self.builder.new_place(elem_ty);
                 let kind = InstKind::OutputSlot {
                     index: *index,
@@ -548,7 +528,7 @@ impl<'a> Elaborator<'a> {
             | InstKind::OutputSlot { result, .. } => *result,
             _ => unreachable!(),
         };
-        let span = self.graph.node_spans.get(&resolved).copied();
+        let span = self.graph.nodes[resolved].span;
         let out_bid = self.block_map[&placed];
         self.builder.func_mut().append_void_inst_with_span(out_bid, kind, span);
         self.elaborated_places.insert(resolved, (place, placed));
@@ -566,12 +546,12 @@ impl<'a> Elaborator<'a> {
 
         let node = self.graph.nodes[resolved].clone();
 
-        match &node {
+        match &node.kind {
             ENode::Constant(c) => {
-                let ty = self.graph.types[&resolved].clone();
+                let ty = self.graph.nodes[resolved].ty.clone();
                 let kind = const_to_inst_kind(c);
                 let placed = self.choose_placement(&[]);
-                let span = self.graph.node_spans.get(&resolved).copied();
+                let span = self.graph.nodes[resolved].span;
                 let vid = self.emit_at(placed, kind, ty, span);
                 self.record_placement(resolved, vid, placed);
                 (vid, placed)
@@ -591,10 +571,10 @@ impl<'a> Elaborator<'a> {
                     operands.iter().map(|&op_nid| self.demand_placed(op_nid)).collect();
                 let args: Vec<ValueId> = arg_placements.iter().map(|&(v, _)| v).collect();
 
-                let ty = self.graph.types[&resolved].clone();
+                let ty = self.graph.nodes[resolved].ty.clone();
                 let kind = pure_to_inst_kind(op, &args);
                 let placed = self.choose_placement(&arg_placements);
-                let span = self.graph.node_spans.get(&resolved).copied();
+                let span = self.graph.nodes[resolved].span;
                 let vid = self.emit_at(placed, kind, ty, span);
                 self.record_placement(resolved, vid, placed);
                 (vid, placed)

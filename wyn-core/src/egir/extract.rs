@@ -10,7 +10,7 @@ use std::collections::HashSet;
 
 use crate::LookupMap;
 
-use super::types::{EGraph, ENode, EgirPhase, NodeId, PureOp};
+use super::types::{EGraph, ENode, Family, NodeId, PureOp};
 
 /// Cost of a node. Lower is better.
 pub type Cost = u32;
@@ -20,7 +20,7 @@ pub type Cost = u32;
 /// Returns a map from NodeId -> best concrete NodeId (the chosen representative).
 /// For non-union nodes, this maps to themselves.
 /// For union nodes, this maps to the best leaf of the union tree.
-pub fn extract<P: EgirPhase>(graph: &EGraph<P>) -> LookupMap<NodeId, NodeId> {
+pub fn extract<P: Family>(graph: &EGraph<P>) -> LookupMap<NodeId, NodeId> {
     let mut best_cost: LookupMap<NodeId, Cost> = LookupMap::new();
     let mut best_node: LookupMap<NodeId, NodeId> = LookupMap::new();
 
@@ -29,7 +29,7 @@ pub fn extract<P: EgirPhase>(graph: &EGraph<P>) -> LookupMap<NodeId, NodeId> {
 
     // Bottom-up: compute cost for each node.
     for &nid in &topo {
-        let node = &graph.nodes[nid];
+        let node = &graph.nodes[nid].kind;
         match node {
             ENode::Union { left, right } => {
                 // A plain subtree-sum comparison would double-count operands
@@ -70,7 +70,7 @@ pub fn extract<P: EgirPhase>(graph: &EGraph<P>) -> LookupMap<NodeId, NodeId> {
 /// Total op cost of the distinct nodes reachable from `root`, following each
 /// union to its already-chosen representative (children precede parents in
 /// the topo order, so nested unions are resolved by the time this runs).
-fn closure_cost<P: EgirPhase>(graph: &EGraph<P>, root: NodeId, best: &LookupMap<NodeId, NodeId>) -> Cost {
+fn closure_cost<P: Family>(graph: &EGraph<P>, root: NodeId, best: &LookupMap<NodeId, NodeId>) -> Cost {
     let mut seen = HashSet::new();
     let mut stack = vec![root];
     let mut total: Cost = 0;
@@ -79,7 +79,7 @@ fn closure_cost<P: EgirPhase>(graph: &EGraph<P>, root: NodeId, best: &LookupMap<
         if !seen.insert(nid) {
             continue;
         }
-        if let ENode::Pure { op, operands } = &graph.nodes[nid] {
+        if let ENode::Pure { op, operands } = &graph.nodes[nid].kind {
             total = total.saturating_add(op_cost(op));
             stack.extend(operands.iter().copied());
         }
@@ -138,9 +138,9 @@ fn op_cost<R>(op: &PureOp<R>) -> Cost {
 /// only holds for a topological order. A cycle means an earlier pass interned a
 /// node into its own operand tree; there is no order to fall back on, so say so
 /// rather than hand the DP an arbitrary one.
-fn topological_sort<P: EgirPhase>(graph: &EGraph<P>) -> Vec<NodeId> {
+fn topological_sort<P: Family>(graph: &EGraph<P>) -> Vec<NodeId> {
     wyn_graph::topo_sort_by_dependencies(graph.nodes.keys(), |node, dependencies| {
-        dependencies.extend(graph.nodes[node].children());
+        dependencies.extend(graph.nodes[node].kind.children());
     })
     .unwrap_or_else(|err| {
         panic!(

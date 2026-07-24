@@ -6,20 +6,34 @@
 //! matching call operands after all SegOps have expanded, when the complete
 //! call graph is concrete.
 
+/// Physical EGIR with compile-time-only resource handles erased.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResourcesErased;
+
+impl crate::egir::ir::Stage for ResourcesErased {
+    type Family = crate::egir::types::Physical;
+    type ResourceDecl = crate::interface::StorageBindingDecl;
+    type OutputRoute = crate::egir::ir::RealizedOutputRoute;
+    type ProgramData = crate::egir::program::CoreProgramData;
+    type GlobalContext = crate::egir::program::PlannedGlobal;
+}
+
 #[cfg(test)]
 #[path = "resource_erasure_tests.rs"]
 mod resource_erasure_tests;
 
 use crate::ast::TypeName;
 use crate::egir::from_tlc::ConvertError;
-use crate::egir::program::{PhysicalFunc, PhysicalProgram};
-use crate::egir::types::{EGraph, ENode, EffectOp, EgirPhase, PureOp, SideEffectKind, SkeletonTerminator};
+use crate::egir::program::{PhysicalFunc, Program};
+use crate::egir::types::{EGraph, ENode, EffectOp, Family, PureOp, SideEffectKind, SkeletonTerminator};
 use crate::{LookupMap, LookupSet};
 use polytype::Type;
 use smallvec::SmallVec;
 
-pub fn run(inner: &mut PhysicalProgram) -> Result<(), ConvertError> {
-    let erasures: LookupMap<String, Vec<bool>> = inner
+pub fn run(
+    program: Program<super::skel_opt::SkeletonOptimized>,
+) -> Result<Program<ResourcesErased>, ConvertError> {
+    let erasures: LookupMap<String, Vec<bool>> = program
         .functions
         .iter()
         .map(|function| {
@@ -30,31 +44,51 @@ pub fn run(inner: &mut PhysicalProgram) -> Result<(), ConvertError> {
         })
         .collect();
 
-    for function in &mut inner.functions {
-        rewrite_graph(&mut function.graph, &erasures)?;
-        erase_function_params(function)?;
-    }
-    for entry in &mut inner.entry_points {
-        rewrite_graph(&mut entry.graph, &erasures)?;
-    }
-    Ok(())
+    let Program {
+        functions,
+        externs,
+        entry_points,
+        constants,
+        data,
+        global_context,
+    } = program;
+    let functions = functions
+        .into_iter()
+        .map(|function| erase_function_resources(function, &erasures))
+        .collect::<Result<_, ConvertError>>()?;
+    let entry_points = entry_points
+        .into_iter()
+        .map(|entry| entry.try_map_graph(|graph| rewrite_graph(graph, &erasures)))
+        .collect::<Result<_, ConvertError>>()?;
+    let constants = constants
+        .into_iter()
+        .map(|constant| constant.try_map_graph(|graph| rewrite_graph(graph, &erasures)))
+        .collect::<Result<_, ConvertError>>()?;
+    Ok(Program::<ResourcesErased>::from_parts(
+        functions,
+        externs,
+        entry_points,
+        constants,
+        data,
+        global_context,
+    ))
 }
 
 fn is_storage_image(ty: &Type<TypeName>) -> bool {
     matches!(ty, Type::Constructed(TypeName::StorageTexture, _))
 }
 
-fn rewrite_graph<P: EgirPhase>(
-    graph: &mut EGraph<P>,
+fn rewrite_graph<P: Family>(
+    mut graph: EGraph<P>,
     erasures: &LookupMap<String, Vec<bool>>,
-) -> Result<(), ConvertError> {
+) -> Result<EGraph<P>, ConvertError> {
     // Calls can be pure nodes or effect-anchored instructions. Rewrite both;
     // filtering by the callee's original signature keeps every positional ABI
     // change in one table.
     let pure_calls: Vec<_> = graph
         .nodes
         .iter()
-        .filter_map(|(nid, node)| match node {
+        .filter_map(|(nid, node)| match &node.kind {
             ENode::Pure {
                 op: PureOp::Call(callee),
                 ..
@@ -85,7 +119,7 @@ fn rewrite_graph<P: EgirPhase>(
             }
         }
     }
-    Ok(())
+    Ok(graph)
 }
 
 fn filter_smallvec(
@@ -109,10 +143,31 @@ fn filter_smallvec(
     Ok(())
 }
 
-fn erase_function_params(function: &mut PhysicalFunc) -> Result<(), ConvertError> {
-    let erase: Vec<bool> = function.params.iter().map(|(ty, _)| is_storage_image(ty)).collect();
+fn erase_function_resources(
+    function: PhysicalFunc,
+    erasures: &LookupMap<String, Vec<bool>>,
+) -> Result<PhysicalFunc, ConvertError> {
+    let crate::egir::ir::Func {
+        region,
+        name,
+        span,
+        linkage_name,
+        params,
+        return_ty,
+        graph,
+    } = function;
+    let mut graph = rewrite_graph(graph, erasures)?;
+    let erase: Vec<bool> = params.iter().map(|(ty, _)| is_storage_image(ty)).collect();
     if !erase.iter().any(|erase| *erase) {
-        return Ok(());
+        return Ok(PhysicalFunc::new(
+            region,
+            name,
+            span,
+            linkage_name,
+            params,
+            return_ty,
+            graph,
+        ));
     }
 
     let mut new_indices = vec![None; erase.len()];
@@ -125,8 +180,8 @@ fn erase_function_params(function: &mut PhysicalFunc) -> Result<(), ConvertError
     }
 
     let mut erased_nodes = Vec::new();
-    for (node_id, node) in &mut function.graph.nodes {
-        let ENode::FuncParam { index } = node else {
+    for (node_id, node) in &mut graph.nodes {
+        let ENode::FuncParam { index } = &mut node.kind else {
             continue;
         };
         match new_indices.get(*index).copied().flatten() {
@@ -138,31 +193,35 @@ fn erase_function_params(function: &mut PhysicalFunc) -> Result<(), ConvertError
     // A remaining use means a new storage-image value operation was added
     // without being reified to a binding-qualified operation. Fail here rather
     // than letting a backend recreate an opaque runtime handle.
-    let live = live_nodes(&function.graph);
+    let live = live_nodes(&graph);
     for erased in erased_nodes {
         if live.contains(&erased) {
             return Err(ConvertError::Internal(format!(
                 "storage-image parameter in `{}` still has a runtime EGIR use after resource erasure",
-                function.name
+                name
             )));
         }
         // Drop the dead param node: its index is stale after the
         // renumbering above and can collide with a surviving param's new
         // index, making elaboration's index-keyed param registration pick
         // the corpse over the real param.
-        function.graph.remove_func_param(erased);
+        graph.remove_func_param(erased);
     }
 
-    function.params = function
-        .params
-        .drain(..)
-        .zip(erase)
-        .filter_map(|(param, erase)| (!erase).then_some(param))
-        .collect();
-    Ok(())
+    let params =
+        params.into_iter().zip(erase).filter_map(|(param, erase)| (!erase).then_some(param)).collect();
+    Ok(PhysicalFunc::new(
+        region,
+        name,
+        span,
+        linkage_name,
+        params,
+        return_ty,
+        graph,
+    ))
 }
 
-fn live_nodes<P: EgirPhase>(graph: &EGraph<P>) -> LookupSet<crate::egir::types::NodeId> {
+fn live_nodes<P: Family>(graph: &EGraph<P>) -> LookupSet<crate::egir::types::NodeId> {
     let mut roots = Vec::new();
     for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {

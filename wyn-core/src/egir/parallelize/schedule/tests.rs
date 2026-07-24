@@ -4,8 +4,9 @@ use super::*;
 use crate::egir::builder::EntryBuilder;
 
 fn body(name: &str) -> PlannedEntry {
+    let mut semantic_ids = crate::egir::program::SemanticOpIdSource::default();
     let mut effect_ids = crate::IdSource::new();
-    EntryBuilder::new_compute(name.to_string(), (1, 1, 1), &mut effect_ids).build()
+    EntryBuilder::new_compute(name.to_string(), (1, 1, 1), &mut semantic_ids, &mut effect_ids).build()
 }
 
 fn spec(name: &str, label: &'static str) -> PhaseSpec {

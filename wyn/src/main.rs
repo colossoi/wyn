@@ -354,11 +354,19 @@ fn compile_file(
     let program = time("infer_input_slice_bounds", verbose, || {
         wyn_core::tlc::infer_input_slice_bounds(program)
     });
-    let raw = time("to_egraph", verbose, || wyn_core::to_egraph(program))?;
-    let outputs_realized = time("egir_realize_outputs", verbose, || raw.realize_outputs())?;
-    let segmented = time("egir_segment", verbose, || outputs_realized.segment());
-    let optimized = time("egir_optimize", verbose, || segmented.optimize());
-    let allocated = time("egir_allocate", verbose, || optimized.allocate())?;
+    let program = time("to_egraph", verbose, || wyn_core::to_egraph(program))?;
+    let program = time("egir_realize_outputs", verbose, || {
+        wyn_core::egir::realize_outputs(program)
+    })?;
+    let program = time("egir_reify_soacs", verbose, || {
+        wyn_core::egir::reify_soacs(program)
+    });
+    let program = time("egir_optimize_semantics", verbose, || {
+        wyn_core::egir::optimize_semantics(program)
+    });
+    let program = time("egir_plan_logical_resources", verbose, || {
+        wyn_core::egir::plan_logical_resources(program)
+    })?;
     let profile = LoweringProfile::new(
         match target {
             Target::Spirv => CodegenTarget::Spirv,
@@ -366,8 +374,10 @@ fn compile_file(
         },
         if single_stage { SchedulePolicy::Serial } else { SchedulePolicy::Parallel },
     );
-    let planned = time("egir_plan", verbose, || allocated.plan(profile))?;
-    let ssa = time("egir_lower_to_ssa", verbose, || planned.lower_to_ssa())?;
+    let program = time("egir_plan", verbose, || wyn_core::egir::plan(program, profile))?;
+    let ssa = time("egir_lower_to_ssa", verbose, || {
+        wyn_core::lower_egir_to_ssa(program)
+    })?;
 
     // Dump MIR if requested
     if let Some(ref path) = output_mir {

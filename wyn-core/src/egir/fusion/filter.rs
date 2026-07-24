@@ -11,12 +11,16 @@ use std::collections::HashSet;
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
-use super::vertical::{capture_types, fresh_region_name, graph_and_span, graph_mut, FusionSite};
+use super::{capture_types, graph_and_span};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::egir::graph_ops;
-use crate::egir::ir::splice_effect_tokens;
-use crate::egir::program::{OutputWriter, SemanticFunc, SemanticProgram, SemanticResourceRef};
+use crate::egir::ir::{splice_effect_tokens, Body, BodySite, RealizedOutputRoute};
+use crate::egir::program::{
+    fresh_region_name, CoreProgramData, OutputWriter, Program, RegionInterner, SemanticFunc,
+    SemanticResourceRef,
+};
+use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::{filter, screma};
 use crate::egir::types::{
@@ -27,8 +31,8 @@ use crate::flow::{BlockId, ControlHeader};
 use crate::LookupMap;
 
 #[derive(Clone)]
-struct Candidate {
-    site: FusionSite,
+pub(super) struct Candidate {
+    site: BodySite,
     block: BlockId,
     filter: usize,
     consumer: Option<usize>,
@@ -46,27 +50,22 @@ struct FilterParts {
     scratch: Option<SemanticResourceRef>,
 }
 
-pub fn fuse_filter_consumers(inner: &mut SemanticProgram, oracle: &SemanticGraph) -> bool {
-    let Some(candidate) = find_candidate(inner, oracle) else {
-        return false;
-    };
-    apply(inner, candidate);
-    true
+pub(super) fn analyze(inner: &Program<Segmented>, oracle: &SemanticGraph) -> Option<Candidate> {
+    find_candidate(inner, oracle)
 }
 
-fn find_candidate(inner: &SemanticProgram, oracle: &SemanticGraph) -> Option<Candidate> {
+fn find_candidate(inner: &Program<Segmented>, oracle: &SemanticGraph) -> Option<Candidate> {
     for (index, entry) in inner.entry_points.iter().enumerate() {
-        if let Some(candidate) = find_in_graph(
-            &entry.graph,
-            FusionSite::Entry(index),
-            oracle,
-            Some(&entry.output_routes),
-        ) {
+        let routes = entry.routes().cloned().collect::<Vec<_>>();
+        if let Some(candidate) = find_in_graph(&entry.graph, BodySite::Entry(index), oracle, Some(&routes))
+        {
             return Some(candidate);
         }
     }
-    for (index, function) in inner.functions.iter().enumerate() {
-        if let Some(candidate) = find_in_graph(&function.graph, FusionSite::Function(index), oracle, None) {
+    for function in &inner.functions {
+        if let Some(candidate) =
+            find_in_graph(&function.graph, BodySite::Function(function.region), oracle, None)
+        {
             return Some(candidate);
         }
     }
@@ -75,9 +74,9 @@ fn find_candidate(inner: &SemanticProgram, oracle: &SemanticGraph) -> Option<Can
 
 fn find_in_graph(
     graph: &EGraph,
-    site: FusionSite,
+    site: BodySite,
     oracle: &SemanticGraph,
-    routes: Option<&[crate::egir::program::OutputRoute]>,
+    routes: Option<&[RealizedOutputRoute]>,
 ) -> Option<Candidate> {
     let live = live_nodes(graph);
     for (block_id, block) in &graph.skeleton.blocks {
@@ -95,7 +94,7 @@ fn find_in_graph(
                     (live.contains(&node) && is_length_of(graph, node, result)).then_some(node)
                 })
                 .collect();
-            if lengths.iter().any(|length| graph.types[length] != graph.types[&lengths[0]]) {
+            if lengths.iter().any(|length| graph.nodes[*length].ty != graph.nodes[lengths[0]].ty) {
                 continue;
             }
 
@@ -144,7 +143,7 @@ fn live_nodes(graph: &EGraph) -> HashSet<NodeId> {
 }
 
 fn is_length_of(graph: &EGraph, node: NodeId, filter_result: NodeId) -> bool {
-    let ENode::Pure { op, operands } = &graph.nodes[node] else {
+    let ENode::Pure { op, operands } = &graph.nodes[node].kind else {
         return false;
     };
     if operands.as_slice() != [filter_result] {
@@ -231,7 +230,7 @@ fn reaches_without(graph: &EGraph, root: NodeId, target: NodeId, stops: &HashSet
     }
     wyn_graph::reaches_ordered(root, target, wyn_graph::WalkOrder::DepthFirst, |node, out| {
         if !stops.contains(&node) {
-            out.extend(graph.nodes[node].children());
+            out.extend(graph.nodes[node].kind.children());
         }
     })
 }
@@ -258,19 +257,21 @@ fn filter_parts(effect: &SideEffect) -> FilterParts {
     }
 }
 
-fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
+pub(super) fn apply(inner: Program<Segmented>, candidate: Candidate) -> Program<Segmented> {
     let (filter_effect, consumer_effect, outer_types, span, scope) = {
-        let (graph, span, scope) = graph_and_span(inner, candidate.site);
+        let (graph, span, scope) = graph_and_span(&inner, candidate.site);
         let block = &graph.skeleton.blocks[candidate.block];
         (
             block.side_effects[candidate.filter].clone(),
             candidate.consumer.map(|consumer| block.side_effects[consumer].clone()),
-            graph.types.clone(),
+            graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect(),
             span,
             scope,
         )
     };
     let filter = filter_parts(&filter_effect);
+    let mut region_interner = inner.data.region_interner.clone();
+    let mut synthesized = Vec::new();
 
     let mut operators: Vec<screma::Operator> = consumer_effect
         .as_ref()
@@ -282,24 +283,37 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
         })
         .unwrap_or_default();
     for (index, operator) in operators.iter_mut().enumerate() {
-        let (step, function) = masked_step(inner, &scope, span, index, &filter, operator, &outer_types);
-        inner.define_region(function);
+        let (step, function) = masked_step(
+            &inner,
+            &mut region_interner,
+            &scope,
+            span,
+            index,
+            &filter,
+            operator,
+            &outer_types,
+        );
+        synthesized.push(function);
         operator.step = step;
         operator.input_indices = vec![screma::InputId(0)];
     }
 
     let count_ty = candidate.lengths.first().map(|length| outer_types[length].clone());
     let count = count_ty.as_ref().map(|ty| {
-        let (mut operator, step_function, combine_function) =
-            count_operator(inner, &scope, span, &filter, ty.clone(), &outer_types);
-        let step_region = inner.define_region(step_function);
-        operator.step.region = step_region;
-        let combine_region = inner.define_region(combine_function);
-        operator.combine.region = combine_region;
+        let (operator, step_function, combine_function) = count_operator(
+            &inner,
+            &mut region_interner,
+            &scope,
+            span,
+            &filter,
+            ty.clone(),
+            &outer_types,
+        );
+        synthesized.extend([step_function, combine_function]);
         operator
     });
 
-    if let Some(consumer) = candidate.consumer {
+    let rebuilt = if let Some(consumer) = candidate.consumer {
         apply_with_consumer(
             inner,
             &candidate,
@@ -310,7 +324,7 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
             operators,
             count,
             count_ty,
-        );
+        )
     } else {
         apply_count_only(
             inner,
@@ -319,13 +333,99 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
             filter,
             count.expect("length-only filter has no count operator"),
             count_ty.expect("length-only filter has no count type"),
-        );
-    }
+        )
+    };
+    rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
+        region_interner,
+        ..data
+    })
+}
+
+struct EntryMetadataPatch {
+    replacement: Option<NodeId>,
+    old_writer: Option<NodeId>,
+    replacement_writer: Option<NodeId>,
+    scratch: Option<SemanticResourceRef>,
 }
 
 #[allow(clippy::too_many_arguments)]
 fn apply_with_consumer(
-    inner: &mut SemanticProgram,
+    inner: Program<Segmented>,
+    candidate: &Candidate,
+    filter_effect: SideEffect,
+    consumer_effect: SideEffect,
+    filter: FilterParts,
+    consumer_index: usize,
+    operators: Vec<screma::Operator>,
+    count: Option<screma::Operator>,
+    count_ty: Option<Type<TypeName>>,
+) -> Program<Segmented> {
+    inner.rewrite_body(candidate.site, |body| {
+        let rewrite = |graph: &mut EGraph| {
+            rewrite_with_consumer(
+                graph,
+                candidate,
+                filter_effect.clone(),
+                consumer_effect.clone(),
+                filter.clone(),
+                consumer_index,
+                operators.clone(),
+                count.clone(),
+                count_ty.clone(),
+            )
+        };
+        match body {
+            Body::Entry(mut entry) => {
+                let metadata = rewrite(&mut entry.graph);
+                finish_entry_metadata(&mut entry, &candidate.lengths, metadata);
+                Body::Entry(entry)
+            }
+            Body::Function(mut function) => {
+                rewrite(&mut function.graph);
+                Body::Function(function)
+            }
+            Body::Constant(_) => unreachable!("filter fusion never targets constants"),
+        }
+    })
+}
+
+fn apply_count_only(
+    inner: Program<Segmented>,
+    candidate: &Candidate,
+    filter_effect: SideEffect,
+    filter: FilterParts,
+    count: screma::Operator,
+    count_ty: Type<TypeName>,
+) -> Program<Segmented> {
+    inner.rewrite_body(candidate.site, |body| {
+        let rewrite = |graph: &mut EGraph| {
+            rewrite_count_only(
+                graph,
+                candidate,
+                filter_effect.clone(),
+                filter.clone(),
+                count.clone(),
+                count_ty.clone(),
+            )
+        };
+        match body {
+            Body::Entry(mut entry) => {
+                let metadata = rewrite(&mut entry.graph);
+                finish_entry_metadata(&mut entry, &candidate.lengths, metadata);
+                Body::Entry(entry)
+            }
+            Body::Function(mut function) => {
+                rewrite(&mut function.graph);
+                Body::Function(function)
+            }
+            Body::Constant(_) => unreachable!("filter fusion never targets constants"),
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rewrite_with_consumer(
+    graph: &mut EGraph,
     candidate: &Candidate,
     filter_effect: SideEffect,
     consumer_effect: SideEffect,
@@ -334,7 +434,7 @@ fn apply_with_consumer(
     mut operators: Vec<screma::Operator>,
     count: Option<screma::Operator>,
     count_ty: Option<Type<TypeName>>,
-) {
+) -> EntryMetadataPatch {
     let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &consumer_effect.kind else {
         unreachable!();
     };
@@ -350,7 +450,6 @@ fn apply_with_consumer(
     };
     let old_resources = old_resources.clone();
 
-    let graph = graph_mut(inner, candidate.site);
     let count_neutral = count_ty.as_ref().map(|ty| integer_literal(graph, "0", ty));
     let count_project = if let (Some(mut count), Some(count_ty), Some(neutral)) =
         (count, count_ty.as_ref(), count_neutral)
@@ -427,26 +526,22 @@ fn apply_with_consumer(
         replace_lengths(graph, &candidate.lengths, project);
     }
     graph.skeleton.blocks[candidate.block].side_effects.remove(candidate.filter);
-    finish_entry_metadata(
-        inner,
-        candidate.site,
-        &candidate.lengths,
-        count_project.map(|(_, value)| value),
-        filter_effect.result,
-        Some(count_project.map(|(result, _)| result).unwrap_or(old_result)),
-        filter.scratch,
-    );
+    EntryMetadataPatch {
+        replacement: count_project.map(|(_, value)| value),
+        old_writer: filter_effect.result,
+        replacement_writer: Some(count_project.map(|(result, _)| result).unwrap_or(old_result)),
+        scratch: filter.scratch,
+    }
 }
 
-fn apply_count_only(
-    inner: &mut SemanticProgram,
+fn rewrite_count_only(
+    graph: &mut EGraph,
     candidate: &Candidate,
     filter_effect: SideEffect,
     filter: FilterParts,
     mut count: screma::Operator,
     count_ty: Type<TypeName>,
-) {
-    let graph = graph_mut(inner, candidate.site);
+) -> EntryMetadataPatch {
     let neutral = integer_literal(graph, "0", &count_ty);
     count.neutral = neutral;
     let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![count_ty.clone()]);
@@ -497,32 +592,21 @@ fn apply_count_only(
         };
         *resources = reads;
     }
-    finish_entry_metadata(
-        inner,
-        candidate.site,
-        &candidate.lengths,
-        Some(project),
-        filter_effect.result,
-        Some(result),
-        filter.scratch,
-    );
+    EntryMetadataPatch {
+        replacement: Some(project),
+        old_writer: filter_effect.result,
+        replacement_writer: Some(result),
+        scratch: filter.scratch,
+    }
 }
 
 fn finish_entry_metadata(
-    inner: &mut SemanticProgram,
-    site: FusionSite,
+    entry: &mut crate::egir::program::SemanticEntry,
     old_values: &[NodeId],
-    replacement: Option<NodeId>,
-    old_writer: Option<NodeId>,
-    replacement_writer: Option<NodeId>,
-    scratch: Option<SemanticResourceRef>,
+    patch: EntryMetadataPatch,
 ) {
-    let FusionSite::Entry(index) = site else {
-        return;
-    };
-    let entry = &mut inner.entry_points[index];
-    if let Some(replacement) = replacement {
-        for route in &mut entry.output_routes {
+    if let Some(replacement) = patch.replacement {
+        for route in entry.routes_mut() {
             if old_values.contains(&route.source.value) {
                 route.source.value = replacement;
             }
@@ -533,8 +617,8 @@ fn finish_entry_metadata(
             }
         }
     }
-    if let (Some(old_writer), Some(replacement_writer)) = (old_writer, replacement_writer) {
-        for route in &mut entry.output_routes {
+    if let (Some(old_writer), Some(replacement_writer)) = (patch.old_writer, patch.replacement_writer) {
+        for route in entry.routes_mut() {
             for writer in &mut route.writers {
                 if *writer == OutputWriter::Value(old_writer) {
                     *writer = OutputWriter::Value(replacement_writer);
@@ -542,7 +626,7 @@ fn finish_entry_metadata(
             }
         }
     }
-    if let Some(scratch) = scratch {
+    if let Some(scratch) = patch.scratch {
         entry.resource_declarations.retain(|declaration| declaration.resource != scratch);
     }
 }
@@ -566,7 +650,7 @@ fn extend_result(
     let projects: Vec<(NodeId, u32)> = graph
         .nodes
         .iter()
-        .filter_map(|(node, definition)| match definition {
+        .filter_map(|(node, definition)| match &definition.kind {
             ENode::Pure {
                 op: PureOp::Project { index },
                 operands,
@@ -590,7 +674,7 @@ fn extend_result(
             )
         })
         .collect();
-    let old_ty = graph.types[&old_result].clone();
+    let old_ty = graph.nodes[old_result].ty.clone();
     let rebuilt = graph.intern_pure(PureOp::Tuple(old_fields.len()), rebuilt_fields, old_ty, None);
     graph_ops::replace_all_references(graph, old_result, rebuilt);
     new_result
@@ -606,7 +690,8 @@ fn integer_literal(graph: &mut EGraph, value: &str, ty: &Type<TypeName>) -> Node
 
 #[allow(clippy::too_many_arguments)]
 fn masked_step(
-    inner: &mut SemanticProgram,
+    inner: &Program<Segmented>,
+    region_interner: &mut RegionInterner,
     scope: &str,
     span: crate::ast::Span,
     index: usize,
@@ -668,23 +753,16 @@ fn masked_step(
         consumer.return_ty.clone(),
         None,
     );
-    let control_headers = conditional_return(&mut graph, pred, args[0], reduced, accumulator_ty);
-    let name = fresh_region_name(inner, &format!("{scope}_filter_reduce_{index}"));
-    let region = inner.region_interner.intern(&name);
-    let function = SemanticFunc::new(
-        name,
-        span,
-        None,
-        params,
-        consumer.return_ty,
-        graph,
-        control_headers,
-    );
+    conditional_return(&mut graph, pred, args[0], reduced, accumulator_ty);
+    let name = fresh_region_name(region_interner, &format!("{scope}_filter_reduce_{index}"));
+    let region = region_interner.intern(&name);
+    let function = SemanticFunc::new(region, name, span, None, params, consumer.return_ty, graph);
     (SegBody { region, captures }, function)
 }
 
 fn count_operator(
-    inner: &mut SemanticProgram,
+    inner: &Program<Segmented>,
+    region_interner: &mut RegionInterner,
     scope: &str,
     span: crate::ast::Span,
     filter: &FilterParts,
@@ -740,17 +818,17 @@ fn count_operator(
         count_ty.clone(),
         None,
     );
-    let control_headers = conditional_return(&mut graph, pred, args[0], incremented, count_ty.clone());
-    let step_name = fresh_region_name(inner, &format!("{scope}_filter_count_step"));
-    let step_region = inner.region_interner.intern(&step_name);
+    conditional_return(&mut graph, pred, args[0], incremented, count_ty.clone());
+    let step_name = fresh_region_name(region_interner, &format!("{scope}_filter_count_step"));
+    let step_region = region_interner.intern(&step_name);
     let step = SemanticFunc::new(
+        step_region,
         step_name,
         span,
         None,
         params,
         count_ty.clone(),
         graph,
-        control_headers,
     );
 
     let mut combine_graph = EGraph::new();
@@ -764,9 +842,10 @@ fn count_operator(
     );
     combine_graph.skeleton.blocks[combine_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(sum));
-    let combine_name = fresh_region_name(inner, &format!("{scope}_filter_count_combine"));
-    let combine_region = inner.region_interner.intern(&combine_name);
+    let combine_name = fresh_region_name(region_interner, &format!("{scope}_filter_count_combine"));
+    let combine_region = region_interner.intern(&combine_name);
     let combine = SemanticFunc::new(
+        combine_region,
         combine_name,
         span,
         None,
@@ -776,7 +855,6 @@ fn count_operator(
         ],
         count_ty.clone(),
         combine_graph,
-        LookupMap::new(),
     );
     (
         screma::Operator {
@@ -806,7 +884,7 @@ fn conditional_return(
     fallback: NodeId,
     selected: NodeId,
     ty: Type<TypeName>,
-) -> LookupMap<BlockId, ControlHeader> {
+) {
     let entry = graph.skeleton.entry;
     let then_block = graph.skeleton.create_block();
     let merge = graph.skeleton.create_block();
@@ -823,7 +901,5 @@ fn conditional_return(
         args: vec![selected],
     };
     graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(result));
-    let mut headers = LookupMap::new();
-    headers.insert(entry, ControlHeader::Selection { merge });
-    headers
+    graph.skeleton.blocks[entry].control_header = Some(ControlHeader::Selection { merge });
 }

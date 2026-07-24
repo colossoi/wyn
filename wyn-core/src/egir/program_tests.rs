@@ -3,6 +3,11 @@
 
 use super::*;
 use crate::ast::{Span, TypeName};
+use crate::egir::allocation::{
+    entries_with_endpoints, plan_logical_resources, verify_allocated_resources, CompilerFlowEndpoint,
+    ResourcesAllocated,
+};
+use crate::egir::semantic_opt::Optimized;
 use crate::egir::types::{EGraph, RegionId};
 use crate::flow::ExecutionModel;
 use crate::pipeline_descriptor::PipelineDescriptor;
@@ -14,13 +19,13 @@ fn unit_ty() -> Type<TypeName> {
 
 fn empty_func(name: &str) -> SemanticFunc {
     SemanticFunc::new(
+        RegionId::from_index(0),
         name.to_string(),
         Span::dummy(),
         None,
         vec![],
         unit_ty(),
         EGraph::new(),
-        LookupMap::new(),
     )
 }
 
@@ -37,13 +42,34 @@ fn empty_entry(name: &str) -> SemanticEntry {
         vec![],
         unit_ty(),
         EGraph::new(),
-        LookupMap::new(),
     )
 }
 
-fn allocated_program(size: LogicalSize) -> AllocatedProgram {
+fn into_allocated(program: Program<crate::egir::reify::Segmented>) -> Program<ResourcesAllocated> {
+    let Program {
+        functions,
+        externs,
+        entry_points,
+        constants,
+        data,
+        global_context,
+    } = program;
+    Program::from_parts(
+        functions,
+        externs,
+        entry_points,
+        constants,
+        AllocatedProgramData {
+            core: data,
+            materializations: crate::IdArena::new(),
+        },
+        global_context,
+    )
+}
+
+fn allocated_program(size: LogicalSize) -> Program<ResourcesAllocated> {
     let binding = crate::BindingRef::new(0, 7);
-    let mut program = SemanticProgram::new(
+    let mut program = semantic_program_for_test(
         vec![],
         vec![],
         vec![empty_entry("main")],
@@ -51,24 +77,21 @@ fn allocated_program(size: LogicalSize) -> AllocatedProgram {
         PipelineDescriptor::default(),
         RegionInterner::default(),
     );
-    let resource = program.resources.allocate(ResourceOrigin::Host(binding), unit_ty(), size);
-    let resource_size = program.resources[resource].size.clone();
+    let resource = program.data.resources.allocate(ResourceOrigin::host(binding), unit_ty(), size);
+    let resource_size = program.data.resources[resource].size.clone();
     program.entry_points[0].resource_declarations.push(SemanticResourceDecl {
         resource: SemanticResourceRef(resource),
         role: crate::interface::StorageRole::Input,
         elem_ty: unit_ty(),
         size: resource_size,
     });
-    AllocatedProgram {
-        semantic: program,
-        materializations: crate::IdArena::new(),
-    }
+    into_allocated(program)
 }
 
 #[test]
 fn logical_allocation_introduces_the_allocated_sidecar() {
     let binding = crate::BindingRef::new(2, 3);
-    let mut semantic = SemanticProgram::new(
+    let mut semantic = semantic_program_for_test(
         vec![],
         vec![],
         vec![],
@@ -76,20 +99,19 @@ fn logical_allocation_introduces_the_allocated_sidecar() {
         PipelineDescriptor::default(),
         RegionInterner::default(),
     );
-    semantic.resources.allocate(ResourceOrigin::Host(binding), unit_ty(), LogicalSize::Unspecified);
+    semantic.data.resources.allocate(ResourceOrigin::host(binding), unit_ty(), LogicalSize::Unspecified);
 
-    let mut effect_ids = crate::IdSource::new();
-    let allocated = plan_logical_resources(semantic, &mut effect_ids).expect("logical resource planning");
+    let allocated =
+        plan_logical_resources(semantic.into_stage::<Optimized>()).expect("logical resource planning");
 
-    assert!(allocated.materializations.is_empty());
-    assert_eq!(allocated.resources.len(), 1);
-    assert_eq!(allocated.resources[0].host_binding(), Some(binding));
-    assert!(allocated.semantic_dependencies.is_empty());
+    assert!(allocated.data.materializations.is_empty());
+    assert_eq!(allocated.data.core.resources.len(), 1);
+    assert_eq!(allocated.data.core.resources[0].host_binding(), Some(binding));
 }
 
 #[test]
 fn semantic_entry_identity_is_stable_and_reused_by_flow_endpoints() {
-    let mut program = SemanticProgram::new(
+    let mut program = semantic_program_for_test(
         vec![],
         vec![],
         vec![empty_entry("first"), empty_entry("second")],
@@ -98,20 +120,16 @@ fn semantic_entry_identity_is_stable_and_reused_by_flow_endpoints() {
         RegionInterner::default(),
     );
 
-    let before = program.entry_ids().collect::<Vec<_>>();
+    let before = (0..program.entry_points.len()).map(SemanticEntryId).collect::<Vec<_>>();
     program.entry_points[0].name = "renamed".into();
-    let after = program.entry_ids().collect::<Vec<_>>();
+    let after = (0..program.entry_points.len()).map(SemanticEntryId).collect::<Vec<_>>();
     assert_ne!(before[0], before[1]);
     assert_eq!(
         after, before,
         "entry optimization must not remint semantic identity"
     );
-    let allocated = AllocatedProgram {
-        semantic: program,
-        materializations: crate::IdArena::new(),
-    };
-    let entries = allocated
-        .entries_with_endpoints()
+    let allocated = into_allocated(program);
+    let entries = entries_with_endpoints(&allocated)
         .map(|(endpoint, entry)| {
             let CompilerFlowEndpoint::Entry(id) = endpoint else {
                 unreachable!("program has no materializations")
@@ -132,7 +150,7 @@ fn allocated_resource_verifier_accepts_resource_only_program() {
 fn semantic_resource_ref_has_no_binding_constructor() {
     let mut resources = LogicalResourceArena::default();
     let resource = resources.allocate(
-        ResourceOrigin::Host(crate::BindingRef::new(0, 0)),
+        ResourceOrigin::host(crate::BindingRef::new(0, 0)),
         unit_ty(),
         LogicalSize::Unspecified,
     );
@@ -144,7 +162,7 @@ fn semantic_resource_ref_has_no_binding_constructor() {
 fn logical_resource_arena_owns_dense_identity_assignment() {
     let mut resources = LogicalResourceArena::default();
     let first = resources.allocate(
-        ResourceOrigin::Host(crate::BindingRef::new(0, 1)),
+        ResourceOrigin::host(crate::BindingRef::new(0, 1)),
         unit_ty(),
         LogicalSize::Unspecified,
     );
@@ -169,7 +187,7 @@ fn physicalization_rebuilds_resource_nodes_as_binding_nodes() {
     let binding = crate::BindingRef::new(3, 5);
     let mut resources = LogicalResourceArena::default();
     let resource = resources.allocate(
-        ResourceOrigin::Host(binding),
+        ResourceOrigin::host(binding),
         Type::Constructed(TypeName::UInt(32), vec![]),
         LogicalSize::Unspecified,
     );
@@ -186,14 +204,14 @@ fn physicalization_rebuilds_resource_nodes_as_binding_nodes() {
         physicalize_graph_resources(graph, &table).expect("resource graph should physicalize");
     let mapped_view = node_map[&view];
     assert!(matches!(
-        &physical.nodes[mapped_view],
+        &physical.nodes[mapped_view].kind,
         crate::egir::types::ENode::Pure {
             op: crate::egir::types::PureOp::StorageView(crate::op::PureViewSource::Storage(found)),
             ..
         } if *found == binding
     ));
     assert!(physical.nodes.values().all(|node| !matches!(
-        node,
+        &node.kind,
         crate::egir::types::ENode::Pure {
             op: crate::egir::types::PureOp::ResourceLen(_),
             ..
@@ -264,7 +282,7 @@ fn interner_assigns_dense_indices_and_deduplicates_names() {
 }
 
 /// Correctness risk #1 — index agreement. A `SegBody` built during TLC→EGIR
-/// conversion interns its callee *before* `SemanticProgram::new` walks the function
+/// conversion interns its callee before the program builder walks the function
 /// list, and the callee may appear later in that list than other functions.
 /// The arena entry for the callee must still land on the index the `SegBody`
 /// already holds.
@@ -275,7 +293,7 @@ fn segbody_index_resolves_to_its_arena_function() {
     let mut interner = RegionInterner::default();
     let op_id: RegionId = interner.intern("op");
 
-    let inner = SemanticProgram::new(
+    let inner = semantic_program_for_test(
         vec![empty_func("main"), empty_func("op")],
         vec![],
         vec![],
@@ -285,12 +303,12 @@ fn segbody_index_resolves_to_its_arena_function() {
     );
 
     // The pre-interned index is preserved and points at the right body.
-    assert_eq!(inner.region_interner.get("op"), Some(op_id));
+    assert_eq!(inner.data.region_interner.get("op"), Some(op_id));
     assert!(inner.contains_region(op_id), "callee region must be in the arena");
     assert_eq!(inner.region_name(op_id), "op");
     assert_eq!(inner.region(op_id).unwrap().name, "op");
-    // `main` was assigned its index by `SemanticProgram::new`, after `op`.
-    let main_id = inner.region_interner.get("main").expect("main interned");
+    // `main` was assigned its index by the program builder, after `op`.
+    let main_id = inner.data.region_interner.get("main").expect("main interned");
     assert_ne!(main_id, op_id);
     assert_eq!(inner.region_name(main_id), "main");
 }
@@ -301,7 +319,7 @@ fn segbody_index_resolves_to_its_arena_function() {
 /// `define_region`, and the body lands under it.
 #[test]
 fn define_region_records_the_body_under_the_reserved_index() {
-    let mut inner = SemanticProgram::new(
+    let mut inner = semantic_program_for_test(
         vec![empty_func("main")],
         vec![],
         vec![],
@@ -310,13 +328,16 @@ fn define_region_records_the_body_under_the_reserved_index() {
         RegionInterner::default(),
     );
 
-    let reserved = inner.intern_region("composed");
+    let reserved = inner.data.region_interner.intern("composed");
     assert!(
         !inner.contains_region(reserved),
         "reserving an index must not invent a body"
     );
 
-    let defined = inner.define_region(empty_func("composed"));
+    let mut composed = empty_func("composed");
+    composed.region = reserved;
+    let defined = composed.region;
+    inner = inner.extend_functions([composed]);
 
     assert_eq!(defined, reserved, "define_region honors the reserved index");
     assert_eq!(inner.region(defined).unwrap().name, "composed");

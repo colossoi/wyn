@@ -25,12 +25,12 @@
 use polytype::Type;
 
 use super::super::from_tlc::ConvertError;
+use super::super::ir::{Body, BodySite, Stage};
 use super::super::program::{Func, Program};
 use super::super::types::{
-    EGraph, ENode, EgirPhase, NodeId, PureOp, RegionId, SideEffectKind, SoacEffect, WynSoacPhase,
+    EGraph, ENode, NodeId, PureOp, RegionId, SideEffectKind, SoacEffect, WynSoacPhase,
 };
 use crate::ast::TypeName;
-use crate::LookupMap;
 
 /// One parameter retype: the callee `region`/function `name`, the parameter
 /// index, and the type its capture argument drifted to.
@@ -41,22 +41,17 @@ struct Retype {
     arg_ty: Type<TypeName>,
 }
 
-pub fn run<P: WynSoacPhase>(inner: &mut Program<P>) -> Result<(), ConvertError> {
-    let Program {
-        entry_points,
-        regions,
-        functions,
-        ..
-    } = inner;
-
+pub fn run<S>(program: Program<S>) -> Result<Program<S>, ConvertError>
+where
+    S: Stage,
+    S::Family: WynSoacPhase,
+{
     // Phase A: propagate drift through aggregate node types in every body, so a
     // record/tuple holding a retargeted array reflects the view at its field.
-    for entry in entry_points.iter_mut() {
-        recompute_aggregate_types(&mut entry.graph);
-    }
-    for func in functions.iter_mut() {
-        recompute_aggregate_types(&mut func.graph);
-    }
+    let mut program = program.map_graphs(|_, mut graph| {
+        recompute_aggregate_types(&mut graph);
+        graph
+    });
 
     // Phase B: reconcile callee parameters to their capture arguments. Retyping a
     // callee parameter re-propagates inside that callee (`recompute_aggregate_types`
@@ -68,15 +63,13 @@ pub fn run<P: WynSoacPhase>(inner: &mut Program<P>) -> Result<(), ConvertError> 
     for _ in 0..64 {
         let mut drifts: Vec<Retype> = Vec::new();
         collect_drifts(
-            entry_points.iter().map(|e| &e.graph),
-            regions,
-            functions,
+            program.entry_points.iter().map(|entry| &entry.graph),
+            &program.functions,
             &mut drifts,
         );
         collect_drifts(
-            functions.iter().map(|f| &f.graph),
-            regions,
-            functions,
+            program.functions.iter().map(|function| &function.graph),
+            &program.functions,
             &mut drifts,
         );
         if drifts.is_empty() {
@@ -84,18 +77,17 @@ pub fn run<P: WynSoacPhase>(inner: &mut Program<P>) -> Result<(), ConvertError> 
         }
         reject_shared_conflicts(&drifts)?;
         for drift in drifts {
-            apply(regions, functions, drift);
+            program = apply(program, drift);
         }
     }
 
-    Ok(())
+    Ok(program)
 }
 
 /// Scan every `Seg` body in `graphs` for a capture whose type has drifted
 /// view-ward from the callee parameter it binds, pushing a retype for each.
 fn collect_drifts<'a, P: WynSoacPhase + 'a>(
     graphs: impl Iterator<Item = &'a EGraph<P>>,
-    regions: &LookupMap<RegionId, usize>,
     functions: &[Func<P>],
     out: &mut Vec<Retype>,
 ) {
@@ -106,7 +98,7 @@ fn collect_drifts<'a, P: WynSoacPhase + 'a>(
                     continue;
                 };
                 for body in soac.seg_bodies() {
-                    let Some(region) = regions.get(&body.region).and_then(|&index| functions.get(index))
+                    let Some(region) = functions.iter().find(|function| function.region == body.region)
                     else {
                         continue;
                     };
@@ -117,7 +109,7 @@ fn collect_drifts<'a, P: WynSoacPhase + 'a>(
                     let base = region.params.len().saturating_sub(n_caps);
                     for (i, &capture) in body.captures.iter().enumerate() {
                         let param_index = base + i;
-                        let Some(cap_ty) = graph.types.get(&capture) else {
+                        let Some(cap_ty) = graph.nodes.get(capture).map(|node| &node.ty) else {
                             continue;
                         };
                         let Some(param_ty) = region.params.get(param_index).map(|(t, _)| t) else {
@@ -163,23 +155,29 @@ fn reject_shared_conflicts(drifts: &[Retype]) -> Result<(), ConvertError> {
 /// that share the name, plus each body's `FuncParam` node — then re-propagate
 /// aggregate types inside the callee so a projection out of the parameter sees
 /// the view.
-fn apply<P: EgirPhase>(
-    regions: &LookupMap<RegionId, usize>,
-    functions: &mut [Func<P>],
+fn apply<S: Stage>(
+    program: Program<S>,
     Retype {
         region,
         name: _,
         param_index,
         arg_ty,
     }: Retype,
-) {
-    if let Some(func) = regions.get(&region).and_then(|&index| functions.get_mut(index)) {
-        if let Some(slot) = func.params.get_mut(param_index) {
+) -> Program<S>
+where
+    S::Family: WynSoacPhase,
+{
+    program.rewrite_body(BodySite::Function(region), |body| {
+        let Body::Function(mut function) = body else {
+            unreachable!()
+        };
+        if let Some(slot) = function.params.get_mut(param_index) {
             slot.0 = arg_ty.clone();
         }
-        retype_func_param(&mut func.graph, param_index, &arg_ty);
-        recompute_aggregate_types(&mut func.graph);
-    }
+        retype_func_param(&mut function.graph, param_index, &arg_ty);
+        recompute_aggregate_types(&mut function.graph);
+        Body::Function(function)
+    })
 }
 
 /// Propagate storage-view representation *view-ward only* through `Tuple` and
@@ -196,16 +194,14 @@ fn apply<P: EgirPhase>(
 /// operand tuple; recomputing that projection from the still-composite tuple
 /// field would undo the retarget and oscillate. The view-ward gate keeps the
 /// retarget and makes the fixpoint monotone.
-fn recompute_aggregate_types<P: EgirPhase>(graph: &mut EGraph<P>) {
+fn recompute_aggregate_types<P: WynSoacPhase>(graph: &mut EGraph<P>) {
     loop {
         let mut updates: Vec<(NodeId, Type<TypeName>)> = Vec::new();
         for (nid, node) in &graph.nodes {
-            let ENode::Pure { op, operands } = node else {
+            let ENode::Pure { op, operands } = &node.kind else {
                 continue;
             };
-            let Some(cur) = graph.types.get(&nid) else {
-                continue;
-            };
+            let cur = &node.ty;
             let recomputed = match op {
                 PureOp::Tuple(_) => {
                     let Type::Constructed(name, _) = cur else {
@@ -214,8 +210,8 @@ fn recompute_aggregate_types<P: EgirPhase>(graph: &mut EGraph<P>) {
                     let mut args = Vec::with_capacity(operands.len());
                     let mut ready = true;
                     for &operand in operands.iter() {
-                        match graph.types.get(&operand) {
-                            Some(ty) => args.push(ty.clone()),
+                        match graph.nodes.get(operand) {
+                            Some(node) => args.push(node.ty.clone()),
                             None => {
                                 ready = false;
                                 break;
@@ -231,7 +227,8 @@ fn recompute_aggregate_types<P: EgirPhase>(graph: &mut EGraph<P>) {
                     let Some(&base) = operands.first() else {
                         continue;
                     };
-                    let Some(Type::Constructed(_, args)) = graph.types.get(&base) else {
+                    let Some(Type::Constructed(_, args)) = graph.nodes.get(base).map(|node| &node.ty)
+                    else {
                         continue;
                     };
                     let Some(field) = args.get(*index as usize) else {
@@ -273,8 +270,8 @@ fn is_view_ward_drift(param: &Type<TypeName>, cap: &Type<TypeName>) -> bool {
 }
 
 /// Retype the `FuncParam { index }` node in a region/function body graph.
-fn retype_func_param<P: EgirPhase>(graph: &mut EGraph<P>, index: usize, view_ty: &Type<TypeName>) {
-    let target = graph.nodes.iter().find_map(|(nid, node)| match node {
+fn retype_func_param<P: WynSoacPhase>(graph: &mut EGraph<P>, index: usize, view_ty: &Type<TypeName>) {
+    let target = graph.nodes.iter().find_map(|(nid, node)| match &node.kind {
         ENode::FuncParam { index: i } if *i == index => Some(nid),
         _ => None,
     });

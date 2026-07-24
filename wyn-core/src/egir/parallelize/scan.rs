@@ -21,7 +21,11 @@ pub(super) struct ScanPhase2Spec<'a> {
 }
 
 impl ScanPhase2Spec<'_> {
-    pub(super) fn build(self, effect_ids: &mut crate::IdSource<EffectToken>) -> Result<BuiltPhase, String> {
+    pub(super) fn build(
+        self,
+        semantic_ids: &mut crate::egir::program::SemanticOpIdSource,
+        effect_ids: &mut crate::IdSource<EffectToken>,
+    ) -> Result<BuiltPhase, String> {
         use crate::egir::builder::EntryBuilder;
 
         let mut accesses = vec![
@@ -44,6 +48,7 @@ impl ScanPhase2Spec<'_> {
         let mut builder = EntryBuilder::new_compute(
             format!("{}_phase2_scan_sums", self.entry_name),
             (1, 1, 1),
+            semantic_ids,
             effect_ids,
         );
         let scratch_len = dispatch_worker_logical_size(&self.elem_ty);
@@ -68,7 +73,7 @@ impl ScanPhase2Spec<'_> {
         let neutral = graph_ops::clone_pure_subgraph(self.source_graph, builder.graph_mut(), self.neutral)?;
         let phase = self.emit_loop(&mut builder, neutral);
         if let (Some(len_out), Some(total)) = (self.total_out, phase.total) {
-            let (graph, _, effect_ids) = builder.construction_parts_mut();
+            let (graph, effect_ids) = builder.construction_parts_mut();
             let len_view = graph_ops::intern_resource_view(graph, len_out, self.elem_ty.clone(), None);
             graph_ops::emit_storage_store(
                 graph,
@@ -96,7 +101,7 @@ impl ScanPhase2Spec<'_> {
         let arr_ty =
             crate::types::view_array_with_size(&elem_ty, Type::Variable(0), crate::types::no_buffer());
         let entry_block = builder.graph_mut().skeleton.entry;
-        let (graph, control_headers, effect_ids) = builder.construction_parts_mut();
+        let (graph, effect_ids) = builder.construction_parts_mut();
         let sums = graph_ops::intern_resource_view(graph, self.scratch.block_sums, arr_ty.clone(), None);
         let offsets = graph_ops::intern_resource_view(graph, self.scratch.block_offsets, arr_ty, None);
         let len = graph_ops::intern_resource_len(graph, self.scratch.block_sums, None);
@@ -121,13 +126,10 @@ impl ScanPhase2Spec<'_> {
             else_target: after,
             else_args: if want_total { vec![accumulator] } else { vec![] },
         };
-        control_headers.insert(
-            header,
-            ControlHeader::Loop {
-                merge: after,
-                continue_block: continuation,
-            },
-        );
+        graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+            merge: after,
+            continue_block: continuation,
+        });
 
         graph_ops::emit_storage_store(
             graph,
@@ -150,7 +152,8 @@ impl ScanPhase2Spec<'_> {
             target: continuation,
             args: vec![next_accumulator],
         };
-        let continued_accumulator = graph.add_block_param(continuation, graph.types[&accumulator].clone());
+        let continued_accumulator =
+            graph.add_block_param(continuation, graph.nodes[accumulator].ty.clone());
         let next_index = graph_ops::intern_binop(graph, "+", index, one, u32_ty, None);
         graph.skeleton.blocks[continuation].term = SkeletonTerminator::Branch {
             target: header,
@@ -179,7 +182,11 @@ pub(super) struct ScanPhase3Spec {
 }
 
 impl ScanPhase3Spec {
-    pub(super) fn build(self, effect_ids: &mut crate::IdSource<EffectToken>) -> Result<BuiltPhase, String> {
+    pub(super) fn build(
+        self,
+        semantic_ids: &mut crate::egir::program::SemanticOpIdSource,
+        effect_ids: &mut crate::IdSource<EffectToken>,
+    ) -> Result<BuiltPhase, String> {
         use crate::egir::builder::EntryBuilder;
 
         let resources = vec![
@@ -196,6 +203,7 @@ impl ScanPhase3Spec {
         let mut builder = EntryBuilder::new_compute(
             format!("{}_phase3_add_offsets", self.entry_name),
             (self.width, 1, 1),
+            semantic_ids,
             effect_ids,
         );
         builder.declare_output_storage(self.output_resource, self.elem_ty.clone());
@@ -312,12 +320,12 @@ pub(super) fn analyze_scan_candidate(
         return Ok(None);
     };
     let owner = located.owner;
-    let scratch_type = entry.graph.types[&operator.neutral].clone();
+    let scratch_type = entry.graph.nodes[operator.neutral].ty.clone();
     if crate::ssa::layout::type_byte_size(&scratch_type).is_none() {
         return Ok(None);
     }
-    let input_view_type = entry.graph.types[&input].clone();
-    let scan_output_view_type = entry.graph.types[&scan_output.node].clone();
+    let input_view_type = entry.graph.nodes[input].ty.clone();
+    let scan_output_view_type = entry.graph.nodes[scan_output.node].ty.clone();
     Ok(Some(ScanCandidate {
         site,
         owner,
@@ -384,9 +392,6 @@ impl KernelPlanBuilder<'_, '_> {
         );
         let block_id = site.block;
         let (block_sums_resource, block_offsets_resource) = (analysis.block_sums, analysis.block_offsets);
-        let op_func = self.callable_name(step_region).to_string();
-        let reduce_func = self.callable_name(combine_region).to_string();
-
         // Chunk the input and the scan output view; swap them into the operand list.
         let chunked = chunk_soac_inputs(
             &mut entry.graph,
@@ -403,7 +408,7 @@ impl KernelPlanBuilder<'_, '_> {
         }
         for (map_index, operand_index) in map_output_view_ops.iter().enumerate() {
             let original = entry.graph.skeleton.effect(site).operand_nodes[*operand_index];
-            let view_ty = entry.graph.types[&original].clone();
+            let view_ty = entry.graph.nodes[original].ty.clone();
             let chunked_view = chunk_view_like(
                 &mut entry.graph,
                 original,
@@ -446,11 +451,11 @@ impl KernelPlanBuilder<'_, '_> {
                     operators: screma::NonEmpty {
                         first: screma::Operator {
                             step: SegBody {
-                                region: self.intern_callable(&op_func),
+                                region: step_region,
                                 captures: step_capture_nodes,
                             },
                             combine: SegBody {
-                                region: self.intern_callable(&op_func),
+                                region: step_region,
                                 captures: vec![],
                             },
                             input_indices: vec![screma::InputId(0)],
@@ -507,25 +512,24 @@ impl KernelPlanBuilder<'_, '_> {
             block_sums: block_sums_resource,
             block_offsets: block_offsets_resource,
         };
+        let combine_name = self.region_interner.resolve(combine_region).clone();
         let phase2 = ScanPhase2Spec {
             entry_name: entry.name.clone(),
-            operator: reduce_func.clone(),
+            operator: combine_name.clone(),
             elem_ty: elem_ty.clone(),
             source_graph: &entry.graph,
             neutral: init_nid,
             scratch: scan_scratch,
             total_out: None,
         };
-        let mut phase2 = phase2.build(self.effect_ids)?;
+        let mut phase2 = phase2.build(self.semantic_ids, self.effect_ids)?;
         apply_manifest_resource_sizes(&mut phase2.body, self.resources);
         let swap_wrapper_name = format!("{}_scan_op_swap", entry.name);
-        let swap_wrapper = synthesize_swap_wrapper(
-            swap_wrapper_name.clone(),
-            reduce_func,
-            elem_ty.clone(),
-            entry.span,
-        );
-        let swap_region = self.define_callable(swap_wrapper)?;
+        let swap_elem_ty = elem_ty.clone();
+        let span = entry.span;
+        let swap_region = self.define_callable(swap_wrapper_name, |region, name| {
+            synthesize_swap_wrapper(region, name, combine_name, swap_elem_ty, span)
+        })?;
         let phase3 = ScanPhase3Spec {
             entry_name: entry.name.clone(),
             swap_region,
@@ -534,7 +538,7 @@ impl KernelPlanBuilder<'_, '_> {
             block_offsets: block_offsets_resource,
             width: total_threads,
         };
-        let mut phase3 = phase3.build(self.effect_ids)?;
+        let mut phase3 = phase3.build(self.semantic_ids, self.effect_ids)?;
         apply_manifest_resource_sizes(&mut phase3.body, self.resources);
 
         // Phase 1 is now a per-invocation Screma scan over the thread's chunk plus

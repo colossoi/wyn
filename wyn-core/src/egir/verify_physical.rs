@@ -2,10 +2,13 @@ use polytype::Type;
 
 use crate::ast::TypeName;
 
-use super::program::{visit_type_names_mut, PhysicalEGraph, PhysicalProgram, PhysicalResourceTable};
+use super::program::{visit_type_names_mut, PhysicalEGraph, PhysicalResourceTable, Program};
 use super::types::{SideEffectKind, SoacEffect};
 
-pub fn check(program: &PhysicalProgram, _physical_resources: &PhysicalResourceTable) -> Result<(), String> {
+pub fn check(
+    program: &Program<super::parallelize::Planned>,
+    _physical_resources: &PhysicalResourceTable,
+) -> Result<(), String> {
     for entry in &program.entry_points {
         for input in &entry.inputs {
             physical_type(&input.ty, &entry.name)?;
@@ -41,12 +44,10 @@ fn graph(graph: &PhysicalEGraph, owner: &str) -> Result<(), String> {
         .skeleton
         .verify_branch_arities()
         .map_err(|error| format!("physical body `{owner}` has invalid control flow: {error}"))?;
-    for ty in graph.types.values() {
-        physical_type(ty, owner)?;
-    }
     for node in graph.nodes.values() {
+        physical_type(&node.ty, owner)?;
         if matches!(
-            node,
+            &node.kind,
             super::types::ENode::Pure {
                 op: super::types::PureOp::ResourceLen(_),
                 ..

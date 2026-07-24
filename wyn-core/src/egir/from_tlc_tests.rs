@@ -19,23 +19,15 @@ use std::collections::{HashMap, HashSet};
 /// SPIR-V-specific dynamic-index rewrites.
 fn compile_via_egir(src: &str) -> Program<crate::ssa::stage::Elaborated> {
     let tlc = crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(src));
-    let mut binding_ids = crate::IdSource::<u32>::new();
-    let mut effect_ids = crate::IdSource::new();
-    crate::EgirRaw {
-        inner: run(&tlc, &mut binding_ids, &mut effect_ids).expect("egir::from_tlc conversion failed"),
-        binding_ids,
-        effect_ids,
-    }
-    .realize_outputs()
-    .expect("egir::realize_outputs failed")
-    .segment()
-    .optimize()
-    .allocate()
-    .expect("semantic EGIR allocation failed")
-    .plan(crate::LoweringProfile::PORTABLE)
-    .expect("semantic EGIR planning failed")
-    .lower_to_ssa()
-    .expect("semantic EGIR lowering failed")
+    let program = run(&tlc, crate::IdSource::<u32>::new(), crate::IdSource::new())
+        .expect("egir::from_tlc conversion failed");
+    let program = crate::egir::realize_outputs(program).expect("egir::realize_outputs failed");
+    let program = crate::egir::reify_soacs(program);
+    let program = crate::egir::optimize_semantics(program);
+    let program = crate::egir::plan_logical_resources(program).expect("semantic EGIR allocation failed");
+    let program = crate::egir::plan(program, crate::LoweringProfile::PORTABLE)
+        .expect("semantic EGIR planning failed");
+    crate::lower_egir_to_ssa(program).expect("semantic EGIR lowering failed")
 }
 
 use crate::ast::Span;
@@ -63,8 +55,8 @@ fn elaborate_converter(
     params: &[(Type<TypeName>, String)],
     return_ty: Type<TypeName>,
 ) -> FuncBody {
-    let (graph, control_headers) = converter.into_graph_parts();
-    let (graph, _, blocks) = graph
+    let graph = converter.into_graph();
+    let (graph, _, _) = graph
         .try_map_resources_and_phase::<crate::egir::types::Physical, String>(
             |resource| {
                 Err(format!(
@@ -74,15 +66,7 @@ fn elaborate_converter(
             |_, _, _| Err("unit-test graph unexpectedly contains an unexpanded SOAC".into()),
         )
         .expect("unit-test graph should be directly physicalizable");
-    let control_headers =
-        crate::egir::program::remap_control_headers(&control_headers, |block| blocks[&block]);
-    crate::egir::elaborate::elaborate_one_body(
-        graph,
-        &control_headers,
-        &crate::LookupMap::new(),
-        params,
-        return_ty,
-    )
+    crate::egir::elaborate::elaborate_one_body(graph, params, return_ty)
 }
 
 /// Build a minimal TLC def and convert it via EGraph.
@@ -639,13 +623,13 @@ def wrapper(x: i32) i32 =
 entry e(xs: []i32) []i32 = map(wrapper, xs)
 "#;
     let tlc = crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(source));
-    let mut binding_ids = crate::IdSource::<u32>::new();
-    let mut effect_ids = crate::IdSource::new();
-    let raw = run(&tlc, &mut binding_ids, &mut effect_ids).expect("TLC-to-EGIR construction succeeds");
+    let binding_ids = crate::IdSource::<u32>::new();
+    let effect_ids = crate::IdSource::new();
+    let raw = run(&tlc, binding_ids, effect_ids).expect("TLC-to-EGIR construction succeeds");
     let wrapper = raw.functions.iter().find(|function| function.name == "wrapper").unwrap();
 
     assert!(wrapper.graph.nodes.values().any(|node| matches!(
-        node,
+        &node.kind,
         ENode::Pure {
             op: PureOp::Call(callee),
             ..
@@ -796,9 +780,9 @@ entry vertex_main(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: 
     );
     wrap_arrow_return_in_marker(&mut def.ty);
 
-    let mut binding_ids = crate::IdSource::<u32>::new();
-    let mut effect_ids = crate::IdSource::new();
-    let egir = super::run(&tlc_program, &mut binding_ids, &mut effect_ids)
+    let binding_ids = crate::IdSource::<u32>::new();
+    let effect_ids = crate::IdSource::new();
+    let egir = super::run(&tlc_program, binding_ids, effect_ids)
         .expect("from_tlc::run on graphics entry must succeed");
     let entry =
         egir.entry_points.iter().find(|e| e.name == "vertex_main").expect("vertex_main SemanticEntry");

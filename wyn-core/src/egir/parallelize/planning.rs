@@ -9,9 +9,10 @@ use crate::egir::soac::screma;
 use crate::egir::types::{EGraph, SideEffect, SideEffectKind, SideEffectSite, Soac, SoacEffect};
 
 use super::model::{CandidateSelection, ParallelizeError, Result};
+use crate::egir::allocation::{self, CompilerFlowEndpoint, ResourcesAllocated};
 use crate::egir::program::{
-    AllocatedProgram, CompilerFlowEndpoint, CompilerResource, CompilerResourceKey, CompilerResourceKind,
-    LogicalResourceArena, LogicalSize, SemanticOpId,
+    CompilerResource, CompilerResourceKey, CompilerResourceKind, LogicalResourceArena, LogicalSize,
+    Program, SemanticOpId,
 };
 use crate::egir::types::SegExtent;
 
@@ -319,9 +320,12 @@ pub(super) struct AnalyzedPlan {
 }
 
 impl AnalyzedPlan {
-    /// Allocate exactly the scratch requested by successfully selected recipes.
-    /// This is the first mutation after immutable analysis has completed.
-    pub(super) fn allocate_scratch(mut self, inner: &mut AllocatedProgram) -> Result<RecipeIndex> {
+    /// Allocate exactly the scratch requested by successfully selected recipes,
+    /// rebuilding the program-owned resource arena after immutable analysis.
+    pub(super) fn allocate_scratch(
+        mut self,
+        program: Program<ResourcesAllocated>,
+    ) -> Result<(Program<ResourcesAllocated>, RecipeIndex)> {
         self.requests.sort_by_key(|request| {
             (
                 request.endpoint,
@@ -332,15 +336,26 @@ impl AnalyzedPlan {
         });
 
         let mut bindings = ScratchBindings { ids: HashMap::new() };
+        let Program {
+            functions,
+            externs,
+            entry_points,
+            constants,
+            mut data,
+            global_context,
+        } = program;
         for request in self.requests {
-            let id = inner.alloc_compiler_resource(
+            let id = data.alloc_compiler_resource(
                 CompilerResource::new(request.key.kind, Some(request.key.owner), request.key.slot),
                 request.elem_ty,
                 request.size,
             );
             bindings.ids.insert(request.key, id);
         }
-        Ok(self.recipes.bind_scratch(&bindings))
+        Ok((
+            Program::from_parts(functions, externs, entry_points, constants, data, global_context),
+            self.recipes.bind_scratch(&bindings),
+        ))
     }
 
     pub(super) fn serial_recipes(self) -> RecipeIndex {
@@ -369,12 +384,12 @@ fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBinding
 
 /// Analyze every projected endpoint once. Recipes retain their projected body
 /// and graph-local handles until emission consumes the endpoint plan.
-pub(super) fn analyze(inner: &AllocatedProgram) -> Result<AnalyzedPlan> {
+pub(super) fn analyze(inner: &Program<ResourcesAllocated>) -> Result<AnalyzedPlan> {
     let mut recipes = RecipeIndex::parallel();
     let mut requests = Vec::new();
-    for (endpoint, entry) in inner.entries_with_endpoints() {
+    for (endpoint, entry) in allocation::entries_with_endpoints(inner) {
         let (plan, endpoint_requests, required_elements) =
-            analyze_endpoint(entry, endpoint, &inner.resources)?;
+            analyze_endpoint(entry, endpoint, &inner.data.core.resources)?;
         recipes.insert(endpoint, plan)?;
         if let Some(count) = required_elements {
             recipes.required_elements.insert(endpoint, count);

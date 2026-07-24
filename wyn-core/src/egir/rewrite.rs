@@ -5,18 +5,29 @@
 //! place, and `extract` picks the cheaper side during elaboration, so the
 //! crossover point lives in `extract::op_cost`, not in the rule.
 //!
-//! Rules run once, over the physical program (`run`, called from
-//! `EgirPlanned::lower_to_ssa`): after fusion and planning — whose subgraph
+//! Rules run once over the physical program after fusion and planning—whose subgraph
 //! clones reject unions — and right before the only consumers that resolve
 //! them (`skel_opt` scopes unions out; `elaborate` extracts).
+
+/// Physical EGIR after pure-graph rewrite alternatives have been installed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Rewritten;
+
+impl super::ir::Stage for Rewritten {
+    type Family = super::types::Physical;
+    type ResourceDecl = crate::interface::StorageBindingDecl;
+    type OutputRoute = super::ir::RealizedOutputRoute;
+    type ProgramData = super::program::CoreProgramData;
+    type GlobalContext = super::program::PlannedGlobal;
+}
 
 use polytype::Type;
 use smallvec::smallvec;
 
 use crate::ast::TypeName;
 
-use super::program::PhysicalProgram;
-use super::types::{EGraph, ENode, EgirPhase, NodeId, PureOp};
+use super::program::Program;
+use super::types::{EGraph, ENode, Family, NodeId, PureOp};
 
 /// Result of attempting a rewrite on a node.
 pub enum RewriteResult {
@@ -33,7 +44,7 @@ pub enum RewriteResult {
 }
 
 /// A rewrite rule applied to each pure node of the graph.
-pub trait RewriteRule<P: EgirPhase> {
+pub trait RewriteRule<P: Family> {
     /// Try to rewrite `node`. The graph is mutable so rules can intern new
     /// nodes for the RHS. The returned node must not contain `node` in its
     /// operand cone.
@@ -41,11 +52,11 @@ pub trait RewriteRule<P: EgirPhase> {
 }
 
 /// A collection of rewrite rules.
-pub struct RewriteSet<P: EgirPhase> {
+pub struct RewriteSet<P: Family> {
     rules: Vec<Box<dyn RewriteRule<P>>>,
 }
 
-impl<P: EgirPhase> RewriteSet<P> {
+impl<P: Family> RewriteSet<P> {
     pub fn new() -> Self {
         RewriteSet { rules: Vec::new() }
     }
@@ -61,7 +72,7 @@ impl<P: EgirPhase> RewriteSet<P> {
         let ids: Vec<NodeId> = graph
             .nodes
             .iter()
-            .filter(|(_, node)| matches!(node, ENode::Pure { .. }))
+            .filter(|(_, node)| matches!(&node.kind, ENode::Pure { .. }))
             .map(|(id, _)| id)
             .collect();
         let mut changed = false;
@@ -93,22 +104,20 @@ impl<P: EgirPhase> RewriteSet<P> {
     }
 }
 
-/// Apply the default rewrite set to every function and entry graph of the
-/// physical program. Runs between materialization and skeleton
-/// optimization, so elaboration's cost extraction is what resolves the
-/// unions it creates.
-pub fn run(program: &mut PhysicalProgram) {
+/// Apply the default rewrite set to every physical body. Elaboration's cost
+/// extraction resolves the unions introduced here.
+pub fn run(program: Program<super::partial_inline::PartiallyInlined>) -> Program<Rewritten> {
     let rules = default_rewrites();
-    for f in &mut program.functions {
-        rules.apply_to_graph(&mut f.graph);
-    }
-    for e in &mut program.entry_points {
-        rules.apply_to_graph(&mut e.graph);
-    }
+    program
+        .map_graphs(|_, mut graph| {
+            rules.apply_to_graph(&mut graph);
+            graph
+        })
+        .into_stage()
 }
 
 /// Every rule whose outcome is arbitrated by cost extraction.
-pub fn default_rewrites<P: EgirPhase>() -> RewriteSet<P> {
+pub fn default_rewrites<P: Family>() -> RewriteSet<P> {
     let mut set = RewriteSet::new();
     set.add(Box::new(PowToMulChain));
     set
@@ -137,12 +146,12 @@ const MAX_CHAIN: u32 = 16;
 /// write the intended `dot(v, v)` / `magnitude(v) ** k` form.
 pub struct PowToMulChain;
 
-impl<P: EgirPhase> RewriteRule<P> for PowToMulChain {
+impl<P: Family> RewriteRule<P> for PowToMulChain {
     fn try_rewrite(&self, graph: &mut EGraph<P>, node: NodeId) -> RewriteResult {
         let ENode::Pure {
             op: PureOp::BinOp(name),
             operands,
-        } = &graph.nodes[node]
+        } = &graph.nodes[node].kind
         else {
             return RewriteResult::NoMatch;
         };
@@ -150,7 +159,7 @@ impl<P: EgirPhase> RewriteRule<P> for PowToMulChain {
             return RewriteResult::NoMatch;
         }
         let (base, exp) = (operands[0], operands[1]);
-        let result_ty = graph.types[&node].clone();
+        let result_ty = graph.nodes[node].ty.clone();
         if matches!(result_ty, Type::Constructed(TypeName::Vec, _)) {
             return RewriteResult::NoMatch;
         }

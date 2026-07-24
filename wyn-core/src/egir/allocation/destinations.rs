@@ -49,24 +49,23 @@ use std::collections::{HashMap, HashSet};
 
 use polytype::Type;
 
-use super::graph_ops;
-use super::program::AllocatedProgram;
-use super::soac::filter;
-use super::types::{
+use super::super::graph_ops;
+use super::super::program::Program;
+use super::super::soac::filter;
+use super::super::types::{
     EGraph, ENode, NodeId, PureOp, SideEffectKind, Soac, SoacDestination, SoacEffect, SoacPlacement,
 };
+use super::ResourcesAllocated;
 use crate::ast::TypeName;
 use crate::flow::BlockId;
 use crate::types::TypeExt;
 
 /// Resolve every outstanding unique-input capability to a physical destination.
-pub(super) fn resolve_destinations(program: &mut AllocatedProgram) {
-    for entry in &mut program.entry_points {
-        resolve_graph_destinations(&mut entry.graph);
-    }
-    for function in &mut program.functions {
-        resolve_graph_destinations(&mut function.graph);
-    }
+pub(super) fn run(program: Program<ResourcesAllocated>) -> Program<ResourcesAllocated> {
+    program.map_graphs(|_, mut graph| {
+        resolve_graph_destinations(&mut graph);
+        graph
+    })
 }
 
 fn resolve_graph_destinations(graph: &mut EGraph) {
@@ -132,7 +131,7 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
             input_use_counts.get(&input) == Some(&1)
                 && claimed_inputs.insert(input)
                 && operands.get(input).is_some_and(|&node| {
-                    input_has_reusable_storage(&graph.types[&node])
+                    input_has_reusable_storage(&graph.nodes[node].ty)
                         && input_has_no_later_observers(&uses, block_id, effect_index, node)
                 })
         };
@@ -174,7 +173,7 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
 
         let resolved_filter = filter_has_candidate.then(|| {
             if operands.first().is_some_and(|&input| {
-                input_has_reusable_storage(&graph.types[&input])
+                input_has_reusable_storage(&graph.nodes[input].ty)
                     && input_has_no_later_observers(&uses, block_id, effect_index, input)
             }) {
                 SoacDestination::unique_input().placed(SoacPlacement::InputBuffer)
@@ -221,7 +220,7 @@ fn retype_reused_results(graph: &mut EGraph, block: BlockId, effect_index: usize
     let projections: Vec<_> = graph
         .nodes
         .iter()
-        .filter_map(|(node, definition)| match definition {
+        .filter_map(|(node, definition)| match &definition.kind {
             ENode::Pure {
                 op: PureOp::Project { index },
                 operands,
@@ -238,7 +237,7 @@ fn retype_reused_results(graph: &mut EGraph, block: BlockId, effect_index: usize
         // storage view. Preserve those later EGIR decisions while changing
         // only fields whose uniqueness candidate became a physical reuse.
         for (projection, field) in &projections {
-            retyped[*field] = graph.types[projection].clone();
+            retyped[*field] = graph.nodes[*projection].ty.clone();
         }
         let mut changed = false;
         for (lane, map) in op.lanes().maps.iter().enumerate() {

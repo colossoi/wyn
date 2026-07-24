@@ -28,27 +28,39 @@ use crate::ast::TypeName;
 use crate::ssa::types::ConstantValue;
 use crate::types::TypeExt;
 
-use super::program::PhysicalProgram;
-use super::types::{EGraph, ENode, EgirPhase, NodeId, PureOp};
+/// Physical EGIR with dynamic composite extraction made explicit.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Materialized;
 
-/// Run `run_one_body` on every function and entry point in the program.
-pub(crate) fn run(inner: &mut PhysicalProgram) {
-    for f in &mut inner.functions {
-        run_one_body(&mut f.graph);
-    }
-    for e in &mut inner.entry_points {
-        run_one_body(&mut e.graph);
-    }
+impl super::ir::Stage for Materialized {
+    type Family = super::types::Physical;
+    type ResourceDecl = crate::interface::StorageBindingDecl;
+    type OutputRoute = super::ir::RealizedOutputRoute;
+    type ProgramData = super::program::CoreProgramData;
+    type GlobalContext = super::program::PlannedGlobal;
+}
+
+use super::program::Program;
+use super::types::{EGraph, ENode, Family, NodeId, PureOp};
+
+/// Make dynamic composite extraction explicit in every body.
+pub fn run(program: Program<super::soac_expand::SoacsExpanded>) -> Program<Materialized> {
+    program
+        .map_graphs(|_, mut graph| {
+            run_one_body(&mut graph);
+            graph
+        })
+        .into_stage()
 }
 
 /// Rewrite all dynamic Index nodes in the e-graph to Materialize +
 /// DynamicExtract.
-fn run_one_body<P: EgirPhase>(graph: &mut EGraph<P>) {
+fn run_one_body<P: Family>(graph: &mut EGraph<P>) {
     // Snapshot first; we'll mutate node entries and add new Materialize nodes.
     let targets: Vec<(NodeId, NodeId, NodeId)> = graph
         .nodes
         .iter()
-        .filter_map(|(nid, node)| match node {
+        .filter_map(|(nid, node)| match &node.kind {
             ENode::Pure {
                 op: PureOp::Index,
                 operands,
@@ -66,7 +78,7 @@ fn run_one_body<P: EgirPhase>(graph: &mut EGraph<P>) {
         .collect();
 
     for (index_nid, arr_nid, idx_nid) in targets {
-        let arr_ty = graph.types[&arr_nid].clone();
+        let arr_ty = graph.nodes[arr_nid].ty.clone();
 
         // Materialize is hash-consed: two Index(arr, _) share the same
         // Materialize(arr) handle automatically.
@@ -74,17 +86,17 @@ fn run_one_body<P: EgirPhase>(graph: &mut EGraph<P>) {
 
         // Replace the original Index node in place with DynamicExtract(mat, idx).
         // The NodeId stays the same so all consumers continue to resolve through it.
-        // graph.types[index_nid] is unchanged (still elem_ty).
+        // The node's stored type is unchanged (still elem_ty).
         graph.replace_pure_node(index_nid, PureOp::DynamicExtract, smallvec![mat_nid, idx_nid]);
     }
 }
 
 /// Is `nid`'s array type a storage view? `lower_index` reads a view with a
 /// native dynamic `OpAccessChain`, so it must not be spilled to a composite.
-fn is_view<P: EgirPhase>(graph: &EGraph<P>, nid: NodeId) -> bool {
-    graph.types.get(&nid).is_some_and(|ty| {
+fn is_view<P: Family>(graph: &EGraph<P>, nid: NodeId) -> bool {
+    graph.nodes.get(nid).is_some_and(|node| {
         matches!(
-            ty.array_variant(),
+            node.ty.array_variant(),
             Some(Type::Constructed(TypeName::ArrayVariantView, _))
         )
     })
@@ -92,8 +104,8 @@ fn is_view<P: EgirPhase>(graph: &EGraph<P>, nid: NodeId) -> bool {
 
 /// Is this NodeId a compile-time integer constant? Includes both the inline
 /// `ENode::Constant(ConstantValue::I32|U32)` form and `ENode::Pure(PureOp::Int|Uint)`.
-fn is_const_int<P: EgirPhase>(graph: &EGraph<P>, nid: NodeId) -> bool {
-    match &graph.nodes[nid] {
+fn is_const_int<P: Family>(graph: &EGraph<P>, nid: NodeId) -> bool {
+    match &graph.nodes[nid].kind {
         ENode::Constant(ConstantValue::I32(_) | ConstantValue::U32(_)) => true,
         ENode::Pure {
             op: PureOp::Int(_) | PureOp::Uint(_),

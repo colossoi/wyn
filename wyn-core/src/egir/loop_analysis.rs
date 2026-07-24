@@ -1,9 +1,9 @@
 //! Loop analysis over the skeleton CFG.
 //!
-//! A block is a loop header iff `control_headers` maps it to
-//! `ControlHeader::Loop`. The body of that loop is the set of blocks
-//! reachable from the header without crossing its `merge` block, which
-//! sits at the loop's exit. Headers themselves are inside their own loop.
+//! A block is a loop header iff it owns a `ControlHeader::Loop`. The body of
+//! that loop is the set of blocks reachable from the header without crossing
+//! its `merge` block, which sits at the loop's exit. Headers themselves are
+//! inside their own loop.
 //!
 //! For LICM, we only need:
 //! - `is_header(b)` — do we need to push a loop frame when we enter `b`?
@@ -12,7 +12,8 @@
 use crate::flow::{BlockId, ControlHeader};
 use crate::{LookupMap, LookupSet};
 
-use super::types::{EGraph, ENode, EgirPhase, NodeId, Skeleton, SkeletonTerminator};
+use super::ir::Family;
+use super::types::{EGraph, ENode, NodeId, Skeleton, SkeletonTerminator};
 
 pub struct LoopAnalysis {
     /// All blocks inside each loop (key = loop header).
@@ -20,14 +21,14 @@ pub struct LoopAnalysis {
 }
 
 impl LoopAnalysis {
-    pub fn build<P: EgirPhase>(
-        skeleton: &Skeleton<P>,
-        control_headers: &LookupMap<BlockId, ControlHeader>,
-    ) -> Self {
+    pub fn build<P: Family>(skeleton: &Skeleton<P>) -> Self {
         let mut bodies: LookupMap<BlockId, LookupSet<BlockId>> = LookupMap::new();
 
         // Collect every header and DFS its body, stopping at `merge`.
-        for (&header, ch) in control_headers {
+        for (header, block) in &skeleton.blocks {
+            let Some(ch) = &block.control_header else {
+                continue;
+            };
             let merge = match ch {
                 ControlHeader::Loop { merge, .. } => *merge,
                 ControlHeader::Selection { .. } => continue,
@@ -68,7 +69,7 @@ impl LoopAnalysis {
 /// Constants and function parameters have no CFG-local definition; block and
 /// effect values use their defining block; pure values recursively require
 /// every operand to be invariant.
-pub struct LoopInvariance<'a, P: EgirPhase> {
+pub struct LoopInvariance<'a, P: Family> {
     graph: &'a EGraph<P>,
     loops: &'a LoopAnalysis,
     header: BlockId,
@@ -76,7 +77,7 @@ pub struct LoopInvariance<'a, P: EgirPhase> {
     memo: LookupMap<NodeId, bool>,
 }
 
-impl<'a, P: EgirPhase> LoopInvariance<'a, P> {
+impl<'a, P: Family> LoopInvariance<'a, P> {
     pub fn new(graph: &'a EGraph<P>, loops: &'a LoopAnalysis, header: BlockId) -> Self {
         let mut effect_blocks = LookupMap::new();
         for (block, body) in &graph.skeleton.blocks {
@@ -99,7 +100,7 @@ impl<'a, P: EgirPhase> LoopInvariance<'a, P> {
         if let Some(value) = self.memo.get(&node) {
             return *value;
         }
-        let invariant = match self.graph.nodes[node].clone() {
+        let invariant = match self.graph.nodes[node].kind.clone() {
             ENode::Constant(_) | ENode::FuncParam { .. } => true,
             ENode::BlockParam { block, .. } => self.loops.block_is_invariant(block, self.header),
             ENode::SideEffectResult => self
@@ -118,7 +119,7 @@ impl<'a, P: EgirPhase> LoopInvariance<'a, P> {
 
 /// DFS the skeleton from `header`, stopping at `merge`. The header itself
 /// is included; `merge` is not.
-fn collect_loop_body<P: EgirPhase>(
+fn collect_loop_body<P: Family>(
     skeleton: &Skeleton<P>,
     header: BlockId,
     merge: BlockId,

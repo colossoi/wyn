@@ -29,16 +29,17 @@ use polytype::Type;
 use crate::ast::TypeName;
 use crate::types::TypeExt;
 
+use super::super::allocation::{entries_with_endpoints, CompilerFlowEndpoint, ResourcesAllocated};
 use super::super::from_tlc::ConvertError;
-use super::super::program::{AllocatedProgram, Entry};
-use super::super::types::{EGraph, ENode, EgirPhase, NodeId, SkeletonTerminator};
+use super::super::program::{Program, SemanticEntry};
+use super::super::types::{EGraph, ENode, Family, NodeId, SkeletonTerminator};
 
 /// Verify the post-realization invariant for every entry. Returns
 /// `ConvertError::Internal` on the first violation, naming the entry
 /// and offending NodeId.
-pub fn check(inner: &AllocatedProgram) -> Result<(), ConvertError> {
-    for (endpoint, entry) in inner.entries_with_endpoints() {
-        if matches!(endpoint, super::super::program::CompilerFlowEndpoint::Entry(_)) {
+pub fn check(inner: &Program<ResourcesAllocated>) -> Result<(), ConvertError> {
+    for (endpoint, entry) in entries_with_endpoints(inner) {
+        if matches!(endpoint, CompilerFlowEndpoint::Entry(_)) {
             check_routes(entry)?;
         }
         check_entry(&entry.name, &entry.graph)?;
@@ -46,35 +47,27 @@ pub fn check(inner: &AllocatedProgram) -> Result<(), ConvertError> {
     Ok(())
 }
 
-fn check_routes<P: EgirPhase>(entry: &Entry<P>) -> Result<(), ConvertError> {
-    for route in &entry.output_routes {
-        if route.slot.0 >= entry.outputs.len() {
-            return Err(ConvertError::Internal(format!(
-                "realize_outputs verifier: entry `{}` has a route to output slot {} but declares only {} outputs",
-                entry.name,
-                route.slot.0,
-                entry.outputs.len()
-            )));
-        }
-        if route.writers.is_empty() {
-            return Err(ConvertError::Internal(format!(
-                "realize_outputs verifier: entry `{}` output slot {} has a source value but no realized writer",
-                entry.name, route.slot.0
-            )));
-        }
-    }
-    for slot in 0..entry.outputs.len() {
-        if !entry.output_routes.iter().any(|route| route.slot.0 == slot) {
+fn check_routes(entry: &SemanticEntry) -> Result<(), ConvertError> {
+    for (slot, output) in entry.outputs.iter().enumerate() {
+        if output.routes.is_empty() {
             return Err(ConvertError::Internal(format!(
                 "realize_outputs verifier: entry `{}` output slot {} has no explicit route",
                 entry.name, slot
             )));
         }
+        for route in &output.routes {
+            if route.writers.is_empty() {
+                return Err(ConvertError::Internal(format!(
+                    "realize_outputs verifier: entry `{}` output slot {} has a source value but no realized writer",
+                    entry.name, slot
+                )));
+            }
+        }
     }
     Ok(())
 }
 
-fn check_entry<P: EgirPhase>(entry_name: &str, graph: &EGraph<P>) -> Result<(), ConvertError> {
+fn check_entry<P: Family>(entry_name: &str, graph: &EGraph<P>) -> Result<(), ConvertError> {
     // Roots: the operand of every Return(Some(_)) terminator, plus
     // every Pure NodeId referenced by a side-effect store's operands.
     // We don't walk SOAC `EgirSoac` operands here: those are
@@ -107,7 +100,7 @@ fn check_entry<P: EgirPhase>(entry_name: &str, graph: &EGraph<P>) -> Result<(), 
         if !seen.insert(nid) {
             continue;
         }
-        let ENode::Pure { operands, .. } = &graph.nodes[nid] else {
+        let ENode::Pure { operands, .. } = &graph.nodes[nid].kind else {
             continue;
         };
         if let Some(ty) = node_type(graph, nid) {
@@ -130,9 +123,9 @@ fn check_entry<P: EgirPhase>(entry_name: &str, graph: &EGraph<P>) -> Result<(), 
 
 /// Look up the Pure result type for `nid`. ENode::Pure carries its
 /// declared type; we just project the field.
-fn node_type<P: EgirPhase>(graph: &EGraph<P>, nid: NodeId) -> Option<&Type<TypeName>> {
-    match &graph.nodes[nid] {
-        ENode::Pure { .. } => graph.types.get(&nid),
+fn node_type<P: Family>(graph: &EGraph<P>, nid: NodeId) -> Option<&Type<TypeName>> {
+    match &graph.nodes[nid].kind {
+        ENode::Pure { .. } => Some(&graph.nodes[nid].ty),
         _ => None,
     }
 }

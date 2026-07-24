@@ -8,13 +8,12 @@
 use polytype::Type;
 use smallvec::SmallVec;
 
-use super::vertical::{
-    capture_types, fresh_region_name, graph_and_span, graph_mut, producer_is_used_only_by, FusionSite,
-};
+use super::{capture_types, graph_and_span, producer_is_used_only_by};
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
-use crate::egir::ir::splice_effect_tokens;
-use crate::egir::program::{SemanticFunc, SemanticProgram};
+use crate::egir::ir::{splice_effect_tokens, Body, BodySite};
+use crate::egir::program::{fresh_region_name, CoreProgramData, Program, RegionInterner, SemanticFunc};
+use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::{filter, hist, screma};
 use crate::egir::types::{
@@ -31,8 +30,8 @@ enum EnvelopeKind {
 }
 
 #[derive(Clone)]
-struct Candidate {
-    site: FusionSite,
+pub(super) struct Candidate {
+    site: BodySite,
     block: BlockId,
     producer: usize,
     consumer: usize,
@@ -50,32 +49,26 @@ struct ProducerParts {
     output_elem_type: Type<TypeName>,
 }
 
-pub fn fuse_producer_into_envelope(inner: &mut SemanticProgram, oracle: &SemanticGraph) -> bool {
-    let Some(candidate) = find_candidate(inner, oracle) else {
-        return false;
-    };
-    match candidate.kind {
-        EnvelopeKind::Filter => apply_filter(inner, candidate),
-        EnvelopeKind::Hist => apply_hist(inner, candidate),
-    }
-    true
+pub(super) fn analyze(inner: &Program<Segmented>, oracle: &SemanticGraph) -> Option<Candidate> {
+    find_candidate(inner, oracle)
 }
 
-fn find_candidate(inner: &SemanticProgram, oracle: &SemanticGraph) -> Option<Candidate> {
+fn find_candidate(inner: &Program<Segmented>, oracle: &SemanticGraph) -> Option<Candidate> {
     for (index, entry) in inner.entry_points.iter().enumerate() {
-        if let Some(candidate) = find_in_graph(&entry.graph, FusionSite::Entry(index), oracle) {
+        if let Some(candidate) = find_in_graph(&entry.graph, BodySite::Entry(index), oracle) {
             return Some(candidate);
         }
     }
-    for (index, function) in inner.functions.iter().enumerate() {
-        if let Some(candidate) = find_in_graph(&function.graph, FusionSite::Function(index), oracle) {
+    for function in &inner.functions {
+        if let Some(candidate) = find_in_graph(&function.graph, BodySite::Function(function.region), oracle)
+        {
             return Some(candidate);
         }
     }
     None
 }
 
-fn find_in_graph(graph: &EGraph, site: FusionSite, oracle: &SemanticGraph) -> Option<Candidate> {
+fn find_in_graph(graph: &EGraph, site: BodySite, oracle: &SemanticGraph) -> Option<Candidate> {
     for (block_id, block) in &graph.skeleton.blocks {
         for producer_index in 0..block.side_effects.len().saturating_sub(1) {
             let producer = &block.side_effects[producer_index];
@@ -275,43 +268,64 @@ fn producer_parts(graph: &EGraph, candidate: &Candidate) -> ProducerParts {
     }
 }
 
-fn apply_filter(inner: &mut SemanticProgram, candidate: Candidate) {
-    let producer = producer_parts(graph_and_span(inner, candidate.site).0, &candidate);
-    debug_assert_eq!(producer.input_nodes.len(), 1);
-    let graph = graph_mut(inner, candidate.site);
-    let block = &mut graph.skeleton.blocks[candidate.block];
-    let fused_effects = splice_effect_tokens(
-        block.side_effects[candidate.producer].effects,
-        block.side_effects[candidate.consumer].effects,
-    );
-    let consumer = &mut block.side_effects[candidate.consumer];
-    consumer.operand_nodes[0] = producer.input_nodes[0];
-    if let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(filter::Op { body, state }))) =
-        &mut consumer.kind
-    {
-        body.input = filter::Input::Mapped {
-            input: producer.inputs[0].clone(),
-            body: producer.body,
-            output_element_type: producer.output_elem_type,
-        };
-        state.space = producer.space;
-        if let filter::Output::Local { destination, .. } = &mut state.storage {
-            if destination.is_unplaced_unique_input() {
-                destination.make_fresh();
-            }
-        }
+pub(super) fn apply(inner: Program<Segmented>, candidate: Candidate) -> Program<Segmented> {
+    match candidate.kind {
+        EnvelopeKind::Filter => apply_filter(inner, candidate),
+        EnvelopeKind::Hist => apply_hist(inner, candidate),
     }
-    consumer.effects = fused_effects;
-    block.side_effects.remove(candidate.producer);
 }
 
-fn apply_hist(inner: &mut SemanticProgram, candidate: Candidate) {
+fn apply_filter(inner: Program<Segmented>, candidate: Candidate) -> Program<Segmented> {
+    let producer = producer_parts(graph_and_span(&inner, candidate.site).0, &candidate);
+    debug_assert_eq!(producer.input_nodes.len(), 1);
+    inner.rewrite_body(candidate.site, |body| {
+        let rewrite_graph = |graph: &mut EGraph| {
+            let block = &mut graph.skeleton.blocks[candidate.block];
+            let fused_effects = splice_effect_tokens(
+                block.side_effects[candidate.producer].effects,
+                block.side_effects[candidate.consumer].effects,
+            );
+            let consumer = &mut block.side_effects[candidate.consumer];
+            consumer.operand_nodes[0] = producer.input_nodes[0];
+            if let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(filter::Op { body, state }))) =
+                &mut consumer.kind
+            {
+                body.input = filter::Input::Mapped {
+                    input: producer.inputs[0].clone(),
+                    body: producer.body.clone(),
+                    output_element_type: producer.output_elem_type.clone(),
+                };
+                state.space = producer.space.clone();
+                if let filter::Output::Local { destination, .. } = &mut state.storage {
+                    if destination.is_unplaced_unique_input() {
+                        destination.make_fresh();
+                    }
+                }
+            }
+            consumer.effects = fused_effects;
+            block.side_effects.remove(candidate.producer);
+        };
+        match body {
+            Body::Entry(mut entry) => {
+                rewrite_graph(&mut entry.graph);
+                Body::Entry(entry)
+            }
+            Body::Function(mut function) => {
+                rewrite_graph(&mut function.graph);
+                Body::Function(function)
+            }
+            Body::Constant(_) => unreachable!("envelope fusion never targets constants"),
+        }
+    })
+}
+
+fn apply_hist(inner: Program<Segmented>, candidate: Candidate) -> Program<Segmented> {
     let (producer, hist_effect, outer_types, span, scope) = {
-        let (graph, span, scope) = graph_and_span(inner, candidate.site);
+        let (graph, span, scope) = graph_and_span(&inner, candidate.site);
         (
             producer_parts(graph, &candidate),
             graph.skeleton.blocks[candidate.block].side_effects[candidate.consumer].clone(),
-            graph.types.clone(),
+            graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect(),
             span,
             scope,
         )
@@ -351,8 +365,10 @@ fn apply_hist(inner: &mut SemanticProgram, candidate: Candidate) {
     let producer_inputs: Vec<usize> = (producer_base..producer_base + producer.input_nodes.len())
         .map(|input| input_remap[input])
         .collect();
+    let mut region_interner = inner.data.region_interner.clone();
     let (body, function) = compose_hist_region(
-        inner,
+        &inner,
+        &mut region_interner,
         &scope,
         span,
         &producer,
@@ -363,37 +379,56 @@ fn apply_hist(inner: &mut SemanticProgram, candidate: Candidate) {
         &producer_inputs,
         &outer_types,
     );
-    inner.define_region(function);
-
-    let graph = graph_mut(inner, candidate.site);
-    let block = &mut graph.skeleton.blocks[candidate.block];
-    let fused_effects = splice_effect_tokens(
-        block.side_effects[candidate.producer].effects,
-        block.side_effects[candidate.consumer].effects,
-    );
-    let destination = block.side_effects[candidate.consumer].operand_nodes[0];
-    let consumer = &mut block.side_effects[candidate.consumer];
-    consumer.operand_nodes =
-        std::iter::once(destination).chain(new_input_nodes).collect::<SmallVec<[NodeId; 4]>>();
-    if let SideEffectKind::Soac(SoacEffect(
-        _,
-        Soac::Hist(hist::Op {
-            body: consumer_body,
-            state,
-        }),
-    )) = &mut consumer.kind
-    {
-        consumer_body.body = body;
-        consumer_body.inputs = new_array_types.into_iter().map(|array| SoacInputType { array }).collect();
-        *state = hist::State::Segmented(producer.space);
-    }
-    consumer.effects = fused_effects;
-    block.side_effects.remove(candidate.producer);
+    let rebuilt = inner.rewrite_body(candidate.site, |program_body| {
+        let rewrite_graph = |graph: &mut EGraph| {
+            let block = &mut graph.skeleton.blocks[candidate.block];
+            let fused_effects = splice_effect_tokens(
+                block.side_effects[candidate.producer].effects,
+                block.side_effects[candidate.consumer].effects,
+            );
+            let destination = block.side_effects[candidate.consumer].operand_nodes[0];
+            let consumer = &mut block.side_effects[candidate.consumer];
+            consumer.operand_nodes = std::iter::once(destination)
+                .chain(new_input_nodes.iter().copied())
+                .collect::<SmallVec<[NodeId; 4]>>();
+            if let SideEffectKind::Soac(SoacEffect(
+                _,
+                Soac::Hist(hist::Op {
+                    body: consumer_body,
+                    state,
+                }),
+            )) = &mut consumer.kind
+            {
+                consumer_body.body = body.clone();
+                consumer_body.inputs =
+                    new_array_types.iter().cloned().map(|array| SoacInputType { array }).collect();
+                *state = hist::State::Segmented(producer.space.clone());
+            }
+            consumer.effects = fused_effects;
+            block.side_effects.remove(candidate.producer);
+        };
+        match program_body {
+            Body::Entry(mut entry) => {
+                rewrite_graph(&mut entry.graph);
+                Body::Entry(entry)
+            }
+            Body::Function(mut function) => {
+                rewrite_graph(&mut function.graph);
+                Body::Function(function)
+            }
+            Body::Constant(_) => unreachable!("envelope fusion never targets constants"),
+        }
+    });
+    rebuilt.extend_functions([function]).map_data(|data| CoreProgramData {
+        region_interner,
+        ..data
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn compose_hist_region(
-    inner: &mut SemanticProgram,
+    inner: &Program<Segmented>,
+    region_interner: &mut RegionInterner,
     scope: &str,
     span: crate::ast::Span,
     producer: &ProducerParts,
@@ -414,11 +449,11 @@ fn compose_hist_region(
         capture_types.iter().enumerate().map(|(index, ty)| (ty.clone(), format!("capture_{index}"))),
     );
     let (producer_name, producer_return_ty) = {
-        let region = inner.ir.region(producer.body.region).expect("producer region");
+        let region = inner.region(producer.body.region).expect("producer region");
         (region.name.clone(), region.return_ty.clone())
     };
     let (hist_name, hist_return_ty) = {
-        let region = inner.ir.region(hist.region).expect("histogram region");
+        let region = inner.region(hist.region).expect("histogram region");
         (region.name.clone(), region.return_ty.clone())
     };
     let mut graph = EGraph::new();
@@ -446,9 +481,9 @@ fn compose_hist_region(
     hist_args.extend(args[hist_capture_start..].iter().copied());
     let result = graph.intern_pure(PureOp::Call(hist_name), hist_args, hist_return_ty.clone(), None);
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
-    let name = fresh_region_name(inner, &format!("{scope}_map_hist"));
-    let region = inner.ir.region_interner.intern(&name);
-    let function = SemanticFunc::new(name, span, None, params, hist_return_ty, graph, LookupMap::new());
+    let name = fresh_region_name(region_interner, &format!("{scope}_map_hist"));
+    let region = region_interner.intern(&name);
+    let function = SemanticFunc::new(region, name, span, None, params, hist_return_ty, graph);
     (
         SegBody {
             region,

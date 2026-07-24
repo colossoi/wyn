@@ -24,9 +24,9 @@ use crate::types::TypeExt;
 use polytype::Type;
 use smallvec::smallvec;
 
-use super::types::{EGraph, ENode, EgirPhase, NodeId, PureOp};
+use super::types::{EGraph, ENode, Family, NodeId, PureOp};
 
-impl<P: EgirPhase> EGraph<P> {
+impl<P: Family> EGraph<P> {
     /// Try every rewrite rule and return a substitute node if any fires.
     pub(super) fn try_algebraic_fold(
         &mut self,
@@ -58,7 +58,7 @@ impl<P: EgirPhase> EGraph<P> {
         let ENode::Pure {
             op: base_op,
             operands: base_operands,
-        } = &self.nodes[base]
+        } = &self.nodes[base].kind
         else {
             return None;
         };
@@ -74,7 +74,7 @@ impl<P: EgirPhase> EGraph<P> {
         let ENode::Pure {
             op: base_op,
             operands: base_operands,
-        } = &self.nodes[base]
+        } = &self.nodes[base].kind
         else {
             return None;
         };
@@ -155,7 +155,7 @@ impl<P: EgirPhase> EGraph<P> {
             return None;
         }
 
-        let divisor_ty = self.types.get(&divisor)?.clone();
+        let divisor_ty = self.nodes.get(divisor)?.ty.clone();
         if !matches!(divisor_ty, Type::Constructed(TypeName::Float(32), _)) {
             return None;
         }
@@ -199,7 +199,7 @@ impl<P: EgirPhase> EGraph<P> {
         let ENode::Pure {
             op: PureOp::UnaryOp(inner_name),
             operands: inner_ops,
-        } = &self.nodes[inner]
+        } = &self.nodes[inner].kind
         else {
             return None;
         };
@@ -220,7 +220,7 @@ impl<P: EgirPhase> EGraph<P> {
         let lowering = &def.overloads().get(overload_idx)?.lowering;
         if matches!(lowering, BuiltinLowering::PrimOp(PrimOp::Bitcast)) && operands.len() == 1 {
             let operand = operands[0];
-            if self.types.get(&operand) == Some(result_ty) {
+            if self.nodes.get(operand).map(|node| &node.ty) == Some(result_ty) {
                 return Some(operand);
             }
             if let ENode::Pure {
@@ -230,14 +230,14 @@ impl<P: EgirPhase> EGraph<P> {
                         overload_idx: inner_overload_idx,
                     },
                 operands: inner_operands,
-            } = &self.nodes[operand]
+            } = &self.nodes[operand].kind
             {
                 let inner_def = by_id(*inner_id);
                 let inner_lowering = &inner_def.overloads().get(*inner_overload_idx)?.lowering;
                 if inner_def.raw.purity == Purity::Pure
                     && matches!(inner_lowering, BuiltinLowering::PrimOp(PrimOp::Bitcast))
                     && inner_operands.len() == 1
-                    && self.types.get(&inner_operands[0]) == Some(result_ty)
+                    && self.nodes.get(inner_operands[0]).map(|node| &node.ty) == Some(result_ty)
                 {
                     return Some(inner_operands[0]);
                 }
@@ -317,7 +317,7 @@ impl<P: EgirPhase> EGraph<P> {
     }
 
     fn eval_const_predicate(&self, op: &str, a: NodeId, b: NodeId) -> Option<bool> {
-        match self.types.get(&a)? {
+        match &self.nodes.get(a)?.ty {
             Type::Constructed(TypeName::Int(32), _) => eval_i32_pred(op, self.as_i32(a)?, self.as_i32(b)?),
             Type::Constructed(TypeName::UInt(32), _) => eval_u32_pred(op, self.as_u32(a)?, self.as_u32(b)?),
             Type::Constructed(TypeName::Float(32), _) => {
@@ -331,7 +331,7 @@ impl<P: EgirPhase> EGraph<P> {
     // ---- literal predicates ------------------------------------------------
 
     fn is_zero_literal(&self, nid: NodeId) -> bool {
-        match &self.nodes[nid] {
+        match &self.nodes[nid].kind {
             ENode::Constant(ConstantValue::I32(0)) | ENode::Constant(ConstantValue::U32(0)) => true,
             ENode::Constant(ConstantValue::F32(bits)) => f32::from_bits(*bits) == 0.0,
             ENode::Pure { op, .. } => match op {
@@ -344,7 +344,7 @@ impl<P: EgirPhase> EGraph<P> {
     }
 
     fn is_one_literal(&self, nid: NodeId) -> bool {
-        match &self.nodes[nid] {
+        match &self.nodes[nid].kind {
             ENode::Constant(ConstantValue::I32(1)) | ENode::Constant(ConstantValue::U32(1)) => true,
             ENode::Constant(ConstantValue::F32(bits)) => f32::from_bits(*bits) == 1.0,
             ENode::Pure { op, .. } => match op {
@@ -359,7 +359,7 @@ impl<P: EgirPhase> EGraph<P> {
     // ---- value extractors --------------------------------------------------
 
     pub(super) fn as_i32(&self, nid: NodeId) -> Option<i32> {
-        match &self.nodes[nid] {
+        match &self.nodes[nid].kind {
             ENode::Constant(ConstantValue::I32(v)) => Some(*v),
             ENode::Pure {
                 op: PureOp::Int(s),
@@ -370,7 +370,7 @@ impl<P: EgirPhase> EGraph<P> {
     }
 
     pub(super) fn as_u32(&self, nid: NodeId) -> Option<u32> {
-        match &self.nodes[nid] {
+        match &self.nodes[nid].kind {
             ENode::Constant(ConstantValue::U32(v)) => Some(*v),
             ENode::Pure {
                 op: PureOp::Uint(s),
@@ -381,7 +381,7 @@ impl<P: EgirPhase> EGraph<P> {
     }
 
     pub(super) fn as_f32(&self, nid: NodeId) -> Option<f32> {
-        match &self.nodes[nid] {
+        match &self.nodes[nid].kind {
             ENode::Constant(ConstantValue::F32(bits)) => Some(f32::from_bits(*bits)),
             ENode::Pure {
                 op: PureOp::Float(s),
@@ -392,7 +392,7 @@ impl<P: EgirPhase> EGraph<P> {
     }
 
     fn as_bool(&self, nid: NodeId) -> Option<bool> {
-        match &self.nodes[nid] {
+        match &self.nodes[nid].kind {
             ENode::Constant(ConstantValue::Bool(v)) => Some(*v),
             ENode::Pure {
                 op: PureOp::Bool(v),

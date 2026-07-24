@@ -1,7 +1,9 @@
 use super::*;
 
 use crate::ast::{Span, TypeName};
+use crate::egir::types::RegionId;
 use crate::egir::types::SkeletonTerminator;
+use crate::flow::ControlHeader;
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
 use smallvec::smallvec;
@@ -12,6 +14,7 @@ fn u32_ty() -> Type<TypeName> {
 
 fn mixed_callee() -> PhysicalFunc {
     let ty = u32_ty();
+    let region = RegionId::from_index(0);
     let mut graph = EGraph::<Physical>::new();
     let varying = graph.add_func_param(0, ty.clone());
     let invariant = graph.add_func_param(1, ty.clone());
@@ -29,18 +32,19 @@ fn mixed_callee() -> PhysicalFunc {
     );
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
     PhysicalFunc::new(
+        region,
         "mixed".into(),
         Span::dummy(),
         None,
         vec![(ty.clone(), "varying".into()), (ty.clone(), "invariant".into())],
         ty,
         graph,
-        LookupMap::new(),
     )
 }
 
 fn mixed_callee_without_invariant_subexpression() -> PhysicalFunc {
     let ty = u32_ty();
+    let region = RegionId::from_index(0);
     let mut graph = EGraph::<Physical>::new();
     let varying = graph.add_func_param(0, ty.clone());
     let invariant = graph.add_func_param(1, ty.clone());
@@ -52,13 +56,13 @@ fn mixed_callee_without_invariant_subexpression() -> PhysicalFunc {
     );
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
     PhysicalFunc::new(
+        region,
         "mixed".into(),
         Span::dummy(),
         None,
         vec![(ty.clone(), "varying".into()), (ty.clone(), "invariant".into())],
         ty,
         graph,
-        LookupMap::new(),
     )
 }
 
@@ -69,14 +73,7 @@ enum CallArgs {
     AllVarying,
 }
 
-fn loop_caller(
-    shape: CallArgs,
-) -> (
-    EGraph<Physical>,
-    LookupMap<BlockId, ControlHeader>,
-    NodeId,
-    NodeId,
-) {
+fn loop_caller(shape: CallArgs) -> (EGraph<Physical>, NodeId, NodeId) {
     let ty = u32_ty();
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let mut graph = EGraph::<Physical>::new();
@@ -114,32 +111,25 @@ fn loop_caller(
     let result = graph.add_block_param(merge, ty);
     graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(result));
 
-    let headers = [(
-        header,
-        ControlHeader::Loop {
-            merge,
-            continue_block: body,
-        },
-    )]
-    .into_iter()
-    .collect();
-    (graph, headers, call, invariant)
+    graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+        merge,
+        continue_block: body,
+    });
+    (graph, call, invariant)
 }
 
 #[test]
 fn inlines_a_profitable_mixed_variance_call_in_a_loop() {
     let callee = mixed_callee();
-    let mut regions = RegionInterner::new();
-    let callee_id = regions.intern(&callee.name);
-    let callees = [(callee_id, callee)].into_iter().collect();
-    let (mut graph, headers, call, invariant) = loop_caller(CallArgs::Mixed);
+    let callees = [(callee.name.clone(), callee)].into_iter().collect();
+    let (mut graph, call, invariant) = loop_caller(CallArgs::Mixed);
 
-    let stats = inline_body(&mut graph, &headers, &regions, &callees).unwrap();
+    let stats = inline_body(&mut graph, &callees).unwrap();
 
     assert_eq!(stats.calls_inlined, 1);
-    assert!(matches!(graph.nodes[call], ENode::Union { .. }));
+    assert!(matches!(graph.nodes[call].kind, ENode::Union { .. }));
     assert!(graph.nodes.values().any(|node| matches!(
-        node,
+        &node.kind,
         ENode::Pure {
             op: PureOp::BinOp(name),
             operands
@@ -150,30 +140,26 @@ fn inlines_a_profitable_mixed_variance_call_in_a_loop() {
 #[test]
 fn mixed_variance_alone_is_enough_for_the_bounded_policy() {
     let callee = mixed_callee_without_invariant_subexpression();
-    let mut regions = RegionInterner::new();
-    let callee_id = regions.intern(&callee.name);
-    let callees = [(callee_id, callee)].into_iter().collect();
-    let (mut graph, headers, call, _) = loop_caller(CallArgs::Mixed);
+    let callees = [(callee.name.clone(), callee)].into_iter().collect();
+    let (mut graph, call, _) = loop_caller(CallArgs::Mixed);
 
-    let stats = inline_body(&mut graph, &headers, &regions, &callees).unwrap();
+    let stats = inline_body(&mut graph, &callees).unwrap();
 
     assert_eq!(stats.calls_inlined, 1);
-    assert!(matches!(graph.nodes[call], ENode::Union { .. }));
+    assert!(matches!(graph.nodes[call].kind, ENode::Union { .. }));
 }
 
 #[test]
 fn leaves_whole_call_licm_and_fully_varying_calls_alone() {
     let callee = mixed_callee();
-    let mut regions = RegionInterner::new();
-    let callee_id = regions.intern(&callee.name);
-    let callees = [(callee_id, callee)].into_iter().collect();
+    let callees = [(callee.name.clone(), callee)].into_iter().collect();
 
     for shape in [CallArgs::AllInvariant, CallArgs::AllVarying] {
-        let (mut graph, headers, call, _) = loop_caller(shape);
-        let stats = inline_body(&mut graph, &headers, &regions, &callees).unwrap();
+        let (mut graph, call, _) = loop_caller(shape);
+        let stats = inline_body(&mut graph, &callees).unwrap();
         assert_eq!(stats.calls_inlined, 0);
         assert!(matches!(
-            graph.nodes[call],
+            graph.nodes[call].kind,
             ENode::Pure {
                 op: PureOp::Call(_),
                 ..

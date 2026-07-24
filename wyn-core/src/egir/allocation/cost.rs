@@ -6,19 +6,18 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::super::graph_ops;
+use super::super::program::{Program, SemanticEntry};
+use super::super::types::{
+    EGraph, ENode, EffectOp, NodeId, PureViewSource, SideEffect, SideEffectKind, SkeletonTerminator, Soac,
+    SoacEffect,
+};
+use super::ResourcesAllocated;
 use crate::builtins::{catalog, Purity};
 use crate::flow::{BlockId, ControlHeader};
 use crate::interface::{EntryInputKind, StorageAccess};
 use crate::op::OpTag;
 use crate::ssa::types::ConstantValue;
-use crate::LookupMap;
-
-use super::graph_ops;
-use super::program::{SemanticEntry, SemanticProgram};
-use super::types::{
-    EGraph, ENode, EffectOp, NodeId, PureViewSource, SideEffect, SideEffectKind, SkeletonTerminator, Soac,
-    SoacEffect,
-};
 
 pub(crate) const STORAGE_LOAD_COST: u64 = 4;
 const SCALAR_OP_COST: u64 = 1;
@@ -57,22 +56,18 @@ impl PreludeAnalysis {
 /// policy separately preserves single evaluation for structured storage
 /// prefixes; all other recipes remain cost-based.
 pub(crate) fn analyze_prelude(
-    program: &SemanticProgram,
+    program: &Program<ResourcesAllocated>,
     entry: &SemanticEntry,
-    recipe: &super::graph_projector::ProjectedValueRecipe,
+    recipe: &super::super::graph_projector::ProjectedValueRecipe,
 ) -> Option<PreludeAnalysis> {
     let graph = &recipe.projection.graph;
-    let dependence = super::stage_variance::StageDependenceAnalysis::for_entry_graph(
-        entry,
-        graph,
-        &recipe.projection.control_headers,
-    )
-    .ok()?;
+    let dependence =
+        super::super::stage_variance::StageDependenceAnalysis::for_entry_graph(entry, graph).ok()?;
     let reachable = graph_ops::execution_value_producer_closure(graph, recipe.values.iter().copied()).nodes;
     for node in reachable {
-        if let ENode::FuncParam { index } = graph.nodes[node] {
+        if let ENode::FuncParam { index } = &graph.nodes[node].kind {
             if !dependence.dependence(node).is_stage_invariant()
-                || !entry_parameter_is_scalar_relocatable(entry, index)
+                || !entry_parameter_is_scalar_relocatable(entry, *index)
             {
                 return None;
             }
@@ -83,7 +78,7 @@ pub(crate) fn analyze_prelude(
     let mut visiting = HashSet::new();
     let extra_roots = HashMap::from([(recipe.result_block, recipe.values.clone())]);
     let block_costs = graph_block_costs(program, graph, &extra_roots, &mut summaries, &mut visiting)?;
-    let cost = StructuredCost::new(graph, &recipe.projection.control_headers, &block_costs).path_cost(
+    let cost = StructuredCost::new(graph, &block_costs).path_cost(
         graph.skeleton.entry,
         None,
         &mut HashSet::new(),
@@ -96,11 +91,11 @@ pub(crate) fn analyze_prelude(
 }
 
 fn prelude_materialization_policy(
-    recipe: &super::graph_projector::ProjectedValueRecipe,
+    recipe: &super::super::graph_projector::ProjectedValueRecipe,
 ) -> PreludeMaterializationPolicy {
     let structured = matches!(
         &recipe.source,
-        super::graph_projector::ValueRecipeSource::StructuredPrefix { .. }
+        super::super::graph_projector::ValueRecipeSource::StructuredPrefix { .. }
     );
     let reads_storage =
         recipe.projection.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects).any(
@@ -135,7 +130,7 @@ pub(crate) fn materialization_is_profitable(
 }
 
 pub(crate) fn entry_parameter_is_scalar_relocatable(entry: &SemanticEntry, index: usize) -> bool {
-    match super::stage_variance::entry_parameter_input_kind(entry, index) {
+    match super::super::stage_variance::entry_parameter_input_kind(entry, index) {
         Some(EntryInputKind::Uniform { .. } | EntryInputKind::PushConstant { .. }) => true,
         Some(EntryInputKind::Storage { access, .. }) => *access == StorageAccess::ReadOnly,
         Some(
@@ -149,7 +144,7 @@ pub(crate) fn entry_parameter_is_scalar_relocatable(entry: &SemanticEntry, index
 }
 
 fn effect_cost(
-    program: &SemanticProgram,
+    program: &Program<ResourcesAllocated>,
     effect: &SideEffect,
     summaries: &mut HashMap<String, u64>,
     visiting: &mut HashSet<String>,
@@ -167,8 +162,8 @@ fn effect_cost(
 }
 
 fn operation_cost(
-    program: &SemanticProgram,
-    op: &OpTag<super::program::SemanticResourceRef>,
+    program: &Program<ResourcesAllocated>,
+    op: &OpTag<super::super::program::SemanticResourceRef>,
     summaries: &mut HashMap<String, u64>,
     visiting: &mut HashSet<String>,
 ) -> Option<u64> {
@@ -229,7 +224,7 @@ fn operation_cost(
 }
 
 fn function_cost(
-    program: &SemanticProgram,
+    program: &Program<ResourcesAllocated>,
     callee: &str,
     summaries: &mut HashMap<String, u64>,
     visiting: &mut HashSet<String>,
@@ -246,7 +241,7 @@ fn function_cost(
         .find(|function| function.name == callee && function.linkage_name.is_none())?;
 
     let block_costs = graph_block_costs(program, &function.graph, &HashMap::new(), summaries, visiting)?;
-    let cost = StructuredCost::new(&function.graph, &function.control_headers, &block_costs).path_cost(
+    let cost = StructuredCost::new(&function.graph, &block_costs).path_cost(
         function.graph.skeleton.entry,
         None,
         &mut HashSet::new(),
@@ -257,7 +252,7 @@ fn function_cost(
 }
 
 fn graph_block_costs(
-    program: &SemanticProgram,
+    program: &Program<ResourcesAllocated>,
     graph: &EGraph,
     extra_roots: &HashMap<BlockId, Vec<NodeId>>,
     summaries: &mut HashMap<String, u64>,
@@ -284,7 +279,7 @@ fn graph_block_costs(
 }
 
 fn local_value_cost(
-    program: &SemanticProgram,
+    program: &Program<ResourcesAllocated>,
     graph: &EGraph,
     roots: impl IntoIterator<Item = NodeId>,
     summaries: &mut HashMap<String, u64>,
@@ -297,7 +292,7 @@ fn local_value_cost(
         if !seen.insert(node) {
             continue;
         }
-        match &graph.nodes[node] {
+        match &graph.nodes[node].kind {
             ENode::Pure { op, operands } => {
                 cost = cost.saturating_add(operation_cost(program, op, summaries, visiting)?);
                 pending.extend(operands.iter().copied());
@@ -314,21 +309,12 @@ fn local_value_cost(
 
 struct StructuredCost<'a> {
     graph: &'a EGraph,
-    headers: &'a LookupMap<BlockId, ControlHeader>,
     block_costs: &'a HashMap<BlockId, u64>,
 }
 
 impl<'a> StructuredCost<'a> {
-    fn new(
-        graph: &'a EGraph,
-        headers: &'a LookupMap<BlockId, ControlHeader>,
-        block_costs: &'a HashMap<BlockId, u64>,
-    ) -> Self {
-        Self {
-            graph,
-            headers,
-            block_costs,
-        }
+    fn new(graph: &'a EGraph, block_costs: &'a HashMap<BlockId, u64>) -> Self {
+        Self { graph, block_costs }
     }
 
     fn path_cost(
@@ -344,7 +330,7 @@ impl<'a> StructuredCost<'a> {
             return Some(UNKNOWN_LOOP_COST);
         }
         let local = self.block_costs.get(&start).copied().unwrap_or(0);
-        let result = match self.headers.get(&start) {
+        let result = match self.graph.skeleton.blocks[start].control_header.as_ref() {
             Some(ControlHeader::Selection { merge }) => {
                 self.selection_cost(start, *merge, stop, local, active)?
             }
@@ -459,7 +445,7 @@ pub(crate) fn fixed_loop_trip_count(
     let ENode::Pure {
         op: OpTag::BinOp(operator),
         operands,
-    } = &graph.nodes[cond]
+    } = &graph.nodes[cond].kind
     else {
         return None;
     };
@@ -481,7 +467,7 @@ pub(crate) fn fixed_loop_trip_count(
     let ENode::Pure {
         op: OpTag::BinOp(operator),
         operands,
-    } = &graph.nodes[next]
+    } = &graph.nodes[next].kind
     else {
         return None;
     };
@@ -526,7 +512,7 @@ fn branch_argument(term: &SkeletonTerminator, target: BlockId, index: usize) -> 
 }
 
 fn integer_literal(graph: &EGraph, node: NodeId) -> Option<i64> {
-    match &graph.nodes[node] {
+    match &graph.nodes[node].kind {
         ENode::Constant(ConstantValue::I32(value)) => Some(i64::from(*value)),
         ENode::Constant(ConstantValue::U32(value)) => Some(i64::from(*value)),
         ENode::Pure {
@@ -542,5 +528,5 @@ fn integer_literal(graph: &EGraph, node: NodeId) -> Option<i64> {
 }
 
 #[cfg(test)]
-#[path = "residency_cost_tests.rs"]
-mod residency_cost_tests;
+#[path = "cost_tests.rs"]
+mod cost_tests;

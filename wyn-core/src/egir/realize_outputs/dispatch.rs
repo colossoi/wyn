@@ -12,7 +12,7 @@
 //!     vector / matrix in practice; if a runtime-sized array ever
 //!     surfaces here it's a contract violation upstream.
 
-use crate::{LookupMap, LookupSet};
+use crate::LookupSet;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -52,7 +52,7 @@ fn reachable_from_outputs(graph: &EGraph<Raw>) -> LookupSet<NodeId> {
         }
     }
     wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |nid, out| {
-        if let ENode::Pure { operands, .. } = &graph.nodes[nid] {
+        if let ENode::Pure { operands, .. } = &graph.nodes[nid].kind {
             out.extend(operands.iter().copied());
         }
     })
@@ -88,7 +88,6 @@ mod dispatch_tests;
 pub fn compute_slot_source(
     graph: &mut EGraph<Raw>,
     effect_index: &SideEffectIndex,
-    aliases: &mut LookupMap<NodeId, NodeId>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     block: BlockId,
     source: NodeId,
@@ -115,19 +114,17 @@ pub fn compute_slot_source(
         if multi_source {
             reject_sibling_consumers(graph, source, slot_index)?;
         } else {
-            rewrite_sibling_index_consumers(
-                graph, aliases, block, effect_ids, source, view, elem_ty, slot_index,
-            )?;
+            rewrite_sibling_index_consumers(graph, block, effect_ids, source, view, elem_ty, slot_index)?;
         }
         retarget_array_projection(graph, effect_index, screma_result, field_idx, view)?;
         // The Project node operationally produces the view at runtime
         // (the Screma's loop body wrote field 0 through the view).
         // Update its type to match so verify_no_abstract doesn't flag
         // the Composite array type. Also alias for NodeId substitution.
-        if let Some(view_ty) = graph.types.get(&view).cloned() {
+        if let Some(view_ty) = graph.nodes.get(view).map(|node| node.ty.clone()) {
             graph.retype_node(source, view_ty);
         }
-        aliases.insert(source, view);
+        graph.nodes[source].alias = Some(view);
         return Ok(vec![OutputWriter::Value(screma_result)]);
     }
 
@@ -210,7 +207,7 @@ fn projected_effect_result(
     effect_index: &SideEffectIndex,
     source: NodeId,
 ) -> Option<NodeId> {
-    let ENode::Pure { operands, .. } = &graph.nodes[source] else {
+    let ENode::Pure { operands, .. } = &graph.nodes[source].kind else {
         return effect_index.effect(graph, source).is_some().then_some(source);
     };
     let [producer] = operands.as_slice() else {
@@ -235,7 +232,7 @@ pub(crate) fn result_soac_is_consuming_scan(
     if let ENode::Pure {
         op: PureOp::Project { index },
         operands,
-    } = &graph.nodes[result]
+    } = &graph.nodes[result].kind
     {
         let field_idx = *index as usize;
         if let [screma_result] = operands.as_slice() {
@@ -268,7 +265,7 @@ pub(crate) fn result_soac_is_array_projection(
     let ENode::Pure {
         op: PureOp::Project { index },
         operands,
-    } = &graph.nodes[source]
+    } = &graph.nodes[source].kind
     else {
         return None;
     };
@@ -371,7 +368,6 @@ pub(crate) fn retarget_array_projection(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rewrite_sibling_index_consumers(
     graph: &mut EGraph<Raw>,
-    aliases: &mut LookupMap<NodeId, NodeId>,
     block: BlockId,
     effect_ids: &mut crate::IdSource<EffectToken>,
     source: NodeId,
@@ -452,7 +448,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
     // SOAC produces values of its declared element type, which is
     // the binding's element type, which is the view's element
     // type — so any mismatch is an upstream bug).
-    let view_arr_ty = graph.types[&view].clone();
+    let view_arr_ty = graph.nodes[view].ty.clone();
     let view_elem_ty = view_arr_ty.elem_type().expect("output view must be Array").clone();
     for (skel_bid, se_idx, op_idx) in input_hits {
         let blk = &mut graph.skeleton.blocks[skel_bid];
@@ -503,14 +499,14 @@ pub(crate) fn rewrite_sibling_index_consumers(
     let consumers: Vec<NodeId> = graph
         .nodes
         .iter()
-        .filter_map(|(nid, node)| match node {
+        .filter_map(|(nid, node)| match &node.kind {
             ENode::Pure { operands, .. } if operands.contains(&source) && live.contains(&nid) => Some(nid),
             _ => None,
         })
         .collect();
 
     for cid in consumers {
-        let (op, operands) = match &graph.nodes[cid] {
+        let (op, operands) = match &graph.nodes[cid].kind {
             ENode::Pure { op, operands } => (op.clone(), operands.clone()),
             _ => unreachable!("filtered to Pure above"),
         };
@@ -526,7 +522,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                     effect_ids,
                     None,
                 );
-                aliases.insert(cid, load_result);
+                graph.nodes[cid].alias = Some(load_result);
             }
             other_op => {
                 return Err(ConvertError::Unsupported(format!(
@@ -549,7 +545,7 @@ pub(crate) fn reject_sibling_consumers(
     source: NodeId,
     slot_index: usize,
 ) -> Result<(), ConvertError> {
-    let has_consumer = graph.nodes.iter().any(|(nid, node)| match node {
+    let has_consumer = graph.nodes.iter().any(|(nid, node)| match &node.kind {
         ENode::Pure { operands, .. } if nid != source => operands.contains(&source),
         _ => false,
     });

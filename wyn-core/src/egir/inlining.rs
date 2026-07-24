@@ -7,8 +7,8 @@
 use crate::LookupMap;
 
 use super::graph_ops::{clone_value_subgraph, ConstantCopy};
-use super::ir::Func;
-use super::types::{EGraph, ENode, EgirPhase, NodeId, PureOp, SkeletonTerminator, WynLanguage};
+use super::ir::{Family, Func};
+use super::types::{EGraph, ENode, NodeId, PureOp, SkeletonTerminator, WynLanguage};
 
 #[cfg(test)]
 #[path = "inlining_tests.rs"]
@@ -17,10 +17,10 @@ mod inlining_tests;
 /// Return the result root of a function whose body is a single, effect-free
 /// block. Such a body is a pure value DAG and can be cloned into a caller
 /// without reconstructing control flow or effect ordering.
-pub(crate) fn inlineable_return_root<P: EgirPhase>(function: &Func<P, WynLanguage>) -> Option<NodeId> {
+pub(crate) fn inlineable_return_root<P: Family>(function: &Func<P, WynLanguage>) -> Option<NodeId> {
     if function.graph.skeleton.blocks.len() != 1
-        || !function.control_headers.is_empty()
-        || !function.aliases.is_empty()
+        || function.graph.skeleton.blocks.iter().any(|(_, block)| block.control_header.is_some())
+        || function.graph.nodes.iter().any(|(_, node)| node.alias.is_some())
     {
         return None;
     }
@@ -36,11 +36,11 @@ pub(crate) fn inlineable_return_root<P: EgirPhase>(function: &Func<P, WynLanguag
 
 /// Number of callee nodes cloned by [`inline_pure_call`] before caller-side
 /// hash-consing. Returns `None` for bodies the generic inliner cannot clone.
-pub(crate) fn inlineable_node_count<P: EgirPhase>(function: &Func<P, WynLanguage>) -> Option<usize> {
+pub(crate) fn inlineable_node_count<P: Family>(function: &Func<P, WynLanguage>) -> Option<usize> {
     let root = inlineable_return_root(function)?;
     Some(
         wyn_graph::reachable_from_ordered([root], wyn_graph::WalkOrder::DepthFirst, |node, out| {
-            out.extend(function.graph.nodes[node].children())
+            out.extend(function.graph.nodes[node].kind.children())
         })
         .len(),
     )
@@ -52,12 +52,12 @@ pub(crate) fn inlineable_node_count<P: EgirPhase>(function: &Func<P, WynLanguage
 /// Hash-consing in `caller` provides CSE while the clone is built. The original
 /// call is subsumed so every existing use follows the inlined value without a
 /// whole-graph reference rewrite.
-pub(crate) fn inline_pure_call<P: EgirPhase>(
+pub(crate) fn inline_pure_call<P: Family>(
     caller: &mut EGraph<P>,
     call: NodeId,
     callee: &Func<P, WynLanguage>,
 ) -> Result<NodeId, String> {
-    let (called_name, operands) = match caller.nodes.get(call) {
+    let (called_name, operands) = match caller.nodes.get(call).map(|node| &node.kind) {
         Some(ENode::Pure {
             op: PureOp::Call(name),
             operands,
@@ -79,8 +79,9 @@ pub(crate) fn inline_pure_call<P: EgirPhase>(
     }
     for (index, (operand, (param_ty, _))) in operands.iter().zip(&callee.params).enumerate() {
         let operand_ty = caller
-            .types
-            .get(operand)
+            .nodes
+            .get(*operand)
+            .map(|node| &node.ty)
             .ok_or_else(|| format!("inline_pure_call: operand {index} has no type"))?;
         if operand_ty != param_ty {
             return Err(format!(
@@ -94,10 +95,10 @@ pub(crate) fn inline_pure_call<P: EgirPhase>(
     let mut memo = LookupMap::new();
     let reachable =
         wyn_graph::reachable_from_ordered([root], wyn_graph::WalkOrder::DepthFirst, |node, out| {
-            out.extend(callee.graph.nodes[node].children())
+            out.extend(callee.graph.nodes[node].kind.children())
         });
     for node in reachable {
-        let definition = &callee.graph.nodes[node];
+        let definition = &callee.graph.nodes[node].kind;
         if let ENode::FuncParam { index } = definition {
             let replacement = operands.get(*index).copied().ok_or_else(|| {
                 format!("inline_pure_call: `{called_name}` contains out-of-range FuncParam {index}")
@@ -113,12 +114,14 @@ pub(crate) fn inline_pure_call<P: EgirPhase>(
         ));
     }
     let result_ty = caller
-        .types
-        .get(&call)
+        .nodes
+        .get(call)
+        .map(|node| &node.ty)
         .ok_or_else(|| format!("inline_pure_call: call {call:?} has no result type"))?;
     let inlined_ty = caller
-        .types
-        .get(&inlined)
+        .nodes
+        .get(inlined)
+        .map(|node| &node.ty)
         .ok_or_else(|| format!("inline_pure_call: inlined root {inlined:?} has no type"))?;
     if result_ty != inlined_ty {
         return Err(format!(

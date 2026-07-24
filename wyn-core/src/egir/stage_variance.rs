@@ -13,13 +13,15 @@
 use smallvec::SmallVec;
 
 use crate::builtins::catalog;
-use crate::flow::{BlockId, ControlHeader, Terminator};
+use crate::flow::{BlockId, Terminator};
 use crate::interface::{EntryInputKind, IoDecoration};
 use crate::{LookupMap, LookupSet};
 
+use super::ir::Family;
 use super::loop_analysis::LoopAnalysis;
-use super::program::{SemanticEntry, SemanticProgram};
-use super::types::{EGraph, ENode, EgirPhase, NodeId, PureOp, PureViewSource, SegBody};
+use super::program::{Program, SemanticEntry};
+use super::reify::Segmented;
+use super::types::{EGraph, ENode, NodeId, PureOp, PureViewSource, SegBody};
 
 #[cfg(test)]
 #[path = "stage_variance_tests.rs"]
@@ -166,13 +168,12 @@ impl StageDependenceAnalysis {
     /// Missing seeds are conservatively invocation-varying. This keeps
     /// projected graphs and temporarily unused parameter placeholders safe to
     /// inspect.
-    pub(crate) fn for_graph<P: EgirPhase>(
+    pub(crate) fn for_graph<P: Family>(
         graph: &EGraph<P>,
-        control_headers: &LookupMap<BlockId, ControlHeader>,
         parameter_dependences: &[StageDependence],
     ) -> Result<Self, String> {
         let (incoming_blocks, incoming_values) = collect_incoming(graph)?;
-        let block_loop_dependencies = block_loop_dependencies(graph, control_headers);
+        let block_loop_dependencies = block_loop_dependencies(graph);
         let effect_blocks = graph
             .skeleton
             .blocks
@@ -187,7 +188,7 @@ impl StageDependenceAnalysis {
             .nodes
             .iter()
             .map(|(node, definition)| {
-                let dependence = match definition {
+                let dependence = match &definition.kind {
                     ENode::Constant(_) => StageDependence::constant(),
                     ENode::FuncParam { index } => {
                         parameter_dependences.get(*index).cloned().unwrap_or_else(unknown_dependence)
@@ -230,7 +231,7 @@ impl StageDependenceAnalysis {
             }
 
             for (node, definition) in &graph.nodes {
-                let next = match definition {
+                let next = match &definition.kind {
                     ENode::Constant(_) => StageDependence::constant(),
                     ENode::FuncParam { index } => {
                         parameter_dependences.get(*index).cloned().unwrap_or_else(unknown_dependence)
@@ -276,18 +277,17 @@ impl StageDependenceAnalysis {
 
     /// Analyze an entry using its declared interface as parameter seeds.
     pub(crate) fn for_entry(entry: &SemanticEntry) -> Result<Self, String> {
-        Self::for_entry_graph(entry, &entry.graph, &entry.control_headers)
+        Self::for_entry_graph(entry, &entry.graph)
     }
 
     /// Analyze a graph projected from `entry`. Function-parameter indices are
     /// preserved by graph projection, so the source entry remains the
     /// authority for their stage dependence.
-    pub(crate) fn for_entry_graph<P: EgirPhase>(
+    pub(crate) fn for_entry_graph<P: Family>(
         entry: &SemanticEntry,
         graph: &EGraph<P>,
-        control_headers: &LookupMap<BlockId, ControlHeader>,
     ) -> Result<Self, String> {
-        Self::for_graph(graph, control_headers, &entry_parameter_dependences(entry))
+        Self::for_graph(graph, &entry_parameter_dependences(entry))
     }
 
     /// Analyze one use of a repeated region.
@@ -296,7 +296,7 @@ impl StageDependenceAnalysis {
     /// last. Leading parameters depend on the repeated-region invocation;
     /// trailing parameters inherit the corresponding enclosing capture facts.
     pub(crate) fn for_seg_body(
-        program: &SemanticProgram,
+        program: &Program<Segmented>,
         enclosing: &Self,
         body: &SegBody,
     ) -> Result<Self, String> {
@@ -304,7 +304,7 @@ impl StageDependenceAnalysis {
             .region(body.region)
             .ok_or_else(|| format!("stage-dependence analysis cannot resolve region {}", body.region))?;
         let parameter_dependences = seg_body_parameter_dependences(region.params.len(), enclosing, body)?;
-        Self::for_graph(&region.graph, &region.control_headers, &parameter_dependences)
+        Self::for_graph(&region.graph, &parameter_dependences)
     }
 
     pub(crate) fn seg_body_parameter_dependences(
@@ -319,7 +319,7 @@ impl StageDependenceAnalysis {
         self.values.get(&node).cloned().unwrap_or_else(unknown_dependence)
     }
 
-    pub(crate) fn call_arguments<P: EgirPhase>(
+    pub(crate) fn call_arguments<P: Family>(
         &self,
         graph: &EGraph<P>,
         node: NodeId,
@@ -327,7 +327,7 @@ impl StageDependenceAnalysis {
         let ENode::Pure {
             op: PureOp::Call(callee),
             operands,
-        } = graph.nodes.get(node)?
+        } = &graph.nodes.get(node)?.kind
         else {
             return None;
         };
@@ -472,11 +472,8 @@ fn accumulate<K: Eq + std::hash::Hash + Copy>(
     }
 }
 
-fn block_loop_dependencies<P: EgirPhase>(
-    graph: &EGraph<P>,
-    control_headers: &LookupMap<BlockId, ControlHeader>,
-) -> LookupMap<BlockId, LookupSet<BlockId>> {
-    let loops = LoopAnalysis::build(&graph.skeleton, control_headers);
+fn block_loop_dependencies<P: Family>(graph: &EGraph<P>) -> LookupMap<BlockId, LookupSet<BlockId>> {
+    let loops = LoopAnalysis::build(&graph.skeleton);
     graph
         .skeleton
         .blocks
@@ -496,7 +493,7 @@ fn block_loop_dependencies<P: EgirPhase>(
 type IncomingBlocks = LookupMap<BlockId, Vec<(BlockId, Option<NodeId>)>>;
 type IncomingValues = LookupMap<NodeId, Vec<IncomingValue>>;
 
-fn collect_incoming<P: EgirPhase>(graph: &EGraph<P>) -> Result<(IncomingBlocks, IncomingValues), String> {
+fn collect_incoming<P: Family>(graph: &EGraph<P>) -> Result<(IncomingBlocks, IncomingValues), String> {
     let mut incoming_blocks = LookupMap::new();
     let mut incoming_values = LookupMap::new();
     let mut seen_edges = LookupSet::new();
@@ -549,7 +546,7 @@ fn collect_incoming<P: EgirPhase>(graph: &EGraph<P>) -> Result<(IncomingBlocks, 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn record_edge<P: EgirPhase>(
+fn record_edge<P: Family>(
     graph: &EGraph<P>,
     incoming_blocks: &mut IncomingBlocks,
     incoming_values: &mut IncomingValues,

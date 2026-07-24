@@ -12,8 +12,9 @@ use smallvec::SmallVec;
 use super::space::seg_space_fusable;
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
-use crate::egir::ir::splice_effect_tokens;
-use crate::egir::program::{OutputSlotId, SemanticProgram};
+use crate::egir::ir::{splice_effect_tokens, Body, BodySite};
+use crate::egir::program::{OutputSlotId, Program};
+use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
 use crate::egir::types::{
@@ -21,41 +22,73 @@ use crate::egir::types::{
 };
 use crate::flow::BlockId;
 
-/// Find one legal sibling pair anywhere in the program and fuse it. Returns
-/// whether a fusion happened.
-pub fn fuse_sibling_seg_ops(inner: &mut SemanticProgram, oracle: &SemanticGraph) -> bool {
-    for idx in 0..inner.entry_points.len() {
-        let scope = inner.entry_points[idx].name.clone();
-        if fuse_in_graph(&mut inner.entry_points[idx].graph, &scope, oracle) {
-            return true;
-        }
-    }
-    for idx in 0..inner.functions.len() {
-        let scope = inner.functions[idx].name.clone();
-        if fuse_in_graph(&mut inner.functions[idx].graph, &scope, oracle) {
-            return true;
-        }
-    }
-    false
+#[derive(Clone, Copy)]
+pub(super) struct Candidate {
+    site: BodySite,
+    block: BlockId,
+    left: usize,
+    right: usize,
 }
 
-fn fuse_in_graph(graph: &mut EGraph, scope: &str, oracle: &SemanticGraph) -> bool {
-    let block_ids: Vec<BlockId> = graph.skeleton.blocks.iter().map(|(id, _)| id).collect();
-    for block_id in block_ids {
-        let segs: Vec<usize> = (0..graph.skeleton.blocks[block_id].side_effects.len())
-            .filter(|&i| is_fusable_seg(&graph.skeleton.blocks[block_id].side_effects[i].kind))
+/// Find one legal sibling pair anywhere in the program.
+pub(super) fn analyze(inner: &Program<Segmented>, oracle: &SemanticGraph) -> Option<Candidate> {
+    for (index, entry) in inner.entry_points.iter().enumerate() {
+        if let Some((block, left, right)) = find_in_graph(&entry.graph, &entry.name, oracle) {
+            return Some(Candidate {
+                site: BodySite::Entry(index),
+                block,
+                left,
+                right,
+            });
+        }
+    }
+    for function in &inner.functions {
+        if let Some((block, left, right)) = find_in_graph(&function.graph, &function.name, oracle) {
+            return Some(Candidate {
+                site: BodySite::Function(function.region),
+                block,
+                left,
+                right,
+            });
+        }
+    }
+    None
+}
+
+fn find_in_graph(graph: &EGraph, scope: &str, oracle: &SemanticGraph) -> Option<(BlockId, usize, usize)> {
+    for (block_id, block) in &graph.skeleton.blocks {
+        let segs: Vec<usize> = (0..block.side_effects.len())
+            .filter(|&i| is_fusable_seg(&block.side_effects[i].kind))
             .collect();
         for a in 0..segs.len() {
             for b in (a + 1)..segs.len() {
                 let (i, j) = (segs[a], segs[b]);
                 if sibling_fusable(graph, block_id, i, j, scope, oracle) {
-                    fuse_pair(graph, block_id, i, j);
-                    return true;
+                    return Some((block_id, i, j));
                 }
             }
         }
     }
-    false
+    None
+}
+
+pub(super) fn apply(inner: Program<Segmented>, candidate: Candidate) -> Program<Segmented> {
+    inner.rewrite_body(candidate.site, |body| {
+        let rewrite_graph = |graph: &mut EGraph| {
+            fuse_pair(graph, candidate.block, candidate.left, candidate.right);
+        };
+        match body {
+            Body::Entry(mut entry) => {
+                rewrite_graph(&mut entry.graph);
+                Body::Entry(entry)
+            }
+            Body::Function(mut function) => {
+                rewrite_graph(&mut function.graph);
+                Body::Function(function)
+            }
+            Body::Constant(_) => unreachable!("horizontal fusion never targets constants"),
+        }
+    })
 }
 
 fn is_fusable_seg(kind: &SideEffectKind) -> bool {
@@ -380,7 +413,7 @@ fn reproject(
     let projects: Vec<(NodeId, u32)> = graph
         .nodes
         .iter()
-        .filter_map(|(nid, node)| match node {
+        .filter_map(|(nid, node)| match &node.kind {
             crate::egir::types::ENode::Pure {
                 op: PureOp::Project { index },
                 operands,
@@ -412,7 +445,7 @@ fn reproject(
             )
         })
         .collect();
-    let old_ty = graph.types[&old_result].clone();
+    let old_ty = graph.nodes[old_result].ty.clone();
     let rebuilt = graph.intern_pure(PureOp::Tuple(field_types.len()), fields, old_ty, None);
     graph_ops::replace_all_references(graph, old_result, rebuilt);
 }

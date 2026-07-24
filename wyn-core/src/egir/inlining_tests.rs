@@ -14,6 +14,7 @@ fn u32_ty() -> Type<TypeName> {
 #[test]
 fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     let ty = u32_ty();
+    let region = crate::egir::types::RegionId::from_index(0);
     let mut callee_graph = EGraph::<Semantic>::new();
     let x = callee_graph.add_func_param(0, ty.clone());
     let invariant = callee_graph.add_func_param(1, ty.clone());
@@ -28,13 +29,13 @@ fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     callee_graph.skeleton.blocks[callee_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(result));
     let callee = SemanticFunc::new(
+        region,
         "mixed".into(),
         Span::dummy(),
         None,
         vec![(ty.clone(), "x".into()), (ty.clone(), "invariant".into())],
         ty.clone(),
         callee_graph,
-        crate::LookupMap::new(),
     );
 
     let mut caller = EGraph::<Semantic>::new();
@@ -45,20 +46,20 @@ fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     let inlined = inline_pure_call(&mut caller, call, &callee).expect("pure call inlines");
 
     assert!(matches!(
-        caller.nodes[call],
+        caller.nodes[call].kind,
         ENode::Union {
             left,
             right
         } if left == inlined && right == inlined
     ));
-    let ENode::Pure { op, operands } = &caller.nodes[inlined] else {
+    let ENode::Pure { op, operands } = &caller.nodes[inlined].kind else {
         panic!("inlined root is not pure")
     };
     assert!(matches!(op, PureOp::BinOp(name) if name == "+"));
     assert!(operands.contains(&two));
     let cloned_square = operands.iter().copied().find(|operand| *operand != two).unwrap();
     assert!(matches!(
-        &caller.nodes[cloned_square],
+        &caller.nodes[cloned_square].kind,
         ENode::Pure {
             op: PureOp::BinOp(name),
             operands

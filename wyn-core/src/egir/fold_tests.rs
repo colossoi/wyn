@@ -101,13 +101,13 @@ fn runtime_f32_div_constant_folds_to_reciprocal_multiply() {
 
         let result = converter.intern_pure(PureOp::BinOp("/".into()), smallvec![value, divisor], f32_ty());
 
-        let ENode::Pure { op, operands } = &converter.graph.nodes[result] else {
+        let ENode::Pure { op, operands } = &converter.graph.nodes[result].kind else {
             panic!("expected reciprocal multiply")
         };
         assert!(matches!(op, PureOp::BinOp(name) if name == "*"));
         assert_eq!(operands[0], value);
         assert!(matches!(
-            converter.graph.nodes[operands[1]],
+            converter.graph.nodes[operands[1]].kind,
             ENode::Constant(ConstantValue::F32(bits)) if f32::from_bits(bits) == 0.25
         ));
     });
@@ -122,16 +122,16 @@ fn runtime_f32_vector_div_scalar_constant_folds_to_reciprocal_multiply() {
         let result =
             converter.intern_pure(PureOp::BinOp("/".into()), smallvec![value, divisor], vec3f32_ty());
 
-        let ENode::Pure { op, operands } = &converter.graph.nodes[result] else {
+        let ENode::Pure { op, operands } = &converter.graph.nodes[result].kind else {
             panic!("expected vector/scalar reciprocal multiply")
         };
         assert!(matches!(op, PureOp::BinOp(name) if name == "*"));
         assert_eq!(operands[0], value);
         assert!(matches!(
-            converter.graph.nodes[operands[1]],
+            converter.graph.nodes[operands[1]].kind,
             ENode::Constant(ConstantValue::F32(bits)) if f32::from_bits(bits) == 0.125
         ));
-        assert_eq!(converter.graph.types[&operands[1]], f32_ty());
+        assert_eq!(converter.graph.nodes[operands[1]].ty, f32_ty());
     });
 }
 
@@ -144,7 +144,7 @@ fn f32_div_zero_does_not_rewrite_to_multiply() {
         let result = converter.intern_pure(PureOp::BinOp("/".into()), smallvec![value, zero], f32_ty());
 
         assert!(matches!(
-            &converter.graph.nodes[result],
+            &converter.graph.nodes[result].kind,
             ENode::Pure { op: PureOp::BinOp(name), .. } if name == "/"
         ));
     });
@@ -181,7 +181,7 @@ fn required_bitcast_is_retained() {
         let result = converter.intern_pure(intrinsic("i32.u32"), smallvec![value], i32_ty());
 
         assert!(matches!(
-            &converter.graph.nodes[result],
+            &converter.graph.nodes[result].kind,
             ENode::Pure { op: PureOp::Intrinsic { .. }, operands } if operands.as_slice() == [value]
         ));
     });
@@ -196,7 +196,7 @@ fn unary_neg_of_float_literal_folds_to_constant() {
     with_converter(|converter| {
         let half = converter.intern_pure(PureOp::Float("0.5".into()), smallvec![], f32_ty());
         let neg = converter.intern_pure(PureOp::UnaryOp("-".into()), smallvec![half], f32_ty());
-        match &converter.graph.nodes[neg] {
+        match &converter.graph.nodes[neg].kind {
             ENode::Constant(ConstantValue::F32(bits)) => assert_eq!(f32::from_bits(*bits), -0.5),
             _ => panic!("expected -(0.5) to fold to the constant -0.5"),
         }
@@ -208,7 +208,7 @@ fn unary_neg_of_int_literal_folds_to_constant() {
     with_converter(|converter| {
         let five = converter.intern_pure(PureOp::Int("5".into()), smallvec![], i32_ty());
         let neg = converter.intern_pure(PureOp::UnaryOp("-".into()), smallvec![five], i32_ty());
-        match &converter.graph.nodes[neg] {
+        match &converter.graph.nodes[neg].kind {
             ENode::Constant(ConstantValue::I32(v)) => assert_eq!(*v, -5),
             _ => panic!("expected -(5) to fold to the constant -5"),
         }
@@ -220,7 +220,7 @@ fn unary_neg_of_runtime_value_does_not_fold() {
     with_converter(|converter| {
         let value = converter.graph.add_func_param(0, f32_ty());
         let neg = converter.intern_pure(PureOp::UnaryOp("-".into()), smallvec![value], f32_ty());
-        let ENode::Pure { op, operands } = &converter.graph.nodes[neg] else {
+        let ENode::Pure { op, operands } = &converter.graph.nodes[neg].kind else {
             panic!("expected a pure node")
         };
         assert!(matches!(op, PureOp::UnaryOp(name) if name == "-"));

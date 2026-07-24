@@ -7,7 +7,6 @@ use crate::ast::Span;
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
 use crate::interface::{EntryInput as InterfaceEntryInput, EntryOutput as InterfaceEntryOutput};
 use crate::op::OpTag;
-use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::types::ExternDecl;
 use crate::{LookupMap, LookupSet, SortedSet};
 
@@ -55,7 +54,7 @@ new_key_type! {
 
 }
 
-/// Opaque handle into the program-level region arena (`SemanticProgram::regions`).
+/// Stable identity stored directly on a callable region.
 ///
 /// Region *identity* is a checked arena index, never a re-derived string. A
 /// region still lowers to a named SSA function — that name is the call ABI and
@@ -176,13 +175,32 @@ impl<R, Lang: Language> ENode<R, Lang> {
     }
 }
 
+/// One graph node together with all metadata intrinsically owned by that
+/// identity.
+#[derive(Clone, Debug)]
+pub struct Node<R, Lang: Language> {
+    pub kind: ENode<R, Lang>,
+    pub ty: Lang::Ty,
+    /// First source span attached to this hash-consed value.
+    pub span: Option<Span>,
+    /// Canonical replacement selected by CFG simplification, if any.
+    pub alias: Option<NodeId>,
+}
+
+impl<R, Lang: Language> Node<R, Lang> {
+    /// Return the graph dependencies referenced by this node.
+    pub fn children(&self) -> SmallVec<[NodeId; 4]> {
+        self.kind.children()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Skeleton — the CFG of side-effectful instructions
 // ---------------------------------------------------------------------------
 
 /// A side effect anchored in the skeleton CFG.
 #[derive(Clone, Debug)]
-pub struct SideEffect<P: EgirPhase, Lang: Language> {
+pub struct SideEffect<P: Family, Lang: Language> {
     pub kind: SideEffectKind<P, Lang>,
     /// Canonical EGIR value operands for this effect.
     pub operand_nodes: SmallVec<[NodeId; 4]>,
@@ -239,7 +257,7 @@ impl<R, Ty> EffectOp<R, Ty> {
 
 /// A skeleton side effect's concrete kind.
 #[derive(Clone, Debug)]
-pub enum SideEffectKind<P: EgirPhase, Lang: Language> {
+pub enum SideEffectKind<P: Family, Lang: Language> {
     Effect(EffectOp<P::Resource, Lang::Ty>),
     /// A placeholder for an unexpanded SOAC. Produced by `from_tlc` and
     /// consumed by `soac_expand`. Never reaches elaborate.
@@ -434,7 +452,7 @@ impl SegBody {
     ///
     /// Segment bodies bind their lane/element parameters first and append one
     /// function parameter for each capture.
-    pub(crate) fn leading_parameter_count<P: EgirPhase, Lang: Language>(
+    pub(crate) fn leading_parameter_count<P: Family, Lang: Language>(
         &self,
         function: &Func<P, Lang>,
     ) -> Result<usize, String> {
@@ -449,14 +467,14 @@ impl SegBody {
     }
 
     /// Map this body's capture parameters to their enclosing graph values.
-    pub(crate) fn capture_bindings<P: EgirPhase, Lang: Language>(
+    pub(crate) fn capture_bindings<P: Family, Lang: Language>(
         &self,
         function: &Func<P, Lang>,
     ) -> Result<LookupMap<NodeId, NodeId>, String> {
         let leading = self.leading_parameter_count(function)?;
         let mut bindings = LookupMap::new();
         for (node, definition) in &function.graph.nodes {
-            let ENode::FuncParam { index } = definition else {
+            let ENode::FuncParam { index } = &definition.kind else {
                 continue;
             };
             if *index < leading || *index >= function.params.len() {
@@ -494,10 +512,25 @@ impl<R: Copy + Ord> SegResourceAccess<R> {
     }
 }
 
-pub trait EgirPhase: Clone + std::fmt::Debug {
+/// Phase-varying data embedded recursively in EGIR nodes.
+///
+/// Every associated type corresponds to an actual field stored in the graph.
+/// Proof-only checkpoints and program-wide state belong to [`Stage`].
+pub trait Family: Clone + std::fmt::Debug {
     type Resource: GraphResource;
-    type ResourceDecl: Clone + std::fmt::Debug;
     type Soac: Clone + std::fmt::Debug;
+}
+
+/// One externally visible EGIR pipeline checkpoint.
+///
+/// The stage generic exists only on the program and entry-output boundary.
+/// Descendants receive the recursive family and route data they actually use.
+pub trait Stage {
+    type Family: Family;
+    type ResourceDecl: Clone + std::fmt::Debug;
+    type OutputRoute: Clone + std::fmt::Debug;
+    type ProgramData: std::fmt::Debug;
+    type GlobalContext: std::fmt::Debug;
 }
 
 #[derive(Clone, Debug)]
@@ -510,33 +543,36 @@ pub type SkeletonTerminator = crate::flow::Terminator<NodeId>;
 
 /// A block in the skeleton CFG.
 #[derive(Clone, Debug)]
-pub struct SkeletonBlock<P: EgirPhase, Lang: Language> {
+pub struct SkeletonBlock<P: Family, Lang: Language> {
     /// Block parameters as NodeIds.
     pub params: Vec<NodeId>,
     /// Effectful instructions, in order.
     pub side_effects: Vec<SideEffect<P, Lang>>,
     /// Block terminator.
     pub term: SkeletonTerminator,
+    /// Structured-control metadata intrinsically owned by this block.
+    pub control_header: Option<ControlHeader>,
 }
 
-impl<P: EgirPhase, Lang: Language> SkeletonBlock<P, Lang> {
+impl<P: Family, Lang: Language> SkeletonBlock<P, Lang> {
     pub fn new() -> Self {
         SkeletonBlock {
             params: Vec::new(),
             side_effects: Vec::new(),
             term: SkeletonTerminator::Unreachable,
+            control_header: None,
         }
     }
 }
 
 /// The skeleton CFG (blocks + effectful instructions).
 #[derive(Clone, Debug)]
-pub struct Skeleton<P: EgirPhase, Lang: Language> {
+pub struct Skeleton<P: Family, Lang: Language> {
     pub entry: BlockId,
     pub blocks: SlotMap<BlockId, SkeletonBlock<P, Lang>>,
 }
 
-impl<P: EgirPhase, Lang: Language> Skeleton<P, Lang> {
+impl<P: Family, Lang: Language> Skeleton<P, Lang> {
     pub fn new() -> Self {
         let mut blocks = SlotMap::with_key();
         let entry = blocks.insert(SkeletonBlock::new());
@@ -585,15 +621,11 @@ impl<P: EgirPhase, Lang: Language> Skeleton<P, Lang> {
     /// following effect, plus the original terminator and any structured
     /// control metadata. The original block is terminated by an unconditional
     /// branch to the continuation.
-    pub fn split_block_before_effect(
-        &mut self,
-        control_headers: &mut LookupMap<BlockId, ControlHeader>,
-        block: BlockId,
-        effect_index: usize,
-    ) -> BlockId {
+    pub fn split_block_before_effect(&mut self, block: BlockId, effect_index: usize) -> BlockId {
         let continuation = self.create_block();
         let source = &mut self.blocks[block];
         let suffix = source.side_effects.split_off(effect_index);
+        let control_header = source.control_header.take();
         let old_term = std::mem::replace(
             &mut source.term,
             SkeletonTerminator::Branch {
@@ -603,9 +635,7 @@ impl<P: EgirPhase, Lang: Language> Skeleton<P, Lang> {
         );
         self.blocks[continuation].side_effects = suffix;
         self.blocks[continuation].term = old_term;
-        if let Some(header) = control_headers.remove(&block) {
-            control_headers.insert(continuation, header);
-        }
+        self.blocks[continuation].control_header = control_header;
         continuation
     }
 
@@ -664,7 +694,7 @@ pub struct SideEffectIndex {
 }
 
 impl SideEffectIndex {
-    pub fn build<P: EgirPhase, Lang: Language>(graph: &EGraph<P, Lang>) -> Self {
+    pub fn build<P: Family, Lang: Language>(graph: &EGraph<P, Lang>) -> Self {
         let mut by_result = LookupMap::new();
         for (block, skeleton_block) in &graph.skeleton.blocks {
             for (index, effect) in skeleton_block.side_effects.iter().enumerate() {
@@ -685,7 +715,7 @@ impl SideEffectIndex {
         self.by_result.get(&result).copied()
     }
 
-    pub fn effect<'a, P: EgirPhase, Lang: Language>(
+    pub fn effect<'a, P: Family, Lang: Language>(
         &self,
         graph: &'a EGraph<P, Lang>,
         result: NodeId,
@@ -695,7 +725,7 @@ impl SideEffectIndex {
         (effect.result == Some(result)).then_some(effect)
     }
 
-    pub fn effect_mut<'a, P: EgirPhase, Lang: Language>(
+    pub fn effect_mut<'a, P: Family, Lang: Language>(
         &self,
         graph: &'a mut EGraph<P, Lang>,
         result: NodeId,
@@ -712,80 +742,58 @@ impl SideEffectIndex {
 
 /// The acyclic e-graph: a sea of pure nodes + a CFG skeleton of side effects.
 #[derive(Clone, Debug)]
-pub struct EGraph<P: EgirPhase, Lang: Language> {
-    /// All nodes (pure, union, params, constants, side-effect results).
-    pub nodes: SlotMap<NodeId, ENode<P::Resource, Lang>>,
-    /// Type of each node's result.
-    pub types: LookupMap<NodeId, Lang::Ty>,
+pub struct EGraph<P: Family, Lang: Language> {
+    /// All nodes (pure, union, params, constants, side-effect results),
+    /// including their type, span, and canonical alias.
+    pub nodes: SlotMap<NodeId, Node<P::Resource, Lang>>,
     /// Hash-cons table: NodeKey → existing NodeId.
     hash_cons: LookupMap<NodeKey<P::Resource, Lang>, NodeId>,
     /// Constant dedup cache.
     const_cache: LookupMap<Lang::Const, NodeId>,
     /// The CFG skeleton.
     pub skeleton: Skeleton<P, Lang>,
-    /// Source span associated with each pure node (first-writer-wins —
-    /// later interns of the same hash-consed node keep the original span).
-    pub node_spans: LookupMap<NodeId, Span>,
 }
 
 /// Graph state excluding indexes derived from that state.
 ///
 /// Transformations may consume and rebuild an `EGraph` through this boundary
 /// without gaining direct access to its hash-consing internals.
-pub(super) struct EGraphParts<P: EgirPhase, Lang: Language> {
-    pub(super) nodes: SlotMap<NodeId, ENode<P::Resource, Lang>>,
-    pub(super) types: LookupMap<NodeId, Lang::Ty>,
+pub(super) struct EGraphParts<P: Family, Lang: Language> {
+    pub(super) nodes: SlotMap<NodeId, Node<P::Resource, Lang>>,
     pub(super) skeleton: Skeleton<P, Lang>,
-    pub(super) node_spans: LookupMap<NodeId, Span>,
 }
 
 pub trait GraphResource: Clone + std::fmt::Debug + Eq + std::hash::Hash {}
 
 impl<T> GraphResource for T where T: Clone + std::fmt::Debug + Eq + std::hash::Hash {}
 
-impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
+impl<P: Family, Lang: Language> EGraph<P, Lang> {
     pub fn new() -> Self {
         EGraph {
             nodes: SlotMap::with_key(),
-            types: LookupMap::new(),
             hash_cons: LookupMap::new(),
             const_cache: LookupMap::new(),
             skeleton: Skeleton::new(),
-            node_spans: LookupMap::new(),
         }
     }
 
     pub(super) fn into_parts(self) -> EGraphParts<P, Lang> {
         let Self {
             nodes,
-            types,
             hash_cons: _,
             const_cache: _,
             skeleton,
-            node_spans,
         } = self;
-        EGraphParts {
-            nodes,
-            types,
-            skeleton,
-            node_spans,
-        }
+        EGraphParts { nodes, skeleton }
     }
 
     pub(super) fn from_parts(parts: EGraphParts<P, Lang>) -> Self {
-        let EGraphParts {
-            nodes,
-            types,
-            skeleton,
-            node_spans,
-        } = parts;
+        let EGraphParts { nodes, skeleton } = parts;
         let mut graph = Self {
             nodes,
-            types,
             hash_cons: LookupMap::new(),
             const_cache: LookupMap::new(),
             skeleton,
-            node_spans,
         };
         graph.rebuild_hash_cons();
         graph.rebuild_const_cache();
@@ -797,13 +805,14 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
     }
 
     fn pure_node_key(&self, id: NodeId) -> Option<NodeKey<P::Resource, Lang>> {
-        let ENode::Pure { op, operands } = self.nodes.get(id)? else {
+        let node = self.nodes.get(id)?;
+        let ENode::Pure { op, operands } = &node.kind else {
             return None;
         };
         Some(NodeKey {
             op: op.clone(),
             operands: operands.clone(),
-            ty: self.types.get(&id)?.clone(),
+            ty: node.ty.clone(),
         })
     }
 
@@ -827,7 +836,7 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
     /// pure-node hash-cons table consistent across the mutation.
     pub fn replace_node_preserving_type(&mut self, id: NodeId, node: ENode<P::Resource, Lang>) {
         self.unindex_current_pure(id);
-        self.nodes[id] = node;
+        self.nodes[id].kind = node;
         self.index_current_pure(id);
     }
 
@@ -848,11 +857,14 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
     where
         F: FnOnce(&mut PureOp<P::Resource>, &mut SmallVec<[NodeId; 4]>),
     {
-        if !matches!(self.nodes.get(id), Some(ENode::Pure { .. })) {
+        if !matches!(
+            self.nodes.get(id).map(|node| &node.kind),
+            Some(ENode::Pure { .. })
+        ) {
             return false;
         }
         self.unindex_current_pure(id);
-        if let ENode::Pure { op, operands } = &mut self.nodes[id] {
+        if let ENode::Pure { op, operands } = &mut self.nodes[id].kind {
             update(op, operands);
         }
         self.index_current_pure(id);
@@ -863,17 +875,18 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
     /// key when the node is hash-consed.
     pub fn retype_node(&mut self, id: NodeId, ty: Lang::Ty) {
         self.unindex_current_pure(id);
-        self.types.insert(id, ty);
+        self.nodes[id].ty = ty;
         self.index_current_pure(id);
     }
 
     /// Remove a function-parameter node and its graph-owned metadata.
     pub fn remove_func_param(&mut self, id: NodeId) -> bool {
-        if !matches!(self.nodes.get(id), Some(ENode::FuncParam { .. })) {
+        if !matches!(
+            self.nodes.get(id).map(|node| &node.kind),
+            Some(ENode::FuncParam { .. })
+        ) {
             return false;
         }
-        self.types.remove(&id);
-        self.node_spans.remove(&id);
         self.nodes.remove(id).is_some()
     }
 
@@ -886,7 +899,10 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
 
         let ids: Vec<NodeId> = self.nodes.keys().collect();
         for id in ids {
-            match self.nodes.get(id) {
+            if self.nodes[id].alias == Some(old) {
+                self.nodes[id].alias = Some(new);
+            }
+            match self.nodes.get(id).map(|node| &node.kind) {
                 Some(ENode::Pure { operands, .. }) if operands.contains(&old) => {
                     self.update_pure_node(id, |_, operands| {
                         for operand in operands {
@@ -897,7 +913,7 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
                     });
                 }
                 Some(ENode::Union { .. }) => {
-                    if let ENode::Union { left, right } = &mut self.nodes[id] {
+                    if let ENode::Union { left, right } = &mut self.nodes[id].kind {
                         if *left == old {
                             *left = new;
                         }
@@ -911,12 +927,21 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
         }
     }
 
+    /// Install canonical aliases produced by a graph rewrite. Alias ownership
+    /// follows the source node, so later graph copies and removals cannot leave
+    /// a detached side table behind.
+    pub fn install_aliases(&mut self, aliases: impl IntoIterator<Item = (NodeId, NodeId)>) {
+        for (source, target) in aliases {
+            self.nodes[source].alias = Some(target);
+        }
+    }
+
     /// Rebuild the pure-node hash-cons table after a bulk rewrite that may
     /// have changed pure node operands, operators, or result types in place.
     pub fn rebuild_hash_cons(&mut self) {
         let mut rebuilt = LookupMap::new();
         for (id, node) in self.nodes.iter() {
-            if matches!(node, ENode::Pure { .. }) {
+            if matches!(&node.kind, ENode::Pure { .. }) {
                 if let Some(key) = self.pure_node_key(id) {
                     rebuilt.entry(key).or_insert(id);
                 }
@@ -929,7 +954,7 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
         self.const_cache = self
             .nodes
             .iter()
-            .filter_map(|(id, node)| match node {
+            .filter_map(|(id, node)| match &node.kind {
                 ENode::Constant(value) => Some((value.clone(), id)),
                 _ => None,
             })
@@ -955,7 +980,7 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
         }
 
         for (id, node) in self.nodes.iter() {
-            if matches!(node, ENode::Pure { .. }) {
+            if matches!(&node.kind, ENode::Pure { .. }) {
                 let Some(key) = self.pure_node_key(id) else {
                     return Err(format!("pure node {:?} has no type", id));
                 };
@@ -980,18 +1005,24 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
         Ok(())
     }
 
+    fn insert_node(&mut self, kind: ENode<P::Resource, Lang>, ty: Lang::Ty, span: Option<Span>) -> NodeId {
+        self.nodes.insert(Node {
+            kind,
+            ty,
+            span,
+            alias: None,
+        })
+    }
+
     /// Allocate a function parameter node.
     pub fn add_func_param(&mut self, index: usize, ty: Lang::Ty) -> NodeId {
-        let id = self.nodes.insert(ENode::FuncParam { index });
-        self.types.insert(id, ty);
-        id
+        self.insert_node(ENode::FuncParam { index }, ty, None)
     }
 
     /// Append a parameter to a block and allocate its corresponding node.
     pub fn add_block_param(&mut self, block: BlockId, ty: Lang::Ty) -> NodeId {
         let index = self.skeleton.blocks[block].params.len();
-        let id = self.nodes.insert(ENode::BlockParam { block, index });
-        self.types.insert(id, ty);
+        let id = self.insert_node(ENode::BlockParam { block, index }, ty, None);
         self.skeleton.blocks[block].params.push(id);
         id
     }
@@ -1046,7 +1077,7 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
 
         let surviving_params = self.skeleton.blocks[block].params.clone();
         for (index, param) in surviving_params.into_iter().enumerate() {
-            match &mut self.nodes[param] {
+            match &mut self.nodes[param].kind {
                 ENode::BlockParam {
                     block: owner,
                     index: old_index,
@@ -1063,8 +1094,7 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
         if let Some(&existing) = self.const_cache.get(&c) {
             return existing;
         }
-        let id = self.nodes.insert(ENode::Constant(c.clone()));
-        self.types.insert(id, ty);
+        let id = self.insert_node(ENode::Constant(c.clone()), ty, None);
         self.const_cache.insert(c, id);
         id
     }
@@ -1087,29 +1117,21 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
         if let Some(&existing) = self.hash_cons.get(&key) {
             return existing;
         }
-        let id = self.nodes.insert(ENode::Pure { op, operands });
-        self.types.insert(id, ty);
+        let id = self.insert_node(ENode::Pure { op, operands }, ty, span);
         self.hash_cons.insert(key, id);
-        if let Some(s) = span {
-            self.node_spans.insert(id, s);
-        }
         id
     }
 
     /// Allocate a node for a side-effect result (not hash-consed).
     pub fn alloc_side_effect_result(&mut self, ty: Lang::Ty) -> NodeId {
-        let id = self.nodes.insert(ENode::SideEffectResult);
-        self.types.insert(id, ty);
-        id
+        self.insert_node(ENode::SideEffectResult, ty, None)
     }
 
     /// Create a union node joining two alternatives.
     pub fn add_union(&mut self, left: NodeId, right: NodeId) -> NodeId {
         // Use the type of the left (they should be equivalent).
-        let ty = self.types[&left].clone();
-        let id = self.nodes.insert(ENode::Union { left, right });
-        self.types.insert(id, ty);
-        id
+        let ty = self.nodes[left].ty.clone();
+        self.insert_node(ENode::Union { left, right }, ty, None)
     }
 
     /// Turn a pure node into a union of itself and `alt`, in place: the
@@ -1122,28 +1144,21 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
             id, alt,
             "union_pure_in_place: alternative must differ from the node"
         );
-        debug_assert!(matches!(self.nodes[id], ENode::Pure { .. }));
-        let ty = self.types[&id].clone();
-        // The arena must retain `id` while the original node is moved to a
-        // fresh slot. A valid degenerate union occupies `id` until `fresh`
-        // is known and installed as its left alternative.
-        let original = std::mem::replace(
-            &mut self.nodes[id],
-            ENode::Union {
-                left: alt,
-                right: alt,
-            },
-        );
-        let fresh = self.nodes.insert(original);
-        self.types.insert(fresh, ty);
-        if let Some(span) = self.node_spans.get(&id).copied() {
-            self.node_spans.insert(fresh, span);
-        }
+        debug_assert!(matches!(&self.nodes[id].kind, ENode::Pure { .. }));
+        let original_kind = self.nodes[id].kind.clone();
+        let original_ty = self.nodes[id].ty.clone();
+        let original_span = self.nodes[id].span;
+        let fresh = self.nodes.insert(Node {
+            kind: original_kind,
+            ty: original_ty,
+            span: original_span,
+            alias: None,
+        });
         // The hash-cons key for the original node now belongs to its fresh id.
         if let Some(key) = self.pure_node_key(fresh) {
             self.hash_cons.insert(key, fresh);
         }
-        self.nodes[id] = ENode::Union {
+        self.nodes[id].kind = ENode::Union {
             left: fresh,
             right: alt,
         };
@@ -1159,14 +1174,42 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
             id, better,
             "subsume_pure_in_place: replacement must differ from the node"
         );
-        debug_assert!(matches!(self.nodes[id], ENode::Pure { .. }));
+        debug_assert!(matches!(&self.nodes[id].kind, ENode::Pure { .. }));
         if let Some(key) = self.pure_node_key(id) {
             self.hash_cons.remove(&key);
         }
-        self.nodes[id] = ENode::Union {
+        self.nodes[id].kind = ENode::Union {
             left: better,
             right: better,
         };
+    }
+
+    /// Drop structured-control metadata whose header or required target block
+    /// was removed by CFG simplification.
+    pub fn retain_live_control_headers(&mut self) {
+        let invalid = self
+            .skeleton
+            .blocks
+            .iter()
+            .filter_map(|(header, block)| {
+                let control = block.control_header.as_ref()?;
+                let valid = matches!(block.term, SkeletonTerminator::CondBranch { .. })
+                    && match control {
+                        ControlHeader::Loop {
+                            merge,
+                            continue_block,
+                        } => {
+                            self.skeleton.blocks.contains_key(*merge)
+                                && self.skeleton.blocks.contains_key(*continue_block)
+                        }
+                        ControlHeader::Selection { merge } => self.skeleton.blocks.contains_key(*merge),
+                    };
+                (!valid).then_some(header)
+            })
+            .collect::<Vec<_>>();
+        for header in invalid {
+            self.skeleton.blocks[header].control_header = None;
+        }
     }
 }
 
@@ -1175,36 +1218,48 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
-pub struct Func<P: EgirPhase, Lang: Language> {
+pub struct Func<P: Family, Lang: Language> {
+    /// Stable identity used by segmented bodies that call this region.
+    pub region: RegionId,
     pub name: String,
     pub span: Span,
     pub linkage_name: Option<String>,
     pub params: Vec<(Lang::Ty, String)>,
     pub return_ty: Lang::Ty,
     pub graph: EGraph<P, Lang>,
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
-    pub aliases: LookupMap<NodeId, NodeId>,
 }
 
-impl<P: EgirPhase, Lang: Language> Func<P, Lang> {
+impl<P: Family, Lang: Language> Func<P, Lang> {
+    pub fn map_graph(mut self, map: impl FnOnce(EGraph<P, Lang>) -> EGraph<P, Lang>) -> Self {
+        self.graph = map(self.graph);
+        self
+    }
+
+    pub fn try_map_graph<E>(
+        mut self,
+        map: impl FnOnce(EGraph<P, Lang>) -> Result<EGraph<P, Lang>, E>,
+    ) -> Result<Self, E> {
+        self.graph = map(self.graph)?;
+        Ok(self)
+    }
+
     pub fn new(
+        region: RegionId,
         name: String,
         span: Span,
         linkage_name: Option<String>,
         params: Vec<(Lang::Ty, String)>,
         return_ty: Lang::Ty,
         graph: EGraph<P, Lang>,
-        control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
         Self {
+            region,
             name,
             span,
             linkage_name,
             params,
             return_ty,
             graph,
-            control_headers,
-            aliases: LookupMap::new(),
         }
     }
 
@@ -1263,7 +1318,7 @@ impl<P: EgirPhase, Lang: Language> Func<P, Lang> {
             .graph
             .nodes
             .iter()
-            .filter_map(|(node, definition)| match definition {
+            .filter_map(|(node, definition)| match &definition.kind {
                 ENode::FuncParam { index } => Some((node, *index)),
                 _ => None,
             })
@@ -1271,9 +1326,9 @@ impl<P: EgirPhase, Lang: Language> Func<P, Lang> {
         let mut tombstone_index = next_index;
         for (node, old_index) in parameter_nodes {
             if let Some(new_index) = remapped.get(old_index).copied().flatten() {
-                self.graph.nodes[node] = ENode::FuncParam { index: new_index };
+                self.graph.nodes[node].kind = ENode::FuncParam { index: new_index };
             } else {
-                self.graph.nodes[node] = ENode::FuncParam {
+                self.graph.nodes[node].kind = ENode::FuncParam {
                     index: tombstone_index,
                 };
                 tombstone_index += 1;
@@ -1297,13 +1352,26 @@ impl<P: EgirPhase, Lang: Language> Func<P, Lang> {
 /// A body-backed compile-time constant retained in EGIR until final
 /// elaboration. Constant bodies have no parameters and must be proven pure.
 #[derive(Clone, Debug)]
-pub struct ConstantDef<P: EgirPhase, Lang: Language> {
+pub struct ConstantDef<P: Family, Lang: Language> {
     pub name: String,
     pub span: Span,
     pub return_ty: Lang::Ty,
     pub graph: EGraph<P, Lang>,
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
-    pub aliases: LookupMap<NodeId, NodeId>,
+}
+
+impl<P: Family, Lang: Language> ConstantDef<P, Lang> {
+    pub fn map_graph(mut self, map: impl FnOnce(EGraph<P, Lang>) -> EGraph<P, Lang>) -> Self {
+        self.graph = map(self.graph);
+        self
+    }
+
+    pub fn try_map_graph<E>(
+        mut self,
+        map: impl FnOnce(EGraph<P, Lang>) -> Result<EGraph<P, Lang>, E>,
+    ) -> Result<Self, E> {
+        self.graph = map(self.graph)?;
+        Ok(self)
+    }
 }
 
 /// One write site for an entry output slot.
@@ -1326,10 +1394,31 @@ pub enum OutputWriter {
 
 /// Declared output ownership carried through EGIR physicalization.
 #[derive(Debug, Clone)]
-pub struct OutputRoute {
+pub struct UnrealizedOutputRoute {
     pub source: SlotSource,
-    pub slot: OutputSlotId,
+}
+
+/// An output route whose concrete writers have been installed in the graph.
+#[derive(Debug, Clone)]
+pub struct RealizedOutputRoute {
+    pub source: SlotSource,
     pub writers: Vec<OutputWriter>,
+}
+
+pub trait RemapBlockIds {
+    fn remap_block_ids(&mut self, blocks: &LookupMap<BlockId, BlockId>);
+}
+
+impl RemapBlockIds for UnrealizedOutputRoute {
+    fn remap_block_ids(&mut self, blocks: &LookupMap<BlockId, BlockId>) {
+        self.source.block = blocks[&self.source.block];
+    }
+}
+
+impl RemapBlockIds for RealizedOutputRoute {
+    fn remap_block_ids(&mut self, blocks: &LookupMap<BlockId, BlockId>) {
+        self.source.block = blocks[&self.source.block];
+    }
 }
 
 /// One entry input together with its phase-typed resource identity, when the
@@ -1357,12 +1446,14 @@ impl<R, Lang: Language> std::ops::DerefMut for EntryInput<R, Lang> {
 /// One entry output together with its phase-typed resource identity, when the
 /// slot is backed by a logical or physical resource.
 #[derive(Debug, Clone)]
-pub struct EntryOutput<R, Lang: Language> {
+pub struct EntryOutput<R, Route, Lang: Language> {
     pub inner: InterfaceEntryOutput<Lang::Ty>,
     pub resource: Option<R>,
+    /// Every control-flow source capable of producing this declared output.
+    pub routes: Vec<Route>,
 }
 
-impl<R, Lang: Language> std::ops::Deref for EntryOutput<R, Lang> {
+impl<R, Route, Lang: Language> std::ops::Deref for EntryOutput<R, Route, Lang> {
     type Target = InterfaceEntryOutput<Lang::Ty>;
 
     fn deref(&self) -> &Self::Target {
@@ -1370,29 +1461,47 @@ impl<R, Lang: Language> std::ops::Deref for EntryOutput<R, Lang> {
     }
 }
 
-impl<R, Lang: Language> std::ops::DerefMut for EntryOutput<R, Lang> {
+impl<R, Route, Lang: Language> std::ops::DerefMut for EntryOutput<R, Route, Lang> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct Entry<P: EgirPhase, Lang: Language> {
+pub struct Entry<P: Family, ResourceDecl, Route, Lang: Language> {
     pub name: String,
     pub span: Span,
     pub execution_model: ExecutionModel,
     pub inputs: Vec<EntryInput<P::Resource, Lang>>,
-    pub outputs: Vec<EntryOutput<P::Resource, Lang>>,
-    pub resource_declarations: Vec<P::ResourceDecl>,
+    pub outputs: Vec<EntryOutput<P::Resource, Route, Lang>>,
+    pub resource_declarations: Vec<ResourceDecl>,
     pub params: Vec<(Lang::Ty, String)>,
     pub return_ty: Lang::Ty,
     pub graph: EGraph<P, Lang>,
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
-    pub aliases: LookupMap<NodeId, NodeId>,
-    pub output_routes: Vec<OutputRoute>,
 }
 
-impl<P: EgirPhase, Lang: Language> Entry<P, Lang> {
+impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, ResourceDecl, Route, Lang> {
+    pub fn routes(&self) -> impl Iterator<Item = &Route> {
+        self.outputs.iter().flat_map(|output| &output.routes)
+    }
+
+    pub fn routes_mut(&mut self) -> impl Iterator<Item = &mut Route> {
+        self.outputs.iter_mut().flat_map(|output| &mut output.routes)
+    }
+
+    pub fn map_graph(mut self, map: impl FnOnce(EGraph<P, Lang>) -> EGraph<P, Lang>) -> Self {
+        self.graph = map(self.graph);
+        self
+    }
+
+    pub fn try_map_graph<E>(
+        mut self,
+        map: impl FnOnce(EGraph<P, Lang>) -> Result<EGraph<P, Lang>, E>,
+    ) -> Result<Self, E> {
+        self.graph = map(self.graph)?;
+        Ok(self)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_resources(
         name: String,
@@ -1400,11 +1509,10 @@ impl<P: EgirPhase, Lang: Language> Entry<P, Lang> {
         execution_model: ExecutionModel,
         inputs: Vec<InterfaceEntryInput<Lang::Ty>>,
         outputs: Vec<InterfaceEntryOutput<Lang::Ty>>,
-        resource_declarations: Vec<P::ResourceDecl>,
+        resource_declarations: Vec<ResourceDecl>,
         params: Vec<(Lang::Ty, String)>,
         return_ty: Lang::Ty,
         graph: EGraph<P, Lang>,
-        control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
         Self {
             name,
@@ -1422,15 +1530,13 @@ impl<P: EgirPhase, Lang: Language> Entry<P, Lang> {
                 .map(|inner| EntryOutput {
                     inner,
                     resource: None,
+                    routes: Vec::new(),
                 })
                 .collect(),
             resource_declarations,
             params,
             return_ty,
             graph,
-            control_headers,
-            aliases: LookupMap::new(),
-            output_routes: Vec::new(),
         }
     }
 
@@ -1441,7 +1547,7 @@ impl<P: EgirPhase, Lang: Language> Entry<P, Lang> {
             .graph
             .nodes
             .iter()
-            .filter_map(|(node, definition)| match definition {
+            .filter_map(|(node, definition)| match &definition.kind {
                 ENode::FuncParam { index } if retained.contains(index) => Some((*index, node)),
                 _ => None,
             })
@@ -1458,7 +1564,7 @@ impl<P: EgirPhase, Lang: Language> Entry<P, Lang> {
             .nodes
             .iter()
             .filter_map(|(node, definition)| {
-                (matches!(definition, ENode::FuncParam { .. }) && !retained_nodes.contains(&node))
+                (matches!(&definition.kind, ENode::FuncParam { .. }) && !retained_nodes.contains(&node))
                     .then_some(node)
             })
             .collect::<Vec<_>>();
@@ -1466,7 +1572,9 @@ impl<P: EgirPhase, Lang: Language> Entry<P, Lang> {
             self.graph.remove_func_param(node);
         }
         for (new_index, (_, node)) in kept.into_iter().enumerate() {
-            if let Some(ENode::FuncParam { index }) = self.graph.nodes.get_mut(node) {
+            if let Some(ENode::FuncParam { index }) =
+                self.graph.nodes.get_mut(node).map(|node| &mut node.kind)
+            {
                 *index = new_index;
             }
         }
@@ -1475,122 +1583,352 @@ impl<P: EgirPhase, Lang: Language> Entry<P, Lang> {
     /// Drop structured-control metadata whose header or required target block
     /// was removed by CFG simplification.
     pub fn retain_live_control_headers(&mut self) {
-        let blocks = &self.graph.skeleton.blocks;
-        self.control_headers.retain(|header, control| {
-            if !blocks.contains_key(*header)
-                || !matches!(blocks[*header].term, SkeletonTerminator::CondBranch { .. })
-            {
-                return false;
-            }
-            match control {
-                ControlHeader::Loop {
-                    merge,
-                    continue_block,
-                } => blocks.contains_key(*merge) && blocks.contains_key(*continue_block),
-                ControlHeader::Selection { merge } => blocks.contains_key(*merge),
-            }
-        });
+        self.graph.retain_live_control_headers();
     }
 }
 
-/// Whole-program EGIR container. Concrete compiler checkpoints wrap this
-/// generic substrate and determine the phase-specific graph payload.
-pub struct Program<P: EgirPhase, Lang: Language> {
-    pub functions: Vec<Func<P, Lang>>,
-    pub externs: Vec<ExternDecl<Lang::Ty>>,
-    pub entry_points: Vec<Entry<P, Lang>>,
-    pub constants: Vec<ConstantDef<P, Lang>>,
-    pub pipeline: PipelineDescriptor,
-    pub input_names: LookupMap<(u32, u32), String>,
-    /// Region identity to the corresponding entry in `functions`.
-    pub regions: LookupMap<RegionId, usize>,
-    pub region_interner: RegionInterner,
-}
-
-fn record_region(
-    interner: &mut RegionInterner,
-    regions: &mut LookupMap<RegionId, usize>,
-    function_index: usize,
-    function_name: &str,
-) -> RegionId {
-    let id = interner.intern(function_name);
-    regions.insert(id, function_index);
-    id
-}
-
-impl<P: EgirPhase, Lang: Language> Program<P, Lang> {
-    pub fn new(
-        functions: Vec<Func<P, Lang>>,
-        externs: Vec<ExternDecl<Lang::Ty>>,
-        entry_points: Vec<Entry<P, Lang>>,
-        constants: Vec<ConstantDef<P, Lang>>,
-        pipeline: PipelineDescriptor,
-        mut region_interner: RegionInterner,
-    ) -> Self {
-        let mut regions = LookupMap::new();
-        for (index, function) in functions.iter().enumerate() {
-            record_region(&mut region_interner, &mut regions, index, &function.name);
+impl<P: Family, ResourceDecl, Route, Lang: Language> Entry<P, ResourceDecl, Route, Lang> {
+    /// Consume an entry while changing only the representation of each
+    /// output route.
+    pub fn map_output_routes<T>(self, mut map: impl FnMut(Route) -> T) -> Entry<P, ResourceDecl, T, Lang> {
+        let Self {
+            name,
+            span,
+            execution_model,
+            inputs,
+            outputs,
+            resource_declarations,
+            params,
+            return_ty,
+            graph,
+        } = self;
+        Entry {
+            name,
+            span,
+            execution_model,
+            inputs,
+            outputs: outputs
+                .into_iter()
+                .map(|output| EntryOutput {
+                    inner: output.inner,
+                    resource: output.resource,
+                    routes: output.routes.into_iter().map(&mut map).collect(),
+                })
+                .collect(),
+            resource_declarations,
+            params,
+            return_ty,
+            graph,
         }
+    }
+}
+
+/// Whole-program EGIR container at one externally visible checkpoint.
+#[derive(Debug)]
+pub struct Program<S: Stage, Lang: Language> {
+    pub functions: Vec<Func<S::Family, Lang>>,
+    pub externs: Vec<ExternDecl<Lang::Ty>>,
+    pub entry_points: Vec<Entry<S::Family, S::ResourceDecl, S::OutputRoute, Lang>>,
+    pub constants: Vec<ConstantDef<S::Family, Lang>>,
+    /// Program-owned IR data selected by this checkpoint.
+    pub data: S::ProgramData,
+    /// Program-wide state available at this exact pipeline checkpoint.
+    pub global_context: S::GlobalContext,
+}
+
+/// Stable address of one graph-bearing body within a program snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BodySite {
+    Function(RegionId),
+    Entry(usize),
+    Constant(usize),
+}
+
+/// One graph-bearing program member removed from a program for a consuming
+/// rewrite.
+pub enum Body<S: Stage, Lang: Language> {
+    Function(Func<S::Family, Lang>),
+    Entry(Entry<S::Family, S::ResourceDecl, S::OutputRoute, Lang>),
+    Constant(ConstantDef<S::Family, Lang>),
+}
+
+impl<S: Stage, Lang: Language> Program<S, Lang> {
+    pub fn from_parts(
+        functions: Vec<Func<S::Family, Lang>>,
+        externs: Vec<ExternDecl<Lang::Ty>>,
+        entry_points: Vec<Entry<S::Family, S::ResourceDecl, S::OutputRoute, Lang>>,
+        constants: Vec<ConstantDef<S::Family, Lang>>,
+        data: S::ProgramData,
+        global_context: S::GlobalContext,
+    ) -> Self {
         Self {
             functions,
             externs,
             entry_points,
             constants,
-            pipeline,
-            input_names: LookupMap::new(),
-            regions,
-            region_interner,
+            data,
+            global_context,
         }
     }
 
-    /// Convenience constructor for a single function body.
-    pub fn single_function(func: Func<P, Lang>) -> Self {
-        Self::new(
-            vec![func],
-            vec![],
-            vec![],
-            vec![],
-            PipelineDescriptor::default(),
-            RegionInterner::default(),
-        )
+    pub fn body_graph(&self, site: BodySite) -> Option<&EGraph<S::Family, Lang>> {
+        match site {
+            BodySite::Function(region) => {
+                self.functions.iter().find(|function| function.region == region).map(|body| &body.graph)
+            }
+            BodySite::Entry(index) => self.entry_points.get(index).map(|body| &body.graph),
+            BodySite::Constant(index) => self.constants.get(index).map(|body| &body.graph),
+        }
     }
 
-    pub fn intern_region(&mut self, name: impl AsRef<str>) -> RegionId {
-        self.region_interner.intern(name.as_ref())
+    /// Change only the top-level checkpoint when all stored types agree.
+    pub fn into_stage<T>(self) -> Program<T, Lang>
+    where
+        T: Stage<
+            Family = S::Family,
+            ResourceDecl = S::ResourceDecl,
+            OutputRoute = S::OutputRoute,
+            ProgramData = S::ProgramData,
+            GlobalContext = S::GlobalContext,
+        >,
+    {
+        let Self {
+            functions,
+            externs,
+            entry_points,
+            constants,
+            data,
+            global_context,
+        } = self;
+        Program {
+            functions,
+            externs,
+            entry_points,
+            constants,
+            data,
+            global_context,
+        }
     }
 
-    pub fn define_region(&mut self, function: Func<P, Lang>) -> RegionId {
-        let index = self.functions.len();
-        let id = record_region(
-            &mut self.region_interner,
-            &mut self.regions,
-            index,
-            &function.name,
+    /// Consume and rebuild every graph-bearing body while moving all
+    /// non-graph fields directly into the resulting program.
+    pub fn map_graphs(
+        self,
+        mut map: impl FnMut(BodySite, EGraph<S::Family, Lang>) -> EGraph<S::Family, Lang>,
+    ) -> Self {
+        match self.try_map_graphs(|site, graph| Ok::<_, std::convert::Infallible>(map(site, graph))) {
+            Ok(program) => program,
+            Err(error) => match error {},
+        }
+    }
+
+    /// Fallible counterpart to [`Self::map_graphs`].
+    pub fn try_map_graphs<E>(
+        self,
+        mut map: impl FnMut(BodySite, EGraph<S::Family, Lang>) -> Result<EGraph<S::Family, Lang>, E>,
+    ) -> Result<Self, E> {
+        let Self {
+            functions,
+            externs,
+            entry_points,
+            constants,
+            data,
+            global_context,
+        } = self;
+        let functions = functions
+            .into_iter()
+            .map(|function| {
+                let site = BodySite::Function(function.region);
+                function.try_map_graph(|graph| map(site, graph))
+            })
+            .collect::<Result<_, E>>()?;
+        let entry_points = entry_points
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry)| entry.try_map_graph(|graph| map(BodySite::Entry(index), graph)))
+            .collect::<Result<_, E>>()?;
+        let constants = constants
+            .into_iter()
+            .enumerate()
+            .map(|(index, constant)| constant.try_map_graph(|graph| map(BodySite::Constant(index), graph)))
+            .collect::<Result<_, E>>()?;
+        Ok(Self {
+            functions,
+            externs,
+            entry_points,
+            constants,
+            data,
+            global_context,
+        })
+    }
+
+    /// Fallibly rebuild every graph-bearing body while allowing the rewrite
+    /// to update both program-owned data and carried global state.
+    pub fn try_map_graphs_with_state<E>(
+        self,
+        mut map: impl FnMut(
+            BodySite,
+            EGraph<S::Family, Lang>,
+            &mut S::ProgramData,
+            &mut S::GlobalContext,
+        ) -> Result<EGraph<S::Family, Lang>, E>,
+    ) -> Result<Self, E> {
+        let Self {
+            functions,
+            externs,
+            entry_points,
+            constants,
+            mut data,
+            mut global_context,
+        } = self;
+        let functions = functions
+            .into_iter()
+            .map(|function| {
+                let site = BodySite::Function(function.region);
+                function.try_map_graph(|graph| map(site, graph, &mut data, &mut global_context))
+            })
+            .collect::<Result<_, E>>()?;
+        let entry_points = entry_points
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                entry.try_map_graph(|graph| {
+                    map(BodySite::Entry(index), graph, &mut data, &mut global_context)
+                })
+            })
+            .collect::<Result<_, E>>()?;
+        let constants = constants
+            .into_iter()
+            .enumerate()
+            .map(|(index, constant)| {
+                constant.try_map_graph(|graph| {
+                    map(BodySite::Constant(index), graph, &mut data, &mut global_context)
+                })
+            })
+            .collect::<Result<_, E>>()?;
+        Ok(Self {
+            functions,
+            externs,
+            entry_points,
+            constants,
+            data,
+            global_context,
+        })
+    }
+
+    /// Consume the program and append synthesized callable regions while
+    /// moving every existing member unchanged.
+    pub fn extend_functions(self, additional: impl IntoIterator<Item = Func<S::Family, Lang>>) -> Self {
+        let Self {
+            functions,
+            externs,
+            entry_points,
+            constants,
+            data,
+            global_context,
+        } = self;
+        Self {
+            functions: functions.into_iter().chain(additional).collect(),
+            externs,
+            entry_points,
+            constants,
+            data,
+            global_context,
+        }
+    }
+
+    /// Consume the program and rebuild only its program-owned data.
+    pub fn map_data(self, map: impl FnOnce(S::ProgramData) -> S::ProgramData) -> Self {
+        let Self {
+            functions,
+            externs,
+            entry_points,
+            constants,
+            data,
+            global_context,
+        } = self;
+        Self {
+            functions,
+            externs,
+            entry_points,
+            constants,
+            data: map(data),
+            global_context,
+        }
+    }
+
+    /// Consume and replace exactly one graph-bearing body. All other bodies
+    /// move directly into the rebuilt program.
+    pub fn rewrite_body(
+        self,
+        site: BodySite,
+        rewrite: impl FnOnce(Body<S, Lang>) -> Body<S, Lang>,
+    ) -> Self {
+        match self.try_rewrite_body(site, |body| Ok::<_, std::convert::Infallible>(rewrite(body))) {
+            Ok(program) => program,
+            Err(error) => match error {},
+        }
+    }
+
+    /// Fallible counterpart to [`Self::rewrite_body`].
+    pub fn try_rewrite_body<E>(
+        self,
+        site: BodySite,
+        rewrite: impl FnOnce(Body<S, Lang>) -> Result<Body<S, Lang>, E>,
+    ) -> Result<Self, E> {
+        let Self {
+            functions,
+            externs,
+            entry_points,
+            constants,
+            data,
+            global_context,
+        } = self;
+        let mut rewrite = Some(rewrite);
+        let mut rebuilt_functions = Vec::with_capacity(functions.len());
+        for function in functions {
+            if site != BodySite::Function(function.region) {
+                rebuilt_functions.push(function);
+                continue;
+            }
+            match rewrite.take().expect("body patch applied more than once")(Body::Function(function))? {
+                Body::Function(function) => rebuilt_functions.push(function),
+                _ => panic!("function body patch returned a different body kind"),
+            }
+        }
+        let mut rebuilt_entries = Vec::with_capacity(entry_points.len());
+        for (index, entry) in entry_points.into_iter().enumerate() {
+            if site != BodySite::Entry(index) {
+                rebuilt_entries.push(entry);
+                continue;
+            }
+            match rewrite.take().expect("body patch applied more than once")(Body::Entry(entry))? {
+                Body::Entry(entry) => rebuilt_entries.push(entry),
+                _ => panic!("entry body patch returned a different body kind"),
+            }
+        }
+        let mut rebuilt_constants = Vec::with_capacity(constants.len());
+        for (index, constant) in constants.into_iter().enumerate() {
+            if site != BodySite::Constant(index) {
+                rebuilt_constants.push(constant);
+                continue;
+            }
+            match rewrite.take().expect("body patch applied more than once")(Body::Constant(constant))? {
+                Body::Constant(constant) => rebuilt_constants.push(constant),
+                _ => panic!("constant body patch returned a different body kind"),
+            }
+        }
+        assert!(
+            rewrite.is_none(),
+            "body patch targeted a body absent from the program"
         );
-        self.functions.push(function);
-        id
-    }
-
-    pub fn contains_region(&self, id: RegionId) -> bool {
-        self.regions.contains_key(&id)
-    }
-
-    pub fn region(&self, id: RegionId) -> Option<&Func<P, Lang>> {
-        self.regions.get(&id).and_then(|&index| self.functions.get(index))
-    }
-
-    pub fn region_mut(&mut self, id: RegionId) -> Option<&mut Func<P, Lang>> {
-        let index = *self.regions.get(&id)?;
-        self.functions.get_mut(index)
-    }
-
-    pub fn iter_regions(&self) -> impl Iterator<Item = (RegionId, &Func<P, Lang>)> {
-        self.regions
-            .iter()
-            .filter_map(|(&id, &index)| self.functions.get(index).map(|function| (id, function)))
-    }
-
-    pub fn region_name(&self, id: RegionId) -> &str {
-        self.region_interner.resolve(id)
+        Ok(Self {
+            functions: rebuilt_functions,
+            externs,
+            entry_points: rebuilt_entries,
+            constants: rebuilt_constants,
+            data,
+            global_context,
+        })
     }
 }

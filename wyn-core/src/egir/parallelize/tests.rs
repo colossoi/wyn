@@ -3,7 +3,9 @@
 use super::projection::side_effect_output_slots;
 use super::*;
 use crate::ast::Span;
-use crate::egir::program::{OutputRoute, OutputSlotId, SlotSource};
+use crate::egir::allocation::ResourcesAllocated;
+use crate::egir::ir::RealizedOutputRoute;
+use crate::egir::program::{Program, SlotSource};
 use crate::egir::soac::screma;
 use crate::egir::types::{EffectOp, EffectToken, Semantic};
 use crate::flow::ExecutionModel;
@@ -12,15 +14,11 @@ pub(crate) const FILTER_SCAN_GROUPS: u32 = model::FILTER_SCAN_GROUPS;
 pub(crate) const REDUCE_PHASE1_WIDTH: u32 = model::REDUCE_PHASE1_WIDTH;
 
 pub(crate) fn planned_callable_names(
-    inner: &mut AllocatedProgram,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    program: Program<ResourcesAllocated>,
 ) -> std::result::Result<Vec<String>, String> {
-    let existing = inner.functions.len();
-    let regions = inner.region_interner.clone();
-    build_parallel_plan(inner, effect_ids).map_err(|error| error.to_string())?;
-    let names = inner.functions[existing..].iter().map(|function| function.name.clone()).collect();
-    inner.functions.truncate(existing);
-    inner.region_interner = regions;
+    let existing = program.functions.len();
+    let (program, _) = build_parallel_plan(program).map_err(|error| error.to_string())?;
+    let names = program.functions[existing..].iter().map(|function| function.name.clone()).collect();
     Ok(names)
 }
 
@@ -77,20 +75,28 @@ fn output_ownership_comes_from_explicit_route_writer() {
             local_size: (1, 1, 1),
         },
         vec![],
-        vec![],
+        (0..4)
+            .map(|_| crate::interface::EntryOutput {
+                ty: Type::Constructed(TypeName::Unit, vec![]),
+                kind: crate::interface::EntryOutputKind::Value {
+                    destination: crate::interface::EntryOutputDestination::Plain,
+                },
+            })
+            .collect(),
         vec![],
         vec![],
         Type::Constructed(TypeName::Unit, vec![]),
         graph,
-        LookupMap::new(),
     );
-    entry.output_routes.push(OutputRoute {
+    entry.outputs[3].routes.push(RealizedOutputRoute {
         source: SlotSource { block, value: source },
-        slot: OutputSlotId(3),
         writers: vec![OutputWriter::Effect(writer)],
     });
+    let resource = SemanticResourceRef(ResourceId::for_test(0));
+    entry.outputs[3].resource = Some(resource);
 
     let entry = crate::egir::program::PlannedEntry::project(&entry).expect("project route fixture");
+    assert_eq!(entry.outputs[3].resource, Some(resource));
     let effect = entry
         .graph
         .skeleton
@@ -194,7 +200,7 @@ fn idle_chunk_start_is_clamped_before_remaining_subtraction() {
     let (_, start, _) =
         emit_chunk_arithmetic(&mut graph, REDUCE_PHASE1_WIDTH, len).expect("u32 chunk arithmetic");
     assert!(matches!(
-        &graph.nodes[start],
+        &graph.nodes[start].kind,
         super::super::types::ENode::Pure {
             op: PureOp::Intrinsic { .. },
             operands,
@@ -209,6 +215,7 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
     let neutral = phase1.intern_pure(PureOp::Int("0".into()), smallvec![], elem_ty.clone(), None);
     let sums = ResourceId::for_test(40);
     let offsets = ResourceId::for_test(41);
+    let mut semantic_ids = crate::egir::program::SemanticOpIdSource::default();
     let mut effect_ids = crate::IdSource::new();
     let phase2 = ScanPhase2Spec {
         entry_name: "prefix".into(),
@@ -222,7 +229,7 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
         },
         total_out: None,
     }
-    .build(&mut effect_ids)
+    .build(&mut semantic_ids, &mut effect_ids)
     .expect("phase2 synthesis");
 
     let stored_value = phase2
@@ -243,7 +250,7 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
         })
         .expect("block-offset store");
     assert!(matches!(
-        phase2.body.graph.nodes[stored_value],
+        phase2.body.graph.nodes[stored_value].kind,
         super::super::types::ENode::BlockParam { .. }
     ));
 }

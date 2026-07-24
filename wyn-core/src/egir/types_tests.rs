@@ -1,3 +1,4 @@
+use super::super::ir::Stage;
 use super::*;
 
 fn i32_ty() -> Type<TypeName> {
@@ -34,10 +35,20 @@ impl Language for TestLanguage {
     type Ty = String;
 }
 
-impl EgirPhase for TestPhase {
+impl Family for TestPhase {
     type Resource = ();
-    type ResourceDecl = u16;
     type Soac = ();
+}
+
+#[derive(Debug)]
+struct TestStage;
+
+impl Stage for TestStage {
+    type Family = TestPhase;
+    type ResourceDecl = u16;
+    type OutputRoute = ();
+    type ProgramData = ();
+    type GlobalContext = ();
 }
 
 #[test]
@@ -64,9 +75,9 @@ fn graph_accepts_non_wyn_payloads() {
         span: None,
     });
 
-    assert_eq!(graph.types[&node], "unit");
+    assert_eq!(graph.nodes[node].ty, "unit");
     assert!(matches!(
-        graph.nodes[constant],
+        graph.nodes[constant].kind,
         super::super::ir::ENode::Constant(TestConst::FortyTwo)
     ));
     assert!(matches!(
@@ -85,15 +96,15 @@ fn adding_block_params_registers_them_in_order() {
 
     assert_eq!(graph.skeleton.blocks[block].params, [first, second]);
     assert!(matches!(
-        graph.nodes[first],
+        graph.nodes[first].kind,
         super::super::ir::ENode::BlockParam { block: owner, index: 0 } if owner == block
     ));
     assert!(matches!(
-        graph.nodes[second],
+        graph.nodes[second].kind,
         super::super::ir::ENode::BlockParam { block: owner, index: 1 } if owner == block
     ));
-    assert_eq!(graph.types[&first], "first");
-    assert_eq!(graph.types[&second], "second");
+    assert_eq!(graph.nodes[first].ty, "first");
+    assert_eq!(graph.nodes[second].ty, "second");
 }
 
 #[test]
@@ -126,7 +137,7 @@ fn removing_block_param_slots_updates_incoming_edges_and_indices() {
     assert_eq!(removed, [first, third]);
     assert_eq!(graph.skeleton.blocks[target].params, [second]);
     assert!(matches!(
-        graph.nodes[second],
+        graph.nodes[second].kind,
         super::super::ir::ENode::BlockParam { block, index: 0 } if block == target
     ));
     assert!(graph.nodes.contains_key(first));
@@ -160,10 +171,10 @@ fn splitting_block_moves_effect_suffix_and_original_terminator() {
     let entry = graph.skeleton.entry;
     graph.skeleton.blocks[entry].side_effects = vec![effect(first), effect(second), effect(third)];
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(Some(third));
-    let mut control_headers = crate::LookupMap::new();
-    control_headers.insert(entry, crate::flow::ControlHeader::Selection { merge: entry });
+    graph.skeleton.blocks[entry].control_header =
+        Some(crate::flow::ControlHeader::Selection { merge: entry });
 
-    let continuation = graph.skeleton.split_block_before_effect(&mut control_headers, entry, 1);
+    let continuation = graph.skeleton.split_block_before_effect(entry, 1);
 
     assert_eq!(
         graph.skeleton.blocks[entry]
@@ -190,9 +201,9 @@ fn splitting_block_moves_effect_suffix_and_original_terminator() {
         graph.skeleton.blocks[continuation].term,
         SkeletonTerminator::Return(Some(result)) if result == third
     ));
-    assert!(!control_headers.contains_key(&entry));
+    assert!(graph.skeleton.blocks[entry].control_header.is_none());
     assert!(matches!(
-        control_headers.get(&continuation),
+        graph.skeleton.blocks[continuation].control_header.as_ref(),
         Some(crate::flow::ControlHeader::Selection { merge }) if *merge == entry
     ));
 }
@@ -200,7 +211,7 @@ fn splitting_block_moves_effect_suffix_and_original_terminator() {
 #[test]
 fn entry_and_program_accept_non_wyn_resource_metadata() {
     let graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
-    let entry = super::super::ir::Entry::<TestPhase, TestLanguage>::new_with_resources(
+    let entry = super::super::ir::Entry::<TestPhase, u16, (), TestLanguage>::new_with_resources(
         "custom".to_string(),
         crate::ast::Span::new(0, 0, 0, 0),
         crate::flow::ExecutionModel::Compute {
@@ -212,17 +223,16 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
         vec![],
         "unit".to_string(),
         graph,
-        crate::LookupMap::new(),
     );
     assert_eq!(entry.resource_declarations, [7]);
 
-    let program = super::super::ir::Program::<TestPhase, TestLanguage>::new(
+    let program = super::super::ir::Program::<TestStage, TestLanguage>::from_parts(
         vec![],
         vec![],
         vec![entry],
         vec![],
-        crate::pipeline_descriptor::PipelineDescriptor::default(),
-        super::super::ir::RegionInterner::default(),
+        (),
+        (),
     );
     assert_eq!(program.entry_points[0].resource_declarations, [7]);
 }
@@ -246,7 +256,7 @@ fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
         .into_iter()
         .map(|name| (name.to_string(), name.to_string()))
         .collect();
-    let mut entry = super::super::ir::Entry::<TestPhase, TestLanguage>::new_with_resources(
+    let mut entry = super::super::ir::Entry::<TestPhase, (), (), TestLanguage>::new_with_resources(
         "compact".to_string(),
         crate::ast::Span::dummy(),
         crate::flow::ExecutionModel::Compute {
@@ -258,7 +268,6 @@ fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
         params,
         "unit".to_string(),
         graph,
-        crate::LookupMap::new(),
     );
 
     entry.retain_parameter_indices(&[0, 2].into_iter().collect());
@@ -272,12 +281,12 @@ fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
         ["first", "third"]
     );
     assert!(matches!(
-        entry.graph.nodes[first],
+        entry.graph.nodes[first].kind,
         super::super::ir::ENode::FuncParam { index: 0 }
     ));
     assert!(!entry.graph.nodes.contains_key(removed));
     assert!(matches!(
-        entry.graph.nodes[third],
+        entry.graph.nodes[third].kind,
         super::super::ir::ENode::FuncParam { index: 1 }
     ));
 }
@@ -345,12 +354,10 @@ fn removing_func_param_clears_its_metadata() {
     let mut graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
     let span = crate::ast::Span::new(1, 2, 3, 4);
     let param = graph.add_func_param(0, "number".to_string());
-    graph.node_spans.insert(param, span);
+    graph.nodes[param].span = Some(span);
 
     assert!(graph.remove_func_param(param));
     assert!(!graph.nodes.contains_key(param));
-    assert!(!graph.types.contains_key(&param));
-    assert!(!graph.node_spans.contains_key(&param));
 }
 
 #[test]

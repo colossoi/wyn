@@ -60,10 +60,11 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
         args: vec![],
     };
     graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(None);
-    let headers = LookupMap::from([(entry, ControlHeader::Selection { merge: exit })]);
-    let aliases = LookupMap::from([(produced, place), (unrelated, place)]);
+    graph.skeleton.blocks[entry].control_header = Some(ControlHeader::Selection { merge: exit });
+    graph.nodes[produced].alias = Some(place);
+    graph.nodes[unrelated].alias = Some(place);
 
-    let projected = GraphProjector::new(&graph, &headers)
+    let projected = GraphProjector::new(&graph)
         .selected(HashSet::from([SideEffectSite {
             block: body,
             index: 0,
@@ -76,9 +77,14 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
     );
     assert!(projected.node(produced).is_some());
     assert!(projected.node(unrelated).is_none());
-    assert_eq!(projected.remap_aliases(&aliases).len(), 1);
+    assert_eq!(
+        projected.graph.nodes[projected.node(produced).unwrap()].alias,
+        projected.node(place)
+    );
     assert!(matches!(
-        projected.control_headers.get(&projected.block(entry).unwrap()),
+        projected.graph.skeleton.blocks[projected.block(entry).unwrap()]
+            .control_header
+            .as_ref(),
         Some(ControlHeader::Selection { merge }) if *merge == projected.block(exit).unwrap()
     ));
 }
@@ -100,14 +106,11 @@ fn complete_projection_remaps_loop_headers_and_parameters() {
         args: vec![],
     };
     graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(None);
-    let headers = LookupMap::from([(
-        header,
-        ControlHeader::Loop {
-            merge: exit,
-            continue_block: header,
-        },
-    )]);
-    let projected = GraphProjector::new(&graph, &headers).all().expect("complete projection");
+    graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+        merge: exit,
+        continue_block: header,
+    });
+    let projected = GraphProjector::new(&graph).all().expect("complete projection");
     assert_eq!(projected.graph.skeleton.blocks.len(), 3);
     assert_eq!(
         projected.graph.skeleton.blocks[projected.block(header).unwrap()].params.len(),
@@ -115,7 +118,9 @@ fn complete_projection_remaps_loop_headers_and_parameters() {
     );
     assert!(projected.node(zero).is_some());
     assert!(matches!(
-        projected.control_headers.get(&projected.block(header).unwrap()),
+        projected.graph.skeleton.blocks[projected.block(header).unwrap()]
+            .control_header
+            .as_ref(),
         Some(ControlHeader::Loop { merge, continue_block })
             if *merge == projected.block(exit).unwrap()
                 && *continue_block == projected.block(header).unwrap()
@@ -159,15 +164,12 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
         args: vec![next_acc, next_index],
     };
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
-    let headers = LookupMap::from([(
-        header,
-        ControlHeader::Loop {
-            merge: continuation,
-            continue_block: body,
-        },
-    )]);
+    graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+        merge: continuation,
+        continue_block: body,
+    });
 
-    let recipe = GraphProjector::new(&graph, &headers)
+    let recipe = GraphProjector::new(&graph)
         .captured_value_recipe(
             result,
             SideEffectSite {
@@ -186,10 +188,9 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
         ValueRecipeSource::StructuredPrefix { continuation: block } if block == continuation
     ));
     assert!(matches!(
-        recipe
-            .projection
-            .control_headers
-            .get(&recipe.projection.block(header).unwrap()),
+        recipe.projection.graph.skeleton.blocks[recipe.projection.block(header).unwrap()]
+            .control_header
+            .as_ref(),
         Some(ControlHeader::Loop { merge, continue_block })
             if *merge == recipe.projection.block(continuation).unwrap()
                 && *continue_block == recipe.projection.block(body).unwrap()
@@ -224,9 +225,9 @@ fn captured_value_recipe_projects_a_structured_selection_prefix() {
         args: vec![right],
     };
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
-    let headers = LookupMap::from([(entry, ControlHeader::Selection { merge: continuation })]);
+    graph.skeleton.blocks[entry].control_header = Some(ControlHeader::Selection { merge: continuation });
 
-    let recipe = GraphProjector::new(&graph, &headers)
+    let recipe = GraphProjector::new(&graph)
         .captured_value_recipe(
             result,
             SideEffectSite {
@@ -237,10 +238,9 @@ fn captured_value_recipe_projects_a_structured_selection_prefix() {
         .expect("structured selection recipe");
     assert_eq!(recipe.projection.graph.skeleton.blocks.len(), 4);
     assert!(matches!(
-        recipe
-            .projection
-            .control_headers
-            .get(&recipe.projection.graph.skeleton.entry),
+        recipe.projection.graph.skeleton.blocks[recipe.projection.graph.skeleton.entry]
+            .control_header
+            .as_ref(),
         Some(ControlHeader::Selection { merge })
             if *merge == recipe.projection.block(continuation).unwrap()
     ));
@@ -286,7 +286,7 @@ fn captured_recipe_reports_selected_effect_result_used_by_retained_terminator() 
     graph.skeleton.blocks[then_block].term = SkeletonTerminator::Return(None);
     graph.skeleton.blocks[else_block].term = SkeletonTerminator::Return(None);
 
-    let recipe = GraphProjector::new(&graph, &LookupMap::new())
+    let recipe = GraphProjector::new(&graph)
         .captured_value_recipe(
             boundary,
             SideEffectSite {
@@ -327,8 +327,7 @@ fn entry_recipe_reports_selected_effect_result_used_by_external_value() {
         u32_ty(),
         None,
     );
-    let headers = LookupMap::new();
-    let projector = GraphProjector::new(&graph, &headers);
+    let projector = GraphProjector::new(&graph);
 
     let internal_only = projector.entry_value_recipe(root).expect("entry value recipe");
     assert!(internal_only.live_outs().next().is_none());
@@ -362,7 +361,7 @@ fn entry_recipe_projects_multiple_requested_values_as_one_component() {
     );
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(None);
 
-    let recipe = GraphProjector::new(&graph, &LookupMap::new())
+    let recipe = GraphProjector::new(&graph)
         .entry_values_recipe([first, second, first])
         .expect("multi-value entry recipe");
 
@@ -413,7 +412,7 @@ fn structured_value_recipe_leaves_independent_continuation_effect_in_source() {
     });
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
-    let recipe = GraphProjector::new(&graph, &LookupMap::new())
+    let recipe = GraphProjector::new(&graph)
         .captured_value_recipe(
             result,
             SideEffectSite {
@@ -455,7 +454,7 @@ fn selected_operation_recipe_detaches_an_independent_continuation_effect() {
     });
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
-    let projected = GraphProjector::new(&graph, &LookupMap::new())
+    let projected = GraphProjector::new(&graph)
         .selected_operation_recipe(HashSet::from([SideEffectSite {
             block: continuation,
             index: 0,
@@ -493,12 +492,10 @@ fn selected_operation_recipe_rejects_a_continuation_parameter_dependency() {
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
     let projection =
-        GraphProjector::new(&graph, &LookupMap::new()).selected_operation_recipe(HashSet::from([
-            SideEffectSite {
-                block: continuation,
-                index: 0,
-            },
-        ]));
+        GraphProjector::new(&graph).selected_operation_recipe(HashSet::from([SideEffectSite {
+            block: continuation,
+            index: 0,
+        }]));
     assert!(matches!(
         projection,
         Err(error) if error.contains("block parameter")
@@ -526,7 +523,7 @@ fn selected_component_detaches_an_independent_continuation_value() {
     });
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
-    let projected = GraphProjector::new(&graph, &LookupMap::new())
+    let projected = GraphProjector::new(&graph)
         .selected_component_with_values(
             HashSet::from([SideEffectSite {
                 block: continuation,
@@ -565,7 +562,7 @@ fn selected_component_retains_cfg_for_a_continuation_parameter_dependency() {
     });
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
-    let projected = GraphProjector::new(&graph, &LookupMap::new())
+    let projected = GraphProjector::new(&graph)
         .selected_component_with_values(
             HashSet::from([SideEffectSite {
                 block: continuation,
@@ -589,20 +586,16 @@ fn projection_does_not_resurrect_eliminated_block_parameters() {
     let mut graph = EGraph::new();
     let entry = graph.skeleton.entry;
     let continuation = graph.skeleton.create_block();
-    let eliminated = graph.nodes.insert(ENode::BlockParam {
-        block: continuation,
-        index: 0,
-    });
-    graph.types.insert(eliminated, u32_ty());
+    let eliminated = graph.add_block_param(continuation, u32_ty());
+    graph.skeleton.blocks[continuation].params.clear();
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: continuation,
         args: vec![],
     };
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
-    let projected = GraphProjector::new(&graph, &LookupMap::new())
-        .all()
-        .expect("projection with an eliminated historical parameter");
+    let projected =
+        GraphProjector::new(&graph).all().expect("projection with an eliminated historical parameter");
     assert!(projected.node(eliminated).is_none());
     assert!(projected.graph.skeleton.blocks[projected.block(continuation).unwrap()].params.is_empty());
     projected

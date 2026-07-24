@@ -23,10 +23,11 @@ use crate::flow::BlockId;
 use crate::ssa::types::ConstantValue;
 use crate::BindingRef;
 
+use super::ir::{Family, Node};
 use super::types::{
-    EGraph, ENode, EffectOp, EffectToken, EgirPhase, GraphResource, NodeId, Physical, PureOp,
-    PureViewSource, Raw, ResourceAccess, SegResourceAccess, Semantic, SideEffect, SideEffectKind,
-    SideEffectSite, SkeletonTerminator, Soac, SoacEffect, WynSoacPhase,
+    EGraph, ENode, EffectOp, EffectToken, GraphResource, NodeId, Physical, PureOp, PureViewSource, Raw,
+    ResourceAccess, SegResourceAccess, Semantic, SideEffect, SideEffectKind, SideEffectSite,
+    SkeletonTerminator, Soac, SoacEffect, WynSoacPhase,
 };
 
 #[cfg(test)]
@@ -38,7 +39,7 @@ mod graph_ops_tests;
 /// Raw SOACs have captures and operator seeds but no resolved segmented
 /// iteration space.  Semantic SOACs additionally expose their resolved space
 /// through `SideEffect::referenced_nodes`.
-pub(crate) trait ValueProducerPhase: EgirPhase {
+pub(crate) trait ValueProducerPhase: Family {
     fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<NodeId>;
 }
 
@@ -134,7 +135,7 @@ impl ValueUseIndex {
         };
 
         for (user, definition) in &graph.nodes {
-            for source in definition.children() {
+            for source in definition.kind.children() {
                 index.pure_successors.entry(source).or_default().push(user);
                 index.value_successors.entry(source).or_default().push(user);
             }
@@ -215,7 +216,7 @@ impl ValueUseIndex {
     }
 }
 
-fn index_block_argument_successors<P: EgirPhase>(
+fn index_block_argument_successors<P: Family>(
     graph: &EGraph<P>,
     successors: &mut LookupMap<NodeId, Vec<NodeId>>,
     term: &SkeletonTerminator,
@@ -264,7 +265,7 @@ pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
         let Some(definition) = graph.nodes.get(node) else {
             continue;
         };
-        match definition {
+        match &definition.kind {
             ENode::Pure { operands, .. } => pending.extend(operands.iter().copied()),
             ENode::Union { left, right } => pending.extend([*left, *right]),
             ENode::BlockParam { block, index } => {
@@ -321,7 +322,7 @@ pub(crate) fn reachable_execution_values<P: ValueProducerPhase>(graph: &EGraph<P
         wyn_graph::WalkOrder::DepthFirst,
         |node, out| {
             if let Some(definition) = graph.nodes.get(node) {
-                out.extend(definition.children());
+                out.extend(definition.kind.children());
             }
         },
     )
@@ -330,10 +331,10 @@ pub(crate) fn reachable_execution_values<P: ValueProducerPhase>(graph: &EGraph<P
 /// Whether `target` is reachable from `root` through floating pure/union
 /// operands only. This is the common dependency predicate for use-site and
 /// fusion analyses that deliberately stop at effect results and CFG params.
-pub(crate) fn pure_depends_on<P: EgirPhase>(graph: &EGraph<P>, root: NodeId, target: NodeId) -> bool {
+pub(crate) fn pure_depends_on<P: Family>(graph: &EGraph<P>, root: NodeId, target: NodeId) -> bool {
     wyn_graph::reaches_ordered(root, target, wyn_graph::WalkOrder::DepthFirst, |node, out| {
         if let Some(definition) = graph.nodes.get(node) {
-            out.extend(definition.children());
+            out.extend(definition.kind.children());
         }
     })
 }
@@ -368,8 +369,9 @@ pub(crate) fn maximal_execution_frontier<P: ValueProducerPhase>(
             continue;
         }
         if let Some(definition) = graph.nodes.get(*node) {
-            boundary
-                .extend(definition.children().into_iter().filter(|child| reachable_set.contains(child)));
+            boundary.extend(
+                definition.kind.children().into_iter().filter(|child| reachable_set.contains(child)),
+            );
         }
     }
     let mut frontier =
@@ -385,7 +387,7 @@ pub(crate) fn read_storage_resources<P>(
     roots: impl IntoIterator<Item = NodeId>,
 ) -> Vec<SegResourceAccess<super::program::SemanticResourceRef>>
 where
-    P: ValueProducerPhase + EgirPhase<Resource = super::program::SemanticResourceRef>,
+    P: ValueProducerPhase + Family<Resource = super::program::SemanticResourceRef>,
 {
     let resources = value_producer_closure(graph, roots)
         .nodes
@@ -404,12 +406,8 @@ where
 }
 
 /// Return the output selected by a direct projection of `root`.
-pub(crate) fn projection_index<P: EgirPhase>(
-    graph: &EGraph<P>,
-    node: NodeId,
-    root: NodeId,
-) -> Option<usize> {
-    match graph.nodes.get(node)? {
+pub(crate) fn projection_index<P: Family>(graph: &EGraph<P>, node: NodeId, root: NodeId) -> Option<usize> {
+    match &graph.nodes.get(node)?.kind {
         ENode::Pure {
             op: PureOp::Project { index },
             operands,
@@ -420,7 +418,7 @@ pub(crate) fn projection_index<P: EgirPhase>(
 
 /// Follow nested projections back to `root` and return its selected output.
 /// For `Project(Project(root, outer), inner)`, this is `outer`.
-pub(crate) fn root_projection_index<P: EgirPhase>(
+pub(crate) fn root_projection_index<P: Family>(
     graph: &EGraph<P>,
     node: NodeId,
     root: NodeId,
@@ -434,7 +432,7 @@ pub(crate) fn root_projection_index<P: EgirPhase>(
         let ENode::Pure {
             op: PureOp::Project { index },
             operands,
-        } = graph.nodes.get(current)?
+        } = &graph.nodes.get(current)?.kind
         else {
             return None;
         };
@@ -443,7 +441,7 @@ pub(crate) fn root_projection_index<P: EgirPhase>(
     }
 }
 
-fn extend_incoming_block_args<P: EgirPhase>(
+fn extend_incoming_block_args<P: Family>(
     graph: &EGraph<P>,
     target: BlockId,
     index: usize,
@@ -491,7 +489,7 @@ fn extend_incoming_block_args<P: EgirPhase>(
 /// shape (`PureOp::Uint(n.to_string())`) as `from_tlc` produces from
 /// `TermKind::IntLit` so hash-consing deduplicates across the two
 /// emission paths.
-pub fn intern_u32<P: EgirPhase>(graph: &mut EGraph<P>, n: u32, span: Option<Span>) -> NodeId {
+pub fn intern_u32<P: Family>(graph: &mut EGraph<P>, n: u32, span: Option<Span>) -> NodeId {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     graph.intern_pure(PureOp::Uint(n.to_string()), smallvec![], u32_ty, span)
 }
@@ -501,7 +499,7 @@ pub fn intern_u32<P: EgirPhase>(graph: &mut EGraph<P>, n: u32, span: Option<Span
 /// already (e.g. carrying a reduce's neutral element across passes).
 /// For freshly-typed-out integer/float literals from terms, prefer the
 /// `PureOp::Uint`/`Int`/`Float` form via the other helpers.
-pub fn intern_constant<P: EgirPhase>(
+pub fn intern_constant<P: Family>(
     graph: &mut EGraph<P>,
     value: ConstantValue,
     ty: Type<TypeName>,
@@ -510,7 +508,7 @@ pub fn intern_constant<P: EgirPhase>(
 }
 
 /// Generic intrinsic call (`PureOp::Intrinsic` with `overload_idx: 0`).
-pub fn intern_intrinsic<P: EgirPhase>(
+pub fn intern_intrinsic<P: Family>(
     graph: &mut EGraph<P>,
     id: BuiltinId,
     operands: SmallVec<[NodeId; 4]>,
@@ -522,7 +520,7 @@ pub fn intern_intrinsic<P: EgirPhase>(
 
 /// Binary op (`PureOp::BinOp`). `op` is the operator string (`"+"`,
 /// `"-"`, etc.) — matches the convention `from_tlc` uses.
-pub fn intern_binop<P: EgirPhase>(
+pub fn intern_binop<P: Family>(
     graph: &mut EGraph<P>,
     op: &str,
     lhs: NodeId,
@@ -563,7 +561,7 @@ pub fn intern_storage_view(
 }
 
 /// Target-independent storage view used after logical-resource allocation.
-pub fn intern_resource_view<P: EgirPhase<Resource = super::program::SemanticResourceRef>>(
+pub fn intern_resource_view<P: Family<Resource = super::program::SemanticResourceRef>>(
     graph: &mut EGraph<P>,
     resource: crate::ResourceId,
     view_ty: Type<TypeName>,
@@ -575,7 +573,7 @@ pub fn intern_resource_view<P: EgirPhase<Resource = super::program::SemanticReso
 }
 
 /// Target-independent logical-resource length.
-pub fn intern_resource_len<P: EgirPhase<Resource = super::program::SemanticResourceRef>>(
+pub fn intern_resource_len<P: Family<Resource = super::program::SemanticResourceRef>>(
     graph: &mut EGraph<P>,
     resource: crate::ResourceId,
     span: Option<Span>,
@@ -588,7 +586,7 @@ pub fn intern_resource_len<P: EgirPhase<Resource = super::program::SemanticResou
     )
 }
 
-pub fn intern_chunked_resource_view<P: EgirPhase<Resource = super::program::SemanticResourceRef>>(
+pub fn intern_chunked_resource_view<P: Family<Resource = super::program::SemanticResourceRef>>(
     graph: &mut EGraph<P>,
     resource: crate::ResourceId,
     offset: NodeId,
@@ -613,7 +611,7 @@ pub fn intern_chunked_resource_view<P: EgirPhase<Resource = super::program::Sema
 /// backends recover the element type from it to declare a module-scope
 /// `array<elem, count>` in workgroup storage. Indexed with the same
 /// `ViewIndex` + `Load`/`Store` machinery as storage views.
-pub fn emit_workgroup_view<P: EgirPhase>(
+pub fn emit_workgroup_view<P: Family>(
     graph: &mut EGraph<P>,
     id: u32,
     count: u32,
@@ -663,7 +661,7 @@ pub fn alloc_effect(effect_ids: &mut crate::IdSource<EffectToken>) -> EffectToke
 /// Emit a `Store` side-effect in `block`. `place_nid` must be a place-
 /// producing pure op (`ViewIndex`, `OutputSlot`). Returns the produced
 /// effect-out token.
-pub fn emit_store<P: EgirPhase>(
+pub fn emit_store<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
     place_nid: NodeId,
@@ -687,7 +685,7 @@ pub fn emit_store<P: EgirPhase>(
 /// in `block`. No operands or result; the effect token keeps it ordered
 /// against the workgroup-shared loads/stores it synchronizes. Returns the
 /// produced effect-out token.
-pub fn emit_workgroup_barrier<P: EgirPhase>(
+pub fn emit_workgroup_barrier<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
     effect_ids: &mut crate::IdSource<EffectToken>,
@@ -706,7 +704,7 @@ pub fn emit_workgroup_barrier<P: EgirPhase>(
 
 /// Emit a store through a `StorageView` at `index_nid`. Builds the
 /// `ViewIndex` pure node and the `Store` side-effect.
-pub fn emit_storage_store<P: EgirPhase>(
+pub fn emit_storage_store<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
     view_nid: NodeId,
@@ -722,7 +720,7 @@ pub fn emit_storage_store<P: EgirPhase>(
 
 /// Emit a `Load` of `place_nid` (a place-producing pure op like `ViewIndex`)
 /// in `block`; returns the loaded-value node (typed `elem_ty`).
-pub fn emit_load<P: EgirPhase>(
+pub fn emit_load<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
     place_nid: NodeId,
@@ -738,7 +736,7 @@ pub fn emit_load<P: EgirPhase>(
 /// Construct a `Load` and its result without choosing its position in a
 /// block. Rewriters use this when a synthesized load must be inserted before
 /// an existing scheduled operation instead of appended to the block tail.
-pub fn detached_load<P: EgirPhase>(
+pub fn detached_load<P: Family>(
     graph: &mut EGraph<P>,
     place_nid: NodeId,
     elem_ty: Type<TypeName>,
@@ -763,7 +761,7 @@ pub fn detached_load<P: EgirPhase>(
 /// element-level addressing, or to `emit_load` / `emit_store` for whole-value
 /// access. The place's element type is `elem_ty`; for an `[T;N]` allocation
 /// `Load` returns the whole array and `PlaceIndex` produces `T`-typed sub-places.
-pub fn emit_alloca<P: EgirPhase>(
+pub fn emit_alloca<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
     elem_ty: Type<TypeName>,
@@ -787,7 +785,7 @@ pub fn emit_alloca<P: EgirPhase>(
 /// sub-place addressing one element. The parent place can be an `Alloca`'d
 /// array or any other place-producing node; the result has element type
 /// `elem_ty` (e.g. `T` for an `[T;N]` parent).
-pub fn intern_place_index<P: EgirPhase>(
+pub fn intern_place_index<P: Family>(
     graph: &mut EGraph<P>,
     parent_place_nid: NodeId,
     index_nid: NodeId,
@@ -805,7 +803,7 @@ pub fn intern_place_index<P: EgirPhase>(
 /// Emit `place[index] = value` as a `PlaceIndex` sub-place + `Store` in
 /// `block`. Companion to `emit_storage_store` for function-local Alloca'd
 /// arrays — no whole-array `Load`/`Store` round-trip.
-pub fn emit_place_index_store<P: EgirPhase>(
+pub fn emit_place_index_store<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
     parent_place_nid: NodeId,
@@ -821,7 +819,7 @@ pub fn emit_place_index_store<P: EgirPhase>(
 
 /// Emit `view[index]` as a `ViewIndex` place + `Load` in `block`; returns the
 /// loaded value. Companion to `emit_storage_store`.
-pub fn emit_view_load<P: EgirPhase>(
+pub fn emit_view_load<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
     view_nid: NodeId,
@@ -842,7 +840,7 @@ pub fn emit_view_load<P: EgirPhase>(
 /// Push a `SideEffectKind::Soac(SoacEffect(id, soac))` side-effect into `block` with
 /// the given operands; returns the allocated `result_nid` (typed as
 /// `result_ty`, which the SOAC's lowering recovers from
-/// `graph.types[result_nid]`).
+/// `graph.nodes[result_nid].ty`).
 pub fn emit_pending_soac<P: WynSoacPhase>(
     graph: &mut EGraph<P>,
     block: BlockId,
@@ -871,11 +869,11 @@ pub fn emit_pending_soac<P: WynSoacPhase>(
 // ---------------------------------------------------------------------------
 
 /// Return the semantic identity carried by a storage-view node.
-pub fn extract_storage_view_source<P: EgirPhase<Resource = super::program::SemanticResourceRef>>(
+pub fn extract_storage_view_source<P: Family<Resource = super::program::SemanticResourceRef>>(
     graph: &EGraph<P>,
     view_nid: NodeId,
 ) -> Option<super::program::SemanticResourceRef> {
-    match &graph.nodes[view_nid] {
+    match &graph.nodes[view_nid].kind {
         ENode::Pure {
             op: PureOp::StorageView(PureViewSource::Storage(resource)),
             ..
@@ -894,7 +892,7 @@ pub(crate) fn storage_resource_under(
         wyn_graph::WalkOrder::DepthFirst,
         |node, out| {
             if let Some(value) = graph.nodes.get(node) {
-                out.extend(value.children());
+                out.extend(value.kind.children());
             }
         },
         |node| extract_storage_view_source(graph, node),
@@ -903,11 +901,11 @@ pub(crate) fn storage_resource_under(
 
 /// If `nid` is a `PureOp::ArrayRange`, return `(start, len, step?)`
 /// NodeIds. Otherwise `None`.
-pub fn extract_array_range_operands<P: EgirPhase>(
+pub fn extract_array_range_operands<P: Family>(
     graph: &EGraph<P>,
     nid: NodeId,
 ) -> Option<(NodeId, NodeId, Option<NodeId>)> {
-    match &graph.nodes[nid] {
+    match &graph.nodes[nid].kind {
         ENode::Pure {
             op: PureOp::ArrayRange { has_step },
             operands,
@@ -933,7 +931,7 @@ pub fn extract_array_range_operands<P: EgirPhase>(
 /// Only pure nodes and constants are cloned; encountering a
 /// `SideEffectResult` or a `BlockParam` returns `Err` because those
 /// reference cross-block / cross-effect data that doesn't translate.
-pub fn clone_pure_subgraph<P: EgirPhase>(
+pub fn clone_pure_subgraph<P: Family>(
     src: &EGraph<P>,
     dst: &mut EGraph<P>,
     root: NodeId,
@@ -947,7 +945,7 @@ pub fn clone_pure_subgraph<P: EgirPhase>(
 /// memo, so a reference to `from` in `src` becomes `to` in `dst`. Lets a value
 /// rooted at a non-pure node (e.g. a SOAC result) be re-expressed over a
 /// replacement `dst` value without rebuilding its projection structure by hand.
-pub fn clone_pure_subgraph_substituting<P: EgirPhase>(
+pub fn clone_pure_subgraph_substituting<P: Family>(
     src: &EGraph<P>,
     dst: &mut EGraph<P>,
     root: NodeId,
@@ -963,7 +961,7 @@ pub(crate) enum ConstantCopy {
     PreserveIdentity,
 }
 
-pub(crate) fn clone_value_subgraph<P: EgirPhase>(
+pub(crate) fn clone_value_subgraph<P: Family>(
     src: &EGraph<P>,
     dst: &mut EGraph<P>,
     nid: NodeId,
@@ -974,40 +972,40 @@ pub(crate) fn clone_value_subgraph<P: EgirPhase>(
     if let Some(&existing) = memo.get(&nid) {
         return Ok(existing);
     }
-    let ty = src
-        .types
-        .get(&nid)
-        .cloned()
-        .ok_or_else(|| format!("clone_value_subgraph: node {nid:?} has no type"))?;
-    let new_nid =
-        match src.nodes.get(nid).ok_or_else(|| format!("clone_value_subgraph: missing node {nid:?}"))? {
-            ENode::Constant(c) => match constants {
-                ConstantCopy::Intern => dst.intern_constant(*c, ty),
-                ConstantCopy::PreserveIdentity => {
-                    let target = dst.nodes.insert(ENode::Constant(*c));
-                    dst.types.insert(target, ty);
-                    target
-                }
-            },
-            ENode::Pure { op, operands, .. } => {
-                let new_ops: SmallVec<[NodeId; 4]> = operands
-                    .iter()
-                    .map(|&operand| clone_value_subgraph(src, dst, operand, memo, constants, allow_unions))
-                    .collect::<Result<_, _>>()?;
-                dst.intern_pure(op.clone(), new_ops, ty, src.node_spans.get(&nid).copied())
+    let source = src.nodes.get(nid).ok_or_else(|| format!("clone_value_subgraph: missing node {nid:?}"))?;
+    let ty = source.ty.clone();
+    let new_nid = match &source.kind {
+        ENode::Constant(c) => match constants {
+            ConstantCopy::Intern => dst.intern_constant(*c, ty),
+            ConstantCopy::PreserveIdentity => {
+                let target = dst.nodes.insert(Node {
+                    kind: ENode::Constant(*c),
+                    ty,
+                    span: source.span,
+                    alias: None,
+                });
+                target
             }
-            ENode::Union { left, right } if allow_unions => {
-                let left = clone_value_subgraph(src, dst, *left, memo, constants, allow_unions)?;
-                let right = clone_value_subgraph(src, dst, *right, memo, constants, allow_unions)?;
-                dst.add_union(left, right)
-            }
-            other => {
-                return Err(format!(
-                    "clone_pure_subgraph: non-pure node {:?}",
-                    std::mem::discriminant(other)
-                ));
-            }
-        };
+        },
+        ENode::Pure { op, operands, .. } => {
+            let new_ops: SmallVec<[NodeId; 4]> = operands
+                .iter()
+                .map(|&operand| clone_value_subgraph(src, dst, operand, memo, constants, allow_unions))
+                .collect::<Result<_, _>>()?;
+            dst.intern_pure(op.clone(), new_ops, ty, source.span)
+        }
+        ENode::Union { left, right } if allow_unions => {
+            let left = clone_value_subgraph(src, dst, *left, memo, constants, allow_unions)?;
+            let right = clone_value_subgraph(src, dst, *right, memo, constants, allow_unions)?;
+            dst.add_union(left, right)
+        }
+        other => {
+            return Err(format!(
+                "clone_pure_subgraph: non-pure node {:?}",
+                std::mem::discriminant(other)
+            ));
+        }
+    };
     memo.insert(nid, new_nid);
     Ok(new_nid)
 }

@@ -7,17 +7,17 @@
 use smallvec::smallvec;
 
 use crate::egir::graph_ops;
-use crate::egir::program::{OutputRoute, OutputWriter, SemanticProgram, SemanticResourceRef};
+use crate::egir::ir::{Body, BodySite, RealizedOutputRoute};
+use crate::egir::program::{OutputWriter, Program, SemanticResourceRef};
+use crate::egir::reify::Segmented;
 use crate::egir::soac::screma;
 use crate::egir::types::{EGraph, ENode, NodeId, PureOp, ResourceAccess, SideEffectKind, Soac, SoacEffect};
 use crate::flow::BlockId;
 use crate::ssa::types::ConstantValue;
 
-use super::vertical::FusionSite;
-
 #[derive(Clone)]
-struct Candidate {
-    site: FusionSite,
+pub(super) struct Candidate {
+    site: BodySite,
     block: BlockId,
     effect: usize,
     index: NodeId,
@@ -25,28 +25,27 @@ struct Candidate {
     output: usize,
 }
 
-pub fn scalarize_indexed_segmap(inner: &mut SemanticProgram) -> bool {
-    let Some(candidate) = find_candidate(inner) else {
-        return false;
-    };
-    apply(inner, candidate);
-    true
+pub(super) fn analyze(inner: &Program<Segmented>) -> Option<Candidate> {
+    find_candidate(inner)
 }
 
-fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
+fn find_candidate(inner: &Program<Segmented>) -> Option<Candidate> {
     for (index, entry) in inner.entry_points.iter().enumerate() {
         let output_resources = entry.outputs.iter().map(|output| output.resource).collect::<Vec<_>>();
+        let output_routes = entry.routes().cloned().collect::<Vec<_>>();
         if let Some(candidate) = find_in_graph(
             &entry.graph,
-            FusionSite::Entry(index),
+            BodySite::Entry(index),
             &output_resources,
-            &entry.output_routes,
+            &output_routes,
         ) {
             return Some(candidate);
         }
     }
-    for (index, function) in inner.functions.iter().enumerate() {
-        if let Some(candidate) = find_in_graph(&function.graph, FusionSite::Function(index), &[], &[]) {
+    for function in &inner.functions {
+        if let Some(candidate) =
+            find_in_graph(&function.graph, BodySite::Function(function.region), &[], &[])
+        {
             return Some(candidate);
         }
     }
@@ -55,9 +54,9 @@ fn find_candidate(inner: &SemanticProgram) -> Option<Candidate> {
 
 fn find_in_graph(
     graph: &EGraph,
-    site: FusionSite,
+    site: BodySite,
     output_resources: &[Option<SemanticResourceRef>],
-    output_routes: &[OutputRoute],
+    output_routes: &[RealizedOutputRoute],
 ) -> Option<Candidate> {
     for (block_id, block) in &graph.skeleton.blocks {
         for (effect_index, effect) in block.side_effects.iter().enumerate() {
@@ -99,7 +98,7 @@ fn find_in_graph(
                     let ENode::Pure {
                         op: PureOp::Index,
                         operands,
-                    } = definition
+                    } = &definition.kind
                     else {
                         return None;
                     };
@@ -134,7 +133,7 @@ fn find_in_graph(
 }
 
 fn is_static_index(graph: &EGraph, node: NodeId) -> bool {
-    match &graph.nodes[node] {
+    match &graph.nodes[node].kind {
         ENode::Constant(ConstantValue::I32(_) | ConstantValue::U32(_)) => true,
         ENode::Pure {
             op: PureOp::Int(_) | PureOp::Uint(_),
@@ -150,7 +149,7 @@ fn used_only_through(
     producer_effect: usize,
     result: NodeId,
     demand: NodeId,
-    output_routes: &[OutputRoute],
+    output_routes: &[RealizedOutputRoute],
 ) -> bool {
     for (block_id, block) in &graph.skeleton.blocks {
         for (index, effect) in block.side_effects.iter().enumerate() {
@@ -184,9 +183,9 @@ fn used_only_through(
     true
 }
 
-fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
+pub(super) fn apply(inner: Program<Segmented>, candidate: Candidate) -> Program<Segmented> {
     let (region_name, input_nodes, input_elem_types, captures, producer_result) = {
-        let graph = graph(inner, candidate.site);
+        let graph = inner.body_graph(candidate.site).expect("indexed fusion body");
         let effect = &graph.skeleton.blocks[candidate.block].side_effects[candidate.effect];
         let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
             unreachable!();
@@ -202,55 +201,54 @@ fn apply(inner: &mut SemanticProgram, candidate: Candidate) {
         )
     };
 
-    let graph = graph_mut(inner, candidate.site);
-    let mut args = smallvec::SmallVec::<[NodeId; 4]>::new();
-    for (input, elem_ty) in input_nodes.iter().zip(&input_elem_types) {
-        args.push(graph.intern_pure(
-            PureOp::Index,
-            smallvec![*input, candidate.index_value],
-            elem_ty.clone(),
-            None,
-        ));
-    }
-    args.extend(captures);
-    let result_ty = graph.types[&candidate.index].clone();
-    let scalar = graph.intern_pure(PureOp::Call(region_name), args, result_ty, None);
-    crate::egir::graph_ops::replace_all_references(graph, candidate.index, scalar);
+    let site = candidate.site;
+    inner.rewrite_body(site, |body| {
+        let rewrite_graph = |graph: &mut EGraph| {
+            let mut args = smallvec::SmallVec::<[NodeId; 4]>::new();
+            for (input, elem_ty) in input_nodes.iter().zip(&input_elem_types) {
+                args.push(graph.intern_pure(
+                    PureOp::Index,
+                    smallvec![*input, candidate.index_value],
+                    elem_ty.clone(),
+                    None,
+                ));
+            }
+            args.extend(captures.iter().copied());
+            let result_ty = graph.nodes[candidate.index].ty.clone();
+            let scalar = graph.intern_pure(PureOp::Call(region_name.clone()), args, result_ty, None);
+            crate::egir::graph_ops::replace_all_references(graph, candidate.index, scalar);
 
-    let block = &mut graph.skeleton.blocks[candidate.block];
-    let removed_effects = block.side_effects[candidate.effect].effects;
-    block.side_effects.remove(candidate.effect);
-    if let Some((input, output)) = removed_effects {
-        for effect in &mut block.side_effects[candidate.effect..] {
-            if let Some((effect_input, _)) = &mut effect.effects {
-                if *effect_input == output {
-                    *effect_input = input;
-                    break;
+            let block = &mut graph.skeleton.blocks[candidate.block];
+            let removed_effects = block.side_effects[candidate.effect].effects;
+            block.side_effects.remove(candidate.effect);
+            if let Some((input, output)) = removed_effects {
+                for effect in &mut block.side_effects[candidate.effect..] {
+                    if let Some((effect_input, _)) = &mut effect.effects {
+                        if *effect_input == output {
+                            *effect_input = input;
+                            break;
+                        }
+                    }
                 }
             }
-        }
-    }
-
-    if let FusionSite::Entry(index) = candidate.site {
-        for route in &mut inner.entry_points[index].output_routes {
-            if route.source.value == candidate.index {
-                route.source.value = scalar;
+            scalar
+        };
+        match body {
+            Body::Entry(mut entry) => {
+                let scalar = rewrite_graph(&mut entry.graph);
+                for route in entry.routes_mut() {
+                    if route.source.value == candidate.index {
+                        route.source.value = scalar;
+                    }
+                    route.writers.retain(|writer| *writer != OutputWriter::Value(producer_result));
+                }
+                Body::Entry(entry)
             }
-            route.writers.retain(|writer| *writer != OutputWriter::Value(producer_result));
+            Body::Function(mut function) => {
+                rewrite_graph(&mut function.graph);
+                Body::Function(function)
+            }
+            Body::Constant(_) => unreachable!("indexed fusion never targets constants"),
         }
-    }
-}
-
-fn graph(inner: &SemanticProgram, site: FusionSite) -> &EGraph {
-    match site {
-        FusionSite::Entry(index) => &inner.entry_points[index].graph,
-        FusionSite::Function(index) => &inner.functions[index].graph,
-    }
-}
-
-fn graph_mut(inner: &mut SemanticProgram, site: FusionSite) -> &mut EGraph {
-    match site {
-        FusionSite::Entry(index) => &mut inner.entry_points[index].graph,
-        FusionSite::Function(index) => &mut inner.functions[index].graph,
-    }
+    })
 }

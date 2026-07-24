@@ -96,12 +96,12 @@ pub(super) fn analyze_reduce_candidate(
         return Ok(None);
     }
     let scratch_types =
-        operators.iter().map(|operator| entry.graph.types[&operator.neutral].clone()).collect::<Vec<_>>();
+        operators.iter().map(|operator| entry.graph.nodes[operator.neutral].ty.clone()).collect::<Vec<_>>();
     if scratch_types.iter().any(|ty| crate::ssa::layout::type_byte_size(ty).is_none()) {
         return Ok(None);
     }
     let input_views =
-        operands.inputs().map(|input| (input.node, entry.graph.types[&input.node].clone())).collect();
+        operands.inputs().map(|input| (input.node, entry.graph.nodes[input.node].ty.clone())).collect();
     let mut stores = (0..n_accs).map(|_| Vec::new()).collect::<Vec<_>>();
     let mut outputs: Vec<Vec<(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)>> =
         vec![Vec::new(); n_accs];
@@ -241,7 +241,7 @@ impl KernelPlanBuilder<'_, '_> {
                 }
                 EmissionAccumulator {
                     scratch_type: accumulator.scratch_type,
-                    operator: self.callable_name(accumulator.combine_region).to_string(),
+                    operator: self.region_interner.resolve(accumulator.combine_region).clone(),
                     neutral: accumulator.neutral,
                     stores,
                     outputs: accumulator.outputs,
@@ -268,7 +268,7 @@ impl KernelPlanBuilder<'_, '_> {
         }
         for (map_index, operand_index) in map_output_view_operands.iter().enumerate() {
             let orig_view = entry.graph.skeleton.effect(site).operand_nodes[*operand_index];
-            let view_ty = entry.graph.types[&orig_view].clone();
+            let view_ty = entry.graph.nodes[orig_view].ty.clone();
             let chunked_view = chunk_view_like(
                 &mut entry.graph,
                 orig_view,
@@ -303,10 +303,10 @@ impl KernelPlanBuilder<'_, '_> {
         for (bid, sx) in drop_locations {
             entry.graph.skeleton.blocks[bid].side_effects.remove(sx);
         }
-        for route in &mut entry.output_routes {
+        for route in entry.outputs.iter_mut().flat_map(|output| &mut output.routes) {
             route.writers.retain(
-            |writer| !matches!(writer, OutputWriter::Effect(effect) if dropped_writers.contains(effect)),
-        );
+                |writer| !matches!(writer, OutputWriter::Effect(effect) if dropped_writers.contains(effect)),
+            );
         }
         for (accumulator, accumulator_value) in accumulators.iter().zip(&accumulator_values) {
             let elem_ty = accumulator.scratch_type.clone();
@@ -378,7 +378,7 @@ impl KernelPlanBuilder<'_, '_> {
                 output_declarations: &accumulator.outputs,
                 width: phase2_width,
             };
-            let phase2 = combine.build(self.effect_ids)?;
+            let phase2 = combine.build(self.semantic_ids, self.effect_ids)?;
             phase2s.push(phase2);
         }
         // Scheduling consumed the semantic SegRed. Phase 1 is now an ordinary
@@ -452,7 +452,7 @@ impl ReduceCombineSpec<'_> {
 
         // ---- entry block: lid, partials view + length, shared view, result view ----
         let entry_bid = b.graph_mut().skeleton.entry;
-        let (graph, control_headers, eff) = b.construction_parts_mut();
+        let (graph, eff) = b.construction_parts_mut();
 
         let lid = graph_ops::intern_intrinsic(
             graph,
@@ -523,13 +523,10 @@ impl ReduceCombineSpec<'_> {
             else_target: grid_after,
             else_args: vec![acc_in],
         };
-        control_headers.insert(
-            grid_header,
-            ControlHeader::Loop {
-                merge: grid_after,
-                continue_block: grid_cont,
-            },
-        );
+        graph.skeleton.blocks[grid_header].control_header = Some(ControlHeader::Loop {
+            merge: grid_after,
+            continue_block: grid_cont,
+        });
 
         // grid_body: acc' = op(acc, partials[i]); → grid_cont(acc')
         let elem_i =
@@ -583,13 +580,10 @@ impl ReduceCombineSpec<'_> {
             else_target: tree_after,
             else_args: vec![],
         };
-        control_headers.insert(
-            tree_header,
-            ControlHeader::Loop {
-                merge: tree_after,
-                continue_block: tree_cont,
-            },
-        );
+        graph.skeleton.blocks[tree_header].control_header = Some(ControlHeader::Loop {
+            merge: tree_after,
+            continue_block: tree_cont,
+        });
 
         // Only the first lane in each adjacent pair combines the two runs.
         let two = graph_ops::intern_u32(graph, 2, None);
@@ -603,12 +597,9 @@ impl ReduceCombineSpec<'_> {
             else_target: tree_sel_merge,
             else_args: vec![],
         };
-        control_headers.insert(
-            tree_body,
-            ControlHeader::Selection {
-                merge: tree_sel_merge,
-            },
-        );
+        graph.skeleton.blocks[tree_body].control_header = Some(ControlHeader::Selection {
+            merge: tree_sel_merge,
+        });
 
         // tree_then: shared[lid] = op(shared[lid], shared[lid+stride]); → tree_sel_merge
         let a = graph_ops::emit_view_load(graph, tree_then, shared_view, lid, elem_ty.clone(), eff, None);
@@ -666,7 +657,8 @@ impl ReduceCombineSpec<'_> {
             else_target: end_blk,
             else_args: vec![],
         };
-        control_headers.insert(tree_after, ControlHeader::Selection { merge: end_blk });
+        graph.skeleton.blocks[tree_after].control_header =
+            Some(ControlHeader::Selection { merge: end_blk });
 
         // write_blk: combined = shared[0]; replay each captured output store reading
         // `combined` in place of the per-thread accumulator value. A scalar reduce
@@ -714,7 +706,11 @@ impl ReduceCombineSpec<'_> {
 /// declares the output bindings this entry writes. Screma's multi-accumulator
 /// path passes a `_phase2_combine_{i}` `full_name` per combiner.
 impl ReduceCombineSpec<'_> {
-    fn build(self, effect_ids: &mut crate::IdSource<EffectToken>) -> Result<BuiltPhase, String> {
+    fn build(
+        self,
+        semantic_ids: &mut crate::egir::program::SemanticOpIdSource,
+        effect_ids: &mut crate::IdSource<EffectToken>,
+    ) -> Result<BuiltPhase, String> {
         use crate::egir::builder::EntryBuilder;
         let mut resources = vec![schedule::ScheduledResource {
             resource: self.partials,
@@ -727,7 +723,8 @@ impl ReduceCombineSpec<'_> {
             }
         }));
         resources.sort_by_key(|resource| resource.resource);
-        let mut b = EntryBuilder::new_compute(self.name.clone(), (self.width, 1, 1), effect_ids);
+        let mut b =
+            EntryBuilder::new_compute(self.name.clone(), (self.width, 1, 1), semantic_ids, effect_ids);
         b.declare_intermediate_storage_sized(
             self.partials,
             self.elem_ty.clone(),

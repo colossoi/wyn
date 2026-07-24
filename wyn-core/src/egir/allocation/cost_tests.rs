@@ -1,6 +1,7 @@
 use super::*;
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_projector::GraphProjector;
+use crate::egir::stage_variance::StageDependenceAnalysis;
 use crate::egir::types::{EffectToken, PureOp, SideEffectSite};
 use crate::flow::ExecutionModel;
 use crate::interface::{BindingExposure, EntryInput, IoDecoration};
@@ -75,10 +76,9 @@ fn stage_invariance_and_scalar_relocation_legality_remain_separate() {
             .collect(),
         ty,
         graph,
-        LookupMap::new(),
     );
 
-    let dependence = super::super::stage_variance::StageDependenceAnalysis::for_entry(&entry).unwrap();
+    let dependence = StageDependenceAnalysis::for_entry(&entry).unwrap();
     assert!(params.iter().all(|parameter| dependence.dependence(*parameter).is_stage_invariant()));
     assert!(entry_parameter_is_scalar_relocatable(&entry, 0));
     assert!(entry_parameter_is_scalar_relocatable(&entry, 1));
@@ -130,7 +130,7 @@ fn structured_storage_prefix_requires_materialization() {
     };
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
-    let recipe = GraphProjector::new(&graph, &LookupMap::new())
+    let recipe = GraphProjector::new(&graph)
         .captured_value_recipe(
             result,
             SideEffectSite {

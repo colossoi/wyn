@@ -25,27 +25,22 @@ fn should_fail_type_check(input: &str) -> bool {
 /// Helper to compile through semantic EGIR optimization and allocation.
 /// Off-milestone stop — drives the typestate API directly so the same
 /// `module_manager` covers both `type_check` and `to_tlc`.
-fn compile_to_semantic_egir(input: &str) -> crate::EgirAllocated {
+fn compile_to_semantic_egir(input: &str) -> crate::egir::program::Program<crate::egir::ResourcesAllocated> {
     let program = crate::compile_thru_tlc(input).expect("compile through TLC");
     let program = crate::tlc::infer_input_slice_bounds(program);
-    let raw = crate::to_egraph(program).expect("convert to raw semantic EGIR");
-    raw.realize_outputs()
-        .expect("realize semantic EGIR outputs")
-        .segment()
-        .optimize()
-        .allocate()
-        .expect("allocate semantic EGIR resources")
+    let program = crate::to_egraph(program).expect("convert to raw semantic EGIR");
+    let program = crate::egir::realize_outputs(program).expect("realize semantic EGIR outputs");
+    let program = crate::egir::reify_soacs(program);
+    let program = crate::egir::optimize_semantics(program);
+    crate::egir::plan_logical_resources(program).expect("allocate semantic EGIR resources")
 }
 
 fn lower_semantic_egir(
-    allocated: crate::EgirAllocated,
+    allocated: crate::egir::program::Program<crate::egir::ResourcesAllocated>,
     profile: crate::LoweringProfile,
 ) -> Program<crate::ssa::stage::Elaborated> {
-    allocated
-        .plan(profile)
-        .expect("plan semantic EGIR")
-        .lower_to_ssa()
-        .expect("lower planned EGIR to SSA")
+    let program = crate::egir::plan(allocated, profile).expect("plan semantic EGIR");
+    crate::lower_egir_to_ssa(program).expect("lower planned EGIR to SSA")
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -61,7 +56,9 @@ struct SemanticSoacStats {
     scan_operators: usize,
 }
 
-fn semantic_soac_stats(allocated: &crate::EgirAllocated) -> SemanticSoacStats {
+fn semantic_soac_stats(
+    allocated: &crate::egir::program::Program<crate::egir::ResourcesAllocated>,
+) -> SemanticSoacStats {
     use crate::egir::soac::screma;
     use crate::egir::types::{EGraph, SideEffectKind, Soac, SoacEffect};
 
@@ -105,10 +102,10 @@ fn semantic_soac_stats(allocated: &crate::EgirAllocated) -> SemanticSoacStats {
     }
 
     let mut stats = SemanticSoacStats::default();
-    for function in &allocated.inner.functions {
+    for function in &allocated.functions {
         visit(&function.graph, &mut stats);
     }
-    for entry in &allocated.inner.entry_points {
+    for entry in &allocated.entry_points {
         visit(&entry.graph, &mut stats);
     }
     stats
@@ -151,7 +148,6 @@ entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
 "#,
     );
     let maps: Vec<_> = allocated
-        .inner
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
@@ -192,7 +188,6 @@ entry mixed() [4]i32 =
 "#,
     );
     let maps: Vec<_> = allocated
-        .inner
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
@@ -229,7 +224,6 @@ entry siblings<[n]>(xs: [n]i32, ys: [n]i32) ([n]i32, [n]i32) =
 "#,
     );
     let fused = allocated
-        .inner
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
@@ -372,7 +366,6 @@ entry stats(xs: []i32) [4]i32 =
     assert_eq!(stats.reduce_operators, 3, "two reductions plus one shared count");
 
     let operators = allocated
-        .inner
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
@@ -388,7 +381,7 @@ entry stats(xs: []i32) [4]i32 =
         .expect("three-operator filtered SegRed");
     let step_names: Vec<_> = operators
         .iter()
-        .map(|operator| allocated.inner.region(operator.step.region).unwrap().name.as_str())
+        .map(|operator| allocated.region(operator.step.region).unwrap().name.as_str())
         .collect();
     assert!(step_names[0].contains("filter_reduce"));
     assert!(step_names[1].contains("filter_reduce"));
@@ -435,7 +428,6 @@ entry pick(xs: []i32) ?k. [k]i32 =
     assert_eq!(stats.seg_maps, 0, "the producer map should not materialize");
     assert_eq!(stats.filters, 1, "the escaping filter remains the envelope");
     let has_map_body = allocated
-        .inner
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
@@ -480,7 +472,6 @@ entry write(xs: []i32, #[storage(set=2, binding=0, access=write)] dest: *[]i32) 
     );
     assert_eq!(stats.hists, 1);
     let input_count = allocated
-        .inner
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
@@ -507,9 +498,8 @@ fn semantic_segops_survive_optimization_and_logical_allocation() {
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#,
     );
-    crate::egir::semantic_graph::verify(&allocated.inner).expect("complete semantic EGIR");
+    crate::egir::semantic_graph::verify(&allocated).expect("complete semantic EGIR");
     let seg = allocated
-        .inner
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
@@ -526,7 +516,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
     assert_eq!(seg.1, screma::Flavor::Reduce);
     assert!(matches!(seg.0.dims(), [SegExtent::ResourceLength { .. }]));
     assert!(
-        allocated.inner.resources.len() >= 2,
+        allocated.data.core.resources.len() >= 2,
         "input and output resources are planned logically"
     );
     assert!(allocated.semantic_ir().contains("SegRed"));
@@ -536,7 +526,8 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
     // not reserve a phase-local partial buffer yet.
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
     let partials = allocated
-        .inner
+        .data
+        .core
         .resources
         .iter()
         .filter(|resource| {
@@ -548,7 +539,8 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         })
         .count();
     assert_eq!(partials, 0, "pre-target allocation has no reduce scratch");
-    let planned = allocated.plan(crate::LoweringProfile::PORTABLE).expect("plan parallel reduction");
+    let planned =
+        crate::egir::plan(allocated, crate::LoweringProfile::PORTABLE).expect("plan parallel reduction");
     assert!(planned.logical_resources().iter().any(|resource| matches!(
         resource.origin,
         ResourceOrigin::Compiler(ref compiler)
@@ -575,7 +567,6 @@ entry e() [4]f32 =
 "#,
     );
     let operator_counts: Vec<usize> = allocated
-        .inner
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
@@ -592,7 +583,6 @@ entry e() [4]f32 =
         "the four same-space reductions fuse into one four-accumulator op"
     );
     let remaining_maps = allocated
-        .inner
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
@@ -605,17 +595,11 @@ entry e() [4]f32 =
         .count();
     assert_eq!(remaining_maps, 0, "the single-consumer map is vertically fused");
     assert_eq!(
-        allocated
-            .inner
-            .functions
-            .iter()
-            .filter(|function| function.name.contains("_vertical_step_"))
-            .count(),
+        allocated.functions.iter().filter(|function| function.name.contains("_vertical_step_")).count(),
         4,
         "one composed step region per accumulator"
     );
     let operators = allocated
-        .inner
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
@@ -629,7 +613,7 @@ entry e() [4]f32 =
     for operator in operators {
         assert_eq!(operator.input_indices.len(), 1);
         assert_eq!(
-            allocated.inner.region(operator.step.region).unwrap().params.len(),
+            allocated.region(operator.step.region).unwrap().params.len(),
             2,
             "composed step receives accumulator plus only its routed input"
         );
@@ -654,7 +638,6 @@ entry e() [3]i32 =
 "#,
     );
     let operator_counts: Vec<_> = allocated
-        .inner
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
@@ -686,7 +669,6 @@ entry e() [2]i32 =
 "#;
     let allocated = compile_to_semantic_egir(source);
     let operators = allocated
-        .inner
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
@@ -740,7 +722,7 @@ fn target_planning_owns_parallel_work_scratch() {
     let scan_kinds = kinds(scan.logical_resources());
     assert!(!scan_kinds.contains(&CompilerResourceKind::ScanBlockSums));
     assert!(!scan_kinds.contains(&CompilerResourceKind::ScanBlockOffsets));
-    let scan = scan.plan(crate::LoweringProfile::PORTABLE).expect("plan parallel scan");
+    let scan = crate::egir::plan(scan, crate::LoweringProfile::PORTABLE).expect("plan parallel scan");
     let scan_kinds = kinds(scan.logical_resources());
     assert!(scan_kinds.contains(&CompilerResourceKind::ScanBlockSums));
     assert!(scan_kinds.contains(&CompilerResourceKind::ScanBlockOffsets));
@@ -784,7 +766,7 @@ fn target_planning_owns_parallel_work_scratch() {
     assert!(!filter_kinds.contains(&CompilerResourceKind::FilterOffsets));
     assert!(!filter_kinds.contains(&CompilerResourceKind::FilterScanBlockSums));
     assert!(!filter_kinds.contains(&CompilerResourceKind::FilterScanBlockOffsets));
-    let filter = filter.plan(crate::LoweringProfile::PORTABLE).expect("plan parallel filter");
+    let filter = crate::egir::plan(filter, crate::LoweringProfile::PORTABLE).expect("plan parallel filter");
     assert_eq!(
         filter
             .logical_resources()
@@ -816,13 +798,12 @@ entry add_sum(xs: []i32) []i32 =
         )
     }));
 
-    let single = compile_to_semantic_egir(
-        "#[compute] entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)",
+    let single = crate::egir::plan(
+        compile_to_semantic_egir(
+            "#[compute] entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)",
+        ),
+        crate::LoweringProfile::new(crate::CodegenTarget::Portable, crate::SchedulePolicy::Serial),
     )
-    .plan(crate::LoweringProfile::new(
-        crate::CodegenTarget::Portable,
-        crate::SchedulePolicy::Serial,
-    ))
     .expect("plan sequential reduction");
     assert!(
         !kinds(single.logical_resources()).contains(&CompilerResourceKind::ReducePartial),
@@ -832,8 +813,8 @@ entry add_sum(xs: []i32) []i32 =
     let fallback = compile_to_semantic_egir(
         "#[compute] entry sum_from(xs: []i32, z: i32) i32 = reduce(|a: i32, b: i32| a + b, z, xs)",
     );
-    let fallback =
-        fallback.plan(crate::LoweringProfile::PORTABLE).expect("plan reduction with a runtime neutral");
+    let fallback = crate::egir::plan(fallback, crate::LoweringProfile::PORTABLE)
+        .expect("plan reduction with a runtime neutral");
     assert!(
         !kinds(fallback.logical_resources()).contains(&CompilerResourceKind::ReducePartial),
         "a reduction rejected before mutation must not retain speculative scratch"
@@ -877,10 +858,12 @@ fn selected_recipes_allocate_exact_ordered_scratch() {
             .collect::<Vec<_>>()
     };
 
-    let scalar_reduce = compile_to_semantic_egir(
-        "#[compute] entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)",
+    let scalar_reduce = crate::egir::plan(
+        compile_to_semantic_egir(
+            "#[compute] entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)",
+        ),
+        crate::LoweringProfile::PORTABLE,
     )
-    .plan(crate::LoweringProfile::PORTABLE)
     .expect("plan scalar reduction");
     let scratch = planned_scratch(scalar_reduce.logical_resources());
     assert_eq!(scratch.len(), 1);
@@ -899,8 +882,8 @@ entry sums() (i32, i32) =
    reduce(|a: i32, b: i32| a + b, 0, ys))
 "#,
     );
-    let multi_reduce =
-        multi_reduce.plan(crate::LoweringProfile::PORTABLE).expect("plan multi-accumulator reduction");
+    let multi_reduce = crate::egir::plan(multi_reduce, crate::LoweringProfile::PORTABLE)
+        .expect("plan multi-accumulator reduction");
     let scratch = planned_scratch(multi_reduce.logical_resources());
     assert_eq!(scratch.len(), 2);
     assert_eq!(
@@ -929,10 +912,12 @@ entry sums() (i32, i32) =
         ]
     );
 
-    let scan = compile_to_semantic_egir(
-        "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
+    let scan = crate::egir::plan(
+        compile_to_semantic_egir(
+            "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
+        ),
+        crate::LoweringProfile::PORTABLE,
     )
-    .plan(crate::LoweringProfile::PORTABLE)
     .expect("plan scan");
     let scratch = planned_scratch(scan.logical_resources());
     let owner = scratch[0].1.expect("scratch has an operation owner");
@@ -954,10 +939,12 @@ entry sums() (i32, i32) =
         ]
     );
 
-    let filter = compile_to_semantic_egir(
-        "#[compute] entry evens(xs: []i32) []i32 = filter(|x: i32| x % 2 == 0, xs)",
+    let filter = crate::egir::plan(
+        compile_to_semantic_egir(
+            "#[compute] entry evens(xs: []i32) []i32 = filter(|x: i32| x % 2 == 0, xs)",
+        ),
+        crate::LoweringProfile::PORTABLE,
     )
-    .plan(crate::LoweringProfile::PORTABLE)
     .expect("plan runtime filter");
     let scratch = planned_scratch(filter.logical_resources());
     assert_eq!(scratch.len(), 4);
@@ -1610,7 +1597,7 @@ entry r(bidx: []u32) ?k. [k]vec4f32 =
 /// SegMap remains and that the shared prepass replaces local `Materialize`s.
 #[test]
 fn multi_consumer_producer_survival_is_characterized() {
-    use crate::egir::program::SemanticDependencyKind;
+    use crate::egir::semantic_graph::SemanticDependencyKind;
     use crate::egir::soac::screma;
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
     use std::collections::HashMap;
@@ -1618,7 +1605,6 @@ fn multi_consumer_producer_survival_is_characterized() {
     fn multi_consumer_producers(src: &str) -> usize {
         let allocated = compile_to_semantic_egir(src);
         let seg_maps: std::collections::HashSet<_> = allocated
-            .inner
             .entry_points
             .iter()
             .flat_map(|entry| {
@@ -1633,9 +1619,9 @@ fn multi_consumer_producer_survival_is_characterized() {
             })
             .collect();
         let mut consumers: HashMap<_, usize> = HashMap::new();
-        for dep in &allocated.inner.semantic_dependencies {
+        for dep in crate::egir::semantic_graph::dependencies(&allocated) {
             if matches!(dep.kind, SemanticDependencyKind::Value) && seg_maps.contains(&dep.producer) {
-                *consumers.entry(dep.producer.clone()).or_default() += 1;
+                *consumers.entry(dep.producer).or_default() += 1;
             }
         }
         consumers.values().filter(|count| **count >= 2).count()
@@ -1731,7 +1717,7 @@ entry e() [4]i32 =
     );
     let shared_resource = shared[0].id();
     let shared_requirements = allocated
-        .inner
+        .data
         .materializations
         .iter()
         .filter(|(_, requirement)| {
@@ -1746,28 +1732,31 @@ entry e() [4]i32 =
     let (&requirement_id, requirement) = shared_requirements[0];
     let requirement_name = requirement_id.entry_name("e", "materialize_shared");
     assert!(
-        allocated.inner.entry_points.iter().all(|entry| entry.name != requirement_name),
+        allocated.entry_points.iter().all(|entry| entry.name != requirement_name),
         "materialization must not be synthesized into the semantic entry arena"
     );
     assert_eq!(requirement.entry().name, requirement_name);
-    let ResourceOrigin::Compiler(shared_compiler) = &shared[0].origin else {
+    let ResourceOrigin::Compiler(_) = &shared[0].origin else {
         unreachable!("shared resource must be compiler-owned")
     };
-    let flow = shared_compiler.flow.as_ref().expect("shared resource has an allocated flow");
+    let flow = crate::egir::allocation::resource_flows(&allocated)
+        .into_iter()
+        .find_map(|(resource, flow)| (resource == shared_resource).then_some(flow))
+        .expect("shared resource has an allocated flow");
     assert!(matches!(
         flow.producer,
-        crate::egir::program::CompilerFlowEndpoint::Materialization(_)
+        crate::egir::allocation::CompilerFlowEndpoint::Materialization(_)
     ));
     let consumer = flow
         .consumers
         .iter()
         .copied()
         .find_map(|consumer| match consumer {
-            crate::egir::program::CompilerFlowEndpoint::Entry(id) => Some(id),
-            crate::egir::program::CompilerFlowEndpoint::Materialization(_) => None,
+            crate::egir::allocation::CompilerFlowEndpoint::Entry(id) => Some(id),
+            crate::egir::allocation::CompilerFlowEndpoint::Materialization(_) => None,
         })
         .expect("shared array remains an input of the source entry");
-    assert_eq!(allocated.inner.entry_points[consumer.index()].name, "e");
+    assert_eq!(allocated.entry_points[consumer.index()].name, "e");
     let lowered = lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE);
     let mir = crate::ssa::print::format_program(&lowered);
     assert_eq!(
@@ -1854,7 +1843,7 @@ fn terminal_schedule_and_descriptor_are_atomic_and_deterministic() {
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#;
     let allocated = compile_to_semantic_egir(source);
-    for pipeline in &allocated.inner.pipeline.pipelines {
+    for pipeline in &allocated.data.core.pipeline.pipelines {
         if let crate::pipeline_descriptor::Pipeline::Compute(compute) = pipeline {
             assert!(
                 compute.bindings.is_empty(),
@@ -1908,38 +1897,28 @@ fn target_profiles_are_selected_before_ssa_lowering() {
 
 #[test]
 fn terminal_scan_helpers_are_complete_region_arena_members() {
-    let mut allocated = compile_to_semantic_egir(
-        "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
-    );
+    let source = "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)";
+    let allocated = compile_to_semantic_egir(source);
     assert!(
-        !allocated.inner.functions.iter().any(|function| function.name.ends_with("_scan_op_swap")),
+        !allocated.functions.iter().any(|function| function.name.ends_with("_scan_op_swap")),
         "planner-generated scan helper leaked into semantic EGIR"
     );
-    let planned_callables = crate::egir::parallelize::tests::planned_callable_names(
-        &mut allocated.inner,
-        &mut allocated.effect_ids,
-    )
-    .expect("parallel schedule");
+    let planned_callables =
+        crate::egir::parallelize::tests::planned_callable_names(compile_to_semantic_egir(source))
+            .expect("parallel schedule");
     assert!(
         planned_callables.iter().any(|name| name.ends_with("_scan_op_swap")),
         "scan helper must be owned by the kernel plan"
     );
-    let mut binding_ids = allocated.binding_ids;
-    let mut effect_ids = allocated.effect_ids;
-    let (physical, _) = crate::egir::parallelize::plan(
-        allocated.inner,
-        &mut binding_ids,
-        &mut effect_ids,
-        crate::LoweringProfile::PORTABLE,
-    )
-    .expect("terminal schedule");
+    let physical =
+        crate::egir::plan(allocated, crate::LoweringProfile::PORTABLE).expect("terminal schedule");
     let helper = physical
         .functions
         .iter()
         .find(|function| function.name.ends_with("_scan_op_swap"))
         .expect("scan swap helper");
-    let region = physical.region_interner.get(&helper.name).expect("helper region id");
-    assert!(physical.regions.contains_key(&region));
+    let region = physical.data.region_interner.get(&helper.name).expect("helper region id");
+    assert!(physical.contains_region(region));
 }
 
 /// Assert that a compute `reduce`-over-`map`-of-range `src` parallelizes and
@@ -3690,30 +3669,34 @@ entry add_sum(xs: []i32) []i32 =
   map(|x: i32| x + total, xs)
 "#,
     );
-    let flow = allocated
+    let resource = allocated
         .logical_resources()
         .iter()
-        .find_map(|resource| match &resource.origin {
+        .find(|resource| match &resource.origin {
             ResourceOrigin::Compiler(compiler) if compiler.kind == CompilerResourceKind::ScalarHandoff => {
-                compiler.flow.as_ref()
+                true
             }
-            _ => None,
+            _ => false,
         })
+        .expect("scalar handoff resource");
+    let flow = crate::egir::allocation::resource_flows(&allocated)
+        .into_iter()
+        .find_map(|(candidate, flow)| (candidate == resource.id()).then_some(flow))
         .expect("scalar handoff has an explicit resource flow");
-    let crate::egir::program::CompilerFlowEndpoint::Materialization(producer_id) = flow.producer else {
+    let crate::egir::allocation::CompilerFlowEndpoint::Materialization(producer_id) = flow.producer else {
         panic!("scalar producer must be a typed materialization requirement")
     };
     let producer = allocated
-        .inner
+        .data
         .materializations
         .get(producer_id)
         .expect("materialization flow producer is arena-owned");
     assert!(producer.entry().name.contains("prepass_scalar"));
     assert_eq!(flow.consumers.len(), 1);
     assert_eq!(
-        allocated.inner.entry_points[match flow.consumers[0] {
-            crate::egir::program::CompilerFlowEndpoint::Entry(id) => id.index(),
-            crate::egir::program::CompilerFlowEndpoint::Materialization(_) => {
+        allocated.entry_points[match flow.consumers[0] {
+            crate::egir::allocation::CompilerFlowEndpoint::Entry(id) => id.index(),
+            crate::egir::allocation::CompilerFlowEndpoint::Materialization(_) => {
                 panic!("scalar materialization consumer must be a semantic entry")
             }
         }]

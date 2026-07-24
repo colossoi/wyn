@@ -3,7 +3,8 @@
 //! This deliberately executes semantic values rather than scheduled kernels;
 //! optional adapter tests compare backend readback against the same oracle.
 
-use crate::egir::program::{SemanticFunc, SemanticProgram};
+use crate::egir::program::{Program, SemanticFunc};
+use crate::egir::reify::Segmented;
 use crate::egir::types::{ENode, NodeId, PureOp, RegionId, SkeletonTerminator};
 use crate::LookupMap;
 
@@ -22,11 +23,11 @@ pub enum Value {
 /// typed region arena used by SegBody/SegBinOp, so semantic tests exercise the
 /// representation rather than parallel Rust closures alone.
 pub struct RegionExecutor<'a> {
-    program: &'a SemanticProgram,
+    program: &'a Program<Segmented>,
 }
 
 impl<'a> RegionExecutor<'a> {
-    pub fn new(program: &'a SemanticProgram) -> Self {
+    pub fn new(program: &'a Program<Segmented>) -> Self {
         Self { program }
     }
 
@@ -51,7 +52,7 @@ impl<'a> RegionExecutor<'a> {
         if let Some(value) = memo.get(&node) {
             return Ok(value.clone());
         }
-        let value = match &region.graph.nodes[node] {
+        let value = match &region.graph.nodes[node].kind {
             ENode::FuncParam { index } => {
                 arguments.get(*index).cloned().ok_or_else(|| format!("missing region argument {index}"))?
             }
@@ -114,6 +115,7 @@ impl<'a> RegionExecutor<'a> {
             PureOp::Call(callee) => {
                 let region = self
                     .program
+                    .data
                     .region_interner
                     .get(callee)
                     .ok_or_else(|| format!("unknown EGIR region `{callee}`"))?;

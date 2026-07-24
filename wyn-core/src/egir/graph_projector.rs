@@ -7,17 +7,16 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::flow::{BlockId, ControlHeader};
-use crate::LookupMap;
 
 use super::graph_ops::ValueUseIndex;
-use super::program::{OutputRoute, OutputWriter};
+use super::ir::RealizedOutputRoute;
+use super::program::OutputWriter;
 use super::types::{
     EGraph, ENode, EffectToken, NodeId, Semantic, SideEffect, SideEffectIndex, SideEffectSite,
     SkeletonTerminator,
 };
 pub struct GraphProjection {
     pub graph: EGraph<Semantic>,
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
     nodes: HashMap<NodeId, NodeId>,
     blocks: HashMap<BlockId, BlockId>,
     effects: HashSet<EffectToken>,
@@ -85,11 +84,10 @@ impl GraphProjection {
         self.effect_sites.get(&source).copied()
     }
 
-    pub fn remap_aliases(&self, aliases: &LookupMap<NodeId, NodeId>) -> LookupMap<NodeId, NodeId> {
-        aliases.iter().filter_map(|(from, to)| Some((self.node(*from)?, self.node(*to)?))).collect()
-    }
-
-    pub fn remap_output_routes(&self, routes: Vec<OutputRoute>) -> Result<Vec<OutputRoute>, String> {
+    pub fn remap_output_routes(
+        &self,
+        routes: Vec<RealizedOutputRoute>,
+    ) -> Result<Vec<RealizedOutputRoute>, String> {
         remap_output_routes(
             routes,
             |node| self.node(node),
@@ -102,13 +100,13 @@ impl GraphProjection {
 }
 
 pub(crate) fn remap_output_routes(
-    routes: Vec<OutputRoute>,
+    routes: Vec<RealizedOutputRoute>,
     mut map_node: impl FnMut(NodeId) -> Option<NodeId>,
     mut map_block: impl FnMut(BlockId) -> Option<BlockId>,
     mut map_effect: impl FnMut(EffectToken) -> Option<EffectToken>,
     require_writers: bool,
     context: &str,
-) -> Result<Vec<OutputRoute>, String> {
+) -> Result<Vec<RealizedOutputRoute>, String> {
     routes
         .into_iter()
         .map(|mut route| {
@@ -141,7 +139,6 @@ pub(crate) fn remap_output_routes(
 
 pub struct GraphProjector<'a> {
     source: &'a EGraph<Semantic>,
-    control_headers: &'a LookupMap<BlockId, ControlHeader>,
     uses: ValueUseIndex,
 }
 
@@ -173,13 +170,9 @@ struct ProjectionShell {
 }
 
 impl<'a> GraphProjector<'a> {
-    pub fn new(
-        source: &'a EGraph<Semantic>,
-        control_headers: &'a LookupMap<BlockId, ControlHeader>,
-    ) -> Self {
+    pub fn new(source: &'a EGraph<Semantic>) -> Self {
         Self {
             source,
-            control_headers,
             uses: ValueUseIndex::build(source),
         }
     }
@@ -461,7 +454,9 @@ impl<'a> GraphProjector<'a> {
         }
         let values = self.close_producers(&mut selected, &mut values, &self.source.side_effect_index())?;
         Ok(selected.iter().all(|site| site.block == block)
-            && values.iter().all(|node| !matches!(self.source.nodes[*node], ENode::BlockParam { .. })))
+            && values
+                .iter()
+                .all(|node| !matches!(&self.source.nodes[*node].kind, ENode::BlockParam { .. })))
     }
 
     fn project(
@@ -484,19 +479,21 @@ impl<'a> GraphProjector<'a> {
         }
         let (effects, effect_sites) = self.clone_effects(&selection, &mut shell)?;
         self.project_terminators(mode, &selection.blocks, &mut shell)?;
-        let control_headers = if matches!(
+        if matches!(
             mode,
             ProjectionMode::EntryRecipe { .. } | ProjectionMode::DetachedRecipe { .. }
         ) {
-            LookupMap::new()
+            for (_, block) in shell.graph.skeleton.blocks.iter_mut() {
+                block.control_header = None;
+            }
         } else {
-            self.project_control_headers(&shell.blocks)?
-        };
+            self.project_control_headers(&mut shell)?;
+        }
+        self.project_aliases(&mut shell);
         shell.graph.verify_hash_cons()?;
         shell.graph.skeleton.verify_branch_arities()?;
         Ok(GraphProjection {
             graph: shell.graph,
-            control_headers,
             nodes: shell.nodes,
             blocks: shell.blocks,
             effects,
@@ -526,9 +523,9 @@ impl<'a> GraphProjector<'a> {
         if selected.iter().any(|site| !allowed_effects.contains(site)) {
             return Err("value recipe depends on an effect outside its prefix boundary".into());
         }
-        if values.iter().any(|node| match self.source.nodes[*node] {
+        if values.iter().any(|node| match &self.source.nodes[*node].kind {
             ENode::BlockParam { block, .. } => {
-                !blocks.contains(&block) || matches!(mode, ProjectionMode::DetachedRecipe { .. })
+                !blocks.contains(block) || matches!(mode, ProjectionMode::DetachedRecipe { .. })
             }
             _ => false,
         }) {
@@ -560,8 +557,8 @@ impl<'a> GraphProjector<'a> {
 
         let mut nodes = HashMap::new();
         for (source_id, node) in &self.source.nodes {
-            if let ENode::FuncParam { index } = node {
-                let target = graph.add_func_param(*index, self.source.types[&source_id].clone());
+            if let ENode::FuncParam { index } = &node.kind {
+                let target = graph.add_func_param(*index, node.ty.clone());
                 nodes.insert(source_id, target);
             }
         }
@@ -570,7 +567,7 @@ impl<'a> GraphProjector<'a> {
         }
         for site in &selection.effects {
             if let Some(result) = self.effect_at(*site)?.result {
-                let target = graph.alloc_side_effect_result(self.source.types[&result].clone());
+                let target = graph.alloc_side_effect_result(self.source.nodes[result].ty.clone());
                 nodes.insert(result, target);
             }
         }
@@ -593,7 +590,8 @@ impl<'a> GraphProjector<'a> {
             }
             let target_block = blocks[&source_block];
             for source_param in source_body.params.iter().copied() {
-                let target = graph.add_block_param(target_block, self.source.types[&source_param].clone());
+                let target =
+                    graph.add_block_param(target_block, self.source.nodes[source_param].ty.clone());
                 nodes.insert(source_param, target);
             }
         }
@@ -768,22 +766,31 @@ impl<'a> GraphProjector<'a> {
             .collect()
     }
 
-    fn project_control_headers(
-        &self,
-        blocks: &HashMap<BlockId, BlockId>,
-    ) -> Result<LookupMap<BlockId, ControlHeader>, String> {
-        let mut projected = LookupMap::new();
-        for (header, control) in self.control_headers {
-            let Some(&target_header) = blocks.get(header) else {
+    fn project_control_headers(&self, shell: &mut ProjectionShell) -> Result<(), String> {
+        for (header, block) in &self.source.skeleton.blocks {
+            let Some(control) = &block.control_header else {
+                continue;
+            };
+            let Some(&target_header) = shell.blocks.get(&header) else {
                 continue;
             };
             let targets = control_header_targets(control);
-            if targets.iter().any(|target| !blocks.contains_key(target)) {
+            if targets.iter().any(|target| !shell.blocks.contains_key(target)) {
                 return Err("projected structured prefix cuts through a control region".into());
             }
-            projected.insert(target_header, control.remap(&|block| blocks[&block]));
+            shell.graph.skeleton.blocks[target_header].control_header =
+                Some(control.remap(&|block| shell.blocks[&block]));
         }
-        Ok(projected)
+        Ok(())
+    }
+
+    fn project_aliases(&self, shell: &mut ProjectionShell) {
+        for (&source, &target) in &shell.nodes {
+            let Some(alias) = self.source.nodes[source].alias else {
+                continue;
+            };
+            shell.graph.nodes[target].alias = shell.nodes.get(&alias).copied();
+        }
     }
 
     fn effect_at(&self, site: SideEffectSite) -> Result<&SideEffect<Semantic>, String> {
@@ -811,7 +818,7 @@ impl<'a> GraphProjector<'a> {
                 .nodes
                 .get(value)
                 .ok_or_else(|| format!("graph projection references missing node {value:?}"))?;
-            match node {
+            match &node.kind {
                 ENode::Pure { operands, .. } => values.extend(operands.iter().copied()),
                 ENode::Union { left, right } => values.extend([*left, *right]),
                 ENode::SideEffectResult => {

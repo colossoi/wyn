@@ -1,16 +1,10 @@
-use std::collections::HashMap;
-
 use polytype::Type;
 
 use crate::ast::TypeName;
 
-use super::super::program::{
-    AllocatedProgram, CompilerResource, CompilerResourceKind, LogicalSize, PhysicalResourceRef, ResourceId,
-    SemanticResourceRef,
-};
+use super::super::program::{PhysicalResourceRef, SemanticResourceRef};
 use super::super::types::{
-    GraphResource, NodeId, SegBody, SegExtent, SegSpace, Semantic, SideEffectKind, Soac, SoacDestination,
-    SoacEffect, SoacInputType, WynSoacPhase,
+    GraphResource, NodeId, SegBody, SegSpace, Semantic, SoacDestination, SoacInputType, WynSoacPhase,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,132 +202,4 @@ impl<R: GraphResource> Op<Semantic<R>> {
         nodes.extend(state.space.referenced_node_slots());
         nodes
     }
-}
-
-/// Resolve compaction capacity from the post-fusion semantic domain.
-pub(crate) fn resolve_scratch_sizes(inner: &mut AllocatedProgram) {
-    let mut resolved = Vec::new();
-    for (_, entry) in inner.entries_with_endpoints() {
-        for (_, block) in &entry.graph.skeleton.blocks {
-            for effect in &block.side_effects {
-                let SideEffectKind::Soac(SoacEffect(
-                    _,
-                    Soac::Filter(Op {
-                        body,
-                        state:
-                            SemanticState {
-                                space,
-                                storage: Output::Runtime { scratch, .. },
-                            },
-                    }),
-                )) = &effect.kind
-                else {
-                    continue;
-                };
-                let elem_bytes =
-                    crate::ssa::layout::storage_elem_stride(&body.output_element_type()).unwrap_or(1);
-                let size = match space.dims() {
-                    [SegExtent::Fixed(count)] => LogicalSize::FixedBytes(*count as u64 * elem_bytes as u64),
-                    [SegExtent::ResourceLength {
-                        resource,
-                        elem_bytes: src_elem_bytes,
-                        ..
-                    }] => LogicalSize::LikeResource {
-                        resource: resource.0,
-                        elem_bytes,
-                        src_elem_bytes: *src_elem_bytes,
-                    },
-                    _ => LogicalSize::SameAsDispatch { elem_bytes },
-                };
-                let output_len = match &size {
-                    LogicalSize::FixedBytes(bytes) => {
-                        Some(crate::pipeline_descriptor::BufferLen::Fixed { bytes: *bytes })
-                    }
-                    LogicalSize::LikeResource {
-                        resource,
-                        elem_bytes,
-                        src_elem_bytes,
-                    } => inner.resources[*resource].host_binding().map(|binding| {
-                        crate::pipeline_descriptor::BufferLen::LikeInput {
-                            set: binding.set,
-                            binding: binding.binding,
-                            elem_bytes: *elem_bytes,
-                            src_elem_bytes: *src_elem_bytes,
-                        }
-                    }),
-                    LogicalSize::SameAsDispatch { elem_bytes } => {
-                        Some(crate::pipeline_descriptor::BufferLen::SameAsDispatch {
-                            elem_bytes: *elem_bytes,
-                        })
-                    }
-                    LogicalSize::Unspecified => None,
-                };
-                resolved.push((scratch.0, size, output_len));
-            }
-        }
-    }
-    for (resource, size, output_len) in resolved {
-        inner.resources[resource].size = size.clone();
-        let AllocatedProgram {
-            semantic,
-            materializations,
-        } = &mut *inner;
-        for entry in semantic
-            .ir
-            .entry_points
-            .iter_mut()
-            .chain(materializations.into_iter().map(|(_, requirement)| requirement.entry_mut()))
-        {
-            if let Some(declaration) = entry
-                .resource_declarations
-                .iter_mut()
-                .find(|declaration| declaration.resource.0 == resource)
-            {
-                declaration.size = size.clone();
-            }
-            for output in &mut entry.outputs {
-                if output.resource == Some(SemanticResourceRef(resource)) {
-                    *output.storage_length_mut().expect("filter output resource must be storage") =
-                        output_len.clone();
-                }
-            }
-        }
-    }
-}
-
-/// Runtime filter identities that predate logical allocation.
-pub(crate) fn resource_kinds(inner: &AllocatedProgram) -> HashMap<ResourceId, CompilerResource> {
-    let mut kinds = HashMap::new();
-    for (_, entry) in inner.entries_with_endpoints() {
-        for (_, block) in &entry.graph.skeleton.blocks {
-            for effect in &block.side_effects {
-                let SideEffectKind::Soac(SoacEffect(
-                    owner,
-                    Soac::Filter(Op {
-                        state:
-                            SemanticState {
-                                storage: Output::Runtime { scratch, length },
-                                ..
-                            },
-                        ..
-                    }),
-                )) = &effect.kind
-                else {
-                    continue;
-                };
-                let owner = Some(*owner);
-                kinds.insert(
-                    scratch.0,
-                    CompilerResource::new(CompilerResourceKind::FilterScratch, owner, 0),
-                );
-                if let RuntimeLength::Stored(length) = length {
-                    kinds.insert(
-                        length.0,
-                        CompilerResource::new(CompilerResourceKind::FilterLenCell, owner, 1),
-                    );
-                }
-            }
-        }
-    }
-    kinds
 }

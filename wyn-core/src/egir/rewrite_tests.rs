@@ -23,7 +23,7 @@ fn vec3f32_ty() -> Type<TypeName> {
 }
 
 fn pow(g: &mut EGraph, base: NodeId, exp: ConstantValue, exp_ty: Type<TypeName>) -> NodeId {
-    let result_ty = g.types[&base].clone();
+    let result_ty = g.nodes[base].ty.clone();
     let exp = g.intern_constant(exp, exp_ty);
     g.intern_pure(PureOp::BinOp("**".into()), smallvec![base, exp], result_ty, None)
 }
@@ -36,7 +36,7 @@ fn apply_and_extract(g: &mut EGraph, node: NodeId) -> NodeId {
         "expected a rewrite to fire"
     );
     assert!(
-        matches!(g.nodes[node], ENode::Union { .. }),
+        matches!(g.nodes[node].kind, ENode::Union { .. }),
         "expected the node to become a union in place"
     );
     let best = extract::extract(g);
@@ -53,7 +53,7 @@ fn chain_len_over_same_base(graph: &EGraph, nid: NodeId, base: NodeId) -> Option
         if current == base {
             return Some(muls);
         }
-        let ENode::Pure { op, operands } = &graph.nodes[current] else {
+        let ENode::Pure { op, operands } = &graph.nodes[current].kind else {
             return None;
         };
         match op {
@@ -71,7 +71,7 @@ fn chain_len_over_same_base(graph: &EGraph, nid: NodeId, base: NodeId) -> Option
 
 fn is_pow(graph: &EGraph, nid: NodeId) -> bool {
     matches!(
-        &graph.nodes[nid],
+        &graph.nodes[nid].kind,
         ENode::Pure { op: PureOp::BinOp(name), .. } if name == "**"
     )
 }
@@ -203,7 +203,7 @@ fn consumers_see_the_rewrite_through_the_original_id() {
 
     // The consumer still references the original id, which extraction now
     // resolves to the chain.
-    let ENode::Pure { operands, .. } = &g.nodes[consumer] else {
+    let ENode::Pure { operands, .. } = &g.nodes[consumer].kind else {
         panic!("expected pure consumer")
     };
     assert_eq!(operands[0], p);

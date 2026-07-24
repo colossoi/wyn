@@ -3,25 +3,24 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{execution_workgroup, KernelDispatch, KernelDomain, KernelPlan, PhaseGroup};
+use crate::egir::allocation::ResourcesAllocated;
 use crate::egir::from_tlc::ConvertError;
 use crate::egir::program::{
-    AllocatedProgram, EntryPublication, PhysicalProgram, PhysicalResourceTable, SemanticEntry,
+    host_resource_names, physicalize_program, EntryPublication, PhysicalResourceTable, Program,
+    SemanticEntry,
 };
 use crate::egir::publish::PipelineDescriptorPublish;
 use crate::pipeline_descriptor::{
     ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor, StageBindingUses,
 };
-use crate::{BindingRef, IdSource, LoweringProfile, SchedulePolicy};
+use crate::{BindingRef, LoweringProfile, SchedulePolicy};
 
 impl KernelPlan {
     pub(in crate::egir::parallelize) fn finalize(
         self,
-        inner: AllocatedProgram,
-        binding_ids: &mut IdSource<u32>,
+        mut program: Program<ResourcesAllocated>,
         profile: LoweringProfile,
-    ) -> Result<(PhysicalProgram, super::KernelPlanSummary), ConvertError> {
-        let mut inner = inner;
-        let mut descriptor = std::mem::take(&mut inner.pipeline);
+    ) -> Result<Program<crate::egir::parallelize::Planned>, ConvertError> {
         #[cfg(debug_assertions)]
         {
             let verification = self.validate();
@@ -31,10 +30,13 @@ impl KernelPlan {
                 verification.as_ref().err().map(String::as_str).unwrap_or("unknown verification failure")
             );
         }
-        self.check_explicit_dispatch_coverage(&inner.entry_points)
+        self.check_explicit_dispatch_coverage(&program.entry_points)
             .map_err(ConvertError::InvalidDispatch)?;
-        self.install_phase_shells(&mut descriptor)?;
-        let mut reserved_bindings = descriptor
+        self.install_phase_shells(&mut program.data.core.pipeline)?;
+        let mut reserved_bindings = program
+            .data
+            .core
+            .pipeline
             .pipelines
             .iter()
             .flat_map(|pipeline| match pipeline {
@@ -44,33 +46,39 @@ impl KernelPlan {
             .filter_map(binding_ref)
             .collect::<HashSet<_>>();
         reserved_bindings.extend(
-            inner
+            program
                 .entry_points
                 .iter()
                 .flat_map(|entry| &entry.inputs)
                 .filter_map(|input| input.descriptor_binding()),
         );
-        let physical_resources =
-            PhysicalResourceTable::allocate_avoiding(&inner.resources, binding_ids, reserved_bindings);
+        let physical_resources = PhysicalResourceTable::allocate_avoiding(
+            &program.data.core.resources,
+            &mut program.global_context.binding_ids,
+            reserved_bindings,
+        );
         let publications = self.publications(&physical_resources)?;
         let publication_refs = publications.iter().collect::<Vec<_>>();
-        descriptor.publish_implicit_bindings(&publication_refs)?;
-        descriptor.publish_graphics_io(&publication_refs);
-        self.publish(&mut descriptor, &physical_resources)?;
-        descriptor.publish_stage_binding_uses(&publication_refs);
-        descriptor.relabel_input_storage_names(&inner.input_names);
-        descriptor.rebuild_frame_graph();
+        program.data.core.pipeline.publish_implicit_bindings(&publication_refs)?;
+        program.data.core.pipeline.publish_graphics_io(&publication_refs);
+        self.publish(&mut program.data.core.pipeline, &physical_resources)?;
+        program.data.core.pipeline.publish_stage_binding_uses(&publication_refs);
+        let input_names = host_resource_names(&program.data.core.resources);
+        program.data.core.pipeline.relabel_input_storage_names(&input_names);
+        program.data.core.pipeline.rebuild_frame_graph();
 
         let summary = super::KernelPlanSummary::from(&self);
-        let physical = PhysicalProgram::from_plan(
-            inner,
-            &self,
+        let entries = self.into_physical_entries();
+        let physical = physicalize_program(
+            program,
+            entries,
             &physical_resources,
             profile.schedule == SchedulePolicy::Serial,
-            descriptor,
+            summary,
+            profile,
         )?;
         crate::egir::verify_physical::check(&physical, &physical_resources)?;
-        Ok((physical, summary))
+        Ok(physical)
     }
 
     /// Entry ABI records in deterministic descriptor-publication order. The

@@ -1,14 +1,14 @@
 //! EGIR phase markers and phase-specific IR behavior.
 //!
 //! The phase-agnostic graph substrate lives in [`super::ir`]. This module
-//! keeps the concrete phase types and their `EgirPhase` implementations so the
+//! keeps the concrete family types and their `Family` implementations so the
 //! low-level IR does not need to know which phases the compiler defines.
 
 use polytype::Type;
 use slotmap::SlotMap;
 
 use crate::ast::TypeName;
-use crate::flow::BlockId;
+use crate::flow::{BlockId, ControlHeader};
 use crate::op::OpTag;
 use crate::ssa::types::ConstantValue;
 use crate::LookupMap;
@@ -19,7 +19,7 @@ use smallvec::SmallVec;
 use super::soac::{filter, hist, screma};
 
 pub use super::ir::{
-    EffectOp, EffectToken, EgirPhase, GraphResource, Language, NodeId, RegionId, SegBody, SideEffectIndex,
+    EffectOp, EffectToken, Family, GraphResource, Language, NodeId, RegionId, SegBody, SideEffectIndex,
     SideEffectSite, SkeletonTerminator, SoacDestination, SoacOwnership, SoacPlacement,
 };
 pub use crate::ResourceAccess;
@@ -32,7 +32,7 @@ impl Language for WynLanguage {
     type Ty = Type<TypeName>;
 }
 
-pub trait WynSoacPhase: EgirPhase<Soac = SoacEffect<Self>> + Sized {
+pub trait WynSoacPhase: Family<Soac = SoacEffect<Self>> + Sized {
     type SoacId: Clone + std::fmt::Debug;
     type MapState: Clone + std::fmt::Debug;
     type ReduceState: Clone + std::fmt::Debug;
@@ -107,8 +107,8 @@ impl<P: WynSoacPhase> super::ir::SideEffectKind<P, WynLanguage> {
     }
 }
 
-// Keep the existing semantic defaults at the compatibility boundary. The
-// definitions in `ir` themselves have no knowledge of concrete EGIR phases.
+// Concrete aliases default to semantic EGIR while the definitions in `ir`
+// remain independent of compiler-specific families.
 pub type PureOp<R = super::program::SemanticResourceRef> = OpTag<R>;
 pub type PureViewSource<R = super::program::SemanticResourceRef> = super::ir::PureViewSource<R>;
 pub type NodeKey<R = super::program::SemanticResourceRef, Lang = WynLanguage> = super::ir::NodeKey<R, Lang>;
@@ -174,9 +174,8 @@ pub struct Scheduled<R = super::program::SemanticResourceRef>(std::marker::Phant
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Physical;
 
-impl<R: GraphResource> EgirPhase for Raw<R> {
+impl<R: GraphResource> Family for Raw<R> {
     type Resource = R;
-    type ResourceDecl = super::program::SemanticResourceDecl;
     type Soac = SoacEffect<Self>;
 }
 
@@ -190,9 +189,8 @@ impl<R: GraphResource> WynSoacPhase for Raw<R> {
     type HistState = hist::RawState;
 }
 
-impl<R: GraphResource> EgirPhase for Semantic<R> {
+impl<R: GraphResource> Family for Semantic<R> {
     type Resource = R;
-    type ResourceDecl = super::program::SemanticResourceDecl;
     type Soac = SoacEffect<Self>;
 }
 
@@ -206,9 +204,8 @@ impl<R: GraphResource> WynSoacPhase for Semantic<R> {
     type HistState = hist::State<R>;
 }
 
-impl<R: GraphResource> EgirPhase for Scheduled<R> {
+impl<R: GraphResource> Family for Scheduled<R> {
     type Resource = R;
-    type ResourceDecl = super::program::SemanticResourceDecl;
     type Soac = SoacEffect<Self>;
 }
 
@@ -222,9 +219,8 @@ impl<R: GraphResource> WynSoacPhase for Scheduled<R> {
     type HistState = hist::State<R>;
 }
 
-impl EgirPhase for Physical {
+impl Family for Physical {
     type Resource = super::program::PhysicalResourceRef;
-    type ResourceDecl = crate::interface::StorageBindingDecl;
     type Soac = SoacEffect<Self>;
 }
 
@@ -238,7 +234,22 @@ impl WynSoacPhase for Physical {
     type HistState = hist::PhysicalState;
 }
 
-impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
+fn remap_control_header(header: ControlHeader, blocks: &LookupMap<BlockId, BlockId>) -> ControlHeader {
+    match header {
+        ControlHeader::Loop {
+            merge,
+            continue_block,
+        } => ControlHeader::Loop {
+            merge: blocks[&merge],
+            continue_block: blocks[&continue_block],
+        },
+        ControlHeader::Selection { merge } => ControlHeader::Selection {
+            merge: blocks[&merge],
+        },
+    }
+}
+
+impl<P: Family> super::ir::EGraph<P, WynLanguage> {
     pub(crate) fn try_map_phase<Q, E>(
         self,
         mut map_soac: impl FnMut(BlockId, usize, P::SoacId, Soac<P>) -> Result<(Q::SoacId, Soac<Q>), E>,
@@ -247,12 +258,7 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
         P: WynSoacPhase,
         Q: WynSoacPhase<Resource = P::Resource>,
     {
-        let super::ir::EGraphParts {
-            mut nodes,
-            types,
-            skeleton,
-            node_spans,
-        } = self.into_parts();
+        let super::ir::EGraphParts { mut nodes, skeleton } = self.into_parts();
         let source_entry = skeleton.entry;
         let source_blocks = skeleton.blocks.into_iter().collect::<Vec<_>>();
         let mut blocks = SlotMap::with_key();
@@ -265,7 +271,7 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
         }
 
         for node in nodes.values_mut() {
-            if let super::ir::ENode::BlockParam { block, .. } = node {
+            if let super::ir::ENode::BlockParam { block, .. } = &mut node.kind {
                 *block = block_map[block];
             }
         }
@@ -300,18 +306,17 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
                 params: block.params,
                 side_effects,
                 term,
+                control_header: block.control_header.map(|header| remap_control_header(header, &block_map)),
             };
         }
 
         Ok((
             super::ir::EGraph::<Q, WynLanguage>::from_parts(super::ir::EGraphParts {
                 nodes,
-                types,
                 skeleton: super::ir::Skeleton {
                     entry: block_map[&source_entry],
                     blocks,
                 },
-                node_spans,
             }),
             block_map,
         ))
@@ -333,12 +338,7 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
         P: WynSoacPhase,
         Q: WynSoacPhase,
     {
-        let super::ir::EGraphParts {
-            nodes,
-            types,
-            skeleton,
-            node_spans,
-        } = self.into_parts();
+        let super::ir::EGraphParts { nodes, skeleton } = self.into_parts();
         let source_entry = skeleton.entry;
         let source_blocks = skeleton.blocks.into_iter().collect::<Vec<_>>();
         let mut blocks = SlotMap::with_key();
@@ -353,16 +353,21 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
         let source_nodes = nodes.into_iter().collect::<Vec<_>>();
         let mut nodes = SlotMap::with_key();
         let mut node_map = LookupMap::new();
-        for (source, _) in &source_nodes {
+        for (source, node) in &source_nodes {
             node_map.insert(
                 *source,
-                nodes.insert(super::ir::ENode::<Q::Resource, WynLanguage>::Constant(
-                    ConstantValue::Bool(false),
-                )),
+                nodes.insert(super::ir::Node {
+                    kind: super::ir::ENode::<Q::Resource, WynLanguage>::Constant(ConstantValue::Bool(
+                        false,
+                    )),
+                    ty: node.ty.clone(),
+                    span: node.span,
+                    alias: None,
+                }),
             );
         }
         for (source, node) in source_nodes {
-            let node = match node {
+            let kind = match node.kind {
                 super::ir::ENode::Pure { op, operands } => super::ir::ENode::Pure {
                     op: op.try_map_resource(&mut map_resource)?,
                     operands: operands.into_iter().map(|node| node_map[&node]).collect(),
@@ -379,7 +384,12 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
                 super::ir::ENode::Constant(value) => super::ir::ENode::Constant(value),
                 super::ir::ENode::SideEffectResult => super::ir::ENode::SideEffectResult,
             };
-            nodes[node_map[&source]] = node;
+            nodes[node_map[&source]] = super::ir::Node {
+                kind,
+                ty: node.ty,
+                span: node.span,
+                alias: node.alias.map(|alias| node_map[&alias]),
+            };
         }
 
         for (source, block) in source_blocks {
@@ -417,49 +427,49 @@ impl<P: EgirPhase> super::ir::EGraph<P, WynLanguage> {
                 params: block.params.into_iter().map(|node| node_map[&node]).collect(),
                 side_effects,
                 term,
+                control_header: block.control_header.map(|header| remap_control_header(header, &block_map)),
             };
         }
 
         let graph = super::ir::EGraph::<Q, WynLanguage>::from_parts(super::ir::EGraphParts {
             nodes,
-            types: types.into_iter().map(|(node, ty)| (node_map[&node], ty)).collect(),
             skeleton: super::ir::Skeleton {
                 entry: block_map[&source_entry],
                 blocks,
             },
-            node_spans: node_spans.into_iter().map(|(node, span)| (node_map[&node], span)).collect(),
         });
         Ok((graph, node_map, block_map))
     }
 }
 
-impl<P: WynSoacPhase> super::ir::Entry<P, WynLanguage> {
+impl<P, ResourceDecl, Route> super::ir::Entry<P, ResourceDecl, Route, WynLanguage>
+where
+    P: WynSoacPhase,
+    Route: super::ir::RemapBlockIds,
+{
     /// Change an entry's SOAC phase while preserving its interface and
     /// remapping every block-bearing piece of entry metadata with the graph.
     pub(crate) fn try_map_phase<Q, E>(
         self,
         map_soac: impl FnMut(BlockId, usize, P::SoacId, Soac<P>) -> Result<(Q::SoacId, Soac<Q>), E>,
-    ) -> Result<super::ir::Entry<Q, WynLanguage>, E>
+    ) -> Result<super::ir::Entry<Q, ResourceDecl, Route, WynLanguage>, E>
     where
-        Q: WynSoacPhase<Resource = P::Resource, ResourceDecl = P::ResourceDecl>,
+        Q: WynSoacPhase<Resource = P::Resource>,
     {
         let super::ir::Entry {
             name,
             span,
             execution_model,
             inputs,
-            outputs,
+            mut outputs,
             resource_declarations,
             params,
             return_ty,
             graph,
-            control_headers,
-            aliases,
-            mut output_routes,
         } = self;
         let (graph, blocks) = graph.try_map_phase(map_soac)?;
-        for route in &mut output_routes {
-            route.source.block = blocks[&route.source.block];
+        for route in outputs.iter_mut().flat_map(|output| &mut output.routes) {
+            route.remap_block_ids(&blocks);
         }
         Ok(super::ir::Entry {
             name,
@@ -471,11 +481,6 @@ impl<P: WynSoacPhase> super::ir::Entry<P, WynLanguage> {
             params,
             return_ty,
             graph,
-            control_headers: super::program::remap_control_headers(&control_headers, |block| {
-                blocks[&block]
-            }),
-            aliases,
-            output_routes,
         })
     }
 }

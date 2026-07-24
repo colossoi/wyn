@@ -3,7 +3,7 @@
 //!
 //! Semantic EGIR uses a DAG over side-effectful semantic SOAC operations for
 //! scheduling, fusion legality, multi-consumer materialization, and semantic
-//! optimization. This module owns the edge builder ([`rebuild_dependencies`]),
+//! optimization. This module owns the snapshot edge builder ([`dependencies`]),
 //! the read-only query index over those edges ([`SemanticGraph`]), the
 //! well-formedness check for the semantic boundary ([`verify`]), and the
 //! human-readable dump of it ([`summary`]).
@@ -13,23 +13,35 @@ use std::collections::{HashMap, HashSet};
 use crate::types::TypeExt;
 
 use super::graph_ops;
-use super::program::{SemanticDependency, SemanticDependencyKind, SemanticOpId, SemanticProgram};
+use super::ir::Stage;
+use super::program::{Program, SemanticOpId};
 use super::soac::{filter, screma};
 use super::types::{
-    EGraph, NodeId, ResourceAccess, SegResourceAccess, SideEffect, SideEffectKind, SideEffectSite, Soac,
-    SoacEffect,
+    EGraph, NodeId, ResourceAccess, SegResourceAccess, Semantic, SideEffect, SideEffectKind,
+    SideEffectSite, Soac, SoacEffect,
 };
 
-/// Rebuild the semantic dependency DAG stored on `inner`.
-pub(crate) fn rebuild_dependencies(inner: &mut SemanticProgram) {
-    inner.semantic_dependencies = dependencies(inner);
-    inner.array_residency_demands = array_residency_demands(inner);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SemanticDependencyKind {
+    Value,
+    Effect,
+    Resource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SemanticDependency {
+    pub producer: SemanticOpId,
+    pub consumer: SemanticOpId,
+    pub kind: SemanticDependencyKind,
 }
 
 /// Record runtime-composite array values whose use requires a storage-backed
 /// representation. This runs at the same semantic snapshot boundary as the
 /// dependency builder, when producer identity and use shape are both direct.
-fn array_residency_demands(inner: &SemanticProgram) -> HashSet<SemanticOpId> {
+pub(crate) fn array_residency_demands<S>(inner: &Program<S>) -> HashSet<SemanticOpId>
+where
+    S: Stage<Family = Semantic>,
+{
     let mut demands = HashSet::new();
     for entry in &inner.entry_points {
         let graph = &entry.graph;
@@ -41,12 +53,12 @@ fn array_residency_demands(inner: &SemanticProgram) -> HashSet<SemanticOpId> {
                 let Some(result) = effect.result else {
                     continue;
                 };
-                if !graph.types.get(&result).is_some_and(TypeExt::contains_runtime_sized_composite_array) {
+                if !TypeExt::contains_runtime_sized_composite_array(&graph.nodes[result].ty) {
                     continue;
                 }
                 let indexed = graph.nodes.iter().any(|(_, node)| {
                     matches!(
-                        node,
+                        &node.kind,
                         super::types::ENode::Pure {
                             op: super::types::PureOp::Index,
                             operands,
@@ -78,7 +90,10 @@ fn array_residency_demands(inner: &SemanticProgram) -> HashSet<SemanticOpId> {
 
 /// Build semantic value/effect/resource dependencies for every semantic SOAC in
 /// the program.
-pub(crate) fn dependencies(inner: &SemanticProgram) -> Vec<SemanticDependency> {
+pub(crate) fn dependencies<S>(inner: &Program<S>) -> Vec<SemanticDependency>
+where
+    S: Stage<Family = Semantic>,
+{
     let mut dependencies = Vec::new();
     for entry in &inner.entry_points {
         collect_graph_dependencies(&entry.name, &entry.graph, &mut dependencies);
@@ -224,13 +239,17 @@ pub(crate) fn read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResource
 }
 
 /// Validate the semantic boundary before any target-aware scheduling occurs.
-pub(crate) fn verify(inner: &SemanticProgram) -> Result<(), String> {
+pub(crate) fn verify<S>(inner: &Program<S>) -> Result<(), String>
+where
+    S: Stage<Family = Semantic>,
+{
+    let contains_region = |region| inner.functions.iter().any(|function| function.region == region);
     let verify_effect = |scope: &str, effect: &SideEffect| -> Result<(), String> {
         let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
             return Ok(());
         };
         let verify_body = |family: &str, body: &super::types::SegBody| {
-            if inner.contains_region(body.region) {
+            if contains_region(body.region) {
                 Ok(())
             } else {
                 Err(format!(
@@ -256,7 +275,7 @@ pub(crate) fn verify(inner: &SemanticProgram) -> Result<(), String> {
                 verify_body("filter predicate", &op.body.predicate)?;
             }
             Soac::Hist(op) => {
-                if !inner.contains_region(op.body.body.region) {
+                if !contains_region(op.body.body.region) {
                     return Err(format!(
                         "{scope}: histogram region `{}` is absent",
                         op.body.body.region
@@ -283,7 +302,10 @@ pub(crate) fn verify(inner: &SemanticProgram) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn summary(inner: &SemanticProgram) -> String {
+pub(crate) fn summary<S>(inner: &Program<S>) -> String
+where
+    S: Stage<Family = Semantic>,
+{
     use std::fmt::Write;
 
     let mut output = String::new();

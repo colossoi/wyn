@@ -121,8 +121,11 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
     fn build_scan_tail(&mut self, scan: &mut BuiltPhase) -> error::Result<(BuiltPhase, BuiltPhase)> {
         let zero = graph_ops::intern_u32(&mut scan.body.graph, 0, None);
         let add_name = format!("{}_filter_scan_add", self.entry.name);
-        let add_fn = synthesize_u32_add_function(add_name.clone(), self.entry.span);
-        self.lowering.define_callable(add_fn)?;
+        let span = self.entry.span;
+        let add_region = self.lowering.define_callable(add_name, |region, name| {
+            synthesize_u32_add_function(region, name, span)
+        })?;
+        let add_name = self.lowering.region_interner.resolve(add_region).clone();
         let scan_scratch = ScanScratch {
             block_sums: self.work.block_sums.0,
             block_offsets: self.work.block_offsets.0,
@@ -136,17 +139,19 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             scratch: scan_scratch,
             total_out: Some(self.candidate.storage.length.0),
         };
-        let mut combine = combine.build(self.lowering.effect_ids).map_err(|error| {
-            format!(
-                "failed to synthesize filter scan for `{}`: {error}",
-                self.entry.name
-            )
-        })?;
+        let mut combine =
+            combine.build(self.lowering.semantic_ids, self.lowering.effect_ids).map_err(|error| {
+                format!(
+                    "failed to synthesize filter scan for `{}`: {error}",
+                    self.entry.name
+                )
+            })?;
         apply_manifest_resource_sizes(&mut combine.body, self.lowering.resources);
         let swap_wrapper_name = format!("{}_filter_scan_add_offsets", self.entry.name);
-        let swap_wrapper =
-            synthesize_swap_wrapper(swap_wrapper_name, add_name, self.elem_ty.clone(), self.entry.span);
-        let swap_region = self.lowering.define_callable(swap_wrapper)?;
+        let elem_ty = self.elem_ty.clone();
+        let swap_region = self.lowering.define_callable(swap_wrapper_name, |region, name| {
+            synthesize_swap_wrapper(region, name, add_name, elem_ty, span)
+        })?;
         let apply_offsets = ScanPhase3Spec {
             entry_name: scan.body.name.clone(),
             swap_region,
@@ -155,7 +160,8 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             block_offsets: self.work.block_offsets.0,
             width: self.candidate.scan_grid.workgroup_width(),
         };
-        let mut apply_offsets = apply_offsets.build(self.lowering.effect_ids)?;
+        let mut apply_offsets =
+            apply_offsets.build(self.lowering.semantic_ids, self.lowering.effect_ids)?;
         apply_manifest_resource_sizes(&mut apply_offsets.body, self.lowering.resources);
         Ok((combine, apply_offsets))
     }

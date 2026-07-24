@@ -5,6 +5,18 @@
 //! are hash-consed (giving GVN for free), and the result is elaborated
 //! back to `FuncBody` via demand-driven scheduling (giving DCE for free).
 
+/// EGIR directly converted from backend-ready TLC.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Converted;
+
+impl super::ir::Stage for Converted {
+    type Family = super::types::Raw;
+    type ResourceDecl = super::program::SemanticResourceDecl;
+    type OutputRoute = super::ir::UnrealizedOutputRoute;
+    type ProgramData = super::program::CoreProgramData;
+    type GlobalContext = super::program::RewriteGlobal;
+}
+
 use crate::builtins::{catalog, Purity};
 use crate::tlc::VarRef;
 use crate::{LookupMap, LookupSet};
@@ -35,8 +47,9 @@ use smallvec::{smallvec, SmallVec};
 use thiserror::Error;
 
 use super::program::{
-    CompilerResource, CompilerResourceKind, ConstantDef, LogicalResourceArenaBuilder, LogicalSize,
-    RawEntry, RawFunc, RawProgram, SemanticResourceDecl, SemanticResourceRef,
+    CompilerResource, CompilerResourceKind, ConstantDef, CoreProgramData, LogicalResourceArenaBuilder,
+    LogicalSize, Program, RawEntry, RawFunc, RewriteGlobal, SemanticOpIdSource, SemanticResourceDecl,
+    SemanticResourceRef,
 };
 use super::publish::PipelineDescriptorPublish;
 use super::soac::{filter, hist, screma};
@@ -271,9 +284,9 @@ impl<'a> GlobalContext<'a> {
 /// elaborate`).
 pub fn run(
     program: &TlcProgram,
-    binding_ids: &mut crate::IdSource<u32>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
-) -> Result<RawProgram, ConvertError> {
+    mut binding_ids: crate::IdSource<u32>,
+    mut effect_ids: crate::IdSource<EffectToken>,
+) -> Result<Program<Converted>, ConvertError> {
     let seed = super::pipeline_seed::run(program);
     let pipeline = seed.pipeline;
     let top_level: LookupMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
@@ -309,20 +322,24 @@ pub fn run(
         }
         let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
 
-        let mut converter = ctx.new_converter(&pure_constant_names, binding_ids, effect_ids, &mut arenas);
+        let mut converter = ctx.new_converter(
+            &pure_constant_names,
+            &mut binding_ids,
+            &mut effect_ids,
+            &mut arenas,
+        );
         if let Ok(result_nid) = converter.convert_term(&def.body) {
             converter.set_return(Some(result_nid));
-            let (mut graph, control_headers) = converter.into_graph_parts();
+            let mut graph = converter.into_graph();
             let aliases = super::skel_opt::run_one_body(&mut graph);
-            if is_purely_constant_graph(&graph, &aliases) {
+            graph.install_aliases(aliases);
+            if is_purely_constant_graph(&graph) {
                 pure_constant_names.insert(def_name.clone());
                 constants.push(ConstantDef {
                     name: def_name,
                     span: def.body.span,
                     return_ty: def.body.ty.clone(),
                     graph,
-                    control_headers,
-                    aliases,
                 });
                 continue;
             }
@@ -345,8 +362,8 @@ pub fn run(
                     def,
                     &ctx,
                     &pure_constant_names,
-                    binding_ids,
-                    effect_ids,
+                    &mut binding_ids,
+                    &mut effect_ids,
                     &mut arenas,
                 )? {
                     ConvertedFunc::Extern(f) => externs.push(f),
@@ -362,8 +379,8 @@ pub fn run(
                     &pure_constant_names,
                     workgroup,
                     &entry.data.by_symbol,
-                    binding_ids,
-                    effect_ids,
+                    &mut binding_ids,
+                    &mut effect_ids,
                     &mut arenas,
                 )?;
                 entry_points.push(ep);
@@ -372,15 +389,29 @@ pub fn run(
     }
 
     let ConversionArenas { regions, resources } = arenas;
-    let mut semantic = RawProgram::new(functions, externs, entry_points, constants, pipeline, regions);
-    semantic.input_names = seed.input_names;
     let (by_binding, resources) = resources.finish().map_err(|resource| {
         ConvertError::Internal(format!(
             "semantic resource {resource:?} was referenced but never declared"
         ))
     })?;
-    super::program::finalize_converted_resources(&mut semantic, resources, &by_binding);
-    Ok(semantic)
+    let mut converted = Program::from_parts(
+        functions,
+        externs,
+        entry_points,
+        constants,
+        CoreProgramData {
+            pipeline,
+            resources,
+            region_interner: regions,
+        },
+        RewriteGlobal {
+            binding_ids,
+            effect_ids,
+            semantic_ids: SemanticOpIdSource::default(),
+        },
+    );
+    super::program::finalize_converted_resources(&mut converted, &by_binding);
+    Ok(converted)
 }
 
 enum ConvertedFunc {
@@ -450,15 +481,16 @@ fn convert_function<'a>(
         )));
     }
 
-    let (graph, control_headers) = converter.into_graph_parts();
+    let region = converter.region(&def_name);
+    let graph = converter.into_graph();
     Ok(ConvertedFunc::Regular(RawFunc::new(
+        region,
         def_name,
         def.body.span,
         None,
         param_info,
         ret_type,
         graph,
-        control_headers,
     )))
 }
 
@@ -772,7 +804,7 @@ fn convert_entry_point(
     let slot_value_tys = converter
         .output_sources
         .iter()
-        .map(|sources| sources.first().map(|source| converter.graph.types[&source.value].clone()))
+        .map(|sources| sources.first().map(|source| converter.graph.nodes[source.value].ty.clone()))
         .collect::<Vec<_>>();
     let outputs = build_entry_outputs(
         entry,
@@ -794,11 +826,15 @@ fn convert_entry_point(
         ret_type
     };
 
-    let slot_sources = std::mem::take(&mut converter.output_sources);
     let mut resource_declarations =
         entry_resource_declarations(&inputs, &outputs, &mut converter.arenas.resources);
-    resource_declarations.extend(std::mem::take(&mut converter.extra_resource_declarations));
-    let (graph, control_headers) = converter.into_graph_parts();
+    let Converter {
+        graph,
+        output_sources: slot_sources,
+        extra_resource_declarations,
+        ..
+    } = converter;
+    resource_declarations.extend(extra_resource_declarations);
     let output_count = outputs.len();
     let mut entry = RawEntry::new_with_resources(
         def_name.to_string(),
@@ -810,20 +846,12 @@ fn convert_entry_point(
         param_info,
         ret_type,
         graph,
-        control_headers,
     );
-    entry.output_routes = slot_sources
-        .into_iter()
-        .enumerate()
-        .filter(|(slot, _)| *slot < output_count)
-        .flat_map(|(slot, sources)| {
-            sources.into_iter().map(move |source| crate::egir::program::OutputRoute {
-                source,
-                slot: crate::egir::program::OutputSlotId(slot),
-                writers: Vec::new(),
-            })
-        })
-        .collect();
+    for (slot, sources) in slot_sources.into_iter().enumerate().take(output_count) {
+        entry.outputs[slot]
+            .routes
+            .extend(sources.into_iter().map(|source| super::ir::UnrealizedOutputRoute { source }));
+    }
 
     Ok(entry)
 }
@@ -873,8 +901,6 @@ struct Converter<'a, 'b> {
     pure_constants: LookupSet<String>,
     /// User definitions proven pure before EGIR construction.
     pure_definitions: LookupSet<SymbolId>,
-    /// Control headers for structured control flow (SPIR-V).
-    control_headers: LookupMap<BlockId, ControlHeader>,
     /// Program-wide identity source for effect-chain endpoints.
     effect_ids: &'b mut crate::IdSource<EffectToken>,
     /// Span of the term currently being converted. Threaded through every
@@ -884,7 +910,7 @@ struct Converter<'a, 'b> {
     current_span: Option<Span>,
     /// Per-slot `SlotSource { block, value }` records derived directly from a
     /// compute entry's original tail and consumed by `convert_entry_point` to
-    /// populate `SemanticEntry.output_routes`.
+    /// populate the declared outputs' route lists.
     ///
     /// A slot with one source has `vec![one]`; a slot written from both
     /// arms of an `If` has two. Unit-returning entries leave it empty.
@@ -922,7 +948,6 @@ impl<'a, 'b> Converter<'a, 'b> {
             inlined_constants: LookupMap::new(),
             pure_constants,
             pure_definitions,
-            control_headers: LookupMap::new(),
             effect_ids,
             current_span: None,
             output_sources: Vec::new(),
@@ -983,11 +1008,9 @@ impl<'a, 'b> Converter<'a, 'b> {
         );
     }
 
-    /// Extract the built EGraph + control_headers, leaving the rest of the
-    /// Converter state behind. Used by the top-level `convert_program`
-    /// phase to feed a ready-to-chain `SemanticFunc` / `SemanticEntry`.
-    fn into_graph_parts(self) -> (EGraph<Raw>, LookupMap<BlockId, ControlHeader>) {
-        (self.graph, self.control_headers)
+    /// Finish this body after all graph-owned metadata has been attached.
+    fn into_graph(self) -> EGraph<Raw> {
+        self.graph
     }
 
     // ========================================================================
@@ -1098,7 +1121,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 // struct to a function-local array, which crashes the
                 // SPIR-V backend. Emit `ViewIndex + Load` directly so
                 // the side-effect pipeline handles it.
-                let arr_ty = self.graph.types[&base].clone();
+                let arr_ty = self.graph.nodes[base].ty.clone();
                 let is_view =
                     arr_ty.array_variant().map(crate::types::is_array_variant_view).unwrap_or(false);
                 if is_view {
@@ -1186,10 +1209,8 @@ impl<'a, 'b> Converter<'a, 'b> {
                 let else_block = self.graph.skeleton.create_block();
                 let merge_block = self.graph.skeleton.create_block();
 
-                self.control_headers.insert(
-                    self.current_block,
-                    ControlHeader::Selection { merge: merge_block },
-                );
+                self.graph.skeleton.blocks[self.current_block].control_header =
+                    Some(ControlHeader::Selection { merge: merge_block });
                 self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::CondBranch {
                     cond: cond_nid,
                     then_target: then_block,
@@ -1409,7 +1430,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 // Arity-0 constant applied to args? Inline the body.
                 let var_nid = self.convert_var(sym, ty.clone())?;
                 // If we got a Global, emit a call
-                if matches!(self.graph.nodes[var_nid], ENode::Pure { ref op, .. } if matches!(op, PureOp::Global(_)))
+                if matches!(self.graph.nodes[var_nid].kind, ENode::Pure { ref op, .. } if matches!(op, PureOp::Global(_)))
                 {
                     let arg_nids: SmallVec<[NodeId; 4]> =
                         args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
@@ -1537,10 +1558,8 @@ impl<'a, 'b> Converter<'a, 'b> {
         };
 
         // Selection header for SPIR-V structured control flow.
-        self.control_headers.insert(
-            self.current_block,
-            ControlHeader::Selection { merge: merge_block },
-        );
+        self.graph.skeleton.blocks[self.current_block].control_header =
+            Some(ControlHeader::Selection { merge: merge_block });
 
         // Terminate current block with CondBranch.
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::CondBranch {
@@ -1684,13 +1703,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         let body_block = self.graph.skeleton.create_block();
         let exit = self.graph.skeleton.create_block();
 
-        self.control_headers.insert(
-            header,
-            ControlHeader::Loop {
-                merge: exit,
-                continue_block: body_block,
-            },
-        );
+        self.graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+            merge: exit,
+            continue_block: body_block,
+        });
 
         let _init_nid = self.convert_term(init)?;
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
@@ -1739,13 +1755,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         let exit = self.graph.skeleton.create_block();
         let idx_nid = self.graph.add_block_param(header, i32_ty.clone());
 
-        self.control_headers.insert(
-            header,
-            ControlHeader::Loop {
-                merge: exit,
-                continue_block: body_block,
-            },
-        );
+        self.graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+            merge: exit,
+            continue_block: body_block,
+        });
 
         let _init_nid = self.convert_term(init)?;
         let bound_nid = self.convert_term(bound)?;
@@ -1800,13 +1813,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         let exit = self.graph.skeleton.create_block();
         let idx_nid = self.graph.add_block_param(header, i32_ty.clone());
 
-        self.control_headers.insert(
-            header,
-            ControlHeader::Loop {
-                merge: exit,
-                continue_block: body_block,
-            },
-        );
+        self.graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+            merge: exit,
+            continue_block: body_block,
+        });
 
         let _init_nid = self.convert_term(init)?;
         let iter_nid = self.convert_term(iter)?;
@@ -1871,13 +1881,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         let result_nid = self.graph.add_block_param(exit, acc_ty.clone());
 
         // Loop header for SPIR-V
-        self.control_headers.insert(
-            header,
-            ControlHeader::Loop {
-                merge: exit,
-                continue_block: body_block,
-            },
-        );
+        self.graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+            merge: exit,
+            continue_block: body_block,
+        });
 
         // Init → header
         let init_nid = self.convert_term(init)?;
@@ -1944,13 +1951,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         let idx_nid = self.graph.add_block_param(header, i32_ty.clone());
         let result_nid = self.graph.add_block_param(exit, acc_ty.clone());
 
-        self.control_headers.insert(
-            header,
-            ControlHeader::Loop {
-                merge: exit,
-                continue_block: body_block,
-            },
-        );
+        self.graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+            merge: exit,
+            continue_block: body_block,
+        });
 
         // Init → header with (init, 0)
         let init_nid = self.convert_term(init)?;
@@ -2023,13 +2027,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         let idx_nid = self.graph.add_block_param(header, i32_ty.clone());
         let result_nid = self.graph.add_block_param(exit, acc_ty.clone());
 
-        self.control_headers.insert(
-            header,
-            ControlHeader::Loop {
-                merge: exit,
-                continue_block: body_block,
-            },
-        );
+        self.graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+            merge: exit,
+            continue_block: body_block,
+        });
 
         // Init
         let init_nid = self.convert_term(init)?;
@@ -2647,9 +2648,10 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// array (e.g. an opaque tuple handle). Mirrors how `length` dispatches on
     /// the value type rather than the source type.
     fn value_array_type(&self, nid: NodeId, fallback: &ArrayExpr) -> Type<TypeName> {
-        if let Some(ty) = self.graph.types.get(&nid) {
-            if matches!(ty, Type::Constructed(TypeName::Array, _)) || as_soa_tuple(ty).is_some() {
-                return ty.clone();
+        if let Some(node) = self.graph.nodes.get(nid) {
+            if matches!(&node.ty, Type::Constructed(TypeName::Array, _)) || as_soa_tuple(&node.ty).is_some()
+            {
+                return node.ty.clone();
             }
         }
         self.array_expr_type(fallback)
@@ -2677,16 +2679,16 @@ impl<'a, 'b> Converter<'a, 'b> {
 /// Check whether every reachable value in a zero-parameter EGIR body is a
 /// compile-time constant expression. This is deliberately an EGIR property;
 /// no temporary SSA body is constructed for classification.
-fn is_purely_constant_graph(graph: &EGraph<Raw>, aliases: &LookupMap<NodeId, NodeId>) -> bool {
+fn is_purely_constant_graph(graph: &EGraph<Raw>) -> bool {
     let mut memo = LookupMap::new();
     graph.skeleton.blocks.values().all(|block| {
         block.side_effects.is_empty()
             && match &block.term {
                 SkeletonTerminator::Return(value) => {
-                    value.is_none_or(|node| is_constant_node(graph, aliases, node, &mut memo))
+                    value.is_none_or(|node| is_constant_node(graph, node, &mut memo))
                 }
                 SkeletonTerminator::Branch { args, .. } => {
-                    args.iter().copied().all(|node| is_constant_node(graph, aliases, node, &mut memo))
+                    args.iter().copied().all(|node| is_constant_node(graph, node, &mut memo))
                 }
                 SkeletonTerminator::CondBranch {
                     cond,
@@ -2696,25 +2698,20 @@ fn is_purely_constant_graph(graph: &EGraph<Raw>, aliases: &LookupMap<NodeId, Nod
                 } => std::iter::once(*cond)
                     .chain(then_args.iter().copied())
                     .chain(else_args.iter().copied())
-                    .all(|node| is_constant_node(graph, aliases, node, &mut memo)),
+                    .all(|node| is_constant_node(graph, node, &mut memo)),
                 SkeletonTerminator::Unreachable => true,
             }
     })
 }
 
-fn is_constant_node(
-    graph: &EGraph<Raw>,
-    aliases: &LookupMap<NodeId, NodeId>,
-    mut node: NodeId,
-    memo: &mut LookupMap<NodeId, bool>,
-) -> bool {
-    while let Some(replacement) = aliases.get(&node) {
-        node = *replacement;
+fn is_constant_node(graph: &EGraph<Raw>, mut node: NodeId, memo: &mut LookupMap<NodeId, bool>) -> bool {
+    while let Some(replacement) = graph.nodes[node].alias {
+        node = replacement;
     }
     if let Some(result) = memo.get(&node) {
         return *result;
     }
-    let result = match &graph.nodes[node] {
+    let result = match &graph.nodes[node].kind {
         ENode::Constant(_) => true,
         ENode::Pure { op, operands } => {
             matches!(
@@ -2729,10 +2726,10 @@ fn is_constant_node(
                     | PureOp::Matrix { .. }
                     | PureOp::ArrayLit(_)
                     | PureOp::Global(_)
-            ) && operands.iter().copied().all(|operand| is_constant_node(graph, aliases, operand, memo))
+            ) && operands.iter().copied().all(|operand| is_constant_node(graph, operand, memo))
         }
         ENode::Union { left, right } => {
-            is_constant_node(graph, aliases, *left, memo) && is_constant_node(graph, aliases, *right, memo)
+            is_constant_node(graph, *left, memo) && is_constant_node(graph, *right, memo)
         }
         ENode::FuncParam { .. } | ENode::BlockParam { .. } | ENode::SideEffectResult => false,
     };

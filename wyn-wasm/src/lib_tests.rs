@@ -37,22 +37,22 @@ fn compile_to_ssa(
     let program = wyn_core::tlc::apply_ownership(program);
     let program = wyn_core::tlc::filter_reachable(program);
     let program = wyn_core::tlc::infer_input_slice_bounds(program);
-    let ssa = wyn_core::to_egraph(program)
-        .expect("to_egraph failed")
-        .realize_outputs()
-        .expect("realize_outputs failed")
-        .segment()
-        .optimize()
-        .allocate()
-        .expect("semantic EGIR allocation failed")
-        .plan(wyn_core::LoweringProfile::new(
+    let program = wyn_core::to_egraph(program).expect("to_egraph failed");
+    let program =
+        wyn_core::egir::realize_outputs(program).expect("realize_outputs failed");
+    let program = wyn_core::egir::reify_soacs(program);
+    let program = wyn_core::egir::optimize_semantics(program);
+    let program = wyn_core::egir::plan_logical_resources(program)
+        .expect("semantic EGIR allocation failed");
+    let program = wyn_core::egir::plan(
+        program,
+        wyn_core::LoweringProfile::new(
             wyn_core::CodegenTarget::Wgsl,
             wyn_core::SchedulePolicy::Parallel,
-        ))
-        .expect("semantic EGIR planning failed")
-        .lower_to_ssa()
-        .expect("planned EGIR lowering failed");
-    ssa
+        ),
+    )
+    .expect("semantic EGIR planning failed");
+    wyn_core::lower_egir_to_ssa(program).expect("planned EGIR lowering failed")
 }
 
 /// A fragment shader whose body contains a fragment-invariant reduce

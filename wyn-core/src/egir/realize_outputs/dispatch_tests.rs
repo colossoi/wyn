@@ -70,13 +70,10 @@ fn compute_slot_source_rejects_unsized_array_without_soac() {
     let source = graph.alloc_side_effect_result(unsized_arr_ty.clone());
     let block = graph.skeleton.entry;
     let mut next_effect = crate::IdSource::new();
-    let mut aliases = std::collections::HashMap::new();
-
     let effect_index = graph.side_effect_index();
     let err = compute_slot_source(
         &mut graph,
         &effect_index,
-        &mut aliases,
         &mut next_effect,
         block,
         source,
@@ -187,19 +184,9 @@ fn rewrite_sibling_index_consumers_rejects_map_output_view_operand() {
         span: None,
     });
 
-    let mut aliases = std::collections::HashMap::new();
     let mut next_effect = crate::IdSource::new();
-    let err = rewrite_sibling_index_consumers(
-        &mut graph,
-        &mut aliases,
-        block,
-        &mut next_effect,
-        source,
-        view,
-        elem,
-        0,
-    )
-    .expect_err("Screma output-view consumer of `source` must be rejected");
+    let err = rewrite_sibling_index_consumers(&mut graph, block, &mut next_effect, source, view, elem, 0)
+        .expect_err("Screma output-view consumer of `source` must be rejected");
     match err {
         ConvertError::Unsupported(msg) => {
             assert!(
@@ -247,19 +234,9 @@ fn rewrite_sibling_index_consumers_rejects_scatter_dest_position() {
         span: None,
     });
 
-    let mut aliases = std::collections::HashMap::new();
     let mut next_effect = crate::IdSource::new();
-    let err = rewrite_sibling_index_consumers(
-        &mut graph,
-        &mut aliases,
-        block,
-        &mut next_effect,
-        source,
-        view,
-        elem,
-        0,
-    )
-    .expect_err("Scatter dest-position consumer of `source` must be rejected");
+    let err = rewrite_sibling_index_consumers(&mut graph, block, &mut next_effect, source, view, elem, 0)
+        .expect_err("Scatter dest-position consumer of `source` must be rejected");
     match err {
         ConvertError::Unsupported(msg) => {
             assert!(
@@ -310,19 +287,9 @@ fn rewrite_sibling_index_consumers_rejects_scatter_capture_position() {
         span: None,
     });
 
-    let mut aliases = std::collections::HashMap::new();
     let mut next_effect = crate::IdSource::new();
-    let err = rewrite_sibling_index_consumers(
-        &mut graph,
-        &mut aliases,
-        block,
-        &mut next_effect,
-        source,
-        view,
-        elem,
-        0,
-    )
-    .expect_err("Scatter capture-position consumer of `source` must be rejected");
+    let err = rewrite_sibling_index_consumers(&mut graph, block, &mut next_effect, source, view, elem, 0)
+        .expect_err("Scatter capture-position consumer of `source` must be rejected");
     match err {
         ConvertError::Unsupported(msg) => {
             assert!(
@@ -391,19 +358,9 @@ fn rewrite_sibling_index_consumers_rejects_accumulator_output_view_operand() {
         span: None,
     });
 
-    let mut aliases = std::collections::HashMap::new();
     let mut next_effect = crate::IdSource::new();
-    let err = rewrite_sibling_index_consumers(
-        &mut graph,
-        &mut aliases,
-        block,
-        &mut next_effect,
-        source,
-        view,
-        elem,
-        0,
-    )
-    .expect_err("Screma accumulator output-view consumer of `source` must be rejected");
+    let err = rewrite_sibling_index_consumers(&mut graph, block, &mut next_effect, source, view, elem, 0)
+        .expect_err("Screma accumulator output-view consumer of `source` must be rejected");
     match err {
         ConvertError::Unsupported(msg) => {
             assert!(

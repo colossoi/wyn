@@ -7,14 +7,25 @@
 //! mixed-variance call is opaque, however, so invariant work inside the callee
 //! cannot reach the preheader until the call is inlined.
 
-use crate::flow::{BlockId, ControlHeader};
+/// Physical EGIR after loop-sensitive partial inlining.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PartiallyInlined;
+
 use crate::LookupMap;
 
 use super::inlining;
-use super::ir::RegionId;
+use super::ir::Stage;
 use super::loop_analysis::{LoopAnalysis, LoopInvariance};
-use super::program::{PhysicalFunc, PhysicalProgram, Program, RegionInterner};
+use super::program::{PhysicalFunc, Program};
 use super::types::{EGraph, ENode, NodeId, Physical, PureOp};
+
+impl Stage for PartiallyInlined {
+    type Family = Physical;
+    type ResourceDecl = crate::interface::StorageBindingDecl;
+    type OutputRoute = super::ir::RealizedOutputRoute;
+    type ProgramData = super::program::CoreProgramData;
+    type GlobalContext = super::program::PlannedGlobal;
+}
 
 #[cfg(test)]
 #[path = "partial_inline_tests.rs"]
@@ -37,54 +48,37 @@ struct InliningStats {
 #[derive(Clone, Debug)]
 struct Candidate {
     call: NodeId,
-    callee: RegionId,
+    callee: String,
     callee_nodes: usize,
 }
 
-/// Inline profitable mixed-variance calls in every physical function and
-/// entry. The ordinary scoped elaborator then performs CSE and LICM on the
-/// exposed DAG.
-pub fn run(program: &mut PhysicalProgram) -> Result<(), String> {
-    let program: &mut Program<Physical> = program;
+/// Inline profitable mixed-variance calls in every physical body. The ordinary
+/// scoped elaborator then performs CSE and LICM on the exposed DAG.
+pub fn run(
+    program: Program<super::materialize::Materialized>,
+) -> Result<Program<PartiallyInlined>, String> {
     // Snapshot callable bodies so callers can be rewritten without aliasing
     // `program.functions`. A caller-local fixpoint handles calls revealed by a
     // clone, so snapshots do not need to be refreshed after each body.
-    let callees: LookupMap<RegionId, PhysicalFunc> =
-        program.iter_regions().map(|(id, function)| (id, function.clone())).collect();
-    let region_interner = &program.region_interner;
-
-    for function in &mut program.functions {
-        inline_body(
-            &mut function.graph,
-            &function.control_headers,
-            region_interner,
-            &callees,
-        )
-        .map_err(|error| format!("partial inlining in function `{}` failed: {error}", function.name))?;
-    }
-    for entry in &mut program.entry_points {
-        inline_body(
-            &mut entry.graph,
-            &entry.control_headers,
-            region_interner,
-            &callees,
-        )
-        .map_err(|error| format!("partial inlining in entry `{}` failed: {error}", entry.name))?;
-    }
-    Ok(())
+    let callees: LookupMap<String, PhysicalFunc> =
+        program.functions.iter().map(|function| (function.name.clone(), function.clone())).collect();
+    program
+        .try_map_graphs(|site, mut graph| {
+            inline_body(&mut graph, &callees)
+                .map_err(|error| format!("partial inlining in {site:?} failed: {error}"))?;
+            Ok(graph)
+        })
+        .map(|program| program.into_stage())
 }
 
 fn inline_body(
     graph: &mut EGraph<Physical>,
-    control_headers: &LookupMap<BlockId, ControlHeader>,
-    region_interner: &RegionInterner,
-    callees: &LookupMap<RegionId, PhysicalFunc>,
+    callees: &LookupMap<String, PhysicalFunc>,
 ) -> Result<InliningStats, String> {
     let mut stats = InliningStats::default();
     while stats.calls_inlined < MAX_INLINES && stats.node_budget < MAX_INLINED_NODES {
         let remaining = MAX_INLINED_NODES - stats.node_budget;
-        let Some(candidate) = find_candidate(graph, control_headers, region_interner, callees, remaining)
-        else {
+        let Some(candidate) = find_candidate(graph, callees, remaining) else {
             break;
         };
         let callee = &callees[&candidate.callee];
@@ -97,12 +91,10 @@ fn inline_body(
 
 fn find_candidate(
     graph: &EGraph<Physical>,
-    control_headers: &LookupMap<BlockId, ControlHeader>,
-    region_interner: &RegionInterner,
-    callees: &LookupMap<RegionId, PhysicalFunc>,
+    callees: &LookupMap<String, PhysicalFunc>,
     remaining_budget: usize,
 ) -> Option<Candidate> {
-    let loops = LoopAnalysis::build(&graph.skeleton, control_headers);
+    let loops = LoopAnalysis::build(&graph.skeleton);
 
     // Iterate in skeleton order for deterministic code growth. Recompute after
     // every inline: the clone can reveal another mixed call, or can make an
@@ -131,14 +123,11 @@ fn find_candidate(
                 let ENode::Pure {
                     op: PureOp::Call(callee_name),
                     operands,
-                } = &graph.nodes[node]
+                } = &graph.nodes[node].kind
                 else {
                     continue;
                 };
-                let Some(callee_id) = region_interner.get(callee_name) else {
-                    continue;
-                };
-                let Some(callee) = callees.get(&callee_id) else {
+                let Some(callee) = callees.get(callee_name) else {
                     continue;
                 };
                 if operands.len() != callee.params.len() {
@@ -158,7 +147,7 @@ fn find_candidate(
                 }
                 return Some(Candidate {
                     call: node,
-                    callee: callee_id,
+                    callee: callee_name.clone(),
                     callee_nodes,
                 });
             }

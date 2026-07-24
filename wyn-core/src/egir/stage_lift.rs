@@ -11,12 +11,13 @@ use polytype::Type;
 use smallvec::smallvec;
 
 use crate::ast::TypeName;
-use crate::flow::{BlockId, ControlHeader};
 use crate::{LookupSet, SortedSet};
 
 use super::graph_ops::{self, ConstantCopy};
 use super::inlining;
-use super::program::{SemanticFunc, SemanticProgram};
+use super::ir::{Body, BodySite as ProgramBodySite};
+use super::program::{fresh_region_name, CoreProgramData, Program, SemanticFunc};
+use super::reify::Segmented;
 use super::stage_variance::{entry_parameter_dependences, StageDependence, StageDependenceAnalysis};
 use super::types::{
     EGraph, ENode, NodeId, PureOp, RegionId, SegBody, SideEffectKind, SideEffectSite, SoacEffect,
@@ -61,7 +62,7 @@ pub(crate) struct StageLiftStats {
 }
 
 #[derive(Clone, Copy)]
-struct BodySite {
+struct SegBodySite {
     entry: usize,
     effect: SideEffectSite,
     body: usize,
@@ -74,70 +75,105 @@ struct StageLiftCandidate {
     calls_inlined: usize,
 }
 
-pub(crate) fn run(program: &mut SemanticProgram) -> Result<StageLiftStats> {
+pub(crate) fn run(program: Program<Segmented>) -> Result<Program<Segmented>> {
+    run_with_stats(program).map(|(program, _)| program)
+}
+
+fn run_with_stats(mut program: Program<Segmented>) -> Result<(Program<Segmented>, StageLiftStats)> {
     let mut stats = StageLiftStats::default();
-    stats.calls_inlined += inline_direct_entry_calls(program)?;
+    while let Some(patch) = analyze_direct_entry_calls(&program)? {
+        stats.calls_inlined += patch.calls_inlined;
+        program = apply_direct_entry_calls(program, patch);
+    }
     loop {
-        let Some((site, prepared)) = find_next_candidate(program)? else {
+        let Some((site, prepared)) = find_next_candidate(&program)? else {
             break;
         };
         let scope = program.entry_points[site.entry].name.clone();
+        let mut region_interner = program.data.region_interner.clone();
         let name = fresh_region_name(
-            program,
+            &region_interner,
             &format!("{}_{}_stage_lift", scope, prepared.function.name),
         );
+        let region = region_interner.intern(&name);
         let frontier_count = prepared.frontier.len();
         let calls_inlined = prepared.calls_inlined;
-        let (mut function, mut captures) = {
-            let graph = &mut program.entry_points[site.entry].graph;
-            apply_lift(graph, prepared)?
-        };
-        function.name = name;
-        let region = program.define_region(function);
-        captures.region = region;
-        let body = program
-            .entry_seg_body_mut(site.entry, site.effect, site.body)
-            .ok_or(StageLiftError::MissingBodySite)?;
-        *body = captures;
+        let mut specialized = None;
+        program = program.try_rewrite_body(ProgramBodySite::Entry(site.entry), |body| match body {
+            Body::Entry(mut entry) => {
+                let (mut function, mut captures) = apply_lift(&mut entry.graph, prepared)?;
+                function.region = region;
+                function.name = name;
+                captures.region = region;
+                let body = entry
+                    .graph
+                    .skeleton
+                    .get_effect_mut(site.effect)
+                    .and_then(|effect| effect.seg_body_mut(site.body))
+                    .ok_or(StageLiftError::MissingBodySite)?;
+                *body = captures;
+                specialized = Some(function);
+                Ok::<_, StageLiftError>(Body::Entry(entry))
+            }
+            _ => unreachable!("stage lifting only targets entry points"),
+        })?;
+        program = program
+            .extend_functions([specialized.expect("stage-lift rewrite did not produce its region")])
+            .map_data(|data| CoreProgramData {
+                region_interner,
+                ..data
+            });
 
         stats.bodies_specialized += 1;
         stats.calls_inlined += calls_inlined;
         stats.values_lifted += frontier_count;
     }
-    Ok(stats)
+    Ok((program, stats))
 }
 
 /// Expose invariant subgraphs hidden inside mixed-stage calls made directly
 /// by shader entries. Scalar residency subsequently decides whether those
 /// exposed values are worth a separate stage invocation.
-fn inline_direct_entry_calls(program: &mut SemanticProgram) -> Result<usize> {
-    let mut total = 0;
-    for entry_index in 0..program.entry_points.len() {
-        let (mut graph, control_headers, parameter_dependences, scope) = {
-            let entry = &program.entry_points[entry_index];
-            (
-                entry.graph.clone(),
-                entry.control_headers.clone(),
-                entry_parameter_dependences(entry),
-                entry.name.clone(),
-            )
-        };
+struct DirectEntryCallsPatch {
+    entry: usize,
+    graph: EGraph,
+    calls_inlined: usize,
+}
+
+fn analyze_direct_entry_calls(program: &Program<Segmented>) -> Result<Option<DirectEntryCallsPatch>> {
+    for (entry_index, entry) in program.entry_points.iter().enumerate() {
+        let mut graph = entry.graph.clone();
         let calls = inline_mixed_calls_in_graph(
             program,
             &mut graph,
-            &control_headers,
-            &parameter_dependences,
-            &scope,
+            &entry_parameter_dependences(entry),
+            &entry.name,
         )?;
         if calls != 0 {
-            program.entry_points[entry_index].graph = graph;
-            total += calls;
+            return Ok(Some(DirectEntryCallsPatch {
+                entry: entry_index,
+                graph,
+                calls_inlined: calls,
+            }));
         }
     }
-    Ok(total)
+    Ok(None)
 }
 
-fn find_next_candidate(program: &SemanticProgram) -> Result<Option<(BodySite, StageLiftCandidate)>> {
+fn apply_direct_entry_calls(
+    program: Program<Segmented>,
+    patch: DirectEntryCallsPatch,
+) -> Program<Segmented> {
+    program.rewrite_body(ProgramBodySite::Entry(patch.entry), |body| match body {
+        Body::Entry(mut entry) => {
+            entry.graph = patch.graph;
+            Body::Entry(entry)
+        }
+        _ => unreachable!("direct entry-call patch targeted a non-entry body"),
+    })
+}
+
+fn find_next_candidate(program: &Program<Segmented>) -> Result<Option<(SegBodySite, StageLiftCandidate)>> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
         let enclosing =
             StageDependenceAnalysis::for_entry(entry).map_err(|reason| StageLiftError::Analysis {
@@ -157,7 +193,7 @@ fn find_next_candidate(program: &SemanticProgram) -> Result<Option<(BodySite, St
                         continue;
                     };
                     return Ok(Some((
-                        BodySite {
+                        SegBodySite {
                             entry: entry_index,
                             effect: SideEffectSite {
                                 block,
@@ -175,7 +211,7 @@ fn find_next_candidate(program: &SemanticProgram) -> Result<Option<(BodySite, St
 }
 
 fn prepare_lift(
-    program: &SemanticProgram,
+    program: &Program<Segmented>,
     enclosing: &StageDependenceAnalysis,
     body: &SegBody,
 ) -> Result<Option<StageLiftCandidate>> {
@@ -188,15 +224,13 @@ fn prepare_lift(
                 reason,
             })?;
     let calls_inlined = inline_mixed_calls(program, &mut function, &parameter_dependences)?;
-    let analysis = StageDependenceAnalysis::for_graph(
-        &function.graph,
-        &function.control_headers,
-        &parameter_dependences,
-    )
-    .map_err(|reason| StageLiftError::Analysis {
-        scope: function.name.clone(),
-        reason,
-    })?;
+    let analysis =
+        StageDependenceAnalysis::for_graph(&function.graph, &parameter_dependences).map_err(|reason| {
+            StageLiftError::Analysis {
+                scope: function.name.clone(),
+                reason,
+            }
+        })?;
     let frontier = invariant_frontier(
         &function.graph,
         &analysis,
@@ -216,33 +250,33 @@ fn prepare_lift(
 }
 
 fn inline_mixed_calls(
-    program: &SemanticProgram,
+    program: &Program<Segmented>,
     function: &mut SemanticFunc,
     parameter_dependences: &[StageDependence],
 ) -> Result<usize> {
     inline_mixed_calls_in_graph(
         program,
         &mut function.graph,
-        &function.control_headers,
         parameter_dependences,
         &function.name,
     )
 }
 
 fn inline_mixed_calls_in_graph(
-    program: &SemanticProgram,
+    program: &Program<Segmented>,
     graph: &mut EGraph,
-    control_headers: &crate::LookupMap<BlockId, ControlHeader>,
     parameter_dependences: &[StageDependence],
     scope: &str,
 ) -> Result<usize> {
     let mut calls_inlined = 0;
     let mut node_budget = 0;
     while node_budget < MAX_INLINED_NODES {
-        let analysis = StageDependenceAnalysis::for_graph(graph, control_headers, parameter_dependences)
-            .map_err(|reason| StageLiftError::Analysis {
-                scope: scope.to_string(),
-                reason,
+        let analysis =
+            StageDependenceAnalysis::for_graph(graph, parameter_dependences).map_err(|reason| {
+                StageLiftError::Analysis {
+                    scope: scope.to_string(),
+                    reason,
+                }
             })?;
         let remaining = MAX_INLINED_NODES - node_budget;
         let candidate = graph_ops::reachable_execution_values(graph).into_iter().find_map(|node| {
@@ -250,7 +284,7 @@ fn inline_mixed_calls_in_graph(
             if !call.has_mixed_stage_variance() {
                 return None;
             }
-            let region = program.region_interner.get(&call.callee)?;
+            let region = program.data.region_interner.get(&call.callee)?;
             let callee = program.region(region)?;
             if callee.params.len() != call.arguments.len() {
                 return None;
@@ -290,7 +324,7 @@ fn is_liftable(
     leading_parameters: usize,
 ) -> bool {
     if !matches!(
-        graph.nodes.get(node),
+        graph.nodes.get(node).map(|node| &node.kind),
         Some(ENode::Pure { op, .. })
             if !matches!(
                 op,
@@ -303,7 +337,7 @@ fn is_liftable(
         return false;
     }
     let dependence = analysis.dependence(node);
-    let Some(ty) = graph.types.get(&node) else {
+    let Some(ty) = graph.nodes.get(node).map(|node| &node.ty) else {
         return false;
     };
     dependence.is_stage_invariant()
@@ -317,13 +351,13 @@ fn is_liftable(
 fn subgraph_contains_call(graph: &EGraph, root: NodeId) -> bool {
     wyn_graph::reachable_from_ordered([root], wyn_graph::WalkOrder::DepthFirst, |node, out| {
         if let Some(definition) = graph.nodes.get(node) {
-            out.extend(definition.children());
+            out.extend(definition.kind.children());
         }
     })
     .into_iter()
     .any(|node| {
         matches!(
-            graph.nodes.get(node),
+            graph.nodes.get(node).map(|node| &node.kind),
             Some(ENode::Pure {
                 op: PureOp::Call(_),
                 ..
@@ -341,7 +375,7 @@ fn cloneable_from_captures(
     if !visiting.insert(node) {
         return true;
     }
-    let cloneable = match graph.nodes.get(node) {
+    let cloneable = match graph.nodes.get(node).map(|node| &node.kind) {
         Some(ENode::Constant(_)) => true,
         Some(ENode::FuncParam { index }) => *index >= leading_parameters,
         Some(ENode::Pure { operands, .. }) => operands
@@ -372,7 +406,7 @@ fn apply_lift(enclosing: &mut EGraph, mut prepared: StageLiftCandidate) -> Resul
             ConstantCopy::Intern,
             true,
         )?);
-        types.push(prepared.function.graph.types[&root].clone());
+        types.push(prepared.function.graph.nodes[root].ty.clone());
     }
 
     let (capture, capture_ty) = if cloned.len() == 1 {
@@ -412,7 +446,7 @@ fn apply_lift(enclosing: &mut EGraph, mut prepared: StageLiftCandidate) -> Resul
 /// one. Alias-bearing bodies are left unchanged because aliases may preserve
 /// incidental demands outside the skeleton roots.
 fn prune_dead_captures(function: &mut SemanticFunc, body: &mut SegBody) -> Result<()> {
-    if !function.aliases.is_empty() {
+    if function.graph.nodes.iter().any(|(_, node)| node.alias.is_some()) {
         return Ok(());
     }
     let leading_parameters = body.leading_parameter_count(function)?;
@@ -420,7 +454,7 @@ fn prune_dead_captures(function: &mut SemanticFunc, body: &mut SegBody) -> Resul
     let live = graph_ops::reachable_execution_values(&function.graph);
     let mut retained_captures = SortedSet::new();
     for node in live {
-        if let Some(ENode::FuncParam { index }) = function.graph.nodes.get(node) {
+        if let Some(ENode::FuncParam { index }) = function.graph.nodes.get(node).map(|node| &node.kind) {
             if *index >= parameter_count {
                 return Err(StageLiftError::Rewrite(format!(
                     "region `{}` has out-of-range parameter {index}",
@@ -434,17 +468,4 @@ fn prune_dead_captures(function: &mut SemanticFunc, body: &mut SegBody) -> Resul
     }
     function.retain_seg_body_captures(body, &retained_captures)?;
     Ok(())
-}
-
-fn fresh_region_name(program: &SemanticProgram, base: &str) -> String {
-    if program.region_interner.get(base).is_none() {
-        return base.to_string();
-    }
-    for suffix in 1.. {
-        let candidate = format!("{base}_{suffix}");
-        if program.region_interner.get(&candidate).is_none() {
-            return candidate;
-        }
-    }
-    unreachable!()
 }

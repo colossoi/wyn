@@ -1,9 +1,9 @@
 //! Focused construction API for planner-generated kernel entries.
 
 use crate::ast::{Span, TypeName};
-use crate::flow::{BlockId, ControlHeader, ExecutionModel};
+use crate::flow::{BlockId, ExecutionModel};
 use crate::interface::{self, EntryInput, EntryOutput};
-use crate::{LookupMap, ResourceId};
+use crate::ResourceId;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -18,7 +18,6 @@ use super::types::{
 
 pub struct EntryBuilder<'a> {
     graph: EGraph,
-    control_headers: LookupMap<BlockId, ControlHeader>,
     current_block: BlockId,
     name: String,
     span: Span,
@@ -28,7 +27,7 @@ pub struct EntryBuilder<'a> {
     resource_declarations: Vec<SemanticResourceDecl>,
     params: Vec<(Type<TypeName>, String)>,
     return_ty: Type<TypeName>,
-    semantic_ids: SemanticOpIdSource,
+    semantic_ids: &'a mut SemanticOpIdSource,
     effect_ids: &'a mut crate::IdSource<EffectToken>,
 }
 
@@ -36,13 +35,13 @@ impl<'a> EntryBuilder<'a> {
     pub fn new_compute(
         name: String,
         local_size: (u32, u32, u32),
+        semantic_ids: &'a mut SemanticOpIdSource,
         effect_ids: &'a mut crate::IdSource<EffectToken>,
     ) -> Self {
         let graph = EGraph::new();
         let current_block = graph.skeleton.entry;
         Self {
             graph,
-            control_headers: LookupMap::new(),
             current_block,
             name,
             span: Span::new(0, 0, 0, 0),
@@ -52,7 +51,7 @@ impl<'a> EntryBuilder<'a> {
             resource_declarations: Vec::new(),
             params: Vec::new(),
             return_ty: Type::Constructed(TypeName::Unit, vec![]),
-            semantic_ids: SemanticOpIdSource::default(),
+            semantic_ids,
             effect_ids,
         }
     }
@@ -98,18 +97,8 @@ impl<'a> EntryBuilder<'a> {
         &mut self.graph
     }
 
-    pub fn construction_parts_mut(
-        &mut self,
-    ) -> (
-        &mut EGraph,
-        &mut LookupMap<BlockId, ControlHeader>,
-        &mut crate::IdSource<EffectToken>,
-    ) {
-        (&mut self.graph, &mut self.control_headers, self.effect_ids)
-    }
-
-    pub fn control_headers_mut(&mut self) -> &mut LookupMap<BlockId, ControlHeader> {
-        &mut self.control_headers
+    pub fn construction_parts_mut(&mut self) -> (&mut EGraph, &mut crate::IdSource<EffectToken>) {
+        (&mut self.graph, self.effect_ids)
     }
 
     pub fn set_current_block(&mut self, block: BlockId) {
@@ -190,15 +179,13 @@ impl<'a> EntryBuilder<'a> {
                 .map(|inner| super::ir::EntryOutput {
                     inner,
                     resource: None,
+                    routes: Vec::new(),
                 })
                 .collect(),
             resource_declarations: self.resource_declarations,
             params: self.params,
             return_ty: self.return_ty,
             graph: self.graph,
-            control_headers: self.control_headers,
-            aliases: LookupMap::new(),
-            output_routes: Vec::new(),
         }
     }
 }

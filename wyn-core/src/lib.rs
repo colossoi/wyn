@@ -51,7 +51,6 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 
 use egir::from_tlc::ConvertError;
-use egir::program::{AllocatedProgram, RawProgram, SemanticProgram};
 
 use ast::{NodeCounter, NodeId};
 use error::Result;
@@ -469,15 +468,15 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //       tlc::filter_reachable(...)       -> tlc::Program<stage::Reachable>
 //       tlc::infer_input_slice_bounds(...)
 //                                      -> tlc::Program<stage::InputSliceBoundsInferred>
-//       to_egraph(...)                  -> EgirRaw
+//       to_egraph(...)                  -> egir::Program<from_tlc::Converted>
 //
 // EGIR stages:
-//       .realize_outputs()                         -> EgirOutputsRealized
-//       .segment()                                 -> EgirSegmented
-//       .optimize()                                -> EgirOptimized
-//       .allocate()?                               -> EgirAllocated
-//       .plan(profile)                             -> EgirPlanned
-//       .lower_to_ssa()                            -> ssa::Program<stage::Elaborated>
+//       egir::realize_outputs(...)       -> Program<OutputsRealized>
+//       egir::reify_soacs(...)           -> Program<Segmented>
+//       egir::optimize_semantics(...)     -> Program<Optimized>
+//       egir::plan_logical_resources(...) -> Program<ResourcesAllocated>
+//       egir::plan(..., profile)          -> Program<Planned>
+//       lower_egir_to_ssa(...)            -> ssa::Program<stage::Elaborated>
 //
 // Backend:
 //       lower_ssa_to_spirv(program) | lower_ssa_to_wgsl(program)
@@ -734,15 +733,9 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
 /// Convert fully analyzed TLC into raw semantic EGIR.
 pub fn to_egraph(
     program: tlc::Program<tlc::stage::InputSliceBoundsInferred>,
-) -> std::result::Result<EgirRaw, ConvertError> {
-    let mut auto_storage_binding_ids = program.global_context.auto_storage_binding_ids.clone();
-    let mut effect_ids = IdSource::new();
-    let inner = egir::from_tlc::run(&program, &mut auto_storage_binding_ids, &mut effect_ids)?;
-    Ok(EgirRaw {
-        inner,
-        binding_ids: auto_storage_binding_ids,
-        effect_ids,
-    })
+) -> std::result::Result<egir::program::Program<egir::from_tlc::Converted>, ConvertError> {
+    let binding_ids = program.global_context.auto_storage_binding_ids.clone();
+    egir::from_tlc::run(&program, binding_ids, IdSource::new())
 }
 
 // =============================================================================
@@ -792,213 +785,17 @@ impl LoweringProfile {
     }
 }
 
-/// Raw EGIR program, directly produced by TLC → EGIR conversion.
-pub struct EgirRaw {
-    inner: RawProgram,
-    binding_ids: IdSource<u32>,
-    effect_ids: IdSource<egir::types::EffectToken>,
-}
-
-/// EGIR after entry-output realization. Every declared output has its
-/// writes materialised as side effects against the bound storage view
-/// (compute) or `OutputSlot` place (graphics). The body's `Return`
-/// terminator carries no value. Non-output runtime arrays can still await
-/// EGIR residency planning. See `egir::realize_outputs`.
-pub struct EgirOutputsRealized {
-    inner: RawProgram,
-    binding_ids: IdSource<u32>,
-    effect_ids: IdSource<egir::types::EffectToken>,
-}
-
-/// EGIR after all reachable SOACs have been reified as semantic
-/// `SegMap`, `SegRed`, or `SegScan` operations. No dispatch schedule or scratch
-/// storage has been chosen yet.
-pub struct EgirSegmented {
-    inner: SemanticProgram,
-    binding_ids: IdSource<u32>,
-    effect_ids: IdSource<egir::types::EffectToken>,
-}
-
-/// Semantic EGIR after graph-level optimization. SegOps remain intact.
-pub struct EgirOptimized {
-    inner: SemanticProgram,
-    binding_ids: IdSource<u32>,
-    effect_ids: IdSource<egir::types::EffectToken>,
-}
-
-/// Semantic EGIR after logical resource planning. Physical scratch bindings,
-/// phase kernels, and descriptor publication are intentionally deferred until
-/// `plan` receives a target profile.
-pub struct EgirAllocated {
-    inner: AllocatedProgram,
-    binding_ids: IdSource<u32>,
-    effect_ids: IdSource<egir::types::EffectToken>,
-}
-
-/// Physical EGIR together with a graph-free summary of the schedule that
-/// produced it. Construction is private to `EgirAllocated::plan`, so callers
-/// cannot bypass schedule validation.
-pub struct EgirPlanned {
-    physical: egir::program::PhysicalProgram,
-    kernel_plan: egir::parallelize::KernelPlanSummary,
-    profile: LoweringProfile,
-    effect_ids: IdSource<egir::types::EffectToken>,
-}
-
-impl EgirRaw {
-    /// Realize every entry's outputs into side-effect writes. For
-    /// compute entries: walk `SemanticEntry.output_routes` and emit a DPS
-    /// write per route against the slot's `OutputView` (Map/Scan
-    /// retarget, fixed-aggregate element stores, scalar `Store` at
-    /// index 0). For graphics entries: classify the body's
-    /// `Return(Some(value))` and emit one store per declared
-    /// `OutputSlot { index }`. Runs before segmentation so the
-    /// SOAC→OutputView rewrite precedes semantic segmented-op wrapping;
-    /// allocation later plans any remaining residency requirements.
-    pub fn realize_outputs(self) -> std::result::Result<EgirOutputsRealized, ConvertError> {
-        let EgirRaw {
-            mut inner,
-            binding_ids,
-            mut effect_ids,
-        } = self;
-        egir::realize_outputs::run(&mut inner, &mut effect_ids)?;
-        Ok(EgirOutputsRealized {
-            inner,
-            binding_ids,
-            effect_ids,
-        })
-    }
-}
-
-impl EgirOutputsRealized {
-    /// Reify every reachable SOAC as a semantic segmented operation and choose
-    /// kernel versus lane-local placement from EGIR value/effect context.
-    pub fn segment(self) -> EgirSegmented {
-        let EgirOutputsRealized {
-            inner,
-            binding_ids,
-            effect_ids,
-        } = self;
-        let inner = egir::reify::run(inner);
-        if cfg!(debug_assertions) {
-            egir::semantic_graph::verify(&inner).expect("invalid semantic EGIR");
-        }
-        EgirSegmented {
-            inner,
-            binding_ids,
-            effect_ids,
-        }
-    }
-}
-
-impl EgirSegmented {
-    /// Preserve semantic SegOps while running graph-level fusion, indexed
-    /// demand scalarization, and dead-operation elimination. The typestate is
-    /// load-bearing because resource planning and scheduling are not permitted
-    /// before this boundary.
-    pub fn optimize(self) -> EgirOptimized {
-        let EgirSegmented {
-            mut inner,
-            binding_ids,
-            effect_ids,
-        } = self;
-        egir::semantic_opt::run(&mut inner);
-        EgirOptimized {
-            inner,
-            binding_ids,
-            effect_ids,
-        }
-    }
-}
-
-impl EgirOptimized {
-    /// Plan logical resources without choosing physical descriptor bindings.
-    /// The carried allocator lets terminal lowering allocate scratch
-    /// transactionally without mutating upstream TLC state.
-    pub fn allocate(self) -> std::result::Result<EgirAllocated, ConvertError> {
-        let EgirOptimized {
-            inner,
-            binding_ids,
-            mut effect_ids,
-        } = self;
-        if cfg!(debug_assertions) {
-            egir::semantic_graph::verify(&inner).expect("invalid optimized semantic EGIR");
-        }
-        let inner = egir::program::plan_logical_resources(inner, &mut effect_ids)?;
-        Ok(EgirAllocated {
-            inner,
-            binding_ids,
-            effect_ids,
-        })
-    }
-}
-
-impl EgirAllocated {
-    /// Human-readable semantic IR including concrete spaces, region captures,
-    /// output routing, and logical resource accesses.
-    pub fn semantic_ir(&self) -> String {
-        egir::semantic_graph::summary(&self.inner)
-    }
-
-    /// The pre-target residency manifest. It contains semantic output storage,
-    /// materializations, filter capacity/length cells, and compiler flows, but
-    /// deliberately excludes reduce/scan/filter algorithm work buffers.
-    pub fn logical_resources(&self) -> &[egir::program::LogicalResource] {
-        &self.inner.resources
-    }
-
-    pub fn semantic_dependencies(&self) -> &[egir::program::SemanticDependency] {
-        &self.inner.semantic_dependencies
-    }
-
-    /// Select and validate a target-specific kernel plan, then construct the
-    /// physical EGIR entries described by that plan.
-    pub fn plan(self, profile: LoweringProfile) -> std::result::Result<EgirPlanned, ConvertError> {
-        let mut binding_ids = self.binding_ids;
-        let mut effect_ids = self.effect_ids;
-        let (physical, kernel_plan) =
-            egir::parallelize::plan(self.inner, &mut binding_ids, &mut effect_ids, profile)?;
-        Ok(EgirPlanned {
-            physical,
-            kernel_plan,
-            profile,
-            effect_ids,
-        })
-    }
-}
-
-impl EgirPlanned {
-    /// Final logical resource manifest after target recipe selection has added
-    /// only the algorithm-specific work buffers required by the validated
-    /// target recipes.
-    pub fn logical_resources(&self) -> &[egir::program::LogicalResource] {
-        self.physical.logical_resources()
-    }
-
-    pub fn kernel_plan(&self) -> &egir::parallelize::KernelPlanSummary {
-        &self.kernel_plan
-    }
-
-    /// Expand and elaborate the validated physical plan into SSA.
-    pub fn lower_to_ssa(
-        mut self,
-    ) -> std::result::Result<ssa::Program<ssa::stage::Elaborated>, ConvertError> {
-        let plan = self.kernel_plan;
-        egir::soac_expand::run(&mut self.physical, &mut self.effect_ids)?;
-        egir::materialize::run(&mut self.physical);
-        egir::partial_inline::run(&mut self.physical).map_err(ConvertError::Internal)?;
-        egir::rewrite::run(&mut self.physical);
-        egir::skel_opt::run(&mut self.physical);
-        egir::resource_erasure::run(&mut self.physical)?;
-        let (ssa, pipeline) = egir::elaborate::run_program(self.physical);
-        Ok(
-            ssa.with_context::<ssa::stage::Elaborated>(ssa::context::BackendGlobal {
-                pipeline,
-                profile: self.profile,
-                kernel_plan: plan,
-            }),
-        )
-    }
+/// Run the physical EGIR passes and construct backend-bound SSA.
+pub fn lower_egir_to_ssa(
+    program: egir::program::Program<egir::parallelize::Planned>,
+) -> std::result::Result<ssa::Program<ssa::stage::Elaborated>, ConvertError> {
+    let program = egir::expand_soacs(program)?;
+    let program = egir::materialize_dynamic_extracts(program);
+    let program = egir::partially_inline_calls(program)?;
+    let program = egir::rewrite(program);
+    let program = egir::optimize_skeleton(program);
+    let program = egir::erase_resources(program)?;
+    Ok(egir::elaborate(program))
 }
 
 /// Validate and lower elaborated SSA to SPIR-V.
@@ -1117,10 +914,13 @@ fn ssa_from_reachable(
     profile: LoweringProfile,
 ) -> std::result::Result<ssa::Program<ssa::stage::Elaborated>, Box<dyn std::error::Error>> {
     let program = tlc::infer_input_slice_bounds(program);
-    let raw = to_egraph(program)?;
-    let allocated = raw.realize_outputs()?.segment().optimize().allocate()?;
-    let planned = allocated.plan(profile)?;
-    Ok(planned.lower_to_ssa()?)
+    let program = to_egraph(program)?;
+    let program = egir::realize_outputs(program)?;
+    let program = egir::reify_soacs(program);
+    let program = egir::optimize_semantics(program);
+    let program = egir::plan_logical_resources(program)?;
+    let program = egir::plan(program, profile)?;
+    Ok(lower_egir_to_ssa(program)?)
 }
 
 /// Run all the way through EGIR + elaborate to SSA. Materialize is enabled

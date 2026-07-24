@@ -28,6 +28,10 @@
 
 #![deny(clippy::expect_used, clippy::unwrap_used)]
 
+/// EGIR rebuilt from a validated target-specific kernel plan.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Planned;
+
 mod filter;
 mod kernel;
 mod model;
@@ -50,7 +54,6 @@ use planning::{make_screma_serial, LocatedScrema, SerialScremaRecipe};
 use projection::{partition_entry_output_domains, project_kernel_body, ProjectionSpec};
 use reduce::{analyze_reduce_candidate, BoundReduce};
 use scan::{analyze_scan_candidate, BoundScan, ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
-pub(super) use schedule::KernelPlan;
 pub use schedule::{
     KernelDomain, KernelId, KernelPhaseSummary, KernelPlanSummary, OutputRouteProjection, ScheduledResource,
 };
@@ -61,13 +64,27 @@ use crate::LookupMap;
 use polytype::Type;
 use smallvec::smallvec;
 
+use super::allocation::{self, CompilerFlowEndpoint, ResourcesAllocated};
 use super::from_tlc::ConvertError;
 use super::graph_ops;
+use super::ir::Stage;
 use super::program::{
-    AllocatedProgram, CompilerFlowEndpoint, CompilerResourceKind, LogicalResourceArena, OutputWriter,
-    PhysicalProgram, ResourceId, SemanticEntry, SemanticFunc, SemanticOpId, SemanticResourceDecl,
-    SemanticResourceRef,
+    CompilerResourceKind, LogicalResourceArena, MaterializationId, MaterializationRequirement,
+    OutputWriter, Program, ResourceId, SemanticEntry, SemanticEntryId, SemanticFunc, SemanticOpId,
+    SemanticResourceDecl, SemanticResourceRef,
 };
+
+impl Program<Planned> {
+    /// Logical resources after target recipe selection has installed only the
+    /// work buffers required by the selected recipes.
+    pub fn logical_resources(&self) -> &[super::program::LogicalResource] {
+        &self.data.resources
+    }
+
+    pub fn kernel_plan(&self) -> &KernelPlanSummary {
+        &self.global_context.kernel_plan
+    }
+}
 use super::soac::screma;
 use super::types::{
     EGraph, ENode, EffectOp, EffectToken, NodeId, PureOp, RegionId, SegBody, SegSpace, SideEffect,
@@ -76,7 +93,15 @@ use super::types::{
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
-use crate::{IdSource, LoweringProfile, SchedulePolicy};
+use crate::{LoweringProfile, SchedulePolicy};
+
+impl Stage for Planned {
+    type Family = super::types::Physical;
+    type ResourceDecl = crate::interface::StorageBindingDecl;
+    type OutputRoute = super::ir::RealizedOutputRoute;
+    type ProgramData = super::program::CoreProgramData;
+    type GlobalContext = super::program::PlannedGlobal;
+}
 
 /// A generated body kept together with the exact accesses established while
 /// that body was built. Scheduling consumes this pair without inspecting the
@@ -129,47 +154,73 @@ impl From<error::ParallelizeError> for ConvertError {
     }
 }
 
-pub(crate) fn plan(
-    mut inner: AllocatedProgram,
-    binding_ids: &mut IdSource<u32>,
-    effect_ids: &mut IdSource<EffectToken>,
+pub fn plan(
+    program: Program<ResourcesAllocated>,
     profile: LoweringProfile,
-) -> Result<(PhysicalProgram, KernelPlanSummary), ConvertError> {
-    let kernel_plan = match profile.schedule {
-        SchedulePolicy::Parallel => build_parallel_plan(&mut inner, effect_ids),
-        SchedulePolicy::Serial => build_serial_plan(&mut inner, effect_ids),
+) -> Result<Program<Planned>, ConvertError> {
+    let (program, kernel_plan) = match profile.schedule {
+        SchedulePolicy::Parallel => build_parallel_plan(program),
+        SchedulePolicy::Serial => build_serial_plan(program),
     }?;
-
-    kernel_plan.finalize(inner, binding_ids, profile)
+    kernel_plan.finalize(program, profile)
 }
 
 /// Analyze target recipes, allocate their scratch resources, and build the
 /// executable parallel kernel plan.
 fn build_parallel_plan(
-    inner: &mut AllocatedProgram,
-    effect_ids: &mut crate::IdSource<EffectToken>,
-) -> error::Result<schedule::KernelPlan> {
-    let analysis = planning::analyze(inner)?;
-    let recipes = analysis.allocate_scratch(inner)?;
-    let built = KernelPlanBuilder::new(inner, recipes, effect_ids)?.build_parallel_schedule(inner)?;
+    program: Program<ResourcesAllocated>,
+) -> error::Result<(Program<ResourcesAllocated>, schedule::KernelPlan)> {
+    let analysis = planning::analyze(&program)?;
+    let (mut program, recipes) = analysis.allocate_scratch(program)?;
+    let flows = allocation::resource_flows(&program);
+    let built = KernelPlanBuilder::new(
+        &program.data.core.resources,
+        &program.data.core.pipeline,
+        &program.entry_points,
+        flows,
+        recipes,
+        &mut program.global_context.semantic_ids,
+        &mut program.global_context.effect_ids,
+        program.data.core.region_interner.clone(),
+    )?
+    .build_parallel_schedule(&program.data.materializations, program.entry_points.len())?;
     let (schedule, generated_callables, region_interner) = built.into_plan();
-    inner.functions.extend(generated_callables);
-    inner.region_interner = region_interner;
-    Ok(schedule)
+    let program = install_generated_callables(program, generated_callables, region_interner);
+    Ok((program, schedule))
 }
 
 /// Build a kernel plan that selects serial recipes without allocating
 /// algorithm-specific parallel scratch resources.
 fn build_serial_plan(
-    inner: &mut AllocatedProgram,
-    effect_ids: &mut crate::IdSource<EffectToken>,
-) -> error::Result<schedule::KernelPlan> {
-    let recipes = planning::analyze(inner)?.serial_recipes();
-    let built = KernelPlanBuilder::new(inner, recipes, effect_ids)?.build_serial_schedule(inner)?;
+    mut program: Program<ResourcesAllocated>,
+) -> error::Result<(Program<ResourcesAllocated>, schedule::KernelPlan)> {
+    let recipes = planning::analyze(&program)?.serial_recipes();
+    let flows = allocation::resource_flows(&program);
+    let built = KernelPlanBuilder::new(
+        &program.data.core.resources,
+        &program.data.core.pipeline,
+        &program.entry_points,
+        flows,
+        recipes,
+        &mut program.global_context.semantic_ids,
+        &mut program.global_context.effect_ids,
+        program.data.core.region_interner.clone(),
+    )?
+    .build_serial_schedule(&program.data.materializations)?;
     let (schedule, generated_callables, region_interner) = built.into_plan();
-    inner.functions.extend(generated_callables);
-    inner.region_interner = region_interner;
-    Ok(schedule)
+    let program = install_generated_callables(program, generated_callables, region_interner);
+    Ok((program, schedule))
+}
+
+fn install_generated_callables(
+    program: Program<ResourcesAllocated>,
+    generated_callables: Vec<SemanticFunc>,
+    region_interner: super::program::RegionInterner,
+) -> Program<ResourcesAllocated> {
+    program.extend_functions(generated_callables).map_data(|mut data| {
+        data.core.region_interner = region_interner;
+        data
+    })
 }
 
 struct KernelPlanBuilder<'resources, 'effects> {
@@ -177,6 +228,7 @@ struct KernelPlanBuilder<'resources, 'effects> {
     resources: &'resources LogicalResourceArena,
     flows: model::ResourceFlowIndex,
     recipes: planning::RecipeIndex,
+    semantic_ids: &'effects mut super::program::SemanticOpIdSource,
     effect_ids: &'effects mut crate::IdSource<EffectToken>,
     generated_callables: Vec<SemanticFunc>,
     region_interner: super::program::RegionInterner,
@@ -245,35 +297,46 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         (self.schedule, self.generated_callables, self.region_interner)
     }
 
-    fn intern_callable(&mut self, name: impl AsRef<str>) -> RegionId {
-        self.region_interner.intern(name.as_ref())
-    }
-
-    fn callable_name(&self, id: RegionId) -> &str {
-        self.region_interner.resolve(id)
-    }
-
-    fn define_callable(&mut self, function: SemanticFunc) -> error::Result<RegionId> {
-        if self.region_interner.get(&function.name).is_some() {
+    fn define_callable(
+        &mut self,
+        name: String,
+        build: impl FnOnce(RegionId, String) -> SemanticFunc,
+    ) -> error::Result<RegionId> {
+        if self.region_interner.get(&name).is_some() {
             return Err(error::ParallelizeError::Invalid(format!(
                 "planner-generated callable `{}` collides with an existing callable",
-                function.name
+                name
             )));
         }
-        let id = self.region_interner.intern(&function.name);
+        let id = self.region_interner.intern(&name);
+        let function = build(id, name);
+        assert_eq!(
+            function.region, id,
+            "planner-generated callable did not retain its reserved region"
+        );
+        assert_eq!(
+            &function.name,
+            self.region_interner.resolve(id),
+            "planner-generated callable did not retain its reserved name"
+        );
         self.generated_callables.push(function);
         Ok(id)
     }
 
     fn new(
-        inner: &'resources AllocatedProgram,
+        resources: &'resources LogicalResourceArena,
+        descriptor: &crate::pipeline_descriptor::PipelineDescriptor,
+        entries: &[SemanticEntry],
+        flows: Vec<(ResourceId, allocation::CompilerResourceFlow)>,
         recipes: planning::RecipeIndex,
+        semantic_ids: &'effects mut super::program::SemanticOpIdSource,
         effect_ids: &'effects mut crate::IdSource<EffectToken>,
+        region_interner: super::program::RegionInterner,
     ) -> error::Result<Self> {
-        let resources = &inner.resources;
-        let flows = model::ResourceFlowIndex::new(&inner.resources);
-        let mut schedule = schedule::KernelPlan::from_descriptor(&inner.pipeline, &inner.semantic)?;
-        for source in inner.semantic.entry_ids() {
+        let flows = model::ResourceFlowIndex::new(flows);
+        let mut schedule = schedule::KernelPlan::from_descriptor(descriptor, resources, entries)?;
+        for index in 0..entries.len() {
+            let source = SemanticEntryId::from_index(index);
             let endpoint = CompilerFlowEndpoint::Entry(source);
             if let Some(count) = recipes.required_elements(endpoint) {
                 schedule.set_required_elements(endpoint, count);
@@ -284,28 +347,37 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
             resources,
             flows,
             recipes,
+            semantic_ids,
             effect_ids,
             generated_callables: Vec::new(),
-            region_interner: inner.region_interner.clone(),
+            region_interner,
         })
     }
 
-    fn build_parallel_schedule(mut self, inner: &'resources AllocatedProgram) -> error::Result<Self> {
-        self.attach_materializations(inner)?;
-        self.schedule_entries(inner)?;
+    fn build_parallel_schedule(
+        mut self,
+        materializations: &crate::IdArena<MaterializationId, MaterializationRequirement>,
+        entry_count: usize,
+    ) -> error::Result<Self> {
+        self.attach_materializations(materializations)?;
+        self.schedule_entries(entry_count)?;
         self.schedule.coalesce_resource_flows(self.flows.flows())?;
         Ok(self)
     }
 
-    fn build_serial_schedule(mut self, inner: &'resources AllocatedProgram) -> error::Result<Self> {
-        self.attach_materializations(inner)?;
+    fn build_serial_schedule(
+        mut self,
+        materializations: &crate::IdArena<MaterializationId, MaterializationRequirement>,
+    ) -> error::Result<Self> {
+        self.attach_materializations(materializations)?;
         self.schedule.make_serial()?;
         self.schedule.coalesce_resource_flows(self.flows.flows())?;
         Ok(self)
     }
 
-    fn schedule_entries(&mut self, inner: &'resources AllocatedProgram) -> error::Result<()> {
-        for source in inner.semantic.entry_ids() {
+    fn schedule_entries(&mut self, entry_count: usize) -> error::Result<()> {
+        for index in 0..entry_count {
+            let source = SemanticEntryId::from_index(index);
             let kernel = self.schedule.primary_kernel(source);
             self.lower_endpoint(CompilerFlowEndpoint::Entry(source), kernel)?;
         }
@@ -314,7 +386,10 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
 
     /// Attach allocation-created producer entries in compiler-flow order and
     /// immediately lower the recipe owned by each new physical kernel.
-    fn attach_materializations(&mut self, inner: &'resources AllocatedProgram) -> error::Result<()> {
+    fn attach_materializations(
+        &mut self,
+        materializations: &crate::IdArena<MaterializationId, MaterializationRequirement>,
+    ) -> error::Result<()> {
         let mut ready = std::collections::BTreeSet::new();
         for (_, flow) in self.flows.flows() {
             for consumer in &flow.consumers {
@@ -333,12 +408,12 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
                     "scheduled flow consumer {consumer_id:?} has no kernel handle"
                 ))
             })?;
-            let crate::egir::program::CompilerFlowEndpoint::Materialization(id) = producer_id else {
+            let CompilerFlowEndpoint::Materialization(id) = producer_id else {
                 return Err(error::ParallelizeError::Invalid(
                     "typed entry/prepass producer was omitted while seeding the kernel plan".into(),
                 ));
             };
-            let requirement = inner.materializations.get(id).ok_or_else(|| {
+            let requirement = materializations.get(id).ok_or_else(|| {
                 error::ParallelizeError::Invalid(format!(
                     "materialization flow references missing requirement {id:?}"
                 ))

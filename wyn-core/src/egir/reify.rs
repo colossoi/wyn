@@ -3,21 +3,35 @@
 //! This is the single boundary that constructs semantic SOAC state. The
 //! operation family is preserved by the direct match in `reify_soac`.
 
+/// EGIR whose higher-order array operations have semantic segmented form.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Segmented;
+
+impl super::ir::Stage for Segmented {
+    type Family = super::types::Semantic;
+    type ResourceDecl = super::program::SemanticResourceDecl;
+    type OutputRoute = super::ir::RealizedOutputRoute;
+    type ProgramData = super::program::CoreProgramData;
+    type GlobalContext = super::program::RewriteGlobal;
+}
+
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 
 use polytype::Type;
 
 use crate::ast::TypeName;
-use crate::flow::{BlockId, ControlHeader};
+use crate::flow::BlockId;
 use crate::types::TypeExt;
 use crate::LookupMap;
 
 use super::graph_ops;
+use super::program::RealizedOutputRoute;
 use super::program::{
-    ConstantDef, Entry, Func, OutputSlotId, OutputWriter, Program, RawEntry, RawProgram,
-    SemanticOpIdSource, SemanticProgram, SemanticResourceRef,
+    ConstantDef, Entry, Func, OutputSlotId, OutputWriter, Program, RawEntry, SemanticOpIdSource,
+    SemanticResourceRef,
 };
+use super::realize_outputs::OutputsRealized;
 use super::soac::{filter, hist, screma};
 use super::types::{
     EGraph, ENode, NodeId, PureOp, Raw, ResourceAccess, SegExtent, SegResourceAccess, SegSpace, Semantic,
@@ -32,43 +46,30 @@ struct Facts {
     entry: bool,
 }
 
-pub fn run(raw: RawProgram) -> SemanticProgram {
-    let RawProgram { ir, resources } = raw;
+pub fn run(program: Program<OutputsRealized>) -> Program<Segmented> {
     let Program {
         functions,
         externs,
         entry_points,
         constants,
-        pipeline,
-        input_names,
-        regions,
-        region_interner,
-    } = ir;
+        data,
+        mut global_context,
+    } = program;
 
-    let mut semantic_ids = SemanticOpIdSource::default();
-    let entry_points =
-        entry_points.into_iter().map(|entry| reify_entry(entry, &mut semantic_ids)).collect();
-    let functions = functions.into_iter().map(|function| reify_func(function, &mut semantic_ids)).collect();
-    let constants =
-        constants.into_iter().map(|constant| reify_constant(constant, &mut semantic_ids)).collect();
+    let entry_points = entry_points
+        .into_iter()
+        .map(|entry| reify_entry(entry, &mut global_context.semantic_ids))
+        .collect();
+    let functions = functions
+        .into_iter()
+        .map(|function| reify_func(function, &mut global_context.semantic_ids))
+        .collect();
+    let constants = constants
+        .into_iter()
+        .map(|constant| reify_constant(constant, &mut global_context.semantic_ids))
+        .collect();
 
-    let mut semantic = SemanticProgram {
-        ir: Program {
-            functions,
-            externs,
-            entry_points,
-            constants,
-            pipeline,
-            input_names,
-            regions,
-            region_interner,
-        },
-        resources,
-        semantic_dependencies: Vec::new(),
-        array_residency_demands: HashSet::new(),
-    };
-    super::semantic_graph::rebuild_dependencies(&mut semantic);
-    semantic
+    Program::from_parts(functions, externs, entry_points, constants, data, global_context)
 }
 
 fn reify_constant(
@@ -81,46 +82,43 @@ fn reify_constant(
         span,
         return_ty,
         graph,
-        control_headers,
-        aliases,
     } = constant;
-    let (graph, blocks) = map_graph(graph, facts, semantic_ids);
+    let (graph, _) = map_graph(graph, facts, semantic_ids);
     ConstantDef {
         name,
         span,
         return_ty,
         graph,
-        control_headers: remap_headers(control_headers, &blocks),
-        aliases,
     }
 }
 
 fn reify_func(function: Func<Raw>, semantic_ids: &mut SemanticOpIdSource) -> Func<Semantic> {
     let facts = function_facts(&function.graph);
     let Func {
+        region,
         name,
         span,
         linkage_name,
         params,
         return_ty,
         graph,
-        control_headers,
-        aliases,
     } = function;
-    let (graph, blocks) = map_graph(graph, facts, semantic_ids);
+    let (graph, _) = map_graph(graph, facts, semantic_ids);
     Func {
+        region,
         name,
         span,
         linkage_name,
         params,
         return_ty,
         graph,
-        control_headers: remap_headers(control_headers, &blocks),
-        aliases,
     }
 }
 
-fn reify_entry(entry: Entry<Raw>, semantic_ids: &mut SemanticOpIdSource) -> Entry<Semantic> {
+fn reify_entry(
+    entry: Entry<Raw, super::program::SemanticResourceDecl, RealizedOutputRoute>,
+    semantic_ids: &mut SemanticOpIdSource,
+) -> Entry<Semantic> {
     let mut facts = entry_facts(&entry);
     match entry.try_map_phase(|block, index, (), soac| {
         let facts = facts.remove(&(block, index)).expect("every raw SOAC must have semantic facts");
@@ -309,7 +307,7 @@ fn function_facts(graph: &EGraph<Raw>) -> HashMap<(BlockId, usize), Facts> {
         .collect()
 }
 
-fn entry_facts(entry: &RawEntry) -> HashMap<(BlockId, usize), Facts> {
+fn entry_facts(entry: &RawEntry<RealizedOutputRoute>) -> HashMap<(BlockId, usize), Facts> {
     let consumed = soac_consumed_nodes(&entry.graph);
     let kernel_scope = entry.execution_model.is_compute();
     let mut facts_by_location = HashMap::new();
@@ -362,7 +360,7 @@ fn entry_facts(entry: &RawEntry) -> HashMap<(BlockId, usize), Facts> {
 
 fn semantic_facts(
     graph: &EGraph<Raw>,
-    entry: Option<&RawEntry>,
+    entry: Option<&RawEntry<RealizedOutputRoute>>,
     effect: &SideEffect<Raw>,
     requested_placement: screma::Placement,
 ) -> Option<Facts> {
@@ -398,7 +396,7 @@ fn filter_input_type(input: &filter::Input) -> &SoacInputType {
 
 fn space(
     graph: &EGraph<Raw>,
-    entry: Option<&RawEntry>,
+    entry: Option<&RawEntry<RealizedOutputRoute>>,
     effect: &SideEffect<Raw>,
     input: Option<&SoacInputType>,
     operand_index: usize,
@@ -429,10 +427,10 @@ fn space(
 
 fn extent_from_node(
     graph: &EGraph<Raw>,
-    entry: Option<&RawEntry>,
+    entry: Option<&RawEntry<RealizedOutputRoute>>,
     node: NodeId,
 ) -> SegExtent<SemanticResourceRef> {
-    match &graph.nodes[node] {
+    match &graph.nodes[node].kind {
         ENode::Pure {
             op: PureOp::Int(value) | PureOp::Uint(value),
             ..
@@ -449,19 +447,22 @@ fn extent_from_node(
     }
 }
 
-fn output_slots(entry: &RawEntry, effect: &SideEffect<Raw>) -> Vec<OutputSlotId> {
+fn output_slots(entry: &RawEntry<RealizedOutputRoute>, effect: &SideEffect<Raw>) -> Vec<OutputSlotId> {
     let value_writer = effect.result.map(OutputWriter::Value);
     let effect_writer = effect.effects.map(|(_, output)| OutputWriter::Effect(output));
     let mut slots = entry
-        .output_routes
+        .outputs
         .iter()
-        .filter(|route| {
-            route
-                .writers
-                .iter()
-                .any(|writer| Some(*writer) == value_writer || Some(*writer) == effect_writer)
+        .enumerate()
+        .filter(|(_, output)| {
+            output.routes.iter().any(|route| {
+                route
+                    .writers
+                    .iter()
+                    .any(|writer| Some(*writer) == value_writer || Some(*writer) == effect_writer)
+            })
         })
-        .map(|route| route.slot)
+        .map(|(slot, _)| OutputSlotId(slot))
         .collect::<Vec<_>>();
     slots.sort_unstable();
     slots.dedup();
@@ -470,7 +471,7 @@ fn output_slots(entry: &RawEntry, effect: &SideEffect<Raw>) -> Vec<OutputSlotId>
 
 fn semantic_resources(
     graph: &EGraph<Raw>,
-    entry: Option<&RawEntry>,
+    entry: Option<&RawEntry<RealizedOutputRoute>>,
     effect: &SideEffect<Raw>,
     output_slots: &[OutputSlotId],
 ) -> Vec<SegResourceAccess<SemanticResourceRef>> {
@@ -528,14 +529,4 @@ fn referenced_nodes(effect: &SideEffect<Raw>) -> Vec<NodeId> {
         }
     }
     nodes
-}
-
-fn remap_headers(
-    headers: LookupMap<BlockId, ControlHeader>,
-    blocks: &LookupMap<BlockId, BlockId>,
-) -> LookupMap<BlockId, ControlHeader> {
-    headers
-        .into_iter()
-        .map(|(block, header)| (blocks[&block], header.remap(&|target| blocks[&target])))
-        .collect()
 }

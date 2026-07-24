@@ -23,30 +23,41 @@
 //! 3. `aliases` values are never themselves aliases (closure is walked
 //!    before the map is returned).
 
+/// Physical EGIR after skeleton control-flow simplification.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SkeletonOptimized;
+
+impl super::ir::Stage for SkeletonOptimized {
+    type Family = super::types::Physical;
+    type ResourceDecl = crate::interface::StorageBindingDecl;
+    type OutputRoute = super::ir::RealizedOutputRoute;
+    type ProgramData = super::program::CoreProgramData;
+    type GlobalContext = super::program::PlannedGlobal;
+}
+
 use crate::flow::BlockId;
 use crate::{LookupMap, LookupSet, SortedSet};
 
 use crate::ssa::types::ConstantValue;
 
-use super::program::PhysicalProgram;
-use super::types::{EGraph, ENode, EgirPhase, NodeId, PureOp, SkeletonTerminator};
+use super::program::Program;
+use super::types::{EGraph, ENode, Family, NodeId, PureOp, SkeletonTerminator};
 
-/// Run skeleton rewrites on every function and entry point in the program,
-/// extending each body's alias map with the freshly stripped block params.
-pub fn run(inner: &mut PhysicalProgram) {
-    for f in &mut inner.functions {
-        let new_aliases = run_one_body(&mut f.graph);
-        f.aliases.extend(new_aliases);
-    }
-    for e in &mut inner.entry_points {
-        let new_aliases = run_one_body(&mut e.graph);
-        e.aliases.extend(new_aliases);
-    }
+/// Run skeleton rewrites on every body and attach each eliminated block
+/// parameter's canonical replacement directly to that node.
+pub fn run(program: Program<super::rewrite::Rewritten>) -> Program<SkeletonOptimized> {
+    program
+        .map_graphs(|_, mut graph| {
+            let aliases = run_one_body(&mut graph);
+            graph.install_aliases(aliases);
+            graph
+        })
+        .into_stage()
 }
 
 /// Run all enabled skeleton rewrites to fixpoint. Returns an alias map
 /// mapping stripped block-param NodeIds to their replacement NodeIds.
-pub fn run_one_body<P: EgirPhase>(graph: &mut EGraph<P>) -> LookupMap<NodeId, NodeId> {
+pub fn run_one_body<P: Family>(graph: &mut EGraph<P>) -> LookupMap<NodeId, NodeId> {
     let mut aliases: LookupMap<NodeId, NodeId> = LookupMap::new();
     loop {
         // Phase order: fold first, prune dead CFG second, phi-elim third.
@@ -74,7 +85,7 @@ pub fn run_one_body<P: EgirPhase>(graph: &mut EGraph<P>) -> LookupMap<NodeId, No
 /// Rewrite every `CondBranch` whose condition is a literal bool into a
 /// direct `Branch` to the chosen arm. Returns true if any block's
 /// terminator was rewritten.
-fn fold_constant_branches<P: EgirPhase>(graph: &mut EGraph<P>) -> bool {
+fn fold_constant_branches<P: Family>(graph: &mut EGraph<P>) -> bool {
     // Collect rewrites first so we don't hold a borrow of graph.nodes
     // while mutating skeleton.blocks.
     let mut rewrites: Vec<(BlockId, SkeletonTerminator)> = Vec::new();
@@ -87,7 +98,7 @@ fn fold_constant_branches<P: EgirPhase>(graph: &mut EGraph<P>) -> bool {
             else_args,
         } = &block.term
         {
-            if let Some(b) = is_const_bool(*cond, &graph.nodes) {
+            if let Some(b) = is_const_bool(*cond, graph) {
                 let new_term = if b {
                     SkeletonTerminator::Branch {
                         target: *then_target,
@@ -119,8 +130,8 @@ fn fold_constant_branches<P: EgirPhase>(graph: &mut EGraph<P>) -> bool {
 /// We do not consult the `best` map (doesn't exist yet at this stage).
 /// Only literal constants are recognized; union-extract winners are out
 /// of scope.
-fn is_const_bool<R>(nid: NodeId, nodes: &slotmap::SlotMap<NodeId, ENode<R>>) -> Option<bool> {
-    match &nodes[nid] {
+fn is_const_bool<P: Family>(nid: NodeId, graph: &EGraph<P>) -> Option<bool> {
+    match &graph.nodes[nid].kind {
         ENode::Constant(ConstantValue::Bool(b)) => Some(*b),
         ENode::Pure {
             op: PureOp::Bool(b),
@@ -133,7 +144,7 @@ fn is_const_bool<R>(nid: NodeId, nodes: &slotmap::SlotMap<NodeId, ENode<R>>) -> 
 /// Remove skeleton blocks that cannot be reached from the entry block.
 /// The pure nodes and block-param nodes owned by dead blocks stay in the
 /// sea; with no reachable demand path to them, later stages ignore them.
-fn remove_unreachable_blocks<P: EgirPhase>(graph: &mut EGraph<P>) -> bool {
+fn remove_unreachable_blocks<P: Family>(graph: &mut EGraph<P>) -> bool {
     let reachable: LookupSet<BlockId> = wyn_graph::reachable_set(
         [graph.skeleton.entry],
         wyn_graph::WalkOrder::DepthFirst,
@@ -174,7 +185,7 @@ fn remove_unreachable_blocks<P: EgirPhase>(graph: &mut EGraph<P>) -> bool {
 /// the `best` map. Hash-consing at intern time should have already
 /// dedup'd structurally-equal subtrees; mixing CFG rewriting with
 /// e-graph equivalence reasoning is where subtle bugs live.
-fn eliminate_redundant_params<P: EgirPhase>(graph: &mut EGraph<P>) -> LookupMap<NodeId, NodeId> {
+fn eliminate_redundant_params<P: Family>(graph: &mut EGraph<P>) -> LookupMap<NodeId, NodeId> {
     use smallvec::SmallVec;
 
     // incoming[B][i] = every distinct NodeId passed into B.params[i] by

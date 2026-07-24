@@ -32,9 +32,9 @@ pub(super) fn emit_chunk_arithmetic(
     // `{start, step, len}` struct (spirv-val rejected it). Derive the index
     // type from `input_len` and emit all arithmetic there.
     let index_ty = graph
-        .types
-        .get(&input_len)
-        .cloned()
+        .nodes
+        .get(input_len)
+        .map(|node| node.ty.clone())
         .ok_or_else(|| format!("chunk input length {input_len:?} has no type"))?;
     let is_u32 = index_ty == u32_ty;
 
@@ -133,6 +133,7 @@ pub(super) fn dispatch_worker_logical_size(elem_ty: &Type<TypeName>) -> crate::e
 /// Build a two-argument (`a`, `b`) helper function of type `T -> T -> T` named
 /// `name`, whose body is produced by `body(graph, a_nid, b_nid)` and returned.
 fn synthesize_binary_fn(
+    region: RegionId,
     name: String,
     elem_ty: Type<TypeName>,
     span: crate::ast::Span,
@@ -145,6 +146,7 @@ fn synthesize_binary_fn(
     let entry_block = graph.skeleton.entry;
     graph.skeleton.blocks[entry_block].term = SkeletonTerminator::Return(Some(result));
     SemanticFunc::new(
+        region,
         name,
         span,
         None,
@@ -154,28 +156,32 @@ fn synthesize_binary_fn(
         ],
         elem_ty,
         graph,
-        LookupMap::new(),
     )
 }
 
 /// A two-argument helper whose body is `inner(b, a)` — an arg-swapped wrapper
 /// around a `T -> T -> T` combiner.
 pub(super) fn synthesize_swap_wrapper(
+    region: RegionId,
     wrapper_name: String,
-    inner: String,
+    inner_name: String,
     elem_ty: Type<TypeName>,
     span: crate::ast::Span,
 ) -> SemanticFunc {
     let result_ty = elem_ty.clone();
-    synthesize_binary_fn(wrapper_name, elem_ty, span, move |graph, a_nid, b_nid| {
-        graph.intern_pure(PureOp::Call(inner), smallvec![b_nid, a_nid], result_ty, None)
+    synthesize_binary_fn(region, wrapper_name, elem_ty, span, move |graph, a_nid, b_nid| {
+        graph.intern_pure(PureOp::Call(inner_name), smallvec![b_nid, a_nid], result_ty, None)
     })
 }
 
-pub(super) fn synthesize_u32_add_function(name: String, span: crate::ast::Span) -> SemanticFunc {
+pub(super) fn synthesize_u32_add_function(
+    region: RegionId,
+    name: String,
+    span: crate::ast::Span,
+) -> SemanticFunc {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let result_ty = u32_ty.clone();
-    synthesize_binary_fn(name, u32_ty, span, move |graph, a_nid, b_nid| {
+    synthesize_binary_fn(region, name, u32_ty, span, move |graph, a_nid, b_nid| {
         graph.intern_pure(
             PureOp::BinOp("+".into()),
             smallvec![a_nid, b_nid],
@@ -209,7 +215,7 @@ impl ChunkableView {
         if matches!(kind, ChunkInputKind::StorageOrRange) {
             if let Some((start, len, step)) = graph_ops::extract_array_range_operands(graph, view) {
                 if matches!(
-                    graph.types.get(&len),
+                    graph.nodes.get(len).map(|node| &node.ty),
                     Some(Type::Constructed(TypeName::UInt(32) | TypeName::Int(32), _))
                 ) {
                     return Some(Self::Range { start, len, step });
@@ -246,9 +252,9 @@ impl ChunkableView {
             Self::Range { start, step, .. } => {
                 let has_step = step.is_some();
                 let start_ty = graph
-                    .types
-                    .get(&start)
-                    .cloned()
+                    .nodes
+                    .get(start)
+                    .map(|node| node.ty.clone())
                     .ok_or_else(|| format!("phase1 {context}: range start has no type"))?;
                 let start_delta = if let Some(step) = step {
                     graph_ops::intern_binop(graph, "*", chunk_start, step, start_ty.clone(), None)
@@ -280,7 +286,7 @@ pub(super) fn can_clone_pure_subgraph(graph: &EGraph, root: NodeId, substitution
         if substitutions.contains(&node) || !seen.insert(node) {
             return true;
         }
-        match &graph.nodes[node] {
+        match &graph.nodes[node].kind {
             ENode::Constant(_) => true,
             ENode::Pure { operands, .. } => {
                 operands.iter().all(|operand| visit(graph, *operand, substitutions, seen))

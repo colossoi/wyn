@@ -1,8 +1,8 @@
 use super::*;
 
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{RegionInterner, SemanticFunc};
-use crate::egir::types::{Semantic, SkeletonTerminator};
+use crate::egir::program::{semantic_program_for_test, RegionInterner, SemanticFunc};
+use crate::egir::types::{RegionId, Semantic, SkeletonTerminator};
 use crate::flow::ExecutionModel;
 use crate::interface::{EntryInput, IoDecoration};
 use crate::pipeline_descriptor::PipelineDescriptor;
@@ -64,7 +64,6 @@ fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
         vec![(ty.clone(), "frame".into()), (ty.clone(), "position".into())],
         ty,
         graph,
-        LookupMap::new(),
     );
 
     let analysis = StageDependenceAnalysis::for_entry(&entry).unwrap();
@@ -130,7 +129,6 @@ fn block_parameters_include_incoming_control_variance() {
 
     let analysis = StageDependenceAnalysis::for_graph(
         &graph,
-        &LookupMap::new(),
         &[StageDependence::from_source(
             Uniformity::InvocationVarying,
             DependenceSource::StageInput,
@@ -177,16 +175,11 @@ fn invariant_loop_carried_values_converge_through_the_cfg_cycle() {
     let result = graph.add_block_param(exit, ty);
     graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(Some(result));
 
-    let control_headers = [(
-        header,
-        crate::flow::ControlHeader::Loop {
-            merge: exit,
-            continue_block: header,
-        },
-    )]
-    .into_iter()
-    .collect();
-    let analysis = StageDependenceAnalysis::for_graph(&graph, &control_headers, &[]).unwrap();
+    graph.skeleton.blocks[header].control_header = Some(crate::flow::ControlHeader::Loop {
+        merge: exit,
+        continue_block: header,
+    });
+    let analysis = StageDependenceAnalysis::for_graph(&graph, &[]).unwrap();
     for value in [current, next, result] {
         assert!(analysis.dependence(value).is_stage_invariant());
         assert!(!analysis.dependence(value).is_loop_invariant(header));
@@ -206,7 +199,6 @@ fn storage_provenance_is_independent_of_index_uniformity() {
     let varying_load = graph.intern_pure(PureOp::Index, smallvec![storage, varying_index], ty, None);
     let analysis = StageDependenceAnalysis::for_graph(
         &graph,
-        &LookupMap::new(),
         &[
             StageDependence::from_source(Uniformity::StageUniform, DependenceSource::Storage),
             StageDependence::from_source(Uniformity::InvocationVarying, DependenceSource::StageInput),
@@ -251,7 +243,7 @@ fn invocation_intrinsics_are_varying_without_operands() {
         None,
     );
 
-    let analysis = StageDependenceAnalysis::for_graph(&graph, &LookupMap::new(), &[]).unwrap();
+    let analysis = StageDependenceAnalysis::for_graph(&graph, &[]).unwrap();
     assert_eq!(
         analysis.dependence(thread_id).uniformity(),
         Uniformity::InvocationVarying
@@ -279,15 +271,15 @@ fn repeated_region_captures_are_analyzed_per_use() {
     region_graph.skeleton.blocks[region_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(result));
     let region = SemanticFunc::new(
+        RegionId::from_index(0),
         "map_body".into(),
         Span::dummy(),
         None,
         vec![(ty.clone(), "lane".into()), (ty.clone(), "capture".into())],
         ty.clone(),
         region_graph,
-        LookupMap::new(),
     );
-    let program = SemanticProgram::new(
+    let program = semantic_program_for_test(
         vec![region],
         vec![],
         vec![],
@@ -295,14 +287,13 @@ fn repeated_region_captures_are_analyzed_per_use() {
         PipelineDescriptor::default(),
         RegionInterner::default(),
     );
-    let region_id = program.region_interner.get("map_body").unwrap();
+    let region_id = program.data.region_interner.get("map_body").unwrap();
 
     let mut enclosing_graph = EGraph::<Semantic>::new();
     let invariant_capture = enclosing_graph.intern_constant(ConstantValue::U32(7), ty.clone());
     let varying_capture = enclosing_graph.add_func_param(0, ty);
     let enclosing = StageDependenceAnalysis::for_graph(
         &enclosing_graph,
-        &LookupMap::new(),
         &[StageDependence::from_source(
             Uniformity::InvocationVarying,
             DependenceSource::StageInput,

@@ -24,28 +24,28 @@ fn bool_ty() -> Type<TypeName> {
 fn is_const_bool_recognizes_constant_true() {
     let mut graph = EGraph::new();
     let b = graph.intern_constant(ConstantValue::Bool(true), bool_ty());
-    assert_eq!(is_const_bool(b, &graph.nodes), Some(true));
+    assert_eq!(is_const_bool(b, &graph), Some(true));
 }
 
 #[test]
 fn is_const_bool_recognizes_constant_false() {
     let mut graph = EGraph::new();
     let b = graph.intern_constant(ConstantValue::Bool(false), bool_ty());
-    assert_eq!(is_const_bool(b, &graph.nodes), Some(false));
+    assert_eq!(is_const_bool(b, &graph), Some(false));
 }
 
 #[test]
 fn is_const_bool_recognizes_pure_bool() {
     let mut graph = EGraph::new();
     let b = graph.intern_pure(PureOp::Bool(true), smallvec![], bool_ty(), None);
-    assert_eq!(is_const_bool(b, &graph.nodes), Some(true));
+    assert_eq!(is_const_bool(b, &graph), Some(true));
 }
 
 #[test]
 fn is_const_bool_rejects_non_bool() {
     let mut graph = EGraph::new();
     let n = graph.intern_pure(PureOp::Int("42".into()), smallvec![], i32_ty(), None);
-    assert_eq!(is_const_bool(n, &graph.nodes), None);
+    assert_eq!(is_const_bool(n, &graph), None);
 }
 
 // -- fold_constant_branches ---------------------------------------------

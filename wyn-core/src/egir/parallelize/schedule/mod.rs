@@ -9,10 +9,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::egir::allocation::{CompilerFlowEndpoint, CompilerResourceFlow};
 use crate::egir::program::{
-    CompilerFlowEndpoint, CompilerResourceFlow, MaterializationId, MaterializationKind,
-    MaterializationRequirement, OutputSlotId, PlannedEntry, PlannedPublication, SemanticEntry,
-    SemanticEntryId, SemanticProgram, SemanticResourceRef,
+    LogicalResourceArena, MaterializationId, MaterializationKind, MaterializationRequirement, OutputSlotId,
+    PlannedEntry, PlannedPublication, SemanticEntry, SemanticEntryId, SemanticResourceRef,
 };
 use crate::egir::soac::filter;
 use crate::egir::types::{Scheduled, SegExtent};
@@ -64,8 +64,21 @@ struct SourceEntryPlan {
 }
 
 impl KernelPlan {
-    pub(in crate::egir) fn physical_entries(&self) -> impl Iterator<Item = &PlannedEntry<Scheduled>> {
-        self.phases().map(|phase| phase.entry.as_ref())
+    pub(in crate::egir) fn into_physical_entries(self) -> Vec<PlannedEntry<Scheduled>> {
+        let order = self.ordered_phase_ids();
+        let mut phases = self.phases.into_iter().map(Some).collect::<Vec<_>>();
+        order
+            .into_iter()
+            .map(|id| {
+                let Some(phase) = phases[id.index()].take() else {
+                    panic!("kernel order contained a duplicate phase");
+                };
+                match Arc::try_unwrap(phase.entry) {
+                    Ok(entry) => entry,
+                    Err(_) => panic!("completed kernel plan retained a shared entry body"),
+                }
+            })
+            .collect()
     }
 }
 
@@ -480,14 +493,14 @@ impl KernelPlan {
 
     pub(super) fn from_descriptor(
         descriptor: &PipelineDescriptor,
-        semantic: &SemanticProgram,
+        resources: &LogicalResourceArena,
+        entries: &[SemanticEntry],
     ) -> Result<Self, String> {
-        let resources = &semantic.resources;
         let host_resources = crate::egir::program::host_resource_map(resources);
-        let mut seeded = vec![None; semantic.entry_points.len()];
+        let mut seeded = vec![None; entries.len()];
         let mut by_name = HashMap::new();
-        for source in semantic.entry_ids() {
-            let entry = &semantic[source];
+        for (index, entry) in entries.iter().enumerate() {
+            let source = SemanticEntryId::from_index(index);
             if by_name.insert(entry.name.as_str(), (source, entry)).is_some() {
                 return Err(format!("duplicate semantic entry `{}`", entry.name));
             }
@@ -563,8 +576,8 @@ impl KernelPlan {
             })
             .collect::<HashSet<_>>();
         let mut unpublished_order = 0;
-        for source in semantic.entry_ids() {
-            let entry = &semantic[source];
+        for (index, entry) in entries.iter().enumerate() {
+            let source = SemanticEntryId::from_index(index);
             if published_names.contains(entry.name.as_str()) {
                 continue;
             }
@@ -597,15 +610,22 @@ impl KernelPlan {
                 kernel.ok_or_else(|| format!("semantic entry {} has no seeded kernel", index))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let source_entries = semantic
-            .entry_ids()
-            .map(|source| {
-                let entry = &semantic[source];
+        let source_entries = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let source = SemanticEntryId::from_index(index);
                 let primary = seeded[source.index()];
                 SourceEntryPlan {
                     publication: PlannedPublication::from_semantic(entry),
                     primary,
-                    output_owners: entry.output_routes.iter().map(|route| (route.slot, primary)).collect(),
+                    output_owners: entry
+                        .outputs
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, output)| !output.routes.is_empty())
+                        .map(|(slot, _)| (OutputSlotId(slot), primary))
+                        .collect(),
                 }
             })
             .collect();
@@ -1046,7 +1066,7 @@ fn phase_from_entry(
             selection.domain = domain;
         }
     }
-    let output_routes = output_projection(&entry.output_routes);
+    let output_routes = output_projection(entry);
     let body = PlannedEntry::project(entry)?;
     let mut phase = phase_from_body(
         source_entry.map(CompilerFlowEndpoint::Entry),
@@ -1125,16 +1145,17 @@ fn graphics_passthrough_phase(
         placement,
         spec,
     )?;
-    phase.output_routes = output_projection(&entry.output_routes);
+    phase.output_routes = output_projection(entry);
     Ok(phase)
 }
 
-fn output_projection(routes: &[crate::egir::program::OutputRoute]) -> Vec<OutputRouteProjection> {
-    let mut slots = routes.iter().map(|route| route.slot).collect::<Vec<_>>();
-    slots.sort_unstable();
-    slots.dedup();
-    slots
-        .into_iter()
+fn output_projection(entry: &SemanticEntry) -> Vec<OutputRouteProjection> {
+    entry
+        .outputs
+        .iter()
+        .enumerate()
+        .filter(|(_, output)| !output.routes.is_empty())
+        .map(|(slot, _)| OutputSlotId(slot))
         .enumerate()
         .map(|(physical, semantic_slot)| OutputRouteProjection {
             semantic_slot,

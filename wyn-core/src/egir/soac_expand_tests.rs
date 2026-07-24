@@ -18,7 +18,7 @@
 use crate::ast::TypeName;
 use crate::egir::program::{PhysicalEGraph, PhysicalSideEffectKind, SemanticOpId};
 use crate::egir::soac::hist;
-use crate::egir::types::{ENode, EgirPhase, Physical, PureOp, Soac, SoacEffect, SoacInputType};
+use crate::egir::types::{ENode, Family, Physical, PureOp, Soac, SoacEffect, SoacInputType};
 use polytype::Type;
 
 /// Compile source through the pipeline to just-past `expand_soacs`,
@@ -27,25 +27,14 @@ use polytype::Type;
 fn compile_to_expanded_egraph(input: &str) -> PhysicalEGraph {
     let program = crate::compile_thru_tlc(input).expect("compile_thru_tlc");
     let program = crate::tlc::infer_input_slice_bounds(program);
-    let allocated = crate::to_egraph(program)
-        .expect("to_egraph")
-        .realize_outputs()
-        .expect("realize_outputs")
-        .segment()
-        .optimize()
-        .allocate()
-        .expect("allocate semantic EGIR");
-    let mut binding_ids = allocated.binding_ids;
-    let mut effect_ids = allocated.effect_ids;
-    let (mut physical, _) = crate::egir::parallelize::plan(
-        allocated.inner,
-        &mut binding_ids,
-        &mut effect_ids,
-        crate::LoweringProfile::PORTABLE,
-    )
-    .expect("terminal schedule");
-    crate::egir::soac_expand::run(&mut physical, &mut effect_ids).expect("physical SOAC expansion");
-    let inner = &physical;
+    let program = crate::to_egraph(program).expect("to_egraph");
+    let program = crate::egir::realize_outputs(program).expect("realize_outputs");
+    let program = crate::egir::reify_soacs(program);
+    let program = crate::egir::optimize_semantics(program);
+    let program = crate::egir::plan_logical_resources(program).expect("allocate semantic EGIR");
+    let program = crate::egir::plan(program, crate::LoweringProfile::PORTABLE).expect("terminal schedule");
+    let program = crate::egir::expand_soacs(program).expect("physical SOAC expansion");
+    let inner = &program;
     assert_eq!(
         inner.entry_points.len(),
         1,
@@ -55,14 +44,12 @@ fn compile_to_expanded_egraph(input: &str) -> PhysicalEGraph {
 }
 
 /// Collect all `_w_intrinsic_array_with_inplace` nodes in the graph.
-fn array_with_nodes<P: EgirPhase>(
-    graph: &crate::egir::types::EGraph<P>,
-) -> Vec<crate::egir::types::NodeId> {
+fn array_with_nodes<P: Family>(graph: &crate::egir::types::EGraph<P>) -> Vec<crate::egir::types::NodeId> {
     let inplace_id = crate::builtins::catalog().known().array_with_in_place;
     graph
         .nodes
         .iter()
-        .filter_map(|(id, node)| match node {
+        .filter_map(|(id, node)| match &node.kind {
             ENode::Pure {
                 op: PureOp::Intrinsic { id: bid, .. },
                 ..
@@ -146,7 +133,7 @@ entry frag(c: vec4f32) vec4f32 =
 
     // 1. No ArrayWith may have a tuple result type.
     for id in &aw_nodes {
-        let ty = &graph.types[id];
+        let ty = &graph.nodes[*id].ty;
         assert!(
             !matches!(ty, Type::Constructed(TypeName::Tuple(_), _)),
             "tuple-typed ArrayWith survived: node {:?} has type {:?}",
@@ -174,12 +161,12 @@ entry frag(c: vec4f32) vec4f32 =
     //    We assert matching indices per ArrayWith. This catches
     //    "wired to the wrong component" bugs.
     for id in &aw_nodes {
-        let ENode::Pure { operands, .. } = &graph.nodes[*id] else {
+        let ENode::Pure { operands, .. } = &graph.nodes[*id].kind else {
             panic!("ArrayWith should be Pure");
         };
         assert_eq!(operands.len(), 3, "ArrayWith takes 3 operands");
-        let arr_op = &graph.nodes[operands[0]];
-        let val_op = &graph.nodes[operands[2]];
+        let arr_op = &graph.nodes[operands[0]].kind;
+        let val_op = &graph.nodes[operands[2]].kind;
 
         let arr_index = match arr_op {
             ENode::Pure {
@@ -217,10 +204,10 @@ entry frag(c: vec4f32) vec4f32 =
     // 4. There exists a PureOp::Tuple(3) node with the SoA-tuple
     //    ([8]f32, [8]i32, [8]vec3f32) as its result type — the
     //    repack produced by `emit_write_element`.
-    let has_repack = graph.nodes.iter().any(|(id, node)| match node {
+    let has_repack = graph.nodes.iter().any(|(_, node)| match &node.kind {
         ENode::Pure {
             op: PureOp::Tuple(3), ..
-        } => is_soa_tuple(&graph.types[&id]),
+        } => is_soa_tuple(&node.ty),
         _ => false,
     });
     assert!(

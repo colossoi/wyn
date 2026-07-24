@@ -2,13 +2,16 @@
 //! into explicit loop subgraphs with pure ops in the sea and block params
 //! carrying accumulators.
 //!
-//! Runs after `from_tlc` populates the EGraph and before `elaborate` produces
-//! the final `FuncBody`. Every variant must be handled here — there is no
-//! fallback. Any semantic SOAC left in the skeleton at elaboration time is a bug.
+//! Consumes target-planned physical EGIR before graph cleanup and SSA
+//! elaboration. Every physical variant must be handled here; any SOAC left in
+//! the skeleton after this stage is a bug.
+
+/// Physical EGIR whose SOAC effects have been expanded into explicit CFGs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SoacsExpanded;
 
 use crate::builtins::catalog;
 use crate::flow::{BlockId, ControlHeader};
-use crate::LookupMap;
 
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
@@ -16,8 +19,8 @@ use smallvec::{smallvec, SmallVec};
 use super::graph_ops::{alloc_effect, emit_alloca, emit_load, emit_place_index_store, emit_store};
 use super::program::{
     PhysicalEGraph as EGraph, PhysicalFilterOutput, PhysicalFilterWorkBuffers as FilterWorkBuffers,
-    PhysicalProgram, PhysicalSegSpace as SegSpace, PhysicalSideEffect as SideEffect,
-    PhysicalSideEffectKind as SideEffectKind, PhysicalSoac as Soac, RegionInterner,
+    PhysicalSegSpace as SegSpace, PhysicalSideEffect as SideEffect,
+    PhysicalSideEffectKind as SideEffectKind, PhysicalSoac as Soac, Program, RegionInterner,
 };
 use super::soac::{filter, screma};
 use crate::ast::TypeName;
@@ -28,35 +31,30 @@ use super::types::{
     SoacDestination, SoacEffect,
 };
 
-/// Run `run_one_body` on every function and entry point in the program.
-pub fn run(
-    inner: &mut PhysicalProgram,
-    effect_ids: &mut crate::IdSource<EffectToken>,
-) -> Result<(), String> {
-    // Borrow the region interner disjointly from the bodies being expanded; it
-    // is read-only here (recovering the SSA `Call` name for each region).
-    let super::ir::Program {
-        functions,
-        entry_points,
-        region_interner,
-        ..
-    } = inner.ir_mut();
-    for f in functions.iter_mut() {
-        run_one_body(&mut f.graph, &mut f.control_headers, region_interner, effect_ids)?;
-    }
-    for e in entry_points.iter_mut() {
-        run_one_body(&mut e.graph, &mut e.control_headers, region_interner, effect_ids)?;
-    }
-    Ok(())
+impl super::ir::Stage for SoacsExpanded {
+    type Family = super::types::Physical;
+    type ResourceDecl = crate::interface::StorageBindingDecl;
+    type OutputRoute = super::ir::RealizedOutputRoute;
+    type ProgramData = super::program::CoreProgramData;
+    type GlobalContext = super::program::PlannedGlobal;
+}
+
+/// Expand every graph-bearing body and rebuild the program at the
+/// post-expansion checkpoint.
+pub fn run(program: Program<super::parallelize::Planned>) -> Result<Program<SoacsExpanded>, String> {
+    program
+        .try_map_graphs_with_state(|_, graph, data, context| {
+            run_one_body(graph, &data.region_interner, &mut context.effect_ids)
+        })
+        .map(|program| program.into_stage())
 }
 
 /// Expand every physical SOAC in the skeleton.
 pub fn run_one_body(
-    graph: &mut EGraph,
-    control_headers: &mut LookupMap<BlockId, ControlHeader>,
+    mut graph: EGraph,
     regions: &RegionInterner,
     effect_ids: &mut crate::IdSource<EffectToken>,
-) -> Result<(), String> {
+) -> Result<EGraph, String> {
     // Collect (block, index) of every handleable Soac in a stable order.
     // Process back-to-front within each block so earlier indices stay valid.
     let mut targets: Vec<(BlockId, usize)> = Vec::new();
@@ -72,9 +70,21 @@ pub fn run_one_body(
     targets.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
 
     for (bid, idx) in targets {
-        expand_one(graph, control_headers, bid, idx, effect_ids, regions)?;
+        expand_one(&mut graph, bid, idx, effect_ids, regions)?;
     }
-    Ok(())
+    if let Some((block, effect)) = graph.skeleton.blocks.iter().find_map(|(block, contents)| {
+        contents
+            .side_effects
+            .iter()
+            .find(|effect| matches!(effect.kind, SideEffectKind::Soac(_)))
+            .map(|effect| (block, effect))
+    }) {
+        return Err(format!(
+            "SOAC expansion left an unsupported physical operation in {block:?}: {:?}",
+            effect.kind
+        ));
+    }
+    Ok(graph)
 }
 
 /// Does this SOAC kind have a TLC→EGIR expansion implemented here?
@@ -150,7 +160,6 @@ fn is_virtual_source(arr_ty: &Type<TypeName>) -> bool {
 
 fn expand_one(
     graph: &mut EGraph,
-    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx: usize,
     next_effect: &mut crate::IdSource<EffectToken>,
@@ -187,7 +196,7 @@ fn expand_one(
             // Operand layout is `[inputs.., output_views..]`; accumulator
             // neutrals and callable captures are explicit in the body.
             let result_nid = operands.result();
-            let result_ty = graph.types[&result_nid].clone();
+            let result_ty = graph.nodes[result_nid].ty.clone();
             let Type::Constructed(TypeName::Tuple(_), result_fields) = &result_ty else {
                 panic!("Screma result must be a tuple");
             };
@@ -325,9 +334,10 @@ fn expand_one(
                     )
                 };
                 let carried_ty = map_output_views[map_idx]
-                    .and_then(|view_nid| graph.types.get(&view_nid).cloned())
+                    .and_then(|view_nid| graph.nodes.get(view_nid).map(|node| node.ty.clone()))
                     .or_else(|| {
-                        map_input_buffer_inits[map_idx].and_then(|nid| graph.types.get(&nid).cloned())
+                        map_input_buffer_inits[map_idx]
+                            .and_then(|nid| graph.nodes.get(nid).map(|node| node.ty.clone()))
                     })
                     .unwrap_or_else(|| map_result_tys[map_idx].clone());
                 map_carried_indices.push(carried.len());
@@ -368,9 +378,10 @@ fn expand_one(
                         )
                     };
                     let scan_ty = acc_output_views[acc_idx]
-                        .and_then(|view_nid| graph.types.get(&view_nid).cloned())
+                        .and_then(|view_nid| graph.nodes.get(view_nid).map(|node| node.ty.clone()))
                         .or_else(|| {
-                            acc_input_buffer_inits[acc_idx].and_then(|nid| graph.types.get(&nid).cloned())
+                            acc_input_buffer_inits[acc_idx]
+                                .and_then(|nid| graph.nodes.get(nid).map(|node| node.ty.clone()))
                         })
                         .unwrap_or_else(|| acc_result_tys[acc_idx].clone());
                     acc_scan_carried_indices.push(Some(carried.len()));
@@ -392,7 +403,6 @@ fn expand_one(
 
             expand_loop(
                 graph,
-                control_headers,
                 bid,
                 idx,
                 &len_input,
@@ -568,18 +578,11 @@ fn expand_one(
                 result_node: result_nid,
             };
             match plan {
-                filter::Plan::Flags(config) => build_filter_flags(
-                    graph,
-                    control_headers,
-                    bid,
-                    idx,
-                    spec,
-                    config.buffers.flags,
-                    next_effect,
-                ),
+                filter::Plan::Flags(config) => {
+                    build_filter_flags(graph, bid, idx, spec, config.buffers.flags, next_effect)
+                }
                 filter::Plan::Scan(config) => build_filter_scan(
                     graph,
-                    control_headers,
                     bid,
                     idx,
                     spec,
@@ -587,18 +590,10 @@ fn expand_one(
                     config.scan_workgroup_width,
                     next_effect,
                 ),
-                filter::Plan::Scatter(config) => build_filter_scatter(
-                    graph,
-                    control_headers,
-                    bid,
-                    idx,
-                    spec,
-                    config.buffers,
-                    next_effect,
-                ),
-                filter::Plan::Loop => {
-                    build_filter_loop(graph, control_headers, bid, idx, spec, next_effect)
+                filter::Plan::Scatter(config) => {
+                    build_filter_scatter(graph, bid, idx, spec, config.buffers, next_effect)
                 }
+                filter::Plan::Loop => build_filter_loop(graph, bid, idx, spec, next_effect),
             }
         }
         SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
@@ -629,7 +624,7 @@ fn expand_one(
             // Ordered overwrite is non-commutative when indices conflict.
             // Preserve source order until a future update policy proves a
             // conflict-safe parallel implementation.
-            build_scatter_loop(graph, control_headers, bid, idx, scatter, next_effect);
+            build_scatter_loop(graph, bid, idx, scatter, next_effect);
         }
         SideEffectKind::Soac(SoacEffect(
             _,
@@ -672,7 +667,6 @@ fn expand_one(
             let len_input = (input_nids[0], inputs[0].array.clone());
             build_parallel_maps(
                 graph,
-                control_headers,
                 bid,
                 idx,
                 ScremaMapsIntoLoop {
@@ -699,7 +693,6 @@ fn expand_one(
 /// body block to produce the new carried values, then wire the back-edge.
 fn build_loop<F>(
     graph: &mut EGraph,
-    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     len_input: &(NodeId, Type<TypeName>),
@@ -712,7 +705,6 @@ fn build_loop<F>(
 {
     let handles = build_loop_skeleton(
         graph,
-        control_headers,
         bid,
         idx_in_block,
         LoopSkeletonSpec {
@@ -743,7 +735,6 @@ fn build_loop<F>(
 /// same `emit_body` closure — write iteration logic once.
 fn expand_loop<F>(
     graph: &mut EGraph,
-    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     len_input: &(NodeId, Type<TypeName>),
@@ -771,7 +762,6 @@ fn expand_loop<F>(
     }
     build_loop(
         graph,
-        control_headers,
         bid,
         idx_in_block,
         len_input,
@@ -885,7 +875,6 @@ struct ScremaMapsIntoLoop {
 
 fn build_parallel_maps(
     graph: &mut EGraph,
-    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     spec: ScremaMapsIntoLoop,
@@ -895,7 +884,7 @@ fn build_parallel_maps(
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
-    let after = graph.skeleton.split_block_before_effect(control_headers, bid, idx_in_block);
+    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
 
     graph.replace_node_preserving_type(
         spec.result_node,
@@ -938,7 +927,7 @@ fn build_parallel_maps(
         else_target: after,
         else_args: vec![],
     };
-    control_headers.insert(bid, ControlHeader::Selection { merge: after });
+    graph.skeleton.blocks[bid].control_header = Some(ControlHeader::Selection { merge: after });
 
     let mut elems = Vec::with_capacity(spec.read_inputs.len());
     for (arr, arr_ty, elem_ty) in &spec.read_inputs {
@@ -1002,7 +991,7 @@ fn emit_seg_space_len(
             }
             SegExtent::PushConstant { node, .. } => *node,
             SegExtent::Value(node) => {
-                let ty = graph.types[node].clone();
+                let ty = graph.nodes[*node].ty.clone();
                 if is_plain_array_source(&ty) {
                     emit_length(graph, *node, &ty, i32_ty)
                 } else {
@@ -1010,7 +999,7 @@ fn emit_seg_space_len(
                 }
             }
             SegExtent::ResourceLength { node, .. } => {
-                let ty = graph.types[node].clone();
+                let ty = graph.nodes[*node].ty.clone();
                 emit_length(graph, *node, &ty, i32_ty)
             }
         };
@@ -1075,7 +1064,6 @@ fn filter_kept_value(graph: &mut EGraph, elem_nid: NodeId, spec: &FilterLoop) ->
 
 fn build_filter_loop(
     graph: &mut EGraph,
-    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     spec: FilterLoop,
@@ -1086,15 +1074,7 @@ fn build_filter_loop(
         filter::Output::Local { .. } => None,
     };
     if let Some(scratch) = runtime_scratch {
-        build_runtime_filter_loop(
-            graph,
-            control_headers,
-            bid,
-            idx_in_block,
-            spec,
-            scratch,
-            next_effect,
-        );
+        build_runtime_filter_loop(graph, bid, idx_in_block, spec, scratch, next_effect);
         return;
     }
     let filter::Output::Local {
@@ -1123,18 +1103,8 @@ fn build_filter_loop(
     // is emitted at the head of `after` — any suffix side-effect that
     // references the filter result resolves through `Tuple(buf_load, count)`
     // and must see `buf_load` already elaborated.
-    let after = graph.skeleton.create_block();
-    let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
-    // `bid` must retain its stable block ID while its terminator moves to the
-    // new continuation. The preheader receives its loop branch below.
-    let old_term = std::mem::replace(
-        &mut graph.skeleton.blocks[bid].term,
-        SkeletonTerminator::Unreachable,
-    );
-    graph.skeleton.blocks[after].term = old_term;
-    if let Some(header_meta) = control_headers.remove(&bid) {
-        control_headers.insert(after, header_meta);
-    }
+    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
+    let suffix = graph.skeleton.blocks[after].side_effects.drain(..).collect::<Vec<_>>();
 
     // `after` block param: the surviving count. The buffer place is
     // referenced directly through `buf_place_nid`. Count is `i32`
@@ -1193,13 +1163,10 @@ fn build_filter_loop(
         else_target: after,
         else_args: vec![count_in_nid],
     };
-    control_headers.insert(
-        header,
-        ControlHeader::Loop {
-            merge: after,
-            continue_block: continue_blk,
-        },
-    );
+    graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+        merge: after,
+        continue_block: continue_blk,
+    });
 
     // Body: elem = arr[i]; pred = pred_func(elem, captures).
     let elem_nid = emit_read_element(
@@ -1216,7 +1183,12 @@ fn build_filter_loop(
     let kept_nid = filter_kept_value(graph, elem_nid, &spec);
     let mut pred_operands: SmallVec<[NodeId; 4]> = smallvec![kept_nid];
     pred_operands.extend(spec.captures.iter().copied());
-    let pred_nid = graph.intern_pure(PureOp::Call(spec.pred_func), pred_operands, bool_ty.clone(), None);
+    let pred_nid = graph.intern_pure(
+        PureOp::Call(spec.pred_func.clone()),
+        pred_operands,
+        bool_ty.clone(),
+        None,
+    );
 
     // Body → cond_br(pred, then, else_).
     graph.skeleton.blocks[body].term = SkeletonTerminator::CondBranch {
@@ -1226,7 +1198,7 @@ fn build_filter_loop(
         else_target: else_blk,
         else_args: vec![],
     };
-    control_headers.insert(body, ControlHeader::Selection { merge: sel_merge });
+    graph.skeleton.blocks[body].control_header = Some(ControlHeader::Selection { merge: sel_merge });
 
     // then: write the accepted value into `buf_place[count_in]`, bump
     // count; Branch(sel_merge, [count_bumped]).
@@ -1321,7 +1293,6 @@ struct ScatterLoop {
 /// pure optimization.
 fn build_scatter_loop(
     graph: &mut EGraph,
-    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     spec: ScatterLoop,
@@ -1344,7 +1315,6 @@ fn build_scatter_loop(
 
     expand_loop(
         graph,
-        control_headers,
         bid,
         idx_in_block,
         &len_input,
@@ -1393,7 +1363,6 @@ fn build_scatter_loop(
 #[allow(dead_code)]
 fn build_parallel_scatter(
     graph: &mut EGraph,
-    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     spec: ScatterLoop,
@@ -1415,7 +1384,7 @@ fn build_parallel_scatter(
         result_node,
     } = spec;
 
-    let after = graph.skeleton.split_block_before_effect(control_headers, bid, idx_in_block);
+    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
 
     graph.replace_node_preserving_type(
         result_node,
@@ -1458,7 +1427,7 @@ fn build_parallel_scatter(
         else_target: after,
         else_args: vec![],
     };
-    control_headers.insert(bid, ControlHeader::Selection { merge: after });
+    graph.skeleton.blocks[bid].control_header = Some(ControlHeader::Selection { merge: after });
 
     let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = SmallVec::new();
     for (arr, arr_ty, elem_ty) in &read_inputs {
@@ -1510,7 +1479,6 @@ fn filter_thread_index(graph: &mut EGraph) -> NodeId {
 
 fn build_filter_flags(
     graph: &mut EGraph,
-    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx: usize,
     spec: FilterLoop,
@@ -1541,7 +1509,7 @@ fn build_filter_flags(
         else_target: after,
         else_args: vec![],
     };
-    control_headers.insert(bid, ControlHeader::Selection { merge: after });
+    graph.skeleton.blocks[bid].control_header = Some(ControlHeader::Selection { merge: after });
     let elem = emit_read_element(
         graph,
         in_range,
@@ -1567,7 +1535,7 @@ fn build_filter_flags(
         else_target: drop,
         else_args: vec![],
     };
-    control_headers.insert(in_range, ControlHeader::Selection { merge: pred_merge });
+    graph.skeleton.blocks[in_range].control_header = Some(ControlHeader::Selection { merge: pred_merge });
     let view = intern_storage_view(graph, flags, Type::Constructed(TypeName::UInt(32), vec![]), None);
     for (block, value) in [(keep, 1), (drop, 0)] {
         let flag = intern_u32(graph, value, None);
@@ -1598,7 +1566,6 @@ fn build_filter_flags(
 
 fn build_filter_scan(
     graph: &mut EGraph,
-    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx: usize,
     spec: FilterLoop,
@@ -1705,13 +1672,10 @@ fn build_filter_scan(
         else_target: after,
         else_args: vec![acc],
     };
-    control_headers.insert(
-        header,
-        ControlHeader::Loop {
-            merge: after,
-            continue_block: body,
-        },
-    );
+    graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+        merge: after,
+        continue_block: body,
+    });
     let flags = intern_storage_view(graph, work.flags, u32_ty.clone(), None);
     let offsets = intern_storage_view(graph, work.offsets, u32_ty.clone(), None);
     let global_i = graph.intern_pure(
@@ -1769,7 +1733,6 @@ fn build_filter_scan(
 
 fn build_filter_scatter(
     graph: &mut EGraph,
-    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx: usize,
     spec: FilterLoop,
@@ -1777,7 +1740,7 @@ fn build_filter_scatter(
     next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     use super::graph_ops::{emit_load, emit_storage_store, intern_storage_view, intern_u32};
-    let after = graph.skeleton.split_block_before_effect(control_headers, bid, idx);
+    let after = graph.skeleton.split_block_before_effect(bid, idx);
     let in_range = graph.skeleton.create_block();
     let write = graph.skeleton.create_block();
     let skip = graph.skeleton.create_block();
@@ -1799,7 +1762,7 @@ fn build_filter_scatter(
         else_target: after,
         else_args: vec![],
     };
-    control_headers.insert(bid, ControlHeader::Selection { merge: after });
+    graph.skeleton.blocks[bid].control_header = Some(ControlHeader::Selection { merge: after });
     let flags = intern_storage_view(graph, work.flags, u32_ty.clone(), None);
     let offsets = intern_storage_view(graph, work.offsets, u32_ty.clone(), None);
     let flag_place = graph.intern_pure(PureOp::ViewIndex, smallvec![flags, gid], u32_ty.clone(), None);
@@ -1813,7 +1776,7 @@ fn build_filter_scatter(
         else_target: skip,
         else_args: vec![],
     };
-    control_headers.insert(in_range, ControlHeader::Selection { merge });
+    graph.skeleton.blocks[in_range].control_header = Some(ControlHeader::Selection { merge });
     let offset_place = graph.intern_pure(PureOp::ViewIndex, smallvec![offsets, gid], u32_ty.clone(), None);
     let inclusive = emit_load(graph, write, offset_place, u32_ty.clone(), next_effect, None);
     let output_index = graph.intern_pure(
@@ -1877,7 +1840,6 @@ fn build_filter_scatter(
 
 fn build_runtime_filter_loop(
     graph: &mut EGraph,
-    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     spec: FilterLoop,
@@ -1893,7 +1855,7 @@ fn build_runtime_filter_loop(
     let scratch_view = intern_storage_view(graph, scratch_out, spec.output_elem_ty.clone(), None);
 
     // Split `bid` into preheader (bid) + after, moving the suffix + terminator.
-    let after = graph.skeleton.split_block_before_effect(control_headers, bid, idx_in_block);
+    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
 
     // After-block param: the final surviving count.
     let after_count_nid = graph.add_block_param(after, u32_ty.clone());
@@ -1932,13 +1894,10 @@ fn build_runtime_filter_loop(
         else_target: after,
         else_args: vec![count_in_nid],
     };
-    control_headers.insert(
-        header,
-        ControlHeader::Loop {
-            merge: after,
-            continue_block: continue_blk,
-        },
-    );
+    graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+        merge: after,
+        continue_block: continue_blk,
+    });
 
     // Body: elem = arr[i]; pred = pred_func(elem, captures); cond_br(pred, then, else).
     let elem_nid = emit_read_element(
@@ -1955,7 +1914,12 @@ fn build_runtime_filter_loop(
     let kept_nid = filter_kept_value(graph, elem_nid, &spec);
     let mut pred_operands: SmallVec<[NodeId; 4]> = smallvec![kept_nid];
     pred_operands.extend(spec.captures.iter().copied());
-    let pred_nid = graph.intern_pure(PureOp::Call(spec.pred_func), pred_operands, bool_ty.clone(), None);
+    let pred_nid = graph.intern_pure(
+        PureOp::Call(spec.pred_func.clone()),
+        pred_operands,
+        bool_ty.clone(),
+        None,
+    );
     graph.skeleton.blocks[body].term = SkeletonTerminator::CondBranch {
         cond: pred_nid,
         then_target: then_blk,
@@ -1963,7 +1927,7 @@ fn build_runtime_filter_loop(
         else_target: else_blk,
         else_args: vec![],
     };
-    control_headers.insert(body, ControlHeader::Selection { merge: sel_merge });
+    graph.skeleton.blocks[body].control_header = Some(ControlHeader::Selection { merge: sel_merge });
 
     // then: scratch_out[count] = v; count_bumped = count + 1; Branch(sel_merge, [count_bumped]).
     emit_storage_store(
@@ -2096,7 +2060,6 @@ struct LoopHandles {
 
 fn build_loop_skeleton(
     graph: &mut EGraph,
-    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     spec: LoopSkeletonSpec,
@@ -2105,7 +2068,7 @@ fn build_loop_skeleton(
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
     // Split `bid` into preheader (bid) + after (holding suffix side-effects + old term).
-    let after = graph.skeleton.split_block_before_effect(control_headers, bid, idx_in_block);
+    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
 
     // The split moves the branching terminator to `after`: if `bid`
     // carries structured-control-flow header metadata (e.g. a Selection
@@ -2185,13 +2148,10 @@ fn build_loop_skeleton(
         else_args,
     };
 
-    control_headers.insert(
-        header,
-        ControlHeader::Loop {
-            merge: after,
-            continue_block: body,
-        },
-    );
+    graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+        merge: after,
+        continue_block: body,
+    });
 
     LoopHandles {
         header,
@@ -2223,7 +2183,8 @@ fn emit_length(
     arr_ty: &Type<TypeName>,
     result_ty: &Type<TypeName>,
 ) -> NodeId {
-    let actual_arr_ty = graph.types.get(&arr_nid).filter(|ty| is_plain_array_source(ty)).cloned();
+    let actual_arr_ty =
+        graph.nodes.get(arr_nid).map(|node| &node.ty).filter(|ty| is_plain_array_source(ty)).cloned();
     let arr_ty = actual_arr_ty.as_ref().unwrap_or(arr_ty);
     if let Some(components) = as_soa_tuple(arr_ty) {
         let first_arr = graph.intern_pure(
@@ -2258,7 +2219,8 @@ fn emit_read_element(
     elem_ty: &Type<TypeName>,
     next_effect: &mut crate::IdSource<EffectToken>,
 ) -> NodeId {
-    let actual_arr_ty = graph.types.get(&arr_nid).filter(|ty| is_plain_array_source(ty)).cloned();
+    let actual_arr_ty =
+        graph.nodes.get(arr_nid).map(|node| &node.ty).filter(|ty| is_plain_array_source(ty)).cloned();
     let arr_ty = actual_arr_ty.as_ref().unwrap_or(arr_ty);
     // SoA tuple: project each component array, recursively read element i
     // from each, repack as the element tuple.

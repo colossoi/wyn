@@ -618,17 +618,20 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
     let program = wyn_core::tlc::apply_ownership(program);
     let program = wyn_core::tlc::filter_reachable(program);
     let program = wyn_core::tlc::infer_input_slice_bounds(program);
-    let raw = match wyn_core::to_egraph(program) {
+    let program = match wyn_core::to_egraph(program) {
         Ok(s) => s,
         Err(e) => return CompileResultWgsl::err_msg(format!("SSA conversion error: {:?}", e)),
     };
     let profile = LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel);
-    let ssa = match raw
-        .realize_outputs()
-        .and_then(|realized| realized.segment().optimize().allocate())
-        .and_then(|allocated| allocated.plan(profile))
-        .and_then(wyn_core::EgirPlanned::lower_to_ssa)
-    {
+    let lower = || -> Result<_, wyn_core::egir::from_tlc::ConvertError> {
+        let program = wyn_core::egir::realize_outputs(program)?;
+        let program = wyn_core::egir::reify_soacs(program);
+        let program = wyn_core::egir::optimize_semantics(program);
+        let program = wyn_core::egir::plan_logical_resources(program)?;
+        let program = wyn_core::egir::plan(program, profile)?;
+        wyn_core::lower_egir_to_ssa(program)
+    };
+    let ssa = match lower() {
         Ok(s) => s,
         Err(e) => return CompileResultWgsl::err_msg(format!("SSA lowering error: {:?}", e)),
     };

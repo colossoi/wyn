@@ -5,9 +5,7 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 use super::schedule::KernelMutationError;
-use crate::egir::program::{
-    CompilerFlowEndpoint, CompilerResourceFlow, LogicalResourceArena, ResourceOrigin,
-};
+use crate::egir::allocation::{CompilerFlowEndpoint, CompilerResourceFlow};
 
 pub(super) const REDUCE_PHASE1_WIDTH: u32 = 64;
 pub(super) const REDUCE_PHASE2_WIDTH: u32 = 256;
@@ -82,16 +80,7 @@ pub(super) struct ResourceFlowIndex {
 }
 
 impl ResourceFlowIndex {
-    pub(super) fn new(resources: &LogicalResourceArena) -> Self {
-        let mut flows = resources
-            .iter()
-            .filter_map(|resource| match &resource.origin {
-                ResourceOrigin::Compiler(compiler) => {
-                    compiler.flow.clone().map(|flow| (resource.id(), flow))
-                }
-                ResourceOrigin::Host(_) => None,
-            })
-            .collect::<Vec<_>>();
+    pub(super) fn new(mut flows: Vec<(crate::ResourceId, CompilerResourceFlow)>) -> Self {
         flows.sort_by_key(|(resource, _)| *resource);
         let mut incoming = BTreeMap::<_, Vec<_>>::new();
         for (_, flow) in &flows {
