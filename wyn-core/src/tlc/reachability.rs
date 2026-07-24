@@ -21,7 +21,7 @@ impl Stage for Reachable {
 ///
 /// Definition bodies are not rewritten: live definitions and their term IDs
 /// move intact into the resulting program.
-pub fn run(program: Program<OwnershipApplied>) -> Program<Reachable> {
+pub fn filter_reachable(program: Program<OwnershipApplied>) -> Program<Reachable> {
     let mut program = program.map_global_context::<Reachable>(|global| BackendGlobal {
         auto_storage_binding_ids: global.auto_storage_binding_ids,
     });

@@ -30,7 +30,7 @@ impl super::Stage for PartialEvaled {
 
 /// Consume a validated TLC program and rebuild its definitions from the
 /// evaluator's residual terms.
-pub fn run(program: Program<OwnershipValidated>) -> Program<PartialEvaled> {
+pub fn partial_eval(program: Program<OwnershipValidated>) -> Program<PartialEvaled> {
     program.assert_flat_apps();
     let Program {
         defs,

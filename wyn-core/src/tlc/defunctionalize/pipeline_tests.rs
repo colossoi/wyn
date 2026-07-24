@@ -11,7 +11,7 @@ use std::collections::HashMap;
 fn defunctionalize(
     program: Program<crate::tlc::stage::RuntimeIndexProducersFloated>,
 ) -> Program<crate::tlc::stage::Defunctionalized> {
-    super::run(program)
+    super::defunctionalize(program)
 }
 
 /// Test helper that manages symbol table and term ID generation.

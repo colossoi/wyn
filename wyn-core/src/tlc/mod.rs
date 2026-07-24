@@ -319,21 +319,19 @@ pub mod stage {
 
 // Named consuming TLC transitions. The stage types remain visible through
 // `tlc::stage`, while callers compose the pipeline as ordinary functions.
-pub use defunctionalize::run as defunctionalize;
-pub use if_over_producer::run as canonicalize_conditional_producers;
-pub use inline::{
-    fold_generated_lambdas, run_force_soac_helpers as force_inline_soac_helpers, run_small as inline_small,
-};
-pub use input_slice_bounds::run as infer_input_slice_bounds;
-pub use monomorphize::run as monomorphize;
-pub use ownership::{apply_ownership, validate as validate_ownership};
-pub use partial_eval::run as partial_eval;
-pub use pin_entry_buffers::run as pin_entry_buffers;
-pub use reachability::run as filter_reachable;
-pub use rep_specialize::run as rep_specialize;
-pub use runtime_index_producers::run as float_runtime_index_nested_producers;
-pub use soa::{rerun as renormalize_inlined_soa, run as normalize_soacs};
-pub use soac_anf::run as normalize_soacs_to_anf;
+pub use defunctionalize::defunctionalize;
+pub use if_over_producer::canonicalize_conditional_producers;
+pub use inline::{fold_generated_lambdas, force_inline_soac_helpers, inline_small};
+pub use input_slice_bounds::infer_input_slice_bounds;
+pub use monomorphize::monomorphize;
+pub use ownership::{apply_ownership, validate_ownership};
+pub use partial_eval::partial_eval;
+pub use pin_entry_buffers::pin_entry_buffers;
+pub use reachability::filter_reachable;
+pub use rep_specialize::rep_specialize;
+pub use runtime_index_producers::float_runtime_index_nested_producers;
+pub use soa::{normalize_soacs, renormalize_inlined_soa};
+pub use soac_anf::normalize_soacs_to_anf;
 
 // =============================================================================
 // Helper functions

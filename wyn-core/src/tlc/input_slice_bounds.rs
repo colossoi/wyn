@@ -72,7 +72,7 @@ type EntryPatches = LookupMap<SymbolId, data::EntryInputBounds>;
 /// Infer every entry patch, then consume the old phase into the phase whose
 /// entry nodes own those bounds. Both families select the same closure and
 /// SOAC-body variables, so every term body moves without traversal.
-pub fn run(program: Program<SourceStage>) -> Program<InputSliceBoundsInferred> {
+pub fn infer_input_slice_bounds(program: Program<SourceStage>) -> Program<InputSliceBoundsInferred> {
     let mut patches = analyze(&program);
     let rebuilt = program.rebuild::<InputSliceBoundsInferred>(std::convert::identity, |def, _term_ids| {
         attach_entry_bounds(def, &mut patches)

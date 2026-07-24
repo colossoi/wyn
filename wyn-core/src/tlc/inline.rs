@@ -56,7 +56,7 @@ const INLINE_SIZE_THRESHOLD: usize = 30;
 /// SOAC helper) fully expand: one round inlines `center`, the next sees
 /// `sum` calls inside the freshly-expanded clump body and inlines those
 /// too.
-pub fn run_force_soac_helpers(mut program: Program<SmallInlined>) -> Program<SoacHelpersInlined> {
+pub fn force_inline_soac_helpers(mut program: Program<SmallInlined>) -> Program<SoacHelpersInlined> {
     force_inline_array_work_helpers_to_fixpoint(&mut program);
     debug_assert!(
         verify_array_work_helpers_inlined(&program).is_ok(),
@@ -272,7 +272,7 @@ fn any_def_calls_candidate(
 /// - Constants (arity-0 defs, substituted at Var reference sites)
 ///
 /// Skips `LiftedLambda` defs (SOAC bodies) — handled by `inline()`.
-pub fn run_small(mut program: Program<RepSpecialized>) -> Program<SmallInlined> {
+pub fn inline_small(mut program: Program<RepSpecialized>) -> Program<SmallInlined> {
     let all_constants = find_all_constants(&program);
     let mut small_candidates = find_small_candidates(&program.defs, &program.symbols);
 

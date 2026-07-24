@@ -20,7 +20,7 @@ impl super::Stage for SoacsAnfNormalized {
     type GlobalContext = super::context::RewriteGlobal;
 }
 
-pub fn run(
+pub fn normalize_soacs_to_anf(
     program: Program<super::stage::ConditionalProducersCanonicalized>,
 ) -> Program<SoacsAnfNormalized> {
     let Program {

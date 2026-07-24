@@ -39,7 +39,7 @@ impl Stage for Defunctionalized {
     type GlobalContext = super::context::PostClosureGlobal;
 }
 
-pub fn run(
+pub fn defunctionalize(
     program: super::Program<super::stage::RuntimeIndexProducersFloated>,
 ) -> super::Program<Defunctionalized> {
     let mut program = closure_convert::run(program);

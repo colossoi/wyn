@@ -35,7 +35,7 @@ impl super::Stage for RuntimeIndexProducersFloated {
     type GlobalContext = super::context::RewriteGlobal;
 }
 
-pub fn run(
+pub fn float_runtime_index_nested_producers(
     mut program: Program<super::stage::SoacsAnfNormalized>,
 ) -> Program<RuntimeIndexProducersFloated> {
     let ids = &mut program.term_ids;

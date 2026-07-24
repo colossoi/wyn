@@ -1,6 +1,6 @@
 //! Tests for TLC partial evaluation.
 
-use super::{run, PartialEvaled, VarRef};
+use super::{partial_eval, VarRef};
 use crate::ast::{BinaryOp, Span, TypeName};
 use crate::tlc::context::RewriteGlobal;
 use crate::tlc::data::{Empty, PolymorphicDefinition};
@@ -83,10 +83,6 @@ fn rewrite_global() -> RewriteGlobal {
         known_defs: Default::default(),
         auto_storage_binding_ids: Default::default(),
     }
-}
-
-fn partial_eval(program: Program<OwnershipValidated>) -> Program<PartialEvaled> {
-    run(program)
 }
 
 fn make_int(ids: &mut TermIdSource, n: i64) -> Term<Empty, Empty> {

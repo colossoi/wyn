@@ -31,7 +31,7 @@ impl super::Stage for ConditionalProducersCanonicalized {
     type GlobalContext = super::context::RewriteGlobal;
 }
 
-pub fn run(
+pub fn canonicalize_conditional_producers(
     mut program: Program<super::stage::InlinedSoaNormalized>,
 ) -> Program<ConditionalProducersCanonicalized> {
     let mut rewriter = ConditionalProducerRewriter {

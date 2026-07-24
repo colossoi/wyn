@@ -758,12 +758,12 @@ fn build_tuple_reconstruction(
 ///    that touch array-of-tuple types.
 /// 2. Flattens Map+Zip into multi-input Map with split lambda params.
 /// 3. Converts standalone Zip to tuple construction.
-pub fn run(program: Program<PartialEvaled>) -> Program<SoaNormalized> {
+pub fn normalize_soacs(program: Program<PartialEvaled>) -> Program<SoaNormalized> {
     transform_program(program)
 }
 
 /// Re-run the same normalization after inlining exposes new array structure.
-pub fn rerun(program: Program<SoacHelpersInlined>) -> Program<InlinedSoaNormalized> {
+pub fn renormalize_inlined_soa(program: Program<SoacHelpersInlined>) -> Program<InlinedSoaNormalized> {
     transform_program(program)
 }
 

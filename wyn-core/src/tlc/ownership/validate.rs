@@ -23,7 +23,9 @@ impl crate::tlc::Stage for OwnershipValidated {
     type GlobalContext = crate::tlc::context::RewriteGlobal;
 }
 
-pub fn validate(program: Program<BuffersPinned>) -> crate::error::Result<Program<OwnershipValidated>> {
+pub fn validate_ownership(
+    program: Program<BuffersPinned>,
+) -> crate::error::Result<Program<OwnershipValidated>> {
     check(&program)?;
     Ok(program.into_stage())
 }

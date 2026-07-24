@@ -6,7 +6,7 @@ mod liveness;
 mod validate;
 
 pub use apply::{apply_ownership, OwnershipApplied};
-pub use validate::{check, validate, OwnershipValidated};
+pub use validate::{check, validate_ownership, OwnershipValidated};
 
 #[cfg(test)]
 use super::VarRef;

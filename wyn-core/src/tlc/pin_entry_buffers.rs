@@ -46,7 +46,9 @@ impl super::Stage for BuffersPinned {
 /// Buffer-variable → concrete `Buffer(set, binding)` substitution.
 type BufferSubst = LookupMap<usize, Type<TypeName>>;
 
-pub fn run(mut program: Program<Transformed>) -> crate::error::Result<Program<BuffersPinned>> {
+pub fn pin_entry_buffers(
+    mut program: Program<Transformed>,
+) -> crate::error::Result<Program<BuffersPinned>> {
     let (defs, term_ids, global_context) = (
         &mut program.defs,
         &mut program.term_ids,

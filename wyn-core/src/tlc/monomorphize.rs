@@ -48,7 +48,7 @@ impl super::Stage for Monomorphized {
 
 /// Specialize intrinsic calls, then consume the polymorphic definition graph
 /// into its reachable monomorphic graph.
-pub fn run(mut program: Program<SoaNormalized>) -> Program<Monomorphized> {
+pub fn monomorphize(mut program: Program<SoaNormalized>) -> Program<Monomorphized> {
     super::specialize::run(&mut program);
 
     let Program {

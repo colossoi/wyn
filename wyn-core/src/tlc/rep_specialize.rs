@@ -98,7 +98,7 @@ struct RepSpecializer<'a> {
 
 /// Specialize representation-polymorphic call edges and consume the
 /// monomorphic checkpoint into the representation-specialized checkpoint.
-pub fn run(mut program: Program<Monomorphized>) -> Program<RepSpecialized> {
+pub fn rep_specialize(mut program: Program<Monomorphized>) -> Program<RepSpecialized> {
     // Only definitions with a specializable parameter need a retained
     // template. Ordinary definitions can be rewritten in place without
     // cloning their trees.

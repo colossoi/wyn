@@ -855,7 +855,7 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
             // so element views are mutable.
             ArrayExpr::Literal(_) | ArrayExpr::Range { .. } => Origin::BorrowedMutableElement,
             // Zip is a phase-scoped sentinel that should be absorbed
-            // by `tlc::soa::run` before we get here. If one survives,
+            // by `tlc::soa::normalize_soacs` before we get here. If one survives,
             // be conservative.
             ArrayExpr::Zip(_) => Origin::Borrowed,
         }
