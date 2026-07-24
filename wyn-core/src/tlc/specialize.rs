@@ -1,10 +1,11 @@
-//! Specialization pass for TLC.
+//! Type-directed specialization of polymorphic intrinsic names.
 //!
-//! Specializes polymorphic intrinsic names based on argument types.
-//! For example: `sign(x)` where `x: f32` becomes `f32.sign(x)`.
+//! This is the first, private step of monomorphization. For example,
+//! `sign(x)` at `f32` becomes the structural catalog reference `f32.sign`.
 
-use super::VarRef;
-use super::{Program, Term, TermIdSource, TermKind};
+use super::data::Empty;
+use super::soa::SoaNormalized;
+use super::{Program, RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter, VarRef};
 use crate::ast::TypeName;
 use crate::builtins::catalog::KnownBuiltinIds;
 use crate::builtins::{catalog, BuiltinId};
@@ -12,79 +13,62 @@ use crate::types::TypeExt;
 use crate::SymbolTable;
 use polytype::Type;
 
-/// Specialize polymorphic intrinsics in a TLC program.
-pub fn run(program: &mut Program) {
-    let term_ids = &mut program.term_ids;
-    for def in &mut program.defs {
-        specialize_term(&mut def.body, &mut program.symbols, term_ids);
+pub(super) fn run(program: &mut Program<SoaNormalized>) {
+    let (defs, symbols, term_ids) = (&mut program.defs, &program.symbols, &mut program.term_ids);
+    let mut specializer = IntrinsicSpecializer { symbols, term_ids };
+    for def in defs {
+        specializer.rewrite_tracked(&mut def.body);
     }
 }
 
-/// Bottom-up: recurse into children, then specialize App nodes in place.
-fn specialize_term(term: &mut Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) {
-    term.for_each_child_mut(&mut |child| specialize_term(child, symbols, term_ids));
+struct IntrinsicSpecializer<'symbols, 'ids> {
+    symbols: &'symbols SymbolTable,
+    term_ids: &'ids mut TermIdSource,
+}
 
-    // Only App nodes need specialization.
-    let TermKind::App { func, args } = &mut term.kind else {
-        return;
-    };
-
-    if args.is_empty() {
-        return;
+impl TermRewriter<Empty, Empty> for IntrinsicSpecializer<'_, '_> {
+    fn next_term_id(&mut self) -> TermId {
+        self.term_ids.next_id()
     }
 
-    // Only catalog references specialize. A `Var(Symbol)` is always a
-    // user binding (or compiler-synthesized fresh symbol) and must
-    // pass through unchanged — user shadows of catalog names like
-    // `let mul = ...` would otherwise be silently rewritten.
-    let Some(id) = crate::tlc::var_term_builtin_id(func, symbols) else {
-        return;
-    };
-    let known = catalog().known();
-
-    // `mul` → `BinOp("*")` rewrite (works for both scalar and
-    // vec/matrix overloads — overload selection at the catalog
-    // level becomes irrelevant once it's a BinOp).
-    if id == known.mul && args.len() == 2 {
-        let binop = Term {
-            id: term_ids.next_id(),
-            ty: func.ty.clone(),
-            span: func.span,
-            kind: TermKind::BinOp(crate::ast::BinaryOp { op: "*".to_string() }),
+    fn rewrite_node(&mut self, term: &mut Term<Empty, Empty>) -> RewriteDecision {
+        let TermKind::App { func, args } = &mut term.kind else {
+            return RewriteDecision::Unchanged;
         };
-        **func = binop;
-        return;
-    }
+        let Some(first_arg) = args.first() else {
+            return RewriteDecision::Unchanged;
+        };
 
-    if let Some(specialized_name) = specialize_name(id, known, &args[0].ty) {
-        // Per-type ops (`f32.abs`, `i32.min`, …) are 4 prefixes × 6
-        // ops = 24 catalog entries, dynamically picked from the arg
-        // type. Cheap enough to keep a per-call surface-name lookup
-        // for now; the lookup result is a `BuiltinId` from a
-        // catalog-known entry, so it still flows structurally.
-        let def = catalog().lookup_by_surface_name(&specialized_name).unwrap_or_else(|| {
-            panic!(
-                "BUG: specialize emitted name '{}' not in catalog",
-                specialized_name
-            )
+        // A Symbol is always a user or compiler binding and may shadow a
+        // catalog name. Only structural builtin references specialize.
+        let Some(id) = crate::tlc::var_term_builtin_id(func, self.symbols) else {
+            return RewriteDecision::Unchanged;
+        };
+        let known = catalog().known();
+
+        // Multiplication no longer needs overload selection after it becomes a
+        // structural binary operator.
+        if id == known.mul && args.len() == 2 {
+            func.kind = TermKind::BinOp(crate::ast::BinaryOp { op: "*".to_string() });
+            func.id = self.term_ids.next_id();
+            return RewriteDecision::Changed;
+        }
+
+        let Some(specialized_name) = specialize_name(id, known, &first_arg.ty) else {
+            return RewriteDecision::Unchanged;
+        };
+        let def = catalog()
+            .lookup_by_surface_name(&specialized_name)
+            .unwrap_or_else(|| panic!("BUG: specialize emitted name '{specialized_name}' not in catalog"));
+        func.kind = TermKind::Var(VarRef::Builtin {
+            id: def.id,
+            overload_idx: 0,
         });
-        let new_func = Term {
-            id: term_ids.next_id(),
-            ty: func.ty.clone(),
-            span: func.span,
-            kind: TermKind::Var(VarRef::Builtin {
-                id: def.id,
-                overload_idx: 0,
-            }),
-        };
-        **func = new_func;
+        func.id = self.term_ids.next_id();
+        RewriteDecision::Changed
     }
 }
 
-/// Specialize a polymorphic-op catalog reference into a per-type
-/// surface name. Only fires for catalog ops in the specialize set
-/// (`abs`, `sign`, `min`, `max`, `clamp`); everything else returns
-/// `None` and passes through unchanged.
 fn specialize_name(id: BuiltinId, known: &KnownBuiltinIds, arg_ty: &Type<TypeName>) -> Option<String> {
     let base = if id == known.abs {
         "abs"
@@ -99,16 +83,15 @@ fn specialize_name(id: BuiltinId, known: &KnownBuiltinIds, arg_ty: &Type<TypeNam
     } else {
         return None;
     };
-    type_prefix(arg_ty).map(|prefix| format!("{}.{}", prefix, base))
+    type_prefix(arg_ty).map(|prefix| format!("{prefix}.{base}"))
 }
 
-/// Get the type prefix for specialization (f32, i32, u32, etc.)
 fn type_prefix(ty: &Type<TypeName>) -> Option<String> {
     let elem_ty = ty.elem_type().filter(|_| ty.is_vec()).unwrap_or(ty);
     match elem_ty {
-        Type::Constructed(TypeName::Float(bits), _) => Some(format!("f{}", bits)),
-        Type::Constructed(TypeName::Int(bits), _) => Some(format!("i{}", bits)),
-        Type::Constructed(TypeName::UInt(bits), _) => Some(format!("u{}", bits)),
+        Type::Constructed(TypeName::Float(bits), _) => Some(format!("f{bits}")),
+        Type::Constructed(TypeName::Int(bits), _) => Some(format!("i{bits}")),
+        Type::Constructed(TypeName::UInt(bits), _) => Some(format!("u{bits}")),
         _ => None,
     }
 }

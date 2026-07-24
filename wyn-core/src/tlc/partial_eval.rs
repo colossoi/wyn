@@ -3,8 +3,13 @@
 //! Simpler than NBE-style: collect application spines, evaluate args,
 //! apply when we have enough arguments (using arity metadata).
 
-use super::VarRef;
-use super::{Def, Lambda, Program, Term, TermIdSource, TermKind};
+use super::data::Empty;
+use super::ownership::OwnershipValidated;
+use super::run::Polymorphic;
+use super::{
+    Def, Lambda, LoopKind, Program, RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter,
+    VarRef,
+};
 use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::builtins::{by_id, Purity};
@@ -15,13 +20,54 @@ use crate::SymbolId;
 use polytype::Type;
 use spirv::GLOp;
 
+/// TLC after partial evaluation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PartialEvaled;
+
+impl super::Stage for PartialEvaled {
+    type Family = super::run::Polymorphic;
+    type GlobalContext = super::context::RewriteGlobal;
+}
+
+/// Consume a validated TLC program and rebuild its definitions from the
+/// evaluator's residual terms.
+pub fn run(program: Program<OwnershipValidated>) -> Program<PartialEvaled> {
+    program.assert_flat_apps();
+    let Program {
+        defs,
+        symbols,
+        def_syms,
+        mut term_ids,
+        global_context,
+    } = program;
+    let definitions = defs
+        .iter()
+        .map(|def| {
+            (
+                def.name,
+                DefinitionTemplate {
+                    arity: def.arity,
+                    body: def.body.clone(),
+                },
+            )
+        })
+        .collect();
+    let mut evaluator = PartialEvaluator::new(definitions, &mut term_ids);
+    let defs = defs.into_iter().map(|def| evaluator.evaluate_definition(def)).collect();
+    drop(evaluator);
+
+    let program = Program::from_parts(defs, symbols, def_syms, term_ids, global_context);
+    program.assert_flat_apps();
+    program
+}
+
 // =============================================================================
 // Values
 // =============================================================================
 
 /// A compile-time value.
 #[derive(Debug, Clone)]
-pub enum Value {
+enum Value {
     /// Known scalar: int, float, bool
     Int(i64),
     Float(f64),
@@ -42,7 +88,7 @@ pub enum Value {
     },
 
     /// Unknown at compile time - residual code
-    Unknown(Term),
+    Unknown(Term<Empty, Empty>),
 }
 
 impl Value {
@@ -55,9 +101,15 @@ impl Value {
 // Evaluator
 // =============================================================================
 
-pub struct PartialEvaluator<'a> {
-    /// Function definitions with their arities
-    defs: LookupMap<SymbolId, Def>,
+#[derive(Clone)]
+struct DefinitionTemplate {
+    arity: usize,
+    body: Term<Empty, Empty>,
+}
+
+struct PartialEvaluator<'a> {
+    /// Function bodies retained for compile-time call expansion.
+    definitions: LookupMap<SymbolId, DefinitionTemplate>,
     /// Term ID source for generating new terms
     term_ids: &'a mut TermIdSource,
     /// Environment: symbol -> Value
@@ -68,28 +120,24 @@ pub struct PartialEvaluator<'a> {
 }
 
 impl<'a> PartialEvaluator<'a> {
-    pub fn partial_eval(program: &mut Program) {
-        program.assert_flat_apps();
-        let term_ids = &mut program.term_ids;
-        let mut eval = PartialEvaluator {
-            defs: program.defs.iter().map(|d| (d.name, d.clone())).collect(),
+    fn new(definitions: LookupMap<SymbolId, DefinitionTemplate>, term_ids: &'a mut TermIdSource) -> Self {
+        Self {
+            definitions,
             term_ids,
             env: LookupMap::new(),
             active_defs: LookupSet::new(),
-        };
+        }
+    }
 
-        crate::map_in_place(&mut program.defs, |def| {
-            let body_val = eval.eval(&def.body);
-            let body = eval.reify(body_val, &def.body.ty, def.body.span);
-            Def { body, ..def }
-        });
-
-        drop(eval);
-        program.assert_flat_apps();
+    fn evaluate_definition(&mut self, def: Def<Polymorphic>) -> Def<Polymorphic> {
+        let body_val = self.eval(&def.body);
+        let body = self.reify(body_val, &def.body.ty, def.body.span);
+        let body = body.rewrite(&mut ResidualConstantFolder { evaluator: self });
+        Def { body, ..def }
     }
 
     /// Evaluate a term to a Value.
-    fn eval(&mut self, term: &Term) -> Value {
+    fn eval(&mut self, term: &Term<Empty, Empty>) -> Value {
         match &term.kind {
             // Literals → known values
             TermKind::IntLit(s) => Value::Int(
@@ -98,6 +146,9 @@ impl<'a> PartialEvaluator<'a> {
             TermKind::FloatLit(f) => Value::Float(*f as f64),
             TermKind::BoolLit(b) => Value::Bool(*b),
             TermKind::UnitLit => Value::Unknown(term.clone()),
+            TermKind::Closure(_) => {
+                unreachable!("closure terms do not exist before defunctionalization")
+            }
             TermKind::Coerce { inner, target_ty } => {
                 let inner_val = self.eval(inner);
                 let inner_term = self.reify(inner_val, &inner.ty, inner.span);
@@ -116,7 +167,7 @@ impl<'a> PartialEvaluator<'a> {
                 let sym = *sym;
                 if let Some(val) = self.env.get(&sym) {
                     val.clone()
-                } else if let Some(def) = self.defs.get(&sym).cloned() {
+                } else if let Some(def) = self.definitions.get(&sym).cloned() {
                     if def.arity == 0 {
                         if !self.active_defs.insert(sym) {
                             Value::Unknown(term.clone())
@@ -220,8 +271,7 @@ impl<'a> PartialEvaluator<'a> {
             // fold constant sub-expressions in the result.
             TermKind::Lambda(lam) => {
                 let mut bound: LookupSet<SymbolId> = lam.params.iter().map(|(p, _)| *p).collect();
-                let substituted = self.substitute_residual_vars((*lam.body).clone(), &mut bound);
-                let body = self.fold_in_body(&substituted);
+                let body = self.substitute_residual_vars((*lam.body).clone(), &mut bound);
                 Value::Unknown(self.mk_term(
                     term.ty.clone(),
                     term.span,
@@ -256,7 +306,7 @@ impl<'a> PartialEvaluator<'a> {
             // dissolved by the eval pass.
             TermKind::Tuple(parts) => {
                 let part_vals: Vec<Value> = parts.iter().map(|p| self.eval(p)).collect();
-                let part_terms: Vec<Term> =
+                let part_terms: Vec<Term<Empty, Empty>> =
                     parts.iter().zip(part_vals).map(|(p, v)| self.reify(v, &p.ty, p.span)).collect();
                 Value::Unknown(self.mk_term(term.ty.clone(), term.span, TermKind::Tuple(part_terms)))
             }
@@ -288,7 +338,7 @@ impl<'a> PartialEvaluator<'a> {
             }
             TermKind::VecLit(parts) => {
                 let part_vals: Vec<Value> = parts.iter().map(|p| self.eval(p)).collect();
-                let part_terms: Vec<Term> =
+                let part_terms: Vec<Term<Empty, Empty>> =
                     parts.iter().zip(part_vals).map(|(p, v)| self.reify(v, &p.ty, p.span)).collect();
                 Value::Unknown(self.mk_term(term.ty.clone(), term.span, TermKind::VecLit(part_terms)))
             }
@@ -296,7 +346,12 @@ impl<'a> PartialEvaluator<'a> {
     }
 
     /// Apply a function to arguments based on the base term kind.
-    fn apply(&mut self, base: &Term, args: Vec<(Value, Type<TypeName>)>, original: &Term) -> Value {
+    fn apply(
+        &mut self,
+        base: &Term<Empty, Empty>,
+        args: Vec<(Value, Type<TypeName>)>,
+        original: &Term<Empty, Empty>,
+    ) -> Value {
         match &base.kind {
             // `eval_binop`/`eval_unop` return `Some` only for a genuine fold
             // or simplification (including identities like `x + 0 → x`).
@@ -343,7 +398,7 @@ impl<'a> PartialEvaluator<'a> {
     /// a dissolved let's variable and surface as "Unknown global: <name>" at
     /// codegen; and not a `reify`-based rebuild, which reconstructs operands
     /// (e.g. partial applications) and can corrupt closure-call arities.
-    fn residualize_unreduced(&mut self, term: &Term) -> Value {
+    fn residualize_unreduced(&mut self, term: &Term<Empty, Empty>) -> Value {
         let mut bound = LookupSet::new();
         Value::Unknown(self.substitute_residual_vars(term.clone(), &mut bound))
     }
@@ -355,11 +410,11 @@ impl<'a> PartialEvaluator<'a> {
     /// original term in this position would discard those substitutions.
     fn residualize_call(
         &mut self,
-        func: Term,
+        func: Term<Empty, Empty>,
         args: Vec<(Value, Type<TypeName>)>,
-        original: &Term,
+        original: &Term<Empty, Empty>,
     ) -> Value {
-        let arg_terms: Vec<Term> =
+        let arg_terms: Vec<Term<Empty, Empty>> =
             args.into_iter().map(|(arg, ty)| self.reify(arg, &ty, original.span)).collect();
         let result = self.mk_term(
             original.ty.clone(),
@@ -373,7 +428,12 @@ impl<'a> PartialEvaluator<'a> {
     }
 
     /// Apply a named function to arguments.
-    fn apply_var(&mut self, sym: SymbolId, args: Vec<(Value, Type<TypeName>)>, original: &Term) -> Value {
+    fn apply_var(
+        &mut self,
+        sym: SymbolId,
+        args: Vec<(Value, Type<TypeName>)>,
+        original: &Term<Empty, Empty>,
+    ) -> Value {
         // Check if this is a let-bound variable aliasing a function.
         // This handles cases like `let f = g in f x` where g is a known function.
         if let Some(Value::Partial {
@@ -413,7 +473,7 @@ impl<'a> PartialEvaluator<'a> {
         }
 
         // Check for known function
-        if let Some(def) = self.defs.get(&sym).cloned() {
+        if let Some(def) = self.definitions.get(&sym).cloned() {
             let args_len = args.len();
             let all_known = args.iter().all(|(v, _)| v.is_known());
             if args_len >= def.arity && def.arity > 0 && all_known {
@@ -442,7 +502,7 @@ impl<'a> PartialEvaluator<'a> {
     }
 
     /// Inline a function call.
-    fn inline(&mut self, def: &Def, args: Vec<(Value, Type<TypeName>)>) -> Value {
+    fn inline(&mut self, def: &DefinitionTemplate, args: Vec<(Value, Type<TypeName>)>) -> Value {
         let mut body = &def.body;
         let mut args_iter = args.into_iter();
 
@@ -567,132 +627,16 @@ impl<'a> PartialEvaluator<'a> {
         }
     }
 
-    // =========================================================================
-    // Structural constant folding inside opaque bodies (lambdas, loops)
-    // =========================================================================
-
-    /// Structurally descend into a term, folding constant sub-expressions
-    /// (like `1.0 / 2.2` → `0.4545`) without changing the Let/Var structure.
-    fn fold_in_body(&mut self, term: &Term) -> Term {
+    fn literal_value(&self, term: &Term<Empty, Empty>) -> Option<Value> {
         match &term.kind {
-            // Constant operator or catalog-builtin application.
-            TermKind::App { func, args } => {
-                let func = self.fold_in_body(func);
-                let folded_args: Vec<Term> = args.iter().map(|a| self.fold_in_body(a)).collect();
-                if matches!(
-                    &func.kind,
-                    TermKind::BinOp(_) | TermKind::UnOp(_) | TermKind::Var(VarRef::Builtin { .. })
-                ) {
-                    let arg_vals: Vec<(Value, Type<TypeName>)> =
-                        folded_args.iter().map(|a| (self.try_literal_value(a), a.ty.clone())).collect();
-                    if arg_vals.iter().all(|(v, _)| v.is_known()) {
-                        let result = self.apply(&func, arg_vals, term);
-                        if !matches!(result, Value::Unknown(_)) {
-                            return self.reify(result, &term.ty, term.span);
-                        }
-                    }
-                }
-                // Couldn't fold — rebuild with folded children
-                self.mk_term(
-                    term.ty.clone(),
-                    term.span,
-                    TermKind::App {
-                        func: Box::new(func),
-                        args: folded_args,
-                    },
-                )
+            TermKind::IntLit(s) => {
+                Some(Value::Int(s.parse().unwrap_or_else(|e| {
+                    panic!("lexer-produced IntLit `{s}` failed to parse as i64: {e}")
+                })))
             }
-            // Recurse into Let
-            TermKind::Let {
-                name,
-                name_ty,
-                rhs,
-                body,
-            } => {
-                let rhs = self.fold_in_body(rhs);
-                let body = self.fold_in_body(body);
-                self.mk_term(
-                    term.ty.clone(),
-                    term.span,
-                    TermKind::Let {
-                        name: *name,
-                        name_ty: name_ty.clone(),
-                        rhs: Box::new(rhs),
-                        body: Box::new(body),
-                    },
-                )
-            }
-            // Recurse into If
-            TermKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                let cond = self.fold_in_body(cond);
-                let then_branch = self.fold_in_body(then_branch);
-                let else_branch = self.fold_in_body(else_branch);
-                self.mk_term(
-                    term.ty.clone(),
-                    term.span,
-                    TermKind::If {
-                        cond: Box::new(cond),
-                        then_branch: Box::new(then_branch),
-                        else_branch: Box::new(else_branch),
-                    },
-                )
-            }
-            // Recurse into Lambda
-            TermKind::Lambda(lam) => {
-                let body = self.fold_in_body(&lam.body);
-                self.mk_term(
-                    term.ty.clone(),
-                    term.span,
-                    TermKind::Lambda(Lambda {
-                        params: lam.params.clone(),
-                        body: Box::new(body),
-                        ret_ty: lam.ret_ty.clone(),
-                    }),
-                )
-            }
-            // Recurse into Loop
-            TermKind::Loop {
-                loop_var,
-                loop_var_ty,
-                init,
-                init_bindings,
-                kind,
-                body,
-            } => {
-                let init = self.fold_in_body(init);
-                let body = self.fold_in_body(body);
-                self.mk_term(
-                    term.ty.clone(),
-                    term.span,
-                    TermKind::Loop {
-                        loop_var: *loop_var,
-                        loop_var_ty: loop_var_ty.clone(),
-                        init: Box::new(init),
-                        init_bindings: init_bindings.clone(),
-                        kind: kind.clone(),
-                        body: Box::new(body),
-                    },
-                )
-            }
-            // Leaves and everything else — return unchanged
-            _ => term.clone(),
-        }
-    }
-
-    /// Try to extract a literal Value from a term. Returns Unknown for non-literals.
-    fn try_literal_value(&self, term: &Term) -> Value {
-        match &term.kind {
-            TermKind::IntLit(s) => Value::Int(
-                s.parse()
-                    .unwrap_or_else(|e| panic!("lexer-produced IntLit `{s}` failed to parse as i64: {e}")),
-            ),
-            TermKind::FloatLit(f) => Value::Float(*f as f64),
-            TermKind::BoolLit(b) => Value::Bool(*b),
-            _ => Value::Unknown(term.clone()),
+            TermKind::FloatLit(f) => Some(Value::Float(*f as f64)),
+            TermKind::BoolLit(b) => Some(Value::Bool(*b)),
+            _ => None,
         }
     }
 
@@ -700,7 +644,7 @@ impl<'a> PartialEvaluator<'a> {
     // Reification (Value → Term)
     // =========================================================================
 
-    fn reify(&mut self, value: Value, ty: &Type<TypeName>, span: Span) -> Term {
+    fn reify(&mut self, value: Value, ty: &Type<TypeName>, span: Span) -> Term<Empty, Empty> {
         match value {
             Value::Int(n) => self.mk_term(ty.clone(), span, TermKind::IntLit(n.to_string())),
             Value::Float(f) => self.mk_term(ty.clone(), span, TermKind::FloatLit(f as f32)),
@@ -714,94 +658,117 @@ impl<'a> PartialEvaluator<'a> {
     }
 
     /// Binder-aware walk that replaces every free `Var(VarRef::Symbol(sym))`
-    /// (one not bound by an enclosing `Let`/`Lambda`) with the reified
-    /// `env[sym]` value, if any. Used when residualizing nodes like `Soac`
-    /// and `ArrayExpr` that the evaluator would otherwise clone wholesale —
-    /// without this, an enclosing `let m = lit in soac(..., m)` dissolves
-    /// the let and leaves a dangling `Var(m)` inside the SOAC.
+    /// with the reified `env[sym]` value, if any. Used when residualizing
+    /// nodes like `Soac` and `ArrayExpr` that the evaluator would otherwise
+    /// clone wholesale: without it, an enclosing `let m = lit in soac(...,
+    /// m)` dissolves the let and leaves a dangling `Var(m)` inside the SOAC.
     ///
     /// `bound` tracks symbols currently in scope (shadowing env). It's
     /// mutated in place as we descend into binders and restored on exit.
-    fn substitute_residual_vars(&mut self, term: Term, bound: &mut LookupSet<SymbolId>) -> Term {
-        let ty = term.ty.clone();
-        let span = term.span;
-        match term.kind {
-            TermKind::Var(VarRef::Symbol(name)) => {
-                if !bound.contains(&name) {
-                    if let Some(val) = self.env.get(&name).cloned() {
-                        return self.reify(val, &ty, span);
-                    }
-                }
-                Term {
-                    id: term.id,
-                    ty,
-                    span,
-                    kind: TermKind::Var(VarRef::Symbol(name)),
-                }
-            }
-            TermKind::Let {
-                name,
-                name_ty,
-                rhs,
-                body,
-            } => {
-                let new_rhs = self.substitute_residual_vars(*rhs, bound);
-                let added = bound.insert(name);
-                let new_body = self.substitute_residual_vars(*body, bound);
-                if added {
-                    bound.remove(&name);
-                }
-                Term {
-                    id: term.id,
-                    ty,
-                    span,
-                    kind: TermKind::Let {
-                        name,
-                        name_ty,
-                        rhs: Box::new(new_rhs),
-                        body: Box::new(new_body),
-                    },
-                }
-            }
-            TermKind::Lambda(lam) => {
-                let mut added: Vec<SymbolId> = Vec::new();
-                for (p, _) in &lam.params {
-                    if bound.insert(*p) {
-                        added.push(*p);
-                    }
-                }
-                let new_body = self.substitute_residual_vars(*lam.body, bound);
-                for p in added {
-                    bound.remove(&p);
-                }
-                Term {
-                    id: term.id,
-                    ty,
-                    span,
-                    kind: TermKind::Lambda(Lambda {
-                        params: lam.params,
-                        body: Box::new(new_body),
-                        ret_ty: lam.ret_ty,
-                    }),
-                }
-            }
-            other => {
-                // Non-binder: recurse through every Term child via
-                // `map_children` (which covers App, If, Soac, ArrayExpr,
-                // Tuple, etc. recursively at the structural level).
-                let outer = Term {
-                    id: term.id,
-                    ty: ty.clone(),
-                    span,
-                    kind: other,
-                };
-                let fresh_id = self.term_ids.next_id();
-                outer.map_children(fresh_id, &mut |child| self.substitute_residual_vars(child, bound))
-            }
-        }
+    fn substitute_residual_vars(
+        &mut self,
+        term: Term<Empty, Empty>,
+        bound: &mut LookupSet<SymbolId>,
+    ) -> Term<Empty, Empty> {
+        let mut term = term;
+        self.substitute_residual_vars_tracked(&mut term, bound);
+        term
     }
 
-    fn reify_tuple(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
+    /// Mutate an exclusively owned residual tree in place and report whether
+    /// this subtree changed. Boxes and vectors survive unchanged; only a
+    /// replaced variable and its ancestor path receive fresh IDs.
+    fn substitute_residual_vars_tracked(
+        &mut self,
+        term: &mut Term<Empty, Empty>,
+        bound: &mut LookupSet<SymbolId>,
+    ) -> bool {
+        let replacement = match &term.kind {
+            TermKind::Var(VarRef::Symbol(name)) if !bound.contains(name) => self.env.get(name).cloned(),
+            _ => None,
+        };
+        if let Some(value) = replacement {
+            *term = self.reify(value, &term.ty.clone(), term.span);
+            return true;
+        }
+
+        let changed = match &mut term.kind {
+            TermKind::Let { name, rhs, body, .. } => {
+                let rhs_changed = self.substitute_residual_vars_tracked(rhs, bound);
+                let added = bound.insert(*name);
+                let body_changed = self.substitute_residual_vars_tracked(body, bound);
+                if added {
+                    bound.remove(name);
+                }
+                rhs_changed || body_changed
+            }
+            TermKind::Lambda(lam) => {
+                let added = add_bound_symbols(bound, lam.params.iter().map(|(name, _)| *name));
+                let changed = self.substitute_residual_vars_tracked(&mut lam.body, bound);
+                remove_bound_symbols(bound, added);
+                changed
+            }
+            TermKind::Loop {
+                loop_var,
+                init,
+                init_bindings,
+                kind,
+                body,
+                ..
+            } => {
+                let mut changed = self.substitute_residual_vars_tracked(init, bound);
+
+                let loop_var_added = bound.insert(*loop_var);
+                for (_, _, extraction) in init_bindings.iter_mut() {
+                    changed |= self.substitute_residual_vars_tracked(extraction, bound);
+                }
+                if loop_var_added {
+                    bound.remove(loop_var);
+                }
+
+                let iteration_var = match kind {
+                    LoopKind::For { var, iter, .. } => {
+                        changed |= self.substitute_residual_vars_tracked(iter, bound);
+                        Some(*var)
+                    }
+                    LoopKind::ForRange {
+                        var, bound: limit, ..
+                    } => {
+                        changed |= self.substitute_residual_vars_tracked(limit, bound);
+                        Some(*var)
+                    }
+                    LoopKind::While { cond } => {
+                        changed |= self.substitute_residual_vars_tracked(cond, bound);
+                        None
+                    }
+                };
+
+                let added = add_bound_symbols(
+                    bound,
+                    std::iter::once(*loop_var)
+                        .chain(init_bindings.iter().map(|(name, _, _)| *name))
+                        .chain(iteration_var),
+                );
+                changed |= self.substitute_residual_vars_tracked(body, bound);
+                remove_bound_symbols(bound, added);
+                changed
+            }
+            _ => {
+                let mut changed = false;
+                term.for_each_child_mut(&mut |child| {
+                    changed |= self.substitute_residual_vars_tracked(child, bound);
+                });
+                changed
+            }
+        };
+
+        if changed {
+            term.id = self.term_ids.next_id();
+        }
+        changed
+    }
+
+    fn reify_tuple(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term<Empty, Empty> {
         let component_types = match ty {
             Type::Constructed(TypeName::Tuple(_), args) => args.as_slice(),
             other => panic!(
@@ -816,7 +783,7 @@ impl<'a> PartialEvaluator<'a> {
             elems.len(),
             component_types.len(),
         );
-        let part_terms: Vec<Term> = elems
+        let part_terms: Vec<Term<Empty, Empty>> = elems
             .into_iter()
             .zip(component_types.iter())
             .map(|(elem, elem_ty)| self.reify(elem, elem_ty, span))
@@ -824,14 +791,14 @@ impl<'a> PartialEvaluator<'a> {
         self.mk_term(ty.clone(), span, TermKind::Tuple(part_terms))
     }
 
-    fn reify_array(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
+    fn reify_array(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term<Empty, Empty> {
         let elem_ty = crate::types::array_elem(ty).cloned().unwrap_or_else(|| {
             panic!(
                 "reify_array dispatched on non-array type {ty:?} — \
                  caller (`reify` for Value::Array) is responsible for the type shape"
             )
         });
-        let part_terms: Vec<Term> =
+        let part_terms: Vec<Term<Empty, Empty>> =
             elems.into_iter().map(|elem| self.reify(elem, &elem_ty, span)).collect();
         self.mk_term(
             ty.clone(),
@@ -840,14 +807,14 @@ impl<'a> PartialEvaluator<'a> {
         )
     }
 
-    fn reify_vector(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
+    fn reify_vector(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term<Empty, Empty> {
         let elem_ty = ty.elem_type().cloned().unwrap_or_else(|| {
             panic!(
                 "reify_vector dispatched on non-vec type {ty:?} — \
                  caller (`reify` for Value::Vector) is responsible for the type shape"
             )
         });
-        let part_terms: Vec<Term> =
+        let part_terms: Vec<Term<Empty, Empty>> =
             elems.into_iter().map(|elem| self.reify(elem, &elem_ty, span)).collect();
         self.mk_term(ty.clone(), span, TermKind::VecLit(part_terms))
     }
@@ -858,9 +825,9 @@ impl<'a> PartialEvaluator<'a> {
         args: Vec<(Value, Type<TypeName>)>,
         ty: &Type<TypeName>,
         span: Span,
-    ) -> Term {
+    ) -> Term<Empty, Empty> {
         let func_term = self.mk_term(ty.clone(), span, TermKind::Var(VarRef::Symbol(sym)));
-        let arg_terms: Vec<Term> =
+        let arg_terms: Vec<Term<Empty, Empty>> =
             args.into_iter().map(|(arg, arg_ty)| self.reify(arg, &arg_ty, span)).collect();
         self.mk_term(
             ty.clone(),
@@ -872,13 +839,18 @@ impl<'a> PartialEvaluator<'a> {
         )
     }
 
-    fn reify_call(&mut self, sym: SymbolId, args: Vec<(Value, Type<TypeName>)>, original: &Term) -> Value {
+    fn reify_call(
+        &mut self,
+        sym: SymbolId,
+        args: Vec<(Value, Type<TypeName>)>,
+        original: &Term<Empty, Empty>,
+    ) -> Value {
         let func_term = self.mk_term(
             original.ty.clone(),
             original.span,
             TermKind::Var(VarRef::Symbol(sym)),
         );
-        let arg_terms: Vec<Term> =
+        let arg_terms: Vec<Term<Empty, Empty>> =
             args.into_iter().map(|(arg, arg_ty)| self.reify(arg, &arg_ty, original.span)).collect();
         let result = self.mk_term(
             original.ty.clone(),
@@ -891,7 +863,13 @@ impl<'a> PartialEvaluator<'a> {
         Value::Unknown(result)
     }
 
-    fn reify_if(&mut self, cond: Value, then_val: Value, else_val: Value, original: &Term) -> Value {
+    fn reify_if(
+        &mut self,
+        cond: Value,
+        then_val: Value,
+        else_val: Value,
+        original: &Term<Empty, Empty>,
+    ) -> Value {
         let cond_term = self.reify(cond, &Type::Constructed(TypeName::Bool, vec![]), original.span);
         let then_term = self.reify(then_val, &original.ty, original.span);
         let else_term = self.reify(else_val, &original.ty, original.span);
@@ -907,13 +885,82 @@ impl<'a> PartialEvaluator<'a> {
         ))
     }
 
-    fn mk_term(&mut self, ty: Type<TypeName>, span: Span, kind: TermKind) -> Term {
+    fn mk_term(
+        &mut self,
+        ty: Type<TypeName>,
+        span: Span,
+        kind: TermKind<Empty, Empty>,
+    ) -> Term<Empty, Empty> {
         Term {
             id: self.term_ids.next_id(),
             ty,
             span,
             kind,
         }
+    }
+}
+
+fn add_bound_symbols(
+    bound: &mut LookupSet<SymbolId>,
+    symbols: impl IntoIterator<Item = SymbolId>,
+) -> Vec<SymbolId> {
+    symbols.into_iter().filter(|symbol| bound.insert(*symbol)).collect()
+}
+
+fn remove_bound_symbols(bound: &mut LookupSet<SymbolId>, symbols: Vec<SymbolId>) {
+    for symbol in symbols {
+        bound.remove(&symbol);
+    }
+}
+
+/// Constant folding is a node-local residual-tree rewrite. The generic
+/// rewriter supplies the bottom-up traversal, preserves unchanged storage,
+/// and refreshes IDs only along changed paths.
+struct ResidualConstantFolder<'e, 'ids> {
+    evaluator: &'e mut PartialEvaluator<'ids>,
+}
+
+impl TermRewriter<Empty, Empty> for ResidualConstantFolder<'_, '_> {
+    fn next_term_id(&mut self) -> TermId {
+        self.evaluator.term_ids.next_id()
+    }
+
+    fn rewrite_node(&mut self, term: &mut Term<Empty, Empty>) -> RewriteDecision {
+        let ty = term.ty.clone();
+        let folded = {
+            let TermKind::App { func, args } = &term.kind else {
+                return RewriteDecision::Unchanged;
+            };
+            let Some(args) = args
+                .iter()
+                .map(|arg| self.evaluator.literal_value(arg).map(|value| (value, arg.ty.clone())))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return RewriteDecision::Unchanged;
+            };
+
+            match &func.kind {
+                TermKind::BinOp(op) if args.len() >= 2 => {
+                    self.evaluator.eval_binop(op, &args[0].0, &args[1].0, &args[0].1)
+                }
+                TermKind::UnOp(op) if !args.is_empty() => self.evaluator.eval_unop(op, &args[0].0),
+                TermKind::Var(VarRef::Builtin { id, overload_idx }) => {
+                    self.evaluator.eval_builtin(*id, *overload_idx, &args, &ty)
+                }
+                _ => None,
+            }
+        };
+
+        let Some(value) = folded else {
+            return RewriteDecision::Unchanged;
+        };
+        term.kind = match value {
+            Value::Int(value) => TermKind::IntLit(value.to_string()),
+            Value::Float(value) => TermKind::FloatLit(value as f32),
+            Value::Bool(value) => TermKind::BoolLit(value),
+            _ => unreachable!("scalar residual folder produced a non-scalar value"),
+        };
+        RewriteDecision::Changed
     }
 }
 

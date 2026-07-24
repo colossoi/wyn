@@ -5,6 +5,7 @@
 use super::{run, ConversionArenas, Converter};
 use crate::ast::TypeName;
 use crate::ssa::types::{FuncBody, InstKind, Program};
+use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::VarRef;
 use crate::tlc::{Term, TermKind};
 use crate::SymbolId;
@@ -17,14 +18,11 @@ use std::collections::{HashMap, HashSet};
 /// → elaborate`) to a `Program`. No `materialize` — tests don't exercise
 /// SPIR-V-specific dynamic-index rewrites.
 fn compile_via_egir(src: &str) -> Program {
-    let tlc = crate::test_pipeline::compile_to_reachable(src);
-
-    let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc.tlc);
+    let tlc = crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(src));
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
     crate::EgirRaw {
-        inner: run(&tlc.tlc, &bounds, &mut binding_ids, &mut effect_ids)
-            .expect("egir::from_tlc conversion failed"),
+        inner: run(&tlc, &mut binding_ids, &mut effect_ids).expect("egir::from_tlc conversion failed"),
         binding_ids,
         effect_ids,
     }
@@ -48,7 +46,11 @@ fn i32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Int(32), vec![])
 }
 
-fn mk_term(ids: &mut TermIdSource, ty: Type<TypeName>, kind: TermKind) -> Term {
+fn mk_term(
+    ids: &mut TermIdSource,
+    ty: Type<TypeName>,
+    kind: TermKind<ExplicitClosurePayload, ExplicitCapturesPayload>,
+) -> Term<ExplicitClosurePayload, ExplicitCapturesPayload> {
     Term {
         id: ids.next_id(),
         ty,
@@ -85,7 +87,10 @@ fn elaborate_converter(
 }
 
 /// Build a minimal TLC def and convert it via EGraph.
-fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> FuncBody {
+fn convert_simple_def(
+    body: Term<ExplicitClosurePayload, ExplicitCapturesPayload>,
+    params: Vec<(SymbolId, Type<TypeName>)>,
+) -> FuncBody {
     let symbols = SymbolTable::new();
     let top_level = HashMap::new();
     let constants_by_name = HashMap::new();
@@ -632,12 +637,10 @@ def wrapper(x: i32) i32 =
 #[compute]
 entry e(xs: []i32) []i32 = map(wrapper, xs)
 "#;
-    let tlc = crate::test_pipeline::compile_to_reachable(source);
-    let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc.tlc);
+    let tlc = crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(source));
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
-    let raw = run(&tlc.tlc, &bounds, &mut binding_ids, &mut effect_ids)
-        .expect("TLC-to-EGIR construction succeeds");
+    let raw = run(&tlc, &mut binding_ids, &mut effect_ids).expect("TLC-to-EGIR construction succeeds");
     let wrapper = raw.functions.iter().find(|function| function.name == "wrapper").unwrap();
 
     assert!(wrapper.graph.nodes.values().any(|node| matches!(
@@ -669,6 +672,7 @@ fn construction_purity_propagates_effectful_builtin_calls() {
     let array_consumer = symbols.alloc("array_consumer".into());
     let ty = i32_ty();
     let definition = |name, body| Def {
+        data: (),
         name,
         ty: ty.clone(),
         body,
@@ -714,6 +718,7 @@ fn construction_purity_propagates_effectful_builtin_calls() {
             definition(reads_storage, storage_read),
             definition(calls_reader, direct_call),
             Def {
+                data: (),
                 name: array_consumer,
                 ty: Type::Constructed(
                     TypeName::Arrow,
@@ -736,6 +741,9 @@ fn construction_purity_propagates_effectful_builtin_calls() {
         .into_iter()
         .collect(),
         term_ids,
+        crate::tlc::context::BackendGlobal {
+            auto_storage_binding_ids: crate::IdSource::new(),
+        },
     );
 
     let pure = super::infer_pure_definitions(&program);
@@ -774,9 +782,8 @@ entry vertex_main(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: 
   (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) =
   (@[position.x, position.y, position.z, 1.0], color)
 "#;
-    let tlc = crate::test_pipeline::compile_to_reachable(src);
-
-    let mut tlc_program = tlc.tlc.clone();
+    let mut tlc_program =
+        crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(src));
 
     // Mutate the vertex entry's `def.ty` arrow-return position to wrap
     // the result tuple in `TypeName::Unique`. `inner_body.ty` stays
@@ -788,15 +795,14 @@ entry vertex_main(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: 
         .find(|d| tlc_program.symbols.get(d.name).map(|n| n == "vertex_main").unwrap_or(false))
         .expect("vertex_main def");
     assert!(
-        matches!(&def.meta, DefMeta::EntryPoint(e) if !e.entry_type.is_compute()),
+        matches!(&def.meta, DefMeta::EntryPoint(e) if !e.declaration.entry_type.is_compute()),
         "precondition: vertex_main is a graphics entry"
     );
     wrap_arrow_return_in_marker(&mut def.ty);
 
-    let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc_program);
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
-    let egir = super::run(&tlc_program, &bounds, &mut binding_ids, &mut effect_ids)
+    let egir = super::run(&tlc_program, &mut binding_ids, &mut effect_ids)
         .expect("from_tlc::run on graphics entry must succeed");
     let entry =
         egir.entry_points.iter().find(|e| e.name == "vertex_main").expect("vertex_main SemanticEntry");

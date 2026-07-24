@@ -60,17 +60,17 @@ impl TreeNode {
 mod tlc_tree {
     use super::TreeNode;
     use wyn_core::ast::TypeName;
-    use wyn_core::tlc::{Def, DefMeta, LoopKind, Program, Term, TermKind};
+    use wyn_core::tlc::{Def, DefMeta, Family, LoopKind, Payload, Program, Stage, Term, TermKind};
 
     fn fmt_ty(ty: &polytype::Type<TypeName>) -> String {
         wyn_core::diags::format_type(ty)
     }
 
-    pub fn program_to_tree(program: &Program) -> Vec<TreeNode> {
+    pub fn program_to_tree<S: Stage>(program: &Program<S>) -> Vec<TreeNode> {
         program.defs.iter().map(def_to_tree).collect()
     }
 
-    fn def_to_tree(def: &Def) -> TreeNode {
+    fn def_to_tree<F: Family>(def: &Def<F>) -> TreeNode {
         let meta = match &def.meta {
             DefMeta::Function => "fn",
             DefMeta::EntryPoint(_) => "entry",
@@ -80,7 +80,7 @@ mod tlc_tree {
         TreeNode::branch(label, vec![term_to_tree(&def.body)])
     }
 
-    fn term_to_tree(term: &Term) -> TreeNode {
+    fn term_to_tree<C: Payload, S: Payload>(term: &Term<C, S>) -> TreeNode {
         let ty = fmt_ty(&term.ty);
         match &term.kind {
             TermKind::Var(wyn_core::tlc::VarRef::Symbol(name)) => {
@@ -155,12 +155,13 @@ mod tlc_tree {
                 children.push(TreeNode::branch("body", vec![term_to_tree(body)]));
                 TreeNode::branch(label, children)
             }
+            TermKind::Closure(_) => TreeNode::leaf(format!("<closure> : {}", ty)),
             TermKind::Soac(_) | TermKind::ArrayExpr(_) => TreeNode::leaf(format!("<soac> : {}", ty)),
             other => TreeNode::leaf(format!("{:?} : {}", other, ty)),
         }
     }
 
-    fn loop_kind_to_tree(kind: &LoopKind) -> TreeNode {
+    fn loop_kind_to_tree<C: Payload, S: Payload>(kind: &LoopKind<C, S>) -> TreeNode {
         match kind {
             LoopKind::For { var, var_ty, iter } => TreeNode::branch(
                 format!("for {} : {}", var, fmt_ty(var_ty)),
@@ -589,33 +590,33 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         Err(e) => return CompileResultWgsl::err(e),
     };
 
-    let tlc_program = match type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_buffers()
-        .and_then(wyn_core::TlcBuffersPinned::validate_ownership)
-    {
+    let program = type_checked.to_tlc(&module_manager, false);
+    let program = match wyn_core::tlc::pin_entry_buffers(program) {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err(e),
     };
-    let tlc_after_partial_eval = tlc_program.partial_eval();
-    let tlc_tree = tlc_tree::program_to_tree(&tlc_after_partial_eval.tlc);
-
-    let tlc_normed = tlc_after_partial_eval.normalize_soacs();
-    let tlc_mono = tlc_normed.monomorphize();
-    let tlc_rep_specialized = tlc_mono.rep_specialize();
-    let tlc_inlined = tlc_rep_specialized.inline_small();
-    let tlc_force_inlined = tlc_inlined.force_inline_soac_helpers();
-    let tlc_inlined_soa = tlc_force_inlined.renormalize_inlined_soa();
-    let tlc_conditional_producers = tlc_inlined_soa.canonicalize_conditional_producers();
-    let tlc_soac_anf = tlc_conditional_producers.normalize_soacs_to_anf();
-    let tlc_runtime_floated = tlc_soac_anf.float_runtime_index_nested_producers();
-    let tlc_defunc = tlc_runtime_floated.defunctionalize();
-    let tlc_folded = tlc_defunc.fold_generated_lambdas();
-    let tlc_with_ownership = match tlc_folded.apply_ownership() {
+    let program = match wyn_core::tlc::validate_ownership(program) {
         Ok(t) => t,
-        Err(e) => return CompileResultWgsl::err_msg(format!("apply_ownership: {:?}", e)),
+        Err(e) => return CompileResultWgsl::err(e),
     };
-    let raw = match tlc_with_ownership.filter_reachable().infer_input_slice_bounds().to_egraph() {
+    let program = wyn_core::tlc::partial_eval(program);
+    let tlc_tree = tlc_tree::program_to_tree(&program);
+
+    let program = wyn_core::tlc::normalize_soacs(program);
+    let program = wyn_core::tlc::monomorphize(program);
+    let program = wyn_core::tlc::rep_specialize(program);
+    let program = wyn_core::tlc::inline_small(program);
+    let program = wyn_core::tlc::force_inline_soac_helpers(program);
+    let program = wyn_core::tlc::renormalize_inlined_soa(program);
+    let program = wyn_core::tlc::canonicalize_conditional_producers(program);
+    let program = wyn_core::tlc::normalize_soacs_to_anf(program);
+    let program = wyn_core::tlc::float_runtime_index_nested_producers(program);
+    let program = wyn_core::tlc::defunctionalize(program);
+    let program = wyn_core::tlc::fold_generated_lambdas(program);
+    let program = wyn_core::tlc::apply_ownership(program);
+    let program = wyn_core::tlc::filter_reachable(program);
+    let program = wyn_core::tlc::infer_input_slice_bounds(program);
+    let raw = match wyn_core::to_egraph(program) {
         Ok(s) => s,
         Err(e) => return CompileResultWgsl::err_msg(format!("SSA conversion error: {:?}", e)),
     };

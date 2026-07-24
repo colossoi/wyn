@@ -755,7 +755,7 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::tlc;
 
-impl Display for tlc::Program {
+impl<S: tlc::Stage> Display for tlc::Program<S> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         for (i, def) in self.defs.iter().enumerate() {
             if i > 0 {
@@ -768,19 +768,19 @@ impl Display for tlc::Program {
     }
 }
 
-impl Display for tlc::Def {
+impl<F: tlc::Family> Display for tlc::Def<F> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{} = {}", self.name, self.body)
     }
 }
 
-impl Display for tlc::Term {
+impl<C: tlc::Payload, S: tlc::Payload> Display for tlc::Term<C, S> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         self.fmt_prec(f, 0)
     }
 }
 
-impl tlc::Term {
+impl<C: tlc::Payload, S: tlc::Payload> tlc::Term<C, S> {
     fn fmt_prec(&self, f: &mut Formatter<'_>, prec: usize) -> fmt::Result {
         match &self.kind {
             tlc::TermKind::Var(VarRef::Symbol(name)) => write!(f, "{}", name),
@@ -801,6 +801,8 @@ impl tlc::Term {
                 }
                 Ok(())
             }
+
+            tlc::TermKind::Closure(_) => write!(f, "<closure>"),
 
             tlc::TermKind::App { func, args } => {
                 if prec > 1 {

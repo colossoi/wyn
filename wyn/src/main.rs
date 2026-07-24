@@ -276,69 +276,85 @@ fn compile_file(
     } = type_check_frontend_file(&input, !fill_holes, verbose)?;
 
     // Transform to TLC (including prelude code - transformed here for consistent type variables)
-    let tlc_transformed = time("to_tlc", verbose, || {
-        type_checked.to_tlc(&module_manager, fill_holes).pin_entry_buffers()
-    })?;
+    let mut program = time("to_tlc", verbose, || {
+        type_checked.to_tlc(&module_manager, fill_holes)
+    });
 
     // Surface any hole-fill errors collected during TLC transform.
     // Aggregate into one multi-line error so the exit-code branch in
-    // `main` prints them once with code 2. Access the inner field
-    // directly (not through the Deref) so we can take ownership.
-    if !tlc_transformed.0.fill_hole_errors.is_empty() {
-        let mut tlc_transformed = tlc_transformed;
+    // `main` prints them once with code 2.
+    if !program.global_context.fill_hole_errors.is_empty() {
         let msgs: Vec<String> =
-            tlc_transformed.0.fill_hole_errors.drain(..).map(|e| format!("{e}")).collect();
+            program.global_context.fill_hole_errors.drain(..).map(|e| format!("{e}")).collect();
         return Err(wyn_core::err_type_hole!("{}", msgs.join("\n")).into());
     }
 
     // Output TLC if requested (before optimization)
     if let Some(ref tlc_path) = output_tlc {
-        fs::write(tlc_path, format!("{}", tlc_transformed.tlc))?;
+        fs::write(tlc_path, format!("{program}"))?;
         if verbose {
             info!("Wrote TLC to {}", tlc_path.display());
         }
     }
 
-    let tlc_validated = time("validate_ownership", verbose, || {
-        tlc_transformed.validate_ownership()
+    let program = time("pin_entry_buffers", verbose, || {
+        wyn_core::tlc::pin_entry_buffers(program)
     })?;
-    let tlc_optimized = time("tlc_partial_eval", verbose, || tlc_validated.partial_eval());
-
-    let tlc_normed = time("normalize_soacs", verbose, || tlc_optimized.normalize_soacs());
-    let tlc_mono = time("tlc_monomorphize", verbose, || tlc_normed.monomorphize());
-    let tlc_rep_specialized = time("tlc_rep_specialize", verbose, || tlc_mono.rep_specialize());
-    let tlc_inlined = time("tlc_inline_small", verbose, || tlc_rep_specialized.inline_small());
-    let tlc_force_inlined = time("force_inline_soac_helpers", verbose, || {
-        tlc_inlined.force_inline_soac_helpers()
+    let program = time("validate_ownership", verbose, || {
+        wyn_core::tlc::validate_ownership(program)
+    })?;
+    let program = time("tlc_partial_eval", verbose, || {
+        wyn_core::tlc::partial_eval(program)
     });
-    let tlc_inlined_soa = time("renormalize_inlined_soa", verbose, || {
-        tlc_force_inlined.renormalize_inlined_soa()
+    let program = time("normalize_soacs", verbose, || {
+        wyn_core::tlc::normalize_soacs(program)
     });
-    let tlc_conditional_producers = time("canonicalize_conditional_producers", verbose, || {
-        tlc_inlined_soa.canonicalize_conditional_producers()
+    let program = time("tlc_monomorphize", verbose, || {
+        wyn_core::tlc::monomorphize(program)
     });
-    let tlc_soac_anf = time("normalize_soacs_to_anf", verbose, || {
-        tlc_conditional_producers.normalize_soacs_to_anf()
+    let program = time("tlc_rep_specialize", verbose, || {
+        wyn_core::tlc::rep_specialize(program)
     });
-    let tlc_runtime_floated = time("expose_runtime_index_producers", verbose, || {
-        tlc_soac_anf.float_runtime_index_nested_producers()
+    let program = time("tlc_inline_small", verbose, || {
+        wyn_core::tlc::inline_small(program)
     });
-    let tlc_defunc = time("defunctionalize", verbose, || {
-        tlc_runtime_floated.defunctionalize()
+    let program = time("force_inline_soac_helpers", verbose, || {
+        wyn_core::tlc::force_inline_soac_helpers(program)
     });
-    let tlc_folded = time("inline", verbose, || tlc_defunc.fold_generated_lambdas());
+    let program = time("renormalize_inlined_soa", verbose, || {
+        wyn_core::tlc::renormalize_inlined_soa(program)
+    });
+    let program = time("canonicalize_conditional_producers", verbose, || {
+        wyn_core::tlc::canonicalize_conditional_producers(program)
+    });
+    let program = time("normalize_soacs_to_anf", verbose, || {
+        wyn_core::tlc::normalize_soacs_to_anf(program)
+    });
+    let program = time("expose_runtime_index_producers", verbose, || {
+        wyn_core::tlc::float_runtime_index_nested_producers(program)
+    });
+    let program = time("defunctionalize", verbose, || {
+        wyn_core::tlc::defunctionalize(program)
+    });
+    let program = time("inline", verbose, || {
+        wyn_core::tlc::fold_generated_lambdas(program)
+    });
 
     // TLC establishes uniqueness candidates. EGIR owns post-fusion liveness,
     // output routes, resources, and physical entry structure.
-    let tlc_owned = time("apply_ownership", verbose, || tlc_folded.apply_ownership())?;
+    let program = time("apply_ownership", verbose, || {
+        wyn_core::tlc::apply_ownership(program)
+    });
     // Eliminate dead TLC defs
-    let tlc_reachable = time("tlc_filter_reachable", verbose, || tlc_owned.filter_reachable());
+    let program = time("tlc_filter_reachable", verbose, || {
+        wyn_core::tlc::filter_reachable(program)
+    });
 
     // Build raw EGIR, then cross each semantic and physical typestate boundary.
-    let tlc_with_bounds = time("infer_input_slice_bounds", verbose, || {
-        tlc_reachable.infer_input_slice_bounds()
+    let program = time("infer_input_slice_bounds", verbose, || {
+        wyn_core::tlc::infer_input_slice_bounds(program)
     });
-    let raw = time("to_egraph", verbose, || tlc_with_bounds.to_egraph())?;
+    let raw = time("to_egraph", verbose, || wyn_core::to_egraph(program))?;
     let outputs_realized = time("egir_realize_outputs", verbose, || raw.realize_outputs())?;
     let segmented = time("egir_segment", verbose, || outputs_realized.segment());
     let optimized = time("egir_optimize", verbose, || segmented.optimize());
@@ -437,7 +453,9 @@ fn check_file(input: PathBuf, verbose: bool) -> Result<(), DriverError> {
         module_manager,
     } = type_check_frontend_file(&input, true, verbose)?;
 
-    type_checked.to_tlc(&module_manager, false).pin_entry_buffers()?.validate_ownership()?;
+    let program = type_checked.to_tlc(&module_manager, false);
+    let program = wyn_core::tlc::pin_entry_buffers(program)?;
+    wyn_core::tlc::validate_ownership(program)?;
 
     if verbose {
         info!("✓ {} is valid", input.display());

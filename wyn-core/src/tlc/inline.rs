@@ -1,17 +1,45 @@
-//! TLC inlining pass.
+//! TLC inlining passes.
 //!
-//! Runs after monomorphization, before SoA transform and SSA conversion.
-//! Inlines small function bodies at call sites and into SOAC lambda bodies.
-//! Everything is first-order and monomorphic at this point.
+//! The monomorphic passes inline small functions/constants and force array-work
+//! helpers across call boundaries. After defunctionalization, the same generic
+//! inliner folds compiler-generated lifted lambdas back into their call sites.
 
+use super::data::{Empty, ExplicitCapturesPayload, ExplicitClosurePayload};
+use super::defunctionalize::{ClosureConverted, Defunctionalized};
+use super::rep_specialize::RepSpecialized;
 use super::VarRef;
 use super::{
-    collect_var_refs, extract_lambda_params, term_size, Def, DefMeta, Program, Term, TermIdSource, TermKind,
+    clone_term_with_fresh_ids, extract_lambda_params, term_size, Def, DefMeta, Payload, Program,
+    RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter,
 };
 use crate::ast::{Span, TypeName};
 use crate::{LookupMap, LookupSet};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SmallInlined;
+
+impl super::Stage for SmallInlined {
+    type Family = super::monomorphize::Monomorphic;
+    type GlobalContext = super::context::RewriteGlobal;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SoacHelpersInlined;
+
+impl super::Stage for SoacHelpersInlined {
+    type Family = super::monomorphize::Monomorphic;
+    type GlobalContext = super::context::RewriteGlobal;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GeneratedLambdasFolded;
+
+impl super::Stage for GeneratedLambdasFolded {
+    type Family = super::defunctionalize::ClosureConverted;
+    type GlobalContext = super::context::PostClosureGlobal;
+}
 
 /// Maximum term size for a user function to be inlined.
 const INLINE_SIZE_THRESHOLD: usize = 30;
@@ -28,14 +56,15 @@ const INLINE_SIZE_THRESHOLD: usize = 30;
 /// SOAC helper) fully expand: one round inlines `center`, the next sees
 /// `sum` calls inside the freshly-expanded clump body and inlines those
 /// too.
-pub fn run_force_soac_helpers(program: &mut Program) {
-    force_inline_array_work_helpers_to_fixpoint(program);
+pub fn run_force_soac_helpers(mut program: Program<SmallInlined>) -> Program<SoacHelpersInlined> {
+    force_inline_array_work_helpers_to_fixpoint(&mut program);
     debug_assert!(
-        verify_array_work_helpers_inlined(program).is_ok(),
+        verify_array_work_helpers_inlined(&program).is_ok(),
         "force-inline left an array-work helper behind a call boundary; \
          semantic EGIR would need an interprocedural path: {:?}",
-        verify_array_work_helpers_inlined(program).err(),
+        verify_array_work_helpers_inlined(&program).err(),
     );
+    program.into_stage()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -48,7 +77,9 @@ struct CalledArrayWorkHelper {
 /// source-level inlining as the one boundary operation that exposes every
 /// array-work helper before conversion, then let EGIR own all
 /// producer/consumer and scheduling decisions.
-fn verify_array_work_helpers_inlined(program: &Program) -> Result<(), Vec<CalledArrayWorkHelper>> {
+fn verify_array_work_helpers_inlined(
+    program: &Program<SmallInlined>,
+) -> Result<(), Vec<CalledArrayWorkHelper>> {
     let array_work_bearing: LookupSet<SymbolId> =
         program.defs.iter().filter(|def| contains_array_work(&def.body)).map(|def| def.name).collect();
     let mut violations = Vec::new();
@@ -63,7 +94,7 @@ fn verify_array_work_helpers_inlined(program: &Program) -> Result<(), Vec<Called
 }
 
 fn collect_called_array_work_helpers(
-    term: &Term,
+    term: &Term<Empty, Empty>,
     caller: SymbolId,
     array_work_bearing: &LookupSet<SymbolId>,
     out: &mut Vec<CalledArrayWorkHelper>,
@@ -83,7 +114,7 @@ fn collect_called_array_work_helpers(
     });
 }
 
-fn force_inline_array_work_helpers_to_fixpoint(program: &mut Program) {
+fn force_inline_array_work_helpers_to_fixpoint(program: &mut Program<SmallInlined>) {
     // Bound iterations to guard against pathological recursion through
     // hand-crafted call graphs; typical wyn helper depth is 2–3.
     for _ in 0..8 {
@@ -103,12 +134,13 @@ fn force_inline_array_work_helpers_to_fixpoint(program: &mut Program) {
             let body = inline_term(def.body, &candidates, term_ids);
             Def { body, ..def }
         });
-        let defs = std::mem::take(&mut program.defs);
-        program.defs = dead_code_eliminate(defs);
+        super::dce::eliminate_unreachable_defs(&mut program.defs);
     }
 }
 
-fn build_array_work_helper_candidates(program: &Program) -> LookupMap<SymbolId, InlineBody> {
+fn build_array_work_helper_candidates(
+    program: &Program<SmallInlined>,
+) -> LookupMap<SymbolId, InlineBody<Empty, Empty>> {
     let mut candidates = LookupMap::new();
     for def in &program.defs {
         if !matches!(def.meta, DefMeta::Function) {
@@ -163,7 +195,7 @@ fn type_contains_variable(ty: &Type<TypeName>) -> bool {
 /// True if any subterm's carried type contains a polytype `Variable` —
 /// or, equivalently, if the def's body still carries free type
 /// parameters that monomorphize would resolve.
-fn term_contains_free_type_variable(term: &Term) -> bool {
+fn term_contains_free_type_variable<C: Payload, S: Payload>(term: &Term<C, S>) -> bool {
     if type_contains_variable(&term.ty) {
         return true;
     }
@@ -180,7 +212,7 @@ fn term_contains_free_type_variable(term: &Term) -> bool {
 /// call. All must be visible in the caller so EGIR can build complete
 /// producer/use edges and derive dispatch extents without interprocedural
 /// summaries.
-pub(super) fn contains_array_work(term: &Term) -> bool {
+pub(super) fn contains_array_work<C: Payload, S: Payload>(term: &Term<C, S>) -> bool {
     if matches!(&term.kind, TermKind::Soac(_) | TermKind::ArrayExpr(_)) {
         return true;
     }
@@ -196,7 +228,7 @@ pub(super) fn contains_array_work(term: &Term) -> bool {
     found
 }
 
-fn is_length_intrinsic_call(term: &Term) -> bool {
+fn is_length_intrinsic_call<C: Payload, S: Payload>(term: &Term<C, S>) -> bool {
     let TermKind::App { func, args } = &term.kind else {
         return false;
     };
@@ -209,8 +241,11 @@ fn is_length_intrinsic_call(term: &Term) -> bool {
     *id == crate::builtins::catalog().known().length
 }
 
-fn any_def_calls_candidate(program: &Program, candidates: &LookupMap<SymbolId, InlineBody>) -> bool {
-    fn walk(term: &Term, cs: &LookupMap<SymbolId, InlineBody>) -> bool {
+fn any_def_calls_candidate(
+    program: &Program<SmallInlined>,
+    candidates: &LookupMap<SymbolId, InlineBody<Empty, Empty>>,
+) -> bool {
+    fn walk(term: &Term<Empty, Empty>, cs: &LookupMap<SymbolId, InlineBody<Empty, Empty>>) -> bool {
         if let TermKind::App { func, .. } = &term.kind {
             if let TermKind::Var(VarRef::Symbol(s)) = &func.kind {
                 if cs.contains_key(s) {
@@ -229,24 +264,6 @@ fn any_def_calls_candidate(program: &Program, candidates: &LookupMap<SymbolId, I
     program.defs.iter().any(|def| walk(&def.body, candidates))
 }
 
-// =============================================================================
-// Public API
-// =============================================================================
-
-/// Eliminate unreachable defs from a TLC program.
-///
-/// Preserves entry points, extern defs, and their transitive dependencies.
-pub fn run_reachable(program: &mut Program) {
-    let defs = std::mem::take(&mut program.defs);
-    program.defs = dead_code_eliminate(defs);
-    super::hof_specialize::verify_hof_specialized(program).unwrap_or_else(|e| {
-        panic!(
-            "hof-specialization verifier failed after filter_reachable: {:?}",
-            e
-        )
-    });
-}
-
 /// Inline small user functions and constants at their call/reference sites.
 ///
 /// This is the TLC equivalent of `ssa::ssa_inline::inline_small_functions`.
@@ -255,20 +272,24 @@ pub fn run_reachable(program: &mut Program) {
 /// - Constants (arity-0 defs, substituted at Var reference sites)
 ///
 /// Skips `LiftedLambda` defs (SOAC bodies) — handled by `inline()`.
-pub fn run_small(program: &mut Program) {
-    let all_constants = find_all_constants(program);
+pub fn run_small(mut program: Program<RepSpecialized>) -> Program<SmallInlined> {
+    let all_constants = find_all_constants(&program);
     let mut small_candidates = find_small_candidates(&program.defs, &program.symbols);
 
     if small_candidates.is_empty() && all_constants.is_empty() {
-        return;
+        return program.into_stage();
     }
 
     // Inline constants into small candidate bodies so that when we inline
     // the candidate into a call site, the inlined body doesn't carry stale
     // Var references to constants.
-    for (_sym, candidate) in &mut small_candidates {
-        candidate.body = inline_constants(candidate.body.clone(), &all_constants, &mut program.term_ids);
-    }
+    small_candidates = small_candidates
+        .into_iter()
+        .map(|(symbol, mut candidate)| {
+            candidate.body = inline_constants(candidate.body, &all_constants, &mut program.term_ids);
+            (symbol, candidate)
+        })
+        .collect();
 
     let term_ids = &mut program.term_ids;
     crate::map_in_place(&mut program.defs, |def| {
@@ -278,12 +299,12 @@ pub fn run_small(program: &mut Program) {
         Def { body, ..def }
     });
 
-    let defs = std::mem::take(&mut program.defs);
-    program.defs = dead_code_eliminate(defs);
+    super::dce::eliminate_unreachable_defs(&mut program.defs);
+    program.into_stage()
 }
 
 /// Inline compiler-generated lifted-lambda defs (`DefMeta::LiftedLambda`) in a TLC program.
-pub fn run_large(program: &mut Program) {
+pub fn fold_generated_lambdas(mut program: Program<Defunctionalized>) -> Program<GeneratedLambdasFolded> {
     let inline_candidates = find_inline_candidates(&program.defs, &program.symbols);
 
     let term_ids = &mut program.term_ids;
@@ -293,10 +314,10 @@ pub fn run_large(program: &mut Program) {
     });
 
     // DCE: remove defs not referenced by any entry point or reachable def.
-    let defs = std::mem::take(&mut program.defs);
-    program.defs = dead_code_eliminate(defs);
+    super::dce::eliminate_unreachable_defs(&mut program.defs);
 
     program.assert_flat_apps();
+    program.into_stage()
 }
 
 // =============================================================================
@@ -304,20 +325,23 @@ pub fn run_large(program: &mut Program) {
 // =============================================================================
 
 /// A function body ready for inlining: flat params + inner body.
-#[derive(Clone)]
-struct InlineBody {
+struct InlineBody<C: Payload, S: Payload> {
     params: Vec<(SymbolId, Type<TypeName>)>,
-    body: Term,
+    body: Term<C, S>,
 }
 
 /// Find small user functions suitable for inlining.
 ///
 /// A function qualifies if:
-/// - It's a `DefMeta::Function` (lifted lambdas are handled by `run_large`)
+/// - It's a `DefMeta::Function` (lifted lambdas are handled by
+///   `fold_generated_lambdas`)
 /// - It has parameters (not a constant)
 /// - Its body is small (term_size ≤ threshold)
 /// - Its body has no control flow (If, Loop) or SOACs
-fn find_small_candidates(defs: &[Def], _symbols: &SymbolTable) -> LookupMap<SymbolId, InlineBody> {
+fn find_small_candidates(
+    defs: &[Def<super::monomorphize::Monomorphic>],
+    _symbols: &SymbolTable,
+) -> LookupMap<SymbolId, InlineBody<Empty, Empty>> {
     let mut candidates = LookupMap::new();
 
     for def in defs {
@@ -352,10 +376,10 @@ fn find_small_candidates(defs: &[Def], _symbols: &SymbolTable) -> LookupMap<Symb
 /// A constant is an arity-0, non-entry, non-extern function def.
 /// After monomorphization, the same constant name may be referenced through
 /// different SymbolIds, so we index by name as well as by def SymbolId.
-fn find_all_constants(program: &Program) -> LookupMap<SymbolId, Term> {
+fn find_all_constants(program: &Program<RepSpecialized>) -> LookupMap<SymbolId, Term<Empty, Empty>> {
     // Find the canonical constant defs.
-    let mut by_sym: LookupMap<SymbolId, Term> = LookupMap::new();
-    let mut by_name: LookupMap<String, Term> = LookupMap::new();
+    let mut by_sym: LookupMap<SymbolId, Term<Empty, Empty>> = LookupMap::new();
+    let mut by_name: LookupMap<String, Term<Empty, Empty>> = LookupMap::new();
 
     for def in &program.defs {
         if !matches!(def.meta, DefMeta::Function) {
@@ -391,7 +415,7 @@ fn find_all_constants(program: &Program) -> LookupMap<SymbolId, Term> {
 }
 
 /// Check if a term contains control flow (If, Loop) or SOACs.
-fn has_control_flow(term: &Term) -> bool {
+fn has_control_flow<C: Payload, S: Payload>(term: &Term<C, S>) -> bool {
     match &term.kind {
         TermKind::If { .. } | TermKind::Loop { .. } => true,
         _ => {
@@ -408,28 +432,44 @@ fn has_control_flow(term: &Term) -> bool {
 
 /// Replace `Var(sym)` references with the constant body when `sym` is a constant candidate.
 fn inline_constants(
-    term: Term,
-    constants: &LookupMap<SymbolId, Term>,
+    term: Term<Empty, Empty>,
+    constants: &LookupMap<SymbolId, Term<Empty, Empty>>,
     term_ids: &mut TermIdSource,
-) -> Term {
-    let fresh_id = term_ids.next_id();
-    let term = term.map_children(fresh_id, &mut |child| {
-        inline_constants(child, constants, term_ids)
-    });
+) -> Term<Empty, Empty> {
+    term.rewrite(&mut ConstantInliner { constants, term_ids })
+}
 
-    if let TermKind::Var(VarRef::Symbol(sym)) = &term.kind {
-        if let Some(body) = constants.get(sym) {
-            return body.clone();
-        }
+struct ConstantInliner<'a, 'ids> {
+    constants: &'a LookupMap<SymbolId, Term<Empty, Empty>>,
+    term_ids: &'ids mut TermIdSource,
+}
+
+impl TermRewriter<Empty, Empty> for ConstantInliner<'_, '_> {
+    fn next_term_id(&mut self) -> TermId {
+        self.term_ids.next_id()
     }
 
-    term
+    fn rewrite_node(&mut self, term: &mut Term<Empty, Empty>) -> RewriteDecision {
+        let TermKind::Var(VarRef::Symbol(symbol)) = &term.kind else {
+            return RewriteDecision::Unchanged;
+        };
+        let Some(template) = self.constants.get(symbol) else {
+            return RewriteDecision::Unchanged;
+        };
+        let mut replacement = clone_term_with_fresh_ids(template, self.term_ids);
+        replacement.id = term.id;
+        *term = replacement;
+        RewriteDecision::Changed
+    }
 }
 
 /// Determine which defs are candidates for inlining.
-/// Inlines all `DefMeta::LiftedLambda` defs — closure_convert-produced lifted
+/// Inlines all `DefMeta::LiftedLambda` defs — defunctionalization-produced lifted
 /// lambdas that we're putting back where they came from.
-fn find_inline_candidates(defs: &[Def], _symbols: &SymbolTable) -> LookupMap<SymbolId, InlineBody> {
+fn find_inline_candidates(
+    defs: &[Def<ClosureConverted>],
+    _symbols: &SymbolTable,
+) -> LookupMap<SymbolId, InlineBody<ExplicitClosurePayload, ExplicitCapturesPayload>> {
     let mut candidates = LookupMap::new();
 
     for def in defs {
@@ -443,58 +483,76 @@ fn find_inline_candidates(defs: &[Def], _symbols: &SymbolTable) -> LookupMap<Sym
             continue;
         }
 
-        candidates.insert(
-            def.name,
-            InlineBody {
-                params,
-                body: body.clone(),
-            },
-        );
+        candidates.insert(def.name, InlineBody { params, body });
     }
 
     candidates
 }
 
 // =============================================================================
-// Term inlining (via map_children)
+// Term inlining
 // =============================================================================
 
 /// Bottom-up: recurse into all children, then try to inline App nodes.
 ///
 /// SOAC lambda bodies are bare Var refs to lifted defs after defunctionalization,
-/// so recursing into them via map_children is harmless — the inline rewrite only
+/// so recursing into them is harmless — the inline rewrite only
 /// fires on fully-saturated App nodes matching candidates.
-fn inline_term(term: Term, candidates: &LookupMap<SymbolId, InlineBody>, ids: &mut TermIdSource) -> Term {
-    let fresh_id = ids.next_id();
-    let term = term.map_children(fresh_id, &mut |child| inline_term(child, candidates, ids));
+fn inline_term<C: Payload, S: Payload>(
+    term: Term<C, S>,
+    candidates: &LookupMap<SymbolId, InlineBody<C, S>>,
+    term_ids: &mut TermIdSource,
+) -> Term<C, S> {
+    term.rewrite(&mut FunctionInliner { candidates, term_ids })
+}
 
-    // Only App nodes can be inline sites.
-    let TermKind::App { ref func, ref args } = term.kind else {
-        return term;
-    };
+struct FunctionInliner<'a, 'ids, C: Payload, S: Payload> {
+    candidates: &'a LookupMap<SymbolId, InlineBody<C, S>>,
+    term_ids: &'ids mut TermIdSource,
+}
 
-    // If the head is a Var referencing an inline candidate, inline it.
-    if let TermKind::Var(VarRef::Symbol(sym)) = &func.kind {
-        if let Some(ib) = candidates.get(sym) {
-            if args.len() == ib.params.len() {
-                let span = term.span;
-                let TermKind::App { func: _, args } = term.kind else {
-                    unreachable!()
-                };
-                return build_inline_lets(&ib.params, &args, ib.body.clone(), span, ids);
-            }
-        }
+impl<C: Payload, S: Payload> TermRewriter<C, S> for FunctionInliner<'_, '_, C, S> {
+    fn next_term_id(&mut self) -> TermId {
+        self.term_ids.next_id()
     }
 
-    // Not inlineable — return as-is.
-    term
+    fn rewrite_node(&mut self, term: &mut Term<C, S>) -> RewriteDecision {
+        let candidate = match &term.kind {
+            TermKind::App { func, args } => match &func.kind {
+                TermKind::Var(VarRef::Symbol(symbol)) => {
+                    self.candidates.get(symbol).filter(|candidate| args.len() == candidate.params.len())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(candidate) = candidate else {
+            return RewriteDecision::Unchanged;
+        };
+        let params = candidate.params.clone();
+        let body = clone_term_with_fresh_ids(&candidate.body, self.term_ids);
+
+        let kind = std::mem::replace(&mut term.kind, TermKind::UnitLit);
+        let TermKind::App { args, .. } = kind else {
+            unreachable!()
+        };
+        let mut replacement = build_inline_lets(&params, args, body, term.span, self.term_ids);
+        replacement.id = term.id;
+        *term = replacement;
+        RewriteDecision::Changed
+    }
 }
 
 // =============================================================================
 // Small helpers
 // =============================================================================
 
-fn mk(ids: &mut TermIdSource, ty: Type<TypeName>, span: Span, kind: TermKind) -> Term {
+fn mk<C: Payload, S: Payload>(
+    ids: &mut TermIdSource,
+    ty: Type<TypeName>,
+    span: Span,
+    kind: TermKind<C, S>,
+) -> Term<C, S> {
     Term {
         id: ids.next_id(),
         ty,
@@ -524,15 +582,15 @@ fn mk(ids: &mut TermIdSource, ty: Type<TypeName>, span: Span, kind: TermKind) ->
 /// `let x = y in body` case where `y` is a `Var`. Non-Var args still
 /// get the `let` wrap so we don't duplicate side-effecting computation
 /// under multi-use params.
-pub(crate) fn build_inline_lets(
+pub(crate) fn build_inline_lets<C: Payload, S: Payload>(
     params: &[(SymbolId, Type<TypeName>)],
-    args: &[Term],
-    body: Term,
+    args: Vec<Term<C, S>>,
+    body: Term<C, S>,
     span: Span,
     ids: &mut TermIdSource,
-) -> Term {
+) -> Term<C, S> {
     let mut result = body;
-    for ((sym, _param_ty), arg) in params.iter().rev().zip(args.iter().rev()) {
+    for ((sym, _param_ty), arg) in params.iter().rev().zip(args.into_iter().rev()) {
         if let TermKind::Var(VarRef::Symbol(arg_sym)) = &arg.kind {
             // Substituting the *symbol* alone is not enough: the param's
             // declared type may be polymorphic (e.g. `[]T` with a region
@@ -553,7 +611,7 @@ pub(crate) fn build_inline_lets(
             TermKind::Let {
                 name: *sym,
                 name_ty: arg.ty.clone(),
-                rhs: Box::new(arg.clone()),
+                rhs: Box::new(arg),
                 body: Box::new(result),
             },
         );
@@ -567,87 +625,22 @@ pub(crate) fn build_inline_lets(
 /// concrete-region arg through a polymorphic param, the substituted
 /// `Var` must end up carrying the concrete type, not the polymorphic
 /// param type that was on the original term.
-fn substitute_sym_and_retype(
-    term: Term,
+fn substitute_sym_and_retype<C: Payload, S: Payload>(
+    term: Term<C, S>,
     old: SymbolId,
     new: SymbolId,
     new_ty: &Type<TypeName>,
     term_ids: &mut TermIdSource,
-) -> Term {
-    match term.kind {
-        TermKind::Var(VarRef::Symbol(s)) if s == old => Term {
-            id: term_ids.next_id(),
+) -> Term<C, S> {
+    super::subst::substitute_with(
+        term,
+        old,
+        &mut |occurrence, ids| Term {
+            id: ids.next_id(),
             ty: new_ty.clone(),
             kind: TermKind::Var(VarRef::Symbol(new)),
-            span: term.span,
+            span: occurrence.span,
         },
-        TermKind::Var(VarRef::Symbol(_))
-        | TermKind::Var(VarRef::Builtin { .. })
-        | TermKind::BinOp(_)
-        | TermKind::UnOp(_)
-        | TermKind::IntLit(_)
-        | TermKind::FloatLit(_)
-        | TermKind::BoolLit(_)
-        | TermKind::Extern(_) => term,
-
-        TermKind::Lambda(ref lam) if lam.params.iter().any(|(p, _)| *p == old) => term,
-
-        TermKind::Let {
-            name,
-            name_ty,
-            rhs,
-            body,
-        } => {
-            let new_rhs = substitute_sym_and_retype(*rhs, old, new, new_ty, term_ids);
-            let new_body = if name == old {
-                *body
-            } else {
-                substitute_sym_and_retype(*body, old, new, new_ty, term_ids)
-            };
-            Term {
-                id: term_ids.next_id(),
-                kind: TermKind::Let {
-                    name,
-                    name_ty,
-                    rhs: Box::new(new_rhs),
-                    body: Box::new(new_body),
-                },
-                ..term
-            }
-        }
-
-        _ => {
-            let fresh_id = term_ids.next_id();
-            term.map_children(fresh_id, &mut |child| {
-                substitute_sym_and_retype(child, old, new, new_ty, term_ids)
-            })
-        }
-    }
-}
-
-// =============================================================================
-// Dead code elimination
-// =============================================================================
-
-/// Remove defs that are not referenced by any entry point or reachable def.
-///
-/// Preserves:
-/// - All entry points and their transitive dependencies
-/// - Extern defs (linked SPIR-V functions, needed even if not directly referenced)
-pub fn dead_code_eliminate(defs: Vec<Def>) -> Vec<Def> {
-    let def_map: LookupMap<SymbolId, &Def> = defs.iter().map(|d| (d.name, d)).collect();
-
-    let roots = defs
-        .iter()
-        .filter(|def| {
-            matches!(def.meta, DefMeta::EntryPoint(_)) || matches!(def.body.kind, TermKind::Extern(_))
-        })
-        .map(|def| def.name);
-    let reachable = wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |sym, refs| {
-        if let Some(def) = def_map.get(&sym) {
-            refs.extend(collect_var_refs(&def.body).into_iter().filter(|r| def_map.contains_key(r)));
-        }
-    });
-
-    defs.into_iter().filter(|d| reachable.contains(&d.name)).collect()
+        term_ids,
+    )
 }

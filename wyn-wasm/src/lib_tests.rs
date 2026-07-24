@@ -17,29 +17,25 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
         .fold_ast_constants()
         .type_check(&mut module_manager)
         .expect("type_check failed");
-    let ssa = type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_buffers()
-        .expect("pin_entry_buffers")
-        .validate_ownership()
-        .expect("validate_ownership")
-        .partial_eval()
-        .normalize_soacs()
-        .monomorphize()
-        .rep_specialize()
-        .inline_small()
-        .force_inline_soac_helpers()
-        .renormalize_inlined_soa()
-        .canonicalize_conditional_producers()
-        .normalize_soacs_to_anf()
-        .float_runtime_index_nested_producers()
-        .defunctionalize()
-        .fold_generated_lambdas()
-        .apply_ownership()
-        .expect("apply_ownership failed")
-        .filter_reachable()
-        .infer_input_slice_bounds()
-        .to_egraph()
+    let program = type_checked.to_tlc(&module_manager, false);
+    let program = wyn_core::tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
+    let program = wyn_core::tlc::validate_ownership(program).expect("validate_ownership");
+    let program = wyn_core::tlc::partial_eval(program);
+    let program = wyn_core::tlc::normalize_soacs(program);
+    let program = wyn_core::tlc::monomorphize(program);
+    let program = wyn_core::tlc::rep_specialize(program);
+    let program = wyn_core::tlc::inline_small(program);
+    let program = wyn_core::tlc::force_inline_soac_helpers(program);
+    let program = wyn_core::tlc::renormalize_inlined_soa(program);
+    let program = wyn_core::tlc::canonicalize_conditional_producers(program);
+    let program = wyn_core::tlc::normalize_soacs_to_anf(program);
+    let program = wyn_core::tlc::float_runtime_index_nested_producers(program);
+    let program = wyn_core::tlc::defunctionalize(program);
+    let program = wyn_core::tlc::fold_generated_lambdas(program);
+    let program = wyn_core::tlc::apply_ownership(program);
+    let program = wyn_core::tlc::filter_reachable(program);
+    let program = wyn_core::tlc::infer_input_slice_bounds(program);
+    let ssa = wyn_core::to_egraph(program)
         .expect("to_egraph failed")
         .realize_outputs()
         .expect("realize_outputs failed")

@@ -26,11 +26,9 @@ fn should_fail_type_check(input: &str) -> bool {
 /// Off-milestone stop — drives the typestate API directly so the same
 /// `module_manager` covers both `type_check` and `to_tlc`.
 fn compile_to_semantic_egir(input: &str) -> crate::EgirAllocated {
-    let raw = crate::compile_thru_tlc(input)
-        .expect("compile through TLC")
-        .infer_input_slice_bounds()
-        .to_egraph()
-        .expect("convert to raw semantic EGIR");
+    let program = crate::compile_thru_tlc(input).expect("compile through TLC");
+    let program = crate::tlc::infer_input_slice_bounds(program);
+    let raw = crate::to_egraph(program).expect("convert to raw semantic EGIR");
     raw.realize_outputs()
         .expect("realize semantic EGIR outputs")
         .segment()
@@ -3741,12 +3739,19 @@ entry add_sum(xs: []i32) []i32 =
 ///
 /// On violation, panics with the offending sym, its symbol-table name,
 /// and the pipeline stage name.
-fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
+fn assert_no_unbound_var_refs(program: &crate::tlc::Program<crate::tlc::stage::Reachable>, stage: &str) {
+    use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
     use crate::tlc::{ArrayExpr, Lambda, LoopKind, SoacOp, Term, TermKind};
     use crate::SymbolId;
     use std::collections::HashSet;
 
-    fn walk(term: &Term, bound: &HashSet<SymbolId>, symbols: &SymbolTable, stage: &str, def_name: &str) {
+    fn walk(
+        term: &Term<ExplicitClosurePayload, ExplicitCapturesPayload>,
+        bound: &HashSet<SymbolId>,
+        symbols: &SymbolTable,
+        stage: &str,
+        def_name: &str,
+    ) {
         match &term.kind {
             TermKind::Var(VarRef::Symbol(sym)) => {
                 assert!(
@@ -3764,6 +3769,11 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
             | TermKind::BoolLit(_)
             | TermKind::UnitLit
             | TermKind::Extern(_) => {}
+            TermKind::Closure(closure) => {
+                for capture in &closure.captures {
+                    walk(capture, bound, symbols, stage, def_name);
+                }
+            }
             TermKind::Coerce { inner, .. } => walk(inner, bound, symbols, stage, def_name),
             TermKind::App { func, args } => {
                 walk(func, bound, symbols, stage, def_name);
@@ -3839,7 +3849,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
     }
 
     fn walk_lambda(
-        lam: &crate::tlc::Lambda,
+        lam: &Lambda<ExplicitClosurePayload, ExplicitCapturesPayload>,
         bound: &HashSet<SymbolId>,
         symbols: &SymbolTable,
         stage: &str,
@@ -3853,7 +3863,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
     }
 
     fn walk_soac(
-        soac: &SoacOp,
+        soac: &SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>,
         bound: &HashSet<SymbolId>,
         symbols: &SymbolTable,
         stage: &str,
@@ -3902,7 +3912,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
     }
 
     fn walk_array_expr(
-        ae: &ArrayExpr,
+        ae: &ArrayExpr<ExplicitClosurePayload, ExplicitCapturesPayload>,
         bound: &HashSet<SymbolId>,
         symbols: &SymbolTable,
         stage: &str,
@@ -3967,7 +3977,7 @@ entry frag() #[target(screen)] vec4f32 =
     @[f32.i32(range[0]), 0.0, 0.0, 1.0]
 "#;
     let tlc = crate::compile_thru_tlc(source).expect("compile_thru_tlc");
-    assert_no_unbound_var_refs(&tlc.tlc, "compile_thru_tlc");
+    assert_no_unbound_var_refs(&tlc, "compile_thru_tlc");
 }
 
 // =============================================================================
@@ -5774,8 +5784,8 @@ entry e(xs: []f32) []f32 = map(|x: f32| x ** 9, xs)
 fn mul_all_three_overloads_compile_to_spirv() {
     // `mul` has three overloads with three different `PrimOp`s
     // (MatrixTimesMatrix / MatrixTimesVector / VectorTimesMatrix).
-    // `tlc::specialize` rewrites every `mul(a, b)` call into
-    // `BinOp("*")(a, b)`; the BinOp lowering then picks the right
+    // Monomorphization's intrinsic-specialization step rewrites every
+    // `mul(a, b)` call into `BinOp("*")(a, b)`; BinOp lowering picks the right
     // SPIR-V op based on operand shapes. This pins the wiring end-to-
     // end: a single shader exercising all three call shapes must
     // compile through to valid SPIR-V.
@@ -6527,9 +6537,9 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32
 // ============================================================================
 
 /// Compile through TLC with `fill_holes = true`; return the resulting
-/// `TlcTransformed` so tests can inspect `fill_hole_errors` and the
+/// `Program<Transformed>` so tests can inspect `fill_hole_errors` and the
 /// program shape.
-fn compile_tlc_with_fill_holes(input: &str) -> crate::TlcTransformed {
+fn compile_tlc_with_fill_holes(input: &str) -> crate::tlc::Program<crate::tlc::stage::Transformed> {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = Compiler::parse(input, &mut node_counter).expect("parse");
     let type_checked = parsed
@@ -6548,10 +6558,10 @@ fn fill_holes_numeric_scalars_compile_clean() {
     for src in ["def x: i32 = ???", "def y: f32 = ???", "def z: bool = ???"] {
         let tlc = compile_tlc_with_fill_holes(src);
         assert!(
-            tlc.0.fill_hole_errors.is_empty(),
+            tlc.global_context.fill_hole_errors.is_empty(),
             "scalar hole in `{}` should fill cleanly: {:?}",
             src,
-            tlc.0.fill_hole_errors
+            tlc.global_context.fill_hole_errors
         );
     }
 }
@@ -6560,9 +6570,9 @@ fn fill_holes_numeric_scalars_compile_clean() {
 fn fill_holes_vec_compiles_clean() {
     let tlc = compile_tlc_with_fill_holes("def v: vec3f32 = ???");
     assert!(
-        tlc.0.fill_hole_errors.is_empty(),
+        tlc.global_context.fill_hole_errors.is_empty(),
         "vec3 hole should fill cleanly: {:?}",
-        tlc.0.fill_hole_errors
+        tlc.global_context.fill_hole_errors
     );
 }
 
@@ -6570,10 +6580,10 @@ fn fill_holes_vec_compiles_clean() {
 fn fill_holes_rejects_function_type() {
     let tlc = compile_tlc_with_fill_holes("def f: i32 -> i32 = ???");
     assert!(
-        !tlc.0.fill_hole_errors.is_empty(),
+        !tlc.global_context.fill_hole_errors.is_empty(),
         "function-typed hole should surface a fill-hole error"
     );
-    let msg = format!("{:?}", tlc.0.fill_hole_errors[0]);
+    let msg = format!("{:?}", tlc.global_context.fill_hole_errors[0]);
     assert!(
         msg.contains("function value") || msg.contains("Arrow"),
         "error should mention function type: {}",
@@ -6587,9 +6597,9 @@ fn fill_holes_respects_inferred_type_from_context() {
     // element type here). Default-fill fires at the inferred type.
     let tlc = compile_tlc_with_fill_holes("def arr: [3]i32 = [1i32, ???, 3i32]");
     assert!(
-        tlc.0.fill_hole_errors.is_empty(),
+        tlc.global_context.fill_hole_errors.is_empty(),
         "hole in i32 array should fill as i32 cleanly: {:?}",
-        tlc.0.fill_hole_errors
+        tlc.global_context.fill_hole_errors
     );
 }
 
@@ -7786,8 +7796,8 @@ entry filt_reduce(xs: []i32) i32 =
 /// literal.
 #[test]
 fn swizzle_on_nontrivial_base_does_not_duplicate_producer() {
-    use crate::tlc::{SoacOp, Term, TermKind};
-    fn count_reduces(t: &Term) -> usize {
+    use crate::tlc::{Payload, SoacOp, Term, TermKind};
+    fn count_reduces<C: Payload, S: Payload>(t: &Term<C, S>) -> usize {
         let mut n = 0;
         if matches!(&t.kind, TermKind::Soac(SoacOp::Reduce { .. })) {
             n += 1;
@@ -7807,7 +7817,7 @@ entry e(xs: [8]vec4f32) vec2f32 = sum2(xs)
 ",
     )
     .expect("compile_thru_tlc");
-    let total: usize = tlc.tlc.defs.iter().map(|d| count_reduces(&d.body)).sum();
+    let total: usize = tlc.defs.iter().map(|d| count_reduces(&d.body)).sum();
     assert_eq!(
         total, 1,
         "`reduce(...).xy` should compile to one physical reduce, not one per swizzle slot — \

@@ -109,3 +109,19 @@ fn test_soa_type_arrow() {
     );
     assert_eq!(result, expected);
 }
+
+#[test]
+fn test_soa_type_is_idempotent() {
+    let original = Type::Constructed(
+        TypeName::Arrow,
+        vec![
+            array_ty(
+                tuple_ty(vec![i32_ty(), array_ty(tuple_ty(vec![f32_ty(), i32_ty()]), 3)]),
+                5,
+            ),
+            tuple_ty(vec![f32_ty(), array_ty(tuple_ty(vec![i32_ty(), f32_ty()]), 4)]),
+        ],
+    );
+    let normalized = soa_type(&original);
+    assert_eq!(soa_type(&normalized), normalized);
+}

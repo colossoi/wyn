@@ -2,10 +2,10 @@
 //! AST→TLC lowering of irrefutable patterns through small source
 //! programs and inspects the resulting Term structure.
 
-use crate::tlc::{Program, Term, TermKind};
+use crate::tlc::{self, Program, Term, TermKind};
 use crate::Compiler;
 
-fn compile_to_tlc_raw(source: &str) -> Program {
+fn compile_to_tlc_raw(source: &str) -> Program<tlc::stage::Transformed> {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
     let type_checked = parsed
@@ -14,10 +14,10 @@ fn compile_to_tlc_raw(source: &str) -> Program {
         .fold_ast_constants()
         .type_check(&mut module_manager)
         .expect("type_check");
-    type_checked.to_tlc(&module_manager, false).0.tlc
+    type_checked.to_tlc(&module_manager, false)
 }
 
-fn find_def_body<'a>(program: &'a Program, name: &str) -> &'a Term {
+fn find_def_body<'a>(program: &'a Program<tlc::stage::Transformed>, name: &str) -> &'a Term {
     let def = program
         .defs
         .iter()

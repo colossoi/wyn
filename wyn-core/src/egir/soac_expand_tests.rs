@@ -25,10 +25,9 @@ use polytype::Type;
 /// returning the EGraph for the (single) entry point so tests can
 /// introspect node structure.
 fn compile_to_expanded_egraph(input: &str) -> PhysicalEGraph {
-    let tlc = crate::compile_thru_tlc(input).expect("compile_thru_tlc");
-    let allocated = tlc
-        .infer_input_slice_bounds()
-        .to_egraph()
+    let program = crate::compile_thru_tlc(input).expect("compile_thru_tlc");
+    let program = crate::tlc::infer_input_slice_bounds(program);
+    let allocated = crate::to_egraph(program)
         .expect("to_egraph")
         .realize_outputs()
         .expect("realize_outputs")

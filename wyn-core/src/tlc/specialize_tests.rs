@@ -4,8 +4,10 @@ use super::run;
 use super::VarRef;
 use crate::ast::{Span, TypeName};
 use crate::builtins::by_id;
+use crate::tlc::context::RewriteGlobal;
+use crate::tlc::data::PolymorphicDefinition;
 use crate::tlc::{Def, DefMeta, Program, Term, TermId, TermIdSource, TermKind};
-use crate::{SymbolId, SymbolTable};
+use crate::{IdSource, LookupSet, SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::HashMap;
 
@@ -84,6 +86,7 @@ fn test_specialize_sign_f32() {
 
     let mut program = Program::from_parts(
         vec![Def {
+            data: PolymorphicDefinition { scheme: None },
             name: test_sym,
             ty: f32_ty.clone(),
             body: sign_call,
@@ -95,6 +98,10 @@ fn test_specialize_sign_f32() {
         symbols,
         HashMap::new(),
         term_ids,
+        RewriteGlobal {
+            known_defs: LookupSet::new(),
+            auto_storage_binding_ids: IdSource::new(),
+        },
     );
 
     run(&mut program);
@@ -168,6 +175,7 @@ fn test_specialize_min_i32() {
 
     let mut program = Program::from_parts(
         vec![Def {
+            data: PolymorphicDefinition { scheme: None },
             name: test_sym,
             ty: i32_ty.clone(),
             body: min_a_b,
@@ -179,6 +187,10 @@ fn test_specialize_min_i32() {
         symbols,
         HashMap::new(),
         term_ids,
+        RewriteGlobal {
+            known_defs: LookupSet::new(),
+            auto_storage_binding_ids: IdSource::new(),
+        },
     );
 
     run(&mut program);

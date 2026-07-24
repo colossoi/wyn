@@ -431,8 +431,9 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 // Typestate Compiler Pipeline
 // =============================================================================
 //
-// The compiler uses a typestate pattern where each struct represents a stage.
-// Methods consume `self` and return the next stage, enforcing valid ordering.
+// The compiler uses typestate to enforce valid pass ordering. Frontend and
+// EGIR stages expose consuming methods; TLC stages are ordinary named
+// functions over `tlc::Program<S>`.
 //
 //   let (mut node_counter, mut module_manager) = init_compiler();
 //   let parsed = Compiler::parse(source, &mut node_counter)?;
@@ -445,25 +446,30 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //       .type_check(&mut module_manager)           -> TypeChecked
 //
 // TLC stages (typed AST → semantic input):
-//       .to_tlc(&module_manager, fill_holes)       -> TlcTransformed
-//       .pin_entry_buffers()                       -> TlcBuffersPinned
-//       .validate_ownership()                      -> TlcOwnershipValidated
-//       .partial_eval()                            -> TlcPartialEvaled
-//       .normalize_soacs()                         -> TlcSoaNormalized
-//       .monomorphize()                            -> TlcMonomorphized
-//       .rep_specialize()                          -> TlcRepSpecialized
-//       .inline_small()                            -> TlcSmallInlined
-//       .force_inline_soac_helpers()               -> TlcSoacHelpersInlined
-//       .renormalize_inlined_soa()                 -> TlcInlinedSoaNormalized
-//       .canonicalize_conditional_producers()      -> TlcConditionalProducersCanonicalized
-//       .normalize_soacs_to_anf()                  -> TlcSoacsAnfNormalized
-//       .float_runtime_index_nested_producers()    -> TlcRuntimeIndexProducersFloated
-//       .defunctionalize()                         -> TlcDefunctionalized
-//       .fold_generated_lambdas()                  -> TlcGeneratedLambdasFolded
-//       .apply_ownership()                         -> TlcOwnershipApplied
-//       .filter_reachable()                        -> TlcReachable
-//       .infer_input_slice_bounds()                -> TlcInputSliceBoundsInferred
-//       .to_egraph()                               -> EgirRaw
+//       .to_tlc(...)                    -> tlc::Program<stage::Transformed>
+//       tlc::pin_entry_buffers(...)      -> tlc::Program<stage::BuffersPinned>
+//       tlc::validate_ownership(...)     -> tlc::Program<stage::OwnershipValidated>
+//       tlc::partial_eval(...)           -> tlc::Program<stage::PartialEvaled>
+//       tlc::normalize_soacs(...)        -> tlc::Program<stage::SoaNormalized>
+//       tlc::monomorphize(...)           -> tlc::Program<stage::Monomorphized>
+//       tlc::rep_specialize(...)         -> tlc::Program<stage::RepSpecialized>
+//       tlc::inline_small(...)           -> tlc::Program<stage::SmallInlined>
+//       tlc::force_inline_soac_helpers(...)
+//                                      -> tlc::Program<stage::SoacHelpersInlined>
+//       tlc::renormalize_inlined_soa(...)
+//                                      -> tlc::Program<stage::InlinedSoaNormalized>
+//       tlc::canonicalize_conditional_producers(...)
+//                                      -> tlc::Program<stage::ConditionalProducersCanonicalized>
+//       tlc::normalize_soacs_to_anf(...) -> tlc::Program<stage::SoacsAnfNormalized>
+//       tlc::float_runtime_index_nested_producers(...)
+//                                      -> tlc::Program<stage::RuntimeIndexProducersFloated>
+//       tlc::defunctionalize(...)        -> tlc::Program<stage::Defunctionalized>
+//       tlc::fold_generated_lambdas(...) -> tlc::Program<stage::GeneratedLambdasFolded>
+//       tlc::apply_ownership(...)        -> tlc::Program<stage::OwnershipApplied>
+//       tlc::filter_reachable(...)       -> tlc::Program<stage::Reachable>
+//       tlc::infer_input_slice_bounds(...)
+//                                      -> tlc::Program<stage::InputSliceBoundsInferred>
+//       to_egraph(...)                  -> EgirRaw
 //
 // EGIR stages:
 //       .realize_outputs()                         -> EgirOutputsRealized
@@ -681,8 +687,8 @@ impl TypeChecked {
         self,
         module_manager: &module_manager::ModuleManager,
         fill_holes: bool,
-    ) -> TlcTransformed {
-        let out = tlc::run::run(
+    ) -> tlc::Program<tlc::stage::Transformed> {
+        tlc::run::run(
             &self.ast,
             self.type_table,
             &self.schemes,
@@ -690,15 +696,7 @@ impl TypeChecked {
             &self.name_resolution,
             module_manager,
             fill_holes,
-        );
-        TlcTransformed(TlcEarlyInner {
-            tlc: out.program,
-            type_table: out.type_table,
-            known_defs: out.known_defs,
-            schemes: out.schemes,
-            fill_hole_errors: out.fill_hole_errors,
-            auto_storage_binding_ids: IdSource::new(),
-        })
+        )
     }
 }
 
@@ -706,460 +704,48 @@ impl TypeChecked {
 // TLC-based pipeline stages
 // =============================================================================
 
-/// Shared payload for the TLC early states (`TlcTransformed`,
-/// `TlcPartialEvaled`, `TlcSoaNormalized`, `TlcSoacsAnfNormalized`). Wrapped by each
-/// newtype; inner fields are crate-pub so the transition impls can move
-/// them across group boundaries by value.
-pub struct TlcEarlyInner {
-    pub tlc: tlc::Program,
-    pub type_table: TypeTable,
-    /// Built-in names that should not be captured as free variables
-    pub known_defs: LookupSet<String>,
-    /// Type schemes for functions (for monomorphization)
-    pub schemes: LookupMap<SymbolId, types::TypeScheme>,
-    /// Errors surfaced while default-filling `???` type holes with
-    /// `--fill-holes`. Empty unless `to_tlc` was called with
-    /// `fill_holes = true` and some hole had a type that couldn't
-    /// be defaulted. The driver checks this before proceeding to
-    /// later TLC passes and turns a non-empty list into a
-    /// `CompilerError::TypeHole`.
-    pub fill_hole_errors: Vec<error::CompilerError>,
-    /// Module-wide id factory for compiler-auto-allocated storage
-    /// bindings (the ones not pinned by a user `#[storage(set, binding)]`
-    /// attribute). `pin_entry_buffers` draws inputs from it; `egir::from_tlc`
-    /// draws outputs and scratch slots from the same factory. Sharing
-    /// one counter across passes guarantees no two `OpVariable`s land
-    /// on the same `(set, binding)` slot regardless of declared type.
-    pub auto_storage_binding_ids: IdSource<u32>,
-}
-
-/// AST has been transformed to TLC
-pub struct TlcTransformed(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcTransformed {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcTransformed {
-    /// Pin each compute entry's storage-param buffer region into its type:
-    /// substitute the param's buffer variable → `Buffer(set, binding)` so a
-    /// view's descriptor is a statically-known property of its type, and every
-    /// downstream view inherits its region by unification. This is the first
-    /// TLC pass; the resulting `TlcBuffersPinned` typestate is what `partial_eval`
-    /// consumes, so the rest of the pipeline cannot run without it.
-    pub fn pin_entry_buffers(self) -> Result<TlcBuffersPinned> {
-        let mut inner = self.0;
-        tlc::pin_entry_buffers::run(&mut inner.tlc, &mut inner.auto_storage_binding_ids)?;
-        Ok(TlcBuffersPinned(inner))
-    }
-}
-
-/// TLC after entry-param buffer regions are pinned into their types.
-pub struct TlcBuffersPinned(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcBuffersPinned {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcBuffersPinned {
-    /// Validate source-level consumption before any simplification or
-    /// inlining can erase the call boundary that carries the `*T`
-    /// contract. `partial_eval` is defined only on the resulting
-    /// typestate, so no pipeline reaches the optimizer unvalidated.
-    pub fn validate_ownership(self) -> Result<TlcOwnershipValidated> {
-        tlc::ownership::check(&self.0.tlc)?;
-        Ok(TlcOwnershipValidated(self.0))
-    }
-}
-
-/// TLC whose source-level consumption has been validated.
-pub struct TlcOwnershipValidated(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcOwnershipValidated {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcOwnershipValidated {
-    /// Constant folding and algebraic simplifications.
-    pub fn partial_eval(self) -> TlcPartialEvaled {
-        let mut inner = self.0;
-        tlc::partial_eval::PartialEvaluator::partial_eval(&mut inner.tlc);
-        TlcPartialEvaled(inner)
-    }
-}
-
 #[cfg(test)]
-pub(crate) fn optimize_tlc_for_test(state: TlcOwnershipValidated) -> TlcReachable {
-    optimize_tlc_for_test_thru_soac_normalization(state)
-        .float_runtime_index_nested_producers()
-        .defunctionalize()
-        .fold_generated_lambdas()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .filter_reachable()
+pub(crate) fn optimize_tlc_for_test(
+    program: tlc::Program<tlc::stage::OwnershipValidated>,
+) -> tlc::Program<tlc::stage::Reachable> {
+    let program = optimize_tlc_for_test_thru_soac_normalization(program);
+    let program = tlc::float_runtime_index_nested_producers(program);
+    let program = tlc::defunctionalize(program);
+    let program = tlc::fold_generated_lambdas(program);
+    let program = tlc::apply_ownership(program);
+    tlc::filter_reachable(program)
 }
 
 #[cfg(test)]
 pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
-    state: TlcOwnershipValidated,
-) -> TlcSoacsAnfNormalized {
-    state
-        .partial_eval()
-        .normalize_soacs()
-        .monomorphize()
-        .rep_specialize()
-        .inline_small()
-        .force_inline_soac_helpers()
-        .renormalize_inlined_soa()
-        .canonicalize_conditional_producers()
-        .normalize_soacs_to_anf()
+    program: tlc::Program<tlc::stage::OwnershipValidated>,
+) -> tlc::Program<tlc::stage::SoacsAnfNormalized> {
+    let program = tlc::partial_eval(program);
+    let program = tlc::normalize_soacs(program);
+    let program = tlc::monomorphize(program);
+    let program = tlc::rep_specialize(program);
+    let program = tlc::inline_small(program);
+    let program = tlc::force_inline_soac_helpers(program);
+    let program = tlc::renormalize_inlined_soa(program);
+    let program = tlc::canonicalize_conditional_producers(program);
+    tlc::normalize_soacs_to_anf(program)
 }
 
-/// TLC after partial evaluation
-pub struct TlcPartialEvaled(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcPartialEvaled {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcPartialEvaled {
-    /// SoA transform + SOAC normalization: rewrite array-of-tuple types,
-    /// flatten Map+Zip into multi-input Map, and convert standalone Zip to tuple.
-    pub fn normalize_soacs(self) -> TlcSoaNormalized {
-        let mut inner = self.0;
-        tlc::soa::run(&mut inner.tlc);
-        TlcSoaNormalized(inner)
-    }
-}
-
-/// TLC after SoA normalization (arrays never contain tuples, zips eliminated)
-pub struct TlcSoaNormalized(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcSoaNormalized {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-/// TLC after force-inlining of every user function whose body contains a SOAC.
-/// This runs after monomorphization so helpers are concrete, exposing
-/// producer/consumer edges to semantic EGIR without cross-call summaries.
-pub struct TlcSoacHelpersInlined(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcSoacHelpersInlined {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcSoacHelpersInlined {
-    /// Re-run SoA normalization after inlining exposed tuple/zip/map structure.
-    pub fn renormalize_inlined_soa(self) -> TlcInlinedSoaNormalized {
-        let mut inner = self.0;
-        tlc::soa::run(&mut inner.tlc);
-        TlcInlinedSoaNormalized(inner)
-    }
-}
-
-/// TLC after post-inlining SoA normalization.
-pub struct TlcInlinedSoaNormalized(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcInlinedSoaNormalized {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcInlinedSoaNormalized {
-    /// Turn eligible array-valued conditionals into one pointwise producer.
-    pub fn canonicalize_conditional_producers(self) -> TlcConditionalProducersCanonicalized {
-        let mut inner = self.0;
-        tlc::if_over_producer::run(&mut inner.tlc);
-        TlcConditionalProducersCanonicalized(inner)
-    }
-}
-
-/// TLC after array-valued conditional producer canonicalization.
-pub struct TlcConditionalProducersCanonicalized(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcConditionalProducersCanonicalized {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcConditionalProducersCanonicalized {
-    /// Lift nested SOAC expressions onto flat let chains so TLC-to-EGIR
-    /// conversion records every semantic producer/consumer edge explicitly.
-    pub fn normalize_soacs_to_anf(self) -> TlcSoacsAnfNormalized {
-        let mut inner = self.0;
-        tlc::soac_anf::run(&mut inner.tlc);
-        TlcSoacsAnfNormalized(inner)
-    }
-}
-
-/// TLC with every SOAC explicit in a flat let chain, ready for EGIR.
-pub struct TlcSoacsAnfNormalized(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcSoacsAnfNormalized {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcSoacsAnfNormalized {
-    /// Expose runtime-indexed nested producers without assigning resources or
-    /// physical entries. Static demand and producer/consumer fusion are EGIR
-    /// graph rewrites, where use edges and resource effects are explicit.
-    pub fn float_runtime_index_nested_producers(self) -> TlcRuntimeIndexProducersFloated {
-        let mut inner = self.0;
-        tlc::runtime_index_producers::run(&mut inner.tlc);
-        TlcRuntimeIndexProducersFloated(inner)
-    }
-}
-
-/// TLC after ownership-driven rewrites. All `with` calls have
-/// settled on either the functional or in-place intrinsic; eligible
-/// SOACs carry a uniqueness-only input candidate for EGIR to resolve.
-pub struct TlcOwnershipApplied(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcOwnershipApplied {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcGeneratedLambdasFolded {
-    /// Ownership/liveness analysis and ownership-driven source rewrites.
-    /// Physical residency and output routing are deferred to EGIR.
-    pub fn apply_ownership(self) -> Result<TlcOwnershipApplied> {
-        let mut inner = self.0;
-        tlc::ownership::apply_ownership(&mut inner.tlc)?;
-        Ok(TlcOwnershipApplied(inner))
-    }
-}
-
-/// TLC after runtime-indexed producers have been exposed without assigning
-/// resources or physical entries.
-pub struct TlcRuntimeIndexProducersFloated(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcRuntimeIndexProducersFloated {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcRuntimeIndexProducersFloated {
-    /// Closure-convert, specialize HOFs, and thread explicit captures. EGIR
-    /// performs subsequent residency and physical-entry decisions.
-    pub fn defunctionalize(self) -> TlcDefunctionalized {
-        let mut inner = self.0;
-        let closure_info = tlc::closure_convert::run(&mut inner.tlc, &inner.known_defs);
-        tlc::hof_specialize::run(&mut inner.tlc, &closure_info);
-        tlc::closure_calls_lower::run(&mut inner.tlc, &closure_info);
-        TlcDefunctionalized(inner)
-    }
-}
-
-impl TlcOwnershipApplied {
-    /// Eliminate unreachable defs before semantic EGIR conversion.
-    pub fn filter_reachable(self) -> TlcReachable {
-        let mut inner = self.0;
-        tlc::inline::run_reachable(&mut inner.tlc);
-        TlcReachable(inner)
-    }
-}
-
-/// TLC with all lambdas defunctionalized (lifted + SOAC captures flattened).
-/// Carries the full early bag so `schemes` is available to `monomorphize`.
-pub struct TlcDefunctionalized(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcDefunctionalized {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcSoaNormalized {
-    /// Specialize polymorphic intrinsics and monomorphize user functions
-    /// (region-specialized). After this no `Type::Variable` remains.
-    pub fn monomorphize(self) -> TlcMonomorphized {
-        let mut inner = self.0;
-        tlc::specialize::run(&mut inner.tlc);
-        tlc::monomorphize::run(&mut inner.tlc, &inner.schemes);
-        TlcMonomorphized(inner)
-    }
-}
-
-/// TLC with all functions monomorphized (no type variables remain)
-pub struct TlcMonomorphized(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcMonomorphized {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcMonomorphized {
-    /// Representation-specialize call edges whose array representation is known
-    /// only at the producer site, before helper inlining and EGIR conversion.
-    pub fn rep_specialize(self) -> TlcRepSpecialized {
-        let mut inner = self.0;
-        tlc::rep_specialize::run(&mut inner.tlc);
-        TlcRepSpecialized(inner)
-    }
-}
-
-/// TLC after inlining compiler-generated lambda defs and DCE
-pub struct TlcGeneratedLambdasFolded(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcGeneratedLambdasFolded {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcRepSpecialized {
-    /// Inline small user functions and constants at their call/reference sites.
-    pub fn inline_small(self) -> TlcSmallInlined {
-        let mut inner = self.0;
-        tlc::inline::run_small(&mut inner.tlc);
-        TlcSmallInlined(inner)
-    }
-}
-
-/// TLC after small function and constant inlining
-pub struct TlcSmallInlined(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcSmallInlined {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcSmallInlined {
-    /// Force-inline every user function whose body contains a SOAC. Helpers are
-    /// already monomorphic, so EGIR receives explicit producer/consumer edges.
-    pub fn force_inline_soac_helpers(self) -> TlcSoacHelpersInlined {
-        let mut inner = self.0;
-        tlc::inline::run_force_soac_helpers(&mut inner.tlc);
-        TlcSoacHelpersInlined(inner)
-    }
-}
-
-/// TLC after representation specialization (Phase 2 of array-variant-
-/// abstract). Every `App` whose `Var(Symbol(callee))` arg at an
-/// `Abstract`-typed position had a producer-known concrete variant now
-/// invokes a specialized clone of the callee with that concrete
-/// variant baked in. Runs before semantic EGIR conversion so every call edge
-/// has a concrete representation.
-pub struct TlcRepSpecialized(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcRepSpecialized {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcDefunctionalized {
-    /// Inline compiler-generated `_w_lambda_*` defs back at their call sites,
-    /// then DCE. Runs after defunctionalize (which produces those lambdas).
-    pub fn fold_generated_lambdas(self) -> TlcGeneratedLambdasFolded {
-        let mut inner = self.0;
-        tlc::inline::run_large(&mut inner.tlc);
-        TlcGeneratedLambdasFolded(inner)
-    }
-}
-
-/// TLC after dead code elimination, ready for semantic EGIR conversion.
-pub struct TlcReachable(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcReachable {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcReachable {
-    /// Run `tlc::input_slice_bounds` over every entry, returning a state
-    /// that carries the inferred per-entry minimum-required input
-    /// buffer lengths alongside the program. `TlcReachable.to_egraph()`
-    /// is intentionally absent: the only mainline path off `TlcReachable`
-    /// is through this analyzer, which keeps the descriptor's input
-    /// `length` fields populated for every storage-bound input the body
-    /// slices.
-    pub fn infer_input_slice_bounds(self) -> TlcInputSliceBoundsInferred {
-        let input_lens = tlc::input_slice_bounds::compute_for_program(&self.0.tlc);
-        TlcInputSliceBoundsInferred {
-            inner: self.0,
-            input_lens,
-        }
-    }
-}
-
-/// TLC after `input_slice_bounds` inference. Same program as
-/// `TlcReachable`; carries a per-entry-name → per-`SymbolId` map of
-/// minimum-required input buffer lengths that flows into
-/// `EntryInput.length` at `to_egraph` time.
-pub struct TlcInputSliceBoundsInferred {
-    pub inner: TlcEarlyInner,
-    pub input_lens: tlc::input_slice_bounds::ProgramBounds,
-}
-
-impl std::ops::Deref for TlcInputSliceBoundsInferred {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.inner
-    }
-}
-
-impl TlcInputSliceBoundsInferred {
-    /// Convert TLC to raw semantic EGIR. Every later EGIR pass has its own
-    /// consuming typestate transition.
-    pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
-        let TlcEarlyInner {
-            tlc,
-            mut auto_storage_binding_ids,
-            ..
-        } = self.inner;
-        let mut effect_ids = IdSource::new();
-        let inner = egir::from_tlc::run(
-            &tlc,
-            &self.input_lens,
-            &mut auto_storage_binding_ids,
-            &mut effect_ids,
-        )?;
-        Ok(EgirRaw {
-            inner,
-            binding_ids: auto_storage_binding_ids,
-            effect_ids,
-        })
-    }
+/// Convert fully analyzed TLC into raw semantic EGIR.
+pub fn to_egraph(
+    mut program: tlc::Program<tlc::stage::InputSliceBoundsInferred>,
+) -> std::result::Result<EgirRaw, ConvertError> {
+    let mut auto_storage_binding_ids = std::mem::replace(
+        &mut program.global_context.auto_storage_binding_ids,
+        IdSource::new(),
+    );
+    let mut effect_ids = IdSource::new();
+    let inner = egir::from_tlc::run(&program, &mut auto_storage_binding_ids, &mut effect_ids)?;
+    Ok(EgirRaw {
+        inner,
+        binding_ids: auto_storage_binding_ids,
+        effect_ids,
+    })
 }
 
 // =============================================================================
@@ -1508,7 +1094,7 @@ pub fn cached_compiler_init() -> (NodeCounter, module_manager::ModuleManager) {
 // just the milestone value. Each subsumes the previous one:
 //
 //   compile_thru_frontend  →  TypeChecked          (AST passes done)
-//   compile_thru_tlc       →  TlcReachable         (TLC pipeline done)
+//   compile_thru_tlc       →  Program<Reachable>    (TLC pipeline done)
 //   compile_thru_ssa       →  SsaConverted         (EGIR + elaborate done)
 //   compile_thru_spirv     →  Lowered              (final SPIR-V binary)
 //
@@ -1530,27 +1116,30 @@ pub fn compile_thru_frontend(source: &str) -> error::Result<TypeChecked> {
 /// Run the canonical TLC optimization pipeline (no physical scheduling or
 /// hole-filling) through `filter_reachable`.
 #[cfg(test)]
-pub fn compile_thru_tlc(source: &str) -> error::Result<TlcReachable> {
+pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::Program<tlc::stage::Reachable>> {
     let (mut node_counter, mut module_manager) = cached_compiler_init();
     let type_checked = Compiler::parse(source, &mut node_counter)?
         .elaborate_modules(&mut module_manager, &mut node_counter)?
         .resolve(&module_manager)?
         .fold_ast_constants()
         .type_check(&mut module_manager)?;
-    let state = type_checked.to_tlc(&module_manager, false).pin_entry_buffers()?.validate_ownership()?;
-    Ok(optimize_tlc_for_test(state))
+    let program = type_checked.to_tlc(&module_manager, false);
+    let program = tlc::pin_entry_buffers(program)?;
+    let program = tlc::validate_ownership(program)?;
+    Ok(optimize_tlc_for_test(program))
 }
 
 /// Internal: run all the way through EGIR + elaborate to SSA from a
-/// pre-built `TlcReachable`. Both `compile_thru_ssa` and
+/// pre-built `Program<Reachable>`. Both `compile_thru_ssa` and
 /// `compile_thru_spirv_single_stage` build the SSA the same way; only
 /// the downstream scheduling profile differs.
 #[cfg(test)]
 fn ssa_from_reachable(
-    tlc: TlcReachable,
+    program: tlc::Program<tlc::stage::Reachable>,
     profile: LoweringProfile,
 ) -> std::result::Result<SsaConverted, Box<dyn std::error::Error>> {
-    let raw = tlc.infer_input_slice_bounds().to_egraph()?;
+    let program = tlc::infer_input_slice_bounds(program);
+    let raw = to_egraph(program)?;
     let allocated = raw.realize_outputs()?.segment().optimize().allocate()?;
     let planned = allocated.plan(profile)?;
     Ok(planned.lower_to_ssa()?)

@@ -2,12 +2,11 @@
 //!
 //! Owns name-registry construction, deterministic SymbolId pre-allocation,
 //! and the three-phase Transformer drive (per prelude module, per top-level
-//! prelude function, then the user program). Returns a fully built
-//! `tlc::Program` plus the supporting metadata (type_table, known_defs,
-//! schemes, fill-hole errors).
+//! prelude function, then the user program). Returns the first phase-typed TLC
+//! program, with definition schemes and the remaining compiler state stored on
+//! their owning nodes.
 
 use crate::LookupMap;
-use crate::LookupSet;
 
 use polytype::TypeScheme;
 
@@ -19,14 +18,26 @@ use crate::name_resolution::NameResolution;
 use crate::types::TypeName;
 use crate::{SymbolId, SymbolTable, TypeTable};
 
-use super::{defaults, Program, TermIdSource, Transformer};
+use super::{defaults, Family, Program, Stage, TermIdSource, Transformer};
 
-pub struct TlcOutput {
-    pub program: Program,
-    pub type_table: TypeTable,
-    pub known_defs: LookupSet<String>,
-    pub schemes: LookupMap<SymbolId, TypeScheme<TypeName>>,
-    pub fill_hole_errors: Vec<CompilerError>,
+/// Polymorphic TLC definitions retain their type schemes in-tree.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Polymorphic;
+
+impl Family for Polymorphic {
+    type DefinitionData = super::data::PolymorphicDefinition;
+    type EntryData = ();
+    type ClosureData = super::data::Empty;
+    type SoacBodyData = super::data::Empty;
+}
+
+/// AST has been transformed to TLC.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Transformed;
+
+impl Stage for Transformed {
+    type Family = Polymorphic;
+    type GlobalContext = super::context::TransformedGlobal;
 }
 
 pub fn run(
@@ -37,7 +48,7 @@ pub fn run(
     name_resolution: &NameResolution,
     module_manager: &ModuleManager,
     fill_holes: bool,
-) -> TlcOutput {
+) -> Program<Transformed> {
     if fill_holes {
         defaults::default_free_vars_in_table(type_table.values_mut());
     }
@@ -102,25 +113,26 @@ pub fn run(
         &mut term_ids,
     );
     let mut parts = transformer.transform_program(ast);
+    drop(transformer);
 
     let mut merged_defs = prelude_defs;
     merged_defs.extend(parts.defs);
     parts.defs = merged_defs;
 
-    // Schemes the type checker recorded for non-top-level bindings
-    // have no SymbolId in `top_level_symbols`; filter them out.
-    let schemes_by_sym: LookupMap<SymbolId, TypeScheme<TypeName>> = schemes
-        .iter()
-        .filter_map(|(name, scheme)| top_level_symbols.get(name).map(|&sym| (sym, scheme.clone())))
-        .collect();
-
-    let program = parts.with_symbols(symbols, top_level_symbols, term_ids);
-
-    TlcOutput {
-        program,
-        type_table,
-        known_defs: registry.name_set(),
-        schemes: schemes_by_sym,
-        fill_hole_errors,
+    for def in &mut parts.defs {
+        let name = symbols.get(def.name).expect("BUG: transformed definition symbol is missing");
+        def.data.scheme = schemes.get(name).cloned();
     }
+
+    parts.with_symbols::<Transformed>(
+        symbols,
+        top_level_symbols,
+        term_ids,
+        super::context::TransformedGlobal {
+            type_table,
+            known_defs: registry.name_set(),
+            fill_hole_errors,
+            auto_storage_binding_ids: crate::IdSource::new(),
+        },
+    )
 }

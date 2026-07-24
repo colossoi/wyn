@@ -6,7 +6,7 @@
 //! back to `FuncBody` via demand-driven scheduling (giving DCE for free).
 
 use crate::builtins::{catalog, Purity};
-use crate::tlc::{SoacBody, VarRef};
+use crate::tlc::VarRef;
 use crate::{LookupMap, LookupSet};
 
 use super::types::EffectToken;
@@ -23,7 +23,9 @@ use crate::interface::{
     StorageAccess, TextureSource,
 };
 use crate::tlc::{
-    ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind, Program as TlcProgram, SoacOp, Term, TermKind,
+    ArrayExpr as GenericArrayExpr, Def as GenericDef, DefMeta as GenericDefMeta, Lambda as GenericLambda,
+    LoopKind as GenericLoopKind, Program as GenericProgram, SoacBody as GenericSoacBody,
+    SoacOp as GenericSoacOp, Term as GenericTerm, TermKind as GenericTermKind,
 };
 use crate::types::ExternDecl;
 use crate::types::{extract_function_signature, TypeExt};
@@ -40,6 +42,20 @@ use super::publish::PipelineDescriptorPublish;
 use super::soac::{filter, hist, screma};
 use super::types::*;
 use crate::pipeline_descriptor::BufferLen;
+
+type TlcFamily = crate::tlc::input_slice_bounds::InputBounded;
+type ClosureData = crate::tlc::data::ExplicitClosurePayload;
+type SoacBodyData = crate::tlc::data::ExplicitCapturesPayload;
+type TlcProgram = GenericProgram<crate::tlc::stage::InputSliceBoundsInferred>;
+type TlcDef = GenericDef<TlcFamily>;
+type DefMeta = GenericDefMeta<crate::tlc::data::EntryInputBounds>;
+type Term = GenericTerm<ClosureData, SoacBodyData>;
+type TermKind = GenericTermKind<ClosureData, SoacBodyData>;
+type Lambda = GenericLambda<ClosureData, SoacBodyData>;
+type LoopKind = GenericLoopKind<ClosureData, SoacBodyData>;
+type ArrayExpr = GenericArrayExpr<ClosureData, SoacBodyData>;
+type SoacBody = GenericSoacBody<ClosureData, SoacBodyData>;
+type SoacOp = GenericSoacOp<ClosureData, SoacBodyData>;
 
 // ============================================================================
 // Descriptor-set convention
@@ -255,7 +271,6 @@ impl<'a> GlobalContext<'a> {
 /// elaborate`).
 pub fn run(
     program: &TlcProgram,
-    input_slice_bounds: &crate::tlc::input_slice_bounds::ProgramBounds,
     binding_ids: &mut crate::IdSource<u32>,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<RawProgram, ConvertError> {
@@ -339,16 +354,14 @@ pub fn run(
                 }
             }
             DefMeta::EntryPoint(entry) => {
-                let workgroup = pipeline.workgroup_size_of(&entry.name);
-                let entry_name = symbol_name(symbols, def.name).unwrap_or("");
-                let entry_input_bounds = input_slice_bounds.get(entry_name);
+                let workgroup = pipeline.workgroup_size_of(&entry.declaration.name);
                 let ep = convert_entry_point(
                     def,
-                    entry,
+                    &entry.declaration,
                     &ctx,
                     &pure_constant_names,
                     workgroup,
-                    entry_input_bounds,
+                    &entry.data.by_symbol,
                     binding_ids,
                     effect_ids,
                     &mut arenas,
@@ -548,7 +561,7 @@ fn convert_entry_point(
     ctx: &GlobalContext,
     pure_constants: &LookupSet<String>,
     workgroup: (u32, u32, u32),
-    input_slice_bounds_for_entry: Option<&LookupMap<SymbolId, BufferLen>>,
+    input_bounds: &LookupMap<SymbolId, BufferLen>,
     binding_ids: &mut crate::IdSource<u32>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     arenas: &mut ConversionArenas,
@@ -720,19 +733,13 @@ fn convert_entry_point(
         });
     }
 
-    // Patch each storage-bound input's `length` from the caller-
-    // supplied side-table. `input_slice_bounds_for_entry` was
-    // computed by the TLC-level `input_slice_bounds` analyzer (the
-    // `TlcInputSliceBoundsInferred` typestate) and is keyed by the
-    // entry param's TLC `SymbolId`.
-    if let Some(map) = input_slice_bounds_for_entry {
-        for (input, (sym, _)) in inputs.iter_mut().zip(params.iter()) {
-            let EntryInputKind::Storage { length, .. } = &mut input.kind else {
-                continue;
-            };
-            if let Some(len) = map.get(sym).cloned() {
-                *length = Some(len);
-            }
+    // The owning TLC entry carries its inferred per-parameter minimums.
+    for (input, (sym, _)) in inputs.iter_mut().zip(params.iter()) {
+        let EntryInputKind::Storage { length, .. } = &mut input.kind else {
+            continue;
+        };
+        if let Some(len) = input_bounds.get(sym).cloned() {
+            *length = Some(len);
         }
     }
     let execution_model = match &entry.entry_type {
@@ -1120,6 +1127,9 @@ impl<'a, 'b> Converter<'a, 'b> {
             // --- Should not appear after defunctionalization ---
             TermKind::Lambda(_) => {
                 panic!("ICE: bare Lambda in to_egir (should be lifted)")
+            }
+            TermKind::Closure(_) => {
+                panic!("ICE: bare Closure in to_egir (closure calls should be lowered)")
             }
             TermKind::BinOp(_) | TermKind::UnOp(_) => {
                 panic!("ICE: bare operator in to_egir (should be inside App)")
@@ -2152,7 +2162,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     ) -> Result<NodeId, ConvertError> {
         let f_name = self.lambda_fn_name(&sb.lam)?;
         let capture_nids: Vec<NodeId> =
-            sb.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
+            sb.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let input_nids: Vec<NodeId> =
             inputs.iter().map(|ae| self.convert_array_expr_value(ae)).collect::<Result<_, _>>()?;
         let input_arr_types: Vec<Type<TypeName>> =
@@ -2237,7 +2247,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     fn convert_soac_scatter(
         &mut self,
         dest: &crate::tlc::Place,
-        lam: &crate::tlc::SoacBody,
+        lam: &SoacBody,
         inputs: &[ArrayExpr],
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
@@ -2265,7 +2275,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let input_array_types: Vec<Type<TypeName>> =
             inputs.iter().zip(input_nids.iter()).map(|(ae, nid)| self.value_array_type(*nid, ae)).collect();
         let capture_nids: Vec<NodeId> =
-            lam.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
+            lam.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
 
         // `[dest_view, inputs..]` — captures live on the `SegBody`.
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![dest_view];
@@ -2301,7 +2311,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     ) -> Result<NodeId, ConvertError> {
         let op_name = self.lambda_fn_name(&op.lam)?;
         let capture_nids: Vec<NodeId> =
-            op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
+            op.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let arr_nid = self.convert_array_expr_value(input)?;
         let arr_ty = self.value_array_type(arr_nid, input);
         let init_nid = self.convert_term(ne)?;
@@ -2355,7 +2365,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     ) -> Result<NodeId, ConvertError> {
         let op_name = self.lambda_fn_name(&op.lam)?;
         let capture_nids: Vec<NodeId> =
-            op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
+            op.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let arr_nid = self.convert_array_expr_value(input)?;
         let arr_ty = self.value_array_type(arr_nid, input);
         let init_nid = self.convert_term(ne)?;
@@ -2426,7 +2436,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     ) -> Result<NodeId, ConvertError> {
         let pred_name = self.lambda_fn_name(&pred.lam)?;
         let capture_nids: Vec<NodeId> =
-            pred.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
+            pred.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let elem_ty = self.array_expr_elem_type(input);
         let arr_ty = self.array_expr_type(input);
         let arr_nid = self.convert_array_expr_value(input)?;

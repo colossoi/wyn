@@ -1,7 +1,8 @@
 use super::run;
 use crate::ast::{Span, TypeName};
 use crate::tlc::{
-    ArrayExpr, Def, DefMeta, Lambda, Place, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
+    self, ArrayExpr, Def, DefMeta, Lambda, Place, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind,
+    VarRef,
 };
 use polytype::Type;
 
@@ -80,11 +81,11 @@ fn range_expr(n: usize, ty: Type<TypeName>, ids: &mut TermIdSource) -> Term {
 /// `float_runtime_index_nested_producers` (after `fuse_static_indices`), the
 /// pass under test — so the inlined runtime-indexed producer is still present
 /// for `run` to float.
-fn prepared(source: &str) -> Program {
+fn prepared(source: &str) -> Program<tlc::stage::SoacsAnfNormalized> {
     crate::test_pipeline::compile_thru_static_index(source)
 }
 
-fn entry_body(program: &Program) -> &Term {
+fn entry_body(program: &Program<tlc::stage::RuntimeIndexProducersFloated>) -> &Term {
     program
         .defs
         .iter()
@@ -98,7 +99,10 @@ fn walk(term: &Term, f: &mut impl FnMut(&Term)) {
     term.for_each_child(&mut |c| walk(c, f));
 }
 
-fn let_bound_runtime_gather(program: &Program, term: &Term) -> bool {
+fn let_bound_runtime_gather(
+    program: &Program<tlc::stage::RuntimeIndexProducersFloated>,
+    term: &Term,
+) -> bool {
     let mut found = false;
     walk(term, &mut |t| {
         if let TermKind::Let { name, rhs, .. } = &t.kind {
@@ -111,7 +115,10 @@ fn let_bound_runtime_gather(program: &Program, term: &Term) -> bool {
     found
 }
 
-fn index_reads_runtime_gather(program: &Program, term: &Term) -> bool {
+fn index_reads_runtime_gather(
+    program: &Program<tlc::stage::RuntimeIndexProducersFloated>,
+    term: &Term,
+) -> bool {
     let mut found = false;
     walk(term, &mut |t| {
         if let TermKind::Index { array, .. } = &t.kind {
@@ -142,8 +149,7 @@ def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
 entry e(j: i32) [1]f32 = [g(256)[j]]
 "#,
     );
-    let mut floated = program;
-    run(&mut floated);
+    let floated = run(program);
     let body = entry_body(&floated);
     assert!(
         let_bound_runtime_gather(&floated, body),
@@ -176,7 +182,7 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
                     body: Box::new(term(TermKind::Var(VarRef::Symbol(i)), i32_ty(), &mut ids)),
                     ret_ty: i32_ty(),
                 },
-                captures: vec![],
+                data: (),
             },
             inputs: vec![input_ae(Box::new(range_expr(
                 8,
@@ -227,7 +233,7 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
                     body: Box::new(envelope_body),
                     ret_ty: tuple_ty,
                 },
-                captures: vec![],
+                data: (),
             },
             inputs: vec![
                 input_ae(Box::new(range_expr(4, static_array_ty(i32_ty(), 4), &mut ids))),
@@ -239,6 +245,7 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
     );
     let program = Program::from_parts(
         vec![Def {
+            data: (),
             name: main,
             ty: unit_ty(),
             body: scatter,
@@ -250,10 +257,13 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
         symbols,
         std::collections::HashMap::new(),
         ids,
+        tlc::context::RewriteGlobal {
+            known_defs: Default::default(),
+            auto_storage_binding_ids: crate::IdSource::new(),
+        },
     );
 
-    let mut floated = program;
-    run(&mut floated);
+    let floated = run(program);
     let body = &floated.defs[0].body;
     assert!(
         let_bound_runtime_gather(&floated, body),

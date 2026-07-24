@@ -2,23 +2,55 @@
 //! on `input_slice_bounds` for the contract.
 
 use crate::pipeline_descriptor::BufferLen;
-use crate::tlc::input_slice_bounds;
-use crate::tlc::Program;
+use crate::tlc::{self, DefMeta, Program};
 
-/// Parse + frontend a fragment of Wyn source down to a TLC `Program`
-/// with constant folding applied (`partial_eval`), which is what the
-/// analyzer expects on `def N` literals.
-fn program_from(src: &str) -> Program {
-    let tc = crate::compile_thru_frontend(src).expect("frontend");
-    let (_nc, module_manager) = crate::cached_compiler_init();
-    tc.to_tlc(&module_manager, false)
-        .pin_entry_buffers()
-        .expect("pin_entry_buffers")
-        .validate_ownership()
-        .expect("validate_ownership")
-        .partial_eval()
-        .0
-        .tlc
+fn program_from(src: &str) -> Program<tlc::stage::InputSliceBoundsInferred> {
+    tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(src))
+}
+
+fn bounds_for_entry<'a>(
+    program: &'a Program<tlc::stage::InputSliceBoundsInferred>,
+    name: &str,
+) -> &'a crate::LookupMap<crate::SymbolId, BufferLen> {
+    let def = program
+        .defs
+        .iter()
+        .find(|def| program.symbols.get(def.name).is_some_and(|def_name| def_name == name))
+        .unwrap_or_else(|| panic!("missing entry {name}"));
+    let DefMeta::EntryPoint(entry) = &def.meta else {
+        panic!("{name} is not an entry");
+    };
+    &entry.data.by_symbol
+}
+
+fn collect_term_ids<C: crate::tlc::Payload, S: crate::tlc::Payload>(
+    term: &crate::tlc::Term<C, S>,
+    ids: &mut Vec<crate::tlc::TermId>,
+) {
+    ids.push(term.id);
+    term.for_each_child(&mut |child| collect_term_ids(child, ids));
+}
+
+#[test]
+fn transition_reuses_entry_term_tree() {
+    let src = r#"
+#[compute]
+entry e(#[storage(set=2, binding=0, access=read)] xs: []i32) i32 =
+  length(xs)
+"#;
+    let reachable = crate::test_pipeline::compile_to_reachable(src);
+    let mut before = Vec::new();
+    for def in &reachable.defs {
+        collect_term_ids(&def.body, &mut before);
+    }
+
+    let bounded = tlc::infer_input_slice_bounds(reachable);
+    let mut after = Vec::new();
+    for def in &bounded.defs {
+        collect_term_ids(&def.body, &mut after);
+    }
+
+    assert_eq!(after, before, "entry-data transition must not rebuild term nodes");
 }
 
 /// `param[0..K]` with `K` a compile-time `IntLit` (folded from a
@@ -34,8 +66,7 @@ entry e(#[storage(set=2, binding=0, access=read)] xs: []vec4f32) vec4f32 =
   reduce(|a,b| a+b, @[0.0,0.0,0.0,0.0], xs)
 "#;
     let prog = program_from(src);
-    let bounds = input_slice_bounds::compute_for_program(&prog);
-    let e = bounds.get("e").expect("entry e has bounds");
+    let e = bounds_for_entry(&prog, "e");
     assert_eq!(e.len(), 1, "exactly one tracked input: {:?}", e);
     let bytes = e.values().next().unwrap();
     assert_eq!(
@@ -55,9 +86,9 @@ entry e(#[storage(set=2, binding=0, access=read)] xs: []vec4f32) i32 =
   length(xs)
 "#;
     let prog = program_from(src);
-    let bounds = input_slice_bounds::compute_for_program(&prog);
+    let bounds = bounds_for_entry(&prog, "e");
     assert!(
-        bounds.get("e").map(|m| m.is_empty()).unwrap_or(true),
+        bounds.is_empty(),
         "length(xs) is a raw use → no bound: {:?}",
         bounds,
     );
@@ -77,8 +108,7 @@ entry e(#[storage(set=2, binding=0, access=read)] xs: []vec4f32) vec4f32 =
   reduce(|a,b| a+b, @[0.0,0.0,0.0,0.0], xs)
 "#;
     let prog = program_from(src);
-    let bounds = input_slice_bounds::compute_for_program(&prog);
-    let e = bounds.get("e").expect("entry e has bounds");
+    let e = bounds_for_entry(&prog, "e");
     assert_eq!(
         e.values().next().unwrap(),
         &BufferLen::Fixed { bytes: 4 * 16 },
@@ -101,8 +131,7 @@ entry e(#[storage(set=2, binding=0, access=read)] xs: []vec4f32) vec4f32 =
     reduce(|x,y| x+y, @[0.0,0.0,0.0,0.0], b)
 "#;
     let prog = program_from(src);
-    let bounds = input_slice_bounds::compute_for_program(&prog);
-    let e = bounds.get("e").expect("entry e has bounds");
+    let e = bounds_for_entry(&prog, "e");
     assert_eq!(
         e.values().next().unwrap(),
         &BufferLen::Fixed { bytes: 16 * 16 },

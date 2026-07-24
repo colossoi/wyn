@@ -1,4 +1,4 @@
-//! Tests for verify_hof_specialized.
+//! Tests for HOF specialization verification.
 
 use super::*;
 use crate::ast::TypeName;
@@ -7,8 +7,16 @@ use crate::SymbolTable;
 use polytype::Type;
 use std::collections::HashMap;
 
-fn empty_program() -> Program {
-    Program::from_parts(vec![], SymbolTable::new(), HashMap::new(), TermIdSource::new())
+fn empty_program() -> Program<Defunctionalized> {
+    Program::from_parts(
+        vec![],
+        SymbolTable::new(),
+        HashMap::new(),
+        TermIdSource::new(),
+        crate::tlc::context::PostClosureGlobal {
+            auto_storage_binding_ids: crate::IdSource::new(),
+        },
+    )
 }
 
 fn unit_ty() -> Type<TypeName> {
@@ -19,7 +27,9 @@ fn arrow(a: Type<TypeName>, b: Type<TypeName>) -> Type<TypeName> {
     Type::Constructed(TypeName::Arrow, vec![a, b])
 }
 
-fn dummy_body(program: &mut Program) -> Term {
+fn dummy_body(
+    program: &mut Program<Defunctionalized>,
+) -> Term<ExplicitClosurePayload, ExplicitCapturesPayload> {
     Term {
         id: program.next_term_id(),
         ty: unit_ty(),
@@ -39,6 +49,7 @@ fn def_with_no_arrow_params_passes() {
     let sym = p.symbols.alloc("f".into());
     let body = dummy_body(&mut p);
     p.defs.push(Def {
+        data: (),
         name: sym,
         ty: arrow(unit_ty(), unit_ty()),
         body,
@@ -57,6 +68,7 @@ fn def_with_function_typed_param_fails() {
     let arrow_ty = arrow(unit_ty(), unit_ty());
     let body = dummy_body(&mut p);
     p.defs.push(Def {
+        data: (),
         name: sym,
         ty: arrow(arrow_ty, unit_ty()),
         body,
@@ -79,6 +91,7 @@ fn function_typed_return_is_ignored() {
     let arrow_ty = arrow(unit_ty(), unit_ty());
     let body = dummy_body(&mut p);
     p.defs.push(Def {
+        data: (),
         name: sym,
         ty: arrow(unit_ty(), arrow_ty),
         body,

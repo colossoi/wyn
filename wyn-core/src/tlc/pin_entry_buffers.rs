@@ -22,61 +22,69 @@
 #[path = "pin_entry_buffers_tests.rs"]
 mod pin_entry_buffers_tests;
 
-use super::{ArrayExpr, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermKind, VarRef};
+use super::data::Empty;
+use super::run::Transformed;
+use super::{apply_type_substitution, extract_lambda_params_ref, DefMeta, Program, Term, TermKind, VarRef};
 use crate::ast::{Span, TypeName};
 use crate::binding_layout::{
     compute_entry_binding_layout, extract_storage_binding, extract_storage_image_binding,
 };
 use crate::interface::{EntryDecl, EntryParamBindingKind};
-use crate::tlc::monomorphize::apply_subst;
 use crate::types::{buffer_tag, TypeExt};
 use crate::{BindingRef, LookupMap, SymbolId};
 use polytype::Type;
 
+/// TLC after entry-parameter buffer regions are pinned into their types.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BuffersPinned;
+
+impl super::Stage for BuffersPinned {
+    type Family = super::run::Polymorphic;
+    type GlobalContext = super::context::RewriteGlobal;
+}
+
 /// Buffer-variable → concrete `Buffer(set, binding)` substitution.
 type BufferSubst = LookupMap<usize, Type<TypeName>>;
 
-pub fn run(program: &mut Program, binding_ids: &mut crate::IdSource<u32>) -> crate::error::Result<()> {
-    for def in program.defs.iter_mut() {
+pub fn run(mut program: Program<Transformed>) -> crate::error::Result<Program<BuffersPinned>> {
+    let (defs, term_ids, global_context) = (
+        &mut program.defs,
+        &mut program.term_ids,
+        &mut program.global_context,
+    );
+    for def in defs {
         if !matches!(&def.meta, DefMeta::EntryPoint(_)) {
             continue;
         }
         let span = def.body.span;
-        let (params, _) = extract_params(&def.body);
+        let (_, params) = extract_lambda_params_ref(&def.body);
 
         let mut subst = BufferSubst::new();
         let mut buffer_env = LookupMap::new();
         if let DefMeta::EntryPoint(entry) = &mut def.meta {
-            entry.param_bindings = compute_entry_binding_layout(
+            let param_bindings = compute_entry_binding_layout(
                 &params,
-                entry,
+                &entry.declaration,
                 crate::egir::from_tlc::AUTO_STORAGE_SET,
-                &mut *binding_ids,
+                &mut global_context.auto_storage_binding_ids,
             );
-            collect_buffer_subst(&params, entry, &mut subst, &mut buffer_env, span)?;
+            entry.declaration.param_bindings = param_bindings;
+            collect_buffer_subst(&params, &entry.declaration, &mut subst, &mut buffer_env, span)?;
         }
 
         while collect_view_slice_buffer_subst(&def.body, &mut subst, &buffer_env)? {}
 
         if !subst.is_empty() {
-            def.ty = apply_subst(&def.ty, &subst);
-            subst_term(&mut def.body, &subst);
+            def.ty = apply_type_substitution(&def.ty, &subst);
+            def.body.rewrite_types(term_ids, &mut |ty| apply_type_substitution(ty, &subst));
         }
     }
-    Ok(())
-}
-
-/// Flatten an entry's curried lambda chain into `(param_sym, param_ty)` pairs.
-fn extract_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
-    match &term.kind {
-        TermKind::Lambda(lam) => {
-            let (mut inner, body) = extract_params(&lam.body);
-            let mut params = lam.params.clone();
-            params.append(&mut inner);
-            (params, body)
-        }
-        _ => (vec![], term),
-    }
+    Ok(
+        program.map_global_context(|global| super::context::RewriteGlobal {
+            known_defs: global.known_defs,
+            auto_storage_binding_ids: global.auto_storage_binding_ids,
+        }),
+    )
 }
 
 /// Map each storage param's buffer variable to its concrete region. An
@@ -172,7 +180,7 @@ fn pin_resource_buffer(
 }
 
 fn collect_view_slice_buffer_subst(
-    term: &Term,
+    term: &Term<Empty, Empty>,
     subst: &mut BufferSubst,
     buffer_env: &LookupMap<SymbolId, Type<TypeName>>,
 ) -> crate::error::Result<bool> {
@@ -186,7 +194,7 @@ fn collect_view_slice_buffer_subst(
         let mut changed = collect_view_slice_buffer_subst(rhs, subst, buffer_env)?;
         let mut scoped_env = buffer_env.clone();
         if let Some(region) = view_buffer_for_term(rhs, subst, buffer_env) {
-            if let Some(Type::Variable(id)) = apply_subst(name_ty, subst).array_buffer() {
+            if let Some(Type::Variable(id)) = apply_type_substitution(name_ty, subst).array_buffer() {
                 if !subst.contains_key(id) {
                     subst.insert(*id, region.clone());
                     changed = true;
@@ -211,7 +219,7 @@ fn collect_view_slice_buffer_subst(
     }
 
     if let Some(source_buffer) = view_buffer_for_term(term, subst, buffer_env) {
-        let result_ty = apply_subst(&term.ty, subst);
+        let result_ty = apply_type_substitution(&term.ty, subst);
         if result_ty.array_variant().map(crate::types::is_array_variant_view).unwrap_or(false) {
             if let Some(Type::Variable(id)) = result_ty.array_buffer() {
                 if !subst.contains_key(id) {
@@ -225,12 +233,12 @@ fn collect_view_slice_buffer_subst(
 }
 
 fn view_buffer_for_term(
-    term: &Term,
+    term: &Term<Empty, Empty>,
     subst: &BufferSubst,
     buffer_env: &LookupMap<SymbolId, Type<TypeName>>,
 ) -> Option<Type<TypeName>> {
     if let Some(region @ Type::Constructed(TypeName::Buffer(_), _)) =
-        apply_subst(&term.ty, subst).array_buffer().cloned()
+        apply_type_substitution(&term.ty, subst).array_buffer().cloned()
     {
         return Some(region);
     }
@@ -248,159 +256,5 @@ fn view_buffer_for_term(
             }
         }
         _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// In-place type substitution over a term tree. Mirrors the type positions in
-// `monomorphize`'s `apply_subst_term` family, but mutates every type in place
-// (term ids unchanged — this only concretizes buffer variables).
-// ---------------------------------------------------------------------------
-
-fn subst_term(t: &mut Term, s: &BufferSubst) {
-    t.ty = apply_subst(&t.ty, s);
-    match &mut t.kind {
-        TermKind::Var(_)
-        | TermKind::IntLit(_)
-        | TermKind::FloatLit(_)
-        | TermKind::BoolLit(_)
-        | TermKind::UnitLit
-        | TermKind::BinOp(_)
-        | TermKind::UnOp(_)
-        | TermKind::Extern(_) => {}
-        TermKind::Coerce { inner, target_ty } => {
-            subst_term(inner, s);
-            *target_ty = apply_subst(target_ty, s);
-        }
-        TermKind::Soac(soac) => subst_soac(soac, s),
-        TermKind::ArrayExpr(ae) => subst_array_expr(ae, s),
-        TermKind::Tuple(parts) | TermKind::VecLit(parts) => {
-            parts.iter_mut().for_each(|p| subst_term(p, s));
-        }
-        TermKind::TupleProj { tuple, .. } => subst_term(tuple, s),
-        TermKind::Index { array, index } => {
-            subst_term(array, s);
-            subst_term(index, s);
-        }
-        TermKind::Lambda(lam) => subst_lambda(lam, s),
-        TermKind::App { func, args } => {
-            subst_term(func, s);
-            args.iter_mut().for_each(|a| subst_term(a, s));
-        }
-        TermKind::Let {
-            name_ty, rhs, body, ..
-        } => {
-            *name_ty = apply_subst(name_ty, s);
-            subst_term(rhs, s);
-            subst_term(body, s);
-        }
-        TermKind::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            subst_term(cond, s);
-            subst_term(then_branch, s);
-            subst_term(else_branch, s);
-        }
-        TermKind::Loop {
-            loop_var_ty,
-            init,
-            init_bindings,
-            kind,
-            body,
-            ..
-        } => {
-            *loop_var_ty = apply_subst(loop_var_ty, s);
-            subst_term(init, s);
-            for (_, ty, expr) in init_bindings.iter_mut() {
-                *ty = apply_subst(ty, s);
-                subst_term(expr, s);
-            }
-            match kind {
-                LoopKind::For { var_ty, iter, .. } => {
-                    *var_ty = apply_subst(var_ty, s);
-                    subst_term(iter, s);
-                }
-                LoopKind::ForRange { var_ty, bound, .. } => {
-                    *var_ty = apply_subst(var_ty, s);
-                    subst_term(bound, s);
-                }
-                LoopKind::While { cond } => subst_term(cond, s),
-            }
-            subst_term(body, s);
-        }
-    }
-}
-
-fn subst_lambda(lam: &mut Lambda, s: &BufferSubst) {
-    for (_, ty) in lam.params.iter_mut() {
-        *ty = apply_subst(ty, s);
-    }
-    lam.ret_ty = apply_subst(&lam.ret_ty, s);
-    subst_term(&mut lam.body, s);
-}
-
-fn subst_soac_body(sb: &mut super::SoacBody, s: &BufferSubst) {
-    subst_lambda(&mut sb.lam, s);
-    for (_, ty, t) in sb.captures.iter_mut() {
-        *ty = apply_subst(ty, s);
-        subst_term(t, s);
-    }
-}
-
-fn subst_soac(soac: &mut SoacOp, s: &BufferSubst) {
-    match soac {
-        SoacOp::Map { lam, inputs, .. } => {
-            subst_soac_body(lam, s);
-            inputs.iter_mut().for_each(|ae| subst_array_expr(ae, s));
-        }
-        SoacOp::Reduce { op, ne, input } => {
-            subst_soac_body(op, s);
-            subst_term(ne, s);
-            subst_array_expr(input, s);
-        }
-        SoacOp::Scan { op, ne, input, .. } => {
-            subst_soac_body(op, s);
-            subst_term(ne, s);
-            subst_array_expr(input, s);
-        }
-        SoacOp::Filter { pred, input, .. } => {
-            subst_soac_body(pred, s);
-            subst_array_expr(input, s);
-        }
-        SoacOp::Scatter { lam, inputs, .. } => {
-            subst_soac_body(lam, s);
-            for input in inputs {
-                subst_array_expr(input, s);
-            }
-        }
-        SoacOp::ReduceByIndex {
-            op,
-            ne,
-            indices,
-            values,
-            ..
-        } => {
-            subst_soac_body(op, s);
-            subst_term(ne, s);
-            subst_array_expr(indices, s);
-            subst_array_expr(values, s);
-        }
-    }
-}
-
-fn subst_array_expr(ae: &mut ArrayExpr, s: &BufferSubst) {
-    match ae {
-        ArrayExpr::Var(_, ty) => *ty = apply_subst(ty, s),
-        ArrayExpr::Zip(exprs) => exprs.iter_mut().for_each(|e| subst_array_expr(e, s)),
-        ArrayExpr::Literal(terms) => terms.iter_mut().for_each(|t| subst_term(t, s)),
-        ArrayExpr::Range { start, len, step } => {
-            subst_term(start, s);
-            subst_term(len, s);
-            if let Some(step) = step {
-                subst_term(step, s);
-            }
-        }
     }
 }

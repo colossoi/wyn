@@ -21,36 +21,48 @@ use polytype::Type;
 use crate::ast::TypeName;
 use crate::SymbolId;
 
-use super::{ArrayExpr, Lambda, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef};
+use super::data::Empty;
+use super::{
+    wrap_let_bindings, ArrayExpr, Def, Lambda, LetBinding, Program, SoacBody, SoacOp, Term, TermIdSource,
+    TermKind, VarRef,
+};
 
-#[derive(Debug)]
-struct Binding {
-    name: SymbolId,
-    name_ty: Type<TypeName>,
-    rhs: Term,
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RuntimeIndexProducersFloated;
+
+impl super::Stage for RuntimeIndexProducersFloated {
+    type Family = super::monomorphize::Monomorphic;
+    type GlobalContext = super::context::RewriteGlobal;
 }
 
-pub fn run(program: &mut Program) {
+pub fn run(
+    mut program: Program<super::stage::SoacsAnfNormalized>,
+) -> Program<RuntimeIndexProducersFloated> {
     let ids = &mut program.term_ids;
     let blocked = LookupSet::new();
 
-    for idx in 0..program.defs.len() {
-        let body = program.defs[idx].body.clone();
+    crate::map_in_place(&mut program.defs, |def| {
+        let body = def.body;
         let (floats, body) = float_term(body, &blocked, ids, &mut program.symbols, false);
-        program.defs[idx].body = wrap_lets(floats, body, ids);
-    }
+        Def {
+            body: wrap_let_bindings(floats, body, ids),
+            ..def
+        }
+    });
 
     super::anf::debug_check(&program, "runtime_index_producers");
+    program.into_stage()
 }
 
 fn float_term(
-    term: Term,
+    term: Term<Empty, Empty>,
     blocked: &LookupSet<SymbolId>,
     ids: &mut TermIdSource,
     symbols: &mut crate::SymbolTable,
     collect: bool,
-) -> (Vec<Binding>, Term) {
-    let Term { id, ty, span, kind } = term;
+) -> (Vec<LetBinding<Empty, Empty>>, Term<Empty, Empty>) {
+    let Term { ty, span, kind, .. } = term;
+    let id = ids.next_id();
     match kind {
         TermKind::Lambda(lam) => {
             let mut inner_blocked = blocked.clone();
@@ -58,7 +70,7 @@ fn float_term(
                 inner_blocked.insert(*sym);
             }
             let (floats, body) = float_term(*lam.body, &inner_blocked, ids, symbols, false);
-            let body = wrap_lets(floats, body, ids);
+            let body = wrap_let_bindings(floats, body, ids);
             (
                 vec![],
                 Term {
@@ -110,8 +122,8 @@ fn float_term(
                         kind: TermKind::Let {
                             name,
                             name_ty,
-                            rhs: Box::new(wrap_lets(rhs_floats, rhs, ids)),
-                            body: Box::new(wrap_lets(body_floats, body, ids)),
+                            rhs: Box::new(wrap_let_bindings(rhs_floats, rhs, ids)),
+                            body: Box::new(wrap_let_bindings(body_floats, body, ids)),
                         },
                     },
                 )
@@ -163,10 +175,11 @@ fn float_term(
                         index: Box::new(index),
                     },
                 };
-                index_floats.push(Binding {
+                index_floats.push(LetBinding {
                     name,
                     name_ty,
                     rhs: *array,
+                    span: array_span,
                 });
                 return finish(index_floats, indexed, collect, ids);
             }
@@ -204,11 +217,11 @@ fn float_term(
 }
 
 fn float_soac(
-    soac: SoacOp,
+    soac: SoacOp<Empty, Empty>,
     blocked: &LookupSet<SymbolId>,
     ids: &mut TermIdSource,
     symbols: &mut crate::SymbolTable,
-) -> (Vec<Binding>, SoacOp) {
+) -> (Vec<LetBinding<Empty, Empty>>, SoacOp<Empty, Empty>) {
     match soac {
         SoacOp::Map {
             lam,
@@ -334,24 +347,17 @@ fn float_soac(
 }
 
 fn float_soac_body(
-    body: SoacBody,
+    body: SoacBody<Empty, Empty>,
     blocked: &LookupSet<SymbolId>,
     ids: &mut TermIdSource,
     symbols: &mut crate::SymbolTable,
-) -> (Vec<Binding>, SoacBody) {
+) -> (Vec<LetBinding<Empty, Empty>>, SoacBody<Empty, Empty>) {
     let mut lambda_blocked = blocked.clone();
     for (sym, _) in &body.lam.params {
         lambda_blocked.insert(*sym);
     }
 
-    let (mut floats, lam_body) = float_term(*body.lam.body, &lambda_blocked, ids, symbols, true);
-    let mut captures = Vec::with_capacity(body.captures.len());
-    for (sym, ty, term) in body.captures {
-        let (mut capture_floats, term) = float_term(term, blocked, ids, symbols, true);
-        floats.append(&mut capture_floats);
-        captures.push((sym, ty, term));
-    }
-
+    let (floats, lam_body) = float_term(*body.lam.body, &lambda_blocked, ids, symbols, true);
     (
         floats,
         SoacBody {
@@ -360,17 +366,17 @@ fn float_soac_body(
                 body: Box::new(lam_body),
                 ret_ty: body.lam.ret_ty,
             },
-            captures,
+            data: (),
         },
     )
 }
 
 fn float_array_expr(
-    ae: ArrayExpr,
+    ae: ArrayExpr<Empty, Empty>,
     blocked: &LookupSet<SymbolId>,
     ids: &mut TermIdSource,
     symbols: &mut crate::SymbolTable,
-) -> (Vec<Binding>, ArrayExpr) {
+) -> (Vec<LetBinding<Empty, Empty>>, ArrayExpr<Empty, Empty>) {
     match ae {
         // A named input has no producer to float.
         ArrayExpr::Var(vr, ty) => (vec![], ArrayExpr::Var(vr, ty)),
@@ -419,33 +425,20 @@ fn float_array_expr(
     }
 }
 
-fn finish(floats: Vec<Binding>, term: Term, collect: bool, ids: &mut TermIdSource) -> (Vec<Binding>, Term) {
+fn finish(
+    floats: Vec<LetBinding<Empty, Empty>>,
+    term: Term<Empty, Empty>,
+    collect: bool,
+    ids: &mut TermIdSource,
+) -> (Vec<LetBinding<Empty, Empty>>, Term<Empty, Empty>) {
     if collect {
         (floats, term)
     } else {
-        (vec![], wrap_lets(floats, term, ids))
+        (vec![], wrap_let_bindings(floats, term, ids))
     }
 }
 
-fn wrap_lets(bindings: Vec<Binding>, mut body: Term, ids: &mut TermIdSource) -> Term {
-    for binding in bindings.into_iter().rev() {
-        let body_ty = body.ty.clone();
-        body = Term {
-            id: ids.next_id(),
-            ty: body_ty,
-            span: binding.rhs.span,
-            kind: TermKind::Let {
-                name: binding.name,
-                name_ty: binding.name_ty,
-                rhs: Box::new(binding.rhs),
-                body: Box::new(body),
-            },
-        };
-    }
-    body
-}
-
-fn is_liftable_array_producer(term: &Term) -> bool {
+fn is_liftable_array_producer(term: &Term<Empty, Empty>) -> bool {
     match &term.kind {
         TermKind::Let { body, .. } => is_liftable_array_producer(body),
         TermKind::Soac(SoacOp::Map { .. } | SoacOp::Scan { .. }) => true,
@@ -457,11 +450,11 @@ fn is_runtime_sized_array(ty: &Type<TypeName>) -> bool {
     crate::types::TypeExt::is_runtime_sized_array(ty)
 }
 
-fn is_int_lit(term: &Term) -> bool {
+fn is_int_lit(term: &Term<Empty, Empty>) -> bool {
     matches!(term.kind, TermKind::IntLit(_))
 }
 
-fn references_any(term: &Term, blocked: &LookupSet<SymbolId>) -> bool {
+fn references_any(term: &Term<Empty, Empty>, blocked: &LookupSet<SymbolId>) -> bool {
     let mut found = false;
     term.for_each_child(&mut |child| {
         if !found {

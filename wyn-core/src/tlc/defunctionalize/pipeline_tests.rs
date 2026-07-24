@@ -1,16 +1,17 @@
-use super::VarRef;
 use crate::ast::{BinaryOp, Span, TypeName};
-use crate::tlc::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermId, TermIdSource, TermKind};
+use crate::tlc::{
+    Def, DefMeta, Lambda, LoopKind, Payload, Program, Stage, Term, TermId, TermIdSource, TermKind, VarRef,
+};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-/// End-to-end runner for the three-phase closure pipeline. Mirrors what
-/// `TlcOwnershipApplied::defunctionalize` does in production.
-fn defunctionalize(program: &mut Program, known_defs: &HashSet<String>) {
-    let closure_info = super::super::closure_convert::run(program, known_defs);
-    super::super::hof_specialize::run(program, &closure_info);
-    super::super::closure_calls_lower::run(program, &closure_info);
+/// End-to-end runner for the three internal defunctionalization algorithms. Mirrors what
+/// `tlc::defunctionalize` does in production.
+fn defunctionalize(
+    program: Program<crate::tlc::stage::RuntimeIndexProducersFloated>,
+) -> Program<crate::tlc::stage::Defunctionalized> {
+    super::run(program)
 }
 
 /// Test helper that manages symbol table and term ID generation.
@@ -69,7 +70,7 @@ fn arrow(from: Type<TypeName>, to: Type<TypeName>) -> Type<TypeName> {
 
 /// Helper to print TLC term structure for debugging
 #[allow(dead_code)]
-fn print_term(term: &Term, symbols: &SymbolTable, indent: usize) -> String {
+fn print_term<C: Payload, S: Payload>(term: &Term<C, S>, symbols: &SymbolTable, indent: usize) -> String {
     let unknown = "<unknown>".to_string();
     let pad = "  ".repeat(indent);
     match &term.kind {
@@ -165,7 +166,7 @@ fn print_term(term: &Term, symbols: &SymbolTable, indent: usize) -> String {
 
 /// Helper to print all defs in a program
 #[allow(dead_code)]
-fn print_program(program: &Program) -> String {
+fn print_program<S: Stage>(program: &Program<S>) -> String {
     let unknown = "<unknown>".to_string();
     let mut out = String::new();
     for def in &program.defs {
@@ -204,6 +205,7 @@ fn test_defunc_simple_lambda_no_capture() {
     let (symbols, term_ids) = b.finish();
     let program = Program::from_parts(
         vec![Def {
+            data: (),
             name: f_sym,
             ty: lam.ty.clone(),
             body: lam,
@@ -215,11 +217,13 @@ fn test_defunc_simple_lambda_no_capture() {
         symbols,
         HashMap::new(),
         term_ids,
+        crate::tlc::context::RewriteGlobal {
+            known_defs: Default::default(),
+            auto_storage_binding_ids: crate::IdSource::new(),
+        },
     );
 
-    let known_defs = HashSet::new();
-    let mut result = program;
-    defunctionalize(&mut result, &known_defs);
+    let result = defunctionalize(program);
 
     // Should preserve the parameter lambda (not lift it)
     assert_eq!(result.defs.len(), 1);
@@ -301,6 +305,7 @@ fn test_defunc_lambda_with_capture() {
 
     let program = Program::from_parts(
         vec![Def {
+            data: (),
             name: f_sym,
             ty: outer_lam.ty.clone(),
             body: outer_lam,
@@ -312,11 +317,13 @@ fn test_defunc_lambda_with_capture() {
         symbols,
         HashMap::new(),
         term_ids,
+        crate::tlc::context::RewriteGlobal {
+            known_defs: Default::default(),
+            auto_storage_binding_ids: crate::IdSource::new(),
+        },
     );
 
-    let known_defs = HashSet::new();
-    let mut result = program;
-    defunctionalize(&mut result, &known_defs);
+    let result = defunctionalize(program);
 
     // Should have lifted the inner lambda
     assert!(result.defs.len() >= 2, "Expected lifted lambda def");
@@ -508,6 +515,7 @@ fn test_nested_hof_passthrough() {
     let program = Program::from_parts(
         vec![
             Def {
+                data: (),
                 name: hof_inner_sym,
                 ty: hof_inner.ty.clone(),
                 body: hof_inner,
@@ -517,6 +525,7 @@ fn test_nested_hof_passthrough() {
                 return_diet: crate::types::Diet::observing(),
             },
             Def {
+                data: (),
                 name: hof_outer_sym,
                 ty: hof_outer.ty.clone(),
                 body: hof_outer,
@@ -526,6 +535,7 @@ fn test_nested_hof_passthrough() {
                 return_diet: crate::types::Diet::observing(),
             },
             Def {
+                data: (),
                 name: main_sym,
                 ty: main_def.ty.clone(),
                 body: main_def,
@@ -538,11 +548,13 @@ fn test_nested_hof_passthrough() {
         symbols,
         HashMap::new(),
         term_ids,
+        crate::tlc::context::RewriteGlobal {
+            known_defs: Default::default(),
+            auto_storage_binding_ids: crate::IdSource::new(),
+        },
     );
 
-    let known_defs = HashSet::new();
-    let mut result = program;
-    defunctionalize(&mut result, &known_defs);
+    let result = defunctionalize(program);
 
     let def_names: Vec<&str> = result
         .defs
@@ -692,6 +704,7 @@ fn specialized_hof_preserves_consuming_data_param_diet() {
     let program = Program::from_parts(
         vec![
             Def {
+                data: (),
                 name: apply_sym,
                 ty: apply_ty,
                 body: apply_lam,
@@ -701,6 +714,7 @@ fn specialized_hof_preserves_consuming_data_param_diet() {
                 return_diet: crate::types::Diet::observing(),
             },
             Def {
+                data: (),
                 name: main_sym,
                 ty: main_lam.ty.clone(),
                 body: main_lam,
@@ -713,10 +727,13 @@ fn specialized_hof_preserves_consuming_data_param_diet() {
         symbols,
         HashMap::new(),
         term_ids,
+        crate::tlc::context::RewriteGlobal {
+            known_defs: Default::default(),
+            auto_storage_binding_ids: crate::IdSource::new(),
+        },
     );
 
-    let mut result = program;
-    defunctionalize(&mut result, &HashSet::new());
+    let result = defunctionalize(program);
 
     // The specialized `apply` (callback removed) keeps only the array param.
     let specialized = result

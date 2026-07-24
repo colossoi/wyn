@@ -28,9 +28,9 @@
 //! via `for_each_child`; no current test exercises a loop that shadows
 //! an input symbol.
 //!
-//! Read-only analysis — no rewrites — consumed by
-//! `egir::from_tlc::convert_entry_point` when it builds the descriptor
-//! entry for each input binding.
+//! Analysis is read-only. The phase transition then attaches each result
+//! directly to its owning entry node; EGIR consumes that in-tree data when
+//! it builds the descriptor entry for each input binding.
 
 use crate::{LookupMap, LookupSet};
 
@@ -42,43 +42,121 @@ use crate::pipeline_descriptor::BufferLen;
 use crate::types::TypeExt;
 use crate::SymbolId;
 
-use super::{extract_lambda_params, DefMeta, Program, Term, TermKind, VarRef};
+use super::{
+    data, extract_lambda_params_ref, Def, DefMeta, EntryPoint, Payload, Program, Term, TermKind,
+    TermVisitor, VarRef, WalkDecision,
+};
 
-/// Per-entry-point per-symbol input slice bounds for an entire program.
-/// Outer key: entry-point surface name. Inner key: the entry's input
-/// parameter `SymbolId` for a storage-bound input. Inner value: inferred
-/// minimum byte length (see `infer`).
-pub type ProgramBounds = LookupMap<String, LookupMap<SymbolId, BufferLen>>;
+/// Backend-ready TLC with input bounds embedded in entry definitions.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InputBounded;
 
-/// Run `infer` on every entry point in `program`. Each entry's storage-
-/// bound params are extracted from its outer lambda chain (paired with
-/// each param's declared type) and fed to `infer` alongside the inner
-/// body.
-pub fn compute_for_program(program: &Program) -> ProgramBounds {
-    let mut out: ProgramBounds = LookupMap::new();
+impl super::Family for InputBounded {
+    type DefinitionData = ();
+    type EntryData = super::data::EntryInputBounds;
+    type ClosureData = super::data::ExplicitClosurePayload;
+    type SoacBodyData = super::data::ExplicitCapturesPayload;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InputSliceBoundsInferred;
+
+impl super::Stage for InputSliceBoundsInferred {
+    type Family = InputBounded;
+    type GlobalContext = super::context::BackendGlobal;
+}
+
+type SourceStage = super::stage::Reachable;
+type EntryPatches = LookupMap<SymbolId, data::EntryInputBounds>;
+
+/// Infer every entry patch, then consume the old phase into the phase whose
+/// entry nodes own those bounds. Both families select the same closure and
+/// SOAC-body variables, so every term body moves without traversal.
+pub fn run(program: Program<SourceStage>) -> Program<InputSliceBoundsInferred> {
+    let mut patches = analyze(&program);
+    let rebuilt = program.rebuild::<InputSliceBoundsInferred>(std::convert::identity, |def, _term_ids| {
+        attach_entry_bounds(def, &mut patches)
+    });
+    assert!(
+        patches.is_empty(),
+        "input-slice-bound patches targeted definitions absent from the rebuilt program: {:?}",
+        patches.keys().collect::<Vec<_>>()
+    );
+    rebuilt
+}
+
+/// Build one patch for every entry, including entries for which no finite
+/// minimum can be inferred. Definition `SymbolId`s are globally unique.
+fn analyze(program: &Program<SourceStage>) -> EntryPatches {
+    let mut out = EntryPatches::new();
     for def in &program.defs {
         if !matches!(def.meta, DefMeta::EntryPoint(_)) {
             continue;
         }
-        let entry_name = match program.symbols.get(def.name) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        let (params, inner_body) = extract_lambda_params(&def.body);
+        let (inner_body, params) = extract_lambda_params_ref(&def.body);
         let inputs: Vec<(SymbolId, Type<TypeName>)> =
             params.iter().map(|(sym, ty)| (*sym, ty.clone())).collect();
-        let bounds = infer(&inner_body, &inputs);
-        if !bounds.is_empty() {
-            out.insert(entry_name, bounds);
-        }
+        let previous = out.insert(
+            def.name,
+            data::EntryInputBounds {
+                by_symbol: infer(inner_body, &inputs),
+            },
+        );
+        assert!(
+            previous.is_none(),
+            "duplicate TLC definition SymbolId {:?}",
+            def.name
+        );
     }
     out
+}
+
+fn attach_entry_bounds(
+    def: Def<super::defunctionalize::ClosureConverted>,
+    patches: &mut EntryPatches,
+) -> Def<InputBounded> {
+    let Def {
+        data: (),
+        name,
+        ty,
+        body,
+        meta,
+        arity,
+        param_diets,
+        return_diet,
+    } = def;
+    let meta = match meta {
+        DefMeta::Function => DefMeta::Function,
+        DefMeta::LiftedLambda => DefMeta::LiftedLambda,
+        DefMeta::EntryPoint(entry) => {
+            let data = patches
+                .remove(&name)
+                .unwrap_or_else(|| panic!("missing input-slice-bound patch for entry {name:?}"));
+            DefMeta::EntryPoint(EntryPoint {
+                declaration: entry.declaration,
+                data,
+            })
+        }
+    };
+    Def {
+        data: (),
+        name,
+        ty,
+        body,
+        meta,
+        arity,
+        param_diets,
+        return_diet,
+    }
 }
 
 /// Per `(SymbolId, array_type)` input, infer a minimum-required buffer
 /// length from how the entry body slices that input. See the module
 /// docs for the exact contract.
-pub fn infer(body: &Term, inputs: &[(SymbolId, Type<TypeName>)]) -> LookupMap<SymbolId, BufferLen> {
+pub fn infer<C: Payload, S: Payload>(
+    body: &Term<C, S>,
+    inputs: &[(SymbolId, Type<TypeName>)],
+) -> LookupMap<SymbolId, BufferLen> {
     let slice_id = catalog().known().slice;
 
     let mut elem_bytes: LookupMap<SymbolId, u64> = LookupMap::new();
@@ -89,11 +167,16 @@ pub fn infer(body: &Term, inputs: &[(SymbolId, Type<TypeName>)]) -> LookupMap<Sy
         };
         elem_bytes.insert(*sym, b as u64);
     }
-    let tracked: LookupSet<SymbolId> = elem_bytes.keys().copied().collect();
-
-    let mut clean_max_k: LookupMap<SymbolId, u64> = LookupMap::new();
-    let mut dirty: LookupSet<SymbolId> = LookupSet::new();
-    walk(body, slice_id, &tracked, &mut clean_max_k, &mut dirty);
+    let mut walker = InputBoundWalker {
+        slice_id,
+        tracked: elem_bytes.keys().copied().collect(),
+        clean_max_k: LookupMap::new(),
+        dirty: LookupSet::new(),
+    };
+    body.walk(&mut walker);
+    let InputBoundWalker {
+        clean_max_k, dirty, ..
+    } = walker;
 
     clean_max_k
         .into_iter()
@@ -111,86 +194,86 @@ pub fn infer(body: &Term, inputs: &[(SymbolId, Type<TypeName>)]) -> LookupMap<Sy
         .collect()
 }
 
-fn walk(
-    term: &Term,
+struct InputBoundWalker {
     slice_id: BuiltinId,
-    tracked: &LookupSet<SymbolId>,
-    clean_max_k: &mut LookupMap<SymbolId, u64>,
-    dirty: &mut LookupSet<SymbolId>,
-) {
-    // 1. Atomic recognition: `slice(Var(sym), IntLit(0), IntLit(K))`
-    // for a tracked `sym`. Does NOT recurse into args[0] (the bare
-    // Var is exactly what we're consuming as the slice's array
-    // operand).
-    if let TermKind::App { func, args } = &term.kind {
-        if args.len() == 3 {
-            let is_slice = matches!(
-                &func.kind,
-                TermKind::Var(VarRef::Builtin { id, .. }) if *id == slice_id
-            );
-            if is_slice {
-                if let TermKind::Var(VarRef::Symbol(sym)) = &args[0].kind {
-                    if tracked.contains(sym) {
-                        let start_ok = matches!(
-                            &args[1].kind,
-                            TermKind::IntLit(s) if s.parse::<i64>() == Ok(0)
-                        );
-                        let end_k = if let TermKind::IntLit(s) = &args[2].kind {
-                            s.parse::<i64>().ok().and_then(|i| if i >= 0 { Some(i as u64) } else { None })
-                        } else {
-                            None
-                        };
-                        if start_ok {
-                            if let Some(k) = end_k {
-                                let entry = clean_max_k.entry(*sym).or_insert(0);
-                                *entry = (*entry).max(k);
-                                walk(&args[1], slice_id, tracked, clean_max_k, dirty);
-                                walk(&args[2], slice_id, tracked, clean_max_k, dirty);
-                                return;
+    tracked: LookupSet<SymbolId>,
+    clean_max_k: LookupMap<SymbolId, u64>,
+    dirty: LookupSet<SymbolId>,
+}
+
+impl<C: Payload, S: Payload> TermVisitor<C, S> for InputBoundWalker {
+    fn visit(&mut self, term: &Term<C, S>) -> WalkDecision {
+        // 1. Atomic recognition: `slice(Var(sym), IntLit(0), IntLit(K))`
+        // for a tracked `sym`. Do not recurse into args[0]: the bare Var is
+        // exactly what this slice consumes as its array operand.
+        if let TermKind::App { func, args } = &term.kind {
+            if args.len() == 3 {
+                let is_slice = matches!(
+                    &func.kind,
+                    TermKind::Var(VarRef::Builtin { id, .. }) if *id == self.slice_id
+                );
+                if is_slice {
+                    if let TermKind::Var(VarRef::Symbol(sym)) = &args[0].kind {
+                        if self.tracked.contains(sym) {
+                            let start_ok = matches!(
+                                &args[1].kind,
+                                TermKind::IntLit(s) if s.parse::<i64>() == Ok(0)
+                            );
+                            let end_k = if let TermKind::IntLit(s) = &args[2].kind {
+                                s.parse::<i64>()
+                                    .ok()
+                                    .and_then(|i| if i >= 0 { Some(i as u64) } else { None })
+                            } else {
+                                None
+                            };
+                            if start_ok {
+                                if let Some(k) = end_k {
+                                    let entry = self.clean_max_k.entry(*sym).or_insert(0);
+                                    *entry = (*entry).max(k);
+                                    args[1].walk(self);
+                                    args[2].walk(self);
+                                    return WalkDecision::Prune;
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
-
-    // 2. Bare `Var(Symbol(sym))` for a tracked sym → mark dirty.
-    if let TermKind::Var(VarRef::Symbol(sym)) = &term.kind {
-        if tracked.contains(sym) {
-            dirty.insert(*sym);
-        }
-        return;
-    }
-
-    // 3. Scope-aware recursion through binders. TLC `Let` is
-    // non-recursive: `rhs` sees the outer scope.
-    match &term.kind {
-        TermKind::Let { name, rhs, body, .. } => {
-            walk(rhs, slice_id, tracked, clean_max_k, dirty);
-            if tracked.contains(name) {
-                let mut sub = tracked.clone();
-                sub.remove(name);
-                walk(body, slice_id, &sub, clean_max_k, dirty);
-            } else {
-                walk(body, slice_id, tracked, clean_max_k, dirty);
+        // 2. Bare `Var(Symbol(sym))` for a tracked sym → mark dirty.
+        if let TermKind::Var(VarRef::Symbol(sym)) = &term.kind {
+            if self.tracked.contains(sym) {
+                self.dirty.insert(*sym);
             }
+            return WalkDecision::Prune;
         }
-        TermKind::Lambda(lam) => {
-            let shadows: Vec<SymbolId> =
-                lam.params.iter().map(|(p, _)| *p).filter(|p| tracked.contains(p)).collect();
-            if shadows.is_empty() {
-                walk(&lam.body, slice_id, tracked, clean_max_k, dirty);
-            } else {
-                let mut sub = tracked.clone();
-                for s in shadows {
-                    sub.remove(&s);
+
+        // 3. Scope-aware recursion through binders. TLC `Let` is
+        // non-recursive: `rhs` sees the outer scope.
+        match &term.kind {
+            TermKind::Let { name, rhs, body, .. } => {
+                rhs.walk(self);
+                let shadowed = self.tracked.remove(name);
+                body.walk(self);
+                if shadowed {
+                    self.tracked.insert(*name);
                 }
-                walk(&lam.body, slice_id, &sub, clean_max_k, dirty);
+                WalkDecision::Prune
             }
-        }
-        _ => {
-            term.for_each_child(&mut |child| walk(child, slice_id, tracked, clean_max_k, dirty));
+            TermKind::Lambda(lam) => {
+                let shadowed: Vec<SymbolId> = lam
+                    .params
+                    .iter()
+                    .map(|(param, _)| *param)
+                    .filter(|param| self.tracked.remove(param))
+                    .collect();
+                lam.body.walk(self);
+                for symbol in shadowed {
+                    self.tracked.insert(symbol);
+                }
+                WalkDecision::Prune
+            }
+            _ => WalkDecision::Recurse,
         }
     }
 }

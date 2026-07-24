@@ -1,7 +1,7 @@
 use super::super::SoacOp;
-use super::{analyze, build, eligible_unique_input_soacs, Origin, OwnershipModel, VarRef};
+use super::{analyze, build, eligible_unique_input_soacs, AnalysisState, Origin, VarRef};
 use crate::builtins::catalog;
-use crate::tlc::{Program, Term, TermKind};
+use crate::tlc::{self, Program, Term, TermKind};
 use crate::types::SoacOwnership;
 use crate::{Compiler, SymbolTable};
 
@@ -17,7 +17,7 @@ fn origin_mutability() {
 
 #[test]
 fn empty_model_lookups() {
-    let model = OwnershipModel::new();
+    let model = AnalysisState::new();
     assert!(model.var_to_owner.is_empty());
     assert!(model.origins.is_empty());
     assert!(model.uses.is_empty());
@@ -26,7 +26,7 @@ fn empty_model_lookups() {
     assert!(model.live_out.is_empty());
 }
 
-fn compile_to_tlc(source: &str) -> Program {
+fn compile_to_tlc(source: &str) -> Program<tlc::stage::SoaNormalized> {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
     let type_checked = parsed
@@ -35,18 +35,14 @@ fn compile_to_tlc(source: &str) -> Program {
         .fold_ast_constants()
         .type_check(&mut module_manager)
         .expect("type_check");
-    let tlc = type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_buffers()
-        .expect("pin_entry_buffers")
-        .validate_ownership()
-        .expect("validate_ownership")
-        .partial_eval()
-        .normalize_soacs();
-    tlc.0.tlc
+    let program = type_checked.to_tlc(&module_manager, false);
+    let program = tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
+    let program = tlc::validate_ownership(program).expect("validate_ownership");
+    let program = tlc::partial_eval(program);
+    tlc::normalize_soacs(program)
 }
 
-fn find_def<'a>(program: &'a Program, name: &str) -> &'a crate::tlc::Def {
+fn find_def<'a, S: tlc::Stage>(program: &'a Program<S>, name: &str) -> &'a crate::tlc::Def<S::Family> {
     program
         .defs
         .iter()
@@ -54,7 +50,11 @@ fn find_def<'a>(program: &'a Program, name: &str) -> &'a crate::tlc::Def {
         .unwrap_or_else(|| panic!("no def named {name}"))
 }
 
-fn param_origin(model: &OwnershipModel, def: &crate::tlc::Def, param_index: usize) -> Origin {
+fn param_origin(
+    model: &AnalysisState,
+    def: &crate::tlc::Def<tlc::family::Polymorphic>,
+    param_index: usize,
+) -> Origin {
     let lam = match &def.body.kind {
         TermKind::Lambda(l) => l,
         _ => panic!("def body is not a lambda"),
@@ -108,7 +108,11 @@ def f(x: i32) i32 = x + 1
 /// Build a Let term by hand and run `build` on a synthesized program.
 /// Bypasses partial_eval, which would otherwise inline trivial
 /// `let x = y in body` aliases away before they reach our pass.
-fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId) {
+fn synth_program_with_alias_let() -> (
+    Program<tlc::stage::SoaNormalized>,
+    crate::SymbolId,
+    crate::SymbolId,
+) {
     use crate::ast::{Span, TypeName};
     use crate::tlc::{Def, DefMeta, Lambda, Term, TermIdSource, TermKind};
     use polytype::Type;
@@ -174,6 +178,7 @@ fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId)
     };
 
     let def = Def {
+        data: crate::tlc::data::PolymorphicDefinition { scheme: None },
         name: f_sym,
         ty: lambda_term.ty.clone(),
         body: lambda_term,
@@ -182,7 +187,16 @@ fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId)
         param_diets: vec![crate::types::Diet::Leaf(true)],
         return_diet: crate::types::Diet::observing(),
     };
-    let program = Program::from_parts(vec![def], symbols, Default::default(), ids);
+    let program = Program::from_parts(
+        vec![def],
+        symbols,
+        Default::default(),
+        ids,
+        tlc::context::RewriteGlobal {
+            known_defs: Default::default(),
+            auto_storage_binding_ids: Default::default(),
+        },
+    );
     let _ = lam_body_id; // silence unused (kept for documentation)
     (program, a_sym, b_sym)
 }
@@ -306,8 +320,12 @@ def f(a: *[4]i32) i32 = a[0]
 /// Locate the App term whose func is a `Var` resolving to any of the
 /// given names. Accepts both array_with intrinsic variants so the
 /// helper works whether or not promotion has fired.
-fn find_app_call_to<'a>(body: &'a Term, names: &[&str], program: &Program) -> Option<&'a Term> {
-    fn func_matches(t: &Term, names: &[&str], program: &Program) -> bool {
+fn find_app_call_to<'a>(
+    body: &'a Term,
+    names: &[&str],
+    program: &Program<tlc::stage::SoaNormalized>,
+) -> Option<&'a Term> {
+    fn func_matches(t: &Term, names: &[&str], program: &Program<tlc::stage::SoaNormalized>) -> bool {
         match &t.kind {
             TermKind::Var(VarRef::Symbol(sym)) => {
                 program.symbols.get(*sym).map(|s| names.contains(&s.as_str())).unwrap_or(false)
@@ -321,7 +339,11 @@ fn find_app_call_to<'a>(body: &'a Term, names: &[&str], program: &Program) -> Op
             _ => false,
         }
     }
-    fn walk<'a>(t: &'a Term, names: &[&str], program: &Program) -> Option<&'a Term> {
+    fn walk<'a>(
+        t: &'a Term,
+        names: &[&str],
+        program: &Program<tlc::stage::SoaNormalized>,
+    ) -> Option<&'a Term> {
         if let TermKind::App { func, args } = &t.kind {
             if func_matches(func, names, program) {
                 return Some(t);
@@ -539,8 +561,9 @@ fn has_use_after_move(source: &str) -> bool {
         .fold_ast_constants()
         .type_check(&mut module_manager)
         .expect("type_check");
-    let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_buffers().expect("pin_entry_buffers");
-    super::check(&tlc.0.tlc).is_err()
+    let program = type_checked.to_tlc(&module_manager, false);
+    let program = tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
+    super::check(&program).is_err()
 }
 
 #[test]
@@ -1041,8 +1064,16 @@ def main(arr: *[4]i32) i32 =
 /// origin. Scoping the search inside the named def avoids
 /// false-positive matches against prelude symbols with the same
 /// surface name.
-fn binder_origin(program: &Program, fn_name: &str, var_name: &str) -> (super::OwnerId, Origin) {
-    fn find_let_sym(t: &Term, var_name: &str, program: &Program) -> Option<crate::SymbolId> {
+fn binder_origin(
+    program: &Program<tlc::stage::SoaNormalized>,
+    fn_name: &str,
+    var_name: &str,
+) -> (super::OwnerId, Origin) {
+    fn find_let_sym(
+        t: &Term,
+        var_name: &str,
+        program: &Program<tlc::stage::SoaNormalized>,
+    ) -> Option<crate::SymbolId> {
         if let TermKind::Let { name, .. } = &t.kind {
             if program.symbols.get(*name).map(|s| s.as_str()) == Some(var_name) {
                 return Some(*name);
@@ -1399,13 +1430,11 @@ entry double(arr: []i32) []i32 = map(|x: i32| x + 1, arr)
 /// Deliberately NOT the full pipeline: running further would monomorphize-drop
 /// an uncalled `def f`, or force-inline a called soac helper away — neither of
 /// which is what the destination flag-flip under test depends on.
-fn compile_to_owned(source: &str) -> Program {
-    let mut program = compile_to_tlc(source);
-    super::apply_ownership(&mut program).expect("apply_ownership");
-    program
+fn compile_to_owned(source: &str) -> Program<tlc::stage::SoaNormalized> {
+    super::apply::apply_ownership_rewrite(compile_to_tlc(source))
 }
 
-fn map_destination(program: &Program, fn_name: &str) -> Option<SoacOwnership> {
+fn map_destination(program: &Program<tlc::stage::SoaNormalized>, fn_name: &str) -> Option<SoacOwnership> {
     fn walk(t: &Term) -> Option<SoacOwnership> {
         if let TermKind::Soac(SoacOp::Map { destination, .. }) = &t.kind {
             return Some(*destination);
@@ -1450,7 +1479,7 @@ def f(a: [3][4]i32) [3][4]i32 = map(|row| row, a)
     );
 }
 
-fn scan_destination(program: &Program, fn_name: &str) -> Option<SoacOwnership> {
+fn scan_destination(program: &Program<tlc::stage::SoaNormalized>, fn_name: &str) -> Option<SoacOwnership> {
     fn walk(t: &Term) -> Option<SoacOwnership> {
         if let TermKind::Soac(SoacOp::Scan { destination, .. }) = &t.kind {
             return Some(*destination);
@@ -1495,7 +1524,10 @@ def f(a: [8]i32) [8]i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
     );
 }
 
-fn filter_destination(program: &Program, fn_name: &str) -> Option<SoacOwnership> {
+fn filter_destination(
+    program: &Program<tlc::stage::SoaNormalized>,
+    fn_name: &str,
+) -> Option<SoacOwnership> {
     fn walk(t: &Term) -> Option<SoacOwnership> {
         if let TermKind::Soac(SoacOp::Filter { destination, .. }) = &t.kind {
             return Some(*destination);
@@ -1594,7 +1626,7 @@ def main(rows: *[3][4]i32) [3]i32 = map(|row: [4]i32| consume(row), rows)
 /// is `UniqueParam` (mutable), and it's dead after the call (the
 /// function returns the with's result). So the call should rewrite
 /// to `_w_intrinsic_array_with_inplace`.
-fn synth_program_with_with_through_index() -> Program {
+fn synth_program_with_with_through_index() -> Program<tlc::stage::SoaNormalized> {
     use crate::ast::{Span, TypeName};
     use crate::tlc::{Def, DefMeta, Lambda, Term, TermIdSource, TermKind};
     use polytype::Type;
@@ -1720,6 +1752,7 @@ fn synth_program_with_with_through_index() -> Program {
         kind: TermKind::Lambda(lambda),
     };
     let f_def = Def {
+        data: crate::tlc::data::PolymorphicDefinition { scheme: None },
         name: f_sym,
         ty: f_ty,
         body: lambda_term,
@@ -1729,7 +1762,16 @@ fn synth_program_with_with_through_index() -> Program {
         return_diet: crate::types::Diet::observing(),
     };
 
-    Program::from_parts(vec![f_def], symbols, def_syms, ids)
+    Program::from_parts(
+        vec![f_def],
+        symbols,
+        def_syms,
+        ids,
+        tlc::context::RewriteGlobal {
+            known_defs: Default::default(),
+            auto_storage_binding_ids: Default::default(),
+        },
+    )
 }
 
 #[test]
@@ -1761,8 +1803,7 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
         "test setup: outer App must call the functional array_with intrinsic"
     );
 
-    let mut rewritten = program;
-    super::apply_ownership(&mut rewritten).expect("apply_ownership");
+    let rewritten = super::apply::apply_ownership_rewrite(program);
     let f_def = find_def(&rewritten, "f");
     let lam = match &f_def.body.kind {
         TermKind::Lambda(l) => l,
@@ -1794,8 +1835,9 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
 // list, then exercise the ownership analysis to confirm capture-kill
 // detection and capture-term liveness propagate through.
 
-fn synth_program_with_populated_soac_captures() -> Program {
+fn synth_program_with_populated_soac_captures() -> Program<tlc::stage::GeneratedLambdasFolded> {
     use crate::ast::{Span, TypeName};
+    use crate::tlc::data::{ExplicitCaptures, ExplicitCapturesPayload, ExplicitClosurePayload};
     use crate::tlc::{Def, DefMeta, Lambda, SoacBody, Term, TermIdSource, TermKind};
     use polytype::Type;
 
@@ -1845,6 +1887,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
         kind: TermKind::Lambda(consume_lam),
     };
     let consume_def = Def {
+        data: (),
         name: consume_sym,
         ty: consume_ty.clone(),
         body: consume_lam_term,
@@ -1924,7 +1967,9 @@ fn synth_program_with_populated_soac_captures() -> Program {
         kind: TermKind::Soac(SoacOp::Map {
             lam: SoacBody {
                 lam: lambda,
-                captures: vec![(cap_sym, unique_arr_ty.clone(), var_outer)],
+                data: ExplicitCaptures {
+                    captures: vec![(cap_sym, unique_arr_ty.clone(), var_outer)],
+                },
             },
             inputs: vec![range_input],
             destination: SoacOwnership::Fresh,
@@ -1956,7 +2001,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
         },
     };
 
-    fn int_lit(ids: &mut TermIdSource, n: &str) -> Term {
+    fn int_lit(ids: &mut TermIdSource, n: &str) -> Term<ExplicitClosurePayload, ExplicitCapturesPayload> {
         Term {
             id: ids.next_id(),
             ty: Type::Constructed(TypeName::Int(32), vec![]),
@@ -1988,6 +2033,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
     };
 
     let main_def = Def {
+        data: (),
         name: main_sym,
         ty: i32_ty.clone(),
         body: outer_let,
@@ -1997,7 +2043,15 @@ fn synth_program_with_populated_soac_captures() -> Program {
         return_diet: crate::types::Diet::observing(),
     };
 
-    Program::from_parts(vec![consume_def, main_def], symbols, def_syms, ids)
+    Program::from_parts(
+        vec![consume_def, main_def],
+        symbols,
+        def_syms,
+        ids,
+        tlc::context::PostClosureGlobal {
+            auto_storage_binding_ids: Default::default(),
+        },
+    )
 }
 
 #[test]
@@ -2008,11 +2062,16 @@ fn soac_with_populated_captures_detects_capture_kill() {
     // SOAC body that consumes a capture across hypothetical re-invocations
     // is a use-after-move.
     let program = synth_program_with_populated_soac_captures();
-    let result = super::check(&program);
+    let model = super::analyze(&program);
+    let outer_sym = program
+        .symbols
+        .iter()
+        .find_map(|(symbol, name)| (name == "outer").then_some(*symbol))
+        .expect("outer symbol");
+    let outer_owner = model.owner_of(outer_sym).expect("outer owner");
     assert!(
-        result.is_err(),
-        "SOAC body that consumes a populated capture should be rejected; got {:?}",
-        result,
+        model.kills.values().any(|kills| kills.contains(&outer_owner)),
+        "SOAC body consumption should kill the captured outer owner",
     );
 }
 
@@ -2024,6 +2083,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
     // program with a populated capture and confirming `live_out` is
     // populated for the capture term's id after `analyze`.
     use crate::ast::{Span, TypeName};
+    use crate::tlc::data::{ExplicitCaptures, ExplicitCapturesPayload, ExplicitClosurePayload};
     use crate::tlc::{Def, DefMeta, Lambda, SoacBody, Term, TermIdSource, TermKind};
     use polytype::Type;
 
@@ -2093,7 +2153,9 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         kind: TermKind::Soac(SoacOp::Map {
             lam: SoacBody {
                 lam: lambda,
-                captures: vec![(cap_sym, arr_ty.clone(), var_outer)],
+                data: ExplicitCaptures {
+                    captures: vec![(cap_sym, arr_ty.clone(), var_outer)],
+                },
             },
             inputs: vec![range_input],
             destination: SoacOwnership::Fresh,
@@ -2118,7 +2180,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         },
     };
 
-    fn int_lit(ids: &mut TermIdSource, n: &str) -> Term {
+    fn int_lit(ids: &mut TermIdSource, n: &str) -> Term<ExplicitClosurePayload, ExplicitCapturesPayload> {
         Term {
             id: ids.next_id(),
             ty: Type::Constructed(TypeName::Int(32), vec![]),
@@ -2150,6 +2212,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
     };
 
     let main_def = Def {
+        data: (),
         name: main_sym,
         ty: i32_ty.clone(),
         body: outer_let,
@@ -2159,7 +2222,15 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         return_diet: crate::types::Diet::observing(),
     };
 
-    let program = Program::from_parts(vec![main_def], symbols, std::collections::HashMap::new(), ids);
+    let program: Program<tlc::stage::GeneratedLambdasFolded> = Program::from_parts(
+        vec![main_def],
+        symbols,
+        std::collections::HashMap::new(),
+        ids,
+        tlc::context::PostClosureGlobal {
+            auto_storage_binding_ids: Default::default(),
+        },
+    );
 
     let model = super::analyze(&program);
     assert!(

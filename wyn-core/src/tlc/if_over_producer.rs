@@ -7,9 +7,12 @@
 //! array instead of a producer. This pass rewrites
 //! the conservative cases to one `Map` whose lambda contains the branch.
 
+use super::data::Empty;
 use super::VarRef;
-use super::{ArrayExpr, Lambda, Program, SoacBody, SoacOp};
-use super::{Term, TermIdSource, TermKind};
+use super::{
+    wrap_let_bindings, ArrayExpr, Lambda, LetBinding, Program, RewriteDecision, SoacBody, SoacOp, Term,
+    TermId, TermIdSource, TermKind, TermRewriter,
+};
 use crate::ast::{Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};
 use crate::types::TypeExt;
@@ -20,88 +23,84 @@ use polytype::Type;
 
 use super::subst::substitute_sym;
 
-pub fn run(program: &mut Program) {
-    let term_ids = &mut program.term_ids;
-    for idx in 0..program.defs.len() {
-        let body = program.defs[idx].body.clone();
-        program.defs[idx].body = rewrite_term(body, &mut program.symbols, term_ids);
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConditionalProducersCanonicalized;
+
+impl super::Stage for ConditionalProducersCanonicalized {
+    type Family = super::monomorphize::Monomorphic;
+    type GlobalContext = super::context::RewriteGlobal;
+}
+
+pub fn run(
+    mut program: Program<super::stage::InlinedSoaNormalized>,
+) -> Program<ConditionalProducersCanonicalized> {
+    let mut rewriter = ConditionalProducerRewriter {
+        symbols: &mut program.symbols,
+        term_ids: &mut program.term_ids,
+    };
+    for def in &mut program.defs {
+        rewriter.rewrite_tracked(&mut def.body);
+    }
+    program.into_stage()
+}
+
+struct ConditionalProducerRewriter<'a> {
+    symbols: &'a mut SymbolTable,
+    term_ids: &'a mut TermIdSource,
+}
+
+impl TermRewriter<Empty, Empty> for ConditionalProducerRewriter<'_> {
+    fn next_term_id(&mut self) -> TermId {
+        self.term_ids.next_id()
+    }
+
+    fn rewrite_node(&mut self, term: &mut Term<Empty, Empty>) -> RewriteDecision {
+        let Some(replacement) = rewrite_if_over_map(term, self.symbols, self.term_ids) else {
+            return RewriteDecision::Unchanged;
+        };
+        *term = replacement;
+        RewriteDecision::Changed
     }
 }
 
-fn rewrite_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Term {
-    let fresh_id = term_ids.next_id();
-    let term = term.map_children(fresh_id, &mut |child| rewrite_term(child, symbols, term_ids));
-    rewrite_if_over_map(term, symbols, term_ids)
-}
-
-#[derive(Clone)]
-struct PrefixLet {
-    name: SymbolId,
-    name_ty: Type<TypeName>,
-    rhs: Term,
-    span: Span,
-}
-
 struct MapBranch {
-    prefix: Vec<PrefixLet>,
-    lam: SoacBody,
-    inputs: Vec<ArrayExpr>,
+    prefix: Vec<LetBinding<Empty, Empty>>,
+    lam: SoacBody<Empty, Empty>,
+    inputs: Vec<ArrayExpr<Empty, Empty>>,
 }
 
-fn rewrite_if_over_map(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Term {
+fn rewrite_if_over_map(
+    term: &Term<Empty, Empty>,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Option<Term<Empty, Empty>> {
     let TermKind::If {
         cond,
         then_branch,
         else_branch,
-    } = term.kind
+    } = &term.kind
     else {
-        return term;
+        return None;
     };
 
-    let then_term = *then_branch;
-    let else_term = *else_branch;
-
-    let Some(then_map) = extract_map_branch(then_term.clone(), symbols, term_ids) else {
-        return Term {
-            kind: TermKind::If {
-                cond,
-                then_branch: Box::new(then_term),
-                else_branch: Box::new(else_term),
-            },
-            ..term
-        };
-    };
-    let Some(else_map) = extract_map_branch(else_term.clone(), symbols, term_ids) else {
-        return Term {
-            kind: TermKind::If {
-                cond,
-                then_branch: Box::new(then_term),
-                else_branch: Box::new(else_term),
-            },
-            ..term
-        };
-    };
-
-    let original_ty = term.ty.clone();
-    let original_span = term.span;
-    if !can_fuse_if_maps(&cond, &then_map, &else_map, &original_ty) {
-        return Term {
-            id: term.id,
-            ty: original_ty.clone(),
-            span: original_span,
-            kind: TermKind::If {
-                cond,
-                then_branch: Box::new(then_term),
-                else_branch: Box::new(else_term),
-            },
-        };
+    let then_map = extract_map_branch((**then_branch).clone(), symbols, term_ids)?;
+    let else_map = extract_map_branch((**else_branch).clone(), symbols, term_ids)?;
+    if !can_fuse_if_maps(cond, &then_map, &else_map, &term.ty) {
+        return None;
     }
 
-    build_fused_map_if(*cond, then_map, else_map, original_ty, original_span, term_ids)
+    Some(build_fused_map_if(
+        (**cond).clone(),
+        then_map,
+        else_map,
+        term.ty.clone(),
+        term.span,
+        term_ids,
+    ))
 }
 
 fn extract_map_branch(
-    term: Term,
+    term: Term<Empty, Empty>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<MapBranch> {
@@ -114,7 +113,7 @@ fn extract_map_branch(
         } => {
             let span = term.span;
             let mut branch = extract_map_branch(*body, symbols, term_ids)?;
-            let prefix = PrefixLet {
+            let prefix = LetBinding {
                 name,
                 name_ty,
                 rhs: *rhs,
@@ -140,7 +139,7 @@ fn extract_map_branch(
 }
 
 fn try_compose_prefix_map(
-    prefix: &PrefixLet,
+    prefix: &LetBinding<Empty, Empty>,
     branch: &mut MapBranch,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
@@ -153,10 +152,6 @@ fn try_compose_prefix_map(
         }) => (lam, inputs),
         _ => return false,
     };
-    if !producer_lam.captures.is_empty() {
-        return false;
-    }
-
     let mut composed = false;
     let mut slot = 0;
     while slot < branch.inputs.len() {
@@ -192,13 +187,13 @@ fn try_compose_prefix_map(
 /// is deliberately EGIR-owned; this helper exists only inside that control-flow
 /// normalization.
 fn compose_map_into_branch(
-    producer: Lambda,
-    envelope: Lambda,
+    producer: Lambda<Empty, Empty>,
+    envelope: Lambda<Empty, Empty>,
     slot: usize,
     span: Span,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
-) -> Lambda {
+) -> Lambda<Empty, Empty> {
     let fresh_sym = symbols.alloc("_branch_value".to_string());
     let slot_param = envelope.params[slot].0;
     let slot_ty = envelope.params[slot].1.clone();
@@ -223,11 +218,11 @@ fn compose_map_into_branch(
 }
 
 fn dedup_branch_inputs(
-    lam: Lambda,
-    inputs: Vec<ArrayExpr>,
+    lam: Lambda<Empty, Empty>,
+    inputs: Vec<ArrayExpr<Empty, Empty>>,
     term_ids: &mut TermIdSource,
-) -> (Lambda, Vec<ArrayExpr>) {
-    let mut kept_inputs: Vec<ArrayExpr> = Vec::new();
+) -> (Lambda<Empty, Empty>, Vec<ArrayExpr<Empty, Empty>>) {
+    let mut kept_inputs: Vec<ArrayExpr<Empty, Empty>> = Vec::new();
     let mut kept_params: Vec<(SymbolId, Type<TypeName>)> = Vec::new();
     let mut body = *lam.body;
     for (input, param) in inputs.into_iter().zip(lam.params) {
@@ -252,15 +247,12 @@ fn dedup_branch_inputs(
 }
 
 fn can_fuse_if_maps(
-    cond: &Term,
+    cond: &Term<Empty, Empty>,
     then_map: &MapBranch,
     else_map: &MapBranch,
     result_ty: &Type<TypeName>,
 ) -> bool {
     if then_map.inputs.is_empty() || else_map.inputs.is_empty() {
-        return false;
-    }
-    if !then_map.lam.captures.is_empty() || !else_map.lam.captures.is_empty() {
         return false;
     }
     if then_map.lam.lam.ret_ty != else_map.lam.lam.ret_ty {
@@ -276,13 +268,13 @@ fn can_fuse_if_maps(
 }
 
 fn build_fused_map_if(
-    cond: Term,
+    cond: Term<Empty, Empty>,
     then_map: MapBranch,
     else_map: MapBranch,
     result_ty: Type<TypeName>,
     span: Span,
     term_ids: &mut TermIdSource,
-) -> Term {
+) -> Term<Empty, Empty> {
     let mut inputs = Vec::with_capacity(then_map.inputs.len() + else_map.inputs.len());
     inputs.extend(then_map.inputs);
     inputs.extend(else_map.inputs);
@@ -304,7 +296,7 @@ fn build_fused_map_if(
             else_branch: else_lambda.body,
         },
     };
-    let mut result = Term {
+    let result = Term {
         id: term_ids.next_id(),
         ty: result_ty,
         span,
@@ -315,27 +307,15 @@ fn build_fused_map_if(
                     body: Box::new(body),
                     ret_ty: elem_ty,
                 },
-                captures: Vec::new(),
+                data: (),
             },
             inputs,
             destination: crate::types::SoacOwnership::Fresh,
         }),
     };
 
-    for prefix in then_map.prefix.into_iter().chain(else_map.prefix).rev() {
-        result = Term {
-            id: term_ids.next_id(),
-            ty: result.ty.clone(),
-            span: prefix.span,
-            kind: TermKind::Let {
-                name: prefix.name,
-                name_ty: prefix.name_ty,
-                rhs: Box::new(prefix.rhs),
-                body: Box::new(result),
-            },
-        };
-    }
-    result
+    let prefixes = then_map.prefix.into_iter().chain(else_map.prefix).collect();
+    wrap_let_bindings(prefixes, result, term_ids)
 }
 
 fn branches_have_same_domain(
@@ -367,12 +347,12 @@ fn static_array_dims_match(result_ty: &Type<TypeName>) -> bool {
 }
 
 fn branch_len_key(branch: &MapBranch) -> Option<LenKey> {
-    let env: Vec<(SymbolId, &Term)> =
+    let env: Vec<(SymbolId, &Term<Empty, Empty>)> =
         branch.prefix.iter().map(|prefix| (prefix.name, &prefix.rhs)).collect();
     array_expr_len_key(branch.inputs.first()?, &env, &mut LookupSet::new())
 }
 
-fn prefixes_can_be_hoisted(cond: &Term, then_map: &MapBranch, else_map: &MapBranch) -> bool {
+fn prefixes_can_be_hoisted(cond: &Term<Empty, Empty>, then_map: &MapBranch, else_map: &MapBranch) -> bool {
     let mut names = LookupSet::new();
     for prefix in then_map.prefix.iter().chain(&else_map.prefix) {
         if !names.insert(prefix.name) {
@@ -427,8 +407,8 @@ enum LenKey {
 }
 
 fn array_expr_len_key(
-    ae: &ArrayExpr,
-    env: &[(SymbolId, &Term)],
+    ae: &ArrayExpr<Empty, Empty>,
+    env: &[(SymbolId, &Term<Empty, Empty>)],
     resolving: &mut LookupSet<SymbolId>,
 ) -> Option<LenKey> {
     match ae {
@@ -443,8 +423,8 @@ fn array_expr_len_key(
 }
 
 fn term_array_len_key(
-    term: &Term,
-    env: &[(SymbolId, &Term)],
+    term: &Term<Empty, Empty>,
+    env: &[(SymbolId, &Term<Empty, Empty>)],
     resolving: &mut LookupSet<SymbolId>,
 ) -> Option<LenKey> {
     if let Some(bound) = extract_iota_bound(term) {
@@ -479,7 +459,11 @@ fn term_array_len_key(
     }
 }
 
-fn len_key(term: &Term, env: &[(SymbolId, &Term)], resolving: &mut LookupSet<SymbolId>) -> Option<LenKey> {
+fn len_key(
+    term: &Term<Empty, Empty>,
+    env: &[(SymbolId, &Term<Empty, Empty>)],
+    resolving: &mut LookupSet<SymbolId>,
+) -> Option<LenKey> {
     match &term.kind {
         TermKind::IntLit(s) if s == "0" => Some(LenKey::Zero),
         TermKind::IntLit(s) => Some(LenKey::Int(s.clone())),
@@ -536,9 +520,9 @@ fn len_key(term: &Term, env: &[(SymbolId, &Term)], resolving: &mut LookupSet<Sym
 }
 
 fn len_key_sub(
-    lhs: &Term,
-    rhs: &Term,
-    env: &[(SymbolId, &Term)],
+    lhs: &Term<Empty, Empty>,
+    rhs: &Term<Empty, Empty>,
+    env: &[(SymbolId, &Term<Empty, Empty>)],
     resolving: &mut LookupSet<SymbolId>,
 ) -> Option<LenKey> {
     let lhs = len_key(lhs, env, resolving)?;
@@ -560,7 +544,7 @@ fn is_zero_len_key(key: &LenKey) -> bool {
     }
 }
 
-fn extract_iota_bound(term: &Term) -> Option<Term> {
+fn extract_iota_bound(term: &Term<Empty, Empty>) -> Option<Term<Empty, Empty>> {
     let TermKind::Let { name, rhs, body, .. } = &term.kind else {
         return None;
     };
@@ -580,15 +564,15 @@ fn extract_iota_bound(term: &Term) -> Option<Term> {
     (op.op == "-" && is_zero_term(start) && is_zero_term(zero) && arg_is_name).then(|| (**rhs).clone())
 }
 
-fn is_builtin(term: &Term, id: BuiltinId) -> bool {
+fn is_builtin(term: &Term<Empty, Empty>, id: BuiltinId) -> bool {
     matches!(&term.kind, TermKind::Var(VarRef::Builtin { id: builtin, .. }) if *builtin == id)
 }
 
-fn is_zero_term(term: &Term) -> bool {
+fn is_zero_term(term: &Term<Empty, Empty>) -> bool {
     matches!(&term.kind, TermKind::IntLit(s) if s == "0")
 }
 
-fn collect_symbol_refs(term: &Term, out: &mut LookupSet<SymbolId>) {
+fn collect_symbol_refs(term: &Term<Empty, Empty>, out: &mut LookupSet<SymbolId>) {
     if let TermKind::Var(VarRef::Symbol(sym)) = &term.kind {
         out.insert(*sym);
     }
@@ -596,14 +580,11 @@ fn collect_symbol_refs(term: &Term, out: &mut LookupSet<SymbolId>) {
     term.for_each_child(&mut |child| collect_symbol_refs(child, out));
 }
 
-fn collect_symbol_refs_soac_body(body: &SoacBody, out: &mut LookupSet<SymbolId>) {
+fn collect_symbol_refs_soac_body(body: &SoacBody<Empty, Empty>, out: &mut LookupSet<SymbolId>) {
     collect_symbol_refs(&body.lam.body, out);
-    for (_, _, expr) in &body.captures {
-        collect_symbol_refs(expr, out);
-    }
 }
 
-fn collect_symbol_refs_array(ae: &ArrayExpr, out: &mut LookupSet<SymbolId>) {
+fn collect_symbol_refs_array(ae: &ArrayExpr<Empty, Empty>, out: &mut LookupSet<SymbolId>) {
     match ae {
         ArrayExpr::Var(vr, _) => {
             if let VarRef::Symbol(s) = vr {
@@ -630,7 +611,7 @@ fn collect_symbol_refs_array(ae: &ArrayExpr, out: &mut LookupSet<SymbolId>) {
     }
 }
 
-fn collect_symbol_refs_in_soac_places(term: &Term, out: &mut LookupSet<SymbolId>) {
+fn collect_symbol_refs_in_soac_places(term: &Term<Empty, Empty>, out: &mut LookupSet<SymbolId>) {
     if let TermKind::Soac(soac) = &term.kind {
         match soac {
             SoacOp::Scatter { dest, .. } | SoacOp::ReduceByIndex { dest, .. } => {

@@ -1,28 +1,27 @@
 //! Shadow-correct symbol substitution over TLC terms.
 //!
-//! One traversal ([`substitute_core`]) handles binder shadowing for `Let`,
-//! `Lambda`, and `Loop` exactly once; the two public entry points differ only
-//! in what a matched `Var(old)` occurrence becomes. Passes that rename or
-//! replace a symbol use these instead of re-rolling the recursion.
+//! One traversal ([`substitute_with`]) handles binder shadowing for `Let`,
+//! `Lambda`, and `Loop` exactly once. Passes supply what a matched `Var(old)`
+//! occurrence becomes instead of re-rolling the recursion; symbol renaming is
+//! the common specialization below.
 
-use super::{LoopKind, Term, TermIdSource, TermKind, VarRef};
+use super::{LoopKind, Payload, Term, TermIdSource, TermKind, VarRef};
 use crate::SymbolId;
 
-/// Shadow-correct substitution traversal shared by [`substitute_term_expr`]
-/// (replace a symbol with an arbitrary term) and [`substitute_sym`] (rename a
-/// symbol). The only difference between the two is what a matched occurrence
-/// becomes; `make_replacement` produces that, given the matched `Var` term so a
-/// rename can preserve the occurrence's own type/span. Shadowing by `Let`,
-/// `Lambda`, and `Loop` binders is handled here once, so neither caller can grow
-/// a capture bug independently.
-fn substitute_core<F>(
-    term: Term,
+/// Shadow-correct substitution traversal. `make_replacement` receives the
+/// matched variable occurrence, allowing callers to preserve its type/span or
+/// replace it with arbitrary syntax. Shadowing by `Let`, `Lambda`, and `Loop`
+/// binders is handled here once.
+pub(crate) fn substitute_with<C, S, F>(
+    term: Term<C, S>,
     old: SymbolId,
     make_replacement: &mut F,
     term_ids: &mut TermIdSource,
-) -> Term
+) -> Term<C, S>
 where
-    F: FnMut(Term, &mut TermIdSource) -> Term,
+    C: Payload,
+    S: Payload,
+    F: FnMut(Term<C, S>, &mut TermIdSource) -> Term<C, S>,
 {
     match term.kind {
         TermKind::Var(VarRef::Symbol(sym)) if sym == old => make_replacement(term, term_ids),
@@ -36,9 +35,9 @@ where
             rhs,
             body,
         } => {
-            let rhs = substitute_core(*rhs, old, make_replacement, term_ids);
+            let rhs = substitute_with(*rhs, old, make_replacement, term_ids);
             let body =
-                if name == old { *body } else { substitute_core(*body, old, make_replacement, term_ids) };
+                if name == old { *body } else { substitute_with(*body, old, make_replacement, term_ids) };
             Term {
                 id: term_ids.next_id(),
                 kind: TermKind::Let {
@@ -58,7 +57,7 @@ where
             kind,
             body,
         } => {
-            let init = substitute_core(*init, old, make_replacement, term_ids);
+            let init = substitute_with(*init, old, make_replacement, term_ids);
             let init_binding_shadows = init_bindings.iter().any(|(sym, _, _)| *sym == old);
             let init_bindings = init_bindings
                 .into_iter()
@@ -69,7 +68,7 @@ where
                         (
                             sym,
                             ty,
-                            substitute_core(extraction, old, make_replacement, term_ids),
+                            substitute_with(extraction, old, make_replacement, term_ids),
                         )
                     }
                 })
@@ -78,7 +77,7 @@ where
             let body = if loop_var == old || init_binding_shadows || kind_shadows {
                 *body
             } else {
-                substitute_core(*body, old, make_replacement, term_ids)
+                substitute_with(*body, old, make_replacement, term_ids)
             };
             Term {
                 id: term_ids.next_id(),
@@ -96,27 +95,29 @@ where
         other => {
             let fresh_id = term_ids.next_id();
             Term { kind: other, ..term }.map_children(fresh_id, &mut |child| {
-                substitute_core(child, old, make_replacement, term_ids)
+                substitute_with(child, old, make_replacement, term_ids)
             })
         }
     }
 }
 
-fn substitute_loop_kind_core<F>(
-    kind: LoopKind,
+fn substitute_loop_kind_core<C, S, F>(
+    kind: LoopKind<C, S>,
     old: SymbolId,
     make_replacement: &mut F,
     term_ids: &mut TermIdSource,
-) -> (LoopKind, bool)
+) -> (LoopKind<C, S>, bool)
 where
-    F: FnMut(Term, &mut TermIdSource) -> Term,
+    C: Payload,
+    S: Payload,
+    F: FnMut(Term<C, S>, &mut TermIdSource) -> Term<C, S>,
 {
     match kind {
         LoopKind::For { var, var_ty, iter } => (
             LoopKind::For {
                 var,
                 var_ty,
-                iter: Box::new(substitute_core(*iter, old, make_replacement, term_ids)),
+                iter: Box::new(substitute_with(*iter, old, make_replacement, term_ids)),
             },
             var == old,
         ),
@@ -124,13 +125,13 @@ where
             LoopKind::ForRange {
                 var,
                 var_ty,
-                bound: Box::new(substitute_core(*bound, old, make_replacement, term_ids)),
+                bound: Box::new(substitute_with(*bound, old, make_replacement, term_ids)),
             },
             var == old,
         ),
         LoopKind::While { cond } => (
             LoopKind::While {
-                cond: Box::new(substitute_core(*cond, old, make_replacement, term_ids)),
+                cond: Box::new(substitute_with(*cond, old, make_replacement, term_ids)),
             },
             false,
         ),
@@ -141,13 +142,13 @@ where
 /// shadowing by Let names, Lambda params, and Loop vars. Each renamed
 /// occurrence keeps its own type/span (a rename doesn't change the value's
 /// type); only the symbol changes.
-pub(crate) fn substitute_sym(
-    term: Term,
+pub(crate) fn substitute_sym<C: Payload, S: Payload>(
+    term: Term<C, S>,
     old: SymbolId,
     new: SymbolId,
     term_ids: &mut TermIdSource,
-) -> Term {
-    substitute_core(
+) -> Term<C, S> {
+    substitute_with(
         term,
         old,
         &mut |occurrence, ids| Term {

@@ -6,9 +6,18 @@
 use crate::ast::TypeName;
 use crate::interface::{Attribute, EntryParamBindingKind};
 use crate::pipeline_descriptor::*;
-use crate::tlc::{DefMeta, Program, Term, TermKind};
+use crate::tlc::{
+    DefMeta as GenericDefMeta, Program as GenericProgram, Term as GenericTerm, TermKind as GenericTermKind,
+};
 use crate::{LookupMap, LookupSet, SymbolId};
 use polytype::Type;
+
+type ClosureData = crate::tlc::data::ExplicitClosurePayload;
+type SoacBodyData = crate::tlc::data::ExplicitCapturesPayload;
+type Program = GenericProgram<crate::tlc::stage::InputSliceBoundsInferred>;
+type DefMeta = GenericDefMeta<crate::tlc::data::EntryInputBounds>;
+type Term = GenericTerm<ClosureData, SoacBodyData>;
+type TermKind = GenericTermKind<ClosureData, SoacBodyData>;
 
 pub(super) struct PipelineSeed {
     pub pipeline: PipelineDescriptor,
@@ -47,9 +56,10 @@ fn collect_entry_input_names(program: &Program) -> LookupMap<(u32, u32), String>
     };
 
     for def in &program.defs {
-        let DefMeta::EntryPoint(decl) = &def.meta else {
+        let DefMeta::EntryPoint(entry) = &def.meta else {
             continue;
         };
+        let decl = &entry.declaration;
         if !decl.entry_type.is_compute() {
             continue;
         }
@@ -88,9 +98,10 @@ pub(super) fn run(program: &Program) -> PipelineSeed {
     let mut pipelines = Vec::new();
 
     for def in &program.defs {
-        let DefMeta::EntryPoint(decl) = &def.meta else {
+        let DefMeta::EntryPoint(entry) = &def.meta else {
             continue;
         };
+        let decl = &entry.declaration;
         let name = crate::symbol_name_or_bug(&program.symbols, def.name).to_string();
         let feedback = decl
             .feedback

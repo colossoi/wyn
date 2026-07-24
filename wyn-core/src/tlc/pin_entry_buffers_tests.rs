@@ -1,13 +1,13 @@
 use super::*;
 use crate::ast::TypeName;
-use crate::tlc::DefMeta;
+use crate::tlc::{self, DefMeta};
 use crate::types::TypeExt;
 use crate::Compiler;
 use polytype::Type;
 
 /// Compile `src` through type-check → TLC → region-pinning and return the
 /// pinned program.
-fn pin(src: &str) -> Program {
+fn pin(src: &str) -> Program<tlc::stage::BuffersPinned> {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let type_checked = Compiler::parse(src, &mut node_counter)
         .expect("parse")
@@ -16,17 +16,18 @@ fn pin(src: &str) -> Program {
         .fold_ast_constants()
         .type_check(&mut module_manager)
         .expect("type_check");
-    type_checked.to_tlc(&module_manager, false).pin_entry_buffers().expect("pin_entry_buffers").0.tlc
+    let program = type_checked.to_tlc(&module_manager, false);
+    tlc::pin_entry_buffers(program).expect("pin_entry_buffers")
 }
 
 /// The buffer slot of the sole entry's `param_index`-th flattened param.
-fn entry_param_buffer(program: &Program, param_index: usize) -> Type<TypeName> {
+fn entry_param_buffer(program: &Program<tlc::stage::BuffersPinned>, param_index: usize) -> Type<TypeName> {
     let def = program
         .defs
         .iter()
         .find(|d| matches!(&d.meta, DefMeta::EntryPoint(_)))
         .expect("program has an entry point");
-    let (params, _) = extract_params(&def.body);
+    let (_, params) = extract_lambda_params_ref(&def.body);
     let ty = &params[param_index].1;
     ty.array_buffer().expect("param is an array").clone()
 }

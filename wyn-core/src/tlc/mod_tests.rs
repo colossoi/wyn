@@ -40,7 +40,7 @@ fn mapping_children_assigns_caller_provided_parent_id() {
 /// Compile a source string down to the raw TLC program produced by
 /// `to_tlc`, skipping every post-TLC pass so the Constructor lowering
 /// is observable verbatim.
-fn compile_to_tlc_raw(source: &str) -> Program {
+fn compile_to_tlc_raw(source: &str) -> Program<stage::Transformed> {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
     let type_checked = parsed
@@ -49,10 +49,10 @@ fn compile_to_tlc_raw(source: &str) -> Program {
         .fold_ast_constants()
         .type_check(&mut module_manager)
         .expect("type_check");
-    type_checked.to_tlc(&module_manager, false).0.tlc
+    type_checked.to_tlc(&module_manager, false)
 }
 
-fn find_def_body<'a>(program: &'a Program, name: &str) -> &'a Term {
+fn find_def_body<'a>(program: &'a Program<stage::Transformed>, name: &str) -> &'a Term {
     let def = program
         .defs
         .iter()
@@ -308,7 +308,11 @@ entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
 
     // Identity envelope: two params, returning the 2-tuple of those same params.
     assert_eq!(lam.lam.params.len(), 2, "envelope takes (i, v)");
-    assert!(lam.captures.is_empty(), "identity envelope captures nothing");
+    assert_eq!(
+        lam.data,
+        (),
+        "pre-defunctionalization envelope has no capture payload"
+    );
     assert!(
         matches!(&lam.lam.ret_ty, Type::Constructed(TypeName::Tuple(2), _)),
         "envelope returns a 2-tuple, got {:?}",

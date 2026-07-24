@@ -15,13 +15,13 @@
 //! operand, `App` argument), where `runtime_index_producers` / `normalize` do
 //! the floating.
 
-use super::{Program, Term, TermKind};
+use super::{Payload, Program, Stage, Term, TermKind};
 use crate::ast::TypeName;
 use polytype::Type;
 
 /// Verify the array-producer ANF invariant for every def body. Returns the
 /// first violating construct, or `Ok(())`.
-pub fn check(program: &Program) -> Result<(), &'static str> {
+pub fn check<S: Stage>(program: &Program<S>) -> Result<(), &'static str> {
     for def in &program.defs {
         walk(&def.body)?;
     }
@@ -33,7 +33,7 @@ pub fn check(program: &Program) -> Result<(), &'static str> {
 /// an `Index`/`App` Term position. Call at the end of every `run()` from
 /// `normalize`/`runtime_index_producers` onward (the passes that establish and
 /// must preserve the floated form). `stage` names the pass for the panic.
-pub fn debug_check(program: &Program, stage: &'static str) {
+pub fn debug_check<S: Stage>(program: &Program<S>, stage: &'static str) {
     debug_assert!(
         check(program).is_ok(),
         "anf::check failed after {}: {}",
@@ -42,7 +42,7 @@ pub fn debug_check(program: &Program, stage: &'static str) {
     );
 }
 
-fn walk(term: &Term) -> Result<(), &'static str> {
+fn walk<C: Payload, S: Payload>(term: &Term<C, S>) -> Result<(), &'static str> {
     match &term.kind {
         TermKind::Index { array, .. } if is_inline_producer(array) => {
             return Err("Index array operand is an inline producer (not ANF)");
@@ -76,7 +76,7 @@ fn walk(term: &Term) -> Result<(), &'static str> {
 /// creates it runs after the last `normalize`. Only an *array* producer in a
 /// `Term` operand position is the thing the backend can't place. An `Index`
 /// array operand is array-typed by construction, so this gate is a no-op there.
-fn is_inline_producer(t: &Term) -> bool {
+fn is_inline_producer<C: Payload, S: Payload>(t: &Term<C, S>) -> bool {
     matches!(&t.kind, TermKind::Soac(_)) && matches!(&t.ty, Type::Constructed(TypeName::Array, _))
 }
 

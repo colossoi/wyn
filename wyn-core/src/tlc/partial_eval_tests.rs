@@ -1,7 +1,10 @@
 //! Tests for TLC partial evaluation.
 
-use super::{PartialEvaluator, VarRef};
+use super::{run, PartialEvaled, VarRef};
 use crate::ast::{BinaryOp, Span, TypeName};
+use crate::tlc::context::RewriteGlobal;
+use crate::tlc::data::{Empty, PolymorphicDefinition};
+use crate::tlc::ownership::OwnershipValidated;
 use crate::tlc::{Def, DefMeta, Lambda, Program, Term, TermId, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -38,7 +41,7 @@ impl TestBuilder {
     }
 }
 
-fn input_ae(boxed: Box<crate::tlc::Term>) -> crate::tlc::ArrayExpr {
+fn input_ae(boxed: Box<Term<Empty, Empty>>) -> crate::tlc::ArrayExpr<Empty, Empty> {
     use crate::tlc::{ArrayExpr, TermKind};
     let t = *boxed;
     match t.kind {
@@ -54,11 +57,12 @@ fn make_span() -> Span {
 
 fn make_program(
     name_sym: SymbolId,
-    body: Term,
+    body: Term<Empty, Empty>,
     (symbols, term_ids): (SymbolTable, TermIdSource),
-) -> Program {
+) -> Program<OwnershipValidated> {
     Program::from_parts(
         vec![Def {
+            data: PolymorphicDefinition { scheme: None },
             name: name_sym,
             ty: body.ty.clone(),
             body,
@@ -70,14 +74,22 @@ fn make_program(
         symbols,
         HashMap::new(),
         term_ids,
+        rewrite_global(),
     )
 }
 
-fn partial_eval(program: &mut Program) {
-    PartialEvaluator::partial_eval(program);
+fn rewrite_global() -> RewriteGlobal {
+    RewriteGlobal {
+        known_defs: Default::default(),
+        auto_storage_binding_ids: Default::default(),
+    }
 }
 
-fn make_int(ids: &mut TermIdSource, n: i64) -> Term {
+fn partial_eval(program: Program<OwnershipValidated>) -> Program<PartialEvaled> {
+    run(program)
+}
+
+fn make_int(ids: &mut TermIdSource, n: i64) -> Term<Empty, Empty> {
     Term {
         id: ids.next_id(),
         ty: Type::Constructed(TypeName::Int(32), vec![]),
@@ -86,7 +98,7 @@ fn make_int(ids: &mut TermIdSource, n: i64) -> Term {
     }
 }
 
-fn make_bool(ids: &mut TermIdSource, b: bool) -> Term {
+fn make_bool(ids: &mut TermIdSource, b: bool) -> Term<Empty, Empty> {
     Term {
         id: ids.next_id(),
         ty: Type::Constructed(TypeName::Bool, vec![]),
@@ -99,7 +111,7 @@ fn float_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Float(32), vec![])
 }
 
-fn make_float(ids: &mut TermIdSource, value: f32) -> Term {
+fn make_float(ids: &mut TermIdSource, value: f32) -> Term<Empty, Empty> {
     Term {
         id: ids.next_id(),
         ty: float_ty(),
@@ -108,7 +120,7 @@ fn make_float(ids: &mut TermIdSource, value: f32) -> Term {
     }
 }
 
-fn make_float_builtin_call(ids: &mut TermIdSource, name: &str, args: &[f32]) -> Term {
+fn make_float_builtin_call(ids: &mut TermIdSource, name: &str, args: &[f32]) -> Term<Empty, Empty> {
     let builtin = crate::builtins::catalog()
         .lookup_by_surface_name(name)
         .unwrap_or_else(|| panic!("missing test builtin `{name}`"));
@@ -132,16 +144,20 @@ fn make_float_builtin_call(ids: &mut TermIdSource, name: &str, args: &[f32]) -> 
     }
 }
 
-fn eval_float_builtin(name: &str, args: &[f32]) -> Term {
+fn eval_float_builtin(name: &str, args: &[f32]) -> Term<Empty, Empty> {
     let mut b = TestBuilder::new();
     let test_sym = b.sym("test");
     let body = make_float_builtin_call(&mut b.ids, name, args);
-    let mut program = make_program(test_sym, body, b.finish());
-    partial_eval(&mut program);
+    let mut program = partial_eval(make_program(test_sym, body, b.finish()));
     program.defs.pop().expect("test definition disappeared").body
 }
 
-fn make_binop(ids: &mut TermIdSource, op: &str, lhs: Term, rhs: Term) -> Term {
+fn make_binop(
+    ids: &mut TermIdSource,
+    op: &str,
+    lhs: Term<Empty, Empty>,
+    rhs: Term<Empty, Empty>,
+) -> Term<Empty, Empty> {
     let result_ty = lhs.ty.clone();
     let partial_ty = Type::Constructed(TypeName::Arrow, vec![result_ty.clone(), result_ty.clone()]);
     let binop_ty = Type::Constructed(TypeName::Arrow, vec![result_ty.clone(), partial_ty.clone()]);
@@ -173,8 +189,7 @@ fn test_constant_folding_add() {
 
     let program = make_program(test_sym, term, b.finish());
 
-    let mut result = program;
-    partial_eval(&mut result);
+    let result = partial_eval(program);
     assert_eq!(result.defs.len(), 1);
 
     match &result.defs[0].body.kind {
@@ -194,8 +209,7 @@ fn test_constant_folding_mul() {
 
     let program = make_program(test_sym, term, b.finish());
 
-    let mut result = program;
-    partial_eval(&mut result);
+    let result = partial_eval(program);
 
     match &result.defs[0].body.kind {
         TermKind::IntLit(s) => assert_eq!(s, "28"),
@@ -280,8 +294,9 @@ fn scalar_glsl_math_folds_inside_lambda_body() {
         }),
     };
     let (symbols, term_ids) = b.finish();
-    let mut program = Program::from_parts(
+    let program = Program::from_parts(
         vec![Def {
+            data: PolymorphicDefinition { scheme: None },
             name: test_sym,
             ty: lambda_ty,
             body: lambda,
@@ -293,9 +308,10 @@ fn scalar_glsl_math_folds_inside_lambda_body() {
         symbols,
         HashMap::new(),
         term_ids,
+        rewrite_global(),
     );
 
-    partial_eval(&mut program);
+    let program = partial_eval(program);
     match &program.defs[0].body.kind {
         TermKind::Lambda(lam) => assert!(matches!(&lam.body.kind, TermKind::FloatLit(1.0))),
         other => panic!("expected Lambda, got {other:?}"),
@@ -319,8 +335,7 @@ fn test_algebraic_add_zero() {
 
     let program = make_program(test_sym, term, b.finish());
 
-    let mut result = program;
-    partial_eval(&mut result);
+    let result = partial_eval(program);
 
     // x + 0 should simplify to just x
     match &result.defs[0].body.kind {
@@ -349,8 +364,7 @@ fn test_algebraic_mul_one() {
 
     let program = make_program(test_sym, term, b.finish());
 
-    let mut result = program;
-    partial_eval(&mut result);
+    let result = partial_eval(program);
 
     // 1 * x should simplify to just x
     match &result.defs[0].body.kind {
@@ -379,8 +393,7 @@ fn test_algebraic_mul_zero() {
 
     let program = make_program(test_sym, term, b.finish());
 
-    let mut result = program;
-    partial_eval(&mut result);
+    let result = partial_eval(program);
 
     // x * 0 should simplify to 0
     match &result.defs[0].body.kind {
@@ -410,8 +423,7 @@ fn test_if_true_elimination() {
 
     let program = make_program(test_sym, term, b.finish());
 
-    let mut result = program;
-    partial_eval(&mut result);
+    let result = partial_eval(program);
 
     // if true then 1 else 2 should simplify to 1
     match &result.defs[0].body.kind {
@@ -441,8 +453,7 @@ fn test_if_false_elimination() {
 
     let program = make_program(test_sym, term, b.finish());
 
-    let mut result = program;
-    partial_eval(&mut result);
+    let result = partial_eval(program);
 
     // if false then 1 else 2 should simplify to 2
     match &result.defs[0].body.kind {
@@ -481,8 +492,7 @@ fn test_let_constant_propagation() {
 
     let program = make_program(test_sym, term, b.finish());
 
-    let mut result = program;
-    partial_eval(&mut result);
+    let result = partial_eval(program);
 
     // let x = 5 in x + 3 should simplify to 8
     match &result.defs[0].body.kind {
@@ -562,6 +572,7 @@ fn test_function_inlining() {
     let program = Program::from_parts(
         vec![
             Def {
+                data: PolymorphicDefinition { scheme: None },
                 name: foo_sym,
                 ty: foo_body.ty.clone(),
                 body: foo_body,
@@ -571,6 +582,7 @@ fn test_function_inlining() {
                 return_diet: crate::types::Diet::observing(),
             },
             Def {
+                data: PolymorphicDefinition { scheme: None },
                 name: bar_sym,
                 ty: int_ty.clone(),
                 body: bar_body,
@@ -583,10 +595,10 @@ fn test_function_inlining() {
         symbols,
         HashMap::new(),
         term_ids,
+        rewrite_global(),
     );
 
-    let mut result = program;
-    partial_eval(&mut result);
+    let result = partial_eval(program);
 
     // bar should be inlined and folded to 17
     let bar_def = result
@@ -679,6 +691,7 @@ fn test_function_alias_inlining() {
     let program = Program::from_parts(
         vec![
             Def {
+                data: PolymorphicDefinition { scheme: None },
                 name: g_sym,
                 ty: g_body.ty.clone(),
                 body: g_body,
@@ -688,6 +701,7 @@ fn test_function_alias_inlining() {
                 return_diet: crate::types::Diet::observing(),
             },
             Def {
+                data: PolymorphicDefinition { scheme: None },
                 name: main_sym,
                 ty: int_ty(),
                 body: main_body,
@@ -700,10 +714,10 @@ fn test_function_alias_inlining() {
         symbols,
         HashMap::new(),
         term_ids,
+        rewrite_global(),
     );
 
-    let mut result = program;
-    partial_eval(&mut result);
+    let result = partial_eval(program);
 
     // Find main's body - it should be simplified to just `42`
     // because g is identity and f aliases g, so f 42 = g 42 = 42
@@ -800,6 +814,7 @@ fn test_function_alias_partial_application() {
     let program = Program::from_parts(
         vec![
             Def {
+                data: PolymorphicDefinition { scheme: None },
                 name: g_sym,
                 ty: g_body.ty.clone(),
                 body: g_body,
@@ -809,6 +824,7 @@ fn test_function_alias_partial_application() {
                 return_diet: crate::types::Diet::observing(),
             },
             Def {
+                data: PolymorphicDefinition { scheme: None },
                 name: main_sym,
                 ty: int_ty(),
                 body: main_body,
@@ -821,10 +837,10 @@ fn test_function_alias_partial_application() {
         symbols,
         HashMap::new(),
         term_ids,
+        rewrite_global(),
     );
 
-    let mut result = program;
-    partial_eval(&mut result);
+    let result = partial_eval(program);
 
     // Find main's body - it should be simplified to `1`
     // because g x y = x, so f 1 2 = g 1 2 = 1
@@ -893,6 +909,7 @@ fn test_intrinsic_alias_inlining() {
 
     let program = Program::from_parts(
         vec![Def {
+            data: PolymorphicDefinition { scheme: None },
             name: main_sym,
             ty: float_ty.clone(),
             body: main_body,
@@ -904,10 +921,10 @@ fn test_intrinsic_alias_inlining() {
         symbols,
         HashMap::new(),
         term_ids,
+        rewrite_global(),
     );
 
-    let mut result = program;
-    partial_eval(&mut result);
+    let result = partial_eval(program);
     let main_def = result
         .defs
         .iter()
@@ -958,8 +975,8 @@ use crate::tlc::{ArrayExpr, SoacBody, SoacOp};
 /// Binder-aware via the `bound` set: Lambda params, Let names, etc.
 /// shadow the assertion (we treat any matching symbol added by an
 /// enclosing binder as a different identifier).
-fn assert_no_free_reference_to(term: &crate::tlc::Term, target_sym: SymbolId) {
-    fn walk(t: &crate::tlc::Term, target: SymbolId, shadowed: bool) {
+fn assert_no_free_reference_to(term: &Term<Empty, Empty>, target_sym: SymbolId) {
+    fn walk(t: &Term<Empty, Empty>, target: SymbolId, shadowed: bool) {
         if shadowed {
             return;
         }
@@ -1051,10 +1068,7 @@ fn let_bound_array_substituted_through_soac_input() {
         ty: arr_ty.clone(),
         span: b.span(),
         kind: TermKind::Soac(SoacOp::Map {
-            lam: SoacBody {
-                lam,
-                captures: vec![],
-            },
+            lam: SoacBody { lam, data: () },
             inputs: vec![input_ae(Box::new(m_var))],
             destination: crate::types::SoacOwnership::Fresh,
         }),
@@ -1073,8 +1087,7 @@ fn let_bound_array_substituted_through_soac_input() {
     };
 
     let program = make_program(test_sym, let_term, b.finish());
-    let mut result = program;
-    partial_eval(&mut result);
+    let result = partial_eval(program);
 
     assert_eq!(result.defs.len(), 1);
     assert_no_free_reference_to(&result.defs[0].body, m_sym);

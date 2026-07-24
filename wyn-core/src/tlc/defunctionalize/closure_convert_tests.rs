@@ -1,13 +1,16 @@
-//! Tests for closure_convert and verify_closure_converted.
+//! Tests for closure conversion and its verifier.
 
 use super::*;
 use crate::ast::{Span, TypeName};
-use crate::tlc::{Def, DefMeta, Lambda, Place, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind};
+use crate::tlc::{
+    data::{Empty, ExplicitCapturesPayload, ExplicitClosurePayload},
+    Def, DefMeta, Lambda, Payload, Place, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind,
+};
 use crate::SymbolTable;
 use polytype::Type;
 use std::collections::HashMap;
 
-fn input_ae(boxed: Box<crate::tlc::Term>) -> crate::tlc::ArrayExpr {
+fn input_ae(boxed: Box<Term<Empty, Empty>>) -> crate::tlc::ArrayExpr<Empty, Empty> {
     use crate::tlc::{ArrayExpr, TermKind};
     let t = *boxed;
     match t.kind {
@@ -25,11 +28,36 @@ fn unit_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Unit, vec![])
 }
 
-fn empty_program() -> Program {
-    Program::from_parts(vec![], SymbolTable::new(), HashMap::new(), TermIdSource::new())
+fn empty_program() -> Program<crate::tlc::stage::RuntimeIndexProducersFloated> {
+    Program::from_parts(
+        vec![],
+        SymbolTable::new(),
+        HashMap::new(),
+        TermIdSource::new(),
+        crate::tlc::context::RewriteGlobal {
+            known_defs: Default::default(),
+            auto_storage_binding_ids: crate::IdSource::new(),
+        },
+    )
 }
 
-fn term(program: &mut Program, kind: TermKind, ty: Type<TypeName>) -> Term {
+fn empty_converted_program() -> Program<Defunctionalized> {
+    Program::from_parts(
+        vec![],
+        SymbolTable::new(),
+        HashMap::new(),
+        TermIdSource::new(),
+        crate::tlc::context::PostClosureGlobal {
+            auto_storage_binding_ids: crate::IdSource::new(),
+        },
+    )
+}
+
+fn term(
+    program: &mut Program<crate::tlc::stage::RuntimeIndexProducersFloated>,
+    kind: TermKind<Empty, Empty>,
+    ty: Type<TypeName>,
+) -> Term<Empty, Empty> {
     Term {
         id: program.next_term_id(),
         ty,
@@ -38,7 +66,24 @@ fn term(program: &mut Program, kind: TermKind, ty: Type<TypeName>) -> Term {
     }
 }
 
-fn term_with_ids(ids: &mut TermIdSource, kind: TermKind, ty: Type<TypeName>) -> Term {
+fn converted_term(
+    program: &mut Program<Defunctionalized>,
+    kind: TermKind<ExplicitClosurePayload, ExplicitCapturesPayload>,
+    ty: Type<TypeName>,
+) -> Term<ExplicitClosurePayload, ExplicitCapturesPayload> {
+    Term {
+        id: program.next_term_id(),
+        ty,
+        span: span(),
+        kind,
+    }
+}
+
+fn term_with_ids<C: Payload, S: Payload>(
+    ids: &mut TermIdSource,
+    kind: TermKind<C, S>,
+    ty: Type<TypeName>,
+) -> Term<C, S> {
     Term {
         id: ids.next_id(),
         ty,
@@ -49,16 +94,17 @@ fn term_with_ids(ids: &mut TermIdSource, kind: TermKind, ty: Type<TypeName>) -> 
 
 #[test]
 fn empty_program_passes_verifier() {
-    let program = empty_program();
+    let program = empty_converted_program();
     assert!(verify_closure_converted(&program).is_ok());
 }
 
 #[test]
 fn def_with_simple_body_passes_verifier() {
-    let mut program = empty_program();
+    let mut program = empty_converted_program();
     let sym = program.symbols.alloc("f".to_string());
-    let body = term(&mut program, TermKind::IntLit("0".into()), unit_ty());
+    let body = converted_term(&mut program, TermKind::IntLit("0".into()), unit_ty());
     program.defs.push(Def {
+        data: (),
         name: sym,
         ty: unit_ty(),
         body,
@@ -72,10 +118,10 @@ fn def_with_simple_body_passes_verifier() {
 
 #[test]
 fn unlifted_lambda_in_body_fails_verifier() {
-    let mut program = empty_program();
+    let mut program = empty_converted_program();
     let sym = program.symbols.alloc("f".to_string());
-    let nested_body = term(&mut program, TermKind::IntLit("0".into()), unit_ty());
-    let nested_lam = term(
+    let nested_body = converted_term(&mut program, TermKind::IntLit("0".into()), unit_ty());
+    let nested_lam = converted_term(
         &mut program,
         TermKind::Lambda(Lambda {
             params: vec![],
@@ -84,9 +130,9 @@ fn unlifted_lambda_in_body_fails_verifier() {
         }),
         unit_ty(),
     );
-    let let_body = term(&mut program, TermKind::IntLit("0".into()), unit_ty());
+    let let_body = converted_term(&mut program, TermKind::IntLit("0".into()), unit_ty());
     let name = program.symbols.alloc("x".to_string());
-    let body = term(
+    let body = converted_term(
         &mut program,
         TermKind::Let {
             name,
@@ -97,6 +143,7 @@ fn unlifted_lambda_in_body_fails_verifier() {
         unit_ty(),
     );
     program.defs.push(Def {
+        data: (),
         name: sym,
         ty: unit_ty(),
         body,
@@ -147,11 +194,11 @@ fn append_capture_params_extends_param_list() {
 
 #[test]
 fn param_spine_lambdas_are_skipped() {
-    let mut program = empty_program();
+    let mut program = empty_converted_program();
     let sym = program.symbols.alloc("f".to_string());
     let p = program.symbols.alloc("p".to_string());
-    let inner = term(&mut program, TermKind::Var(VarRef::Symbol(p)), unit_ty());
-    let body = term(
+    let inner = converted_term(&mut program, TermKind::Var(VarRef::Symbol(p)), unit_ty());
+    let body = converted_term(
         &mut program,
         TermKind::Lambda(Lambda {
             params: vec![(p, unit_ty())],
@@ -161,6 +208,7 @@ fn param_spine_lambdas_are_skipped() {
         unit_ty(),
     );
     program.defs.push(Def {
+        data: (),
         name: sym,
         ty: unit_ty(),
         body,
@@ -174,11 +222,11 @@ fn param_spine_lambdas_are_skipped() {
 
 #[test]
 fn unlifted_scatter_envelope_fails_verifier() {
-    let mut program = empty_program();
+    let mut program = empty_converted_program();
     let sym = program.symbols.alloc("f".to_string());
     let dest = program.symbols.alloc("dest".to_string());
-    let scatter_body = term(&mut program, TermKind::UnitLit, unit_ty());
-    let scatter = term(
+    let scatter_body = converted_term(&mut program, TermKind::UnitLit, unit_ty());
+    let scatter = converted_term(
         &mut program,
         TermKind::Soac(SoacOp::Scatter {
             dest: Place {
@@ -191,13 +239,14 @@ fn unlifted_scatter_envelope_fails_verifier() {
                     body: Box::new(scatter_body),
                     ret_ty: unit_ty(),
                 },
-                captures: vec![],
+                data: crate::tlc::data::ExplicitCaptures { captures: vec![] },
             },
             inputs: vec![],
         }),
         unit_ty(),
     );
     program.defs.push(Def {
+        data: (),
         name: sym,
         ty: unit_ty(),
         body: scatter,
@@ -231,20 +280,30 @@ fn scatter_envelope_params_count_as_bound_symbols() {
                     params: vec![(param, unit_ty())],
                     body: Box::new(term_with_ids(
                         &mut ids,
-                        TermKind::Var(VarRef::Symbol(param)),
+                        TermKind::<ExplicitClosurePayload, ExplicitCapturesPayload>::Var(VarRef::Symbol(
+                            param,
+                        )),
                         unit_ty(),
                     )),
                     ret_ty: unit_ty(),
                 },
-                captures: vec![],
+                data: crate::tlc::data::ExplicitCaptures { captures: vec![] },
             },
             inputs: vec![],
         }),
     };
 
-    let bound = collect_bound_syms(&scatter);
+    let free = compute_free_vars(
+        &scatter,
+        &crate::LookupSet::new(),
+        &crate::LookupSet::new(),
+        &crate::LookupSet::new(),
+        &symbols,
+    );
     assert!(
-        bound.contains(&param),
+        !free
+            .iter()
+            .any(|term| matches!(&term.kind, TermKind::Var(VarRef::Symbol(symbol)) if *symbol == param)),
         "scatter envelope param should be treated like other SOAC lambda params"
     );
 }
@@ -268,7 +327,7 @@ fn binop_ty(elem: &Type<TypeName>) -> Type<TypeName> {
 /// envelope forwards its parameters to `g` (in order → eta-reducible).
 fn reduce_with_operator(
     op_args: impl Fn(crate::SymbolId, crate::SymbolId) -> [crate::SymbolId; 2],
-) -> (Program, ClosureInfo, crate::SymbolId, crate::SymbolId) {
+) -> (Program<Defunctionalized>, crate::SymbolId, crate::SymbolId) {
     let mut program = empty_program();
     let elem = unit_ty();
     let op_ty = binop_ty(&elem);
@@ -287,6 +346,7 @@ fn reduce_with_operator(
         op_ty.clone(),
     );
     program.defs.push(Def {
+        data: (),
         name: g,
         ty: op_ty.clone(),
         body: g_body,
@@ -316,7 +376,7 @@ fn reduce_with_operator(
             body: Box::new(op_body),
             ret_ty: elem.clone(),
         },
-        captures: vec![],
+        data: (),
     };
 
     let arr = program.symbols.alloc("arr".to_string());
@@ -343,6 +403,7 @@ fn reduce_with_operator(
         main_ty.clone(),
     );
     program.defs.push(Def {
+        data: (),
         name: main,
         ty: main_ty.clone(),
         body: main_body,
@@ -352,13 +413,15 @@ fn reduce_with_operator(
         return_diet: crate::types::Diet::observing(),
     });
 
-    let mut result = program;
-    let info = run(&mut result, &std::collections::HashSet::new());
-    (result, info, g, main)
+    let result = run(program);
+    (result, g, main)
 }
 
 /// Peel `main`'s parameter spine and return its tail `reduce` operator body.
-fn reduce_operator_body(program: &Program, main: crate::SymbolId) -> Term {
+fn reduce_operator_body(
+    program: &Program<Defunctionalized>,
+    main: crate::SymbolId,
+) -> Term<ExplicitClosurePayload, ExplicitCapturesPayload> {
     let def = program.defs.iter().find(|d| d.name == main).expect("main def");
     let mut body = &def.body;
     while let TermKind::Lambda(Lambda { body: inner, .. }) = &body.kind {
@@ -373,7 +436,7 @@ fn reduce_operator_body(program: &Program, main: crate::SymbolId) -> Term {
 #[test]
 fn eta_wrapper_operator_references_function_directly() {
     // `λ(p0,p1). g(p0,p1)` is a pure forwarder — the operator is just `g`.
-    let (result, _info, g, main) = reduce_with_operator(|p0, p1| [p0, p1]);
+    let (result, g, main) = reduce_with_operator(|p0, p1| [p0, p1]);
 
     assert_eq!(
         result.defs.iter().filter(|d| matches!(d.meta, DefMeta::LiftedLambda)).count(),
@@ -392,7 +455,7 @@ fn eta_wrapper_operator_references_function_directly() {
 fn non_forwarding_operator_is_lifted() {
     // `λ(p0,p1). g(p1,p0)` swaps its arguments — not eta-reducible, so the
     // envelope must still be lifted to its own def.
-    let (result, _info, g, main) = reduce_with_operator(|p0, p1| [p1, p0]);
+    let (result, g, main) = reduce_with_operator(|p0, p1| [p1, p0]);
 
     assert_eq!(
         result.defs.iter().filter(|d| matches!(d.meta, DefMeta::LiftedLambda)).count(),

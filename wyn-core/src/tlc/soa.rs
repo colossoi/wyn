@@ -13,14 +13,36 @@
 //!
 //! Runs before fusion and defunctionalization.
 
+use super::data::Empty;
+use super::inline::SoacHelpersInlined;
+use super::partial_eval::PartialEvaled;
 use super::{
-    ArrayExpr, Def, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind, VarRef,
+    ArrayExpr, Family, Lambda, Program, RewriteDecision, SoacBody, SoacOp, Stage, Term, TermId,
+    TermIdSource, TermKind, TermRewriter, VarRef,
 };
 use crate::ast::{Span, TypeName};
 use crate::builtins::{by_id, catalog};
 use crate::types::TypeExt;
 use crate::SymbolTable;
 use polytype::Type;
+
+/// TLC after its first SoA normalization.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SoaNormalized;
+
+impl super::Stage for SoaNormalized {
+    type Family = super::run::Polymorphic;
+    type GlobalContext = super::context::RewriteGlobal;
+}
+
+/// TLC after normalization of array structure exposed by inlining.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InlinedSoaNormalized;
+
+impl super::Stage for InlinedSoaNormalized {
+    type Family = super::monomorphize::Monomorphic;
+    type GlobalContext = super::context::RewriteGlobal;
+}
 
 // =============================================================================
 // Type rewriting
@@ -183,198 +205,54 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
         SoaTransformer { term_ids, symbols }
     }
 
-    fn transform_def(&mut self, def: &mut Def) {
-        def.ty = soa_type(&def.ty);
-        def.body = self.transform_term(&def.body);
+    fn transform_term(&mut self, term: Term<Empty, Empty>) -> Term<Empty, Empty> {
+        let mut term = term.rewrite(self);
+        term.rewrite_types(self.term_ids, &mut soa_type);
+        term.rewrite(&mut MapNormalizer {
+            term_ids: &mut *self.term_ids,
+            symbols: &mut *self.symbols,
+        })
     }
 
-    /// Transform a term, rewriting types via soa_type and transforming
-    /// operations that touch array-of-tuple types.
-    fn transform_term(&mut self, term: &Term) -> Term {
-        let orig_ty = &term.ty;
-        let new_ty = soa_type(orig_ty);
-        let span = term.span;
-
+    fn structural_replacement(&mut self, term: &Term<Empty, Empty>) -> Option<Term<Empty, Empty>> {
         match &term.kind {
-            TermKind::Var(_)
-            | TermKind::IntLit(_)
-            | TermKind::FloatLit(_)
-            | TermKind::BoolLit(_)
-            | TermKind::UnitLit
-            | TermKind::BinOp(_)
-            | TermKind::UnOp(_)
-            | TermKind::Extern(_) => self.mk_term(new_ty, span, term.kind.clone()),
-
-            TermKind::Coerce { inner, target_ty } => {
-                let new_inner = self.transform_term(inner);
-                self.mk_term(
-                    new_ty,
-                    span,
-                    TermKind::Coerce {
-                        inner: Box::new(new_inner),
-                        target_ty: soa_type(target_ty),
-                    },
-                )
-            }
-
-            TermKind::Lambda(lam) => {
-                let new_lam = self.transform_lambda(lam);
-                self.mk_term(new_ty, span, TermKind::Lambda(new_lam))
-            }
-
-            TermKind::App { func, args } => self.transform_app(func, args, orig_ty, new_ty, span),
-
-            TermKind::Let {
-                name,
-                name_ty,
-                rhs,
-                body,
-            } => {
-                let new_rhs = self.transform_term(rhs);
-                let new_body = self.transform_term(body);
-                self.mk_term(
-                    new_ty,
-                    span,
-                    TermKind::Let {
-                        name: *name,
-                        name_ty: soa_type(name_ty),
-                        rhs: Box::new(new_rhs),
-                        body: Box::new(new_body),
-                    },
-                )
-            }
-
-            TermKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                let new_cond = self.transform_term(cond);
-                let new_then = self.transform_term(then_branch);
-                let new_else = self.transform_term(else_branch);
-                self.mk_term(
-                    new_ty,
-                    span,
-                    TermKind::If {
-                        cond: Box::new(new_cond),
-                        then_branch: Box::new(new_then),
-                        else_branch: Box::new(new_else),
-                    },
-                )
-            }
-
-            TermKind::Loop {
-                loop_var,
-                loop_var_ty,
-                init,
-                init_bindings,
-                kind,
-                body,
-            } => {
-                let new_init = self.transform_term(init);
-                let new_loop_var_ty = soa_type(loop_var_ty);
-                let new_init_bindings = init_bindings
-                    .iter()
-                    .map(|(sym, ty, expr)| (*sym, soa_type(ty), self.transform_term(expr)))
-                    .collect();
-                let new_kind = self.transform_loop_kind(kind);
-                let new_body = self.transform_term(body);
-                self.mk_term(
-                    new_ty,
-                    span,
-                    TermKind::Loop {
-                        loop_var: *loop_var,
-                        loop_var_ty: new_loop_var_ty,
-                        init: Box::new(new_init),
-                        init_bindings: new_init_bindings,
-                        kind: new_kind,
-                        body: Box::new(new_body),
-                    },
-                )
-            }
-
-            TermKind::Soac(soac) => {
-                let new_soac = self.transform_soac(soac);
-                // Try to normalize Map+Zip after SoA transform
-                let new_soac = match new_soac {
-                    SoacOp::Map {
-                        lam,
-                        inputs,
-                        destination,
-                    } => self.try_normalize_map(lam, inputs, destination),
-                    other => other,
-                };
-                self.mk_term(new_ty, span, TermKind::Soac(new_soac))
-            }
-
-            TermKind::ArrayExpr(ae) => self.transform_array_expr_term(ae, orig_ty, new_ty, span),
-
-            TermKind::Tuple(parts) => {
-                let new_parts: Vec<Term> = parts.iter().map(|p| self.transform_term(p)).collect();
-                self.mk_term(new_ty, span, TermKind::Tuple(new_parts))
-            }
-            TermKind::TupleProj { tuple, idx } => {
-                let idx = *idx;
-                let new_tuple = self.transform_term(tuple);
-                self.mk_term(
-                    new_ty,
-                    span,
-                    TermKind::TupleProj {
-                        tuple: Box::new(new_tuple),
-                        idx,
-                    },
-                )
-            }
+            TermKind::App { func, args } => self.rewrite_special_app(func, args, &term.ty, term.span),
             TermKind::Index { array, index } => {
-                // Array-of-tuple index: distribute over per-component arrays.
-                let arr_orig_ty = &array.ty;
-                if let Some((n, comp_tys, variant, size, region)) = array_of_tuple_parts(arr_orig_ty) {
-                    let new_arr = self.transform_term(array);
-                    let new_idx = self.transform_term(index);
-                    return self.rewrite_index_aot(
-                        &new_arr, &new_idx, &comp_tys, &variant, &size, &region, n, span,
-                    );
-                }
-                let new_array = self.transform_term(array);
-                let new_index = self.transform_term(index);
-                self.mk_term(
-                    new_ty,
-                    span,
-                    TermKind::Index {
-                        array: Box::new(new_array),
-                        index: Box::new(new_index),
-                    },
-                )
+                let (n, component_types, variant, size, region) = array_of_tuple_parts(&array.ty)?;
+                Some(self.rewrite_index_aot(
+                    array,
+                    index,
+                    &component_types,
+                    &variant,
+                    &size,
+                    &region,
+                    n,
+                    term.span,
+                ))
             }
-            TermKind::VecLit(parts) => {
-                let new_parts: Vec<Term> = parts.iter().map(|p| self.transform_term(p)).collect();
-                self.mk_term(new_ty, span, TermKind::VecLit(new_parts))
-            }
+            TermKind::ArrayExpr(array) => self.rewrite_special_array_expr(array, &term.ty, term.span),
+            _ => None,
         }
     }
 
     /// Transform a function application. This is where we intercept intrinsics
     /// that operate on array-of-tuple types and rewrite them.
-    fn transform_app(
+    fn rewrite_special_app(
         &mut self,
-        func: &Term,
-        args: &[Term],
+        func: &Term<Empty, Empty>,
+        args: &[Term<Empty, Empty>],
         orig_result_ty: &Type<TypeName>,
-        new_result_ty: Type<TypeName>,
         span: Span,
-    ) -> Term {
+    ) -> Option<Term<Empty, Empty>> {
         let known = catalog().known();
         if let Some(id) = crate::tlc::var_term_builtin_id(func, &self.symbols) {
             // array_with(arr, i, val) where arr was [n](A,B)
             if (id == known.array_with || id == known.array_with_in_place) && args.len() == 3 {
                 let arr_orig_ty = &args[0].ty;
                 if let Some((n, comp_tys, variant, size, region)) = array_of_tuple_parts(arr_orig_ty) {
-                    let new_arr = self.transform_term(&args[0]);
-                    let new_idx = self.transform_term(&args[1]);
-                    let new_val = self.transform_term(&args[2]);
-                    return self.rewrite_array_with_aot(
-                        &new_arr, &new_idx, &new_val, &comp_tys, &variant, &size, &region, n, span,
-                    );
+                    return Some(self.rewrite_array_with_aot(
+                        &args[0], &args[1], &args[2], &comp_tys, &variant, &size, &region, n, span,
+                    ));
                 }
             }
 
@@ -388,7 +266,7 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
                         _ => self.symbols.alloc(by_id(id).raw.surface_name.to_string()),
                     };
                     let soa_ty = soa_type(orig_result_ty);
-                    return self.rewrite_uninit_aot(&soa_ty, sym, span);
+                    return Some(self.rewrite_uninit_aot(&soa_ty, sym, span));
                 }
             }
 
@@ -400,24 +278,11 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
                         TermKind::Var(VarRef::Symbol(s)) => *s,
                         _ => self.symbols.alloc(by_id(id).raw.surface_name.to_string()),
                     };
-                    let new_arr = self.transform_term(&args[0]);
-                    return self.rewrite_length_aot(&new_arr, sym, new_result_ty, span);
+                    return Some(self.rewrite_length_aot(&args[0], sym, soa_type(orig_result_ty), span));
                 }
             }
         }
-
-        // Default: recursively transform all parts.
-        let _ = orig_result_ty;
-        let new_func = self.transform_term(func);
-        let new_args: Vec<Term> = args.iter().map(|a| self.transform_term(a)).collect();
-        self.mk_term(
-            new_result_ty,
-            span,
-            TermKind::App {
-                func: Box::new(new_func),
-                args: new_args,
-            },
-        )
+        None
     }
 
     // =========================================================================
@@ -429,16 +294,16 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
     /// `arr[i]` to `(proj(arr,0)[i], proj(arr,1)[i])`.
     fn rewrite_index_aot(
         &mut self,
-        arr: &Term,
-        idx: &Term,
+        arr: &Term<Empty, Empty>,
+        idx: &Term<Empty, Empty>,
         comp_tys: &[Type<TypeName>],
         variant: &Type<TypeName>,
         size: &Type<TypeName>,
         region: &Type<TypeName>,
         n: usize,
         span: Span,
-    ) -> Term {
-        let components: Vec<Term> = (0..n)
+    ) -> Term<Empty, Empty> {
+        let components: Vec<Term<Empty, Empty>> = (0..n)
             .map(|i| {
                 // Recursively soa_type the constructed array so nested array-of-tuples
                 // like [8](int, vec3) are further distributed to ([8]int, [8]vec3).
@@ -466,17 +331,17 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
     /// -> `_w_tuple(array_with(proj(arr,0), i, proj(val,0)), ...)`
     fn rewrite_array_with_aot(
         &mut self,
-        arr: &Term,
-        idx: &Term,
-        val: &Term,
+        arr: &Term<Empty, Empty>,
+        idx: &Term<Empty, Empty>,
+        val: &Term<Empty, Empty>,
         comp_tys: &[Type<TypeName>],
         variant: &Type<TypeName>,
         size: &Type<TypeName>,
         region: &Type<TypeName>,
         n: usize,
         span: Span,
-    ) -> Term {
-        let components: Vec<Term> = (0..n)
+    ) -> Term<Empty, Empty> {
+        let components: Vec<Term<Empty, Empty>> = (0..n)
             .map(|i| {
                 let soa_comp_ty = soa_type(&comp_tys[i]);
                 let comp_arr_ty = soa_type(&Type::Constructed(
@@ -512,18 +377,18 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
     /// -> `_w_tuple(_w_array_lit(proj(e1,0), proj(e2,0), ...), ...)`
     fn rewrite_array_lit_aot(
         &mut self,
-        elems: &[Term],
+        elems: &[Term<Empty, Empty>],
         comp_tys: &[Type<TypeName>],
         variant: &Type<TypeName>,
         size: &Type<TypeName>,
         region: &Type<TypeName>,
         span: Span,
-    ) -> Term {
+    ) -> Term<Empty, Empty> {
         let n = comp_tys.len();
-        let components: Vec<Term> = (0..n)
+        let components: Vec<Term<Empty, Empty>> = (0..n)
             .map(|i| {
                 let soa_comp_ty = soa_type(&comp_tys[i]);
-                let projected_elems: Vec<Term> = elems
+                let projected_elems: Vec<Term<Empty, Empty>> = elems
                     .iter()
                     .map(|e| self.mk_tuple_proj(e.clone(), i, soa_comp_ty.clone(), span))
                     .collect();
@@ -561,10 +426,10 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
         soa_ty: &Type<TypeName>,
         uninit_sym: crate::SymbolId,
         span: Span,
-    ) -> Term {
+    ) -> Term<Empty, Empty> {
         match soa_ty {
             Type::Constructed(TypeName::Tuple(_), comp_tys) => {
-                let components: Vec<Term> = comp_tys
+                let components: Vec<Term<Empty, Empty>> = comp_tys
                     .iter()
                     .map(|ct| {
                         // Each component is a call to _w_intrinsic_uninit with the component type
@@ -581,11 +446,11 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
     /// -> `_w_intrinsic_length(proj(arr, 0))`
     fn rewrite_length_aot(
         &mut self,
-        arr: &Term,
+        arr: &Term<Empty, Empty>,
         length_sym: crate::SymbolId,
         result_ty: Type<TypeName>,
         span: Span,
-    ) -> Term {
+    ) -> Term<Empty, Empty> {
         // arr is now a tuple of arrays. Project the first component and take its length.
         let first_comp_ty = match &arr.ty {
             Type::Constructed(TypeName::Tuple(_), comp_tys) => comp_tys[0].clone(),
@@ -605,163 +470,28 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
         )
     }
 
-    // =========================================================================
-    // SOAC rewriting
-    // =========================================================================
-
-    fn transform_soac(&mut self, soac: &SoacOp) -> SoacOp {
-        match soac {
-            SoacOp::Map {
-                lam,
-                inputs,
-                destination,
-            } => {
-                let new_lam = self.transform_soac_body(lam);
-                let new_inputs: Vec<ArrayExpr> =
-                    inputs.iter().map(|ae| self.transform_array_expr(ae)).collect();
-                SoacOp::Map {
-                    lam: new_lam,
-                    inputs: new_inputs,
-                    destination: *destination,
-                }
-            }
-            SoacOp::Reduce { op, ne, input } => {
-                let new_op = self.transform_soac_body(op);
-                let new_ne = self.transform_term(ne);
-                let new_input = self.transform_array_expr(input);
-                SoacOp::Reduce {
-                    op: new_op,
-                    ne: Box::new(new_ne),
-                    input: new_input,
-                }
-            }
-            SoacOp::Scan {
-                op,
-                ne,
-                input,
-                destination,
-            } => {
-                let new_op = self.transform_soac_body(op);
-                let new_ne = self.transform_term(ne);
-                let new_input = self.transform_array_expr(input);
-                SoacOp::Scan {
-                    op: new_op,
-                    ne: Box::new(new_ne),
-                    input: new_input,
-                    destination: *destination,
-                }
-            }
-            SoacOp::Filter {
-                pred,
-                input,
-                destination,
-            } => {
-                let new_pred = self.transform_soac_body(pred);
-                let new_input = self.transform_array_expr(input);
-                SoacOp::Filter {
-                    pred: new_pred,
-                    input: new_input,
-                    destination: *destination,
-                }
-            }
-            SoacOp::Scatter { dest, lam, inputs } => {
-                let new_dest = self.transform_place(dest);
-                let new_lam = self.transform_soac_body(lam);
-                let new_inputs: Vec<ArrayExpr> =
-                    inputs.iter().map(|ae| self.transform_array_expr(ae)).collect();
-                SoacOp::Scatter {
-                    dest: new_dest,
-                    lam: new_lam,
-                    inputs: new_inputs,
-                }
-            }
-            SoacOp::ReduceByIndex {
-                dest,
-                op,
-                ne,
-                indices,
-                values,
-            } => {
-                let new_dest = self.transform_place(dest);
-                let new_op = self.transform_soac_body(op);
-                let new_ne = self.transform_term(ne);
-                let new_indices = self.transform_array_expr(indices);
-                let new_values = self.transform_array_expr(values);
-                SoacOp::ReduceByIndex {
-                    dest: new_dest,
-                    op: new_op,
-                    ne: Box::new(new_ne),
-                    indices: new_indices,
-                    values: new_values,
-                }
-            }
-        }
-    }
-
-    fn transform_place(&mut self, place: &Place) -> Place {
-        Place {
-            id: place.id,
-            elem_ty: soa_type(&place.elem_ty),
-        }
-    }
-
-    // =========================================================================
-    // ArrayExpr rewriting
-    // =========================================================================
-
-    fn transform_array_expr(&mut self, ae: &ArrayExpr) -> ArrayExpr {
-        match ae {
-            ArrayExpr::Var(vr, ty) => {
-                let t = crate::tlc::atom_var_term(*vr, ty.clone(), &mut self.term_ids);
-                let new = self.transform_term(&t);
-                match new.kind {
-                    TermKind::Var(new_vr) => ArrayExpr::Var(new_vr, new.ty),
-                    _ => unreachable!("SoA transform of a named input yields a named input"),
-                }
-            }
-            ArrayExpr::Zip(exprs) => {
-                let new_exprs: Vec<ArrayExpr> =
-                    exprs.iter().map(|e| self.transform_array_expr(e)).collect();
-                ArrayExpr::Zip(new_exprs)
-            }
-            ArrayExpr::Literal(terms) => {
-                let new_terms: Vec<Term> = terms.iter().map(|t| self.transform_term(t)).collect();
-                ArrayExpr::Literal(new_terms)
-            }
-            ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
-                start: Box::new(self.transform_term(start)),
-                len: Box::new(self.transform_term(len)),
-                step: step.as_ref().map(|s| Box::new(self.transform_term(s))),
-            },
-        }
-    }
-
-    /// Transform an ArrayExpr appearing as a standalone term.
-    /// Standalone Zip is converted to tuple construction here.
-    fn transform_array_expr_term(
+    /// Rewrite a standalone array expression whose representation changes.
+    fn rewrite_special_array_expr(
         &mut self,
-        ae: &ArrayExpr,
+        ae: &ArrayExpr<Empty, Empty>,
         orig_ty: &Type<TypeName>,
-        new_ty: Type<TypeName>,
         span: Span,
-    ) -> Term {
+    ) -> Option<Term<Empty, Empty>> {
+        let new_ty = soa_type(orig_ty);
+
         // Standalone Zip -> tuple construction: zip(a, b) becomes a Tuple term.
         if let ArrayExpr::Zip(exprs) = ae {
             if !exprs.is_empty() {
-                let components: Vec<Term> = exprs
+                let components: Vec<Term<Empty, Empty>> = exprs
                     .iter()
                     .map(|inner_ae| match inner_ae {
                         ArrayExpr::Var(vr, ty) => {
-                            let t = crate::tlc::atom_var_term(*vr, ty.clone(), &mut self.term_ids);
-                            self.transform_term(&t)
+                            crate::tlc::atom_var_term(*vr, ty.clone(), &mut self.term_ids)
                         }
-                        _ => {
-                            let new_inner = self.transform_array_expr(inner_ae);
-                            self.mk_term(new_ty.clone(), span, TermKind::ArrayExpr(new_inner))
-                        }
+                        _ => self.mk_term(new_ty.clone(), span, TermKind::ArrayExpr(inner_ae.clone())),
                     })
                     .collect();
-                return self.mk_tuple(components, new_ty, span);
+                return Some(self.mk_tuple(components, new_ty, span));
             }
         }
 
@@ -769,200 +499,25 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
         if let ArrayExpr::Literal(elems) = ae {
             if !elems.is_empty() {
                 if let Some((_n, comp_tys, variant, size, region)) = array_of_tuple_parts(orig_ty) {
-                    let new_elems: Vec<Term> = elems.iter().map(|t| self.transform_term(t)).collect();
-                    return self
-                        .rewrite_array_lit_aot(&new_elems, &comp_tys, &variant, &size, &region, span);
+                    return Some(
+                        self.rewrite_array_lit_aot(elems, &comp_tys, &variant, &size, &region, span),
+                    );
                 }
             }
         }
-
-        let new_ae = self.transform_array_expr(ae);
-        self.mk_term(new_ty, span, TermKind::ArrayExpr(new_ae))
-    }
-
-    // =========================================================================
-    // Lambda rewriting
-    // =========================================================================
-
-    fn transform_lambda(&mut self, lam: &Lambda) -> Lambda {
-        let new_params: Vec<(crate::SymbolId, Type<TypeName>)> =
-            lam.params.iter().map(|(sym, ty)| (*sym, soa_type(ty))).collect();
-        let new_body = self.transform_term(&lam.body);
-        Lambda {
-            params: new_params,
-            body: Box::new(new_body),
-            ret_ty: soa_type(&lam.ret_ty),
-        }
-    }
-
-    fn transform_soac_body(&mut self, sb: &super::SoacBody) -> super::SoacBody {
-        let new_lam = self.transform_lambda(&sb.lam);
-        let new_captures: Vec<(crate::SymbolId, Type<TypeName>, Term)> = sb
-            .captures
-            .iter()
-            .map(|(sym, ty, term)| (*sym, soa_type(ty), self.transform_term(term)))
-            .collect();
-        super::SoacBody {
-            lam: new_lam,
-            captures: new_captures,
-        }
-    }
-
-    fn transform_loop_kind(&mut self, kind: &LoopKind) -> LoopKind {
-        match kind {
-            LoopKind::For { var, var_ty, iter } => LoopKind::For {
-                var: *var,
-                var_ty: soa_type(var_ty),
-                iter: Box::new(self.transform_term(iter)),
-            },
-            LoopKind::ForRange { var, var_ty, bound } => LoopKind::ForRange {
-                var: *var,
-                var_ty: soa_type(var_ty),
-                bound: Box::new(self.transform_term(bound)),
-            },
-            LoopKind::While { cond } => LoopKind::While {
-                cond: Box::new(self.transform_term(cond)),
-            },
-        }
-    }
-
-    // =========================================================================
-    // SOAC normalization: Map+Zip flattening
-    // =========================================================================
-
-    /// If the Map has multiple inputs but a single tuple-typed lambda param,
-    /// split the param into N separate params and substitute.
-    fn try_normalize_map(
-        &mut self,
-        sb: super::SoacBody,
-        inputs: Vec<ArrayExpr>,
-        destination: crate::types::SoacOwnership,
-    ) -> SoacOp {
-        if inputs.len() <= 1 || sb.lam.params.len() != 1 {
-            return SoacOp::Map {
-                lam: sb,
-                inputs,
-                destination,
-            };
-        }
-
-        let (old_param, param_ty) = (sb.lam.params[0].0, sb.lam.params[0].1.clone());
-
-        // Must be a concrete tuple type matching the input count.
-        let flat_types = match &param_ty {
-            Type::Constructed(TypeName::Tuple(_), types) if !types.is_empty() => flatten_tuple_types(types),
-            _ => {
-                return SoacOp::Map {
-                    lam: sb,
-                    inputs,
-                    destination,
-                };
-            }
-        };
-
-        if flat_types.len() != inputs.len() || has_type_variables(&param_ty) {
-            return SoacOp::Map {
-                lam: sb,
-                inputs,
-                destination,
-            };
-        }
-
-        let super::SoacBody { lam, captures } = sb;
-
-        // Create N fresh params.
-        let new_params: Vec<(crate::SymbolId, Type<TypeName>)> = flat_types
-            .iter()
-            .enumerate()
-            .map(|(i, ty)| (self.symbols.alloc(format!("_sn_{}", i)), ty.clone()))
-            .collect();
-
-        // Substitute: every `Var(old_param)` -> `_w_tuple(Var(p0), ..., Var(pN))`
-        // reconstructed with the original tuple type. Downstream simplification
-        // (partial eval / project folding) will reduce proj(tuple(...), i) -> pi.
-        let span = lam.body.span;
-        let rewritten_body = self.substitute_param(*lam.body, old_param, &new_params, &param_ty, span);
-
-        SoacOp::Map {
-            lam: super::SoacBody {
-                lam: Lambda {
-                    params: new_params,
-                    body: Box::new(rewritten_body),
-                    ret_ty: lam.ret_ty,
-                },
-                captures,
-            },
-            inputs,
-            destination,
-        }
-    }
-
-    /// Replace every occurrence of `Var(old_sym)` with a tuple reconstruction
-    /// from the new params. Respects shadowing.
-    fn substitute_param(
-        &mut self,
-        term: Term,
-        old_sym: crate::SymbolId,
-        new_params: &[(crate::SymbolId, Type<TypeName>)],
-        tuple_ty: &Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        if let TermKind::Var(VarRef::Symbol(sym)) = &term.kind {
-            if *sym == old_sym {
-                return self.build_tuple_reconstruction(new_params, tuple_ty, span);
-            }
-        }
-
-        // Stop at shadowing.
-        match &term.kind {
-            TermKind::Let { name, .. } if *name == old_sym => return term,
-            TermKind::Lambda(lam) if lam.params.iter().any(|(s, _)| *s == old_sym) => return term,
-            _ => {}
-        }
-
-        let fresh_id = self.term_ids.next_id();
-        term.map_children(fresh_id, &mut |child| {
-            self.substitute_param(child, old_sym, new_params, tuple_ty, span)
-        })
-    }
-
-    /// Build `Tuple(Var(p0), Var(p1), ..., Var(pN))` matching the original tuple type.
-    ///
-    /// For nested tuple types like `((A, B), C)` with flat params `[p0, p1, p2]`,
-    /// builds `Tuple(Tuple(Var(p0), Var(p1)), Var(p2))` to match the nesting.
-    fn build_tuple_reconstruction(
-        &mut self,
-        new_params: &[(crate::SymbolId, Type<TypeName>)],
-        tuple_ty: &Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        match tuple_ty {
-            Type::Constructed(TypeName::Tuple(_), component_types) if !component_types.is_empty() => {
-                let mut offset = 0;
-                let mut elements = Vec::with_capacity(component_types.len());
-                for comp_ty in component_types {
-                    let count = flat_type_count(comp_ty);
-                    let sub_params = &new_params[offset..offset + count];
-                    let elem = self.build_tuple_reconstruction(sub_params, comp_ty, span);
-                    elements.push(elem);
-                    offset += count;
-                }
-                self.mk_tuple(elements, tuple_ty.clone(), span)
-            }
-            _ => {
-                // Leaf -- single param.
-                assert_eq!(new_params.len(), 1);
-                let (sym, ty) = &new_params[0];
-                self.mk_term(ty.clone(), span, TermKind::Var(VarRef::Symbol(*sym)))
-            }
-        }
+        None
     }
 
     // =========================================================================
     // Term construction helpers
     // =========================================================================
 
-    fn mk_term(&mut self, ty: Type<TypeName>, span: Span, kind: TermKind) -> Term {
+    fn mk_term(
+        &mut self,
+        ty: Type<TypeName>,
+        span: Span,
+        kind: TermKind<Empty, Empty>,
+    ) -> Term<Empty, Empty> {
         Term {
             id: self.term_ids.next_id(),
             ty,
@@ -972,12 +527,23 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
     }
 
     /// Build a `TermKind::Tuple` term.
-    fn mk_tuple(&mut self, components: Vec<Term>, result_ty: Type<TypeName>, span: Span) -> Term {
+    fn mk_tuple(
+        &mut self,
+        components: Vec<Term<Empty, Empty>>,
+        result_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term<Empty, Empty> {
         self.mk_term(result_ty, span, TermKind::Tuple(components))
     }
 
     /// Build a `TermKind::TupleProj` term.
-    fn mk_tuple_proj(&mut self, term: Term, index: usize, result_ty: Type<TypeName>, span: Span) -> Term {
+    fn mk_tuple_proj(
+        &mut self,
+        term: Term<Empty, Empty>,
+        index: usize,
+        result_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term<Empty, Empty> {
         self.mk_term(
             result_ty,
             span,
@@ -989,7 +555,13 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
     }
 
     /// Build a `TermKind::Index` term.
-    fn mk_index(&mut self, arr: Term, idx: Term, result_ty: Type<TypeName>, span: Span) -> Term {
+    fn mk_index(
+        &mut self,
+        arr: Term<Empty, Empty>,
+        idx: Term<Empty, Empty>,
+        result_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term<Empty, Empty> {
         self.mk_term(
             result_ty,
             span,
@@ -1004,12 +576,12 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
     /// `VarRef::Builtin` call so downstream passes dispatch by id.
     fn mk_array_with(
         &mut self,
-        arr: Term,
-        idx: Term,
-        val: Term,
+        arr: Term<Empty, Empty>,
+        idx: Term<Empty, Empty>,
+        val: Term<Empty, Empty>,
         result_ty: Type<TypeName>,
         span: Span,
-    ) -> Term {
+    ) -> Term<Empty, Empty> {
         let aw_id = catalog().known().array_with;
         let t3 = Type::Constructed(TypeName::Arrow, vec![val.ty.clone(), result_ty.clone()]);
         let t2 = Type::Constructed(TypeName::Arrow, vec![idx.ty.clone(), t3.clone()]);
@@ -1034,8 +606,145 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
     }
 
     /// Build a `TermKind::ArrayExpr(ArrayExpr::Literal(elems))` term.
-    fn mk_array_lit(&mut self, elems: Vec<Term>, result_ty: Type<TypeName>, span: Span) -> Term {
+    fn mk_array_lit(
+        &mut self,
+        elems: Vec<Term<Empty, Empty>>,
+        result_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term<Empty, Empty> {
         self.mk_term(result_ty, span, TermKind::ArrayExpr(ArrayExpr::Literal(elems)))
+    }
+}
+
+impl TermRewriter<Empty, Empty> for SoaTransformer<'_, '_> {
+    fn next_term_id(&mut self) -> TermId {
+        self.term_ids.next_id()
+    }
+
+    fn rewrite_node_before_children(&mut self, term: &mut Term<Empty, Empty>) -> RewriteDecision {
+        let Some(mut replacement) = self.structural_replacement(term) else {
+            return RewriteDecision::Unchanged;
+        };
+        replacement.id = term.id;
+        *term = replacement;
+        RewriteDecision::Changed
+    }
+}
+
+/// Normalize multi-input maps only after the uniform SoA type rewrite, so the
+/// lambda parameter shape and the input shapes are compared in the same type
+/// representation.
+struct MapNormalizer<'a, 'ids> {
+    term_ids: &'ids mut TermIdSource,
+    symbols: &'a mut SymbolTable,
+}
+
+impl MapNormalizer<'_, '_> {
+    fn normalize_map(
+        &mut self,
+        body: SoacBody<Empty, Empty>,
+        inputs: Vec<ArrayExpr<Empty, Empty>>,
+        destination: crate::types::SoacOwnership,
+    ) -> Option<SoacOp<Empty, Empty>> {
+        if inputs.len() <= 1 || body.lam.params.len() != 1 {
+            return None;
+        }
+
+        let (old_param, param_ty) = (body.lam.params[0].0, body.lam.params[0].1.clone());
+        let flat_types = match &param_ty {
+            Type::Constructed(TypeName::Tuple(_), types) if !types.is_empty() => flatten_tuple_types(types),
+            _ => return None,
+        };
+        if flat_types.len() != inputs.len() || has_type_variables(&param_ty) {
+            return None;
+        }
+
+        let SoacBody { lam, data } = body;
+        let new_params: Vec<(crate::SymbolId, Type<TypeName>)> = flat_types
+            .into_iter()
+            .enumerate()
+            .map(|(index, ty)| (self.symbols.alloc(format!("_sn_{index}")), ty))
+            .collect();
+        let span = lam.body.span;
+        let rewritten_body = super::subst::substitute_with(
+            *lam.body,
+            old_param,
+            &mut |_occurrence, term_ids| build_tuple_reconstruction(&new_params, &param_ty, span, term_ids),
+            self.term_ids,
+        );
+
+        Some(SoacOp::Map {
+            lam: SoacBody {
+                lam: Lambda {
+                    params: new_params,
+                    body: Box::new(rewritten_body),
+                    ret_ty: lam.ret_ty,
+                },
+                data,
+            },
+            inputs,
+            destination,
+        })
+    }
+}
+
+impl TermRewriter<Empty, Empty> for MapNormalizer<'_, '_> {
+    fn next_term_id(&mut self) -> TermId {
+        self.term_ids.next_id()
+    }
+
+    fn rewrite_node(&mut self, term: &mut Term<Empty, Empty>) -> RewriteDecision {
+        let replacement = match &term.kind {
+            TermKind::Soac(SoacOp::Map {
+                lam,
+                inputs,
+                destination,
+            }) => self.normalize_map(lam.clone(), inputs.clone(), *destination).map(TermKind::Soac),
+            _ => None,
+        };
+        let Some(kind) = replacement else {
+            return RewriteDecision::Unchanged;
+        };
+        term.kind = kind;
+        RewriteDecision::Changed
+    }
+}
+
+/// Build a tuple reconstruction from flattened map parameters. Each call is
+/// made for one substituted occurrence, so every inserted term receives IDs
+/// from the owning program.
+fn build_tuple_reconstruction(
+    new_params: &[(crate::SymbolId, Type<TypeName>)],
+    tuple_ty: &Type<TypeName>,
+    span: Span,
+    term_ids: &mut TermIdSource,
+) -> Term<Empty, Empty> {
+    let kind = match tuple_ty {
+        Type::Constructed(TypeName::Tuple(_), component_types) if !component_types.is_empty() => {
+            let mut offset = 0;
+            let mut elements = Vec::with_capacity(component_types.len());
+            for component_type in component_types {
+                let count = flat_type_count(component_type);
+                elements.push(build_tuple_reconstruction(
+                    &new_params[offset..offset + count],
+                    component_type,
+                    span,
+                    term_ids,
+                ));
+                offset += count;
+            }
+            TermKind::Tuple(elements)
+        }
+        _ => {
+            assert_eq!(new_params.len(), 1);
+            TermKind::Var(VarRef::Symbol(new_params[0].0))
+        }
+    };
+    Term {
+        id: term_ids.next_id(),
+        ty: tuple_ty.clone(),
+        span,
+        kind,
     }
 }
 
@@ -1043,17 +752,45 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
 // Public API
 // =============================================================================
 
-/// Run the combined SoA transform and SOAC normalization on a TLC program.
+/// Run the first combined SoA transform and SOAC normalization.
 ///
 /// 1. Rewrites `[n](A,B)` types to `([n]A, [n]B)` and adjusts all operations
 ///    that touch array-of-tuple types.
 /// 2. Flattens Map+Zip into multi-input Map with split lambda params.
 /// 3. Converts standalone Zip to tuple construction.
-pub fn run(program: &mut Program) {
-    let mut transformer = SoaTransformer::new(&mut program.symbols, &mut program.term_ids);
-    for def in &mut program.defs {
-        transformer.transform_def(def);
-    }
+pub fn run(program: Program<PartialEvaled>) -> Program<SoaNormalized> {
+    transform_program(program)
+}
+
+/// Re-run the same normalization after inlining exposes new array structure.
+pub fn rerun(program: Program<SoacHelpersInlined>) -> Program<InlinedSoaNormalized> {
+    transform_program(program)
+}
+
+fn transform_program<S, T>(program: Program<S>) -> Program<T>
+where
+    S: Stage,
+    T: Stage<Family = S::Family, GlobalContext = S::GlobalContext>,
+    S::Family: Family<ClosureData = Empty, SoacBodyData = Empty>,
+{
+    let Program {
+        defs,
+        mut symbols,
+        def_syms,
+        mut term_ids,
+        global_context,
+    } = program;
+    let mut transformer = SoaTransformer::new(&mut symbols, &mut term_ids);
+    let defs = defs
+        .into_iter()
+        .map(|mut def| {
+            def.ty = soa_type(&def.ty);
+            def.body = transformer.transform_term(def.body);
+            def
+        })
+        .collect();
+    drop(transformer);
+    Program::from_parts(defs, symbols, def_syms, term_ids, global_context)
 }
 
 // =============================================================================

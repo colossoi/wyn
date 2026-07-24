@@ -1,7 +1,7 @@
 use super::check;
 use crate::ast::{Span, TypeName};
 use crate::tlc::{
-    ArrayExpr, Def, DefMeta, Lambda, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
+    self, ArrayExpr, Def, DefMeta, Lambda, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
 };
 use crate::{LookupMap, SymbolId, SymbolTable};
 use polytype::Type;
@@ -48,7 +48,7 @@ fn trivial_lam(ret: Type<TypeName>, lit: TermKind, ids: &mut TermIdSource) -> So
             body: Box::new(term(lit, ret.clone(), ids)),
             ret_ty: ret,
         },
-        captures: vec![],
+        data: (),
     }
 }
 
@@ -79,11 +79,12 @@ fn filter_term(input: ArrayExpr, ids: &mut TermIdSource) -> Term {
     )
 }
 
-fn prog(body: Term, ids: TermIdSource) -> Program {
+fn prog(body: Term, ids: TermIdSource) -> Program<tlc::stage::SoacsAnfNormalized> {
     // The validator never reads `symbols` (it's a structural check), so an empty
     // table and a raw def id are fine.
     Program::from_parts(
         vec![Def {
+            data: (),
             name: SymbolId::from(0),
             ty: arr_ty(),
             body,
@@ -95,6 +96,10 @@ fn prog(body: Term, ids: TermIdSource) -> Program {
         SymbolTable::new(),
         LookupMap::new(),
         ids,
+        tlc::context::RewriteGlobal {
+            known_defs: Default::default(),
+            auto_storage_binding_ids: crate::IdSource::new(),
+        },
     )
 }
 
@@ -158,11 +163,7 @@ fn real_program_single_map_is_anf() {
     let reachable =
         crate::compile_thru_tlc("#[compute]\nentry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)\n")
             .expect("compile_thru_tlc");
-    assert!(
-        check(&reachable.tlc).is_ok(),
-        "{}",
-        check(&reachable.tlc).unwrap_err()
-    );
+    assert!(check(&reachable).is_ok(), "{}", check(&reachable).unwrap_err());
 }
 
 /// Inline `filter(p, map(...))` leaves an inline producer in the filter's input
@@ -174,9 +175,5 @@ fn real_program_inline_filter_over_map_is_anf() {
         "open f32\n#[compute]\nentry e(xs: []u32) ?k. [k]u32 =\n  filter(|y: u32| y < 100u32, map(|x: u32| x + 1u32, xs))\n",
     )
     .expect("compile_thru_tlc");
-    assert!(
-        check(&reachable.tlc).is_ok(),
-        "{}",
-        check(&reachable.tlc).unwrap_err()
-    );
+    assert!(check(&reachable).is_ok(), "{}", check(&reachable).unwrap_err());
 }

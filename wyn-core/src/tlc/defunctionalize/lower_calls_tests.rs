@@ -1,4 +1,4 @@
-//! Tests for verify_closure_calls_lowered.
+//! Tests for direct-call lowering verification.
 
 use super::*;
 use crate::ast::{Span, TypeName};
@@ -7,15 +7,26 @@ use crate::SymbolTable;
 use polytype::Type;
 use std::collections::HashMap;
 
-fn empty_program() -> Program {
-    Program::from_parts(vec![], SymbolTable::new(), HashMap::new(), TermIdSource::new())
+fn empty_program() -> Program<Defunctionalized> {
+    Program::from_parts(
+        vec![],
+        SymbolTable::new(),
+        HashMap::new(),
+        TermIdSource::new(),
+        crate::tlc::context::PostClosureGlobal {
+            auto_storage_binding_ids: crate::IdSource::new(),
+        },
+    )
 }
 
 fn unit_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Unit, vec![])
 }
 
-fn term(program: &mut Program, kind: TermKind) -> Term {
+fn term(
+    program: &mut Program<Defunctionalized>,
+    kind: TermKind<ExplicitClosurePayload, ExplicitCapturesPayload>,
+) -> Term<ExplicitClosurePayload, ExplicitCapturesPayload> {
     Term {
         id: program.next_term_id(),
         ty: unit_ty(),
@@ -44,6 +55,7 @@ fn direct_call_passes() {
         },
     );
     p.defs.push(Def {
+        data: (),
         name: f,
         ty: unit_ty(),
         body,
@@ -63,6 +75,7 @@ fn arity_mismatch_fails() {
     // g is a defined function with arity 2.
     let g_body = term(&mut p, TermKind::IntLit("0".into()));
     p.defs.push(Def {
+        data: (),
         name: g,
         ty: unit_ty(),
         body: g_body,
@@ -82,6 +95,7 @@ fn arity_mismatch_fails() {
         },
     );
     p.defs.push(Def {
+        data: (),
         name: f,
         ty: unit_ty(),
         body,
@@ -126,6 +140,7 @@ fn nested_app_in_func_position_fails() {
         },
     );
     p.defs.push(Def {
+        data: (),
         name: f,
         ty: unit_ty(),
         body,
