@@ -915,9 +915,8 @@ impl ModuleManager {
     /// Preserves the input pattern's NodeId via `pattern.h.clone()`.
     /// Callers that duplicate source patterns across elaborated
     /// instances (e.g. functor instantiations) MUST freshen NodeIds
-    /// first via `clone_pattern_fresh_ids`; calling this directly on a
-    /// source pattern reintroduces the cross-instance NodeId collision
-    /// bug that motivated functor-instance ID freshening.
+    /// first via `clone_pattern_fresh_ids`; direct reuse would give distinct
+    /// instances the same NodeId.
     fn substitute_in_pattern(&self, pattern: &Pattern, substitutions: &LookupMap<String, Type>) -> Pattern {
         let new_kind = match &pattern.kind {
             PatternKind::Typed(inner, ty) => {

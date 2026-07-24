@@ -2,9 +2,7 @@
 //!
 //! The matrices and queries are built directly in `CovPat` form so
 //! the algorithm can be tested in isolation from the AST → CovPat
-//! lowering. End-to-end coverage of the lowering happens via
-//! `types::checker_tests` once Phase 2 wires `check_match` into the
-//! checker.
+//! lowering. `types::checker_tests` covers the checker integration.
 
 use super::*;
 use crate::ast::Span;

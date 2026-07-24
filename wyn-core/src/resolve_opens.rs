@@ -41,9 +41,8 @@ mod tests;
 ///
 /// Storage is `module → set of member names` rather than a flat
 /// `LookupSet<(String, String)>` so `has_member(m, n)` can probe with
-/// `&str` borrows instead of allocating two owned `String`s per call
-/// — the resolver checks every identifier in every expression, so the
-/// per-probe `to_string()` allocations were a hot path.
+/// `&str` borrows without per-probe `String` allocations. The resolver
+/// performs this lookup for every identifier in every expression.
 #[derive(Debug, Default, Clone)]
 pub struct OpenIndex {
     /// Value-namespace members keyed by module. Module-presence is

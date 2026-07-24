@@ -378,9 +378,9 @@ fn optimize_skeleton_alias_closure_invariant() {
 
 #[test]
 fn optimize_skeleton_removes_block_unreachable_post_fold() {
-    // entry CondBranch{true} → A/B. After fold, B is unreachable. B has
-    // a block param. Pruning should remove B before phi-elim gets a
-    // chance to reason from the dead edge that used to feed it.
+    // entry CondBranch{true} → A/B. After folding, B and its block parameter
+    // are unreachable. Pruning must remove B before phi elimination considers
+    // that dead edge.
     let mut graph = EGraph::new();
     let t = graph.intern_constant(ConstantValue::Bool(true), bool_ty());
     let entry = graph.skeleton.entry;

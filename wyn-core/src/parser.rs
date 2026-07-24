@@ -2243,11 +2243,10 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    // Function application: f(x, y, z)
-    // Now uses tuple-style syntax with parentheses
+    // Function application uses tuple-style syntax: f(x, y, z).
     fn parse_application_expression(&mut self) -> Result<Expression> {
         trace!("parse_application_expression: next token = {:?}", self.peek());
-        // Postfix expression now handles function calls with ()
+        // Postfix parsing owns parenthesized function calls.
         self.parse_postfix_expression()
     }
 

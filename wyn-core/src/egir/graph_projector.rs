@@ -585,8 +585,8 @@ impl<'a> GraphProjector<'a> {
         nodes: &mut HashMap<NodeId, NodeId>,
     ) {
         // The skeleton parameter list is authoritative. CFG cleanup leaves
-        // eliminated BlockParam definitions in the sea, so iterating every
-        // historical BlockParam node would resurrect removed parameters.
+        // eliminated BlockParam definitions in the sea; iterating the sea
+        // would therefore resurrect parameters absent from the live skeleton.
         for (source_block, source_body) in &self.source.skeleton.blocks {
             if !projected_blocks.contains(&source_block) {
                 continue;

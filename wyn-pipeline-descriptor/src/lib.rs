@@ -507,9 +507,7 @@ pub enum DispatchSize {
         explicit: bool,
     },
     /// Dispatch `ceil(len / workgroup_size)` workgroups, where `len` is the
-    /// number of iterations resolved from `DispatchLen`. Replaces the old
-    /// `DerivedFromInputLength`, which only said "derive from *an* input
-    /// buffer" and silently guessed the wrong one for range-driven maps.
+    /// number of iterations resolved from the explicit `DispatchLen` source.
     DerivedFrom {
         len: DispatchLen,
         workgroup_size: u32,

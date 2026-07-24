@@ -1945,11 +1945,9 @@ fn terminal_scan_helpers_are_complete_region_arena_members() {
 /// that phase1's per-thread loop trip-count transitively depends on
 /// `thread_id` — i.e. each thread reduces only its *chunk* of the range.
 ///
-/// The bug: phase1 looped the full `0..n` per invocation (quadratic — every
-/// thread redoes the whole reduction; `thread_id` was used only as the
-/// partials output slot, never to bound the loop). With the bug the
-/// trip-count is the raw input length `n` (thread-independent), so
-/// `thread_id` is unreachable from the loop condition and this fails.
+/// The trip count must therefore depend on `thread_id`; a raw,
+/// thread-independent input length would make every invocation reduce the
+/// entire range.
 fn assert_phase1_loop_depends_on_thread_id(src: &str) {
     use crate::builtins::catalog;
     use crate::op::OpTag;
@@ -2084,11 +2082,8 @@ entry mn(n: u32) (u32, [4]u32) =
 /// A reduce whose element is a tuple is decomposed across one output buffer per
 /// field. Phase 1 must store the whole accumulator tuple to its partials buffer,
 /// and phase 2 must write *every* output field from the combined result.
-/// Regression: the lowering kept only the first field's store (writing a scalar
-/// into the tuple-typed partials → invalid SPIR-V) and dropped the array field's
-/// output entirely. `compile_to_spirv` alone doesn't catch it — the malformed
-/// store only fails `spirv-val` (see `testfiles/miner.wyn`); this asserts the
-/// descriptor invariant that no output buffer is left unwritten.
+/// The descriptor must therefore contain a writer for every output buffer;
+/// `spirv-val` additionally checks that the partials store has tuple type.
 #[test]
 fn tuple_reduce_writes_every_output_field() {
     use crate::pipeline_descriptor::{Binding, BufferUsage, Pipeline};
@@ -2437,9 +2432,8 @@ entry generated() []i32 = map(|i: i32| i + 1, 0i32..<2048)
 }
 
 /// A map over a fixed `iota` keeps its iteration domain when the array is
-/// returned directly from a helper. Regression: the helper-return boundary
-/// used to discard the map's domain, leaving the entry on the inferred
-/// `Fixed { 1, 1, 1 }` fallback (only 64 of 1024 lanes).
+/// returned directly from a helper. The helper-return boundary must preserve
+/// the 1024-element dispatch instead of falling back to `Fixed { 1, 1, 1 }`.
 #[test]
 fn iota_map_returned_from_helper_keeps_dispatch_domain() {
     use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
@@ -3728,7 +3722,7 @@ entry add_sum(xs: []i32) []i32 =
 }
 
 // =============================================================================
-// Phase 2 regression: unbound `Var(Symbol(sym))` references through TLC passes
+// Bound-symbol verification through TLC passes
 // =============================================================================
 
 /// Walk a term and assert that every `TermKind::Var(VarRef::Symbol(sym))`
@@ -3961,13 +3955,9 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program<crate::tlc::stage::R
     }
 }
 
-/// Regression: under Phase 2, `let x = arr in body[x]` was leaving a
-/// free `Var(Symbol)` in the post-`partial_eval` TLC because `apply`'s
-/// `Var(Builtin)` and catch-all arms cloned the original term instead
-/// of residualizing through the eval'd args. The fix lives in
-/// `tlc::partial_eval::residualize_call`. This test compiles the
-/// minimal repro through the full canonical TLC pipeline and asserts
-/// no `Var(Symbol(sym))` references an unbound symbol.
+/// `tlc::partial_eval::residualize_call` must substitute `let x = arr` through
+/// `body[x]`. Compile through the canonical TLC pipeline and assert that every
+/// `Var(Symbol(sym))` remains bound.
 #[test]
 fn let_binding_substitution_survives_partial_eval() {
     let source = r#"
@@ -4039,13 +4029,8 @@ fn consuming_map_skips_fresh_allocation() {
     // SOAC — no `_w_intrinsic_uninit`. A later observer makes resolution fall
     // back to a fresh allocation.
     //
-    // The previous shape (consuming `*[N]T` vs borrowing `[N]T`
-    // helper) is now collapsed by `force_inline_soac_helpers`: both
-    // helper variants get inlined upstream and ownership sees the
-    // exact same caller-level shape in either case. We express the
-    // same invariant by varying *use-after-SOAC* on a let-bound
-    // array literal: the fresh literal is consumable iff it has no
-    // remaining uses past the map.
+    // Vary use-after-SOAC on a let-bound array literal: the fresh literal is
+    // consumable exactly when it has no remaining uses past the map.
     let dead_after_ssa = compile_to_ssa(
         r#"
 #[fragment]
@@ -4083,7 +4068,7 @@ fn consuming_scan_compiles_end_to_end() {
     // Parallel of `consuming_map_compiles_end_to_end` for Scan: `*[N]T`
     // input that's dead-after; ownership grants `UniqueInput`, EGIR resolves
     // it to `InputBuffer`, and `soac_expand` runs the destination-passing
-    // loop. Pre-S4 this hit a panic.
+    // loop.
     let _ssa = compile_to_ssa(
         r#"
 def cumsum(a: *[8]i32) [8]i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
@@ -4132,7 +4117,7 @@ entry frag(c: vec4f32) #[target(screen)] vec4f32 =
 #[test]
 fn consuming_scan_compute_entry_compiles_to_spirv() {
     // Compute entry with `*[]T` param. Exercises the Scan-DPS path
-    // end-to-end through SPIR-V emission. Regression guards:
+    // end-to-end through SPIR-V emission. Required invariants:
     //
     // 1. Type-checker: `*[]T` on a compute-entry param must constrain
     //    the array variant to `View`, not default to `Composite`.
@@ -4345,20 +4330,9 @@ fn inst_signature_multiset(ssa: &Program) -> std::collections::BTreeMap<String, 
 
 #[test]
 fn filter_length_is_runtime_count_not_static_capacity() {
-    // The bug this test guards against: if the bounded filter result's
-    // `len` field is fed the input array's static capacity (e.g. 4)
-    // instead of the runtime write-cursor count, `length(r)` silently
-    // returns the capacity. Indexed reads `r[0]` / `r[1]` still
-    // produce the first two kept elements (those slots were written),
-    // so a smoke test would pass — but anything iterating
-    // `0..length(r)` would read garbage past the real count.
-    //
-    // The previous shape (consuming `*[N]T` vs borrowing `[N]T` helper)
-    // collapsed under `force_inline_soac_helpers`: both helper
-    // variants get force-inlined before ownership runs, so the helper
-    // boundary the test depended on disappears. We test the same
-    // invariant directly on a static-literal filter in the entry
-    // body: the lowered SSA must contain a `_w_intrinsic_length`
+    // A bounded filter's `len` field holds the runtime write-cursor count, not
+    // its static capacity. On a static-literal filter, the lowered SSA must
+    // contain a `_w_intrinsic_length`
     // intrinsic call against the filter result — proving the length
     // is *computed* from the bounded wrapper's runtime `len` field,
     // not short-circuited to the literal capacity.
@@ -4502,14 +4476,9 @@ entry gen(xs: []i32) ([]i32, []i32, [1]i32, []i32) =
 // Multi-output compute entries
 // =============================================================================
 
-/// Regression: a compute entry returning a tuple of >1 runtime-sized
-/// array used to panic in EGIR lowering — the SOAC→OutputView rewrite
-/// that streams a runtime-sized result into its bound storage view only
-/// fired for the single-output case. For a tuple result, each field
-/// reached `emit_compute_output_stores` as a plain value and hit the
-/// `is_unsized_array` guard (`from_tlc.rs` "must rewrite to OutputView
-/// upstream"). Each tuple field's producing Map/Scan must be retargeted
-/// to its own output view.
+/// For a compute entry returning multiple runtime-sized arrays, each tuple
+/// field's producing Map or Scan must be retargeted to its own output view
+/// before `emit_compute_output_stores`.
 #[test]
 fn test_multi_output_compute_runtime_sized_arrays() {
     let _ssa = compile_to_ssa(
@@ -4526,10 +4495,8 @@ entry gen(src: []f32) ([]f32, []f32) =
 /// the equal-domain pair into one multi-lane SegMap that writes *two* output
 /// slots; the split must keep that fused side-effect — and both its output
 /// bindings — together in one kernel, not strand it as "shared" while dropping
-/// its bindings from `outputs`. Regression: a computed-fixed output plus a
-/// shared-domain map pair plus enough distinct-domain maps to reach five
-/// outputs used to lower to a stage whose output binding wasn't allocated
-/// ("Storage buffer not found").
+/// its bindings from `outputs`. This case combines a computed-fixed output, a
+/// shared-domain map pair, and enough distinct domains to reach five outputs.
 #[test]
 fn multidomain_split_with_shared_domain_map_pair_compiles() {
     use crate::pipeline_descriptor::Pipeline;
@@ -4661,7 +4628,6 @@ entry two(ids: []u32, params: []f32) ([]f32, []f32) =
 /// pipeline — not reify into an independent output `SegMap` stage — otherwise
 /// the scatter's view resolution is left with a bogus placeholder and the
 /// backend emits an invalid `OpCompositeExtract` from a non-aggregate.
-/// Regression distilled from `testfiles/playground/particles.wyn`.
 #[test]
 fn inplace_clear_feeding_scatter_stays_wired() {
     use crate::pipeline_descriptor::Pipeline;
@@ -5322,12 +5288,8 @@ def test: (i32 -> i32) =
 
 /// Companion to `test_spirv_loop_carrying_map_over_iota`, with the
 /// loop initialized from a composite ARRAY LITERAL rather than a
-/// `map(…, iota(…))` call. Before the fix these had asymmetric
-/// outcomes: literal-init produced a Composite variant, map-init
-/// produced a Virtual variant, and the loop back-edge unification
-/// failed with "Loop body type must match loop variable type:
-/// Failure(Virtual, Composite)". Now that `map`'s output variant is
-/// pinned to Composite, both styles compile.
+/// `map(…, iota(…))` call. Both initializers must produce the Composite
+/// representation carried around the loop back edge.
 #[test]
 fn test_spirv_loop_carrying_literal_init() {
     let source = r#"
@@ -5348,15 +5310,12 @@ entry main(x: []f32) [4]f32 = f(x[0])
     );
 }
 
-/// Regression: `lift_graphical_invariant_soacs` used to look only at the
-/// direct free vars of a candidate SOAC for entry-param refs. A
+/// `lift_graphical_invariant_soacs` must follow let bindings transitively when
+/// looking for entry-parameter dependencies. A
 /// fragment-shader-local `let uv = fragCoord.x` introduces `uv` as a
 /// fresh symbol that's *not* an entry param but transitively depends on
 /// one. A reduce (plain or fused map→reduce) whose body reads `uv` would then be wrongly
-/// classified as graphical-invariant and hoisted into a compute prepass
-/// that references `@uv` as an unbound global — SPIR-V codegen panics
-/// with `Unknown global: uv`. The check needs to follow let bindings
-/// transitively.
+/// classified as graphical-invariant or hoisted into a compute prepass.
 #[test]
 fn test_no_overhoist_fused_reduce_through_let_bound_dependency() {
     let source = r#"
@@ -5459,9 +5418,8 @@ entry fragment_main(
   @[breath, 0.0, 0.0, 1.0]
 "#;
 
-    // The lift must fire: the uniform-driven reduce becomes a compute
-    // pre-pass (multi-staged into phase1 + phase2 compute entries). Before
-    // the uniform exemption there were no compute entries at all.
+    // The uniform-driven reduce becomes a compute pre-pass with phase1 and
+    // phase2 compute entries.
     let ssa = compile_to_ssa_with_modules(source);
     let compute_entries: Vec<&str> = ssa
         .entry_points
@@ -5888,9 +5846,7 @@ fn compile_to_spirv_single_stage(input: &str) -> Result<Vec<u32>, Box<dyn std::e
     Ok(crate::compile_thru_spirv_single_stage(input)?.spirv)
 }
 
-/// Helper: compile source through SSA. Same as `compile_to_ssa`; kept as
-/// a separate name because some legacy tests distinguished module-bearing
-/// programs from non-module ones — `compile_thru_frontend` handles both.
+/// Compile module-bearing source through SSA using the shared frontend.
 fn compile_to_ssa_with_modules(input: &str) -> Program {
     crate::compile_thru_ssa(input).expect("compile to SSA").ssa
 }
@@ -5956,15 +5912,9 @@ entry e() f32 = g(256)
         .expect("a runtime-sized array read by multiple consumers should lower to SPIR-V");
 }
 
-/// Regression for the named-callee HOF gap. The outer `fbm2(perlin2, …)`
-/// is specialized cleanly by the existing main loop, but `fbm2`'s body
-/// also closes over `noise` via a lifted SOAC lambda (closure_convert
-/// adds the function-typed capture as a parameter on the lifted def).
-/// The main loop's substitution only rewrites direct `noise(…)` references
-/// in `fbm2`'s surface body, not the lifted def's signature — so the
-/// captured `noise` still survives as an arrow-typed parameter and the
-/// verifier rejects it. Fixed by adding a cascade closure-specialization
-/// step in `hof_specialize::run` that walks every reachable def, finds
+/// Named-callee HOF specialization must also rewrite lifted SOAC closures.
+/// `fbm2` closes over `noise` through a function-typed capture on its lifted
+/// definition. The cascade in `hof_specialize::run` walks reachable defs, finds
 /// `SoacBody`s whose captures include `(_, arrow_ty, Var(known_callable))`,
 /// clones the lifted def with the callable substituted into the body,
 /// and drops the callable param from its signature. Lets `lib/noise.wyn`
@@ -6036,7 +5986,7 @@ entry cmp(x: f32, y: f32) i32 =
 /// The payoff of reifying operators into real module members: an operator can
 /// be passed as a first-class value to a higher-order function (Wyn forbids
 /// partial application, but operator members are saturated function references,
-/// which it does support). Before reification `i32.(+)` had no referent.
+/// which it does support).
 #[test]
 fn reified_operator_passed_as_first_class_value() {
     let source = r#"
@@ -6062,12 +6012,12 @@ entry e(xs: [8]i32) i32 = reduce(i32.(+), map(0i32), xs)
     compile_to_spirv(source).expect("a user def shadowing a SOAC name should lower as a normal call");
 }
 
-/// Regression: a user `def map(x: i32) i32 = x` at file scope must
-/// not break prelude `unzip`'s `map(|...|, xys)` call. Both `unzip`
+/// A user `def map(x: i32) i32 = x` at file scope must not break prelude
+/// `unzip`'s `map(|...|, xys)` call. Both `unzip`
 /// and the user reference `map` by surface name, but `name_resolution`
 /// structurally tags the prelude reference as `Soac(Map)` while the
-/// user reference is left bare. Post env-split, prelude bodies are
-/// checked under `LookupContext::Prelude`, which never sees user
+/// user reference is left bare. Prelude bodies are checked under
+/// `LookupContext::Prelude`, which never sees user
 /// file-scope; the structural Soac tag routes directly to
 /// `globals.builtins["map"]` so the SOAC scheme resolves regardless
 /// of what the user did at file scope.
@@ -6084,12 +6034,9 @@ entry e(xs: [4](i32, i32)) i32 =
         .expect("user `def map` must not interfere with prelude unzip's internal `map` call");
 }
 
-/// Companion to `aspiration_user_module_body_sees_file_scope_shadow_of_soac`
-/// — the env-split makes user file-scope visible inside user module
-/// bodies, so a `def map(x: i32) [4]i32` shadows the SOAC `map` for a
-/// module's `map(xs)` call too. Pre-env-split, the module body saw
-/// only its own siblings + catalog and the call resolved as the SOAC.
-/// This test pins the new shadowing behaviour with a multi-line
+/// User file scope is visible inside user module bodies, so a
+/// `def map(x: i32) [4]i32` shadows the SOAC `map` for a module's
+/// `map(xs)` call. This test pins that shadowing with a multi-line
 /// transitive `def map` body so an inline-small pass can't collapse
 /// the call before TLC observes it.
 #[test]
@@ -6108,8 +6055,7 @@ entry e(xs: [4]i32) i32 = m.first_four_sum(xs)
     );
 }
 
-/// Regression for the env-split. After the conversion landed, user
-/// module bodies see user file-scope shadows of SOAC names at the
+/// User module bodies see file-scope shadows of SOAC names at the
 /// surface level — `name_resolution` seeds user file-scope into each
 /// user-defined module's `module_scope`, so a bare `map(xs[0])` inside
 /// `m.first_doubled` resolves to the user `def map`, not the SOAC.
@@ -6163,16 +6109,11 @@ entry summarize() [6]f32 =
     compile_to_spirv(source).expect("the statistics gatherer should lower to SPIR-V");
 }
 
-/// Regression for an elaborate-pass bug: `emit_storage_store` interns the
-/// output's `view_index` access chain, so both arms of an `if`-then-`else`
+/// `emit_storage_store` interns an output's `view_index` access chain, so both
+/// arms of an `if`-then-`else`
 /// writing the same output slot share one hashconsed `ViewIndex` node.
-/// `demand_place`'s cache (`elaborated_places`) wasn't scope-pushed per
-/// subtree, so the access-chain instruction landed in whichever arm
-/// demanded it first; the sibling arm's store then referenced a place
-/// defined in a non-dominating block ("place … has no pointer"). Fix:
-/// scope `elaborated_places` alongside `elaborated` in `elaborate_subtree`
-/// so per-arm cache entries pop with the arm, and the second arm re-emits
-/// its own access chain. The bitwise `&` here matters only because the
+/// `elaborated_places` must be scoped per subtree so each arm emits an
+/// access chain in a dominating block. The bitwise `&` here matters only because the
 /// arithmetic version constant-folds through `partial_eval`; see
 /// `branch_with_let_terminal_into_output_slot_lowers` for the
 /// fold-resistant parameter-driven repro.
@@ -6190,11 +6131,9 @@ entry t() i32 =
         .expect("bitwise result threaded through a deep let-chain into an if should lower");
 }
 
-/// Minimal repro for the same `elaborate_subtree` place-cache bug. The
-/// runtime parameter `n` keeps the `if` branch live (`partial_eval` can't
-/// fold it), so both arms route to the same output slot's `view_index`.
-/// Pre-fix this panicked at SPIR-V emission with
-/// "place … has no pointer".
+/// The runtime parameter `n` keeps the `if` branch live, so both arms route to
+/// the same output slot's `view_index`. Each arm must elaborate that place in
+/// a dominating scope.
 #[test]
 fn branch_with_let_terminal_into_output_slot_lowers() {
     let source = r#"
@@ -6304,13 +6243,12 @@ entry compute_main(data: [4]f32) [4]f32 =
     compile_to_spirv(source).expect("Conditional array construction should compile to SPIR-V");
 }
 
-/// Regression: mapping a lambda whose return type is a mixed
-/// scalar/vector tuple. The SoA transform rewrites the output
+/// Mapping a lambda whose return type is a mixed scalar/vector tuple. The SoA
+/// transform rewrites the output
 /// `[N](f32, i32, vec3f32)` into a tuple-of-arrays before EGIR
 /// conversion; `egir::soac_expand` must split the per-iteration
 /// ArrayWith into per-component ArrayWith calls + a Tuple repack.
-/// Without the split, SPIR-V lowering's runtime-index path hit a
-/// cache miss and failed with "element type not found".
+/// The split supplies the element types needed by SPIR-V runtime indexing.
 #[test]
 fn test_spirv_map_array_of_mixed_tuple() {
     let source = r#"
@@ -6326,8 +6264,8 @@ entry frag(c: vec4f32) vec4f32 =
     compile_to_spirv(source).expect("map over [N](f32, i32, vec3f32) should compile to SPIR-V");
 }
 
-/// Regression: nested SoA. The element type itself contains a
-/// composite array, so the SoA transform produces a tuple of
+/// Nested SoA where the element type itself contains a composite array. The
+/// transform produces a tuple of
 /// arrays whose components are themselves arrays — exercising
 /// `emit_write_element`'s recursion through `soa_element_type`.
 #[test]
@@ -6345,20 +6283,13 @@ entry frag(c: vec4f32) vec4f32 =
     compile_to_spirv(source).expect("map over [N](f32, [M]f32) should compile to SPIR-V");
 }
 
-/// Regression: a loop that carries an array whose next-iteration
-/// value comes from `map(…, iota(N))`.
-///
-/// Before the fix, `map`'s type scheme claimed the output variant
-/// was the same as the input's. Since `iota` returns a Virtual
-/// array, `map`'s output was typed Virtual — but `egir::soac_expand`
-/// actually materializes the result via `_w_intrinsic_uninit` +
-/// `_w_intrinsic_array_with_inplace`, which is a Composite
-/// representation. That type/representation mismatch surfaced as
-/// a SPIR-V "ArrayWith: element type not found" cache miss when
-/// the loop back-edge carried what SSA thought was a Virtual
-/// array. Fix: pin `map` / `scan` / `filter` output variant to
-/// Composite in the type scheme, matching the runtime
-/// representation.
+/// A loop carries an array whose next-iteration value comes from
+/// `map(…, iota(N))`. Although `iota` is Virtual, `egir::soac_expand`
+/// materializes the map result through `_w_intrinsic_uninit` and
+/// `_w_intrinsic_array_with_inplace`, so the carried result must have
+/// Composite representation.
+/// The `map`, `scan`, and `filter` schemes pin their materialized outputs to
+/// Composite to match that runtime representation.
 #[test]
 fn test_spirv_loop_carrying_map_over_iota() {
     let source = r#"
@@ -6390,10 +6321,9 @@ fn test_spirv_raytrace() {
     compile_to_spirv(&source).expect("raytrace.wyn should compile to SPIR-V");
 }
 
-/// Regression: if/else before interprocedural map+reduce fusion caused
-/// UnterminatedBlock in soac_lower. The if/else creates a dead Unreachable
-/// block in SSA, which soac_lower's rebuild would pre-create but finish()
-/// rejected because Unreachable doubles as the "unterminated" sentinel.
+/// Interprocedural map+reduce fusion must preserve a dead Unreachable block
+/// introduced by a preceding if/else without treating it as an unterminated
+/// block during reconstruction.
 #[test]
 fn test_interproc_fusion_if_before_fused_reduce() {
     let source = r#"
@@ -6467,23 +6397,11 @@ entry frag(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
     compile_to_spirv(source).expect("constants referencing constants should compile");
 }
 
-// `test_soa_eliminates_extraction_maps` was deleted: it inspected post-SSA for
-// `InstKind::Soac(Soac::Map { .. })`, but SOACs no longer exist as SSA
-// instructions — they're expanded inside EGIR (`egir::soac_expand`) before
-// elaboration produces any SSA. The underlying optimization concern (extraction
-// maps after a zip-map should fold to tuple projections) is now an EGIR-level
-// question and would need a different shape of test.
-
-/// Pipeline that includes TLC inline_small (now always part of the mainline).
-fn compile_to_ssa_with_inline_small(input: &str) -> Program {
-    compile_to_ssa(input)
-}
-
 #[test]
 fn test_constant_inlining_global_ref() {
     // Minimal repro: a constant def used by a function, going through inline_small.
     // This should NOT produce an unresolved Global("PI") in SSA.
-    let ssa = compile_to_ssa_with_inline_small(
+    let ssa = compile_to_ssa(
         r#"
 def PI: f32 = 3.141592
 
@@ -6604,24 +6522,11 @@ fn fill_holes_respects_inferred_type_from_context() {
 }
 
 // =============================================================================
-// Known-failing tests for higher-order-function defunctionalization gaps
+// Higher-order-function defunctionalization
 // =============================================================================
-//
-// Both currently fail. Keep them as guards: when the underlying bugs in
-// defunctionalization / SPIR-V lowering are fixed, these tests start
-// passing and the cleanup will be obvious.
 
-/// Bug 1: A closure with captured free variables, passed to a user-
-/// defined HOF, produces SPIR-V that fails `spirv-val` with
-/// `OpFunctionCall Function <id>'s parameter count does not match the
-/// argument count`. Defunc/mono specializes both the HOF and the
-/// closure body correctly (each gets the captured-env params it
-/// needs), but the call-sites for the function-typed parameter inside
-/// the HOF body still pass only the original arguments — the captured
-/// env never gets threaded through.
-///
-/// Minimal repro: a 2-arg HOF that calls its f-arg twice, with a
-/// closure capturing two scalars from the entry's params.
+/// A two-argument HOF that calls its function twice must thread the closure's
+/// captured environment through every specialized call site.
 #[test]
 fn hof_closure_with_captures_lowers_to_valid_spirv() {
     let src = r#"
@@ -6636,16 +6541,8 @@ entry test(a: f32, b: f32) f32 =
     assert_spirv_call_arities_match(&spirv);
 }
 
-/// Bug 2: An inline lambda with no captures, called from inside a
-/// `map` body, panics in SPIR-V lowering with "BUG: Unknown type
-/// reached lowering: Ignored". The HOF passed the lambda survives
-/// type checking but the elaborated function's signature carries an
-/// `Ignored` placeholder where the lambda's argument type should be —
-/// presumably defunctionalization or the elaborator is leaving the
-/// inner call's type unresolved.
-///
-/// Minimal repro: a HOF taking `f32 -> f32`, called inside a `map`
-/// over `[]f32`, with a closure-free inline lambda.
+/// A closure-free inline lambda passed to a HOF inside a map body retains its
+/// concrete argument type through defunctionalization and SPIR-V lowering.
 #[test]
 fn hof_no_capture_lambda_in_map_body_lowers_without_panic() {
     let src = r#"
@@ -6658,12 +6555,12 @@ entry test(in_arr: []f32) []f32 =
     // catch_unwind because the bug surfaces as a panic in
     // spirv/mod.rs (not a Result::Err).
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile_to_spirv(src)));
-    let bytes = result.expect("compilation panicked — see Bug 2 docstring").expect("compile returned Err");
+    let bytes = result.expect("compilation panicked").expect("compile returned Err");
     assert_spirv_call_arities_match(&bytes);
 }
 
 // =============================================================================
-// Sum-type lowering (Phase C) integration tests
+// Sum-type lowering integration tests
 // =============================================================================
 
 /// Build a sum value with one constructor and select on it. Exercises
@@ -6709,7 +6606,7 @@ entry main() #[target(screen)] vec4f32 =
 }
 
 // =============================================================================
-// Swizzle-with lowering (Phase C) integration tests
+// Swizzle-with lowering integration tests
 // =============================================================================
 
 /// Plain `=` swizzle update: write `e` into v.yz, leaving v.x intact.
@@ -6900,8 +6797,7 @@ fn assert_spirv_storage_access_chain_pointee_types_match(spirv_words: &[u32]) {
 
 /// Walk every `OpFunctionCall` in a SPIR-V module and assert each
 /// call's argument count matches the called function's declared
-/// parameter count. The arity-mismatch class of bug above produces
-/// SPIR-V that round-trips through rspirv but fails this invariant.
+/// parameter count.
 fn assert_spirv_call_arities_match(spirv_words: &[u32]) {
     use wspirv::binary::parse_words;
     use wspirv::dr::{Loader, Operand};
@@ -6949,7 +6845,7 @@ fn assert_spirv_call_arities_match(spirv_words: &[u32]) {
 }
 
 // =============================================================================
-// EGIR-side Map parallelization regression tests
+// EGIR-side Map parallelization
 // =============================================================================
 
 /// A compute entry whose body is `map(f, xs)` should emit a kernel that
@@ -7078,10 +6974,8 @@ fn entry_loads_global_invocation_id(spirv: &[u32], entry_name: &str) -> bool {
 }
 
 /// A fixed-size output ahead of a streamed `map` must not force the entry
-/// serial — the map still lowers to a GID-indexed kernel. Regression: the
-/// planner used to treat only output slot 0 as the parallelizable tail, so
-/// `([2]u32, []u32)` (fixed first) lowered serial while `([]u32, [2]u32)`
-/// sharded.
+/// serial; the map still lowers to a GID-indexed kernel regardless of whether
+/// the streamed slot appears before or after the fixed slot.
 fn assert_fixed_output_and_streamed_map_partition(source: &str, output_count: usize) {
     use crate::pipeline_descriptor::{Binding, BufferUsage, DispatchSize, Pipeline};
 
@@ -7222,8 +7116,7 @@ entry r(tidx: []u32, src: []vec4f32, st: []f32) ([2]f32, []vec4f32, []vec4f32) =
 
 /// A fixed-size output alongside several *different-domain* maps: the fixed
 /// slot becomes its own 1×1×1 constant-write stage while each map keeps its
-/// own GID-indexed per-domain dispatch. Regression: any non-map slot used to
-/// drag the whole multidomain entry onto the serial fallback.
+/// own GID-indexed per-domain dispatch.
 #[test]
 fn fixed_output_with_multidomain_maps_shards() {
     let spirv = compile_to_spirv(
@@ -7426,9 +7319,8 @@ fn compute_storage_buffers(
         .collect()
 }
 
-/// Gathering a *computed* array (a `map` result) at a runtime index used to
-/// panic in SPIR-V emission ("Composite variant unsized arrays not
-/// supported"). EGIR residency planning splits the producer `map` into its own
+/// Gathering a computed `map` result at a runtime index requires residency
+/// planning to split the producer into its own
 /// materialization stage writing a storage buffer, and rewrites the
 /// consumer's `counts[i]` into a load from that buffer. This pins the
 /// end-to-end wiring: both stages agree on the gather buffer's binding, it's a
@@ -7579,7 +7471,7 @@ entry gen(bh: []vec4f32) []i32 =
 }
 
 // ---------------------------------------------------------------------------
-// Multi-consumer gather regression
+// Multi-consumer gather
 // ---------------------------------------------------------------------------
 //
 // EGIR residency planning handles a computed array `counts = map(...)` shared
@@ -7698,8 +7590,7 @@ entry filt_count(xs: []i32) i32 =
 
 /// Summing a filtered runtime-sized array — `reduce(+, 0, filter(p, xs))` over
 /// an entry-param view. `filter` yields a runtime-length scratch view; `reduce`
-/// consumes it like any reduce-over-view. (Was a gap: the static-literal form
-/// left an unexpanded `EgirSoac` panicking at `elaborate.rs`.)
+/// consumes it like any reduce-over-view.
 #[test]
 fn filter_into_reduce_compiles() {
     compile_to_spirv(
@@ -7756,19 +7647,11 @@ entry filt_reduce(xs: []i32) i32 =
     .expect("let-bound filter result crossing a call boundary into a helper that takes a plain array must compile");
 }
 
-/// Regression: `reduce(_, _, filter(...))` with the filter result used inline
-/// as an argument (no `let` to bind it first) compiles to the same program
-/// as the let-bound form above. Used to fail with
-///
-///   Function argument type mismatch at argument 3:
-///   expected Array[i32, ?, ?, ?],
-///   got ?k. [Array[i32, abstract, k, no_buffer]]
-///
-/// because existential elimination only fired at `let` binders, not at
-/// general use sites. Fixed in `unify_apply_arg` by mirroring the let-
-/// binder's `open_existential` call at each function-argument unification
-/// site, gated on "expected param is not itself existential" so existential-
-/// typed values can still flow through unchanged when that's the param's
+/// `reduce(_, _, filter(...))` with the filter result used inline as an
+/// argument compiles to the same program as the let-bound form above.
+/// `unify_apply_arg` opens the existential at ordinary argument sites unless
+/// the expected parameter is itself existential, so existential values can
+/// still flow through unchanged when that is the parameter's
 /// declared type. Surfaced minimizing the type error in
 /// `testfiles/playground/particles3.wyn`'s `align`.
 #[test]
@@ -7783,17 +7666,9 @@ entry filt_reduce(xs: []i32) i32 =
     .expect("filter result used inline as `reduce`'s array arg unifies like the let-bound form");
 }
 
-/// Regression: a multi-letter swizzle on a non-trivial expression
-/// must not duplicate the expression. `reduce(...).xy` previously
-/// desugared to `@[reduce(...).0, reduce(...).1]` (clone-per-letter)
-/// and downstream saw two independent `Soac(Reduce)` producers, so
-/// the compiled output ran the reduce twice. Surfaced in
-/// `particles3.wyn`: `center`, `align`, and `separate` each took a
-/// `.xy` (or `.zw`) of an aggregate reduce, and SPIR-V emitted
-/// duplicated reduce loops + duplicate `Length`/`Normalize` ops.
-/// Fixed by let-binding the projection base before splitting it into
-/// per-letter `TupleProj`s when the base isn't already a `Var` /
-/// literal.
+/// A multi-letter swizzle on a non-trivial expression must not duplicate its
+/// producer. The lowering let-binds a non-atomic projection base before
+/// splitting it into per-letter `TupleProj`s.
 #[test]
 fn swizzle_on_nontrivial_base_does_not_duplicate_producer() {
     use crate::tlc::{Payload, SoacOp, Term, TermKind};
@@ -7826,9 +7701,9 @@ entry e(xs: [8]vec4f32) vec2f32 = sum2(xs)
 }
 
 /// True iff the pipeline for `entry` is a multi-stage compute (the two-phase
-/// shape a parallelized scalar reduction lowers to: chunk + combine). Used to
-/// confirm the masked fused-reduce fusion fired — a *serial* filter→reduce would be
-/// a single-stage `Compute` instead.
+/// shape of a parallelized scalar reduction: chunk + combine). This
+/// distinguishes masked fused reduction from a serial single-stage
+/// filter→reduce.
 fn is_two_phase_compute(pipeline: &crate::pipeline_descriptor::PipelineDescriptor, entry: &str) -> bool {
     use crate::pipeline_descriptor::Pipeline;
     pipeline.pipelines.iter().any(|p| match p {
@@ -8291,17 +8166,10 @@ entry gen(bh: []vec4f32, #[uniform(set=1,binding=0)] nb: i32) [1]i32 =
     .expect("fused-scan-of-helper-mapping with indexed scan read should compile");
 }
 
-/// Bisected min-repro: a multi-output entry returns a scan result AS one
-/// output and also reads that scan by a (constant) index for a second
-/// output. Previously panicked at `spirv/mod.rs:375` ("Composite variant
-/// unsized arrays not supported") because `realize_outputs` retargeted the
-/// scan to `OutputView` for slot 0 but slot 1's `[offsets[0]]` still
-/// demanded the (now-vanished) in-register Composite. Fixed in
-/// `realize_outputs::rewrite_other_index_consumers_to_loads`: detect the
-/// sibling Index consumer, synthesize a `ViewIndex + Load` against slot
-/// 0's output view (both backends declare output bindings as read-write),
-/// alias the Index NodeId to the load result. Slot 0's binding doubles as
-/// the shared buffer.
+/// A multi-output entry returns a scan as one output and reads it by a
+/// constant index for another. Once slot 0 retargets the scan to an
+/// `OutputView`, `rewrite_other_index_consumers_to_loads` rewrites the sibling
+/// index to `ViewIndex + Load` against that same read-write binding.
 #[test]
 fn multi_output_returns_scan_and_reads_it_by_index() {
     compile_to_spirv(
@@ -9052,8 +8920,6 @@ fn multidim_view_inner_fixed_carries_subarray_elem_bytes() {
 }
 
 /// `If`-over-two-retargetable-maps with a runtime-sized output:
-/// previously rejected by `realize_outputs::lower_slot` because the
-/// merge-block param wasn't a Map/Scan node. After the DPS migration,
 /// TLC-to-EGIR conversion records each branch's `SlotSource` at its block;
 /// `realize_outputs` retargets both Maps into the same
 /// output view. Runtime CFG ensures only one fires per execution
@@ -9234,12 +9100,10 @@ fn compute_let_wrapped_if_over_two_maps_compiles_runtime_sized() {
     crate::compile_thru_spirv(src).expect("Let-wrapped If over two maps must compile");
 }
 
-/// The user's original case 1 (fixed-size output): both branches map
+/// Fixed-size output: both branches map
 /// over different sources (`0..<N` vs `prev_pos`) but the output is
 /// `[Size(2)]vec2f32` because `N = 2` is a literal. Lands in the
-/// fixed-aggregate path of `dispatch::compute_slot_source`. This
-/// always worked; the test pins it as regression protection alongside
-/// the runtime-sized variants the DPS migration unblocked.
+/// fixed-aggregate path of `dispatch::compute_slot_source`.
 #[test]
 fn compute_if_over_two_maps_compiles_fixed_size_different_sources() {
     let src = r#"
@@ -9296,9 +9160,8 @@ fn compute_multi_output_tuple_of_ifs_compiles() {
 
 /// Assert the StorageBuffer variable decorated `(set, binding)` is the base
 /// of at least one `OpAccessChain` — i.e. actually read/written, not merely
-/// declared. Regression guard for view-array provenance loss, where a lifted
-/// lambda's reads went to the (wrong) output descriptor and the input buffer
-/// was declared but never accessed.
+/// declared. A lifted lambda must retain the input view's descriptor
+/// provenance rather than reading from an output descriptor.
 fn assert_storage_descriptor_is_accessed(spirv_words: &[u32], set: u32, binding: u32) {
     use std::collections::HashMap;
     use wspirv::binary::parse_words;
@@ -9356,11 +9219,9 @@ fn assert_storage_descriptor_is_accessed(spirv_words: &[u32], set: u32, binding:
     );
 }
 
-// View-array slice provenance through a SOAC capture: `xs[0..3]` is fine at
-// top level but used to fail inside a `map` lambda body with
-// "slice_to_composite: no buffer provenance". After buffer-specialize learned
-// the slice→composite case, the lifted lambda's reads must come from `xs`'s
-// own descriptor (set=2, binding=0), not the compiler-allocated output buffer.
+// View-array slice provenance through a SOAC capture: the lifted lambda's
+// `xs[0..3]` reads must come from `xs`'s descriptor (set=2, binding=0), not
+// the compiler-allocated output buffer.
 #[test]
 fn slice_view_inside_map_lambda_compiles_to_spirv() {
     let src = r#"
@@ -9377,13 +9238,10 @@ fn slice_view_inside_map_lambda_compiles_to_spirv() {
 
 // ---- Buffer-provenance guards ------------------------------------------------
 //
-// These pin the *correct* descriptor each view read resolves to, so a later
-// refactor of buffer_specialize (e.g. unifying `rewrite_term` and
-// `rewrite_specialized_body`) can't silently mis-route a read to the wrong
-// buffer. `cargo test` green alone does NOT prove this: a wrong-buffer read
-// still passes spirv-val as long as the (wrong) descriptor is declared — which
-// is exactly the historical bug. Each guard asserts via rspirv that the
-// expected `(set, binding)` is actually the base of an `OpAccessChain`.
+// These assert the exact descriptor each view read resolves to. A wrong-buffer
+// read can still pass spirv-val when that descriptor is declared, so each guard
+// checks via rspirv that the expected `(set, binding)` is the base of an
+// `OpAccessChain`.
 
 /// Indexing a *captured* view inside a `map` lambda (→ lifted lambda, the
 /// `rewrite_specialized_body` Index arm) must read from the captured buffer.
@@ -9506,8 +9364,8 @@ fn assert_array_length_queried_on_descriptor(spirv_words: &[u32], set: u32, bind
 }
 
 /// An `OpArrayLength` already produces `u32`; consuming it as `u32` must not
-/// insert the identity `OpBitcast %uint` that older storage-length lowering
-/// emitted. A cast to a genuinely different type remains legal.
+/// insert an identity `OpBitcast %uint`. A cast to a genuinely different type
+/// remains legal.
 fn assert_array_lengths_have_no_identity_bitcasts(spirv_words: &[u32]) {
     use std::collections::{HashMap, HashSet};
     use wspirv::binary::parse_words;
@@ -9638,7 +9496,7 @@ fn ctor_scalar_constructor_matches_legacy_dot_form() {
                    #[uniform(set=1, binding=0)] n: u32) []i32 =
           map(|x: f32| i32.f32(x), xs)
     "#;
-    // Both must compile; backward-compat sanity for the legacy form.
+    // Constructor and dot-form compatibility syntax lower identically.
     crate::compile_thru_spirv(new).expect("new T(value) form must compile");
     crate::compile_thru_spirv(legacy).expect("legacy T.source(value) form must still compile");
 }
@@ -9674,16 +9532,16 @@ fn ctor_vec3_and_vec4_constructors_compile_to_spirv() {
 
 // ---- ArrayVariantAbstract — `filter` → size-polymorphic consumer ----
 //
-// `filter`'s return scheme is now `?k. Array[a, Abstract, k, no_buffer]`
-// (was `Composite`). The producer's EGIR lowering picks Bounded for
+// `filter` returns `?k. Array[a, Abstract, k, no_buffer]`. The producer's EGIR
+// lowering picks Bounded for
 // static-capacity inputs and View for runtime-sized ones; the consumer
 // can be a size-polymorphic helper that gets specialized against the
 // `Abstract` representation in TLC and resolved at the producer edge in
 // EGIR. The backend-boundary verifier (`egir::verify_no_abstract`)
 // rejects any residual `Array[_, Abstract, _, _]`.
 //
-// These pin the canonical patterns; for fusion-shape and runtime-length
-// coverage see the older `filter_into_reduce_*` tests above.
+// These pin the canonical patterns; `filter_into_reduce_*` covers fusion shape
+// and runtime length.
 
 #[test]
 fn filter_into_user_size_poly_helper_compiles() {
@@ -9715,19 +9573,10 @@ entry tick() f32 =
         .expect("static-capacity filter piped through a size-poly helper must compile");
 }
 
-/// Regression: a `filter -> map -> reduce` chain whose reduced result
-/// feeds a vector op + swizzle, inside a helper called from a compute
-/// `map`. Distilled from the `separation` boids force in
-/// `testfiles/playground/particles.wyn`. Two defects had to be fixed:
-///   1. the intermediate `map`'s result carried the existential
-///      `Composite` + `Skolem` size opened from the `filter`, which the
-///      backend can't lower (panic: "invalid size argument: Skolem").
-///      `convert_soac_map` now inherits the input's shape (`from_tlc.rs`).
-///   2. the chain didn't fuse: the swizzle desugars the `reduce` under a
-///      binop (`let r = reduce(..) * k`), and `normalize` lifted it only
-///      into a *nested* let, invisible to the top-level-only fusion
-///      driver — so the `filter` was materialized and hit "ArrayWith on
-///      an unsized scratch". `normalize` now flattens nested lets so the
+/// A `filter -> map -> reduce` chain feeds a vector operation and swizzle
+/// inside a helper called from a compute map. `convert_soac_map` inherits the
+/// existential input shape, and normalization flattens nested lets so the
+/// fusion driver sees the complete chain.
 ///      reduce joins the top-level chain and `map->reduce` /
 ///      `filter->reduce` collapse it to a masked fused reduce.
 #[test]
@@ -9843,10 +9692,9 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
     crate::compile_thru_spirv(src).expect("Scan->Map should compile");
 }
 
-/// Regression: an entry returning a tuple where the second output is a
-/// fixed-size literal that *indexes into a scan result* used to silently
-/// drop the second output's binding from the descriptor JSON. EGIR must derive
-/// both output routes before allocating the scan materialization resource.
+/// An entry returning a scan and a fixed-size literal that indexes it must
+/// derive both output routes before allocating the scan materialization
+/// resource.
 #[test]
 fn entry_tuple_output_with_scan_indexed_literal_keeps_both_bindings() {
     use crate::pipeline_descriptor::{BufferUsage, Pipeline};
@@ -9958,8 +9806,8 @@ entry e() []f32 =
 /// partial_eval inlines the constant call `nested_lambda(100)`, dissolving the
 /// inner `let outer = <lambda>`; `apply_var` must apply the call through that
 /// env-bound lambda, otherwise `outer` is left dangling and closure conversion
-/// mis-threads its capture (`ArityMismatch`). Regression for the env-bound
-/// lambda case of dissolved-let residualization.
+/// mis-threads its capture (`ArityMismatch`). This covers env-bound lambdas
+/// during dissolved-let residualization.
 #[test]
 fn nested_transitive_capture_through_inlined_lambda_lowers() {
     let _ = compile_to_ssa(
@@ -10029,12 +9877,12 @@ entry e() []u32 = map(|i: i32| g.at((0x9e3779b9u32, 0x243f6a88u32), u32.i32(i)),
 }
 
 // =========================================================================
-// Captured compiler panics — minimal reproducers
+// Unsupported compiler shapes — minimal reproducers
 //
 // Each test here pins a Wyn-source shape that currently panics during
 // compilation. Tests use `#[should_panic]` so the suite stays green while
 // the fixture stays committed; drop `#[should_panic]` when the panic is
-// fixed to make the test a passing regression.
+// supported.
 // =========================================================================
 
 /// `T(value)` where `value` is already of type `T` errors with
@@ -10086,8 +9934,8 @@ entry b(xs: []u32) []f32 = map(|x| f32.u32(x), xs)
 /// binding 0)` slot with DIFFERENT element types must each get a fresh
 /// slot — sharing one `OpVariable` between a `[]u32` and a `[]f32`
 /// trips `spirv-val: OpAccessChain result type '%float' does not match
-/// indexing into base '%uint'`. Fix: `pin_entry_buffers` owns a single
-/// `IdSource<u32>` across all entries so input bindings can't alias.
+/// indexing into base '%uint'`. `pin_entry_buffers` therefore owns a single
+/// `IdSource<u32>` across all entries.
 #[test]
 fn two_compute_entries_with_differently_typed_inputs_do_not_alias() {
     let lowered = crate::compile_thru_spirv(
@@ -10334,10 +10182,8 @@ entry r(xs: []u32,
 /// A storage image shared across entries with mixed access — read in one entry,
 /// written in another — collapses to a single module global. Its access
 /// decoration must be the union of every view, so a read+write image carries
-/// neither `NonReadable` nor `NonWritable`. With the reader entry first (as
-/// here), the pre-fix behaviour decorated the global `NonWritable` and naga
-/// rejected the writer's `OpImageWrite`; `assert_no_runtime_storage_image_handles`
-/// runs naga validation, so it fails if the decoration regresses.
+/// neither `NonReadable` nor `NonWritable`. Naga validation ensures the writer's
+/// `OpImageWrite` is legal even when the reader entry appears first.
 #[test]
 fn storage_image_shared_read_and_write_across_entries_validates() {
     let source = r#"
@@ -10354,9 +10200,9 @@ entry writer(#[builtin(global_invocation_id)] gid: vec3u32,
     assert_no_runtime_storage_image_handles(&lowered.spirv);
 }
 
-/// Minimal `history = 1` feedback program shared by the two KNOWN-BUG tests
-/// below: one compute entry writing a resource's current frame and sampling
-/// its `previous` view.
+/// Minimal `history = 1` feedback program shared by frame-graph tests: one
+/// compute entry writes a resource's current frame and samples its `previous`
+/// view.
 const HISTORY_FEEDBACK_SOURCE: &str = r#"
 resource acc: image2d {
   format  = rgba32float
@@ -10375,8 +10221,8 @@ entry step(#[view(acc, storage_write)] out_acc: *storage_image,
 
 /// The `FeedbackPair` a `previous` view of a `history` resource records must
 /// reach the published descriptor — it's what makes the runtime ping-pong the
-/// two textures. Regression test: `tlc::parallelize` once seeded the
-/// per-entry pipelines with an empty `feedback` instead of the entry's pairs.
+/// two textures. Every per-entry pipeline must carry the entry's feedback
+/// pairs.
 #[test]
 fn history_resource_feedback_pair_reaches_descriptor() {
     use crate::pipeline_descriptor::Pipeline;
@@ -10522,9 +10368,9 @@ entry consume(#[builtin(frag_coord)] fc: vec4f32,
 }
 
 /// Descriptor bindings must be slot-unique — a duplicated (set, binding)
-/// fails wgpu bind-group-layout creation ("Conflicting binding"). Regression
-/// test: the publication pass's claimed-slot snapshot skipped the texture /
-/// sampler / storage-texture kinds, so a second pass re-pushed exactly those.
+/// fails wgpu bind-group-layout creation ("Conflicting binding"). The
+/// publication pass's claimed-slot snapshot must include textures, samplers,
+/// and storage textures.
 #[test]
 fn history_resource_bindings_are_not_duplicated() {
     use crate::pipeline_descriptor::Pipeline;
@@ -10549,10 +10395,8 @@ fn history_resource_bindings_are_not_duplicated() {
 /// domain) dispatches one thread per texel: `DerivedFrom { len: StorageImage }`,
 /// which the host resolves from the bound texture's extent. An incidental
 /// storage-buffer input (mountains' keyboard buffer) doesn't opt out — the
-/// image is the domain. Regression test: the skeletal `Fixed {1,1,1}` survived
-/// scheduling for serial per-texel entries (fresh mountains.wyn compiles
-/// disagreed with its committed descriptor), so a window-sized pass only ever
-/// ran one workgroup.
+/// image is the domain, so scheduling must replace the skeletal
+/// `Fixed {1,1,1}` dispatch.
 #[test]
 fn storage_image_entry_dispatch_derives_from_image() {
     use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
@@ -10725,9 +10569,10 @@ entry e() []i32 = map(|x| x * 2, iota(100))
     .expect("a covering #[dispatch] grid compiles");
 }
 
-/// The former storage-image write function is no longer a surface builtin.
+/// Storage-image writes use place-update syntax; `image_store` is not a
+/// surface builtin.
 #[test]
-fn legacy_image_store_is_not_user_visible() {
+fn image_store_is_not_user_visible() {
     let result = crate::compile_thru_spirv(
         r#"
 #[compute]
@@ -11044,18 +10889,10 @@ entry main(pts: [](f32, f32)) ([]f32, []f32) =
     assert!(!lowered.spirv.is_empty());
 }
 
-/// A global `def` whose initializer contains a *function call*
-/// referencing other globals used to error at SPIR-V emission with
-/// "Unknown global: ELEV" when the synthesized global was then used
-/// inside another function. Contrast: a global initialized by plain
-/// constant arithmetic (e.g. `def g4 = base * 3.0`) compiled because
-/// the entire chain got constant-folded — the failure shape only
-/// surfaced when a function-call initializer prevented folding and
-/// the SPIR-V backend had to actually emit the consumer body. The
-/// fix: forward-declare and lower `program.constants` as zero-arg
-/// functions, mirroring the existing handling of `program.functions`
-/// (the WGSL backend handled them already; the SPIR-V backend did
-/// not).
+/// A global definition whose initializer calls a function may reference other
+/// globals. The SPIR-V backend forward-declares and lowers
+/// `program.constants` as zero-argument functions, matching
+/// `program.functions`.
 #[test]
 fn function_call_initialized_global_compiles() {
     crate::compile_thru_spirv(
@@ -11077,11 +10914,8 @@ entry f() #[target(screen)] vec4f32 =
 /// `filter` allocates a scratch storage binding (`filt_gather_b<n>`)
 /// that the same compute stage writes into via the SOAC expansion.
 /// `egir::from_tlc::convert_soac_filter` declares that scratch with
-/// `role: Output` so the descriptor reports it as write-capable —
-/// previously the role was `Intermediate`, which fell through to
-/// `Access::ReadOnly` in `publish.rs` and produced an "unwritten
-/// read-only intermediate" the host couldn't safely bind without
-/// zero-initing.
+/// `role: Output` so `publish.rs` reports it as write-capable rather than a
+/// read-only intermediate.
 #[test]
 fn filter_scratch_binding_is_not_read_only() {
     use crate::pipeline_descriptor::{Access, Binding, BufferUsage};
@@ -11200,7 +11034,6 @@ entry e(#[storage(set=2, binding=1, access=write)] o: *[]point) () =
 /// The array fields' variant/buffer slots must be buffer-polymorphic across
 /// the call boundary (the alias body's placeholders freshen per use), so
 /// `world` unifies with a `{ points = view, items = view }` argument.
-/// (PR7 repro pr7_2a.)
 #[test]
 fn record_of_arrays_param_across_boundary_compiles() {
     crate::compile_thru_spirv(
@@ -11224,7 +11057,7 @@ entry step(dom: []u32, points_in: []vec2f32, items_in: []vec4f32)
 
 /// Construct a record-of-runtime-arrays from `map` outputs and RETURN it.
 /// The declared `world` return must unify with the body's concrete
-/// `composite`/`no_buffer` map-result arrays. (PR7 repro pr7_2b.)
+/// `composite`/`no_buffer` map-result arrays.
 #[test]
 fn record_of_arrays_construct_and_return_compiles() {
     crate::compile_thru_spirv(
@@ -11248,7 +11081,7 @@ entry step(dom: []u32) ([]vec2f32, []vec4f32) =
 
 /// A `map` output (`occ`) that is BOTH fed to another map (`occ[j%4]`) AND
 /// returned. `occ` must be materialized to storage rather than left an
-/// in-register runtime-sized Composite array. (PR7 repro pr7_3c.)
+/// in-register runtime-sized Composite array.
 #[test]
 fn map_output_fed_and_returned_compiles() {
     crate::compile_thru_spirv(
@@ -11263,10 +11096,9 @@ entry frame(occ_dom: []u32, sett_dom: []u32) ([]u32, []u32) =
     .expect("a map output both consumed and returned should compile");
 }
 
-/// Control for pr7_3c: the same producer→consumer dataflow, but only the
-/// dependent array (`setts`) is returned — `occ` is consumed solely via
-/// dynamic index, so EGIR residency planning materializes it.
-/// Bounds the pr7_3c trigger to the returned-AND-fed shape. (PR7 repro pr7_3b.)
+/// The same producer→consumer dataflow with only the dependent array returned.
+/// `occ` is consumed solely by dynamic index, so EGIR residency planning
+/// materializes it.
 #[test]
 fn map_output_fed_but_only_dependent_returned_compiles() {
     crate::compile_thru_spirv(
@@ -11284,15 +11116,11 @@ entry frame(occ_dom: []u32, sett_dom: []u32) []u32 =
     .expect("consuming a map output internally (not returned) should compile");
 }
 
-/// pr7_3e: a `map` output carried in a RECORD FIELD (`w.points`), then both
-/// read by a downstream map (through the whole-record capture) AND returned.
+/// A `map` output carried in a record field (`w.points`), then both read by a
+/// downstream map through the whole-record capture and returned.
 /// Output realization retargets the producer `p` to the output view and the
-/// record is built holding that view (`tuple(view)`), but the drift is not
-/// propagated: the capturing lambda's parameter keeps its stale
-/// `Record([Composite])` type, and its internal `w.points` projection lowers a
-/// runtime-sized Composite array — panicking at `types_lowering.rs:139`.
-/// Byte-identical dataflow with plain arrays (pr7_3c) already compiles; the
-/// record indirection is the whole delta. Central to the PR9 `world` value.
+/// record holds that view (`tuple(view)`); the capturing lambda's parameter
+/// and internal `w.points` projection must receive the same representation.
 #[test]
 fn map_output_in_record_field_fed_and_returned_compiles() {
     crate::compile_thru_spirv(
@@ -11453,9 +11281,8 @@ fn qualified_module_import_per_spec() {
 /// `open import "file"` semantics (re-export).
 ///
 /// The dedupe fix in [`crate::resolve_opens`] for two identical
-/// `open M` entries papers over the most-visible symptom of this
-/// mismatch (importer + library both doing `open f32` no longer
-/// ambiguates), but does not restore the spec's hiding semantics.
+/// `open M` entries prevents duplicate-open ambiguity but does not implement
+/// the specification's hiding semantics.
 ///
 /// IMPLEMENTATION OPTIONS: see the C-variants documented on
 /// [`local_open_parses_per_spec`] — same machinery.
@@ -11826,11 +11653,8 @@ entry copy_matrix(
 }
 
 /// Storage-buffer struct elements get std430 member offsets and an
-/// aligned ArrayStride. Regression: the offsets used to be a tight
-/// unaligned sum ({f32, vec2f32} → [0, 4], stride 12), which is
-/// std430-nonconformant AND disagrees with naga's layout of the same
-/// struct on the WGSL path — silent data corruption for records with
-/// vector members.
+/// aligned ArrayStride. For `{f32, vec2f32}`, std430 requires aligned member
+/// offsets and stride matching naga's WGSL layout.
 #[test]
 fn storage_record_elements_get_std430_offsets_and_stride() {
     use std::collections::HashMap;

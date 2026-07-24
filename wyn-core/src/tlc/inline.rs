@@ -503,7 +503,7 @@ fn inline_term<C: Payload, S: Payload>(
     candidates: &LookupMap<SymbolId, InlineBody<C, S>>,
     term_ids: &mut TermIdSource,
 ) -> Term<C, S> {
-    term.rewrite(&mut FunctionInliner { candidates, term_ids })
+    term.rewrite_owned(&mut FunctionInliner { candidates, term_ids })
 }
 
 struct FunctionInliner<'a, 'ids, C: Payload, S: Payload> {
@@ -516,7 +516,7 @@ impl<C: Payload, S: Payload> TermRewriter<C, S> for FunctionInliner<'_, '_, C, S
         self.term_ids.next_id()
     }
 
-    fn rewrite_node(&mut self, term: &mut Term<C, S>) -> RewriteDecision {
+    fn rewrite_owned_node(&mut self, term: Term<C, S>) -> (Term<C, S>, RewriteDecision) {
         let candidate = match &term.kind {
             TermKind::App { func, args } => match &func.kind {
                 TermKind::Var(VarRef::Symbol(symbol)) => {
@@ -527,19 +527,23 @@ impl<C: Payload, S: Payload> TermRewriter<C, S> for FunctionInliner<'_, '_, C, S
             _ => None,
         };
         let Some(candidate) = candidate else {
-            return RewriteDecision::Unchanged;
+            return (term, RewriteDecision::Unchanged);
         };
         let params = candidate.params.clone();
         let body = clone_term_with_fresh_ids(&candidate.body, self.term_ids);
 
-        let kind = std::mem::replace(&mut term.kind, TermKind::UnitLit);
+        let Term {
+            id,
+            ty: _,
+            span,
+            kind,
+        } = term;
         let TermKind::App { args, .. } = kind else {
             unreachable!()
         };
-        let mut replacement = build_inline_lets(&params, args, body, term.span, self.term_ids);
-        replacement.id = term.id;
-        *term = replacement;
-        RewriteDecision::Changed
+        let mut replacement = build_inline_lets(&params, args, body, span, self.term_ids);
+        replacement.id = id;
+        (replacement, RewriteDecision::Changed)
     }
 }
 

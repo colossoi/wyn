@@ -3132,10 +3132,10 @@ fn lower_primop_wgsl(prim_op: &PrimOp, args: &[String], result_ty_str: Option<&s
 /// dispatch through `lower_primop_wgsl`; without this shortcut they'd
 /// each compile to a mangled user-function call returning a constant.
 ///
-/// All math ops, type casts, vector ops, etc. now route through
-/// `lower_primop_wgsl` via `impl_source.get(name)`; the surface name's
-/// qualifier prefix (`f32.cos`, `vec.cos`, `_w_intrinsic_cos`) is no
-/// longer load-bearing here.
+/// Math operations, type casts, and vector operations route through
+/// `lower_primop_wgsl` via `impl_source.get(name)`; this shortcut therefore
+/// does not depend on qualifier prefixes such as `f32.cos`, `vec.cos`, or
+/// `_w_intrinsic_cos`.
 fn try_lower_wgsl_builtin(name: &str, _args: &[String]) -> Option<String> {
     let (to, from) = name.split_once('.')?;
     if matches!(to, "f32" | "f64") {

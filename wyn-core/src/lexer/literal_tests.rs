@@ -95,7 +95,7 @@ fn test_pointfloat() {
         Ok(("", Token::FloatLiteral(3.14)))
     );
     assert_eq!(parse_float_literal("0.5f32"), Ok(("", Token::FloatLiteral(0.5))));
-    // Note: .5f32 no longer parses as float (conflicts with tuple field access xy.0)
+    // A leading digit is required so `.5f32` cannot conflict with tuple fields.
     assert!(parse_float_literal(".5f32").is_err());
 }
 
@@ -165,7 +165,7 @@ fn test_float_without_suffix() {
     // Float literals without suffix should parse as f32
     assert_eq!(parse_float_literal("3.14"), Ok(("", Token::FloatLiteral(3.14))));
     assert_eq!(parse_float_literal("0.5"), Ok(("", Token::FloatLiteral(0.5))));
-    // Note: .5 no longer parses as float (conflicts with tuple field access xy.0)
+    // A leading digit is required so `.5` cannot conflict with tuple fields.
     assert!(parse_float_literal(".5").is_err());
     assert_eq!(parse_float_literal("7.0"), Ok(("", Token::FloatLiteral(7.0))));
     // Leading `-` is NOT part of the literal — see `test_basic_decimals`.

@@ -369,20 +369,19 @@ def f(t: #yes | #no) i32 =
     }
 }
 
-/// Regression test for the eager-AND lowering of nested constructor
-/// patterns. With `match outer case #pair(#left(_), ...) -> ...`, the
+/// Eager-AND lowering of nested constructor patterns. With
+/// `match outer case #pair(#left(_), ...) -> ...`, the
 /// lowering eagerly evaluates the outer tag check AND the inner
 /// payload tag check; on a value whose outer tag mismatches, the
 /// inner projection reads the blank-filled dead slot. Correctness
-/// depends on blank-fill (commits f8131a5/f3d2fc7) guaranteeing dead
+/// depends on blank-fill guaranteeing that dead
 /// payload slots carry well-typed zero values, so an inner test
 /// against a non-zero tag is `false` and the AND structurally yields
 /// `false` — the arm correctly skips and the chain falls through.
 ///
 /// This test pins the IR shape end-to-end: the first-arm condition
 /// must be an AND of the outer-tag test and the inner-tag test,
-/// confirming the eager-AND lowering is in place and not being
-/// silently regressed to short-circuit form (which would only paper
+/// confirming the eager-AND lowering rather than a short-circuit form (which would only paper
 /// over the blank-fill dependency).
 #[test]
 fn nested_ctor_with_outer_mismatch_emits_eager_and_chain() {

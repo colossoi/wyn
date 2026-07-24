@@ -1299,11 +1299,10 @@ pub(super) fn alias_target_of<C: Payload, S: Payload>(
     }
 }
 
-/// The result type of applying `func_ty` to `n_args` arguments — the
-/// residue after peeling `n_args` arrows. This is where a function's
-/// `*` return contract lives now that expression types no longer carry
-/// uniqueness: ownership reads "does this call produce a fresh value"
-/// from the callee's signature, not the call's inferred type.
+/// The result type of applying `func_ty` to `n_args` arguments: the residue
+/// after peeling `n_args` arrows. Ownership reads the callee signature's `*`
+/// return contract to decide whether a call produces a fresh value; the
+/// inferred call type supplies only its value shape.
 fn callee_return_type(func_ty: &Type<TypeName>, n_args: usize) -> Type<TypeName> {
     let mut current = func_ty.clone();
     for _ in 0..n_args {

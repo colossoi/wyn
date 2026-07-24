@@ -1,9 +1,8 @@
 //! Source-level integration-style tests for the `rep_specialize` pass.
 //!
-//! Every case is a small program that previously tripped the
-//! backend-boundary verifier `egir::verify_no_abstract` (when
-//! `filter(...)` flowed into a non-inlined user helper) and now must
-//! compile end-to-end to SPIR-V cleanly.
+//! These programs carry `filter(...)` results through user helpers and assert
+//! that representation specialization eliminates every abstract array before
+//! the EGIR backend boundary.
 
 use crate::compile_thru_spirv;
 
@@ -58,18 +57,6 @@ entry tick() i32 =
 "#;
     compile_thru_spirv(src).expect("nested user helpers must specialize transitively");
 }
-
-// Removed: `verifier_fires_when_rep_specialize_is_bypassed` exercised
-// the verifier in `egir::verify_no_abstract` by deliberately skipping
-// `rep_specialize` on a program where `filter`'s Bounded result flowed
-// through a non-inlined helper (`sum`/`center`) carrying an Abstract
-// param. `force_inline_soac_helpers` now always inlines SOAC-bodied
-// helpers before `rep_specialize` runs, so this exact Abstract-bearing
-// call edge cannot survive in any Wyn-source program — the fixture
-// the test pinned no longer reproduces. The verifier itself still
-// lives in `egir/verify_no_abstract.rs` and fires for any Abstract
-// that reaches the backend through any other route; removing this
-// specific fixture does not weaken the invariant.
 
 #[test]
 fn non_filter_let_binding_does_not_trigger_spec() {

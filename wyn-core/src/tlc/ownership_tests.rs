@@ -1576,14 +1576,8 @@ def f(a: [8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
 // SoacBody captures (SOAC envelope shape)
 // =============================================================================
 //
-// `Lambda` no longer carries captures — those live on the `SoacBody`
-// envelope used by SOAC nodes. The previous test harness here built a
-// hand-rolled "post-defunc free-standing lambda" with populated
-// `Lambda::captures` to exercise the analysis seam; that shape is
-// architecturally unrepresentable now, so the harness and its two
-// tests are gone. The SOAC-side capture handling is exercised by the
-// end-to-end SOAC tests (e.g. `compute_shader_*` in the integration
-// suite) that lower a Map / Reduce with closures through defunc into
+// Captures belong to the `SoacBody` envelope. End-to-end SOAC tests exercise
+// Map and Reduce closures lowered through defunctionalization into
 // `SoacBody { captures: [...] }`.
 
 // =============================================================================

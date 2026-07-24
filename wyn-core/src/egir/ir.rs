@@ -120,9 +120,8 @@ pub type PureOp<R> = OpTag<R>;
 /// `_w_intrinsic_storage_len(0, 0)` can be retyped at a rewrite site
 /// from its registered `u32` to a caller-required `i32`, and collapsing
 /// those two interns into one node would silently let the first-inserted
-/// type win at the merged site. Mirrors the 3b8cb24 fix that split
-/// `PureOp::Int` / `PureOp::Uint` tags for literals, but uniformly for
-/// every pure op.
+/// type win at the merged site. The type distinction applies uniformly to
+/// literals and every other pure operation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NodeKey<R, Lang: Language> {
     pub op: PureOp<R>,
@@ -256,7 +255,7 @@ pub enum SoacPlacement {
 
 /// Complete lowering state for a SOAC result destination. Keeping candidate
 /// ownership and resolved placement in one enum prevents combinations whose
-/// ownership no longer has meaning after a concrete destination is selected.
+/// ownership applies only before a concrete destination is selected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoacDestination {
     Fresh,
@@ -1125,6 +1124,9 @@ impl<P: EgirPhase, Lang: Language> EGraph<P, Lang> {
         );
         debug_assert!(matches!(self.nodes[id], ENode::Pure { .. }));
         let ty = self.types[&id].clone();
+        // The arena must retain `id` while the original node is moved to a
+        // fresh slot. A valid degenerate union occupies `id` until `fresh`
+        // is known and installed as its left alternative.
         let original = std::mem::replace(
             &mut self.nodes[id],
             ENode::Union {

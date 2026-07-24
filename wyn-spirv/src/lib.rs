@@ -838,13 +838,9 @@ impl SpirvBuilder {
     }
 }
 
-/// Temporary bridge: existing call sites can keep writing
-/// `builder.type_int(32, 1)` etc. directly during the refactor.
-/// Each subsequent stage adds typed `SpirvBuilder` methods and the
-/// matching call sites switch to them; the final commit removes
-/// these `Deref` impls and the build flags any remaining raw rspirv
-/// access. **Do not add new `Deref`-using call sites** — write
-/// against the typed `SpirvBuilder` API instead.
+/// Provides raw `rspirv::Builder` access for operations that the typed
+/// `SpirvBuilder` API does not expose. New lowering code should prefer typed
+/// methods so SPIR-V ID kinds remain visible to the compiler.
 impl std::ops::Deref for SpirvBuilder {
     type Target = Builder;
     fn deref(&self) -> &Builder {

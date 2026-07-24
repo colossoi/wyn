@@ -308,11 +308,8 @@ module i32_sum = sum_module(my_i32)
     );
 }
 
-/// Regression guard: when an outer signature has a `with t = i32`
-/// substitution, references to `t` inside a NESTED module signature
-/// must also be rewritten. Previously `substitute_in_spec`'s
-/// `Spec::Module` arm cloned the inner `ModuleTypeExpression`
-/// unchanged, leaving the nested `t` reference unresolved.
+/// An outer signature's `with t = i32` substitution applies recursively to
+/// references inside nested module signatures.
 ///
 /// Build the signature directly:
 ///
@@ -364,7 +361,7 @@ fn test_substitute_into_nested_module_signature() {
         _ => panic!("nested M should be a signature, got {:?}", nested_mte),
     };
 
-    // The nested `sig f : t -> t` must now read `sig f : i32 -> i32`.
+    // The nested signature must read `sig f : i32 -> i32`.
     let f_ty = nested_specs
         .iter()
         .find_map(|spec| match spec {
@@ -382,15 +379,11 @@ fn test_substitute_into_nested_module_signature() {
 }
 
 // ---------------------------------------------------------------------------
-// Regression: intra-module rewriting must recurse into every ExprKind.
+// Intra-module rewriting recurses into every ExprKind.
 //
-// The elaboration-time walker used to be a hand-written match with arms for
-// Application / Lambda / LetIn / If / BinaryOp / UnaryOp / Tuple / Array /
-// ArrayIndex / ArrayWith / RecordLiteral / Match and a catch-all `_ => {}`.
-// That meant intra-module refs buried inside Loop / Range / Slice /
-// TypeAscription / TypeCoercion / TypeHole silently escaped qualification.
-// After consolidating onto the shared `name_resolution::walk_expr`, every
-// ExprKind is visited. These tests guard that.
+// The shared `name_resolution::walk_expr` must qualify module references
+// inside Loop, Range, Slice, TypeAscription, TypeCoercion, TypeHole, and all
+// other expression forms.
 //
 // Each case constructs a tiny module with an intra-module reference
 // inside the expression kind under test and asserts the elaborated
@@ -438,8 +431,7 @@ module foo = {
 
 #[test]
 fn intra_module_ref_inside_range_is_qualified() {
-    // Range expression `helper(0) ..< helper(n)`. Range was not in the old
-    // walker's match; the call sites inside its endpoints escaped
+    // Both endpoints of `helper(0) ..< helper(n)` participate in module-name
     // qualification.
     let body = module_body_str(
         r#"

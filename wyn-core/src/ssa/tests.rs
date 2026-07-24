@@ -36,14 +36,8 @@ fn test_func_body_params() {
 
 /// `InstKind::remap` rewrites `ValueId` operands but must leave `PlaceId`s
 /// (the identity of `ViewIndex` / `OutputSlot` / `Alloca` results and the
-/// operand slot of `Load` / `Store`) untouched. This is the property that
-/// was silently violated in the pre-split world: a generic value-remap
-/// would rename the `StorageViewIndex` result ValueId *and* the Load/Store
-/// pointers referencing it, but the separate backend shadow maps
-/// (`view_buffer_id`, `view_handles`) stayed keyed by the *old* ValueId,
-/// desynchronising the IR from its own metadata. With a dedicated
-/// `PlaceId` the identity is in the IR, so remaps of the value axis can't
-/// corrupt the place axis.
+/// operand slot of `Load` / `Store`) untouched. Place identity lives directly
+/// in the IR, so remapping the value axis cannot desynchronize place metadata.
 #[test]
 fn value_remap_preserves_place_identity() {
     use crate::ssa::types::PlaceId;
@@ -170,17 +164,12 @@ fn value_uses_does_not_traverse_places() {
 }
 
 /// Compile a compute shader whose MapInto lowers to a `ViewIndex` → `Store`
-/// chain and confirm we emit valid SPIR-V without the removed
-/// `view_buffer_id` fallback path ever being exercised. This is the
-/// integration-level regression test for the place/value split: if any
-/// backend ever resurrects `ValueId`-keyed place tracking, the
-/// `simple_compute` path is what'll bitrot first.
+/// chain and confirm the place/value split emits valid SPIR-V without
+/// ValueId-keyed place tracking.
 #[test]
 fn spirv_storage_write_chain_lowers_cleanly() {
     // Minimal compute shader: the map's `[]f32 → []f32` writeback forces
-    // the MapInto path → ViewIndex (place) + Store. If lowering were still
-    // using `view_buffer_id` cross-lookups, a mismatched ValueId would
-    // surface as `resolve_buffer_by_id: not a u32 constant`.
+    // the MapInto path → ViewIndex (place) + Store.
     let source = "#[compute]\nentry double(arr: []f32) []f32 = map(|x: f32| x * 2.0, arr)\n";
 
     let spirv = crate::compile_thru_spirv(source)

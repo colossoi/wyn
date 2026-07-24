@@ -200,10 +200,10 @@ impl RepSpecializer<'_> {
         body: &mut Term<Empty, Empty>,
         initial_variants: ProducerVariants,
     ) {
-        let variants = analyze_producer_variants(body, initial_variants);
-        let previous = std::mem::replace(&mut self.producer_variants, variants);
+        let mut variants = analyze_producer_variants(body, initial_variants);
+        std::mem::swap(&mut self.producer_variants, &mut variants);
         self.rewrite_tracked(body);
-        self.producer_variants = previous;
+        std::mem::swap(&mut self.producer_variants, &mut variants);
     }
 
     /// If `term` calls an abstract-array callee with a producer whose concrete

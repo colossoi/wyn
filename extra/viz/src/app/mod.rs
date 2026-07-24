@@ -417,12 +417,10 @@ impl State {
     /// descriptor-driven compute chain + one graphics pipeline. See
     /// `InteractivePipelineSpec` for the descriptor source.
     ///
-    /// v1 supports: storage textures (cross-stage write+sample),
-    /// samplers, and uniform/push-constant-less compute + graphics
-    /// pipelines. Storage buffers, push constants, and Shadertoy
-    /// uniforms (iResolution / iTime / iMouse / iFrame) are scaffolded
-    /// — the `PipelineState`'s slots are `None` for now and follow-up
-    /// commits wire the descriptor → buffer mapping for each.
+    /// Supports storage textures (including cross-stage write+sample),
+    /// samplers, and compute + graphics pipelines without uniforms or push
+    /// constants. Unsupported descriptor resources leave their
+    /// `PipelineState` slots empty.
     async fn new_pipeline(window: Arc<Window>, spec: &InteractivePipelineSpec) -> Result<Self> {
         use wyn_pipeline_descriptor::Pipeline as DescPipeline;
 

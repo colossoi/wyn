@@ -24,7 +24,8 @@ use crate::{LookupMap, LookupSet, SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::VecDeque;
 
-/// Monomorphic TLC no longer carries per-definition type schemes.
+/// Monomorphic TLC stores no per-definition payload; monomorphization consumes
+/// the source schemes while constructing this family.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Monomorphic;
 

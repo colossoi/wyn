@@ -128,7 +128,6 @@ impl TypeWarning {
 /// `current_context` and set at each top-level entry point
 /// (`check_program` → `UserFile`, `check_prelude_functions` →
 /// `Prelude`, `check_decl_as_in_module(_, Some(m))` → `Module { m }`).
-/// Phase 3 makes `resolve_value_name` consult this enum directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LookupContext {
     /// Checking a user file-scope `def` body. Sees: locals →
@@ -147,7 +146,6 @@ pub enum LookupContext {
 
 impl LookupContext {
     /// Module name if this context is checking inside a module.
-    /// Used as a backwards-compat accessor for `current_module`.
     pub fn module_name(&self) -> Option<&str> {
         match self {
             LookupContext::Module { name } => Some(name.as_str()),
@@ -158,10 +156,10 @@ impl LookupContext {
 
 /// Globally-named environments, separated by namespace.
 ///
-/// Phase 1 of the env-split: populated by dual-writes alongside the
-/// existing `scope_stack` so we can validate the population logic
-/// before any read path depends on it. Lookups still go through
-/// `scope_stack` until Phase 3 swaps in the per-context precedence.
+/// Local bindings live in `scope_stack`; this structure stores builtins,
+/// prelude definitions, file definitions, and qualified module schemes so
+/// `resolve_value_name` can apply the precedence of the current
+/// [`LookupContext`].
 ///
 /// Each map is `StableMap` to preserve insertion order across runs —
 /// same reason `module_manager.elaborated_modules` / `prelude_functions`
@@ -189,17 +187,10 @@ pub struct GlobalEnv {
 
 pub struct TypeChecker<'a> {
     scope_stack: ScopeStack<ScopeEntry<TypeScheme>>,
-    /// Phase-1 dual-write target — read path still uses
-    /// `scope_stack` / `module_schemes` below. Populated by
-    /// `define_builtin`, the forward-decl pass, the main loop, and
-    /// `check_module_functions` / `check_prelude_functions`. Phase 3
-    /// will switch `resolve_value_name` to query this directly.
+    /// Global namespaces consulted after local scope lookup.
     pub(super) globals: GlobalEnv,
-    /// What context the checker is currently in. Replaces the
-    /// short-lived Phase-1 `checking_prelude` bool and supplements
-    /// the existing `current_module` field (which Phase 4 collapses
-    /// into the `Module` variant). Threaded via save/restore at
-    /// `check_decl_as_in_module`'s prologue/epilogue.
+    /// Selects the global-name precedence for the declaration being checked.
+    /// Saved and restored around nested module and prelude checks.
     pub(super) current_context: LookupContext,
     pub(super) context: Context<TypeName>, // Polytype unification context
     record_field_map: LookupMap<(String, String), Type>, // Map (type_name, field_name) -> field_type
@@ -800,19 +791,15 @@ impl<'a> TypeChecker<'a> {
     /// to a catalog builtin. Identifiers absent from the side table fall
     /// through to scope/module lookup.
     ///
-    /// `node_id` is the AST id of the Identifier expression being
-    /// resolved. After Phase 4, callers must always supply a real
-    /// NodeId — the `Option<NodeId>` branch (and the synthetic
-    /// FieldAccess recovery) is gone.
+    /// `node_id` is the AST id of the identifier expression being resolved.
     fn resolve_value_name(
         &mut self,
         full_name: &str,
         is_qualified: bool,
         node_id: NodeId,
     ) -> Option<ResolvedValue> {
-        // Path A: NameResolution side table covers every catalog
-        // identifier (Phases 1 + 3.5 + the prelude-walk in
-        // `name_resolution::build_name_resolution`).
+        // The NameResolution side table covers every catalog identifier,
+        // including identifiers found while walking the prelude.
         if let Some(crate::name_resolution::ResolvedValueRef::Builtin { id: builtin_id, .. }) =
             self.name_resolution.get(node_id)
         {
@@ -822,11 +809,9 @@ impl<'a> TypeChecker<'a> {
             return Some(self.resolve_scheme_lookup(def_name, lookup));
         }
 
-        // Path A also fires for SOAC-tagged identifiers — go straight
+        // SOAC-tagged identifiers go straight
         // to the catalog's builtin scheme so a user-defined shadow at
-        // file scope can't reach the prelude. Equivalent to the
-        // previous `scope_stack.lookup_by_kind(_, Builtin)` hack, but
-        // sourced from the canonical `globals.builtins` map.
+        // file scope cannot reach the prelude.
         if let Some(crate::name_resolution::ResolvedValueRef::Soac(_)) = self.name_resolution.get(node_id) {
             if let Some(scheme) = self.globals.builtins.get(full_name) {
                 return Some(self.resolve_scheme_lookup(full_name, SchemeLookup::Single(scheme.clone())));
@@ -1281,10 +1266,8 @@ impl<'a> TypeChecker<'a> {
 
         let name = format!("zip{}", arity);
         let scheme = Self::generalize_closed(body);
-        // Route through `define_builtin` so the dual-write hits
-        // `globals.builtins` — direct `define` here skipped Phase 1's
-        // mirror and made `zipN` lookups in Path A's Soac branch
-        // miss after Phase 3's switch to `globals.builtins`.
+        // Register generated zip functions in the canonical builtin namespace
+        // used by SOAC-tagged identifier lookup.
         self.define_builtin(&name, scheme);
     }
 
@@ -1540,7 +1523,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn register_vector_fields(&mut self) {
-        // Vector field access is now handled directly in the FieldAccess case
+        // Vector field access is handled directly in the FieldAccess case.
         // Vec(size, element_type) fields (x, y, z, w) return element_type
     }
 
@@ -1897,21 +1880,12 @@ impl<'a> TypeChecker<'a> {
         Ok(())
     }
 
-    /// Phase-1 dual-write hook, Phase-2 reading `current_context`.
-    /// Routes a top-level `Decl` scheme into the right `GlobalEnv` slot:
+    /// Route a top-level `Decl` scheme into the right `GlobalEnv` slot:
     ///   * `module_name = Some(_)` → `globals.module_schemes` (key
     ///     is the already-qualified `scope_name`).
     ///   * `current_context == Prelude` → `globals.prelude_defs`.
     ///   * Otherwise → `globals.user_file_defs`.
-    ///
-    /// Removed when Phase 4 migrates the `define` insertion sites
-    /// directly.
-    fn globals_dual_write_decl(
-        &mut self,
-        scope_name: &str,
-        scheme: &TypeScheme,
-        module_name: Option<&str>,
-    ) {
+    fn register_global_decl(&mut self, scope_name: &str, scheme: &TypeScheme, module_name: Option<&str>) {
         if module_name.is_some() {
             self.globals.module_schemes.insert(scope_name.to_string(), scheme.clone());
         } else if self.current_context == LookupContext::Prelude {
@@ -1958,7 +1932,7 @@ impl<'a> TypeChecker<'a> {
             .collect();
 
         // Type-check each module function with module context for
-        // alias resolution. `globals_dual_write_decl` inside
+        // alias resolution. `register_global_decl` inside
         // `check_decl_as_in_module` is the single source of truth
         // for `globals.module_schemes`.
         for (module_name, decl) in module_functions {
@@ -1977,7 +1951,8 @@ impl<'a> TypeChecker<'a> {
         let prelude_functions: Vec<crate::ast::Decl> =
             self.module_manager.get_prelude_function_declarations().into_iter().cloned().collect();
 
-        let saved_context = std::mem::replace(&mut self.current_context, LookupContext::Prelude);
+        let saved_context = self.current_context.clone();
+        self.current_context = LookupContext::Prelude;
         let result: Result<()> = (|| {
             for decl in prelude_functions {
                 debug!("Type-checking prelude function: {}", decl.name);
@@ -2173,9 +2148,8 @@ impl<'a> TypeChecker<'a> {
         // Set current module context for alias resolution in nested expressions
         let saved_module = self.current_module.take();
         self.current_module = module_name.map(|s| s.to_string());
-        // Mirror the legacy `current_module` field into `current_context`.
-        // Inside `Prelude` (set by `check_prelude_functions`) we KEEP the
-        // Prelude context; module_name will be None there. Otherwise:
+        // Select module lookup precedence without disturbing the Prelude
+        // context, where `module_name` is always `None`:
         //   Some(m) → Module { name: m }
         //   None    → preserve the surrounding context (UserFile, or
         //             whatever else the outer driver chose).
@@ -2184,8 +2158,8 @@ impl<'a> TypeChecker<'a> {
             self.current_context = LookupContext::Module { name: m.to_string() };
         }
 
-        // Note: SizeVar/UserVar substitution is now handled by resolve_placeholders pass
-        // before type checking. Type parameter names are already converted to type variables.
+        // `resolve_placeholders` has already converted SizeVar/UserVar names
+        // into type variables.
 
         if decl.params.is_empty() {
             // Variable or entry point declaration: let/def name: type = value or let/def name = value
@@ -2210,7 +2184,7 @@ impl<'a> TypeChecker<'a> {
             let stored_type = resolved_declared_type.unwrap_or(expr_type.clone());
             let type_scheme = self.generalize(&stored_type);
             debug!("Inserting variable '{}' into globals", scope_name);
-            self.globals_dual_write_decl(scope_name, &type_scheme, module_name);
+            self.register_global_decl(scope_name, &type_scheme, module_name);
             debug!("Inferred type for {}: {}", scope_name, stored_type);
         } else {
             // Function declaration: let/def name param1 param2 = body
@@ -2268,7 +2242,7 @@ impl<'a> TypeChecker<'a> {
             // Update GlobalEnv with inferred type (no scope_stack
             // write — locals only).
             let type_scheme = self.generalize_function(&func_type);
-            self.globals_dual_write_decl(scope_name, &type_scheme, module_name);
+            self.register_global_decl(scope_name, &type_scheme, module_name);
 
             // Track arity for partial application checking
             self.arity_map.insert(scope_name.to_string(), decl.params.len());
@@ -2287,7 +2261,7 @@ impl<'a> TypeChecker<'a> {
         // Sig declarations are just type signatures - register them in
         // GlobalEnv per current context.
         let type_scheme = TypeScheme::Monotype(decl.ty.clone());
-        self.globals_dual_write_decl(&decl.name, &type_scheme, None);
+        self.register_global_decl(&decl.name, &type_scheme, None);
         Ok(())
     }
 
@@ -2295,7 +2269,7 @@ impl<'a> TypeChecker<'a> {
         // Extern declarations register a type signature for a linked
         // SPIR-V function — same routing as Sig / Decl.
         let type_scheme = TypeScheme::Monotype(decl.ty.clone());
-        self.globals_dual_write_decl(&decl.name, &type_scheme, None);
+        self.register_global_decl(&decl.name, &type_scheme, None);
         debug!(
             "Registered extern function '{}' with linkage '{}'",
             decl.name, decl.linkage_name
@@ -2782,10 +2756,8 @@ impl<'a> TypeChecker<'a> {
             ExprKind::FieldAccess(inner_expr, field) => {
                 // `name_resolution::run` rewrites every module-style
                 // `mod.name` chain into `Identifier([mod], name)` before
-                // type-check, so by the time we see `FieldAccess` here
-                // it's a genuine record field access. (The previous
-                // `try_extract_qual_name` recovery path was a defensive
-                // shim from before that rewrite; it's now unreachable.)
+                // type-checking, so every remaining `FieldAccess` is a
+                // genuine record field access.
                 let base_type = self.infer_expression(inner_expr)?;
 
                 // Apply context and strip uniqueness
@@ -3178,8 +3150,6 @@ impl<'a> TypeChecker<'a> {
         self.type_table.insert(expr.h.id, TypeScheme::Monotype(ty.clone()));
         Ok(ty)
     }
-
-    // Removed: fresh_var - now using polytype's context.new_variable()
 
     /// Resolve a callee expression to a set of candidate function types.
     /// For overloaded intrinsics, returns multiple candidates.

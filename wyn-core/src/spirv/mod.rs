@@ -286,11 +286,8 @@ impl Constructor {
     }
 
     /// Get or create an i32 constant
-    // Thin delegators over `SpirvBuilder`'s typed constant
-    // emitters. The wrapper-returned `ConstId` is `*`-deref'd back to
-    // `spirv::Word` here so existing untyped call sites in
-    // `LowerCtx` and `pow.rs` keep working. As call sites migrate to
-    // typed `Id<K>`s the delegators will be removed.
+    // LowerCtx exposes raw SPIR-V words at this boundary; these delegators use
+    // the typed builder internally and unwrap its `ConstId` result.
     fn const_i32(&mut self, value: i32) -> spirv::Word {
         *self.builder.const_i32(value)
     }

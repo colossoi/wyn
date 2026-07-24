@@ -281,8 +281,8 @@ impl KernelPlanBuilder<'_, '_> {
             entry.graph.skeleton.effect_mut(site).operand_nodes[*operand_index] = chunked_view;
         }
 
-        // 5. Phase 1 stores each thread's whole accumulator value to `partials[tid]`
-        // and no longer writes the outputs. `accumulator_value` is the hash-consed
+        // 5. Phase 1 stores each thread's whole accumulator value to
+        // `partials[tid]`; phase 2 owns the output writes. `accumulator_value` is the hash-consed
         // `Project{acc_pos}(screma_result)` node — phase 2 substitutes it for the
         // combined result when replaying the captured stores.
         let accumulator_values: Vec<NodeId> = (0..n_accs)
@@ -342,8 +342,9 @@ impl KernelPlanBuilder<'_, '_> {
                 size: self.resources[accumulator.partial].size.clone(),
             });
         }
-        // A moved output binding may also carry an Output storage declaration (e.g. a
-        // hoisted prepass result). Phase 1 no longer writes it; phase 2 owns it.
+        // A moved output binding may also carry an Output storage declaration
+        // (e.g. a hoisted prepass result). Since phase 2 owns the write, the
+        // phase-1 declaration must not publish it as an output.
         let moved: std::collections::HashSet<ResourceId> = accumulators
             .iter()
             .flat_map(|accumulator| &accumulator.outputs)

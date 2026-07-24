@@ -57,7 +57,7 @@ if not exist "%BINARY%" (
 
 REM Collect every .wyn under testfiles\ and testfiles\playground\.
 REM The `if /I "%%~xf"==".wyn"` guard is load-bearing: cmd's `*.wyn`
-REM glob has legacy DOS semantics and matches files whose extension
+REM glob uses DOS-compatible semantics and matches files whose extension
 REM *begins with* `.wyn` (so `sha256_linked_test.wyn_` — the deliberately
 REM disabled file — slips through without it).
 set FILES=

@@ -244,7 +244,7 @@ builtin**: applied as `T(value)` it dispatches on `value`'s inferred
 type to the corresponding per-type catalog entry. The vec shorthand
 names (`vec2i32`, `vec3f32`, `vec4u32`, …) extend the same scheme to
 vectors — `vecNT(v)` is componentwise. See *Type Conversions* below
-for the full dispatch table and the legacy `T.source(value)` form.
+for the full dispatch table and the dot-form `T.source(value)` compatibility syntax.
 
 ### Numeric Literals
 
@@ -302,7 +302,7 @@ literal, applying the scalar `T(...)` conversion to each component.
 Arity is read from the constructor name (`vec2`/`vec3`/`vec4`); the
 arg must be a vec of matching arity, or it's a type error.
 
-### Legacy dot-form (`T.source(value)`)
+### Dot-form compatibility syntax (`T.source(value)`)
 
 The original surface — `i32.f32(x)` — remains supported and resolves
 to the same catalog entry as `i32(x)`. The constructor form is

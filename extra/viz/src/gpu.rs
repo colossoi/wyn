@@ -753,7 +753,7 @@ pub fn build_push_constant_bytes(
 }
 
 // =============================================================================
-// Storage textures (Phase 1b — Path B)
+// Storage textures
 // =============================================================================
 //
 // A `Binding::StorageTexture` declares a 2D wgpu::Texture that a compute
@@ -764,10 +764,8 @@ pub fn build_push_constant_bytes(
 // through the appropriate view (storage view for `StorageTexture`
 // bindings, sampled view for `Texture` bindings).
 //
-// Sizing: v1 uses a fixed 1024×1024 dimension. A per-binding sizing
-// policy in the descriptor (analogous to `BufferLen::LikeInput`) is
-// future work — comes in Phase 3 when the multi-stage simulate mode
-// needs descriptor-driven dispatch sizing for the chained passes.
+// The descriptor selects a fixed extent or `SameAsWindow`; headless callers
+// use the fallback below until a surface size is available.
 
 /// Fallback storage-texture extent for `SameAsWindow` allocations
 /// before the surface size is known (e.g. headless smoke runs). The
@@ -788,9 +786,8 @@ pub fn storage_image_format_to_wgpu(f: StorageImageFormat) -> wgpu::TextureForma
     }
 }
 
-/// Map descriptor `Access` to wgpu's `StorageTextureAccess`. v1 ships
-/// `read_only` and `write_only`; `read_write` requires an adapter
-/// feature flag and is exposed but the caller must verify support.
+/// Map descriptor `Access` to wgpu's `StorageTextureAccess`. Read-write access
+/// requires adapter support, which the caller must verify.
 fn access_to_storage_texture_access(a: Access) -> wgpu::StorageTextureAccess {
     match a {
         Access::ReadOnly => wgpu::StorageTextureAccess::ReadOnly,
@@ -1513,10 +1510,11 @@ pub fn build_resource_bind_group_for_set(
                 //   1. `backing` set — a compiler-managed `resource` sampled
                 //      view: sample the named storage allocation (current or,
                 //      for `previous`, opposite parity).
-                //   2. legacy `--feedback` read with no `backing`: sample the
-                //      write side's storage texture at the opposite parity.
-                //   3. otherwise — a legacy shared-binding handoff or a
-                //      host-uploaded texture (keyboard, etc.).
+                //   2. `--feedback` compatibility read with no `backing`:
+                //      sample the write side's storage texture at the
+                //      opposite parity.
+                //   3. otherwise — a shared-binding handoff or a host-uploaded
+                //      texture (keyboard, etc.).
                 let view = if let Some(b) = backing {
                     let sk = (b.set, b.binding);
                     let res = storage_textures.get(&sk).ok_or_else(|| {

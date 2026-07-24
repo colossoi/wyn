@@ -6,11 +6,9 @@
 //! anything else has to spill the composite to a memory-backed handle and
 //! `OpAccessChain` into it.
 //!
-//! In the SSA version of this pass we also had to LICM `Materialize` out of
-//! loops manually. In EGIR that's free: `Materialize` only depends on the
-//! array operand, so `elaborate`'s scoped/loop-aware placement emits it at
-//! the deepest dominator of the array — outside the loop whenever the array
-//! is loop-invariant.
+//! `Materialize` depends only on the array operand, so `elaborate`'s
+//! scoped, loop-aware placement emits it at the deepest dominator of the
+//! array—outside the loop whenever the array is loop-invariant.
 //!
 //! Two `Index` nodes with the same array share a single `Materialize` node
 //! via hash-consing, so we don't need a separate dedup step either.

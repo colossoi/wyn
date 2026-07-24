@@ -733,12 +733,9 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
 
 /// Convert fully analyzed TLC into raw semantic EGIR.
 pub fn to_egraph(
-    mut program: tlc::Program<tlc::stage::InputSliceBoundsInferred>,
+    program: tlc::Program<tlc::stage::InputSliceBoundsInferred>,
 ) -> std::result::Result<EgirRaw, ConvertError> {
-    let mut auto_storage_binding_ids = std::mem::replace(
-        &mut program.global_context.auto_storage_binding_ids,
-        IdSource::new(),
-    );
+    let mut auto_storage_binding_ids = program.global_context.auto_storage_binding_ids.clone();
     let mut effect_ids = IdSource::new();
     let inner = egir::from_tlc::run(&program, &mut auto_storage_binding_ids, &mut effect_ids)?;
     Ok(EgirRaw {

@@ -46,8 +46,8 @@ impl TermRewriter<Empty, Empty> for IntrinsicSpecializer<'_, '_> {
         };
         let known = catalog().known();
 
-        // Multiplication no longer needs overload selection after it becomes a
-        // structural binary operator.
+        // Multiplication becomes a structural binary operator and needs no
+        // overload-bearing callee.
         if id == known.mul && args.len() == 2 {
             func.kind = TermKind::BinOp(crate::ast::BinaryOp { op: "*".to_string() });
             func.id = self.term_ids.next_id();

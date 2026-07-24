@@ -1324,10 +1324,9 @@ fn test_parse_pattern_tuple_with_trailing_comma() {
 }
 
 /// Parser should accept `@[a, b, c, d]` as a vec-destructuring pattern —
-/// the positional inverse of the `@[…]` vec constructor. Shape assertion
-/// will be tightened once `PatternKind::Vec` lands; for now this only
-/// pins down "the parser doesn't reject the syntax". Currently fails
-/// because `@` isn't recognised at the pattern position.
+/// the positional inverse of the `@[…]` vec constructor. This assertion
+/// covers syntax acceptance; the AST currently represents the result with
+/// the available positional pattern form.
 #[test]
 fn test_parse_pattern_vec_destructure() {
     let tokens = tokenize("@[a, b, c, d]").expect("Failed to tokenize");
@@ -3698,13 +3697,9 @@ def f(v: vec3f32, m: mat2f32) vec3f32 =
 
 #[test]
 fn test_parse_vec_with_swizzle_value_captures_full_binop() {
-    // Regression: `v with .y = v.y + s` must parse with the `+` *inside*
-    // the VecWith's `value`, so only the y component is updated. Earlier
-    // the value RHS was parsed at precedence 11 — higher than `+` at 6 —
-    // so the parser closed the VecWith at `v.y` and then attached `+ s`
-    // outside, producing `(v with .y = v.y) + s`. That second AST type-
-    // checks as a vec3+f32 broadcast: every component gets `+ s`, which
-    // is the wrong semantics and the source of the octagrams flicker.
+    // `v with .y = v.y + s` must keep the `+` inside the VecWith value so only
+    // the y component is updated. Parsing it as `(v with .y = v.y) + s`
+    // would broadcast the addition to every component.
     let src = "def f(v: vec3f32, s: f32) vec3f32 = v with .y = v.y + s";
     let decl = single_decl(src);
     match &decl.body.kind {
@@ -3867,11 +3862,9 @@ entry frag(
 //   type~  T = ...    -- size-lifted: RHS may contain existential sizes ?[n]
 //   type^  T = ...    -- fully-lifted: RHS may contain function types
 //
-// The AST records the marker on each `TypeBind` so downstream passes can
-// enforce the restrictions (lifted types cannot be put in arrays;
-// fully-lifted types cannot be returned from conditionals or loops).
-// Restriction enforcement itself is out of scope for this commit —
-// aspirational `#[ignore]`d integration tests live in integration_tests.rs.
+// The AST records the marker on each `TypeBind`. Type checking owns the
+// restrictions on arrays of lifted types and fully-lifted conditional or loop
+// results; ignored integration cases document restrictions not yet enforced.
 
 #[test]
 fn test_parse_type_bind_unlifted() {
@@ -3971,9 +3964,9 @@ fn test_parse_let_in_size_binding() {
     parse_ok("def f = let [n] xs: [n]i32 = [1, 2, 3] in xs[0]");
 }
 
-/// Regression: `let name(params) = body in rest` parses as a local
-/// function. Desugared at parse time to `let name = |params| body in
-/// rest` — no new AST variant. Wyn forbids recursion; the desugar
+/// `let name(params) = body in rest` parses as a local function and
+/// desugars to `let name = |params| body in rest` with no new AST variant.
+/// Wyn forbids recursion; the desugar
 /// honours that by construction (the lambda is closed over before
 /// `name` enters scope, so `name` is structurally absent from the
 /// lambda body and present only in `rest`).
@@ -4019,8 +4012,8 @@ fn test_parse_nested_abs_checkerboard_pattern() {
 
 #[test]
 fn test_parse_storage_image_size_fixed_wxh() {
-    // `size=512x512` lexes as `IntLit(512)` + `Ident("x512")`. Regression:
-    // pre-fix the parser called expect_identifier() and rejected the IntLit.
+    // `size=512x512` lexes as `IntLit(512)` + `Ident("x512")`; the size parser
+    // accepts that token pair directly.
     use crate::pipeline_descriptor::StorageTextureSize;
     let src = "#[compute]\n\
                entry e(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only, size=512x512)] img: storage_image) () = ()";

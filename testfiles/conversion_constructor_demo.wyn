@@ -12,5 +12,5 @@ entry tick(#[storage(set=2, binding=0, access=read)] xs: []vec2f32,
   (map(|v: vec2f32| vec2i32(v), xs),
    map(|v: vec3i32| vec3f32(v), ys),
    map(|v: vec4u32| vec4f32(v), zs),
-   -- Legacy dot-form keeps working alongside the new constructor form.
+   -- The dot-form compatibility syntax resolves to the same conversion.
    map(|w: f32| i32.f32(w), ws))

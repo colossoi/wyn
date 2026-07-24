@@ -51,13 +51,9 @@ fn test_if_expression() {
 
 #[test]
 fn test_if_literal_true_lowers() {
-    // Regression for the const-fold / domtree interaction: when the
-    // condition is a literal bool, `fold_constant_branches` rewrites
-    // the entry's CondBranch into a Branch to the live arm and leaves
-    // the dead arm in `skeleton.blocks` without a predecessor. If
-    // dominator analysis lets that unreachable block poison its
-    // formerly-shared merge block, elaborate skips the merge and
-    // SPIR-V lowering panics on the dangling branch.
+    // `fold_constant_branches` leaves the dead arm in `skeleton.blocks`
+    // without a predecessor. Dominator analysis must ignore that arm when
+    // deciding whether to emit the live path's merge block.
     let spirv = compile_to_spirv("def f(x) = if true then x + 1 else x + 2").unwrap();
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
@@ -266,10 +262,8 @@ def sum_u32(arr: [4]u32) u32 =
 
 #[test]
 fn test_reduce_with_tuple_destructuring() {
-    // Test reduce with tuple pattern destructuring in the combiner.
-    // This pattern from raytrace.wyn's findClosestHit was causing:
-    // "Undefined global: _w_lambda_N" error because HOF specialization
-    // was not eliminating function parameters correctly.
+    // HOF specialization must eliminate the tuple-destructuring combiner's
+    // function parameters before SPIR-V lowering.
     let result = compile_to_spirv(
         r#"
 def minPair(hits: [4](f32, i32)) (f32, i32) =
@@ -323,17 +317,8 @@ def test(x: f32) f32 =
 
 #[test]
 fn test_partial_eval_inlined_function_local_id_collision() {
-    // This test reproduces a bug where partial_eval inlining causes LocalId collision.
-    //
-    // The bug: When partial_eval inlines a function with all known args, it evaluates
-    // the inlined function's body. If that body has a let binding with an Unknown RHS
-    // (e.g., uses a uniform), it calls map_local() to allocate a LocalId. But local_map
-    // still contains mappings from the OUTER function, causing LocalId collisions.
-    //
-    // Setup:
-    // - helper() has a let binding that uses a uniform (Unknown)
-    // - fragment_main has multiple locals before calling helper() with known args
-    // - The helper's local collides with fragment_main's locals in local_map
+    // Partial evaluation of an inlined helper with an unknown let RHS must
+    // allocate locals independently of the caller's local map.
     let spirv = compile_to_spirv(
         r#"
 -- Helper function that will be inlined when called with known args.
@@ -361,17 +346,8 @@ entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)
 
 #[test]
 fn test_partial_eval_intrinsic_arg_types() {
-    // This test reproduces a bug where partial_eval reifies intrinsic arguments
-    // using the result type instead of the argument types.
-    //
-    // The bug: When residualizing an intrinsic like dot(vec3, vec3) -> f32,
-    // the code was reifying the vector arguments with type f32 (the result type)
-    // instead of vec3f32 (the argument type). This causes OpCompositeConstruct
-    // to use a scalar type with multiple values.
-    //
-    // Setup:
-    // - dot() takes two vec3 arguments and returns f32
-    // - When the vec3 arguments are known vectors, they get reified with wrong type
+    // Residualizing dot(vec3, vec3) -> f32 must reify each known argument with
+    // its vec3 type rather than the scalar result type.
     let spirv = compile_to_spirv(
         r#"
 def verts: [3]vec4f32 =
@@ -396,13 +372,8 @@ entry fragment_main() #[target(screen)] vec4f32 =
 
 #[test]
 fn test_nested_if_else_in_entry_point() {
-    // Regression test: nested if-else directly in entry point body
-    // was causing NestedBlock error in SPIR-V builder.
-    //
-    // The issue: when an entry point has nested conditionals, the SSA
-    // lowering's special handling for entry points (re-selecting the
-    // "last block" for emitting OpReturn) was interfering with the
-    // multi-block structure created by nested if-else.
+    // Entry-point return emission must preserve the multi-block structure of
+    // nested conditionals.
     let result = compile_to_spirv(
         r#"
 #[fragment]
@@ -425,17 +396,9 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[target(screen)] v
 
 #[test]
 fn test_two_compute_entries_share_one_global_invocation_id() {
-    // Regression for VUID-StandaloneSpirv-OpEntryPoint-09658: the
-    // backend used to emit a fresh `BuiltIn GlobalInvocationId` Input
-    // variable for every entry-point param with
-    // `#[builtin(global_invocation_id)]`, on top of the cached
-    // module-level one — so each OpEntryPoint's interface ended up
-    // with two variables sharing the same BuiltIn decoration, which
-    // Vulkan rejects.
-    //
-    // The check here counts BuiltIn-decoration words in the SPIR-V
-    // module: exactly one should appear for GlobalInvocationId no
-    // matter how many compute entries reference it.
+    // VUID-StandaloneSpirv-OpEntryPoint-09658 permits exactly one module-level
+    // GlobalInvocationId input variable. Count its BuiltIn decoration to
+    // ensure multiple compute entries share that variable.
     let src = "\
 def verts: [3]vec4f32 =
   [@[0.0 - 1.0, 0.0 - 1.0, 0.0, 1.0],

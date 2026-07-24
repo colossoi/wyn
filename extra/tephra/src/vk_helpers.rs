@@ -534,7 +534,7 @@ impl<'a> ComputePipeline<'a> {
         }
     }
 
-    /// Dispatch with a single buffer (legacy API).
+    /// Convenience dispatch for a single buffer and one-dimensional grid.
     pub fn dispatch(&self, buffer: &StorageBuffer, num_workgroups: u32) -> Result<()> {
         self.dispatch_multi(&[buffer], [num_workgroups, 1, 1], &[])
     }

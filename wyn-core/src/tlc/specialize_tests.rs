@@ -50,10 +50,9 @@ fn test_specialize_sign_f32() {
     let x_sym = b.sym("x");
     let test_sym = b.sym("test");
 
-    // Build: sign(x) where x: f32. After NameResolution covers every
-    // catalog ref, real-program calls arrive at `specialize` as
-    // `VarRef::Builtin`; the pass no longer touches `VarRef::Symbol`
-    // (those are user bindings that may shadow catalog names).
+    // Build sign(x) where x: f32. Catalog calls reach `specialize` as
+    // `VarRef::Builtin`; `VarRef::Symbol` denotes a user binding that may
+    // shadow a catalog name.
     let x_var = Term {
         id: b.next_id(),
         ty: f32_ty.clone(),

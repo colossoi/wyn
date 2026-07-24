@@ -280,10 +280,9 @@ fn test_gvn_via_let() {
 #[test]
 fn test_hash_cons_distinguishes_by_result_type() {
     // Interning the same intrinsic with the same operands but different
-    // result types must produce distinct NodeIds — otherwise the
-    // first-inserted type silently wins at the merged node. Extends the
-    // 3b8cb24 Int/Uint-literal split to cover every pure op. Regression
-    // for the conway.wyn `_w_intrinsic_storage_len` i32/u32 collision.
+    // result types must produce distinct NodeIds; otherwise the first-inserted
+    // type silently wins at the merged node. This applies to every pure op,
+    // including `_w_intrinsic_storage_len` instantiated as i32 and u32.
     use crate::egir::types::{EGraph, PureOp};
     use smallvec::smallvec;
 
@@ -759,13 +758,10 @@ fn construction_purity_propagates_effectful_builtin_calls() {
 /// Graphics entries must NOT derive `SemanticEntry.return_ty` from
 /// `def.ty`'s arrow-return position. Compute output routes use that signature,
 /// while graphics entries use `inner_body.ty`, which
-/// matches the body's actual produced shape after ownership /
-/// monomorphize / etc. Forcing the def.ty-derived form here makes any
-/// future divergence (e.g. a uniqueness wrapper that ownership doesn't
-/// strip from `def.ty` for non-compute entries) silently change how
-/// `build_entry_outputs` classifies the return — a tuple wrapped in
-/// `Unique` no longer matches the `Tuple` arm, and an N-output entry
-/// gets collapsed to a single output.
+/// matches the body's actual produced shape after ownership and
+/// monomorphization. A divergence between the signature and body must not
+/// change how `build_entry_outputs` classifies a graphics return; wrapping
+/// the signature's tuple would otherwise collapse N outputs to one.
 ///
 /// This test constructs the divergence directly by mutating the graphics
 /// entry's `def.ty` after type-checking. With the guard (`if is_compute
@@ -785,10 +781,8 @@ entry vertex_main(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: 
     let mut tlc_program =
         crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(src));
 
-    // Mutate the vertex entry's `def.ty` arrow-return position to wrap
-    // the result tuple in `TypeName::Unique`. `inner_body.ty` stays
-    // unchanged. This synthesises the divergence that a future ownership
-    // / lowering change could produce naturally.
+    // Wrap only the vertex entry's signature return. `inner_body.ty` stays
+    // unchanged, giving the test two deliberately divergent type sources.
     let def = tlc_program
         .defs
         .iter_mut()
@@ -817,10 +811,9 @@ entry vertex_main(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: 
 }
 
 /// Walk an arrow chain `P1 -> P2 -> ... -> Pn -> R` and wrap `R` in a
-/// spurious single-element `Tuple(1)`. Used to synthesise a divergence
-/// between `def.ty`'s arrow-return position and `inner_body.ty` (the
-/// real 2-tuple), so the test can assert EGIR derives outputs from the
-/// body, not `def.ty`.
+/// spurious single-element `Tuple(1)`. This creates a divergence between
+/// `def.ty`'s arrow-return position and the real two-element
+/// `inner_body.ty`.
 fn wrap_arrow_return_in_marker(mut ty: &mut Type<TypeName>) {
     loop {
         let inner = match ty {

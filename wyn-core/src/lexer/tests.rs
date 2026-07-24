@@ -43,8 +43,8 @@ fn test_tokenize_identifiers() {
 
 #[test]
 fn test_tokenize_literals() {
-    // Leading `-` is a separate `BinOp("-")` token — the lexer no longer
-    // folds it into the numeric literal. Negation is handled at parse time.
+    // Leading `-` is a separate `BinOp("-")` token; parsing applies it as
+    // unary negation to a positive numeric literal.
     let input = "-1.0f32 42 3.14f32";
     let tokens = tokens_only(input);
     assert_eq!(

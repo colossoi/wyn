@@ -235,9 +235,7 @@ def make: #m([2][3]i32) | #s(i32) = #s(0)
 // user signature, and TLC lowers the call to match: SOAC identity is a
 // structural tag set by the frontend resolver (which honours shadowing — local
 // and top-level), so `map(y)` is an ordinary application of the user def, not a
-// `Soac(Map)` node. Before the resolver-driven tag, AST→TLC re-derived SOAC-ness
-// by string match (excluding only *locally* bound names) and the 1-arg call was
-// routed to `transform_soac_map`, which `assert!(args.len() >= 2)` and panicked.
+// `Soac(Map)` node.
 #[test]
 fn user_def_shadowing_soac_map_is_a_normal_call() {
     let program = compile_to_tlc_raw(

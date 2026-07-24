@@ -63,9 +63,9 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
 /// storage buffers, build compute pipelines for the pre-passes, and
 /// dispatch them before each render pass.
 ///
-/// Regression guard: every materialization storage binding must appear in
-/// `interface.storage`, and each compute entry's inputs must expose
-/// the `(set, binding)` coordinates it reads/writes.
+/// Every materialization storage binding appears in `interface.storage`, and
+/// each compute entry exposes the `(set, binding)` coordinates it reads and
+/// writes.
 #[test]
 fn interface_surfaces_materialization_storage_bindings() {
     let src = r#"

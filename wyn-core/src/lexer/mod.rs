@@ -259,8 +259,8 @@ fn parse_keyword(input: &str) -> IResult<&str, Token> {
     ))(input)
 }
 
-// Removed parse_type - i32 and f32 are now treated as regular identifiers
-// They are only special in type position (handled by parser) and as suffixes on literals
+// `i32` and `f32` lex as identifiers. The parser gives them meaning in type
+// position, while literal parsing recognizes them as suffixes.
 
 fn parse_identifier(input: &str) -> IResult<&str, Token> {
     map(

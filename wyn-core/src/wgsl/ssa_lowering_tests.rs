@@ -486,9 +486,8 @@ fn wgsl_compute_reduce_writes_to_storage_buffer() {
     //
     //     _buf_0_1[(i32(off) + i32(tid))] = v_accum;
     //
-    // Regression guard against the no-op form where the write targets
-    // a local `var` that mirrors the buffer slot — naga accepts it, but
-    // the buffer never changes at runtime:
+    // Writing only a local `var` that mirrors the buffer slot is a no-op at
+    // runtime even though naga accepts it:
     //
     //     var v27_1: f32 = _buf_0_1[(i32(off) + i32(tid))];
     //     v27_1 = v_accum;
@@ -547,8 +546,8 @@ entry sum_array(#[size_hint(1024)] data: []f32) f32 =
     );
 }
 
-/// An `i32`-range reduce lowers to valid WGSL — regression guard and the
-/// passing contrast to the `u32`-range case below.
+/// An `i32`-range reduce lowers to valid WGSL and provides the signed
+/// counterpart to the `u32` case below.
 #[test]
 fn wgsl_i32_range_reduce_validates() {
     let wgsl = compile_to_wgsl(
@@ -562,15 +561,10 @@ entry mn(n: i32) i32 =
     validate_wgsl(&wgsl);
 }
 
-/// Regression: a reduce over a u32 range used to mislower because the
-/// WGSL `_w_intrinsic_length` branch for `ArrayVariantVirtual` returned
-/// the struct's element-typed `.f2` field verbatim while `emit_length`
-/// (EGIR) asked for i32 — a u32 expression assigned into an i32 var.
-/// The sibling branches (Bounded / View / runtime-storage) all honor
-/// `wants_i32`; this one didn't. The reduce loop's counter stays i32
-/// universally; the element value is derived per iteration via an
-/// explicit `u32(idx)` cast, so the only missing piece was the length
-/// cast at the comparison site.
+/// A reduce over a u32 virtual range still uses an i32 loop counter.
+/// `_w_intrinsic_length` must honor `wants_i32` by casting the range's
+/// element-typed `.f2` field at the comparison site; each element is converted
+/// back with `u32(idx)`.
 #[test]
 fn wgsl_u32_range_reduce_validates() {
     let wgsl = compile_to_wgsl(
@@ -604,9 +598,8 @@ entry filtered() []i32 =
 #[test]
 fn wgsl_compute_multi_output_runtime_sized_arrays() {
     // A compute entry returning a tuple of >1 runtime-sized array: each
-    // field's producing `map` must stream into its own bound output
-    // storage view. Regression for the EGIR panic where the
-    // SOAC→OutputView rewrite only fired for the single-output case.
+    // field's producing `map` must stream into its own bound output storage
+    // view.
     let wgsl = compile_to_wgsl(
         r#"
 #[compute]

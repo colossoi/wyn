@@ -3,7 +3,7 @@
 //! These tests drive the pipeline up to `expand_soacs` and then walk
 //! the resulting `EGraph` to confirm:
 //!   - No `_w_intrinsic_array_with_inplace` node carries a tuple
-//!     result type (the bug this pass now prevents).
+//!     result type.
 //!   - For SoA-tuple outputs, exactly N componentwise
 //!     `_w_intrinsic_array_with_inplace` calls exist, each with a
 //!     plain composite array result type.

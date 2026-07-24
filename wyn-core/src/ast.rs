@@ -290,8 +290,8 @@ pub struct TypeBind {
     /// (sections "Lifted Types" / "Higher-order Functions"), the marker
     /// controls whether the type may contain existential sizes or
     /// function types, and downstream what shapes can use it (no arrays
-    /// of lifted; no fully-lifted out of if/loop). The parser records
-    /// the marker; enforcement is a follow-up.
+    /// of lifted; no fully-lifted out of if/loop). This field records the
+    /// syntax for the type-checking boundary that enforces those rules.
     pub lifting: Option<TypeLifting>,
     pub type_params: Vec<TypeParam>,
     pub definition: Type,
@@ -370,8 +370,6 @@ pub enum Spec {
     Module(String, ModuleTypeExpression),       // module name : mod_type_exp
     Include(ModuleTypeExpression),              // include mod_type_exp
 }
-
-// We now use polytype::Type instead of our own Type enum
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {

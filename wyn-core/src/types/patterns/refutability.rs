@@ -129,9 +129,8 @@ pub fn is_irrefutable(pat: &ast::Pattern, ty: &Type) -> Result<(), RefutabilityE
                             ),
                         });
                     }
-                    // Arity is the checker's invariant; assert at the
-                    // boundary so a future checker regression surfaces
-                    // here rather than as a silent truncated zip.
+                    // Arity is the checker's invariant; assert it at this
+                    // boundary rather than silently truncating the zip.
                     debug_assert_eq!(
                         sub.len(),
                         payload_tys.len(),

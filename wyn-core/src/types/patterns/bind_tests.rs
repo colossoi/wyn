@@ -16,7 +16,7 @@ fn type_check_source(source: &str) -> std::result::Result<(), String> {
         .map_err(|e| format!("type_check: {}", e))
 }
 
-// ----- bind_pattern accepts every variant the language now supports -----
+// ----- bind_pattern accepts every supported pattern variant -----
 
 #[test]
 fn name_pattern_in_let_binds() {

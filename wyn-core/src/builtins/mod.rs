@@ -3,8 +3,8 @@
 // `BuiltinCatalog` is the single source of truth: each builtin has one
 // `BuiltinId`, one declarative `BuiltinDef` describing its overloads
 // (scheme builder + lowering), and one entry in the static `ALL_BUILTINS`
-// table. Consumers query by `BuiltinId` (canonical) or by surface/internal
-// name (transitional).
+// table. Consumers query canonically by `BuiltinId` or use a surface/internal
+// name at parsing and diagnostic boundaries.
 
 pub mod catalog;
 pub mod defs;

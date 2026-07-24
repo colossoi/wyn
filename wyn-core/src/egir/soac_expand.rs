@@ -1125,6 +1125,8 @@ fn build_filter_loop(
     // and must see `buf_load` already elaborated.
     let after = graph.skeleton.create_block();
     let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
+    // `bid` must retain its stable block ID while its terminator moves to the
+    // new continuation. The preheader receives its loop branch below.
     let old_term = std::mem::replace(
         &mut graph.skeleton.blocks[bid].term,
         SkeletonTerminator::Unreachable,

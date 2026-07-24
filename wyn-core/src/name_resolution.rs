@@ -9,7 +9,7 @@
 //! generic over a `ResolveContext` that decides what a given identifier /
 //! field-access means in the current mode. See `Resolver` below.
 //!
-//! After the rewrite pass, `build_name_resolution` populates a
+//! `build_name_resolution` then populates a
 //! `NameResolution` side table that classifies each `Identifier` NodeId as
 //! `Builtin(BuiltinId)` (single catalog match) or
 //! `OverloadedBuiltin(Vec<BuiltinId>)` (multiple catalog matches under

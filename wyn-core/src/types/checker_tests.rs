@@ -526,10 +526,8 @@ fn test_bidirectional_with_concrete_type() {
 
 #[test]
 fn test_bidirectional_explicit_annotation_mismatch() {
-    // Minimal test demonstrating bidirectional checking bug with explicit parameter annotations.
-    // Two chained maps: vec3f32->vec4f32, then vec4f32->vec3f32
-    // The second lambda's parameter annotation (q:vec4f32) is correct (v4s is [1]vec4f32),
-    // but bidirectional checking incorrectly rejects it.
+    // Two chained maps carry explicit vec3f32 -> vec4f32 and
+    // vec4f32 -> vec3f32 parameter annotations through bidirectional checking.
     typecheck_program(
         r#"
             def test =
@@ -573,9 +571,6 @@ fn test_lambda_with_wildcard_in_tuple() {
         "#,
     );
 }
-
-// Tests for loop type checking will be added once Loop support is implemented
-// in the type checker (currently todo!())
 
 #[test]
 fn test_map_with_array_size_inference() {
@@ -1524,15 +1519,11 @@ def test: f32 =
     );
 }
 
-// Tests for polymorphic builtins with different vector sizes
-// Bug: polymorphic builtins get monomorphized on first use
-// See BUGS.txt for details
+// Polymorphic builtins at different vector sizes
 
 #[test]
 fn test_polymorphic_builtin_magnitude_different_sizes() {
-    // This test verifies that polymorphic builtins like magnitude can be
-    // used with different vector sizes in the same file.
-    // Bug: Type gets fixed on first use due to Monotype instead of Polytype
+    // Each use of a polymorphic builtin receives a fresh instantiation.
     typecheck_program(
         r#"
 def test1(v:vec3f32) f32 = magnitude(v)
@@ -1837,9 +1828,7 @@ def test: [5]i32 =
 
 #[test]
 fn test_type_alias_cycle_is_fatal() {
-    // Two modules whose type aliases refer to each other → cycle.
-    // Previously the checker silently logged this and returned the
-    // unresolved type; now it must surface as a fatal type error.
+    // A cycle between module type aliases is a fatal type error.
     let result = try_typecheck_program(
         r#"
 module a = {
@@ -1899,27 +1888,13 @@ def use_it: i32 = m.(+)(1, 2)
 }
 
 // =========================================================================
-// Module-system gaps (aspirational, #[ignore]d)
-//
-// Each test below asserts the *desired* behavior of a module-system feature
-// that Wyn currently lacks; all are `#[ignore]`d so the suite stays green.
-// Surfaced while building the lib/ statistics generators (rng/dist/disttest)
-// and spiking a Futhark-style functor-produced numeric hierarchy. Drop the
-// `#[ignore]` when the corresponding gap is closed.
+// Module-system closure and lookup
 // =========================================================================
 
-/// Regression: a nested `module` body closes over the enclosing
-/// file scope (ML/Futhark-style). Used to fail with
-/// `UndefinedVariable("K")` because `check_module_functions` runs
-/// before `check_program`'s user-decl loop, so file-scope `def K`
-/// hadn't been inserted into the scope when module `m`'s `f` body
-/// was checked. Now fixed by a forward-declaration pass at the top
-/// of `check_program` that pre-binds file-scope `def`s with full
-/// ascription (return type + all param types) — without disturbing
-/// SOAC builtin resolution, since names that already collide with
-/// something in scope are deliberately skipped (else a user
-/// `def map(x) = …` would shadow the SOAC during prelude function
-/// checking and break `unzip`'s `map(|...|, xys)`).
+/// A nested module body closes over fully ascribed definitions in the enclosing
+/// file scope (ML/Futhark-style). Forward declaration makes `K` visible while
+/// the module is checked without allowing file definitions to shadow catalog
+/// SOACs during prelude checking.
 #[test]
 fn nested_module_can_reference_outer_top_level_def() {
     typecheck_program(
@@ -1933,15 +1908,8 @@ def use_k: u32 = m.f(1u32)
     );
 }
 
-/// Regression: `open base` inside `module derived = { … }` brings
-/// `base`'s members into local scope, so `derived`'s body can call
-/// `foo` unqualified. Used to fail with `UndefinedVariable("foo")`
-/// because the open-resolver's index was built from `spec_schemes` +
-/// catalog only, and user-defined module `Decl` members never reach
-/// `spec_schemes` — so the resolver didn't know `base` had any
-/// members and the bare `foo` reference fell through. Module
-/// elaboration already splices `open base`'s items into `derived`'s
-/// items; the index now sees them too.
+/// `open base` inside `module derived = { … }` brings user-defined module
+/// members into local scope, allowing `derived` to call `foo` unqualified.
 #[test]
 fn open_brings_members_into_local_scope() {
     typecheck_program(
@@ -1958,14 +1926,8 @@ def use_it: i32 = derived.bar(10)
     );
 }
 
-/// Regression: `f32.(+)` references f32's reified `+` function value
-/// (operators can be forwarded through a functor the way named builtins
-/// like `f32.max` already are). Used to fail with
-/// `UndefinedVariable("f32.(+)")` because the catalog mis-stored
-/// operator members under the binop spelling `f32.+`. `+` is the
-/// binop; `(+)` is the function value, and member names are always
-/// functions — so the catalog now stores `f32.(+)` and Spec::SigOp's
-/// qualified key uses the same spelling.
+/// `f32.(+)` references the reified `+` function value, using the same
+/// parenthesized member spelling in the catalog and `Spec::SigOp` lookup.
 #[test]
 fn qualified_operator_member_resolves_builtin() {
     typecheck_program(
@@ -2295,10 +2257,8 @@ fn test_sum_constructor_payload_type_mismatch() {
     );
 }
 
-// Match expressions can't run end-to-end yet (Phase C lowering hasn't
-// landed), but the type checker should accept a well-typed match and
-// reject obvious shape violations. The tests below stop after
-// type-checking, before the AST→TLC step that would panic.
+// Type-checker-focused match tests accept well-typed arms and reject shape
+// violations before lowering.
 
 #[test]
 fn test_match_well_typed() {
@@ -2983,7 +2943,7 @@ fn pow_operator_heterogeneous_cases() {
     // 2. Permitted: `f32 ** u32` (explicit unsigned exponent).
     typecheck_program("def pow5u(x: f32) f32 = x ** 5u32");
 
-    // 3. Regression guard: existing homogeneous shape keeps working.
+    // 3. Permitted: homogeneous float operands.
     typecheck_program("def pow5f(x: f32) f32 = x ** 5.0f32");
 
     // 4. Rejected: integer base, float exponent — the exception only
@@ -3071,9 +3031,8 @@ fn ctor_vec_rejects_arity_mismatch() {
     );
 }
 
-/// The legacy dot-form `i32.f32(x)` must keep working — the
-/// constructor hook is additive, the existing `lookup_module_scheme`
-/// path is untouched.
+/// The dot-form compatibility syntax `i32.f32(x)` resolves through module
+/// scheme lookup.
 #[test]
 fn ctor_legacy_dot_syntax_still_works() {
     typecheck_program("def to_i(x: f32) i32 = i32.f32(x)");
@@ -3152,12 +3111,9 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 
 #[test]
 fn filter_into_reduce_typechecks() {
-    // Canonical "filter then size-polymorphic consumer" pattern. With
-    // filter's old `Composite` pinning the consumer (reduce) was
-    // specialized against Composite — but at EGIR time the producer
-    // chose Bounded/View, mismatching. With Abstract, reduce's
-    // signature stays variant-polymorphic and the producer-side
-    // resolution is what fixes the runtime representation.
+    // Canonical filter-to-size-polymorphic-consumer pattern. Abstract keeps
+    // reduce's signature variant-polymorphic until producer-side
+    // representation selection chooses Bounded or View.
     typecheck_program(
         r#"
 #[compute]
@@ -3176,7 +3132,7 @@ fn filter_array_and_its_length_from_one_entry() {
     // body's inferred type is a bare `Array[u32, abstract, #skolem, _]`. The
     // declared `?k. (...)` return is *packed*: its bound `k` instantiates to a
     // fresh variable that unifies with the skolem, so one entry can emit both
-    // the compacted array and its count (no two-entry re-filter workaround).
+    // the compacted array and its count from one entry.
     typecheck_program(
         r#"
 open f32
@@ -3234,10 +3190,8 @@ def bad(x: f32, y: f32) f32 = x ^ y
 
 // ---- Top-level integer constants keep their annotated/suffixed type ----
 //
-// Regression: a top-level `def C: u32 = <lit>` (or any non-i32 integer
-// constant) dropped its type at use sites and defaulted to i32, so using it
-// where a u32 was required failed with "requires same-typed operands, got
-// u32 and i32". Float constants were unaffected.
+// A top-level non-i32 integer constant retains its annotated or suffixed type
+// at every use site.
 
 #[test]
 fn top_level_u32_constant_keeps_its_type() {
@@ -3261,14 +3215,8 @@ def use_it(x: i64) i64 = x + BIG
 
 // ---- Functor member-function abstract-type substitution ----
 //
-// Regression: a functor over a module-type with more than one member, whose
-// body calls a member that *consumes* the abstract type (`at(k: key, ...)`),
-// fails to substitute the abstract `key` for that member at instantiation —
-// the argument resolves to the concrete type while the parameter stays
-// abstract ("Function argument type mismatch: expected key, got u32"). A
-// single-member signature, or a functor that never calls the key-consuming
-// member, both type-check fine — so the trigger is the *other* member
-// shifting which signature the abstract type is substituted into.
+// Functor instantiation substitutes an abstract type through every member
+// signature, including a member that consumes it after unrelated members.
 #[test]
 fn functor_substitutes_abstract_type_in_member_call() {
     typecheck_program(

@@ -395,9 +395,8 @@ fn run_pipeline_interactive(
 /// Create wgpu buffers for a set of bindings. Returns a map from binding number
 
 /// Run a compute pipeline as a sequence of dispatches over a shared
-/// binding table. Single-stage and multi-stage pipelines flow through
-/// the same path; the `mp.stages.len() == 1` case covers what used to
-/// be `run_single_compute`.
+/// binding table. Single-stage and multi-stage pipelines use the same
+/// dispatch path.
 fn run_compute(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

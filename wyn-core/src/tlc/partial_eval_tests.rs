@@ -957,15 +957,9 @@ fn test_intrinsic_alias_inlining() {
 // Substitution survives through SOAC residualization
 // =============================================================================
 //
-// Regression: `let m = lit in map(f, m)` — partial_eval evaluates the let-rhs
-// and binds `m` in env, then descends into the body. Hitting the SOAC at
-// `body`, the previous code returned `Value::Unknown(term.clone())` *without
-// substituting let-bound vars into the SOAC's sub-terms*, so the resulting
-// program had a dangling free `Var(m_sym)` inside the SOAC's input expression.
-//
-// The corrected behavior: when residualizing a SOAC (or ArrayExpr), free
-// Vars referring to env-bound symbols must be substituted with the let-rhs
-// term (binder-aware — Lambda params and inner Let-bound names shadow env).
+// When residualizing a SOAC or ArrayExpr, free variables bound in the
+// partial-evaluation environment must be substituted with their let RHS.
+// Lambda parameters and inner let-bound names shadow that environment.
 
 use crate::tlc::{ArrayExpr, SoacBody, SoacOp};
 
