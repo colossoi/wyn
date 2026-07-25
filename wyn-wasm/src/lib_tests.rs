@@ -5,7 +5,7 @@ use super::*;
 /// Compile a Wyn source through the same pipeline used by
 /// `compile_to_wgsl_impl` and return the SSA program so tests can inspect
 /// the interface shape without going through JSON serialization.
-fn compile_to_ssa(source: &str) -> wyn_core::ssa::Program<wyn_core::ssa::stage::Elaborated> {
+fn compile_to_ssa(source: &str) -> wyn_core::ssa::stage::Elaborated {
     let (node_counter, module_manager) = wyn_core::init_compiler().expect("compiler initialization failed");
     let program = wyn_core::parser::parse(source, node_counter, module_manager).expect("parse failed");
     let program = wyn_core::resolve_imports::resolve_imports(program, std::path::Path::new("."))

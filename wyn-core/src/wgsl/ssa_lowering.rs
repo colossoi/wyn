@@ -21,7 +21,7 @@ use crate::error::Result;
 use crate::interface::IoDecoration;
 use crate::ssa::storage_function_variants::StorageFunctionVariants;
 use crate::ssa::types::{
-    EntryPoint, ExecutionModel, FuncBody, Function, InstKind, Program, ValueId, ValueRef, WynInstNode,
+    EntryPoint, ExecutionModel, FuncBody, Function, InstKind, ValueId, ValueRef, WynInstNode,
 };
 use crate::types::TypeExt;
 use crate::BindingRef;
@@ -29,7 +29,7 @@ use crate::BindingRef;
 /// Lower an SSA program to a WGSL module. The module contains all entry
 /// points (distinguished by `@vertex` / `@fragment` / `@compute`
 /// attributes), module-scope types, bindings, and helper functions.
-pub fn lower(program: &Program<crate::ssa::stage::WgslReady>) -> Result<String> {
+pub fn lower(program: &crate::ssa::stage::WgslReady) -> Result<String> {
     let mut ctx = LowerCtx::new(program);
     ctx.lower_program()
 }
@@ -556,7 +556,7 @@ fn is_view_array_ty(ty: &polytype::Type<TypeName>) -> bool {
 }
 
 struct LowerCtx<'a> {
-    program: &'a Program<crate::ssa::stage::WgslReady>,
+    program: &'a crate::ssa::stage::WgslReady,
     function_variants: StorageFunctionVariants,
     current_function_names: LookupMap<String, String>,
     current_storage_accesses: LookupMap<BindingRef, crate::ResourceAccess>,
@@ -607,7 +607,7 @@ struct PcBlock {
 }
 
 impl<'a> LowerCtx<'a> {
-    fn new(program: &'a Program<crate::ssa::stage::WgslReady>) -> Self {
+    fn new(program: &'a crate::ssa::stage::WgslReady) -> Self {
         let function_variants = StorageFunctionVariants::new(program);
         let mut current_storage_accesses = LookupMap::new();
         let mut storage_access_variants = LookupMap::new();

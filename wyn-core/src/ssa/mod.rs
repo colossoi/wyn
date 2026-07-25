@@ -22,13 +22,11 @@ pub mod print;
 pub(crate) mod storage_function_variants;
 pub mod types;
 
-pub use types::{context, stage, Program, Stage};
+pub use types::{context, stage, Program};
 
 /// Validate an elaborated SSA program for SPIR-V and record that proof in its
 /// top-level type.
-pub fn prepare_spirv(
-    program: Program<stage::Elaborated>,
-) -> crate::error::Result<Program<stage::SpirvReady>> {
+pub fn prepare_spirv(program: stage::Elaborated) -> crate::error::Result<stage::SpirvReady> {
     if program.global_context.profile.target == crate::CodegenTarget::Wgsl {
         return Err(crate::err_spirv!(
             "SSA was scheduled for WGSL and cannot be lowered as SPIR-V"
@@ -36,21 +34,19 @@ pub fn prepare_spirv(
     }
     crate::egir::verify_no_abstract::run(&program)?;
     crate::spirv::verify_buffer_layouts::run(&program)?;
-    Ok(program.into_stage())
+    Ok(program.retag())
 }
 
 /// Validate an elaborated SSA program for WGSL and record that proof in its
 /// top-level type.
-pub fn prepare_wgsl(
-    program: Program<stage::Elaborated>,
-) -> crate::error::Result<Program<stage::WgslReady>> {
+pub fn prepare_wgsl(program: stage::Elaborated) -> crate::error::Result<stage::WgslReady> {
     if program.global_context.profile.target == crate::CodegenTarget::Spirv {
         return Err(crate::err_spirv!(
             "SSA was scheduled for SPIR-V and cannot be lowered as WGSL"
         ));
     }
     crate::egir::verify_no_abstract::run(&program)?;
-    Ok(program.into_stage())
+    Ok(program.retag())
 }
 
 #[cfg(test)]

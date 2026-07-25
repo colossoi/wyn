@@ -86,7 +86,7 @@ fn fmt_block(b: BlockId) -> String {
     format!("{:?}", b)
 }
 
-pub fn format_program<S: crate::ssa::Stage>(program: &Program<S>) -> String {
+pub fn format_program<Tag, GlobalContext>(program: &Program<Tag, GlobalContext>) -> String {
     let mut out = String::new();
 
     for func in &program.functions {

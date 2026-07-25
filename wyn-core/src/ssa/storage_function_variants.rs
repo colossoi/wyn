@@ -26,7 +26,7 @@ pub(crate) struct StorageFunctionVariants {
 }
 
 impl StorageFunctionVariants {
-    pub(crate) fn new<S: crate::ssa::Stage>(program: &Program<S>) -> Self {
+    pub(crate) fn new<Tag, GlobalContext>(program: &Program<Tag, GlobalContext>) -> Self {
         let function_indices = program
             .functions
             .iter()
@@ -137,9 +137,9 @@ impl StorageFunctionVariants {
         &self.entry_names[entry]
     }
 
-    pub(crate) fn accesses_for<'a, S: crate::ssa::Stage>(
+    pub(crate) fn accesses_for<'a, Tag, GlobalContext>(
         &'a self,
-        program: &'a Program<S>,
+        program: &'a Program<Tag, GlobalContext>,
         entry: Option<usize>,
     ) -> LookupMap<BindingRef, ResourceAccess> {
         entry

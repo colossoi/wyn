@@ -482,7 +482,7 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //       egir::optimize_semantics(...)     -> Program<Optimized>
 //       egir::plan_logical_resources(...) -> Program<ResourcesAllocated>
 //       egir::plan(..., profile)          -> Program<Planned>
-//       lower_egir_to_ssa(...)            -> ssa::Program<stage::Elaborated>
+//       lower_egir_to_ssa(...)            -> ssa::stage::Elaborated
 //
 // Backend:
 //       lower_ssa_to_spirv(program) | lower_ssa_to_wgsl(program)
@@ -601,7 +601,7 @@ impl LoweringProfile {
 /// Run the physical EGIR passes and construct backend-bound SSA.
 pub fn lower_egir_to_ssa(
     program: egir::program::Program<egir::parallelize::Planned>,
-) -> std::result::Result<ssa::Program<ssa::stage::Elaborated>, ConvertError> {
+) -> std::result::Result<ssa::stage::Elaborated, ConvertError> {
     let program = egir::expand_soacs(program)?;
     let program = egir::materialize_dynamic_extracts(program);
     let program = egir::partially_inline_calls(program)?;
@@ -612,7 +612,7 @@ pub fn lower_egir_to_ssa(
 }
 
 /// Validate and lower elaborated SSA to SPIR-V.
-pub fn lower_ssa_to_spirv(program: ssa::Program<ssa::stage::Elaborated>) -> error::Result<Lowered> {
+pub fn lower_ssa_to_spirv(program: ssa::stage::Elaborated) -> error::Result<Lowered> {
     let program = ssa::prepare_spirv(program)?;
     let spirv = spirv::lower_ssa_program(&program)?;
     Ok(Lowered {
@@ -622,7 +622,7 @@ pub fn lower_ssa_to_spirv(program: ssa::Program<ssa::stage::Elaborated>) -> erro
 }
 
 /// Validate and lower elaborated SSA to WGSL.
-pub fn lower_ssa_to_wgsl(program: ssa::Program<ssa::stage::Elaborated>) -> error::Result<String> {
+pub fn lower_ssa_to_wgsl(program: ssa::stage::Elaborated) -> error::Result<String> {
     let program = ssa::prepare_wgsl(program)?;
     wgsl::lower(&program)
 }
@@ -725,7 +725,7 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::Program<tlc::stage::
 fn ssa_from_reachable(
     program: tlc::Program<tlc::stage::Reachable>,
     profile: LoweringProfile,
-) -> std::result::Result<ssa::Program<ssa::stage::Elaborated>, Box<dyn std::error::Error>> {
+) -> std::result::Result<ssa::stage::Elaborated, Box<dyn std::error::Error>> {
     let program = tlc::infer_input_slice_bounds(program);
     let program = to_egraph(program)?;
     let program = egir::realize_outputs(program)?;
@@ -743,7 +743,7 @@ fn ssa_from_reachable(
 #[cfg(test)]
 pub fn compile_thru_ssa(
     source: &str,
-) -> std::result::Result<ssa::Program<ssa::stage::Elaborated>, Box<dyn std::error::Error>> {
+) -> std::result::Result<ssa::stage::Elaborated, Box<dyn std::error::Error>> {
     ssa_from_reachable(compile_thru_tlc(source)?, LoweringProfile::PORTABLE)
 }
 

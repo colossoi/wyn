@@ -4,7 +4,6 @@
 //! through SSA, and that constant folding in slice indices works.
 
 use crate::error::CompilerError;
-use crate::ssa::types::Program;
 
 /// Helper to run full pipeline through SPIR-V lowering. Discards the
 /// output; only the pipeline succeeding/failing matters.
@@ -13,7 +12,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
 }
 
 /// Helper to run pipeline through SSA.
-fn compile_through_ssa(input: &str) -> Result<Program<crate::ssa::stage::Elaborated>, CompilerError> {
+fn compile_through_ssa(input: &str) -> Result<crate::ssa::stage::Elaborated, CompilerError> {
     crate::compile_thru_ssa(input).map_err(|e| crate::err_spirv!("{}", e))
 }
 

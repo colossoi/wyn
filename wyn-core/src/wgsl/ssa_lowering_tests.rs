@@ -252,7 +252,7 @@ fn type_tuple_distinct_shapes_distinct_structs() {
 fn lower_empty_program_succeeds() {
     // Empty program: no functions, no entries — lower emits just the
     // header comment and returns a string.
-    let program = crate::ssa::types::Program::<crate::ssa::stage::WgslReady>::from_parts(
+    let program = crate::ssa::types::Program::<crate::ssa::stage::WgslReadyTag, _>::from_parts(
         Vec::new(),
         Vec::new(),
         Vec::new(),

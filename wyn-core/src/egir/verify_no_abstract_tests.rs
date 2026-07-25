@@ -35,7 +35,7 @@ fn composite_array_ty() -> Type<TypeName> {
     )
 }
 
-fn empty_program() -> Program {
+fn empty_program() -> crate::ssa::stage::Bare {
     Program::bare(Vec::new(), Vec::new(), Vec::new())
 }
 

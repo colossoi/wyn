@@ -362,7 +362,9 @@ fn entry_binding_from_output(idx: usize, output: &wyn_core::interface::EntryOutp
     }
 }
 
-fn program_interface<S: wyn_core::ssa::Stage>(program: &wyn_core::ssa::Program<S>) -> ProgramInterface {
+fn program_interface<Tag, GlobalContext>(
+    program: &wyn_core::ssa::Program<Tag, GlobalContext>,
+) -> ProgramInterface {
     use wyn_core::flow::ExecutionModel;
     use wyn_core::types::TypeExt;
     let entries = program

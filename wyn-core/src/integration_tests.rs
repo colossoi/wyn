@@ -12,7 +12,7 @@ use crate::tlc::VarRef;
 use crate::SymbolTable;
 
 /// Run source through the pipeline up to SSA.
-fn compile_to_ssa(input: &str) -> Program<crate::ssa::stage::Elaborated> {
+fn compile_to_ssa(input: &str) -> crate::ssa::stage::Elaborated {
     crate::compile_thru_ssa(input).expect("compile to SSA")
 }
 
@@ -37,7 +37,7 @@ fn compile_to_semantic_egir(input: &str) -> crate::egir::program::Program<crate:
 fn lower_semantic_egir(
     allocated: crate::egir::program::Program<crate::egir::ResourcesAllocated>,
     profile: crate::LoweringProfile,
-) -> Program<crate::ssa::stage::Elaborated> {
+) -> crate::ssa::stage::Elaborated {
     let program = crate::egir::plan(allocated, profile).expect("plan semantic EGIR");
     crate::lower_egir_to_ssa(program).expect("lower planned EGIR to SSA")
 }
@@ -3975,7 +3975,7 @@ def f(a: *[8]i32) [8]i32 = map(|x: i32| x + 1, a)
 /// one per allocation; the `InputBuffer` destination should
 /// introduce zero. Aggregating across all bodies sidesteps
 /// inlining choices that move the map's body between functions.
-fn count_uninit_in_program<S: crate::ssa::Stage>(ssa: &Program<S>) -> usize {
+fn count_uninit_in_program<Tag, GlobalContext>(ssa: &Program<Tag, GlobalContext>) -> usize {
     let mut count = 0;
     let bodies = ssa
         .functions
@@ -4240,8 +4240,8 @@ entry frag(c: vec4f32) vec4f32 =
 /// in `ssa.functions` + `ssa.entry_points`. Used by structural-equivalence
 /// tests that need to compare two SSA programs while ignoring value-id
 /// renumbering, block-ordering, and other low-level details.
-fn inst_signature_multiset<S: crate::ssa::Stage>(
-    ssa: &Program<S>,
+fn inst_signature_multiset<Tag, GlobalContext>(
+    ssa: &Program<Tag, GlobalContext>,
 ) -> std::collections::BTreeMap<String, usize> {
     use crate::op::OpTag;
     use crate::ssa::types::InstKind;
@@ -5838,7 +5838,7 @@ fn compile_to_spirv_single_stage(input: &str) -> Result<Vec<u32>, Box<dyn std::e
 }
 
 /// Compile module-bearing source through SSA using the shared frontend.
-fn compile_to_ssa_with_modules(input: &str) -> Program<crate::ssa::stage::Elaborated> {
+fn compile_to_ssa_with_modules(input: &str) -> crate::ssa::stage::Elaborated {
     crate::compile_thru_ssa(input).expect("compile to SSA")
 }
 

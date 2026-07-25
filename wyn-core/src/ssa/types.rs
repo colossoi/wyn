@@ -447,11 +447,6 @@ impl FuncBody {
 // Program-Level Types
 // =============================================================================
 
-/// Global data selected by an SSA program's top-level stage.
-pub trait Stage {
-    type GlobalContext: Clone + std::fmt::Debug;
-}
-
 pub mod context {
     /// Pipeline and planning data carried alongside a backend-bound SSA tree.
     #[derive(Clone, Debug)]
@@ -463,44 +458,32 @@ pub mod context {
 }
 
 pub mod stage {
-    use super::{context::BackendGlobal, Stage};
+    use super::{context::BackendGlobal, Program};
 
     /// Standalone SSA tree without compiler-pipeline context.
-    #[derive(Clone, Copy, Debug, Default)]
-    pub struct Bare;
-
-    impl Stage for Bare {
-        type GlobalContext = ();
-    }
+    #[derive(Clone, Copy, Debug)]
+    pub enum BareTag {}
+    pub type Bare = Program<BareTag, ()>;
 
     /// SSA freshly elaborated from the final physical EGIR program.
-    #[derive(Clone, Copy, Debug, Default)]
-    pub struct Elaborated;
-
-    impl Stage for Elaborated {
-        type GlobalContext = BackendGlobal;
-    }
+    #[derive(Clone, Copy, Debug)]
+    pub enum ElaboratedTag {}
+    pub type Elaborated = Program<ElaboratedTag, BackendGlobal>;
 
     /// SSA validated for SPIR-V lowering.
-    #[derive(Clone, Copy, Debug, Default)]
-    pub struct SpirvReady;
-
-    impl Stage for SpirvReady {
-        type GlobalContext = BackendGlobal;
-    }
+    #[derive(Clone, Copy, Debug)]
+    pub enum SpirvReadyTag {}
+    pub type SpirvReady = Program<SpirvReadyTag, BackendGlobal>;
 
     /// SSA validated for WGSL lowering.
-    #[derive(Clone, Copy, Debug, Default)]
-    pub struct WgslReady;
-
-    impl Stage for WgslReady {
-        type GlobalContext = BackendGlobal;
-    }
+    #[derive(Clone, Copy, Debug)]
+    pub enum WgslReadyTag {}
+    pub type WgslReady = Program<WgslReadyTag, BackendGlobal>;
 }
 
 /// An SSA program — the result of converting TLC to SSA.
 #[derive(Debug, Clone)]
-pub struct Program<S: Stage = stage::Bare> {
+pub struct Program<Tag, GlobalContext> {
     /// Function definitions with their SSA bodies.
     pub functions: Vec<Function>,
     /// Entry point definitions.
@@ -508,33 +491,30 @@ pub struct Program<S: Stage = stage::Bare> {
     /// Program-level constant definitions (zero-arg defs with purely constant bodies).
     /// Emitted once at module scope; functions reference them via `InstKind::Global`.
     pub constants: Vec<Constant>,
-    /// Program-wide pipeline and planning data selected by `S`.
-    pub global_context: S::GlobalContext,
-    stage: std::marker::PhantomData<S>,
+    /// Program-wide pipeline and planning data.
+    pub global_context: GlobalContext,
+    state: std::marker::PhantomData<fn() -> Tag>,
 }
 
-impl<S: Stage> Program<S> {
+impl<Tag, GlobalContext> Program<Tag, GlobalContext> {
     pub(crate) fn from_parts(
         functions: Vec<Function>,
         entry_points: Vec<EntryPoint>,
         constants: Vec<Constant>,
-        global_context: S::GlobalContext,
+        global_context: GlobalContext,
     ) -> Self {
         Self {
             functions,
             entry_points,
             constants,
             global_context,
-            stage: std::marker::PhantomData,
+            state: std::marker::PhantomData,
         }
     }
 
     /// Change only the top-level proof state while preserving the SSA tree and
     /// its program-wide context.
-    pub(crate) fn into_stage<T>(self) -> Program<T>
-    where
-        T: Stage<GlobalContext = S::GlobalContext>,
-    {
+    pub(crate) fn retag<NewTag>(self) -> Program<NewTag, GlobalContext> {
         Program::from_parts(
             self.functions,
             self.entry_points,
@@ -544,12 +524,15 @@ impl<S: Stage> Program<S> {
     }
 }
 
-impl Program<stage::Bare> {
+impl Program<stage::BareTag, ()> {
     pub fn bare(functions: Vec<Function>, entry_points: Vec<EntryPoint>, constants: Vec<Constant>) -> Self {
         Self::from_parts(functions, entry_points, constants, ())
     }
 
-    pub(crate) fn with_context<S: Stage>(self, global_context: S::GlobalContext) -> Program<S> {
+    pub(crate) fn with_context<Tag, GlobalContext>(
+        self,
+        global_context: GlobalContext,
+    ) -> Program<Tag, GlobalContext> {
         Program::from_parts(self.functions, self.entry_points, self.constants, global_context)
     }
 }

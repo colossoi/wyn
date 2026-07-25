@@ -4,7 +4,7 @@
 
 use super::{run, ConversionArenas, Converter};
 use crate::ast::TypeName;
-use crate::ssa::types::{FuncBody, InstKind, Program};
+use crate::ssa::types::{FuncBody, InstKind};
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::VarRef;
 use crate::tlc::{Term, TermKind};
@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 /// through the full EGIR chain (`from_tlc → expand_soacs → optimize_skeleton
 /// → elaborate`) to a `Program`. No `materialize` — tests don't exercise
 /// SPIR-V-specific dynamic-index rewrites.
-fn compile_via_egir(src: &str) -> Program<crate::ssa::stage::Elaborated> {
+fn compile_via_egir(src: &str) -> crate::ssa::stage::Elaborated {
     let tlc = crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(src));
     let program = run(&tlc, crate::IdSource::<u32>::new(), crate::IdSource::new())
         .expect("egir::from_tlc conversion failed");

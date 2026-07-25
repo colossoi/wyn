@@ -35,7 +35,7 @@ use polytype::Type;
 
 pub type Result<T> = std::result::Result<T, CompilerError>;
 
-pub fn run<S: crate::ssa::Stage>(program: &Program<S>) -> Result<()> {
+pub fn run<Tag, GlobalContext>(program: &Program<Tag, GlobalContext>) -> Result<()> {
     for entry in &program.entry_points {
         check_entry(entry)?;
     }

@@ -28,7 +28,7 @@ use crate::ssa::layout::{buffer_array_strides, std430_alignment};
 use crate::ssa::storage_function_variants::StorageFunctionVariants;
 use crate::ssa::types::{
     BlockId, ConstantValue, ControlHeader, EntryPoint, ExecutionModel, FuncBody, Function, InstKind,
-    Program, Terminator, ValueId, ValueRef, WynInstNode,
+    Terminator, ValueId, ValueRef, WynInstNode,
 };
 use crate::types::TypeExt;
 use crate::{bail_spirv, bail_spirv_at, err_spirv, err_spirv_at, types, BindingRef};
@@ -389,7 +389,7 @@ fn storage_image_format_to_spirv(f: crate::pipeline_descriptor::StorageImageForm
 /// Lower an SSA program directly to SPIR-V.
 ///
 /// This is the new direct path: TLC → SSA → SPIR-V, bypassing MIR.
-pub fn lower_ssa_program(program: &Program<crate::ssa::stage::SpirvReady>) -> Result<Vec<u32>> {
+pub fn lower_ssa_program(program: &crate::ssa::stage::SpirvReady) -> Result<Vec<u32>> {
     // Use a thread with larger stack size for complex shaders
     const STACK_SIZE: usize = 16 * 1024 * 1024; // 16MB
 
@@ -416,7 +416,7 @@ pub fn lower_ssa_program(program: &Program<crate::ssa::stage::SpirvReady>) -> Re
     }
 }
 
-fn lower_ssa_program_impl(program: &Program<crate::ssa::stage::SpirvReady>) -> Result<Vec<u32>> {
+fn lower_ssa_program_impl(program: &crate::ssa::stage::SpirvReady) -> Result<Vec<u32>> {
     let mut constructor = Constructor::new();
     let function_variants = StorageFunctionVariants::new(program);
 

@@ -35,9 +35,7 @@ use super::types::*;
 /// Lower the whole EGIR program to SSA. Each per-body EGraph is
 /// elaborated to a `FuncBody`, externs pass through, and the result is
 /// assembled into a backend-bound SSA program.
-pub fn run(
-    inner: EgirProgram<super::resource_erasure::ResourcesErased>,
-) -> crate::ssa::Program<crate::ssa::stage::Elaborated> {
+pub fn run(inner: EgirProgram<super::resource_erasure::ResourcesErased>) -> crate::ssa::stage::Elaborated {
     let super::ir::Program {
         functions,
         externs,
@@ -95,7 +93,7 @@ pub fn run(
         effect_ids: _,
         semantic_ids: _,
     } = global_context;
-    program.with_context::<crate::ssa::stage::Elaborated>(crate::ssa::context::BackendGlobal {
+    program.with_context::<crate::ssa::stage::ElaboratedTag, _>(crate::ssa::context::BackendGlobal {
         pipeline,
         profile,
         kernel_plan,
