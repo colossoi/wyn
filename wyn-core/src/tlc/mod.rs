@@ -235,7 +235,7 @@ pub trait TermRewriter<C: Payload, S: Payload> {
 /// The phase-varying data structures embedded in the TLC tree.
 ///
 /// Every associated type corresponds to an actual field stored on a tree node.
-/// Structural invariants and proof-only state belong to [`Stage`] or to the
+/// Structural invariants and proof-only state belong to [`Program`] or to the
 /// concrete node shape, not to empty per-node marker payloads.
 pub trait Family {
     type DefinitionData: Clone + std::fmt::Debug;
@@ -244,13 +244,24 @@ pub trait Family {
     type SoacBodyData: Payload;
 }
 
-/// One externally visible TLC pipeline checkpoint.
-///
-/// `Program<S>` is the compiler state. The stage selects both the recursive
-/// tree family and the program-wide context available at that checkpoint.
-pub trait Stage {
-    type Family: Family;
-    type GlobalContext: std::fmt::Debug;
+/// A transparent description of the data physically stored in a TLC tree.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TreeFamily<DefinitionData, EntryData, ClosureData, SoacBodyData>(
+    std::marker::PhantomData<fn() -> (DefinitionData, EntryData, ClosureData, SoacBodyData)>,
+);
+
+impl<DefinitionData, EntryData, ClosureData, SoacBodyData> Family
+    for TreeFamily<DefinitionData, EntryData, ClosureData, SoacBodyData>
+where
+    DefinitionData: Clone + std::fmt::Debug,
+    EntryData: Clone + std::fmt::Debug,
+    ClosureData: Payload,
+    SoacBodyData: Payload,
+{
+    type DefinitionData = DefinitionData;
+    type EntryData = EntryData;
+    type ClosureData = ClosureData;
+    type SoacBodyData = SoacBodyData;
 }
 
 /// Program-wide context selected by TLC pipeline checkpoints.
@@ -1010,8 +1021,8 @@ pub struct Def<F: Family> {
 
 /// A TLC program (collection of definitions).
 #[derive(Debug, Clone)]
-pub struct Program<S: Stage> {
-    pub defs: Vec<Def<S::Family>>,
+pub struct Program<Tag, F: Family, GlobalContext> {
+    pub defs: Vec<Def<F>>,
     /// Symbol table: maps SymbolId to original name (for errors/debugging).
     pub symbols: SymbolTable,
     /// Canonical function name → def SymbolId mapping.
@@ -1020,17 +1031,18 @@ pub struct Program<S: Stage> {
     /// The sole allocator for terms added to this program.
     term_ids: TermIdSource,
     /// Program-wide state available at this exact pipeline checkpoint.
-    pub global_context: S::GlobalContext,
+    pub global_context: GlobalContext,
+    pub(crate) state: std::marker::PhantomData<fn() -> Tag>,
 }
 
-impl<S: Stage> Program<S> {
+impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
     /// Assemble a TLC program from nodes and the allocator that created them.
     pub(crate) fn from_parts(
-        defs: Vec<Def<S::Family>>,
+        defs: Vec<Def<F>>,
         symbols: SymbolTable,
         def_syms: LookupMap<String, SymbolId>,
         term_ids: TermIdSource,
-        global_context: S::GlobalContext,
+        global_context: GlobalContext,
     ) -> Self {
         Self {
             defs,
@@ -1038,6 +1050,7 @@ impl<S: Stage> Program<S> {
             def_syms,
             term_ids,
             global_context,
+            state: std::marker::PhantomData,
         }
     }
 
@@ -1051,10 +1064,7 @@ impl<S: Stage> Program<S> {
     ///
     /// Read-only validation passes use this after proving their invariant. No
     /// tree nodes, vectors, symbol tables, or allocator state are rebuilt.
-    pub fn into_stage<T>(self) -> Program<T>
-    where
-        T: Stage<Family = S::Family, GlobalContext = S::GlobalContext>,
-    {
+    pub fn retag<NewTag>(self) -> Program<NewTag, F, GlobalContext> {
         self.map_global_context(std::convert::identity)
     }
 
@@ -1064,19 +1074,17 @@ impl<S: Stage> Program<S> {
     /// This is the consuming transition for passes that update or narrow only
     /// global state. The definition vector, definitions, and term trees all
     /// move directly into the destination program.
-    pub fn map_global_context<T>(
+    pub fn map_global_context<NewTag, NewGlobalContext>(
         self,
-        map_global: impl FnOnce(S::GlobalContext) -> T::GlobalContext,
-    ) -> Program<T>
-    where
-        T: Stage<Family = S::Family>,
-    {
+        map_global: impl FnOnce(GlobalContext) -> NewGlobalContext,
+    ) -> Program<NewTag, F, NewGlobalContext> {
         let Program {
             defs,
             symbols,
             def_syms,
             term_ids,
             global_context,
+            state: _,
         } = self;
         Program {
             defs,
@@ -1084,6 +1092,7 @@ impl<S: Stage> Program<S> {
             def_syms,
             term_ids,
             global_context: map_global(global_context),
+            state: std::marker::PhantomData,
         }
     }
 
@@ -1118,29 +1127,26 @@ pub struct ProgramParts<F: Family> {
 
 impl<F: Family> ProgramParts<F> {
     /// Combine with a symbol table to create a complete Program.
-    pub fn with_symbols<S>(
+    pub fn with_symbols<Tag, GlobalContext>(
         self,
         symbols: SymbolTable,
         def_syms: LookupMap<String, SymbolId>,
         term_ids: TermIdSource,
-        global_context: S::GlobalContext,
-    ) -> Program<S>
-    where
-        S: Stage<Family = F>,
-    {
+        global_context: GlobalContext,
+    ) -> Program<Tag, F, GlobalContext> {
         Program::from_parts(self.defs, symbols, def_syms, term_ids, global_context)
     }
 }
 
-impl<S: Stage> Program<S> {
+impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
     /// Infallible form of [`Program::try_rebuild`].
-    pub fn rebuild<T>(
+    pub fn rebuild<NewTag, NewFamily, NewGlobalContext>(
         self,
-        map_global: impl FnOnce(S::GlobalContext) -> T::GlobalContext,
-        mut map_def: impl FnMut(Def<S::Family>, &mut TermIdSource) -> Def<T::Family>,
-    ) -> Program<T>
+        map_global: impl FnOnce(GlobalContext) -> NewGlobalContext,
+        mut map_def: impl FnMut(Def<F>, &mut TermIdSource) -> Def<NewFamily>,
+    ) -> Program<NewTag, NewFamily, NewGlobalContext>
     where
-        T: Stage,
+        NewFamily: Family,
     {
         let Program {
             defs,
@@ -1148,6 +1154,7 @@ impl<S: Stage> Program<S> {
             def_syms,
             mut term_ids,
             global_context,
+            state: _,
         } = self;
         Program {
             defs: defs.into_iter().map(|def| map_def(def, &mut term_ids)).collect(),
@@ -1155,6 +1162,7 @@ impl<S: Stage> Program<S> {
             def_syms,
             term_ids,
             global_context: map_global(global_context),
+            state: std::marker::PhantomData,
         }
     }
 
@@ -1165,13 +1173,13 @@ impl<S: Stage> Program<S> {
     /// boundary: global data and definition reconstruction. A definition
     /// mapper can move unchanged subtrees directly whenever the source and
     /// destination field types agree.
-    pub fn try_rebuild<T, E>(
+    pub fn try_rebuild<NewTag, NewFamily, NewGlobalContext, E>(
         self,
-        map_global: impl FnOnce(S::GlobalContext) -> Result<T::GlobalContext, E>,
-        mut map_def: impl FnMut(Def<S::Family>, &mut TermIdSource) -> Result<Def<T::Family>, E>,
-    ) -> Result<Program<T>, E>
+        map_global: impl FnOnce(GlobalContext) -> Result<NewGlobalContext, E>,
+        mut map_def: impl FnMut(Def<F>, &mut TermIdSource) -> Result<Def<NewFamily>, E>,
+    ) -> Result<Program<NewTag, NewFamily, NewGlobalContext>, E>
     where
-        T: Stage,
+        NewFamily: Family,
     {
         let Program {
             defs,
@@ -1179,6 +1187,7 @@ impl<S: Stage> Program<S> {
             def_syms,
             mut term_ids,
             global_context,
+            state: _,
         } = self;
         let global_context = map_global(global_context)?;
         let defs =
@@ -1189,6 +1198,7 @@ impl<S: Stage> Program<S> {
             def_syms,
             term_ids,
             global_context,
+            state: std::marker::PhantomData,
         })
     }
 }

@@ -60,13 +60,15 @@ impl TreeNode {
 mod tlc_tree {
     use super::TreeNode;
     use wyn_core::ast::TypeName;
-    use wyn_core::tlc::{Def, DefMeta, Family, LoopKind, Payload, Program, Stage, Term, TermKind};
+    use wyn_core::tlc::{Def, DefMeta, Family, LoopKind, Payload, Program, Term, TermKind};
 
     fn fmt_ty(ty: &polytype::Type<TypeName>) -> String {
         wyn_core::diags::format_type(ty)
     }
 
-    pub fn program_to_tree<S: Stage>(program: &Program<S>) -> Vec<TreeNode> {
+    pub fn program_to_tree<Tag, F: Family, GlobalContext>(
+        program: &Program<Tag, F, GlobalContext>,
+    ) -> Vec<TreeNode> {
         program.defs.iter().map(def_to_tree).collect()
     }
 

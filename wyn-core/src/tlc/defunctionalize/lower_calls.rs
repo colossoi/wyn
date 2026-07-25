@@ -25,10 +25,9 @@ pub enum ClosureCallsLowerError {
     },
 }
 
-pub fn verify_closure_calls_lowered<S>(program: &Program<S>) -> Result<(), ClosureCallsLowerError>
-where
-    S: crate::tlc::Stage<Family = ClosureConverted>,
-{
+pub fn verify_closure_calls_lowered<Tag, GlobalContext>(
+    program: &Program<Tag, ClosureConverted, GlobalContext>,
+) -> Result<(), ClosureCallsLowerError> {
     let arities: LookupMap<SymbolId, usize> =
         program.defs.iter().map(|def| (def.name, def.arity)).collect();
     for def in &program.defs {
@@ -141,7 +140,7 @@ impl TermRewriter<ExplicitClosurePayload, ExplicitCapturesPayload> for CallLower
     }
 }
 
-pub(super) fn run(program: &mut Program<Defunctionalized>) {
+pub(super) fn run(program: &mut Defunctionalized) {
     let mut lowerer = CallLowerer {
         term_ids: &mut program.term_ids,
     };

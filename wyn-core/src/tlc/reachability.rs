@@ -6,23 +6,18 @@
 
 use super::context::BackendGlobal;
 use super::ownership::OwnershipApplied;
-use super::{Program, Stage};
 
 /// TLC containing only definitions reachable from an entry point or extern.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Reachable;
-
-impl Stage for Reachable {
-    type Family = super::defunctionalize::ClosureConverted;
-    type GlobalContext = BackendGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum ReachableTag {}
+pub type Reachable = super::Program<ReachableTag, super::defunctionalize::ClosureConverted, BackendGlobal>;
 
 /// Eliminate unreachable definitions before semantic EGIR conversion.
 ///
 /// Definition bodies are not rewritten: live definitions and their term IDs
 /// move intact into the resulting program.
-pub fn filter_reachable(program: Program<OwnershipApplied>) -> Program<Reachable> {
-    let mut program = program.map_global_context::<Reachable>(|global| BackendGlobal {
+pub fn filter_reachable(program: OwnershipApplied) -> Reachable {
+    let mut program = program.map_global_context::<ReachableTag, _>(|global| BackendGlobal {
         auto_storage_binding_ids: global.auto_storage_binding_ids,
     });
 

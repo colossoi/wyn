@@ -25,13 +25,10 @@ use crate::module_manager::ModuleManager;
 use crate::scope::{for_each_pattern_name, ScopeStack};
 
 /// AST after module-qualified value names have been resolved.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct NamesResolved;
-
-impl crate::ast::Stage for NamesResolved {
-    type Family = crate::elaborate_modules::ModulesElaboratedFamily;
-    type GlobalContext = ModuleManager;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum NamesResolvedTag {}
+pub type NamesResolved =
+    Program<NamesResolvedTag, crate::elaborate_modules::ModulesElaboratedFamily, ModuleManager>;
 
 /// Insert every name bound by `pattern` into `scope`.
 fn collect_pattern_bindings<H, A>(pattern: &crate::ast::Pattern<H, A>, scope: &mut ScopeStack<()>)
@@ -263,13 +260,12 @@ impl<'a> ResolveContext for ProgramResolver<'a> {
 }
 
 /// Resolve qualified field accesses while consuming the old program stage.
-pub fn resolve_names(
-    program: Program<crate::elaborate_modules::ModulesElaborated>,
-) -> Program<NamesResolved> {
+pub fn resolve_names(program: crate::elaborate_modules::ModulesElaborated) -> NamesResolved {
     let Program {
         mut declarations,
         node_ids,
         global_context,
+        state: _,
     } = program;
     let context = ProgramResolver {
         known_modules: global_context.known_module_names(),
@@ -292,6 +288,7 @@ pub fn resolve_names(
         declarations,
         node_ids,
         global_context,
+        state: std::marker::PhantomData,
     }
 }
 
@@ -428,7 +425,7 @@ impl NameResolution {
 /// `module_manager::elaborate_decl_signature`), so per-instance bodies
 /// have their own NodeId space and the previous collision risk is gone.
 pub fn build_name_resolution(
-    program: &Program<crate::resolve_opens::OpensResolved>,
+    program: &crate::resolve_opens::OpensResolved,
     module_manager: &ModuleManager,
     catalog: &BuiltinCatalog,
 ) -> NameResolution {

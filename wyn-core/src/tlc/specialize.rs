@@ -5,7 +5,7 @@
 
 use super::data::Empty;
 use super::soa::SoaNormalized;
-use super::{Program, RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter, VarRef};
+use super::{RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter, VarRef};
 use crate::ast::TypeName;
 use crate::builtins::catalog::KnownBuiltinIds;
 use crate::builtins::{catalog, BuiltinId};
@@ -13,7 +13,7 @@ use crate::types::TypeExt;
 use crate::SymbolTable;
 use polytype::Type;
 
-pub(super) fn run(program: &mut Program<SoaNormalized>) {
+pub(super) fn run(program: &mut SoaNormalized) {
     let (defs, symbols, term_ids) = (&mut program.defs, &program.symbols, &mut program.term_ids);
     let mut specializer = IntrinsicSpecializer { symbols, term_ids };
     for def in defs {

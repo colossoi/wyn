@@ -43,28 +43,22 @@ use crate::types::TypeExt;
 use crate::SymbolId;
 
 use super::{
-    data, extract_lambda_params_ref, Def, DefMeta, EntryPoint, Payload, Program, Term, TermKind,
-    TermVisitor, VarRef, WalkDecision,
+    data, extract_lambda_params_ref, Def, DefMeta, EntryPoint, Payload, Term, TermKind, TermVisitor,
+    VarRef, WalkDecision,
 };
 
 /// Backend-ready TLC with input bounds embedded in entry definitions.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct InputBounded;
+pub type InputBounded = super::TreeFamily<
+    (),
+    super::data::EntryInputBounds,
+    super::data::ExplicitClosurePayload,
+    super::data::ExplicitCapturesPayload,
+>;
 
-impl super::Family for InputBounded {
-    type DefinitionData = ();
-    type EntryData = super::data::EntryInputBounds;
-    type ClosureData = super::data::ExplicitClosurePayload;
-    type SoacBodyData = super::data::ExplicitCapturesPayload;
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct InputSliceBoundsInferred;
-
-impl super::Stage for InputSliceBoundsInferred {
-    type Family = InputBounded;
-    type GlobalContext = super::context::BackendGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum InputSliceBoundsInferredTag {}
+pub type InputSliceBoundsInferred =
+    super::Program<InputSliceBoundsInferredTag, InputBounded, super::context::BackendGlobal>;
 
 type SourceStage = super::stage::Reachable;
 type EntryPatches = LookupMap<SymbolId, data::EntryInputBounds>;
@@ -72,9 +66,9 @@ type EntryPatches = LookupMap<SymbolId, data::EntryInputBounds>;
 /// Infer every entry patch, then consume the old phase into the phase whose
 /// entry nodes own those bounds. Both families select the same closure and
 /// SOAC-body variables, so every term body moves without traversal.
-pub fn infer_input_slice_bounds(program: Program<SourceStage>) -> Program<InputSliceBoundsInferred> {
+pub fn infer_input_slice_bounds(program: SourceStage) -> InputSliceBoundsInferred {
     let mut patches = analyze(&program);
-    let rebuilt = program.rebuild::<InputSliceBoundsInferred>(std::convert::identity, |def, _term_ids| {
+    let rebuilt = program.rebuild(std::convert::identity, |def, _term_ids| {
         attach_entry_bounds(def, &mut patches)
     });
     assert!(
@@ -87,7 +81,7 @@ pub fn infer_input_slice_bounds(program: Program<SourceStage>) -> Program<InputS
 
 /// Build one patch for every entry, including entries for which no finite
 /// minimum can be inferred. Definition `SymbolId`s are globally unique.
-fn analyze(program: &Program<SourceStage>) -> EntryPatches {
+fn analyze(program: &SourceStage) -> EntryPatches {
     let mut out = EntryPatches::new();
     for def in &program.defs {
         let DefMeta::EntryPoint(entry) = &def.meta else {

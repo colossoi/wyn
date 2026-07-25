@@ -16,19 +16,15 @@ use super::data::Empty;
 use super::monomorphize::{Monomorphic, Monomorphized};
 use super::{
     clone_term_with_fresh_ids, curried_function_type, extract_lambda_params_ref, rebuild_nested_lam, Def,
-    DefMeta, Program, RewriteDecision, SoacOp, Term, TermId, TermIdSource, TermKind, TermRewriter, VarRef,
+    DefMeta, RewriteDecision, SoacOp, Term, TermId, TermIdSource, TermKind, TermRewriter, VarRef,
 };
 use crate::ast::TypeName;
 use crate::{LookupMap, SymbolId, SymbolTable};
 use polytype::Type;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RepSpecialized;
-
-impl super::Stage for RepSpecialized {
-    type Family = Monomorphic;
-    type GlobalContext = super::context::RewriteGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum RepSpecializedTag {}
+pub type RepSpecialized = super::Program<RepSpecializedTag, Monomorphic, super::context::RewriteGlobal>;
 
 /// Concrete array representation selected from a known producer.
 ///
@@ -98,7 +94,7 @@ struct RepSpecializer<'a> {
 
 /// Specialize representation-polymorphic call edges and consume the
 /// monomorphic checkpoint into the representation-specialized checkpoint.
-pub fn rep_specialize(mut program: Program<Monomorphized>) -> Program<RepSpecialized> {
+pub fn rep_specialize(mut program: Monomorphized) -> RepSpecialized {
     // Only definitions with a specializable parameter need a retained
     // template. Ordinary definitions can be rewritten in place without
     // cloning their trees.
@@ -125,7 +121,7 @@ pub fn rep_specialize(mut program: Program<Monomorphized>) -> Program<RepSpecial
     };
 
     program.defs.extend(new_defs);
-    program.into_stage()
+    program.retag()
 }
 
 fn is_specialization_template(def: &Def<Monomorphic>) -> bool {

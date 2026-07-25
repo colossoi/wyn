@@ -115,7 +115,7 @@ enum DriverError {
 }
 
 struct FrontendFile {
-    program: wyn_core::ast::Program<wyn_core::ast_type_holes::HolesResolved>,
+    program: wyn_core::ast_type_holes::HolesResolved,
 }
 
 fn type_check_frontend_file(

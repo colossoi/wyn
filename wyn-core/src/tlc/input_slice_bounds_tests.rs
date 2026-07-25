@@ -2,14 +2,14 @@
 //! on `input_slice_bounds` for the contract.
 
 use crate::pipeline_descriptor::BufferLen;
-use crate::tlc::{self, DefMeta, Program};
+use crate::tlc::{self, DefMeta};
 
-fn program_from(src: &str) -> Program<tlc::stage::InputSliceBoundsInferred> {
+fn program_from(src: &str) -> tlc::stage::InputSliceBoundsInferred {
     tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(src))
 }
 
 fn bounds_for_entry<'a>(
-    program: &'a Program<tlc::stage::InputSliceBoundsInferred>,
+    program: &'a tlc::stage::InputSliceBoundsInferred,
     name: &str,
 ) -> &'a crate::LookupMap<crate::SymbolId, BufferLen> {
     let def = program

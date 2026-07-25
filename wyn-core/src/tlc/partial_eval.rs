@@ -20,17 +20,14 @@ use polytype::Type;
 use spirv::GLOp;
 
 /// TLC after partial evaluation.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PartialEvaled;
-
-impl super::Stage for PartialEvaled {
-    type Family = super::pin_entry_buffers::Polymorphic;
-    type GlobalContext = super::context::RewriteGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum PartialEvaledTag {}
+pub type PartialEvaled =
+    super::Program<PartialEvaledTag, super::pin_entry_buffers::Polymorphic, super::context::RewriteGlobal>;
 
 /// Consume a validated TLC program and rebuild its definitions from the
 /// evaluator's residual terms.
-pub fn partial_eval(program: Program<OwnershipValidated>) -> Program<PartialEvaled> {
+pub fn partial_eval(program: OwnershipValidated) -> PartialEvaled {
     program.assert_flat_apps();
     let Program {
         defs,
@@ -38,6 +35,7 @@ pub fn partial_eval(program: Program<OwnershipValidated>) -> Program<PartialEval
         def_syms,
         mut term_ids,
         global_context,
+        state: _,
     } = program;
     let definitions = defs
         .iter()

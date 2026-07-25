@@ -1,6 +1,6 @@
 use crate::ast::{BinaryOp, Span, TypeName};
 use crate::tlc::{
-    Def, DefMeta, Lambda, LoopKind, Payload, Program, Stage, Term, TermId, TermIdSource, TermKind, VarRef,
+    Def, DefMeta, Family, Lambda, LoopKind, Payload, Program, Term, TermId, TermIdSource, TermKind, VarRef,
 };
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -9,8 +9,8 @@ use std::collections::HashMap;
 /// End-to-end runner for the three internal defunctionalization algorithms. Mirrors what
 /// `tlc::defunctionalize` does in production.
 fn defunctionalize(
-    program: Program<crate::tlc::stage::RuntimeIndexProducersFloated>,
-) -> Program<crate::tlc::stage::Defunctionalized> {
+    program: crate::tlc::stage::RuntimeIndexProducersFloated,
+) -> crate::tlc::stage::Defunctionalized {
     super::defunctionalize(program)
 }
 
@@ -166,7 +166,7 @@ fn print_term<C: Payload, S: Payload>(term: &Term<C, S>, symbols: &SymbolTable, 
 
 /// Helper to print all defs in a program
 #[allow(dead_code)]
-fn print_program<S: Stage>(program: &Program<S>) -> String {
+fn print_program<Tag, F: Family, GlobalContext>(program: &Program<Tag, F, GlobalContext>) -> String {
     let unknown = "<unknown>".to_string();
     let mut out = String::new();
     for def in &program.defs {

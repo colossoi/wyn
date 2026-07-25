@@ -204,7 +204,7 @@ impl AstFormatter {
     }
 
     /// Format a program and return the formatted string.
-    pub fn format_program(program: &Program<Parsed>) -> String {
+    pub fn format_program(program: &Parsed) -> String {
         let mut formatter = AstFormatter::new();
         for decl in &program.declarations {
             formatter.write_declaration(decl);
@@ -214,7 +214,7 @@ impl AstFormatter {
     }
 
     /// Format a program with node IDs and return the formatted string.
-    pub fn format_program_with_ids(program: &Program<Parsed>) -> String {
+    pub fn format_program_with_ids(program: &Parsed) -> String {
         let mut formatter = AstFormatter::with_node_ids();
         for decl in &program.declarations {
             formatter.write_declaration(decl);
@@ -762,7 +762,7 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::tlc;
 
-impl<S: tlc::Stage> Display for tlc::Program<S> {
+impl<Tag, F: tlc::Family, GlobalContext> Display for tlc::Program<Tag, F, GlobalContext> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         for (i, def) in self.defs.iter().enumerate() {
             if i > 0 {

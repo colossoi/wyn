@@ -59,7 +59,7 @@ fn make_program(
     name_sym: SymbolId,
     body: Term<Empty, Empty>,
     (symbols, term_ids): (SymbolTable, TermIdSource),
-) -> Program<OwnershipValidated> {
+) -> OwnershipValidated {
     Program::from_parts(
         vec![Def {
             data: PolymorphicDefinition { scheme: None },

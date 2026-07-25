@@ -15,26 +15,19 @@ mod pattern;
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ParsedFamily;
-
-impl Family for ParsedFamily {
-    type Tree = SourceTree;
-    type DefinitionData = DefinitionSyntax;
-    type EntryData = EntrySyntax;
-    type EntryParameterAttribute = Attribute;
-    type ExternData = ExternSyntax;
-    type FrontendDeclaration = ParsedFrontend<NestedDeclaration>;
-}
+pub type ParsedFamily = AstFamily<
+    SourceTree,
+    DefinitionSyntax,
+    EntrySyntax,
+    Attribute,
+    ExternSyntax,
+    ParsedFrontend<NestedDeclaration>,
+>;
 
 /// AST produced directly by parsing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Parsed;
-
-impl Stage for Parsed {
-    type Family = ParsedFamily;
-    type GlobalContext = crate::module_manager::ModuleManager;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum ParsedTag {}
+pub type Parsed = Program<ParsedTag, ParsedFamily, crate::module_manager::ModuleManager>;
 
 /// Parse source into the first phase-typed AST while transferring ownership of
 /// the sole node allocator and module state into the resulting program.
@@ -42,7 +35,7 @@ pub fn parse(
     source: &str,
     mut node_ids: NodeCounter,
     module_manager: crate::module_manager::ModuleManager,
-) -> Result<Program<Parsed>> {
+) -> Result<Parsed> {
     let tokens = crate::lexer::tokenize(source).map_err(|error| err_parse!("{}", error))?;
     let declarations = {
         let mut parser = Parser::new(tokens, &mut node_ids);
@@ -52,6 +45,7 @@ pub fn parse(
         declarations,
         node_ids,
         global_context: module_manager,
+        state: std::marker::PhantomData,
     })
 }
 

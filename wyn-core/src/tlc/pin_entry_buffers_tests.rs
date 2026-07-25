@@ -6,7 +6,7 @@ use polytype::Type;
 
 /// Compile `src` through type-check → TLC → region-pinning and return the
 /// pinned program.
-fn pin(src: &str) -> Program<tlc::stage::BuffersPinned> {
+fn pin(src: &str) -> tlc::stage::BuffersPinned {
     let type_checked = crate::compile_thru_frontend(src).expect("type_check");
     let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     let program = tlc::lower_from_ast(program);
@@ -14,7 +14,7 @@ fn pin(src: &str) -> Program<tlc::stage::BuffersPinned> {
 }
 
 /// The buffer slot of the sole entry's `param_index`-th flattened param.
-fn entry_param_buffer(program: &Program<tlc::stage::BuffersPinned>, param_index: usize) -> Type<TypeName> {
+fn entry_param_buffer(program: &tlc::stage::BuffersPinned, param_index: usize) -> Type<TypeName> {
     let def = program
         .defs
         .iter()

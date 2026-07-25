@@ -9,37 +9,31 @@ use super::defunctionalize::{ClosureConverted, Defunctionalized};
 use super::rep_specialize::RepSpecialized;
 use super::VarRef;
 use super::{
-    clone_term_with_fresh_ids, extract_lambda_params, term_size, Def, DefMeta, Payload, Program,
-    RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter,
+    clone_term_with_fresh_ids, extract_lambda_params, term_size, Def, DefMeta, Payload, RewriteDecision,
+    Term, TermId, TermIdSource, TermKind, TermRewriter,
 };
 use crate::ast::{Span, TypeName};
 use crate::{LookupMap, LookupSet};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SmallInlined;
+#[derive(Debug, Clone, Copy)]
+pub enum SmallInlinedTag {}
+pub type SmallInlined =
+    super::Program<SmallInlinedTag, super::monomorphize::Monomorphic, super::context::RewriteGlobal>;
 
-impl super::Stage for SmallInlined {
-    type Family = super::monomorphize::Monomorphic;
-    type GlobalContext = super::context::RewriteGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum SoacHelpersInlinedTag {}
+pub type SoacHelpersInlined =
+    super::Program<SoacHelpersInlinedTag, super::monomorphize::Monomorphic, super::context::RewriteGlobal>;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SoacHelpersInlined;
-
-impl super::Stage for SoacHelpersInlined {
-    type Family = super::monomorphize::Monomorphic;
-    type GlobalContext = super::context::RewriteGlobal;
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GeneratedLambdasFolded;
-
-impl super::Stage for GeneratedLambdasFolded {
-    type Family = super::defunctionalize::ClosureConverted;
-    type GlobalContext = super::context::PostClosureGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum GeneratedLambdasFoldedTag {}
+pub type GeneratedLambdasFolded = super::Program<
+    GeneratedLambdasFoldedTag,
+    super::defunctionalize::ClosureConverted,
+    super::context::PostClosureGlobal,
+>;
 
 /// Maximum term size for a user function to be inlined.
 const INLINE_SIZE_THRESHOLD: usize = 30;
@@ -56,7 +50,7 @@ const INLINE_SIZE_THRESHOLD: usize = 30;
 /// SOAC helper) fully expand: one round inlines `center`, the next sees
 /// `sum` calls inside the freshly-expanded clump body and inlines those
 /// too.
-pub fn force_inline_soac_helpers(mut program: Program<SmallInlined>) -> Program<SoacHelpersInlined> {
+pub fn force_inline_soac_helpers(mut program: SmallInlined) -> SoacHelpersInlined {
     force_inline_array_work_helpers_to_fixpoint(&mut program);
     debug_assert!(
         verify_array_work_helpers_inlined(&program).is_ok(),
@@ -64,7 +58,7 @@ pub fn force_inline_soac_helpers(mut program: Program<SmallInlined>) -> Program<
          semantic EGIR would need an interprocedural path: {:?}",
         verify_array_work_helpers_inlined(&program).err(),
     );
-    program.into_stage()
+    program.retag()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -77,9 +71,7 @@ struct CalledArrayWorkHelper {
 /// source-level inlining as the one boundary operation that exposes every
 /// array-work helper before conversion, then let EGIR own all
 /// producer/consumer and scheduling decisions.
-fn verify_array_work_helpers_inlined(
-    program: &Program<SmallInlined>,
-) -> Result<(), Vec<CalledArrayWorkHelper>> {
+fn verify_array_work_helpers_inlined(program: &SmallInlined) -> Result<(), Vec<CalledArrayWorkHelper>> {
     let array_work_bearing: LookupSet<SymbolId> =
         program.defs.iter().filter(|def| contains_array_work(&def.body)).map(|def| def.name).collect();
     let mut violations = Vec::new();
@@ -114,7 +106,7 @@ fn collect_called_array_work_helpers(
     });
 }
 
-fn force_inline_array_work_helpers_to_fixpoint(program: &mut Program<SmallInlined>) {
+fn force_inline_array_work_helpers_to_fixpoint(program: &mut SmallInlined) {
     // Bound iterations to guard against pathological recursion through
     // hand-crafted call graphs; typical wyn helper depth is 2–3.
     for _ in 0..8 {
@@ -139,7 +131,7 @@ fn force_inline_array_work_helpers_to_fixpoint(program: &mut Program<SmallInline
 }
 
 fn build_array_work_helper_candidates(
-    program: &Program<SmallInlined>,
+    program: &SmallInlined,
 ) -> LookupMap<SymbolId, InlineBody<Empty, Empty>> {
     let mut candidates = LookupMap::new();
     for def in &program.defs {
@@ -242,7 +234,7 @@ fn is_length_intrinsic_call<C: Payload, S: Payload>(term: &Term<C, S>) -> bool {
 }
 
 fn any_def_calls_candidate(
-    program: &Program<SmallInlined>,
+    program: &SmallInlined,
     candidates: &LookupMap<SymbolId, InlineBody<Empty, Empty>>,
 ) -> bool {
     fn walk(term: &Term<Empty, Empty>, cs: &LookupMap<SymbolId, InlineBody<Empty, Empty>>) -> bool {
@@ -272,12 +264,12 @@ fn any_def_calls_candidate(
 /// - Constants (arity-0 defs, substituted at Var reference sites)
 ///
 /// Skips `LiftedLambda` defs (SOAC bodies) — handled by `inline()`.
-pub fn inline_small(mut program: Program<RepSpecialized>) -> Program<SmallInlined> {
+pub fn inline_small(mut program: RepSpecialized) -> SmallInlined {
     let all_constants = find_all_constants(&program);
     let mut small_candidates = find_small_candidates(&program.defs, &program.symbols);
 
     if small_candidates.is_empty() && all_constants.is_empty() {
-        return program.into_stage();
+        return program.retag();
     }
 
     // Inline constants into small candidate bodies so that when we inline
@@ -300,11 +292,11 @@ pub fn inline_small(mut program: Program<RepSpecialized>) -> Program<SmallInline
     });
 
     super::dce::eliminate_unreachable_defs(&mut program.defs);
-    program.into_stage()
+    program.retag()
 }
 
 /// Inline compiler-generated lifted-lambda defs (`DefMeta::LiftedLambda`) in a TLC program.
-pub fn fold_generated_lambdas(mut program: Program<Defunctionalized>) -> Program<GeneratedLambdasFolded> {
+pub fn fold_generated_lambdas(mut program: Defunctionalized) -> GeneratedLambdasFolded {
     let inline_candidates = find_inline_candidates(&program.defs, &program.symbols);
 
     let term_ids = &mut program.term_ids;
@@ -317,7 +309,7 @@ pub fn fold_generated_lambdas(mut program: Program<Defunctionalized>) -> Program
     super::dce::eliminate_unreachable_defs(&mut program.defs);
 
     program.assert_flat_apps();
-    program.into_stage()
+    program.retag()
 }
 
 // =============================================================================
@@ -376,7 +368,7 @@ fn find_small_candidates(
 /// A constant is an arity-0, non-entry, non-extern function def.
 /// After monomorphization, the same constant name may be referenced through
 /// different SymbolIds, so we index by name as well as by def SymbolId.
-fn find_all_constants(program: &Program<RepSpecialized>) -> LookupMap<SymbolId, Term<Empty, Empty>> {
+fn find_all_constants(program: &RepSpecialized) -> LookupMap<SymbolId, Term<Empty, Empty>> {
     // Find the canonical constant defs.
     let mut by_sym: LookupMap<SymbolId, Term<Empty, Empty>> = LookupMap::new();
     let mut by_name: LookupMap<String, Term<Empty, Empty>> = LookupMap::new();

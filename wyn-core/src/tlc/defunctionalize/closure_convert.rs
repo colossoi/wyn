@@ -288,10 +288,9 @@ pub enum ClosureConvertError {
     },
 }
 
-pub fn verify_closure_converted<S>(program: &Program<S>) -> Result<(), ClosureConvertError>
-where
-    S: tlc::Stage<Family = ClosureConverted>,
-{
+pub fn verify_closure_converted<Tag, GlobalContext>(
+    program: &Program<Tag, ClosureConverted, GlobalContext>,
+) -> Result<(), ClosureConvertError> {
     let top_level: LookupSet<SymbolId> = program.defs.iter().map(|def| def.name).collect();
     for def in &program.defs {
         let mut body = &def.body;
@@ -822,15 +821,14 @@ impl ClosureConverter {
     }
 }
 
-pub(super) fn run(
-    program: Program<crate::tlc::stage::RuntimeIndexProducersFloated>,
-) -> Program<Defunctionalized> {
+pub(super) fn run(program: crate::tlc::stage::RuntimeIndexProducersFloated) -> Defunctionalized {
     let Program {
         defs,
         symbols,
         def_syms,
         term_ids,
         global_context,
+        state: _,
     } = program;
     let crate::tlc::context::RewriteGlobal {
         known_defs,

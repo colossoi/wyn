@@ -1,32 +1,21 @@
 //! Top-level AST → TLC transition.
 
-use crate::ast;
 use crate::name_registry::NameRegistry;
 use crate::{LookupMap, SymbolId, SymbolTable};
 
-use super::{Family, Program, Stage, TermIdSource, Transformer};
+use super::{TermIdSource, Transformer};
 
 /// Polymorphic TLC definitions retain their type schemes in-tree.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct UnpinnedPolymorphic;
-
-impl Family for UnpinnedPolymorphic {
-    type DefinitionData = super::data::PolymorphicDefinition;
-    type EntryData = ();
-    type ClosureData = super::data::Empty;
-    type SoacBodyData = super::data::Empty;
-}
+pub type UnpinnedPolymorphic =
+    super::TreeFamily<super::data::PolymorphicDefinition, (), super::data::Empty, super::data::Empty>;
 
 /// AST has been transformed to TLC.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Transformed;
+#[derive(Debug, Clone, Copy)]
+pub enum TransformedTag {}
+pub type Transformed =
+    super::Program<TransformedTag, UnpinnedPolymorphic, super::context::TransformedGlobal>;
 
-impl Stage for Transformed {
-    type Family = UnpinnedPolymorphic;
-    type GlobalContext = super::context::TransformedGlobal;
-}
-
-pub fn lower_from_ast(ast: ast::Program<crate::ast_type_holes::HolesResolved>) -> Program<Transformed> {
+pub fn lower_from_ast(ast: crate::ast_type_holes::HolesResolved) -> Transformed {
     let registry = NameRegistry::build(&ast);
     let mut symbols = SymbolTable::new();
     let mut top_level_symbols: LookupMap<String, SymbolId> = LookupMap::new();
@@ -55,7 +44,7 @@ pub fn lower_from_ast(ast: ast::Program<crate::ast_type_holes::HolesResolved>) -
     parts.defs = support_defs;
     let known_defs = top_level_symbols.keys().cloned().collect();
 
-    parts.with_symbols::<Transformed>(
+    parts.with_symbols::<TransformedTag, _>(
         symbols,
         top_level_symbols,
         term_ids,

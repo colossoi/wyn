@@ -25,8 +25,8 @@ mod pin_entry_buffers_tests;
 use super::data::Empty;
 use super::run::Transformed;
 use super::{
-    apply_type_substitution, data, extract_lambda_params_ref, Def, DefMeta, EntryPoint, Family, Program,
-    Term, TermIdSource, TermKind, VarRef,
+    apply_type_substitution, data, extract_lambda_params_ref, Def, DefMeta, EntryPoint, Program, Term,
+    TermIdSource, TermKind, VarRef,
 };
 use crate::ast::{Span, TypeName};
 use crate::binding_layout::{
@@ -38,34 +38,23 @@ use crate::{BindingRef, LookupMap, SymbolId};
 use polytype::Type;
 
 /// TLC after entry-parameter buffer regions are pinned into their types.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Polymorphic;
+pub type Polymorphic = super::TreeFamily<data::PolymorphicDefinition, data::PinnedEntry, Empty, Empty>;
 
-impl Family for Polymorphic {
-    type DefinitionData = data::PolymorphicDefinition;
-    type EntryData = data::PinnedEntry;
-    type ClosureData = Empty;
-    type SoacBodyData = Empty;
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BuffersPinned;
-
-impl super::Stage for BuffersPinned {
-    type Family = Polymorphic;
-    type GlobalContext = super::context::RewriteGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum BuffersPinnedTag {}
+pub type BuffersPinned = super::Program<BuffersPinnedTag, Polymorphic, super::context::RewriteGlobal>;
 
 /// Buffer-variable → concrete `Buffer(set, binding)` substitution.
 type BufferSubst = LookupMap<usize, Type<TypeName>>;
 
-pub fn pin_entry_buffers(program: Program<Transformed>) -> crate::error::Result<Program<BuffersPinned>> {
+pub fn pin_entry_buffers(program: Transformed) -> crate::error::Result<BuffersPinned> {
     let Program {
         defs,
         symbols,
         def_syms,
         mut term_ids,
         global_context,
+        state: _,
     } = program;
     let mut binding_ids = global_context.auto_storage_binding_ids;
     let defs = defs

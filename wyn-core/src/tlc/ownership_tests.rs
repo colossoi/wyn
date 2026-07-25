@@ -26,7 +26,7 @@ fn empty_model_lookups() {
     assert!(model.live_out.is_empty());
 }
 
-fn compile_to_tlc(source: &str) -> Program<tlc::stage::SoaNormalized> {
+fn compile_to_tlc(source: &str) -> tlc::stage::SoaNormalized {
     let type_checked = crate::compile_thru_frontend(source).expect("type_check");
     let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     let program = tlc::lower_from_ast(program);
@@ -36,7 +36,10 @@ fn compile_to_tlc(source: &str) -> Program<tlc::stage::SoaNormalized> {
     tlc::normalize_soacs(program)
 }
 
-fn find_def<'a, S: tlc::Stage>(program: &'a Program<S>, name: &str) -> &'a crate::tlc::Def<S::Family> {
+fn find_def<'a, Tag, F: tlc::Family, GlobalContext>(
+    program: &'a Program<Tag, F, GlobalContext>,
+    name: &str,
+) -> &'a crate::tlc::Def<F> {
     program
         .defs
         .iter()
@@ -102,11 +105,7 @@ def f(x: i32) i32 = x + 1
 /// Build a Let term by hand and run `build` on a synthesized program.
 /// Bypasses partial_eval, which would otherwise inline trivial
 /// `let x = y in body` aliases away before they reach our pass.
-fn synth_program_with_alias_let() -> (
-    Program<tlc::stage::SoaNormalized>,
-    crate::SymbolId,
-    crate::SymbolId,
-) {
+fn synth_program_with_alias_let() -> (tlc::stage::SoaNormalized, crate::SymbolId, crate::SymbolId) {
     use crate::ast::{Span, TypeName};
     use crate::tlc::{Def, DefMeta, Lambda, Term, TermIdSource, TermKind};
     use polytype::Type;
@@ -317,9 +316,9 @@ def f(a: *[4]i32) i32 = a[0]
 fn find_app_call_to<'a>(
     body: &'a Term,
     names: &[&str],
-    program: &Program<tlc::stage::SoaNormalized>,
+    program: &tlc::stage::SoaNormalized,
 ) -> Option<&'a Term> {
-    fn func_matches(t: &Term, names: &[&str], program: &Program<tlc::stage::SoaNormalized>) -> bool {
+    fn func_matches(t: &Term, names: &[&str], program: &tlc::stage::SoaNormalized) -> bool {
         match &t.kind {
             TermKind::Var(VarRef::Symbol(sym)) => {
                 program.symbols.get(*sym).map(|s| names.contains(&s.as_str())).unwrap_or(false)
@@ -333,11 +332,7 @@ fn find_app_call_to<'a>(
             _ => false,
         }
     }
-    fn walk<'a>(
-        t: &'a Term,
-        names: &[&str],
-        program: &Program<tlc::stage::SoaNormalized>,
-    ) -> Option<&'a Term> {
+    fn walk<'a>(t: &'a Term, names: &[&str], program: &tlc::stage::SoaNormalized) -> Option<&'a Term> {
         if let TermKind::App { func, args } = &t.kind {
             if func_matches(func, names, program) {
                 return Some(t);
@@ -1053,14 +1048,14 @@ def main(arr: *[4]i32) i32 =
 /// false-positive matches against prelude symbols with the same
 /// surface name.
 fn binder_origin(
-    program: &Program<tlc::stage::SoaNormalized>,
+    program: &tlc::stage::SoaNormalized,
     fn_name: &str,
     var_name: &str,
 ) -> (super::OwnerId, Origin) {
     fn find_let_sym(
         t: &Term,
         var_name: &str,
-        program: &Program<tlc::stage::SoaNormalized>,
+        program: &tlc::stage::SoaNormalized,
     ) -> Option<crate::SymbolId> {
         if let TermKind::Let { name, .. } = &t.kind {
             if program.symbols.get(*name).map(|s| s.as_str()) == Some(var_name) {
@@ -1418,11 +1413,11 @@ entry double(arr: []i32) []i32 = map(|x: i32| x + 1, arr)
 /// Deliberately NOT the full pipeline: running further would monomorphize-drop
 /// an uncalled `def f`, or force-inline a called soac helper away — neither of
 /// which is what the destination flag-flip under test depends on.
-fn compile_to_owned(source: &str) -> Program<tlc::stage::SoaNormalized> {
+fn compile_to_owned(source: &str) -> tlc::stage::SoaNormalized {
     super::apply::apply_ownership_rewrite(compile_to_tlc(source))
 }
 
-fn map_destination(program: &Program<tlc::stage::SoaNormalized>, fn_name: &str) -> Option<SoacOwnership> {
+fn map_destination(program: &tlc::stage::SoaNormalized, fn_name: &str) -> Option<SoacOwnership> {
     fn walk(t: &Term) -> Option<SoacOwnership> {
         if let TermKind::Soac(SoacOp::Map { destination, .. }) = &t.kind {
             return Some(*destination);
@@ -1467,7 +1462,7 @@ def f(a: [3][4]i32) [3][4]i32 = map(|row| row, a)
     );
 }
 
-fn scan_destination(program: &Program<tlc::stage::SoaNormalized>, fn_name: &str) -> Option<SoacOwnership> {
+fn scan_destination(program: &tlc::stage::SoaNormalized, fn_name: &str) -> Option<SoacOwnership> {
     fn walk(t: &Term) -> Option<SoacOwnership> {
         if let TermKind::Soac(SoacOp::Scan { destination, .. }) = &t.kind {
             return Some(*destination);
@@ -1512,10 +1507,7 @@ def f(a: [8]i32) [8]i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
     );
 }
 
-fn filter_destination(
-    program: &Program<tlc::stage::SoaNormalized>,
-    fn_name: &str,
-) -> Option<SoacOwnership> {
+fn filter_destination(program: &tlc::stage::SoaNormalized, fn_name: &str) -> Option<SoacOwnership> {
     fn walk(t: &Term) -> Option<SoacOwnership> {
         if let TermKind::Soac(SoacOp::Filter { destination, .. }) = &t.kind {
             return Some(*destination);
@@ -1608,7 +1600,7 @@ def main(rows: *[3][4]i32) [3]i32 = map(|row: [4]i32| consume(row), rows)
 /// is `UniqueParam` (mutable), and it's dead after the call (the
 /// function returns the with's result). So the call should rewrite
 /// to `_w_intrinsic_array_with_inplace`.
-fn synth_program_with_with_through_index() -> Program<tlc::stage::SoaNormalized> {
+fn synth_program_with_with_through_index() -> tlc::stage::SoaNormalized {
     use crate::ast::{Span, TypeName};
     use crate::tlc::{Def, DefMeta, Lambda, Term, TermIdSource, TermKind};
     use polytype::Type;
@@ -1817,7 +1809,7 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
 // list, then exercise the ownership analysis to confirm capture-kill
 // detection and capture-term liveness propagate through.
 
-fn synth_program_with_populated_soac_captures() -> Program<tlc::stage::GeneratedLambdasFolded> {
+fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasFolded {
     use crate::ast::{Span, TypeName};
     use crate::tlc::data::{ExplicitCaptures, ExplicitCapturesPayload, ExplicitClosurePayload};
     use crate::tlc::{Def, DefMeta, Lambda, SoacBody, Term, TermIdSource, TermKind};
@@ -2204,7 +2196,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         return_diet: crate::types::Diet::observing(),
     };
 
-    let program: Program<tlc::stage::GeneratedLambdasFolded> = Program::from_parts(
+    let program: tlc::stage::GeneratedLambdasFolded = Program::from_parts(
         vec![main_def],
         symbols,
         std::collections::HashMap::new(),

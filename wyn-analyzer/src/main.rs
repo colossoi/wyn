@@ -41,7 +41,7 @@ fn init_compiler_cached() -> (NodeCounter, ModuleManager) {
 
 /// Cached document state after successful type checking
 struct DocumentState {
-    ast: ast::Program<wyn_core::types::run::TypeChecked>,
+    ast: wyn_core::types::run::TypeChecked,
 }
 
 struct Backend {
@@ -489,7 +489,7 @@ impl Backend {
 }
 
 fn definition_scheme<'a>(
-    program: &'a ast::Program<wyn_core::types::run::TypeChecked>,
+    program: &'a wyn_core::types::run::TypeChecked,
     name: &str,
 ) -> Option<&'a TypeScheme> {
     program.declarations.iter().find_map(|declaration| match declaration {
@@ -503,7 +503,7 @@ fn definition_scheme<'a>(
 
 /// Find the smallest AST node containing the given position
 fn find_node_at_position(
-    ast: &ast::Program<wyn_core::types::run::TypeChecked>,
+    ast: &wyn_core::types::run::TypeChecked,
     line: usize,
     col: usize,
 ) -> Option<(&TypeScheme, Span)> {
@@ -652,7 +652,7 @@ fn find_in_expr<'a>(
 
 /// Find the application context at cursor position
 fn find_application_context(
-    ast: &ast::Program<wyn_core::types::run::TypeChecked>,
+    ast: &wyn_core::types::run::TypeChecked,
     line: usize,
     col: usize,
 ) -> Option<(String, usize)> {
@@ -845,7 +845,7 @@ fn get_field_completions(scheme: &TypeScheme) -> Vec<CompletionItem> {
 
 /// Find if cursor is on a declaration name
 fn find_declaration_name_at(
-    ast: &ast::Program<wyn_core::types::run::TypeChecked>,
+    ast: &wyn_core::types::run::TypeChecked,
     line: usize,
     col: usize,
 ) -> Option<(String, &'static str)> {
@@ -879,7 +879,7 @@ fn find_declaration_name_at(
 
 /// Find the name at cursor position (identifier or declaration name)
 fn find_name_at_position(
-    ast: &ast::Program<wyn_core::types::run::TypeChecked>,
+    ast: &wyn_core::types::run::TypeChecked,
     line: usize,
     col: usize,
 ) -> Option<String> {
@@ -1079,7 +1079,7 @@ fn find_name_in_expr(expr: &ast::Expression<ast::TypedTree>, line: usize, col: u
 
 /// Find all references to a name in the AST
 fn find_all_references(
-    ast: &ast::Program<wyn_core::types::run::TypeChecked>,
+    ast: &wyn_core::types::run::TypeChecked,
     target_name: &str,
     include_declaration: bool,
 ) -> Vec<Span> {
@@ -1235,11 +1235,7 @@ fn collect_refs_in_expr(expr: &ast::Expression<ast::TypedTree>, target: &str, re
 }
 
 /// Find the definition site of an identifier at the given position
-fn find_definition(
-    ast: &ast::Program<wyn_core::types::run::TypeChecked>,
-    line: usize,
-    col: usize,
-) -> Option<Span> {
+fn find_definition(ast: &wyn_core::types::run::TypeChecked, line: usize, col: usize) -> Option<Span> {
     let bindings: Vec<(String, Span)> = Vec::new();
 
     for decl in &ast.declarations {

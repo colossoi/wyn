@@ -15,13 +15,15 @@
 //! operand, `App` argument), where `runtime_index_producers` / `normalize` do
 //! the floating.
 
-use super::{Payload, Program, Stage, Term, TermKind};
+use super::{Family, Payload, Program, Term, TermKind};
 use crate::ast::TypeName;
 use polytype::Type;
 
 /// Verify the array-producer ANF invariant for every def body. Returns the
 /// first violating construct, or `Ok(())`.
-pub fn check<S: Stage>(program: &Program<S>) -> Result<(), &'static str> {
+pub fn check<Tag, F: Family, GlobalContext>(
+    program: &Program<Tag, F, GlobalContext>,
+) -> Result<(), &'static str> {
     for def in &program.defs {
         walk(&def.body)?;
     }
@@ -34,7 +36,10 @@ pub fn check<S: Stage>(program: &Program<S>) -> Result<(), &'static str> {
 /// `normalize_soacs_to_anf` establishes the floated form and after every
 /// subsequent rewrite that must preserve it. `stage` names the pass for the
 /// panic.
-pub fn debug_check<S: Stage>(program: &Program<S>, stage: &'static str) {
+pub fn debug_check<Tag, F: Family, GlobalContext>(
+    program: &Program<Tag, F, GlobalContext>,
+    stage: &'static str,
+) {
     debug_assert!(
         check(program).is_ok(),
         "anf::check failed after {}: {}",

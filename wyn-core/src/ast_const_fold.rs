@@ -24,13 +24,13 @@ use crate::ast::{
 use crate::LookupMap;
 
 /// AST after integer constants needed by static-size inference are exposed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ConstantsFolded;
-
-impl crate::ast::Stage for ConstantsFolded {
-    type Family = crate::resolve_resources::ResourcesResolvedFamily;
-    type GlobalContext = crate::module_manager::ModuleManager;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum ConstantsFoldedTag {}
+pub type ConstantsFolded = Program<
+    ConstantsFoldedTag,
+    crate::resolve_resources::ResourcesResolvedFamily,
+    crate::module_manager::ModuleManager,
+>;
 
 /// AST-level constant folder for integer constants.
 pub struct AstConstFolder {
@@ -64,7 +64,7 @@ impl AstConstFolder {
     /// Two passes:
     /// 1. Collect top-level constant definitions (parameterless defs with integer values)
     /// 2. Fold and inline in all expressions
-    pub fn fold_program(&mut self, program: &mut Program<crate::resolve_resources::ResourcesResolved>) {
+    pub fn fold_program(&mut self, program: &mut crate::resolve_resources::ResourcesResolved) {
         // First pass: collect top-level constant definitions
         for decl in &program.declarations {
             if let Declaration::Decl(d) = decl {
@@ -487,12 +487,10 @@ impl AstConstFolder {
 }
 
 /// Expose literal integer bounds needed by static-size inference.
-pub fn fold_constants(
-    mut program: Program<crate::resolve_resources::ResourcesResolved>,
-) -> Program<ConstantsFolded> {
+pub fn fold_constants(mut program: crate::resolve_resources::ResourcesResolved) -> ConstantsFolded {
     let mut folder = AstConstFolder::new();
     folder.fold_program(&mut program);
-    program.into_stage()
+    program.retag()
 }
 
 #[cfg(test)]

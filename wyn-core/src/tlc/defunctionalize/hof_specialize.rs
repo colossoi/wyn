@@ -27,10 +27,9 @@ pub enum HofSpecializeError {
     },
 }
 
-pub fn verify_hof_specialized<S>(program: &Program<S>) -> Result<(), HofSpecializeError>
-where
-    S: tlc::Stage<Family = ClosureConverted>,
-{
+pub fn verify_hof_specialized<Tag, GlobalContext>(
+    program: &Program<Tag, ClosureConverted, GlobalContext>,
+) -> Result<(), HofSpecializeError> {
     for def in &program.defs {
         let mut current = &def.ty;
         let mut param_index = 0;
@@ -747,7 +746,7 @@ impl HofSpecializer<'_> {
     }
 }
 
-pub(super) fn run(program: &mut Program<Defunctionalized>) {
+pub(super) fn run(program: &mut Defunctionalized) {
     let hof_info = detect_hofs(&program.defs);
     let top_level = program.defs.iter().map(|def| def.name).collect();
 

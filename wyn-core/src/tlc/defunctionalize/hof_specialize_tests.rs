@@ -7,7 +7,7 @@ use crate::SymbolTable;
 use polytype::Type;
 use std::collections::HashMap;
 
-fn empty_program() -> Program<Defunctionalized> {
+fn empty_program() -> Defunctionalized {
     Program::from_parts(
         vec![],
         SymbolTable::new(),
@@ -27,9 +27,7 @@ fn arrow(a: Type<TypeName>, b: Type<TypeName>) -> Type<TypeName> {
     Type::Constructed(TypeName::Arrow, vec![a, b])
 }
 
-fn dummy_body(
-    program: &mut Program<Defunctionalized>,
-) -> Term<ExplicitClosurePayload, ExplicitCapturesPayload> {
+fn dummy_body(program: &mut Defunctionalized) -> Term<ExplicitClosurePayload, ExplicitCapturesPayload> {
     Term {
         id: program.next_term_id(),
         ty: unit_ty(),

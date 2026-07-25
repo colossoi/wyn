@@ -79,7 +79,7 @@ fn filter_term(input: ArrayExpr, ids: &mut TermIdSource) -> Term {
     )
 }
 
-fn prog(body: Term, ids: TermIdSource) -> Program<tlc::stage::SoacsAnfNormalized> {
+fn prog(body: Term, ids: TermIdSource) -> tlc::stage::SoacsAnfNormalized {
     // The validator never reads `symbols` (it's a structural check), so an empty
     // table and a raw def id are fine.
     Program::from_parts(

@@ -17,8 +17,8 @@ use super::data::Empty;
 use super::inline::SoacHelpersInlined;
 use super::partial_eval::PartialEvaled;
 use super::{
-    ArrayExpr, Family, Lambda, Program, RewriteDecision, SoacBody, SoacOp, Stage, Term, TermId,
-    TermIdSource, TermKind, TermRewriter, VarRef,
+    ArrayExpr, Family, Lambda, Program, RewriteDecision, SoacBody, SoacOp, Term, TermId, TermIdSource,
+    TermKind, TermRewriter, VarRef,
 };
 use crate::ast::{Span, TypeName};
 use crate::builtins::{by_id, catalog};
@@ -27,22 +27,19 @@ use crate::SymbolTable;
 use polytype::Type;
 
 /// TLC after its first SoA normalization.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SoaNormalized;
-
-impl super::Stage for SoaNormalized {
-    type Family = super::pin_entry_buffers::Polymorphic;
-    type GlobalContext = super::context::RewriteGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum SoaNormalizedTag {}
+pub type SoaNormalized =
+    super::Program<SoaNormalizedTag, super::pin_entry_buffers::Polymorphic, super::context::RewriteGlobal>;
 
 /// TLC after normalization of array structure exposed by inlining.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct InlinedSoaNormalized;
-
-impl super::Stage for InlinedSoaNormalized {
-    type Family = super::monomorphize::Monomorphic;
-    type GlobalContext = super::context::RewriteGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum InlinedSoaNormalizedTag {}
+pub type InlinedSoaNormalized = super::Program<
+    InlinedSoaNormalizedTag,
+    super::monomorphize::Monomorphic,
+    super::context::RewriteGlobal,
+>;
 
 // =============================================================================
 // Type rewriting
@@ -758,20 +755,20 @@ fn build_tuple_reconstruction(
 ///    that touch array-of-tuple types.
 /// 2. Flattens Map+Zip into multi-input Map with split lambda params.
 /// 3. Converts standalone Zip to tuple construction.
-pub fn normalize_soacs(program: Program<PartialEvaled>) -> Program<SoaNormalized> {
+pub fn normalize_soacs(program: PartialEvaled) -> SoaNormalized {
     transform_program(program)
 }
 
 /// Re-run the same normalization after inlining exposes new array structure.
-pub fn renormalize_inlined_soa(program: Program<SoacHelpersInlined>) -> Program<InlinedSoaNormalized> {
+pub fn renormalize_inlined_soa(program: SoacHelpersInlined) -> InlinedSoaNormalized {
     transform_program(program)
 }
 
-fn transform_program<S, T>(program: Program<S>) -> Program<T>
+fn transform_program<InputTag, OutputTag, F, GlobalContext>(
+    program: Program<InputTag, F, GlobalContext>,
+) -> Program<OutputTag, F, GlobalContext>
 where
-    S: Stage,
-    T: Stage<Family = S::Family, GlobalContext = S::GlobalContext>,
-    S::Family: Family<ClosureData = Empty, SoacBodyData = Empty>,
+    F: Family<ClosureData = Empty, SoacBodyData = Empty>,
 {
     let Program {
         defs,
@@ -779,6 +776,7 @@ where
         def_syms,
         mut term_ids,
         global_context,
+        state: _,
     } = program;
     let mut transformer = SoaTransformer::new(&mut symbols, &mut term_ids);
     let defs = defs

@@ -4,12 +4,12 @@
 //! calls, so a pipeline reorder only has to touch one helper rather
 //! than a dozen bespoke front-end-plus-chain copies.
 
-use crate::tlc::{self, Program};
+use crate::tlc;
 
 /// Front-end (parse → resolve → type-check → to_tlc → pin_entry_buffers →
 /// validate_ownership) shared by every `compile_*` helper, so they differ only
 /// in how far down the canonical chain they run.
-fn front_end(src: &str) -> Program<tlc::stage::OwnershipValidated> {
+fn front_end(src: &str) -> tlc::stage::OwnershipValidated {
     let type_checked = crate::compile_thru_frontend(src).expect("type_check");
     let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     let program = tlc::lower_from_ast(program);
@@ -17,8 +17,8 @@ fn front_end(src: &str) -> Program<tlc::stage::OwnershipValidated> {
     tlc::validate_ownership(program).expect("validate_ownership")
 }
 
-/// Run the front-end + the canonical TLC pipeline to `Program<Reachable>`.
-pub(crate) fn compile_to_reachable(src: &str) -> Program<tlc::stage::Reachable> {
+/// Run the front-end + the canonical TLC pipeline to `tlc::stage::Reachable`.
+pub(crate) fn compile_to_reachable(src: &str) -> tlc::stage::Reachable {
     crate::optimize_tlc_for_test(front_end(src))
 }
 
@@ -29,12 +29,12 @@ pub(crate) fn compile_to_reachable(src: &str) -> Program<tlc::stage::Reachable> 
 
 /// Through source-level SOAC ANF normalization, immediately before nested
 /// runtime-index producers are floated.
-pub(crate) fn compile_thru_expose_producers(src: &str) -> Program<tlc::stage::SoacsAnfNormalized> {
+pub(crate) fn compile_thru_expose_producers(src: &str) -> tlc::stage::SoacsAnfNormalized {
     crate::optimize_tlc_for_test_thru_soac_normalization(front_end(src))
 }
 
 /// Compatibility name for tests whose subject starts at the same SOAC ANF
 /// boundary and then runs runtime-index producer exposure directly.
-pub(crate) fn compile_thru_static_index(src: &str) -> Program<tlc::stage::SoacsAnfNormalized> {
+pub(crate) fn compile_thru_static_index(src: &str) -> tlc::stage::SoacsAnfNormalized {
     crate::optimize_tlc_for_test_thru_soac_normalization(front_end(src))
 }

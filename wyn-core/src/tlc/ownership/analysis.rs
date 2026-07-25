@@ -28,7 +28,7 @@ use crate::{LookupMap, LookupSet};
 
 use crate::ast::{Span, TypeName};
 use crate::tlc::{
-    ArrayExpr, DefMeta, Family, Lambda, LoopKind, Payload, Program, SoacBody, SoacOp, Stage, Term, TermId,
+    ArrayExpr, DefMeta, Family, Lambda, LoopKind, Payload, Program, SoacBody, SoacOp, Term, TermId,
     TermKind,
 };
 use crate::types;
@@ -229,7 +229,9 @@ impl AnalysisState {
 /// Build per-term effect sets, then compute backward liveness with
 /// fixed-point over loops and SOAC bodies. The returned model has
 /// `live_out` populated for every term reachable from a function body.
-pub(super) fn analyze<S: Stage>(program: &Program<S>) -> AnalysisState {
+pub(super) fn analyze<Tag, F: Family, GlobalContext>(
+    program: &Program<Tag, F, GlobalContext>,
+) -> AnalysisState {
     let mut model = build(program);
     super::liveness::solve(program, &mut model);
     model
@@ -238,16 +240,15 @@ pub(super) fn analyze<S: Stage>(program: &Program<S>) -> AnalysisState {
 /// Walk the program and populate the model's effect sets, leaving
 /// `live_out` empty. Exposed for testing the build step in isolation;
 /// production code should call `analyze` instead.
-pub(super) fn build<S: Stage>(program: &Program<S>) -> AnalysisState {
+pub(super) fn build<Tag, F: Family, GlobalContext>(
+    program: &Program<Tag, F, GlobalContext>,
+) -> AnalysisState {
     let def_diets = program
         .defs
         .iter()
         .map(|def| (def.name, (def.param_diets.clone(), def.return_diet.clone())))
         .collect();
-    let mut builder = Builder::<
-        <<S as Stage>::Family as Family>::ClosureData,
-        <<S as Stage>::Family as Family>::SoacBodyData,
-    >::new(&program.symbols, def_diets);
+    let mut builder = Builder::<F::ClosureData, F::SoacBodyData>::new(&program.symbols, def_diets);
     for def in &program.defs {
         builder.visit_def(&def.body, &def.meta, &def.param_diets, &def.return_diet);
     }

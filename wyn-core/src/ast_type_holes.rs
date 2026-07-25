@@ -2,32 +2,27 @@
 
 use crate::ast;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct HolesResolvedFamily;
-
-impl ast::Family for HolesResolvedFamily {
-    type Tree = ast::HolesResolvedTree;
-    type DefinitionData = ast::TypedDefinition;
-    type EntryData = ast::TypedEntry;
-    type EntryParameterAttribute = crate::interface::ResolvedAttribute;
-    type ExternData = ast::TypedExtern;
-    type FrontendDeclaration = std::convert::Infallible;
-}
+pub type HolesResolvedFamily = ast::AstFamily<
+    ast::HolesResolvedTree,
+    ast::TypedDefinition,
+    ast::TypedEntry,
+    crate::interface::ResolvedAttribute,
+    ast::TypedExtern,
+    std::convert::Infallible,
+>;
 
 /// Fully typed AST accepted by AST-to-TLC lowering. Both rejecting a program
 /// that contains holes and replacing every hole with a typed default produce
 /// this single checkpoint.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct HolesResolved;
+#[derive(Debug, Clone, Copy)]
+pub enum HolesResolvedTag {}
+pub type HolesResolved = ast::Program<
+    HolesResolvedTag,
+    HolesResolvedFamily,
+    ast::TypedGlobal<ast::TypedDefinition, ast::HolesResolvedTree>,
+>;
 
-impl ast::Stage for HolesResolved {
-    type Family = HolesResolvedFamily;
-    type GlobalContext = ast::TypedGlobal<ast::TypedDefinition, ast::HolesResolvedTree>;
-}
-
-pub fn reject_type_holes(
-    program: ast::Program<crate::types::run::TypeChecked>,
-) -> crate::error::Result<ast::Program<HolesResolved>> {
+pub fn reject_type_holes(program: crate::types::run::TypeChecked) -> crate::error::Result<HolesResolved> {
     use std::fmt::Write;
 
     let holes: Vec<_> = program
@@ -60,9 +55,7 @@ pub fn reject_type_holes(
     })
 }
 
-pub fn fill_type_holes(
-    program: ast::Program<crate::types::run::TypeChecked>,
-) -> crate::error::Result<ast::Program<HolesResolved>> {
+pub fn fill_type_holes(program: crate::types::run::TypeChecked) -> crate::error::Result<HolesResolved> {
     let mut errors = Vec::new();
     let rebuilt = rebuild(program, &mut |header, _hole, node_ids| {
         Ok(default_kind(header, node_ids, &mut errors))
@@ -75,17 +68,18 @@ pub fn fill_type_holes(
 }
 
 fn rebuild(
-    program: ast::Program<crate::types::run::TypeChecked>,
+    program: crate::types::run::TypeChecked,
     hole: &mut impl FnMut(
         &ast::TypedHeader,
         ast::TypeHole,
         &mut ast::NodeCounter,
     ) -> crate::error::Result<ast::ExprKind<ast::HolesResolvedTree>>,
-) -> crate::error::Result<ast::Program<HolesResolved>> {
+) -> crate::error::Result<HolesResolved> {
     let ast::Program {
         declarations,
         mut node_ids,
         global_context,
+        state: _,
     } = program;
     let declarations = declarations
         .into_iter()
@@ -122,6 +116,7 @@ fn rebuild(
             warnings: global_context.warnings,
             builtin_names: global_context.builtin_names,
         },
+        state: std::marker::PhantomData,
     })
 }
 

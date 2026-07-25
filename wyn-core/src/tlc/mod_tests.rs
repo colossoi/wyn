@@ -39,13 +39,13 @@ fn mapping_children_assigns_caller_provided_parent_id() {
 /// Compile a source string down to the raw TLC program produced by
 /// `to_tlc`, skipping every post-TLC pass so the Constructor lowering
 /// is observable verbatim.
-fn compile_to_tlc_raw(source: &str) -> Program<stage::Transformed> {
+fn compile_to_tlc_raw(source: &str) -> stage::Transformed {
     let type_checked = crate::compile_thru_frontend(source).expect("type_check");
     let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     lower_from_ast(program)
 }
 
-fn find_def_body<'a>(program: &'a Program<stage::Transformed>, name: &str) -> &'a Term {
+fn find_def_body<'a>(program: &'a stage::Transformed, name: &str) -> &'a Term {
     let def = program
         .defs
         .iter()

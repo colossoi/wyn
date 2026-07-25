@@ -43,7 +43,7 @@ const MATH_BUILTINS: &[&str] = &[
 ];
 
 impl NameRegistry {
-    pub fn build(ast: &ast::Program<crate::ast_type_holes::HolesResolved>) -> Self {
+    pub fn build(ast: &crate::ast_type_holes::HolesResolved) -> Self {
         let mut names = BTreeMap::new();
 
         // 1+2. All catalog entries: per-source-name, classify into

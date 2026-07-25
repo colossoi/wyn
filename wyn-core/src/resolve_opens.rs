@@ -35,31 +35,25 @@ use polytype::TypeScheme;
 #[path = "resolve_opens_tests.rs"]
 mod tests;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct OpensResolvedFamily;
-
-impl ast::Family for OpensResolvedFamily {
-    type Tree = ast::SourceTree;
-    type DefinitionData = ast::DefinitionSyntax;
-    type EntryData = ast::ResolvedEntry;
-    type EntryParameterAttribute = crate::interface::ResolvedAttribute;
-    type ExternData = ast::ExternSyntax;
-    type FrontendDeclaration = ast::OpensResolvedFrontend;
-}
+pub type OpensResolvedFamily = ast::AstFamily<
+    ast::SourceTree,
+    ast::DefinitionSyntax,
+    ast::ResolvedEntry,
+    crate::interface::ResolvedAttribute,
+    ast::ExternSyntax,
+    ast::OpensResolvedFrontend,
+>;
 
 /// AST after `open` declarations have been consumed and affected identifiers
 /// have been qualified.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct OpensResolved;
-
-impl ast::Stage for OpensResolved {
-    type Family = OpensResolvedFamily;
-    type GlobalContext = crate::resolve_placeholders::PlaceholdersResolvedGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum OpensResolvedTag {}
+pub type OpensResolved =
+    Program<OpensResolvedTag, OpensResolvedFamily, crate::resolve_placeholders::PlaceholdersResolvedGlobal>;
 
 pub fn resolve_opens(
-    mut program: Program<crate::resolve_placeholders::TypePlaceholdersResolved>,
-) -> Result<Program<OpensResolved>> {
+    mut program: crate::resolve_placeholders::TypePlaceholdersResolved,
+) -> Result<OpensResolved> {
     let mut index = build_index(&program.global_context.spec_schemes, crate::builtins::catalog());
     for (module_name, elaborated) in program.global_context.module_manager.get_elaborated_modules() {
         for item in &elaborated.items {
@@ -525,13 +519,12 @@ pub fn run_in_module_with_index(
     r.resolve_expression(expr)
 }
 
-fn materialize(
-    program: Program<crate::resolve_placeholders::TypePlaceholdersResolved>,
-) -> Result<Program<OpensResolved>> {
+fn materialize(program: crate::resolve_placeholders::TypePlaceholdersResolved) -> Result<OpensResolved> {
     let Program {
         declarations,
         node_ids,
         global_context,
+        state: _,
     } = program;
     let declarations = declarations
         .into_iter()
@@ -552,6 +545,7 @@ fn materialize(
         declarations,
         node_ids,
         global_context,
+        state: std::marker::PhantomData,
     })
 }
 

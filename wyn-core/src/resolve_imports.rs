@@ -12,26 +12,20 @@ use crate::ast::{self, ImportsResolvedFrontend, ParsedFrontend};
 use crate::error::Result;
 use crate::{err_module, err_parse, lexer, parser};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ImportsResolvedFamily;
-
-impl ast::Family for ImportsResolvedFamily {
-    type Tree = ast::SourceTree;
-    type DefinitionData = ast::DefinitionSyntax;
-    type EntryData = ast::EntrySyntax;
-    type EntryParameterAttribute = crate::interface::Attribute;
-    type ExternData = ast::ExternSyntax;
-    type FrontendDeclaration = ast::ImportsResolvedFrontend<ast::NestedDeclaration>;
-}
+pub type ImportsResolvedFamily = ast::AstFamily<
+    ast::SourceTree,
+    ast::DefinitionSyntax,
+    ast::EntrySyntax,
+    crate::interface::Attribute,
+    ast::ExternSyntax,
+    ast::ImportsResolvedFrontend<ast::NestedDeclaration>,
+>;
 
 /// AST after every top-level file import has been expanded.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ImportsResolved;
-
-impl ast::Stage for ImportsResolved {
-    type Family = ImportsResolvedFamily;
-    type GlobalContext = crate::module_manager::ModuleManager;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum ImportsResolvedTag {}
+pub type ImportsResolved =
+    ast::Program<ImportsResolvedTag, ImportsResolvedFamily, crate::module_manager::ModuleManager>;
 
 /// Recursively expand every `Declaration::Import(path)` in `decls` by parsing
 /// the referenced file (relative to `base_dir`), resolving its own imports
@@ -43,14 +37,12 @@ impl ast::Stage for ImportsResolved {
 /// Cycle / re-import safety: each canonical path is loaded at most once per
 /// compilation. Diamond imports work; cycles are silently broken at the
 /// second encounter.
-pub fn resolve_imports(
-    program: ast::Program<parser::Parsed>,
-    base_dir: &Path,
-) -> Result<ast::Program<ImportsResolved>> {
+pub fn resolve_imports(program: parser::Parsed, base_dir: &Path) -> Result<ImportsResolved> {
     let ast::Program {
         declarations,
         mut node_ids,
         global_context,
+        state: _,
     } = program;
     let mut visited: LookupSet<PathBuf> = LookupSet::new();
     let declarations = expand(declarations, base_dir, &mut node_ids, &mut visited)?;
@@ -58,6 +50,7 @@ pub fn resolve_imports(
         declarations,
         node_ids,
         global_context,
+        state: std::marker::PhantomData,
     })
 }
 

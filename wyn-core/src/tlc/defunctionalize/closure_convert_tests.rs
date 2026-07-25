@@ -28,7 +28,7 @@ fn unit_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Unit, vec![])
 }
 
-fn empty_program() -> Program<crate::tlc::stage::RuntimeIndexProducersFloated> {
+fn empty_program() -> crate::tlc::stage::RuntimeIndexProducersFloated {
     Program::from_parts(
         vec![],
         SymbolTable::new(),
@@ -41,7 +41,7 @@ fn empty_program() -> Program<crate::tlc::stage::RuntimeIndexProducersFloated> {
     )
 }
 
-fn empty_converted_program() -> Program<Defunctionalized> {
+fn empty_converted_program() -> Defunctionalized {
     Program::from_parts(
         vec![],
         SymbolTable::new(),
@@ -54,7 +54,7 @@ fn empty_converted_program() -> Program<Defunctionalized> {
 }
 
 fn term(
-    program: &mut Program<crate::tlc::stage::RuntimeIndexProducersFloated>,
+    program: &mut crate::tlc::stage::RuntimeIndexProducersFloated,
     kind: TermKind<Empty, Empty>,
     ty: Type<TypeName>,
 ) -> Term<Empty, Empty> {
@@ -67,7 +67,7 @@ fn term(
 }
 
 fn converted_term(
-    program: &mut Program<Defunctionalized>,
+    program: &mut Defunctionalized,
     kind: TermKind<ExplicitClosurePayload, ExplicitCapturesPayload>,
     ty: Type<TypeName>,
 ) -> Term<ExplicitClosurePayload, ExplicitCapturesPayload> {
@@ -327,7 +327,7 @@ fn binop_ty(elem: &Type<TypeName>) -> Type<TypeName> {
 /// envelope forwards its parameters to `g` (in order → eta-reducible).
 fn reduce_with_operator(
     op_args: impl Fn(crate::SymbolId, crate::SymbolId) -> [crate::SymbolId; 2],
-) -> (Program<Defunctionalized>, crate::SymbolId, crate::SymbolId) {
+) -> (Defunctionalized, crate::SymbolId, crate::SymbolId) {
     let mut program = empty_program();
     let elem = unit_ty();
     let op_ty = binop_ty(&elem);
@@ -419,7 +419,7 @@ fn reduce_with_operator(
 
 /// Peel `main`'s parameter spine and return its tail `reduce` operator body.
 fn reduce_operator_body(
-    program: &Program<Defunctionalized>,
+    program: &Defunctionalized,
     main: crate::SymbolId,
 ) -> Term<ExplicitClosurePayload, ExplicitCapturesPayload> {
     let def = program.defs.iter().find(|d| d.name == main).expect("main def");

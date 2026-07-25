@@ -2,19 +2,18 @@
 
 use super::analysis::{AnalysisState, OwnerId};
 use crate::tlc::{
-    ArrayExpr, Family, Lambda, LoopKind, Payload, Program, SoacBody, SoacOp, Stage, Term, TermId, TermKind,
-    VarRef,
+    ArrayExpr, Family, Lambda, LoopKind, Payload, Program, SoacBody, SoacOp, Term, TermId, TermKind, VarRef,
 };
 use crate::LookupSet;
 
 type LiveSet = LookupSet<OwnerId>;
 
 /// Fill `state.live_out` for every stored term in `program`.
-pub(super) fn solve<S: Stage>(program: &Program<S>, state: &mut AnalysisState) {
-    let mut solver = Liveness::<
-        <<S as Stage>::Family as Family>::ClosureData,
-        <<S as Stage>::Family as Family>::SoacBodyData,
-    > {
+pub(super) fn solve<Tag, F: Family, GlobalContext>(
+    program: &Program<Tag, F, GlobalContext>,
+    state: &mut AnalysisState,
+) {
+    let mut solver = Liveness::<F::ClosureData, F::SoacBodyData> {
         state,
         payloads: std::marker::PhantomData,
     };

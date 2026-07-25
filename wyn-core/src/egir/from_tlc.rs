@@ -38,8 +38,8 @@ use crate::interface::{
 };
 use crate::tlc::{
     ArrayExpr as GenericArrayExpr, Def as GenericDef, DefMeta as GenericDefMeta, Lambda as GenericLambda,
-    LoopKind as GenericLoopKind, Program as GenericProgram, SoacBody as GenericSoacBody,
-    SoacOp as GenericSoacOp, Term as GenericTerm, TermKind as GenericTermKind,
+    LoopKind as GenericLoopKind, SoacBody as GenericSoacBody, SoacOp as GenericSoacOp, Term as GenericTerm,
+    TermKind as GenericTermKind,
 };
 use crate::types::ExternDecl;
 use crate::types::{extract_function_signature, TypeExt};
@@ -61,7 +61,7 @@ use crate::pipeline_descriptor::BufferLen;
 type TlcFamily = crate::tlc::input_slice_bounds::InputBounded;
 type ClosureData = crate::tlc::data::ExplicitClosurePayload;
 type SoacBodyData = crate::tlc::data::ExplicitCapturesPayload;
-type TlcProgram = GenericProgram<crate::tlc::stage::InputSliceBoundsInferred>;
+type TlcProgram = crate::tlc::stage::InputSliceBoundsInferred;
 type TlcDef = GenericDef<TlcFamily>;
 type DefMeta = GenericDefMeta<crate::tlc::data::EntryInputBounds>;
 type Term = GenericTerm<ClosureData, SoacBodyData>;

@@ -23,21 +23,21 @@ use crate::SymbolId;
 
 use super::data::Empty;
 use super::{
-    wrap_let_bindings, ArrayExpr, Def, Lambda, LetBinding, Program, SoacBody, SoacOp, Term, TermIdSource,
-    TermKind, VarRef,
+    wrap_let_bindings, ArrayExpr, Def, Lambda, LetBinding, SoacBody, SoacOp, Term, TermIdSource, TermKind,
+    VarRef,
 };
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RuntimeIndexProducersFloated;
-
-impl super::Stage for RuntimeIndexProducersFloated {
-    type Family = super::monomorphize::Monomorphic;
-    type GlobalContext = super::context::RewriteGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum RuntimeIndexProducersFloatedTag {}
+pub type RuntimeIndexProducersFloated = super::Program<
+    RuntimeIndexProducersFloatedTag,
+    super::monomorphize::Monomorphic,
+    super::context::RewriteGlobal,
+>;
 
 pub fn float_runtime_index_nested_producers(
-    mut program: Program<super::stage::SoacsAnfNormalized>,
-) -> Program<RuntimeIndexProducersFloated> {
+    mut program: super::stage::SoacsAnfNormalized,
+) -> RuntimeIndexProducersFloated {
     let ids = &mut program.term_ids;
     let blocked = LookupSet::new();
 
@@ -51,7 +51,7 @@ pub fn float_runtime_index_nested_producers(
     });
 
     super::anf::debug_check(&program, "runtime_index_producers");
-    program.into_stage()
+    program.retag()
 }
 
 fn float_term(

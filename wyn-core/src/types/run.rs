@@ -5,31 +5,23 @@ use crate::error::Result;
 use crate::name_resolution::ResolvedValueRef;
 use crate::types::checker::{TypeChecker, TypeWarning};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct TypeCheckedFamily;
-
-impl ast::Family for TypeCheckedFamily {
-    type Tree = ast::TypedTree;
-    type DefinitionData = ast::TypedDefinition;
-    type EntryData = ast::TypedEntry;
-    type EntryParameterAttribute = crate::interface::ResolvedAttribute;
-    type ExternData = ast::TypedExtern;
-    type FrontendDeclaration = std::convert::Infallible;
-}
+pub type TypeCheckedFamily = ast::AstFamily<
+    ast::TypedTree,
+    ast::TypedDefinition,
+    ast::TypedEntry,
+    crate::interface::ResolvedAttribute,
+    ast::TypedExtern,
+    std::convert::Infallible,
+>;
 
 /// AST with all inferred types, declaration schemes, and identifier
 /// classifications stored on their owning tree nodes.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct TypeChecked;
+#[derive(Debug, Clone, Copy)]
+pub enum TypeCheckedTag {}
+pub type TypeChecked =
+    ast::Program<TypeCheckedTag, TypeCheckedFamily, ast::TypedGlobal<ast::TypedDefinition, ast::TypedTree>>;
 
-impl ast::Stage for TypeChecked {
-    type Family = TypeCheckedFamily;
-    type GlobalContext = ast::TypedGlobal<ast::TypedDefinition, ast::TypedTree>;
-}
-
-pub fn type_check(
-    program: ast::Program<crate::resolve_opens::OpensResolved>,
-) -> Result<ast::Program<TypeChecked>> {
+pub fn type_check(program: crate::resolve_opens::OpensResolved) -> Result<TypeChecked> {
     let name_resolution = crate::name_resolution::build_name_resolution(
         &program,
         &program.global_context.module_manager,
@@ -39,6 +31,7 @@ pub fn type_check(
         declarations,
         node_ids,
         global_context,
+        state: _,
     } = program;
     let crate::resolve_placeholders::PlaceholdersResolvedGlobal {
         module_manager,
@@ -77,7 +70,7 @@ fn materialize(
     warnings: Vec<TypeWarning>,
     builtin_names: Vec<String>,
     mut name_resolution: crate::name_resolution::NameResolution,
-) -> Result<ast::Program<TypeChecked>> {
+) -> Result<TypeChecked> {
     let mut support_definitions = Vec::new();
     for (module_name, definition) in module_manager.get_all_module_declarations() {
         support_definitions.push(ast::SupportDefinition {
@@ -138,6 +131,7 @@ fn materialize(
             warnings,
             builtin_names,
         },
+        state: std::marker::PhantomData,
     })
 }
 

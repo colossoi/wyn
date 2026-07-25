@@ -5,9 +5,9 @@
 
 use crate::interface::EntryKind;
 use crate::pipeline_descriptor::*;
-use crate::tlc::{DefMeta as GenericDefMeta, Program as GenericProgram};
+use crate::tlc::DefMeta as GenericDefMeta;
 
-type Program = GenericProgram<crate::tlc::stage::InputSliceBoundsInferred>;
+type Program = crate::tlc::stage::InputSliceBoundsInferred;
 type DefMeta = GenericDefMeta<crate::tlc::data::EntryInputBounds>;
 
 pub(super) struct PipelineSeed {

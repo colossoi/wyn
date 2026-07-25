@@ -26,29 +26,17 @@ use std::collections::VecDeque;
 
 /// Monomorphic TLC stores no per-definition payload; monomorphization consumes
 /// the source schemes while constructing this family.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Monomorphic;
-
-impl super::Family for Monomorphic {
-    type DefinitionData = ();
-    type EntryData = super::data::PinnedEntry;
-    type ClosureData = Empty;
-    type SoacBodyData = Empty;
-}
+pub type Monomorphic = super::TreeFamily<(), super::data::PinnedEntry, Empty, Empty>;
 
 /// TLC after intrinsic specialization and reachable user-function
 /// monomorphization.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Monomorphized;
-
-impl super::Stage for Monomorphized {
-    type Family = Monomorphic;
-    type GlobalContext = super::context::RewriteGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum MonomorphizedTag {}
+pub type Monomorphized = super::Program<MonomorphizedTag, Monomorphic, super::context::RewriteGlobal>;
 
 /// Specialize intrinsic calls, then consume the polymorphic definition graph
 /// into its reachable monomorphic graph.
-pub fn monomorphize(mut program: Program<SoaNormalized>) -> Program<Monomorphized> {
+pub fn monomorphize(mut program: SoaNormalized) -> Monomorphized {
     super::specialize::run(&mut program);
 
     let Program {
@@ -57,6 +45,7 @@ pub fn monomorphize(mut program: Program<SoaNormalized>) -> Program<Monomorphize
         def_syms,
         mut term_ids,
         global_context,
+        state: _,
     } = program;
     let defs = Monomorphizer::new(&mut symbols, defs, &mut term_ids).monomorphize();
     let program = Program::from_parts(defs, symbols, def_syms, term_ids, global_context);

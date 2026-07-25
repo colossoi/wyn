@@ -451,29 +451,29 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //     let program = ast_type_holes::reject_type_holes(program)?;
 //
 // TLC stages (typed AST → semantic input):
-//       tlc::lower_from_ast(program)    -> tlc::Program<stage::Transformed>
-//       tlc::pin_entry_buffers(...)      -> tlc::Program<stage::BuffersPinned>
-//       tlc::validate_ownership(...)     -> tlc::Program<stage::OwnershipValidated>
-//       tlc::partial_eval(...)           -> tlc::Program<stage::PartialEvaled>
-//       tlc::normalize_soacs(...)        -> tlc::Program<stage::SoaNormalized>
-//       tlc::monomorphize(...)           -> tlc::Program<stage::Monomorphized>
-//       tlc::rep_specialize(...)         -> tlc::Program<stage::RepSpecialized>
-//       tlc::inline_small(...)           -> tlc::Program<stage::SmallInlined>
+//       tlc::lower_from_ast(program)    -> tlc::stage::Transformed
+//       tlc::pin_entry_buffers(...)      -> tlc::stage::BuffersPinned
+//       tlc::validate_ownership(...)     -> tlc::stage::OwnershipValidated
+//       tlc::partial_eval(...)           -> tlc::stage::PartialEvaled
+//       tlc::normalize_soacs(...)        -> tlc::stage::SoaNormalized
+//       tlc::monomorphize(...)           -> tlc::stage::Monomorphized
+//       tlc::rep_specialize(...)         -> tlc::stage::RepSpecialized
+//       tlc::inline_small(...)           -> tlc::stage::SmallInlined
 //       tlc::force_inline_soac_helpers(...)
-//                                      -> tlc::Program<stage::SoacHelpersInlined>
+//                                      -> tlc::stage::SoacHelpersInlined
 //       tlc::renormalize_inlined_soa(...)
-//                                      -> tlc::Program<stage::InlinedSoaNormalized>
+//                                      -> tlc::stage::InlinedSoaNormalized
 //       tlc::canonicalize_conditional_producers(...)
-//                                      -> tlc::Program<stage::ConditionalProducersCanonicalized>
-//       tlc::normalize_soacs_to_anf(...) -> tlc::Program<stage::SoacsAnfNormalized>
+//                                      -> tlc::stage::ConditionalProducersCanonicalized
+//       tlc::normalize_soacs_to_anf(...) -> tlc::stage::SoacsAnfNormalized
 //       tlc::float_runtime_index_nested_producers(...)
-//                                      -> tlc::Program<stage::RuntimeIndexProducersFloated>
-//       tlc::defunctionalize(...)        -> tlc::Program<stage::Defunctionalized>
-//       tlc::fold_generated_lambdas(...) -> tlc::Program<stage::GeneratedLambdasFolded>
-//       tlc::apply_ownership(...)        -> tlc::Program<stage::OwnershipApplied>
-//       tlc::filter_reachable(...)       -> tlc::Program<stage::Reachable>
+//                                      -> tlc::stage::RuntimeIndexProducersFloated
+//       tlc::defunctionalize(...)        -> tlc::stage::Defunctionalized
+//       tlc::fold_generated_lambdas(...) -> tlc::stage::GeneratedLambdasFolded
+//       tlc::apply_ownership(...)        -> tlc::stage::OwnershipApplied
+//       tlc::filter_reachable(...)       -> tlc::stage::Reachable
 //       tlc::infer_input_slice_bounds(...)
-//                                      -> tlc::Program<stage::InputSliceBoundsInferred>
+//                                      -> tlc::stage::InputSliceBoundsInferred
 //       to_egraph(...)                  -> egir::from_tlc::Converted
 //
 // EGIR stages:
@@ -517,9 +517,7 @@ pub fn init_compiler_from_prelude(
 // =============================================================================
 
 #[cfg(test)]
-pub(crate) fn optimize_tlc_for_test(
-    program: tlc::Program<tlc::stage::OwnershipValidated>,
-) -> tlc::Program<tlc::stage::Reachable> {
+pub(crate) fn optimize_tlc_for_test(program: tlc::stage::OwnershipValidated) -> tlc::stage::Reachable {
     let program = optimize_tlc_for_test_thru_soac_normalization(program);
     let program = tlc::float_runtime_index_nested_producers(program);
     let program = tlc::defunctionalize(program);
@@ -530,8 +528,8 @@ pub(crate) fn optimize_tlc_for_test(
 
 #[cfg(test)]
 pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
-    program: tlc::Program<tlc::stage::OwnershipValidated>,
-) -> tlc::Program<tlc::stage::SoacsAnfNormalized> {
+    program: tlc::stage::OwnershipValidated,
+) -> tlc::stage::SoacsAnfNormalized {
     let program = tlc::partial_eval(program);
     let program = tlc::normalize_soacs(program);
     let program = tlc::monomorphize(program);
@@ -545,7 +543,7 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
 
 /// Convert fully analyzed TLC into raw semantic EGIR.
 pub fn to_egraph(
-    program: tlc::Program<tlc::stage::InputSliceBoundsInferred>,
+    program: tlc::stage::InputSliceBoundsInferred,
 ) -> std::result::Result<egir::from_tlc::Converted, ConvertError> {
     let binding_ids = program.global_context.auto_storage_binding_ids.clone();
     egir::from_tlc::run(&program, binding_ids, IdSource::new())
@@ -681,9 +679,9 @@ pub fn cached_compiler_init() -> (NodeCounter, module_manager::ModuleManager) {
 // `compile_thru_*` helpers run the pipeline up to a milestone and return
 // just the milestone value. Each subsumes the previous one:
 //
-//   compile_thru_frontend  →  ast::Program<types::run::TypeChecked>
-//   compile_thru_tlc       →  Program<Reachable>    (TLC pipeline done)
-//   compile_thru_ssa       →  Program<Elaborated>  (EGIR + elaborate done)
+//   compile_thru_frontend  →  types::run::TypeChecked
+//   compile_thru_tlc       →  tlc::stage::Reachable
+//   compile_thru_ssa       →  ssa::Elaborated
 //   compile_thru_spirv     →  Lowered              (final SPIR-V binary)
 //
 // These exist so test files don't have to enumerate every pass — when a
@@ -692,7 +690,7 @@ pub fn cached_compiler_init() -> (NodeCounter, module_manager::ModuleManager) {
 
 /// Run AST passes through type checking. Uses the cached prelude.
 #[cfg(test)]
-pub fn compile_thru_frontend(source: &str) -> error::Result<ast::Program<types::run::TypeChecked>> {
+pub fn compile_thru_frontend(source: &str) -> error::Result<types::run::TypeChecked> {
     let (node_ids, module_manager) = cached_compiler_init();
     let program = parser::parse(source, node_ids, module_manager)?;
     let program = resolve_imports::resolve_imports(program, std::path::Path::new("."))?;
@@ -708,7 +706,7 @@ pub fn compile_thru_frontend(source: &str) -> error::Result<ast::Program<types::
 /// Run the canonical TLC optimization pipeline (no physical scheduling or
 /// hole-filling) through `filter_reachable`.
 #[cfg(test)]
-pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::Program<tlc::stage::Reachable>> {
+pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::stage::Reachable> {
     let type_checked = compile_thru_frontend(source)?;
     let program = ast_type_holes::reject_type_holes(type_checked)?;
     let program = tlc::lower_from_ast(program);
@@ -718,12 +716,12 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::Program<tlc::stage::
 }
 
 /// Internal: run all the way through EGIR + elaborate to SSA from a
-/// pre-built `Program<Reachable>`. Both `compile_thru_ssa` and
+/// pre-built `tlc::stage::Reachable`. Both `compile_thru_ssa` and
 /// `compile_thru_spirv_single_stage` build the SSA the same way; only
 /// the downstream scheduling profile differs.
 #[cfg(test)]
 fn ssa_from_reachable(
-    program: tlc::Program<tlc::stage::Reachable>,
+    program: tlc::stage::Reachable,
     profile: LoweringProfile,
 ) -> std::result::Result<ssa::stage::Elaborated, Box<dyn std::error::Error>> {
     let program = tlc::infer_input_slice_bounds(program);

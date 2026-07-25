@@ -335,30 +335,65 @@ pub trait Family: Clone + std::fmt::Debug + PartialEq {
     type FrontendDeclaration: Clone + std::fmt::Debug + PartialEq;
 }
 
-pub trait Stage: std::fmt::Debug {
-    type Family: Family;
-    type GlobalContext: std::fmt::Debug;
+/// A transparent description of the concrete node payloads stored by one AST
+/// representation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AstFamily<
+    Tree,
+    DefinitionData,
+    EntryData,
+    EntryParameterAttribute,
+    ExternData,
+    FrontendDeclaration,
+>(
+    std::marker::PhantomData<
+        fn() -> (
+            Tree,
+            DefinitionData,
+            EntryData,
+            EntryParameterAttribute,
+            ExternData,
+            FrontendDeclaration,
+        ),
+    >,
+);
+
+impl<Tree, DefinitionData, EntryData, EntryParameterAttribute, ExternData, FrontendDeclaration> Family
+    for AstFamily<Tree, DefinitionData, EntryData, EntryParameterAttribute, ExternData, FrontendDeclaration>
+where
+    Tree: TreeFamily,
+    DefinitionData: Clone + std::fmt::Debug + PartialEq,
+    EntryData: Clone + std::fmt::Debug + PartialEq,
+    EntryParameterAttribute: Clone + std::fmt::Debug + PartialEq,
+    ExternData: Clone + std::fmt::Debug + PartialEq,
+    FrontendDeclaration: Clone + std::fmt::Debug + PartialEq,
+{
+    type Tree = Tree;
+    type DefinitionData = DefinitionData;
+    type EntryData = EntryData;
+    type EntryParameterAttribute = EntryParameterAttribute;
+    type ExternData = ExternData;
+    type FrontendDeclaration = FrontendDeclaration;
 }
 
 #[derive(Debug)]
-pub struct Program<S: Stage = crate::parser::Parsed> {
-    pub declarations: Vec<Declaration<S::Family>>,
+pub struct Program<Tag, F: Family, GlobalContext> {
+    pub declarations: Vec<Declaration<F>>,
     /// The sole allocator for nodes added while this AST is rebuilt.
     pub(crate) node_ids: NodeCounter,
-    pub global_context: S::GlobalContext,
+    pub global_context: GlobalContext,
+    pub(crate) state: std::marker::PhantomData<fn() -> Tag>,
 }
 
-impl<S: Stage> Program<S> {
-    /// Change only the top-level checkpoint when two stages store the same
-    /// tree family and global state.
-    pub fn into_stage<T>(self) -> Program<T>
-    where
-        T: Stage<Family = S::Family, GlobalContext = S::GlobalContext>,
-    {
+impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
+    /// Change only the program's nominal state while retaining its exact tree
+    /// representation and global context.
+    pub fn retag<NewTag>(self) -> Program<NewTag, F, GlobalContext> {
         Program {
             declarations: self.declarations,
             node_ids: self.node_ids,
             global_context: self.global_context,
+            state: std::marker::PhantomData,
         }
     }
 }

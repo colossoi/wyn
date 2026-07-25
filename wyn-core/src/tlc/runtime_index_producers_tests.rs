@@ -81,11 +81,11 @@ fn range_expr(n: usize, ty: Type<TypeName>, ids: &mut TermIdSource) -> Term {
 /// `float_runtime_index_nested_producers` (after `fuse_static_indices`), the
 /// pass under test — so the inlined runtime-indexed producer is still present
 /// for `run` to float.
-fn prepared(source: &str) -> Program<tlc::stage::SoacsAnfNormalized> {
+fn prepared(source: &str) -> tlc::stage::SoacsAnfNormalized {
     crate::test_pipeline::compile_thru_static_index(source)
 }
 
-fn entry_body(program: &Program<tlc::stage::RuntimeIndexProducersFloated>) -> &Term {
+fn entry_body(program: &tlc::stage::RuntimeIndexProducersFloated) -> &Term {
     program
         .defs
         .iter()
@@ -99,10 +99,7 @@ fn walk(term: &Term, f: &mut impl FnMut(&Term)) {
     term.for_each_child(&mut |c| walk(c, f));
 }
 
-fn let_bound_runtime_gather(
-    program: &Program<tlc::stage::RuntimeIndexProducersFloated>,
-    term: &Term,
-) -> bool {
+fn let_bound_runtime_gather(program: &tlc::stage::RuntimeIndexProducersFloated, term: &Term) -> bool {
     let mut found = false;
     walk(term, &mut |t| {
         if let TermKind::Let { name, rhs, .. } = &t.kind {
@@ -115,10 +112,7 @@ fn let_bound_runtime_gather(
     found
 }
 
-fn index_reads_runtime_gather(
-    program: &Program<tlc::stage::RuntimeIndexProducersFloated>,
-    term: &Term,
-) -> bool {
+fn index_reads_runtime_gather(program: &tlc::stage::RuntimeIndexProducersFloated, term: &Term) -> bool {
     let mut found = false;
     walk(term, &mut |t| {
         if let TermKind::Index { array, .. } = &t.kind {

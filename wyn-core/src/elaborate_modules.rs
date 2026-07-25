@@ -2,38 +2,33 @@
 
 use crate::ast;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ModulesElaboratedFamily;
-
-impl ast::Family for ModulesElaboratedFamily {
-    type Tree = ast::SourceTree;
-    type DefinitionData = ast::DefinitionSyntax;
-    type EntryData = ast::EntrySyntax;
-    type EntryParameterAttribute = crate::interface::Attribute;
-    type ExternData = ast::ExternSyntax;
-    type FrontendDeclaration = ast::ModulesElaboratedFrontend<ast::NestedDeclaration>;
-}
+pub type ModulesElaboratedFamily = ast::AstFamily<
+    ast::SourceTree,
+    ast::DefinitionSyntax,
+    ast::EntrySyntax,
+    crate::interface::Attribute,
+    ast::ExternSyntax,
+    ast::ModulesElaboratedFrontend<ast::NestedDeclaration>,
+>;
 
 /// AST after module and module-type declarations have moved into the module
 /// manager. Their absence is represented by the declaration family rather
 /// than by a convention over a shared enum.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ModulesElaborated;
-
-impl ast::Stage for ModulesElaborated {
-    type Family = ModulesElaboratedFamily;
-    type GlobalContext = crate::module_manager::ModuleManager;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum ModulesElaboratedTag {}
+pub type ModulesElaborated =
+    ast::Program<ModulesElaboratedTag, ModulesElaboratedFamily, crate::module_manager::ModuleManager>;
 
 /// Elaborate modules into `module_manager` and remove module declarations
 /// from the ordinary program tree.
 pub fn elaborate_modules(
-    program: ast::Program<crate::resolve_imports::ImportsResolved>,
-) -> crate::error::Result<ast::Program<ModulesElaborated>> {
+    program: crate::resolve_imports::ImportsResolved,
+) -> crate::error::Result<ModulesElaborated> {
     let ast::Program {
         declarations,
         mut node_ids,
         mut global_context,
+        state: _,
     } = program;
     global_context.elaborate_modules(&declarations, &mut node_ids)?;
 
@@ -69,5 +64,6 @@ pub fn elaborate_modules(
         declarations,
         node_ids,
         global_context,
+        state: std::marker::PhantomData,
     })
 }

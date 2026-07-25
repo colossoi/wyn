@@ -32,7 +32,7 @@ where
 }
 
 /// Parse input and return the Program, panicking on failure
-fn parse_ok(input: &str) -> Program {
+fn parse_ok(input: &str) -> Parsed {
     let tokens = tokenize(input).expect("tokenize failed");
     let tokens_clone = tokens.clone();
     let mut nc = NodeCounter::new();
@@ -45,6 +45,7 @@ fn parse_ok(input: &str) -> Program {
         declarations,
         node_ids: nc,
         global_context: crate::module_manager::ModuleManager::new_empty(),
+        state: std::marker::PhantomData,
     }
 }
 

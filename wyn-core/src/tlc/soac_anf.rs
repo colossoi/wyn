@@ -12,23 +12,21 @@ use super::{
 };
 use crate::SymbolTable;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SoacsAnfNormalized;
-
-impl super::Stage for SoacsAnfNormalized {
-    type Family = super::monomorphize::Monomorphic;
-    type GlobalContext = super::context::RewriteGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum SoacsAnfNormalizedTag {}
+pub type SoacsAnfNormalized =
+    super::Program<SoacsAnfNormalizedTag, super::monomorphize::Monomorphic, super::context::RewriteGlobal>;
 
 pub fn normalize_soacs_to_anf(
-    program: Program<super::stage::ConditionalProducersCanonicalized>,
-) -> Program<SoacsAnfNormalized> {
+    program: super::stage::ConditionalProducersCanonicalized,
+) -> SoacsAnfNormalized {
     let Program {
         defs,
         mut symbols,
         def_syms,
         mut term_ids,
         global_context,
+        state: _,
     } = program;
     let mut rewriter = SoacAnfRewriter {
         symbols: &mut symbols,
@@ -224,7 +222,7 @@ fn flatten_nested_let(term: Term<Empty, Empty>, term_ids: &mut TermIdSource) -> 
     (result, true)
 }
 
-fn verify_flattened(program: &Program<SoacsAnfNormalized>) -> Result<(), ()> {
+fn verify_flattened(program: &SoacsAnfNormalized) -> Result<(), ()> {
     fn walk(term: &Term<Empty, Empty>) -> Result<(), ()> {
         if matches!(&term.kind, TermKind::Let { rhs, .. } if matches!(rhs.kind, TermKind::Let { .. })) {
             return Err(());

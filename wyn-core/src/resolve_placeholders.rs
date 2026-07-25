@@ -35,17 +35,17 @@ pub struct PlaceholdersResolvedGlobal {
 
 /// AST after every placeholder in annotations and module specs has a stable
 /// inference variable.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct TypePlaceholdersResolved;
-
-impl ast::Stage for TypePlaceholdersResolved {
-    type Family = crate::resolve_resources::ResourcesResolvedFamily;
-    type GlobalContext = PlaceholdersResolvedGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum TypePlaceholdersResolvedTag {}
+pub type TypePlaceholdersResolved = Program<
+    TypePlaceholdersResolvedTag,
+    crate::resolve_resources::ResourcesResolvedFamily,
+    PlaceholdersResolvedGlobal,
+>;
 
 pub fn resolve_type_placeholders(
-    mut program: Program<crate::ast_const_fold::ConstantsFolded>,
-) -> Program<TypePlaceholdersResolved> {
+    mut program: crate::ast_const_fold::ConstantsFolded,
+) -> TypePlaceholdersResolved {
     let mut resolver = PlaceholderResolver::new();
     resolver.resolve(&mut program.global_context, &mut program.declarations);
     let (context, spec_schemes) = resolver.into_parts();
@@ -53,6 +53,7 @@ pub fn resolve_type_placeholders(
         declarations,
         node_ids,
         global_context: module_manager,
+        state: _,
     } = program;
     Program {
         declarations,
@@ -62,6 +63,7 @@ pub fn resolve_type_placeholders(
             context,
             spec_schemes,
         },
+        state: std::marker::PhantomData,
     }
 }
 

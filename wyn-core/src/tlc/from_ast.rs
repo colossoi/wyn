@@ -127,7 +127,7 @@ impl<'a> Transformer<'a> {
     /// their owned symbol table using `ProgramParts::with_symbols`.
     pub fn transform_program(
         &mut self,
-        program: &ast::Program<crate::ast_type_holes::HolesResolved>,
+        program: &crate::ast_type_holes::HolesResolved,
     ) -> ProgramParts<run::UnpinnedPolymorphic> {
         // First pass: register all top-level function names so that
         // references within function bodies use the same SymbolId as

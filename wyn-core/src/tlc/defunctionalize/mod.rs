@@ -14,34 +14,24 @@ mod closure_convert;
 mod hof_specialize;
 mod lower_calls;
 
-use super::{Family, Stage};
-
 pub(crate) use hof_specialize::verify_hof_specialized;
 
 /// TLC whose closure values and SOAC environments are explicit.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ClosureConverted;
-
-impl Family for ClosureConverted {
-    type DefinitionData = ();
-    type EntryData = super::data::PinnedEntry;
-    type ClosureData = super::data::ExplicitClosurePayload;
-    type SoacBodyData = super::data::ExplicitCapturesPayload;
-}
+pub type ClosureConverted = super::TreeFamily<
+    (),
+    super::data::PinnedEntry,
+    super::data::ExplicitClosurePayload,
+    super::data::ExplicitCapturesPayload,
+>;
 
 /// TLC after all higher-order values have been replaced by direct-callable
 /// code plus explicit environments.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Defunctionalized;
+#[derive(Debug, Clone, Copy)]
+pub enum DefunctionalizedTag {}
+pub type Defunctionalized =
+    super::Program<DefunctionalizedTag, ClosureConverted, super::context::PostClosureGlobal>;
 
-impl Stage for Defunctionalized {
-    type Family = ClosureConverted;
-    type GlobalContext = super::context::PostClosureGlobal;
-}
-
-pub fn defunctionalize(
-    program: super::Program<super::stage::RuntimeIndexProducersFloated>,
-) -> super::Program<Defunctionalized> {
+pub fn defunctionalize(program: super::stage::RuntimeIndexProducersFloated) -> Defunctionalized {
     let mut program = closure_convert::run(program);
     hof_specialize::run(&mut program);
     lower_calls::run(&mut program);

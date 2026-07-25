@@ -3714,7 +3714,7 @@ entry add_sum(xs: []i32) []i32 =
 ///
 /// On violation, panics with the offending sym, its symbol-table name,
 /// and the pipeline stage name.
-fn assert_no_unbound_var_refs(program: &crate::tlc::Program<crate::tlc::stage::Reachable>, stage: &str) {
+fn assert_no_unbound_var_refs(program: &crate::tlc::stage::Reachable, stage: &str) {
     use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
     use crate::tlc::{ArrayExpr, Lambda, LoopKind, SoacOp, Term, TermKind};
     use crate::SymbolId;
@@ -6443,9 +6443,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32
 // `--fill-holes`: type-hole default fill
 // ============================================================================
 
-fn compile_tlc_with_fill_holes(
-    input: &str,
-) -> crate::error::Result<crate::tlc::Program<crate::tlc::stage::Transformed>> {
+fn compile_tlc_with_fill_holes(input: &str) -> crate::error::Result<crate::tlc::stage::Transformed> {
     let typed = crate::compile_thru_frontend(input)?;
     let filled = crate::ast_type_holes::fill_type_holes(typed)?;
     Ok(crate::tlc::lower_from_ast(filled))

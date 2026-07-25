@@ -5,9 +5,9 @@
 //! the expected identifier rewrites or error.
 
 use super::*;
-use crate::ast::{self, Declaration, ExprKind, Expression, Program};
+use crate::ast::{self, Declaration, ExprKind, Expression};
 
-fn parse(src: &str) -> Program<crate::resolve_resources::ResourcesResolved> {
+fn parse(src: &str) -> crate::resolve_resources::ResourcesResolved {
     let program = crate::parser::parse(
         src,
         ast::NodeCounter::new(),
@@ -30,7 +30,7 @@ fn make_index(pairs: &[(&str, &str)]) -> OpenIndex {
 }
 
 /// Pull the body expression of the first `def`/`let` declaration.
-fn first_decl_body(prog: &Program<crate::resolve_resources::ResourcesResolved>) -> &Expression {
+fn first_decl_body(prog: &crate::resolve_resources::ResourcesResolved) -> &Expression {
     for d in &prog.declarations {
         if let Declaration::Decl(d) = d {
             return &d.body;

@@ -10,8 +10,8 @@
 use super::data::Empty;
 use super::VarRef;
 use super::{
-    wrap_let_bindings, ArrayExpr, Lambda, LetBinding, Program, RewriteDecision, SoacBody, SoacOp, Term,
-    TermId, TermIdSource, TermKind, TermRewriter,
+    wrap_let_bindings, ArrayExpr, Lambda, LetBinding, RewriteDecision, SoacBody, SoacOp, Term, TermId,
+    TermIdSource, TermKind, TermRewriter,
 };
 use crate::ast::{Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};
@@ -23,17 +23,17 @@ use polytype::Type;
 
 use super::subst::substitute_sym;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ConditionalProducersCanonicalized;
-
-impl super::Stage for ConditionalProducersCanonicalized {
-    type Family = super::monomorphize::Monomorphic;
-    type GlobalContext = super::context::RewriteGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum ConditionalProducersCanonicalizedTag {}
+pub type ConditionalProducersCanonicalized = super::Program<
+    ConditionalProducersCanonicalizedTag,
+    super::monomorphize::Monomorphic,
+    super::context::RewriteGlobal,
+>;
 
 pub fn canonicalize_conditional_producers(
-    mut program: Program<super::stage::InlinedSoaNormalized>,
-) -> Program<ConditionalProducersCanonicalized> {
+    mut program: super::stage::InlinedSoaNormalized,
+) -> ConditionalProducersCanonicalized {
     let mut rewriter = ConditionalProducerRewriter {
         symbols: &mut program.symbols,
         term_ids: &mut program.term_ids,
@@ -41,7 +41,7 @@ pub fn canonicalize_conditional_producers(
     for def in &mut program.defs {
         rewriter.rewrite_tracked(&mut def.body);
     }
-    program.into_stage()
+    program.retag()
 }
 
 struct ConditionalProducerRewriter<'a> {

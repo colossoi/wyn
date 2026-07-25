@@ -18,27 +18,21 @@ use crate::interface::{
 use crate::types::{Type, TypeName};
 use crate::{bail_type_at, BindingRef, LookupMap, LookupSet};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ResourcesResolvedFamily;
-
-impl ast::Family for ResourcesResolvedFamily {
-    type Tree = ast::SourceTree;
-    type DefinitionData = ast::DefinitionSyntax;
-    type EntryData = ast::ResolvedEntry;
-    type EntryParameterAttribute = ResolvedAttribute;
-    type ExternData = ast::ExternSyntax;
-    type FrontendDeclaration = ast::ResourcesResolvedFrontend<ast::NestedDeclaration>;
-}
+pub type ResourcesResolvedFamily = ast::AstFamily<
+    ast::SourceTree,
+    ast::DefinitionSyntax,
+    ast::ResolvedEntry,
+    ResolvedAttribute,
+    ast::ExternSyntax,
+    ast::ResourcesResolvedFrontend<ast::NestedDeclaration>,
+>;
 
 /// AST after resource declarations and source-only `#[view]` attributes have
 /// been consumed into concrete entry metadata.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ResourcesResolved;
-
-impl ast::Stage for ResourcesResolved {
-    type Family = ResourcesResolvedFamily;
-    type GlobalContext = crate::module_manager::ModuleManager;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum ResourcesResolvedTag {}
+pub type ResourcesResolved =
+    ast::Program<ResourcesResolvedTag, ResourcesResolvedFamily, crate::module_manager::ModuleManager>;
 
 /// Default descriptor set for auto-assigned resource bindings. Set 0 is
 /// compiler-reserved; user resources live on set 1+.
@@ -61,9 +55,7 @@ struct ResolvedResource {
     previous_sampled: Option<BindingRef>,
 }
 
-pub fn resolve_resources(
-    mut program: ast::Program<crate::name_resolution::NamesResolved>,
-) -> Result<ast::Program<ResourcesResolved>> {
+pub fn resolve_resources(mut program: crate::name_resolution::NamesResolved) -> Result<ResourcesResolved> {
     let decls: Vec<ResourceDecl> = program
         .declarations
         .iter()
@@ -91,7 +83,7 @@ pub fn resolve_resources(
 /// set, avoiding slots already taken by explicit param attributes or pins.
 fn derive_bindings(
     decls: &[ResourceDecl],
-    program: &ast::Program<crate::name_resolution::NamesResolved>,
+    program: &crate::name_resolution::NamesResolved,
 ) -> Result<LookupMap<String, ResolvedResource>> {
     let mut used: LookupSet<(u32, u32)> = collect_explicit_slots(program);
     for r in decls {
@@ -260,13 +252,14 @@ fn rewrite_view_param(
 }
 
 fn materialize(
-    program: ast::Program<crate::name_resolution::NamesResolved>,
+    program: crate::name_resolution::NamesResolved,
     mut entry_feedback: std::collections::VecDeque<Vec<FeedbackPair>>,
-) -> Result<ast::Program<ResourcesResolved>> {
+) -> Result<ResourcesResolved> {
     let ast::Program {
         declarations,
         node_ids,
         global_context,
+        state: _,
     } = program;
     let mut resolved = Vec::with_capacity(declarations.len());
     for declaration in declarations {
@@ -288,6 +281,7 @@ fn materialize(
         declarations: resolved,
         node_ids,
         global_context,
+        state: std::marker::PhantomData,
     })
 }
 
@@ -343,9 +337,7 @@ fn materialize_frontend(
 
 /// Every `(set, binding)` already claimed by an explicit binding attribute on
 /// any entry param — so auto-assigned resources don't collide with them.
-fn collect_explicit_slots(
-    program: &ast::Program<crate::name_resolution::NamesResolved>,
-) -> LookupSet<(u32, u32)> {
+fn collect_explicit_slots(program: &crate::name_resolution::NamesResolved) -> LookupSet<(u32, u32)> {
     let mut used = LookupSet::new();
     for decl in &program.declarations {
         let Declaration::Entry(entry) = decl else {
