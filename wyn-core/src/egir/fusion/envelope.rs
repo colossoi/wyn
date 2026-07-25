@@ -12,7 +12,7 @@ use super::{capture_types, graph_and_span, producer_is_used_only_by};
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, Body, BodySite};
-use crate::egir::program::{fresh_region_name, CoreProgramData, Program, RegionInterner, SemanticFunc};
+use crate::egir::program::{fresh_region_name, CoreProgramData, RegionInterner, SemanticFunc};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::{filter, hist, screma};
@@ -49,11 +49,11 @@ struct ProducerParts {
     output_elem_type: Type<TypeName>,
 }
 
-pub(super) fn analyze(inner: &Program<Segmented>, oracle: &SemanticGraph) -> Option<Candidate> {
+pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
     find_candidate(inner, oracle)
 }
 
-fn find_candidate(inner: &Program<Segmented>, oracle: &SemanticGraph) -> Option<Candidate> {
+fn find_candidate(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
     for (index, entry) in inner.entry_points.iter().enumerate() {
         if let Some(candidate) = find_in_graph(&entry.graph, BodySite::Entry(index), oracle) {
             return Some(candidate);
@@ -268,14 +268,14 @@ fn producer_parts(graph: &EGraph, candidate: &Candidate) -> ProducerParts {
     }
 }
 
-pub(super) fn apply(inner: Program<Segmented>, candidate: Candidate) -> Program<Segmented> {
+pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     match candidate.kind {
         EnvelopeKind::Filter => apply_filter(inner, candidate),
         EnvelopeKind::Hist => apply_hist(inner, candidate),
     }
 }
 
-fn apply_filter(inner: Program<Segmented>, candidate: Candidate) -> Program<Segmented> {
+fn apply_filter(inner: Segmented, candidate: Candidate) -> Segmented {
     let producer = producer_parts(graph_and_span(&inner, candidate.site).0, &candidate);
     debug_assert_eq!(producer.input_nodes.len(), 1);
     inner.rewrite_body(candidate.site, |body| {
@@ -319,7 +319,7 @@ fn apply_filter(inner: Program<Segmented>, candidate: Candidate) -> Program<Segm
     })
 }
 
-fn apply_hist(inner: Program<Segmented>, candidate: Candidate) -> Program<Segmented> {
+fn apply_hist(inner: Segmented, candidate: Candidate) -> Segmented {
     let (producer, hist_effect, outer_types, span, scope) = {
         let (graph, span, scope) = graph_and_span(&inner, candidate.site);
         (
@@ -427,7 +427,7 @@ fn apply_hist(inner: Program<Segmented>, candidate: Candidate) -> Program<Segmen
 
 #[allow(clippy::too_many_arguments)]
 fn compose_hist_region(
-    inner: &Program<Segmented>,
+    inner: &Segmented,
     region_interner: &mut RegionInterner,
     scope: &str,
     span: crate::ast::Span,

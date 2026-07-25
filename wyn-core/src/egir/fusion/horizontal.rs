@@ -13,7 +13,7 @@ use super::space::seg_space_fusable;
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, Body, BodySite};
-use crate::egir::program::{OutputSlotId, Program};
+use crate::egir::program::OutputSlotId;
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
@@ -31,7 +31,7 @@ pub(super) struct Candidate {
 }
 
 /// Find one legal sibling pair anywhere in the program.
-pub(super) fn analyze(inner: &Program<Segmented>, oracle: &SemanticGraph) -> Option<Candidate> {
+pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
     for (index, entry) in inner.entry_points.iter().enumerate() {
         if let Some((block, left, right)) = find_in_graph(&entry.graph, &entry.name, oracle) {
             return Some(Candidate {
@@ -72,7 +72,7 @@ fn find_in_graph(graph: &EGraph, scope: &str, oracle: &SemanticGraph) -> Option<
     None
 }
 
-pub(super) fn apply(inner: Program<Segmented>, candidate: Candidate) -> Program<Segmented> {
+pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     inner.rewrite_body(candidate.site, |body| {
         let rewrite_graph = |graph: &mut EGraph| {
             fuse_pair(graph, candidate.block, candidate.left, candidate.right);

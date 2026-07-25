@@ -515,22 +515,41 @@ impl<R: Copy + Ord> SegResourceAccess<R> {
 /// Phase-varying data embedded recursively in EGIR nodes.
 ///
 /// Every associated type corresponds to an actual field stored in the graph.
-/// Proof-only checkpoints and program-wide state belong to [`Stage`].
+/// Proof-only typestates and program-wide context stay at [`Program`].
 pub trait Family: Clone + std::fmt::Debug {
     type Resource: GraphResource;
     type Soac: Clone + std::fmt::Debug;
 }
 
-/// One externally visible EGIR pipeline checkpoint.
+/// The complete collection of types physically stored by an EGIR program.
 ///
-/// The stage generic exists only on the program and entry-output boundary.
-/// Descendants receive the recursive family and route data they actually use.
-pub trait Stage {
+/// [`ProgramFamily`] makes this collection explicit at each top-level
+/// typestate alias. Descendants receive only the individual types they store.
+pub trait ProgramShape {
     type Family: Family;
     type ResourceDecl: Clone + std::fmt::Debug;
     type OutputRoute: Clone + std::fmt::Debug;
     type ProgramData: std::fmt::Debug;
-    type GlobalContext: std::fmt::Debug;
+}
+
+/// A transparent description of one EGIR tree representation.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProgramFamily<GraphFamily, ResourceDecl, OutputRoute, ProgramData>(
+    std::marker::PhantomData<fn() -> (GraphFamily, ResourceDecl, OutputRoute, ProgramData)>,
+);
+
+impl<GraphFamily, ResourceDecl, OutputRoute, ProgramData> ProgramShape
+    for ProgramFamily<GraphFamily, ResourceDecl, OutputRoute, ProgramData>
+where
+    GraphFamily: Family,
+    ResourceDecl: Clone + std::fmt::Debug,
+    OutputRoute: Clone + std::fmt::Debug,
+    ProgramData: std::fmt::Debug,
+{
+    type Family = GraphFamily;
+    type ResourceDecl = ResourceDecl;
+    type OutputRoute = OutputRoute;
+    type ProgramData = ProgramData;
 }
 
 #[derive(Clone, Debug)]
@@ -1625,15 +1644,16 @@ impl<P: Family, ResourceDecl, Route, Lang: Language> Entry<P, ResourceDecl, Rout
 
 /// Whole-program EGIR container at one externally visible checkpoint.
 #[derive(Debug)]
-pub struct Program<S: Stage, Lang: Language> {
-    pub functions: Vec<Func<S::Family, Lang>>,
+pub struct Program<Tag, Shape: ProgramShape, GlobalContext, Lang: Language> {
+    pub functions: Vec<Func<Shape::Family, Lang>>,
     pub externs: Vec<ExternDecl<Lang::Ty>>,
-    pub entry_points: Vec<Entry<S::Family, S::ResourceDecl, S::OutputRoute, Lang>>,
-    pub constants: Vec<ConstantDef<S::Family, Lang>>,
+    pub entry_points: Vec<Entry<Shape::Family, Shape::ResourceDecl, Shape::OutputRoute, Lang>>,
+    pub constants: Vec<ConstantDef<Shape::Family, Lang>>,
     /// Program-owned IR data selected by this checkpoint.
-    pub data: S::ProgramData,
+    pub data: Shape::ProgramData,
     /// Program-wide state available at this exact pipeline checkpoint.
-    pub global_context: S::GlobalContext,
+    pub global_context: GlobalContext,
+    pub(crate) state: std::marker::PhantomData<fn() -> Tag>,
 }
 
 /// Stable address of one graph-bearing body within a program snapshot.
@@ -1646,20 +1666,20 @@ pub enum BodySite {
 
 /// One graph-bearing program member removed from a program for a consuming
 /// rewrite.
-pub enum Body<S: Stage, Lang: Language> {
-    Function(Func<S::Family, Lang>),
-    Entry(Entry<S::Family, S::ResourceDecl, S::OutputRoute, Lang>),
-    Constant(ConstantDef<S::Family, Lang>),
+pub enum Body<P: Family, ResourceDecl, OutputRoute, Lang: Language> {
+    Function(Func<P, Lang>),
+    Entry(Entry<P, ResourceDecl, OutputRoute, Lang>),
+    Constant(ConstantDef<P, Lang>),
 }
 
-impl<S: Stage, Lang: Language> Program<S, Lang> {
+impl<Tag, Shape: ProgramShape, GlobalContext, Lang: Language> Program<Tag, Shape, GlobalContext, Lang> {
     pub fn from_parts(
-        functions: Vec<Func<S::Family, Lang>>,
+        functions: Vec<Func<Shape::Family, Lang>>,
         externs: Vec<ExternDecl<Lang::Ty>>,
-        entry_points: Vec<Entry<S::Family, S::ResourceDecl, S::OutputRoute, Lang>>,
-        constants: Vec<ConstantDef<S::Family, Lang>>,
-        data: S::ProgramData,
-        global_context: S::GlobalContext,
+        entry_points: Vec<Entry<Shape::Family, Shape::ResourceDecl, Shape::OutputRoute, Lang>>,
+        constants: Vec<ConstantDef<Shape::Family, Lang>>,
+        data: Shape::ProgramData,
+        global_context: GlobalContext,
     ) -> Self {
         Self {
             functions,
@@ -1668,10 +1688,11 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
             constants,
             data,
             global_context,
+            state: std::marker::PhantomData,
         }
     }
 
-    pub fn body_graph(&self, site: BodySite) -> Option<&EGraph<S::Family, Lang>> {
+    pub fn body_graph(&self, site: BodySite) -> Option<&EGraph<Shape::Family, Lang>> {
         match site {
             BodySite::Function(region) => {
                 self.functions.iter().find(|function| function.region == region).map(|body| &body.graph)
@@ -1681,17 +1702,8 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
         }
     }
 
-    /// Change only the top-level checkpoint when all stored types agree.
-    pub fn into_stage<T>(self) -> Program<T, Lang>
-    where
-        T: Stage<
-            Family = S::Family,
-            ResourceDecl = S::ResourceDecl,
-            OutputRoute = S::OutputRoute,
-            ProgramData = S::ProgramData,
-            GlobalContext = S::GlobalContext,
-        >,
-    {
+    /// Change only the top-level proof tag while preserving all stored types.
+    pub fn retag<NewTag>(self) -> Program<NewTag, Shape, GlobalContext, Lang> {
         let Self {
             functions,
             externs,
@@ -1699,6 +1711,7 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
             constants,
             data,
             global_context,
+            state: _,
         } = self;
         Program {
             functions,
@@ -1707,6 +1720,7 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
             constants,
             data,
             global_context,
+            state: std::marker::PhantomData,
         }
     }
 
@@ -1714,7 +1728,7 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
     /// non-graph fields directly into the resulting program.
     pub fn map_graphs(
         self,
-        mut map: impl FnMut(BodySite, EGraph<S::Family, Lang>) -> EGraph<S::Family, Lang>,
+        mut map: impl FnMut(BodySite, EGraph<Shape::Family, Lang>) -> EGraph<Shape::Family, Lang>,
     ) -> Self {
         match self.try_map_graphs(|site, graph| Ok::<_, std::convert::Infallible>(map(site, graph))) {
             Ok(program) => program,
@@ -1725,7 +1739,7 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
     /// Fallible counterpart to [`Self::map_graphs`].
     pub fn try_map_graphs<E>(
         self,
-        mut map: impl FnMut(BodySite, EGraph<S::Family, Lang>) -> Result<EGraph<S::Family, Lang>, E>,
+        mut map: impl FnMut(BodySite, EGraph<Shape::Family, Lang>) -> Result<EGraph<Shape::Family, Lang>, E>,
     ) -> Result<Self, E> {
         let Self {
             functions,
@@ -1734,6 +1748,7 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
             constants,
             data,
             global_context,
+            state,
         } = self;
         let functions = functions
             .into_iter()
@@ -1759,6 +1774,7 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
             constants,
             data,
             global_context,
+            state,
         })
     }
 
@@ -1768,10 +1784,10 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
         self,
         mut map: impl FnMut(
             BodySite,
-            EGraph<S::Family, Lang>,
-            &mut S::ProgramData,
-            &mut S::GlobalContext,
-        ) -> Result<EGraph<S::Family, Lang>, E>,
+            EGraph<Shape::Family, Lang>,
+            &mut Shape::ProgramData,
+            &mut GlobalContext,
+        ) -> Result<EGraph<Shape::Family, Lang>, E>,
     ) -> Result<Self, E> {
         let Self {
             functions,
@@ -1780,6 +1796,7 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
             constants,
             mut data,
             mut global_context,
+            state,
         } = self;
         let functions = functions
             .into_iter()
@@ -1813,12 +1830,13 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
             constants,
             data,
             global_context,
+            state,
         })
     }
 
     /// Consume the program and append synthesized callable regions while
     /// moving every existing member unchanged.
-    pub fn extend_functions(self, additional: impl IntoIterator<Item = Func<S::Family, Lang>>) -> Self {
+    pub fn extend_functions(self, additional: impl IntoIterator<Item = Func<Shape::Family, Lang>>) -> Self {
         let Self {
             functions,
             externs,
@@ -1826,6 +1844,7 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
             constants,
             data,
             global_context,
+            state,
         } = self;
         Self {
             functions: functions.into_iter().chain(additional).collect(),
@@ -1834,11 +1853,12 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
             constants,
             data,
             global_context,
+            state,
         }
     }
 
     /// Consume the program and rebuild only its program-owned data.
-    pub fn map_data(self, map: impl FnOnce(S::ProgramData) -> S::ProgramData) -> Self {
+    pub fn map_data(self, map: impl FnOnce(Shape::ProgramData) -> Shape::ProgramData) -> Self {
         let Self {
             functions,
             externs,
@@ -1846,6 +1866,7 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
             constants,
             data,
             global_context,
+            state,
         } = self;
         Self {
             functions,
@@ -1854,6 +1875,7 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
             constants,
             data: map(data),
             global_context,
+            state,
         }
     }
 
@@ -1862,7 +1884,9 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
     pub fn rewrite_body(
         self,
         site: BodySite,
-        rewrite: impl FnOnce(Body<S, Lang>) -> Body<S, Lang>,
+        rewrite: impl FnOnce(
+            Body<Shape::Family, Shape::ResourceDecl, Shape::OutputRoute, Lang>,
+        ) -> Body<Shape::Family, Shape::ResourceDecl, Shape::OutputRoute, Lang>,
     ) -> Self {
         match self.try_rewrite_body(site, |body| Ok::<_, std::convert::Infallible>(rewrite(body))) {
             Ok(program) => program,
@@ -1874,7 +1898,10 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
     pub fn try_rewrite_body<E>(
         self,
         site: BodySite,
-        rewrite: impl FnOnce(Body<S, Lang>) -> Result<Body<S, Lang>, E>,
+        rewrite: impl FnOnce(
+            Body<Shape::Family, Shape::ResourceDecl, Shape::OutputRoute, Lang>,
+        )
+            -> Result<Body<Shape::Family, Shape::ResourceDecl, Shape::OutputRoute, Lang>, E>,
     ) -> Result<Self, E> {
         let Self {
             functions,
@@ -1883,6 +1910,7 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
             constants,
             data,
             global_context,
+            state,
         } = self;
         let mut rewrite = Some(rewrite);
         let mut rebuilt_functions = Vec::with_capacity(functions.len());
@@ -1929,6 +1957,7 @@ impl<S: Stage, Lang: Language> Program<S, Lang> {
             constants: rebuilt_constants,
             data,
             global_context,
+            state,
         })
     }
 }

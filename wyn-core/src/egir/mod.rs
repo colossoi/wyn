@@ -49,17 +49,17 @@ pub mod verify_no_abstract;
 pub(crate) mod verify_physical;
 
 pub use allocation::{plan_logical_resources, ResourcesAllocated};
-pub use elaborate::run as elaborate;
-pub use materialize::{run as materialize_dynamic_extracts, Materialized};
+pub use elaborate::elaborate;
+pub use materialize::{materialize_dynamic_extracts, Materialized};
 pub use parallelize::plan;
-pub use partial_inline::{run as partially_inline_calls, PartiallyInlined};
-pub use realize_outputs::run as realize_outputs;
-pub use reify::run as reify_soacs;
-pub use resource_erasure::{run as erase_resources, ResourcesErased};
-pub use rewrite::run as rewrite;
-pub use semantic_opt::{run as optimize_semantics, Optimized};
-pub use skel_opt::{run as optimize_skeleton, SkeletonOptimized};
-pub use soac_expand::{run as expand_soacs, SoacsExpanded};
+pub use partial_inline::{partially_inline_calls, PartiallyInlined};
+pub use realize_outputs::realize_outputs;
+pub use reify::reify_soacs;
+pub use resource_erasure::{erase_resources, ResourcesErased};
+pub use rewrite::rewrite;
+pub use semantic_opt::{optimize_semantics, Optimized};
+pub use skel_opt::{optimize_skeleton, SkeletonOptimized};
+pub use soac_expand::{expand_soacs, SoacsExpanded};
 
 #[cfg(test)]
 pub(crate) mod semantic_exec;

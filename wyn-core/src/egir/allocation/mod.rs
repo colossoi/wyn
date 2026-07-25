@@ -12,18 +12,27 @@ mod residency;
 use std::collections::{HashMap, HashSet};
 
 use super::from_tlc::ConvertError;
-use super::ir::Stage;
 use super::program::{
     AllocatedProgramData, CompilerResource, CompilerResourceKind, LogicalSize, MaterializationId, Program,
     ResourceId, ResourceOrigin, RewriteGlobal, SemanticEntry, SemanticEntryId, SemanticResourceRef,
 };
 use super::semantic_opt::Optimized;
 use super::soac::filter;
-use super::types::{Semantic, SideEffectKind, Soac, SoacEffect, WynLanguage};
+use super::types::{Semantic, SideEffectKind, Soac, SoacEffect};
 
 /// EGIR after logical resources and materialization entries have been planned.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ResourcesAllocated;
+#[derive(Debug, Clone, Copy)]
+pub enum ResourcesAllocatedTag {}
+pub type ResourcesAllocated = super::program::Program<
+    ResourcesAllocatedTag,
+    super::ir::ProgramFamily<
+        Semantic,
+        super::program::SemanticResourceDecl,
+        super::ir::RealizedOutputRoute,
+        AllocatedProgramData,
+    >,
+    RewriteGlobal,
+>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CompilerFlowEndpoint {
@@ -37,15 +46,7 @@ pub struct CompilerResourceFlow {
     pub consumers: Vec<CompilerFlowEndpoint>,
 }
 
-impl Stage for ResourcesAllocated {
-    type Family = Semantic;
-    type ResourceDecl = super::program::SemanticResourceDecl;
-    type OutputRoute = super::ir::RealizedOutputRoute;
-    type ProgramData = AllocatedProgramData;
-    type GlobalContext = RewriteGlobal;
-}
-
-impl Program<ResourcesAllocated, WynLanguage> {
+impl ResourcesAllocated {
     /// Human-readable semantic IR including segmented spaces, captures,
     /// output routing, and logical resource accesses.
     pub fn semantic_ir(&self) -> String {
@@ -59,9 +60,7 @@ impl Program<ResourcesAllocated, WynLanguage> {
 }
 
 /// Establish target-independent residency and logical resources.
-pub fn plan_logical_resources(
-    program: Program<Optimized, WynLanguage>,
-) -> Result<Program<ResourcesAllocated, WynLanguage>, ConvertError> {
+pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, ConvertError> {
     let Program {
         functions,
         externs,
@@ -69,6 +68,7 @@ pub fn plan_logical_resources(
         constants,
         data,
         global_context,
+        state: _,
     } = program;
     let program = Program::from_parts(
         functions,
@@ -94,7 +94,7 @@ pub fn plan_logical_resources(
 }
 
 pub(crate) fn entries_with_endpoints(
-    program: &Program<ResourcesAllocated, WynLanguage>,
+    program: &ResourcesAllocated,
 ) -> impl Iterator<Item = (CompilerFlowEndpoint, &SemanticEntry)> {
     program
         .entry_points
@@ -116,9 +116,7 @@ pub(crate) fn entries_with_endpoints(
 
 /// Derived resource-flow edges consumed by target scheduling. They are not
 /// stored on resources because entry rewrites are their source of truth.
-pub(crate) fn resource_flows(
-    program: &Program<ResourcesAllocated, WynLanguage>,
-) -> Vec<(ResourceId, CompilerResourceFlow)> {
+pub(crate) fn resource_flows(program: &ResourcesAllocated) -> Vec<(ResourceId, CompilerResourceFlow)> {
     let mut producers: HashMap<ResourceId, Vec<CompilerFlowEndpoint>> = HashMap::new();
     let mut consumers: HashMap<ResourceId, Vec<CompilerFlowEndpoint>> = HashMap::new();
     for (endpoint, entry) in entries_with_endpoints(program) {
@@ -172,9 +170,7 @@ pub(crate) fn resource_flows(
     flows
 }
 
-pub(crate) fn verify_allocated_resources(
-    program: &Program<ResourcesAllocated, WynLanguage>,
-) -> Result<(), String> {
+pub(crate) fn verify_allocated_resources(program: &ResourcesAllocated) -> Result<(), String> {
     let check_size = |size: &LogicalSize| match size {
         LogicalSize::LikeResource { resource, .. } if !program.data.core.resources.contains(*resource) => {
             Err(format!("resource size references missing source {resource:?}"))
@@ -198,9 +194,7 @@ pub(crate) fn verify_allocated_resources(
     Ok(())
 }
 
-fn classify_existing_compiler_resources(
-    program: Program<ResourcesAllocated, WynLanguage>,
-) -> Program<ResourcesAllocated, WynLanguage> {
+fn classify_existing_compiler_resources(program: ResourcesAllocated) -> ResourcesAllocated {
     let mut classifications = HashMap::new();
     for entry in &program.entry_points {
         for declaration in &entry.resource_declarations {
@@ -232,9 +226,7 @@ fn classify_existing_compiler_resources(
     })
 }
 
-fn filter_resource_kinds(
-    program: &Program<ResourcesAllocated, WynLanguage>,
-) -> HashMap<ResourceId, CompilerResource> {
+fn filter_resource_kinds(program: &ResourcesAllocated) -> HashMap<ResourceId, CompilerResource> {
     let mut kinds = HashMap::new();
     for (_, entry) in entries_with_endpoints(program) {
         for (_, block) in &entry.graph.skeleton.blocks {
@@ -270,9 +262,7 @@ fn filter_resource_kinds(
     kinds
 }
 
-fn resolve_scratch_sizes(
-    program: Program<ResourcesAllocated, WynLanguage>,
-) -> Program<ResourcesAllocated, WynLanguage> {
+fn resolve_scratch_sizes(program: ResourcesAllocated) -> ResourcesAllocated {
     let mut resolved = Vec::new();
     for (_, entry) in entries_with_endpoints(&program) {
         for (_, block) in &entry.graph.skeleton.blocks {
@@ -343,6 +333,7 @@ fn resolve_scratch_sizes(
         constants,
         mut data,
         global_context,
+        state: _,
     } = program;
     for (resource, size, output_len) in resolved {
         data.core.resources[resource].size = size.clone();
@@ -368,9 +359,7 @@ fn resolve_scratch_sizes(
     Program::from_parts(functions, externs, entry_points, constants, data, global_context)
 }
 
-fn strip_compiler_abi(
-    program: Program<ResourcesAllocated, WynLanguage>,
-) -> Program<ResourcesAllocated, WynLanguage> {
+fn strip_compiler_abi(program: ResourcesAllocated) -> ResourcesAllocated {
     let compiler_resources = program
         .data
         .core
@@ -398,6 +387,7 @@ fn strip_compiler_abi(
         constants,
         mut data,
         global_context,
+        state: _,
     } = program;
     for entry in &mut entry_points {
         strip(entry);

@@ -31,13 +31,13 @@ use crate::types::TypeExt;
 
 use super::super::allocation::{entries_with_endpoints, CompilerFlowEndpoint, ResourcesAllocated};
 use super::super::from_tlc::ConvertError;
-use super::super::program::{Program, SemanticEntry};
+use super::super::program::SemanticEntry;
 use super::super::types::{EGraph, ENode, Family, NodeId, SkeletonTerminator};
 
 /// Verify the post-realization invariant for every entry. Returns
 /// `ConvertError::Internal` on the first violation, naming the entry
 /// and offending NodeId.
-pub fn check(inner: &Program<ResourcesAllocated>) -> Result<(), ConvertError> {
+pub fn check(inner: &ResourcesAllocated) -> Result<(), ConvertError> {
     for (endpoint, entry) in entries_with_endpoints(inner) {
         if matches!(endpoint, CompilerFlowEndpoint::Entry(_)) {
             check_routes(entry)?;

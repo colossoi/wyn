@@ -17,8 +17,7 @@ use crate::builtins::catalog;
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, Body, BodySite, RealizedOutputRoute};
 use crate::egir::program::{
-    fresh_region_name, CoreProgramData, OutputWriter, Program, RegionInterner, SemanticFunc,
-    SemanticResourceRef,
+    fresh_region_name, CoreProgramData, OutputWriter, RegionInterner, SemanticFunc, SemanticResourceRef,
 };
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
@@ -50,11 +49,11 @@ struct FilterParts {
     scratch: Option<SemanticResourceRef>,
 }
 
-pub(super) fn analyze(inner: &Program<Segmented>, oracle: &SemanticGraph) -> Option<Candidate> {
+pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
     find_candidate(inner, oracle)
 }
 
-fn find_candidate(inner: &Program<Segmented>, oracle: &SemanticGraph) -> Option<Candidate> {
+fn find_candidate(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
     for (index, entry) in inner.entry_points.iter().enumerate() {
         let routes = entry.routes().cloned().collect::<Vec<_>>();
         if let Some(candidate) = find_in_graph(&entry.graph, BodySite::Entry(index), oracle, Some(&routes))
@@ -257,7 +256,7 @@ fn filter_parts(effect: &SideEffect) -> FilterParts {
     }
 }
 
-pub(super) fn apply(inner: Program<Segmented>, candidate: Candidate) -> Program<Segmented> {
+pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     let (filter_effect, consumer_effect, outer_types, span, scope) = {
         let (graph, span, scope) = graph_and_span(&inner, candidate.site);
         let block = &graph.skeleton.blocks[candidate.block];
@@ -350,7 +349,7 @@ struct EntryMetadataPatch {
 
 #[allow(clippy::too_many_arguments)]
 fn apply_with_consumer(
-    inner: Program<Segmented>,
+    inner: Segmented,
     candidate: &Candidate,
     filter_effect: SideEffect,
     consumer_effect: SideEffect,
@@ -359,7 +358,7 @@ fn apply_with_consumer(
     operators: Vec<screma::Operator>,
     count: Option<screma::Operator>,
     count_ty: Option<Type<TypeName>>,
-) -> Program<Segmented> {
+) -> Segmented {
     inner.rewrite_body(candidate.site, |body| {
         let rewrite = |graph: &mut EGraph| {
             rewrite_with_consumer(
@@ -390,13 +389,13 @@ fn apply_with_consumer(
 }
 
 fn apply_count_only(
-    inner: Program<Segmented>,
+    inner: Segmented,
     candidate: &Candidate,
     filter_effect: SideEffect,
     filter: FilterParts,
     count: screma::Operator,
     count_ty: Type<TypeName>,
-) -> Program<Segmented> {
+) -> Segmented {
     inner.rewrite_body(candidate.site, |body| {
         let rewrite = |graph: &mut EGraph| {
             rewrite_count_only(
@@ -690,7 +689,7 @@ fn integer_literal(graph: &mut EGraph, value: &str, ty: &Type<TypeName>) -> Node
 
 #[allow(clippy::too_many_arguments)]
 fn masked_step(
-    inner: &Program<Segmented>,
+    inner: &Segmented,
     region_interner: &mut RegionInterner,
     scope: &str,
     span: crate::ast::Span,
@@ -761,7 +760,7 @@ fn masked_step(
 }
 
 fn count_operator(
-    inner: &Program<Segmented>,
+    inner: &Segmented,
     region_interner: &mut RegionInterner,
     scope: &str,
     span: crate::ast::Span,

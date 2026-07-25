@@ -26,16 +26,14 @@ use smallvec::SmallVec;
 
 use super::extract;
 use super::loop_analysis::LoopAnalysis;
-use super::program::{
-    PhysicalEGraph, PhysicalPureOp, PhysicalSideEffect, PlannedGlobal, Program as EgirProgram,
-};
+use super::program::{PhysicalEGraph, PhysicalPureOp, PhysicalSideEffect, PlannedGlobal};
 use super::scoped_map::ScopedMap;
 use super::types::*;
 
 /// Lower the whole EGIR program to SSA. Each per-body EGraph is
 /// elaborated to a `FuncBody`, externs pass through, and the result is
 /// assembled into a backend-bound SSA program.
-pub fn run(inner: EgirProgram<super::resource_erasure::ResourcesErased>) -> crate::ssa::stage::Elaborated {
+pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> crate::ssa::stage::Elaborated {
     let super::ir::Program {
         functions,
         externs,
@@ -43,6 +41,7 @@ pub fn run(inner: EgirProgram<super::resource_erasure::ResourcesErased>) -> crat
         constants,
         data,
         global_context,
+        state: _,
     } = inner;
     let pipeline = data.pipeline;
     let pipeline_storage_accesses = pipeline_storage_accesses(&pipeline);

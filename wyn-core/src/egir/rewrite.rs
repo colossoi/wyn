@@ -10,23 +10,24 @@
 //! them (`skel_opt` scopes unions out; `elaborate` extracts).
 
 /// Physical EGIR after pure-graph rewrite alternatives have been installed.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Rewritten;
-
-impl super::ir::Stage for Rewritten {
-    type Family = super::types::Physical;
-    type ResourceDecl = crate::interface::StorageBindingDecl;
-    type OutputRoute = super::ir::RealizedOutputRoute;
-    type ProgramData = super::program::CoreProgramData;
-    type GlobalContext = super::program::PlannedGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum RewrittenTag {}
+pub type Rewritten = super::program::Program<
+    RewrittenTag,
+    super::ir::ProgramFamily<
+        super::types::Physical,
+        crate::interface::StorageBindingDecl,
+        super::ir::RealizedOutputRoute,
+        super::program::CoreProgramData,
+    >,
+    super::program::PlannedGlobal,
+>;
 
 use polytype::Type;
 use smallvec::smallvec;
 
 use crate::ast::TypeName;
 
-use super::program::Program;
 use super::types::{EGraph, ENode, Family, NodeId, PureOp};
 
 /// Result of attempting a rewrite on a node.
@@ -106,14 +107,14 @@ impl<P: Family> RewriteSet<P> {
 
 /// Apply the default rewrite set to every physical body. Elaboration's cost
 /// extraction resolves the unions introduced here.
-pub fn run(program: Program<super::partial_inline::PartiallyInlined>) -> Program<Rewritten> {
+pub fn rewrite(program: super::partial_inline::PartiallyInlined) -> Rewritten {
     let rules = default_rewrites();
     program
         .map_graphs(|_, mut graph| {
             rules.apply_to_graph(&mut graph);
             graph
         })
-        .into_stage()
+        .retag()
 }
 
 /// Every rule whose outcome is arbitrated by cost extraction.

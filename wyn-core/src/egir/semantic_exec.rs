@@ -3,7 +3,7 @@
 //! This deliberately executes semantic values rather than scheduled kernels;
 //! optional adapter tests compare backend readback against the same oracle.
 
-use crate::egir::program::{Program, SemanticFunc};
+use crate::egir::program::SemanticFunc;
 use crate::egir::reify::Segmented;
 use crate::egir::types::{ENode, NodeId, PureOp, RegionId, SkeletonTerminator};
 use crate::LookupMap;
@@ -23,11 +23,11 @@ pub enum Value {
 /// typed region arena used by SegBody/SegBinOp, so semantic tests exercise the
 /// representation rather than parallel Rust closures alone.
 pub struct RegionExecutor<'a> {
-    program: &'a Program<Segmented>,
+    program: &'a Segmented,
 }
 
 impl<'a> RegionExecutor<'a> {
-    pub fn new(program: &'a Program<Segmented>) -> Self {
+    pub fn new(program: &'a Segmented) -> Self {
         Self { program }
     }
 

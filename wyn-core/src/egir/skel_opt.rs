@@ -24,35 +24,36 @@
 //!    before the map is returned).
 
 /// Physical EGIR after skeleton control-flow simplification.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SkeletonOptimized;
-
-impl super::ir::Stage for SkeletonOptimized {
-    type Family = super::types::Physical;
-    type ResourceDecl = crate::interface::StorageBindingDecl;
-    type OutputRoute = super::ir::RealizedOutputRoute;
-    type ProgramData = super::program::CoreProgramData;
-    type GlobalContext = super::program::PlannedGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum SkeletonOptimizedTag {}
+pub type SkeletonOptimized = super::program::Program<
+    SkeletonOptimizedTag,
+    super::ir::ProgramFamily<
+        super::types::Physical,
+        crate::interface::StorageBindingDecl,
+        super::ir::RealizedOutputRoute,
+        super::program::CoreProgramData,
+    >,
+    super::program::PlannedGlobal,
+>;
 
 use crate::flow::BlockId;
 use crate::{LookupMap, LookupSet, SortedSet};
 
 use crate::ssa::types::ConstantValue;
 
-use super::program::Program;
 use super::types::{EGraph, ENode, Family, NodeId, PureOp, SkeletonTerminator};
 
 /// Run skeleton rewrites on every body and attach each eliminated block
 /// parameter's canonical replacement directly to that node.
-pub fn run(program: Program<super::rewrite::Rewritten>) -> Program<SkeletonOptimized> {
+pub fn optimize_skeleton(program: super::rewrite::Rewritten) -> SkeletonOptimized {
     program
         .map_graphs(|_, mut graph| {
             let aliases = run_one_body(&mut graph);
             graph.install_aliases(aliases);
             graph
         })
-        .into_stage()
+        .retag()
 }
 
 /// Run all enabled skeleton rewrites to fixpoint. Returns an alias map

@@ -7,16 +7,18 @@
 //! call graph is concrete.
 
 /// Physical EGIR with compile-time-only resource handles erased.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ResourcesErased;
-
-impl crate::egir::ir::Stage for ResourcesErased {
-    type Family = crate::egir::types::Physical;
-    type ResourceDecl = crate::interface::StorageBindingDecl;
-    type OutputRoute = crate::egir::ir::RealizedOutputRoute;
-    type ProgramData = crate::egir::program::CoreProgramData;
-    type GlobalContext = crate::egir::program::PlannedGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum ResourcesErasedTag {}
+pub type ResourcesErased = crate::egir::program::Program<
+    ResourcesErasedTag,
+    crate::egir::ir::ProgramFamily<
+        crate::egir::types::Physical,
+        crate::interface::StorageBindingDecl,
+        crate::egir::ir::RealizedOutputRoute,
+        crate::egir::program::CoreProgramData,
+    >,
+    crate::egir::program::PlannedGlobal,
+>;
 
 #[cfg(test)]
 #[path = "resource_erasure_tests.rs"]
@@ -30,9 +32,9 @@ use crate::{LookupMap, LookupSet};
 use polytype::Type;
 use smallvec::SmallVec;
 
-pub fn run(
-    program: Program<super::skel_opt::SkeletonOptimized>,
-) -> Result<Program<ResourcesErased>, ConvertError> {
+pub fn erase_resources(
+    program: super::skel_opt::SkeletonOptimized,
+) -> Result<ResourcesErased, ConvertError> {
     let erasures: LookupMap<String, Vec<bool>> = program
         .functions
         .iter()
@@ -51,6 +53,7 @@ pub fn run(
         constants,
         data,
         global_context,
+        state: _,
     } = program;
     let functions = functions
         .into_iter()
@@ -64,7 +67,7 @@ pub fn run(
         .into_iter()
         .map(|constant| constant.try_map_graph(|graph| rewrite_graph(graph, &erasures)))
         .collect::<Result<_, ConvertError>>()?;
-    Ok(Program::<ResourcesErased>::from_parts(
+    Ok(Program::from_parts(
         functions,
         externs,
         entry_points,

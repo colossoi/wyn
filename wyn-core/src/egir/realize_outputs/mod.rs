@@ -25,16 +25,18 @@
 //! rewrite must precede SOAC wrapping/expansion.
 
 /// EGIR whose entry outputs own their realized writer routes.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct OutputsRealized;
-
-impl super::ir::Stage for OutputsRealized {
-    type Family = super::types::Raw;
-    type ResourceDecl = super::program::SemanticResourceDecl;
-    type OutputRoute = super::ir::RealizedOutputRoute;
-    type ProgramData = super::program::CoreProgramData;
-    type GlobalContext = super::program::RewriteGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum OutputsRealizedTag {}
+pub type OutputsRealized = super::program::Program<
+    OutputsRealizedTag,
+    super::ir::ProgramFamily<
+        super::types::Raw,
+        super::program::SemanticResourceDecl,
+        super::ir::RealizedOutputRoute,
+        super::program::CoreProgramData,
+    >,
+    super::program::RewriteGlobal,
+>;
 
 use crate::flow::{BlockId, ExecutionModel};
 #[allow(unused_imports)]
@@ -56,7 +58,7 @@ pub mod verify;
 
 /// Realize every entry's outputs into side-effect stores. After this
 /// pass, `verify::check` confirms the invariant.
-pub fn run(program: Program<super::from_tlc::Converted>) -> Result<Program<OutputsRealized>, ConvertError> {
+pub fn realize_outputs(program: super::from_tlc::Converted) -> Result<OutputsRealized, ConvertError> {
     let Program {
         functions,
         externs,
@@ -64,6 +66,7 @@ pub fn run(program: Program<super::from_tlc::Converted>) -> Result<Program<Outpu
         constants,
         mut data,
         mut global_context,
+        state: _,
     } = program;
     let by_binding = host_resource_map(&data.resources);
     let entry_points = entry_points

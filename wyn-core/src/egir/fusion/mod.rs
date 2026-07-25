@@ -19,7 +19,6 @@ use polytype::Type;
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_ops;
 use crate::egir::ir::BodySite;
-use crate::egir::program::Program;
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::types::{EGraph, NodeId};
@@ -44,7 +43,7 @@ enum RewriteKind {
 }
 
 /// Select the first legal fusion rewrite in profitability order.
-pub(super) fn analyze(program: &Program<Segmented>, oracle: &SemanticGraph) -> Option<Rewrite> {
+pub(super) fn analyze(program: &Segmented, oracle: &SemanticGraph) -> Option<Rewrite> {
     indexed::analyze(program)
         .map(|candidate| Rewrite(RewriteKind::Indexed(candidate)))
         .or_else(|| {
@@ -63,7 +62,7 @@ pub(super) fn analyze(program: &Program<Segmented>, oracle: &SemanticGraph) -> O
 }
 
 /// Consume the snapshot analyzed by [`analyze`] and rebuild the targeted body.
-pub(super) fn apply(program: Program<Segmented>, rewrite: Rewrite) -> Program<Segmented> {
+pub(super) fn apply(program: Segmented, rewrite: Rewrite) -> Segmented {
     match rewrite.0 {
         RewriteKind::Indexed(candidate) => indexed::apply(program, candidate),
         RewriteKind::Vertical(candidate) => vertical::apply(program, candidate),
@@ -73,7 +72,7 @@ pub(super) fn apply(program: Program<Segmented>, rewrite: Rewrite) -> Program<Se
     }
 }
 
-pub(super) fn graph_and_span(program: &Program<Segmented>, site: BodySite) -> (&EGraph, Span, String) {
+pub(super) fn graph_and_span(program: &Segmented, site: BodySite) -> (&EGraph, Span, String) {
     let graph = program.body_graph(site).expect("semantic fusion body");
     let (span, scope) = match site {
         BodySite::Entry(index) => {

@@ -6,8 +6,7 @@ use super::{execution_workgroup, KernelDispatch, KernelDomain, KernelPlan, Phase
 use crate::egir::allocation::ResourcesAllocated;
 use crate::egir::from_tlc::ConvertError;
 use crate::egir::program::{
-    host_resource_names, physicalize_program, EntryPublication, PhysicalResourceTable, Program,
-    SemanticEntry,
+    host_resource_names, physicalize_program, EntryPublication, PhysicalResourceTable, SemanticEntry,
 };
 use crate::egir::publish::PipelineDescriptorPublish;
 use crate::pipeline_descriptor::{
@@ -18,9 +17,9 @@ use crate::{BindingRef, LoweringProfile, SchedulePolicy};
 impl KernelPlan {
     pub(in crate::egir::parallelize) fn finalize(
         self,
-        mut program: Program<ResourcesAllocated>,
+        mut program: ResourcesAllocated,
         profile: LoweringProfile,
-    ) -> Result<Program<crate::egir::parallelize::Planned>, ConvertError> {
+    ) -> Result<crate::egir::parallelize::Planned, ConvertError> {
         #[cfg(debug_assertions)]
         {
             let verification = self.validate();

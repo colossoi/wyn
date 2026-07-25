@@ -7,7 +7,6 @@ use crate::egir::allocation::{
     entries_with_endpoints, plan_logical_resources, verify_allocated_resources, CompilerFlowEndpoint,
     ResourcesAllocated,
 };
-use crate::egir::semantic_opt::Optimized;
 use crate::egir::types::{EGraph, RegionId};
 use crate::flow::ExecutionModel;
 use crate::pipeline_descriptor::PipelineDescriptor;
@@ -45,7 +44,7 @@ fn empty_entry(name: &str) -> SemanticEntry {
     )
 }
 
-fn into_allocated(program: Program<crate::egir::reify::Segmented>) -> Program<ResourcesAllocated> {
+fn into_allocated(program: crate::egir::reify::Segmented) -> ResourcesAllocated {
     let Program {
         functions,
         externs,
@@ -53,6 +52,7 @@ fn into_allocated(program: Program<crate::egir::reify::Segmented>) -> Program<Re
         constants,
         data,
         global_context,
+        state: _,
     } = program;
     Program::from_parts(
         functions,
@@ -67,7 +67,7 @@ fn into_allocated(program: Program<crate::egir::reify::Segmented>) -> Program<Re
     )
 }
 
-fn allocated_program(size: LogicalSize) -> Program<ResourcesAllocated> {
+fn allocated_program(size: LogicalSize) -> ResourcesAllocated {
     let binding = crate::BindingRef::new(0, 7);
     let mut program = semantic_program_for_test(
         vec![],
@@ -101,8 +101,7 @@ fn logical_allocation_introduces_the_allocated_sidecar() {
     );
     semantic.data.resources.allocate(ResourceOrigin::host(binding), unit_ty(), LogicalSize::Unspecified);
 
-    let allocated =
-        plan_logical_resources(semantic.into_stage::<Optimized>()).expect("logical resource planning");
+    let allocated = plan_logical_resources(semantic.retag()).expect("logical resource planning");
 
     assert!(allocated.data.materializations.is_empty());
     assert_eq!(allocated.data.core.resources.len(), 1);

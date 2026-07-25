@@ -25,7 +25,7 @@
 use polytype::Type;
 
 use super::super::from_tlc::ConvertError;
-use super::super::ir::{Body, BodySite, Stage};
+use super::super::ir::{Body, BodySite, ProgramShape};
 use super::super::program::{Func, Program};
 use super::super::types::{
     EGraph, ENode, NodeId, PureOp, RegionId, SideEffectKind, SoacEffect, WynSoacPhase,
@@ -41,10 +41,12 @@ struct Retype {
     arg_ty: Type<TypeName>,
 }
 
-pub fn run<S>(program: Program<S>) -> Result<Program<S>, ConvertError>
+pub fn run<Tag, Shape, GlobalContext>(
+    program: Program<Tag, Shape, GlobalContext>,
+) -> Result<Program<Tag, Shape, GlobalContext>, ConvertError>
 where
-    S: Stage,
-    S::Family: WynSoacPhase,
+    Shape: ProgramShape,
+    Shape::Family: WynSoacPhase,
 {
     // Phase A: propagate drift through aggregate node types in every body, so a
     // record/tuple holding a retargeted array reflects the view at its field.
@@ -155,17 +157,18 @@ fn reject_shared_conflicts(drifts: &[Retype]) -> Result<(), ConvertError> {
 /// that share the name, plus each body's `FuncParam` node — then re-propagate
 /// aggregate types inside the callee so a projection out of the parameter sees
 /// the view.
-fn apply<S: Stage>(
-    program: Program<S>,
+fn apply<Tag, Shape, GlobalContext>(
+    program: Program<Tag, Shape, GlobalContext>,
     Retype {
         region,
         name: _,
         param_index,
         arg_ty,
     }: Retype,
-) -> Program<S>
+) -> Program<Tag, Shape, GlobalContext>
 where
-    S::Family: WynSoacPhase,
+    Shape: ProgramShape,
+    Shape::Family: WynSoacPhase,
 {
     program.rewrite_body(BodySite::Function(region), |body| {
         let Body::Function(mut function) = body else {

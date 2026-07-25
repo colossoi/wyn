@@ -7,8 +7,18 @@
 //! the skeleton after this stage is a bug.
 
 /// Physical EGIR whose SOAC effects have been expanded into explicit CFGs.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SoacsExpanded;
+#[derive(Debug, Clone, Copy)]
+pub enum SoacsExpandedTag {}
+pub type SoacsExpanded = super::program::Program<
+    SoacsExpandedTag,
+    super::ir::ProgramFamily<
+        super::types::Physical,
+        crate::interface::StorageBindingDecl,
+        super::ir::RealizedOutputRoute,
+        super::program::CoreProgramData,
+    >,
+    super::program::PlannedGlobal,
+>;
 
 use crate::builtins::catalog;
 use crate::flow::{BlockId, ControlHeader};
@@ -20,7 +30,7 @@ use super::graph_ops::{alloc_effect, emit_alloca, emit_load, emit_place_index_st
 use super::program::{
     PhysicalEGraph as EGraph, PhysicalFilterOutput, PhysicalFilterWorkBuffers as FilterWorkBuffers,
     PhysicalSegSpace as SegSpace, PhysicalSideEffect as SideEffect,
-    PhysicalSideEffectKind as SideEffectKind, PhysicalSoac as Soac, Program, RegionInterner,
+    PhysicalSideEffectKind as SideEffectKind, PhysicalSoac as Soac, RegionInterner,
 };
 use super::soac::{filter, screma};
 use crate::ast::TypeName;
@@ -31,22 +41,14 @@ use super::types::{
     SoacDestination, SoacEffect,
 };
 
-impl super::ir::Stage for SoacsExpanded {
-    type Family = super::types::Physical;
-    type ResourceDecl = crate::interface::StorageBindingDecl;
-    type OutputRoute = super::ir::RealizedOutputRoute;
-    type ProgramData = super::program::CoreProgramData;
-    type GlobalContext = super::program::PlannedGlobal;
-}
-
 /// Expand every graph-bearing body and rebuild the program at the
 /// post-expansion checkpoint.
-pub fn run(program: Program<super::parallelize::Planned>) -> Result<Program<SoacsExpanded>, String> {
+pub fn expand_soacs(program: super::parallelize::Planned) -> Result<SoacsExpanded, String> {
     program
         .try_map_graphs_with_state(|_, graph, data, context| {
             run_one_body(graph, &data.region_interner, &mut context.effect_ids)
         })
-        .map(|program| program.into_stage())
+        .map(|program| program.retag())
 }
 
 /// Expand every physical SOAC in the skeleton.

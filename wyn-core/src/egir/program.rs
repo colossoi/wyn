@@ -1,9 +1,9 @@
 //! Compiler-specific EGIR program data and per-body records.
 //!
-//! [`super::ir::Program`] selects its recursive graph family, entry boundary
-//! data, program-owned data, and global context through its top-level stage.
-//! This module defines the concrete resource arenas, identifiers, and program
-//! data used by those stages.
+//! EGIR typestate aliases explicitly select their recursive graph family,
+//! entry-boundary data, program-owned data, and global context. This module
+//! defines the concrete resource arenas, identifiers, and program data used
+//! by those states.
 
 use crate::LookupMap;
 
@@ -35,7 +35,8 @@ pub type Entry<
     Route = RealizedOutputRoute,
     Lang = WynLanguage,
 > = super::ir::Entry<P, ResourceDecl, Route, Lang>;
-pub type Program<S, Lang = WynLanguage> = super::ir::Program<S, Lang>;
+pub type Program<Tag, Shape, GlobalContext, Lang = WynLanguage> =
+    super::ir::Program<Tag, Shape, GlobalContext, Lang>;
 
 pub(crate) fn fresh_region_name(region_interner: &RegionInterner, base: &str) -> String {
     if region_interner.get(base).is_none() {
@@ -50,46 +51,45 @@ pub(crate) fn fresh_region_name(region_interner: &RegionInterner, base: &str) ->
     unreachable!()
 }
 
-impl<S: super::ir::Stage> super::ir::Program<S, WynLanguage> {
+impl<Tag, Shape, GlobalContext> super::ir::Program<Tag, Shape, GlobalContext, WynLanguage>
+where
+    Shape: super::ir::ProgramShape,
+{
     pub fn contains_region(&self, region: RegionId) -> bool {
         self.functions.iter().any(|function| function.region == region)
     }
 
-    pub fn region(&self, region: RegionId) -> Option<&super::ir::Func<S::Family, WynLanguage>> {
+    pub fn region(&self, region: RegionId) -> Option<&super::ir::Func<Shape::Family, WynLanguage>> {
         self.functions.iter().find(|function| function.region == region)
     }
 
     pub fn iter_regions(
         &self,
-    ) -> impl Iterator<Item = (RegionId, &super::ir::Func<S::Family, WynLanguage>)> {
+    ) -> impl Iterator<Item = (RegionId, &super::ir::Func<Shape::Family, WynLanguage>)> {
         self.functions.iter().map(|function| (function.region, function))
     }
 }
 
-impl<S> super::ir::Program<S, WynLanguage>
-where
-    S: super::ir::Stage<
-        Family = Semantic,
-        ResourceDecl = SemanticResourceDecl,
-        OutputRoute = RealizedOutputRoute,
-        ProgramData = CoreProgramData,
-        GlobalContext = RewriteGlobal,
-    >,
+impl<Tag>
+    super::ir::Program<
+        Tag,
+        super::ir::ProgramFamily<Semantic, SemanticResourceDecl, RealizedOutputRoute, CoreProgramData>,
+        RewriteGlobal,
+        WynLanguage,
+    >
 {
     pub fn region_name(&self, region: RegionId) -> &str {
         self.data.region_interner.resolve(region)
     }
 }
 
-impl<S> Index<SemanticEntryId> for super::ir::Program<S, WynLanguage>
-where
-    S: super::ir::Stage<
-        Family = Semantic,
-        ResourceDecl = SemanticResourceDecl,
-        OutputRoute = RealizedOutputRoute,
-        ProgramData = CoreProgramData,
-        GlobalContext = RewriteGlobal,
-    >,
+impl<Tag> Index<SemanticEntryId>
+    for super::ir::Program<
+        Tag,
+        super::ir::ProgramFamily<Semantic, SemanticResourceDecl, RealizedOutputRoute, CoreProgramData>,
+        RewriteGlobal,
+        WynLanguage,
+    >
 {
     type Output = SemanticEntry;
 
@@ -663,7 +663,7 @@ pub(crate) fn host_resource_names(resources: &[LogicalResource]) -> LookupMap<(u
 /// just-built graphs and types. No later semantic pass is allowed to perform
 /// this rewrite or to introduce a binding-backed semantic resource.
 pub(crate) fn finalize_converted_resources(
-    inner: &mut Program<super::from_tlc::Converted>,
+    inner: &mut super::from_tlc::Converted,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
 ) {
     for entry in &mut inner.entry_points {
@@ -710,7 +710,7 @@ fn normalize_converted_graph_types(
 }
 
 fn normalize_structural_resources(
-    inner: &mut Program<super::from_tlc::Converted>,
+    inner: &mut super::from_tlc::Converted,
     by_binding: &HashMap<crate::BindingRef, ResourceId>,
 ) {
     for resource in &mut inner.data.resources {
@@ -1153,7 +1153,7 @@ pub(crate) fn semantic_program_for_test(
     constants: Vec<ConstantDef<Semantic>>,
     pipeline: PipelineDescriptor,
     mut region_interner: RegionInterner,
-) -> Program<super::reify::Segmented> {
+) -> super::reify::Segmented {
     for function in &mut functions {
         function.region = region_interner.intern(&function.name);
     }
@@ -1833,13 +1833,13 @@ fn physicalize_entry(
 }
 
 pub(in crate::egir) fn physicalize_program(
-    program: Program<super::allocation::ResourcesAllocated>,
+    program: super::allocation::ResourcesAllocated,
     entries: impl IntoIterator<Item = PlannedEntry<Scheduled>>,
     physical_resources: &PhysicalResourceTable,
     serial: bool,
     kernel_plan: super::parallelize::KernelPlanSummary,
     profile: crate::LoweringProfile,
-) -> Result<Program<super::parallelize::Planned>, String> {
+) -> Result<super::parallelize::Planned, String> {
     let Program {
         functions,
         externs,
@@ -1847,6 +1847,7 @@ pub(in crate::egir) fn physicalize_program(
         constants,
         data,
         global_context,
+        state: _,
     } = program;
     let entry_points = entries
         .into_iter()

@@ -19,7 +19,7 @@ use crate::{LookupMap, LookupSet};
 
 use super::ir::Family;
 use super::loop_analysis::LoopAnalysis;
-use super::program::{Program, SemanticEntry};
+use super::program::SemanticEntry;
 use super::reify::Segmented;
 use super::types::{EGraph, ENode, NodeId, PureOp, PureViewSource, SegBody};
 
@@ -296,7 +296,7 @@ impl StageDependenceAnalysis {
     /// last. Leading parameters depend on the repeated-region invocation;
     /// trailing parameters inherit the corresponding enclosing capture facts.
     pub(crate) fn for_seg_body(
-        program: &Program<Segmented>,
+        program: &Segmented,
         enclosing: &Self,
         body: &SegBody,
     ) -> Result<Self, String> {

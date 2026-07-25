@@ -6,16 +6,18 @@
 //! back to `FuncBody` via demand-driven scheduling (giving DCE for free).
 
 /// EGIR directly converted from backend-ready TLC.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Converted;
-
-impl super::ir::Stage for Converted {
-    type Family = super::types::Raw;
-    type ResourceDecl = super::program::SemanticResourceDecl;
-    type OutputRoute = super::ir::UnrealizedOutputRoute;
-    type ProgramData = super::program::CoreProgramData;
-    type GlobalContext = super::program::RewriteGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum ConvertedTag {}
+pub type Converted = super::program::Program<
+    ConvertedTag,
+    super::ir::ProgramFamily<
+        super::types::Raw,
+        super::program::SemanticResourceDecl,
+        super::ir::UnrealizedOutputRoute,
+        super::program::CoreProgramData,
+    >,
+    super::program::RewriteGlobal,
+>;
 
 use crate::builtins::{catalog, Purity};
 use crate::tlc::VarRef;
@@ -286,7 +288,7 @@ pub fn run(
     program: &TlcProgram,
     mut binding_ids: crate::IdSource<u32>,
     mut effect_ids: crate::IdSource<EffectToken>,
-) -> Result<Program<Converted>, ConvertError> {
+) -> Result<Converted, ConvertError> {
     let seed = super::pipeline_seed::run(program);
     let pipeline = seed.pipeline;
     let top_level: LookupMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();

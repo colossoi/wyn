@@ -24,7 +24,7 @@ fn should_fail_type_check(input: &str) -> bool {
 /// Helper to compile through semantic EGIR optimization and allocation.
 /// Off-milestone stop — drives the typestate API directly so the same
 /// `module_manager` covers both `type_check` and `to_tlc`.
-fn compile_to_semantic_egir(input: &str) -> crate::egir::program::Program<crate::egir::ResourcesAllocated> {
+fn compile_to_semantic_egir(input: &str) -> crate::egir::ResourcesAllocated {
     let program = crate::compile_thru_tlc(input).expect("compile through TLC");
     let program = crate::tlc::infer_input_slice_bounds(program);
     let program = crate::to_egraph(program).expect("convert to raw semantic EGIR");
@@ -35,7 +35,7 @@ fn compile_to_semantic_egir(input: &str) -> crate::egir::program::Program<crate:
 }
 
 fn lower_semantic_egir(
-    allocated: crate::egir::program::Program<crate::egir::ResourcesAllocated>,
+    allocated: crate::egir::ResourcesAllocated,
     profile: crate::LoweringProfile,
 ) -> crate::ssa::stage::Elaborated {
     let program = crate::egir::plan(allocated, profile).expect("plan semantic EGIR");
@@ -55,9 +55,7 @@ struct SemanticSoacStats {
     scan_operators: usize,
 }
 
-fn semantic_soac_stats(
-    allocated: &crate::egir::program::Program<crate::egir::ResourcesAllocated>,
-) -> SemanticSoacStats {
+fn semantic_soac_stats(allocated: &crate::egir::ResourcesAllocated) -> SemanticSoacStats {
     use crate::egir::soac::screma;
     use crate::egir::types::{EGraph, SideEffectKind, Soac, SoacEffect};
 

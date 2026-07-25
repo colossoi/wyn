@@ -16,7 +16,7 @@ use crate::{LookupSet, SortedSet};
 use super::graph_ops::{self, ConstantCopy};
 use super::inlining;
 use super::ir::{Body, BodySite as ProgramBodySite};
-use super::program::{fresh_region_name, CoreProgramData, Program, SemanticFunc};
+use super::program::{fresh_region_name, CoreProgramData, SemanticFunc};
 use super::reify::Segmented;
 use super::stage_variance::{entry_parameter_dependences, StageDependence, StageDependenceAnalysis};
 use super::types::{
@@ -75,11 +75,11 @@ struct StageLiftCandidate {
     calls_inlined: usize,
 }
 
-pub(crate) fn run(program: Program<Segmented>) -> Result<Program<Segmented>> {
+pub(crate) fn run(program: Segmented) -> Result<Segmented> {
     run_with_stats(program).map(|(program, _)| program)
 }
 
-fn run_with_stats(mut program: Program<Segmented>) -> Result<(Program<Segmented>, StageLiftStats)> {
+fn run_with_stats(mut program: Segmented) -> Result<(Segmented, StageLiftStats)> {
     let mut stats = StageLiftStats::default();
     while let Some(patch) = analyze_direct_entry_calls(&program)? {
         stats.calls_inlined += patch.calls_inlined;
@@ -140,7 +140,7 @@ struct DirectEntryCallsPatch {
     calls_inlined: usize,
 }
 
-fn analyze_direct_entry_calls(program: &Program<Segmented>) -> Result<Option<DirectEntryCallsPatch>> {
+fn analyze_direct_entry_calls(program: &Segmented) -> Result<Option<DirectEntryCallsPatch>> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
         let mut graph = entry.graph.clone();
         let calls = inline_mixed_calls_in_graph(
@@ -160,10 +160,7 @@ fn analyze_direct_entry_calls(program: &Program<Segmented>) -> Result<Option<Dir
     Ok(None)
 }
 
-fn apply_direct_entry_calls(
-    program: Program<Segmented>,
-    patch: DirectEntryCallsPatch,
-) -> Program<Segmented> {
+fn apply_direct_entry_calls(program: Segmented, patch: DirectEntryCallsPatch) -> Segmented {
     program.rewrite_body(ProgramBodySite::Entry(patch.entry), |body| match body {
         Body::Entry(mut entry) => {
             entry.graph = patch.graph;
@@ -173,7 +170,7 @@ fn apply_direct_entry_calls(
     })
 }
 
-fn find_next_candidate(program: &Program<Segmented>) -> Result<Option<(SegBodySite, StageLiftCandidate)>> {
+fn find_next_candidate(program: &Segmented) -> Result<Option<(SegBodySite, StageLiftCandidate)>> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
         let enclosing =
             StageDependenceAnalysis::for_entry(entry).map_err(|reason| StageLiftError::Analysis {
@@ -211,7 +208,7 @@ fn find_next_candidate(program: &Program<Segmented>) -> Result<Option<(SegBodySi
 }
 
 fn prepare_lift(
-    program: &Program<Segmented>,
+    program: &Segmented,
     enclosing: &StageDependenceAnalysis,
     body: &SegBody,
 ) -> Result<Option<StageLiftCandidate>> {
@@ -250,7 +247,7 @@ fn prepare_lift(
 }
 
 fn inline_mixed_calls(
-    program: &Program<Segmented>,
+    program: &Segmented,
     function: &mut SemanticFunc,
     parameter_dependences: &[StageDependence],
 ) -> Result<usize> {
@@ -263,7 +260,7 @@ fn inline_mixed_calls(
 }
 
 fn inline_mixed_calls_in_graph(
-    program: &Program<Segmented>,
+    program: &Segmented,
     graph: &mut EGraph,
     parameter_dependences: &[StageDependence],
     scope: &str,

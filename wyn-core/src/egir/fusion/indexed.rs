@@ -8,7 +8,7 @@ use smallvec::smallvec;
 
 use crate::egir::graph_ops;
 use crate::egir::ir::{Body, BodySite, RealizedOutputRoute};
-use crate::egir::program::{OutputWriter, Program, SemanticResourceRef};
+use crate::egir::program::{OutputWriter, SemanticResourceRef};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::screma;
 use crate::egir::types::{EGraph, ENode, NodeId, PureOp, ResourceAccess, SideEffectKind, Soac, SoacEffect};
@@ -25,11 +25,11 @@ pub(super) struct Candidate {
     output: usize,
 }
 
-pub(super) fn analyze(inner: &Program<Segmented>) -> Option<Candidate> {
+pub(super) fn analyze(inner: &Segmented) -> Option<Candidate> {
     find_candidate(inner)
 }
 
-fn find_candidate(inner: &Program<Segmented>) -> Option<Candidate> {
+fn find_candidate(inner: &Segmented) -> Option<Candidate> {
     for (index, entry) in inner.entry_points.iter().enumerate() {
         let output_resources = entry.outputs.iter().map(|output| output.resource).collect::<Vec<_>>();
         let output_routes = entry.routes().cloned().collect::<Vec<_>>();
@@ -183,7 +183,7 @@ fn used_only_through(
     true
 }
 
-pub(super) fn apply(inner: Program<Segmented>, candidate: Candidate) -> Program<Segmented> {
+pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     let (region_name, input_nodes, input_elem_types, captures, producer_result) = {
         let graph = inner.body_graph(candidate.site).expect("indexed fusion body");
         let effect = &graph.skeleton.blocks[candidate.block].side_effects[candidate.effect];

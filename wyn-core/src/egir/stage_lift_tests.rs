@@ -1,9 +1,7 @@
 use super::*;
 
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{
-    semantic_program_for_test, Program, RegionInterner, SemanticEntry, SemanticOpId,
-};
+use crate::egir::program::{semantic_program_for_test, RegionInterner, SemanticEntry, SemanticOpId};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::screma;
 use crate::egir::types::{
@@ -78,7 +76,7 @@ fn analyze_enclosing(graph: &EGraph<Semantic>) -> StageDependenceAnalysis {
     .unwrap()
 }
 
-fn empty_program(functions: Vec<SemanticFunc>) -> Program<Segmented> {
+fn empty_program(functions: Vec<SemanticFunc>) -> Segmented {
     semantic_program_for_test(
         functions,
         vec![],

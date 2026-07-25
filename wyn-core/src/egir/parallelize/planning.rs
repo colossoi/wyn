@@ -324,8 +324,8 @@ impl AnalyzedPlan {
     /// rebuilding the program-owned resource arena after immutable analysis.
     pub(super) fn allocate_scratch(
         mut self,
-        program: Program<ResourcesAllocated>,
-    ) -> Result<(Program<ResourcesAllocated>, RecipeIndex)> {
+        program: ResourcesAllocated,
+    ) -> Result<(ResourcesAllocated, RecipeIndex)> {
         self.requests.sort_by_key(|request| {
             (
                 request.endpoint,
@@ -343,6 +343,7 @@ impl AnalyzedPlan {
             constants,
             mut data,
             global_context,
+            state: _,
         } = program;
         for request in self.requests {
             let id = data.alloc_compiler_resource(
@@ -384,7 +385,7 @@ fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBinding
 
 /// Analyze every projected endpoint once. Recipes retain their projected body
 /// and graph-local handles until emission consumes the endpoint plan.
-pub(super) fn analyze(inner: &Program<ResourcesAllocated>) -> Result<AnalyzedPlan> {
+pub(super) fn analyze(inner: &ResourcesAllocated) -> Result<AnalyzedPlan> {
     let mut recipes = RecipeIndex::parallel();
     let mut requests = Vec::new();
     for (endpoint, entry) in allocation::entries_with_endpoints(inner) {

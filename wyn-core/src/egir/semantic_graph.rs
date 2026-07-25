@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use crate::types::TypeExt;
 
 use super::graph_ops;
-use super::ir::Stage;
+use super::ir::ProgramShape;
 use super::program::{Program, SemanticOpId};
 use super::soac::{filter, screma};
 use super::types::{
@@ -38,9 +38,11 @@ pub struct SemanticDependency {
 /// Record runtime-composite array values whose use requires a storage-backed
 /// representation. This runs at the same semantic snapshot boundary as the
 /// dependency builder, when producer identity and use shape are both direct.
-pub(crate) fn array_residency_demands<S>(inner: &Program<S>) -> HashSet<SemanticOpId>
+pub(crate) fn array_residency_demands<Tag, Shape, GlobalContext>(
+    inner: &Program<Tag, Shape, GlobalContext>,
+) -> HashSet<SemanticOpId>
 where
-    S: Stage<Family = Semantic>,
+    Shape: ProgramShape<Family = Semantic>,
 {
     let mut demands = HashSet::new();
     for entry in &inner.entry_points {
@@ -90,9 +92,11 @@ where
 
 /// Build semantic value/effect/resource dependencies for every semantic SOAC in
 /// the program.
-pub(crate) fn dependencies<S>(inner: &Program<S>) -> Vec<SemanticDependency>
+pub(crate) fn dependencies<Tag, Shape, GlobalContext>(
+    inner: &Program<Tag, Shape, GlobalContext>,
+) -> Vec<SemanticDependency>
 where
-    S: Stage<Family = Semantic>,
+    Shape: ProgramShape<Family = Semantic>,
 {
     let mut dependencies = Vec::new();
     for entry in &inner.entry_points {
@@ -239,9 +243,11 @@ pub(crate) fn read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResource
 }
 
 /// Validate the semantic boundary before any target-aware scheduling occurs.
-pub(crate) fn verify<S>(inner: &Program<S>) -> Result<(), String>
+pub(crate) fn verify<Tag, Shape, GlobalContext>(
+    inner: &Program<Tag, Shape, GlobalContext>,
+) -> Result<(), String>
 where
-    S: Stage<Family = Semantic>,
+    Shape: ProgramShape<Family = Semantic>,
 {
     let contains_region = |region| inner.functions.iter().any(|function| function.region == region);
     let verify_effect = |scope: &str, effect: &SideEffect| -> Result<(), String> {
@@ -302,9 +308,9 @@ where
     Ok(())
 }
 
-pub(crate) fn summary<S>(inner: &Program<S>) -> String
+pub(crate) fn summary<Tag, Shape, GlobalContext>(inner: &Program<Tag, Shape, GlobalContext>) -> String
 where
-    S: Stage<Family = Semantic>,
+    Shape: ProgramShape<Family = Semantic>,
 {
     use std::fmt::Write;
 

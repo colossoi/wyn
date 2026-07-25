@@ -29,28 +29,29 @@ use crate::ssa::types::ConstantValue;
 use crate::types::TypeExt;
 
 /// Physical EGIR with dynamic composite extraction made explicit.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Materialized;
+#[derive(Debug, Clone, Copy)]
+pub enum MaterializedTag {}
+pub type Materialized = super::program::Program<
+    MaterializedTag,
+    super::ir::ProgramFamily<
+        super::types::Physical,
+        crate::interface::StorageBindingDecl,
+        super::ir::RealizedOutputRoute,
+        super::program::CoreProgramData,
+    >,
+    super::program::PlannedGlobal,
+>;
 
-impl super::ir::Stage for Materialized {
-    type Family = super::types::Physical;
-    type ResourceDecl = crate::interface::StorageBindingDecl;
-    type OutputRoute = super::ir::RealizedOutputRoute;
-    type ProgramData = super::program::CoreProgramData;
-    type GlobalContext = super::program::PlannedGlobal;
-}
-
-use super::program::Program;
 use super::types::{EGraph, ENode, Family, NodeId, PureOp};
 
 /// Make dynamic composite extraction explicit in every body.
-pub fn run(program: Program<super::soac_expand::SoacsExpanded>) -> Program<Materialized> {
+pub fn materialize_dynamic_extracts(program: super::soac_expand::SoacsExpanded) -> Materialized {
     program
         .map_graphs(|_, mut graph| {
             run_one_body(&mut graph);
             graph
         })
-        .into_stage()
+        .retag()
 }
 
 /// Rewrite all dynamic Index nodes in the e-graph to Materialize +

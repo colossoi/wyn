@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::super::graph_ops;
-use super::super::program::{Program, SemanticEntry};
+use super::super::program::SemanticEntry;
 use super::super::types::{
     EGraph, ENode, EffectOp, NodeId, PureViewSource, SideEffect, SideEffectKind, SkeletonTerminator, Soac,
     SoacEffect,
@@ -56,7 +56,7 @@ impl PreludeAnalysis {
 /// policy separately preserves single evaluation for structured storage
 /// prefixes; all other recipes remain cost-based.
 pub(crate) fn analyze_prelude(
-    program: &Program<ResourcesAllocated>,
+    program: &ResourcesAllocated,
     entry: &SemanticEntry,
     recipe: &super::super::graph_projector::ProjectedValueRecipe,
 ) -> Option<PreludeAnalysis> {
@@ -144,7 +144,7 @@ pub(crate) fn entry_parameter_is_scalar_relocatable(entry: &SemanticEntry, index
 }
 
 fn effect_cost(
-    program: &Program<ResourcesAllocated>,
+    program: &ResourcesAllocated,
     effect: &SideEffect,
     summaries: &mut HashMap<String, u64>,
     visiting: &mut HashSet<String>,
@@ -162,7 +162,7 @@ fn effect_cost(
 }
 
 fn operation_cost(
-    program: &Program<ResourcesAllocated>,
+    program: &ResourcesAllocated,
     op: &OpTag<super::super::program::SemanticResourceRef>,
     summaries: &mut HashMap<String, u64>,
     visiting: &mut HashSet<String>,
@@ -224,7 +224,7 @@ fn operation_cost(
 }
 
 fn function_cost(
-    program: &Program<ResourcesAllocated>,
+    program: &ResourcesAllocated,
     callee: &str,
     summaries: &mut HashMap<String, u64>,
     visiting: &mut HashSet<String>,
@@ -252,7 +252,7 @@ fn function_cost(
 }
 
 fn graph_block_costs(
-    program: &Program<ResourcesAllocated>,
+    program: &ResourcesAllocated,
     graph: &EGraph,
     extra_roots: &HashMap<BlockId, Vec<NodeId>>,
     summaries: &mut HashMap<String, u64>,
@@ -279,7 +279,7 @@ fn graph_block_costs(
 }
 
 fn local_value_cost(
-    program: &Program<ResourcesAllocated>,
+    program: &ResourcesAllocated,
     graph: &EGraph,
     roots: impl IntoIterator<Item = NodeId>,
     summaries: &mut HashMap<String, u64>,

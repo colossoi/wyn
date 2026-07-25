@@ -474,14 +474,14 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //       tlc::filter_reachable(...)       -> tlc::Program<stage::Reachable>
 //       tlc::infer_input_slice_bounds(...)
 //                                      -> tlc::Program<stage::InputSliceBoundsInferred>
-//       to_egraph(...)                  -> egir::Program<from_tlc::Converted>
+//       to_egraph(...)                  -> egir::from_tlc::Converted
 //
 // EGIR stages:
-//       egir::realize_outputs(...)       -> Program<OutputsRealized>
-//       egir::reify_soacs(...)           -> Program<Segmented>
-//       egir::optimize_semantics(...)     -> Program<Optimized>
-//       egir::plan_logical_resources(...) -> Program<ResourcesAllocated>
-//       egir::plan(..., profile)          -> Program<Planned>
+//       egir::realize_outputs(...)       -> OutputsRealized
+//       egir::reify_soacs(...)           -> Segmented
+//       egir::optimize_semantics(...)     -> Optimized
+//       egir::plan_logical_resources(...) -> ResourcesAllocated
+//       egir::plan(..., profile)          -> Planned
 //       lower_egir_to_ssa(...)            -> ssa::stage::Elaborated
 //
 // Backend:
@@ -546,7 +546,7 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
 /// Convert fully analyzed TLC into raw semantic EGIR.
 pub fn to_egraph(
     program: tlc::Program<tlc::stage::InputSliceBoundsInferred>,
-) -> std::result::Result<egir::program::Program<egir::from_tlc::Converted>, ConvertError> {
+) -> std::result::Result<egir::from_tlc::Converted, ConvertError> {
     let binding_ids = program.global_context.auto_storage_binding_ids.clone();
     egir::from_tlc::run(&program, binding_ids, IdSource::new())
 }
@@ -600,7 +600,7 @@ impl LoweringProfile {
 
 /// Run the physical EGIR passes and construct backend-bound SSA.
 pub fn lower_egir_to_ssa(
-    program: egir::program::Program<egir::parallelize::Planned>,
+    program: egir::parallelize::Planned,
 ) -> std::result::Result<ssa::stage::Elaborated, ConvertError> {
     let program = egir::expand_soacs(program)?;
     let program = egir::materialize_dynamic_extracts(program);

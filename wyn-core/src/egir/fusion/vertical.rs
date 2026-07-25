@@ -14,7 +14,7 @@ use super::{capture_types, graph_and_span, producer_is_used_only_by};
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, Body, BodySite};
-use crate::egir::program::{fresh_region_name, CoreProgramData, Program, RegionInterner, SemanticFunc};
+use crate::egir::program::{fresh_region_name, CoreProgramData, RegionInterner, SemanticFunc};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
@@ -35,11 +35,11 @@ pub(super) struct Candidate {
     producer_output: usize,
 }
 
-pub(super) fn analyze(inner: &Program<Segmented>, oracle: &SemanticGraph) -> Option<Candidate> {
+pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
     find_candidate(inner, oracle)
 }
 
-fn find_candidate(inner: &Program<Segmented>, oracle: &SemanticGraph) -> Option<Candidate> {
+fn find_candidate(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
     for (index, entry) in inner.entry_points.iter().enumerate() {
         if let Some(candidate) = find_in_graph(&entry.graph, &entry.name, BodySite::Entry(index), oracle) {
             return Some(candidate);
@@ -201,7 +201,7 @@ struct ProducerParts {
     resources: Vec<SegResourceAccess>,
 }
 
-pub(super) fn apply(inner: Program<Segmented>, candidate: Candidate) -> Program<Segmented> {
+pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     let (graph, span, scope) = graph_and_span(&inner, candidate.site);
     let outer_types = graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect();
     let producer_effect = graph.skeleton.blocks[candidate.block].side_effects[candidate.producer].clone();
@@ -381,7 +381,7 @@ pub(super) fn apply(inner: Program<Segmented>, candidate: Candidate) -> Program<
 
 #[allow(clippy::too_many_arguments)]
 fn compose_map_region(
-    inner: &Program<Segmented>,
+    inner: &Segmented,
     region_interner: &mut RegionInterner,
     scope: &str,
     span: Span,
@@ -475,7 +475,7 @@ fn compose_map_region(
 
 #[allow(clippy::too_many_arguments)]
 fn compose_step_region(
-    inner: &Program<Segmented>,
+    inner: &Segmented,
     region_interner: &mut RegionInterner,
     scope: &str,
     span: Span,

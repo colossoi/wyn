@@ -6,19 +6,20 @@
 //! effect.
 
 /// Semantic EGIR after target-independent graph optimization.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Optimized;
-
-impl super::ir::Stage for Optimized {
-    type Family = super::types::Semantic;
-    type ResourceDecl = super::program::SemanticResourceDecl;
-    type OutputRoute = super::ir::RealizedOutputRoute;
-    type ProgramData = super::program::CoreProgramData;
-    type GlobalContext = super::program::RewriteGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum OptimizedTag {}
+pub type Optimized = super::program::Program<
+    OptimizedTag,
+    super::ir::ProgramFamily<
+        super::types::Semantic,
+        super::program::SemanticResourceDecl,
+        super::ir::RealizedOutputRoute,
+        super::program::CoreProgramData,
+    >,
+    super::program::RewriteGlobal,
+>;
 
 use super::ir::BodySite;
-use super::program::Program;
 use super::reify::Segmented;
 use super::semantic_graph::SemanticGraph;
 use super::soac::screma;
@@ -30,7 +31,7 @@ use crate::LookupMap;
 #[path = "semantic_opt_tests.rs"]
 mod semantic_opt_tests;
 
-pub fn run(program: Program<Segmented>) -> Program<Optimized> {
+pub fn optimize_semantics(program: Segmented) -> Optimized {
     let mut program = program.map_graphs(|_, mut graph| {
         canonicalize_resource_accesses(&mut graph);
         graph
@@ -62,7 +63,7 @@ pub fn run(program: Program<Segmented>) -> Program<Optimized> {
             panic!("semantic optimization produced invalid EGIR: {error}");
         }
     }
-    program.into_stage()
+    program.retag()
 }
 
 fn canonicalize_resource_accesses(graph: &mut EGraph) {
@@ -86,7 +87,7 @@ struct DeadSegOpsPatch {
     bodies: LookupMap<BodySite, DeadGraphPatch>,
 }
 
-fn analyze_dead_seg_ops(inner: &Program<Segmented>) -> Option<DeadSegOpsPatch> {
+fn analyze_dead_seg_ops(inner: &Segmented) -> Option<DeadSegOpsPatch> {
     let mut bodies = LookupMap::new();
     for (index, entry) in inner.entry_points.iter().enumerate() {
         let patch = dead_seg_ops_in_graph(&entry.graph);
@@ -103,7 +104,7 @@ fn analyze_dead_seg_ops(inner: &Program<Segmented>) -> Option<DeadSegOpsPatch> {
     (!bodies.is_empty()).then_some(DeadSegOpsPatch { bodies })
 }
 
-fn apply_dead_seg_ops(inner: Program<Segmented>, mut patch: DeadSegOpsPatch) -> Program<Segmented> {
+fn apply_dead_seg_ops(inner: Segmented, mut patch: DeadSegOpsPatch) -> Segmented {
     let rebuilt = inner.map_graphs(|site, mut graph| {
         let Some(blocks) = patch.bodies.remove(&site) else {
             return graph;

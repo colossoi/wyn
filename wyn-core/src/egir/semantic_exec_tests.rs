@@ -1,8 +1,6 @@
 use super::*;
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{
-    semantic_program_for_test, Program as EgirProgram, RegionInterner, SemanticFunc,
-};
+use crate::egir::program::{semantic_program_for_test, RegionInterner, SemanticFunc};
 use crate::egir::reify::Segmented;
 use crate::egir::types::{EGraph, PureOp, SkeletonTerminator};
 use crate::pipeline_descriptor::PipelineDescriptor;
@@ -18,7 +16,7 @@ fn compose(left: &(i64, i64), right: &(i64, i64)) -> (i64, i64) {
     )
 }
 
-fn affine_program() -> (RegionId, EgirProgram<Segmented>) {
+fn affine_program() -> (RegionId, Segmented) {
     let int = Type::Constructed(TypeName::Int(64), vec![]);
     let pair = Type::Constructed(TypeName::Tuple(2), vec![int.clone(), int.clone()]);
     let mut graph = EGraph::new();

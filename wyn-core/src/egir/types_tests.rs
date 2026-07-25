@@ -1,4 +1,3 @@
-use super::super::ir::Stage;
 use super::*;
 
 fn i32_ty() -> Type<TypeName> {
@@ -41,15 +40,8 @@ impl Family for TestPhase {
 }
 
 #[derive(Debug)]
-struct TestStage;
-
-impl Stage for TestStage {
-    type Family = TestPhase;
-    type ResourceDecl = u16;
-    type OutputRoute = ();
-    type ProgramData = ();
-    type GlobalContext = ();
-}
+enum TestTag {}
+type TestProgramFamily = super::super::ir::ProgramFamily<TestPhase, u16, (), ()>;
 
 #[test]
 fn soac_placement_resolves_unique_input_candidate() {
@@ -226,7 +218,7 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
     );
     assert_eq!(entry.resource_declarations, [7]);
 
-    let program = super::super::ir::Program::<TestStage, TestLanguage>::from_parts(
+    let program = super::super::ir::Program::<TestTag, TestProgramFamily, (), TestLanguage>::from_parts(
         vec![],
         vec![],
         vec![entry],

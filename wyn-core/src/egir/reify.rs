@@ -4,16 +4,18 @@
 //! operation family is preserved by the direct match in `reify_soac`.
 
 /// EGIR whose higher-order array operations have semantic segmented form.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Segmented;
-
-impl super::ir::Stage for Segmented {
-    type Family = super::types::Semantic;
-    type ResourceDecl = super::program::SemanticResourceDecl;
-    type OutputRoute = super::ir::RealizedOutputRoute;
-    type ProgramData = super::program::CoreProgramData;
-    type GlobalContext = super::program::RewriteGlobal;
-}
+#[derive(Debug, Clone, Copy)]
+pub enum SegmentedTag {}
+pub type Segmented = super::program::Program<
+    SegmentedTag,
+    super::ir::ProgramFamily<
+        super::types::Semantic,
+        super::program::SemanticResourceDecl,
+        super::ir::RealizedOutputRoute,
+        super::program::CoreProgramData,
+    >,
+    super::program::RewriteGlobal,
+>;
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
@@ -46,7 +48,7 @@ struct Facts {
     entry: bool,
 }
 
-pub fn run(program: Program<OutputsRealized>) -> Program<Segmented> {
+pub fn reify_soacs(program: OutputsRealized) -> Segmented {
     let Program {
         functions,
         externs,
@@ -54,6 +56,7 @@ pub fn run(program: Program<OutputsRealized>) -> Program<Segmented> {
         constants,
         data,
         mut global_context,
+        state: _,
     } = program;
 
     let entry_points = entry_points

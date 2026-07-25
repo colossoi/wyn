@@ -5,7 +5,7 @@ use super::*;
 use crate::ast::Span;
 use crate::egir::allocation::ResourcesAllocated;
 use crate::egir::ir::RealizedOutputRoute;
-use crate::egir::program::{Program, SlotSource};
+use crate::egir::program::SlotSource;
 use crate::egir::soac::screma;
 use crate::egir::types::{EffectOp, EffectToken, Semantic};
 use crate::flow::ExecutionModel;
@@ -14,7 +14,7 @@ pub(crate) const FILTER_SCAN_GROUPS: u32 = model::FILTER_SCAN_GROUPS;
 pub(crate) const REDUCE_PHASE1_WIDTH: u32 = model::REDUCE_PHASE1_WIDTH;
 
 pub(crate) fn planned_callable_names(
-    program: Program<ResourcesAllocated>,
+    program: ResourcesAllocated,
 ) -> std::result::Result<Vec<String>, String> {
     let existing = program.functions.len();
     let (program, _) = build_parallel_plan(program).map_err(|error| error.to_string())?;

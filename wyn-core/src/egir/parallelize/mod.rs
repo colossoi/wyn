@@ -29,8 +29,18 @@
 #![deny(clippy::expect_used, clippy::unwrap_used)]
 
 /// EGIR rebuilt from a validated target-specific kernel plan.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Planned;
+#[derive(Debug, Clone, Copy)]
+pub enum PlannedTag {}
+pub type Planned = super::program::Program<
+    PlannedTag,
+    super::ir::ProgramFamily<
+        super::types::Physical,
+        crate::interface::StorageBindingDecl,
+        super::ir::RealizedOutputRoute,
+        super::program::CoreProgramData,
+    >,
+    super::program::PlannedGlobal,
+>;
 
 mod filter;
 mod kernel;
@@ -67,14 +77,13 @@ use smallvec::smallvec;
 use super::allocation::{self, CompilerFlowEndpoint, ResourcesAllocated};
 use super::from_tlc::ConvertError;
 use super::graph_ops;
-use super::ir::Stage;
 use super::program::{
     CompilerResourceKind, LogicalResourceArena, MaterializationId, MaterializationRequirement,
-    OutputWriter, Program, ResourceId, SemanticEntry, SemanticEntryId, SemanticFunc, SemanticOpId,
+    OutputWriter, ResourceId, SemanticEntry, SemanticEntryId, SemanticFunc, SemanticOpId,
     SemanticResourceDecl, SemanticResourceRef,
 };
 
-impl Program<Planned> {
+impl Planned {
     /// Logical resources after target recipe selection has installed only the
     /// work buffers required by the selected recipes.
     pub fn logical_resources(&self) -> &[super::program::LogicalResource] {
@@ -94,14 +103,6 @@ use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
 use crate::{LoweringProfile, SchedulePolicy};
-
-impl Stage for Planned {
-    type Family = super::types::Physical;
-    type ResourceDecl = crate::interface::StorageBindingDecl;
-    type OutputRoute = super::ir::RealizedOutputRoute;
-    type ProgramData = super::program::CoreProgramData;
-    type GlobalContext = super::program::PlannedGlobal;
-}
 
 /// A generated body kept together with the exact accesses established while
 /// that body was built. Scheduling consumes this pair without inspecting the
@@ -154,10 +155,7 @@ impl From<error::ParallelizeError> for ConvertError {
     }
 }
 
-pub fn plan(
-    program: Program<ResourcesAllocated>,
-    profile: LoweringProfile,
-) -> Result<Program<Planned>, ConvertError> {
+pub fn plan(program: ResourcesAllocated, profile: LoweringProfile) -> Result<Planned, ConvertError> {
     let (program, kernel_plan) = match profile.schedule {
         SchedulePolicy::Parallel => build_parallel_plan(program),
         SchedulePolicy::Serial => build_serial_plan(program),
@@ -168,8 +166,8 @@ pub fn plan(
 /// Analyze target recipes, allocate their scratch resources, and build the
 /// executable parallel kernel plan.
 fn build_parallel_plan(
-    program: Program<ResourcesAllocated>,
-) -> error::Result<(Program<ResourcesAllocated>, schedule::KernelPlan)> {
+    program: ResourcesAllocated,
+) -> error::Result<(ResourcesAllocated, schedule::KernelPlan)> {
     let analysis = planning::analyze(&program)?;
     let (mut program, recipes) = analysis.allocate_scratch(program)?;
     let flows = allocation::resource_flows(&program);
@@ -192,8 +190,8 @@ fn build_parallel_plan(
 /// Build a kernel plan that selects serial recipes without allocating
 /// algorithm-specific parallel scratch resources.
 fn build_serial_plan(
-    mut program: Program<ResourcesAllocated>,
-) -> error::Result<(Program<ResourcesAllocated>, schedule::KernelPlan)> {
+    mut program: ResourcesAllocated,
+) -> error::Result<(ResourcesAllocated, schedule::KernelPlan)> {
     let recipes = planning::analyze(&program)?.serial_recipes();
     let flows = allocation::resource_flows(&program);
     let built = KernelPlanBuilder::new(
@@ -213,10 +211,10 @@ fn build_serial_plan(
 }
 
 fn install_generated_callables(
-    program: Program<ResourcesAllocated>,
+    program: ResourcesAllocated,
     generated_callables: Vec<SemanticFunc>,
     region_interner: super::program::RegionInterner,
-) -> Program<ResourcesAllocated> {
+) -> ResourcesAllocated {
     program.extend_functions(generated_callables).map_data(|mut data| {
         data.core.region_interner = region_interner;
         data

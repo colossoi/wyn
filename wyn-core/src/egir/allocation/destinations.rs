@@ -50,7 +50,6 @@ use std::collections::{HashMap, HashSet};
 use polytype::Type;
 
 use super::super::graph_ops;
-use super::super::program::Program;
 use super::super::soac::filter;
 use super::super::types::{
     EGraph, ENode, NodeId, PureOp, SideEffectKind, Soac, SoacDestination, SoacEffect, SoacPlacement,
@@ -61,7 +60,7 @@ use crate::flow::BlockId;
 use crate::types::TypeExt;
 
 /// Resolve every outstanding unique-input capability to a physical destination.
-pub(super) fn run(program: Program<ResourcesAllocated>) -> Program<ResourcesAllocated> {
+pub(super) fn run(program: ResourcesAllocated) -> ResourcesAllocated {
     program.map_graphs(|_, mut graph| {
         resolve_graph_destinations(&mut graph);
         graph

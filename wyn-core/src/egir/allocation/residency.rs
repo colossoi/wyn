@@ -117,7 +117,7 @@ struct InputReplacement {
     resource: ResourceId,
 }
 
-pub fn run(mut program: Program<ResourcesAllocated>) -> Result<Program<ResourcesAllocated>, String> {
+pub fn run(mut program: ResourcesAllocated) -> Result<ResourcesAllocated, String> {
     loop {
         let Some(plan) = next_materialization_plan(&program)? else {
             break;
@@ -132,9 +132,7 @@ pub fn run(mut program: Program<ResourcesAllocated>) -> Result<Program<Resources
     Ok(program)
 }
 
-fn next_materialization_plan(
-    program: &Program<ResourcesAllocated>,
-) -> Result<Option<MaterializationPlan>, String> {
+fn next_materialization_plan(program: &ResourcesAllocated) -> Result<Option<MaterializationPlan>, String> {
     let dependencies = super::super::semantic_graph::dependencies(program);
     let array_residency_demands = super::super::semantic_graph::array_residency_demands(program);
     if let Some(plan) = plan_operation_result(program, &dependencies, &array_residency_demands)? {
@@ -144,9 +142,9 @@ fn next_materialization_plan(
 }
 
 fn apply_materialization(
-    program: Program<ResourcesAllocated>,
+    program: ResourcesAllocated,
     plan: MaterializationPlan,
-) -> Result<Program<ResourcesAllocated>, String> {
+) -> Result<ResourcesAllocated, String> {
     match plan {
         MaterializationPlan::FixedOperation {
             entry,
@@ -179,7 +177,7 @@ fn apply_materialization(
 }
 
 fn plan_operation_result(
-    program: &Program<ResourcesAllocated>,
+    program: &ResourcesAllocated,
     dependency_edges: &[super::super::semantic_graph::SemanticDependency],
     array_residency_demands: &HashSet<SemanticOpId>,
 ) -> Result<Option<MaterializationPlan>, String> {
@@ -405,7 +403,7 @@ fn operation_result_plan(
 }
 
 fn plan_parallel_prelude(
-    program: &Program<ResourcesAllocated>,
+    program: &ResourcesAllocated,
     dependency_edges: &[super::super::semantic_graph::SemanticDependency],
 ) -> Option<MaterializationPlan> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
@@ -475,7 +473,7 @@ fn plan_parallel_prelude(
 /// uniform work clears the singleton-launch overhead.
 const DIRECT_STAGE_INVOCATION_FALLBACK: u64 = 64;
 
-fn plan_direct_stage_prelude(program: &Program<ResourcesAllocated>) -> Option<MaterializationPlan> {
+fn plan_direct_stage_prelude(program: &ResourcesAllocated) -> Option<MaterializationPlan> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
         let Ok(analysis) = StageDependenceAnalysis::for_entry(entry) else {
             continue;
@@ -511,7 +509,7 @@ fn plan_direct_stage_prelude(program: &Program<ResourcesAllocated>) -> Option<Ma
     None
 }
 
-fn direct_stage_invocations(program: &Program<ResourcesAllocated>, entry: &SemanticEntry) -> u64 {
+fn direct_stage_invocations(program: &ResourcesAllocated, entry: &SemanticEntry) -> u64 {
     let ExecutionModel::Compute { local_size } = &entry.execution_model else {
         return DIRECT_STAGE_INVOCATION_FALLBACK;
     };
@@ -824,13 +822,13 @@ fn dependencies_are_cloneable(graph: &EGraph, block_id: BlockId, effects: &HashS
 }
 
 fn materialize_operation_result(
-    program: Program<ResourcesAllocated>,
+    program: ResourcesAllocated,
     entry_index: usize,
     kind: FixedMaterializationKind,
     operation: ProjectedOperation,
     projected_result: NodeId,
     output_specs: Vec<OutputSpec>,
-) -> Result<Program<ResourcesAllocated>, String> {
+) -> Result<ResourcesAllocated, String> {
     let Program {
         functions,
         externs,
@@ -838,6 +836,7 @@ fn materialize_operation_result(
         constants,
         mut data,
         mut global_context,
+        state: _,
     } = program;
     let ProjectedOperation {
         result,
@@ -940,14 +939,14 @@ fn materialize_operation_result(
 }
 
 fn materialize_runtime_array_result(
-    program: Program<ResourcesAllocated>,
+    program: ResourcesAllocated,
     entry_index: usize,
     operation: ProjectedOperation,
     scratch: ResourceId,
     elem_ty: Type<TypeName>,
     result_ty: Type<TypeName>,
     size: LogicalSize,
-) -> Result<Program<ResourcesAllocated>, String> {
+) -> Result<ResourcesAllocated, String> {
     let Program {
         functions,
         externs,
@@ -955,6 +954,7 @@ fn materialize_runtime_array_result(
         constants,
         mut data,
         mut global_context,
+        state: _,
     } = program;
     let ProjectedOperation {
         result,
@@ -1320,12 +1320,12 @@ fn rewrite_materialized_operation_source(
 }
 
 fn materialize_stage_prelude(
-    program: Program<ResourcesAllocated>,
+    program: ResourcesAllocated,
     entry_index: usize,
     insertion_site: Option<SideEffectSite>,
     recipe: ProjectedValueRecipe,
     outputs: Vec<StagePreludeOutput>,
-) -> Program<ResourcesAllocated> {
+) -> ResourcesAllocated {
     if outputs.is_empty() {
         return program;
     }
@@ -1336,6 +1336,7 @@ fn materialize_stage_prelude(
         constants,
         mut data,
         mut global_context,
+        state: _,
     } = program;
     let ProjectedValueRecipe {
         projection,

@@ -2,11 +2,11 @@ use polytype::Type;
 
 use crate::ast::TypeName;
 
-use super::program::{visit_type_names_mut, PhysicalEGraph, PhysicalResourceTable, Program};
+use super::program::{visit_type_names_mut, PhysicalEGraph, PhysicalResourceTable};
 use super::types::{SideEffectKind, SoacEffect};
 
 pub fn check(
-    program: &Program<super::parallelize::Planned>,
+    program: &super::parallelize::Planned,
     _physical_resources: &PhysicalResourceTable,
 ) -> Result<(), String> {
     for entry in &program.entry_points {

@@ -8,24 +8,25 @@
 //! cannot reach the preheader until the call is inlined.
 
 /// Physical EGIR after loop-sensitive partial inlining.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PartiallyInlined;
+#[derive(Debug, Clone, Copy)]
+pub enum PartiallyInlinedTag {}
+pub type PartiallyInlined = super::program::Program<
+    PartiallyInlinedTag,
+    super::ir::ProgramFamily<
+        Physical,
+        crate::interface::StorageBindingDecl,
+        super::ir::RealizedOutputRoute,
+        super::program::CoreProgramData,
+    >,
+    super::program::PlannedGlobal,
+>;
 
 use crate::LookupMap;
 
 use super::inlining;
-use super::ir::Stage;
 use super::loop_analysis::{LoopAnalysis, LoopInvariance};
-use super::program::{PhysicalFunc, Program};
+use super::program::PhysicalFunc;
 use super::types::{EGraph, ENode, NodeId, Physical, PureOp};
-
-impl Stage for PartiallyInlined {
-    type Family = Physical;
-    type ResourceDecl = crate::interface::StorageBindingDecl;
-    type OutputRoute = super::ir::RealizedOutputRoute;
-    type ProgramData = super::program::CoreProgramData;
-    type GlobalContext = super::program::PlannedGlobal;
-}
 
 #[cfg(test)]
 #[path = "partial_inline_tests.rs"]
@@ -54,9 +55,9 @@ struct Candidate {
 
 /// Inline profitable mixed-variance calls in every physical body. The ordinary
 /// scoped elaborator then performs CSE and LICM on the exposed DAG.
-pub fn run(
-    program: Program<super::materialize::Materialized>,
-) -> Result<Program<PartiallyInlined>, String> {
+pub fn partially_inline_calls(
+    program: super::materialize::Materialized,
+) -> Result<PartiallyInlined, String> {
     // Snapshot callable bodies so callers can be rewritten without aliasing
     // `program.functions`. A caller-local fixpoint handles calls revealed by a
     // clone, so snapshots do not need to be refreshed after each body.
@@ -68,7 +69,7 @@ pub fn run(
                 .map_err(|error| format!("partial inlining in {site:?} failed: {error}"))?;
             Ok(graph)
         })
-        .map(|program| program.into_stage())
+        .map(|program| program.retag())
 }
 
 fn inline_body(
