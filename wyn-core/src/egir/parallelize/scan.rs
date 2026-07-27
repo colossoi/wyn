@@ -277,19 +277,15 @@ pub(super) struct BoundScan {
 pub(super) fn analyze_scan_candidate(
     entry: &crate::egir::program::PlannedEntry,
     located: LocatedScrema<'_>,
-    lanes: &screma::Lanes,
-    operators: &[screma::Operator],
 ) -> error::Result<Option<ScanCandidate>> {
+    debug_assert_eq!(
+        super::capabilities::ScremaRecipeCapabilities::analyze(located.op).recipe_class(),
+        super::capabilities::ScremaRecipeClass::Scan
+    );
     let segment = located.segmented()?;
     let serial = located.serial_recipe();
-    if operators.len() != 1
-        || lanes.inputs.len() != 1
-        || !operators[0].combine.captures.is_empty()
-        || !lanes.maps.iter().all(|map| map.destination.is_output_view())
-        || !operators.iter().all(|operator| operator.destination.is_output_view())
-    {
-        return Ok(None);
-    }
+    let lanes = located.op.lanes();
+    let operators = located.op.operators();
     let site = located.site;
     let side_effect = located.effect;
     let operator = &operators[0];

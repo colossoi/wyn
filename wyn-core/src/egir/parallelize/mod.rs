@@ -42,6 +42,7 @@ pub type Planned = super::program::Program<
     super::program::PlannedGlobal,
 >;
 
+mod capabilities;
 mod filter;
 mod kernel;
 mod model;

@@ -55,19 +55,16 @@ impl ReduceCandidate {
 pub(super) fn analyze_reduce_candidate(
     entry: &crate::egir::program::PlannedEntry,
     located: LocatedScrema<'_>,
-    lanes: &screma::Lanes,
-    operators: &[screma::Operator],
     resources: &crate::egir::program::LogicalResourceArena,
 ) -> error::Result<Option<ReduceCandidate>> {
+    debug_assert_eq!(
+        super::capabilities::ScremaRecipeCapabilities::analyze(located.op).recipe_class(),
+        super::capabilities::ScremaRecipeClass::Reduce
+    );
     let segment = located.segmented()?;
     let serial = located.serial_recipe();
-    if operators.iter().any(|operator| !operator.combine.captures.is_empty())
-        || lanes.inputs.is_empty()
-        || !lanes.maps.iter().all(|map| map.destination.is_output_view())
-        || !operators.iter().all(|operator| operator.destination.is_unplaced_fresh())
-    {
-        return Ok(None);
-    }
+    let lanes = located.op.lanes();
+    let operators = located.op.operators();
     let site = located.site;
     let side_effect = located.effect;
     let operators = operators.iter().collect::<Vec<_>>();

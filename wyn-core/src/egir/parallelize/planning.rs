@@ -16,6 +16,8 @@ use crate::egir::program::{
 };
 use crate::egir::types::SegExtent;
 
+use super::capabilities::{ScremaRecipeCapabilities, ScremaRecipeClass, ScremaShape};
+
 #[derive(Clone, Copy)]
 pub(super) struct LocatedScrema<'a> {
     pub site: SideEffectSite,
@@ -77,24 +79,29 @@ impl RecipeTargets {
                 let site = SideEffectSite { block, index };
                 match &effect.kind {
                     SideEffectKind::Soac(SoacEffect(_, Soac::Filter(_))) => targets.filters.push(site),
-                    SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => match op.semantic_state() {
-                        screma::SemanticState::Segmented {
-                            placement: screma::Placement::Kernel,
-                            ..
-                        } => targets.kernel_scremas.push(site),
-                        screma::SemanticState::Segmented {
-                            placement: screma::Placement::LaneLocal,
-                            output_slots,
-                            ..
-                        } if !output_slots.is_empty()
-                            && !op.is_map()
-                            && !op.is_mixed()
-                            && entry.execution_model.is_compute() =>
-                        {
-                            targets.promoted_folds.push(site);
+                    SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
+                        let capabilities = ScremaRecipeCapabilities::analyze(op);
+                        match op.semantic_state() {
+                            screma::SemanticState::Segmented {
+                                placement: screma::Placement::Kernel,
+                                ..
+                            } => targets.kernel_scremas.push(site),
+                            screma::SemanticState::Segmented {
+                                placement: screma::Placement::LaneLocal,
+                                output_slots,
+                                ..
+                            } if !output_slots.is_empty()
+                                && matches!(
+                                    capabilities.shape(),
+                                    ScremaShape::Reduce | ScremaShape::Scan
+                                )
+                                && entry.execution_model.is_compute() =>
+                            {
+                                targets.promoted_folds.push(site);
+                            }
+                            _ => {}
                         }
-                        _ => {}
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -478,12 +485,9 @@ fn analyze_reduce_recipe(
     endpoint: CompilerFlowEndpoint,
     resources: &LogicalResourceArena,
     located: LocatedScrema<'_>,
-    lanes: &screma::Lanes,
-    operators: &[screma::Operator],
 ) -> Result<(AnalyzedRecipe, Vec<ScratchRequest>)> {
     let serial = located.serial_recipe();
-    let Some(candidate) = super::analyze_reduce_candidate(body, located, lanes, operators, resources)?
-    else {
+    let Some(candidate) = super::analyze_reduce_candidate(body, located, resources)? else {
         return Ok((AnalyzedRecipe::Serial(serial), Vec::new()));
     };
     let requests = candidate
@@ -507,11 +511,9 @@ fn analyze_scan_recipe(
     body: &crate::egir::program::PlannedEntry,
     endpoint: CompilerFlowEndpoint,
     located: LocatedScrema<'_>,
-    lanes: &screma::Lanes,
-    operators: &[screma::Operator],
 ) -> Result<(AnalyzedRecipe, Vec<ScratchRequest>)> {
     let serial = located.serial_recipe();
-    let Some(candidate) = super::analyze_scan_candidate(body, located, lanes, operators)? else {
+    let Some(candidate) = super::analyze_scan_candidate(body, located)? else {
         return Ok((AnalyzedRecipe::Serial(serial), Vec::new()));
     };
     let requests = [
@@ -553,27 +555,11 @@ fn analyze_projected_kernel(
     let (recipe, requests) = match targets.screma_site() {
         Some(site) => {
             let located = located_screma(&body, site)?;
-            if located.op.is_reduce() && !located.op.has_post_map() {
-                analyze_reduce_recipe(
-                    &body,
-                    endpoint,
-                    resources,
-                    located,
-                    located.op.lanes(),
-                    located.op.operators(),
-                )?
-            } else if located.op.is_scan_only() && !located.op.has_post_map() {
-                analyze_scan_recipe(
-                    &body,
-                    endpoint,
-                    located,
-                    located.op.lanes(),
-                    located.op.operators(),
-                )?
-            } else if located.op.is_map() && !located.op.has_post_map() {
-                (AnalyzedRecipe::Map(located.segmented()?), Vec::new())
-            } else {
-                (AnalyzedRecipe::Serial(located.serial_recipe()), Vec::new())
+            match ScremaRecipeCapabilities::analyze(located.op).recipe_class() {
+                ScremaRecipeClass::Reduce => analyze_reduce_recipe(&body, endpoint, resources, located)?,
+                ScremaRecipeClass::Scan => analyze_scan_recipe(&body, endpoint, located)?,
+                ScremaRecipeClass::Map => (AnalyzedRecipe::Map(located.segmented()?), Vec::new()),
+                ScremaRecipeClass::Serial => (AnalyzedRecipe::Serial(located.serial_recipe()), Vec::new()),
             }
         }
         None => (AnalyzedRecipe::Unchanged, Vec::new()),
