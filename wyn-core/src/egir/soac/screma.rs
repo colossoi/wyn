@@ -139,6 +139,7 @@ pub struct Map {
 
 #[derive(Clone, Debug)]
 pub struct Operator {
+    pub kind: OperatorKind,
     pub step: SegBody,
     pub combine: SegBody,
     pub input_indices: Vec<InputId>,
@@ -149,36 +150,17 @@ pub struct Operator {
     pub result_type: Type<TypeName>,
 }
 
-#[derive(Clone, Debug)]
-pub enum CompositeOperator {
-    Reduce(Operator),
-    Scan(Operator),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperatorKind {
+    Reduce,
+    Scan,
 }
 
-impl CompositeOperator {
-    pub fn operator(&self) -> &Operator {
-        match self {
-            Self::Reduce(operator) | Self::Scan(operator) => operator,
-        }
-    }
-
-    pub fn operator_mut(&mut self) -> &mut Operator {
-        match self {
-            Self::Reduce(operator) | Self::Scan(operator) => operator,
-        }
-    }
-
-    pub fn into_operator(self) -> Operator {
-        match self {
-            Self::Reduce(operator) | Self::Scan(operator) => operator,
-        }
-    }
-
+impl Operator {
     pub fn is_scan(&self) -> bool {
-        matches!(self, Self::Scan(_))
+        self.kind == OperatorKind::Scan
     }
 }
-
 #[derive(Clone, Debug)]
 pub struct Lanes {
     pub inputs: Vec<SoacInputType>,
@@ -224,110 +206,120 @@ pub enum ScheduledState<R> {
     Segmented(Segmented<R>),
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct PhysicalSerialState;
-
 #[derive(Clone, Debug)]
-pub enum Op<P: WynSoacPhase> {
-    Map {
-        lanes: Lanes,
-        state: P::MapState,
-    },
-    Reduce {
-        lanes: Lanes,
-        operators: NonEmpty<Operator>,
-        state: P::ReduceState,
-    },
-    Scan {
-        lanes: Lanes,
-        operators: NonEmpty<Operator>,
-        state: P::ScanState,
-    },
-    Composite {
-        lanes: Lanes,
-        operators: NonEmpty<CompositeOperator>,
-        state: P::CompositeState,
-    },
+pub enum PhysicalState {
+    Serial,
+    Segmented(Segmented<super::super::program::PhysicalResourceRef>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Flavor {
-    Map,
-    Reduce,
-    Scan,
-    Composite,
+/// The canonical semantic form for map/scan/reduce compositions.
+///
+/// Operator kind is data rather than an outer representation variant. This
+/// gives construction, traversal, fusion, and lowering one stable shape even
+/// when scans and reductions are mixed.
+#[derive(Clone, Debug)]
+pub struct Op<P: WynSoacPhase> {
+    pub lanes: Lanes,
+    pub operators: Vec<Operator>,
+    /// Per-element work evaluated after accumulator updates.
+    pub post_maps: Vec<Map>,
+    /// Scan operators consumed only by post-map work and omitted from top-level results.
+    pub hidden_scan_outputs: Vec<usize>,
+    pub state: P::ScremaState,
 }
 
 impl<P: WynSoacPhase> Op<P> {
-    pub fn flavor(&self) -> Flavor {
-        match self {
-            Self::Map { .. } => Flavor::Map,
-            Self::Reduce { .. } => Flavor::Reduce,
-            Self::Scan { .. } => Flavor::Scan,
-            Self::Composite { .. } => Flavor::Composite,
-        }
+    pub fn is_map(&self) -> bool {
+        self.operators.is_empty()
+    }
+
+    pub fn is_reduce(&self) -> bool {
+        !self.operators.is_empty() && self.operators.iter().all(|operator| !operator.is_scan())
+    }
+
+    pub fn is_scan_only(&self) -> bool {
+        !self.operators.is_empty() && self.operators.iter().all(Operator::is_scan)
+    }
+
+    pub fn is_mixed(&self) -> bool {
+        !self.is_map() && !self.is_reduce() && !self.is_scan_only()
     }
 
     pub fn lanes(&self) -> &Lanes {
-        match self {
-            Self::Map { lanes, .. }
-            | Self::Reduce { lanes, .. }
-            | Self::Scan { lanes, .. }
-            | Self::Composite { lanes, .. } => lanes,
-        }
+        &self.lanes
     }
 
     pub fn lanes_mut(&mut self) -> &mut Lanes {
-        match self {
-            Self::Map { lanes, .. }
-            | Self::Reduce { lanes, .. }
-            | Self::Scan { lanes, .. }
-            | Self::Composite { lanes, .. } => lanes,
-        }
+        &mut self.lanes
     }
 
-    pub fn operators(&self) -> Vec<&Operator> {
-        match self {
-            Self::Map { .. } => Vec::new(),
-            Self::Reduce { operators, .. } | Self::Scan { operators, .. } => operators.iter().collect(),
-            Self::Composite { operators, .. } => {
-                operators.iter().map(CompositeOperator::operator).collect()
-            }
-        }
+    pub fn operators(&self) -> &[Operator] {
+        &self.operators
     }
 
-    pub fn operators_mut(&mut self) -> Vec<&mut Operator> {
-        match self {
-            Self::Map { .. } => Vec::new(),
-            Self::Reduce { operators, .. } | Self::Scan { operators, .. } => operators.iter_mut().collect(),
-            Self::Composite { operators, .. } => {
-                operators.iter_mut().map(CompositeOperator::operator_mut).collect()
-            }
-        }
+    pub fn operators_mut(&mut self) -> &mut [Operator] {
+        &mut self.operators
     }
 
     pub fn is_scan(&self, index: usize) -> bool {
-        match self {
-            Self::Scan { operators, .. } => index < 1 + operators.rest.len(),
-            Self::Composite { operators, .. } => {
-                (if index == 0 { Some(&operators.first) } else { operators.rest.get(index - 1) })
-                    .is_some_and(CompositeOperator::is_scan)
-            }
-            Self::Map { .. } | Self::Reduce { .. } => false,
-        }
+        self.operators.get(index).is_some_and(Operator::is_scan)
+    }
+
+    pub fn map_count(&self) -> usize {
+        self.lanes.maps.len() + self.post_maps.len()
     }
 
     pub fn result_count(&self) -> usize {
-        self.lanes().maps.len() + self.operators().len()
+        self.map_count() + self.visible_operator_count()
+    }
+
+    pub fn has_post_map(&self) -> bool {
+        !self.post_maps.is_empty()
+    }
+
+    pub fn operator_is_output(&self, index: usize) -> bool {
+        !self.hidden_scan_outputs.contains(&index)
+    }
+
+    fn visible_operator_count(&self) -> usize {
+        (0..self.operators.len()).filter(|&index| self.operator_is_output(index)).count()
+    }
+
+    pub fn operator_index_for_field(&self, field: usize) -> Option<usize> {
+        let visible = field.checked_sub(self.map_count())?;
+        (0..self.operators.len()).filter(|&index| self.operator_is_output(index)).nth(visible)
+    }
+
+    pub fn result_field_for_operator(&self, operator_index: usize) -> Option<usize> {
+        self.operator_is_output(operator_index).then(|| {
+            self.map_count() + (0..operator_index).filter(|&index| self.operator_is_output(index)).count()
+        })
+    }
+
+    fn map(&self, index: usize) -> Option<&Map> {
+        self.lanes.maps.get(index).or_else(|| self.post_maps.get(index.checked_sub(self.lanes.maps.len())?))
+    }
+
+    fn map_mut(&mut self, index: usize) -> Option<&mut Map> {
+        let pre_count = self.lanes.maps.len();
+        if index < pre_count {
+            self.lanes.maps.get_mut(index)
+        } else {
+            self.post_maps.get_mut(index - pre_count)
+        }
     }
 
     pub fn destination(&self, field: usize) -> Option<SoacDestination> {
-        if let Some(map) = self.lanes().maps.get(field) {
-            return Some(map.destination);
+        let map_count = self.map_count();
+        if field < map_count {
+            return self.map(field).map(|map| map.destination);
         }
-        self.operators()
-            .get(field.checked_sub(self.lanes().maps.len())?)
-            .map(|operator| operator.destination)
+        self.operators
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.operator_is_output(*index))
+            .nth(field - map_count)
+            .map(|(_, operator)| operator.destination)
     }
 
     pub fn place_destination(
@@ -335,62 +327,70 @@ impl<P: WynSoacPhase> Op<P> {
         field: usize,
         placement: super::super::types::SoacPlacement,
     ) -> bool {
-        let map_count = self.lanes().maps.len();
+        let map_count = self.map_count();
         if field < map_count {
-            self.lanes_mut().maps[field].destination.place(placement);
+            self.map_mut(field).expect("map result field exists").destination.place(placement);
             return true;
         }
-        let operator = field - map_count;
-        let mut operators = self.operators_mut();
-        let Some(operator) = operators.get_mut(operator) else {
+        let visible = field - map_count;
+        let Some(index) =
+            (0..self.operators.len()).filter(|&index| self.operator_is_output(index)).nth(visible)
+        else {
             return false;
         };
-        operator.destination.place(placement);
+        self.operators[index].destination.place(placement);
         true
     }
 
     pub fn result_types(&self) -> Vec<Type<TypeName>> {
-        self.lanes()
+        self.lanes
             .maps
             .iter()
+            .chain(&self.post_maps)
             .map(|map| map.result_type.clone())
-            .chain(self.operators().into_iter().map(|operator| operator.result_type.clone()))
+            .chain(
+                self.operators
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| self.operator_is_output(*index))
+                    .map(|(_, operator)| operator.result_type.clone()),
+            )
             .collect()
     }
 
     pub fn set_result_types(&mut self, result_types: &[Type<TypeName>]) {
         assert_eq!(self.result_count(), result_types.len());
-        let map_count = self.lanes().maps.len();
-        for (map, result_type) in self.lanes_mut().maps.iter_mut().zip(result_types) {
+        let map_count = self.map_count();
+        for (map, result_type) in self.lanes.maps.iter_mut().chain(&mut self.post_maps).zip(result_types) {
             map.result_type = result_type.clone();
         }
-        for (operator, result_type) in self.operators_mut().into_iter().zip(&result_types[map_count..]) {
-            operator.result_type = result_type.clone();
+        let visible_indices = (0..self.operators.len())
+            .filter(|&index| !self.hidden_scan_outputs.contains(&index))
+            .collect::<Vec<_>>();
+        for (index, result_type) in visible_indices.into_iter().zip(&result_types[map_count..]) {
+            self.operators[index].result_type = result_type.clone();
         }
     }
-
     pub(crate) fn for_each_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
-        match self {
-            Self::Map { lanes, .. } => lanes.for_each_type_mut(visit),
-            Self::Reduce { lanes, operators, .. } | Self::Scan { lanes, operators, .. } => {
-                lanes.for_each_type_mut(visit);
-                for operator in operators.iter_mut() {
-                    visit(&mut operator.result_type);
-                }
-            }
-            Self::Composite { lanes, operators, .. } => {
-                lanes.for_each_type_mut(visit);
-                for operator in operators.iter_mut() {
-                    visit(&mut operator.operator_mut().result_type)
-                }
-            }
+        self.lanes.for_each_type_mut(visit);
+        for map in &mut self.post_maps {
+            visit(&mut map.output_element_type);
+            visit(&mut map.result_type);
+        }
+        for operator in &mut self.operators {
+            visit(&mut operator.result_type);
         }
     }
 
     pub(crate) fn capture_nodes(&self) -> Vec<NodeId> {
-        let mut nodes =
-            self.lanes().maps.iter().flat_map(|map| map.body.captures.iter().copied()).collect::<Vec<_>>();
-        for operator in self.operators() {
+        let mut nodes = self
+            .lanes
+            .maps
+            .iter()
+            .chain(&self.post_maps)
+            .flat_map(|map| map.body.captures.iter().copied())
+            .collect::<Vec<_>>();
+        for operator in &self.operators {
             nodes.extend(operator.step.captures.iter().copied());
             nodes.extend(operator.combine.captures.iter().copied());
         }
@@ -399,7 +399,7 @@ impl<P: WynSoacPhase> Op<P> {
 
     fn base_referenced_nodes(&self) -> Vec<NodeId> {
         let mut nodes = self.capture_nodes();
-        for operator in self.operators() {
+        for operator in &self.operators {
             nodes.push(operator.neutral);
             nodes.extend(operator.shape.iter().copied());
         }
@@ -409,115 +409,44 @@ impl<P: WynSoacPhase> Op<P> {
 
 impl<R: GraphResource> Op<Semantic<R>> {
     pub fn semantic_state(&self) -> &SemanticState<R> {
-        match self {
-            Self::Map { state, .. }
-            | Self::Reduce { state, .. }
-            | Self::Scan { state, .. }
-            | Self::Composite { state, .. } => state,
-        }
+        &self.state
     }
 
     pub fn semantic_state_mut(&mut self) -> &mut SemanticState<R> {
-        match self {
-            Self::Map { state, .. }
-            | Self::Reduce { state, .. }
-            | Self::Scan { state, .. }
-            | Self::Composite { state, .. } => state,
-        }
+        &mut self.state
     }
 
     pub(crate) fn referenced_nodes(&self) -> Vec<NodeId> {
         let mut nodes = self.base_referenced_nodes();
-        match self {
-            Self::Map {
-                state: SemanticState::Segmented { space, .. },
-                ..
-            }
-            | Self::Reduce {
-                state: SemanticState::Segmented { space, .. },
-                ..
-            }
-            | Self::Scan {
-                state: SemanticState::Segmented { space, .. },
-                ..
-            }
-            | Self::Composite {
-                state: SemanticState::Segmented { space, .. },
-                ..
-            } => nodes.extend(space.referenced_nodes()),
-            _ => {}
+        if let SemanticState::Segmented { space, .. } = &self.state {
+            nodes.extend(space.referenced_nodes());
         }
         nodes
     }
 
     pub(crate) fn referenced_node_slots(&mut self) -> Vec<&mut NodeId> {
-        match self {
-            Self::Map { lanes, state } => {
-                let mut nodes =
-                    lanes.maps.iter_mut().flat_map(|map| map.body.captures.iter_mut()).collect::<Vec<_>>();
-                if let SemanticState::Segmented { space, .. } = state {
-                    nodes.extend(space.referenced_node_slots());
-                }
-                nodes
-            }
-            Self::Reduce {
-                lanes,
-                operators,
-                state,
-            }
-            | Self::Scan {
-                lanes,
-                operators,
-                state,
-            } => {
-                let mut nodes =
-                    lanes.maps.iter_mut().flat_map(|map| map.body.captures.iter_mut()).collect::<Vec<_>>();
-                for operator in operators.iter_mut() {
-                    nodes.extend(operator.step.captures.iter_mut());
-                    nodes.extend(operator.combine.captures.iter_mut());
-                    nodes.push(&mut operator.neutral);
-                    nodes.extend(operator.shape.iter_mut());
-                }
-                if let SemanticState::Segmented { space, .. } = state {
-                    nodes.extend(space.referenced_node_slots());
-                }
-                nodes
-            }
-            Self::Composite {
-                lanes,
-                operators,
-                state,
-            } => {
-                let mut nodes =
-                    lanes.maps.iter_mut().flat_map(|map| map.body.captures.iter_mut()).collect::<Vec<_>>();
-                for composite in operators.iter_mut() {
-                    let operator = match composite {
-                        CompositeOperator::Reduce(operator) | CompositeOperator::Scan(operator) => operator,
-                    };
-                    nodes.extend(operator.step.captures.iter_mut());
-                    nodes.extend(operator.combine.captures.iter_mut());
-                    nodes.push(&mut operator.neutral);
-                    nodes.extend(operator.shape.iter_mut());
-                }
-                if let SemanticState::Segmented { space, .. } = state {
-                    nodes.extend(space.referenced_node_slots());
-                }
-                nodes
-            }
+        let mut nodes = self
+            .lanes
+            .maps
+            .iter_mut()
+            .chain(&mut self.post_maps)
+            .flat_map(|map| map.body.captures.iter_mut())
+            .collect::<Vec<_>>();
+        for operator in &mut self.operators {
+            nodes.extend(operator.step.captures.iter_mut());
+            nodes.extend(operator.combine.captures.iter_mut());
+            nodes.push(&mut operator.neutral);
+            nodes.extend(operator.shape.iter_mut());
         }
+        if let SemanticState::Segmented { space, .. } = &mut self.state {
+            nodes.extend(space.referenced_node_slots());
+        }
+        nodes
     }
 }
 
 impl Op<super::super::types::Physical> {
     pub fn is_serial(&self) -> bool {
-        matches!(
-            self,
-            Self::Map {
-                state: ScheduledState::Serial,
-                ..
-            } | Self::Reduce { .. }
-                | Self::Scan { .. }
-                | Self::Composite { .. }
-        )
+        matches!(self.state, PhysicalState::Serial)
     }
 }

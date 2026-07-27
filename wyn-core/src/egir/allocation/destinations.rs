@@ -83,6 +83,7 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
             map_inputs,
             operator_inputs,
             map_destinations,
+            post_map_destinations,
             accumulator_destinations,
             filter_has_candidate,
         ) = {
@@ -96,6 +97,7 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
                         .map(|operator| operator.input_indices.clone())
                         .collect::<Vec<_>>(),
                     op.lanes().maps.iter().map(|map| map.destination).collect(),
+                    op.post_maps.iter().map(|map| map.destination).collect::<Vec<_>>(),
                     op.operators().into_iter().map(|operator| operator.destination).collect(),
                     false,
                 ),
@@ -111,6 +113,7 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
                     }),
                 )) => (
                     effect.operand_nodes.to_vec(),
+                    Vec::new(),
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
@@ -152,6 +155,16 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
                     })
             })
             .collect();
+        let resolved_post_maps = post_map_destinations
+            .into_iter()
+            .map(|destination| {
+                if destination.is_unplaced_unique_input() {
+                    SoacDestination::fresh()
+                } else {
+                    destination
+                }
+            })
+            .collect::<Vec<_>>();
         let resolved_accumulators: Vec<_> = accumulator_destinations
             .iter()
             .enumerate()
@@ -184,6 +197,9 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
         match &mut effect.kind {
             SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                 for (map, destination) in op.lanes_mut().maps.iter_mut().zip(resolved_maps) {
+                    map.destination = destination;
+                }
+                for (map, destination) in op.post_maps.iter_mut().zip(resolved_post_maps) {
                     map.destination = destination;
                 }
                 for (operator, destination) in op.operators_mut().into_iter().zip(resolved_accumulators) {
@@ -250,8 +266,10 @@ fn retype_reused_results(graph: &mut EGraph, block: BlockId, effect_index: usize
         for (operator_index, operator) in op.operators().into_iter().enumerate() {
             if operator.destination.is_input_buffer() {
                 if let Some(input) = operator.input_indices.first() {
-                    retyped[op.lanes().maps.len() + operator_index] =
-                        op.lanes().inputs[input.index()].array.clone();
+                    let field = op
+                        .result_field_for_operator(operator_index)
+                        .expect("reused operator must be a visible result");
+                    retyped[field] = op.lanes().inputs[input.index()].array.clone();
                     changed = true;
                 }
             }
@@ -283,6 +301,11 @@ fn discard_unique_input_candidates(graph: &mut EGraph) {
             match &mut effect.kind {
                 SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                     for map in &mut op.lanes_mut().maps {
+                        if map.destination.is_unplaced_unique_input() {
+                            map.destination.make_fresh();
+                        }
+                    }
+                    for map in &mut op.post_maps {
                         if map.destination.is_unplaced_unique_input() {
                             map.destination.make_fresh();
                         }

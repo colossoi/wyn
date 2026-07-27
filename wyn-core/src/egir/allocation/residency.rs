@@ -304,16 +304,17 @@ fn operation_result_residency(
     let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() else {
         return None;
     };
-    let cloneable = op.lanes().maps.iter().all(|map| map.destination.is_unplaced_fresh())
-        && op.operators().into_iter().all(|operator| operator.destination.is_unplaced_fresh())
-        && resources.iter().all(|resource| {
-            resource.access == ResourceAccess::Read
-                || entry
-                    .outputs
-                    .iter()
-                    .filter_map(|output| output.resource)
-                    .any(|output| output == resource.resource)
-        });
+    let cloneable =
+        op.lanes().maps.iter().chain(&op.post_maps).all(|map| map.destination.is_unplaced_fresh())
+            && op.operators().into_iter().all(|operator| operator.destination.is_unplaced_fresh())
+            && resources.iter().all(|resource| {
+                resource.access == ResourceAccess::Read
+                    || entry
+                        .outputs
+                        .iter()
+                        .filter_map(|output| output.resource)
+                        .any(|output| output == resource.resource)
+            });
     let dependencies = dependency_effects(&entry.graph, site)?;
     let upstream =
         dependencies.iter().copied().filter(|index| *index != site.index).collect::<HashSet<_>>();
@@ -321,21 +322,17 @@ fn operation_result_residency(
         return None;
     }
 
-    match op {
-        screma::Op::Map { lanes, .. } if !lanes.maps.is_empty() => {
-            array_result_residency(entry, result, consumers, requires_array_storage)
-        }
-        screma::Op::Scan { .. } => array_result_residency(entry, result, consumers, requires_array_storage),
-        screma::Op::Reduce { operators, .. }
-            if operators.rest.is_empty()
-                && (has_segmented_screma_consumer(entry, consumers)
-                    || !entry.execution_model.is_compute())
-                && scalar_result_is_used(uses, result, site)
-                && invocation_invariant(entry, site.block, &dependencies) =>
-        {
-            Some(FixedMaterializationKind::Scalar)
-        }
-        _ => None,
+    if (op.is_map() && (!op.lanes().maps.is_empty() || op.has_post_map())) || op.is_scan_only() {
+        array_result_residency(entry, result, consumers, requires_array_storage)
+    } else if op.is_reduce()
+        && op.operators().len() == 1
+        && (has_segmented_screma_consumer(entry, consumers) || !entry.execution_model.is_compute())
+        && scalar_result_is_used(uses, result, site)
+        && invocation_invariant(entry, site.block, &dependencies)
+    {
+        Some(FixedMaterializationKind::Scalar)
+    } else {
+        None
     }
 }
 
@@ -677,10 +674,11 @@ fn operation_sites(
 fn supports_parallel_prefix_consumer(entry: &SemanticEntry, site: SideEffectSite) -> bool {
     matches!(
         &entry.graph.skeleton.effect(site).kind,
-        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(screma::Op::Map {
-            lanes,
-            state: screma::SemanticState::Segmented { .. },
-        }))) if !lanes.maps.is_empty()
+        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
+            if op.is_map()
+                && !op.has_post_map()
+                && !op.lanes().maps.is_empty()
+                && matches!(op.semantic_state(), screma::SemanticState::Segmented { .. })
     )
 }
 
@@ -811,6 +809,7 @@ fn dependencies_are_cloneable(graph: &EGraph, block_id: BlockId, effects: &HashS
                             .lanes()
                             .maps
                             .iter()
+                            .chain(&op.post_maps)
                             .all(|map| map.destination.is_unplaced_fresh())
                         && op
                             .operators()
@@ -1553,22 +1552,26 @@ fn output_specs(
     op: &screma::Op<Semantic>,
 ) -> Option<Vec<OutputSpec>> {
     let result_types = op.result_types();
-    let output_elem_types = match (materialization, op) {
-        (FixedMaterializationKind::Scalar, screma::Op::Reduce { .. }) => result_types.clone(),
-        (_, screma::Op::Map { lanes, .. }) => {
-            lanes.maps.iter().map(|map| map.output_element_type.clone()).collect()
-        }
-        (_, screma::Op::Scan { lanes, operators, .. }) => lanes
+    let output_elem_types = if materialization.is_scalar() && op.is_reduce() {
+        result_types.clone()
+    } else if op.is_map() {
+        op.lanes().maps.iter().chain(&op.post_maps).map(|map| map.output_element_type.clone()).collect()
+    } else if op.is_scan_only() {
+        op.lanes()
             .maps
             .iter()
+            .chain(&op.post_maps)
             .map(|map| map.output_element_type.clone())
             .chain(
-                std::iter::once(&operators.first)
-                    .chain(&operators.rest)
-                    .map(|operator| graph.nodes[operator.neutral].ty.clone()),
+                op.operators()
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| op.operator_is_output(*index))
+                    .map(|(_, operator)| graph.nodes[operator.neutral].ty.clone()),
             )
-            .collect(),
-        _ => return None,
+            .collect()
+    } else {
+        return None;
     };
     if output_elem_types.len() != result_types.len() {
         return None;

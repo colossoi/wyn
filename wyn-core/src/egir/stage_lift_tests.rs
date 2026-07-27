@@ -259,7 +259,7 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
     let effect = SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(
             SemanticOpId::for_test(0),
-            Soac::Screma(screma::Op::Map {
+            Soac::Screma(screma::Op {
                 lanes: screma::Lanes {
                     inputs: vec![SoacInputType {
                         array: input_ty.clone(),
@@ -275,6 +275,9 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
                         result_type: result_ty.clone(),
                     }],
                 },
+                operators: Vec::new(),
+                post_maps: Vec::new(),
+                hidden_scan_outputs: Vec::new(),
                 state: screma::SemanticState::Segmented {
                     space: SegSpace::new(SegExtent::Fixed(64)),
                     placement: screma::Placement::Kernel,

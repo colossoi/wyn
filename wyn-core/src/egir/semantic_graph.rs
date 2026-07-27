@@ -266,7 +266,7 @@ where
         };
         match soac {
             Soac::Screma(op) => {
-                for map in &op.lanes().maps {
+                for map in op.lanes().maps.iter().chain(&op.post_maps) {
                     verify_body("map", &map.body)?;
                 }
                 for operator in op.operators() {
@@ -320,19 +320,23 @@ where
             for effect in &block.side_effects {
                 match &effect.kind {
                     SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
-                        let kind = match op.flavor() {
-                            screma::Flavor::Map => "SegMap",
-                            screma::Flavor::Reduce => "SegRed",
-                            screma::Flavor::Scan => "SegScan",
-                            screma::Flavor::Composite => "SegComposite",
+                        let kind = if op.is_map() {
+                            "SegMap"
+                        } else if op.is_reduce() {
+                            "SegRed"
+                        } else if op.is_scan_only() {
+                            "SegScan"
+                        } else {
+                            "SegMixed"
                         };
                         let _ = writeln!(
                             output,
-                            "{scope}: {kind} state={:?} inputs={:?} maps={:?} kind={:?}",
+                            "{scope}: {kind} state={:?} inputs={:?} pre_maps={:?} post_maps={:?} kind={:?}",
                             op.semantic_state(),
                             op.lanes().inputs,
                             op.lanes().maps,
-                            op.flavor(),
+                            op.post_maps,
+                            op.operators().iter().map(|operator| operator.kind).collect::<Vec<_>>(),
                         );
                     }
                     SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => {

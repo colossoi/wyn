@@ -74,8 +74,11 @@ fn find_in_graph(graph: &EGraph, site: BodySite, oracle: &SemanticGraph) -> Opti
             let producer = &block.side_effects[producer_index];
             let SideEffectKind::Soac(SoacEffect(
                 producer_id,
-                Soac::Screma(screma::Op::Map {
+                Soac::Screma(screma::Op {
                     lanes: screma::Lanes { maps, .. },
+                    operators,
+                    post_maps: _,
+                    hidden_scan_outputs: _,
                     state:
                         screma::SemanticState::Segmented {
                             output_slots,
@@ -87,7 +90,8 @@ fn find_in_graph(graph: &EGraph, site: BodySite, oracle: &SemanticGraph) -> Opti
             else {
                 continue;
             };
-            if maps.is_empty()
+            if !operators.is_empty()
+                || maps.is_empty()
                 || !output_slots.is_empty()
                 || !maps.iter().all(|map| map.destination.is_unplaced())
                 || resources.iter().any(|resource| resource.access != ResourceAccess::Read)
@@ -249,8 +253,11 @@ fn producer_parts(graph: &EGraph, candidate: &Candidate) -> ProducerParts {
     let effect = &graph.skeleton.blocks[candidate.block].side_effects[candidate.producer];
     let SideEffectKind::Soac(SoacEffect(
         _,
-        Soac::Screma(screma::Op::Map {
+        Soac::Screma(screma::Op {
             lanes,
+            operators: _,
+            post_maps: _,
+            hidden_scan_outputs: _,
             state: screma::SemanticState::Segmented { space, .. },
         }),
     )) = &effect.kind

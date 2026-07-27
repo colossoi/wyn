@@ -238,9 +238,7 @@ pub(crate) fn result_soac_is_consuming_scan(
         if let [screma_result] = operands.as_slice() {
             if let Some(se) = effect_index.effect(graph, *screma_result) {
                 if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &se.kind {
-                    let n_maps = op.lanes().maps.len();
-                    if field_idx >= n_maps {
-                        let acc_idx = field_idx - n_maps;
+                    if let Some(acc_idx) = op.operator_index_for_field(field_idx) {
                         if op.is_scan(acc_idx)
                             && op.destination(field_idx).is_some_and(SoacDestination::is_input_buffer)
                         {
@@ -277,9 +275,8 @@ pub(crate) fn result_soac_is_array_projection(
     let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &se.kind else {
         return None;
     };
-    let operator_field = field_idx.checked_sub(op.lanes().maps.len());
-    let supported =
-        field_idx < op.lanes().maps.len() || operator_field.is_some_and(|index| op.is_scan(index));
+    let supported = field_idx < op.map_count()
+        || op.operator_index_for_field(field_idx).is_some_and(|index| op.is_scan(index));
     (supported && op.destination(field_idx).is_some_and(SoacDestination::is_unplaced))
         .then_some((*screma_result, field_idx))
 }
@@ -322,8 +319,8 @@ pub(crate) fn retarget_array_projection(
         let mut views =
             operands.outputs().map(|operand| operand.map(|operand| operand.node)).collect::<Vec<_>>();
 
-        let operator_index = field_idx.checked_sub(op.lanes().maps.len());
-        if operator_index.is_some_and(|index| !op.is_scan(index)) {
+        let operator_index = op.operator_index_for_field(field_idx);
+        if field_idx >= op.map_count() && operator_index.is_some_and(|index| !op.is_scan(index)) {
             return Err(ConvertError::Internal(format!(
                 "cannot retarget non-scan Screma field {field_idx}"
             )));

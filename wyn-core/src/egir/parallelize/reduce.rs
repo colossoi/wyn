@@ -56,7 +56,7 @@ pub(super) fn analyze_reduce_candidate(
     entry: &crate::egir::program::PlannedEntry,
     located: LocatedScrema<'_>,
     lanes: &screma::Lanes,
-    operators: &screma::NonEmpty<screma::Operator>,
+    operators: &[screma::Operator],
     resources: &crate::egir::program::LogicalResourceArena,
 ) -> error::Result<Option<ReduceCandidate>> {
     let segment = located.segmented()?;

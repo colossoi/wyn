@@ -53,35 +53,17 @@ fn schedule_soac_with_mode(
     serial: bool,
 ) -> Result<Soac<Scheduled>, String> {
     Ok(match soac {
-        Soac::Screma(screma::Op::Map { lanes, state }) => Soac::Screma(screma::Op::Map {
-            lanes,
-            state: schedule_screma_state(state, serial),
-        }),
-        Soac::Screma(screma::Op::Reduce {
+        Soac::Screma(screma::Op {
             lanes,
             operators,
+            post_maps,
+            hidden_scan_outputs,
             state,
-        }) => Soac::Screma(screma::Op::Reduce {
+        }) => Soac::Screma(screma::Op {
             lanes,
             operators,
-            state: schedule_screma_state(state, serial),
-        }),
-        Soac::Screma(screma::Op::Scan {
-            lanes,
-            operators,
-            state,
-        }) => Soac::Screma(screma::Op::Scan {
-            lanes,
-            operators,
-            state: schedule_screma_state(state, serial),
-        }),
-        Soac::Screma(screma::Op::Composite {
-            lanes,
-            operators,
-            state,
-        }) => Soac::Screma(screma::Op::Composite {
-            lanes,
-            operators,
+            post_maps,
+            hidden_scan_outputs,
             state: schedule_screma_state(state, serial),
         }),
         Soac::Filter(filter::Op { body, state }) => {
@@ -143,16 +125,8 @@ pub(super) fn force_serial(graph: &mut EGraph<Scheduled>) {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut effect.kind else {
                 continue;
             };
-            match op {
-                screma::Op::Map { state, .. }
-                | screma::Op::Reduce { state, .. }
-                | screma::Op::Scan { state, .. }
-                | screma::Op::Composite { state, .. }
-                    if matches!(state, screma::ScheduledState::Segmented(_)) =>
-                {
-                    *state = screma::ScheduledState::Serial;
-                }
-                _ => {}
+            if matches!(op.state, screma::ScheduledState::Segmented(_)) {
+                op.state = screma::ScheduledState::Serial;
             }
         }
     }

@@ -6,6 +6,7 @@
 //!
 //! All tests include entry points to ensure monomorphization can find reachable code.
 
+use crate::egir::soac::screma;
 use crate::ssa::types::Program;
 use crate::tlc::extract_lambda_params;
 use crate::tlc::VarRef;
@@ -56,7 +57,6 @@ struct SemanticSoacStats {
 }
 
 fn semantic_soac_stats(allocated: &crate::egir::ResourcesAllocated) -> SemanticSoacStats {
-    use crate::egir::soac::screma;
     use crate::egir::types::{EGraph, SideEffectKind, Soac, SoacEffect};
 
     fn visit(graph: &EGraph, stats: &mut SemanticSoacStats) {
@@ -68,30 +68,21 @@ fn semantic_soac_stats(allocated: &crate::egir::ResourcesAllocated) -> SemanticS
                 Soac::Filter(_) => stats.filters += 1,
                 Soac::Hist(_) => stats.hists += 1,
                 Soac::Screma(op) => {
-                    stats.map_bodies += op.lanes().maps.len();
-                    match op {
-                        screma::Op::Map { .. } => stats.seg_maps += 1,
-                        screma::Op::Reduce { operators, .. } => {
-                            stats.seg_reds += 1;
-                            stats.reduce_operators += 1 + operators.rest.len();
-                        }
-                        screma::Op::Scan { operators, .. } => {
-                            stats.seg_scans += 1;
-                            stats.scan_operators += 1 + operators.rest.len();
-                        }
-                        screma::Op::Composite { operators, .. } => {
-                            stats.seg_composites += 1;
-                            let classify = |operator: &screma::CompositeOperator| match operator {
-                                screma::CompositeOperator::Reduce(_) => (1, 0),
-                                screma::CompositeOperator::Scan(_) => (0, 1),
-                            };
-                            let (reduce, scan) = std::iter::once(&operators.first)
-                                .chain(&operators.rest)
-                                .map(classify)
-                                .fold((0, 0), |(r, s), (dr, ds)| (r + dr, s + ds));
-                            stats.reduce_operators += reduce;
-                            stats.scan_operators += scan;
-                        }
+                    stats.map_bodies += op.lanes().maps.len() + op.post_maps.len();
+                    if op.is_map() {
+                        stats.seg_maps += 1;
+                    } else if op.is_reduce() {
+                        stats.seg_reds += 1;
+                        stats.reduce_operators += op.operators().len();
+                    } else if op.is_scan_only() {
+                        stats.seg_scans += 1;
+                        stats.scan_operators += op.operators().len();
+                    } else {
+                        stats.seg_composites += 1;
+                        stats.reduce_operators +=
+                            op.operators().iter().filter(|operator| !operator.is_scan()).count();
+                        stats.scan_operators +=
+                            op.operators().iter().filter(|operator| operator.is_scan()).count();
                     }
                 }
             }
@@ -132,7 +123,6 @@ entry chain(xs: []i32) []i32 =
 
 #[test]
 fn egir_vertical_fusion_preserves_multi_input_producer_sources() {
-    use crate::egir::soac::screma;
     use crate::egir::types::{ResourceAccess, SideEffectKind, Soac, SoacEffect};
 
     let allocated = compile_to_semantic_egir(
@@ -152,9 +142,9 @@ entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            let screma::Op::Map { .. } = op else {
+            if !op.is_map() {
                 return None;
-            };
+            }
             let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() else {
                 return None;
             };
@@ -173,7 +163,6 @@ entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
 
 #[test]
 fn egir_vertical_fusion_composes_one_slot_of_multi_input_consumer() {
-    use crate::egir::soac::screma;
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let allocated = compile_to_semantic_egir(
@@ -192,9 +181,9 @@ entry mixed() [4]i32 =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            let screma::Op::Map { .. } = op else {
+            if !op.is_map() {
                 return None;
-            };
+            }
             Some((
                 op.lanes().inputs.len(),
                 op.lanes().maps.iter().map(|map| map.input_indices.clone()).collect::<Vec<_>>(),
@@ -207,7 +196,6 @@ entry mixed() [4]i32 =
 
 #[test]
 fn egir_horizontal_fusion_deduplicates_shared_multi_input_vector() {
-    use crate::egir::soac::screma;
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let allocated = compile_to_semantic_egir(
@@ -228,7 +216,7 @@ entry siblings<[n]>(xs: [n]i32, ys: [n]i32) ([n]i32, [n]i32) =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            if !matches!(op, screma::Op::Map { .. }) || op.lanes().maps.len() != 2 {
+            if !op.is_map() || op.lanes().maps.len() != 2 {
                 return None;
             }
             Some((
@@ -340,7 +328,6 @@ entry count(xs: []i32) i32 =
 
 #[test]
 fn egir_filter_fusion_reuses_count_for_multiple_reductions() {
-    use crate::egir::soac::screma;
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let source = r#"
@@ -370,10 +357,11 @@ entry stats(xs: []i32) [4]i32 =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            let screma::Op::Reduce { operators, .. } = op else {
+            if !op.is_reduce() {
                 return None;
-            };
-            (1 + operators.rest.len() == 3).then(|| op.operators())
+            }
+            let operators = op.operators();
+            (operators.len() == 3).then(|| op.operators())
         })
         .expect("three-operator filtered SegRed");
     let step_names: Vec<_> = operators
@@ -486,7 +474,6 @@ entry write(xs: []i32, #[storage(set=2, binding=0, access=write)] dest: *[]i32) 
 
 #[test]
 fn semantic_segops_survive_optimization_and_logical_allocation() {
-    use crate::egir::soac::screma;
     use crate::egir::types::{SegExtent, SideEffectKind, Soac, SoacEffect};
 
     let allocated = compile_to_semantic_egir(
@@ -507,10 +494,10 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
             let screma::SemanticState::Segmented { space, .. } = op.semantic_state() else {
                 return None;
             };
-            Some((space, op.flavor()))
+            Some((space, op.is_reduce()))
         })
         .expect("SegRed remains present before target lowering");
-    assert_eq!(seg.1, screma::Flavor::Reduce);
+    assert!(seg.1);
     assert!(matches!(seg.0.dims(), [SegExtent::ResourceLength { .. }]));
     assert!(
         allocated.data.core.resources.len() >= 2,
@@ -551,7 +538,6 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 /// four-accumulator SegOp instead of four one-accumulator ops.
 #[test]
 fn same_space_reductions_fuse_into_one_multi_accumulator_op() {
-    use crate::egir::soac::screma;
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let allocated = compile_to_semantic_egir(
@@ -571,7 +557,7 @@ entry e() [4]f32 =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            (!matches!(op, screma::Op::Map { .. })).then(|| op.operators().len())
+            (!op.is_map()).then(|| op.operators().len())
         })
         .collect();
     assert_eq!(
@@ -584,10 +570,7 @@ entry e() [4]f32 =
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter(|effect| {
-            matches!(
-                &effect.kind,
-                SideEffectKind::Soac(SoacEffect(_, Soac::Screma(screma::Op::Map { .. })))
-            )
+            matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if op.is_map())
         })
         .count();
     assert_eq!(remaining_maps, 0, "the single-consumer map is vertically fused");
@@ -604,7 +587,7 @@ entry e() [4]f32 =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            matches!(op, screma::Op::Reduce { .. }).then(|| op.operators())
+            op.is_reduce().then(|| op.operators())
         })
         .expect("fused SegRed");
     for operator in operators {
@@ -619,7 +602,6 @@ entry e() [4]f32 =
 
 #[test]
 fn horizontal_fusion_does_not_cross_an_intervening_effect_token() {
-    use crate::egir::soac::screma;
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
     let allocated = compile_to_semantic_egir(
         r#"
@@ -642,7 +624,7 @@ entry e() [3]i32 =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            matches!(op, screma::Op::Reduce { .. }).then(|| op.operators().len())
+            op.is_reduce().then(|| op.operators().len())
         })
         .collect();
     assert_eq!(
@@ -654,7 +636,6 @@ entry e() [3]i32 =
 
 #[test]
 fn fused_accumulators_preserve_distinct_composed_steps_on_shared_input() {
-    use crate::egir::soac::screma;
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
     let source = r#"
 #[compute]
@@ -673,10 +654,11 @@ entry e() [2]i32 =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            let screma::Op::Reduce { operators, .. } = op else {
+            if !op.is_reduce() {
                 return None;
-            };
-            (1 + operators.rest.len() == 2).then(|| op.operators())
+            }
+            let operators = op.operators();
+            (operators.len() == 2).then(|| op.operators())
         })
         .expect("two-accumulator SegRed");
     assert_eq!(operators[0].input_indices, vec![screma::InputId(0)]);
@@ -1595,7 +1577,6 @@ entry r(bidx: []u32) ?k. [k]vec4f32 =
 #[test]
 fn multi_consumer_producer_survival_is_characterized() {
     use crate::egir::semantic_graph::SemanticDependencyKind;
-    use crate::egir::soac::screma;
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
     use std::collections::HashMap;
 
@@ -1607,9 +1588,7 @@ fn multi_consumer_producer_survival_is_characterized() {
             .flat_map(|entry| {
                 entry.graph.skeleton.blocks.iter().flat_map(move |(_, block)| {
                     block.side_effects.iter().filter_map(move |effect| match &effect.kind {
-                        SideEffectKind::Soac(SoacEffect(id, Soac::Screma(screma::Op::Map { .. }))) => {
-                            Some(*id)
-                        }
+                        SideEffectKind::Soac(SoacEffect(id, Soac::Screma(op))) if op.is_map() => Some(*id),
                         _ => None,
                     })
                 })
@@ -4444,10 +4423,17 @@ entry gen(xs: []i32) ([]i32, []i32, [1]i32, []i32) =
 "#;
 
     let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
-    assert_eq!(stats.seg_reds, 1, "map and reduce consumers should co-schedule");
     assert_eq!(
-        stats.seg_scans, 1,
-        "the scan remains an explicit semantic schedule"
+        stats.seg_reds, 0,
+        "the reduction is represented by the mixed canonical Screma"
+    );
+    assert_eq!(
+        stats.seg_scans, 0,
+        "the scan is represented by the mixed canonical Screma"
+    );
+    assert_eq!(
+        stats.seg_composites, 1,
+        "scan and reduction siblings share one canonical Screma"
     );
     assert_eq!(stats.reduce_operators, 1);
     assert_eq!(stats.scan_operators, 1);
@@ -9652,18 +9638,65 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
     crate::compile_thru_spirv(src).expect("Filter->Scan should compile");
 }
 
-/// Scan -> Map, e.g. `map(g, scan(op, ne, a))`. Compiles (unfused). Fusing it
-/// (post-compose the map onto the scan's output) is a perf TODO.
+/// Scan -> Map is represented as one canonical Screma whose post-map consumes
+/// the inclusive scan value. The nontrivial post region selects serial fallback.
 #[test]
 fn scan_into_map_compiles() {
-    let src = r#"
+    let cases = [
+        (
+            "scan-map",
+            r#"
 #[compute]
-entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
-        #[storage(set=2, binding=1, access=write)] o: *[]f32) () =
-  let m = map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a[0..256])) in
-  let _ = scatter(o, [0i32], [m[0]]) in ()
-"#;
-    crate::compile_thru_spirv(src).expect("Scan->Map should compile");
+entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
+  map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a[0..256]))
+"#,
+        ),
+        (
+            "map-scan-map",
+            r#"
+#[compute]
+entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
+  map(
+    |x: f32| x + 1.0,
+    scan(|x: f32, y: f32| x + y, 0.0, map(|x: f32| x * 2.0, a[0..256])))
+"#,
+        ),
+    ];
+
+    for (label, src) in cases {
+        let allocated = compile_to_semantic_egir(src);
+        let stats = semantic_soac_stats(&allocated);
+        assert_eq!(stats.seg_scans, 1, "{label}: scan and post-map share one Screma");
+        assert_eq!(stats.seg_maps, 0, "{label}: no map may remain materialized");
+        assert_eq!(
+            stats.map_bodies, 1,
+            "{label}: the Screma retains one post-map body"
+        );
+        let has_post_scan = allocated
+            .entry_points
+            .iter()
+            .flat_map(|entry| entry.graph.skeleton.blocks.iter())
+            .flat_map(|(_, block)| &block.side_effects)
+            .any(|effect| {
+                matches!(
+                    &effect.kind,
+                    crate::egir::types::SideEffectKind::Soac(crate::egir::types::SoacEffect(
+                        _,
+                        crate::egir::types::Soac::Screma(op)
+                    )) if op.is_scan_only() && op.has_post_map() && op.hidden_scan_outputs == [0]
+                )
+            });
+        assert!(
+            has_post_scan,
+            "{label}: scan result must route through the post-map"
+        );
+        crate::compile_thru_spirv(src).unwrap_or_else(|error| panic!("{label}: SPIR-V: {error}"));
+        crate::lower_ssa_to_wgsl(lower_semantic_egir(
+            compile_to_semantic_egir(src),
+            crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Serial),
+        ))
+        .unwrap_or_else(|error| panic!("{label}: WGSL: {error}"));
+    }
 }
 
 /// An entry returning a scan and a fixed-size literal that indexes it must

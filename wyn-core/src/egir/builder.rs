@@ -126,7 +126,7 @@ impl<'a> EntryBuilder<'a> {
             &mut self.graph,
             self.current_block,
             id,
-            Soac::Screma(screma::Op::Map {
+            Soac::Screma(screma::Op {
                 lanes: screma::Lanes {
                     inputs: vec![SoacInputType {
                         array: input_array_ty,
@@ -139,6 +139,9 @@ impl<'a> EntryBuilder<'a> {
                         result_type: output_view_ty,
                     }],
                 },
+                operators: Vec::new(),
+                post_maps: Vec::new(),
+                hidden_scan_outputs: Vec::new(),
                 state: screma::SemanticState::Serial,
             }),
             smallvec![input_array, output_view],

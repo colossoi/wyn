@@ -87,7 +87,8 @@ impl RecipeTargets {
                             output_slots,
                             ..
                         } if !output_slots.is_empty()
-                            && matches!(op, screma::Op::Reduce { .. } | screma::Op::Scan { .. })
+                            && !op.is_map()
+                            && !op.is_mixed()
                             && entry.execution_model.is_compute() =>
                         {
                             targets.promoted_folds.push(site);
@@ -478,7 +479,7 @@ fn analyze_reduce_recipe(
     resources: &LogicalResourceArena,
     located: LocatedScrema<'_>,
     lanes: &screma::Lanes,
-    operators: &screma::NonEmpty<screma::Operator>,
+    operators: &[screma::Operator],
 ) -> Result<(AnalyzedRecipe, Vec<ScratchRequest>)> {
     let serial = located.serial_recipe();
     let Some(candidate) = super::analyze_reduce_candidate(body, located, lanes, operators, resources)?
@@ -507,7 +508,7 @@ fn analyze_scan_recipe(
     endpoint: CompilerFlowEndpoint,
     located: LocatedScrema<'_>,
     lanes: &screma::Lanes,
-    operators: &screma::NonEmpty<screma::Operator>,
+    operators: &[screma::Operator],
 ) -> Result<(AnalyzedRecipe, Vec<ScratchRequest>)> {
     let serial = located.serial_recipe();
     let Some(candidate) = super::analyze_scan_candidate(body, located, lanes, operators)? else {
@@ -552,17 +553,27 @@ fn analyze_projected_kernel(
     let (recipe, requests) = match targets.screma_site() {
         Some(site) => {
             let located = located_screma(&body, site)?;
-            match located.op {
-                screma::Op::Reduce { lanes, operators, .. } => {
-                    analyze_reduce_recipe(&body, endpoint, resources, located, lanes, operators)?
-                }
-                screma::Op::Scan { lanes, operators, .. } => {
-                    analyze_scan_recipe(&body, endpoint, located, lanes, operators)?
-                }
-                screma::Op::Map { .. } => (AnalyzedRecipe::Map(located.segmented()?), Vec::new()),
-                screma::Op::Composite { .. } => {
-                    (AnalyzedRecipe::Serial(located.serial_recipe()), Vec::new())
-                }
+            if located.op.is_reduce() && !located.op.has_post_map() {
+                analyze_reduce_recipe(
+                    &body,
+                    endpoint,
+                    resources,
+                    located,
+                    located.op.lanes(),
+                    located.op.operators(),
+                )?
+            } else if located.op.is_scan_only() && !located.op.has_post_map() {
+                analyze_scan_recipe(
+                    &body,
+                    endpoint,
+                    located,
+                    located.op.lanes(),
+                    located.op.operators(),
+                )?
+            } else if located.op.is_map() && !located.op.has_post_map() {
+                (AnalyzedRecipe::Map(located.segmented()?), Vec::new())
+            } else {
+                (AnalyzedRecipe::Serial(located.serial_recipe()), Vec::new())
             }
         }
         None => (AnalyzedRecipe::Unchanged, Vec::new()),

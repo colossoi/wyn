@@ -2220,7 +2220,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let map_input_indices = vec![(0..input_arr_types.len()).map(screma::InputId).collect::<Vec<_>>()];
         let map_region = self.region(f_name);
         let screma_nid = self.emit_soac(
-            Soac::Screma(screma::Op::Map {
+            Soac::Screma(screma::Op {
                 lanes: screma::Lanes {
                     inputs: input_arr_types.into_iter().map(|array| SoacInputType { array }).collect(),
                     maps: vec![screma::Map {
@@ -2234,6 +2234,9 @@ impl<'a, 'b> Converter<'a, 'b> {
                         result_type: project_ty.clone(),
                     }],
                 },
+                operators: Vec::new(),
+                post_maps: Vec::new(),
+                hidden_scan_outputs: Vec::new(),
                 state: screma::RawState,
             }),
             operands,
@@ -2325,30 +2328,30 @@ impl<'a, 'b> Converter<'a, 'b> {
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
         let op_region = self.region(op_name);
         let screma_nid = self.emit_soac(
-            Soac::Screma(screma::Op::Reduce {
+            Soac::Screma(screma::Op {
                 lanes: screma::Lanes {
                     inputs: vec![SoacInputType { array: arr_ty }],
                     maps: vec![],
                 },
-                operators: screma::NonEmpty {
-                    first: screma::Operator {
-                        step: SegBody {
-                            region: op_region,
-                            captures: capture_nids,
-                        },
-                        combine: SegBody {
-                            region: op_region,
-                            captures: vec![],
-                        },
-                        input_indices: vec![screma::InputId(0)],
-                        neutral: init_nid,
-                        shape: Vec::new(),
-                        commutative: false,
-                        destination: SoacDestination::fresh(),
-                        result_type: result_ty.clone(),
+                operators: vec![screma::Operator {
+                    kind: screma::OperatorKind::Reduce,
+                    step: SegBody {
+                        region: op_region,
+                        captures: capture_nids,
                     },
-                    rest: Vec::new(),
-                },
+                    combine: SegBody {
+                        region: op_region,
+                        captures: vec![],
+                    },
+                    input_indices: vec![screma::InputId(0)],
+                    neutral: init_nid,
+                    shape: Vec::new(),
+                    commutative: false,
+                    destination: SoacDestination::fresh(),
+                    result_type: result_ty.clone(),
+                }],
+                post_maps: Vec::new(),
+                hidden_scan_outputs: Vec::new(),
                 state: screma::RawState,
             }),
             operands,
@@ -2397,30 +2400,30 @@ impl<'a, 'b> Converter<'a, 'b> {
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
         let op_region = self.region(op_name);
         let screma_nid = self.emit_soac(
-            Soac::Screma(screma::Op::Scan {
+            Soac::Screma(screma::Op {
                 lanes: screma::Lanes {
                     inputs: vec![SoacInputType { array: arr_ty }],
                     maps: vec![],
                 },
-                operators: screma::NonEmpty {
-                    first: screma::Operator {
-                        step: SegBody {
-                            region: op_region,
-                            captures: capture_nids,
-                        },
-                        combine: SegBody {
-                            region: op_region,
-                            captures: vec![],
-                        },
-                        input_indices: vec![screma::InputId(0)],
-                        neutral: init_nid,
-                        shape: Vec::new(),
-                        commutative: false,
-                        destination,
-                        result_type: project_ty.clone(),
+                operators: vec![screma::Operator {
+                    kind: screma::OperatorKind::Scan,
+                    step: SegBody {
+                        region: op_region,
+                        captures: capture_nids,
                     },
-                    rest: Vec::new(),
-                },
+                    combine: SegBody {
+                        region: op_region,
+                        captures: vec![],
+                    },
+                    input_indices: vec![screma::InputId(0)],
+                    neutral: init_nid,
+                    shape: Vec::new(),
+                    commutative: false,
+                    destination,
+                    result_type: project_ty.clone(),
+                }],
+                post_maps: Vec::new(),
+                hidden_scan_outputs: Vec::new(),
                 state: screma::RawState,
             }),
             operands,

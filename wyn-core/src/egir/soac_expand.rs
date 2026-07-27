@@ -111,10 +111,13 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
                 && op.body.inputs.iter().all(|input| is_plain_array_source(&input.array))
         }
         // A reified parallel map/reduce/scan; same source rules as its inputs.
-        Soac::Screma(screma::Op::Map {
+        Soac::Screma(screma::Op {
             lanes,
-            state: screma::ScheduledState::Segmented(_),
-        }) => lanes.inputs.iter().all(|input| is_plain_array_source(&input.array)),
+            operators,
+            post_maps: _,
+            hidden_scan_outputs: _,
+            state: screma::PhysicalState::Segmented(_),
+        }) if operators.is_empty() => lanes.inputs.iter().all(|input| is_plain_array_source(&input.array)),
         Soac::Screma(_) => false,
     }
 }
@@ -172,14 +175,14 @@ fn expand_one(
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if op.is_serial() => {
             let operands = screma::ScremaOperands::decode(op, &se.operand_nodes, se.result)?;
             let lanes = op.lanes();
-            let map_input_indices =
-                lanes.maps.iter().map(|map| map.input_indices.clone()).collect::<Vec<_>>();
+            let pre_map_count = lanes.maps.len();
+            let maps = lanes.maps.iter().chain(&op.post_maps).collect::<Vec<_>>();
+            let map_input_indices = maps.iter().map(|map| map.input_indices.clone()).collect::<Vec<_>>();
             // Captures and the callee region are explicit on each `SegBody`;
             // the serial loop reads them directly rather than reslicing the
             // operand list by a separate capture-count layout.
-            let map_funcs = regions.resolve_cloned(lanes.maps.iter().map(|map| map.body.region));
-            let map_captures: Vec<Vec<NodeId>> =
-                lanes.maps.iter().map(|map| map.body.captures.clone()).collect();
+            let map_funcs = regions.resolve_cloned(maps.iter().map(|map| map.body.region));
+            let map_captures: Vec<Vec<NodeId>> = maps.iter().map(|map| map.body.captures.clone()).collect();
             let acc_specs = op.operators().into_iter().cloned().collect::<Vec<_>>();
             let acc_is_scan = (0..acc_specs.len()).map(|index| op.is_scan(index)).collect::<Vec<_>>();
             let acc_step_captures: Vec<Vec<NodeId>> =
@@ -187,12 +190,14 @@ fn expand_one(
             let arr_tys = lanes.inputs.iter().map(|input| input.array.clone()).collect::<Vec<_>>();
             let elem_tys = lanes.inputs.iter().map(|input| input.element()).collect::<Vec<_>>();
             let map_output_elem_types =
-                lanes.maps.iter().map(|map| map.output_element_type.clone()).collect::<Vec<_>>();
-            let map_destinations = lanes.maps.iter().map(|map| map.destination).collect::<Vec<_>>();
+                maps.iter().map(|map| map.output_element_type.clone()).collect::<Vec<_>>();
+            let map_destinations = maps.iter().map(|map| map.destination).collect::<Vec<_>>();
             let acc_destinations =
                 acc_specs.iter().map(|operator| operator.destination).collect::<Vec<_>>();
             let n_maps = map_funcs.len();
             let n_accs = acc_specs.len();
+            let visible_accs =
+                (0..n_accs).filter(|&index| op.operator_is_output(index)).collect::<Vec<_>>();
             let input_nids = operands.inputs().map(|operand| operand.node).collect::<Vec<_>>();
             let init_acc_nids = acc_specs.iter().map(|operator| operator.neutral).collect::<Vec<_>>();
             // Operand layout is `[inputs.., output_views..]`; accumulator
@@ -204,8 +209,8 @@ fn expand_one(
             };
             assert_eq!(
                 result_fields.len(),
-                n_maps + n_accs,
-                "Screma result is (mapped..., accumulator...)"
+                n_maps + visible_accs.len(),
+                "Screma result is (mapped..., visible accumulators...)"
             );
 
             let mut map_output_views = Vec::with_capacity(n_maps);
@@ -241,7 +246,13 @@ fn expand_one(
             }
             let mut acc_output_views = Vec::with_capacity(n_accs);
             let mut acc_input_buffer_inits = Vec::with_capacity(n_accs);
+            let mut visible_acc_field = 0;
             for (acc_idx, dest) in acc_destinations.iter().enumerate() {
+                if !op.operator_is_output(acc_idx) {
+                    acc_output_views.push(None);
+                    acc_input_buffer_inits.push(None);
+                    continue;
+                }
                 match dest {
                     SoacDestination::UniqueInput => {
                         panic!("unresolved UniqueInput destination reached physical expansion")
@@ -251,7 +262,7 @@ fn expand_one(
                         acc_input_buffer_inits.push(None);
                     }
                     SoacDestination::OutputView => {
-                        let field = n_maps + acc_idx;
+                        let field = n_maps + visible_acc_field;
                         let view = operands.output(field).map(|operand| operand.node).ok_or_else(|| {
                             format!("Screma accumulator result {acc_idx} has no output-view operand")
                         })?;
@@ -266,10 +277,12 @@ fn expand_one(
                         acc_input_buffer_inits.push(Some(input_nids[0]));
                     }
                 }
+                visible_acc_field += 1;
             }
 
             let map_result_tys: Vec<Type<TypeName>> = result_fields[..n_maps].to_vec();
-            let acc_result_tys: Vec<Type<TypeName>> = result_fields[n_maps..].to_vec();
+            let acc_result_tys: Vec<Type<TypeName>> =
+                acc_specs.iter().map(|operator| operator.result_type.clone()).collect();
             let acc_elem_tys: Vec<Type<TypeName>> = acc_specs
                 .iter()
                 .zip(acc_result_tys.iter())
@@ -360,6 +373,11 @@ fn expand_one(
                     result_field_tys.push(acc_result_tys[acc_idx].clone());
                     acc_scan_carried_tys.push(None);
                     carried.push((acc_elem_tys[acc_idx].clone(), init_acc_nids[acc_idx]));
+                } else if !op.operator_is_output(acc_idx) {
+                    acc_scan_carried_indices.push(None);
+                    acc_current_carried_indices.push(carried.len());
+                    acc_scan_carried_tys.push(None);
+                    carried.push((acc_elem_tys[acc_idx].clone(), init_acc_nids[acc_idx]));
                 } else {
                     let init_scan_out = if let Some(view_nid) = acc_output_views[acc_idx] {
                         view_nid
@@ -395,7 +413,8 @@ fn expand_one(
                     carried.push((acc_elem_tys[acc_idx].clone(), init_acc_nids[acc_idx]));
                 }
             }
-            let result_tuple_ty = Type::Constructed(TypeName::Tuple(n_maps + n_accs), result_field_tys);
+            let result_tuple_ty =
+                Type::Constructed(TypeName::Tuple(n_maps + visible_accs.len()), result_field_tys);
             graph.retype_node(result_nid, result_tuple_ty.clone());
             let result = ResultBinding::TupleFromCarried {
                 result_node: result_nid,
@@ -429,10 +448,41 @@ fn expand_one(
                     let mut new_carried = Vec::with_capacity(carried_nids.len());
                     for map_idx in 0..n_maps {
                         let out_nid = carried_nids[map_carried_indices[map_idx]];
-                        let mut map_operands: smallvec::SmallVec<[NodeId; 4]> = map_input_indices[map_idx]
-                            .iter()
-                            .map(|input| elem_nids[input.index()])
-                            .collect();
+                        let mut map_operands: smallvec::SmallVec<[NodeId; 4]> = if map_idx < pre_map_count {
+                            map_input_indices[map_idx]
+                                .iter()
+                                .map(|input| elem_nids[input.index()])
+                                .collect()
+                        } else {
+                            map_input_indices[map_idx]
+                                .iter()
+                                .map(|input| {
+                                    let acc_idx = input.index();
+                                    let acc_nid = carried_nids[acc_current_carried_indices[acc_idx]];
+                                    let mut step_operands: smallvec::SmallVec<[NodeId; 4]> =
+                                        smallvec![acc_nid];
+                                    if acc_specs[acc_idx].input_indices.is_empty() {
+                                        step_operands.extend(elem_nids.iter().copied());
+                                    } else {
+                                        step_operands.extend(
+                                            acc_specs[acc_idx]
+                                                .input_indices
+                                                .iter()
+                                                .map(|input| elem_nids[input.index()]),
+                                        );
+                                    }
+                                    step_operands.extend(acc_step_captures[acc_idx].iter().copied());
+                                    graph.intern_pure(
+                                        PureOp::Call(
+                                            regions.resolve(acc_specs[acc_idx].step.region).to_string(),
+                                        ),
+                                        step_operands,
+                                        acc_elem_tys[acc_idx].clone(),
+                                        None,
+                                    )
+                                })
+                                .collect()
+                        };
                         map_operands.extend(map_captures[map_idx].iter().copied());
                         let mapped = graph.intern_pure(
                             PureOp::Call(map_funcs[map_idx].clone()),
@@ -630,11 +680,14 @@ fn expand_one(
         }
         SideEffectKind::Soac(SoacEffect(
             _,
-            Soac::Screma(screma::Op::Map {
+            Soac::Screma(screma::Op {
                 lanes: screma::Lanes { inputs, maps },
-                state: screma::ScheduledState::Segmented(screma::Segmented { space, .. }),
+                operators,
+                post_maps: _,
+                hidden_scan_outputs: _,
+                state: screma::PhysicalState::Segmented(screma::Segmented { space, .. }),
             }),
-        )) => {
+        )) if operators.is_empty() => {
             // SegRed/SegScan are consumed by `egir::parallelize::lower`
             // before expansion. This arm is therefore semantically map-only.
             let operands = screma::ScremaOperands::decode(

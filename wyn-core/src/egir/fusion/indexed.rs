@@ -62,8 +62,11 @@ fn find_in_graph(
         for (effect_index, effect) in block.side_effects.iter().enumerate() {
             let SideEffectKind::Soac(SoacEffect(
                 _,
-                Soac::Screma(screma::Op::Map {
+                Soac::Screma(screma::Op {
                     lanes: screma::Lanes { maps, .. },
+                    operators,
+                    post_maps: _,
+                    hidden_scan_outputs: _,
                     state:
                         screma::SemanticState::Segmented {
                             output_slots,
@@ -79,7 +82,8 @@ fn find_in_graph(
                 .iter()
                 .filter_map(|slot| output_resources.get(slot.0).copied().flatten())
                 .collect();
-            if maps.is_empty()
+            if !operators.is_empty()
+                || maps.is_empty()
                 || !maps.iter().all(|map| map.destination.is_unplaced())
                 || resources.iter().any(|resource| {
                     resource.access != ResourceAccess::Read

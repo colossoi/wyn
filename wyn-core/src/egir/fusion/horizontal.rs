@@ -151,19 +151,24 @@ fn sibling_fusable(
         .zip(op_j.lanes().inputs.first().and_then(|input| crate::types::array_size(&input.array)))
         .is_some_and(|(left, right)| left == right);
     let symbolic_domain_matches = shared_input || shared_size;
-    if pl_i != pl_j || (!seg_space_fusable(sp_i, sp_j) && !symbolic_domain_matches) {
+    if op_i.has_post_map()
+        || op_j.has_post_map()
+        || pl_i != pl_j
+        || (!seg_space_fusable(sp_i, sp_j) && !symbolic_domain_matches)
+    {
         return false;
     }
-    let (mut has_reduce, mut has_scan) = (false, false);
-    for op in [op_i, op_j] {
-        for index in 0..op.operators().len() {
-            has_scan |= op.is_scan(index);
-            has_reduce |= !op.is_scan(index);
-        }
-    }
-    if has_reduce && has_scan {
-        // The target scheduler has separate reduction and scan phase models.
-        // Keep mixed siblings independent until a joint physical recipe exists.
+    let has_scan = op_i.operators().iter().any(screma::Operator::is_scan)
+        || op_j.operators().iter().any(screma::Operator::is_scan);
+    let has_reduce = op_i.operators().iter().any(|operator| !operator.is_scan())
+        || op_j.operators().iter().any(|operator| !operator.is_scan());
+    if has_scan
+        && has_reduce
+        && (oracle.value_consumer_count(op_i_id) != 0 || oracle.value_consumer_count(op_j_id) != 0)
+    {
+        // A mixed result has fields with different residency: reductions are
+        // scalar while scans are arrays. Keep a downstream-consumed sibling
+        // separate until result residency can materialize fields independently.
         return false;
     }
     let (op_i, op_j) = (*op_i_id, *op_j_id);
@@ -232,12 +237,12 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
 
     let mut operators = p.operators.clone();
     for operator in &mut operators {
-        for input in &mut operator.operator_mut().input_indices {
+        for input in &mut operator.input_indices {
             *input = screma::InputId(input_remap[input.index()]);
         }
     }
     operators.extend(q.operators.iter().cloned().map(|mut operator| {
-        for input in &mut operator.operator_mut().input_indices {
+        for input in &mut operator.input_indices {
             *input = screma::InputId(input_remap[base + input.index()]);
         }
         operator
@@ -287,7 +292,13 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
         inputs: input_types,
         maps,
     };
-    let fused = Soac::Screma(rebuild_screma(lanes, operators, state));
+    let fused = Soac::Screma(screma::Op {
+        lanes,
+        operators,
+        post_maps: Vec::new(),
+        hidden_scan_outputs: Vec::new(),
+        state,
+    });
 
     let block = &mut graph.skeleton.blocks[block_id];
     // Splice the effect chain: the fused op spans from P's input token to Q's
@@ -308,7 +319,7 @@ struct SegParts {
     space: crate::egir::types::SegSpace,
     placement: screma::Placement,
     lanes: screma::Lanes,
-    operators: Vec<screma::CompositeOperator>,
+    operators: Vec<screma::Operator>,
     output_slots: Vec<OutputSlotId>,
     resources: Vec<SegResourceAccess>,
     result: NodeId,
@@ -322,7 +333,7 @@ impl SegParts {
             .maps
             .iter()
             .map(|map| map.result_type.clone())
-            .chain(self.operators.iter().map(|operator| operator.operator().result_type.clone()))
+            .chain(self.operators.iter().map(|operator| operator.result_type.clone()))
             .collect()
     }
 }
@@ -349,55 +360,12 @@ fn extract_seg(graph: &EGraph, block_id: BlockId, idx: usize) -> SegParts {
         space: space.clone(),
         placement: *placement,
         lanes: op.lanes().clone(),
-        operators: tagged_operators(op),
+        operators: op.operators.clone(),
         output_slots: output_slots.clone(),
         resources: resources.clone(),
         result: effect.result.expect("fusable Seg has a result"),
         inputs,
         output_views,
-    }
-}
-
-fn tagged_operators(op: &screma::Op<crate::egir::types::Semantic>) -> Vec<screma::CompositeOperator> {
-    match op {
-        screma::Op::Map { .. } => Vec::new(),
-        screma::Op::Reduce { operators, .. } => {
-            operators.iter().cloned().map(screma::CompositeOperator::Reduce).collect()
-        }
-        screma::Op::Scan { operators, .. } => {
-            operators.iter().cloned().map(screma::CompositeOperator::Scan).collect()
-        }
-        screma::Op::Composite { operators, .. } => operators.iter().cloned().collect(),
-    }
-}
-
-fn rebuild_screma(
-    lanes: screma::Lanes,
-    operators: Vec<screma::CompositeOperator>,
-    state: screma::SemanticState<crate::egir::program::SemanticResourceRef>,
-) -> screma::Op<crate::egir::types::Semantic> {
-    let Some(operators) = screma::NonEmpty::from_vec(operators) else {
-        return screma::Op::Map { lanes, state };
-    };
-    let scans = operators.iter().filter(|operator| operator.is_scan()).count();
-    if scans == 0 {
-        return screma::Op::Reduce {
-            lanes,
-            operators: operators.map(screma::CompositeOperator::into_operator),
-            state,
-        };
-    }
-    if scans == 1 + operators.rest.len() {
-        return screma::Op::Scan {
-            lanes,
-            operators: operators.map(screma::CompositeOperator::into_operator),
-            state,
-        };
-    }
-    screma::Op::Composite {
-        lanes,
-        operators,
-        state,
     }
 }
 

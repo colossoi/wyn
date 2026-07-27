@@ -159,9 +159,11 @@ fn is_reduction_of_filter(effect: &SideEffect, filter_result: NodeId) -> bool {
     let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
         return false;
     };
-    let screma::Op::Reduce { lanes, operators, .. } = op else {
+    if !op.is_reduce() {
         return false;
-    };
+    }
+    let lanes = op.lanes();
+    let operators = op.operators();
     let n_inputs = lanes.inputs.len();
     n_inputs != 0
         && lanes.maps.is_empty()
@@ -491,15 +493,16 @@ fn rewrite_with_consumer(
             for (operator, result_type) in operators.iter_mut().zip(&result_types) {
                 operator.result_type = result_type.clone();
             }
-            *op = screma::Op::Reduce {
+            *op = screma::Op {
                 lanes: screma::Lanes {
                     inputs: vec![SoacInputType {
                         array: filter.input_array_type.clone(),
                     }],
                     maps: Vec::new(),
                 },
-                operators: screma::NonEmpty::from_vec(operators)
-                    .expect("filter reduction must retain at least one operator"),
+                operators,
+                post_maps: Vec::new(),
+                hidden_scan_outputs: Vec::new(),
                 state,
             };
         }
@@ -558,17 +561,16 @@ fn rewrite_count_only(
     };
     effect.kind = SideEffectKind::Soac(SoacEffect(
         id,
-        Soac::Screma(screma::Op::Reduce {
+        Soac::Screma(screma::Op {
             lanes: screma::Lanes {
                 inputs: vec![SoacInputType {
                     array: filter.input_array_type,
                 }],
                 maps: Vec::new(),
             },
-            operators: screma::NonEmpty {
-                first: count,
-                rest: Vec::new(),
-            },
+            operators: vec![count],
+            post_maps: Vec::new(),
+            hidden_scan_outputs: Vec::new(),
             state: screma::SemanticState::Segmented {
                 space: filter.space,
                 placement: screma::Placement::LaneLocal,
@@ -857,6 +859,7 @@ fn count_operator(
     );
     (
         screma::Operator {
+            kind: screma::OperatorKind::Reduce,
             step: SegBody {
                 region: step_region,
                 captures,

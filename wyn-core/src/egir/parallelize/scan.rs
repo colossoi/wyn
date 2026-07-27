@@ -278,13 +278,13 @@ pub(super) fn analyze_scan_candidate(
     entry: &crate::egir::program::PlannedEntry,
     located: LocatedScrema<'_>,
     lanes: &screma::Lanes,
-    operators: &screma::NonEmpty<screma::Operator>,
+    operators: &[screma::Operator],
 ) -> error::Result<Option<ScanCandidate>> {
     let segment = located.segmented()?;
     let serial = located.serial_recipe();
-    if !operators.rest.is_empty()
+    if operators.len() != 1
         || lanes.inputs.len() != 1
-        || !operators.first.combine.captures.is_empty()
+        || !operators[0].combine.captures.is_empty()
         || !lanes.maps.iter().all(|map| map.destination.is_output_view())
         || !operators.iter().all(|operator| operator.destination.is_output_view())
     {
@@ -292,7 +292,7 @@ pub(super) fn analyze_scan_candidate(
     }
     let site = located.site;
     let side_effect = located.effect;
-    let operator = &operators.first;
+    let operator = &operators[0];
     if !can_clone_pure_subgraph(&entry.graph, operator.neutral, &[]) {
         return Ok(None);
     }
@@ -443,30 +443,30 @@ impl KernelPlanBuilder<'_, '_> {
                 &mut entry.graph,
                 block_id,
                 owner.implementation(0),
-                Soac::Screma(screma::Op::Reduce {
+                Soac::Screma(screma::Op {
                     lanes: screma::Lanes {
                         inputs: vec![crate::egir::types::SoacInputType { array: input_view_ty }],
                         maps: vec![],
                     },
-                    operators: screma::NonEmpty {
-                        first: screma::Operator {
-                            step: SegBody {
-                                region: step_region,
-                                captures: step_capture_nodes,
-                            },
-                            combine: SegBody {
-                                region: step_region,
-                                captures: vec![],
-                            },
-                            input_indices: vec![screma::InputId(0)],
-                            neutral: init_nid,
-                            shape: Vec::new(),
-                            commutative: false,
-                            destination: SoacDestination::fresh(),
-                            result_type: elem_ty.clone(),
+                    operators: vec![screma::Operator {
+                        kind: screma::OperatorKind::Reduce,
+                        step: SegBody {
+                            region: step_region,
+                            captures: step_capture_nodes,
                         },
-                        rest: Vec::new(),
-                    },
+                        combine: SegBody {
+                            region: step_region,
+                            captures: vec![],
+                        },
+                        input_indices: vec![screma::InputId(0)],
+                        neutral: init_nid,
+                        shape: Vec::new(),
+                        commutative: false,
+                        destination: SoacDestination::fresh(),
+                        result_type: elem_ty.clone(),
+                    }],
+                    post_maps: Vec::new(),
+                    hidden_scan_outputs: Vec::new(),
                     state: screma::SemanticState::Serial,
                 }),
                 reduce_operands,

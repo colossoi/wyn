@@ -150,9 +150,16 @@ fn map_graph(
 
 fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
     match soac {
-        Soac::Screma(screma::Op::Map { lanes, .. }) => {
+        Soac::Screma(screma::Op {
+            lanes,
+            operators,
+            post_maps,
+            hidden_scan_outputs,
+            ..
+        }) => {
             let mut placement = facts.placement;
-            if placement == screma::Placement::Kernel
+            if operators.is_empty()
+                && placement == screma::Placement::Kernel
                 && (lanes.maps.is_empty() || !lanes.maps.iter().all(|map| !map.destination.is_unplaced()))
             {
                 placement = screma::Placement::LaneLocal;
@@ -160,43 +167,14 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
             if placement == screma::Placement::Kernel && facts.output_slots.is_empty() {
                 placement = screma::Placement::LaneLocal;
             }
-            Soac::Screma(screma::Op::Map {
+            Soac::Screma(screma::Op {
                 lanes,
+                operators,
+                post_maps,
+                hidden_scan_outputs,
                 state: screma::SemanticState::Segmented {
                     space: facts.space,
                     placement,
-                    output_slots: facts.output_slots,
-                    resources: facts.resources,
-                },
-            })
-        }
-        Soac::Screma(screma::Op::Reduce { lanes, operators, .. }) => Soac::Screma(screma::Op::Reduce {
-            lanes,
-            operators,
-            state: screma::SemanticState::Segmented {
-                space: facts.space,
-                placement: facts.placement,
-                output_slots: facts.output_slots,
-                resources: facts.resources,
-            },
-        }),
-        Soac::Screma(screma::Op::Scan { lanes, operators, .. }) => Soac::Screma(screma::Op::Scan {
-            lanes,
-            operators,
-            state: screma::SemanticState::Segmented {
-                space: facts.space,
-                placement: facts.placement,
-                output_slots: facts.output_slots,
-                resources: facts.resources,
-            },
-        }),
-        Soac::Screma(screma::Op::Composite { lanes, operators, .. }) => {
-            Soac::Screma(screma::Op::Composite {
-                lanes,
-                operators,
-                state: screma::SemanticState::Segmented {
-                    space: facts.space,
-                    placement: facts.placement,
                     output_slots: facts.output_slots,
                     resources: facts.resources,
                 },
@@ -230,11 +208,14 @@ mod tests {
         SideEffect {
             kind: SideEffectKind::Soac(SoacEffect(
                 (),
-                Soac::Screma(screma::Op::Map {
+                Soac::Screma(screma::Op {
                     lanes: screma::Lanes {
                         inputs: vec![],
                         maps: vec![],
                     },
+                    operators: Vec::new(),
+                    post_maps: Vec::new(),
+                    hidden_scan_outputs: Vec::new(),
                     state: screma::RawState,
                 }),
             )),
@@ -340,7 +321,8 @@ fn entry_facts(entry: &RawEntry<RealizedOutputRoute>) -> HashMap<(BlockId, usize
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return false;
             };
-            matches!(op, screma::Op::Reduce { .. } | screma::Op::Scan { .. })
+            !op.is_map()
+                && !op.is_mixed()
                 && matches!(
                     facts_by_location.get(&(*block, *index)),
                     Some(Facts {

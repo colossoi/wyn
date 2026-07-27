@@ -11,7 +11,7 @@ fn raw_map_soac(
     output_element_type: Type<TypeName>,
     result_type: Type<TypeName>,
 ) -> Soac<Raw> {
-    Soac::Screma(screma::Op::Map {
+    Soac::Screma(screma::Op {
         lanes: screma::Lanes {
             inputs: vec![input],
             maps: vec![screma::Map {
@@ -22,6 +22,9 @@ fn raw_map_soac(
                 result_type,
             }],
         },
+        operators: Vec::new(),
+        post_maps: Vec::new(),
+        hidden_scan_outputs: Vec::new(),
         state: screma::RawState,
     })
 }
@@ -323,32 +326,32 @@ fn rewrite_sibling_index_consumers_rejects_accumulator_output_view_operand() {
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(
             (),
-            Soac::Screma(screma::Op::Reduce {
+            Soac::Screma(screma::Op {
                 lanes: screma::Lanes {
                     inputs: vec![SoacInputType {
                         array: arr_ty.clone(),
                     }],
                     maps: vec![],
                 },
-                operators: screma::NonEmpty {
-                    first: screma::Operator {
-                        step: SegBody {
-                            region: RegionId::from_index(0),
-                            captures: vec![],
-                        },
-                        combine: SegBody {
-                            region: RegionId::from_index(1),
-                            captures: vec![],
-                        },
-                        input_indices: vec![screma::InputId(0)],
-                        neutral: source,
-                        shape: vec![],
-                        commutative: false,
-                        destination: SoacDestination::fresh().placed(SoacPlacement::OutputView),
-                        result_type: elem.clone(),
+                operators: vec![screma::Operator {
+                    kind: screma::OperatorKind::Reduce,
+                    step: SegBody {
+                        region: RegionId::from_index(0),
+                        captures: vec![],
                     },
-                    rest: vec![],
-                },
+                    combine: SegBody {
+                        region: RegionId::from_index(1),
+                        captures: vec![],
+                    },
+                    input_indices: vec![screma::InputId(0)],
+                    neutral: source,
+                    shape: vec![],
+                    commutative: false,
+                    destination: SoacDestination::fresh().placed(SoacPlacement::OutputView),
+                    result_type: elem.clone(),
+                }],
+                post_maps: Vec::new(),
+                hidden_scan_outputs: Vec::new(),
                 state: screma::RawState,
             }),
         )),

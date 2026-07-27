@@ -17,7 +17,7 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
     graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(
             SemanticOpId::for_test(0),
-            Soac::Screma(screma::Op::Map {
+            Soac::Screma(screma::Op {
                 lanes: screma::Lanes {
                     inputs: Vec::<SoacInputType>::new(),
                     maps: vec![screma::Map {
@@ -31,6 +31,9 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
                         result_type: int,
                     }],
                 },
+                operators: Vec::new(),
+                post_maps: Vec::new(),
+                hidden_scan_outputs: Vec::new(),
                 state: screma::SemanticState::Segmented {
                     space: SegSpace::new(crate::egir::types::SegExtent::Fixed(1)),
                     placement: screma::Placement::LaneLocal,

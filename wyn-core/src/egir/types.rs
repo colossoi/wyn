@@ -34,10 +34,7 @@ impl Language for WynLanguage {
 
 pub trait WynSoacPhase: Family<Soac = SoacEffect<Self>> + Sized {
     type SoacId: Clone + std::fmt::Debug;
-    type MapState: Clone + std::fmt::Debug;
-    type ReduceState: Clone + std::fmt::Debug;
-    type ScanState: Clone + std::fmt::Debug;
-    type CompositeState: Clone + std::fmt::Debug;
+    type ScremaState: Clone + std::fmt::Debug;
     type FilterState: Clone + std::fmt::Debug;
     type HistState: Clone + std::fmt::Debug;
 }
@@ -57,7 +54,8 @@ impl<P: WynSoacPhase> Soac<P> {
     pub(crate) fn seg_bodies(&self) -> Vec<&SegBody> {
         match self {
             Self::Screma(op) => {
-                let mut bodies = op.lanes().maps.iter().map(|map| &map.body).collect::<Vec<_>>();
+                let mut bodies =
+                    op.lanes().maps.iter().chain(&op.post_maps).map(|map| &map.body).collect::<Vec<_>>();
                 for operator in op.operators() {
                     bodies.extend([&operator.step, &operator.combine]);
                 }
@@ -78,12 +76,16 @@ impl<P: WynSoacPhase> Soac<P> {
     pub(crate) fn seg_body_mut(&mut self, index: usize) -> Option<&mut SegBody> {
         match self {
             Self::Screma(op) => {
-                let map_count = op.lanes().maps.len();
-                if index < map_count {
+                let pre_count = op.lanes().maps.len();
+                let map_count = pre_count + op.post_maps.len();
+                if index < pre_count {
                     return Some(&mut op.lanes_mut().maps[index].body);
                 }
+                if index < map_count {
+                    return Some(&mut op.post_maps[index - pre_count].body);
+                }
                 let operator_slot = index - map_count;
-                let operator = op.operators_mut().into_iter().nth(operator_slot / 2)?;
+                let operator = op.operators_mut().iter_mut().nth(operator_slot / 2)?;
                 Some(if operator_slot % 2 == 0 { &mut operator.step } else { &mut operator.combine })
             }
             Self::Filter(op) => match (&mut op.body.input, index) {
@@ -181,10 +183,7 @@ impl<R: GraphResource> Family for Raw<R> {
 
 impl<R: GraphResource> WynSoacPhase for Raw<R> {
     type SoacId = ();
-    type MapState = screma::RawState;
-    type ReduceState = screma::RawState;
-    type ScanState = screma::RawState;
-    type CompositeState = screma::RawState;
+    type ScremaState = screma::RawState;
     type FilterState = filter::RawState<R>;
     type HistState = hist::RawState;
 }
@@ -196,10 +195,7 @@ impl<R: GraphResource> Family for Semantic<R> {
 
 impl<R: GraphResource> WynSoacPhase for Semantic<R> {
     type SoacId = super::program::SemanticOpId;
-    type MapState = screma::SemanticState<R>;
-    type ReduceState = screma::SemanticState<R>;
-    type ScanState = screma::SemanticState<R>;
-    type CompositeState = screma::SemanticState<R>;
+    type ScremaState = screma::SemanticState<R>;
     type FilterState = filter::SemanticState<R>;
     type HistState = hist::State<R>;
 }
@@ -211,10 +207,7 @@ impl<R: GraphResource> Family for Scheduled<R> {
 
 impl<R: GraphResource> WynSoacPhase for Scheduled<R> {
     type SoacId = super::program::SemanticOpId;
-    type MapState = screma::ScheduledState<R>;
-    type ReduceState = screma::ScheduledState<R>;
-    type ScanState = screma::ScheduledState<R>;
-    type CompositeState = screma::ScheduledState<R>;
+    type ScremaState = screma::ScheduledState<R>;
     type FilterState = filter::ScheduledState<R>;
     type HistState = hist::State<R>;
 }
@@ -226,10 +219,7 @@ impl Family for Physical {
 
 impl WynSoacPhase for Physical {
     type SoacId = super::program::SemanticOpId;
-    type MapState = screma::ScheduledState<super::program::PhysicalResourceRef>;
-    type ReduceState = screma::PhysicalSerialState;
-    type ScanState = screma::PhysicalSerialState;
-    type CompositeState = screma::PhysicalSerialState;
+    type ScremaState = screma::PhysicalState;
     type FilterState = filter::PhysicalState;
     type HistState = hist::PhysicalState;
 }

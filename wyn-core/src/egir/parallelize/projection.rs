@@ -181,8 +181,15 @@ fn requires_unrouted_owner(effect: &SideEffect) -> bool {
             .lanes()
             .maps
             .iter()
+            .chain(&op.post_maps)
             .map(|map| map.destination)
-            .chain(op.operators().into_iter().map(|operator| operator.destination))
+            .chain(
+                op.operators()
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| op.operator_is_output(*index))
+                    .map(|(_, operator)| operator.destination),
+            )
             .any(|destination| !destination.is_unplaced()),
         SideEffectKind::Effect(EffectOp::Store) => true,
         _ => false,
