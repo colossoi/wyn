@@ -13,7 +13,8 @@ use crate::ast::{Span, TypeName};
 use crate::egir::program::{fresh_region_name, RegionInterner, SemanticFunc};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::screma;
-use crate::egir::types::{EGraph, NodeId, PureOp, SegBody, SkeletonTerminator, SoacInputType};
+use crate::egir::types::{EGraph, ENode, NodeId, PureOp, SegBody, SkeletonTerminator, SoacInputType};
+use crate::egir::{graph_ops, inlining};
 use crate::LookupMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,15 +111,47 @@ struct SuperScrema<'a> {
     producer_output: usize,
 }
 
-pub(crate) fn can_fuse_vertical(producer: &screma::ScremaForm, consumer: &screma::ScremaForm) -> bool {
-    let before_first_barrier =
-        producer.scans.is_empty() && producer.reductions.is_empty() && producer.post.is_identity();
-    let after_last_barrier = !producer.scans.is_empty()
-        && producer.reductions.is_empty()
-        && consumer.scans.is_empty()
-        && consumer.reductions.is_empty()
-        && consumer.post.is_identity();
-    before_first_barrier || after_last_barrier
+pub(crate) fn can_fuse_vertical(
+    program: &Segmented,
+    producer: &screma::ScremaForm,
+    consumer: &screma::ScremaForm,
+    consumer_inputs_from_producer: &[usize],
+    producer_output: usize,
+) -> bool {
+    if producer.scans.is_empty() && producer.reductions.is_empty() && producer.post.is_identity() {
+        return true;
+    }
+    if producer.scans.is_empty() || !producer.reductions.is_empty() {
+        return false;
+    }
+
+    let collective_results = consumer.operator_input_count();
+    if collective_results == 0 {
+        return true;
+    }
+    let collective = 0..collective_results;
+    if !lambda_results_projectable(program, &consumer.pre, collective.clone()) {
+        return false;
+    }
+    let collective_depends_on_producer = lambda_results_depend_on_parameters(
+        program,
+        &consumer.pre,
+        collective,
+        consumer_inputs_from_producer,
+    )
+    .unwrap_or(true);
+    if !collective_depends_on_producer {
+        return true;
+    }
+
+    lambda_results_projectable(program, &producer.post, producer_output..producer_output + 1)
+        && !lambda_results_depend_on_parameters(
+            program,
+            &producer.post,
+            producer_output..producer_output + 1,
+            &(0..producer.scan_input_count()).collect::<Vec<_>>(),
+        )
+        .unwrap_or(true)
 }
 
 pub(crate) fn fuse_vertical(
@@ -151,19 +184,20 @@ impl SuperScrema<'_> {
                 self.producer_output,
             ));
         }
-        if !self.producer.form.scans.is_empty()
-            && self.producer.form.reductions.is_empty()
-            && self.consumer.form.scans.is_empty()
-            && self.consumer.form.reductions.is_empty()
-            && self.consumer.form.post.is_identity()
-        {
-            return Some(fuse_after_last_barrier(
+        if can_fuse_vertical(
+            context.program,
+            self.producer.form,
+            self.consumer.form,
+            self.consumer_inputs_from_producer,
+            self.producer_output,
+        ) {
+            return fuse_across_middle_barrier(
                 context,
                 self.producer,
                 self.consumer,
                 self.consumer_inputs_from_producer,
                 self.producer_output,
-            ));
+            );
         }
         None
     }
@@ -225,17 +259,17 @@ fn fuse_before_first_barrier(
     }
 }
 
-/// Normalize a SuperScrema whose consumer has no collective barrier. The
-/// consumer's independent inputs are forwarded through the producer pre-lambda,
-/// and the producer post-lambda composes with the consumer pre-lambda after the
-/// surviving scan barrier.
-fn fuse_after_last_barrier(
+/// Move the consumer's independent collective inputs to the first barrier.
+/// The consumer pre-lambda is partitioned by result dependency: its scan and
+/// reduction inputs run before the producer barrier, while its mapped suffix
+/// remains between the combined barrier and the consumer post-lambda.
+fn fuse_across_middle_barrier(
     context: &mut Context<'_>,
     producer: Source<'_>,
     consumer: Source<'_>,
     consumer_inputs_from_producer: &[usize],
     producer_output: usize,
-) -> Normalized {
+) -> Option<Normalized> {
     let remaining_slots = (0..consumer.inputs.len())
         .filter(|slot| !consumer_inputs_from_producer.contains(slot))
         .collect::<Vec<_>>();
@@ -251,69 +285,399 @@ fn fuse_after_last_barrier(
 
     let producer_parameters = remap[..producer_input_count].to_vec();
     let forwarded_parameters = remap[producer_input_count..].to_vec();
-    let forwarded_types =
-        remaining_slots.iter().map(|&slot| consumer.inputs[slot].element()).collect::<Vec<_>>();
-    let forwarded = screma::Lambda::identity(forwarded_types);
-    let pre_outputs = (0..producer.form.pre.result_types.len())
-        .map(|result| ValueRef { call: 0, result })
-        .chain((0..remaining_slots.len()).map(|result| ValueRef { call: 1, result }))
-        .collect();
-    let (pre, pre_function) = parallel_lambdas(
-        context,
-        "vertical_forward_pre",
-        input_element_types,
-        vec![
-            LambdaCall {
-                lambda: &producer.form.pre,
-                parameters: producer_parameters,
-            },
-            LambdaCall {
-                lambda: &forwarded,
-                parameters: forwarded_parameters,
-            },
-        ],
-        pre_outputs,
-    );
+    let producer_scan_inputs = producer.form.scan_input_count();
+    let producer_mapped_types = producer.form.mapped_types()?.to_vec();
+    let consumer_scan_inputs = consumer.form.scan_input_count();
+    let consumer_collective_inputs = consumer.form.operator_input_count();
+    let consumer_collective_depends_on_producer = lambda_results_depend_on_parameters(
+        context.program,
+        &consumer.form.pre,
+        0..consumer_collective_inputs,
+        consumer_inputs_from_producer,
+    )?;
 
-    let producer_post_parameters = producer.form.post.parameter_types.len();
-    let post_parameter_types = producer
+    let pre_captures = producer
         .form
-        .post
-        .parameter_types
-        .iter()
-        .cloned()
-        .chain(remaining_slots.iter().map(|&slot| consumer.inputs[slot].element()))
+        .pre
+        .seg_body()
+        .into_iter()
+        .flat_map(|body| body.captures.iter().copied())
+        .chain(
+            consumer_collective_depends_on_producer
+                .then_some(&producer.form.post)
+                .into_iter()
+                .flat_map(|lambda| lambda.seg_body())
+                .flat_map(|body| body.captures.iter().copied()),
+        )
+        .chain(
+            (consumer_collective_inputs > 0)
+                .then_some(&consumer.form.pre)
+                .into_iter()
+                .flat_map(|lambda| lambda.seg_body())
+                .flat_map(|body| body.captures.iter().copied()),
+        )
         .collect::<Vec<_>>();
-    let consumer_parameters = (0..consumer.inputs.len())
+    let mut pre_params = named_parameters(&input_element_types, "element");
+    pre_params.extend(named_parameters(
+        &capture_types(context.outer_types, pre_captures.iter()),
+        "capture",
+    ));
+    let mut pre_graph = EGraph::new();
+    let pre_arguments = function_parameters(&mut pre_graph, &pre_params);
+    let mut pre_capture_cursor = input_element_types.len();
+
+    let mut producer_pre_arguments =
+        producer_parameters.iter().map(|&index| pre_arguments[index]).collect::<Vec<_>>();
+    append_wrapper_captures(
+        &mut producer_pre_arguments,
+        &pre_arguments,
+        &mut pre_capture_cursor,
+        &producer.form.pre,
+    );
+    let producer_pre_results = invoke_lambda(
+        &mut pre_graph,
+        context.program,
+        &producer.form.pre,
+        producer_pre_arguments,
+    );
+    let producer_mapped = producer_pre_results[producer_scan_inputs..].to_vec();
+
+    let produced_before_barrier = if consumer_collective_depends_on_producer {
+        let mut producer_post_arguments = vec![None; producer_scan_inputs];
+        producer_post_arguments.extend(producer_mapped.iter().copied().map(Some));
+        append_optional_wrapper_captures(
+            &mut producer_post_arguments,
+            &pre_arguments,
+            &mut pre_capture_cursor,
+            &producer.form.post,
+        );
+        Some(
+            emit_projected_lambda_results(
+                &mut pre_graph,
+                context.program,
+                &producer.form.post,
+                &producer_post_arguments,
+                producer_output..producer_output + 1,
+            )?
+            .into_iter()
+            .next()?,
+        )
+    } else {
+        None
+    };
+
+    let mut consumer_pre_arguments = (0..consumer.inputs.len())
         .map(|slot| {
-            remaining_slots
-                .iter()
-                .position(|candidate| *candidate == slot)
-                .map(|position| producer_post_parameters + position)
+            if consumer_inputs_from_producer.contains(&slot) {
+                produced_before_barrier
+            } else {
+                let position = remaining_slots.iter().position(|candidate| *candidate == slot)?;
+                Some(pre_arguments[forwarded_parameters[position]])
+            }
         })
         .collect::<Vec<_>>();
-    let (post, post_function) = vertical_lambda(
-        context,
-        "vertical_after_post",
-        &post_parameter_types,
-        &producer.form.post,
-        (0..producer_post_parameters).collect(),
-        producer_output,
+    append_optional_wrapper_captures(
+        &mut consumer_pre_arguments,
+        &pre_arguments,
+        &mut pre_capture_cursor,
         &consumer.form.pre,
-        &consumer_parameters,
+    );
+    let consumer_collective = emit_projected_lambda_results(
+        &mut pre_graph,
+        context.program,
+        &consumer.form.pre,
+        &consumer_pre_arguments,
+        0..consumer_collective_inputs,
+    )?;
+    debug_assert_eq!(pre_capture_cursor, pre_arguments.len());
+
+    let pre_results = producer_pre_results[..producer_scan_inputs]
+        .iter()
+        .copied()
+        .chain(consumer_collective[..consumer_scan_inputs].iter().copied())
+        .chain(consumer_collective[consumer_scan_inputs..].iter().copied())
+        .chain(producer_mapped.iter().copied())
+        .chain(forwarded_parameters.iter().map(|&index| pre_arguments[index]))
+        .collect::<Vec<_>>();
+    let pre_result_types = producer.form.pre.result_types[..producer_scan_inputs]
+        .iter()
+        .cloned()
+        .chain(consumer.form.pre.result_types[..consumer_scan_inputs].iter().cloned())
+        .chain(
+            consumer.form.pre.result_types[consumer_scan_inputs..consumer_collective_inputs]
+                .iter()
+                .cloned(),
+        )
+        .chain(producer_mapped_types.iter().cloned())
+        .chain(remaining_slots.iter().map(|&slot| consumer.inputs[slot].element()))
+        .collect::<Vec<_>>();
+    let (pre, pre_function) = finish_lambda(
+        context,
+        "vertical_middle_pre",
+        pre_graph,
+        pre_params,
+        pre_captures,
+        input_element_types,
+        pre_result_types,
+        pre_results,
     );
 
-    Normalized {
+    let producer_scan_types = producer
+        .form
+        .scans
+        .iter()
+        .flat_map(|scan| scan.operator.result_types.iter().cloned())
+        .collect::<Vec<_>>();
+    let consumer_scan_types = consumer
+        .form
+        .scans
+        .iter()
+        .flat_map(|scan| scan.operator.result_types.iter().cloned())
+        .collect::<Vec<_>>();
+    let forwarded_types =
+        remaining_slots.iter().map(|&slot| consumer.inputs[slot].element()).collect::<Vec<_>>();
+    let post_parameter_types = producer_scan_types
+        .iter()
+        .cloned()
+        .chain(consumer_scan_types.iter().cloned())
+        .chain(producer_mapped_types.iter().cloned())
+        .chain(forwarded_types.iter().cloned())
+        .collect::<Vec<_>>();
+    let post_captures = producer
+        .form
+        .post
+        .seg_body()
+        .into_iter()
+        .flat_map(|body| body.captures.iter().copied())
+        .chain(consumer.form.pre.seg_body().into_iter().flat_map(|body| body.captures.iter().copied()))
+        .chain(consumer.form.post.seg_body().into_iter().flat_map(|body| body.captures.iter().copied()))
+        .collect::<Vec<_>>();
+    let mut post_params = named_parameters(&post_parameter_types, "value");
+    post_params.extend(named_parameters(
+        &capture_types(context.outer_types, post_captures.iter()),
+        "capture",
+    ));
+    let mut post_graph = EGraph::new();
+    let post_arguments = function_parameters(&mut post_graph, &post_params);
+    let mut post_capture_cursor = post_parameter_types.len();
+    let producer_scan_end = producer_scan_types.len();
+    let consumer_scan_end = producer_scan_end + consumer_scan_types.len();
+    let producer_mapped_end = consumer_scan_end + producer_mapped_types.len();
+
+    let mut producer_post_arguments = post_arguments[..producer_scan_end].to_vec();
+    producer_post_arguments.extend_from_slice(&post_arguments[consumer_scan_end..producer_mapped_end]);
+    append_wrapper_captures(
+        &mut producer_post_arguments,
+        &post_arguments,
+        &mut post_capture_cursor,
+        &producer.form.post,
+    );
+    let producer_post_results = invoke_lambda(
+        &mut post_graph,
+        context.program,
+        &producer.form.post,
+        producer_post_arguments,
+    );
+    let produced = producer_post_results[producer_output];
+
+    let mut consumer_pre_arguments = (0..consumer.inputs.len())
+        .map(|slot| {
+            if consumer_inputs_from_producer.contains(&slot) {
+                produced
+            } else {
+                let position = remaining_slots
+                    .iter()
+                    .position(|candidate| *candidate == slot)
+                    .expect("remaining consumer input");
+                post_arguments[producer_mapped_end + position]
+            }
+        })
+        .collect::<Vec<_>>();
+    append_wrapper_captures(
+        &mut consumer_pre_arguments,
+        &post_arguments,
+        &mut post_capture_cursor,
+        &consumer.form.pre,
+    );
+    let consumer_pre_results = invoke_lambda(
+        &mut post_graph,
+        context.program,
+        &consumer.form.pre,
+        consumer_pre_arguments,
+    );
+    let mut consumer_post_arguments = post_arguments[producer_scan_end..consumer_scan_end].to_vec();
+    consumer_post_arguments.extend_from_slice(&consumer_pre_results[consumer_collective_inputs..]);
+    append_wrapper_captures(
+        &mut consumer_post_arguments,
+        &post_arguments,
+        &mut post_capture_cursor,
+        &consumer.form.post,
+    );
+    let post_results = invoke_lambda(
+        &mut post_graph,
+        context.program,
+        &consumer.form.post,
+        consumer_post_arguments,
+    );
+    debug_assert_eq!(post_capture_cursor, post_arguments.len());
+    let (post, post_function) = finish_lambda(
+        context,
+        "vertical_middle_post",
+        post_graph,
+        post_params,
+        post_captures,
+        post_parameter_types,
+        consumer.form.post.result_types.clone(),
+        post_results,
+    );
+
+    Some(Normalized {
         input_nodes,
         inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
         form: screma::ScremaForm {
             pre,
-            scans: producer.form.scans.clone(),
-            reductions: Vec::new(),
+            scans: producer.form.scans.iter().chain(&consumer.form.scans).cloned().collect(),
+            reductions: consumer.form.reductions.clone(),
             post,
         },
         outputs: (0..consumer.form.result_count()).map(OutputOrigin::Consumer).collect(),
         synthesized: pre_function.into_iter().chain(post_function).collect(),
+    })
+}
+
+fn lambda_results_projectable(
+    program: &Segmented,
+    lambda: &screma::Lambda,
+    results: std::ops::Range<usize>,
+) -> bool {
+    if results.end > lambda.result_types.len() {
+        return false;
+    }
+    lambda.is_identity() || results.is_empty() || lambda_result_roots(program, lambda).is_some()
+}
+
+fn lambda_results_depend_on_parameters(
+    program: &Segmented,
+    lambda: &screma::Lambda,
+    results: std::ops::Range<usize>,
+    parameters: &[usize],
+) -> Option<bool> {
+    if results.end > lambda.result_types.len() {
+        return None;
+    }
+    if results.is_empty() || parameters.is_empty() {
+        return Some(false);
+    }
+    if lambda.is_identity() {
+        return Some(results.into_iter().any(|result| parameters.contains(&result)));
+    }
+
+    let body = lambda.seg_body()?;
+    let function = program.region(body.region)?;
+    let roots = lambda_result_roots(program, lambda)?;
+    let closure = graph_ops::value_producer_closure(&function.graph, results.map(|result| roots[result]));
+    Some(closure.nodes.into_iter().any(|node| {
+        matches!(
+            function.graph.nodes.get(node).map(|node| &node.kind),
+            Some(ENode::FuncParam { index }) if parameters.contains(index)
+        )
+    }))
+}
+
+fn lambda_result_roots(program: &Segmented, lambda: &screma::Lambda) -> Option<Vec<NodeId>> {
+    let body = lambda.seg_body()?;
+    let function = program.region(body.region)?;
+    let root = inlining::inlineable_return_root(function)?;
+    match lambda.result_types.as_slice() {
+        [_] => Some(vec![root]),
+        results => match &function.graph.nodes.get(root)?.kind {
+            ENode::Pure {
+                op: PureOp::Tuple(arity),
+                operands,
+            } if *arity == results.len() && operands.len() == results.len() => Some(operands.to_vec()),
+            _ => None,
+        },
+    }
+}
+
+fn emit_projected_lambda_results(
+    graph: &mut EGraph,
+    program: &Segmented,
+    lambda: &screma::Lambda,
+    arguments: &[Option<NodeId>],
+    results: std::ops::Range<usize>,
+) -> Option<Vec<NodeId>> {
+    if results.end > lambda.result_types.len() {
+        return None;
+    }
+    if lambda.is_identity() {
+        return results.map(|result| arguments.get(result).copied().flatten()).collect();
+    }
+    if results.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let body = lambda.seg_body()?;
+    let function = program.region(body.region)?;
+    if arguments.len() != function.params.len() {
+        return None;
+    }
+    let roots = lambda_result_roots(program, lambda)?;
+    let mut memo = LookupMap::new();
+    for (node, definition) in &function.graph.nodes {
+        if let ENode::FuncParam { index } = &definition.kind {
+            if let Some(Some(argument)) = arguments.get(*index) {
+                memo.insert(node, *argument);
+            }
+        }
+    }
+    results
+        .map(|result| {
+            graph_ops::clone_value_subgraph(
+                &function.graph,
+                graph,
+                roots[result],
+                &mut memo,
+                graph_ops::ConstantCopy::Intern,
+                true,
+            )
+            .ok()
+        })
+        .collect()
+}
+
+fn append_wrapper_captures(
+    arguments: &mut Vec<NodeId>,
+    wrapper_arguments: &[NodeId],
+    cursor: &mut usize,
+    lambda: &screma::Lambda,
+) {
+    let capture_count = lambda.seg_body().map_or(0, |body| body.captures.len());
+    arguments.extend_from_slice(&wrapper_arguments[*cursor..*cursor + capture_count]);
+    *cursor += capture_count;
+}
+
+fn append_optional_wrapper_captures(
+    arguments: &mut Vec<Option<NodeId>>,
+    wrapper_arguments: &[NodeId],
+    cursor: &mut usize,
+    lambda: &screma::Lambda,
+) {
+    let capture_count = lambda.seg_body().map_or(0, |body| body.captures.len());
+    arguments.extend(wrapper_arguments[*cursor..*cursor + capture_count].iter().copied().map(Some));
+    *cursor += capture_count;
+}
+
+fn invoke_lambda(
+    graph: &mut EGraph,
+    program: &Segmented,
+    lambda: &screma::Lambda,
+    arguments: Vec<NodeId>,
+) -> Vec<NodeId> {
+    if lambda.is_identity() {
+        arguments
+    } else {
+        call_lambda(graph, program, lambda, arguments)
     }
 }
 #[derive(Clone, Copy)]
@@ -590,6 +954,19 @@ fn finish_lambda(
     result_types: Vec<Type<TypeName>>,
     results: Vec<NodeId>,
 ) -> (screma::Lambda, Option<SemanticFunc>) {
+    let is_identity = captures.is_empty()
+        && params.len() == parameter_types.len()
+        && result_types == parameter_types
+        && results.iter().enumerate().all(|(index, result)| {
+            matches!(
+                graph.nodes.get(*result).map(|node| &node.kind),
+                Some(ENode::FuncParam { index: parameter }) if *parameter == index
+            )
+        });
+    if is_identity {
+        return (screma::Lambda::identity(parameter_types), None);
+    }
+
     let return_type = lambda_return_type(&result_types);
     let result = match results.as_slice() {
         [result] => *result,

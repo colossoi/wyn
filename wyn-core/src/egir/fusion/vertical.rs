@@ -30,20 +30,29 @@ pub(crate) struct Candidate {
 
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
     for (index, entry) in inner.entry_points.iter().enumerate() {
-        if let Some(candidate) = find_in_graph(&entry.graph, BodySite::Entry(index), oracle) {
+        if let Some(candidate) = find_in_graph(inner, &entry.graph, BodySite::Entry(index), oracle) {
             return Some(candidate);
         }
     }
     for function in &inner.functions {
-        if let Some(candidate) = find_in_graph(&function.graph, BodySite::Function(function.region), oracle)
-        {
+        if let Some(candidate) = find_in_graph(
+            inner,
+            &function.graph,
+            BodySite::Function(function.region),
+            oracle,
+        ) {
             return Some(candidate);
         }
     }
     None
 }
 
-fn find_in_graph(graph: &EGraph, site: BodySite, oracle: &SemanticGraph) -> Option<Candidate> {
+fn find_in_graph(
+    inner: &Segmented,
+    graph: &EGraph,
+    site: BodySite,
+    oracle: &SemanticGraph,
+) -> Option<Candidate> {
     for (block_id, block) in &graph.skeleton.blocks {
         for producer_index in 0..block.side_effects.len().saturating_sub(1) {
             let producer = &block.side_effects[producer_index];
@@ -88,9 +97,7 @@ fn find_in_graph(graph: &EGraph, site: BodySite, oracle: &SemanticGraph) -> Opti
                 else {
                     continue;
                 };
-                if consumer.result.is_none()
-                    || !fusion_screma::can_fuse_vertical(&producer_op.form, &consumer_op.form)
-                {
+                if consumer.result.is_none() {
                     continue;
                 }
                 if oracle.conflicts(producer_id, consumer_id)
@@ -169,12 +176,22 @@ fn find_in_graph(graph: &EGraph, site: BodySite, oracle: &SemanticGraph) -> Opti
                 {
                     continue;
                 }
+                let consumer_inputs = projected.iter().map(|(input, _)| *input).collect::<Vec<_>>();
+                if !fusion_screma::can_fuse_vertical(
+                    inner,
+                    &producer_op.form,
+                    &consumer_op.form,
+                    &consumer_inputs,
+                    producer_output,
+                ) {
+                    continue;
+                }
                 return Some(Candidate {
                     site,
                     block: block_id,
                     producer: producer_index,
                     consumer: consumer_index,
-                    consumer_inputs: projected.into_iter().map(|(input, _)| input).collect(),
+                    consumer_inputs,
                     producer_output,
                 });
             }

@@ -9777,6 +9777,44 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
     }
 }
 
+#[test]
+fn scan_fuses_with_independent_consumer_collective() {
+    let source = r#"
+#[compute]
+entry e(xs: [8]i32, ys: [8]i32) ([8]i32, [1]i32) =
+  let prefixes = scan(|a: i32, b: i32| a + b, 0, xs) in
+  let mapped = map(|x: i32| x * 2, prefixes) in
+  let total = reduce(|a: i32, b: i32| a + b, 0, ys) in
+  (mapped, [total])
+"#;
+
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_composites, 1,
+        "independent scan and reduction share one Screma"
+    );
+    assert_eq!(stats.scan_operators, 1);
+    assert_eq!(stats.reduce_operators, 1);
+    assert_eq!(stats.seg_maps + stats.seg_scans + stats.seg_reds, 0);
+    compile_to_spirv(source).expect("middle-barrier-normalized Screma lowers to SPIR-V");
+}
+
+#[test]
+fn dependent_scan_into_reduce_keeps_two_collective_barriers() {
+    let source = r#"
+#[compute]
+entry e(xs: [8]i32) [1]i32 =
+  let prefixes = scan(|a: i32, b: i32| a + b, 0, xs) in
+  let total = reduce(|a: i32, b: i32| a + b, 0, prefixes) in
+  [total]
+"#;
+
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(stats.seg_scans, 1, "the producer scan barrier remains");
+    assert_eq!(stats.seg_reds, 1, "the dependent reduction barrier remains");
+    assert_eq!(stats.seg_composites, 0);
+    compile_to_spirv(source).expect("unfused dependent barriers lower to SPIR-V");
+}
 /// An entry returning a scan and a fixed-size literal that indexes it must
 /// derive both output routes before allocating the scan materialization
 /// resource.
