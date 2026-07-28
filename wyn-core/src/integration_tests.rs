@@ -9639,7 +9639,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
 }
 
 /// Scan -> Map is represented as one canonical Screma whose post-map consumes
-/// the inclusive scan value. A flat, type-preserving post region runs after
+/// the inclusive scan value. A flat post region runs after
 /// the parallel scan has applied global block offsets.
 #[test]
 fn scan_into_map_compiles() {
@@ -9661,6 +9661,15 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
   map(
     |x: f32| x + 1.0,
     scan(|x: f32, y: f32| x + y, 0.0, map(|x: f32| x * 2.0, a)))
+"#,
+            true,
+        ),
+        (
+            "type-changing-scan-map",
+            r#"
+#[compute]
+entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []vec2f32 =
+  map(|x: f32| @[x, x + 1.0], scan(|x: f32, y: f32| x + y, 0.0, a))
 "#,
             true,
         ),

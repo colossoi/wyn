@@ -394,9 +394,7 @@ pub(super) fn analyze_scan_candidate(
     };
     let owner = located.owner;
     let scratch_type = entry.graph.nodes[operator.neutral].ty.clone();
-    if crate::ssa::layout::type_byte_size(&scratch_type).is_none()
-        || post_map.is_some_and(|map| map.output_element_type != scratch_type)
-    {
+    if crate::ssa::layout::type_byte_size(&scratch_type).is_none() {
         return Ok(None);
     }
     let input_view_type = entry.graph.nodes[input].ty.clone();
@@ -661,6 +659,15 @@ impl KernelPlanBuilder<'_, '_> {
             op.hidden_scan_outputs.clear();
             op.operators_mut()[0].destination =
                 SoacDestination::fresh().placed(crate::egir::types::SoacPlacement::OutputView);
+            let result_ty =
+                Type::Constructed(TypeName::Tuple(1), vec![op.operators()[0].result_type.clone()]);
+            let result = entry
+                .graph
+                .skeleton
+                .effect(site)
+                .result
+                .ok_or_else(|| "parallel scan phase 1 lost its result".to_owned())?;
+            entry.graph.retype_node(result, result_ty);
         }
         phase1_resources.push(schedule::ScheduledResource {
             resource: block_sums_resource,
