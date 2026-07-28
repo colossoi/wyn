@@ -1,9 +1,7 @@
 //! Structural classification for canonical Scremas.
 //!
-//! Recipe eligibility is deliberately conservative while the parallel
-//! algorithms are migrated to consume whole pre/operator/post lambdas.  The
-//! shape remains available to scheduling policy, but no legacy mini-map
-//! recipe is selected.
+//! Recipe eligibility describes whole pre/operator/post lambdas. Graph-local
+//! cloning and storage checks remain in the individual recipe analyzers.
 
 use crate::egir::soac::screma;
 use crate::egir::types::WynSoacPhase;
@@ -55,12 +53,21 @@ impl ScremaRecipeCapabilities {
             })
             && (reduction_results..op.result_count())
                 .all(|field| op.destination(field).is_some_and(|destination| destination.is_output_view()));
+        let scan_ready = shape == ScremaShape::Scan
+            && !op.inputs.is_empty()
+            && matches!(op.form.scans.as_slice(), [scan]
+                if scan.neutral.len() == 1
+                    && scan.operator.seg_body().is_some_and(|body| body.captures.is_empty()))
+            && (0..op.result_count())
+                .all(|field| op.destination(field).is_some_and(|destination| destination.is_output_view()));
         Self {
             shape,
             recipe: if map_ready {
                 ScremaRecipeClass::Map
             } else if reduce_ready {
                 ScremaRecipeClass::Reduce
+            } else if scan_ready {
+                ScremaRecipeClass::Scan
             } else {
                 ScremaRecipeClass::Serial
             },

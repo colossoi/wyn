@@ -9654,6 +9654,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
 "#,
             true,
             1,
+            1,
         ),
         (
             "map-scan-map",
@@ -9665,6 +9666,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
     scan(|x: f32, y: f32| x + y, 0.0, map(|x: f32| x * 2.0, a)))
 "#,
             true,
+            2,
             1,
         ),
         (
@@ -9676,6 +9678,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []vec2f32 =
 "#,
             true,
             1,
+            1,
         ),
         (
             "sliced-scan-map",
@@ -9685,6 +9688,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
   map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a[0..256]))
 "#,
             true,
+            1,
             1,
         ),
         (
@@ -9696,6 +9700,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) ([]f32, []f32) =
   (map(|x: f32| x + 1.0, prefixes), map(|x: f32| x * 2.0, prefixes))
 "#,
             true,
+            1,
             2,
         ),
         (
@@ -9707,17 +9712,18 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
 "#,
             false,
             1,
+            1,
         ),
     ];
 
-    for (label, src, parallel, expected_maps) in cases {
+    for (label, src, parallel, expected_lambdas, expected_outputs) in cases {
         let allocated = compile_to_semantic_egir(src);
         let stats = semantic_soac_stats(&allocated);
         assert_eq!(stats.seg_scans, 1, "{label}: scan and post-map share one Screma");
         assert_eq!(stats.seg_maps, 0, "{label}: no map may remain materialized");
         assert_eq!(
-            stats.map_bodies, expected_maps,
-            "{label}: the Screma retains every post-map body"
+            stats.map_bodies, expected_lambdas,
+            "{label}: canonical pre/post lambda count"
         );
         let has_post_scan = allocated
             .entry_points
@@ -9730,7 +9736,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
                     crate::egir::types::SideEffectKind::Soac(crate::egir::types::SoacEffect(
                         _,
                         crate::egir::types::Soac::Screma(op)
-                    )) if op.is_scan_only() && !op.form.post.is_identity() && op.form.post.result_types.len() == 1
+                    )) if op.is_scan_only() && !op.form.post.is_identity() && op.form.post.result_types.len() == expected_outputs
                 )
             });
         assert!(

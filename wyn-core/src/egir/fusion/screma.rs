@@ -110,12 +110,15 @@ struct SuperScrema<'a> {
     producer_output: usize,
 }
 
-pub(crate) fn can_fuse_vertical(producer: &screma::ScremaForm, _consumer: &screma::ScremaForm) -> bool {
-    // No lambda split is needed when the first collective group is empty:
-    // all producer element work can move directly into the consumer pre.
-    // Other shapes will be enabled here only with the dependency-based lambda
-    // partition corresponding to Futhark's `splitLambdaByPar`.
-    producer.scans.is_empty() && producer.reductions.is_empty() && producer.post.is_identity()
+pub(crate) fn can_fuse_vertical(producer: &screma::ScremaForm, consumer: &screma::ScremaForm) -> bool {
+    let before_first_barrier =
+        producer.scans.is_empty() && producer.reductions.is_empty() && producer.post.is_identity();
+    let after_last_barrier = !producer.scans.is_empty()
+        && producer.reductions.is_empty()
+        && consumer.scans.is_empty()
+        && consumer.reductions.is_empty()
+        && consumer.post.is_identity();
+    before_first_barrier || after_last_barrier
 }
 
 pub(crate) fn fuse_vertical(
@@ -136,15 +139,33 @@ pub(crate) fn fuse_vertical(
 
 impl SuperScrema<'_> {
     fn normalize(self, context: &mut Context<'_>) -> Option<Normalized> {
-        can_fuse_vertical(self.producer.form, self.consumer.form).then(|| {
-            fuse_before_first_barrier(
+        if self.producer.form.scans.is_empty()
+            && self.producer.form.reductions.is_empty()
+            && self.producer.form.post.is_identity()
+        {
+            return Some(fuse_before_first_barrier(
                 context,
                 self.producer,
                 self.consumer,
                 self.consumer_inputs_from_producer,
                 self.producer_output,
-            )
-        })
+            ));
+        }
+        if !self.producer.form.scans.is_empty()
+            && self.producer.form.reductions.is_empty()
+            && self.consumer.form.scans.is_empty()
+            && self.consumer.form.reductions.is_empty()
+            && self.consumer.form.post.is_identity()
+        {
+            return Some(fuse_after_last_barrier(
+                context,
+                self.producer,
+                self.consumer,
+                self.consumer_inputs_from_producer,
+                self.producer_output,
+            ));
+        }
+        None
     }
 }
 
@@ -179,8 +200,9 @@ fn fuse_before_first_barrier(
             remaining_slots.iter().position(|candidate| *candidate == slot).map(|position| remap[position])
         })
         .collect::<Vec<_>>();
-    let (pre, function) = vertical_pre(
+    let (pre, function) = vertical_lambda(
         context,
+        "vertical_pre",
         &input_element_types,
         &producer.form.pre,
         producer_parameters,
@@ -199,10 +221,101 @@ fn fuse_before_first_barrier(
             post: consumer.form.post.clone(),
         },
         outputs: (0..consumer.form.result_count()).map(OutputOrigin::Consumer).collect(),
-        synthesized: vec![function],
+        synthesized: function.into_iter().collect(),
     }
 }
 
+/// Normalize a SuperScrema whose consumer has no collective barrier. The
+/// consumer's independent inputs are forwarded through the producer pre-lambda,
+/// and the producer post-lambda composes with the consumer pre-lambda after the
+/// surviving scan barrier.
+fn fuse_after_last_barrier(
+    context: &mut Context<'_>,
+    producer: Source<'_>,
+    consumer: Source<'_>,
+    consumer_inputs_from_producer: &[usize],
+    producer_output: usize,
+) -> Normalized {
+    let remaining_slots = (0..consumer.inputs.len())
+        .filter(|slot| !consumer_inputs_from_producer.contains(slot))
+        .collect::<Vec<_>>();
+    let producer_input_count = producer.inputs.len();
+    let mut raw_nodes = producer.input_nodes.to_vec();
+    raw_nodes.extend(remaining_slots.iter().map(|&slot| consumer.input_nodes[slot]));
+    let mut raw_array_types = producer.inputs.iter().map(|input| input.array.clone()).collect::<Vec<_>>();
+    raw_array_types.extend(remaining_slots.iter().map(|&slot| consumer.inputs[slot].array.clone()));
+    let mut raw_element_types = producer.inputs.iter().map(SoacInputType::element).collect::<Vec<_>>();
+    raw_element_types.extend(remaining_slots.iter().map(|&slot| consumer.inputs[slot].element()));
+    let (input_nodes, input_array_types, input_element_types, remap) =
+        deduplicate_array_inputs(raw_nodes, raw_array_types, raw_element_types);
+
+    let producer_parameters = remap[..producer_input_count].to_vec();
+    let forwarded_parameters = remap[producer_input_count..].to_vec();
+    let forwarded_types =
+        remaining_slots.iter().map(|&slot| consumer.inputs[slot].element()).collect::<Vec<_>>();
+    let forwarded = screma::Lambda::identity(forwarded_types);
+    let pre_outputs = (0..producer.form.pre.result_types.len())
+        .map(|result| ValueRef { call: 0, result })
+        .chain((0..remaining_slots.len()).map(|result| ValueRef { call: 1, result }))
+        .collect();
+    let (pre, pre_function) = parallel_lambdas(
+        context,
+        "vertical_forward_pre",
+        input_element_types,
+        vec![
+            LambdaCall {
+                lambda: &producer.form.pre,
+                parameters: producer_parameters,
+            },
+            LambdaCall {
+                lambda: &forwarded,
+                parameters: forwarded_parameters,
+            },
+        ],
+        pre_outputs,
+    );
+
+    let producer_post_parameters = producer.form.post.parameter_types.len();
+    let post_parameter_types = producer
+        .form
+        .post
+        .parameter_types
+        .iter()
+        .cloned()
+        .chain(remaining_slots.iter().map(|&slot| consumer.inputs[slot].element()))
+        .collect::<Vec<_>>();
+    let consumer_parameters = (0..consumer.inputs.len())
+        .map(|slot| {
+            remaining_slots
+                .iter()
+                .position(|candidate| *candidate == slot)
+                .map(|position| producer_post_parameters + position)
+        })
+        .collect::<Vec<_>>();
+    let (post, post_function) = vertical_lambda(
+        context,
+        "vertical_after_post",
+        &post_parameter_types,
+        &producer.form.post,
+        (0..producer_post_parameters).collect(),
+        producer_output,
+        &consumer.form.pre,
+        &consumer_parameters,
+    );
+
+    Normalized {
+        input_nodes,
+        inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
+        form: screma::ScremaForm {
+            pre,
+            scans: producer.form.scans.clone(),
+            reductions: Vec::new(),
+            post,
+        },
+        outputs: (0..consumer.form.result_count()).map(OutputOrigin::Consumer).collect(),
+        synthesized: pre_function.into_iter().chain(post_function).collect(),
+    }
+}
 #[derive(Clone, Copy)]
 struct ValueRef {
     call: usize,
@@ -379,15 +492,16 @@ fn parallel_lambdas(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn vertical_pre(
+fn vertical_lambda(
     context: &mut Context<'_>,
+    label: &str,
     parameter_types: &[Type<TypeName>],
     producer: &screma::Lambda,
     producer_parameters: Vec<usize>,
     producer_output: usize,
     consumer: &screma::Lambda,
     consumer_parameters: &[Option<usize>],
-) -> (screma::Lambda, SemanticFunc) {
+) -> (screma::Lambda, Option<SemanticFunc>) {
     let producer_body = producer.seg_body();
     let consumer_body = consumer.seg_body();
     let captures = producer_body
@@ -429,7 +543,7 @@ fn vertical_pre(
 
     let (lambda, function) = finish_lambda(
         context,
-        "vertical_pre",
+        label,
         graph,
         params,
         captures,
@@ -437,7 +551,7 @@ fn vertical_pre(
         consumer.result_types.clone(),
         results,
     );
-    (lambda, function.expect("vertical composition is never identity"))
+    (lambda, function)
 }
 
 fn named_parameters(types: &[Type<TypeName>], prefix: &str) -> Vec<(Type<TypeName>, String)> {

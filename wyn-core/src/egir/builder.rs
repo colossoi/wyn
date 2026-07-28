@@ -5,7 +5,7 @@ use crate::flow::{BlockId, ExecutionModel};
 use crate::interface::{self, EntryInput, EntryOutput};
 use crate::ResourceId;
 use polytype::Type;
-use smallvec::smallvec;
+use smallvec::SmallVec;
 
 use super::graph_ops;
 use super::program::{
@@ -80,6 +80,15 @@ impl<'a> EntryBuilder<'a> {
         self.declare(resource, interface::StorageRole::Intermediate, elem_ty, size);
     }
 
+    pub fn declare_input_storage_sized(
+        &mut self,
+        resource: ResourceId,
+        elem_ty: Type<TypeName>,
+        size: LogicalSize,
+    ) {
+        self.declare(resource, interface::StorageRole::Input, elem_ty, size);
+    }
+
     pub fn declare_output_storage(&mut self, resource: ResourceId, elem_ty: Type<TypeName>) {
         self.declare_output_storage_sized(resource, elem_ty, LogicalSize::Unspecified);
     }
@@ -120,7 +129,6 @@ impl<'a> EntryBuilder<'a> {
         output_view: NodeId,
         output_view_ty: Type<TypeName>,
     ) -> NodeId {
-        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![output_view_ty]);
         let input = SoacInputType {
             array: input_array_ty,
         };
@@ -130,30 +138,61 @@ impl<'a> EntryBuilder<'a> {
             vec![input_element_type],
             vec![output_elem_ty.clone()],
         );
+        self.emit_pending_map_into_views(
+            vec![(input_array, input)],
+            pre,
+            vec![(output_view, output_view_ty)],
+        )
+    }
+
+    /// Emit one canonical map whose complete pre-lambda writes all result
+    /// fields to the corresponding output views.
+    pub fn emit_pending_map_into_views(
+        &mut self,
+        inputs: Vec<(NodeId, SoacInputType)>,
+        pre: screma::Lambda,
+        output_views: Vec<(NodeId, Type<TypeName>)>,
+    ) -> NodeId {
+        debug_assert_eq!(inputs.len(), pre.parameter_types.len());
+        debug_assert_eq!(output_views.len(), pre.result_types.len());
+        let tuple_ty = Type::Constructed(
+            TypeName::Tuple(output_views.len()),
+            output_views.iter().map(|(_, ty)| ty.clone()).collect(),
+        );
+        let result_types = pre.result_types.clone();
+        let operands = inputs
+            .iter()
+            .map(|(node, _)| *node)
+            .chain(output_views.iter().map(|(node, _)| *node))
+            .collect::<SmallVec<[NodeId; 4]>>();
         let id = self.semantic_ids.next_id();
         graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
             id,
             Soac::Screma(screma::Op {
-                inputs: vec![input],
+                inputs: inputs.into_iter().map(|(_, input)| input).collect(),
                 form: screma::ScremaForm {
                     pre,
                     scans: Vec::new(),
                     reductions: Vec::new(),
-                    post: screma::Lambda::identity(vec![output_elem_ty]),
+                    post: screma::Lambda::identity(result_types.clone()),
                 },
-                result_state: vec![screma::ResultState {
-                    destination: SoacDestination::fresh().placed(SoacPlacement::OutputView),
-                }],
+                result_state: result_types
+                    .iter()
+                    .map(|_| screma::ResultState {
+                        destination: SoacDestination::fresh().placed(SoacPlacement::OutputView),
+                    })
+                    .collect(),
                 state: screma::SemanticState::Serial,
             }),
-            smallvec![input_array, output_view],
+            operands,
             tuple_ty,
             self.effect_ids,
             Some(self.span),
         )
     }
+
     pub fn emit_load(&mut self, place: NodeId, elem_ty: Type<TypeName>) -> NodeId {
         graph_ops::emit_load(
             &mut self.graph,
