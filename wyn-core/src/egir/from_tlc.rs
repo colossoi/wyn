@@ -2115,11 +2115,13 @@ impl<'a, 'b> Converter<'a, 'b> {
                 destination,
             } => self.convert_soac_filter(pred, input, (*destination).into(), ty),
             SoacOp::Scatter { dest, lam, inputs } => self.convert_soac_scatter(dest, lam, inputs, ty),
-            // TODO(reduce_by_index): parallel path needs atomic-op emission
-            // (atomicAdd/atomicMin/etc.) in spirv/wgsl backends — not yet wired.
-            // Sequential lowering is straightforward (read-combine-write loop) but
-            // also not yet wired. Produced by `to_tlc::transform_soac_reduce_by_index`.
-            SoacOp::ReduceByIndex { .. } => Err(ConvertError::Unsupported("SOAC reduce_by_index".into())),
+            SoacOp::ReduceByIndex {
+                dest,
+                op,
+                ne,
+                indices,
+                values,
+            } => self.convert_soac_reduce_by_index(dest, op, ne, indices, values, ty),
         }
     }
 
@@ -2243,10 +2245,72 @@ impl<'a, 'b> Converter<'a, 'b> {
         Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], project_ty))
     }
 
-    /// `scatter(dest, indices, values)` → a side-effecting `EgirSoac::Hist`.
-    /// `dest` is a `#[storage]` buffer param whose `StorageView` was already
-    /// interned at param setup and stored in `self.locals`; the writes target
-    /// that view. The result node is discarded (rebound during expansion).
+    /// Convert `reduce_by_index` to a histogram with an identity bucket and an
+    /// explicit associative read-combine-write operator.
+    fn convert_soac_reduce_by_index(
+        &mut self,
+        dest: &crate::tlc::Place,
+        op: &SoacBody,
+        ne: &Term,
+        indices: &ArrayExpr,
+        values: &ArrayExpr,
+        result_ty: Type<TypeName>,
+    ) -> Result<NodeId, ConvertError> {
+        let dest_view = *self.locals.get(&dest.id).ok_or_else(|| {
+            ConvertError::GraphError("reduce_by_index destination is not a bound #[storage] view".into())
+        })?;
+        let operator_region = self.region(self.lambda_fn_name(&op.lam)?);
+        let operator_captures = op
+            .data
+            .captures
+            .iter()
+            .map(|(_, _, term)| self.convert_term(term))
+            .collect::<Result<Vec<_>, _>>()?;
+        let neutral = self.convert_term(ne)?;
+        let index_node = self.convert_array_expr_value(indices)?;
+        let value_node = self.convert_array_expr_value(values)?;
+        let index_array = self.value_array_type(index_node, indices);
+        let value_array = self.value_array_type(value_node, values);
+        let index_type = crate::types::array_elem(&index_array)
+            .cloned()
+            .ok_or_else(|| ConvertError::GraphError("reduce_by_index indices are not an array".into()))?;
+        let value_type = crate::types::array_elem(&value_array)
+            .cloned()
+            .ok_or_else(|| ConvertError::GraphError("reduce_by_index values are not an array".into()))?;
+        let operator_parameters = op.lam.params.iter().map(|(_, ty)| ty.clone()).collect();
+        let operator = screma::Lambda::region(
+            SegBody {
+                region: operator_region,
+                captures: operator_captures,
+            },
+            operator_parameters,
+            vec![dest.elem_ty.clone()],
+        );
+        let operands = smallvec![dest_view, index_node, value_node];
+        self.emit_soac(
+            Soac::Hist(hist::Op {
+                body: hist::Body {
+                    bucket: screma::Lambda::identity(vec![index_type.clone(), value_type.clone()]),
+                    inputs: vec![
+                        SoacInputType { array: index_array },
+                        SoacInputType { array: value_array },
+                    ],
+                    index_type,
+                    value_type,
+                    dest_elem_type: dest.elem_ty.clone(),
+                    update: hist::Update::Reduce { operator, neutral },
+                },
+                state: hist::RawState,
+            }),
+            operands,
+            result_ty,
+        );
+        Ok(dest_view)
+    }
+
+    /// `scatter(dest, indices, values)` becomes an ordered-overwrite histogram.
+    /// The destination is a bound storage view; expansion rebinds the dummy
+    /// result after emitting the indexed stores.
     fn convert_soac_scatter(
         &mut self,
         dest: &crate::tlc::Place,
@@ -2285,24 +2349,29 @@ impl<'a, 'b> Converter<'a, 'b> {
         operands.extend_from_slice(&input_nids);
         let body_region = self.region(func);
 
-        Ok(self.emit_soac(
+        self.emit_soac(
             Soac::Hist(hist::Op {
                 body: hist::Body {
-                    body: SegBody {
-                        region: body_region,
-                        captures: capture_nids,
-                    },
+                    bucket: screma::Lambda::region(
+                        SegBody {
+                            region: body_region,
+                            captures: capture_nids,
+                        },
+                        lam.lam.params.iter().map(|(_, ty)| ty.clone()).collect(),
+                        vec![index_type.clone(), value_type.clone()],
+                    ),
                     inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
                     index_type,
                     value_type,
                     dest_elem_type: dest_elem_ty,
-                    update_policy: hist::UpdatePolicy::OrderedOverwrite,
+                    update: hist::Update::OrderedOverwrite,
                 },
                 state: hist::RawState,
             }),
             operands,
             result_ty,
-        ))
+        );
+        Ok(dest_view)
     }
 
     fn convert_soac_reduce(

@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use polytype::Type;
 use smallvec::SmallVec;
 
-use super::{graph_and_span, horizontal, screma as fusion_screma, space};
+use super::{graph_and_span, horizontal, screma as fusion_screma};
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, Body, BodySite};
@@ -53,7 +53,7 @@ fn find_in_graph(graph: &EGraph, site: BodySite, oracle: &SemanticGraph) -> Opti
                 continue;
             };
             let screma::SemanticState::Segmented {
-                space: producer_space,
+                space: _,
                 output_slots,
                 resources,
                 ..
@@ -78,7 +78,7 @@ fn find_in_graph(graph: &EGraph, site: BodySite, oracle: &SemanticGraph) -> Opti
                 else {
                     continue;
                 };
-                let hist::State::Segmented(consumer_space) = &consumer_op.state else {
+                let hist::State::Segmented(_) = &consumer_op.state else {
                     continue;
                 };
                 if consumer.result.is_none() || oracle.conflicts(producer_id, consumer_id) {
@@ -119,9 +119,11 @@ fn find_in_graph(graph: &EGraph, site: BodySite, oracle: &SemanticGraph) -> Opti
                     .collect::<Vec<_>>();
                 let routed_outputs =
                     routes.iter().map(|route| route.producer_post_output).collect::<HashSet<_>>();
-                let domain_is_producer_output = routes.iter().any(|route| route.consumer_input == 0);
-                if (!domain_is_producer_output && !space::seg_space_fusable(producer_space, consumer_space))
-                    || routed_outputs.len() != producer_op.form.post.result_types.len()
+                // Hist inputs share one explicit width. A shape-preserving map
+                // routed into any bucket parameter therefore has the Hist
+                // domain, even when the extent expression is rooted in a
+                // different input node.
+                if routed_outputs.len() != producer_op.form.post.result_types.len()
                     || routes.is_empty()
                     || !producer_used_only_by(
                         graph,
@@ -193,14 +195,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     };
     let input_count = consumer_op.body.inputs.len();
     let input_nodes = consumer_effect.operand_nodes[1..1 + input_count].to_vec();
-    let consumer_lambda = screma::Lambda::region(
-        consumer_op.body.body.clone(),
-        consumer_op.body.inputs.iter().map(|input| input.element()).collect(),
-        vec![
-            consumer_op.body.index_type.clone(),
-            consumer_op.body.value_type.clone(),
-        ],
-    );
+    let consumer_lambda = consumer_op.body.bucket.clone();
     let mut interner = inner.data.region_interner.clone();
     let mut context = fusion_screma::Context {
         program: &inner,
@@ -225,11 +220,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     )
     .expect("analyzed map-to-histogram fusion no longer composes");
     consumer_op.body.inputs = normalized.inputs;
-    consumer_op.body.body = normalized
-        .lambda
-        .seg_body()
-        .expect("histogram composition must synthesize a concrete region")
-        .clone();
+    consumer_op.body.bucket = normalized.lambda;
     if candidate.routes.iter().any(|route| route.consumer_input == 0) {
         consumer_op.state = hist::State::Segmented(producer.space.clone());
     }

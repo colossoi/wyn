@@ -36,15 +36,19 @@ fn raw_hist_soac(
 ) -> Soac<Raw> {
     Soac::Hist(hist::Op {
         body: hist::Body {
-            body: SegBody {
-                region: RegionId::from_index(0),
-                captures,
-            },
+            bucket: screma::Lambda::region(
+                SegBody {
+                    region: RegionId::from_index(0),
+                    captures,
+                },
+                inputs.iter().map(SoacInputType::element).collect(),
+                vec![index_type.clone(), value_type.clone()],
+            ),
             inputs,
             index_type,
             value_type,
             dest_elem_type,
-            update_policy: hist::UpdatePolicy::OrderedOverwrite,
+            update: hist::Update::OrderedOverwrite,
         },
         state: hist::RawState,
     })

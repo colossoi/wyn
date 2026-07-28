@@ -474,6 +474,78 @@ entry pick(xs: []i32) ?k. [k]i32 =
 }
 
 #[test]
+fn egir_reduce_by_index_is_a_general_histogram_and_lowers() {
+    use crate::egir::soac::hist;
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
+
+    let source = r#"
+#[compute]
+entry accumulate(indices: []i32,
+                 values: []i32,
+                 bias: i32,
+                 #[storage(set=2, binding=0, access=write)] dest: *[]i32) () =
+  let updated = reduce_by_index(dest, |a: i32, b: i32| a + b + bias, -bias, indices, values) in
+  let _ = scatter(updated, [0i32], [bias]) in
+  ()
+"#;
+    let allocated = compile_to_semantic_egir(source);
+    let histogram = allocated
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+        .find_map(|effect| match &effect.kind {
+            SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => Some(op),
+            _ => None,
+        })
+        .expect("semantic reduce_by_index histogram");
+    assert!(histogram.body.bucket.is_identity());
+    let hist::Update::Reduce { operator, .. } = &histogram.body.update else {
+        panic!("reduce_by_index must retain its reducer")
+    };
+    assert_eq!(operator.parameter_types.len(), 2);
+    assert_eq!(operator.result_types.len(), 1);
+    assert_eq!(
+        operator.seg_body().expect("reduce_by_index reducer region").captures.len(),
+        1,
+        "captured reducer inputs remain explicit in the histogram operator",
+    );
+    compile_to_spirv(source).expect("general histogram should lower through read-combine-write");
+}
+
+#[test]
+fn egir_map_into_reducing_histogram_fuses() {
+    use crate::egir::soac::hist;
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
+
+    let source = r#"
+#[compute]
+entry accumulate(indices: []i32,
+                 values: []i32,
+                 #[storage(set=2, binding=0, access=write)] dest: *[]i32) () =
+  let doubled = map(|value: i32| value * 2, values) in
+  let _ = reduce_by_index(dest, |a: i32, b: i32| a + b, 0, indices, doubled) in
+  ()
+"#;
+    let allocated = compile_to_semantic_egir(source);
+    let stats = semantic_soac_stats(&allocated);
+    assert_eq!(
+        stats.seg_maps, 0,
+        "the producer map should fold into the bucket lambda"
+    );
+    let histogram = allocated
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+        .find_map(|effect| match &effect.kind {
+            SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => Some(op),
+            _ => None,
+        })
+        .expect("fused reducing histogram");
+    assert!(!histogram.body.bucket.is_identity());
+    assert!(matches!(histogram.body.update, hist::Update::Reduce { .. }));
+    compile_to_spirv(source).expect("map-reduce_by_index fusion should lower");
+}
+#[test]
 fn egir_map_scatter_envelope_fuses_and_deduplicates_both_producers() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 

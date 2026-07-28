@@ -961,10 +961,8 @@ pub enum SoacOp<C: Payload = data::Empty, S: Payload = data::Empty> {
         lam: SoacBody<C, S>,
         inputs: Vec<ArrayExpr<C, S>>,
     },
-    // TODO(reduce_by_index): produced by to_tlc but EGIR rejects
-    // (`egir::from_tlc::convert_soac`). Sequential lowering would be a
-    // straightforward read-combine-write loop; the parallel path needs
-    // atomic-op emission in the backends, which doesn't exist yet.
+    /// General histogram update. EGIR retains the reducer and neutral value;
+    /// physical expansion currently emits a serial read-combine-write loop.
     ReduceByIndex {
         dest: Place,
         op: SoacBody<C, S>,

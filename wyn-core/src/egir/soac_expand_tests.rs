@@ -17,7 +17,7 @@
 
 use crate::ast::TypeName;
 use crate::egir::program::{PhysicalEGraph, PhysicalSideEffectKind, SemanticOpId};
-use crate::egir::soac::hist;
+use crate::egir::soac::{hist, screma};
 use crate::egir::types::{ENode, Family, Physical, PureOp, Soac, SoacEffect, SoacInputType};
 use polytype::Type;
 
@@ -86,10 +86,14 @@ fn scatter_handleability_checks_every_input() {
         SemanticOpId::for_test(0),
         Soac::<Physical>::Hist(hist::Op {
             body: hist::Body {
-                body: crate::egir::types::SegBody {
-                    region: crate::egir::types::RegionId::from_index(0),
-                    captures: vec![],
-                },
+                bucket: screma::Lambda::region(
+                    crate::egir::types::SegBody {
+                        region: crate::egir::types::RegionId::from_index(0),
+                        captures: vec![],
+                    },
+                    vec![i32_ty.clone(), f32_ty.clone()],
+                    vec![i32_ty.clone(), f32_ty.clone()],
+                ),
                 inputs: vec![
                     SoacInputType {
                         array: plain_array_ty(i32_ty.clone()),
@@ -99,7 +103,7 @@ fn scatter_handleability_checks_every_input() {
                 index_type: i32_ty,
                 value_type: f32_ty.clone(),
                 dest_elem_type: f32_ty,
-                update_policy: hist::UpdatePolicy::OrderedOverwrite,
+                update: hist::Update::OrderedOverwrite,
             },
             state: hist::PhysicalState::Serial,
         }),

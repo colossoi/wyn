@@ -15,7 +15,7 @@ use crate::types::TypeExt;
 use super::graph_ops;
 use super::ir::ProgramShape;
 use super::program::{Program, SemanticOpId};
-use super::soac::{filter, screma};
+use super::soac::{filter, hist, screma};
 use super::types::{
     EGraph, NodeId, ResourceAccess, SegResourceAccess, Semantic, SideEffect, SideEffectKind,
     SideEffectSite, Soac, SoacEffect,
@@ -250,7 +250,7 @@ where
     Shape: ProgramShape<Family = Semantic>,
 {
     let contains_region = |region| inner.functions.iter().any(|function| function.region == region);
-    let verify_effect = |scope: &str, effect: &SideEffect| -> Result<(), String> {
+    let verify_effect = |scope: &str, graph: &EGraph, effect: &SideEffect| -> Result<(), String> {
         let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
             return Ok(());
         };
@@ -292,12 +292,20 @@ where
                 verify_body("filter predicate", &op.body.predicate)?;
             }
             Soac::Hist(op) => {
-                if !contains_region(op.body.body.region) {
-                    return Err(format!(
-                        "{scope}: histogram region `{}` is absent",
-                        op.body.body.region
-                    ));
+                if let Some(body) = op.body.bucket.seg_body() {
+                    verify_body("histogram bucket", body)?;
                 }
+                let neutral_type = match &op.body.update {
+                    hist::Update::OrderedOverwrite => None,
+                    hist::Update::Reduce { operator, neutral } => {
+                        let body = operator
+                            .seg_body()
+                            .ok_or_else(|| format!("{scope}: histogram reducer cannot be identity"))?;
+                        verify_body("histogram reducer", body)?;
+                        graph.nodes.get(*neutral).map(|node| &node.ty)
+                    }
+                };
+                op.body.validate(neutral_type).map_err(|error| format!("{scope}: {error}"))?;
             }
         }
         Ok(())
@@ -305,14 +313,14 @@ where
     for entry in &inner.entry_points {
         for (_, block) in &entry.graph.skeleton.blocks {
             for effect in &block.side_effects {
-                verify_effect(&format!("entry `{}`", entry.name), effect)?;
+                verify_effect(&format!("entry `{}`", entry.name), &entry.graph, effect)?;
             }
         }
     }
     for function in &inner.functions {
         for (_, block) in &function.graph.skeleton.blocks {
             for effect in &block.side_effects {
-                verify_effect(&format!("function `{}`", function.name), effect)?;
+                verify_effect(&format!("function `{}`", function.name), &function.graph, effect)?;
             }
         }
     }
@@ -361,7 +369,7 @@ where
                         let _ = writeln!(
                             output,
                             "{scope}: Hist state={:?} body={:?} update={:?}",
-                            op.state, op.body.body, op.body.update_policy
+                            op.state, op.body.bucket, op.body.update
                         );
                     }
                     SideEffectKind::Effect(_) => {}

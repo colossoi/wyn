@@ -32,7 +32,7 @@ use super::program::{
     PhysicalSegSpace as SegSpace, PhysicalSideEffect as SideEffect,
     PhysicalSideEffectKind as SideEffectKind, PhysicalSoac as Soac, RegionInterner,
 };
-use super::soac::{filter, screma};
+use super::soac::{filter, hist, screma};
 use crate::ast::TypeName;
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
@@ -443,7 +443,6 @@ fn expand_one(
             let dest_view = se.operand_nodes[0];
             let n_inputs = op.body.inputs.len();
             let input_nids = &se.operand_nodes[1..1 + n_inputs];
-            let captures = op.body.body.captures.clone();
             let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
                 .iter()
                 .zip(op.body.inputs.iter())
@@ -452,21 +451,18 @@ fn expand_one(
             let len_input = (input_nids[0], op.body.inputs[0].array.clone());
             let result_nid = se.result.expect("Scatter has a result");
 
-            let scatter = ScatterLoop {
+            let hist = HistLoop {
                 dest_view,
                 dest_elem_ty: op.body.dest_elem_type.clone(),
-                func: regions.resolve(op.body.body.region).to_string(),
+                bucket: op.body.bucket.clone(),
+                update: op.body.update.clone(),
                 read_inputs,
-                captures,
-                index_type: op.body.index_type.clone(),
-                value_type: op.body.value_type.clone(),
                 len_input,
                 result_node: result_nid,
             };
-            // Ordered overwrite is non-commutative when indices conflict.
-            // Preserve source order until a future update policy proves a
-            // conflict-safe parallel implementation.
-            build_scatter_loop(graph, bid, idx, scatter, next_effect);
+            // Both ordered overwrite and general reducers remain serial until
+            // a backend atomic implementation can preserve their contracts.
+            build_hist_loop(graph, bid, idx, hist, next_effect, regions);
         }
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
             if matches!(op.state, screma::PhysicalState::Segmented(_)) && op.is_map() =>
@@ -1106,45 +1102,41 @@ fn build_filter_loop(
 /// over the buffer — its type (set by `convert_soac_filter`) already carries
 /// `Buffer(scratch_out)`, so the backend recovers the descriptor from the type.
 /// All offsets/lengths are `u32` to match the view `{offset, len}` convention.
-/// Inputs for a sequential `scatter` expansion. The per-element envelope
-/// `func` maps the read input elements (plus captures) to an `(index, value)`
-/// pair; the loop projects the pair and writes `dest[index] = value`.
-struct ScatterLoop {
+/// Inputs for sequential histogram expansion. The bucket lambda maps the read
+/// input elements to an `(index, value)` pair. The update is either ordered
+/// overwrite (source `scatter`) or read-combine-write (source
+/// `reduce_by_index`).
+struct HistLoop {
     dest_view: NodeId,
     dest_elem_ty: Type<TypeName>,
-    func: String,
+    bucket: screma::Lambda,
+    update: hist::Update,
     /// `(array_nid, array_type, elem_type)` per input, read per iteration.
     read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,
-    captures: Vec<NodeId>,
-    index_type: Type<TypeName>,
-    value_type: Type<TypeName>,
     /// Loop bound source — the first input `(nid, array_type)`.
     len_input: (NodeId, Type<TypeName>),
     result_node: NodeId,
 }
 
-/// Sequential `scatter`: for each `i`, `dest_view[indices[i]] = values[i]`.
-/// The per-element writes are effectful, so the SOAC result binds to a dummy.
-/// Out-of-bounds indices are not guarded here (Futhark ignores them; v1 trusts
-/// the producer to emit in-bounds indices). This is the serial cut — a parallel
-/// (one-thread-per-element) version is deferred; sequential semantics make it a
-/// pure optimization.
-fn build_scatter_loop(
+/// Sequential histogram semantics. Out-of-bounds indices are not guarded here
+/// (Futhark ignores them; v1 trusts the bucket lambda to emit in-bounds
+/// indices). General reducers remain serial until backend atomics can preserve
+/// their update contract.
+fn build_hist_loop(
     graph: &mut EGraph,
     bid: BlockId,
     idx_in_block: usize,
-    spec: ScatterLoop,
+    spec: HistLoop,
     next_effect: &mut crate::IdSource<EffectToken>,
+    regions: &RegionInterner,
 ) {
-    use super::graph_ops::emit_storage_store;
-    let ScatterLoop {
+    use super::graph_ops::{emit_storage_store, emit_view_load};
+    let HistLoop {
         dest_view,
         dest_elem_ty,
-        func,
+        bucket,
+        update,
         read_inputs,
-        captures,
-        index_type,
-        value_type,
         len_input,
         result_node,
     } = spec;
@@ -1161,34 +1153,46 @@ fn build_scatter_loop(
         next_effect,
         true,
         move |graph, next_effect, blk, i_nid, _carried| {
-            // (index, value) = func(inputs[i].., ..captures)
-            let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = SmallVec::new();
-            for (arr, arr_ty, elem_ty) in &read_inputs {
-                let elem = emit_read_element(graph, blk, *arr, i_nid, arr_ty, elem_ty, next_effect);
-                call_operands.push(elem);
+            let mut arguments = Vec::with_capacity(read_inputs.len());
+            for (array, array_type, element_type) in &read_inputs {
+                arguments.push(emit_read_element(
+                    graph,
+                    blk,
+                    *array,
+                    i_nid,
+                    array_type,
+                    element_type,
+                    next_effect,
+                ));
             }
-            call_operands.extend(captures.iter().copied());
-            let pair_ty =
-                Type::Constructed(TypeName::Tuple(2), vec![index_type.clone(), value_type.clone()]);
-            let pair_nid = graph.intern_pure(PureOp::Call(func.clone()), call_operands, pair_ty, None);
-            let scatter_idx = graph.intern_pure(
-                PureOp::Project { index: 0 },
-                smallvec![pair_nid],
-                index_type.clone(),
-                None,
-            );
-            let val = graph.intern_pure(
-                PureOp::Project { index: 1 },
-                smallvec![pair_nid],
-                value_type.clone(),
-                None,
-            );
+            let bucket_values = emit_screma_lambda(graph, regions, &bucket, arguments);
+            debug_assert_eq!(bucket_values.len(), 2);
+            let bucket_index = bucket_values[0];
+            let bucket_value = bucket_values[1];
+            let updated = match &update {
+                hist::Update::OrderedOverwrite => bucket_value,
+                hist::Update::Reduce { operator, .. } => {
+                    let previous = emit_view_load(
+                        graph,
+                        blk,
+                        dest_view,
+                        bucket_index,
+                        dest_elem_ty.clone(),
+                        next_effect,
+                        None,
+                    );
+                    emit_screma_lambda(graph, regions, operator, vec![previous, bucket_value])
+                        .into_iter()
+                        .next()
+                        .expect("validated histogram reducer returns one value")
+                }
+            };
             emit_storage_store(
                 graph,
                 blk,
                 dest_view,
-                scatter_idx,
-                val,
+                bucket_index,
+                updated,
                 dest_elem_ty.clone(),
                 next_effect,
                 None,
@@ -1197,112 +1201,6 @@ fn build_scatter_loop(
         },
     );
 }
-
-#[allow(dead_code)]
-fn build_parallel_scatter(
-    graph: &mut EGraph,
-    bid: BlockId,
-    idx_in_block: usize,
-    spec: ScatterLoop,
-    next_effect: &mut crate::IdSource<EffectToken>,
-) {
-    use super::graph_ops::emit_storage_store;
-    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-    let ScatterLoop {
-        dest_view,
-        dest_elem_ty,
-        func,
-        read_inputs,
-        captures,
-        index_type,
-        value_type,
-        len_input,
-        result_node,
-    } = spec;
-
-    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
-
-    graph.replace_node_preserving_type(
-        result_node,
-        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
-    );
-
-    let body = graph.skeleton.create_block();
-    let known = catalog().known();
-    let tid_nid = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: known.thread_id,
-            overload_idx: 0,
-        },
-        smallvec![],
-        u32_ty,
-        None,
-    );
-    let i32_from_u32 = catalog().lookup_by_any_name("i32.u32").expect("catalog has i32.u32 bitcast");
-    let i_nid = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: i32_from_u32.id,
-            overload_idx: 0,
-        },
-        smallvec![tid_nid],
-        i32_ty.clone(),
-        None,
-    );
-    let len_nid = emit_length(graph, len_input.0, &len_input.1, &i32_ty);
-    let cond_nid = graph.intern_pure(
-        PureOp::BinOp("<".into()),
-        smallvec![i_nid, len_nid],
-        bool_ty,
-        None,
-    );
-
-    graph.skeleton.blocks[bid].term = SkeletonTerminator::CondBranch {
-        cond: cond_nid,
-        then_target: body,
-        then_args: vec![],
-        else_target: after,
-        else_args: vec![],
-    };
-    graph.skeleton.blocks[bid].control_header = Some(ControlHeader::Selection { merge: after });
-
-    let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = SmallVec::new();
-    for (arr, arr_ty, elem_ty) in &read_inputs {
-        let elem = emit_read_element(graph, body, *arr, i_nid, arr_ty, elem_ty, next_effect);
-        call_operands.push(elem);
-    }
-    call_operands.extend(captures.iter().copied());
-    let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![index_type.clone(), value_type.clone()]);
-    let pair_nid = graph.intern_pure(PureOp::Call(func), call_operands, pair_ty, None);
-    let scatter_idx = graph.intern_pure(
-        PureOp::Project { index: 0 },
-        smallvec![pair_nid],
-        index_type,
-        None,
-    );
-    let val = graph.intern_pure(
-        PureOp::Project { index: 1 },
-        smallvec![pair_nid],
-        value_type,
-        None,
-    );
-    emit_storage_store(
-        graph,
-        body,
-        dest_view,
-        scatter_idx,
-        val,
-        dest_elem_ty,
-        next_effect,
-        None,
-    );
-    graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
-        target: after,
-        args: vec![],
-    };
-}
-
 fn filter_thread_index(graph: &mut EGraph) -> NodeId {
     graph.intern_pure(
         PureOp::Intrinsic {

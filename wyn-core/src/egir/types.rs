@@ -76,7 +76,13 @@ impl<P: WynSoacPhase> Soac<P> {
                 bodies.push(&op.body.predicate);
                 bodies
             }
-            Self::Hist(op) => vec![&op.body.body],
+            Self::Hist(op) => {
+                let mut bodies = op.body.bucket.seg_body().into_iter().collect::<Vec<_>>();
+                if let hist::Update::Reduce { operator, .. } = &op.body.update {
+                    bodies.extend(operator.seg_body());
+                }
+                bodies
+            }
         }
     }
 
@@ -115,7 +121,21 @@ impl<P: WynSoacPhase> Soac<P> {
                 }
                 _ => None,
             },
-            Self::Hist(op) => (index == 0).then_some(&mut op.body.body),
+            Self::Hist(op) => {
+                let mut remaining = index;
+                if let Some(body) = op.body.bucket.seg_body_mut() {
+                    if remaining == 0 {
+                        return Some(body);
+                    }
+                    remaining -= 1;
+                }
+                match &mut op.body.update {
+                    hist::Update::Reduce { operator, .. } => {
+                        operator.seg_body_mut().filter(|_| remaining == 0)
+                    }
+                    hist::Update::OrderedOverwrite => None,
+                }
+            }
         }
     }
 }

@@ -980,7 +980,11 @@ fn physicalize_soac(
             Soac::Filter(filter::Op { body, state })
         }
         Soac::Hist(hist::Op { mut body, state }) => {
-            body.body = seg_body(body.body, nodes);
+            body.bucket = lambda(body.bucket, nodes);
+            if let hist::Update::Reduce { operator, neutral } = &mut body.update {
+                *operator = lambda(operator.clone(), nodes);
+                *neutral = nodes[neutral];
+            }
             let state = match state {
                 hist::State::Serial => hist::State::Serial,
                 hist::State::Segmented(iteration_space) => {

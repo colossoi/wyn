@@ -8,10 +8,8 @@
 //!
 //! Horizontal fusion combines independent siblings. Vertical fusion composes
 //! canonical Scremas while retaining producer outputs needed by other consumers
-//! or output routes. Envelope fusion composes maps into
-//! filters, scatters, and histograms; filter fusion redirects scalar consumers
-//! through the compacted route; indexed scalarization removes producers whose
-//! complete demand is a set of scalar element reads.
+//! or output routes. Histogram fusion composes pure maps into the general
+//! bucket lambda shared by ordered scatter and reducing histogram updates.
 
 use polytype::Type;
 
