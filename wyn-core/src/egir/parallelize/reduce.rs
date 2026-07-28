@@ -9,7 +9,6 @@ pub(super) struct ReduceCandidate {
     serial: SerialScremaRecipe,
     input_views: Vec<(NodeId, Type<TypeName>)>,
     map_output_view_operands: Vec<usize>,
-    map_count: usize,
     result: NodeId,
     accumulators: Vec<ReduceAccumulator>,
     phase1_width: u32,
@@ -57,10 +56,132 @@ pub(super) fn analyze_reduce_candidate(
     located: LocatedScrema<'_>,
     resources: &crate::egir::program::LogicalResourceArena,
 ) -> error::Result<Option<ReduceCandidate>> {
-    let _ = (entry, located, resources);
-    Ok(None)
+    debug_assert_eq!(
+        super::capabilities::ScremaRecipeCapabilities::analyze(located.op).recipe_class(),
+        super::capabilities::ScremaRecipeClass::Reduce
+    );
+    let segment = located.segmented()?;
+    let serial = located.serial_recipe();
+    let site = located.site;
+    let side_effect = located.effect;
+    let reductions = &located.op.form.reductions;
+    let n_accs = reductions.len();
+    let n_maps = located.op.form.post.result_types.len();
+    let operands =
+        screma::ScremaOperands::decode(located.op, &side_effect.operand_nodes, side_effect.result)?;
+    for input in operands.inputs() {
+        if !can_chunk_view(&entry.graph, input.node, ChunkInputKind::StorageOrRange) {
+            return Ok(None);
+        }
+    }
+    let mut map_output_view_operands = Vec::with_capacity(n_maps);
+    for index in 0..n_maps {
+        let Some(output) = operands.output(n_accs + index) else {
+            return Ok(None);
+        };
+        if !can_chunk_view(&entry.graph, output.node, ChunkInputKind::StorageOnly) {
+            return Ok(None);
+        }
+        map_output_view_operands.push(output.slot);
+    }
+    let result = operands.result();
+    let owner = located.owner;
+    if reductions.iter().any(|reduction| !can_clone_pure_subgraph(&entry.graph, reduction.neutral[0], &[]))
+    {
+        return Ok(None);
+    }
+    let scratch_types = reductions
+        .iter()
+        .map(|reduction| entry.graph.nodes[reduction.neutral[0]].ty.clone())
+        .collect::<Vec<_>>();
+    if scratch_types.iter().any(|ty| crate::ssa::layout::type_byte_size(ty).is_none()) {
+        return Ok(None);
+    }
+    let input_views =
+        operands.inputs().map(|input| (input.node, entry.graph.nodes[input.node].ty.clone())).collect();
+    let mut stores = (0..n_accs).map(|_| Vec::new()).collect::<Vec<_>>();
+    let mut outputs: Vec<Vec<(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)>> =
+        vec![Vec::new(); n_accs];
+    for (block_id, block) in &entry.graph.skeleton.blocks {
+        for (effect_index, effect) in block.side_effects.iter().enumerate() {
+            if !matches!(effect.kind, SideEffectKind::Effect(EffectOp::Store)) {
+                continue;
+            }
+            let (Some(&place), Some(&value)) = (effect.operand_nodes.first(), effect.operand_nodes.get(1))
+            else {
+                continue;
+            };
+            let Some(root) = graph_ops::root_projection_index(&entry.graph, value, result)
+                .or_else(|| (value == result && n_maps + n_accs == 1).then_some(0))
+            else {
+                continue;
+            };
+            if root >= n_accs {
+                continue;
+            }
+            let accumulator = root;
+            if !can_clone_pure_subgraph(&entry.graph, place, &[])
+                || !can_clone_pure_subgraph(&entry.graph, value, &[result])
+            {
+                return Ok(None);
+            }
+            stores[accumulator].push(ReduceOutputStore {
+                location: (block_id, effect_index),
+                place,
+                value,
+                writer: effect.effects.map(|(_, writer)| writer),
+            });
+            if let Some(resource) =
+                graph_ops::storage_resource_under(&entry.graph, place).map(|resource| resource.0)
+            {
+                let logical = &resources[resource];
+                let output = entry.resource_declarations.iter().find(|declaration| {
+                    declaration.role == crate::interface::StorageRole::Output
+                        && declaration.resource.0 == resource
+                });
+                if let Some(output) = output {
+                    if !outputs[accumulator].iter().any(|(candidate, _, _)| *candidate == resource) {
+                        outputs[accumulator].push((resource, output.elem_ty.clone(), logical.size.clone()));
+                    }
+                }
+            }
+        }
+    }
+    if !(0..n_accs).all(|index| !stores[index].is_empty() && !outputs[index].is_empty()) {
+        return Ok(None);
+    }
+    let accumulators = reductions
+        .iter()
+        .zip(scratch_types)
+        .zip(stores)
+        .zip(outputs)
+        .map(
+            |(((reduction, scratch_type), stores), outputs)| ReduceAccumulator {
+                scratch_type,
+                combine_region: reduction
+                    .operator
+                    .seg_body()
+                    .expect("eligible reduction operator has a region")
+                    .region,
+                neutral: reduction.neutral[0],
+                stores,
+                outputs,
+            },
+        )
+        .collect();
+    Ok(Some(ReduceCandidate {
+        site,
+        owner,
+        serial,
+        input_views,
+        map_output_view_operands,
+        result,
+        accumulators,
+        phase1_width: REDUCE_PHASE1_WIDTH,
+        phase2_width: REDUCE_PHASE2_WIDTH,
+        segment,
+    }))
 }
-
 impl BoundReduce {
     pub(super) fn segment(&self) -> &screma::Segmented<SemanticResourceRef> {
         &self.candidate.segment
@@ -89,7 +210,6 @@ impl KernelPlanBuilder<'_, '_> {
             serial,
             input_views: input_view_data,
             map_output_view_operands,
-            map_count: n_maps,
             result: screma_result_nid,
             accumulators,
             phase1_width,
@@ -166,9 +286,7 @@ impl KernelPlanBuilder<'_, '_> {
             .zip(&accumulators)
             .map(|(acc_i, accumulator)| {
                 entry.graph.intern_pure(
-                    crate::egir::types::PureOp::Project {
-                        index: (n_maps + acc_i) as u32,
-                    },
+                    crate::egir::types::PureOp::Project { index: acc_i as u32 },
                     smallvec![screma_result_nid],
                     accumulator.scratch_type.clone(),
                     None,

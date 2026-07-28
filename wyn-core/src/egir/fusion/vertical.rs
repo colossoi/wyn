@@ -1,112 +1,76 @@
-//! Same-space producer/consumer fusion.
+//! Same-space producer/consumer fusion for canonical Scremas.
 //!
-//! A pure `SegMap` whose result has exactly one semantic consumer is folded
-//! into that consumer by composing callable regions.  The producer and
-//! consumer must be in the same block, and every intervening operation must be
-//! conflict-free according to the semantic dependency graph. This keeps
-//! effect-token splicing explicit while permitting independent bindings.
-//! Multi-consumer producers are left to logical allocation.
+//! A pure map producer can be folded into any downstream Screma by composing
+//! its pre-lambda with the consumer's pre-lambda. This preserves the consumer's
+//! single collective barrier and never reconstructs the former lane graph.
 
-use polytype::Type;
-use smallvec::smallvec;
+use smallvec::SmallVec;
 
-use super::{capture_types, graph_and_span, producer_is_used_only_by};
-use crate::ast::{Span, TypeName};
+use super::screma as fusion_screma;
+use super::{graph_and_span, producer_is_used_only_by};
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, Body, BodySite};
-use crate::egir::program::{fresh_region_name, CoreProgramData, RegionInterner, SemanticFunc};
+use crate::egir::program::CoreProgramData;
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
-use crate::egir::types::{
-    EGraph, NodeId, PureOp, ResourceAccess, SegBody, SegResourceAccess, SegSpace, SideEffectKind,
-    SkeletonTerminator, Soac, SoacEffect, SoacInputType,
-};
+use crate::egir::types::{EGraph, ResourceAccess, SegResourceAccess, SideEffectKind, Soac, SoacEffect};
 use crate::flow::BlockId;
 use crate::LookupMap;
 
 #[derive(Clone)]
-pub(super) struct Candidate {
+pub(crate) struct Candidate {
     site: BodySite,
     block: BlockId,
     producer: usize,
     consumer: usize,
     consumer_inputs: Vec<usize>,
     producer_output: usize,
-    scan_post: bool,
 }
 
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
-    find_candidate(inner, oracle)
-}
-
-fn find_candidate(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
     for (index, entry) in inner.entry_points.iter().enumerate() {
-        if let Some(candidate) = find_in_graph(&entry.graph, &entry.name, BodySite::Entry(index), oracle) {
+        if let Some(candidate) = find_in_graph(&entry.graph, BodySite::Entry(index), oracle) {
             return Some(candidate);
         }
     }
     for function in &inner.functions {
-        if let Some(candidate) = find_in_graph(
-            &function.graph,
-            &function.name,
-            BodySite::Function(function.region),
-            oracle,
-        ) {
+        if let Some(candidate) = find_in_graph(&function.graph, BodySite::Function(function.region), oracle)
+        {
             return Some(candidate);
         }
     }
     None
 }
 
-fn find_in_graph(
-    graph: &EGraph,
-    _scope: &str,
-    site: BodySite,
-    oracle: &SemanticGraph,
-) -> Option<Candidate> {
+fn find_in_graph(graph: &EGraph, site: BodySite, oracle: &SemanticGraph) -> Option<Candidate> {
     for (block_id, block) in &graph.skeleton.blocks {
         for producer_index in 0..block.side_effects.len().saturating_sub(1) {
             let producer = &block.side_effects[producer_index];
-            let SideEffectKind::Soac(SoacEffect(
-                producer_id,
-                Soac::Screma(screma::Op {
-                    lanes: screma::Lanes { maps, .. },
-                    operators,
-                    post_maps,
-                    hidden_scan_outputs,
-                    state:
-                        screma::SemanticState::Segmented {
-                            placement: producer_placement,
-                            output_slots,
-                            resources,
-                            ..
-                        },
-                }),
-            )) = &producer.kind
+            let SideEffectKind::Soac(SoacEffect(producer_id, Soac::Screma(producer_op))) = &producer.kind
             else {
                 continue;
             };
-            let map_producer = operators.is_empty()
-                && !maps.is_empty()
-                && post_maps.is_empty()
-                && maps.iter().all(|map| map.destination.is_unplaced());
-            let scan_post = maps.is_empty()
-                && post_maps.is_empty()
-                && hidden_scan_outputs.is_empty()
-                && operators.len() == 1
-                && operators[0].is_scan()
-                && operators[0].destination.is_unplaced();
-            if (!map_producer && !scan_post)
+            let screma::SemanticState::Segmented {
+                placement,
+                output_slots,
+                resources,
+                ..
+            } = producer_op.semantic_state()
+            else {
+                continue;
+            };
+            if *placement != screma::Placement::LaneLocal
                 || !output_slots.is_empty()
                 || resources.iter().any(|resource| resource.access != ResourceAccess::Read)
+                || producer_op.result_state.iter().any(|result| !result.destination.is_unplaced())
             {
                 continue;
             }
             let Some(producer_result) = producer.result else {
                 continue;
             };
-            if oracle.value_consumer_count(&producer_id) != 1 {
+            if oracle.value_consumer_count(producer_id) != 1 {
                 continue;
             }
 
@@ -124,15 +88,16 @@ fn find_in_graph(
                 else {
                     continue;
                 };
-                if *producer_placement != screma::Placement::LaneLocal {
+                if consumer.result.is_none()
+                    || !fusion_screma::can_fuse_vertical(&producer_op.form, &consumer_op.form)
+                {
                     continue;
                 }
-                let Some(_) = consumer.result else {
-                    continue;
-                };
-                if oracle.conflicts(&producer_id, &consumer_id)
-                    && !matches!((producer.effects, consumer.effects),
-                    (Some((_, producer_out)), Some((consumer_in, _))) if producer_out == consumer_in)
+                if oracle.conflicts(producer_id, consumer_id)
+                    && !matches!(
+                        (producer.effects, consumer.effects),
+                        (Some((_, producer_out)), Some((consumer_in, _))) if producer_out == consumer_in
+                    )
                 {
                     continue;
                 }
@@ -145,48 +110,52 @@ fn find_in_graph(
                 }) {
                     continue;
                 }
-                // Folding P into C moves P's pure computation down to C's
-                // position.  Every intervening semantic op must therefore be free
-                // of ordering conflicts with P; opaque effects remain a
-                // conservative barrier.
                 if !((producer_index + 1)..consumer_index).all(|index| {
                     let effect = &block.side_effects[index];
                     match (&effect.kind, effect.result) {
                         (SideEffectKind::Soac(SoacEffect(intervening, Soac::Screma(_))), Some(_)) => {
-                            !oracle.conflicts(&producer_id, &intervening)
+                            !oracle.conflicts(producer_id, intervening)
                         }
                         _ => effect.effects.is_none(),
                     }
                 }) {
                     continue;
                 }
-                let n_inputs = consumer_op.lanes().inputs.len();
-                let projected: Vec<(usize, usize)> = consumer.operand_nodes[..n_inputs]
+
+                let consumer_input_count = consumer_op.inputs.len();
+                let projected = consumer.operand_nodes[..consumer_input_count]
                     .iter()
                     .enumerate()
                     .filter_map(|(input, &operand)| {
                         graph_ops::projection_index(graph, operand, producer_result)
-                            .map(|output| (input, output))
+                            .map(|field| (input, field))
                     })
-                    .collect();
-                let Some(&(_, producer_output)) = projected.first() else {
+                    .collect::<Vec<_>>();
+                let Some(&(_, producer_field)) = projected.first() else {
                     continue;
                 };
-                let projected_roots: std::collections::HashSet<_> =
-                    projected.iter().map(|(input, _)| consumer.operand_nodes[*input]).collect();
-                if (map_producer && producer_output >= maps.len())
-                    || (scan_post && producer_output != 0)
-                    || (scan_post
-                        && (!consumer_op.is_map()
-                            || consumer_op.has_post_map()
-                            || projected.len() != consumer_op.lanes().inputs.len()
-                            || consumer_op.lanes().maps.iter().any(|map| {
-                                map.input_indices
-                                    .iter()
-                                    .any(|input| !projected.iter().any(|(slot, _)| *slot == input.index()))
-                            })))
-                    || projected.iter().any(|&(_, output)| output != producer_output)
-                    || consumer.referenced_nodes().any(|root| {
+                let Some(screma::ResultId::Post(producer_output)) =
+                    producer_op.form.result_id(producer_field)
+                else {
+                    continue;
+                };
+                let projected_roots = projected
+                    .iter()
+                    .map(|(input, _)| consumer.operand_nodes[*input])
+                    .collect::<std::collections::HashSet<_>>();
+                let semantic_roots = consumer_op
+                    .capture_nodes()
+                    .into_iter()
+                    .chain(consumer_op.form.scans.iter().flat_map(|scan| scan.neutral.iter().copied()))
+                    .chain(
+                        consumer_op
+                            .form
+                            .reductions
+                            .iter()
+                            .flat_map(|reduction| reduction.neutral.iter().copied()),
+                    );
+                if projected.iter().any(|(_, field)| *field != producer_field)
+                    || semantic_roots.into_iter().any(|root| {
                         graph_ops::pure_depends_on(graph, root, producer_result)
                             && !projected_roots.contains(&root)
                     })
@@ -207,7 +176,6 @@ fn find_in_graph(
                     consumer: consumer_index,
                     consumer_inputs: projected.into_iter().map(|(input, _)| input).collect(),
                     producer_output,
-                    scan_post,
                 });
             }
         }
@@ -215,80 +183,87 @@ fn find_in_graph(
     None
 }
 
-#[derive(Clone)]
-struct ProducerParts {
-    space: SegSpace,
-    body: SegBody,
-    source_indices: Vec<screma::InputId>,
-    input_nodes: Vec<NodeId>,
-    inputs: Vec<SoacInputType>,
-    resources: Vec<SegResourceAccess>,
-}
-
-fn apply_scan_post(inner: Segmented, candidate: Candidate) -> Segmented {
-    let graph = graph_and_span(&inner, candidate.site).0;
+pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
+    let (graph, span, scope) = graph_and_span(&inner, candidate.site);
+    let outer_types =
+        graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect::<LookupMap<_, _>>();
     let producer_effect = graph.skeleton.blocks[candidate.block].side_effects[candidate.producer].clone();
     let consumer_effect = graph.skeleton.blocks[candidate.block].side_effects[candidate.consumer].clone();
-    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(mut producer_op))) = producer_effect.kind else {
+    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(producer_op))) = &producer_effect.kind else {
         unreachable!();
     };
-    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(mut consumer_op))) = consumer_effect.kind else {
+    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(consumer_op))) = &consumer_effect.kind else {
         unreachable!();
     };
-    debug_assert!(producer_op.is_scan_only());
-    debug_assert!(consumer_op.is_map());
-    let producer_input_count = producer_op.lanes().inputs.len();
-    let consumer_input_count = consumer_op.lanes().inputs.len();
-    let mut post_maps = std::mem::take(&mut consumer_op.lanes.maps);
-    for map in &mut post_maps {
-        for input in &mut map.input_indices {
-            debug_assert!(candidate.consumer_inputs.contains(&input.index()));
-            *input = screma::InputId(0);
-        }
-        if map.destination.is_unplaced_unique_input() {
-            map.destination.make_fresh();
-        }
-    }
-    producer_op.post_maps = post_maps;
-    producer_op.hidden_scan_outputs = vec![0];
-    let producer_resources = match producer_op.semantic_state() {
-        screma::SemanticState::Segmented { resources, .. } => resources.clone(),
-        screma::SemanticState::Serial => Vec::new(),
-    };
-    let mut fused_state = consumer_op.semantic_state().clone();
-    if let screma::SemanticState::Segmented { space, resources, .. } = &mut fused_state {
-        if let screma::SemanticState::Segmented {
-            space: producer_space,
-            ..
-        } = producer_op.semantic_state()
-        {
-            *space = producer_space.clone();
-        }
-        *resources = SegResourceAccess::merge(resources, &producer_resources);
-    }
-    producer_op.state = fused_state;
 
-    inner.rewrite_body(candidate.site, |body| {
+    let producer_input_count = producer_op.inputs.len();
+    let consumer_input_count = consumer_op.inputs.len();
+    let mut interner = inner.data.region_interner.clone();
+    let mut context = fusion_screma::Context {
+        program: &inner,
+        interner: &mut interner,
+        scope: &scope,
+        span,
+        outer_types: &outer_types,
+    };
+    let normalized = fusion_screma::fuse_vertical(
+        &mut context,
+        fusion_screma::Source {
+            input_nodes: &producer_effect.operand_nodes[..producer_input_count],
+            inputs: &producer_op.inputs,
+            form: &producer_op.form,
+        },
+        fusion_screma::Source {
+            input_nodes: &consumer_effect.operand_nodes[..consumer_input_count],
+            inputs: &consumer_op.inputs,
+            form: &consumer_op.form,
+        },
+        &candidate.consumer_inputs,
+        candidate.producer_output,
+    )
+    .expect("analyzed SuperScrema no longer normalizes");
+    debug_assert!(normalized
+        .outputs
+        .iter()
+        .enumerate()
+        .all(|(field, origin)| { *origin == fusion_screma::OutputOrigin::Consumer(field) }));
+
+    let mut fused_op = consumer_op.clone();
+    fused_op.inputs = normalized.inputs;
+    fused_op.form = normalized.form;
+    let producer_resources = match producer_op.semantic_state() {
+        screma::SemanticState::Segmented { resources, space, .. } => (resources.clone(), space.clone()),
+        screma::SemanticState::Serial => unreachable!(),
+    };
+    let screma::SemanticState::Segmented { space, resources, .. } = fused_op.semantic_state_mut() else {
+        unreachable!();
+    };
+    *space = producer_resources.1;
+    *resources = SegResourceAccess::merge(resources, &producer_resources.0);
+    debug_assert!(
+        fused_op.validate().is_ok(),
+        "invalid vertically fused Screma: {:?}",
+        fused_op.validate()
+    );
+
+    let tail = consumer_effect.operand_nodes[consumer_input_count..].to_vec();
+    let operands = normalized.input_nodes.into_iter().chain(tail).collect::<SmallVec<[_; 4]>>();
+    let synthesized = normalized.synthesized;
+    let site = candidate.site;
+    let rebuilt = inner.rewrite_body(site, |body| {
         let rewrite = |graph: &mut EGraph| {
             let block = &mut graph.skeleton.blocks[candidate.block];
-            let fused_effects = splice_effect_tokens(
+            let effects = splice_effect_tokens(
                 block.side_effects[candidate.producer].effects,
                 block.side_effects[candidate.consumer].effects,
             );
-            let producer_inputs =
-                block.side_effects[candidate.producer].operand_nodes[..producer_input_count].to_vec();
-            let consumer_tail =
-                block.side_effects[candidate.consumer].operand_nodes[consumer_input_count..].to_vec();
             let consumer = &mut block.side_effects[candidate.consumer];
-            consumer.kind = SideEffectKind::Soac(SoacEffect(
-                match &consumer.kind {
-                    SideEffectKind::Soac(SoacEffect(id, _)) => *id,
-                    _ => unreachable!(),
-                },
-                Soac::Screma(producer_op.clone()),
-            ));
-            consumer.operand_nodes = producer_inputs.into_iter().chain(consumer_tail).collect();
-            consumer.effects = fused_effects;
+            let SideEffectKind::Soac(SoacEffect(id, _)) = consumer.kind else {
+                unreachable!();
+            };
+            consumer.kind = SideEffectKind::Soac(SoacEffect(id, Soac::Screma(fused_op.clone())));
+            consumer.operand_nodes = operands.clone();
+            consumer.effects = effects;
             block.side_effects.remove(candidate.producer);
         };
         match body {
@@ -302,593 +277,9 @@ fn apply_scan_post(inner: Segmented, candidate: Candidate) -> Segmented {
             }
             Body::Constant(_) => unreachable!("vertical fusion never targets constants"),
         }
-    })
-}
-pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
-    if candidate.scan_post {
-        return apply_scan_post(inner, candidate);
-    }
-    let (graph, span, scope) = graph_and_span(&inner, candidate.site);
-    let outer_types = graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect();
-    let producer_effect = graph.skeleton.blocks[candidate.block].side_effects[candidate.producer].clone();
-    let consumer_effect = graph.skeleton.blocks[candidate.block].side_effects[candidate.consumer].clone();
-
-    let SideEffectKind::Soac(SoacEffect(
-        _,
-        Soac::Screma(screma::Op {
-            lanes: producer_lanes,
-            operators: _,
-            post_maps: _,
-            hidden_scan_outputs: _,
-            state: screma::SemanticState::Segmented { resources, space, .. },
-        }),
-    )) = producer_effect.kind
-    else {
-        unreachable!();
-    };
-    let producer_input_count = producer_lanes.inputs.len();
-    let producer_map = &producer_lanes.maps[candidate.producer_output];
-    let source_indices = producer_map.input_indices.clone();
-    let producer = ProducerParts {
-        space,
-        body: producer_map.body.clone(),
-        source_indices: source_indices.clone(),
-        input_nodes: source_indices
-            .iter()
-            .map(|index| producer_effect.operand_nodes[index.index()])
-            .collect(),
-        inputs: source_indices.iter().map(|index| producer_lanes.inputs[index.index()].clone()).collect(),
-        resources,
-    };
-    debug_assert!(producer_input_count >= producer.source_indices.len());
-
-    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(mut consumer_op))) = consumer_effect.kind else {
-        unreachable!();
-    };
-    let old_input_count = consumer_op.lanes().inputs.len();
-    let mut new_inputs = consumer_op.lanes().inputs.clone();
-    for &input in candidate.consumer_inputs.iter().rev() {
-        new_inputs.remove(input);
-    }
-    new_inputs.extend(producer.inputs.iter().cloned());
-    let new_elem_types = new_inputs.iter().map(SoacInputType::element).collect::<Vec<_>>();
-    let appended_base = old_input_count - candidate.consumer_inputs.len();
-
-    let mut new_maps = consumer_op.lanes().maps.clone();
-    let mut synthesized = Vec::new();
-    let mut region_interner = inner.data.region_interner.clone();
-    for (lane, map) in new_maps.iter_mut().enumerate() {
-        let body = map.body.clone();
-        let indices = map.input_indices.clone();
-        let mut rebased = Vec::new();
-        for &index in &indices {
-            if candidate.consumer_inputs.contains(&index.index()) {
-                rebased.extend(
-                    (0..producer.inputs.len()).map(|offset| screma::InputId(appended_base + offset)),
-                );
-            } else {
-                rebased.push(rebase_after_removals(index, &candidate.consumer_inputs));
-            }
-        }
-        if indices.iter().any(|index| candidate.consumer_inputs.contains(&index.index())) {
-            let (new_body, function) = compose_map_region(
-                &inner,
-                &mut region_interner,
-                &scope,
-                span,
-                lane,
-                &producer,
-                &body,
-                &indices,
-                &rebased,
-                &candidate.consumer_inputs,
-                &new_elem_types,
-                &outer_types,
-            );
-            map.body = new_body;
-            synthesized.push(function);
-            if map.destination.is_unplaced_unique_input()
-                && indices.first().is_some_and(|index| candidate.consumer_inputs.contains(&index.index()))
-            {
-                map.destination.make_fresh();
-            }
-        }
-        map.input_indices = rebased;
-    }
-
-    for (operator_index, operator) in consumer_op.operators_mut().into_iter().enumerate() {
-        let old_indices = operator.input_indices.clone();
-        let mut rebased = Vec::new();
-        for &index in &old_indices {
-            if candidate.consumer_inputs.contains(&index.index()) {
-                rebased.extend(
-                    (0..producer.inputs.len()).map(|offset| screma::InputId(appended_base + offset)),
-                );
-            } else {
-                rebased.push(rebase_after_removals(index, &candidate.consumer_inputs));
-            }
-        }
-        if old_indices.iter().any(|index| candidate.consumer_inputs.contains(&index.index())) {
-            let (step, function) = compose_step_region(
-                &inner,
-                &mut region_interner,
-                &scope,
-                span,
-                operator_index,
-                &producer,
-                operator,
-                &old_indices,
-                &rebased,
-                &candidate.consumer_inputs,
-                &new_elem_types,
-                &outer_types,
-            );
-            operator.step = step;
-            synthesized.push(function);
-            if operator.destination.is_unplaced_unique_input()
-                && old_indices
-                    .first()
-                    .is_some_and(|index| candidate.consumer_inputs.contains(&index.index()))
-            {
-                operator.destination.make_fresh();
-            }
-        }
-        operator.input_indices = rebased;
-    }
-
-    let site = candidate.site;
-    let rebuilt = inner.rewrite_body(site, |body| {
-        let mut rewrite_graph = |graph: &mut EGraph| {
-            let block = &mut graph.skeleton.blocks[candidate.block];
-            let producer_effects = block.side_effects[candidate.producer].effects;
-            let consumer_effects = block.side_effects[candidate.consumer].effects;
-            // Legality above ensures that every intervening effect is token-free, so
-            // the producer/consumer token endpoints can be spliced exactly as for an
-            // adjacent pair.
-            let fused_effects = splice_effect_tokens(producer_effects, consumer_effects);
-            let consumer = &mut block.side_effects[candidate.consumer];
-            let tail = consumer.operand_nodes[old_input_count..].to_vec();
-            let mut operands = consumer.operand_nodes[..old_input_count].to_vec();
-            for &input in candidate.consumer_inputs.iter().rev() {
-                operands.remove(input);
-            }
-            operands.extend(producer.input_nodes.iter().copied());
-            operands.extend(tail);
-            consumer.operand_nodes = operands.into();
-            if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut consumer.kind {
-                consumer_op.lanes_mut().maps = new_maps.clone();
-                consumer_op.lanes_mut().inputs = new_inputs.clone();
-                let screma::SemanticState::Segmented { space, resources, .. } =
-                    consumer_op.semantic_state_mut()
-                else {
-                    unreachable!();
-                };
-                *space = producer.space.clone();
-                *resources = SegResourceAccess::merge(resources, &producer.resources);
-                *op = consumer_op.clone();
-            }
-            consumer.effects = fused_effects;
-            block.side_effects.remove(candidate.producer);
-        };
-        match body {
-            Body::Entry(mut entry) => {
-                rewrite_graph(&mut entry.graph);
-                Body::Entry(entry)
-            }
-            Body::Function(mut function) => {
-                rewrite_graph(&mut function.graph);
-                Body::Function(function)
-            }
-            Body::Constant(_) => unreachable!("vertical fusion never targets constants"),
-        }
     });
     rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
-        region_interner,
+        region_interner: interner,
         ..data
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compose_map_region(
-    inner: &Segmented,
-    region_interner: &mut RegionInterner,
-    scope: &str,
-    span: Span,
-    lane: usize,
-    producer: &ProducerParts,
-    consumer: &SegBody,
-    old_indices: &[screma::InputId],
-    new_indices: &[screma::InputId],
-    replaced_inputs: &[usize],
-    new_elem_types: &[Type<TypeName>],
-    outer_types: &LookupMap<NodeId, Type<TypeName>>,
-) -> (SegBody, SemanticFunc) {
-    let element_types: Vec<_> =
-        new_indices.iter().map(|index| new_elem_types[index.index()].clone()).collect();
-    let capture_types = capture_types(
-        outer_types,
-        producer.body.captures.iter().chain(&consumer.captures),
-    );
-    let mut params: Vec<(Type<TypeName>, String)> = element_types
-        .iter()
-        .enumerate()
-        .map(|(index, ty)| (ty.clone(), format!("element_{index}")))
-        .collect();
-    params.extend(
-        capture_types.iter().enumerate().map(|(index, ty)| (ty.clone(), format!("capture_{index}"))),
-    );
-    let (producer_name, producer_return_ty) = {
-        let region = inner.region(producer.body.region).expect("producer region");
-        (region.name.clone(), region.return_ty.clone())
-    };
-    let (consumer_name, consumer_return_ty) = {
-        let region = inner.region(consumer.region).expect("consumer region");
-        (region.name.clone(), region.return_ty.clone())
-    };
-    let mut graph = EGraph::new();
-    let args: Vec<_> =
-        params.iter().enumerate().map(|(index, (ty, _))| graph.add_func_param(index, ty.clone())).collect();
-    let element_count = element_types.len();
-    let producer_capture_start = element_count;
-    let consumer_capture_start = producer_capture_start + producer.body.captures.len();
-    let mut cursor = 0;
-    let mut producer_elements = None;
-    let mut consumer_elements = Vec::with_capacity(old_indices.len());
-    for &index in old_indices {
-        if replaced_inputs.contains(&index.index()) {
-            let end = cursor + producer.inputs.len();
-            if producer_elements.is_none() {
-                producer_elements = Some(args[cursor..end].to_vec());
-            }
-            cursor = end;
-            consumer_elements.push(NodeId::default());
-        } else {
-            consumer_elements.push(args[cursor]);
-            cursor += 1;
-        }
-    }
-    let mut producer_args: smallvec::SmallVec<[NodeId; 4]> =
-        producer_elements.expect("composed map body consumes producer output").into_iter().collect();
-    producer_args.extend(args[producer_capture_start..consumer_capture_start].iter().copied());
-    let produced = graph.intern_pure(
-        PureOp::Call(producer_name),
-        producer_args,
-        producer_return_ty,
-        None,
-    );
-    for (position, &index) in old_indices.iter().enumerate() {
-        if replaced_inputs.contains(&index.index()) {
-            consumer_elements[position] = produced;
-        }
-    }
-    let mut consumer_args: smallvec::SmallVec<[NodeId; 4]> = consumer_elements.into_iter().collect();
-    consumer_args.extend(args[consumer_capture_start..].iter().copied());
-    let result = graph.intern_pure(
-        PureOp::Call(consumer_name),
-        consumer_args,
-        consumer_return_ty.clone(),
-        None,
-    );
-    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
-    let name = fresh_region_name(region_interner, &format!("{scope}_vertical_map_{lane}"));
-    let region = region_interner.intern(&name);
-    let function = SemanticFunc::new(region, name, span, None, params, consumer_return_ty, graph);
-    (
-        SegBody {
-            region,
-            captures: producer.body.captures.iter().chain(&consumer.captures).copied().collect(),
-        },
-        function,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compose_step_region(
-    inner: &Segmented,
-    region_interner: &mut RegionInterner,
-    scope: &str,
-    span: Span,
-    operator_index: usize,
-    producer: &ProducerParts,
-    operator: &screma::Operator,
-    old_indices: &[screma::InputId],
-    new_indices: &[screma::InputId],
-    replaced_inputs: &[usize],
-    new_elem_types: &[Type<TypeName>],
-    outer_types: &LookupMap<NodeId, Type<TypeName>>,
-) -> (SegBody, SemanticFunc) {
-    let (producer_name, producer_return_ty) = {
-        let region = inner.region(producer.body.region).expect("producer region");
-        (region.name.clone(), region.return_ty.clone())
-    };
-    let (consumer_name, consumer_return_ty, accumulator_ty) = {
-        let region = inner.region(operator.step.region).expect("consumer region");
-        (
-            region.name.clone(),
-            region.return_ty.clone(),
-            region.params[0].0.clone(),
-        )
-    };
-    let capture_types = capture_types(
-        outer_types,
-        producer.body.captures.iter().chain(&operator.step.captures),
-    );
-    let mut params = vec![(accumulator_ty, "accumulator".to_string())];
-    let element_types: Vec<_> =
-        new_indices.iter().map(|index| new_elem_types[index.index()].clone()).collect();
-    params.extend(
-        element_types.iter().enumerate().map(|(index, ty)| (ty.clone(), format!("element_{index}"))),
-    );
-    params.extend(
-        capture_types.iter().enumerate().map(|(index, ty)| (ty.clone(), format!("capture_{index}"))),
-    );
-    let mut graph = EGraph::new();
-    let args: Vec<_> =
-        params.iter().enumerate().map(|(index, (ty, _))| graph.add_func_param(index, ty.clone())).collect();
-    let producer_capture_start = 1 + element_types.len();
-    let consumer_capture_start = producer_capture_start + producer.body.captures.len();
-    let mut cursor = 1;
-    let mut producer_elements = None;
-    let mut consumer_elements = Vec::with_capacity(old_indices.len());
-    for &index in old_indices {
-        if replaced_inputs.contains(&index.index()) {
-            let end = cursor + producer.inputs.len();
-            if producer_elements.is_none() {
-                producer_elements = Some(args[cursor..end].to_vec());
-            }
-            cursor = end;
-            consumer_elements.push(NodeId::default());
-        } else {
-            consumer_elements.push(args[cursor]);
-            cursor += 1;
-        }
-    }
-    let mut producer_args: smallvec::SmallVec<[NodeId; 4]> =
-        producer_elements.expect("composed accumulator consumes producer output").into_iter().collect();
-    producer_args.extend(args[producer_capture_start..consumer_capture_start].iter().copied());
-    let produced = graph.intern_pure(
-        PureOp::Call(producer_name),
-        producer_args,
-        producer_return_ty,
-        None,
-    );
-    let mut consumer_args = smallvec![args[0]];
-    for (position, &index) in old_indices.iter().enumerate() {
-        if replaced_inputs.contains(&index.index()) {
-            consumer_elements[position] = produced;
-        }
-    }
-    consumer_args.extend(consumer_elements);
-    consumer_args.extend(args[consumer_capture_start..].iter().copied());
-    let result = graph.intern_pure(
-        PureOp::Call(consumer_name),
-        consumer_args,
-        consumer_return_ty.clone(),
-        None,
-    );
-    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
-    let name = fresh_region_name(
-        region_interner,
-        &format!("{scope}_vertical_step_{operator_index}"),
-    );
-    let region = region_interner.intern(&name);
-    let function = SemanticFunc::new(region, name, span, None, params, consumer_return_ty, graph);
-    (
-        SegBody {
-            region,
-            captures: producer.body.captures.iter().chain(&operator.step.captures).copied().collect(),
-        },
-        function,
-    )
-}
-
-fn rebase_after_removals(index: screma::InputId, removed: &[usize]) -> screma::InputId {
-    screma::InputId(
-        index.index() - removed.iter().filter(|&&removed_index| removed_index < index.index()).count(),
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::egir::program::{semantic_program_for_test, RegionInterner, SemanticEntry, SemanticOpId};
-    use crate::egir::semantic_exec::{RegionExecutor, Value};
-    use crate::egir::types::{EffectToken, RegionId, SegExtent, SideEffect, SoacDestination};
-    use crate::flow::ExecutionModel;
-
-    fn captured_binary_function(name: &str, op: &str) -> SemanticFunc {
-        let int = Type::Constructed(TypeName::Int(32), vec![]);
-        let mut graph = EGraph::new();
-        let left = graph.add_func_param(0, int.clone());
-        let right = graph.add_func_param(1, int.clone());
-        let result = graph.intern_pure(
-            PureOp::BinOp(op.into()),
-            smallvec![left, right],
-            int.clone(),
-            None,
-        );
-        graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
-        SemanticFunc::new(
-            RegionId::from_index(0),
-            name.into(),
-            Span::new(0, 0, 0, 0),
-            None,
-            vec![(int.clone(), "x".into()), (int.clone(), "capture".into())],
-            int,
-            graph,
-        )
-    }
-
-    #[test]
-    fn map_producer_and_map_consumer_compose_regions_value_exactly() {
-        let int = Type::Constructed(TypeName::Int(32), vec![]);
-        let array = Type::Constructed(
-            TypeName::Array,
-            vec![
-                int.clone(),
-                Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
-                Type::Constructed(TypeName::Size(8), vec![]),
-                Type::Constructed(TypeName::NoBuffer, vec![]),
-            ],
-        );
-        let tuple = Type::Constructed(TypeName::Tuple(1), vec![array.clone()]);
-        let producer_fn = captured_binary_function("producer", "+");
-        let consumer_fn = captured_binary_function("consumer", "*");
-        let mut interner = RegionInterner::default();
-        let producer_region = interner.intern("producer");
-        let consumer_region = interner.intern("consumer");
-        let mut graph = EGraph::new();
-        let input = graph.add_func_param(0, array.clone());
-        let producer_capture = graph.intern_pure(PureOp::Int("1".into()), smallvec![], int.clone(), None);
-        let consumer_capture = graph.intern_pure(PureOp::Int("2".into()), smallvec![], int.clone(), None);
-        let producer_result = graph.alloc_side_effect_result(tuple.clone());
-        graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
-            kind: SideEffectKind::Soac(SoacEffect(
-                SemanticOpId::for_test(0),
-                Soac::Screma(screma::Op {
-                    lanes: screma::Lanes {
-                        inputs: vec![SoacInputType { array: array.clone() }],
-                        maps: vec![screma::Map {
-                            body: SegBody {
-                                region: producer_region,
-                                captures: vec![producer_capture],
-                            },
-                            input_indices: vec![screma::InputId(0)],
-                            output_element_type: int.clone(),
-                            destination: SoacDestination::fresh(),
-                            result_type: array.clone(),
-                        }],
-                    },
-                    operators: Vec::new(),
-                    post_maps: Vec::new(),
-                    hidden_scan_outputs: Vec::new(),
-                    state: screma::SemanticState::Segmented {
-                        space: SegSpace::new(SegExtent::Fixed(8)),
-                        placement: screma::Placement::LaneLocal,
-                        output_slots: vec![],
-                        resources: vec![],
-                    },
-                }),
-            )),
-            operand_nodes: smallvec![input],
-            result: Some(producer_result),
-            effects: Some((EffectToken::from(0), EffectToken::from(1))),
-            span: None,
-        });
-        let projected = graph.intern_pure(
-            PureOp::Project { index: 0 },
-            smallvec![producer_result],
-            array.clone(),
-            None,
-        );
-        // A token-free independent operation may sit between producer and
-        // consumer. F3 must use the dependency oracle rather than requiring
-        // textual adjacency.
-        let unrelated_result = graph.alloc_side_effect_result(tuple.clone());
-        let mut unrelated = graph.skeleton.blocks[graph.skeleton.entry].side_effects[0].clone();
-        let SideEffectKind::Soac(SoacEffect(id, _)) = &mut unrelated.kind else {
-            unreachable!();
-        };
-        *id = SemanticOpId::for_test(1);
-        unrelated.result = Some(unrelated_result);
-        unrelated.effects = None;
-        graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(unrelated);
-        let consumer_result = graph.alloc_side_effect_result(tuple.clone());
-        graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
-            kind: SideEffectKind::Soac(SoacEffect(
-                SemanticOpId::for_test(2),
-                Soac::Screma(screma::Op {
-                    lanes: screma::Lanes {
-                        inputs: vec![SoacInputType { array: array.clone() }],
-                        maps: vec![screma::Map {
-                            body: SegBody {
-                                region: consumer_region,
-                                captures: vec![consumer_capture],
-                            },
-                            input_indices: vec![screma::InputId(0)],
-                            output_element_type: int,
-                            destination: SoacDestination::fresh(),
-                            result_type: array.clone(),
-                        }],
-                    },
-                    operators: Vec::new(),
-                    post_maps: Vec::new(),
-                    hidden_scan_outputs: Vec::new(),
-                    state: screma::SemanticState::Segmented {
-                        space: SegSpace::new(SegExtent::Fixed(8)),
-                        placement: screma::Placement::LaneLocal,
-                        output_slots: vec![],
-                        resources: vec![],
-                    },
-                }),
-            )),
-            operand_nodes: smallvec![projected],
-            result: Some(consumer_result),
-            effects: Some((EffectToken::from(1), EffectToken::from(2))),
-            span: None,
-        });
-        let output = graph.intern_pure(
-            PureOp::Project { index: 0 },
-            smallvec![consumer_result],
-            array.clone(),
-            None,
-        );
-        graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(output));
-        let entry = SemanticEntry::new_with_resources(
-            "entry".into(),
-            Span::new(0, 0, 0, 0),
-            ExecutionModel::Compute {
-                local_size: (64, 1, 1),
-            },
-            vec![],
-            vec![],
-            vec![],
-            vec![(array, "xs".into())],
-            tuple,
-            graph,
-        );
-        let inner = semantic_program_for_test(
-            vec![producer_fn, consumer_fn],
-            vec![],
-            vec![entry],
-            vec![],
-            Default::default(),
-            interner,
-        );
-        let dependencies = crate::egir::semantic_graph::dependencies(&inner);
-        let oracle = SemanticGraph::new(&dependencies);
-        let candidate = analyze(&inner, &oracle).expect("vertical fusion candidate");
-        let inner = apply(inner, candidate);
-        let block =
-            &inner.entry_points[0].graph.skeleton.blocks[inner.entry_points[0].graph.skeleton.entry];
-        assert_eq!(block.side_effects.len(), 2);
-        assert_eq!(block.side_effects[0].result, Some(unrelated_result));
-        assert_eq!(
-            block.side_effects[1].effects,
-            Some((EffectToken::from(0), EffectToken::from(2)))
-        );
-        let effect = &block.side_effects[1];
-        let SideEffectKind::Soac(SoacEffect(id, Soac::Screma(op))) = &effect.kind else {
-            panic!("one fused SegMap")
-        };
-        assert_eq!(
-            *id,
-            SemanticOpId::for_test(2),
-            "fusion keeps the consumer's semantic identity"
-        );
-        let executor = RegionExecutor::new(&inner);
-        assert_eq!(
-            executor
-                .call(
-                    &op.lanes().maps[0].body.region,
-                    &[Value::Int(3), Value::Int(1), Value::Int(2)],
-                )
-                .unwrap(),
-            Value::Int(8)
-        );
-        assert_eq!(
-            op.lanes().maps[0].body.captures,
-            [producer_capture, consumer_capture]
-        );
-    }
 }

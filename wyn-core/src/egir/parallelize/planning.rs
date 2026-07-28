@@ -81,6 +81,7 @@ impl RecipeTargets {
                     SideEffectKind::Soac(SoacEffect(_, Soac::Filter(_))) => targets.filters.push(site),
                     SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                         let capabilities = ScremaRecipeCapabilities::analyze(op);
+
                         match op.semantic_state() {
                             screma::SemanticState::Segmented {
                                 placement: screma::Placement::Kernel,

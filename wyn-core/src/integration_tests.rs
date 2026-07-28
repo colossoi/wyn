@@ -183,11 +183,19 @@ entry mixed() [4]i32 =
             if !op.is_map() {
                 return None;
             }
-            Some((op.inputs.len(), op.form.pre.parameter_types.len()))
+            Some((
+                op.inputs.len(),
+                op.form.pre.parameter_types.len(),
+                op.form.post.result_types.len(),
+            ))
         })
         .collect();
     assert_eq!(maps.len(), 1, "the producer should compose into the zip consumer");
-    assert_eq!(maps[0].1, 1, "the fused consumer keeps one output lane");
+    assert_eq!(
+        maps[0].0, maps[0].1,
+        "the canonical pre-lambda has one parameter per array input"
+    );
+    assert_eq!(maps[0].2, 1, "the fused consumer keeps one output lane");
 }
 
 #[test]
@@ -568,12 +576,7 @@ entry e() [4]f32 =
         })
         .count();
     assert_eq!(remaining_maps, 0, "the single-consumer map is vertically fused");
-    assert_eq!(
-        allocated.functions.iter().filter(|function| function.name.contains("_vertical_step_")).count(),
-        4,
-        "one composed step region per accumulator"
-    );
-    let operators = allocated
+    let (pre, operators) = allocated
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
@@ -581,9 +584,13 @@ entry e() [4]f32 =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            op.is_reduce().then_some(op.form.reductions.as_slice())
+            op.is_reduce().then_some((&op.form.pre, op.form.reductions.as_slice()))
         })
         .expect("fused SegRed");
+    assert!(
+        !pre.is_identity(),
+        "all elementwise producer work belongs in the fused Screma pre-lambda"
+    );
     for operator in operators {
         assert_eq!(
             allocated.region(operator.operator.seg_body().unwrap().region).unwrap().params.len(),
@@ -7211,7 +7218,10 @@ entry pair(xs: []f32) ([]f32, []f32) =
 "#;
     let stats = semantic_soac_stats(&compile_to_semantic_egir(src));
     assert_eq!(stats.seg_maps, 1, "equal-domain sibling maps should co-schedule");
-    assert_eq!(stats.map_bodies, 2, "both pointwise bodies must share the SegMap");
+    assert_eq!(
+        stats.map_bodies, 1,
+        "the sibling bodies are composed into one canonical pre-lambda"
+    );
 
     let program = compile_to_ssa(src);
     let thread_id_builtin = catalog().known().thread_id;

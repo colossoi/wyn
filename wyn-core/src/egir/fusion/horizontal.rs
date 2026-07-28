@@ -1,39 +1,39 @@
-//! Same-space horizontal fusion: merge sibling SegOps over an equal iteration
-//! space into one multi-output SegOp so a single kernel produces several
-//! outputs. This is the structural inverse of `split_multidomain_seg_maps` and
-//! the rewrite that retires the ad-hoc multi-reduce demotion guard.
+//! Same-space horizontal fusion for canonical Scremas.
 //!
-//! One fusion per call: the driver rebuilds the dependency DAG and re-invokes,
-//! so the legality oracle is never stale.
+//! Sibling Scremas are fused by composing their complete pre/post lambdas.  The
+//! wrapper lambdas perform the canonical scan/reduction/map partitioning and
+//! result reordering; no legacy lane graph is reconstructed.
 
 use polytype::Type;
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 
+use super::graph_and_span;
+use super::screma as fusion_screma;
 use super::space::seg_space_fusable;
-use crate::ast::TypeName;
+use crate::ast::{Span, TypeName};
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, Body, BodySite};
-use crate::egir::program::OutputSlotId;
+use crate::egir::program::{CoreProgramData, OutputSlotId, RegionInterner, SemanticFunc};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
 use crate::egir::types::{
-    EGraph, NodeId, PureOp, SegResourceAccess, SideEffectKind, Soac, SoacEffect, SoacInputType,
+    EGraph, NodeId, PureOp, SegResourceAccess, Semantic, SideEffectKind, Soac, SoacEffect,
 };
 use crate::flow::BlockId;
+use crate::LookupMap;
 
 #[derive(Clone, Copy)]
-pub(super) struct Candidate {
+pub(crate) struct Candidate {
     site: BodySite,
     block: BlockId,
     left: usize,
     right: usize,
 }
 
-/// Find one legal sibling pair anywhere in the program.
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
     for (index, entry) in inner.entry_points.iter().enumerate() {
-        if let Some((block, left, right)) = find_in_graph(&entry.graph, &entry.name, oracle) {
+        if let Some((block, left, right)) = find_in_graph(&entry.graph, oracle) {
             return Some(Candidate {
                 site: BodySite::Entry(index),
                 block,
@@ -43,7 +43,7 @@ pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candi
         }
     }
     for function in &inner.functions {
-        if let Some((block, left, right)) = find_in_graph(&function.graph, &function.name, oracle) {
+        if let Some((block, left, right)) = find_in_graph(&function.graph, oracle) {
             return Some(Candidate {
                 site: BodySite::Function(function.region),
                 block,
@@ -55,16 +55,16 @@ pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candi
     None
 }
 
-fn find_in_graph(graph: &EGraph, scope: &str, oracle: &SemanticGraph) -> Option<(BlockId, usize, usize)> {
+fn find_in_graph(graph: &EGraph, oracle: &SemanticGraph) -> Option<(BlockId, usize, usize)> {
     for (block_id, block) in &graph.skeleton.blocks {
-        let segs: Vec<usize> = (0..block.side_effects.len())
-            .filter(|&i| is_fusable_seg(&block.side_effects[i].kind))
-            .collect();
-        for a in 0..segs.len() {
-            for b in (a + 1)..segs.len() {
-                let (i, j) = (segs[a], segs[b]);
-                if sibling_fusable(graph, block_id, i, j, scope, oracle) {
-                    return Some((block_id, i, j));
+        let scremas = (0..block.side_effects.len())
+            .filter(|&index| is_segmented_screma(&block.side_effects[index].kind))
+            .collect::<Vec<_>>();
+        for left in 0..scremas.len() {
+            for right in (left + 1)..scremas.len() {
+                let pair = (scremas[left], scremas[right]);
+                if sibling_fusable(graph, block_id, pair.0, pair.1, oracle) {
+                    return Some((block_id, pair.0, pair.1));
                 }
             }
         }
@@ -72,276 +72,141 @@ fn find_in_graph(graph: &EGraph, scope: &str, oracle: &SemanticGraph) -> Option<
     None
 }
 
-pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
-    inner.rewrite_body(candidate.site, |body| {
-        let rewrite_graph = |graph: &mut EGraph| {
-            fuse_pair(graph, candidate.block, candidate.left, candidate.right);
-        };
-        match body {
-            Body::Entry(mut entry) => {
-                rewrite_graph(&mut entry.graph);
-                Body::Entry(entry)
-            }
-            Body::Function(mut function) => {
-                rewrite_graph(&mut function.graph);
-                Body::Function(function)
-            }
-            Body::Constant(_) => unreachable!("horizontal fusion never targets constants"),
-        }
-    })
+fn is_segmented_screma(kind: &SideEffectKind) -> bool {
+    matches!(
+        kind,
+        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
+            if matches!(op.semantic_state(), screma::SemanticState::Segmented { .. })
+    )
 }
 
-fn is_fusable_seg(kind: &SideEffectKind) -> bool {
-    matches!(kind, SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if matches!(op.semantic_state(), screma::SemanticState::Segmented { .. }))
-}
-
-/// Legality: equal space, compatible placement, no resource/effect conflict, and
-/// not a producer/consumer chain (that is vertical fusion's job).
 fn sibling_fusable(
     graph: &EGraph,
     block_id: BlockId,
-    i: usize,
-    j: usize,
-    _scope: &str,
+    left: usize,
+    right: usize,
     oracle: &SemanticGraph,
 ) -> bool {
     let block = &graph.skeleton.blocks[block_id];
-    let effect_i = &block.side_effects[i];
-    let effect_j = &block.side_effects[j];
-    let (SideEffectKind::Soac(SoacEffect(op_i_id, Soac::Screma(op_i))), Some(_)) =
-        (&effect_i.kind, effect_i.result)
+    let left_effect = &block.side_effects[left];
+    let right_effect = &block.side_effects[right];
+    let (SideEffectKind::Soac(SoacEffect(left_id, Soac::Screma(left_op))), Some(_)) =
+        (&left_effect.kind, left_effect.result)
+    else {
+        return false;
+    };
+    let (SideEffectKind::Soac(SoacEffect(right_id, Soac::Screma(right_op))), Some(_)) =
+        (&right_effect.kind, right_effect.result)
     else {
         return false;
     };
     let screma::SemanticState::Segmented {
-        space: sp_i,
-        placement: pl_i,
+        space: left_space,
+        placement: _,
         ..
-    } = op_i.semantic_state()
-    else {
-        return false;
-    };
-    let (SideEffectKind::Soac(SoacEffect(op_j_id, Soac::Screma(op_j))), Some(_)) =
-        (&effect_j.kind, effect_j.result)
+    } = left_op.semantic_state()
     else {
         return false;
     };
     let screma::SemanticState::Segmented {
-        space: sp_j,
-        placement: pl_j,
+        space: right_space,
+        placement: _,
         ..
-    } = op_j.semantic_state()
+    } = right_op.semantic_state()
     else {
         return false;
     };
-    // A shared input value or a shared symbolic size is also a proof of equal
-    // dynamic extent, even when the two length expressions were not hash-consed.
-    // Independently-authored `[]T` parameters receive distinct skolems during
-    // type checking, while `[n]` parameters intentionally share one.
-    let shared_input = effect_i
-        .operand_nodes
-        .first()
-        .zip(effect_j.operand_nodes.first())
-        .is_some_and(|(left, right)| left == right);
-    let shared_size = op_i
-        .lanes()
-        .inputs
-        .first()
-        .and_then(|input| crate::types::array_size(&input.array))
-        .zip(op_j.lanes().inputs.first().and_then(|input| crate::types::array_size(&input.array)))
-        .is_some_and(|(left, right)| left == right);
-    let symbolic_domain_matches = shared_input || shared_size;
-    if op_i.has_post_map()
-        || op_j.has_post_map()
-        || pl_i != pl_j
-        || (!seg_space_fusable(sp_i, sp_j) && !symbolic_domain_matches)
-    {
+
+    let left_inputs = &left_effect.operand_nodes[..left_op.inputs.len()];
+    let right_inputs = &right_effect.operand_nodes[..right_op.inputs.len()];
+    let shared_input = left_inputs.iter().any(|node| right_inputs.contains(node));
+    let shared_size = left_op.inputs.iter().any(|left| {
+        crate::types::array_size(&left.array).is_some_and(|left_size| {
+            right_op
+                .inputs
+                .iter()
+                .filter_map(|right| crate::types::array_size(&right.array))
+                .any(|right_size| right_size == left_size)
+        })
+    });
+    if !seg_space_fusable(left_space, right_space) && !shared_input && !shared_size {
         return false;
     }
-    let has_scan = op_i.operators().iter().any(screma::Operator::is_scan)
-        || op_j.operators().iter().any(screma::Operator::is_scan);
-    let has_reduce = op_i.operators().iter().any(|operator| !operator.is_scan())
-        || op_j.operators().iter().any(|operator| !operator.is_scan());
+
+    let has_scan = !left_op.form.scans.is_empty() || !right_op.form.scans.is_empty();
+    let has_reduce = !left_op.form.reductions.is_empty() || !right_op.form.reductions.is_empty();
     if has_scan
         && has_reduce
-        && (oracle.value_consumer_count(op_i_id) != 0 || oracle.value_consumer_count(op_j_id) != 0)
+        && (oracle.value_consumer_count(left_id) != 0 || oracle.value_consumer_count(right_id) != 0)
     {
-        // A mixed result has fields with different residency: reductions are
-        // scalar while scans are arrays. Keep a downstream-consumed sibling
-        // separate until result residency can materialize fields independently.
         return false;
     }
-    let (op_i, op_j) = (*op_i_id, *op_j_id);
-    // A value edge either way makes them a producer/consumer chain (handled by
-    // vertical EGIR fusion), never fusable siblings.
-    if oracle.reachable_between(&op_i, &op_j) || oracle.reachable_between(&op_j, &op_i) {
+
+    if oracle.reachable_between(left_id, right_id) || oracle.reachable_between(right_id, left_id) {
         return false;
     }
-    // Fusing performs P's effects then Q's, in order, so a P–Q resource conflict
-    // (e.g. both writing fields of one aggregate output) is *not* blocking.
-    // Moving Q up past an *intervening* op is, though, if that op aliases P or Q:
-    // require every op strictly between them to be conflict-free. A non-Seg
-    // effectful op (not summarized in the DAG) is treated conservatively as a
-    // possible aliaser.
-    ((i + 1)..j).all(|k| {
-        let effect = &block.side_effects[k];
+
+    ((left + 1)..right).all(|index| {
+        let effect = &block.side_effects[index];
         match (&effect.kind, effect.result) {
-            (SideEffectKind::Soac(SoacEffect(op_k, Soac::Screma(_))), Some(_)) => {
-                !oracle.conflicts(&op_k, &op_i) && !oracle.conflicts(&op_k, &op_j)
+            (SideEffectKind::Soac(SoacEffect(id, Soac::Screma(_))), Some(_)) => {
+                !oracle.conflicts(id, left_id) && !oracle.conflicts(id, right_id)
             }
             _ => effect.effects.is_none(),
         }
     })
 }
 
-/// Merge the Seg at `j` into the Seg at `i`, remove `j`, and rewire results.
-/// Fields concatenate lane-wise; the operand vector is rebuilt in the canonical
-/// `[inputs, output_views]` order with `map_input_indices` rebased by
-/// the input offset. The fused op produces a tuple of both operands' outputs, so
-/// consumers of each original result are re-pointed at the corresponding fields.
-fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
-    let p = extract_seg(graph, block_id, i);
-    let q = extract_seg(graph, block_id, j);
+pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
+    let (graph, span, scope) = graph_and_span(&inner, candidate.site);
+    let outer_types =
+        graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect::<LookupMap<_, _>>();
+    let left = extract_screma(graph, candidate.block, candidate.left);
+    let right = extract_screma(graph, candidate.block, candidate.right);
+    let mut interner = inner.data.region_interner.clone();
+    let plan = build_plan(&inner, &mut interner, &scope, span, &outer_types, left, right);
+    let synthesized = plan.synthesized.clone();
 
-    let base = p.lanes.inputs.len();
-    let mut raw_inputs = p.inputs.clone();
-    raw_inputs.extend(q.inputs.iter().copied());
-    let mut raw_array_types: Vec<Type<TypeName>> =
-        p.lanes.inputs.iter().map(|input| input.array.clone()).collect();
-    raw_array_types.extend(q.lanes.inputs.iter().map(|input| input.array.clone()));
-    let mut raw_elem_types: Vec<Type<TypeName>> =
-        p.lanes.inputs.iter().map(SoacInputType::element).collect();
-    raw_elem_types.extend(q.lanes.inputs.iter().map(SoacInputType::element));
-    let (inputs, input_array_types, _input_elem_types, input_remap) =
-        super::deduplicate_array_inputs(raw_inputs, raw_array_types, raw_elem_types);
-    let input_types = input_array_types.into_iter().map(|array| SoacInputType { array }).collect();
-
-    let mut maps: Vec<screma::Map> = p
-        .lanes
-        .maps
-        .iter()
-        .cloned()
-        .map(|mut map| {
-            for input in &mut map.input_indices {
-                *input = screma::InputId(input_remap[input.index()]);
+    let rebuilt = inner.rewrite_body(candidate.site, |body| {
+        let rewrite = |graph: &mut EGraph| {
+            apply_plan(graph, candidate.block, candidate.left, candidate.right, &plan);
+        };
+        match body {
+            Body::Entry(mut entry) => {
+                rewrite(&mut entry.graph);
+                Body::Entry(entry)
             }
-            map
-        })
-        .collect();
-    maps.extend(q.lanes.maps.iter().cloned().map(|mut map| {
-        for input in &mut map.input_indices {
-            *input = screma::InputId(input_remap[base + input.index()]);
+            Body::Function(mut function) => {
+                rewrite(&mut function.graph);
+                Body::Function(function)
+            }
+            Body::Constant(_) => unreachable!("horizontal fusion never targets constants"),
         }
-        map
-    }));
-
-    let mut operators = p.operators.clone();
-    for operator in &mut operators {
-        for input in &mut operator.input_indices {
-            *input = screma::InputId(input_remap[input.index()]);
-        }
-    }
-    operators.extend(q.operators.iter().cloned().map(|mut operator| {
-        for input in &mut operator.input_indices {
-            *input = screma::InputId(input_remap[base + input.index()]);
-        }
-        operator
-    }));
-
-    let p_result_types = p.result_types();
-    let q_result_types = q.result_types();
-    let mut result_types = p_result_types.clone();
-    result_types.extend(q_result_types.iter().cloned());
-
-    let mut output_slots = p.output_slots.clone();
-    output_slots.extend(q.output_slots.iter().copied());
-    output_slots.sort_unstable();
-    output_slots.dedup();
-
-    let resources = SegResourceAccess::merge(&p.resources, &q.resources);
-
-    // Rebuild `[inputs, output_views]`. Operator neutrals stay in `kind`;
-    // output views are the trailing operands of each original op.
-    let mut operands: SmallVec<[NodeId; 4]> = SmallVec::new();
-    operands.extend(inputs);
-    operands.extend(p.output_views.iter().copied());
-    operands.extend(q.output_views.iter().copied());
-
-    // Fused tuple result: fields are P's outputs then Q's.
-    let tuple_ty = Type::Constructed(TypeName::Tuple(result_types.len()), result_types.clone());
-    let fused_result = graph.alloc_side_effect_result(tuple_ty);
-
-    // Re-point consumers: `Project(P.result, f)` → `Project(fused, f)`,
-    // `Project(Q.result, f)` → `Project(fused, base_fields + f)`.
-    reproject(graph, p.result, fused_result, 0, &p_result_types);
-    reproject(
-        graph,
-        q.result,
-        fused_result,
-        p_result_types.len() as u32,
-        &q_result_types,
-    );
-
-    let state = screma::SemanticState::Segmented {
-        space: p.space.clone(),
-        placement: p.placement,
-        output_slots,
-        resources,
-    };
-    let lanes = screma::Lanes {
-        inputs: input_types,
-        maps,
-    };
-    let fused = Soac::Screma(screma::Op {
-        lanes,
-        operators,
-        post_maps: Vec::new(),
-        hidden_scan_outputs: Vec::new(),
-        state,
     });
-
-    let block = &mut graph.skeleton.blocks[block_id];
-    // Splice the effect chain: the fused op spans from P's input token to Q's
-    // output token (P precedes Q in the block), so any downstream effect that
-    // read Q's output stays connected once Q is removed.
-    let fused_effects = splice_effect_tokens(block.side_effects[i].effects, block.side_effects[j].effects);
-    block.side_effects[i].kind = SideEffectKind::Soac(SoacEffect(p.id, fused));
-    block.side_effects[i].operand_nodes = operands;
-    block.side_effects[i].result = Some(fused_result);
-    block.side_effects[i].effects = fused_effects;
-    block.side_effects.remove(j);
+    rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
+        region_interner: interner,
+        ..data
+    })
 }
 
-/// Everything `fuse_pair` needs from one Seg side-effect, cloned so the two can
-/// be read independently while the block is rebuilt.
-struct SegParts {
+#[derive(Clone)]
+struct ScremaParts {
     id: crate::egir::program::SemanticOpId,
+    op: screma::Op<Semantic>,
     space: crate::egir::types::SegSpace,
     placement: screma::Placement,
-    lanes: screma::Lanes,
-    operators: Vec<screma::Operator>,
     output_slots: Vec<OutputSlotId>,
     resources: Vec<SegResourceAccess>,
     result: NodeId,
-    inputs: Vec<NodeId>,
-    output_views: Vec<NodeId>,
+    result_types: Vec<Type<TypeName>>,
+    input_nodes: Vec<NodeId>,
+    output_nodes: Vec<Option<NodeId>>,
 }
 
-impl SegParts {
-    fn result_types(&self) -> Vec<Type<TypeName>> {
-        self.lanes
-            .maps
-            .iter()
-            .map(|map| map.result_type.clone())
-            .chain(self.operators.iter().map(|operator| operator.result_type.clone()))
-            .collect()
-    }
-}
-
-fn extract_seg(graph: &EGraph, block_id: BlockId, idx: usize) -> SegParts {
-    let effect = &graph.skeleton.blocks[block_id].side_effects[idx];
+fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> ScremaParts {
+    let effect = &graph.skeleton.blocks[block].side_effects[index];
     let SideEffectKind::Soac(SoacEffect(id, Soac::Screma(op))) = &effect.kind else {
-        unreachable!("extract_seg on non-Seg");
+        unreachable!("horizontal fusion selected a non-Screma");
     };
     let screma::SemanticState::Segmented {
         space,
@@ -350,70 +215,239 @@ fn extract_seg(graph: &EGraph, block_id: BlockId, idx: usize) -> SegParts {
         resources,
     } = op.semantic_state()
     else {
-        unreachable!("extract_seg on non-Seg");
+        unreachable!("horizontal fusion selected a serial Screma");
     };
-    let n_inputs = op.lanes().inputs.len();
-    let inputs = effect.operand_nodes[..n_inputs].to_vec();
-    let output_views = effect.operand_nodes[n_inputs..].to_vec();
-    SegParts {
+    let result = effect.result.expect("fusable Screma has no result");
+    let Type::Constructed(TypeName::Tuple(arity), result_types) = graph.nodes[result].ty.clone() else {
+        unreachable!("Screma result is not a tuple");
+    };
+    assert_eq!(arity, op.result_count());
+    assert_eq!(result_types.len(), op.result_count());
+
+    let input_count = op.inputs.len();
+    let input_nodes = effect.operand_nodes[..input_count].to_vec();
+    let mut output_operands = effect.operand_nodes[input_count..].iter().copied();
+    let output_nodes = (0..op.result_count())
+        .map(|field| {
+            op.destination(field)
+                .filter(|destination| destination.is_output_view())
+                .map(|_| output_operands.next().expect("missing Screma output-view operand"))
+        })
+        .collect::<Vec<_>>();
+    assert!(output_operands.next().is_none());
+
+    ScremaParts {
         id: *id,
+        op: op.clone(),
         space: space.clone(),
         placement: *placement,
-        lanes: op.lanes().clone(),
-        operators: op.operators.clone(),
         output_slots: output_slots.clone(),
         resources: resources.clone(),
-        result: effect.result.expect("fusable Seg has a result"),
-        inputs,
-        output_views,
+        result,
+        result_types,
+        input_nodes,
+        output_nodes,
     }
 }
 
-/// Rewrite every `Project(old_result, f)` to `Project(new_result, f + offset)`,
-/// and rebuild any whole-result use with the old tuple type.
-fn reproject(
+#[derive(Clone)]
+struct FusionPlan {
+    id: crate::egir::program::SemanticOpId,
+    op: screma::Op<Semantic>,
+    operands: SmallVec<[NodeId; 4]>,
+    result_types: Vec<Type<TypeName>>,
+    left_result: NodeId,
+    right_result: NodeId,
+    left_mapping: Vec<usize>,
+    right_mapping: Vec<usize>,
+    left_result_types: Vec<Type<TypeName>>,
+    right_result_types: Vec<Type<TypeName>>,
+    synthesized: Vec<SemanticFunc>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_plan(
+    inner: &Segmented,
+    interner: &mut RegionInterner,
+    scope: &str,
+    span: Span,
+    outer_types: &LookupMap<NodeId, Type<TypeName>>,
+    left: ScremaParts,
+    right: ScremaParts,
+) -> FusionPlan {
+    let mut context = fusion_screma::Context {
+        program: inner,
+        interner,
+        scope,
+        span,
+        outer_types,
+    };
+    let normalized = fusion_screma::fuse_horizontal(
+        &mut context,
+        fusion_screma::Source {
+            input_nodes: &left.input_nodes,
+            inputs: &left.op.inputs,
+            form: &left.op.form,
+        },
+        fusion_screma::Source {
+            input_nodes: &right.input_nodes,
+            inputs: &right.op.inputs,
+            form: &right.op.form,
+        },
+    );
+
+    let mut left_mapping = vec![usize::MAX; left.result_types.len()];
+    let mut right_mapping = vec![usize::MAX; right.result_types.len()];
+    let mut result_state = Vec::with_capacity(normalized.outputs.len());
+    let mut result_types = Vec::with_capacity(normalized.outputs.len());
+    let mut output_nodes = Vec::with_capacity(normalized.outputs.len());
+    for (fused_field, origin) in normalized.outputs.iter().copied().enumerate() {
+        let (source_field, source_state, source_types, source_outputs, mapping) = match origin {
+            fusion_screma::OutputOrigin::Producer(field) => (
+                field,
+                &left.op.result_state,
+                &left.result_types,
+                &left.output_nodes,
+                &mut left_mapping,
+            ),
+            fusion_screma::OutputOrigin::Consumer(field) => (
+                field,
+                &right.op.result_state,
+                &right.result_types,
+                &right.output_nodes,
+                &mut right_mapping,
+            ),
+        };
+        mapping[source_field] = fused_field;
+        result_state.push(source_state[source_field].clone());
+        result_types.push(source_types[source_field].clone());
+        output_nodes.push(source_outputs[source_field]);
+    }
+    debug_assert!(left_mapping.iter().all(|field| *field != usize::MAX));
+    debug_assert!(right_mapping.iter().all(|field| *field != usize::MAX));
+
+    let mut output_slots = left.output_slots.clone();
+    output_slots.extend(right.output_slots.iter().copied());
+    output_slots.sort_unstable();
+    output_slots.dedup();
+    let resources = SegResourceAccess::merge(&left.resources, &right.resources);
+    let op = screma::Op {
+        inputs: normalized.inputs,
+        form: normalized.form,
+        result_state,
+        state: screma::SemanticState::Segmented {
+            space: left.space,
+            placement: if left.placement == screma::Placement::Kernel
+                || right.placement == screma::Placement::Kernel
+            {
+                screma::Placement::Kernel
+            } else {
+                screma::Placement::LaneLocal
+            },
+            output_slots,
+            resources,
+        },
+    };
+    debug_assert!(
+        op.validate().is_ok(),
+        "invalid horizontally fused Screma: {:?}",
+        op.validate()
+    );
+
+    let mut operands = SmallVec::new();
+    operands.extend(normalized.input_nodes);
+    operands.extend(output_nodes.into_iter().flatten());
+
+    FusionPlan {
+        id: left.id,
+        op,
+        operands,
+        result_types,
+        left_result: left.result,
+        right_result: right.result,
+        left_mapping,
+        right_mapping,
+        left_result_types: left.result_types,
+        right_result_types: right.result_types,
+        synthesized: normalized.synthesized,
+    }
+}
+fn apply_plan(graph: &mut EGraph, block: BlockId, left: usize, right: usize, plan: &FusionPlan) {
+    let tuple = Type::Constructed(
+        TypeName::Tuple(plan.result_types.len()),
+        plan.result_types.clone(),
+    );
+    let fused_result = graph.alloc_side_effect_result(tuple);
+    reproject_fields(
+        graph,
+        plan.left_result,
+        fused_result,
+        &plan.left_mapping,
+        &plan.left_result_types,
+    );
+    reproject_fields(
+        graph,
+        plan.right_result,
+        fused_result,
+        &plan.right_mapping,
+        &plan.right_result_types,
+    );
+
+    let block = &mut graph.skeleton.blocks[block];
+    let effects = splice_effect_tokens(
+        block.side_effects[left].effects,
+        block.side_effects[right].effects,
+    );
+    block.side_effects[left].kind =
+        SideEffectKind::Soac(SoacEffect(plan.id, Soac::Screma(plan.op.clone())));
+    block.side_effects[left].operand_nodes = plan.operands.clone();
+    block.side_effects[left].result = Some(fused_result);
+    block.side_effects[left].effects = effects;
+    block.side_effects.remove(right);
+}
+
+fn reproject_fields(
     graph: &mut EGraph,
     old_result: NodeId,
     new_result: NodeId,
-    offset: u32,
+    mapping: &[usize],
     field_types: &[Type<TypeName>],
 ) {
-    let projects: Vec<(NodeId, u32)> = graph
+    let projects = graph
         .nodes
         .iter()
-        .filter_map(|(nid, node)| match &node.kind {
+        .filter_map(|(node, data)| match &data.kind {
             crate::egir::types::ENode::Pure {
                 op: PureOp::Project { index },
                 operands,
-            } if operands.first() == Some(&old_result) => Some((nid, *index)),
+            } if operands.first() == Some(&old_result) => Some((node, *index as usize)),
             _ => None,
         })
-        .collect();
-    for (project_nid, index) in projects {
-        graph.update_pure_node(project_nid, |op, operands| {
+        .collect::<Vec<_>>();
+    for (project, field) in projects {
+        graph.update_pure_node(project, |op, operands| {
             *op = PureOp::Project {
-                index: index + offset,
+                index: mapping[field] as u32,
             };
             operands[0] = new_result;
         });
     }
-    // Preserve the old tuple type for whole-result users. Pointing those users
-    // at the larger fused tuple would silently change their argument type.
-    let fields: SmallVec<[NodeId; 4]> = field_types
+
+    let fields = field_types
         .iter()
         .enumerate()
-        .map(|(index, ty)| {
+        .map(|(field, ty)| {
             graph.intern_pure(
                 PureOp::Project {
-                    index: offset + index as u32,
+                    index: mapping[field] as u32,
                 },
-                smallvec::smallvec![new_result],
+                smallvec![new_result],
                 ty.clone(),
                 None,
             )
         })
-        .collect();
-    let old_ty = graph.nodes[old_result].ty.clone();
-    let rebuilt = graph.intern_pure(PureOp::Tuple(field_types.len()), fields, old_ty, None);
+        .collect::<SmallVec<[NodeId; 4]>>();
+    let old_type = graph.nodes[old_result].ty.clone();
+    let rebuilt = graph.intern_pure(PureOp::Tuple(field_types.len()), fields, old_type, None);
     graph_ops::replace_all_references(graph, old_result, rebuilt);
 }

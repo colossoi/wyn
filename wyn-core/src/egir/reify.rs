@@ -157,14 +157,6 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
             ..
         }) => {
             let mut placement = facts.placement;
-            let map_only = form.scans.is_empty() && form.reductions.is_empty();
-            if map_only
-                && placement == screma::Placement::Kernel
-                && (form.post.result_types.is_empty()
-                    || result_state.iter().all(|result| !result.destination.is_unplaced()))
-            {
-                placement = screma::Placement::LaneLocal;
-            }
             if placement == screma::Placement::Kernel && facts.output_slots.is_empty() {
                 placement = screma::Placement::LaneLocal;
             }

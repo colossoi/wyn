@@ -25,22 +25,30 @@ use crate::egir::types::{EGraph, NodeId};
 use crate::flow::BlockId;
 use crate::LookupMap;
 
+mod horizontal;
+mod screma;
 pub(crate) mod space;
+mod vertical;
 
-pub(super) struct Rewrite;
+pub(super) enum Rewrite {
+    Vertical(vertical::Candidate),
+    Horizontal(horizontal::Candidate),
+}
 
-/// Fusion is intentionally conservative while the canonical Screma lambdas
-/// replace the former mini-map DAG.  A rewrite is re-enabled only once it can
-/// compose whole pre/post lambdas without reconstructing the rejected form.
+/// Select one semantics-preserving rewrite. Each call applies exactly one
+/// candidate so the dependency oracle is rebuilt before another fusion.
 pub(super) fn analyze(program: &Segmented, oracle: &SemanticGraph) -> Option<Rewrite> {
-    let _ = (program, oracle);
-    None
+    vertical::analyze(program, oracle)
+        .map(Rewrite::Vertical)
+        .or_else(|| horizontal::analyze(program, oracle).map(Rewrite::Horizontal))
 }
 
 /// Consume a rewrite selected by [`analyze`].
 pub(super) fn apply(program: Segmented, rewrite: Rewrite) -> Segmented {
-    let _ = rewrite;
-    program
+    match rewrite {
+        Rewrite::Vertical(candidate) => vertical::apply(program, candidate),
+        Rewrite::Horizontal(candidate) => horizontal::apply(program, candidate),
+    }
 }
 
 pub(super) fn graph_and_span(program: &Segmented, site: BodySite) -> (&EGraph, Span, String) {
