@@ -77,22 +77,23 @@ fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<Nod
         kind: SideEffectKind::Soac(SoacEffect(
             op(id),
             Soac::Screma(screma::Op {
-                lanes: screma::Lanes {
-                    inputs: vec![],
-                    maps: vec![screma::Map {
-                        body: SegBody {
+                inputs: vec![],
+                form: screma::ScremaForm {
+                    pre: screma::Lambda::region(
+                        SegBody {
                             region: RegionId::from_index(0),
                             captures,
                         },
-                        input_indices: vec![],
-                        output_element_type: ty.clone(),
-                        destination: SoacDestination::fresh(),
-                        result_type: ty,
-                    }],
+                        vec![],
+                        vec![ty.clone()],
+                    ),
+                    scans: vec![],
+                    reductions: vec![],
+                    post: screma::Lambda::identity(vec![ty]),
                 },
-                operators: Vec::new(),
-                post_maps: Vec::new(),
-                hidden_scan_outputs: Vec::new(),
+                result_state: vec![screma::ResultState {
+                    destination: SoacDestination::fresh(),
+                }],
                 state: screma::SemanticState::Serial,
             }),
         )),

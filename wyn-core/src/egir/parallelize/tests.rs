@@ -22,33 +22,30 @@ pub(crate) fn planned_callable_names(
     Ok(names)
 }
 
-/// Region indices used by the operator fixtures below: step is region 0,
-/// combine is region 1. Opaque indices stand in for the named regions a
-/// real conversion would intern.
-const STEP_REGION: RegionId = RegionId::from_index(0);
-const COMBINE_REGION: RegionId = RegionId::from_index(1);
+/// Opaque region used by canonical operator-lambda fixtures.
+const OPERATOR_REGION: RegionId = RegionId::from_index(0);
 
-fn operator(
-    neutral: NodeId,
-    step_captures: Vec<NodeId>,
-    combine_captures: Vec<NodeId>,
-) -> screma::Operator {
-    screma::Operator {
-        kind: screma::OperatorKind::Reduce,
-        step: SegBody {
-            region: STEP_REGION,
-            captures: step_captures,
-        },
-        combine: SegBody {
-            region: COMBINE_REGION,
-            captures: combine_captures,
-        },
-        input_indices: vec![],
-        neutral,
-        shape: vec![],
+fn reduce_operator(neutral: NodeId, captures: Vec<NodeId>) -> screma::Reduce {
+    let unit = Type::Constructed(TypeName::Unit, vec![]);
+    screma::Reduce {
+        operator: screma::Lambda::region(
+            SegBody {
+                region: OPERATOR_REGION,
+                captures,
+            },
+            vec![unit.clone(), unit.clone()],
+            vec![unit],
+        ),
+        neutral: vec![neutral],
         commutative: false,
-        destination: SoacDestination::fresh(),
-        result_type: Type::Constructed(TypeName::Unit, vec![]),
+    }
+}
+
+fn scan_operator(neutral: NodeId, captures: Vec<NodeId>) -> screma::Scan {
+    let reduction = reduce_operator(neutral, captures);
+    screma::Scan {
+        operator: reduction.operator,
+        neutral: reduction.neutral,
     }
 }
 
@@ -122,53 +119,52 @@ fn disjoint_sets_merge_transitive_components() {
 }
 
 #[test]
-fn reduction_kind_keeps_operator_payload_together() {
+fn reduction_keeps_canonical_operator_lambda_together() {
     let mut graph = EGraph::new();
-    let ne = neutral(&mut graph, 0);
+    let neutral = neutral(&mut graph, 0);
+    let unit = Type::Constructed(TypeName::Unit, vec![]);
     let op = screma::Op::<Semantic> {
-        lanes: screma::Lanes {
-            inputs: vec![],
-            maps: vec![],
+        inputs: vec![],
+        form: screma::ScremaForm {
+            pre: screma::Lambda::identity(vec![unit]),
+            scans: vec![],
+            reductions: vec![reduce_operator(neutral, vec![neutral])],
+            post: screma::Lambda::identity(vec![]),
         },
-        operators: vec![operator(ne, vec![ne], vec![ne, ne])],
-        post_maps: Vec::new(),
-        hidden_scan_outputs: Vec::new(),
+        result_state: vec![screma::ResultState {
+            destination: SoacDestination::fresh(),
+        }],
         state: screma::SemanticState::Serial,
     };
     assert!(op.is_reduce());
-    let operators = op.operators();
-    assert_eq!(operators.len(), 1);
-    assert_eq!(operators[0].step.region, STEP_REGION);
-    assert_eq!(operators[0].combine.region, COMBINE_REGION);
-    assert_eq!(operators[0].neutral, ne);
-    assert!(operators[0].shape.is_empty());
-    assert_eq!(operators[0].step.captures, vec![ne]);
-    assert_eq!(operators[0].combine.captures, vec![ne, ne]);
-    assert!(
-        !operators[0].commutative,
-        "Wyn does not yet declare commutativity"
-    );
+    let reduction = &op.form.reductions[0];
+    let body = reduction.operator.seg_body().unwrap();
+    assert_eq!(body.region, OPERATOR_REGION);
+    assert_eq!(body.captures, vec![neutral]);
+    assert_eq!(reduction.neutral, vec![neutral]);
+    assert!(!reduction.commutative, "Wyn does not yet declare commutativity");
 }
 
 #[test]
 fn scan_kind_is_non_empty_by_construction() {
     let mut graph = EGraph::new();
-    let ne = neutral(&mut graph, 0);
+    let neutral = neutral(&mut graph, 0);
+    let unit = Type::Constructed(TypeName::Unit, vec![]);
     let op = screma::Op::<Semantic> {
-        lanes: screma::Lanes {
-            inputs: vec![],
-            maps: vec![],
+        inputs: vec![],
+        form: screma::ScremaForm {
+            pre: screma::Lambda::identity(vec![unit.clone()]),
+            scans: vec![scan_operator(neutral, vec![])],
+            reductions: vec![],
+            post: screma::Lambda::identity(vec![unit]),
         },
-        operators: vec![screma::Operator {
-            kind: screma::OperatorKind::Scan,
-            ..operator(ne, vec![], vec![])
+        result_state: vec![screma::ResultState {
+            destination: SoacDestination::fresh(),
         }],
-        post_maps: Vec::new(),
-        hidden_scan_outputs: Vec::new(),
         state: screma::SemanticState::Serial,
     };
     assert!(op.is_scan_only());
-    assert_eq!(op.operators().len(), 1);
+    assert_eq!(op.form.scans.len(), 1);
 }
 
 #[test]
@@ -176,26 +172,28 @@ fn mixed_reduce_and_scan_has_explicit_composite_kind() {
     let mut graph = EGraph::new();
     let reduce_neutral = neutral(&mut graph, 0);
     let scan_neutral = neutral(&mut graph, 1);
+    let unit = Type::Constructed(TypeName::Unit, vec![]);
     let op = screma::Op::<Semantic> {
-        lanes: screma::Lanes {
-            inputs: vec![],
-            maps: vec![],
+        inputs: vec![],
+        form: screma::ScremaForm {
+            pre: screma::Lambda::identity(vec![unit.clone(), unit.clone()]),
+            scans: vec![scan_operator(scan_neutral, vec![])],
+            reductions: vec![reduce_operator(reduce_neutral, vec![])],
+            post: screma::Lambda::identity(vec![unit]),
         },
-        operators: vec![
-            operator(reduce_neutral, vec![], vec![]),
-            screma::Operator {
-                kind: screma::OperatorKind::Scan,
-                ..operator(scan_neutral, vec![], vec![])
+        result_state: vec![
+            screma::ResultState {
+                destination: SoacDestination::fresh(),
+            },
+            screma::ResultState {
+                destination: SoacDestination::fresh(),
             },
         ],
-        post_maps: Vec::new(),
-        hidden_scan_outputs: Vec::new(),
         state: screma::SemanticState::Serial,
     };
     assert!(op.is_mixed());
-    assert_eq!(op.operators().len(), 2);
-    assert!(!op.is_scan(0));
-    assert!(op.is_scan(1));
+    assert_eq!(op.form.reductions.len(), 1);
+    assert_eq!(op.form.scans.len(), 1);
 }
 
 #[test]

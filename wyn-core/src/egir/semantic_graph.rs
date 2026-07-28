@@ -266,12 +266,23 @@ where
         };
         match soac {
             Soac::Screma(op) => {
-                for map in op.lanes().maps.iter().chain(&op.post_maps) {
-                    verify_body("map", &map.body)?;
+                if let Some(body) = op.form.pre.seg_body() {
+                    verify_body("Screma pre-lambda", body)?;
                 }
-                for operator in op.operators() {
-                    verify_body("operator step", &operator.step)?;
-                    verify_body("operator combine", &operator.combine)?;
+                for scan in &op.form.scans {
+                    verify_body(
+                        "Screma scan operator",
+                        scan.operator.seg_body().expect("validated scan operator has a region"),
+                    )?;
+                }
+                for reduction in &op.form.reductions {
+                    verify_body(
+                        "Screma reduction operator",
+                        reduction.operator.seg_body().expect("validated reduction operator has a region"),
+                    )?;
+                }
+                if let Some(body) = op.form.post.seg_body() {
+                    verify_body("Screma post-lambda", body)?;
                 }
             }
             Soac::Filter(op) => {
@@ -331,13 +342,13 @@ where
                         };
                         let _ = writeln!(
                             output,
-                            "{scope}: {kind} state={:?} inputs={:?} pre_maps={:?} post_maps={:?} kind={:?}",
+                            "{scope}: {kind} state={:?} inputs={:?} pre={:?} scans={:?} reductions={:?} post={:?}",
                             op.semantic_state(),
-                            op.lanes().inputs,
-                            op.lanes().maps,
-                            op.post_maps,
-                            op.operators().iter().map(|operator| operator.kind).collect::<Vec<_>>(),
-                        );
+                            op.inputs,
+                            op.form.pre,
+                            op.form.scans,
+                            op.form.reductions,
+                            op.form.post,                        );
                     }
                     SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => {
                         let _ = writeln!(

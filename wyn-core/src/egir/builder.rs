@@ -120,28 +120,32 @@ impl<'a> EntryBuilder<'a> {
         output_view: NodeId,
         output_view_ty: Type<TypeName>,
     ) -> NodeId {
-        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![output_view_ty.clone()]);
+        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![output_view_ty]);
+        let input = SoacInputType {
+            array: input_array_ty,
+        };
+        let input_element_type = input.element();
+        let pre = screma::Lambda::region(
+            super::types::SegBody { region, captures },
+            vec![input_element_type],
+            vec![output_elem_ty.clone()],
+        );
         let id = self.semantic_ids.next_id();
         graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
             id,
             Soac::Screma(screma::Op {
-                lanes: screma::Lanes {
-                    inputs: vec![SoacInputType {
-                        array: input_array_ty,
-                    }],
-                    maps: vec![screma::Map {
-                        body: super::types::SegBody { region, captures },
-                        input_indices: vec![screma::InputId(0)],
-                        output_element_type: output_elem_ty,
-                        destination: SoacDestination::fresh().placed(SoacPlacement::OutputView),
-                        result_type: output_view_ty,
-                    }],
+                inputs: vec![input],
+                form: screma::ScremaForm {
+                    pre,
+                    scans: Vec::new(),
+                    reductions: Vec::new(),
+                    post: screma::Lambda::identity(vec![output_elem_ty]),
                 },
-                operators: Vec::new(),
-                post_maps: Vec::new(),
-                hidden_scan_outputs: Vec::new(),
+                result_state: vec![screma::ResultState {
+                    destination: SoacDestination::fresh().placed(SoacPlacement::OutputView),
+                }],
                 state: screma::SemanticState::Serial,
             }),
             smallvec![input_array, output_view],
@@ -150,7 +154,6 @@ impl<'a> EntryBuilder<'a> {
             Some(self.span),
         )
     }
-
     pub fn emit_load(&mut self, place: NodeId, elem_ty: Type<TypeName>) -> NodeId {
         graph_ops::emit_load(
             &mut self.graph,

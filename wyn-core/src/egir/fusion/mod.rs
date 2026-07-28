@@ -25,51 +25,22 @@ use crate::egir::types::{EGraph, NodeId};
 use crate::flow::BlockId;
 use crate::LookupMap;
 
-pub(crate) mod envelope;
-pub(crate) mod filter;
-pub(crate) mod horizontal;
-pub(crate) mod indexed;
 pub(crate) mod space;
-pub(crate) mod vertical;
 
-pub(super) struct Rewrite(RewriteKind);
+pub(super) struct Rewrite;
 
-enum RewriteKind {
-    Indexed(indexed::Candidate),
-    Vertical(vertical::Candidate),
-    Envelope(envelope::Candidate),
-    Filter(filter::Candidate),
-    Horizontal(horizontal::Candidate),
-}
-
-/// Select the first legal fusion rewrite in profitability order.
+/// Fusion is intentionally conservative while the canonical Screma lambdas
+/// replace the former mini-map DAG.  A rewrite is re-enabled only once it can
+/// compose whole pre/post lambdas without reconstructing the rejected form.
 pub(super) fn analyze(program: &Segmented, oracle: &SemanticGraph) -> Option<Rewrite> {
-    indexed::analyze(program)
-        .map(|candidate| Rewrite(RewriteKind::Indexed(candidate)))
-        .or_else(|| {
-            vertical::analyze(program, oracle).map(|candidate| Rewrite(RewriteKind::Vertical(candidate)))
-        })
-        .or_else(|| {
-            envelope::analyze(program, oracle).map(|candidate| Rewrite(RewriteKind::Envelope(candidate)))
-        })
-        .or_else(|| {
-            filter::analyze(program, oracle).map(|candidate| Rewrite(RewriteKind::Filter(candidate)))
-        })
-        .or_else(|| {
-            horizontal::analyze(program, oracle)
-                .map(|candidate| Rewrite(RewriteKind::Horizontal(candidate)))
-        })
+    let _ = (program, oracle);
+    None
 }
 
-/// Consume the snapshot analyzed by [`analyze`] and rebuild the targeted body.
+/// Consume a rewrite selected by [`analyze`].
 pub(super) fn apply(program: Segmented, rewrite: Rewrite) -> Segmented {
-    match rewrite.0 {
-        RewriteKind::Indexed(candidate) => indexed::apply(program, candidate),
-        RewriteKind::Vertical(candidate) => vertical::apply(program, candidate),
-        RewriteKind::Envelope(candidate) => envelope::apply(program, candidate),
-        RewriteKind::Filter(candidate) => filter::apply(program, candidate),
-        RewriteKind::Horizontal(candidate) => horizontal::apply(program, candidate),
-    }
+    let _ = rewrite;
+    program
 }
 
 pub(super) fn graph_and_span(program: &Segmented, site: BodySite) -> (&EGraph, Span, String) {

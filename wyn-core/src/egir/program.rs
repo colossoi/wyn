@@ -837,30 +837,30 @@ fn physicalize_soac(
         SegSpace::from_dims(dims).ok_or_else(|| "physicalized segmented space was empty".to_string())
     }
 
-    fn operator(mut operator: screma::Operator, nodes: &LookupMap<NodeId, NodeId>) -> screma::Operator {
-        operator.step = seg_body(operator.step, nodes);
-        operator.combine = seg_body(operator.combine, nodes);
-        operator.neutral = nodes[&operator.neutral];
-        for node in &mut operator.shape {
-            *node = nodes[node];
+    fn lambda(mut lambda: screma::Lambda, nodes: &LookupMap<NodeId, NodeId>) -> screma::Lambda {
+        if let Some(body) = lambda.seg_body_mut() {
+            *body = seg_body(body.clone(), nodes);
         }
-        operator
+        lambda
     }
 
-    fn operators(
-        operators: Vec<screma::Operator>,
-        nodes: &LookupMap<NodeId, NodeId>,
-    ) -> Vec<screma::Operator> {
-        operators.into_iter().map(|value| operator(value, nodes)).collect()
-    }
-
-    fn screma_lanes(mut lanes: screma::Lanes, nodes: &LookupMap<NodeId, NodeId>) -> screma::Lanes {
-        for map in &mut lanes.maps {
-            map.body = seg_body(map.body.clone(), nodes);
+    fn screma_form(mut form: screma::ScremaForm, nodes: &LookupMap<NodeId, NodeId>) -> screma::ScremaForm {
+        form.pre = lambda(form.pre, nodes);
+        for scan in &mut form.scans {
+            scan.operator = lambda(scan.operator.clone(), nodes);
+            for neutral in &mut scan.neutral {
+                *neutral = nodes[neutral];
+            }
         }
-        lanes
+        for reduction in &mut form.reductions {
+            reduction.operator = lambda(reduction.operator.clone(), nodes);
+            for neutral in &mut reduction.neutral {
+                *neutral = nodes[neutral];
+            }
+        }
+        form.post = lambda(form.post, nodes);
+        form
     }
-
     fn physical_segment(
         segment: screma::Segmented<SemanticResourceRef>,
         nodes: &LookupMap<NodeId, NodeId>,
@@ -920,13 +920,12 @@ fn physicalize_soac(
 
     Ok(match soac {
         Soac::Screma(screma::Op {
-            lanes,
-            operators: values,
-            mut post_maps,
-            hidden_scan_outputs,
+            inputs,
+            form,
+            result_state,
             state,
         }) => {
-            let map_shaped = values.is_empty() && post_maps.is_empty();
+            let map_shaped = form.scans.is_empty() && form.reductions.is_empty();
             let state = match state {
                 screma::ScheduledState::Serial => screma::PhysicalState::Serial,
                 screma::ScheduledState::Segmented(segment) if map_shaped => {
@@ -936,14 +935,10 @@ fn physicalize_soac(
                     return Err("scheduled parallel fold reached physicalization; split it into physical kernels first".into());
                 }
             };
-            for map in &mut post_maps {
-                map.body = seg_body(map.body.clone(), nodes);
-            }
             Soac::Screma(screma::Op {
-                lanes: screma_lanes(lanes, nodes),
-                operators: operators(values, nodes),
-                post_maps,
-                hidden_scan_outputs,
+                inputs,
+                form: screma_form(form, nodes),
+                result_state,
                 state,
             })
         }

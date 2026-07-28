@@ -260,24 +260,25 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
         kind: SideEffectKind::Soac(SoacEffect(
             SemanticOpId::for_test(0),
             Soac::Screma(screma::Op {
-                lanes: screma::Lanes {
-                    inputs: vec![SoacInputType {
-                        array: input_ty.clone(),
-                    }],
-                    maps: vec![screma::Map {
-                        body: SegBody {
+                inputs: vec![SoacInputType {
+                    array: input_ty.clone(),
+                }],
+                form: screma::ScremaForm {
+                    pre: screma::Lambda::region(
+                        SegBody {
                             region: original_region,
                             captures: vec![camera],
                         },
-                        input_indices: vec![screma::InputId(0)],
-                        output_element_type: element_ty.clone(),
-                        destination: SoacDestination::fresh(),
-                        result_type: result_ty.clone(),
-                    }],
+                        vec![element_ty.clone()],
+                        vec![element_ty.clone()],
+                    ),
+                    scans: vec![],
+                    reductions: vec![],
+                    post: screma::Lambda::identity(vec![element_ty.clone()]),
                 },
-                operators: Vec::new(),
-                post_maps: Vec::new(),
-                hidden_scan_outputs: Vec::new(),
+                result_state: vec![screma::ResultState {
+                    destination: SoacDestination::fresh(),
+                }],
                 state: screma::SemanticState::Segmented {
                     space: SegSpace::new(SegExtent::Fixed(64)),
                     placement: screma::Placement::Kernel,
@@ -343,7 +344,7 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
     else {
         panic!("entry no longer contains its parallel map")
     };
-    let body = &op.lanes().maps[0].body;
+    let body = op.form.pre.seg_body().expect("map pre-lambda region");
     assert_ne!(body.region, original_region);
     assert_eq!(body.captures.len(), 1);
     assert!(matches!(

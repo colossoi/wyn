@@ -96,7 +96,7 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
     };
     match soac {
         Soac::Screma(op) if op.is_serial() => {
-            op.lanes().inputs.iter().all(|input| is_plain_array_source(&input.array))
+            op.inputs.iter().all(|input| is_plain_array_source(&input.array))
         }
         Soac::Filter(op) => {
             let input = match &op.body.input {
@@ -110,14 +110,11 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
             !op.body.inputs.is_empty()
                 && op.body.inputs.iter().all(|input| is_plain_array_source(&input.array))
         }
-        // A reified parallel map/reduce/scan; same source rules as its inputs.
-        Soac::Screma(screma::Op {
-            lanes,
-            operators,
-            post_maps: _,
-            hidden_scan_outputs: _,
-            state: screma::PhysicalState::Segmented(_),
-        }) if operators.is_empty() => lanes.inputs.iter().all(|input| is_plain_array_source(&input.array)),
+        Soac::Screma(op) if matches!(op.state, screma::PhysicalState::Segmented(_)) && op.is_map() => {
+            op.form.post.is_identity() && op.inputs.iter().all(|input| is_plain_array_source(&input.array))
+        }
+        // Scan and reduction recipes must lower the complete canonical
+        // contract before this pass.
         Soac::Screma(_) => false,
     }
 }
@@ -174,251 +171,105 @@ fn expand_one(
     match &se.kind {
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if op.is_serial() => {
             let operands = screma::ScremaOperands::decode(op, &se.operand_nodes, se.result)?;
-            let lanes = op.lanes();
-            let pre_map_count = lanes.maps.len();
-            let maps = lanes.maps.iter().chain(&op.post_maps).collect::<Vec<_>>();
-            let map_input_indices = maps.iter().map(|map| map.input_indices.clone()).collect::<Vec<_>>();
-            // Captures and the callee region are explicit on each `SegBody`;
-            // the serial loop reads them directly rather than reslicing the
-            // operand list by a separate capture-count layout.
-            let map_funcs = regions.resolve_cloned(maps.iter().map(|map| map.body.region));
-            let map_captures: Vec<Vec<NodeId>> = maps.iter().map(|map| map.body.captures.clone()).collect();
-            let acc_specs = op.operators().into_iter().cloned().collect::<Vec<_>>();
-            let acc_is_scan = (0..acc_specs.len()).map(|index| op.is_scan(index)).collect::<Vec<_>>();
-            let acc_step_captures: Vec<Vec<NodeId>> =
-                acc_specs.iter().map(|acc| acc.step.captures.clone()).collect();
-            let arr_tys = lanes.inputs.iter().map(|input| input.array.clone()).collect::<Vec<_>>();
-            let elem_tys = lanes.inputs.iter().map(|input| input.element()).collect::<Vec<_>>();
-            let map_output_elem_types =
-                maps.iter().map(|map| map.output_element_type.clone()).collect::<Vec<_>>();
-            let map_destinations = maps.iter().map(|map| map.destination).collect::<Vec<_>>();
-            let acc_destinations =
-                acc_specs.iter().map(|operator| operator.destination).collect::<Vec<_>>();
-            let n_maps = map_funcs.len();
-            let n_accs = acc_specs.len();
-            let visible_accs =
-                (0..n_accs).filter(|&index| op.operator_is_output(index)).collect::<Vec<_>>();
             let input_nids = operands.inputs().map(|operand| operand.node).collect::<Vec<_>>();
-            let init_acc_nids = acc_specs.iter().map(|operator| operator.neutral).collect::<Vec<_>>();
-            // Operand layout is `[inputs.., output_views..]`; accumulator
-            // neutrals and callable captures are explicit in the body.
-            let result_nid = operands.result();
-            let result_ty = graph.nodes[result_nid].ty.clone();
-            let Type::Constructed(TypeName::Tuple(_), result_fields) = &result_ty else {
-                panic!("Screma result must be a tuple");
+            let Some(first_input) = op.inputs.first() else {
+                return Err("serial Screma has no array input".into());
             };
-            assert_eq!(
-                result_fields.len(),
-                n_maps + visible_accs.len(),
-                "Screma result is (mapped..., visible accumulators...)"
-            );
-
-            let mut map_output_views = Vec::with_capacity(n_maps);
-            let mut map_input_buffer_inits = Vec::with_capacity(n_maps);
-            for (map_idx, dest) in map_destinations.iter().enumerate() {
-                match dest {
-                    SoacDestination::UniqueInput => {
-                        panic!("unresolved UniqueInput destination reached physical expansion")
-                    }
-                    SoacDestination::Fresh => {
-                        map_output_views.push(None);
-                        map_input_buffer_inits.push(None);
-                    }
-                    SoacDestination::OutputView => {
-                        let view =
-                            operands.output(map_idx).map(|operand| operand.node).ok_or_else(|| {
-                                format!("Screma map result {map_idx} has no output-view operand")
-                            })?;
-                        map_output_views.push(Some(view));
-                        map_input_buffer_inits.push(None);
-                    }
-                    SoacDestination::InputBuffer => {
-                        // Consuming map: loop carries `inputs[map_idx]`
-                        // (or `inputs[0]` for single-input Screma) as the
-                        // initial output, so the result aliases the input
-                        // buffer in place (same shape as
-                        // a map with an `InputBuffer` destination).
-                        let carry_from = input_nids.get(map_idx).copied().unwrap_or(input_nids[0]);
-                        map_output_views.push(None);
-                        map_input_buffer_inits.push(Some(carry_from));
-                    }
-                }
-            }
-            let mut acc_output_views = Vec::with_capacity(n_accs);
-            let mut acc_input_buffer_inits = Vec::with_capacity(n_accs);
-            let mut visible_acc_field = 0;
-            for (acc_idx, dest) in acc_destinations.iter().enumerate() {
-                if !op.operator_is_output(acc_idx) {
-                    acc_output_views.push(None);
-                    acc_input_buffer_inits.push(None);
-                    continue;
-                }
-                match dest {
-                    SoacDestination::UniqueInput => {
-                        panic!("unresolved UniqueInput destination reached physical expansion")
-                    }
-                    SoacDestination::Fresh => {
-                        acc_output_views.push(None);
-                        acc_input_buffer_inits.push(None);
-                    }
-                    SoacDestination::OutputView => {
-                        let field = n_maps + visible_acc_field;
-                        let view = operands.output(field).map(|operand| operand.node).ok_or_else(|| {
-                            format!("Screma accumulator result {acc_idx} has no output-view operand")
-                        })?;
-                        acc_output_views.push(Some(view));
-                        acc_input_buffer_inits.push(None);
-                    }
-                    SoacDestination::InputBuffer => {
-                        // Consuming Scan accumulator: writes back to the
-                        // input buffer in-place. Loop carries inputs[0]
-                        // as the initial scan-output value.
-                        acc_output_views.push(None);
-                        acc_input_buffer_inits.push(Some(input_nids[0]));
-                    }
-                }
-                visible_acc_field += 1;
+            let result_nid = operands.result();
+            let Type::Constructed(TypeName::Tuple(_), result_fields) = graph.nodes[result_nid].ty.clone()
+            else {
+                return Err("Screma result must be represented as a tuple".into());
+            };
+            if result_fields.len() != op.result_count() {
+                return Err(format!(
+                    "Screma result tuple has {} fields, expected {}",
+                    result_fields.len(),
+                    op.result_count()
+                ));
             }
 
-            let map_result_tys: Vec<Type<TypeName>> = result_fields[..n_maps].to_vec();
-            let acc_result_tys: Vec<Type<TypeName>> =
-                acc_specs.iter().map(|operator| operator.result_type.clone()).collect();
-            let acc_elem_tys: Vec<Type<TypeName>> = acc_specs
+            let read_inputs = input_nids
                 .iter()
-                .zip(acc_result_tys.iter())
-                .enumerate()
-                .map(|(index, (_acc, result_ty))| {
-                    if !acc_is_scan[index] {
-                        result_ty.clone()
-                    } else {
-                        if result_ty.is_array() {
-                            result_ty.elem_type().expect("Array has elem").clone()
-                        } else if as_soa_tuple(result_ty).is_some() {
-                            soac_element_type(result_ty)
-                        } else {
-                            panic!("Screma[Scan] accumulator result must be an array or SoA tuple")
-                        }
-                    }
-                })
-                .collect();
-
-            let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
-                .iter()
-                .zip(arr_tys.iter().zip(elem_tys.iter()))
-                .map(|(n, (a, e))| (*n, a.clone(), e.clone()))
-                .collect();
-            let len_input = (input_nids[0], arr_tys[0].clone());
-
+                .zip(&op.inputs)
+                .map(|(&node, input)| (node, input.array.clone(), input.element()))
+                .collect::<Vec<_>>();
+            let len_input = (input_nids[0], first_input.array.clone());
+            let reduction_components = op.form.reduction_result_count();
+            let scan_components = op.form.scan_input_count();
+            let post_count = op.form.post.result_types.len();
             let uninit_id = catalog().known().uninit;
-            let mut carried = Vec::new();
-            let mut result_indices = Vec::with_capacity(n_maps + n_accs);
-            let mut map_carried_indices = Vec::with_capacity(n_maps);
-            let mut acc_scan_carried_indices = Vec::with_capacity(n_accs);
-            let mut acc_current_carried_indices = Vec::with_capacity(n_accs);
-            let mut result_field_tys = Vec::with_capacity(n_maps + n_accs);
-            // Per-map type used as `arr_ty` for the in-loop
-            // `emit_write_element` call. Differs from
-            // `map_result_tys[map_idx]` when the destination is
-            // `InputBuffer` or `OutputView`: the carried buffer is
-            // the actual input (a `View`), not the Screma's pre-
-            // decision Composite tuple-field type. Passing the
-            // pre-decision type to `emit_write_element` produces
-            // an `array_with_inplace` node whose declared result
-            // type disagrees with the carried block param's type;
-            // the SPIR-V backend then panics trying to lower the
-            // bogus `Array[..., Composite, Variable, NoBuffer]`.
-            let mut map_carried_tys: Vec<Type<TypeName>> = Vec::with_capacity(n_maps);
 
-            for map_idx in 0..n_maps {
-                let init = if let Some(view_nid) = map_output_views[map_idx] {
-                    view_nid
-                } else if let Some(input_nid) = map_input_buffer_inits[map_idx] {
-                    // InputBuffer: carry the input array as the initial
-                    // output; the loop's `emit_write_element` will fold
-                    // updates into it in place.
-                    input_nid
-                } else {
-                    graph.intern_pure(
+            // Carried order is post-result arrays, scan accumulators, then
+            // reduction accumulators.  The external tuple is independently
+            // rebound in Futhark order: reductions first, post arrays second.
+            let mut carried = Vec::new();
+            let mut post_carried_types = Vec::with_capacity(post_count);
+            let mut post_is_output_view = Vec::with_capacity(post_count);
+            for post in 0..post_count {
+                let field = reduction_components + post;
+                let destination = op
+                    .destination(field)
+                    .ok_or_else(|| format!("Screma result {field} has no destination"))?;
+                let initial = match destination {
+                    SoacDestination::UniqueInput => {
+                        return Err("unresolved UniqueInput destination reached physical expansion".into())
+                    }
+                    SoacDestination::Fresh => graph.intern_pure(
                         PureOp::Intrinsic {
                             id: uninit_id,
                             overload_idx: 0,
                         },
                         smallvec![],
-                        map_result_tys[map_idx].clone(),
+                        result_fields[field].clone(),
                         None,
-                    )
+                    ),
+                    SoacDestination::OutputView => operands
+                        .output(field)
+                        .map(|operand| operand.node)
+                        .ok_or_else(|| format!("Screma post result {post} has no output-view operand"))?,
+                    SoacDestination::InputBuffer => {
+                        if input_nids.len() != 1 {
+                            return Err(
+                                "input-buffer Screma result requires exactly one array input".into()
+                            );
+                        }
+                        input_nids[0]
+                    }
                 };
-                let carried_ty = map_output_views[map_idx]
-                    .and_then(|view_nid| graph.nodes.get(view_nid).map(|node| node.ty.clone()))
-                    .or_else(|| {
-                        map_input_buffer_inits[map_idx]
-                            .and_then(|nid| graph.nodes.get(nid).map(|node| node.ty.clone()))
-                    })
-                    .unwrap_or_else(|| map_result_tys[map_idx].clone());
-                map_carried_indices.push(carried.len());
-                result_indices.push(carried.len());
-                result_field_tys.push(carried_ty.clone());
-                map_carried_tys.push(carried_ty.clone());
-                carried.push((carried_ty, init));
+                post_is_output_view.push(destination.is_output_view());
+                let carried_type = graph.nodes[initial].ty.clone();
+                post_carried_types.push(carried_type.clone());
+                carried.push((carried_type, initial));
             }
-            // Per-Scan-accumulator carried type, used for
-            // `emit_write_element` exactly like `map_carried_tys` above.
-            // `None` for Reduce accumulators (no buffer carried).
-            let mut acc_scan_carried_tys: Vec<Option<Type<TypeName>>> = Vec::with_capacity(n_accs);
-            for acc_idx in 0..n_accs {
-                if !acc_is_scan[acc_idx] {
-                    acc_scan_carried_indices.push(None);
-                    acc_current_carried_indices.push(carried.len());
-                    result_indices.push(carried.len());
-                    result_field_tys.push(acc_result_tys[acc_idx].clone());
-                    acc_scan_carried_tys.push(None);
-                    carried.push((acc_elem_tys[acc_idx].clone(), init_acc_nids[acc_idx]));
-                } else if !op.operator_is_output(acc_idx) {
-                    acc_scan_carried_indices.push(None);
-                    acc_current_carried_indices.push(carried.len());
-                    acc_scan_carried_tys.push(None);
-                    carried.push((acc_elem_tys[acc_idx].clone(), init_acc_nids[acc_idx]));
-                } else {
-                    let init_scan_out = if let Some(view_nid) = acc_output_views[acc_idx] {
-                        view_nid
-                    } else if let Some(input_nid) = acc_input_buffer_inits[acc_idx] {
-                        // Consuming Scan: carry the input array as
-                        // the initial scan output; folds updates in
-                        // place via emit_write_element.
-                        input_nid
-                    } else {
-                        graph.intern_pure(
-                            PureOp::Intrinsic {
-                                id: uninit_id,
-                                overload_idx: 0,
-                            },
-                            smallvec![],
-                            acc_result_tys[acc_idx].clone(),
-                            None,
-                        )
-                    };
-                    let scan_ty = acc_output_views[acc_idx]
-                        .and_then(|view_nid| graph.nodes.get(view_nid).map(|node| node.ty.clone()))
-                        .or_else(|| {
-                            acc_input_buffer_inits[acc_idx]
-                                .and_then(|nid| graph.nodes.get(nid).map(|node| node.ty.clone()))
-                        })
-                        .unwrap_or_else(|| acc_result_tys[acc_idx].clone());
-                    acc_scan_carried_indices.push(Some(carried.len()));
-                    result_indices.push(carried.len());
-                    result_field_tys.push(scan_ty.clone());
-                    acc_scan_carried_tys.push(Some(scan_ty.clone()));
-                    carried.push((scan_ty, init_scan_out));
-                    acc_current_carried_indices.push(carried.len());
-                    carried.push((acc_elem_tys[acc_idx].clone(), init_acc_nids[acc_idx]));
+
+            for scan in &op.form.scans {
+                for neutral in &scan.neutral {
+                    carried.push((graph.nodes[*neutral].ty.clone(), *neutral));
                 }
             }
-            let result_tuple_ty =
-                Type::Constructed(TypeName::Tuple(n_maps + visible_accs.len()), result_field_tys);
-            graph.retype_node(result_nid, result_tuple_ty.clone());
+            for reduction in &op.form.reductions {
+                for neutral in &reduction.neutral {
+                    carried.push((graph.nodes[*neutral].ty.clone(), *neutral));
+                }
+            }
+
+            let mut result_indices = (0..reduction_components)
+                .map(|component| post_count + scan_components + component)
+                .collect::<Vec<_>>();
+            result_indices.extend(0..post_count);
+            let mut result_field_types = op
+                .form
+                .reductions
+                .iter()
+                .flat_map(|reduction| reduction.operator.result_types.iter().cloned())
+                .collect::<Vec<_>>();
+            result_field_types.extend(post_carried_types.iter().cloned());
+            let result_tuple_type =
+                Type::Constructed(TypeName::Tuple(op.result_count()), result_field_types);
+            graph.retype_node(result_nid, result_tuple_type.clone());
             let result = ResultBinding::TupleFromCarried {
                 result_node: result_nid,
-                tuple_ty: result_tuple_ty,
+                tuple_ty: result_tuple_type,
                 indices: result_indices,
             };
 
@@ -431,153 +282,92 @@ fn expand_one(
                 &result,
                 next_effect,
                 false,
-                |graph, next_effect, body_bid, idx_nid, carried_nids| {
-                    let mut elem_nids = Vec::with_capacity(read_inputs.len());
-                    for (arr, arr_ty, elem_ty) in &read_inputs {
-                        elem_nids.push(emit_read_element(
-                            graph,
-                            body_bid,
-                            *arr,
-                            idx_nid,
-                            arr_ty,
-                            elem_ty,
-                            next_effect,
-                        ));
+                |graph, next_effect, body, lane, carried_values| {
+                    let input_elements = read_inputs
+                        .iter()
+                        .map(|(array, array_type, element_type)| {
+                            emit_read_element(
+                                graph,
+                                body,
+                                *array,
+                                lane,
+                                array_type,
+                                element_type,
+                                next_effect,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let pre_values = emit_screma_lambda(graph, regions, &op.form.pre, input_elements);
+
+                    let mut pre_offset = 0;
+                    let mut scan_offset = post_count;
+                    let mut new_scans = Vec::with_capacity(scan_components);
+                    for scan in &op.form.scans {
+                        let width = scan.neutral.len();
+                        let mut arguments = carried_values[scan_offset..scan_offset + width].to_vec();
+                        arguments.extend_from_slice(&pre_values[pre_offset..pre_offset + width]);
+                        new_scans.extend(emit_screma_lambda(graph, regions, &scan.operator, arguments));
+                        pre_offset += width;
+                        scan_offset += width;
                     }
 
-                    let mut new_carried = Vec::with_capacity(carried_nids.len());
-                    for map_idx in 0..n_maps {
-                        let out_nid = carried_nids[map_carried_indices[map_idx]];
-                        let mut map_operands: smallvec::SmallVec<[NodeId; 4]> = if map_idx < pre_map_count {
-                            map_input_indices[map_idx]
-                                .iter()
-                                .map(|input| elem_nids[input.index()])
-                                .collect()
-                        } else {
-                            map_input_indices[map_idx]
-                                .iter()
-                                .map(|input| {
-                                    let acc_idx = input.index();
-                                    let acc_nid = carried_nids[acc_current_carried_indices[acc_idx]];
-                                    let mut step_operands: smallvec::SmallVec<[NodeId; 4]> =
-                                        smallvec![acc_nid];
-                                    if acc_specs[acc_idx].input_indices.is_empty() {
-                                        step_operands.extend(elem_nids.iter().copied());
-                                    } else {
-                                        step_operands.extend(
-                                            acc_specs[acc_idx]
-                                                .input_indices
-                                                .iter()
-                                                .map(|input| elem_nids[input.index()]),
-                                        );
-                                    }
-                                    step_operands.extend(acc_step_captures[acc_idx].iter().copied());
-                                    graph.intern_pure(
-                                        PureOp::Call(
-                                            regions.resolve(acc_specs[acc_idx].step.region).to_string(),
-                                        ),
-                                        step_operands,
-                                        acc_elem_tys[acc_idx].clone(),
-                                        None,
-                                    )
-                                })
-                                .collect()
-                        };
-                        map_operands.extend(map_captures[map_idx].iter().copied());
-                        let mapped = graph.intern_pure(
-                            PureOp::Call(map_funcs[map_idx].clone()),
-                            map_operands,
-                            map_output_elem_types[map_idx].clone(),
-                            None,
-                        );
-                        let new_out = if map_output_views[map_idx].is_some() {
-                            let ptr_nid = graph.intern_pure(
+                    let mut reduction_offset = post_count + scan_components;
+                    let mut new_reductions = Vec::with_capacity(reduction_components);
+                    for reduction in &op.form.reductions {
+                        let width = reduction.neutral.len();
+                        let mut arguments =
+                            carried_values[reduction_offset..reduction_offset + width].to_vec();
+                        arguments.extend_from_slice(&pre_values[pre_offset..pre_offset + width]);
+                        new_reductions.extend(emit_screma_lambda(
+                            graph,
+                            regions,
+                            &reduction.operator,
+                            arguments,
+                        ));
+                        pre_offset += width;
+                        reduction_offset += width;
+                    }
+
+                    let mut post_arguments = new_scans.clone();
+                    post_arguments.extend_from_slice(&pre_values[pre_offset..]);
+                    let post_values = emit_screma_lambda(graph, regions, &op.form.post, post_arguments);
+                    debug_assert_eq!(post_values.len(), post_count);
+
+                    let mut next = Vec::with_capacity(carried_values.len());
+                    for post in 0..post_count {
+                        let output = carried_values[post];
+                        let value = post_values[post];
+                        if post_is_output_view[post] {
+                            let place = graph.intern_pure(
                                 PureOp::ViewIndex,
-                                smallvec![out_nid, idx_nid],
-                                map_output_elem_types[map_idx].clone(),
+                                smallvec![output, lane],
+                                op.form.post.result_types[post].clone(),
                                 None,
                             );
-                            let eff_in = alloc_effect(next_effect);
-                            let eff_out = alloc_effect(next_effect);
-                            graph.skeleton.blocks[body_bid].side_effects.push(SideEffect {
+                            let effect_in = alloc_effect(next_effect);
+                            let effect_out = alloc_effect(next_effect);
+                            graph.skeleton.blocks[body].side_effects.push(SideEffect {
                                 kind: SideEffectKind::Effect(EffectOp::Store),
-                                operand_nodes: smallvec![ptr_nid, mapped],
+                                operand_nodes: smallvec![place, value],
                                 result: None,
-                                effects: Some((eff_in, eff_out)),
+                                effects: Some((effect_in, effect_out)),
                                 span: None,
                             });
-                            out_nid
+                            next.push(output);
                         } else {
-                            emit_write_element(
+                            next.push(emit_write_element(
                                 graph,
-                                out_nid,
-                                idx_nid,
-                                mapped,
-                                &map_carried_tys[map_idx],
-                                &map_output_elem_types[map_idx],
-                            )
-                        };
-                        new_carried.push(new_out);
-                    }
-
-                    for acc_idx in 0..n_accs {
-                        let acc_nid = carried_nids[acc_current_carried_indices[acc_idx]];
-                        let mut reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![acc_nid];
-                        if acc_specs[acc_idx].input_indices.is_empty() {
-                            reduce_operands.extend(elem_nids.iter().copied());
-                        } else {
-                            reduce_operands.extend(
-                                acc_specs[acc_idx]
-                                    .input_indices
-                                    .iter()
-                                    .map(|input| elem_nids[input.index()]),
-                            );
-                        }
-                        reduce_operands.extend(acc_step_captures[acc_idx].iter().copied());
-                        let new_acc = graph.intern_pure(
-                            PureOp::Call(regions.resolve(acc_specs[acc_idx].step.region).to_string()),
-                            reduce_operands,
-                            acc_elem_tys[acc_idx].clone(),
-                            None,
-                        );
-                        if let Some(scan_idx) = acc_scan_carried_indices[acc_idx] {
-                            let scan_out_nid = carried_nids[scan_idx];
-                            let new_scan_out = if acc_output_views[acc_idx].is_some() {
-                                let ptr_nid = graph.intern_pure(
-                                    PureOp::ViewIndex,
-                                    smallvec![scan_out_nid, idx_nid],
-                                    acc_elem_tys[acc_idx].clone(),
-                                    None,
-                                );
-                                let eff_in = alloc_effect(next_effect);
-                                let eff_out = alloc_effect(next_effect);
-                                graph.skeleton.blocks[body_bid].side_effects.push(SideEffect {
-                                    kind: SideEffectKind::Effect(EffectOp::Store),
-                                    operand_nodes: smallvec![ptr_nid, new_acc],
-                                    result: None,
-                                    effects: Some((eff_in, eff_out)),
-                                    span: None,
-                                });
-                                scan_out_nid
-                            } else {
-                                emit_write_element(
-                                    graph,
-                                    scan_out_nid,
-                                    idx_nid,
-                                    new_acc,
-                                    acc_scan_carried_tys[acc_idx]
-                                        .as_ref()
-                                        .expect("Scan accumulator must have a carried type"),
-                                    &acc_elem_tys[acc_idx],
-                                )
-                            };
-                            new_carried.push(new_scan_out);
-                            new_carried.push(new_acc);
-                        } else {
-                            new_carried.push(new_acc);
+                                output,
+                                lane,
+                                value,
+                                &post_carried_types[post],
+                                &op.form.post.result_types[post],
+                            ));
                         }
                     }
-                    new_carried
+                    next.extend(new_scans);
+                    next.extend(new_reductions);
+                    next
                 },
             );
         }
@@ -678,72 +468,98 @@ fn expand_one(
             // conflict-safe parallel implementation.
             build_scatter_loop(graph, bid, idx, scatter, next_effect);
         }
-        SideEffectKind::Soac(SoacEffect(
-            _,
-            Soac::Screma(screma::Op {
-                lanes: screma::Lanes { inputs, maps },
-                operators,
-                post_maps: _,
-                hidden_scan_outputs: _,
-                state: screma::PhysicalState::Segmented(screma::Segmented { space, .. }),
-            }),
-        )) if operators.is_empty() => {
-            // SegRed/SegScan are consumed by `egir::parallelize::lower`
-            // before expansion. This arm is therefore semantically map-only.
-            let operands = screma::ScremaOperands::decode(
-                match &se.kind {
-                    SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => op,
-                    _ => return Err("segmented map lost its Screma operation".into()),
-                },
-                &se.operand_nodes,
-                se.result,
-            )?;
-            let input_nids = operands.inputs().map(|operand| operand.node).collect::<Vec<_>>();
-            let map_captures: Vec<Vec<NodeId>> = maps.iter().map(|map| map.body.captures.clone()).collect();
-            let map_funcs = regions.resolve_cloned(maps.iter().map(|map| map.body.region));
-            let output_views = if maps.iter().all(|map| map.destination.is_input_buffer()) {
-                vec![input_nids[0]; map_funcs.len()]
-            } else {
-                (0..maps.len())
-                    .map(|field| {
-                        operands
-                            .output(field)
-                            .map(|operand| operand.node)
-                            .ok_or_else(|| format!("segmented map result {field} has no output view"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
+        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
+            if matches!(op.state, screma::PhysicalState::Segmented(_)) && op.is_map() =>
+        {
+            let screma::PhysicalState::Segmented(segment) = &op.state else {
+                unreachable!()
             };
-            let result_nid = operands.result();
-            let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
+            let operands = screma::ScremaOperands::decode(op, &se.operand_nodes, se.result)?;
+            let input_nodes = operands.inputs().map(|operand| operand.node).collect::<Vec<_>>();
+            let read_inputs = input_nodes
                 .iter()
-                .zip(inputs.iter())
-                .map(|(nid, input)| (*nid, input.array.clone(), input.element()))
-                .collect();
-            let len_input = (input_nids[0], inputs[0].array.clone());
-            build_parallel_maps(
+                .zip(&op.inputs)
+                .map(|(&node, input)| (node, input.array.clone(), input.element()))
+                .collect::<Vec<_>>();
+            let Some(first_input) = read_inputs.first() else {
+                return Err("segmented map has no array input".into());
+            };
+            let mut output_views = Vec::with_capacity(op.result_count());
+            for field in 0..op.result_count() {
+                let destination = op
+                    .destination(field)
+                    .ok_or_else(|| format!("segmented map result {field} has no destination"))?;
+                let output = if destination.is_output_view() {
+                    operands
+                        .output(field)
+                        .map(|operand| operand.node)
+                        .ok_or_else(|| format!("segmented map result {field} has no output view"))?
+                } else if destination.is_input_buffer() && input_nodes.len() == 1 {
+                    input_nodes[0]
+                } else {
+                    return Err(format!(
+                        "segmented map result {field} has unsupported destination {destination:?}"
+                    ));
+                };
+                output_views.push(output);
+            }
+            build_parallel_screma_map(
                 graph,
                 bid,
                 idx,
-                ScremaMapsIntoLoop {
-                    space: space.clone(),
-                    len_input,
-                    read_inputs,
-                    func_input_indices: maps.iter().map(|map| map.input_indices.clone()).collect(),
-                    output_views,
-                    output_elem_tys: maps.iter().map(|map| map.output_element_type.clone()).collect(),
-                    result_node: result_nid,
-                    funcs: map_funcs.clone(),
-                    captures: map_captures,
-                },
+                &segment.space,
+                (first_input.0, first_input.1.clone()),
+                &read_inputs,
+                &op.form.pre,
+                &output_views,
+                operands.result(),
                 next_effect,
+                regions,
             );
         }
-
         _ => return Err("SOAC expansion target changed after selection".into()),
     }
     Ok(())
 }
 
+fn emit_screma_lambda(
+    graph: &mut EGraph,
+    regions: &RegionInterner,
+    lambda: &screma::Lambda,
+    mut arguments: Vec<NodeId>,
+) -> Vec<NodeId> {
+    if lambda.is_identity() {
+        debug_assert_eq!(arguments.len(), lambda.result_types.len());
+        return arguments;
+    }
+    let body = lambda.seg_body().expect("non-identity Screma lambda has a region");
+    arguments.extend(body.captures.iter().copied());
+    let result_type = match lambda.result_types.as_slice() {
+        [result] => result.clone(),
+        results => Type::Constructed(TypeName::Tuple(results.len()), results.to_vec()),
+    };
+    let result = graph.intern_pure(
+        PureOp::Call(regions.resolve(body.region).to_string()),
+        arguments.into_iter().collect(),
+        result_type,
+        None,
+    );
+    match lambda.result_types.as_slice() {
+        [_] => vec![result],
+        results => results
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                graph.intern_pure(
+                    PureOp::Project { index: index as u32 },
+                    smallvec![result],
+                    ty.clone(),
+                    None,
+                )
+            })
+            .collect(),
+    }
+}
 /// Emit a real loop via `build_loop_skeleton`, invoking `emit_body` in the
 /// body block to produce the new carried values, then wire the back-edge.
 fn build_loop<F>(
@@ -909,127 +725,94 @@ where
 /// MapInto: `y = func(elem1, ..., ...caps); view[i] = y` per iteration. No
 /// loop-carried state (writes are effectful); the SOAC "result" is a dummy.
 
-/// Parallel pointwise Screma: one lane per input element, guarded by
-/// `if tid < len then body else ()`. Reads the shared inputs once and
-/// writes every mapped output field to its corresponding output view —
-/// no loop, no phi.
-struct ScremaMapsIntoLoop {
-    space: SegSpace,
-    len_input: (NodeId, Type<TypeName>),
-    read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,
-    /// Which `read_inputs` each lane consumes: `func_input_indices[k]` lists the
-    /// input positions whose elements feed `funcs[k]`, in order, before its
-    /// captures. One entry per func.
-    func_input_indices: Vec<Vec<screma::InputId>>,
-    output_views: Vec<NodeId>,
-    output_elem_tys: Vec<Type<TypeName>>,
-    result_node: NodeId,
-    funcs: Vec<String>,
-    captures: Vec<Vec<NodeId>>,
-}
-
-fn build_parallel_maps(
+fn build_parallel_screma_map(
     graph: &mut EGraph,
-    bid: BlockId,
-    idx_in_block: usize,
-    spec: ScremaMapsIntoLoop,
+    block: BlockId,
+    effect_index: usize,
+    space: &SegSpace,
+    length_input: (NodeId, Type<TypeName>),
+    read_inputs: &[(NodeId, Type<TypeName>, Type<TypeName>)],
+    pre: &screma::Lambda,
+    output_views: &[NodeId],
+    result_node: NodeId,
     next_effect: &mut crate::IdSource<EffectToken>,
+    regions: &RegionInterner,
 ) {
-    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-
-    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
-
+    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+    let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
+    let bool_type = Type::Constructed(TypeName::Bool, vec![]);
+    let after = graph.skeleton.split_block_before_effect(block, effect_index);
     graph.replace_node_preserving_type(
-        spec.result_node,
+        result_node,
         ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
     );
-
     let body = graph.skeleton.create_block();
     let known = catalog().known();
-    let tid_nid = graph.intern_pure(
+    let thread = graph.intern_pure(
         PureOp::Intrinsic {
             id: known.thread_id,
             overload_idx: 0,
         },
         smallvec![],
-        u32_ty,
+        u32_type,
         None,
     );
-    let i32_from_u32 = catalog().lookup_by_any_name("i32.u32").expect("catalog has i32.u32 bitcast");
-    let i_nid = graph.intern_pure(
+    let bitcast = catalog().lookup_by_any_name("i32.u32").expect("catalog has i32.u32 bitcast");
+    let lane = graph.intern_pure(
         PureOp::Intrinsic {
-            id: i32_from_u32.id,
+            id: bitcast.id,
             overload_idx: 0,
         },
-        smallvec![tid_nid],
-        i32_ty.clone(),
+        smallvec![thread],
+        i32_type.clone(),
         None,
     );
-    let len_nid = emit_seg_space_len(graph, &spec.space, &spec.len_input, &i32_ty);
-    let cond_nid = graph.intern_pure(
+    let length = emit_seg_space_len(graph, space, &length_input, &i32_type);
+    let condition = graph.intern_pure(
         PureOp::BinOp("<".into()),
-        smallvec![i_nid, len_nid],
-        bool_ty,
+        smallvec![lane, length],
+        bool_type,
         None,
     );
-
-    graph.skeleton.blocks[bid].term = SkeletonTerminator::CondBranch {
-        cond: cond_nid,
+    graph.skeleton.blocks[block].term = SkeletonTerminator::CondBranch {
+        cond: condition,
         then_target: body,
         then_args: vec![],
         else_target: after,
         else_args: vec![],
     };
-    graph.skeleton.blocks[bid].control_header = Some(ControlHeader::Selection { merge: after });
+    graph.skeleton.blocks[block].control_header = Some(ControlHeader::Selection { merge: after });
 
-    let mut elems = Vec::with_capacity(spec.read_inputs.len());
-    for (arr, arr_ty, elem_ty) in &spec.read_inputs {
-        elems.push(emit_read_element(
-            graph,
-            body,
-            *arr,
-            i_nid,
-            arr_ty,
-            elem_ty,
-            next_effect,
-        ));
-    }
-
-    for map_idx in 0..spec.funcs.len() {
-        let mut call_operands: smallvec::SmallVec<[NodeId; 4]> =
-            spec.func_input_indices[map_idx].iter().map(|input| elems[input.index()]).collect();
-        call_operands.extend(spec.captures[map_idx].iter().copied());
-        let y_nid = graph.intern_pure(
-            PureOp::Call(spec.funcs[map_idx].clone()),
-            call_operands,
-            spec.output_elem_tys[map_idx].clone(),
-            None,
-        );
-        let ptr_nid = graph.intern_pure(
+    let elements = read_inputs
+        .iter()
+        .map(|(array, array_type, element_type)| {
+            emit_read_element(graph, body, *array, lane, array_type, element_type, next_effect)
+        })
+        .collect::<Vec<_>>();
+    let values = emit_screma_lambda(graph, regions, pre, elements);
+    debug_assert_eq!(values.len(), output_views.len());
+    for ((output, value), element_type) in output_views.iter().zip(values).zip(&pre.result_types) {
+        let place = graph.intern_pure(
             PureOp::ViewIndex,
-            smallvec![spec.output_views[map_idx], i_nid],
-            spec.output_elem_tys[map_idx].clone(),
+            smallvec![*output, lane],
+            element_type.clone(),
             None,
         );
-        let eff_in = alloc_effect(next_effect);
-        let eff_out = alloc_effect(next_effect);
+        let effect_in = alloc_effect(next_effect);
+        let effect_out = alloc_effect(next_effect);
         graph.skeleton.blocks[body].side_effects.push(SideEffect {
             kind: SideEffectKind::Effect(EffectOp::Store),
-            operand_nodes: smallvec![ptr_nid, y_nid],
+            operand_nodes: smallvec![place, value],
             result: None,
-            effects: Some((eff_in, eff_out)),
+            effects: Some((effect_in, effect_out)),
             span: None,
         });
     }
-
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: after,
         args: vec![],
     };
 }
-
 fn emit_seg_space_len(
     graph: &mut EGraph,
     space: &SegSpace,

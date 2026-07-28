@@ -304,17 +304,15 @@ fn operation_result_residency(
     let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() else {
         return None;
     };
-    let cloneable =
-        op.lanes().maps.iter().chain(&op.post_maps).all(|map| map.destination.is_unplaced_fresh())
-            && op.operators().into_iter().all(|operator| operator.destination.is_unplaced_fresh())
-            && resources.iter().all(|resource| {
-                resource.access == ResourceAccess::Read
-                    || entry
-                        .outputs
-                        .iter()
-                        .filter_map(|output| output.resource)
-                        .any(|output| output == resource.resource)
-            });
+    let cloneable = op.result_state.iter().all(|result| result.destination.is_unplaced_fresh())
+        && resources.iter().all(|resource| {
+            resource.access == ResourceAccess::Read
+                || entry
+                    .outputs
+                    .iter()
+                    .filter_map(|output| output.resource)
+                    .any(|output| output == resource.resource)
+        });
     let dependencies = dependency_effects(&entry.graph, site)?;
     let upstream =
         dependencies.iter().copied().filter(|index| *index != site.index).collect::<HashSet<_>>();
@@ -322,10 +320,10 @@ fn operation_result_residency(
         return None;
     }
 
-    if (op.is_map() && (!op.lanes().maps.is_empty() || op.has_post_map())) || op.is_scan_only() {
+    if (op.is_map() && !op.form.post.result_types.is_empty()) || op.is_scan_only() {
         array_result_residency(entry, result, consumers, requires_array_storage)
     } else if op.is_reduce()
-        && op.operators().len() == 1
+        && op.form.reductions.len() == 1
         && (has_segmented_screma_consumer(entry, consumers) || !entry.execution_model.is_compute())
         && scalar_result_is_used(uses, result, site)
         && invocation_invariant(entry, site.block, &dependencies)
@@ -375,7 +373,7 @@ fn operation_result_plan(
                 return Ok(None);
             }
         };
-    let output_specs = output_specs(&entry.graph, kind, space, op)
+    let output_specs = output_specs(&entry.graph, result, kind, space, op)
         .ok_or_else(|| format!("materialization producer {producer:?} has an unsupported output layout"))?;
     let projected_result = projection
         .node(result)
@@ -676,8 +674,8 @@ fn supports_parallel_prefix_consumer(entry: &SemanticEntry, site: SideEffectSite
         &entry.graph.skeleton.effect(site).kind,
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
             if op.is_map()
-                && !op.has_post_map()
-                && !op.lanes().maps.is_empty()
+                && op.form.post.is_identity()
+                && !op.form.post.result_types.is_empty()
                 && matches!(op.semantic_state(), screma::SemanticState::Segmented { .. })
     )
 }
@@ -806,15 +804,9 @@ fn dependencies_are_cloneable(graph: &EGraph, block_id: BlockId, effects: &HashS
                 if matches!(op.semantic_state(), screma::SemanticState::Segmented { output_slots, resources, .. }
                     if output_slots.is_empty()
                         && op
-                            .lanes()
-                            .maps
+                            .result_state
                             .iter()
-                            .chain(&op.post_maps)
-                            .all(|map| map.destination.is_unplaced_fresh())
-                        && op
-                            .operators()
-                            .into_iter()
-                            .all(|operator| operator.destination.is_unplaced_fresh())
+                            .all(|result| result.destination.is_unplaced_fresh())
                         && resources.iter().all(|resource| resource.access == ResourceAccess::Read))
         )
     })
@@ -1170,11 +1162,8 @@ fn configure_materialized_soac(
     if kind.is_scalar() {
         return Ok(());
     }
-    for map in &mut op.lanes_mut().maps {
-        map.destination.place(SoacPlacement::OutputView);
-    }
-    for operator in op.operators_mut() {
-        operator.destination.place(SoacPlacement::OutputView);
+    for result in &mut op.result_state {
+        result.destination.place(SoacPlacement::OutputView);
     }
     producer_effect.operand_nodes.extend(output_views.iter().copied());
     let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
@@ -1547,32 +1536,19 @@ fn replace_structured_prefix_with_load(
 
 fn output_specs(
     graph: &EGraph,
+    result: NodeId,
     materialization: FixedMaterializationKind,
     space: &SegSpace,
     op: &screma::Op<Semantic>,
 ) -> Option<Vec<OutputSpec>> {
-    let result_types = op.result_types();
-    let output_elem_types = if materialization.is_scalar() && op.is_reduce() {
-        result_types.clone()
-    } else if op.is_map() {
-        op.lanes().maps.iter().chain(&op.post_maps).map(|map| map.output_element_type.clone()).collect()
-    } else if op.is_scan_only() {
-        op.lanes()
-            .maps
-            .iter()
-            .chain(&op.post_maps)
-            .map(|map| map.output_element_type.clone())
-            .chain(
-                op.operators()
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, _)| op.operator_is_output(*index))
-                    .map(|(_, operator)| graph.nodes[operator.neutral].ty.clone()),
-            )
-            .collect()
-    } else {
-        return None;
+    let result_types = match &graph.nodes[result].ty {
+        Type::Constructed(TypeName::Tuple(arity), fields) if *arity == fields.len() => fields.clone(),
+        ty if op.result_count() == 1 => vec![ty.clone()],
+        _ => return None,
     };
+    let output_elem_types = (0..op.result_count())
+        .map(|field| op.form.result_element_type(field).cloned())
+        .collect::<Option<Vec<_>>>()?;
     if output_elem_types.len() != result_types.len() {
         return None;
     }
@@ -1658,7 +1634,7 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                 SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                     let mut new_resources = Vec::new();
                     let mut domain_input = None;
-                    for (input, input_type) in op.lanes_mut().inputs.iter_mut().enumerate() {
+                    for (input, input_type) in op.inputs.iter_mut().enumerate() {
                         if let Some(replacement) = replacements
                             .iter()
                             .find(|replacement| effect.operand_nodes[input] == replacement.project)
@@ -1700,24 +1676,22 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                             }
                         }
                     }
-                    let input_arrays =
-                        op.lanes().inputs.iter().map(|input| input.array.clone()).collect::<Vec<_>>();
-                    for map in &mut op.lanes_mut().maps {
-                        if map.destination.is_input_buffer() {
-                            if let Some(input) = map.input_indices.first() {
-                                map.result_type = input_arrays[input.index()].clone();
+                    if op.inputs.len() == 1 {
+                        if let Some(result) = effect.result {
+                            let replacements = op
+                                .result_state
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, state)| state.destination.is_input_buffer())
+                                .filter_map(|(field, _)| {
+                                    matches!(op.form.result_id(field), Some(screma::ResultId::Post(_)))
+                                        .then(|| (field, op.inputs[0].array.clone()))
+                                })
+                                .collect::<Vec<_>>();
+                            if !replacements.is_empty() {
+                                result_retypes.push((result, replacements));
                             }
                         }
-                    }
-                    for operator in op.operators_mut() {
-                        if operator.destination.is_input_buffer() {
-                            if let Some(input) = operator.input_indices.first() {
-                                operator.result_type = input_arrays[input.index()].clone();
-                            }
-                        }
-                    }
-                    if let Some(result) = effect.result {
-                        result_retypes.push((result, op.result_types()));
                     }
                 }
                 SideEffectKind::Soac(SoacEffect(_, Soac::Filter(filter::Op { body, state }))) => {
@@ -1752,14 +1726,19 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
             }
         }
     }
-    for (result, result_types) in result_retypes {
+    for (result, replacements) in result_retypes {
         let current = graph.nodes[result].ty.clone();
         let retyped = match current {
-            Type::Constructed(TypeName::Tuple(_), _) => {
-                Type::Constructed(TypeName::Tuple(result_types.len()), result_types)
+            Type::Constructed(TypeName::Tuple(arity), mut fields) => {
+                for (field, ty) in replacements {
+                    if let Some(slot) = fields.get_mut(field) {
+                        *slot = ty;
+                    }
+                }
+                Type::Constructed(TypeName::Tuple(arity), fields)
             }
-            _ if result_types.len() == 1 => result_types[0].clone(),
-            _ => Type::Constructed(TypeName::Tuple(result_types.len()), result_types),
+            current if replacements.len() == 1 && replacements[0].0 == 0 => replacements[0].1.clone(),
+            current => current,
         };
         graph.retype_node(result, retyped);
     }

@@ -177,20 +177,9 @@ fn output_execution_domain(effect: &SideEffect) -> OutputExecutionDomain {
 fn requires_unrouted_owner(effect: &SideEffect) -> bool {
     match &effect.kind {
         SideEffectKind::Soac(SoacEffect(_, Soac::Hist(_) | Soac::Filter(_))) => true,
-        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => op
-            .lanes()
-            .maps
-            .iter()
-            .chain(&op.post_maps)
-            .map(|map| map.destination)
-            .chain(
-                op.operators()
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, _)| op.operator_is_output(*index))
-                    .map(|(_, operator)| operator.destination),
-            )
-            .any(|destination| !destination.is_unplaced()),
+        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
+            op.result_state.iter().any(|result| !result.destination.is_unplaced())
+        }
         SideEffectKind::Effect(EffectOp::Store) => true,
         _ => false,
     }

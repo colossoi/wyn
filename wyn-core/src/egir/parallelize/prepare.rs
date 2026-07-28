@@ -54,16 +54,14 @@ fn schedule_soac_with_mode(
 ) -> Result<Soac<Scheduled>, String> {
     Ok(match soac {
         Soac::Screma(screma::Op {
-            lanes,
-            operators,
-            post_maps,
-            hidden_scan_outputs,
+            inputs,
+            form,
+            result_state,
             state,
         }) => Soac::Screma(screma::Op {
-            lanes,
-            operators,
-            post_maps,
-            hidden_scan_outputs,
+            inputs,
+            form,
+            result_state,
             state: schedule_screma_state(state, serial),
         }),
         Soac::Filter(filter::Op { body, state }) => {

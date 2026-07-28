@@ -51,10 +51,8 @@ impl<R: GraphResource> ValueProducerPhase for Raw<R> {
         };
         nodes.extend(soac.seg_bodies().into_iter().flat_map(|body| body.captures.iter().copied()));
         if let Soac::Screma(op) = soac {
-            for operator in op.operators() {
-                nodes.push(operator.neutral);
-                nodes.extend(operator.shape.iter().copied());
-            }
+            nodes.extend(op.form.scans.iter().flat_map(|scan| scan.neutral.iter().copied()));
+            nodes.extend(op.form.reductions.iter().flat_map(|reduction| reduction.neutral.iter().copied()));
         }
         nodes
     }

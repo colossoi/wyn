@@ -68,21 +68,20 @@ fn semantic_soac_stats(allocated: &crate::egir::ResourcesAllocated) -> SemanticS
                 Soac::Filter(_) => stats.filters += 1,
                 Soac::Hist(_) => stats.hists += 1,
                 Soac::Screma(op) => {
-                    stats.map_bodies += op.lanes().maps.len() + op.post_maps.len();
+                    stats.map_bodies +=
+                        usize::from(!op.form.pre.is_identity()) + usize::from(!op.form.post.is_identity());
                     if op.is_map() {
                         stats.seg_maps += 1;
                     } else if op.is_reduce() {
                         stats.seg_reds += 1;
-                        stats.reduce_operators += op.operators().len();
+                        stats.reduce_operators += op.form.reductions.len();
                     } else if op.is_scan_only() {
                         stats.seg_scans += 1;
-                        stats.scan_operators += op.operators().len();
+                        stats.scan_operators += op.form.scans.len();
                     } else {
                         stats.seg_composites += 1;
-                        stats.reduce_operators +=
-                            op.operators().iter().filter(|operator| !operator.is_scan()).count();
-                        stats.scan_operators +=
-                            op.operators().iter().filter(|operator| operator.is_scan()).count();
+                        stats.reduce_operators += op.form.reductions.len();
+                        stats.scan_operators += op.form.scans.len();
                     }
                 }
             }
@@ -149,7 +148,7 @@ entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
                 return None;
             };
             Some((
-                op.lanes().inputs.len(),
+                op.inputs.len(),
                 resources.iter().filter(|resource| resource.access == ResourceAccess::Read).count(),
             ))
         })
@@ -184,14 +183,11 @@ entry mixed() [4]i32 =
             if !op.is_map() {
                 return None;
             }
-            Some((
-                op.lanes().inputs.len(),
-                op.lanes().maps.iter().map(|map| map.input_indices.clone()).collect::<Vec<_>>(),
-            ))
+            Some((op.inputs.len(), op.form.pre.parameter_types.len()))
         })
         .collect();
     assert_eq!(maps.len(), 1, "the producer should compose into the zip consumer");
-    assert_eq!(maps[0].1.len(), 1, "the fused consumer keeps one output lane");
+    assert_eq!(maps[0].1, 1, "the fused consumer keeps one output lane");
 }
 
 #[test]
@@ -216,17 +212,14 @@ entry siblings<[n]>(xs: [n]i32, ys: [n]i32) ([n]i32, [n]i32) =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            if !op.is_map() || op.lanes().maps.len() != 2 {
+            if !op.is_map() || op.form.post.result_types.len() != 2 {
                 return None;
             }
-            Some((
-                op.lanes().inputs.len(),
-                op.lanes().maps.iter().map(|map| map.input_indices.clone()).collect::<Vec<_>>(),
-            ))
+            Some((op.inputs.len(), op.form.pre.parameter_types.len()))
         })
         .expect("one two-lane SegMap");
     assert_eq!(fused.0, 1, "the shared zipped input must not be duplicated");
-    assert_eq!(fused.1, vec![vec![screma::InputId(0)], vec![screma::InputId(0)]]);
+    assert_eq!(fused.1, 1);
 }
 
 #[test]
@@ -360,13 +353,14 @@ entry stats(xs: []i32) [4]i32 =
             if !op.is_reduce() {
                 return None;
             }
-            let operators = op.operators();
-            (operators.len() == 3).then(|| op.operators())
+            (op.form.reductions.len() == 3).then_some(op.form.reductions.as_slice())
         })
         .expect("three-operator filtered SegRed");
     let step_names: Vec<_> = operators
         .iter()
-        .map(|operator| allocated.region(operator.step.region).unwrap().name.as_str())
+        .map(|operator| {
+            allocated.region(operator.operator.seg_body().unwrap().region).unwrap().name.as_str()
+        })
         .collect();
     assert!(step_names[0].contains("filter_reduce"));
     assert!(step_names[1].contains("filter_reduce"));
@@ -557,7 +551,7 @@ entry e() [4]f32 =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            (!op.is_map()).then(|| op.operators().len())
+            (!op.is_map()).then(|| op.form.scans.len() + op.form.reductions.len())
         })
         .collect();
     assert_eq!(
@@ -587,13 +581,12 @@ entry e() [4]f32 =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            op.is_reduce().then(|| op.operators())
+            op.is_reduce().then_some(op.form.reductions.as_slice())
         })
         .expect("fused SegRed");
     for operator in operators {
-        assert_eq!(operator.input_indices.len(), 1);
         assert_eq!(
-            allocated.region(operator.step.region).unwrap().params.len(),
+            allocated.region(operator.operator.seg_body().unwrap().region).unwrap().params.len(),
             2,
             "composed step receives accumulator plus only its routed input"
         );
@@ -624,7 +617,7 @@ entry e() [3]i32 =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            op.is_reduce().then(|| op.operators().len())
+            op.is_reduce().then(|| op.form.reductions.len())
         })
         .collect();
     assert_eq!(
@@ -657,14 +650,12 @@ entry e() [2]i32 =
             if !op.is_reduce() {
                 return None;
             }
-            let operators = op.operators();
-            (operators.len() == 2).then(|| op.operators())
+            (op.form.reductions.len() == 2).then_some(op.form.reductions.as_slice())
         })
         .expect("two-accumulator SegRed");
-    assert_eq!(operators[0].input_indices, vec![screma::InputId(0)]);
-    assert_eq!(operators[1].input_indices, vec![screma::InputId(0)]);
     assert_ne!(
-        operators[0].step.region, operators[1].step.region,
+        operators[0].operator.seg_body().unwrap().region,
+        operators[1].operator.seg_body().unwrap().region,
         "deduplicated inputs may share a column, but composed map bodies must remain distinct"
     );
     crate::lower_ssa_to_spirv(lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE))
@@ -9729,7 +9720,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
                     crate::egir::types::SideEffectKind::Soac(crate::egir::types::SoacEffect(
                         _,
                         crate::egir::types::Soac::Screma(op)
-                    )) if op.is_scan_only() && op.has_post_map() && op.hidden_scan_outputs == [0]
+                    )) if op.is_scan_only() && !op.form.post.is_identity() && op.form.post.result_types.len() == 1
                 )
             });
         assert!(

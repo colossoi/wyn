@@ -238,12 +238,12 @@ pub(crate) fn result_soac_is_consuming_scan(
         if let [screma_result] = operands.as_slice() {
             if let Some(se) = effect_index.effect(graph, *screma_result) {
                 if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &se.kind {
-                    if let Some(acc_idx) = op.operator_index_for_field(field_idx) {
-                        if op.is_scan(acc_idx)
-                            && op.destination(field_idx).is_some_and(SoacDestination::is_input_buffer)
-                        {
-                            return true;
-                        }
+                    if matches!(
+                        op.form.result_id(field_idx),
+                        Some(screma::ResultId::Post(post)) if post < op.form.scan_input_count()
+                    ) && op.destination(field_idx).is_some_and(SoacDestination::is_input_buffer)
+                    {
+                        return true;
                     }
                 }
                 return false;
@@ -275,8 +275,7 @@ pub(crate) fn result_soac_is_array_projection(
     let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &se.kind else {
         return None;
     };
-    let supported = field_idx < op.map_count()
-        || op.operator_index_for_field(field_idx).is_some_and(|index| op.is_scan(index));
+    let supported = matches!(op.form.result_id(field_idx), Some(screma::ResultId::Post(_)));
     (supported && op.destination(field_idx).is_some_and(SoacDestination::is_unplaced))
         .then_some((*screma_result, field_idx))
 }
@@ -319,8 +318,7 @@ pub(crate) fn retarget_array_projection(
         let mut views =
             operands.outputs().map(|operand| operand.map(|operand| operand.node)).collect::<Vec<_>>();
 
-        let operator_index = op.operator_index_for_field(field_idx);
-        if field_idx >= op.map_count() && operator_index.is_some_and(|index| !op.is_scan(index)) {
+        if !matches!(op.form.result_id(field_idx), Some(screma::ResultId::Post(_))) {
             return Err(ConvertError::Internal(format!(
                 "cannot retarget non-scan Screma field {field_idx}"
             )));
@@ -393,7 +391,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                         // Captures and neutrals live in the typed body.
                         // Only the leading `input_array_types.len()`
                         // slots are array inputs read per element.
-                        if op_idx < op.lanes().inputs.len() {
+                        if op_idx < op.inputs.len() {
                             input_hits.push((skel_bid, se_idx, op_idx));
                             continue;
                         }
@@ -405,7 +403,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                              substitution",
                             slot_index,
                             op_idx,
-                            op.lanes().inputs.len()
+                            op.inputs.len()
                         )));
                     }
                     SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
@@ -455,17 +453,17 @@ pub(crate) fn rewrite_sibling_index_consumers(
             SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                 let k = op_idx;
                 assert_eq!(
-                    op.lanes().inputs[k].element(),
+                    op.inputs[k].element(),
                     view_elem_ty,
                     "rewrite_sibling_index_consumers: Screma input_elem_types[{}] \
                      {:?} disagrees with output view's elem type {:?}; the SOAC's \
                      produced elements should equal the entry-output binding's \
                      element type",
                     k,
-                    op.lanes().inputs[k].element(),
+                    op.inputs[k].element(),
                     view_elem_ty
                 );
-                op.lanes_mut().inputs[k].array = view_arr_ty.clone();
+                op.inputs[k].array = view_arr_ty.clone();
             }
             SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
                 let k = op_idx - 1;

@@ -45,12 +45,10 @@
 //! The range is virtual, so its result must be `Fresh`. Unique ownership
 //! permits reuse; it does not promise mutation or manufacture backing storage.
 
-use std::collections::{HashMap, HashSet};
-
 use polytype::Type;
 
 use super::super::graph_ops;
-use super::super::soac::filter;
+use super::super::soac::{filter, screma};
 use super::super::types::{
     EGraph, ENode, NodeId, PureOp, SideEffectKind, Soac, SoacDestination, SoacEffect, SoacPlacement,
 };
@@ -78,132 +76,72 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
     let uses = graph_ops::ValueUseIndex::build(graph);
     let effect_count = graph.skeleton.blocks[block_id].side_effects.len();
     for effect_index in 0..effect_count {
-        let (
-            operands,
-            map_inputs,
-            operator_inputs,
-            map_destinations,
-            post_map_destinations,
-            accumulator_destinations,
-            filter_has_candidate,
-        ) = {
-            let effect = &graph.skeleton.blocks[block_id].side_effects[effect_index];
-            match &effect.kind {
-                SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => (
-                    effect.operand_nodes.to_vec(),
-                    op.lanes().maps.iter().map(|map| map.input_indices.clone()).collect(),
-                    op.operators()
-                        .into_iter()
-                        .map(|operator| operator.input_indices.clone())
-                        .collect::<Vec<_>>(),
-                    op.lanes().maps.iter().map(|map| map.destination).collect(),
-                    op.post_maps.iter().map(|map| map.destination).collect::<Vec<_>>(),
-                    op.operators().into_iter().map(|operator| operator.destination).collect(),
-                    false,
-                ),
-                SideEffectKind::Soac(SoacEffect(
-                    _,
-                    Soac::Filter(filter::Op {
-                        state:
-                            filter::SemanticState {
-                                storage: filter::Output::Local { destination, .. },
-                                ..
-                            },
-                        ..
-                    }),
-                )) => (
-                    effect.operand_nodes.to_vec(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    destination.is_unplaced_unique_input(),
-                ),
-                _ => continue,
-            }
-        };
-
-        let mut input_use_counts = HashMap::<usize, usize>::new();
-        for &input in map_inputs.iter().flatten().chain(operator_inputs.iter().flatten()) {
-            *input_use_counts.entry(input.index()).or_default() += 1;
-        }
-        let mut claimed_inputs = HashSet::<usize>::new();
-        let can_reuse = |input: usize, claimed_inputs: &mut HashSet<usize>| {
-            input_use_counts.get(&input) == Some(&1)
-                && claimed_inputs.insert(input)
-                && operands.get(input).is_some_and(|&node| {
+        let screma_resolution = match &graph.skeleton.blocks[block_id].side_effects[effect_index].kind {
+            SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
+                let effect = &graph.skeleton.blocks[block_id].side_effects[effect_index];
+                let input = (op.inputs.len() == 1).then(|| effect.operand_nodes[0]);
+                let reusable_input = input.filter(|&node| {
                     input_has_reusable_storage(&graph.nodes[node].ty)
                         && input_has_no_later_observers(&uses, block_id, effect_index, node)
-                })
+                });
+                let single_array_result = op.form.post.result_types.len() == 1;
+                Some(
+                    op.result_state
+                        .iter()
+                        .enumerate()
+                        .map(|(field, result)| {
+                            if !result.destination.is_unplaced_unique_input() {
+                                return result.destination;
+                            }
+                            if single_array_result
+                                && matches!(op.form.result_id(field), Some(screma::ResultId::Post(0)))
+                                && reusable_input.is_some()
+                            {
+                                result.destination.placed(SoacPlacement::InputBuffer)
+                            } else {
+                                SoacDestination::fresh()
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
+            _ => None,
         };
 
-        let resolved_maps: Vec<_> = map_destinations
-            .iter()
-            .enumerate()
-            .map(|(lane, destination)| {
-                if !destination.is_unplaced_unique_input() {
-                    return *destination;
-                }
-                map_inputs
-                    .get(lane)
-                    .and_then(|inputs| inputs.first())
-                    .copied()
-                    .filter(|input| can_reuse(input.index(), &mut claimed_inputs))
-                    .map_or_else(SoacDestination::fresh, |_| {
-                        destination.placed(SoacPlacement::InputBuffer)
-                    })
-            })
-            .collect();
-        let resolved_post_maps = post_map_destinations
-            .into_iter()
-            .map(|destination| {
-                if destination.is_unplaced_unique_input() {
-                    SoacDestination::fresh()
-                } else {
-                    destination
-                }
-            })
-            .collect::<Vec<_>>();
-        let resolved_accumulators: Vec<_> = accumulator_destinations
-            .iter()
-            .enumerate()
-            .map(|(operator, destination)| {
-                if !destination.is_unplaced_unique_input() {
-                    return *destination;
-                }
-                operator_inputs
-                    .get(operator)
-                    .and_then(|inputs| inputs.first())
-                    .copied()
-                    .filter(|input| can_reuse(input.index(), &mut claimed_inputs))
-                    .map_or_else(SoacDestination::fresh, |_| {
-                        destination.placed(SoacPlacement::InputBuffer)
-                    })
-            })
-            .collect();
-
-        let resolved_filter = filter_has_candidate.then(|| {
-            if operands.first().is_some_and(|&input| {
-                input_has_reusable_storage(&graph.nodes[input].ty)
-                    && input_has_no_later_observers(&uses, block_id, effect_index, input)
-            }) {
-                SoacDestination::unique_input().placed(SoacPlacement::InputBuffer)
-            } else {
-                SoacDestination::fresh()
+        let filter_resolution = match &graph.skeleton.blocks[block_id].side_effects[effect_index].kind {
+            SideEffectKind::Soac(SoacEffect(
+                _,
+                Soac::Filter(filter::Op {
+                    state:
+                        filter::SemanticState {
+                            storage: filter::Output::Local { destination, .. },
+                            ..
+                        },
+                    ..
+                }),
+            )) => {
+                let effect = &graph.skeleton.blocks[block_id].side_effects[effect_index];
+                destination.is_unplaced_unique_input().then(|| {
+                    if effect.operand_nodes.first().is_some_and(|&input| {
+                        input_has_reusable_storage(&graph.nodes[input].ty)
+                            && input_has_no_later_observers(&uses, block_id, effect_index, input)
+                    }) {
+                        SoacDestination::unique_input().placed(SoacPlacement::InputBuffer)
+                    } else {
+                        SoacDestination::fresh()
+                    }
+                })
             }
-        });
+            _ => None,
+        };
+
         let effect = &mut graph.skeleton.blocks[block_id].side_effects[effect_index];
         match &mut effect.kind {
             SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
-                for (map, destination) in op.lanes_mut().maps.iter_mut().zip(resolved_maps) {
-                    map.destination = destination;
-                }
-                for (map, destination) in op.post_maps.iter_mut().zip(resolved_post_maps) {
-                    map.destination = destination;
-                }
-                for (operator, destination) in op.operators_mut().into_iter().zip(resolved_accumulators) {
-                    operator.destination = destination;
+                if let Some(destinations) = screma_resolution {
+                    for (result, destination) in op.result_state.iter_mut().zip(destinations) {
+                        result.destination = destination;
+                    }
                 }
             }
             SideEffectKind::Soac(SoacEffect(
@@ -217,7 +155,7 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
                     ..
                 }),
             )) => {
-                if let Some(resolved) = resolved_filter {
+                if let Some(resolved) = filter_resolution {
                     *destination = resolved;
                 }
             }
@@ -226,7 +164,6 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
         retype_reused_results(graph, block_id, effect_index);
     }
 }
-
 fn retype_reused_results(graph: &mut EGraph, block: BlockId, effect_index: usize) {
     let effect = &graph.skeleton.blocks[block].side_effects[effect_index];
     let Some(result) = effect.result else {
@@ -243,47 +180,29 @@ fn retype_reused_results(graph: &mut EGraph, block: BlockId, effect_index: usize
             _ => None,
         })
         .collect();
-    let (result_types, changed) = {
-        let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
-            return;
-        };
-        let mut retyped = op.result_types();
-        // Output realization may already have changed a projected field to a
-        // storage view. Preserve those later EGIR decisions while changing
-        // only fields whose uniqueness candidate became a physical reuse.
-        for (projection, field) in &projections {
-            retyped[*field] = graph.nodes[*projection].ty.clone();
-        }
-        let mut changed = false;
-        for (lane, map) in op.lanes().maps.iter().enumerate() {
-            if map.destination.is_input_buffer() {
-                if let Some(input) = map.input_indices.first() {
-                    retyped[lane] = op.lanes().inputs[input.index()].array.clone();
-                    changed = true;
-                }
-            }
-        }
-        for (operator_index, operator) in op.operators().into_iter().enumerate() {
-            if operator.destination.is_input_buffer() {
-                if let Some(input) = operator.input_indices.first() {
-                    let field = op
-                        .result_field_for_operator(operator_index)
-                        .expect("reused operator must be a visible result");
-                    retyped[field] = op.lanes().inputs[input.index()].array.clone();
-                    changed = true;
-                }
-            }
-        }
-        (retyped, changed)
+    let Type::Constructed(TypeName::Tuple(_), mut result_types) = graph.nodes[result].ty.clone() else {
+        return;
     };
-    if !changed {
+    for (projection, field) in &projections {
+        if let Some(ty) = result_types.get_mut(*field) {
+            *ty = graph.nodes[*projection].ty.clone();
+        }
+    }
+
+    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
+        return;
+    };
+    if op.inputs.len() != 1 || op.form.post.result_types.len() != 1 {
         return;
     }
-    if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) =
-        &mut graph.skeleton.blocks[block].side_effects[effect_index].kind
-    {
-        op.set_result_types(&result_types);
-    }
+    let Some(field) = (0..op.result_count()).find(|&field| {
+        matches!(op.form.result_id(field), Some(screma::ResultId::Post(0)))
+            && op.destination(field).is_some_and(SoacDestination::is_input_buffer)
+    }) else {
+        return;
+    };
+    result_types[field] = op.inputs[0].array.clone();
+
     graph.retype_node(
         result,
         Type::Constructed(TypeName::Tuple(result_types.len()), result_types.clone()),
@@ -294,25 +213,14 @@ fn retype_reused_results(graph: &mut EGraph, block: BlockId, effect_index: usize
         }
     }
 }
-
 fn discard_unique_input_candidates(graph: &mut EGraph) {
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
             match &mut effect.kind {
                 SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
-                    for map in &mut op.lanes_mut().maps {
-                        if map.destination.is_unplaced_unique_input() {
-                            map.destination.make_fresh();
-                        }
-                    }
-                    for map in &mut op.post_maps {
-                        if map.destination.is_unplaced_unique_input() {
-                            map.destination.make_fresh();
-                        }
-                    }
-                    for operator in op.operators_mut() {
-                        if operator.destination.is_unplaced_unique_input() {
-                            operator.destination.make_fresh();
+                    for result in &mut op.result_state {
+                        if result.destination.is_unplaced_unique_input() {
+                            result.destination.make_fresh();
                         }
                     }
                 }
@@ -334,7 +242,6 @@ fn discard_unique_input_candidates(graph: &mut EGraph) {
         }
     }
 }
-
 fn input_has_no_later_observers(
     uses: &graph_ops::ValueUseIndex,
     block: BlockId,

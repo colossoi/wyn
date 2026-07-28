@@ -34,6 +34,7 @@ impl Language for WynLanguage {
 
 pub trait WynSoacPhase: Family<Soac = SoacEffect<Self>> + Sized {
     type SoacId: Clone + std::fmt::Debug;
+    type ScremaResults: screma::PhaseResults;
     type ScremaState: Clone + std::fmt::Debug;
     type FilterState: Clone + std::fmt::Debug;
     type HistState: Clone + std::fmt::Debug;
@@ -54,10 +55,16 @@ impl<P: WynSoacPhase> Soac<P> {
     pub(crate) fn seg_bodies(&self) -> Vec<&SegBody> {
         match self {
             Self::Screma(op) => {
-                let mut bodies =
-                    op.lanes().maps.iter().chain(&op.post_maps).map(|map| &map.body).collect::<Vec<_>>();
-                for operator in op.operators() {
-                    bodies.extend([&operator.step, &operator.combine]);
+                let mut bodies = Vec::new();
+                if let Some(body) = op.form.pre.seg_body() {
+                    bodies.push(body);
+                }
+                bodies.extend(op.form.scans.iter().filter_map(|scan| scan.operator.seg_body()));
+                bodies.extend(
+                    op.form.reductions.iter().filter_map(|reduction| reduction.operator.seg_body()),
+                );
+                if let Some(body) = op.form.post.seg_body() {
+                    bodies.push(body);
                 }
                 bodies
             }
@@ -76,17 +83,30 @@ impl<P: WynSoacPhase> Soac<P> {
     pub(crate) fn seg_body_mut(&mut self, index: usize) -> Option<&mut SegBody> {
         match self {
             Self::Screma(op) => {
-                let pre_count = op.lanes().maps.len();
-                let map_count = pre_count + op.post_maps.len();
-                if index < pre_count {
-                    return Some(&mut op.lanes_mut().maps[index].body);
+                let mut remaining = index;
+                if let Some(body) = op.form.pre.seg_body_mut() {
+                    if remaining == 0 {
+                        return Some(body);
+                    }
+                    remaining -= 1;
                 }
-                if index < map_count {
-                    return Some(&mut op.post_maps[index - pre_count].body);
+                for scan in &mut op.form.scans {
+                    if let Some(body) = scan.operator.seg_body_mut() {
+                        if remaining == 0 {
+                            return Some(body);
+                        }
+                        remaining -= 1;
+                    }
                 }
-                let operator_slot = index - map_count;
-                let operator = op.operators_mut().iter_mut().nth(operator_slot / 2)?;
-                Some(if operator_slot % 2 == 0 { &mut operator.step } else { &mut operator.combine })
+                for reduction in &mut op.form.reductions {
+                    if let Some(body) = reduction.operator.seg_body_mut() {
+                        if remaining == 0 {
+                            return Some(body);
+                        }
+                        remaining -= 1;
+                    }
+                }
+                op.form.post.seg_body_mut().filter(|_| remaining == 0)
             }
             Self::Filter(op) => match (&mut op.body.input, index) {
                 (filter::Input::Mapped { body, .. }, 0) => Some(body),
@@ -183,6 +203,7 @@ impl<R: GraphResource> Family for Raw<R> {
 
 impl<R: GraphResource> WynSoacPhase for Raw<R> {
     type SoacId = ();
+    type ScremaResults = Vec<screma::ResultState>;
     type ScremaState = screma::RawState;
     type FilterState = filter::RawState<R>;
     type HistState = hist::RawState;
@@ -195,6 +216,7 @@ impl<R: GraphResource> Family for Semantic<R> {
 
 impl<R: GraphResource> WynSoacPhase for Semantic<R> {
     type SoacId = super::program::SemanticOpId;
+    type ScremaResults = Vec<screma::ResultState>;
     type ScremaState = screma::SemanticState<R>;
     type FilterState = filter::SemanticState<R>;
     type HistState = hist::State<R>;
@@ -207,6 +229,7 @@ impl<R: GraphResource> Family for Scheduled<R> {
 
 impl<R: GraphResource> WynSoacPhase for Scheduled<R> {
     type SoacId = super::program::SemanticOpId;
+    type ScremaResults = Vec<screma::ResultState>;
     type ScremaState = screma::ScheduledState<R>;
     type FilterState = filter::ScheduledState<R>;
     type HistState = hist::State<R>;
@@ -219,6 +242,7 @@ impl Family for Physical {
 
 impl WynSoacPhase for Physical {
     type SoacId = super::program::SemanticOpId;
+    type ScremaResults = Vec<screma::ResultState>;
     type ScremaState = screma::PhysicalState;
     type FilterState = filter::PhysicalState;
     type HistState = hist::PhysicalState;

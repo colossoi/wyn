@@ -2216,27 +2216,25 @@ impl<'a, 'b> Converter<'a, 'b> {
                 .unwrap_or_else(|| result_ty.clone())
         };
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
-        // Singleton map: its one lane reads every input.
-        let map_input_indices = vec![(0..input_arr_types.len()).map(screma::InputId).collect::<Vec<_>>()];
+
         let map_region = self.region(f_name);
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op {
-                lanes: screma::Lanes {
-                    inputs: input_arr_types.into_iter().map(|array| SoacInputType { array }).collect(),
-                    maps: vec![screma::Map {
-                        body: SegBody {
+                inputs: input_arr_types.into_iter().map(|array| SoacInputType { array }).collect(),
+                form: screma::ScremaForm {
+                    pre: screma::Lambda::region(
+                        SegBody {
                             region: map_region,
                             captures: capture_nids,
                         },
-                        input_indices: map_input_indices.into_iter().next().unwrap_or_default(),
-                        output_element_type: output_elem_ty,
-                        destination,
-                        result_type: project_ty.clone(),
-                    }],
+                        input_elem_types,
+                        vec![output_elem_ty.clone()],
+                    ),
+                    scans: Vec::new(),
+                    reductions: Vec::new(),
+                    post: screma::Lambda::identity(vec![output_elem_ty]),
                 },
-                operators: Vec::new(),
-                post_maps: Vec::new(),
-                hidden_scan_outputs: Vec::new(),
+                result_state: vec![screma::ResultState { destination }],
                 state: screma::RawState,
             }),
             operands,
@@ -2329,29 +2327,27 @@ impl<'a, 'b> Converter<'a, 'b> {
         let op_region = self.region(op_name);
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op {
-                lanes: screma::Lanes {
-                    inputs: vec![SoacInputType { array: arr_ty }],
-                    maps: vec![],
+                inputs: vec![SoacInputType { array: arr_ty }],
+                form: screma::ScremaForm {
+                    pre: screma::Lambda::identity(vec![result_ty.clone()]),
+                    scans: Vec::new(),
+                    reductions: vec![screma::Reduce {
+                        operator: screma::Lambda::region(
+                            SegBody {
+                                region: op_region,
+                                captures: capture_nids,
+                            },
+                            vec![result_ty.clone(), result_ty.clone()],
+                            vec![result_ty.clone()],
+                        ),
+                        neutral: vec![init_nid],
+                        commutative: false,
+                    }],
+                    post: screma::Lambda::identity(Vec::new()),
                 },
-                operators: vec![screma::Operator {
-                    kind: screma::OperatorKind::Reduce,
-                    step: SegBody {
-                        region: op_region,
-                        captures: capture_nids,
-                    },
-                    combine: SegBody {
-                        region: op_region,
-                        captures: vec![],
-                    },
-                    input_indices: vec![screma::InputId(0)],
-                    neutral: init_nid,
-                    shape: Vec::new(),
-                    commutative: false,
+                result_state: vec![screma::ResultState {
                     destination: SoacDestination::fresh(),
-                    result_type: result_ty.clone(),
                 }],
-                post_maps: Vec::new(),
-                hidden_scan_outputs: Vec::new(),
                 state: screma::RawState,
             }),
             operands,
@@ -2398,32 +2394,28 @@ impl<'a, 'b> Converter<'a, 'b> {
                 .unwrap_or_else(|| result_ty.clone())
         };
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
+        let scan_elem_ty = soac_element_type(&project_ty);
         let op_region = self.region(op_name);
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op {
-                lanes: screma::Lanes {
-                    inputs: vec![SoacInputType { array: arr_ty }],
-                    maps: vec![],
+                inputs: vec![SoacInputType { array: arr_ty }],
+                form: screma::ScremaForm {
+                    pre: screma::Lambda::identity(vec![scan_elem_ty.clone()]),
+                    scans: vec![screma::Scan {
+                        operator: screma::Lambda::region(
+                            SegBody {
+                                region: op_region,
+                                captures: capture_nids,
+                            },
+                            vec![scan_elem_ty.clone(), scan_elem_ty.clone()],
+                            vec![scan_elem_ty.clone()],
+                        ),
+                        neutral: vec![init_nid],
+                    }],
+                    reductions: Vec::new(),
+                    post: screma::Lambda::identity(vec![scan_elem_ty.clone()]),
                 },
-                operators: vec![screma::Operator {
-                    kind: screma::OperatorKind::Scan,
-                    step: SegBody {
-                        region: op_region,
-                        captures: capture_nids,
-                    },
-                    combine: SegBody {
-                        region: op_region,
-                        captures: vec![],
-                    },
-                    input_indices: vec![screma::InputId(0)],
-                    neutral: init_nid,
-                    shape: Vec::new(),
-                    commutative: false,
-                    destination,
-                    result_type: project_ty.clone(),
-                }],
-                post_maps: Vec::new(),
-                hidden_scan_outputs: Vec::new(),
+                result_state: vec![screma::ResultState { destination }],
                 state: screma::RawState,
             }),
             operands,

@@ -151,16 +151,17 @@ fn map_graph(
 fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
     match soac {
         Soac::Screma(screma::Op {
-            lanes,
-            operators,
-            post_maps,
-            hidden_scan_outputs,
+            inputs,
+            form,
+            result_state,
             ..
         }) => {
             let mut placement = facts.placement;
-            if operators.is_empty()
+            let map_only = form.scans.is_empty() && form.reductions.is_empty();
+            if map_only
                 && placement == screma::Placement::Kernel
-                && (lanes.maps.is_empty() || !lanes.maps.iter().all(|map| !map.destination.is_unplaced()))
+                && (form.post.result_types.is_empty()
+                    || result_state.iter().all(|result| !result.destination.is_unplaced()))
             {
                 placement = screma::Placement::LaneLocal;
             }
@@ -168,10 +169,9 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
                 placement = screma::Placement::LaneLocal;
             }
             Soac::Screma(screma::Op {
-                lanes,
-                operators,
-                post_maps,
-                hidden_scan_outputs,
+                inputs,
+                form,
+                result_state,
                 state: screma::SemanticState::Segmented {
                     space: facts.space,
                     placement,
@@ -209,13 +209,14 @@ mod tests {
             kind: SideEffectKind::Soac(SoacEffect(
                 (),
                 Soac::Screma(screma::Op {
-                    lanes: screma::Lanes {
-                        inputs: vec![],
-                        maps: vec![],
+                    inputs: vec![],
+                    form: screma::ScremaForm {
+                        pre: screma::Lambda::identity(vec![]),
+                        scans: vec![],
+                        reductions: vec![],
+                        post: screma::Lambda::identity(vec![]),
                     },
-                    operators: Vec::new(),
-                    post_maps: Vec::new(),
-                    hidden_scan_outputs: Vec::new(),
+                    result_state: vec![],
                     state: screma::RawState,
                 }),
             )),
@@ -353,7 +354,7 @@ fn semantic_facts(
         return None;
     };
     let (input, operand_index, is_screma) = match soac {
-        Soac::Screma(op) => (op.lanes().inputs.first(), 0, true),
+        Soac::Screma(op) => (op.inputs.first(), 0, true),
         Soac::Filter(op) => (Some(filter_input_type(&op.body.input)), 0, false),
         Soac::Hist(op) => (op.body.inputs.first(), 1, false),
     };
@@ -508,10 +509,8 @@ fn referenced_nodes(effect: &SideEffect<Raw>) -> Vec<NodeId> {
     };
     nodes.extend(soac.seg_bodies().into_iter().flat_map(|body| body.captures.iter().copied()));
     if let Soac::Screma(op) = soac {
-        for operator in op.operators() {
-            nodes.push(operator.neutral);
-            nodes.extend(operator.shape.iter().copied());
-        }
+        nodes.extend(op.form.scans.iter().flat_map(|scan| scan.neutral.iter().copied()));
+        nodes.extend(op.form.reductions.iter().flat_map(|reduction| reduction.neutral.iter().copied()));
     }
     nodes
 }

@@ -18,22 +18,23 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
         kind: SideEffectKind::Soac(SoacEffect(
             SemanticOpId::for_test(0),
             Soac::Screma(screma::Op {
-                lanes: screma::Lanes {
-                    inputs: Vec::<SoacInputType>::new(),
-                    maps: vec![screma::Map {
-                        body: crate::egir::types::SegBody {
+                inputs: Vec::<SoacInputType>::new(),
+                form: screma::ScremaForm {
+                    pre: screma::Lambda::region(
+                        crate::egir::types::SegBody {
                             region: crate::egir::types::RegionId::from_index(0),
                             captures: vec![],
                         },
-                        input_indices: vec![],
-                        output_element_type: int.clone(),
-                        destination: SoacDestination::fresh(),
-                        result_type: int,
-                    }],
+                        vec![],
+                        vec![int.clone()],
+                    ),
+                    scans: vec![],
+                    reductions: vec![],
+                    post: screma::Lambda::identity(vec![int]),
                 },
-                operators: Vec::new(),
-                post_maps: Vec::new(),
-                hidden_scan_outputs: Vec::new(),
+                result_state: vec![screma::ResultState {
+                    destination: SoacDestination::fresh(),
+                }],
                 state: screma::SemanticState::Segmented {
                     space: SegSpace::new(crate::egir::types::SegExtent::Fixed(1)),
                     placement: screma::Placement::LaneLocal,
