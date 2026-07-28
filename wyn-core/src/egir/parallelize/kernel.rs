@@ -1,6 +1,8 @@
 //! Shared chunk arithmetic, resource sizing, and callable construction.
 
 use super::*;
+use crate::types::TypeExt;
+
 pub(super) fn apply_manifest_resource_sizes(
     entry: &mut crate::egir::program::PlannedEntry,
     resources: &crate::egir::program::LogicalResourceArena,
@@ -205,12 +207,41 @@ enum ChunkableView {
         len: NodeId,
         step: Option<NodeId>,
     },
+    StorageSlice {
+        view: NodeId,
+        start: NodeId,
+        end: NodeId,
+        overload_idx: usize,
+    },
 }
 
 impl ChunkableView {
     fn classify(graph: &EGraph, view: NodeId, kind: ChunkInputKind) -> Option<Self> {
         if let Some(resource) = graph_ops::extract_storage_view_source(graph, view) {
             return Some(Self::Storage(resource));
+        }
+        if let ENode::Pure {
+            op: PureOp::Intrinsic { id, overload_idx },
+            operands,
+        } = &graph.nodes[view].kind
+        {
+            let is_flat_storage_slice = *id == catalog().known().slice
+                && operands.len() == 3
+                && graph_ops::extract_storage_view_source(graph, operands[0]).is_some()
+                && graph.nodes[view].ty.array_variant().is_some_and(crate::types::is_array_variant_view)
+                && graph.nodes[operands[1]].ty == graph.nodes[operands[2]].ty
+                && matches!(
+                    &graph.nodes[operands[1]].ty,
+                    Type::Constructed(TypeName::UInt(32) | TypeName::Int(32), _)
+                );
+            if is_flat_storage_slice {
+                return Some(Self::StorageSlice {
+                    view,
+                    start: operands[1],
+                    end: operands[2],
+                    overload_idx: *overload_idx,
+                });
+            }
         }
         if matches!(kind, ChunkInputKind::StorageOrRange) {
             if let Some((start, len, step)) = graph_ops::extract_array_range_operands(graph, view) {
@@ -229,6 +260,10 @@ impl ChunkableView {
         match self {
             Self::Storage(resource) => graph_ops::intern_resource_len(graph, resource.0, None),
             Self::Range { len, .. } => len,
+            Self::StorageSlice { start, end, .. } => {
+                let index_ty = graph.nodes[end].ty.clone();
+                graph_ops::intern_binop(graph, "-", end, start, index_ty, None)
+            }
         }
     }
 
@@ -249,6 +284,24 @@ impl ChunkableView {
                 view_ty,
                 None,
             )),
+            Self::StorageSlice {
+                view,
+                start: _,
+                end,
+                overload_idx,
+            } => {
+                let index_ty = graph.nodes[end].ty.clone();
+                let chunk_end = graph_ops::intern_binop(graph, "+", chunk_start, chunk_len, index_ty, None);
+                Ok(graph.intern_pure(
+                    PureOp::Intrinsic {
+                        id: catalog().known().slice,
+                        overload_idx,
+                    },
+                    smallvec![view, chunk_start, chunk_end],
+                    view_ty,
+                    None,
+                ))
+            }
             Self::Range { start, step, .. } => {
                 let has_step = step.is_some();
                 let start_ty = graph

@@ -9680,6 +9680,15 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []vec2f32 =
 entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
   map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a[0..256]))
 "#,
+            true,
+        ),
+        (
+            "nested-sliced-scan-map",
+            r#"
+#[compute]
+entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
+  map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a[0..512][0..256]))
+"#,
             false,
         ),
     ];
