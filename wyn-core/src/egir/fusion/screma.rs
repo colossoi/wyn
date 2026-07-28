@@ -192,6 +192,78 @@ pub(crate) fn fuse_vertical(
     .normalize(context)
 }
 
+pub(crate) struct LambdaSource<'a> {
+    pub input_nodes: &'a [NodeId],
+    pub inputs: &'a [SoacInputType],
+    pub lambda: &'a screma::Lambda,
+}
+
+pub(crate) struct NormalizedLambda {
+    pub input_nodes: Vec<NodeId>,
+    pub inputs: Vec<SoacInputType>,
+    pub lambda: screma::Lambda,
+    pub synthesized: Vec<SemanticFunc>,
+}
+
+/// Compose a pure map producer into an arbitrary element lambda. This is the
+/// common Futhark `fuseMaps` operation used by non-Screma envelopes.
+pub(crate) fn fuse_map_into_lambda(
+    context: &mut Context<'_>,
+    producer: Source<'_>,
+    consumer: LambdaSource<'_>,
+    routes: &[InputRoute],
+) -> Option<NormalizedLambda> {
+    if !producer.form.scans.is_empty()
+        || !producer.form.reductions.is_empty()
+        || !producer.form.post.is_identity()
+        || routes.iter().any(|route| route.producer_post_output >= producer.form.post.result_types.len())
+    {
+        return None;
+    }
+
+    let remaining_slots = (0..consumer.inputs.len())
+        .filter(|slot| routed_producer_post_output(routes, *slot).is_none())
+        .collect::<Vec<_>>();
+    let mut raw_nodes = remaining_slots.iter().map(|&slot| consumer.input_nodes[slot]).collect::<Vec<_>>();
+    raw_nodes.extend_from_slice(producer.input_nodes);
+    let mut raw_array_types =
+        remaining_slots.iter().map(|&slot| consumer.inputs[slot].array.clone()).collect::<Vec<_>>();
+    raw_array_types.extend(producer.inputs.iter().map(|input| input.array.clone()));
+    let mut raw_element_types =
+        remaining_slots.iter().map(|&slot| consumer.inputs[slot].element()).collect::<Vec<_>>();
+    raw_element_types.extend(producer.inputs.iter().map(SoacInputType::element));
+    let (input_nodes, input_array_types, input_element_types, remap) =
+        deduplicate_array_inputs(raw_nodes, raw_array_types, raw_element_types);
+
+    let producer_base = remaining_slots.len();
+    let producer_parameters = remap[producer_base..].to_vec();
+    let consumer_parameters = (0..consumer.inputs.len())
+        .map(|slot| {
+            remaining_slots.iter().position(|candidate| *candidate == slot).map(|position| remap[position])
+        })
+        .collect::<Vec<_>>();
+    let outputs =
+        (0..consumer.lambda.result_types.len()).map(VerticalValueRef::Consumer).collect::<Vec<_>>();
+    let (lambda, function) = vertical_lambda(
+        context,
+        "map_envelope",
+        &input_element_types,
+        &producer.form.pre,
+        producer_parameters,
+        0,
+        consumer.lambda,
+        &consumer_parameters,
+        routes,
+        &outputs,
+    );
+
+    Some(NormalizedLambda {
+        input_nodes,
+        inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
+        lambda,
+        synthesized: function.into_iter().collect(),
+    })
+}
 impl SuperScrema<'_> {
     fn normalize(self, context: &mut Context<'_>) -> Option<Normalized> {
         if self.producer.form.scans.is_empty() && self.producer.form.post.is_identity() {
