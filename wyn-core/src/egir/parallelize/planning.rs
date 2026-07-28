@@ -516,22 +516,31 @@ fn analyze_scan_recipe(
     let Some(candidate) = super::analyze_scan_candidate(body, located)? else {
         return Ok((AnalyzedRecipe::Serial(serial), Vec::new()));
     };
-    let requests = [
+    let mut requests = Vec::with_capacity(2 + usize::from(candidate.prefix_scratch_type().is_some()));
+    for (slot, kind) in [
         CompilerResourceKind::ScanBlockSums,
         CompilerResourceKind::ScanBlockOffsets,
     ]
     .into_iter()
     .enumerate()
-    .map(|(slot, kind)| {
-        scratch_request(
+    {
+        requests.push(scratch_request(
             endpoint,
             candidate.owner,
             slot,
             kind,
             candidate.scratch_type.clone(),
-        )
-    })
-    .collect::<Result<Vec<_>>>()?;
+        )?);
+    }
+    if let Some(elem_ty) = candidate.prefix_scratch_type() {
+        requests.push(scratch_request(
+            endpoint,
+            candidate.owner,
+            2,
+            CompilerResourceKind::ScanPrefixes,
+            elem_ty.clone(),
+        )?);
+    }
     Ok((AnalyzedRecipe::Scan(candidate), requests))
 }
 

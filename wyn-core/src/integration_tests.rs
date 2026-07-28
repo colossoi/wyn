@@ -9639,7 +9639,8 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
 }
 
 /// Scan -> Map is represented as one canonical Screma whose post-map consumes
-/// the inclusive scan value. The nontrivial post region selects serial fallback.
+/// the inclusive scan value. A flat, type-preserving post region runs after
+/// the parallel scan has applied global block offsets.
 #[test]
 fn scan_into_map_compiles() {
     let cases = [
@@ -9648,8 +9649,9 @@ fn scan_into_map_compiles() {
             r#"
 #[compute]
 entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
-  map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a[0..256]))
+  map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a))
 "#,
+            true,
         ),
         (
             "map-scan-map",
@@ -9658,12 +9660,22 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
 entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
   map(
     |x: f32| x + 1.0,
-    scan(|x: f32, y: f32| x + y, 0.0, map(|x: f32| x * 2.0, a[0..256])))
+    scan(|x: f32, y: f32| x + y, 0.0, map(|x: f32| x * 2.0, a)))
 "#,
+            true,
+        ),
+        (
+            "sliced-scan-map",
+            r#"
+#[compute]
+entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
+  map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a[0..256]))
+"#,
+            false,
         ),
     ];
 
-    for (label, src) in cases {
+    for (label, src, parallel) in cases {
         let allocated = compile_to_semantic_egir(src);
         let stats = semantic_soac_stats(&allocated);
         assert_eq!(stats.seg_scans, 1, "{label}: scan and post-map share one Screma");
@@ -9690,10 +9702,35 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
             has_post_scan,
             "{label}: scan result must route through the post-map"
         );
+        let planned = crate::egir::plan(compile_to_semantic_egir(src), crate::LoweringProfile::PORTABLE)
+            .unwrap_or_else(|error| panic!("{label}: parallel plan: {error}"));
+        let expected_phases: &[&str] = if parallel {
+            &["scan_phase1", "scan_block", "scan_apply_offsets"]
+        } else {
+            &["serial_compute"]
+        };
+        assert_eq!(
+            planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+            expected_phases,
+            "{label}: recipe selection"
+        );
+        assert_eq!(
+            planned
+                .logical_resources()
+                .iter()
+                .filter(|resource| matches!(
+                    &resource.origin,
+                    crate::egir::program::ResourceOrigin::Compiler(compiler)
+                        if compiler.kind == crate::egir::program::CompilerResourceKind::ScanPrefixes
+                ))
+                .count(),
+            usize::from(parallel),
+            "{label}: prefix handoff ownership"
+        );
         crate::compile_thru_spirv(src).unwrap_or_else(|error| panic!("{label}: SPIR-V: {error}"));
         crate::lower_ssa_to_wgsl(lower_semantic_egir(
             compile_to_semantic_egir(src),
-            crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Serial),
+            crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
         ))
         .unwrap_or_else(|error| panic!("{label}: WGSL: {error}"));
     }

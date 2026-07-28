@@ -301,9 +301,11 @@ pub enum CompilerResourceKind {
     GatherHandoff,
     /// One per-accumulator partial buffer of a parallel `SegRed`.
     ReducePartial,
-    /// The two scratch buffers of a parallel `SegScan`.
+    /// Block-level scratch buffers of a parallel `SegScan`.
     ScanBlockSums,
     ScanBlockOffsets,
+    /// Per-element local prefixes retained until phase 3 applies global offsets.
+    ScanPrefixes,
     /// A runtime `filter`'s compaction buffer and its paired length cell.
     FilterScratch,
     FilterLenCell,

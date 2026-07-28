@@ -159,6 +159,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             output_resource: self.work.offsets.0,
             block_offsets: self.work.block_offsets.0,
             width: self.candidate.scan_grid.workgroup_width(),
+            post_map: None,
         };
         let mut apply_offsets =
             apply_offsets.build(self.lowering.semantic_ids, self.lowering.effect_ids)?;

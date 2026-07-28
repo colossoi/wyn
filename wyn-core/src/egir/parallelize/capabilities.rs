@@ -26,6 +26,7 @@ pub(super) enum ScremaRecipeClass {
 struct RecipeFacts {
     shape: ScremaShape,
     identity_post: bool,
+    parallel_scan_post: bool,
     closed_combines: bool,
     input_count: usize,
     operator_count: usize,
@@ -54,6 +55,11 @@ impl ScremaRecipeCapabilities {
         classify(RecipeFacts {
             shape,
             identity_post: !op.has_post_map() && op.hidden_scan_outputs.is_empty(),
+            parallel_scan_post: op.lanes().maps.is_empty()
+                && matches!(op.post_maps.as_slice(), [map]
+                if map.input_indices == [screma::InputId(0)]
+                    && map.destination.is_output_view())
+                && op.hidden_scan_outputs == [0],
             // Associativity belongs to the Screma operator contract. Ordered
             // recipes deliberately do not require commutativity.
             closed_combines: op.operators().iter().all(|op| op.combine.captures.is_empty()),
@@ -87,12 +93,12 @@ fn classify(facts: RecipeFacts) -> ScremaRecipeCapabilities {
             ScremaRecipeClass::Reduce
         }
         ScremaShape::Scan
-            if facts.identity_post
+            if (facts.identity_post || facts.parallel_scan_post)
                 && facts.closed_combines
                 && facts.input_count == 1
                 && facts.operator_count == 1
                 && facts.routed_maps
-                && facts.routed_operators =>
+                && (facts.routed_operators || facts.parallel_scan_post) =>
         {
             ScremaRecipeClass::Scan
         }
@@ -111,7 +117,8 @@ mod tests {
     #[derive(Clone, Copy)]
     enum Mutation {
         None,
-        Post,
+        ParallelScanPost,
+        UnsupportedPost,
         CapturedCombine,
         NoInput,
         SecondInput,
@@ -125,6 +132,7 @@ mod tests {
         let mut facts = RecipeFacts {
             shape,
             identity_post: true,
+            parallel_scan_post: false,
             closed_combines: true,
             input_count: 1,
             operator_count: usize::from(shape != ScremaShape::Map),
@@ -134,7 +142,12 @@ mod tests {
         };
         match mutation {
             Mutation::None => {}
-            Mutation::Post => facts.identity_post = false,
+            Mutation::ParallelScanPost => {
+                facts.identity_post = false;
+                facts.parallel_scan_post = true;
+                facts.routed_operators = false;
+            }
+            Mutation::UnsupportedPost => facts.identity_post = false,
             Mutation::CapturedCombine => facts.closed_combines = false,
             Mutation::NoInput => facts.input_count = 0,
             Mutation::SecondInput => facts.input_count = 2,
@@ -155,7 +168,7 @@ mod tests {
         #[rustfmt::skip]
         let cases = [
             ("map",                       MapShape,    None,             Map),
-            ("map post",                  MapShape,    Post,             Serial),
+            ("map post",                  MapShape,    UnsupportedPost,  Serial),
             ("reduction",                 ReduceShape, None,             Reduce),
             ("reduction combine capture", ReduceShape, CapturedCombine,  Serial),
             ("reduction without input",   ReduceShape, NoInput,          Serial),
@@ -167,7 +180,8 @@ mod tests {
             ("scan input arity",          ScanShape,   SecondInput,      Serial),
             ("scan map routing",          ScanShape,   UnroutedMap,      Serial),
             ("scan output routing",       ScanShape,   UnroutedScan,     Serial),
-            ("scan post or hidden output",ScanShape,   Post,             Serial),
+            ("scan post-map",             ScanShape,   ParallelScanPost, Scan),
+            ("unsupported scan post-map", ScanShape,   UnsupportedPost,  Serial),
             ("mixed operators",           Mixed,       None,             Serial),
         ];
 
