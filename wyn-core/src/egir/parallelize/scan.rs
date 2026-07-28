@@ -190,7 +190,7 @@ pub(super) struct ScanPhase3Spec<'a> {
     pub output_resource: ResourceId,
     pub block_offsets: ResourceId,
     pub width: u32,
-    pub post_map: Option<ScanPostPhaseSpec<'a>>,
+    pub post_maps: Vec<ScanPostPhaseSpec<'a>>,
 }
 
 impl ScanPhase3Spec<'_> {
@@ -211,7 +211,7 @@ impl ScanPhase3Spec<'_> {
                 access: crate::ResourceAccess::Read,
             },
         ];
-        if let Some(post_map) = &self.post_map {
+        for post_map in &self.post_maps {
             resources.push(schedule::ScheduledResource {
                 resource: post_map.output_resource,
                 access: crate::ResourceAccess::Write,
@@ -225,15 +225,17 @@ impl ScanPhase3Spec<'_> {
             semantic_ids,
             effect_ids,
         );
-        if let Some(post_map) = &self.post_map {
+        if self.post_maps.is_empty() {
+            builder.declare_output_storage(self.output_resource, self.elem_ty.clone());
+        } else {
             builder.declare_intermediate_storage_sized(
                 self.output_resource,
                 self.elem_ty.clone(),
                 dispatch_worker_logical_size(&self.elem_ty),
             );
+        }
+        for post_map in &self.post_maps {
             builder.declare_output_storage(post_map.output_resource, post_map.output_elem_ty.clone());
-        } else {
-            builder.declare_output_storage(self.output_resource, self.elem_ty.clone());
         }
         builder.declare_intermediate_storage_sized(
             self.block_offsets,
@@ -271,7 +273,7 @@ impl ScanPhase3Spec<'_> {
             chunked_output,
             arr_ty.clone(),
         );
-        if let Some(post_map) = self.post_map {
+        for post_map in self.post_maps {
             let mut captures = Vec::with_capacity(post_map.captures.len());
             for capture in post_map.captures {
                 captures.push(graph_ops::clone_pure_subgraph(
@@ -291,7 +293,7 @@ impl ScanPhase3Spec<'_> {
             builder.emit_pending_map_into(
                 post_map.region,
                 chunked_output,
-                arr_ty,
+                arr_ty.clone(),
                 post_map.output_elem_ty,
                 captures,
                 output_view,
@@ -327,14 +329,14 @@ pub(super) struct ScanCandidate {
     scan_output_view_operand: usize,
     scan_output_storage: SemanticResourceRef,
     scan_prefix_view_type: Type<TypeName>,
-    post_map: Option<ScanPostMap>,
+    post_maps: Vec<ScanPostMap>,
     phase1_width: u32,
     segment: screma::Segmented<SemanticResourceRef>,
 }
 
 impl ScanCandidate {
     pub(super) fn prefix_scratch_type(&self) -> Option<&Type<TypeName>> {
-        self.post_map.as_ref().map(|_| &self.scratch_type)
+        (!self.post_maps.is_empty()).then_some(&self.scratch_type)
     }
 }
 
@@ -363,8 +365,7 @@ pub(super) fn analyze_scan_candidate(
     if !can_clone_pure_subgraph(&entry.graph, operator.neutral, &[]) {
         return Ok(None);
     }
-    let post_map = located.op.post_maps.first();
-    if post_map.is_some_and(|map| {
+    if located.op.post_maps.iter().any(|map| {
         map.body.captures.iter().any(|capture| !can_clone_pure_subgraph(&entry.graph, *capture, &[]))
     }) {
         return Ok(None);
@@ -399,18 +400,28 @@ pub(super) fn analyze_scan_candidate(
     }
     let input_view_type = entry.graph.nodes[input].ty.clone();
     let scan_output_view_type = entry.graph.nodes[scan_output.node].ty.clone();
-    let scan_prefix_view_type = if post_map.is_some() {
-        crate::types::view_array_with_size(&scratch_type, Type::Variable(0), crate::types::no_buffer())
-    } else {
+    let scan_prefix_view_type = if located.op.post_maps.is_empty() {
         scan_output_view_type.clone()
+    } else {
+        crate::types::view_array_with_size(&scratch_type, Type::Variable(0), crate::types::no_buffer())
     };
-    let post_map = post_map.map(|map| ScanPostMap {
-        region: map.body.region,
-        captures: map.body.captures.clone(),
-        output_elem_type: map.output_element_type.clone(),
-        output_resource: scan_output_storage,
-        output_view_type: scan_output_view_type.clone(),
-    });
+    let mut post_maps = Vec::with_capacity(located.op.post_maps.len());
+    for (index, map) in located.op.post_maps.iter().enumerate() {
+        let Some(output) = operands.output(lanes.maps.len() + index) else {
+            return Ok(None);
+        };
+        let Some(output_resource) = graph_ops::extract_storage_view_source(&entry.graph, output.node)
+        else {
+            return Ok(None);
+        };
+        post_maps.push(ScanPostMap {
+            region: map.body.region,
+            captures: map.body.captures.clone(),
+            output_elem_type: map.output_element_type.clone(),
+            output_resource,
+            output_view_type: entry.graph.nodes[output.node].ty.clone(),
+        });
+    }
     Ok(Some(ScanCandidate {
         site,
         owner,
@@ -426,7 +437,7 @@ pub(super) fn analyze_scan_candidate(
         scan_output_view_operand: scan_output.slot,
         scan_output_storage,
         scan_prefix_view_type,
-        post_map,
+        post_maps,
         phase1_width: REDUCE_PHASE1_WIDTH,
         segment,
     }))
@@ -473,7 +484,7 @@ impl KernelPlanBuilder<'_, '_> {
             scan_output_view_operand: scan_output_view_op,
             scan_output_storage,
             scan_prefix_view_type,
-            post_map,
+            post_maps,
             phase1_width: total_threads,
             segment,
         } = analysis.candidate;
@@ -484,8 +495,9 @@ impl KernelPlanBuilder<'_, '_> {
         let block_id = site.block;
         let (block_sums_resource, block_offsets_resource) = (analysis.block_sums, analysis.block_offsets);
         let scan_prefixes_resource = analysis.scan_prefixes.unwrap_or(scan_output_storage.0);
-        if post_map.is_some() {
-            phase1_resources.retain(|resource| resource.resource != scan_output_storage.0);
+        if !post_maps.is_empty() {
+            phase1_resources
+                .retain(|resource| !post_maps.iter().any(|map| map.output_resource.0 == resource.resource));
         }
         // Chunk the input and the scan output view; swap them into the operand list.
         let chunked = chunk_soac_inputs(
@@ -523,8 +535,12 @@ impl KernelPlanBuilder<'_, '_> {
             scan_prefix_view_type,
             None,
         );
-        {
+        if post_maps.is_empty() {
             entry.graph.skeleton.effect_mut(site).operand_nodes[scan_output_view_op] = chunked_scan_output;
+        } else {
+            let operands = &mut entry.graph.skeleton.effect_mut(site).operand_nodes;
+            operands.truncate(scan_output_view_op);
+            operands.push(chunked_scan_output);
         }
 
         // Append a chunked reduce over the same input that stores each thread's
@@ -634,14 +650,17 @@ impl KernelPlanBuilder<'_, '_> {
             output_resource: scan_prefixes_resource,
             block_offsets: block_offsets_resource,
             width: total_threads,
-            post_map: post_map.as_ref().map(|map| ScanPostPhaseSpec {
-                region: map.region,
-                captures: map.captures.clone(),
-                source_graph: &entry.graph,
-                output_resource: map.output_resource.0,
-                output_elem_ty: map.output_elem_type.clone(),
-                output_view_ty: map.output_view_type.clone(),
-            }),
+            post_maps: post_maps
+                .iter()
+                .map(|map| ScanPostPhaseSpec {
+                    region: map.region,
+                    captures: map.captures.clone(),
+                    source_graph: &entry.graph,
+                    output_resource: map.output_resource.0,
+                    output_elem_ty: map.output_elem_type.clone(),
+                    output_view_ty: map.output_view_type.clone(),
+                })
+                .collect(),
         };
         let mut phase3 = phase3.build(self.semantic_ids, self.effect_ids)?;
         apply_manifest_resource_sizes(&mut phase3.body, self.resources);
@@ -649,7 +668,7 @@ impl KernelPlanBuilder<'_, '_> {
         // Phase 1 is now a per-invocation Screma scan over the thread's chunk plus
         // the appended block-sum reduce; `soac_expand` lowers both.
         make_screma_serial(&mut entry.graph, serial);
-        if post_map.is_some() {
+        if !post_maps.is_empty() {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) =
                 &mut entry.graph.skeleton.effect_mut(site).kind
             else {

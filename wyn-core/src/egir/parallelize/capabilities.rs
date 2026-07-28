@@ -56,9 +56,10 @@ impl ScremaRecipeCapabilities {
             shape,
             identity_post: !op.has_post_map() && op.hidden_scan_outputs.is_empty(),
             parallel_scan_post: op.lanes().maps.is_empty()
-                && matches!(op.post_maps.as_slice(), [map]
-                if map.input_indices == [screma::InputId(0)]
-                    && map.destination.is_output_view())
+                && !op.post_maps.is_empty()
+                && op.post_maps.iter().all(|map| {
+                    map.input_indices == [screma::InputId(0)] && map.destination.is_output_view()
+                })
                 && op.hidden_scan_outputs == [0],
             // Associativity belongs to the Screma operator contract. Ordered
             // recipes deliberately do not require commutativity.

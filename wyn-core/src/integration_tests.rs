@@ -9652,6 +9652,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
   map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a))
 "#,
             true,
+            1,
         ),
         (
             "map-scan-map",
@@ -9663,6 +9664,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
     scan(|x: f32, y: f32| x + y, 0.0, map(|x: f32| x * 2.0, a)))
 "#,
             true,
+            1,
         ),
         (
             "type-changing-scan-map",
@@ -9672,6 +9674,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []vec2f32 =
   map(|x: f32| @[x, x + 1.0], scan(|x: f32, y: f32| x + y, 0.0, a))
 "#,
             true,
+            1,
         ),
         (
             "sliced-scan-map",
@@ -9681,6 +9684,18 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
   map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a[0..256]))
 "#,
             true,
+            1,
+        ),
+        (
+            "multi-output-scan-map",
+            r#"
+#[compute]
+entry e(#[storage(set=2, binding=0, access=read)] a: []f32) ([]f32, []f32) =
+  let prefixes = scan(|x: f32, y: f32| x + y, 0.0, a) in
+  (map(|x: f32| x + 1.0, prefixes), map(|x: f32| x * 2.0, prefixes))
+"#,
+            true,
+            2,
         ),
         (
             "nested-sliced-scan-map",
@@ -9690,17 +9705,18 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
   map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a[0..512][0..256]))
 "#,
             false,
+            1,
         ),
     ];
 
-    for (label, src, parallel) in cases {
+    for (label, src, parallel, expected_maps) in cases {
         let allocated = compile_to_semantic_egir(src);
         let stats = semantic_soac_stats(&allocated);
         assert_eq!(stats.seg_scans, 1, "{label}: scan and post-map share one Screma");
         assert_eq!(stats.seg_maps, 0, "{label}: no map may remain materialized");
         assert_eq!(
-            stats.map_bodies, 1,
-            "{label}: the Screma retains one post-map body"
+            stats.map_bodies, expected_maps,
+            "{label}: the Screma retains every post-map body"
         );
         let has_post_scan = allocated
             .entry_points
