@@ -199,6 +199,24 @@ entry mixed() [4]i32 =
 }
 
 #[test]
+fn egir_vertical_fusion_routes_distinct_producer_results() {
+    let source = r#"
+#[compute]
+entry paired<[n]>(xs: [n]i32) [n]i32 =
+  let pair = map(|x: i32| (x + 1, x * 2), xs) in
+  let (plus, times) = unzip(pair) in
+  map(|values: (i32, i32)| values.0 + values.1, zip(plus, times))
+"#;
+
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_maps, 1,
+        "both producer fields route into one composed map"
+    );
+    assert_eq!(stats.seg_composites, 0);
+    compile_to_spirv(source).expect("multi-result vertical fusion lowers to SPIR-V");
+}
+#[test]
 fn egir_horizontal_fusion_deduplicates_shared_multi_input_vector() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 

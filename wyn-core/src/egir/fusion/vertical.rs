@@ -24,8 +24,7 @@ pub(crate) struct Candidate {
     block: BlockId,
     producer: usize,
     consumer: usize,
-    consumer_inputs: Vec<usize>,
-    producer_output: usize,
+    routes: Vec<fusion_screma::InputRoute>,
 }
 
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
@@ -138,12 +137,24 @@ fn find_in_graph(
                             .map(|field| (input, field))
                     })
                     .collect::<Vec<_>>();
-                let Some(&(_, producer_field)) = projected.first() else {
+                if projected.is_empty() {
                     continue;
-                };
-                let Some(screma::ResultId::Post(producer_output)) =
-                    producer_op.form.result_id(producer_field)
-                else {
+                }
+                let routes = projected
+                    .iter()
+                    .map(|(consumer_input, producer_field)| {
+                        let screma::ResultId::Post(producer_output) =
+                            producer_op.form.result_id(*producer_field)?
+                        else {
+                            return None;
+                        };
+                        Some(fusion_screma::InputRoute {
+                            consumer_input: *consumer_input,
+                            producer_output,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>();
+                let Some(routes) = routes else {
                     continue;
                 };
                 let projected_roots = projected
@@ -161,29 +172,19 @@ fn find_in_graph(
                             .iter()
                             .flat_map(|reduction| reduction.neutral.iter().copied()),
                     );
-                if projected.iter().any(|(_, field)| *field != producer_field)
-                    || semantic_roots.into_iter().any(|root| {
-                        graph_ops::pure_depends_on(graph, root, producer_result)
-                            && !projected_roots.contains(&root)
-                    })
-                    || !producer_is_used_only_by(
-                        graph,
-                        block_id,
-                        producer_index,
-                        consumer_index,
-                        producer_result,
-                    )
-                {
+                if semantic_roots.into_iter().any(|root| {
+                    graph_ops::pure_depends_on(graph, root, producer_result)
+                        && !projected_roots.contains(&root)
+                }) || !producer_is_used_only_by(
+                    graph,
+                    block_id,
+                    producer_index,
+                    consumer_index,
+                    producer_result,
+                ) {
                     continue;
                 }
-                let consumer_inputs = projected.iter().map(|(input, _)| *input).collect::<Vec<_>>();
-                if !fusion_screma::can_fuse_vertical(
-                    inner,
-                    &producer_op.form,
-                    &consumer_op.form,
-                    &consumer_inputs,
-                    producer_output,
-                ) {
+                if !fusion_screma::can_fuse_vertical(inner, &producer_op.form, &consumer_op.form, &routes) {
                     continue;
                 }
                 return Some(Candidate {
@@ -191,8 +192,7 @@ fn find_in_graph(
                     block: block_id,
                     producer: producer_index,
                     consumer: consumer_index,
-                    consumer_inputs,
-                    producer_output,
+                    routes,
                 });
             }
         }
@@ -235,8 +235,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
             inputs: &consumer_op.inputs,
             form: &consumer_op.form,
         },
-        &candidate.consumer_inputs,
-        candidate.producer_output,
+        &candidate.routes,
     )
     .expect("analyzed SuperScrema no longer normalizes");
     debug_assert!(normalized
