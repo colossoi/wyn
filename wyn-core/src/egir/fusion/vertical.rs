@@ -153,14 +153,14 @@ fn find_in_graph(
                 let routes = projected
                     .iter()
                     .map(|(consumer_input, producer_field)| {
-                        let screma::ResultId::Post(producer_output) =
+                        let screma::ResultId::Post(producer_post_output) =
                             producer_op.form.result_id(*producer_field)?
                         else {
                             return None;
                         };
                         Some(fusion_screma::InputRoute {
                             consumer_input: *consumer_input,
-                            producer_output,
+                            producer_post_output,
                         })
                     })
                     .collect::<Option<Vec<_>>>();
@@ -231,7 +231,10 @@ fn find_in_graph(
                     producer_op,
                 );
                 let retains_unplaced_fresh = retained_producer_outputs.iter().any(|field| {
-                    producer_op
+                    matches!(
+                        producer_op.form.result_id(*field),
+                        Some(screma::ResultId::Post(_))
+                    ) && producer_op
                         .destination(*field)
                         .is_some_and(|destination| destination.is_unplaced_fresh())
                 });
