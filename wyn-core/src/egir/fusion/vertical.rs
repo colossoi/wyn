@@ -4,10 +4,13 @@
 //! its pre-lambda with the consumer's pre-lambda. This preserves the consumer's
 //! single collective barrier and never reconstructs the former lane graph.
 
+use polytype::Type;
 use smallvec::SmallVec;
 
+use super::graph_and_span;
+use super::horizontal;
 use super::screma as fusion_screma;
-use super::{graph_and_span, producer_is_used_only_by};
+use crate::ast::TypeName;
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, Body, BodySite};
 use crate::egir::program::CoreProgramData;
@@ -16,6 +19,7 @@ use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
 use crate::egir::types::{EGraph, ResourceAccess, SegResourceAccess, SideEffectKind, Soac, SoacEffect};
 use crate::flow::BlockId;
+use crate::types::TypeExt;
 use crate::LookupMap;
 
 #[derive(Clone)]
@@ -25,6 +29,7 @@ pub(crate) struct Candidate {
     producer: usize,
     consumer: usize,
     routes: Vec<fusion_screma::InputRoute>,
+    retained_producer_outputs: Vec<usize>,
 }
 
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
@@ -59,28 +64,30 @@ fn find_in_graph(
             else {
                 continue;
             };
-            let screma::SemanticState::Segmented {
-                placement,
-                output_slots,
-                resources,
-                ..
-            } = producer_op.semantic_state()
-            else {
+            let screma::SemanticState::Segmented { resources, .. } = producer_op.semantic_state() else {
                 continue;
             };
-            if *placement != screma::Placement::LaneLocal
-                || !output_slots.is_empty()
-                || resources.iter().any(|resource| resource.access != ResourceAccess::Read)
-                || producer_op.result_state.iter().any(|result| !result.destination.is_unplaced())
-            {
-                continue;
-            }
             let Some(producer_result) = producer.result else {
                 continue;
             };
-            if oracle.value_consumer_count(producer_id) != 1 {
-                continue;
-            }
+            let value_consumers =
+                oracle.value_consumers(producer_id).collect::<std::collections::HashSet<_>>();
+            let value_consumer_kinds = block
+                .side_effects
+                .iter()
+                .filter_map(|effect| match &effect.kind {
+                    SideEffectKind::Soac(SoacEffect(id, Soac::Screma(op)))
+                        if value_consumers.contains(id) =>
+                    {
+                        Some(op.is_map())
+                    }
+                    SideEffectKind::Soac(SoacEffect(id, _)) if value_consumers.contains(id) => Some(false),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let all_value_consumers_are_maps = value_consumers.len() > 1
+                && value_consumer_kinds.len() == value_consumers.len()
+                && value_consumer_kinds.into_iter().all(|is_map| is_map);
 
             for consumer_index in (producer_index + 1)..block.side_effects.len() {
                 let consumer = &block.side_effects[consumer_index];
@@ -99,23 +106,7 @@ fn find_in_graph(
                 if consumer.result.is_none() {
                     continue;
                 }
-                if oracle.conflicts(producer_id, consumer_id)
-                    && !matches!(
-                        (producer.effects, consumer.effects),
-                        (Some((_, producer_out)), Some((consumer_in, _))) if producer_out == consumer_in
-                    )
-                {
-                    continue;
-                }
-                if resources.iter().any(|producer_resource| {
-                    consumer_resources.iter().any(|consumer_resource| {
-                        producer_resource.resource == consumer_resource.resource
-                            && (producer_resource.access != ResourceAccess::Read
-                                || consumer_resource.access != ResourceAccess::Read)
-                    })
-                }) {
-                    continue;
-                }
+
                 if !((producer_index + 1)..consumer_index).all(|index| {
                     let effect = &block.side_effects[index];
                     match (&effect.kind, effect.result) {
@@ -128,12 +119,31 @@ fn find_in_graph(
                     continue;
                 }
 
+                let producer_input_count = producer_op.inputs.len();
+                let mut producer_output_operands =
+                    producer.operand_nodes[producer_input_count..].iter().copied();
+                let producer_output_nodes = (0..producer_op.result_count())
+                    .map(|field| {
+                        producer_op
+                            .destination(field)
+                            .filter(|destination| destination.is_output_view())
+                            .map(|_| {
+                                producer_output_operands
+                                    .next()
+                                    .expect("missing producer output-view operand")
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                debug_assert!(producer_output_operands.next().is_none());
                 let consumer_input_count = consumer_op.inputs.len();
                 let projected = consumer.operand_nodes[..consumer_input_count]
                     .iter()
                     .enumerate()
                     .filter_map(|(input, &operand)| {
                         graph_ops::projection_index(graph, operand, producer_result)
+                            .or_else(|| {
+                                producer_output_nodes.iter().position(|output| *output == Some(operand))
+                            })
                             .map(|field| (input, field))
                     })
                     .collect::<Vec<_>>();
@@ -157,6 +167,33 @@ fn find_in_graph(
                 let Some(routes) = routes else {
                     continue;
                 };
+                let routed_resources = routes
+                    .iter()
+                    .filter_map(|route| consumer_op.inputs[route.consumer_input].array.array_buffer())
+                    .filter_map(|buffer| match buffer {
+                        Type::Constructed(TypeName::Resource(resource), _) => Some(*resource),
+                        _ => None,
+                    })
+                    .collect::<std::collections::HashSet<_>>();
+                let unrouteable_resource_conflict = resources.iter().any(|producer_resource| {
+                    consumer_resources.iter().any(|consumer_resource| {
+                        producer_resource.resource == consumer_resource.resource
+                            && (producer_resource.access != ResourceAccess::Read
+                                || consumer_resource.access != ResourceAccess::Read)
+                            && !routed_resources.contains(&producer_resource.resource.0)
+                    })
+                });
+                let direct_effect_chain = matches!(
+                    (producer.effects, consumer.effects),
+                    (Some((_, producer_out)), Some((consumer_in, _))) if producer_out == consumer_in
+                );
+                if unrouteable_resource_conflict
+                    || (oracle.conflicts(producer_id, consumer_id)
+                        && !direct_effect_chain
+                        && routed_resources.is_empty())
+                {
+                    continue;
+                }
                 let projected_roots = projected
                     .iter()
                     .map(|(input, _)| consumer.operand_nodes[*input])
@@ -175,16 +212,30 @@ fn find_in_graph(
                 if semantic_roots.into_iter().any(|root| {
                     graph_ops::pure_depends_on(graph, root, producer_result)
                         && !projected_roots.contains(&root)
-                }) || !producer_is_used_only_by(
+                }) {
+                    continue;
+                }
+                if !fusion_screma::can_fuse_vertical(inner, &producer_op.form, &consumer_op.form, &routes) {
+                    continue;
+                }
+                let consumer_count = oracle.value_consumer_count(producer_id);
+                if consumer_count > 1 && !all_value_consumers_are_maps {
+                    continue;
+                }
+                let retained_producer_outputs = retained_producer_outputs(
                     graph,
                     block_id,
                     producer_index,
                     consumer_index,
                     producer_result,
-                ) {
-                    continue;
-                }
-                if !fusion_screma::can_fuse_vertical(inner, &producer_op.form, &consumer_op.form, &routes) {
+                    producer_op,
+                );
+                let retains_unplaced_fresh = retained_producer_outputs.iter().any(|field| {
+                    producer_op
+                        .destination(*field)
+                        .is_some_and(|destination| destination.is_unplaced_fresh())
+                });
+                if retains_unplaced_fresh && consumer_op.form.operator_input_count() > 0 {
                     continue;
                 }
                 return Some(Candidate {
@@ -193,6 +244,7 @@ fn find_in_graph(
                     producer: producer_index,
                     consumer: consumer_index,
                     routes,
+                    retained_producer_outputs,
                 });
             }
         }
@@ -200,21 +252,103 @@ fn find_in_graph(
     None
 }
 
+fn reproject_retained_fields(
+    graph: &mut EGraph,
+    old_result: crate::egir::types::NodeId,
+    new_result: crate::egir::types::NodeId,
+    mapping: &[usize],
+) {
+    let projects = graph
+        .nodes
+        .iter()
+        .filter_map(|(node, definition)| match &definition.kind {
+            crate::egir::types::ENode::Pure {
+                op: crate::egir::types::PureOp::Project { index },
+                operands,
+            } if operands.first() == Some(&old_result) => Some((node, *index as usize)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (project, field) in projects {
+        let Some(&fused_field) = mapping.get(field).filter(|field| **field != usize::MAX) else {
+            continue;
+        };
+        graph.update_pure_node(project, |op, operands| {
+            *op = crate::egir::types::PureOp::Project {
+                index: fused_field as u32,
+            };
+            operands[0] = new_result;
+        });
+    }
+}
+fn retained_producer_outputs(
+    graph: &EGraph,
+    producer_block: BlockId,
+    producer_index: usize,
+    consumer_index: usize,
+    producer_result: crate::egir::types::NodeId,
+    producer: &screma::Op<crate::egir::types::Semantic>,
+) -> Vec<usize> {
+    let projects = graph
+        .nodes
+        .iter()
+        .filter_map(|(node, definition)| {
+            let crate::egir::types::ENode::Pure {
+                op: crate::egir::types::PureOp::Project { index },
+                operands,
+            } = &definition.kind
+            else {
+                return None;
+            };
+            (operands.first() == Some(&producer_result)).then_some((node, *index as usize))
+        })
+        .collect::<Vec<_>>();
+
+    (0..producer.result_count())
+        .filter(|field| {
+            if producer.destination(*field).is_some_and(|destination| !destination.is_unplaced()) {
+                return true;
+            }
+            let field_projects = projects
+                .iter()
+                .filter_map(|(project, project_field)| (*project_field == *field).then_some(*project))
+                .collect::<Vec<_>>();
+            if field_projects.is_empty() {
+                return false;
+            }
+            for (block_id, block) in &graph.skeleton.blocks {
+                for (index, effect) in block.side_effects.iter().enumerate() {
+                    if block_id == producer_block && (index == producer_index || index == consumer_index) {
+                        continue;
+                    }
+                    if effect.referenced_nodes().any(|root| {
+                        graph_ops::projection_index(graph, root, producer_result) == Some(*field)
+                            || field_projects
+                                .iter()
+                                .any(|project| graph_ops::pure_depends_on(graph, root, *project))
+                    }) {
+                        return true;
+                    }
+                }
+                if block.term.referenced_nodes().into_iter().any(|root| {
+                    graph_ops::projection_index(graph, root, producer_result) == Some(*field)
+                        || field_projects
+                            .iter()
+                            .any(|project| graph_ops::pure_depends_on(graph, root, *project))
+                }) {
+                    return true;
+                }
+            }
+            false
+        })
+        .collect()
+}
 pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     let (graph, span, scope) = graph_and_span(&inner, candidate.site);
     let outer_types =
         graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect::<LookupMap<_, _>>();
-    let producer_effect = graph.skeleton.blocks[candidate.block].side_effects[candidate.producer].clone();
-    let consumer_effect = graph.skeleton.blocks[candidate.block].side_effects[candidate.consumer].clone();
-    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(producer_op))) = &producer_effect.kind else {
-        unreachable!();
-    };
-    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(consumer_op))) = &consumer_effect.kind else {
-        unreachable!();
-    };
-
-    let producer_input_count = producer_op.inputs.len();
-    let consumer_input_count = consumer_op.inputs.len();
+    let producer = horizontal::extract_screma(graph, candidate.block, candidate.producer);
+    let consumer = horizontal::extract_screma(graph, candidate.block, candidate.consumer);
     let mut interner = inner.data.region_interner.clone();
     let mut context = fusion_screma::Context {
         program: &inner,
@@ -226,59 +360,112 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     let normalized = fusion_screma::fuse_vertical(
         &mut context,
         fusion_screma::Source {
-            input_nodes: &producer_effect.operand_nodes[..producer_input_count],
-            inputs: &producer_op.inputs,
-            form: &producer_op.form,
+            input_nodes: &producer.input_nodes,
+            inputs: &producer.op.inputs,
+            form: &producer.op.form,
         },
         fusion_screma::Source {
-            input_nodes: &consumer_effect.operand_nodes[..consumer_input_count],
-            inputs: &consumer_op.inputs,
-            form: &consumer_op.form,
+            input_nodes: &consumer.input_nodes,
+            inputs: &consumer.op.inputs,
+            form: &consumer.op.form,
         },
         &candidate.routes,
+        &candidate.retained_producer_outputs,
     )
     .expect("analyzed SuperScrema no longer normalizes");
-    debug_assert!(normalized
-        .outputs
-        .iter()
-        .enumerate()
-        .all(|(field, origin)| { *origin == fusion_screma::OutputOrigin::Consumer(field) }));
 
-    let mut fused_op = consumer_op.clone();
-    fused_op.inputs = normalized.inputs;
-    fused_op.form = normalized.form;
-    let producer_resources = match producer_op.semantic_state() {
-        screma::SemanticState::Segmented { resources, space, .. } => (resources.clone(), space.clone()),
-        screma::SemanticState::Serial => unreachable!(),
+    let mut producer_mapping = vec![usize::MAX; producer.result_types.len()];
+    let mut consumer_mapping = vec![usize::MAX; consumer.result_types.len()];
+    let mut result_state = Vec::with_capacity(normalized.outputs.len());
+    let mut result_types = Vec::with_capacity(normalized.outputs.len());
+    let mut output_nodes = Vec::with_capacity(normalized.outputs.len());
+    for (fused_field, origin) in normalized.outputs.iter().copied().enumerate() {
+        let (source_field, source_state, source_types, source_outputs, mapping) = match origin {
+            fusion_screma::OutputOrigin::Producer(field) => (
+                field,
+                &producer.op.result_state,
+                &producer.result_types,
+                &producer.output_nodes,
+                &mut producer_mapping,
+            ),
+            fusion_screma::OutputOrigin::Consumer(field) => (
+                field,
+                &consumer.op.result_state,
+                &consumer.result_types,
+                &consumer.output_nodes,
+                &mut consumer_mapping,
+            ),
+        };
+        mapping[source_field] = fused_field;
+        result_state.push(source_state[source_field]);
+        result_types.push(source_types[source_field].clone());
+        output_nodes.push(source_outputs[source_field]);
+    }
+
+    debug_assert!(consumer_mapping.iter().all(|field| *field != usize::MAX));
+
+    let mut output_slots = producer.output_slots.clone();
+    output_slots.extend(consumer.output_slots.iter().copied());
+    output_slots.sort_unstable();
+    output_slots.dedup();
+    let resources = SegResourceAccess::merge(&producer.resources, &consumer.resources);
+    let fused_op = screma::Op {
+        inputs: normalized.inputs,
+        form: normalized.form,
+        result_state,
+        state: screma::SemanticState::Segmented {
+            space: producer.space,
+            placement: if producer.placement == screma::Placement::Kernel
+                || consumer.placement == screma::Placement::Kernel
+            {
+                screma::Placement::Kernel
+            } else {
+                screma::Placement::LaneLocal
+            },
+            output_slots,
+            resources,
+        },
     };
-    let screma::SemanticState::Segmented { space, resources, .. } = fused_op.semantic_state_mut() else {
-        unreachable!();
-    };
-    *space = producer_resources.1;
-    *resources = SegResourceAccess::merge(resources, &producer_resources.0);
     debug_assert!(
         fused_op.validate().is_ok(),
         "invalid vertically fused Screma: {:?}",
         fused_op.validate()
     );
 
-    let tail = consumer_effect.operand_nodes[consumer_input_count..].to_vec();
-    let operands = normalized.input_nodes.into_iter().chain(tail).collect::<SmallVec<[_; 4]>>();
+    let mut operands = SmallVec::new();
+    operands.extend(normalized.input_nodes);
+    operands.extend(output_nodes.into_iter().flatten());
     let synthesized = normalized.synthesized;
+    let producer_result = producer.result;
+    let consumer_result = consumer.result;
+
+    let consumer_result_types = consumer.result_types;
+    let consumer_id = consumer.id;
     let site = candidate.site;
     let rebuilt = inner.rewrite_body(site, |body| {
         let rewrite = |graph: &mut EGraph| {
+            let tuple_type = Type::Constructed(TypeName::Tuple(result_types.len()), result_types.clone());
+            let fused_result = graph.alloc_side_effect_result(tuple_type);
+            if producer_mapping.iter().any(|field| *field != usize::MAX) {
+                reproject_retained_fields(graph, producer_result, fused_result, &producer_mapping);
+            }
+            horizontal::reproject_fields(
+                graph,
+                consumer_result,
+                fused_result,
+                &consumer_mapping,
+                &consumer_result_types,
+            );
+
             let block = &mut graph.skeleton.blocks[candidate.block];
             let effects = splice_effect_tokens(
                 block.side_effects[candidate.producer].effects,
                 block.side_effects[candidate.consumer].effects,
             );
             let consumer = &mut block.side_effects[candidate.consumer];
-            let SideEffectKind::Soac(SoacEffect(id, _)) = consumer.kind else {
-                unreachable!();
-            };
-            consumer.kind = SideEffectKind::Soac(SoacEffect(id, Soac::Screma(fused_op.clone())));
+            consumer.kind = SideEffectKind::Soac(SoacEffect(consumer_id, Soac::Screma(fused_op.clone())));
             consumer.operand_nodes = operands.clone();
+            consumer.result = Some(fused_result);
             consumer.effects = effects;
             block.side_effects.remove(candidate.producer);
         };

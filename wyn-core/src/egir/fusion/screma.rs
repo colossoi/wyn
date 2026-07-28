@@ -121,6 +121,7 @@ struct SuperScrema<'a> {
     producer: Source<'a>,
     consumer: Source<'a>,
     routes: &'a [InputRoute],
+    retained_producer_outputs: &'a [usize],
 }
 
 pub(crate) fn can_fuse_vertical(
@@ -173,11 +174,13 @@ pub(crate) fn fuse_vertical(
     producer: Source<'_>,
     consumer: Source<'_>,
     routes: &[InputRoute],
+    retained_producer_outputs: &[usize],
 ) -> Option<Normalized> {
     SuperScrema {
         producer,
         consumer,
         routes,
+        retained_producer_outputs,
     }
     .normalize(context)
 }
@@ -193,6 +196,7 @@ impl SuperScrema<'_> {
                 self.producer,
                 self.consumer,
                 self.routes,
+                self.retained_producer_outputs,
             ));
         }
         if can_fuse_vertical(
@@ -201,7 +205,13 @@ impl SuperScrema<'_> {
             self.consumer.form,
             self.routes,
         ) {
-            return fuse_across_middle_barrier(context, self.producer, self.consumer, self.routes);
+            return fuse_across_middle_barrier(
+                context,
+                self.producer,
+                self.consumer,
+                self.routes,
+                self.retained_producer_outputs,
+            );
         }
         None
     }
@@ -214,6 +224,7 @@ fn fuse_before_first_barrier(
     producer: Source<'_>,
     consumer: Source<'_>,
     routes: &[InputRoute],
+    retained_producer_outputs: &[usize],
 ) -> Normalized {
     let remaining_slots = (0..consumer.inputs.len())
         .filter(|slot| routed_producer_output(routes, *slot).is_none())
@@ -236,7 +247,7 @@ fn fuse_before_first_barrier(
             remaining_slots.iter().position(|candidate| *candidate == slot).map(|position| remap[position])
         })
         .collect::<Vec<_>>();
-    let (pre, function) = vertical_lambda(
+    let (pre, pre_function) = vertical_lambda(
         context,
         "vertical_pre",
         &input_element_types,
@@ -245,6 +256,57 @@ fn fuse_before_first_barrier(
         &consumer.form.pre,
         &consumer_parameters,
         routes,
+        retained_producer_outputs,
+    );
+
+    let retained_producer_types = retained_producer_outputs
+        .iter()
+        .map(|output| producer.form.pre.result_types[*output].clone())
+        .collect::<Vec<_>>();
+    let producer_outputs = retained_producer_types.len();
+    let consumer_post_parameters = consumer.form.post.parameter_types.len();
+    let post_parameter_types = consumer
+        .form
+        .post
+        .parameter_types
+        .iter()
+        .cloned()
+        .chain(retained_producer_types.iter().cloned())
+        .collect::<Vec<_>>();
+    let (post, post_function) = if consumer.form.scans.is_empty() {
+        (screma::Lambda::identity(post_parameter_types), None)
+    } else {
+        let forwarded = screma::Lambda::identity(retained_producer_types);
+        let outputs = (0..consumer.form.post.result_types.len())
+            .map(|result| ValueRef { call: 0, result })
+            .chain((0..producer_outputs).map(|result| ValueRef { call: 1, result }))
+            .collect();
+        parallel_lambdas(
+            context,
+            "vertical_forward_post",
+            post_parameter_types,
+            vec![
+                LambdaCall {
+                    lambda: &consumer.form.post,
+                    parameters: (0..consumer_post_parameters).collect(),
+                },
+                LambdaCall {
+                    lambda: &forwarded,
+                    parameters: (consumer_post_parameters..consumer_post_parameters + producer_outputs)
+                        .collect(),
+                },
+            ],
+            outputs,
+        )
+    };
+    let consumer_reductions = consumer.form.reduction_result_count();
+    let outputs = (0..consumer.form.result_count())
+        .map(OutputOrigin::Consumer)
+        .chain(retained_producer_outputs.iter().copied().map(OutputOrigin::Producer))
+        .collect();
+    debug_assert_eq!(
+        consumer_reductions + post.result_types.len(),
+        consumer.form.result_count() + producer_outputs
     );
 
     Normalized {
@@ -254,10 +316,10 @@ fn fuse_before_first_barrier(
             pre,
             scans: consumer.form.scans.clone(),
             reductions: consumer.form.reductions.clone(),
-            post: consumer.form.post.clone(),
+            post,
         },
-        outputs: (0..consumer.form.result_count()).map(OutputOrigin::Consumer).collect(),
-        synthesized: function.into_iter().collect(),
+        outputs,
+        synthesized: pre_function.into_iter().chain(post_function).collect(),
     }
 }
 
@@ -270,6 +332,7 @@ fn fuse_across_middle_barrier(
     producer: Source<'_>,
     consumer: Source<'_>,
     routes: &[InputRoute],
+    retained_producer_outputs: &[usize],
 ) -> Option<Normalized> {
     let remaining_slots = (0..consumer.inputs.len())
         .filter(|slot| routed_producer_output(routes, *slot).is_none())
@@ -518,13 +581,24 @@ fn fuse_across_middle_barrier(
         &mut post_capture_cursor,
         &consumer.form.post,
     );
-    let post_results = invoke_lambda(
+    let mut post_results = invoke_lambda(
         &mut post_graph,
         context.program,
         &consumer.form.post,
         consumer_post_arguments,
     );
+    post_results.extend(retained_producer_outputs.iter().map(|output| producer_post_results[*output]));
     debug_assert_eq!(post_capture_cursor, post_arguments.len());
+    let post_result_types = consumer
+        .form
+        .post
+        .result_types
+        .iter()
+        .cloned()
+        .chain(
+            retained_producer_outputs.iter().map(|output| producer.form.post.result_types[*output].clone()),
+        )
+        .collect();
     let (post, post_function) = finish_lambda(
         context,
         "vertical_middle_post",
@@ -532,7 +606,7 @@ fn fuse_across_middle_barrier(
         post_params,
         post_captures,
         post_parameter_types,
-        consumer.form.post.result_types.clone(),
+        post_result_types,
         post_results,
     );
 
@@ -545,7 +619,10 @@ fn fuse_across_middle_barrier(
             reductions: consumer.form.reductions.clone(),
             post,
         },
-        outputs: (0..consumer.form.result_count()).map(OutputOrigin::Consumer).collect(),
+        outputs: (0..consumer.form.result_count())
+            .map(OutputOrigin::Consumer)
+            .chain(retained_producer_outputs.iter().copied().map(OutputOrigin::Producer))
+            .collect(),
         synthesized: pre_function.into_iter().chain(post_function).collect(),
     })
 }
@@ -881,6 +958,7 @@ fn vertical_lambda(
     consumer: &screma::Lambda,
     consumer_parameters: &[Option<usize>],
     routes: &[InputRoute],
+    retained_producer_outputs: &[usize],
 ) -> (screma::Lambda, Option<SemanticFunc>) {
     let producer_body = producer.seg_body();
     let consumer_body = consumer.seg_body();
@@ -927,6 +1005,16 @@ fn vertical_lambda(
     };
     debug_assert_eq!(capture_cursor, arguments.len());
 
+    let result_types = consumer
+        .result_types
+        .iter()
+        .cloned()
+        .chain(retained_producer_outputs.iter().map(|output| producer.result_types[*output].clone()))
+        .collect();
+    let results = results
+        .into_iter()
+        .chain(retained_producer_outputs.iter().map(|output| produced[*output]))
+        .collect();
     let (lambda, function) = finish_lambda(
         context,
         label,
@@ -934,7 +1022,7 @@ fn vertical_lambda(
         params,
         captures,
         parameter_types.to_vec(),
-        consumer.result_types.clone(),
+        result_types,
         results,
     );
     (lambda, function)

@@ -7,9 +7,8 @@
 //! an operation across resource or effect ordering.
 //!
 //! Horizontal fusion combines independent siblings. Vertical fusion composes
-//! callable regions for a pure, single-consumer `SegMap` producer and its
-//! same-space consumer. Multi-consumer producers deliberately survive for the
-//! allocation pass to materialize once. Envelope fusion composes maps into
+//! canonical Scremas while retaining producer outputs needed by other consumers
+//! or output routes. Envelope fusion composes maps into
 //! filters, scatters, and histograms; filter fusion redirects scalar consumers
 //! through the compacted route; indexed scalarization removes producers whose
 //! complete demand is a set of scalar element reads.
@@ -17,12 +16,12 @@
 use polytype::Type;
 
 use crate::ast::{Span, TypeName};
-use crate::egir::graph_ops;
+
 use crate::egir::ir::BodySite;
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::types::{EGraph, NodeId};
-use crate::flow::BlockId;
+
 use crate::LookupMap;
 
 mod horizontal;
@@ -65,37 +64,6 @@ pub(super) fn graph_and_span(program: &Segmented, site: BodySite) -> (&EGraph, S
         BodySite::Constant(_) => unreachable!("semantic fusion never targets constants"),
     };
     (graph, span, scope)
-}
-
-pub(super) fn producer_is_used_only_by(
-    graph: &EGraph,
-    producer_block: BlockId,
-    producer_index: usize,
-    consumer_index: usize,
-    producer_result: NodeId,
-) -> bool {
-    for (block_id, block) in &graph.skeleton.blocks {
-        for (index, effect) in block.side_effects.iter().enumerate() {
-            if block_id == producer_block && (index == producer_index || index == consumer_index) {
-                continue;
-            }
-            if effect
-                .referenced_nodes()
-                .any(|node| graph_ops::pure_depends_on(graph, node, producer_result))
-            {
-                return false;
-            }
-        }
-        if block
-            .term
-            .referenced_nodes()
-            .into_iter()
-            .any(|root| graph_ops::pure_depends_on(graph, root, producer_result))
-        {
-            return false;
-        }
-    }
-    true
 }
 
 pub(super) fn capture_types<'a>(

@@ -249,7 +249,7 @@ entry siblings<[n]>(xs: [n]i32, ys: [n]i32) ([n]i32, [n]i32) =
 }
 
 #[test]
-fn egir_vertical_fusion_keeps_producer_that_also_escapes() {
+fn egir_vertical_fusion_preserves_escaping_producer_output() {
     let source = r#"
 #[compute]
 entry both(xs: []i32) ([]i32, []i32) =
@@ -258,10 +258,26 @@ entry both(xs: []i32) ([]i32, []i32) =
   (produced, consumed)
 "#;
     let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(stats.seg_maps, 1, "the fused map retains both observable outputs");
+    compile_to_spirv(source).expect("output-preserving vertical fusion lowers to SPIR-V");
+}
+
+#[test]
+fn egir_vertical_fusion_absorbs_multiple_consumers() {
+    let source = r#"
+#[compute]
+entry shared(xs: []i32) ([]i32, []i32) =
+  let produced = map(|x: i32| x + 1, xs) in
+  let left = map(|x: i32| x * 2, produced) in
+  let right = map(|x: i32| x - 3, produced) in
+  (left, right)
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
     assert_eq!(
-        stats.seg_maps, 2,
-        "an observable producer cannot be folded into its consumer"
+        stats.seg_maps, 1,
+        "one Screma serves both consumers without materializing the shared producer"
     );
+    compile_to_spirv(source).expect("multi-consumer vertical fusion lowers to SPIR-V");
 }
 
 #[test]

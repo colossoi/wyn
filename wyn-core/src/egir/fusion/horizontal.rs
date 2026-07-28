@@ -190,20 +190,20 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
 }
 
 #[derive(Clone)]
-struct ScremaParts {
-    id: crate::egir::program::SemanticOpId,
-    op: screma::Op<Semantic>,
-    space: crate::egir::types::SegSpace,
-    placement: screma::Placement,
-    output_slots: Vec<OutputSlotId>,
-    resources: Vec<SegResourceAccess>,
-    result: NodeId,
-    result_types: Vec<Type<TypeName>>,
-    input_nodes: Vec<NodeId>,
-    output_nodes: Vec<Option<NodeId>>,
+pub(super) struct ScremaParts {
+    pub(super) id: crate::egir::program::SemanticOpId,
+    pub(super) op: screma::Op<Semantic>,
+    pub(super) space: crate::egir::types::SegSpace,
+    pub(super) placement: screma::Placement,
+    pub(super) output_slots: Vec<OutputSlotId>,
+    pub(super) resources: Vec<SegResourceAccess>,
+    pub(super) result: NodeId,
+    pub(super) result_types: Vec<Type<TypeName>>,
+    pub(super) input_nodes: Vec<NodeId>,
+    pub(super) output_nodes: Vec<Option<NodeId>>,
 }
 
-fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> ScremaParts {
+pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> ScremaParts {
     let effect = &graph.skeleton.blocks[block].side_effects[index];
     let SideEffectKind::Soac(SoacEffect(id, Soac::Screma(op))) = &effect.kind else {
         unreachable!("horizontal fusion selected a non-Screma");
@@ -406,7 +406,7 @@ fn apply_plan(graph: &mut EGraph, block: BlockId, left: usize, right: usize, pla
     block.side_effects.remove(right);
 }
 
-fn reproject_fields(
+pub(super) fn reproject_fields(
     graph: &mut EGraph,
     old_result: NodeId,
     new_result: NodeId,
