@@ -407,21 +407,21 @@ pub(crate) fn rewrite_sibling_index_consumers(
                         )));
                     }
                     SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
-                        // Scatter operand layout: [dest_view, inputs..].
-                        // Input region is `1..1+input_array_types.len()`.
-                        if op_idx >= 1 && op_idx < 1 + op.body.inputs.len() {
+                        // Hist destinations and operator metadata live in the
+                        // canonical form; compact effect operands are inputs.
+                        if op_idx < op.inputs.len() {
                             input_hits.push((skel_bid, se_idx, op_idx));
                             continue;
                         }
                         return Err(ConvertError::Unsupported(format!(
-                            "compute output #{}: SOAC result reaches a Scatter \
+                            "compute output #{}: SOAC result reaches a Hist \
                              side-effect operand position that is not an array \
                              input (op_index={}, inputs.len()={}); v1 supports \
-                             only input-array consumers via `source → output_view` \
+                             only input-array consumers via source-to-output-view \
                              substitution",
                             slot_index,
                             op_idx,
-                            op.body.inputs.len()
+                            op.inputs.len()
                         )));
                     }
                     _ => {
@@ -466,19 +466,19 @@ pub(crate) fn rewrite_sibling_index_consumers(
                 op.inputs[k].array = view_arr_ty.clone();
             }
             SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
-                let k = op_idx - 1;
+                let k = op_idx;
                 assert_eq!(
-                    op.body.inputs[k].element(),
+                    op.inputs[k].element(),
                     view_elem_ty,
-                    "rewrite_sibling_index_consumers: Scatter input_elem_types[{}] \
+                    "rewrite_sibling_index_consumers: Hist input_elem_types[{}] \
                      {:?} disagrees with output view's elem type {:?}; the SOAC's \
                      produced elements should equal the entry-output binding's \
                      element type",
                     k,
-                    op.body.inputs[k].element(),
+                    op.inputs[k].element(),
                     view_elem_ty
                 );
-                op.body.inputs[k].array = view_arr_ty.clone();
+                op.inputs[k].array = view_arr_ty.clone();
             }
             _ => unreachable!("classifier above only queues Screma or Hist input-region hits"),
         }

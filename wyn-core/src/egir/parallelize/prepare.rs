@@ -84,13 +84,13 @@ fn schedule_soac_with_mode(
             };
             Soac::Filter(filter::Op { body, state })
         }
-        Soac::Hist(hist::Op { body, state }) => {
+        Soac::Hist(hist::Op { inputs, form, state }) => {
             let state = match state {
                 hist::State::Serial => hist::State::Serial,
                 hist::State::Segmented(space) if !serial => hist::State::Segmented(space),
                 hist::State::Segmented(_) => hist::State::Serial,
             };
-            Soac::Hist(hist::Op { body, state })
+            Soac::Hist(hist::Op { inputs, form, state })
         }
     })
 }

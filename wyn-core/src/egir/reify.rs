@@ -183,7 +183,8 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
             })
         }
         Soac::Hist(op) => Soac::Hist(hist::Op {
-            body: op.body,
+            inputs: op.inputs,
+            form: op.form,
             state: if facts.entry { hist::State::Segmented(facts.space) } else { hist::State::Serial },
         }),
     }
@@ -347,7 +348,7 @@ fn semantic_facts(
     let (input, operand_index, is_screma) = match soac {
         Soac::Screma(op) => (op.inputs.first(), 0, true),
         Soac::Filter(op) => (op.body.inputs.first(), 0, false),
-        Soac::Hist(op) => (op.body.inputs.first(), 1, false),
+        Soac::Hist(op) => (op.inputs.first(), 0, false),
     };
     let output_slots = if is_screma {
         entry.map_or_else(Vec::new, |entry| output_slots(entry, effect))
@@ -493,9 +494,13 @@ fn referenced_nodes(effect: &SideEffect<Raw>) -> Vec<NodeId> {
         return nodes;
     };
     nodes.extend(soac.seg_bodies().into_iter().flat_map(|body| body.captures.iter().copied()));
-    if let Soac::Screma(op) = soac {
-        nodes.extend(op.form.scans.iter().flat_map(|scan| scan.neutral.iter().copied()));
-        nodes.extend(op.form.reductions.iter().flat_map(|reduction| reduction.neutral.iter().copied()));
+    match soac {
+        Soac::Screma(op) => {
+            nodes.extend(op.form.scans.iter().flat_map(|scan| scan.neutral.iter().copied()));
+            nodes.extend(op.form.reductions.iter().flat_map(|reduction| reduction.neutral.iter().copied()));
+        }
+        Soac::Hist(op) => nodes.extend(op.referenced_nodes()),
+        Soac::Filter(_) => {}
     }
     nodes
 }

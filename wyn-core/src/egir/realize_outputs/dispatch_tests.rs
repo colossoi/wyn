@@ -32,28 +32,33 @@ fn raw_hist_soac(
     captures: Vec<NodeId>,
     index_type: Type<TypeName>,
     value_type: Type<TypeName>,
-    dest_elem_type: Type<TypeName>,
+    destination: NodeId,
+    shape: NodeId,
+    race_factor: NodeId,
 ) -> Soac<Raw> {
     Soac::Hist(hist::Op {
-        body: hist::Body {
+        inputs: inputs.clone(),
+        form: hist::HistForm {
             bucket: screma::Lambda::region(
                 SegBody {
                     region: RegionId::from_index(0),
                     captures,
                 },
                 inputs.iter().map(SoacInputType::element).collect(),
-                vec![index_type.clone(), value_type.clone()],
+                vec![index_type, value_type.clone()],
             ),
-            inputs,
-            index_type,
-            value_type,
-            dest_elem_type,
-            update: hist::Update::OrderedOverwrite,
+            operations: vec![hist::HistOp {
+                shape: vec![shape],
+                race_factor,
+                destinations: vec![destination],
+                update: hist::Update::OrderedOverwrite {
+                    value_types: vec![value_type],
+                },
+            }],
         },
         state: hist::RawState,
     })
 }
-
 /// A runtime-sized compute output that no retargetable Map/Scan produced
 /// must surface a clean `Unsupported` error.
 #[test]
@@ -116,18 +121,6 @@ fn vec4_ty() -> Type<TypeName> {
     Type::Constructed(
         TypeName::Vec,
         vec![f32_ty(), Type::Constructed(TypeName::Size(4), vec![])],
-    )
-}
-
-fn view_arr_ty(elem: Type<TypeName>, binding: crate::BindingRef) -> Type<TypeName> {
-    Type::Constructed(
-        TypeName::Array,
-        vec![
-            elem,
-            Type::Constructed(TypeName::ArrayVariantView, vec![]),
-            Type::Variable(0),
-            Type::Constructed(TypeName::Buffer(binding), vec![]),
-        ],
     )
 }
 
@@ -203,109 +196,52 @@ fn rewrite_sibling_index_consumers_rejects_map_output_view_operand() {
     }
 }
 
-/// `source` at the `Scatter` dest slot (operand 0) must be rejected —
-/// the dest is a write-storage view, not an input read.
+/// Hist's compact operands contain only co-iterated inputs. Destination,
+/// shape, race-factor, and capture references live in the canonical form and
+/// cannot be mistaken for retargetable array inputs.
 #[test]
-fn rewrite_sibling_index_consumers_rejects_scatter_dest_position() {
+fn rewrite_sibling_index_consumers_rewrites_hist_input_only() {
     let mut graph = EGraph::<Raw>::new();
     let block = graph.skeleton.entry;
     let elem = vec4_ty();
     let arr_ty = composite_arr_ty(elem.clone(), 4);
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
 
     let source = graph.alloc_side_effect_result(arr_ty.clone());
     let view =
         graph_ops::intern_resource_view(&mut graph, crate::ResourceId::for_test(1), elem.clone(), None);
-
-    // Scatter with `source` placed at the dest_view operand (index 0)
-    // instead of the legitimate input region (`1..1+inputs.len()`).
-    let dummy_input = graph.alloc_side_effect_result(arr_ty.clone());
+    let destination =
+        graph_ops::intern_resource_view(&mut graph, crate::ResourceId::for_test(2), elem.clone(), None);
+    let shape = graph.intern_pure(PureOp::Int("4".into()), smallvec![], i32_ty.clone(), None);
+    let race_factor = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), None);
     let result_nid = graph.alloc_side_effect_result(Type::Constructed(TypeName::Bool, vec![]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(
             (),
             raw_hist_soac(
-                vec![SoacInputType {
-                    array: arr_ty.clone(),
-                }],
+                vec![SoacInputType { array: arr_ty }],
                 vec![],
-                Type::Constructed(TypeName::Int(32), vec![]),
+                i32_ty,
                 elem.clone(),
-                elem.clone(),
+                destination,
+                shape,
+                race_factor,
             ),
         )),
-        operand_nodes: smallvec![source, dummy_input],
+        operand_nodes: smallvec![source],
         result: Some(result_nid),
         effects: None,
         span: None,
     });
 
     let mut next_effect = crate::IdSource::new();
-    let err = rewrite_sibling_index_consumers(&mut graph, block, &mut next_effect, source, view, elem, 0)
-        .expect_err("Scatter dest-position consumer of `source` must be rejected");
-    match err {
-        ConvertError::Unsupported(msg) => {
-            assert!(
-                msg.contains("Scatter") && msg.contains("not an array input"),
-                "unexpected message: {msg}"
-            );
-        }
-        other => panic!("expected ConvertError::Unsupported, got {other:?}"),
-    }
+    rewrite_sibling_index_consumers(&mut graph, block, &mut next_effect, source, view, elem, 0)
+        .expect("Hist input should retarget to the output view");
+    assert_eq!(
+        graph.skeleton.blocks[block].side_effects[0].operand_nodes.as_slice(),
+        &[view]
+    );
 }
-
-/// `source` at a `Scatter` capture slot (past `1+inputs.len()`) must
-/// be rejected — captures feed the envelope's free vars, not a
-/// per-element view read.
-#[test]
-fn rewrite_sibling_index_consumers_rejects_scatter_capture_position() {
-    let mut graph = EGraph::<Raw>::new();
-    let block = graph.skeleton.entry;
-    let elem = vec4_ty();
-    let arr_ty = composite_arr_ty(elem.clone(), 4);
-
-    let source = graph.alloc_side_effect_result(arr_ty.clone());
-    let view =
-        graph_ops::intern_resource_view(&mut graph, crate::ResourceId::for_test(1), elem.clone(), None);
-
-    // Scatter with one input + one capture. The capture slot (index 2,
-    // past `1+inputs.len()=2`) is where `source` lives.
-    let dummy_dest =
-        graph.alloc_side_effect_result(view_arr_ty(elem.clone(), crate::BindingRef::new(0, 1)));
-    let dummy_input = graph.alloc_side_effect_result(arr_ty.clone());
-    let result_nid = graph.alloc_side_effect_result(Type::Constructed(TypeName::Bool, vec![]));
-    graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Soac(SoacEffect(
-            (),
-            raw_hist_soac(
-                vec![SoacInputType {
-                    array: arr_ty.clone(),
-                }],
-                vec![source],
-                Type::Constructed(TypeName::Int(32), vec![]),
-                elem.clone(),
-                elem.clone(),
-            ),
-        )),
-        operand_nodes: smallvec![dummy_dest, dummy_input, source],
-        result: Some(result_nid),
-        effects: None,
-        span: None,
-    });
-
-    let mut next_effect = crate::IdSource::new();
-    let err = rewrite_sibling_index_consumers(&mut graph, block, &mut next_effect, source, view, elem, 0)
-        .expect_err("Scatter capture-position consumer of `source` must be rejected");
-    match err {
-        ConvertError::Unsupported(msg) => {
-            assert!(
-                msg.contains("Scatter") && msg.contains("not an array input"),
-                "unexpected message: {msg}"
-            );
-        }
-        other => panic!("expected ConvertError::Unsupported, got {other:?}"),
-    }
-}
-
 /// `source` at a `Screma` accumulator-init slot (past `inputs.len()`)
 /// must be rejected — init values are scalars/values, not per-element
 /// view reads.

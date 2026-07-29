@@ -72,10 +72,13 @@ impl<P: WynSoacPhase> Soac<P> {
                 op.body.map.seg_body().into_iter().chain(op.body.predicate.seg_body()).collect()
             }
             Self::Hist(op) => {
-                let mut bodies = op.body.bucket.seg_body().into_iter().collect::<Vec<_>>();
-                if let hist::Update::Reduce { operator, .. } = &op.body.update {
-                    bodies.extend(operator.seg_body());
-                }
+                let mut bodies = op.form.bucket.seg_body().into_iter().collect::<Vec<_>>();
+                bodies.extend(
+                    op.form.operations.iter().filter_map(|operation| match &operation.update {
+                        hist::Update::OrderedOverwrite { .. } => None,
+                        hist::Update::Reduce { operator, .. } => operator.seg_body(),
+                    }),
+                );
                 bodies
             }
         }
@@ -121,18 +124,23 @@ impl<P: WynSoacPhase> Soac<P> {
             }
             Self::Hist(op) => {
                 let mut remaining = index;
-                if let Some(body) = op.body.bucket.seg_body_mut() {
+                if let Some(body) = op.form.bucket.seg_body_mut() {
                     if remaining == 0 {
                         return Some(body);
                     }
                     remaining -= 1;
                 }
-                match &mut op.body.update {
-                    hist::Update::Reduce { operator, .. } => {
-                        operator.seg_body_mut().filter(|_| remaining == 0)
+                for operation in &mut op.form.operations {
+                    if let hist::Update::Reduce { operator, .. } = &mut operation.update {
+                        if let Some(body) = operator.seg_body_mut() {
+                            if remaining == 0 {
+                                return Some(body);
+                            }
+                            remaining -= 1;
+                        }
                     }
-                    hist::Update::OrderedOverwrite => None,
                 }
+                None
             }
         }
     }
@@ -531,7 +539,7 @@ impl<P: WynSoacPhase> Soac<P> {
         match self {
             Self::Screma(op) => op.for_each_type_mut(visit),
             Self::Filter(op) => op.body.for_each_type_mut(visit),
-            Self::Hist(op) => op.body.for_each_type_mut(visit),
+            Self::Hist(op) => op.for_each_type_mut(visit),
         }
     }
 }
@@ -584,7 +592,7 @@ impl<R: GraphResource> Soac<Semantic<R>> {
         match self {
             Self::Screma(op) => op.referenced_nodes(),
             Self::Filter(op) => op.referenced_nodes(),
-            Self::Hist(op) => op.referenced_nodes(),
+            Self::Hist(op) => op.referenced_nodes_with_state(),
         }
     }
 
@@ -592,7 +600,7 @@ impl<R: GraphResource> Soac<Semantic<R>> {
         match self {
             Self::Screma(op) => op.referenced_node_slots(),
             Self::Filter(op) => op.referenced_node_slots(),
-            Self::Hist(op) => op.referenced_node_slots(),
+            Self::Hist(op) => op.referenced_node_slots_with_state(),
         }
     }
 }

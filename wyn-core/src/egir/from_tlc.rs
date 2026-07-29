@@ -2286,19 +2286,33 @@ impl<'a, 'b> Converter<'a, 'b> {
             operator_parameters,
             vec![dest.elem_ty.clone()],
         );
-        let operands = smallvec![dest_view, index_node, value_node];
+        let destination_length = self.intern_pure(
+            PureOp::Intrinsic {
+                id: catalog().known().length,
+                overload_idx: 0,
+            },
+            smallvec![dest_view],
+            index_type.clone(),
+        );
+        let race_factor = self.intern_pure(PureOp::Int("1".into()), smallvec![], index_type.clone());
+        let operands = smallvec![index_node, value_node];
         self.emit_soac(
             Soac::Hist(hist::Op {
-                body: hist::Body {
-                    bucket: screma::Lambda::identity(vec![index_type.clone(), value_type.clone()]),
-                    inputs: vec![
-                        SoacInputType { array: index_array },
-                        SoacInputType { array: value_array },
-                    ],
-                    index_type,
-                    value_type,
-                    dest_elem_type: dest.elem_ty.clone(),
-                    update: hist::Update::Reduce { operator, neutral },
+                inputs: vec![
+                    SoacInputType { array: index_array },
+                    SoacInputType { array: value_array },
+                ],
+                form: hist::HistForm {
+                    bucket: screma::Lambda::identity(vec![index_type, value_type]),
+                    operations: vec![hist::HistOp {
+                        shape: vec![destination_length],
+                        race_factor,
+                        destinations: vec![dest_view],
+                        update: hist::Update::Reduce {
+                            operator,
+                            neutral: vec![neutral],
+                        },
+                    }],
                 },
                 state: hist::RawState,
             }),
@@ -2344,27 +2358,38 @@ impl<'a, 'b> Converter<'a, 'b> {
         let capture_nids: Vec<NodeId> =
             lam.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
 
-        // `[dest_view, inputs..]` — captures live on the `SegBody`.
-        let mut operands: SmallVec<[NodeId; 4]> = smallvec![dest_view];
-        operands.extend_from_slice(&input_nids);
+        let operands: SmallVec<[NodeId; 4]> = input_nids.into_iter().collect();
         let body_region = self.region(func);
+        let destination_length = self.intern_pure(
+            PureOp::Intrinsic {
+                id: catalog().known().length,
+                overload_idx: 0,
+            },
+            smallvec![dest_view],
+            index_type.clone(),
+        );
+        let race_factor = self.intern_pure(PureOp::Int("1".into()), smallvec![], index_type.clone());
 
         self.emit_soac(
             Soac::Hist(hist::Op {
-                body: hist::Body {
+                inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
+                form: hist::HistForm {
                     bucket: screma::Lambda::region(
                         SegBody {
                             region: body_region,
                             captures: capture_nids,
                         },
                         lam.lam.params.iter().map(|(_, ty)| ty.clone()).collect(),
-                        vec![index_type.clone(), value_type.clone()],
+                        vec![index_type, value_type],
                     ),
-                    inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
-                    index_type,
-                    value_type,
-                    dest_elem_type: dest_elem_ty,
-                    update: hist::Update::OrderedOverwrite,
+                    operations: vec![hist::HistOp {
+                        shape: vec![destination_length],
+                        race_factor,
+                        destinations: vec![dest_view],
+                        update: hist::Update::OrderedOverwrite {
+                            value_types: vec![dest_elem_ty],
+                        },
+                    }],
                 },
                 state: hist::RawState,
             }),

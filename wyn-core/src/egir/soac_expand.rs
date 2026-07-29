@@ -102,11 +102,10 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
             !op.body.inputs.is_empty()
                 && op.body.inputs.iter().all(|input| is_plain_array_source(&input.array))
         }
-        // Scatter reads all input arrays per element; loop length comes from
-        // the first input, but every input must support the read path.
+        // Hist reads all input arrays per element; loop length comes from the
+        // first input, but every input must support the read path.
         Soac::Hist(op) => {
-            !op.body.inputs.is_empty()
-                && op.body.inputs.iter().all(|input| is_plain_array_source(&input.array))
+            !op.inputs.is_empty() && op.inputs.iter().all(|input| is_plain_array_source(&input.array))
         }
         Soac::Screma(op) if matches!(op.state, screma::PhysicalState::Segmented(_)) && op.is_map() => {
             op.form.post.is_identity() && op.inputs.iter().all(|input| is_plain_array_source(&input.array))
@@ -437,29 +436,24 @@ fn expand_one(
             }
         }
         SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
-            // Operands: [dest_view, inputs.., captures..].
-            let dest_view = se.operand_nodes[0];
-            let n_inputs = op.body.inputs.len();
-            let input_nids = &se.operand_nodes[1..1 + n_inputs];
+            let n_inputs = op.inputs.len();
+            let input_nids = &se.operand_nodes[..n_inputs];
             let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
                 .iter()
-                .zip(op.body.inputs.iter())
+                .zip(op.inputs.iter())
                 .map(|(nid, input)| (*nid, input.array.clone(), input.element()))
                 .collect();
-            let len_input = (input_nids[0], op.body.inputs[0].array.clone());
-            let result_nid = se.result.expect("Scatter has a result");
+            let len_input = (input_nids[0], op.inputs[0].array.clone());
+            let result_nid = se.result.expect("Hist has a result");
 
             let hist = HistLoop {
-                dest_view,
-                dest_elem_ty: op.body.dest_elem_type.clone(),
-                bucket: op.body.bucket.clone(),
-                update: op.body.update.clone(),
+                form: op.form.clone(),
                 read_inputs,
                 len_input,
                 result_node: result_nid,
             };
-            // Both ordered overwrite and general reducers remain serial until
-            // a backend atomic implementation can preserve their contracts.
+            // General reducers and ordered overwrites remain serial until a
+            // backend atomic implementation can preserve their contracts.
             build_hist_loop(graph, bid, idx, hist, next_effect, regions);
         }
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
@@ -1116,26 +1110,46 @@ fn build_filter_loop(
 /// over the buffer — its type (set by `convert_soac_filter`) already carries
 /// `Buffer(scratch_out)`, so the backend recovers the descriptor from the type.
 /// All offsets/lengths are `u32` to match the view `{offset, len}` convention.
-/// Inputs for sequential histogram expansion. The bucket lambda maps the read
-/// input elements to an `(index, value)` pair. The update is either ordered
-/// overwrite (source `scatter`) or read-combine-write (source
-/// `reduce_by_index`).
+/// Inputs for canonical serial histogram expansion. The form owns all bucket
+/// result routing and operation metadata; the loop supplies co-iterated input
+/// elements and a domain length.
 struct HistLoop {
-    dest_view: NodeId,
-    dest_elem_ty: Type<TypeName>,
-    bucket: screma::Lambda,
-    update: hist::Update,
+    form: hist::HistForm,
     /// `(array_nid, array_type, elem_type)` per input, read per iteration.
     read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,
-    /// Loop bound source — the first input `(nid, array_type)`.
+    /// Loop bound source -- the first input `(nid, array_type)`.
     len_input: (NodeId, Type<TypeName>),
     result_node: NodeId,
 }
 
-/// Sequential histogram semantics. Out-of-bounds indices are not guarded here
-/// (Futhark ignores them; v1 trusts the bucket lambda to emit in-bounds
-/// indices). General reducers remain serial until backend atomics can preserve
-/// their update contract.
+/// Convert one operation's multidimensional index to the row-major scalar
+/// offset used by Wyn storage views.
+fn flatten_hist_index(graph: &mut EGraph, indices: &[NodeId], shape: &[NodeId]) -> NodeId {
+    debug_assert_eq!(indices.len(), shape.len());
+    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+    let Some((&first, rest)) = indices.split_first() else {
+        return graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_type, None);
+    };
+    rest.iter().copied().zip(shape.iter().copied().skip(1)).fold(first, |linear, (index, dimension)| {
+        let scaled = graph.intern_pure(
+            PureOp::BinOp("*".into()),
+            smallvec![linear, dimension],
+            i32_type.clone(),
+            None,
+        );
+        graph.intern_pure(
+            PureOp::BinOp("+".into()),
+            smallvec![scaled, index],
+            i32_type.clone(),
+            None,
+        )
+    })
+}
+
+/// Canonical serial histogram semantics. Bucket results are decoded in
+/// Futhark order: all operation indices, then all operation values. A
+/// multi-component reducer is invoked once with all previous components and
+/// all incoming components, then its results are stored componentwise.
 fn build_hist_loop(
     graph: &mut EGraph,
     bid: BlockId,
@@ -1146,10 +1160,7 @@ fn build_hist_loop(
 ) {
     use super::graph_ops::{emit_storage_store, emit_view_load};
     let HistLoop {
-        dest_view,
-        dest_elem_ty,
-        bucket,
-        update,
+        form,
         read_inputs,
         len_input,
         result_node,
@@ -1179,38 +1190,55 @@ fn build_hist_loop(
                     next_effect,
                 ));
             }
-            let bucket_values = emit_screma_lambda(graph, regions, &bucket, arguments);
-            debug_assert_eq!(bucket_values.len(), 2);
-            let bucket_index = bucket_values[0];
-            let bucket_value = bucket_values[1];
-            let updated = match &update {
-                hist::Update::OrderedOverwrite => bucket_value,
-                hist::Update::Reduce { operator, .. } => {
-                    let previous = emit_view_load(
+            let bucket_values = emit_screma_lambda(graph, regions, &form.bucket, arguments);
+            debug_assert_eq!(bucket_values.len(), form.index_count() + form.value_count());
+            let (indices, values) = bucket_values.split_at(form.index_count());
+            let mut index_offset = 0;
+            let mut value_offset = 0;
+
+            for operation in &form.operations {
+                let operation_indices = &indices[index_offset..index_offset + operation.index_count()];
+                let operation_values = &values[value_offset..value_offset + operation.value_count()];
+                index_offset += operation.index_count();
+                value_offset += operation.value_count();
+                let bucket_index = flatten_hist_index(graph, operation_indices, &operation.shape);
+                let value_types = operation.update.value_types();
+
+                let updated_values = match &operation.update {
+                    hist::Update::OrderedOverwrite { .. } => operation_values.to_vec(),
+                    hist::Update::Reduce { operator, .. } => {
+                        let mut reducer_arguments = Vec::with_capacity(operation.value_count() * 2);
+                        for (&destination, value_type) in operation.destinations.iter().zip(value_types) {
+                            reducer_arguments.push(emit_view_load(
+                                graph,
+                                blk,
+                                destination,
+                                bucket_index,
+                                value_type.clone(),
+                                next_effect,
+                                None,
+                            ));
+                        }
+                        reducer_arguments.extend_from_slice(operation_values);
+                        emit_screma_lambda(graph, regions, operator, reducer_arguments)
+                    }
+                };
+                debug_assert_eq!(updated_values.len(), operation.destinations.len());
+                for ((&destination, value_type), updated) in
+                    operation.destinations.iter().zip(value_types).zip(updated_values)
+                {
+                    emit_storage_store(
                         graph,
                         blk,
-                        dest_view,
+                        destination,
                         bucket_index,
-                        dest_elem_ty.clone(),
+                        updated,
+                        value_type.clone(),
                         next_effect,
                         None,
                     );
-                    emit_screma_lambda(graph, regions, operator, vec![previous, bucket_value])
-                        .into_iter()
-                        .next()
-                        .expect("validated histogram reducer returns one value")
                 }
-            };
-            emit_storage_store(
-                graph,
-                blk,
-                dest_view,
-                bucket_index,
-                updated,
-                dest_elem_ty.clone(),
-                next_effect,
-                None,
-            );
+            }
             vec![]
         },
     );

@@ -96,11 +96,11 @@ fn find_in_graph(graph: &EGraph, site: BodySite, oracle: &SemanticGraph) -> Opti
                     continue;
                 }
 
-                let input_count = consumer_op.body.inputs.len();
-                if consumer.operand_nodes.len() < 1 + input_count {
+                let input_count = consumer_op.inputs.len();
+                if consumer.operand_nodes.len() != input_count {
                     continue;
                 }
-                let input_nodes = &consumer.operand_nodes[1..1 + input_count];
+                let input_nodes = &consumer.operand_nodes[..input_count];
                 let routes = input_nodes
                     .iter()
                     .enumerate()
@@ -162,9 +162,9 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     else {
         unreachable!();
     };
-    let input_count = consumer_op.body.inputs.len();
-    let input_nodes = consumer_effect.operand_nodes[1..1 + input_count].to_vec();
-    let consumer_lambda = consumer_op.body.bucket.clone();
+    let input_count = consumer_op.inputs.len();
+    let input_nodes = consumer_effect.operand_nodes[..input_count].to_vec();
+    let consumer_lambda = consumer_op.form.bucket.clone();
     let mut interner = inner.data.region_interner.clone();
     let mut context = fusion_screma::Context {
         program: &inner,
@@ -182,20 +182,18 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
         },
         fusion_screma::LambdaSource {
             input_nodes: &input_nodes,
-            inputs: &consumer_op.body.inputs,
+            inputs: &consumer_op.inputs,
             lambda: &consumer_lambda,
         },
         &candidate.routes,
     )
     .expect("analyzed map-to-histogram fusion no longer composes");
-    consumer_op.body.inputs = normalized.inputs;
-    consumer_op.body.bucket = normalized.lambda;
+    consumer_op.inputs = normalized.inputs;
+    consumer_op.form.bucket = normalized.lambda;
     if candidate.routes.iter().any(|route| route.consumer_input == 0) {
         consumer_op.state = hist::State::Segmented(producer.space.clone());
     }
-    let mut operands = SmallVec::new();
-    operands.push(consumer_effect.operand_nodes[0]);
-    operands.extend(normalized.input_nodes);
+    let operands: SmallVec<[crate::egir::types::NodeId; 4]> = normalized.input_nodes.into_iter().collect();
     let synthesized = normalized.synthesized;
 
     let rebuilt = inner.rewrite_body(candidate.site, |body| {

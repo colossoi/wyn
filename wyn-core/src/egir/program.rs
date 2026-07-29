@@ -977,11 +977,26 @@ fn physicalize_soac(
             };
             Soac::Filter(filter::Op { body, state })
         }
-        Soac::Hist(hist::Op { mut body, state }) => {
-            body.bucket = lambda(body.bucket, nodes);
-            if let hist::Update::Reduce { operator, neutral } = &mut body.update {
-                *operator = lambda(operator.clone(), nodes);
-                *neutral = nodes[neutral];
+        Soac::Hist(hist::Op {
+            inputs,
+            mut form,
+            state,
+        }) => {
+            form.bucket = lambda(form.bucket, nodes);
+            for operation in &mut form.operations {
+                for dimension in &mut operation.shape {
+                    *dimension = nodes[dimension];
+                }
+                operation.race_factor = nodes[&operation.race_factor];
+                for destination in &mut operation.destinations {
+                    *destination = nodes[destination];
+                }
+                if let hist::Update::Reduce { operator, neutral } = &mut operation.update {
+                    *operator = lambda(operator.clone(), nodes);
+                    for value in neutral {
+                        *value = nodes[value];
+                    }
+                }
             }
             let state = match state {
                 hist::State::Serial => hist::State::Serial,
@@ -989,7 +1004,7 @@ fn physicalize_soac(
                     hist::State::Segmented(space(iteration_space, nodes, bindings)?)
                 }
             };
-            Soac::Hist(hist::Op { body, state })
+            Soac::Hist(hist::Op { inputs, form, state })
         }
     })
 }

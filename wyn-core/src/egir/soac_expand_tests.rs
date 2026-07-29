@@ -18,7 +18,7 @@
 use crate::ast::TypeName;
 use crate::egir::program::{PhysicalEGraph, PhysicalSideEffectKind, SemanticOpId};
 use crate::egir::soac::{hist, screma};
-use crate::egir::types::{ENode, Family, Physical, PureOp, Soac, SoacEffect, SoacInputType};
+use crate::egir::types::{ENode, Family, NodeId, Physical, PureOp, Soac, SoacEffect, SoacInputType};
 use polytype::Type;
 
 /// Compile source through the pipeline to just-past `expand_soacs`,
@@ -85,7 +85,13 @@ fn scatter_handleability_checks_every_input() {
     let kind: PhysicalSideEffectKind = PhysicalSideEffectKind::Soac(SoacEffect(
         SemanticOpId::for_test(0),
         Soac::<Physical>::Hist(hist::Op {
-            body: hist::Body {
+            inputs: vec![
+                SoacInputType {
+                    array: plain_array_ty(i32_ty.clone()),
+                },
+                SoacInputType { array: bad_input_ty },
+            ],
+            form: hist::HistForm {
                 bucket: screma::Lambda::region(
                     crate::egir::types::SegBody {
                         region: crate::egir::types::RegionId::from_index(0),
@@ -94,16 +100,14 @@ fn scatter_handleability_checks_every_input() {
                     vec![i32_ty.clone(), f32_ty.clone()],
                     vec![i32_ty.clone(), f32_ty.clone()],
                 ),
-                inputs: vec![
-                    SoacInputType {
-                        array: plain_array_ty(i32_ty.clone()),
+                operations: vec![hist::HistOp {
+                    shape: vec![NodeId::from(slotmap::KeyData::from_ffi(1))],
+                    race_factor: NodeId::from(slotmap::KeyData::from_ffi(2)),
+                    destinations: vec![NodeId::from(slotmap::KeyData::from_ffi(3))],
+                    update: hist::Update::OrderedOverwrite {
+                        value_types: vec![f32_ty],
                     },
-                    SoacInputType { array: bad_input_ty },
-                ],
-                index_type: i32_ty,
-                value_type: f32_ty.clone(),
-                dest_elem_type: f32_ty,
-                update: hist::Update::OrderedOverwrite,
+                }],
             },
             state: hist::PhysicalState::Serial,
         }),
@@ -115,6 +119,143 @@ fn scatter_handleability_checks_every_input() {
     );
 }
 
+#[test]
+fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
+    use crate::egir::graph_ops;
+    use crate::egir::program::RegionInterner;
+    use crate::egir::types::{EffectOp, SideEffectKind};
+    use smallvec::{smallvec, SmallVec};
+
+    let mut graph = PhysicalEGraph::new();
+    let block = graph.skeleton.entry;
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let array_ty = plain_array_ty(i32_ty.clone());
+    let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone(), None);
+    let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), None);
+    let two = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty.clone(), None);
+    let four = graph.intern_pure(PureOp::Int("4".into()), smallvec![], i32_ty.clone(), None);
+    let mut input_nodes = SmallVec::<[NodeId; 4]>::new();
+    for _ in 0..6 {
+        input_nodes.push(graph.intern_pure(
+            PureOp::ArrayLit(4),
+            smallvec![zero, zero, zero, zero],
+            array_ty.clone(),
+            None,
+        ));
+    }
+    let destinations = (0..3)
+        .map(|binding| {
+            graph_ops::intern_storage_view(
+                &mut graph,
+                crate::BindingRef::new(2, binding),
+                i32_ty.clone(),
+                None,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut regions = RegionInterner::default();
+    let reducer_region = regions.intern("hist_tuple_reducer");
+    let histogram = hist::Op::<Physical> {
+        inputs: (0..6)
+            .map(|_| SoacInputType {
+                array: array_ty.clone(),
+            })
+            .collect(),
+        form: hist::HistForm {
+            bucket: screma::Lambda::identity(vec![i32_ty.clone(); 6]),
+            operations: vec![
+                hist::HistOp {
+                    shape: vec![two, two],
+                    race_factor: one,
+                    destinations: destinations[..2].to_vec(),
+                    update: hist::Update::Reduce {
+                        operator: screma::Lambda::region(
+                            crate::egir::types::SegBody {
+                                region: reducer_region,
+                                captures: vec![],
+                            },
+                            vec![i32_ty.clone(); 4],
+                            vec![i32_ty.clone(); 2],
+                        ),
+                        neutral: vec![zero, zero],
+                    },
+                },
+                hist::HistOp {
+                    shape: vec![four],
+                    race_factor: one,
+                    destinations: destinations[2..].to_vec(),
+                    update: hist::Update::OrderedOverwrite {
+                        value_types: vec![i32_ty.clone()],
+                    },
+                },
+            ],
+        },
+        state: hist::PhysicalState::Serial,
+    };
+    let mut effect_ids = crate::IdSource::new();
+    graph_ops::emit_pending_soac(
+        &mut graph,
+        block,
+        SemanticOpId::for_test(0),
+        Soac::Hist(histogram),
+        input_nodes,
+        bool_ty,
+        &mut effect_ids,
+        None,
+    );
+
+    let graph =
+        super::run_one_body(graph, &regions, &mut effect_ids).expect("general serial Hist should expand");
+    let stores = graph
+        .skeleton
+        .blocks
+        .iter()
+        .flat_map(|(_, block)| &block.side_effects)
+        .filter(|effect| matches!(effect.kind, SideEffectKind::Effect(EffectOp::Store)))
+        .count();
+    assert_eq!(
+        stores, 12,
+        "three destination components are stored across four unrolled iterations"
+    );
+    assert!(graph.skeleton.blocks.iter().all(|(_, block)| {
+        block.side_effects.iter().all(|effect| !matches!(effect.kind, SideEffectKind::Soac(_)))
+    }));
+    let reducer_calls = graph
+        .nodes
+        .iter()
+        .filter(|(_, node)| {
+            matches!(
+                &node.kind,
+                ENode::Pure {
+                    op: PureOp::Call(name),
+                    operands,
+                } if name == "hist_tuple_reducer" && operands.len() == 4
+            )
+        })
+        .count();
+    assert_eq!(
+        reducer_calls, 4,
+        "the two-component reducer must be invoked once, not once per component, in each iteration"
+    );
+    assert_eq!(
+        stores / reducer_calls,
+        3,
+        "each iteration stores all three components"
+    );
+    assert!(
+        graph.nodes.iter().any(|(_, node)| {
+            matches!(
+                &node.kind,
+                ENode::Pure {
+                    op: PureOp::BinOp(op),
+                    ..
+                } if op == "*"
+            )
+        }),
+        "rank-2 indices must be flattened row-major"
+    );
+}
 #[test]
 fn map_array_of_mixed_tuple_emits_componentwise_array_with() {
     // Map output: [8](f32, i32, vec3f32).

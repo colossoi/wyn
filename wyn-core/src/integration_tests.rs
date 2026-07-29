@@ -750,8 +750,8 @@ entry accumulate(indices: []i32,
             _ => None,
         })
         .expect("semantic reduce_by_index histogram");
-    assert!(histogram.body.bucket.is_identity());
-    let hist::Update::Reduce { operator, .. } = &histogram.body.update else {
+    assert!(histogram.form.bucket.is_identity());
+    let hist::Update::Reduce { operator, .. } = &histogram.form.operations[0].update else {
         panic!("reduce_by_index must retain its reducer")
     };
     assert_eq!(operator.parameter_types.len(), 2);
@@ -793,8 +793,11 @@ entry accumulate(indices: []i32,
             _ => None,
         })
         .expect("fused reducing histogram");
-    assert!(!histogram.body.bucket.is_identity());
-    assert!(matches!(histogram.body.update, hist::Update::Reduce { .. }));
+    assert!(!histogram.form.bucket.is_identity());
+    assert!(matches!(
+        histogram.form.operations[0].update,
+        hist::Update::Reduce { .. }
+    ));
     compile_to_spirv(source).expect("map-reduce_by_index fusion should lower");
 }
 #[test]
@@ -821,7 +824,7 @@ entry write(xs: []i32, #[storage(set=2, binding=0, access=write)] dest: *[]i32) 
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| match &effect.kind {
-            SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => Some(op.body.inputs.len()),
+            SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => Some(op.inputs.len()),
             _ => None,
         })
         .expect("fused SegHist");

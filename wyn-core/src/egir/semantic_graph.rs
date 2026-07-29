@@ -151,12 +151,14 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
                         }
                         resources
                     }
-                    Soac::Hist(_) => {
+                    Soac::Hist(op) => {
                         let mut resources = read_resources(graph, effect);
-                        if let Some(destination) = effect
-                            .operand_nodes
-                            .first()
-                            .and_then(|node| graph_ops::extract_storage_view_source(graph, *node))
+                        for destination in op
+                            .form
+                            .operations
+                            .iter()
+                            .flat_map(|operation| &operation.destinations)
+                            .filter_map(|node| graph_ops::extract_storage_view_source(graph, *node))
                         {
                             if let Some(resource) =
                                 resources.iter_mut().find(|resource| resource.resource == destination)
@@ -299,20 +301,26 @@ where
                 op.body.validate().map_err(|error| format!("{scope}: {error}"))?;
             }
             Soac::Hist(op) => {
-                if let Some(body) = op.body.bucket.seg_body() {
+                if effect.operand_nodes.len() != op.inputs.len() {
+                    return Err(format!(
+                        "{scope}: Hist requires {} input operands, found {}",
+                        op.inputs.len(),
+                        effect.operand_nodes.len(),
+                    ));
+                }
+                if let Some(body) = op.form.bucket.seg_body() {
                     verify_body("histogram bucket", body)?;
                 }
-                let neutral_type = match &op.body.update {
-                    hist::Update::OrderedOverwrite => None,
-                    hist::Update::Reduce { operator, neutral } => {
-                        let body = operator
-                            .seg_body()
-                            .ok_or_else(|| format!("{scope}: histogram reducer cannot be identity"))?;
+                for (index, operation) in op.form.operations.iter().enumerate() {
+                    if let hist::Update::Reduce { operator, .. } = &operation.update {
+                        let body = operator.seg_body().ok_or_else(|| {
+                            format!("{scope}: histogram reducer {index} cannot be identity")
+                        })?;
                         verify_body("histogram reducer", body)?;
-                        graph.nodes.get(*neutral).map(|node| &node.ty)
                     }
-                };
-                op.body.validate(neutral_type).map_err(|error| format!("{scope}: {error}"))?;
+                }
+                op.validate(|node| graph.nodes.get(node).map(|node| node.ty.clone()))
+                    .map_err(|error| format!("{scope}: {error}"))?;
             }
         }
         Ok(())
@@ -367,8 +375,8 @@ where
                     SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
                         let _ = writeln!(
                             output,
-                            "{scope}: Hist state={:?} body={:?} update={:?}",
-                            op.state, op.body.bucket, op.body.update
+                            "{scope}: Hist state={:?} inputs={:?} bucket={:?} operations={:?}",
+                            op.state, op.inputs, op.form.bucket, op.form.operations
                         );
                     }
                     SideEffectKind::Effect(_) => {}
