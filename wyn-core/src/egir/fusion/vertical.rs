@@ -5,7 +5,7 @@
 //! single collective barrier.
 
 use polytype::Type;
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 
 use super::graph_and_span;
 use super::horizontal;
@@ -18,10 +18,108 @@ use crate::egir::program::CoreProgramData;
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
-use crate::egir::types::{EGraph, ResourceAccess, SegResourceAccess, SideEffectKind, Soac, SoacEffect};
+use crate::egir::types::{
+    EGraph, ENode, NodeId, PureOp, ResourceAccess, SegResourceAccess, SideEffectKind, Soac, SoacEffect,
+    SoacInputType,
+};
 use crate::flow::BlockId;
 use crate::types::TypeExt;
 use crate::LookupMap;
+
+/// Ordered array-to-array transforms on a routed producer result. Slice is the
+/// only such operation in Wyn's current pure IR; scalar `Index` transforms are
+/// handled by the point-demand pass because they do not remain SOAC inputs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct InputTransform {
+    slices: Vec<SliceTransform>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SliceTransform {
+    op: PureOp,
+    start: NodeId,
+    end: NodeId,
+    size: Type<TypeName>,
+}
+
+impl InputTransform {
+    fn route(
+        graph: &EGraph,
+        operand: NodeId,
+        producer_result: NodeId,
+        producer_outputs: &[Option<NodeId>],
+    ) -> Option<(usize, Self)> {
+        let mut current = operand;
+        let mut slices = Vec::new();
+        loop {
+            if let Some(field) = graph_ops::projection_index(graph, current, producer_result) {
+                slices.reverse();
+                return Some((field, Self { slices }));
+            }
+            if let Some(field) = producer_outputs.iter().position(|output| *output == Some(current)) {
+                slices.reverse();
+                return Some((field, Self { slices }));
+            }
+            let ENode::Pure { op, operands } = &graph.nodes.get(current)?.kind else {
+                return None;
+            };
+            let PureOp::Intrinsic { id, .. } = op else {
+                return None;
+            };
+            if *id != crate::builtins::catalog().known().slice {
+                return None;
+            }
+            let [base, start, end] = operands.as_slice() else {
+                return None;
+            };
+            slices.push(SliceTransform {
+                op: op.clone(),
+                start: *start,
+                end: *end,
+                size: graph.nodes[current].ty.array_size()?.clone(),
+            });
+            current = *base;
+        }
+    }
+
+    fn is_identity(&self) -> bool {
+        self.slices.is_empty()
+    }
+
+    fn apply(
+        &self,
+        graph: &mut EGraph,
+        mut node: NodeId,
+        input: &SoacInputType,
+    ) -> Option<(NodeId, SoacInputType)> {
+        let mut array = input.array.clone();
+        for slice in &self.slices {
+            array = array_with_outer_size(&array, &slice.size)?;
+            node = graph.intern_pure(
+                slice.op.clone(),
+                smallvec![node, slice.start, slice.end],
+                array.clone(),
+                None,
+            );
+        }
+        Some((node, SoacInputType { array }))
+    }
+}
+
+fn array_with_outer_size(array: &Type<TypeName>, size: &Type<TypeName>) -> Option<Type<TypeName>> {
+    match array {
+        Type::Constructed(TypeName::Array, arguments) if arguments.len() >= 4 => {
+            let mut arguments = arguments.clone();
+            arguments[2] = size.clone();
+            Some(Type::Constructed(TypeName::Array, arguments))
+        }
+        Type::Constructed(TypeName::Tuple(arity), fields) => Some(Type::Constructed(
+            TypeName::Tuple(*arity),
+            fields.iter().map(|field| array_with_outer_size(field, size)).collect::<Option<Vec<_>>>()?,
+        )),
+        _ => None,
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct Candidate {
@@ -30,6 +128,7 @@ pub(super) struct Candidate {
     producer: usize,
     consumer: usize,
     routes: Vec<fusion_screma::InputRoute>,
+    transform: InputTransform,
     retained_producer_outputs: Vec<usize>,
 }
 
@@ -137,23 +236,42 @@ fn find_in_graph(
                     .collect::<Vec<_>>();
                 debug_assert!(producer_output_operands.next().is_none());
                 let consumer_input_count = consumer_op.inputs.len();
-                let projected = consumer.operand_nodes[..consumer_input_count]
+                let routed = consumer.operand_nodes[..consumer_input_count]
                     .iter()
                     .enumerate()
                     .filter_map(|(input, &operand)| {
-                        graph_ops::projection_index(graph, operand, producer_result)
-                            .or_else(|| {
-                                producer_output_nodes.iter().position(|output| *output == Some(operand))
-                            })
-                            .map(|field| (input, field))
+                        InputTransform::route(graph, operand, producer_result, &producer_output_nodes)
+                            .map(|(field, transform)| (input, field, transform))
                     })
                     .collect::<Vec<_>>();
-                if projected.is_empty() {
+                if routed.is_empty() {
                     continue;
                 }
-                let routes = projected
+                let routed_inputs =
+                    routed.iter().map(|(input, _, _)| *input).collect::<std::collections::HashSet<_>>();
+                let has_unrouteable_input = consumer.operand_nodes[..consumer_input_count]
                     .iter()
-                    .map(|(consumer_input, producer_field)| {
+                    .enumerate()
+                    .any(|(input, &operand)| {
+                        !routed_inputs.contains(&input)
+                            && (graph_ops::pure_depends_on(graph, operand, producer_result)
+                                || producer_output_nodes
+                                    .iter()
+                                    .flatten()
+                                    .any(|output| graph_ops::pure_depends_on(graph, operand, *output)))
+                    });
+                if has_unrouteable_input {
+                    continue;
+                }
+                let transform = routed[0].2.clone();
+                if routed.iter().any(|(_, _, candidate_transform)| *candidate_transform != transform)
+                    || (!transform.is_identity() && !producer_op.is_map())
+                {
+                    continue;
+                }
+                let routes = routed
+                    .iter()
+                    .map(|(consumer_input, producer_field, _)| {
                         let screma::ResultId::Post(producer_post_output) =
                             producer_op.form.result_id(*producer_field)?
                         else {
@@ -195,9 +313,9 @@ fn find_in_graph(
                 {
                     continue;
                 }
-                let projected_roots = projected
+                let routed_roots = routed
                     .iter()
-                    .map(|(input, _)| consumer.operand_nodes[*input])
+                    .map(|(input, _, _)| consumer.operand_nodes[*input])
                     .collect::<std::collections::HashSet<_>>();
                 let semantic_roots = consumer_op
                     .capture_nodes()
@@ -212,7 +330,7 @@ fn find_in_graph(
                     );
                 if semantic_roots.into_iter().any(|root| {
                     graph_ops::pure_depends_on(graph, root, producer_result)
-                        && !projected_roots.contains(&root)
+                        && !routed_roots.contains(&root)
                 }) {
                     continue;
                 }
@@ -263,12 +381,16 @@ fn find_in_graph(
                 if retains_placed_array && consumer_has_unplaced_array {
                     continue;
                 }
+                if !transform.is_identity() && !retained_producer_outputs.is_empty() {
+                    continue;
+                }
                 return Some(Candidate {
                     site,
                     block: block_id,
                     producer: producer_index,
                     consumer: consumer_index,
                     routes,
+                    transform,
                     retained_producer_outputs,
                 });
             }
@@ -339,7 +461,36 @@ fn retained_producer_outputs(
         })
         .collect()
 }
-pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
+pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
+    let transform = candidate.transform.clone();
+    let mut transformed_source = None;
+    inner = inner.rewrite_body(candidate.site, |body| {
+        support::rewrite_body_graph(body, |graph| {
+            let (input_nodes, inputs) = {
+                let effect = &graph.skeleton.blocks[candidate.block].side_effects[candidate.producer];
+                let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
+                    unreachable!("vertical fusion selected a non-Screma producer")
+                };
+                (
+                    effect.operand_nodes[..op.inputs.len()].to_vec(),
+                    op.inputs.clone(),
+                )
+            };
+            let (input_nodes, inputs): (Vec<_>, Vec<_>) = input_nodes
+                .into_iter()
+                .zip(&inputs)
+                .map(|(node, input)| {
+                    transform
+                        .apply(graph, node, input)
+                        .expect("analyzed producer input transform became invalid")
+                })
+                .unzip();
+            transformed_source = Some((input_nodes, inputs));
+        })
+    });
+    let (producer_input_nodes, producer_inputs) =
+        transformed_source.expect("vertical fusion body was not rewritten");
+
     let (graph, span, scope) = graph_and_span(&inner, candidate.site);
     let outer_types =
         graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect::<LookupMap<_, _>>();
@@ -356,8 +507,8 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     let normalized = fusion_screma::fuse_vertical(
         &mut context,
         fusion_screma::Source {
-            input_nodes: &producer.input_nodes,
-            inputs: &producer.op.inputs,
+            input_nodes: &producer_input_nodes,
+            inputs: &producer_inputs,
             form: &producer.op.form,
         },
         fusion_screma::Source {
@@ -410,7 +561,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
         form: normalized.form,
         result_state,
         state: screma::SemanticState::Segmented {
-            space: producer.space,
+            space: if candidate.transform.is_identity() { producer.space } else { consumer.space },
             placement: if producer.placement == screma::Placement::Kernel
                 || consumer.placement == screma::Placement::Kernel
             {

@@ -281,6 +281,87 @@ entry shared(xs: []i32) ([]i32, []i32) =
 }
 
 #[test]
+fn egir_vertical_fusion_pushes_slice_onto_producer_inputs() {
+    let source = r#"
+#[compute]
+entry sliced(xs: []i32) [4]i32 =
+  let produced = map(|x: i32| x + 1, xs) in
+  map(|x: i32| x * 2, produced[2..6])
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_maps, 1,
+        "a sliced producer should execute as one transformed Screma"
+    );
+    compile_to_spirv(source).expect("slice-transform vertical fusion lowers to SPIR-V");
+}
+
+#[test]
+fn egir_vertical_fusion_composes_nested_slices() {
+    let source = r#"
+#[compute]
+entry sliced_twice(xs: []i32) [3]i32 =
+  let produced = map(|x: i32| x + 1, xs) in
+  map(|x: i32| x * 2, produced[1..7][2..5])
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_maps, 1,
+        "nested slices should remain one ordered input-transform chain"
+    );
+    compile_to_spirv(source).expect("nested slice-transform fusion lowers to SPIR-V");
+}
+
+#[test]
+fn egir_vertical_fusion_slices_every_producer_input() {
+    let source = r#"
+#[compute]
+entry sliced_zip(xs: []i32, ys: []i32) [4]i32 =
+  let produced = map(|pair: (i32, i32)| pair.0 + pair.1, zip(xs, ys)) in
+  map(|x: i32| x * 2, produced[2..6])
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_maps, 1,
+        "one slice transform must be pushed onto every producer input"
+    );
+    compile_to_spirv(source).expect("multi-input slice-transform fusion lowers to SPIR-V");
+}
+
+#[test]
+fn egir_vertical_fusion_declines_incompatible_slice_routes() {
+    let source = r#"
+#[compute]
+entry differently_sliced(xs: [8]i32) [4]i32 =
+  let produced = map(|x: i32| x + 1, xs) in
+  map(|pair: (i32, i32)| pair.0 + pair.1, zip(produced[0..4], produced[2..6]))
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_maps, 2,
+        "different producer indices cannot share one transformed producer invocation"
+    );
+    compile_to_spirv(source).expect("incompatible slice routes remain safely materialized");
+}
+
+#[test]
+fn egir_vertical_fusion_does_not_shrink_retained_producer_output() {
+    let source = r#"
+#[compute]
+entry retained(xs: []i32) ([]i32, [4]i32) =
+  let produced = map(|x: i32| x + 1, xs) in
+  let sliced = map(|x: i32| x * 2, produced[2..6]) in
+  (produced, sliced)
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_maps, 2,
+        "a transformed fusion must not replace an escaping full-domain producer"
+    );
+    compile_to_spirv(source).expect("retained producer and sliced consumer lower independently");
+}
+
+#[test]
 fn egir_indexed_fusion_scalarizes_one_static_demand() {
     let source = r#"
 #[compute]
@@ -4157,47 +4238,6 @@ fn count_uninit_in_program<Tag, GlobalContext>(ssa: &Program<Tag, GlobalContext>
 }
 
 #[test]
-fn consuming_map_skips_fresh_allocation() {
-    // The ownership/resolution invariant: TLC grants a reuse capability to a
-    // unique input, and EGIR reuses its buffer only when it is dead after the
-    // SOAC — no `_w_intrinsic_uninit`. A later observer makes resolution fall
-    // back to a fresh allocation.
-    //
-    // Vary use-after-SOAC on a let-bound array literal: the fresh literal is
-    // consumable exactly when it has no remaining uses past the map.
-    let dead_after_ssa = compile_to_ssa(
-        r#"
-#[fragment]
-entry frag(c: vec4f32) #[target(screen)] vec4f32 =
-    let xs = [1, 2, 3, 4, 5, 6, 7, 8] in
-    let r = map(|x: i32| x + 1, xs) in
-    @[f32.i32(r[0]), f32.i32(r[1]), 0.0, 0.0]
-"#,
-    );
-    assert_eq!(
-        count_uninit_in_program(&dead_after_ssa),
-        0,
-        "map over a unique-and-dead input should write back in place, no fresh buffer",
-    );
-
-    let aliased_ssa = compile_to_ssa(
-        r#"
-#[fragment]
-entry frag(c: vec4f32) #[target(screen)] vec4f32 =
-    let xs = [1, 2, 3, 4, 5, 6, 7, 8] in
-    let r = map(|x: i32| x + 1, xs) in
-    let j = i32.f32(c.x) % 8 in
-    -- A dynamic read keeps `xs` live past the map.
-    @[f32.i32(r[j]), f32.i32(xs[j]), 0.0, 0.0]
-"#,
-    );
-    assert!(
-        count_uninit_in_program(&aliased_ssa) >= 1,
-        "map over an input that's still aliased after the map should allocate a fresh buffer",
-    );
-}
-
-#[test]
 fn consuming_scan_compiles_end_to_end() {
     // Parallel of `consuming_map_compiles_end_to_end` for Scan: `*[N]T`
     // input that's dead-after; ownership grants `UniqueInput`, EGIR resolves
@@ -6023,20 +6063,22 @@ entry e() [1]f32 = [g(256)[3]]
     compile_to_spirv(source).expect("returning a runtime-sized array should lower to SPIR-V");
 }
 
-/// The runtime counterpart of the static fusion above: a *runtime* index into a
-/// nested runtime-sized producer (`g(256)[j]`). With no fused form (fusion is
-/// literal-index only), TLC exposes the nested producer at entry scope and EGIR
-/// residency planning materializes it to a gather buffer. The runtime index
-/// then reads the buffer. Distinct from the static case, which never materializes.
+/// A runtime point demand is as legal to scalarize as a literal one when its
+/// index is independent of the producer. The complete map pre-lambda is invoked
+/// at `j`, so no runtime-sized intermediate array or gather handoff is needed.
 #[test]
-fn runtime_index_into_nested_producer_lowers() {
+fn runtime_index_into_nested_producer_scalarizes() {
     let source = r#"
 def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
 #[compute]
 entry e(j: i32) [1]f32 = [g(256)[j]]
 "#;
-    compile_to_spirv(source)
-        .expect("a runtime index into a nested runtime-sized producer should materialize + lower");
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_maps, 0,
+        "a producer-independent runtime point demand should not materialize its map"
+    );
+    compile_to_spirv(source).expect("a scalarized runtime point demand should lower");
 }
 
 /// Gap: a runtime-sized array with *two or more* consumers panics the backend

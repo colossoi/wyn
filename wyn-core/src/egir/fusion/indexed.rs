@@ -1,4 +1,4 @@
-//! Scalarize statically indexed demands of a canonical pointwise Screma.
+//! Scalarize producer-independent point demands of a canonical pointwise Screma.
 //!
 //! For `map(f, inputs)[i]`, index every source at `i` and invoke the complete
 //! pre-lambda.  When all observable uses of the produced arrays are such
@@ -14,7 +14,6 @@ use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
 use crate::egir::types::{EGraph, ENode, NodeId, PureOp, ResourceAccess, SideEffectKind, Soac, SoacEffect};
 use crate::flow::BlockId;
-use crate::ssa::types::ConstantValue;
 use smallvec::smallvec;
 
 use super::support;
@@ -112,7 +111,7 @@ fn find_in_graph(
                     let [base, index_value] = operands.as_slice() else {
                         return None;
                     };
-                    if !is_static_index(graph, *index_value) {
+                    if graph_ops::value_depends_on(graph, *index_value, result) {
                         return None;
                     }
                     let field = graph_ops::projection_index(graph, *base, result)?;
@@ -140,17 +139,6 @@ fn find_in_graph(
         }
     }
     None
-}
-
-fn is_static_index(graph: &EGraph, node: NodeId) -> bool {
-    match &graph.nodes[node].kind {
-        ENode::Constant(ConstantValue::I32(_) | ConstantValue::U32(_)) => true,
-        ENode::Pure {
-            op: PureOp::Int(_) | PureOp::Uint(_),
-            operands,
-        } => operands.is_empty(),
-        _ => false,
-    }
 }
 
 fn used_only_through(
