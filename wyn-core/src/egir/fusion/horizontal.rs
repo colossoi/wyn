@@ -5,21 +5,19 @@
 //! result reordering; no legacy lane graph is reconstructed.
 
 use polytype::Type;
-use smallvec::{smallvec, SmallVec};
+use smallvec::SmallVec;
 
 use super::graph_and_span;
 use super::screma as fusion_screma;
 use super::space::seg_space_fusable;
+use super::support;
 use crate::ast::{Span, TypeName};
-use crate::egir::graph_ops;
-use crate::egir::ir::{splice_effect_tokens, Body, BodySite};
+use crate::egir::ir::{splice_effect_tokens, BodySite};
 use crate::egir::program::{CoreProgramData, OutputSlotId, RegionInterner, SemanticFunc};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
-use crate::egir::types::{
-    EGraph, NodeId, PureOp, SegResourceAccess, Semantic, SideEffectKind, Soac, SoacEffect,
-};
+use crate::egir::types::{EGraph, NodeId, SegResourceAccess, Semantic, SideEffectKind, Soac, SoacEffect};
 use crate::flow::BlockId;
 use crate::LookupMap;
 
@@ -171,17 +169,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
         let rewrite = |graph: &mut EGraph| {
             apply_plan(graph, candidate.block, candidate.left, candidate.right, &plan);
         };
-        match body {
-            Body::Entry(mut entry) => {
-                rewrite(&mut entry.graph);
-                Body::Entry(entry)
-            }
-            Body::Function(mut function) => {
-                rewrite(&mut function.graph);
-                Body::Function(function)
-            }
-            Body::Constant(_) => unreachable!("horizontal fusion never targets constants"),
-        }
+        support::rewrite_body_graph(body, rewrite)
     });
     rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
         region_interner: interner,
@@ -413,41 +401,7 @@ pub(super) fn reproject_fields(
     mapping: &[usize],
     field_types: &[Type<TypeName>],
 ) {
-    let projects = graph
-        .nodes
-        .iter()
-        .filter_map(|(node, data)| match &data.kind {
-            crate::egir::types::ENode::Pure {
-                op: PureOp::Project { index },
-                operands,
-            } if operands.first() == Some(&old_result) => Some((node, *index as usize)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    for (project, field) in projects {
-        graph.update_pure_node(project, |op, operands| {
-            *op = PureOp::Project {
-                index: mapping[field] as u32,
-            };
-            operands[0] = new_result;
-        });
-    }
-
-    let fields = field_types
-        .iter()
-        .enumerate()
-        .map(|(field, ty)| {
-            graph.intern_pure(
-                PureOp::Project {
-                    index: mapping[field] as u32,
-                },
-                smallvec![new_result],
-                ty.clone(),
-                None,
-            )
-        })
-        .collect::<SmallVec<[NodeId; 4]>>();
-    let old_type = graph.nodes[old_result].ty.clone();
-    let rebuilt = graph.intern_pure(PureOp::Tuple(field_types.len()), fields, old_type, None);
-    graph_ops::replace_all_references(graph, old_result, rebuilt);
+    let partial = mapping.iter().copied().map(Some).collect::<Vec<_>>();
+    support::retarget_projects(graph, old_result, new_result, &partial);
+    support::rebuild_result(graph, old_result, new_result, mapping, field_types);
 }

@@ -7,18 +7,17 @@
 
 use std::collections::HashSet;
 
-use polytype::Type;
-use smallvec::{smallvec, SmallVec};
-
-use crate::ast::TypeName;
 use crate::egir::graph_ops;
-use crate::egir::ir::{Body, BodySite, RealizedOutputRoute};
-use crate::egir::program::{OutputWriter, SemanticResourceRef};
+use crate::egir::ir::{BodySite, RealizedOutputRoute};
+use crate::egir::program::SemanticResourceRef;
 use crate::egir::reify::Segmented;
-use crate::egir::soac::screma;
+use crate::egir::soac::{lambda as lambda_ops, screma};
 use crate::egir::types::{EGraph, ENode, NodeId, PureOp, ResourceAccess, SideEffectKind, Soac, SoacEffect};
 use crate::flow::BlockId;
 use crate::ssa::types::ConstantValue;
+use smallvec::smallvec;
+
+use super::support;
 
 #[derive(Clone, Copy)]
 struct Demand {
@@ -163,7 +162,7 @@ fn used_only_through(
     output_routes: &[RealizedOutputRoute],
 ) -> bool {
     let demand_nodes = demands.iter().map(|demand| demand.index).collect::<HashSet<_>>();
-    let has_unindexed_path = |root| pure_depends_on_avoiding(graph, root, result, &demand_nodes);
+    let has_unindexed_path = |root| support::pure_depends_on_avoiding(graph, root, result, &demand_nodes);
     for (block_id, block) in &graph.skeleton.blocks {
         for (index, effect) in block.side_effects.iter().enumerate() {
             if block_id == producer_block && index == producer_effect {
@@ -183,26 +182,6 @@ fn used_only_through(
     true
 }
 
-/// Does `root` reach `target` without crossing a recognized indexed demand?
-/// Treating demands as cut vertices rejects roots that also retain a separate
-/// path to the full producer result.
-fn pure_depends_on_avoiding(graph: &EGraph, root: NodeId, target: NodeId, cut: &HashSet<NodeId>) -> bool {
-    let mut pending = vec![root];
-    let mut visited = HashSet::new();
-    while let Some(node) = pending.pop() {
-        if cut.contains(&node) || !visited.insert(node) {
-            continue;
-        }
-        if node == target {
-            return true;
-        }
-        if let Some(definition) = graph.nodes.get(node) {
-            pending.extend(definition.kind.children());
-        }
-    }
-    false
-}
-
 pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     let (pre, input_nodes, producer_result) = {
         let graph = inner.body_graph(candidate.site).expect("indexed fusion body");
@@ -216,14 +195,14 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
             effect.result.expect("indexed map has no result"),
         )
     };
-    let region_name =
+    let callee =
         pre.seg_body().map(|body| inner.region(body.region).expect("map pre-lambda region").name.clone());
 
     inner.rewrite_body(candidate.site, |body| {
         let rewrite_graph = |graph: &mut EGraph| {
             let mut replacements = Vec::with_capacity(candidate.demands.len());
             for demand in &candidate.demands {
-                let arguments = input_nodes
+                let mut arguments = input_nodes
                     .iter()
                     .zip(&pre.parameter_types)
                     .map(|(&input, elem_ty)| {
@@ -235,20 +214,8 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
                         )
                     })
                     .collect::<Vec<_>>();
-                let results = if let Some(name) = &region_name {
-                    let body = pre.seg_body().expect("region name without body");
-                    let mut operands = SmallVec::<[NodeId; 4]>::from_vec(arguments);
-                    operands.extend(body.captures.iter().copied());
-                    let result = graph.intern_pure(
-                        PureOp::Call(name.clone()),
-                        operands,
-                        lambda_return_type(&pre.result_types),
-                        None,
-                    );
-                    unpack_result(graph, result, &pre.result_types)
-                } else {
-                    arguments
-                };
+                arguments.extend_from_slice(pre.captures());
+                let results = lambda_ops::emit_call(graph, &pre, callee.as_deref(), arguments);
                 let scalar = results[demand.output];
                 graph_ops::replace_all_references(graph, demand.index, scalar);
                 replacements.push((demand.index, scalar));
@@ -269,49 +236,9 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
             }
             replacements
         };
-        match body {
-            Body::Entry(mut entry) => {
-                let replacements = rewrite_graph(&mut entry.graph);
-                for route in entry.routes_mut() {
-                    if let Some((_, scalar)) =
-                        replacements.iter().find(|(demand, _)| route.source.value == *demand)
-                    {
-                        route.source.value = *scalar;
-                    }
-                    route.writers.retain(|writer| *writer != OutputWriter::Value(producer_result));
-                }
-                Body::Entry(entry)
-            }
-            Body::Function(mut function) => {
-                rewrite_graph(&mut function.graph);
-                Body::Function(function)
-            }
-            Body::Constant(_) => unreachable!("indexed fusion never targets constants"),
-        }
+        support::rewrite_body_graph_with_entry(body, rewrite_graph, |entry, replacements| {
+            support::replace_route_sources(entry, &replacements);
+            support::remove_value_writer(entry, producer_result);
+        })
     })
-}
-
-fn lambda_return_type(types: &[Type<TypeName>]) -> Type<TypeName> {
-    match types {
-        [ty] => ty.clone(),
-        _ => Type::Constructed(TypeName::Tuple(types.len()), types.to_vec()),
-    }
-}
-
-fn unpack_result(graph: &mut EGraph, result: NodeId, types: &[Type<TypeName>]) -> Vec<NodeId> {
-    match types {
-        [_] => vec![result],
-        _ => types
-            .iter()
-            .enumerate()
-            .map(|(index, ty)| {
-                graph.intern_pure(
-                    PureOp::Project { index: index as u32 },
-                    smallvec![result],
-                    ty.clone(),
-                    None,
-                )
-            })
-            .collect(),
-    }
 }

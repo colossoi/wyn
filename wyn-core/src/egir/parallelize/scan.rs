@@ -2,6 +2,7 @@
 
 use super::model::REDUCE_PHASE1_WIDTH;
 use super::*;
+use crate::egir::soac::lambda as lambda_ops;
 
 #[derive(Clone, Copy)]
 pub(super) struct ScanScratch {
@@ -794,11 +795,21 @@ fn synthesize_scan_input_function(
 ) -> SemanticFunc {
     let mut parameter_types = pre.parameter_types.clone();
     parameter_types.extend(capture_types);
-    let params = named_parameters(&parameter_types);
+    let params = lambda_ops::named_parameters(&parameter_types, "arg");
     let mut graph = EGraph::new();
-    let arguments = function_parameters(&mut graph, &params);
-    let results = emit_lambda_call(&mut graph, &pre, callee.as_deref(), arguments);
-    finish_generated_function(graph, region, name, params, result_type, results[0], span)
+    let arguments = lambda_ops::function_parameters(&mut graph, &params);
+    let results = lambda_ops::emit_call(&mut graph, &pre, callee.as_deref(), arguments);
+    let entry = graph.skeleton.entry;
+    lambda_ops::finish_function(
+        graph,
+        entry,
+        region,
+        name,
+        span,
+        params,
+        &[result_type],
+        &results[..1],
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -818,96 +829,26 @@ fn synthesize_scan_post_function(
     let pre_capture_count = pre.seg_body().map_or(0, |body| body.captures.len());
     let mut parameter_types = element_types;
     parameter_types.extend(capture_types);
-    let params = named_parameters(&parameter_types);
+    let params = lambda_ops::named_parameters(&parameter_types, "arg");
     let mut graph = EGraph::new();
-    let arguments = function_parameters(&mut graph, &params);
+    let arguments = lambda_ops::function_parameters(&mut graph, &params);
 
     let mut pre_arguments = arguments[1..element_count].to_vec();
     pre_arguments.extend_from_slice(&arguments[element_count..element_count + pre_capture_count]);
-    let pre_results = emit_lambda_call(&mut graph, &pre, pre_callee.as_deref(), pre_arguments);
+    let pre_results = lambda_ops::emit_call(&mut graph, &pre, pre_callee.as_deref(), pre_arguments);
     let mut post_arguments = vec![arguments[0]];
     post_arguments.extend_from_slice(&pre_results[1..]);
     post_arguments.extend_from_slice(&arguments[element_count + pre_capture_count..]);
-    let post_results = emit_lambda_call(&mut graph, &post, post_callee.as_deref(), post_arguments);
-    let return_type = lambda_return_type(&post.result_types);
-    let result = pack_results(&mut graph, &post_results, return_type.clone());
-    finish_generated_function(graph, region, name, params, return_type, result, span)
-}
-
-fn named_parameters(types: &[Type<TypeName>]) -> Vec<(Type<TypeName>, String)> {
-    types.iter().enumerate().map(|(index, ty)| (ty.clone(), format!("arg_{index}"))).collect()
-}
-
-fn function_parameters(graph: &mut EGraph, params: &[(Type<TypeName>, String)]) -> Vec<NodeId> {
-    params.iter().enumerate().map(|(index, (ty, _))| graph.add_func_param(index, ty.clone())).collect()
-}
-
-fn emit_lambda_call(
-    graph: &mut EGraph,
-    lambda: &screma::Lambda,
-    callee: Option<&str>,
-    arguments: Vec<NodeId>,
-) -> Vec<NodeId> {
-    if lambda.is_identity() {
-        return arguments;
-    }
-    let result_type = lambda_return_type(&lambda.result_types);
-    let result = graph.intern_pure(
-        PureOp::Call(callee.expect("region lambda has a callee").to_owned()),
-        arguments.into_iter().collect(),
-        result_type,
-        None,
-    );
-    unpack_results(graph, result, &lambda.result_types)
-}
-
-fn lambda_return_type(results: &[Type<TypeName>]) -> Type<TypeName> {
-    match results {
-        [result] => result.clone(),
-        results => Type::Constructed(TypeName::Tuple(results.len()), results.to_vec()),
-    }
-}
-
-fn unpack_results(graph: &mut EGraph, result: NodeId, types: &[Type<TypeName>]) -> Vec<NodeId> {
-    match types {
-        [_] => vec![result],
-        types => types
-            .iter()
-            .enumerate()
-            .map(|(index, ty)| {
-                graph.intern_pure(
-                    PureOp::Project { index: index as u32 },
-                    smallvec![result],
-                    ty.clone(),
-                    None,
-                )
-            })
-            .collect(),
-    }
-}
-
-fn pack_results(graph: &mut EGraph, results: &[NodeId], result_type: Type<TypeName>) -> NodeId {
-    match results {
-        [result] => *result,
-        results => graph.intern_pure(
-            PureOp::Tuple(results.len()),
-            results.iter().copied().collect(),
-            result_type,
-            None,
-        ),
-    }
-}
-
-fn finish_generated_function(
-    mut graph: EGraph,
-    region: RegionId,
-    name: String,
-    params: Vec<(Type<TypeName>, String)>,
-    return_type: Type<TypeName>,
-    result: NodeId,
-    span: crate::ast::Span,
-) -> SemanticFunc {
+    let post_results = lambda_ops::emit_call(&mut graph, &post, post_callee.as_deref(), post_arguments);
     let entry = graph.skeleton.entry;
-    graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(Some(result));
-    SemanticFunc::new(region, name, span, None, params, return_type, graph)
+    lambda_ops::finish_function(
+        graph,
+        entry,
+        region,
+        name,
+        span,
+        params,
+        &post.result_types,
+        &post_results,
+    )
 }

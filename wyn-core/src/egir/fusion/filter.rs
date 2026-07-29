@@ -11,17 +11,17 @@ use std::collections::HashSet;
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
-use super::{capture_types, graph_and_span};
+use super::{capture_types, graph_and_span, support};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::egir::graph_ops;
-use crate::egir::ir::{splice_effect_tokens, Body, BodySite, RealizedOutputRoute};
+use crate::egir::ir::{splice_effect_tokens, BodySite, RealizedOutputRoute};
 use crate::egir::program::{
-    fresh_region_name, CoreProgramData, OutputWriter, RegionInterner, SemanticFunc, SemanticResourceRef,
+    CoreProgramData, OutputWriter, RegionInterner, SemanticFunc, SemanticResourceRef,
 };
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
-use crate::egir::soac::{filter, screma};
+use crate::egir::soac::{filter, lambda as lambda_ops, screma};
 use crate::egir::types::{
     EGraph, ENode, NodeId, PureOp, SegResourceAccess, SegSpace, SideEffect, SideEffectKind,
     SkeletonTerminator, Soac, SoacEffect,
@@ -106,7 +106,9 @@ fn find_in_graph(
             }
             let stops = lengths.iter().copied().collect::<HashSet<_>>();
             if routes.is_some_and(|routes| {
-                routes.iter().any(|route| reaches_without(graph, route.source.value, result, &stops))
+                routes.iter().any(|route| {
+                    support::pure_depends_on_avoiding(graph, route.source.value, result, &stops)
+                })
             }) {
                 continue;
             }
@@ -186,7 +188,10 @@ fn filter_result_escapes(
                 }
                 continue;
             }
-            if effect.referenced_nodes().any(|root| reaches_without(graph, root, result, &stops)) {
+            if effect
+                .referenced_nodes()
+                .any(|root| support::pure_depends_on_avoiding(graph, root, result, &stops))
+            {
                 return true;
             }
         }
@@ -194,23 +199,12 @@ fn filter_result_escapes(
             .term
             .referenced_nodes()
             .into_iter()
-            .any(|root| reaches_without(graph, root, result, &stops))
+            .any(|root| support::pure_depends_on_avoiding(graph, root, result, &stops))
         {
             return true;
         }
     }
     false
-}
-
-fn reaches_without(graph: &EGraph, root: NodeId, target: NodeId, stops: &HashSet<NodeId>) -> bool {
-    if stops.contains(&root) {
-        return false;
-    }
-    wyn_graph::reaches_ordered(root, target, wyn_graph::WalkOrder::DepthFirst, |node, out| {
-        if !stops.contains(&node) {
-            out.extend(graph.nodes[node].kind.children());
-        }
-    })
 }
 
 fn filter_parts(effect: &SideEffect) -> FilterParts {
@@ -312,36 +306,34 @@ fn build_count_reduction(
         count_ty.clone(),
         None,
     );
-    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(sum));
-    let name = fresh_region_name(interner, &format!("{scope}_filter_count_combine"));
-    let region = interner.intern(&name);
-    let function = SemanticFunc::new(
-        region,
-        name,
+    let entry = graph.skeleton.entry;
+    let parameter_types = vec![count_ty.clone(), count_ty.clone()];
+    let (operator, function) = lambda_ops::finish_region_lambda(
+        interner,
+        scope,
+        "filter_count_combine",
         span,
-        None,
+        graph,
+        entry,
         vec![
             (count_ty.clone(), "left".to_string()),
             (count_ty.clone(), "right".to_string()),
         ],
-        count_ty.clone(),
-        graph,
+        vec![],
+        parameter_types,
+        vec![count_ty],
+        vec![sum],
+        false,
     );
-    let reduction = screma::Reduce {
-        operator: screma::Lambda::region(
-            crate::egir::types::SegBody {
-                region,
-                captures: vec![],
-            },
-            vec![count_ty.clone(), count_ty.clone()],
-            vec![count_ty],
-        ),
-        neutral: Vec::new(),
-        commutative: true,
-    };
-    (reduction, function)
+    (
+        screma::Reduce {
+            operator,
+            neutral: Vec::new(),
+            commutative: true,
+        },
+        function.expect("filter count operator cannot be identity"),
+    )
 }
-
 #[allow(clippy::too_many_arguments)]
 fn build_masked_pre(
     inner: &Segmented,
@@ -353,10 +345,10 @@ fn build_masked_pre(
     count_ty: Option<&Type<TypeName>>,
     outer_types: &LookupMap<NodeId, Type<TypeName>>,
 ) -> (screma::Lambda, SemanticFunc) {
-    let mut captures = lambda_captures(&filter.body.map);
-    captures.extend(lambda_captures(&filter.body.predicate));
+    let mut captures = filter.body.map.captures().to_vec();
+    captures.extend_from_slice(filter.body.predicate.captures());
     if let Some(consumer) = consumer {
-        captures.extend(lambda_captures(&consumer.pre));
+        captures.extend_from_slice(consumer.pre.captures());
         captures.extend(consumer.reductions.iter().flat_map(|reduction| reduction.neutral.iter().copied()));
     }
     let capture_types = capture_types(outer_types, captures.iter());
@@ -381,8 +373,8 @@ fn build_masked_pre(
         .map(|(index, (ty, _))| graph.add_func_param(index, ty.clone()))
         .collect::<Vec<_>>();
     let mut cursor = input_types.len();
-    let mapped_capture_count = lambda_capture_count(&filter.body.map);
-    let mapped = invoke_lambda(
+    let mapped_capture_count = filter.body.map.capture_count();
+    let mapped = support::invoke_lambda(
         &mut graph,
         inner,
         &filter.body.map,
@@ -390,8 +382,8 @@ fn build_masked_pre(
         &args[cursor..cursor + mapped_capture_count],
     );
     cursor += mapped_capture_count;
-    let predicate_capture_count = lambda_capture_count(&filter.body.predicate);
-    let predicate = invoke_lambda(
+    let predicate_capture_count = filter.body.predicate.capture_count();
+    let predicate = support::invoke_lambda(
         &mut graph,
         inner,
         &filter.body.predicate,
@@ -404,9 +396,9 @@ fn build_masked_pre(
     let mut selected = Vec::new();
     let mut fallback = Vec::new();
     if let Some(consumer) = consumer {
-        let consumer_capture_count = lambda_capture_count(&consumer.pre);
+        let consumer_capture_count = consumer.pre.capture_count();
         let consumer_args = vec![mapped[0]; consumer.pre.parameter_types.len()];
-        selected.extend(invoke_lambda(
+        selected.extend(support::invoke_lambda(
             &mut graph,
             inner,
             &consumer.pre,
@@ -423,86 +415,32 @@ fn build_masked_pre(
         fallback.push(integer_literal(&mut graph, "0", count_ty));
     }
     debug_assert_eq!(cursor, args.len());
-    conditional_return_many(&mut graph, predicate[0], fallback, selected, &result_types);
-    let name = fresh_region_name(interner, &format!("{scope}_filter_pre"));
-    let region = interner.intern(&name);
-    let return_ty = lambda_return_type(&result_types);
-    let function = SemanticFunc::new(region, name, span, None, params, return_ty, graph);
-    (
-        screma::Lambda::region(
-            crate::egir::types::SegBody { region, captures },
-            input_types,
-            result_types,
-        ),
-        function,
-    )
-}
-
-fn lambda_captures(lambda: &screma::Lambda) -> Vec<NodeId> {
-    lambda.seg_body().map(|body| body.captures.clone()).unwrap_or_default()
-}
-
-fn lambda_capture_count(lambda: &screma::Lambda) -> usize {
-    lambda.seg_body().map_or(0, |body| body.captures.len())
-}
-
-fn invoke_lambda(
-    graph: &mut EGraph,
-    inner: &Segmented,
-    lambda: &screma::Lambda,
-    arguments: &[NodeId],
-    captures: &[NodeId],
-) -> Vec<NodeId> {
-    if lambda.is_identity() {
-        debug_assert!(captures.is_empty());
-        debug_assert_eq!(arguments.len(), lambda.result_types.len());
-        return arguments.to_vec();
-    }
-    let body = lambda.seg_body().expect("non-identity lambda has no body");
-    let function = inner.region(body.region).expect("Filter lambda region is absent");
-    let mut operands = SmallVec::<[NodeId; 4]>::from_slice(arguments);
-    operands.extend(captures.iter().copied());
-    let result = graph.intern_pure(
-        PureOp::Call(function.name.clone()),
-        operands,
-        lambda_return_type(&lambda.result_types),
-        None,
+    let (return_block, results) =
+        conditional_results(&mut graph, predicate[0], fallback, selected, &result_types);
+    let (pre, function) = lambda_ops::finish_region_lambda(
+        interner,
+        scope,
+        "filter_pre",
+        span,
+        graph,
+        return_block,
+        params,
+        captures,
+        input_types,
+        result_types,
+        results,
+        false,
     );
-    unpack_result(graph, result, &lambda.result_types)
+    (pre, function.expect("filter pre-lambda cannot be identity"))
 }
 
-fn lambda_return_type(types: &[Type<TypeName>]) -> Type<TypeName> {
-    match types {
-        [ty] => ty.clone(),
-        _ => Type::Constructed(TypeName::Tuple(types.len()), types.to_vec()),
-    }
-}
-
-fn unpack_result(graph: &mut EGraph, result: NodeId, types: &[Type<TypeName>]) -> Vec<NodeId> {
-    match types {
-        [_] => vec![result],
-        _ => types
-            .iter()
-            .enumerate()
-            .map(|(index, ty)| {
-                graph.intern_pure(
-                    PureOp::Project { index: index as u32 },
-                    smallvec![result],
-                    ty.clone(),
-                    None,
-                )
-            })
-            .collect(),
-    }
-}
-
-fn conditional_return_many(
+fn conditional_results(
     graph: &mut EGraph,
     predicate: NodeId,
     fallback: Vec<NodeId>,
     selected: Vec<NodeId>,
     types: &[Type<TypeName>],
-) {
+) -> (BlockId, Vec<NodeId>) {
     debug_assert_eq!(fallback.len(), types.len());
     debug_assert_eq!(selected.len(), types.len());
     let entry = graph.skeleton.entry;
@@ -526,16 +464,7 @@ fn conditional_return_many(
         target: merge,
         args: fallback,
     };
-    let returned = match results.as_slice() {
-        [result] => *result,
-        _ => graph.intern_pure(
-            PureOp::Tuple(results.len()),
-            SmallVec::from_vec(results),
-            lambda_return_type(types),
-            None,
-        ),
-    };
-    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(returned));
+    (merge, results)
 }
 
 struct EntryMetadataPatch {
@@ -647,18 +576,9 @@ fn rewrite_with_consumer(
                 scratch: filter.scratch,
             }
         };
-        match body {
-            Body::Entry(mut entry) => {
-                let metadata = rewrite(&mut entry.graph);
-                finish_entry_metadata(&mut entry, &candidate.lengths, metadata);
-                Body::Entry(entry)
-            }
-            Body::Function(mut function) => {
-                rewrite(&mut function.graph);
-                Body::Function(function)
-            }
-            Body::Constant(_) => unreachable!("Filter fusion never targets constants"),
-        }
+        support::rewrite_body_graph_with_entry(body, rewrite, |entry, metadata| {
+            finish_entry_metadata(entry, &candidate.lengths, metadata);
+        })
     });
     (rebuilt, synthesized)
 }
@@ -673,7 +593,7 @@ fn rewrite_count_only(
     count_ty: Type<TypeName>,
 ) -> (Segmented, Vec<SemanticFunc>) {
     let rebuilt = inner.rewrite_body(candidate.site, |body| {
-        let mut rewrite = |graph: &mut EGraph| {
+        let rewrite = |graph: &mut EGraph| {
             let neutral = integer_literal(graph, "0", &count_ty);
             count.neutral = vec![neutral];
             let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![count_ty.clone()]);
@@ -732,18 +652,9 @@ fn rewrite_count_only(
                 scratch: filter.scratch,
             }
         };
-        match body {
-            Body::Entry(mut entry) => {
-                let metadata = rewrite(&mut entry.graph);
-                finish_entry_metadata(&mut entry, &candidate.lengths, metadata);
-                Body::Entry(entry)
-            }
-            Body::Function(mut function) => {
-                rewrite(&mut function.graph);
-                Body::Function(function)
-            }
-            Body::Constant(_) => unreachable!("Filter fusion never targets constants"),
-        }
+        support::rewrite_body_graph_with_entry(body, rewrite, |entry, metadata| {
+            finish_entry_metadata(entry, &candidate.lengths, metadata);
+        })
     });
     (rebuilt, Vec::new())
 }

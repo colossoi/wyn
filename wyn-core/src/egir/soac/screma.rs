@@ -141,6 +141,16 @@ impl Lambda {
         }
     }
 
+    pub(crate) fn captures(&self) -> &[NodeId] {
+        match &self.body {
+            LambdaBody::Identity => &[],
+            LambdaBody::Region(body) => &body.captures,
+        }
+    }
+
+    pub(crate) fn capture_count(&self) -> usize {
+        self.captures().len()
+    }
     fn validate(&self, role: &str) -> Result<(), String> {
         if self.is_identity() && self.parameter_types != self.result_types {
             return Err(format!(
@@ -161,7 +171,7 @@ impl Lambda {
     }
 
     fn capture_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.seg_body().into_iter().flat_map(|body| body.captures.iter().copied())
+        self.captures().iter().copied()
     }
 }
 

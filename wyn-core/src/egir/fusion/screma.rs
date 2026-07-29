@@ -6,14 +6,13 @@
 //! deduplicates forwarded inputs, and synthesises whole pre/post lambdas.
 
 use polytype::Type;
-use smallvec::smallvec;
 
 use super::{capture_types, deduplicate_array_inputs};
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{fresh_region_name, RegionInterner, SemanticFunc};
+use crate::egir::program::{RegionInterner, SemanticFunc};
 use crate::egir::reify::Segmented;
-use crate::egir::soac::screma;
-use crate::egir::types::{EGraph, ENode, NodeId, PureOp, SegBody, SkeletonTerminator, SoacInputType};
+use crate::egir::soac::{lambda as lambda_ops, screma};
+use crate::egir::types::{EGraph, ENode, NodeId, PureOp, SoacInputType};
 use crate::egir::{graph_ops, inlining};
 use crate::LookupMap;
 
@@ -495,13 +494,13 @@ fn fuse_across_middle_barrier(
                 .flat_map(|body| body.captures.iter().copied()),
         )
         .collect::<Vec<_>>();
-    let mut pre_params = named_parameters(&input_element_types, "element");
-    pre_params.extend(named_parameters(
+    let mut pre_params = lambda_ops::named_parameters(&input_element_types, "element");
+    pre_params.extend(lambda_ops::named_parameters(
         &capture_types(context.outer_types, pre_captures.iter()),
         "capture",
     ));
     let mut pre_graph = EGraph::new();
-    let pre_arguments = function_parameters(&mut pre_graph, &pre_params);
+    let pre_arguments = lambda_ops::function_parameters(&mut pre_graph, &pre_params);
     let mut pre_capture_cursor = input_element_types.len();
 
     let mut producer_pre_arguments =
@@ -637,13 +636,13 @@ fn fuse_across_middle_barrier(
         .chain(consumer.form.pre.seg_body().into_iter().flat_map(|body| body.captures.iter().copied()))
         .chain(consumer.form.post.seg_body().into_iter().flat_map(|body| body.captures.iter().copied()))
         .collect::<Vec<_>>();
-    let mut post_params = named_parameters(&post_parameter_types, "value");
-    post_params.extend(named_parameters(
+    let mut post_params = lambda_ops::named_parameters(&post_parameter_types, "value");
+    post_params.extend(lambda_ops::named_parameters(
         &capture_types(context.outer_types, post_captures.iter()),
         "capture",
     ));
     let mut post_graph = EGraph::new();
-    let post_arguments = function_parameters(&mut post_graph, &post_params);
+    let post_arguments = lambda_ops::function_parameters(&mut post_graph, &post_params);
     let mut post_capture_cursor = post_parameter_types.len();
     let producer_scan_end = producer_scan_types.len();
     let consumer_scan_end = producer_scan_end + consumer_scan_types.len();
@@ -865,7 +864,7 @@ fn append_wrapper_captures(
     cursor: &mut usize,
     lambda: &screma::Lambda,
 ) {
-    let capture_count = lambda.seg_body().map_or(0, |body| body.captures.len());
+    let capture_count = lambda.capture_count();
     arguments.extend_from_slice(&wrapper_arguments[*cursor..*cursor + capture_count]);
     *cursor += capture_count;
 }
@@ -876,7 +875,7 @@ fn append_optional_wrapper_captures(
     cursor: &mut usize,
     lambda: &screma::Lambda,
 ) {
-    let capture_count = lambda.seg_body().map_or(0, |body| body.captures.len());
+    let capture_count = lambda.capture_count();
     arguments.extend(wrapper_arguments[*cursor..*cursor + capture_count].iter().copied().map(Some));
     *cursor += capture_count;
 }
@@ -887,11 +886,10 @@ fn invoke_lambda(
     lambda: &screma::Lambda,
     arguments: Vec<NodeId>,
 ) -> Vec<NodeId> {
-    if lambda.is_identity() {
-        arguments
-    } else {
-        call_lambda(graph, program, lambda, arguments)
-    }
+    let callee = lambda
+        .seg_body()
+        .map(|body| program.region(body.region).expect("Screma lambda region").name.as_str());
+    lambda_ops::emit_call(graph, lambda, callee, arguments)
 }
 #[derive(Clone, Copy)]
 struct ValueRef {
@@ -1031,10 +1029,10 @@ fn parallel_lambdas(
         .flat_map(|call| call.lambda.seg_body().into_iter().flat_map(|body| body.captures.iter().copied()))
         .collect::<Vec<_>>();
     let capture_types = capture_types(context.outer_types, captures.iter());
-    let mut params = named_parameters(&parameter_types, "element");
-    params.extend(named_parameters(&capture_types, "capture"));
+    let mut params = lambda_ops::named_parameters(&parameter_types, "element");
+    params.extend(lambda_ops::named_parameters(&capture_types, "capture"));
     let mut graph = EGraph::new();
-    let arguments = function_parameters(&mut graph, &params);
+    let arguments = lambda_ops::function_parameters(&mut graph, &params);
     let mut capture_cursor = parameter_types.len();
     let mut call_results = Vec::with_capacity(calls.len());
     for call in &calls {
@@ -1043,7 +1041,7 @@ fn parallel_lambdas(
             let capture_end = capture_cursor + body.captures.len();
             call_arguments.extend_from_slice(&arguments[capture_cursor..capture_end]);
             capture_cursor = capture_end;
-            call_results.push(call_lambda(
+            call_results.push(invoke_lambda(
                 &mut graph,
                 context.program,
                 call.lambda,
@@ -1095,10 +1093,10 @@ fn vertical_lambda(
         .chain(consumer_body.into_iter().flat_map(|body| body.captures.iter().copied()))
         .collect::<Vec<_>>();
     let capture_types = capture_types(context.outer_types, captures.iter());
-    let mut params = named_parameters(parameter_types, "element");
-    params.extend(named_parameters(&capture_types, "capture"));
+    let mut params = lambda_ops::named_parameters(parameter_types, "element");
+    params.extend(lambda_ops::named_parameters(&capture_types, "capture"));
     let mut graph = EGraph::new();
-    let arguments = function_parameters(&mut graph, &params);
+    let arguments = lambda_ops::function_parameters(&mut graph, &params);
     let mut capture_cursor = parameter_types.len();
 
     let mut producer_arguments =
@@ -1107,7 +1105,7 @@ fn vertical_lambda(
         let capture_end = capture_cursor + body.captures.len();
         producer_arguments.extend_from_slice(&arguments[capture_cursor..capture_end]);
         capture_cursor = capture_end;
-        call_lambda(&mut graph, context.program, producer, producer_arguments)
+        invoke_lambda(&mut graph, context.program, producer, producer_arguments)
     } else {
         producer_arguments
     };
@@ -1126,7 +1124,7 @@ fn vertical_lambda(
         let capture_end = capture_cursor + body.captures.len();
         consumer_arguments.extend_from_slice(&arguments[capture_cursor..capture_end]);
         capture_cursor = capture_end;
-        call_lambda(&mut graph, context.program, consumer, consumer_arguments)
+        invoke_lambda(&mut graph, context.program, consumer, consumer_arguments)
     } else {
         consumer_arguments
     };
@@ -1158,96 +1156,30 @@ fn vertical_lambda(
     );
     (lambda, function)
 }
-fn named_parameters(types: &[Type<TypeName>], prefix: &str) -> Vec<(Type<TypeName>, String)> {
-    types.iter().enumerate().map(|(index, ty)| (ty.clone(), format!("{prefix}_{index}"))).collect()
-}
-
-fn function_parameters(graph: &mut EGraph, params: &[(Type<TypeName>, String)]) -> Vec<NodeId> {
-    params.iter().enumerate().map(|(index, (ty, _))| graph.add_func_param(index, ty.clone())).collect()
-}
-
-fn call_lambda(
-    graph: &mut EGraph,
-    program: &Segmented,
-    lambda: &screma::Lambda,
-    arguments: Vec<NodeId>,
-) -> Vec<NodeId> {
-    let body = lambda.seg_body().expect("identity lambda calls are handled by the caller");
-    let name = program.region(body.region).expect("Screma lambda region").name.clone();
-    let result = graph.intern_pure(
-        PureOp::Call(name),
-        arguments.into_iter().collect(),
-        lambda_return_type(&lambda.result_types),
-        None,
-    );
-    unpack_result(graph, result, &lambda.result_types)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn finish_lambda(
     context: &mut Context<'_>,
     label: &str,
-    mut graph: EGraph,
+    graph: EGraph,
     params: Vec<(Type<TypeName>, String)>,
     captures: Vec<NodeId>,
     parameter_types: Vec<Type<TypeName>>,
     result_types: Vec<Type<TypeName>>,
     results: Vec<NodeId>,
 ) -> (screma::Lambda, Option<SemanticFunc>) {
-    let is_identity = captures.is_empty()
-        && params.len() == parameter_types.len()
-        && result_types == parameter_types
-        && results.iter().enumerate().all(|(index, result)| {
-            matches!(
-                graph.nodes.get(*result).map(|node| &node.kind),
-                Some(ENode::FuncParam { index: parameter }) if *parameter == index
-            )
-        });
-    if is_identity {
-        return (screma::Lambda::identity(parameter_types), None);
-    }
-
-    let return_type = lambda_return_type(&result_types);
-    let result = match results.as_slice() {
-        [result] => *result,
-        results => graph.intern_pure(
-            PureOp::Tuple(results.len()),
-            results.iter().copied().collect(),
-            return_type.clone(),
-            None,
-        ),
-    };
-    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
-    let name = fresh_region_name(context.interner, &format!("{}_{}", context.scope, label));
-    let region = context.interner.intern(&name);
-    let function = SemanticFunc::new(region, name, context.span, None, params, return_type, graph);
-    (
-        screma::Lambda::region(SegBody { region, captures }, parameter_types, result_types),
-        Some(function),
+    let return_block = graph.skeleton.entry;
+    lambda_ops::finish_region_lambda(
+        context.interner,
+        context.scope,
+        label,
+        context.span,
+        graph,
+        return_block,
+        params,
+        captures,
+        parameter_types,
+        result_types,
+        results,
+        true,
     )
-}
-
-fn lambda_return_type(results: &[Type<TypeName>]) -> Type<TypeName> {
-    match results {
-        [result] => result.clone(),
-        results => Type::Constructed(TypeName::Tuple(results.len()), results.to_vec()),
-    }
-}
-
-fn unpack_result(graph: &mut EGraph, result: NodeId, types: &[Type<TypeName>]) -> Vec<NodeId> {
-    match types {
-        [_] => vec![result],
-        types => types
-            .iter()
-            .enumerate()
-            .map(|(index, ty)| {
-                graph.intern_pure(
-                    PureOp::Project { index: index as u32 },
-                    smallvec![result],
-                    ty.clone(),
-                    None,
-                )
-            })
-            .collect(),
-    }
 }

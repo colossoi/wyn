@@ -9,10 +9,10 @@ use std::collections::HashSet;
 use polytype::Type;
 use smallvec::SmallVec;
 
-use super::{graph_and_span, horizontal, screma as fusion_screma};
+use super::{graph_and_span, horizontal, screma as fusion_screma, support};
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
-use crate::egir::ir::{splice_effect_tokens, Body, BodySite};
+use crate::egir::ir::{splice_effect_tokens, BodySite};
 use crate::egir::program::CoreProgramData;
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
@@ -118,7 +118,7 @@ fn find_in_graph(graph: &EGraph, site: BodySite, oracle: &SemanticGraph) -> Opti
                     routes.iter().map(|route| route.producer_post_output).collect::<HashSet<_>>();
                 if routes.is_empty()
                     || routed_outputs.len() != producer_op.form.post.result_types.len()
-                    || !producer_used_only_by(
+                    || !support::result_used_only_by_effect_pair(
                         graph,
                         block_id,
                         producer_index,
@@ -140,37 +140,6 @@ fn find_in_graph(graph: &EGraph, site: BodySite, oracle: &SemanticGraph) -> Opti
         }
     }
     None
-}
-
-fn producer_used_only_by(
-    graph: &EGraph,
-    producer_block: BlockId,
-    producer_index: usize,
-    consumer_index: usize,
-    producer_result: crate::egir::types::NodeId,
-) -> bool {
-    for (block_id, block) in &graph.skeleton.blocks {
-        for (index, effect) in block.side_effects.iter().enumerate() {
-            if block_id == producer_block && (index == producer_index || index == consumer_index) {
-                continue;
-            }
-            if effect
-                .referenced_nodes()
-                .any(|node| graph_ops::pure_depends_on(graph, node, producer_result))
-            {
-                return false;
-            }
-        }
-        if block
-            .term
-            .referenced_nodes()
-            .into_iter()
-            .any(|node| graph_ops::pure_depends_on(graph, node, producer_result))
-        {
-            return false;
-        }
-    }
-    true
 }
 
 pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
@@ -238,17 +207,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
             consumer.effects = effects;
             block.side_effects.remove(candidate.producer);
         };
-        match body {
-            Body::Entry(mut entry) => {
-                rewrite(&mut entry.graph);
-                Body::Entry(entry)
-            }
-            Body::Function(mut function) => {
-                rewrite(&mut function.graph);
-                Body::Function(function)
-            }
-            Body::Constant(_) => unreachable!("Filter fusion never targets constants"),
-        }
+        support::rewrite_body_graph(body, rewrite)
     });
     rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
         region_interner: interner,

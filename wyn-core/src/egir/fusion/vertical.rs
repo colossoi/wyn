@@ -10,9 +10,10 @@ use smallvec::SmallVec;
 use super::graph_and_span;
 use super::horizontal;
 use super::screma as fusion_screma;
+use super::support;
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
-use crate::egir::ir::{splice_effect_tokens, Body, BodySite};
+use crate::egir::ir::{splice_effect_tokens, BodySite};
 use crate::egir::program::CoreProgramData;
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
@@ -276,35 +277,6 @@ fn find_in_graph(
     None
 }
 
-fn reproject_retained_fields(
-    graph: &mut EGraph,
-    old_result: crate::egir::types::NodeId,
-    new_result: crate::egir::types::NodeId,
-    mapping: &[usize],
-) {
-    let projects = graph
-        .nodes
-        .iter()
-        .filter_map(|(node, definition)| match &definition.kind {
-            crate::egir::types::ENode::Pure {
-                op: crate::egir::types::PureOp::Project { index },
-                operands,
-            } if operands.first() == Some(&old_result) => Some((node, *index as usize)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    for (project, field) in projects {
-        let Some(&fused_field) = mapping.get(field).filter(|field| **field != usize::MAX) else {
-            continue;
-        };
-        graph.update_pure_node(project, |op, operands| {
-            *op = crate::egir::types::PureOp::Project {
-                index: fused_field as u32,
-            };
-            operands[0] = new_result;
-        });
-    }
-}
 fn retained_producer_outputs(
     graph: &EGraph,
     producer_block: BlockId,
@@ -471,7 +443,11 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
             let tuple_type = Type::Constructed(TypeName::Tuple(result_types.len()), result_types.clone());
             let fused_result = graph.alloc_side_effect_result(tuple_type);
             if producer_mapping.iter().any(|field| *field != usize::MAX) {
-                reproject_retained_fields(graph, producer_result, fused_result, &producer_mapping);
+                let retained_mapping = producer_mapping
+                    .iter()
+                    .map(|field| (*field != usize::MAX).then_some(*field))
+                    .collect::<Vec<_>>();
+                support::retarget_projects(graph, producer_result, fused_result, &retained_mapping);
             }
             horizontal::reproject_fields(
                 graph,
@@ -493,17 +469,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
             consumer.effects = effects;
             block.side_effects.remove(candidate.producer);
         };
-        match body {
-            Body::Entry(mut entry) => {
-                rewrite(&mut entry.graph);
-                Body::Entry(entry)
-            }
-            Body::Function(mut function) => {
-                rewrite(&mut function.graph);
-                Body::Function(function)
-            }
-            Body::Constant(_) => unreachable!("vertical fusion never targets constants"),
-        }
+        support::rewrite_body_graph(body, rewrite)
     });
     rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
         region_interner: interner,
