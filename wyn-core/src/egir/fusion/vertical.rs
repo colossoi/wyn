@@ -241,6 +241,27 @@ fn find_in_graph(
                 if retains_unplaced_fresh && consumer_op.form.operator_input_count() > 0 {
                     continue;
                 }
+                let retains_placed_array = retained_producer_outputs.iter().any(|field| {
+                    matches!(
+                        producer_op.form.result_id(*field),
+                        Some(screma::ResultId::Post(_))
+                    ) && producer_op
+                        .destination(*field)
+                        .is_some_and(|destination| !destination.is_unplaced())
+                });
+                let consumer_has_unplaced_array = (0..consumer_op.result_count()).any(|field| {
+                    matches!(consumer_op.form.result_id(field), Some(screma::ResultId::Post(_)))
+                        && consumer_op
+                            .destination(field)
+                            .is_some_and(|destination| destination.is_unplaced())
+                });
+                // A fused map with both externally placed and unplaced array
+                // results has no parallel lowering recipe. Keeping these
+                // operations separate also leaves the consumer available for
+                // fusion into a later output envelope.
+                if retains_placed_array && consumer_has_unplaced_array {
+                    continue;
+                }
                 return Some(Candidate {
                     site,
                     block: block_id,
