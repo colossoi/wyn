@@ -22,16 +22,19 @@ fn should_fail_type_check(input: &str) -> bool {
     crate::compile_thru_frontend(input).is_err()
 }
 
-/// Helper to compile through semantic EGIR optimization and allocation.
-/// Off-milestone stop — drives the typestate API directly so the same
-/// `module_manager` covers both `type_check` and `to_tlc`.
-fn compile_to_semantic_egir(input: &str) -> crate::egir::ResourcesAllocated {
+fn compile_to_segmented_egir(input: &str) -> crate::egir::reify::Segmented {
     let program = crate::compile_thru_tlc(input).expect("compile through TLC");
     let program = crate::tlc::infer_input_slice_bounds(program);
     let program = crate::to_egraph(program).expect("convert to raw semantic EGIR");
     let program = crate::egir::realize_outputs(program).expect("realize semantic EGIR outputs");
-    let program = crate::egir::reify_soacs(program);
-    let program = crate::egir::optimize_semantics(program);
+    crate::egir::reify_soacs(program)
+}
+
+/// Helper to compile through semantic EGIR optimization and allocation.
+/// Off-milestone stop — drives the typestate API directly so the same
+/// `module_manager` covers both `type_check` and `to_tlc`.
+fn compile_to_semantic_egir(input: &str) -> crate::egir::ResourcesAllocated {
+    let program = crate::egir::optimize_semantics(compile_to_segmented_egir(input));
     crate::egir::plan_logical_resources(program).expect("allocate semantic EGIR resources")
 }
 
@@ -94,6 +97,9 @@ fn semantic_soac_stats(allocated: &crate::egir::ResourcesAllocated) -> SemanticS
     }
     for entry in &allocated.entry_points {
         visit(&entry.graph, &mut stats);
+    }
+    for materialization in allocated.data.materializations.values() {
+        visit(&materialization.entry().graph, &mut stats);
     }
     stats
 }
@@ -297,6 +303,54 @@ entry sliced(xs: []i32) [4]i32 =
 }
 
 #[test]
+fn egir_vertical_fusion_preserves_slice_semantics() {
+    use crate::egir::reify::Segmented;
+    use crate::egir::semantic_exec::{execute_map_screma, Value};
+    use crate::egir::types::{Semantic, SideEffectKind, Soac, SoacEffect};
+
+    fn entry_maps(program: &Segmented) -> Vec<&screma::Op<Semantic>> {
+        program
+            .entry_points
+            .iter()
+            .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+            .filter_map(|effect| {
+                let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
+                    return None;
+                };
+                op.is_map().then_some(op)
+            })
+            .collect()
+    }
+
+    let source = r#"
+#[compute]
+entry sliced(xs: []i32) [4]i32 =
+  let produced = map(|x: i32| x + 1, xs) in
+  map(|x: i32| x * 2, produced[2..6])
+"#;
+    let before = compile_to_segmented_egir(source);
+    let after: Segmented = crate::egir::optimize_semantics(compile_to_segmented_egir(source)).retag();
+
+    let input = (0..8).map(Value::Int).collect::<Vec<_>>();
+    let before_maps = entry_maps(&before);
+    assert_eq!(
+        before_maps.len(),
+        2,
+        "unoptimized graph retains producer and consumer"
+    );
+    let produced = execute_map_screma(&before, before_maps[0], &[input.clone()]).unwrap();
+    let sliced = produced[0][2..6].to_vec();
+    let expected = execute_map_screma(&before, before_maps[1], &[sliced.clone()]).unwrap();
+
+    let after_maps = entry_maps(&after);
+    assert_eq!(after_maps.len(), 1, "optimization composes the two maps");
+    let actual = execute_map_screma(&after, after_maps[0], &[input[2..6].to_vec()]).unwrap();
+    assert_eq!(
+        actual, expected,
+        "fused lambda must preserve concrete lane values"
+    );
+}
+#[test]
 fn egir_vertical_fusion_composes_nested_slices() {
     let source = r#"
 #[compute]
@@ -419,7 +473,35 @@ entry both() ([8]i32, [1]i32) =
     );
     compile_to_spirv(source).expect("returned producer with a static demand should lower");
 }
+#[test]
+fn egir_indexed_fusion_respects_fixed_domain_profitability() {
+    let source = r#"
+#[compute]
+entry many(i: i32, j: i32, k: i32) [1]i32 =
+  let produced = map(|x: i32| x + 1, [10, 20]) in
+  [produced[i % 2] + produced[j % 2] + produced[k % 2]]
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_maps, 1,
+        "three point evaluations should not replace a two-element materialization"
+    );
+}
 
+#[test]
+fn egir_indexed_fusion_bounds_unknown_domain_duplication() {
+    let source = r#"
+#[compute]
+entry many(xs: []i32, i: i32, j: i32, k: i32) [1]i32 =
+  let produced = map(|x: i32| x + 1, xs) in
+  [produced[i] + produced[j] + produced[k]]
+"#;
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(
+        stats.seg_maps, 1,
+        "unknown-size maps should not be copied across unbounded point demands"
+    );
+}
 #[test]
 fn egir_filter_length_only_becomes_count_reduction() {
     let source = r#"

@@ -5,7 +5,8 @@
 
 use crate::egir::program::SemanticFunc;
 use crate::egir::reify::Segmented;
-use crate::egir::types::{ENode, NodeId, PureOp, RegionId, SkeletonTerminator};
+use crate::egir::soac::screma;
+use crate::egir::types::{ENode, NodeId, PureOp, RegionId, Semantic, SkeletonTerminator};
 use crate::LookupMap;
 
 #[cfg(test)]
@@ -40,6 +41,46 @@ impl<'a> RegionExecutor<'a> {
         };
         let mut memo = LookupMap::new();
         self.eval_node(body, result, arguments, &mut memo)
+    }
+
+    /// Invoke a canonical Screma lambda and unpack its logical result fields.
+    fn call_lambda(
+        &self,
+        lambda: &screma::Lambda,
+        parameters: &[Value],
+        captures: &[Value],
+    ) -> Result<Vec<Value>, String> {
+        if parameters.len() != lambda.parameter_types.len() {
+            return Err(format!(
+                "lambda expects {} parameters, found {}",
+                lambda.parameter_types.len(),
+                parameters.len()
+            ));
+        }
+        if captures.len() != lambda.capture_count() {
+            return Err(format!(
+                "lambda expects {} captures, found {}",
+                lambda.capture_count(),
+                captures.len()
+            ));
+        }
+        if lambda.is_identity() {
+            return Ok(parameters.to_vec());
+        }
+        let mut arguments = Vec::with_capacity(parameters.len() + captures.len());
+        arguments.extend_from_slice(parameters);
+        arguments.extend_from_slice(captures);
+        let body = lambda.seg_body().expect("non-identity lambda has no region");
+        let packed = self.call(&body.region, &arguments)?;
+        match lambda.result_types.len() {
+            1 => Ok(vec![packed]),
+            arity => match packed {
+                Value::Tuple(fields) if fields.len() == arity => Ok(fields),
+                value => Err(format!(
+                    "{arity}-result lambda returned an incompatible value {value:?}"
+                )),
+            },
+        }
     }
 
     fn eval_node(
@@ -126,6 +167,50 @@ impl<'a> RegionExecutor<'a> {
     }
 }
 
+/// Execute a capture-free, pointwise canonical Screma on concrete lanes.
+pub(crate) fn execute_map_screma(
+    program: &Segmented,
+    op: &screma::Op<Semantic>,
+    inputs: &[Vec<Value>],
+) -> Result<Vec<Vec<Value>>, String> {
+    op.validate()?;
+    if !op.is_map() {
+        return Err("semantic map executor received a collective Screma".into());
+    }
+    if inputs.len() != op.inputs.len() {
+        return Err(format!(
+            "map expects {} input arrays, found {}",
+            op.inputs.len(),
+            inputs.len()
+        ));
+    }
+    let len = inputs.first().map_or(0, Vec::len);
+    if inputs.iter().any(|input| input.len() != len) {
+        return Err("map input arrays have different lengths".into());
+    }
+    if op.form.pre.capture_count() != 0 || op.form.post.capture_count() != 0 {
+        return Err("map executor requires capture-free lambdas".into());
+    }
+
+    let executor = RegionExecutor::new(program);
+    let mut outputs = vec![Vec::with_capacity(len); op.form.result_count()];
+    for index in 0..len {
+        let parameters = inputs.iter().map(|input| input[index].clone()).collect::<Vec<_>>();
+        let mapped = executor.call_lambda(&op.form.pre, &parameters, &[])?;
+        let results = executor.call_lambda(&op.form.post, &mapped, &[])?;
+        if results.len() != outputs.len() {
+            return Err(format!(
+                "map produced {} fields, expected {}",
+                results.len(),
+                outputs.len()
+            ));
+        }
+        for (output, result) in outputs.iter_mut().zip(results) {
+            output.push(result);
+        }
+    }
+    Ok(outputs)
+}
 pub fn map<T, U>(input: &[T], f: impl Fn(&T) -> U) -> Vec<U> {
     input.iter().map(f).collect()
 }

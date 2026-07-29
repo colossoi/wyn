@@ -12,7 +12,9 @@ use crate::egir::ir::{BodySite, RealizedOutputRoute};
 use crate::egir::program::SemanticResourceRef;
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
-use crate::egir::types::{EGraph, ENode, NodeId, PureOp, ResourceAccess, SideEffectKind, Soac, SoacEffect};
+use crate::egir::types::{
+    EGraph, ENode, NodeId, PureOp, ResourceAccess, SegExtent, SegSpace, SideEffectKind, Soac, SoacEffect,
+};
 use crate::flow::BlockId;
 use smallvec::smallvec;
 
@@ -69,6 +71,7 @@ fn find_in_graph(
                 continue;
             };
             let screma::SemanticState::Segmented {
+                space,
                 output_slots,
                 resources,
                 ..
@@ -126,6 +129,7 @@ fn find_in_graph(
                 })
                 .collect::<Vec<_>>();
             if demands.is_empty()
+                || !point_scalarization_is_profitable(space, demands.len())
                 || !used_only_through(graph, block_id, effect_index, result, &demands, output_routes)
             {
                 continue;
@@ -141,6 +145,18 @@ fn find_in_graph(
     None
 }
 
+/// Scalarization evaluates the complete map body once per point demand. A
+/// fixed domain supplies its own break-even point. Without a static extent, cap
+/// the number of copies so an unknown-size producer cannot cause unbounded IR
+/// and runtime-work duplication.
+fn point_scalarization_is_profitable(space: &SegSpace, demands: usize) -> bool {
+    const UNKNOWN_DOMAIN_DEMAND_LIMIT: usize = 2;
+
+    match space.dims() {
+        [SegExtent::Fixed(elements)] => demands as u64 <= u64::from(*elements),
+        _ => demands <= UNKNOWN_DOMAIN_DEMAND_LIMIT,
+    }
+}
 fn used_only_through(
     graph: &EGraph,
     producer_block: BlockId,
