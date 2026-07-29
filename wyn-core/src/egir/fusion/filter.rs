@@ -30,7 +30,7 @@ use crate::flow::{BlockId, ControlHeader};
 use crate::LookupMap;
 
 #[derive(Clone)]
-pub(crate) struct Candidate {
+pub(super) struct Candidate {
     site: BodySite,
     block: BlockId,
     filter: usize,

@@ -225,6 +225,8 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
         operator: "combine".into(),
         elem_ty,
         source_graph: &phase1,
+        operator_captures: &[],
+        capture_inputs: &[],
         neutral,
         scratch: ScanScratch {
             block_sums: sums,

@@ -17,12 +17,12 @@ use crate::egir::{graph_ops, inlining};
 use crate::LookupMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OutputOrigin {
+pub(super) enum OutputOrigin {
     Producer(usize),
     Consumer(usize),
 }
 
-pub(crate) struct Normalized {
+pub(super) struct Normalized {
     pub input_nodes: Vec<NodeId>,
     pub inputs: Vec<SoacInputType>,
     pub form: screma::ScremaForm,
@@ -32,14 +32,14 @@ pub(crate) struct Normalized {
     pub synthesized: Vec<SemanticFunc>,
 }
 
-pub(crate) struct Source<'a> {
+pub(super) struct Source<'a> {
     pub input_nodes: &'a [NodeId],
     pub inputs: &'a [SoacInputType],
     pub form: &'a screma::ScremaForm,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct InputRoute {
+pub(super) struct InputRoute {
     pub consumer_input: usize,
     /// Producer post-lambda result index. Reduction results cannot be array routes.
     pub producer_post_output: usize,
@@ -57,7 +57,7 @@ fn result_post_output(form: &screma::ScremaForm, output: usize) -> Option<usize>
     (post < form.post.result_types.len()).then_some(post)
 }
 
-pub(crate) struct Context<'a> {
+pub(super) struct Context<'a> {
     pub program: &'a Segmented,
     pub interner: &'a mut RegionInterner,
     pub scope: &'a str,
@@ -68,7 +68,7 @@ pub(crate) struct Context<'a> {
 /// Horizontal normalisation using the SuperScrema barrier algebra. Independent
 /// collective groups move to the first barrier; the wrapper forms the
 /// associative product and preserves left-to-right results within each partition.
-pub(crate) fn fuse_horizontal(
+pub(super) fn fuse_horizontal(
     context: &mut Context<'_>,
     producer: Source<'_>,
     consumer: Source<'_>,
@@ -129,7 +129,7 @@ struct SuperScrema<'a> {
     retained_producer_outputs: &'a [usize],
 }
 
-pub(crate) fn can_fuse_vertical(
+pub(super) fn can_fuse_vertical(
     program: &Segmented,
     producer: &screma::ScremaForm,
     consumer: &screma::ScremaForm,
@@ -175,7 +175,7 @@ pub(crate) fn can_fuse_vertical(
     })
 }
 
-pub(crate) fn fuse_vertical(
+pub(super) fn fuse_vertical(
     context: &mut Context<'_>,
     producer: Source<'_>,
     consumer: Source<'_>,
@@ -191,13 +191,13 @@ pub(crate) fn fuse_vertical(
     .normalize(context)
 }
 
-pub(crate) struct LambdaSource<'a> {
+pub(super) struct LambdaSource<'a> {
     pub input_nodes: &'a [NodeId],
     pub inputs: &'a [SoacInputType],
     pub lambda: &'a screma::Lambda,
 }
 
-pub(crate) struct NormalizedLambda {
+pub(super) struct NormalizedLambda {
     pub input_nodes: Vec<NodeId>,
     pub inputs: Vec<SoacInputType>,
     pub lambda: screma::Lambda,
@@ -206,7 +206,7 @@ pub(crate) struct NormalizedLambda {
 
 /// Compose a pure map producer into an arbitrary element lambda. This is the
 /// common Futhark `fuseMaps` operation used by non-Screma envelopes.
-pub(crate) fn fuse_map_into_lambda(
+pub(super) fn fuse_map_into_lambda(
     context: &mut Context<'_>,
     producer: Source<'_>,
     consumer: LambdaSource<'_>,

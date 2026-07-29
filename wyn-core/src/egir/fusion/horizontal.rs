@@ -2,7 +2,7 @@
 //!
 //! Sibling Scremas are fused by composing their complete pre/post lambdas.  The
 //! wrapper lambdas perform the canonical scan/reduction/map partitioning and
-//! result reordering; no legacy lane graph is reconstructed.
+//! result reordering.
 
 use polytype::Type;
 use smallvec::SmallVec;
@@ -22,7 +22,7 @@ use crate::flow::BlockId;
 use crate::LookupMap;
 
 #[derive(Clone, Copy)]
-pub(crate) struct Candidate {
+pub(super) struct Candidate {
     site: BodySite,
     block: BlockId,
     left: usize,

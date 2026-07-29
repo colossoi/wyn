@@ -27,7 +27,7 @@ struct Demand {
 }
 
 #[derive(Clone)]
-pub(crate) struct Candidate {
+pub(super) struct Candidate {
     site: BodySite,
     block: BlockId,
     effect: usize,

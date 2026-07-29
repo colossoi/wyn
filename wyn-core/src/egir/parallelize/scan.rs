@@ -1,5 +1,6 @@
 //! Parallel scan candidate analysis, binding, and phase emission.
 
+use super::kernel::cloneable_capture_inputs;
 use super::model::REDUCE_PHASE1_WIDTH;
 use super::*;
 use crate::egir::soac::lambda as lambda_ops;
@@ -16,6 +17,8 @@ pub(super) struct ScanPhase2Spec<'a> {
     pub operator: String,
     pub elem_ty: Type<TypeName>,
     pub source_graph: &'a EGraph,
+    pub operator_captures: &'a [NodeId],
+    pub capture_inputs: &'a [SemanticResourceDecl],
     pub neutral: NodeId,
     pub scratch: ScanScratch,
     pub total_out: Option<ResourceId>,
@@ -45,6 +48,13 @@ impl ScanPhase2Spec<'_> {
                 access: crate::ResourceAccess::Write,
             });
         }
+        accesses.extend(
+            self.capture_inputs.iter().map(|declaration| schedule::ScheduledResource {
+                resource: declaration.resource.0,
+                access: crate::ResourceAccess::Read,
+            }),
+        );
+        accesses = crate::egir::ir::SegResourceAccess::merge(&accesses, &[]);
 
         let mut builder = EntryBuilder::new_compute(
             format!("{}_phase2_scan_sums", self.entry_name),
@@ -63,6 +73,13 @@ impl ScanPhase2Spec<'_> {
             self.elem_ty.clone(),
             scratch_len,
         );
+        for declaration in self.capture_inputs {
+            builder.declare_input_storage_sized(
+                declaration.resource.0,
+                declaration.elem_ty.clone(),
+                declaration.size.clone(),
+            );
+        }
         if let Some(len_out) = self.total_out {
             builder.declare_output_storage_sized(
                 len_out,
@@ -72,7 +89,12 @@ impl ScanPhase2Spec<'_> {
         }
 
         let neutral = graph_ops::clone_pure_subgraph(self.source_graph, builder.graph_mut(), self.neutral)?;
-        let phase = self.emit_loop(&mut builder, neutral);
+        let operator_captures = self
+            .operator_captures
+            .iter()
+            .map(|capture| graph_ops::clone_pure_subgraph(self.source_graph, builder.graph_mut(), *capture))
+            .collect::<Result<Vec<_>, _>>()?;
+        let phase = self.emit_loop(&mut builder, neutral, &operator_captures);
         if let (Some(len_out), Some(total)) = (self.total_out, phase.total) {
             let (graph, effect_ids) = builder.construction_parts_mut();
             let len_view = graph_ops::intern_resource_view(graph, len_out, self.elem_ty.clone(), None);
@@ -94,6 +116,7 @@ impl ScanPhase2Spec<'_> {
         &self,
         builder: &mut crate::egir::builder::EntryBuilder,
         neutral: NodeId,
+        operator_captures: &[NodeId],
     ) -> ExclusiveScanPhase2 {
         let elem_ty = self.elem_ty.clone();
         let want_total = self.total_out.is_some();
@@ -143,9 +166,11 @@ impl ScanPhase2Spec<'_> {
             None,
         );
         let value = graph_ops::emit_view_load(graph, body, sums, index, elem_ty.clone(), effect_ids, None);
+        let mut operator_arguments = smallvec![accumulator, value];
+        operator_arguments.extend_from_slice(operator_captures);
         let next_accumulator = graph.intern_pure(
             PureOp::Call(self.operator.clone()),
-            smallvec![accumulator, value],
+            operator_arguments,
             elem_ty.clone(),
             None,
         );
@@ -194,6 +219,9 @@ pub(super) struct ScanPhase3Spec<'a> {
     pub entry_name: String,
     pub swap_region: RegionId,
     pub elem_ty: Type<TypeName>,
+    pub source_graph: &'a EGraph,
+    pub operator_captures: Vec<NodeId>,
+    pub capture_inputs: Vec<SemanticResourceDecl>,
     /// Holds local prefixes on entry and global prefixes after offsetting.
     pub output_resource: ResourceId,
     pub block_offsets: ResourceId,
@@ -209,6 +237,14 @@ impl ScanPhase3Spec<'_> {
     ) -> Result<BuiltPhase, String> {
         use crate::egir::builder::EntryBuilder;
 
+        let mut input_declarations = self.capture_inputs.clone();
+        if let Some(post) = &self.post {
+            for declaration in &post.input_declarations {
+                if !input_declarations.iter().any(|existing| existing.resource == declaration.resource) {
+                    input_declarations.push(declaration.clone());
+                }
+            }
+        }
         let mut resources = vec![
             schedule::ScheduledResource {
                 resource: self.output_resource,
@@ -219,9 +255,8 @@ impl ScanPhase3Spec<'_> {
                 access: crate::ResourceAccess::Read,
             },
         ];
+        resources = merge_scheduled_resources(&resources, &declared_input_resources(&input_declarations));
         if let Some(post) = &self.post {
-            resources =
-                merge_scheduled_resources(&resources, &declared_input_resources(&post.input_declarations));
             resources = merge_scheduled_resources(
                 &resources,
                 &post
@@ -250,14 +285,14 @@ impl ScanPhase3Spec<'_> {
                 dispatch_worker_logical_size(&self.elem_ty),
             );
         }
+        for declaration in &input_declarations {
+            builder.declare_input_storage_sized(
+                declaration.resource.0,
+                declaration.elem_ty.clone(),
+                declaration.size.clone(),
+            );
+        }
         if let Some(post) = &self.post {
-            for declaration in &post.input_declarations {
-                builder.declare_input_storage_sized(
-                    declaration.resource.0,
-                    declaration.elem_ty.clone(),
-                    declaration.size.clone(),
-                );
-            }
             for output in &post.outputs {
                 builder.declare_output_storage(output.resource, output.elem_ty.clone());
             }
@@ -289,12 +324,21 @@ impl ScanPhase3Spec<'_> {
             None,
         );
 
+        let mut operator_captures = vec![offset];
+        operator_captures.extend(
+            self.operator_captures
+                .iter()
+                .map(|capture| {
+                    graph_ops::clone_pure_subgraph(self.source_graph, builder.graph_mut(), *capture)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
         builder.emit_pending_map_into(
             self.swap_region,
             chunked_output,
             arr_ty.clone(),
             self.elem_ty,
-            vec![offset],
+            operator_captures,
             chunked_output,
             arr_ty.clone(),
         );
@@ -360,7 +404,8 @@ pub(super) struct ScanCandidate {
     pub scratch_type: Type<TypeName>,
     serial: SerialScremaRecipe,
     pre: screma::Lambda,
-    scan: screma::Scan,
+    scans: Vec<screma::Scan>,
+    operator_capture_inputs: Vec<SemanticResourceDecl>,
     post: screma::Lambda,
     input_views: Vec<(NodeId, crate::egir::types::SoacInputType)>,
     result: NodeId,
@@ -388,20 +433,25 @@ pub(super) fn analyze_scan_candidate(
     located: LocatedScrema<'_>,
 ) -> error::Result<Option<ScanCandidate>> {
     debug_assert_eq!(
-        super::capabilities::ScremaRecipeCapabilities::analyze(located.op).recipe_class(),
-        super::capabilities::ScremaRecipeClass::Scan
+        super::capabilities::classify(located.op),
+        super::capabilities::Strategy::Scan
     );
     let segment = located.segmented()?;
     let serial = located.serial_recipe();
-    let [scan] = located.op.form.scans.as_slice() else {
-        return Ok(None);
-    };
-    let [neutral] = scan.neutral.as_slice() else {
-        return Ok(None);
-    };
-    if !can_clone_pure_subgraph(&entry.graph, *neutral, &[]) {
+    let scans = &located.op.form.scans;
+    if scans.is_empty()
+        || scans
+            .iter()
+            .flat_map(|scan| &scan.neutral)
+            .any(|neutral| !can_clone_pure_subgraph(&entry.graph, *neutral, &[]))
+    {
         return Ok(None);
     }
+    let operator_captures =
+        scans.iter().flat_map(|scan| scan.operator.captures().iter().copied()).collect::<Vec<_>>();
+    let Some(operator_capture_inputs) = cloneable_capture_inputs(entry, &operator_captures) else {
+        return Ok(None);
+    };
 
     let operands =
         screma::ScremaOperands::decode(located.op, &located.effect.operand_nodes, located.effect.result)?;
@@ -434,7 +484,9 @@ pub(super) fn analyze_scan_candidate(
         return Ok(None);
     }
 
-    let scratch_type = entry.graph.nodes[*neutral].ty.clone();
+    let component_types =
+        scans.iter().flat_map(|scan| scan.operator.result_types.iter().cloned()).collect::<Vec<_>>();
+    let scratch_type = lambda_ops::result_type(&component_types);
     if crate::ssa::layout::type_byte_size(&scratch_type).is_none() {
         return Ok(None);
     }
@@ -462,7 +514,8 @@ pub(super) fn analyze_scan_candidate(
         scratch_type,
         serial,
         pre: located.op.form.pre.clone(),
-        scan: scan.clone(),
+        scans: scans.to_vec(),
+        operator_capture_inputs,
         post: located.op.form.post.clone(),
         input_views,
         result: operands.result(),
@@ -511,7 +564,8 @@ impl KernelPlanBuilder<'_, '_> {
             scratch_type: elem_ty,
             serial,
             pre,
-            scan,
+            scans,
+            operator_capture_inputs,
             post,
             input_views,
             result: screma_result,
@@ -521,14 +575,68 @@ impl KernelPlanBuilder<'_, '_> {
             segment,
         } = candidate;
         let block_id = site.block;
-        let neutral = scan.neutral[0];
-        let operator_region = scan
-            .operator
-            .seg_body()
-            .ok_or_else(|| "parallel scan operator lost its region".to_owned())?
-            .region;
+        let component_types =
+            scans.iter().flat_map(|scan| scan.operator.result_types.iter().cloned()).collect::<Vec<_>>();
+        let component_count = component_types.len();
+        let operator_captures =
+            scans.iter().flat_map(|scan| scan.operator.captures().iter().copied()).collect::<Vec<_>>();
+        let original_operators = scans
+            .iter()
+            .map(|scan| {
+                let region = scan
+                    .operator
+                    .seg_body()
+                    .ok_or_else(|| "parallel scan operator lost its region".to_owned())?
+                    .region;
+                Ok((
+                    scan.operator.clone(),
+                    self.region_interner.resolve(region).clone(),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let phase_operator = if scans.len() == 1 && component_count == 1 {
+            scans[0].operator.clone()
+        } else {
+            let capture_types = operator_captures
+                .iter()
+                .map(|capture| entry.graph.nodes[*capture].ty.clone())
+                .collect::<Vec<_>>();
+            let wrapper_component_types = component_types.clone();
+            let wrapper_scratch_type = elem_ty.clone();
+            let span = entry.span;
+            let region = self.define_callable(
+                format!("{}_scan_product_operator", entry.name),
+                move |region, name| {
+                    synthesize_packed_operator_function(
+                        region,
+                        name,
+                        original_operators,
+                        wrapper_component_types,
+                        capture_types,
+                        wrapper_scratch_type,
+                        span,
+                    )
+                },
+            )?;
+            screma::Lambda::region(
+                SegBody {
+                    region,
+                    captures: operator_captures.clone(),
+                },
+                vec![elem_ty.clone(), elem_ty.clone()],
+                vec![elem_ty.clone()],
+            )
+        };
+        let operator_region =
+            phase_operator.seg_body().expect("parallel scan phase operator has a region").region;
         let combine_name = self.region_interner.resolve(operator_region).clone();
-        let phase1_pre = if pre.result_types.len() == 1 {
+        let neutrals = scans.iter().flat_map(|scan| scan.neutral.iter().copied()).collect::<Vec<_>>();
+        let neutral = lambda_ops::pack_results(&mut entry.graph, &neutrals, &component_types);
+        let phase_scan = screma::Scan {
+            operator: phase_operator,
+            neutral: vec![neutral],
+        };
+        let phase1_pre = if pre.result_types.len() == 1 && component_count == 1 {
             pre.clone()
         } else {
             let captures = pre
@@ -551,6 +659,7 @@ impl KernelPlanBuilder<'_, '_> {
                         source,
                         callee,
                         capture_types,
+                        component_count,
                         result_type,
                         span,
                     )
@@ -580,6 +689,8 @@ impl KernelPlanBuilder<'_, '_> {
             let mut parameter_types = vec![elem_ty.clone()];
             parameter_types.extend(pre.parameter_types.iter().cloned());
             let result_types = post.result_types.clone();
+            let post_component_types = component_types.clone();
+            let post_scratch_type = elem_ty.clone();
             let span = entry.span;
             let region =
                 self.define_callable(format!("{}_scan_post", entry.name), move |region, name| {
@@ -590,6 +701,8 @@ impl KernelPlanBuilder<'_, '_> {
                         pre_callee,
                         source_post,
                         post_callee,
+                        post_component_types,
+                        post_scratch_type,
                         capture_types,
                         span,
                     )
@@ -641,6 +754,7 @@ impl KernelPlanBuilder<'_, '_> {
                 return Err("selected scan site changed during phase construction".into());
             };
             op.form.pre = phase1_pre.clone();
+            op.form.scans = vec![phase_scan.clone()];
             op.form.post = screma::Lambda::identity(vec![elem_ty.clone()]);
             op.result_state = vec![screma::ResultState {
                 destination: SoacDestination::fresh().placed(crate::egir::types::SoacPlacement::OutputView),
@@ -661,8 +775,8 @@ impl KernelPlanBuilder<'_, '_> {
                     pre: phase1_pre,
                     scans: Vec::new(),
                     reductions: vec![screma::Reduce {
-                        operator: scan.operator.clone(),
-                        neutral: scan.neutral.clone(),
+                        operator: phase_scan.operator.clone(),
+                        neutral: phase_scan.neutral.clone(),
                         commutative: false,
                     }],
                     post: screma::Lambda::identity(Vec::new()),
@@ -716,6 +830,8 @@ impl KernelPlanBuilder<'_, '_> {
             operator: combine_name.clone(),
             elem_ty: elem_ty.clone(),
             source_graph: &entry.graph,
+            operator_captures: &operator_captures,
+            capture_inputs: &operator_capture_inputs,
             neutral,
             scratch: ScanScratch {
                 block_sums: block_sums_resource,
@@ -727,10 +843,21 @@ impl KernelPlanBuilder<'_, '_> {
         apply_manifest_resource_sizes(&mut phase2.body, self.resources);
 
         let swap_elem_ty = elem_ty.clone();
+        let operator_capture_types = operator_captures
+            .iter()
+            .map(|capture| entry.graph.nodes[*capture].ty.clone())
+            .collect::<Vec<_>>();
         let span = entry.span;
-        let swap_region = self
-            .define_callable(format!("{}_scan_op_swap", entry.name), |region, name| {
-                synthesize_swap_wrapper(region, name, combine_name, swap_elem_ty, span)
+        let swap_region =
+            self.define_callable(format!("{}_scan_op_swap", entry.name), |region, name| {
+                synthesize_swap_wrapper(
+                    region,
+                    name,
+                    combine_name,
+                    swap_elem_ty,
+                    operator_capture_types,
+                    span,
+                )
             })?;
         let input_declarations = entry
             .resource_declarations
@@ -756,6 +883,9 @@ impl KernelPlanBuilder<'_, '_> {
             entry_name: entry.name.clone(),
             swap_region,
             elem_ty,
+            source_graph: &entry.graph,
+            operator_captures,
+            capture_inputs: operator_capture_inputs,
             output_resource: prefix_resource,
             block_offsets: block_offsets_resource,
             width: total_threads,
@@ -784,12 +914,64 @@ impl KernelPlanBuilder<'_, '_> {
     }
 }
 
+fn synthesize_packed_operator_function(
+    region: RegionId,
+    name: String,
+    operators: Vec<(screma::Lambda, String)>,
+    component_types: Vec<Type<TypeName>>,
+    capture_types: Vec<Type<TypeName>>,
+    scratch_type: Type<TypeName>,
+    span: crate::ast::Span,
+) -> SemanticFunc {
+    let mut parameter_types = vec![scratch_type.clone(), scratch_type.clone()];
+    parameter_types.extend(capture_types);
+    let params = lambda_ops::named_parameters(&parameter_types, "arg");
+    let mut graph = EGraph::new();
+    let arguments = lambda_ops::function_parameters(&mut graph, &params);
+    let left = lambda_ops::unpack_results(&mut graph, arguments[0], &component_types);
+    let right = lambda_ops::unpack_results(&mut graph, arguments[1], &component_types);
+    let mut component_cursor = 0;
+    let mut capture_cursor = 2;
+    let mut results = Vec::with_capacity(component_types.len());
+    for (operator, callee) in &operators {
+        let component_end = component_cursor + operator.result_types.len();
+        let capture_end = capture_cursor + operator.capture_count();
+        let mut operator_arguments = left[component_cursor..component_end].to_vec();
+        operator_arguments.extend_from_slice(&right[component_cursor..component_end]);
+        operator_arguments.extend_from_slice(&arguments[capture_cursor..capture_end]);
+        results.extend(lambda_ops::emit_call(
+            &mut graph,
+            operator,
+            Some(callee),
+            operator_arguments,
+        ));
+        component_cursor = component_end;
+        capture_cursor = capture_end;
+    }
+    debug_assert_eq!(component_cursor, component_types.len());
+    debug_assert_eq!(capture_cursor, arguments.len());
+    let packed = lambda_ops::pack_results(&mut graph, &results, &component_types);
+    let entry = graph.skeleton.entry;
+    lambda_ops::finish_function(
+        graph,
+        entry,
+        region,
+        name,
+        span,
+        params,
+        &[scratch_type],
+        &[packed],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn synthesize_scan_input_function(
     region: RegionId,
     name: String,
     pre: screma::Lambda,
     callee: Option<String>,
     capture_types: Vec<Type<TypeName>>,
+    component_count: usize,
     result_type: Type<TypeName>,
     span: crate::ast::Span,
 ) -> SemanticFunc {
@@ -799,6 +981,11 @@ fn synthesize_scan_input_function(
     let mut graph = EGraph::new();
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
     let results = lambda_ops::emit_call(&mut graph, &pre, callee.as_deref(), arguments);
+    let packed = lambda_ops::pack_results(
+        &mut graph,
+        &results[..component_count],
+        &pre.result_types[..component_count],
+    );
     let entry = graph.skeleton.entry;
     lambda_ops::finish_function(
         graph,
@@ -808,7 +995,7 @@ fn synthesize_scan_input_function(
         span,
         params,
         &[result_type],
-        &results[..1],
+        &[packed],
     )
 }
 
@@ -820,13 +1007,15 @@ fn synthesize_scan_post_function(
     pre_callee: Option<String>,
     post: screma::Lambda,
     post_callee: Option<String>,
+    component_types: Vec<Type<TypeName>>,
+    scratch_type: Type<TypeName>,
     capture_types: Vec<Type<TypeName>>,
     span: crate::ast::Span,
 ) -> SemanticFunc {
-    let mut element_types = vec![post.parameter_types[0].clone()];
+    let mut element_types = vec![scratch_type];
     element_types.extend(pre.parameter_types.iter().cloned());
     let element_count = element_types.len();
-    let pre_capture_count = pre.seg_body().map_or(0, |body| body.captures.len());
+    let pre_capture_count = pre.capture_count();
     let mut parameter_types = element_types;
     parameter_types.extend(capture_types);
     let params = lambda_ops::named_parameters(&parameter_types, "arg");
@@ -836,8 +1025,8 @@ fn synthesize_scan_post_function(
     let mut pre_arguments = arguments[1..element_count].to_vec();
     pre_arguments.extend_from_slice(&arguments[element_count..element_count + pre_capture_count]);
     let pre_results = lambda_ops::emit_call(&mut graph, &pre, pre_callee.as_deref(), pre_arguments);
-    let mut post_arguments = vec![arguments[0]];
-    post_arguments.extend_from_slice(&pre_results[1..]);
+    let mut post_arguments = lambda_ops::unpack_results(&mut graph, arguments[0], &component_types);
+    post_arguments.extend_from_slice(&pre_results[component_types.len()..]);
     post_arguments.extend_from_slice(&arguments[element_count + pre_capture_count..]);
     let post_results = lambda_ops::emit_call(&mut graph, &post, post_callee.as_deref(), post_arguments);
     let entry = graph.skeleton.entry;

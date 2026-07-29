@@ -28,11 +28,11 @@ mod histogram;
 mod horizontal;
 mod indexed;
 mod screma;
-pub(crate) mod space;
+mod space;
 mod support;
 mod vertical;
 
-pub(super) enum Rewrite {
+enum Rewrite {
     Indexed(indexed::Candidate),
     Vertical(vertical::Candidate),
     Histogram(histogram::Candidate),
@@ -43,7 +43,7 @@ pub(super) enum Rewrite {
 
 /// Select one semantics-preserving rewrite. Each call applies exactly one
 /// candidate so the dependency oracle is rebuilt before another fusion.
-pub(super) fn analyze(program: &Segmented, oracle: &SemanticGraph) -> Option<Rewrite> {
+fn analyze(program: &Segmented, oracle: &SemanticGraph) -> Option<Rewrite> {
     indexed::analyze(program)
         .map(Rewrite::Indexed)
         .or_else(|| vertical::analyze(program, oracle).map(Rewrite::Vertical))
@@ -54,7 +54,7 @@ pub(super) fn analyze(program: &Segmented, oracle: &SemanticGraph) -> Option<Rew
 }
 
 /// Consume a rewrite selected by [`analyze`].
-pub(super) fn apply(program: Segmented, rewrite: Rewrite) -> Segmented {
+fn apply(program: Segmented, rewrite: Rewrite) -> Segmented {
     match rewrite {
         Rewrite::Indexed(candidate) => indexed::apply(program, candidate),
         Rewrite::Vertical(candidate) => vertical::apply(program, candidate),
@@ -62,6 +62,15 @@ pub(super) fn apply(program: Segmented, rewrite: Rewrite) -> Segmented {
         Rewrite::Envelope(candidate) => envelope::apply(program, candidate),
         Rewrite::Filter(candidate) => filter::apply(program, candidate),
         Rewrite::Horizontal(candidate) => horizontal::apply(program, candidate),
+    }
+}
+
+/// Apply at most one fusion rewrite while keeping candidate types private to
+/// this module. The caller rebuilds the dependency oracle after a change.
+pub(super) fn rewrite_once(program: Segmented, oracle: &SemanticGraph) -> (Segmented, bool) {
+    match analyze(&program, oracle) {
+        Some(rewrite) => (apply(program, rewrite), true),
+        None => (program, false),
     }
 }
 

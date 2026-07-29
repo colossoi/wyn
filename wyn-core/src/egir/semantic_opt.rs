@@ -48,8 +48,9 @@ pub fn optimize_semantics(program: Segmented) -> Optimized {
             program = apply_dead_seg_ops(program, patch);
             continue;
         }
-        if let Some(patch) = super::fusion::analyze(&program, &oracle) {
-            program = super::fusion::apply(program, patch);
+        let (rewritten, changed) = super::fusion::rewrite_once(program, &oracle);
+        program = rewritten;
+        if changed {
             continue;
         }
         break;

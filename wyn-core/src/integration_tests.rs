@@ -2330,6 +2330,30 @@ entry scaled_sum(xs: []i32, scale: i32) i32 =
     assert_eq!(stages.expect("scaled_sum pipeline").len(), 2);
 }
 
+#[test]
+fn captured_reduce_operator_stays_parallel() {
+    use crate::pipeline_descriptor::Pipeline;
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry captured_reduce(xs: []i32, modes: []i32) i32 =
+  reduce(
+    |a: i32, b: i32| if modes[0] > 0 then a + b else a * b,
+    1,
+    xs)
+"#,
+    )
+    .expect("capturing reduction operator compiles");
+    let stages = lowered.pipeline.pipelines.iter().find_map(|pipeline| match pipeline {
+        Pipeline::Compute(compute)
+            if compute.stages.iter().any(|stage| stage.entry_point == "captured_reduce") =>
+        {
+            Some(&compute.stages)
+        }
+        _ => None,
+    });
+    assert_eq!(stages.expect("captured_reduce pipeline").len(), 2);
+}
 /// Output sizing (review finding #2): `build_entry_outputs` now sizes a runtime
 /// output to the dispatch domain (`SameAsDispatch`) per *output type*
 /// (`ty.is_array()`) instead of a per-*entry* `dispatch_sized` flag. A reduction
@@ -2454,6 +2478,59 @@ entry scaled_prefix(xs: []i32, scale: i32) []i32 =
     assert_eq!(stages.expect("scaled_prefix pipeline").len(), 3);
 }
 
+#[test]
+fn captured_scan_operator_stays_parallel() {
+    use crate::pipeline_descriptor::Pipeline;
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry captured_scan(xs: []i32, modes: []i32) []i32 =
+  scan(
+    |a: i32, b: i32| if modes[0] > 0 then a + b else a * b,
+    1,
+    xs)
+"#,
+    )
+    .expect("capturing scan operator compiles");
+    let stages = lowered.pipeline.pipelines.iter().find_map(|pipeline| match pipeline {
+        Pipeline::Compute(compute)
+            if compute.stages.iter().any(|stage| stage.entry_point == "captured_scan") =>
+        {
+            Some(&compute.stages)
+        }
+        _ => None,
+    });
+    assert_eq!(stages.expect("captured_scan pipeline").len(), 3);
+}
+#[test]
+fn tuple_element_scan_stays_parallel() {
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
+
+    let source = r#"
+#[compute]
+entry tuple_prefixes(xs: [8](i32, i32)) [8](i32, i32) =
+  scan(
+    |(sum1, max1): (i32, i32), (sum2, max2): (i32, i32)|
+      (sum1 + sum2, if max1 > max2 then max1 else max2),
+    (0, -2147483648),
+    xs)
+"#;
+    let allocated = compile_to_semantic_egir(source);
+    let scan = allocated
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+        .find_map(|effect| {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
+                return None;
+            };
+            op.is_scan_only().then_some(&op.form.scans)
+        })
+        .expect("tuple scan remains canonical");
+    assert_eq!(scan.len(), 1);
+    assert_eq!(scan[0].neutral.len(), 1);
+    crate::compile_thru_spirv(source).expect("tuple-element scan compiles through the parallel recipe");
+}
 #[test]
 fn range_map_dispatch_uses_range_length() {
     use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
@@ -9876,6 +9953,26 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
     }
 }
 
+#[test]
+fn independent_scans_use_one_parallel_product_recipe() {
+    let source = r#"
+#[compute]
+entry paired_prefixes(xs: []i32) ([]i32, []i32) =
+  (scan(|a: i32, b: i32| a + b, 0, xs),
+   scan(|a: i32, b: i32| if a > b then a else b, 0, xs))
+"#;
+
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(stats.seg_scans, 1, "independent scans share one Screma");
+    assert_eq!(stats.scan_operators, 2);
+    let planned = crate::egir::plan(compile_to_semantic_egir(source), crate::LoweringProfile::PORTABLE)
+        .expect("plan independent scans");
+    assert_eq!(
+        planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        ["scan_phase1", "scan_block", "scan_apply_offsets"]
+    );
+    crate::compile_thru_spirv(source).expect("parallel product scan compiles to SPIR-V");
+}
 #[test]
 fn scan_fuses_with_independent_consumer_collective() {
     let source = r#"

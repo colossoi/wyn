@@ -21,7 +21,7 @@ use crate::egir::types::{EGraph, ResourceAccess, SideEffectKind, Soac, SoacEffec
 use crate::flow::BlockId;
 use crate::LookupMap;
 
-pub(crate) struct Candidate {
+pub(super) struct Candidate {
     site: BodySite,
     block: BlockId,
     producer: usize,

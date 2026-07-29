@@ -1,8 +1,8 @@
 //! Same-space producer/consumer fusion for canonical Scremas.
 //!
 //! A pure map producer can be folded into any downstream Screma by composing
-//! its pre-lambda with the consumer's pre-lambda. This preserves the consumer's
-//! single collective barrier and never reconstructs the former lane graph.
+//! its pre-lambda with the consumer's pre-lambda while preserving the consumer's
+//! single collective barrier.
 
 use polytype::Type;
 use smallvec::SmallVec;
@@ -24,7 +24,7 @@ use crate::types::TypeExt;
 use crate::LookupMap;
 
 #[derive(Clone)]
-pub(crate) struct Candidate {
+pub(super) struct Candidate {
     site: BodySite,
     block: BlockId,
     producer: usize,

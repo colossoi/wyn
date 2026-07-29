@@ -1,6 +1,7 @@
 //! Shared chunk arithmetic, resource sizing, and callable construction.
 
 use super::*;
+use crate::egir::soac::lambda as lambda_ops;
 use crate::types::TypeExt;
 
 pub(super) fn apply_manifest_resource_sizes(
@@ -12,6 +13,31 @@ pub(super) fn apply_manifest_resource_sizes(
         let logical = &resources[resource];
         declaration.size = logical.size.clone();
     }
+}
+
+/// Input-storage declarations needed when captured operator values are cloned
+/// into a synthesized phase. Non-cloneable captures and captures of writable
+/// resources keep the operation on the serial fallback.
+pub(super) fn cloneable_capture_inputs(
+    entry: &crate::egir::program::PlannedEntry,
+    captures: &[NodeId],
+) -> Option<Vec<SemanticResourceDecl>> {
+    if captures.iter().any(|capture| !can_clone_pure_subgraph(&entry.graph, *capture, &[])) {
+        return None;
+    }
+    graph_ops::read_storage_resources(&entry.graph, captures.iter().copied())
+        .into_iter()
+        .map(|access| {
+            entry
+                .resource_declarations
+                .iter()
+                .find(|declaration| {
+                    declaration.resource == access.resource
+                        && declaration.role == crate::interface::StorageRole::Input
+                })
+                .cloned()
+        })
+        .collect()
 }
 
 /// Emit the chunk-arithmetic preamble (`tid`, `chunk_start`,
@@ -168,12 +194,33 @@ pub(super) fn synthesize_swap_wrapper(
     wrapper_name: String,
     inner_name: String,
     elem_ty: Type<TypeName>,
+    capture_types: Vec<Type<TypeName>>,
     span: crate::ast::Span,
 ) -> SemanticFunc {
-    let result_ty = elem_ty.clone();
-    synthesize_binary_fn(region, wrapper_name, elem_ty, span, move |graph, a_nid, b_nid| {
-        graph.intern_pure(PureOp::Call(inner_name), smallvec![b_nid, a_nid], result_ty, None)
-    })
+    let mut parameter_types = vec![elem_ty.clone(), elem_ty.clone()];
+    parameter_types.extend(capture_types);
+    let params = lambda_ops::named_parameters(&parameter_types, "arg");
+    let mut graph = EGraph::new();
+    let arguments = lambda_ops::function_parameters(&mut graph, &params);
+    let mut inner_arguments = vec![arguments[1], arguments[0]];
+    inner_arguments.extend_from_slice(&arguments[2..]);
+    let result = graph.intern_pure(
+        PureOp::Call(inner_name),
+        inner_arguments.into_iter().collect(),
+        elem_ty.clone(),
+        None,
+    );
+    let entry = graph.skeleton.entry;
+    lambda_ops::finish_function(
+        graph,
+        entry,
+        region,
+        wrapper_name,
+        span,
+        params,
+        &[elem_ty],
+        &[result],
+    )
 }
 
 pub(super) fn synthesize_u32_add_function(

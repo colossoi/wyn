@@ -135,6 +135,8 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             operator: add_name.clone(),
             elem_ty: self.elem_ty.clone(),
             source_graph: &scan.body.graph,
+            operator_captures: &[],
+            capture_inputs: &[],
             neutral: zero,
             scratch: scan_scratch,
             total_out: Some(self.candidate.storage.length.0),
@@ -150,12 +152,15 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         let swap_wrapper_name = format!("{}_filter_scan_add_offsets", self.entry.name);
         let elem_ty = self.elem_ty.clone();
         let swap_region = self.lowering.define_callable(swap_wrapper_name, |region, name| {
-            synthesize_swap_wrapper(region, name, add_name, elem_ty, span)
+            synthesize_swap_wrapper(region, name, add_name, elem_ty, Vec::new(), span)
         })?;
         let apply_offsets = ScanPhase3Spec {
             entry_name: scan.body.name.clone(),
             swap_region,
             elem_ty: self.elem_ty.clone(),
+            source_graph: &scan.body.graph,
+            operator_captures: Vec::new(),
+            capture_inputs: Vec::new(),
             output_resource: self.work.offsets.0,
             block_offsets: self.work.block_offsets.0,
             width: self.candidate.scan_grid.workgroup_width(),
