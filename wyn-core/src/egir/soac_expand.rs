@@ -99,10 +99,8 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
             op.inputs.iter().all(|input| is_plain_array_source(&input.array))
         }
         Soac::Filter(op) => {
-            let input = match &op.body.input {
-                filter::Input::Plain(input) | filter::Input::Mapped { input, .. } => input,
-            };
-            is_plain_array_source(&input.array)
+            !op.body.inputs.is_empty()
+                && op.body.inputs.iter().all(|input| is_plain_array_source(&input.array))
         }
         // Scatter reads all input arrays per element; loop length comes from
         // the first input, but every input must support the read path.
@@ -372,15 +370,19 @@ fn expand_one(
             );
         }
         SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => {
-            let (input, map_body) = match &op.body.input {
-                filter::Input::Plain(input) => (input, None),
-                filter::Input::Mapped { input, body, .. } => (input, Some(body)),
-            };
+            let input_count = op.body.inputs.len();
+            let read_inputs = se.operand_nodes[..input_count]
+                .iter()
+                .copied()
+                .zip(&op.body.inputs)
+                .map(|(node, input)| (node, input.array.clone(), input.element()))
+                .collect::<Vec<_>>();
+            let map_body = op.body.map.seg_body();
             let map_func = map_body.map(|body| regions.resolve(body.region).to_string());
             let output_elem_ty = op.body.output_element_type();
-            let pred_func = regions.resolve(op.body.predicate.region).to_string();
-            let arr_ty = input.array.clone();
-            let elem_ty = input.element();
+            let predicate_body =
+                op.body.predicate.seg_body().expect("validated Filter predicate has a region");
+            let pred_func = regions.resolve(predicate_body.region).to_string();
             let (output, plan) = match &op.state {
                 filter::ScheduledState::Loop { storage, .. } => (storage.clone(), filter::Plan::Loop),
                 filter::ScheduledState::Pipeline { storage, plan, .. } => {
@@ -401,16 +403,12 @@ fn expand_one(
                 }
             };
 
-            // Operand layout: [input, ...map_captures, ...pred_captures].
-            let arr_nid = se.operand_nodes[0];
             let map_captures = map_body.map(|body| body.captures.clone()).unwrap_or_default();
-            let captures = op.body.predicate.captures.clone();
+            let captures = predicate_body.captures.clone();
             let result_nid = se.result.expect("Filter has a result");
 
             let spec = FilterLoop {
-                arr_nid,
-                arr_ty,
-                elem_ty,
+                read_inputs,
                 output_elem_ty,
                 output,
                 map_func,
@@ -861,41 +859,56 @@ fn emit_seg_space_len(
 /// non-passing iterations overwrite the same slot on the next iteration that
 /// advances `count`. Two loop-carried values: the buffer and the runtime count.
 struct FilterLoop {
-    /// The input array node, used both for the read path and for length.
-    arr_nid: NodeId,
-    arr_ty: Type<TypeName>,
-    /// The input element type (what `emit_read_element` yields).
-    elem_ty: Type<TypeName>,
-    /// The output element type: `map_func`'s return type when a map is fused,
-    /// else equal to `elem_ty`. The buffer/result hold this type.
+    /// Co-iterated arrays read once per logical filter element.
+    read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,
+    /// The output element type returned by the canonical map lambda.
     output_elem_ty: Type<TypeName>,
-    /// `Size(N)` — the input's static capacity, reused as the output buffer's
-    /// capacity (the upper bound on filtered count).
     output: PhysicalFilterOutput,
-    /// `Some(name)` folds a producer `map(f, …)` in: per element compute
-    /// `v = f(elem, ...map_captures)` and keep/test `v` instead of `elem`.
+    /// `None` denotes the validated one-input identity map.
     map_func: Option<String>,
     map_captures: Vec<NodeId>,
     pred_func: String,
     captures: Vec<NodeId>,
-    /// The original SOAC result NodeId. After expansion this becomes a
-    /// `Tuple(buffer, count)` whose type is `Array[T, Size(N), Bounded]`.
     result_node: NodeId,
 }
 
-/// The value the filter keeps and tests for a read element: `f(elem, ..caps)`
-/// when a producer map is fused, else the element itself.
-fn filter_kept_value(graph: &mut EGraph, elem_nid: NodeId, spec: &FilterLoop) -> NodeId {
-    match &spec.map_func {
-        Some(name) => {
-            let mut ops: SmallVec<[NodeId; 4]> = smallvec![elem_nid];
-            ops.extend(spec.map_captures.iter().copied());
-            graph.intern_pure(PureOp::Call(name.clone()), ops, spec.output_elem_ty.clone(), None)
-        }
-        None => elem_nid,
-    }
+fn filter_primary_input(spec: &FilterLoop) -> &(NodeId, Type<TypeName>, Type<TypeName>) {
+    spec.read_inputs.first().expect("Filter has no input")
 }
 
+/// Read one element from every co-iterated input and invoke the canonical map
+/// lambda. Identity is represented without a synthetic region.
+fn filter_kept_value(
+    graph: &mut EGraph,
+    block: BlockId,
+    index: NodeId,
+    spec: &FilterLoop,
+    next_effect: &mut crate::IdSource<EffectToken>,
+) -> NodeId {
+    let elements = spec
+        .read_inputs
+        .iter()
+        .map(|(array, array_ty, elem_ty)| {
+            emit_read_element(graph, block, *array, index, array_ty, elem_ty, next_effect)
+        })
+        .collect::<SmallVec<[NodeId; 4]>>();
+    match &spec.map_func {
+        Some(name) => {
+            let mut operands = elements;
+            operands.extend(spec.map_captures.iter().copied());
+            graph.intern_pure(
+                PureOp::Call(name.clone()),
+                operands,
+                spec.output_elem_ty.clone(),
+                None,
+            )
+        }
+        None => {
+            debug_assert_eq!(elements.len(), 1);
+            elements[0]
+        }
+    }
+}
 fn build_filter_loop(
     graph: &mut EGraph,
     bid: BlockId,
@@ -971,7 +984,14 @@ fn build_filter_loop(
     // advances past it, so unread slots are never observed.
     let buf_place_nid = emit_alloca(graph, bid, buf_ty.clone(), next_effect, None);
     if destination.is_input_buffer() {
-        let _ = emit_store(graph, bid, buf_place_nid, spec.arr_nid, next_effect, None);
+        let _ = emit_store(
+            graph,
+            bid,
+            buf_place_nid,
+            filter_primary_input(&spec).0,
+            next_effect,
+            None,
+        );
     } else if !destination.is_unplaced_fresh() {
         panic!("Filter[OutputView] not supported — see filter-consuming-input.md");
     }
@@ -983,7 +1003,12 @@ fn build_filter_loop(
 
     // Header → cond_br(i<N, body, after(count)). The buffer place is
     // referenced through `buf_place_nid` directly, no block-param carry.
-    let len_nid = emit_length(graph, spec.arr_nid, &spec.arr_ty, &i32_ty);
+    let len_nid = emit_length(
+        graph,
+        filter_primary_input(&spec).0,
+        &filter_primary_input(&spec).1,
+        &i32_ty,
+    );
     let cond_nid = graph.intern_pure(
         PureOp::BinOp("<".into()),
         smallvec![i_in_nid, len_nid],
@@ -1003,18 +1028,7 @@ fn build_filter_loop(
     });
 
     // Body: elem = arr[i]; pred = pred_func(elem, captures).
-    let elem_nid = emit_read_element(
-        graph,
-        body,
-        spec.arr_nid,
-        i_in_nid,
-        &spec.arr_ty,
-        &spec.elem_ty,
-        next_effect,
-    );
-    // A fused producer map computes the kept value `v = f(elem)`; `pred` tests
-    // `v` and `v` is what's written. A plain filter keeps the input element.
-    let kept_nid = filter_kept_value(graph, elem_nid, &spec);
+    let kept_nid = filter_kept_value(graph, body, i_in_nid, &spec, next_effect);
     let mut pred_operands: SmallVec<[NodeId; 4]> = smallvec![kept_nid];
     pred_operands.extend(spec.captures.iter().copied());
     let pred_nid = graph.intern_pure(
@@ -1231,7 +1245,12 @@ fn build_filter_flags(
     graph.skeleton.blocks[after].term = SkeletonTerminator::Return(None);
     let gid = filter_thread_index(graph);
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let len = emit_length(graph, spec.arr_nid, &spec.arr_ty, &u32_ty);
+    let len = emit_length(
+        graph,
+        filter_primary_input(&spec).0,
+        &filter_primary_input(&spec).1,
+        &u32_ty,
+    );
     let bounded = graph.intern_pure(
         PureOp::BinOp("<".into()),
         smallvec![gid, len],
@@ -1246,16 +1265,7 @@ fn build_filter_flags(
         else_args: vec![],
     };
     graph.skeleton.blocks[bid].control_header = Some(ControlHeader::Selection { merge: after });
-    let elem = emit_read_element(
-        graph,
-        in_range,
-        spec.arr_nid,
-        gid,
-        &spec.arr_ty,
-        &spec.elem_ty,
-        next_effect,
-    );
-    let kept = filter_kept_value(graph, elem, &spec);
+    let kept = filter_kept_value(graph, in_range, gid, &spec, next_effect);
     let mut operands: SmallVec<[NodeId; 4]> = smallvec![kept];
     operands.extend(spec.captures.iter().copied());
     let pred = graph.intern_pure(
@@ -1318,7 +1328,12 @@ fn build_filter_scan(
     let zero = intern_u32(graph, 0, None);
     let one = intern_u32(graph, 1, None);
     let gid = filter_thread_index(graph);
-    let input_len = emit_length(graph, spec.arr_nid, &spec.arr_ty, &u32_ty);
+    let input_len = emit_length(
+        graph,
+        filter_primary_input(&spec).0,
+        &filter_primary_input(&spec).1,
+        &u32_ty,
+    );
     let nwg = graph.intern_pure(
         PureOp::Intrinsic {
             id: catalog().known().num_workgroups,
@@ -1484,7 +1499,12 @@ fn build_filter_scatter(
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let gid = filter_thread_index(graph);
-    let len = emit_length(graph, spec.arr_nid, &spec.arr_ty, &u32_ty);
+    let len = emit_length(
+        graph,
+        filter_primary_input(&spec).0,
+        &filter_primary_input(&spec).1,
+        &u32_ty,
+    );
     let bounded = graph.intern_pure(
         PureOp::BinOp("<".into()),
         smallvec![gid, len],
@@ -1521,16 +1541,7 @@ fn build_filter_scatter(
         u32_ty.clone(),
         None,
     );
-    let elem = emit_read_element(
-        graph,
-        write,
-        spec.arr_nid,
-        gid,
-        &spec.arr_ty,
-        &spec.elem_ty,
-        next_effect,
-    );
-    let kept = filter_kept_value(graph, elem, &spec);
+    let kept = filter_kept_value(graph, write, gid, &spec, next_effect);
     let (out_binding, len_binding) = match &spec.output {
         filter::Output::Runtime {
             scratch,
@@ -1616,7 +1627,12 @@ fn build_runtime_filter_loop(
     };
 
     // Header → cond_br(i < len, body, after(count)).
-    let len_nid = emit_length(graph, spec.arr_nid, &spec.arr_ty, &u32_ty);
+    let len_nid = emit_length(
+        graph,
+        filter_primary_input(&spec).0,
+        &filter_primary_input(&spec).1,
+        &u32_ty,
+    );
     let cond_nid = graph.intern_pure(
         PureOp::BinOp("<".into()),
         smallvec![i_in_nid, len_nid],
@@ -1636,18 +1652,7 @@ fn build_runtime_filter_loop(
     });
 
     // Body: elem = arr[i]; pred = pred_func(elem, captures); cond_br(pred, then, else).
-    let elem_nid = emit_read_element(
-        graph,
-        body,
-        spec.arr_nid,
-        i_in_nid,
-        &spec.arr_ty,
-        &spec.elem_ty,
-        next_effect,
-    );
-    // A fused producer map computes the kept value `v = f(elem)`; `pred` tests
-    // `v` and `v` is what's compacted into the scratch buffer.
-    let kept_nid = filter_kept_value(graph, elem_nid, &spec);
+    let kept_nid = filter_kept_value(graph, body, i_in_nid, &spec, next_effect);
     let mut pred_operands: SmallVec<[NodeId; 4]> = smallvec![kept_nid];
     pred_operands.extend(spec.captures.iter().copied());
     let pred_nid = graph.intern_pure(

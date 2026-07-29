@@ -943,10 +943,8 @@ fn physicalize_soac(
             })
         }
         Soac::Filter(filter::Op { mut body, state }) => {
-            if let filter::Input::Mapped { body, .. } = &mut body.input {
-                *body = seg_body(body.clone(), nodes);
-            }
-            body.predicate = seg_body(body.predicate, nodes);
+            body.map = lambda(body.map, nodes);
+            body.predicate = lambda(body.predicate, nodes);
             let state = match state {
                 filter::ScheduledState::Loop {
                     space: iteration_space,

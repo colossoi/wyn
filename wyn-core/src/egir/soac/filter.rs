@@ -4,8 +4,9 @@ use crate::ast::TypeName;
 
 use super::super::program::{PhysicalResourceRef, SemanticResourceRef};
 use super::super::types::{
-    GraphResource, NodeId, SegBody, SegSpace, Semantic, SoacDestination, SoacInputType, WynSoacPhase,
+    GraphResource, NodeId, SegSpace, Semantic, SoacDestination, SoacInputType, WynSoacPhase,
 };
+use super::screma;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkBuffers<R = SemanticResourceRef> {
@@ -53,66 +54,78 @@ pub struct ParallelConfig<R = SemanticResourceRef> {
 }
 
 #[derive(Clone, Debug)]
-pub enum Input {
-    Plain(SoacInputType),
-    Mapped {
-        input: SoacInputType,
-        body: SegBody,
-        output_element_type: Type<TypeName>,
-    },
-}
-
-#[derive(Clone, Debug)]
 pub struct Body {
-    pub input: Input,
-    pub predicate: SegBody,
+    /// Co-iterated array inputs consumed by `map`.
+    pub inputs: Vec<SoacInputType>,
+    /// Computes the candidate output element from one element of each input.
+    pub map: screma::Lambda,
+    /// Decides whether the mapped candidate is retained.
+    pub predicate: screma::Lambda,
 }
 
 impl Body {
+    pub fn validate(&self) -> Result<(), String> {
+        let input_types = self.inputs.iter().map(SoacInputType::element).collect::<Vec<_>>();
+        if self.map.parameter_types != input_types {
+            return Err(format!(
+                "Filter map parameters {:?} do not match input element types {input_types:?}",
+                self.map.parameter_types
+            ));
+        }
+        if self.map.result_types.len() != 1 {
+            return Err(format!(
+                "Filter map must produce one candidate element, found {}",
+                self.map.result_types.len()
+            ));
+        }
+        if self.predicate.parameter_types != self.map.result_types {
+            return Err(format!(
+                "Filter predicate parameters {:?} do not match mapped element type {:?}",
+                self.predicate.parameter_types, self.map.result_types
+            ));
+        }
+        if self.predicate.result_types != [Type::Constructed(TypeName::Bool, Vec::new())] {
+            return Err(format!(
+                "Filter predicate must return bool, found {:?}",
+                self.predicate.result_types
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn for_each_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
-        let input = match &mut self.input {
-            Input::Plain(input) => input,
-            Input::Mapped {
-                input,
-                output_element_type,
-                ..
-            } => {
-                visit(output_element_type);
-                input
-            }
-        };
-        visit(&mut input.array);
+        for input in &mut self.inputs {
+            visit(&mut input.array);
+        }
+        self.map.for_each_type_mut(visit);
+        self.predicate.for_each_type_mut(visit);
     }
 
     pub fn output_element_type(&self) -> Type<TypeName> {
-        match &self.input {
-            Input::Plain(input) => input.element(),
-            Input::Mapped {
-                output_element_type, ..
-            } => output_element_type.clone(),
-        }
+        self.map.result_types[0].clone()
     }
 
     pub(crate) fn capture_nodes(&self) -> Vec<NodeId> {
-        let mut nodes = match &self.input {
-            Input::Plain(_) => Vec::new(),
-            Input::Mapped { body, .. } => body.captures.clone(),
-        };
-        nodes.extend(self.predicate.captures.iter().copied());
-        nodes
+        lambda_captures(&self.map).chain(lambda_captures(&self.predicate)).copied().collect()
     }
 
     fn referenced_node_slots(&mut self) -> Vec<&mut NodeId> {
-        let Self { input, predicate } = self;
-        let mut nodes = match input {
-            Input::Plain(_) => Vec::new(),
-            Input::Mapped { body, .. } => body.captures.iter_mut().collect(),
-        };
-        nodes.extend(predicate.captures.iter_mut());
-        nodes
+        let Self {
+            inputs: _,
+            map,
+            predicate,
+        } = self;
+        lambda_capture_slots(map).chain(lambda_capture_slots(predicate)).collect()
     }
 }
 
+fn lambda_captures(lambda: &screma::Lambda) -> impl Iterator<Item = &NodeId> {
+    lambda.seg_body().into_iter().flat_map(|body| body.captures.iter())
+}
+
+fn lambda_capture_slots(lambda: &mut screma::Lambda) -> impl Iterator<Item = &mut NodeId> {
+    lambda.seg_body_mut().into_iter().flat_map(|body| body.captures.iter_mut())
+}
 #[derive(Clone, Debug)]
 pub struct RawState<R> {
     pub storage: Output<R>,

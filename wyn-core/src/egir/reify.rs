@@ -347,7 +347,7 @@ fn semantic_facts(
     };
     let (input, operand_index, is_screma) = match soac {
         Soac::Screma(op) => (op.inputs.first(), 0, true),
-        Soac::Filter(op) => (Some(filter_input_type(&op.body.input)), 0, false),
+        Soac::Filter(op) => (op.body.inputs.first(), 0, false),
         Soac::Hist(op) => (op.body.inputs.first(), 1, false),
     };
     let output_slots = if is_screma {
@@ -364,12 +364,6 @@ fn semantic_facts(
         resources,
         entry: entry.is_some(),
     })
-}
-
-fn filter_input_type(input: &filter::Input) -> &SoacInputType {
-    match input {
-        filter::Input::Plain(input) | filter::Input::Mapped { input, .. } => input,
-    }
 }
 
 fn space(

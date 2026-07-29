@@ -1,10 +1,10 @@
-//! Fuse filters into scalar consumers.
+//! Fuse a non-escaping Filter into scalar Screma reductions.
 //!
-//! A filter whose array does not escape can be represented as masked reduction
-//! steps over the original domain. Reductions consume a value only when the
-//! predicate succeeds; `length` becomes one shared count reduction. This
-//! removes both compaction work and its scratch/output requirements before
-//! allocation and scheduling see them.
+//! The Filter's map and predicate become a canonical Screma pre-lambda.  For
+//! each reduction component the pre-lambda yields the consumer value when the
+//! predicate holds and that reduction's neutral value otherwise.  The original
+//! associative reduction operators remain unchanged.  `length` is represented
+//! by one additional sum reduction over `1`/`0` values.
 
 use std::collections::HashSet;
 
@@ -23,14 +23,14 @@ use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::{filter, screma};
 use crate::egir::types::{
-    EGraph, ENode, NodeId, PureOp, SegBody, SegResourceAccess, SegSpace, SideEffect, SideEffectKind,
-    SkeletonTerminator, Soac, SoacDestination, SoacEffect, SoacInputType,
+    EGraph, ENode, NodeId, PureOp, SegResourceAccess, SegSpace, SideEffect, SideEffectKind,
+    SkeletonTerminator, Soac, SoacEffect,
 };
 use crate::flow::{BlockId, ControlHeader};
 use crate::LookupMap;
 
 #[derive(Clone)]
-pub(super) struct Candidate {
+pub(crate) struct Candidate {
     site: BodySite,
     block: BlockId,
     filter: usize,
@@ -41,19 +41,12 @@ pub(super) struct Candidate {
 #[derive(Clone)]
 struct FilterParts {
     space: SegSpace,
-    map: Option<SegBody>,
-    pred: SegBody,
-    input: NodeId,
-    input_array_type: Type<TypeName>,
-    input_elem_type: Type<TypeName>,
+    body: filter::Body,
+    input_nodes: Vec<NodeId>,
     scratch: Option<SemanticResourceRef>,
 }
 
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
-    find_candidate(inner, oracle)
-}
-
-fn find_candidate(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
     for (index, entry) in inner.entry_points.iter().enumerate() {
         let routes = entry.routes().cloned().collect::<Vec<_>>();
         if let Some(candidate) = find_in_graph(&entry.graph, BodySite::Entry(index), oracle, Some(&routes))
@@ -77,7 +70,7 @@ fn find_in_graph(
     oracle: &SemanticGraph,
     routes: Option<&[RealizedOutputRoute]>,
 ) -> Option<Candidate> {
-    let live = live_nodes(graph);
+    let live = graph_ops::reachable_execution_values(graph).into_iter().collect::<HashSet<_>>();
     for (block_id, block) in &graph.skeleton.blocks {
         for (filter_index, effect) in block.side_effects.iter().enumerate() {
             let SideEffectKind::Soac(SoacEffect(filter_id, Soac::Filter(_))) = &effect.kind else {
@@ -86,24 +79,24 @@ fn find_in_graph(
             let Some(result) = effect.result else {
                 continue;
             };
-            let lengths: Vec<NodeId> = graph
+            let lengths = graph
                 .nodes
                 .iter()
                 .filter_map(|(node, _)| {
                     (live.contains(&node) && is_length_of(graph, node, result)).then_some(node)
                 })
-                .collect();
-            if lengths.iter().any(|length| graph.nodes[*length].ty != graph.nodes[lengths[0]].ty) {
+                .collect::<Vec<_>>();
+            if lengths.iter().skip(1).any(|length| graph.nodes[*length].ty != graph.nodes[lengths[0]].ty) {
                 continue;
             }
 
-            let consumers: Vec<usize> = block
+            let consumers = block
                 .side_effects
                 .iter()
                 .enumerate()
                 .skip(filter_index + 1)
                 .filter_map(|(index, consumer)| is_reduction_of_filter(consumer, result).then_some(index))
-                .collect();
+                .collect::<Vec<_>>();
             if consumers.len() > 1 {
                 continue;
             }
@@ -111,14 +104,20 @@ fn find_in_graph(
             if consumer.is_none() && lengths.is_empty() {
                 continue;
             }
-            let stops: HashSet<_> = lengths.iter().copied().collect();
+            let stops = lengths.iter().copied().collect::<HashSet<_>>();
             if routes.is_some_and(|routes| {
                 routes.iter().any(|route| reaches_without(graph, route.source.value, result, &stops))
             }) {
                 continue;
             }
             if let Some(consumer_index) = consumer {
-                if !intervening_ops_are_safe(block, filter_index, consumer_index, filter_id, oracle) {
+                if !((filter_index + 1)..consumer_index).all(|index| {
+                    let intervening = &block.side_effects[index];
+                    match &intervening.kind {
+                        SideEffectKind::Soac(SoacEffect(id, _)) => !oracle.conflicts(filter_id, id),
+                        _ => intervening.effects.is_none(),
+                    }
+                }) {
                     continue;
                 }
             }
@@ -135,10 +134,6 @@ fn find_in_graph(
         }
     }
     None
-}
-
-fn live_nodes(graph: &EGraph) -> HashSet<NodeId> {
-    graph_ops::reachable_execution_values(graph).into_iter().collect()
 }
 
 fn is_length_of(graph: &EGraph, node: NodeId, filter_result: NodeId) -> bool {
@@ -159,34 +154,16 @@ fn is_reduction_of_filter(effect: &SideEffect, filter_result: NodeId) -> bool {
     let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
         return false;
     };
-    if !op.is_reduce() {
+    if !op.is_reduce()
+        || op.form.pre.result_types.len() != op.form.reduction_input_count()
+        || !op.form.post.result_types.is_empty()
+    {
         return false;
     }
-    let lanes = op.lanes();
-    let operators = op.operators();
-    let n_inputs = lanes.inputs.len();
-    n_inputs != 0
-        && lanes.maps.is_empty()
-        && effect.operand_nodes[..n_inputs].iter().all(|&input| input == filter_result)
-        && operators.iter().all(|operator| {
-            operator.input_indices.len() == 1 && operator.input_indices[0].index() < n_inputs
-        })
-}
-
-fn intervening_ops_are_safe(
-    block: &crate::egir::types::SkeletonBlock,
-    filter: usize,
-    consumer: usize,
-    filter_id: &crate::egir::program::SemanticOpId,
-    oracle: &SemanticGraph,
-) -> bool {
-    ((filter + 1)..consumer).all(|index| {
-        let effect = &block.side_effects[index];
-        match &effect.kind {
-            SideEffectKind::Soac(SoacEffect(intervening, _)) => !oracle.conflicts(filter_id, intervening),
-            _ => effect.effects.is_none(),
-        }
-    })
+    let input_count = op.inputs.len();
+    input_count != 0
+        && effect.operand_nodes.len() >= input_count
+        && effect.operand_nodes[..input_count].iter().all(|&input| input == filter_result)
 }
 
 fn filter_result_escapes(
@@ -197,7 +174,7 @@ fn filter_result_escapes(
     result: NodeId,
     lengths: &[NodeId],
 ) -> bool {
-    let stops: HashSet<NodeId> = lengths.iter().copied().collect();
+    let stops = lengths.iter().copied().collect::<HashSet<_>>();
     for (block_id, block) in &graph.skeleton.blocks {
         for (effect_index, effect) in block.side_effects.iter().enumerate() {
             if block_id == filter_block && effect_index == filter_index {
@@ -240,17 +217,11 @@ fn filter_parts(effect: &SideEffect) -> FilterParts {
     let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) = &effect.kind else {
         unreachable!();
     };
-    let (map, input_type) = match &op.body.input {
-        filter::Input::Plain(input) => (None, input),
-        filter::Input::Mapped { input, body, .. } => (Some(body.clone()), input),
-    };
+    let input_count = op.body.inputs.len();
     FilterParts {
         space: op.state.space.clone(),
-        map,
-        pred: op.body.predicate.clone(),
-        input: effect.operand_nodes[0],
-        input_array_type: input_type.array.clone(),
-        input_elem_type: input_type.element(),
+        body: op.body.clone(),
+        input_nodes: effect.operand_nodes[..input_count].to_vec(),
         scratch: match &op.state.storage {
             filter::Output::Local { .. } => None,
             filter::Output::Runtime { scratch, .. } => Some(*scratch),
@@ -265,81 +236,306 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
         (
             block.side_effects[candidate.filter].clone(),
             candidate.consumer.map(|consumer| block.side_effects[consumer].clone()),
-            graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect(),
+            graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect::<LookupMap<_, _>>(),
             span,
             scope,
         )
     };
     let filter = filter_parts(&filter_effect);
-    let mut region_interner = inner.data.region_interner.clone();
-    let mut synthesized = Vec::new();
-
-    let mut operators: Vec<screma::Operator> = consumer_effect
-        .as_ref()
-        .map(|effect| {
-            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
-                unreachable!();
-            };
-            op.operators().into_iter().cloned().collect()
-        })
-        .unwrap_or_default();
-    for (index, operator) in operators.iter_mut().enumerate() {
-        let (step, function) = masked_step(
-            &inner,
-            &mut region_interner,
-            &scope,
-            span,
-            index,
-            &filter,
-            operator,
-            &outer_types,
-        );
-        synthesized.push(function);
-        operator.step = step;
-        operator.input_indices = vec![screma::InputId(0)];
-    }
-
+    let mut interner = inner.data.region_interner.clone();
     let count_ty = candidate.lengths.first().map(|length| outer_types[length].clone());
-    let count = count_ty.as_ref().map(|ty| {
-        let (operator, step_function, combine_function) = count_operator(
-            &inner,
-            &mut region_interner,
-            &scope,
-            span,
-            &filter,
-            ty.clone(),
-            &outer_types,
-        );
-        synthesized.extend([step_function, combine_function]);
-        operator
+    let consumer_form = consumer_effect.as_ref().map(|effect| {
+        let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
+            unreachable!();
+        };
+        &op.form
     });
+    let (pre, pre_function) = build_masked_pre(
+        &inner,
+        &mut interner,
+        &scope,
+        span,
+        &filter,
+        consumer_form,
+        count_ty.as_ref(),
+        &outer_types,
+    );
+    let (count_reduction, count_function) = count_ty
+        .as_ref()
+        .map(|ty| build_count_reduction(&mut interner, &scope, span, ty.clone()))
+        .map_or((None, None), |(reduction, function)| {
+            (Some(reduction), Some(function))
+        });
 
-    let rebuilt = if let Some(consumer) = candidate.consumer {
-        apply_with_consumer(
+    let (rebuilt, _) = if let Some(consumer_index) = candidate.consumer {
+        rewrite_with_consumer(
             inner,
             &candidate,
             filter_effect,
-            consumer_effect.expect("filter reduction consumer disappeared"),
+            consumer_effect.expect("Filter reduction consumer disappeared"),
             filter,
-            consumer,
-            operators,
-            count,
+            consumer_index,
+            pre,
+            count_reduction,
             count_ty,
         )
     } else {
-        apply_count_only(
+        rewrite_count_only(
             inner,
             &candidate,
             filter_effect,
             filter,
-            count.expect("length-only filter has no count operator"),
-            count_ty.expect("length-only filter has no count type"),
+            pre,
+            count_reduction.expect("length-only Filter has no count reduction"),
+            count_ty.expect("length-only Filter has no count type"),
         )
     };
+    let synthesized = std::iter::once(pre_function).chain(count_function).collect::<Vec<_>>();
     rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
-        region_interner,
+        region_interner: interner,
         ..data
     })
+}
+
+fn build_count_reduction(
+    interner: &mut RegionInterner,
+    scope: &str,
+    span: crate::ast::Span,
+    count_ty: Type<TypeName>,
+) -> (screma::Reduce, SemanticFunc) {
+    let mut graph = EGraph::new();
+    let left = graph.add_func_param(0, count_ty.clone());
+    let right = graph.add_func_param(1, count_ty.clone());
+    let sum = graph.intern_pure(
+        PureOp::BinOp("+".into()),
+        smallvec![left, right],
+        count_ty.clone(),
+        None,
+    );
+    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(sum));
+    let name = fresh_region_name(interner, &format!("{scope}_filter_count_combine"));
+    let region = interner.intern(&name);
+    let function = SemanticFunc::new(
+        region,
+        name,
+        span,
+        None,
+        vec![
+            (count_ty.clone(), "left".to_string()),
+            (count_ty.clone(), "right".to_string()),
+        ],
+        count_ty.clone(),
+        graph,
+    );
+    let reduction = screma::Reduce {
+        operator: screma::Lambda::region(
+            crate::egir::types::SegBody {
+                region,
+                captures: vec![],
+            },
+            vec![count_ty.clone(), count_ty.clone()],
+            vec![count_ty],
+        ),
+        neutral: Vec::new(),
+        commutative: true,
+    };
+    (reduction, function)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_masked_pre(
+    inner: &Segmented,
+    interner: &mut RegionInterner,
+    scope: &str,
+    span: crate::ast::Span,
+    filter: &FilterParts,
+    consumer: Option<&screma::ScremaForm>,
+    count_ty: Option<&Type<TypeName>>,
+    outer_types: &LookupMap<NodeId, Type<TypeName>>,
+) -> (screma::Lambda, SemanticFunc) {
+    let mut captures = lambda_captures(&filter.body.map);
+    captures.extend(lambda_captures(&filter.body.predicate));
+    if let Some(consumer) = consumer {
+        captures.extend(lambda_captures(&consumer.pre));
+        captures.extend(consumer.reductions.iter().flat_map(|reduction| reduction.neutral.iter().copied()));
+    }
+    let capture_types = capture_types(outer_types, captures.iter());
+    let input_types =
+        filter.body.inputs.iter().map(crate::egir::types::SoacInputType::element).collect::<Vec<_>>();
+    let mut result_types = consumer.map(|consumer| consumer.pre.result_types.clone()).unwrap_or_default();
+    if let Some(count_ty) = count_ty {
+        result_types.push(count_ty.clone());
+    }
+    let mut params = input_types
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| (ty.clone(), format!("input_{index}")))
+        .collect::<Vec<_>>();
+    params.extend(
+        capture_types.iter().enumerate().map(|(index, ty)| (ty.clone(), format!("capture_{index}"))),
+    );
+    let mut graph = EGraph::new();
+    let args = params
+        .iter()
+        .enumerate()
+        .map(|(index, (ty, _))| graph.add_func_param(index, ty.clone()))
+        .collect::<Vec<_>>();
+    let mut cursor = input_types.len();
+    let mapped_capture_count = lambda_capture_count(&filter.body.map);
+    let mapped = invoke_lambda(
+        &mut graph,
+        inner,
+        &filter.body.map,
+        &args[..input_types.len()],
+        &args[cursor..cursor + mapped_capture_count],
+    );
+    cursor += mapped_capture_count;
+    let predicate_capture_count = lambda_capture_count(&filter.body.predicate);
+    let predicate = invoke_lambda(
+        &mut graph,
+        inner,
+        &filter.body.predicate,
+        &mapped,
+        &args[cursor..cursor + predicate_capture_count],
+    );
+    cursor += predicate_capture_count;
+    debug_assert_eq!(predicate.len(), 1);
+
+    let mut selected = Vec::new();
+    let mut fallback = Vec::new();
+    if let Some(consumer) = consumer {
+        let consumer_capture_count = lambda_capture_count(&consumer.pre);
+        let consumer_args = vec![mapped[0]; consumer.pre.parameter_types.len()];
+        selected.extend(invoke_lambda(
+            &mut graph,
+            inner,
+            &consumer.pre,
+            &consumer_args,
+            &args[cursor..cursor + consumer_capture_count],
+        ));
+        cursor += consumer_capture_count;
+        let neutral_count = consumer.reduction_input_count();
+        fallback.extend_from_slice(&args[cursor..cursor + neutral_count]);
+        cursor += neutral_count;
+    }
+    if let Some(count_ty) = count_ty {
+        selected.push(integer_literal(&mut graph, "1", count_ty));
+        fallback.push(integer_literal(&mut graph, "0", count_ty));
+    }
+    debug_assert_eq!(cursor, args.len());
+    conditional_return_many(&mut graph, predicate[0], fallback, selected, &result_types);
+    let name = fresh_region_name(interner, &format!("{scope}_filter_pre"));
+    let region = interner.intern(&name);
+    let return_ty = lambda_return_type(&result_types);
+    let function = SemanticFunc::new(region, name, span, None, params, return_ty, graph);
+    (
+        screma::Lambda::region(
+            crate::egir::types::SegBody { region, captures },
+            input_types,
+            result_types,
+        ),
+        function,
+    )
+}
+
+fn lambda_captures(lambda: &screma::Lambda) -> Vec<NodeId> {
+    lambda.seg_body().map(|body| body.captures.clone()).unwrap_or_default()
+}
+
+fn lambda_capture_count(lambda: &screma::Lambda) -> usize {
+    lambda.seg_body().map_or(0, |body| body.captures.len())
+}
+
+fn invoke_lambda(
+    graph: &mut EGraph,
+    inner: &Segmented,
+    lambda: &screma::Lambda,
+    arguments: &[NodeId],
+    captures: &[NodeId],
+) -> Vec<NodeId> {
+    if lambda.is_identity() {
+        debug_assert!(captures.is_empty());
+        debug_assert_eq!(arguments.len(), lambda.result_types.len());
+        return arguments.to_vec();
+    }
+    let body = lambda.seg_body().expect("non-identity lambda has no body");
+    let function = inner.region(body.region).expect("Filter lambda region is absent");
+    let mut operands = SmallVec::<[NodeId; 4]>::from_slice(arguments);
+    operands.extend(captures.iter().copied());
+    let result = graph.intern_pure(
+        PureOp::Call(function.name.clone()),
+        operands,
+        lambda_return_type(&lambda.result_types),
+        None,
+    );
+    unpack_result(graph, result, &lambda.result_types)
+}
+
+fn lambda_return_type(types: &[Type<TypeName>]) -> Type<TypeName> {
+    match types {
+        [ty] => ty.clone(),
+        _ => Type::Constructed(TypeName::Tuple(types.len()), types.to_vec()),
+    }
+}
+
+fn unpack_result(graph: &mut EGraph, result: NodeId, types: &[Type<TypeName>]) -> Vec<NodeId> {
+    match types {
+        [_] => vec![result],
+        _ => types
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                graph.intern_pure(
+                    PureOp::Project { index: index as u32 },
+                    smallvec![result],
+                    ty.clone(),
+                    None,
+                )
+            })
+            .collect(),
+    }
+}
+
+fn conditional_return_many(
+    graph: &mut EGraph,
+    predicate: NodeId,
+    fallback: Vec<NodeId>,
+    selected: Vec<NodeId>,
+    types: &[Type<TypeName>],
+) {
+    debug_assert_eq!(fallback.len(), types.len());
+    debug_assert_eq!(selected.len(), types.len());
+    let entry = graph.skeleton.entry;
+    let then_block = graph.skeleton.create_block();
+    let else_block = graph.skeleton.create_block();
+    let merge = graph.skeleton.create_block();
+    let results = types.iter().cloned().map(|ty| graph.add_block_param(merge, ty)).collect::<Vec<_>>();
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
+        cond: predicate,
+        then_target: then_block,
+        then_args: vec![],
+        else_target: else_block,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[entry].control_header = Some(ControlHeader::Selection { merge });
+    graph.skeleton.blocks[then_block].term = SkeletonTerminator::Branch {
+        target: merge,
+        args: selected,
+    };
+    graph.skeleton.blocks[else_block].term = SkeletonTerminator::Branch {
+        target: merge,
+        args: fallback,
+    };
+    let returned = match results.as_slice() {
+        [result] => *result,
+        _ => graph.intern_pure(
+            PureOp::Tuple(results.len()),
+            SmallVec::from_vec(results),
+            lambda_return_type(types),
+            None,
+        ),
+    };
+    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(returned));
 }
 
 struct EntryMetadataPatch {
@@ -350,255 +546,206 @@ struct EntryMetadataPatch {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn apply_with_consumer(
-    inner: Segmented,
-    candidate: &Candidate,
-    filter_effect: SideEffect,
-    consumer_effect: SideEffect,
-    filter: FilterParts,
-    consumer_index: usize,
-    operators: Vec<screma::Operator>,
-    count: Option<screma::Operator>,
-    count_ty: Option<Type<TypeName>>,
-) -> Segmented {
-    inner.rewrite_body(candidate.site, |body| {
-        let rewrite = |graph: &mut EGraph| {
-            rewrite_with_consumer(
-                graph,
-                candidate,
-                filter_effect.clone(),
-                consumer_effect.clone(),
-                filter.clone(),
-                consumer_index,
-                operators.clone(),
-                count.clone(),
-                count_ty.clone(),
-            )
-        };
-        match body {
-            Body::Entry(mut entry) => {
-                let metadata = rewrite(&mut entry.graph);
-                finish_entry_metadata(&mut entry, &candidate.lengths, metadata);
-                Body::Entry(entry)
-            }
-            Body::Function(mut function) => {
-                rewrite(&mut function.graph);
-                Body::Function(function)
-            }
-            Body::Constant(_) => unreachable!("filter fusion never targets constants"),
-        }
-    })
-}
-
-fn apply_count_only(
-    inner: Segmented,
-    candidate: &Candidate,
-    filter_effect: SideEffect,
-    filter: FilterParts,
-    count: screma::Operator,
-    count_ty: Type<TypeName>,
-) -> Segmented {
-    inner.rewrite_body(candidate.site, |body| {
-        let rewrite = |graph: &mut EGraph| {
-            rewrite_count_only(
-                graph,
-                candidate,
-                filter_effect.clone(),
-                filter.clone(),
-                count.clone(),
-                count_ty.clone(),
-            )
-        };
-        match body {
-            Body::Entry(mut entry) => {
-                let metadata = rewrite(&mut entry.graph);
-                finish_entry_metadata(&mut entry, &candidate.lengths, metadata);
-                Body::Entry(entry)
-            }
-            Body::Function(mut function) => {
-                rewrite(&mut function.graph);
-                Body::Function(function)
-            }
-            Body::Constant(_) => unreachable!("filter fusion never targets constants"),
-        }
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
 fn rewrite_with_consumer(
-    graph: &mut EGraph,
+    inner: Segmented,
     candidate: &Candidate,
     filter_effect: SideEffect,
     consumer_effect: SideEffect,
     filter: FilterParts,
     consumer_index: usize,
-    mut operators: Vec<screma::Operator>,
-    count: Option<screma::Operator>,
+    pre: screma::Lambda,
+    count: Option<screma::Reduce>,
     count_ty: Option<Type<TypeName>>,
-) -> EntryMetadataPatch {
-    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &consumer_effect.kind else {
-        unreachable!();
-    };
-    let old_input_count = op.lanes().inputs.len();
-    let old_result = consumer_effect.result.expect("filter reduction has no result");
-    let mut result_types = op.result_types();
-    let screma::SemanticState::Segmented {
-        resources: old_resources,
-        ..
-    } = op.semantic_state()
-    else {
-        unreachable!();
-    };
-    let old_resources = old_resources.clone();
+) -> (Segmented, Vec<SemanticFunc>) {
+    let synthesized = Vec::new();
+    let rebuilt = inner.rewrite_body(candidate.site, |body| {
+        let rewrite = |graph: &mut EGraph| {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(old_op))) = &consumer_effect.kind else {
+                unreachable!();
+            };
+            let old_result = consumer_effect.result.expect("Filter reduction has no result");
+            let old_result_types = old_op
+                .form
+                .reductions
+                .iter()
+                .flat_map(|reduction| reduction.operator.result_types.iter().cloned())
+                .collect::<Vec<_>>();
+            let count_neutral = count_ty.as_ref().map(|ty| integer_literal(graph, "0", ty));
+            let count_project = if let (Some(mut count), Some(count_ty), Some(neutral)) =
+                (count.clone(), count_ty.as_ref(), count_neutral)
+            {
+                count.neutral = vec![neutral];
+                let field = old_result_types.len() as u32;
+                let new_result = extend_result(graph, old_result, &old_result_types, count_ty.clone());
+                let project = graph.intern_pure(
+                    PureOp::Project { index: field },
+                    smallvec![new_result],
+                    count_ty.clone(),
+                    None,
+                );
+                Some((count, new_result, project))
+            } else {
+                None
+            };
 
-    let count_neutral = count_ty.as_ref().map(|ty| integer_literal(graph, "0", ty));
-    let count_project = if let (Some(mut count), Some(count_ty), Some(neutral)) =
-        (count, count_ty.as_ref(), count_neutral)
-    {
-        count.neutral = neutral;
-        let field = result_types.len() as u32;
-        let new_result = extend_result(graph, old_result, &result_types, count_ty.clone());
-        let project = graph.intern_pure(
-            PureOp::Project { index: field },
-            smallvec![new_result],
-            count_ty.clone(),
-            None,
-        );
-        result_types.push(count_ty.clone());
-        operators.push(count);
-        Some((new_result, project))
-    } else {
-        None
-    };
-
-    let output_views = consumer_effect.operand_nodes[old_input_count..].iter().copied();
-    let mut operands = SmallVec::<[NodeId; 4]>::new();
-    operands.push(filter.input);
-    operands.extend(output_views);
-
-    let fused_effects = splice_effect_tokens(filter_effect.effects, consumer_effect.effects);
-    {
-        let consumer = &mut graph.skeleton.blocks[candidate.block].side_effects[consumer_index];
-        consumer.operand_nodes = operands;
-        consumer.effects = fused_effects;
-        if let Some((new_result, _)) = count_project {
-            consumer.result = Some(new_result);
-        }
-        if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut consumer.kind {
-            let mut state = op.semantic_state().clone();
-            let screma::SemanticState::Segmented { space, .. } = &mut state else {
+            let mut op = old_op.clone();
+            op.inputs = filter.body.inputs.clone();
+            op.form.pre = pre.clone();
+            if let Some((count, _, _)) = &count_project {
+                op.form.reductions.push(count.clone());
+                op.result_state.push(screma::ResultState {
+                    destination: crate::egir::types::SoacDestination::fresh(),
+                });
+            }
+            let screma::SemanticState::Segmented { space, resources, .. } = op.semantic_state_mut() else {
                 unreachable!();
             };
             *space = filter.space.clone();
-            for (operator, result_type) in operators.iter_mut().zip(&result_types) {
-                operator.result_type = result_type.clone();
+            *resources = resources
+                .iter()
+                .copied()
+                .filter(|resource| Some(resource.resource) != filter.scratch)
+                .collect();
+            debug_assert!(
+                op.validate().is_ok(),
+                "invalid filtered Screma: {:?}",
+                op.validate()
+            );
+
+            let fused_effects = splice_effect_tokens(filter_effect.effects, consumer_effect.effects);
+            let consumer_id = consumer_effect.kind.soac_id().copied().expect("consumer SOAC id");
+            {
+                let consumer = &mut graph.skeleton.blocks[candidate.block].side_effects[consumer_index];
+                consumer.kind = SideEffectKind::Soac(SoacEffect(consumer_id, Soac::Screma(op)));
+                consumer.operand_nodes = SmallVec::from_vec(filter.input_nodes.clone());
+                consumer.effects = fused_effects;
+                if let Some((_, new_result, _)) = &count_project {
+                    consumer.result = Some(*new_result);
+                }
             }
-            *op = screma::Op {
-                lanes: screma::Lanes {
-                    inputs: vec![SoacInputType {
-                        array: filter.input_array_type.clone(),
-                    }],
-                    maps: Vec::new(),
-                },
-                operators,
-                post_maps: Vec::new(),
-                hidden_scan_outputs: Vec::new(),
-                state,
-            };
-        }
-    }
-    let reads = {
-        let consumer = &graph.skeleton.blocks[candidate.block].side_effects[consumer_index];
-        crate::egir::semantic_graph::read_resources(graph, consumer)
-    };
-    let retained: Vec<_> = old_resources
-        .iter()
-        .copied()
-        .filter(|resource| Some(resource.resource) != filter.scratch)
-        .collect();
-    if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) =
-        &mut graph.skeleton.blocks[candidate.block].side_effects[consumer_index].kind
-    {
-        let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
-            unreachable!();
+            let consumer_snapshot =
+                graph.skeleton.blocks[candidate.block].side_effects[consumer_index].clone();
+            let reads = crate::egir::semantic_graph::read_resources(graph, &consumer_snapshot);
+            if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) =
+                &mut graph.skeleton.blocks[candidate.block].side_effects[consumer_index].kind
+            {
+                let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
+                    unreachable!();
+                };
+                *resources = SegResourceAccess::merge(resources, &reads);
+            }
+            if let Some((_, _, project)) = &count_project {
+                replace_lengths(graph, &candidate.lengths, *project);
+            }
+            graph.skeleton.blocks[candidate.block].side_effects.remove(candidate.filter);
+            EntryMetadataPatch {
+                replacement: count_project.as_ref().map(|(_, _, value)| *value),
+                old_writer: filter_effect.result,
+                replacement_writer: Some(
+                    count_project.as_ref().map(|(_, result, _)| *result).unwrap_or(old_result),
+                ),
+                scratch: filter.scratch,
+            }
         };
-        *resources = SegResourceAccess::merge(&retained, &reads);
-    }
-    if let Some((_, project)) = count_project {
-        replace_lengths(graph, &candidate.lengths, project);
-    }
-    graph.skeleton.blocks[candidate.block].side_effects.remove(candidate.filter);
-    EntryMetadataPatch {
-        replacement: count_project.map(|(_, value)| value),
-        old_writer: filter_effect.result,
-        replacement_writer: Some(count_project.map(|(result, _)| result).unwrap_or(old_result)),
-        scratch: filter.scratch,
-    }
+        match body {
+            Body::Entry(mut entry) => {
+                let metadata = rewrite(&mut entry.graph);
+                finish_entry_metadata(&mut entry, &candidate.lengths, metadata);
+                Body::Entry(entry)
+            }
+            Body::Function(mut function) => {
+                rewrite(&mut function.graph);
+                Body::Function(function)
+            }
+            Body::Constant(_) => unreachable!("Filter fusion never targets constants"),
+        }
+    });
+    (rebuilt, synthesized)
 }
 
 fn rewrite_count_only(
-    graph: &mut EGraph,
+    inner: Segmented,
     candidate: &Candidate,
     filter_effect: SideEffect,
     filter: FilterParts,
-    mut count: screma::Operator,
+    pre: screma::Lambda,
+    mut count: screma::Reduce,
     count_ty: Type<TypeName>,
-) -> EntryMetadataPatch {
-    let neutral = integer_literal(graph, "0", &count_ty);
-    count.neutral = neutral;
-    let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![count_ty.clone()]);
-    let result = graph.alloc_side_effect_result(tuple_ty);
-    let project = graph.intern_pure(
-        PureOp::Project { index: 0 },
-        smallvec![result],
-        count_ty.clone(),
-        None,
-    );
-    replace_lengths(graph, &candidate.lengths, project);
-    let effect = &mut graph.skeleton.blocks[candidate.block].side_effects[candidate.filter];
-    let SideEffectKind::Soac(SoacEffect(id, _)) = effect.kind else {
-        unreachable!("count-only rewrite requires a filter SOAC");
-    };
-    effect.kind = SideEffectKind::Soac(SoacEffect(
-        id,
-        Soac::Screma(screma::Op {
-            lanes: screma::Lanes {
-                inputs: vec![SoacInputType {
-                    array: filter.input_array_type,
-                }],
-                maps: Vec::new(),
-            },
-            operators: vec![count],
-            post_maps: Vec::new(),
-            hidden_scan_outputs: Vec::new(),
-            state: screma::SemanticState::Segmented {
-                space: filter.space,
-                placement: screma::Placement::LaneLocal,
-                output_slots: Vec::new(),
-                resources: Vec::new(),
-            },
-        }),
-    ));
-    effect.operand_nodes = smallvec![filter.input];
-    effect.result = Some(result);
-    let reads = {
-        let effect = &graph.skeleton.blocks[candidate.block].side_effects[candidate.filter];
-        crate::egir::semantic_graph::read_resources(graph, effect)
-    };
-    if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) =
-        &mut graph.skeleton.blocks[candidate.block].side_effects[candidate.filter].kind
-    {
-        let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
-            unreachable!();
+) -> (Segmented, Vec<SemanticFunc>) {
+    let rebuilt = inner.rewrite_body(candidate.site, |body| {
+        let mut rewrite = |graph: &mut EGraph| {
+            let neutral = integer_literal(graph, "0", &count_ty);
+            count.neutral = vec![neutral];
+            let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![count_ty.clone()]);
+            let result = graph.alloc_side_effect_result(tuple_ty);
+            let project = graph.intern_pure(
+                PureOp::Project { index: 0 },
+                smallvec![result],
+                count_ty.clone(),
+                None,
+            );
+            replace_lengths(graph, &candidate.lengths, project);
+            {
+                let effect = &mut graph.skeleton.blocks[candidate.block].side_effects[candidate.filter];
+                let SideEffectKind::Soac(SoacEffect(id, _)) = effect.kind else {
+                    unreachable!();
+                };
+                effect.kind = SideEffectKind::Soac(SoacEffect(
+                    id,
+                    Soac::Screma(screma::Op {
+                        inputs: filter.body.inputs.clone(),
+                        form: screma::ScremaForm {
+                            pre: pre.clone(),
+                            scans: vec![],
+                            reductions: vec![count.clone()],
+                            post: screma::Lambda::identity(vec![]),
+                        },
+                        result_state: vec![screma::ResultState {
+                            destination: crate::egir::types::SoacDestination::fresh(),
+                        }],
+                        state: screma::SemanticState::Segmented {
+                            space: filter.space.clone(),
+                            placement: screma::Placement::LaneLocal,
+                            output_slots: vec![],
+                            resources: vec![],
+                        },
+                    }),
+                ));
+                effect.operand_nodes = SmallVec::from_vec(filter.input_nodes.clone());
+                effect.result = Some(result);
+            }
+            let effect_snapshot =
+                graph.skeleton.blocks[candidate.block].side_effects[candidate.filter].clone();
+            let reads = crate::egir::semantic_graph::read_resources(graph, &effect_snapshot);
+            if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) =
+                &mut graph.skeleton.blocks[candidate.block].side_effects[candidate.filter].kind
+            {
+                let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
+                    unreachable!();
+                };
+                *resources = reads;
+            }
+            EntryMetadataPatch {
+                replacement: Some(project),
+                old_writer: filter_effect.result,
+                replacement_writer: Some(result),
+                scratch: filter.scratch,
+            }
         };
-        *resources = reads;
-    }
-    EntryMetadataPatch {
-        replacement: Some(project),
-        old_writer: filter_effect.result,
-        replacement_writer: Some(result),
-        scratch: filter.scratch,
-    }
+        match body {
+            Body::Entry(mut entry) => {
+                let metadata = rewrite(&mut entry.graph);
+                finish_entry_metadata(&mut entry, &candidate.lengths, metadata);
+                Body::Entry(entry)
+            }
+            Body::Function(mut function) => {
+                rewrite(&mut function.graph);
+                Body::Function(function)
+            }
+            Body::Constant(_) => unreachable!("Filter fusion never targets constants"),
+        }
+    });
+    (rebuilt, Vec::new())
 }
 
 fn finish_entry_metadata(
@@ -648,7 +795,7 @@ fn extend_result(
     fields.push(extra);
     let new_result =
         graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(fields.len()), fields));
-    let projects: Vec<(NodeId, u32)> = graph
+    let projects = graph
         .nodes
         .iter()
         .filter_map(|(node, definition)| match &definition.kind {
@@ -658,12 +805,12 @@ fn extend_result(
             } if operands.first() == Some(&old_result) => Some((node, *index)),
             _ => None,
         })
-        .collect();
+        .collect::<Vec<_>>();
     for (project, index) in projects {
         graph.update_pure_node(project, |_, operands| operands[0] = new_result);
         debug_assert!((index as usize) < old_fields.len());
     }
-    let rebuilt_fields: SmallVec<[NodeId; 4]> = old_fields
+    let rebuilt_fields = old_fields
         .iter()
         .enumerate()
         .map(|(index, ty)| {
@@ -674,7 +821,7 @@ fn extend_result(
                 None,
             )
         })
-        .collect();
+        .collect::<SmallVec<[NodeId; 4]>>();
     let old_ty = graph.nodes[old_result].ty.clone();
     let rebuilt = graph.intern_pure(PureOp::Tuple(old_fields.len()), rebuilt_fields, old_ty, None);
     graph_ops::replace_all_references(graph, old_result, rebuilt);
@@ -687,221 +834,4 @@ fn integer_literal(graph: &mut EGraph, value: &str, ty: &Type<TypeName>) -> Node
         _ => PureOp::Int(value.to_string()),
     };
     graph.intern_pure(op, smallvec![], ty.clone(), None)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn masked_step(
-    inner: &Segmented,
-    region_interner: &mut RegionInterner,
-    scope: &str,
-    span: crate::ast::Span,
-    index: usize,
-    filter: &FilterParts,
-    operator: &screma::Operator,
-    outer_types: &LookupMap<NodeId, Type<TypeName>>,
-) -> (SegBody, SemanticFunc) {
-    let consumer = inner.region(operator.step.region).expect("operator step region").clone();
-    let accumulator_ty = consumer.params[0].0.clone();
-    let captures: Vec<NodeId> = filter
-        .map
-        .iter()
-        .flat_map(|body| body.captures.iter())
-        .chain(&filter.pred.captures)
-        .chain(&operator.step.captures)
-        .copied()
-        .collect();
-    let capture_types = capture_types(outer_types, captures.iter());
-    let mut params = vec![
-        (accumulator_ty.clone(), "accumulator".to_string()),
-        (filter.input_elem_type.clone(), "element".to_string()),
-    ];
-    params.extend(
-        capture_types.iter().enumerate().map(|(capture, ty)| (ty.clone(), format!("capture_{capture}"))),
-    );
-    let mut graph = EGraph::new();
-    let args: Vec<_> =
-        params.iter().enumerate().map(|(param, (ty, _))| graph.add_func_param(param, ty.clone())).collect();
-    let mut cursor = 2;
-    let value = if let Some(map) = &filter.map {
-        let region = inner.region(map.region).expect("map region");
-        let mut call_args = smallvec![args[1]];
-        call_args.extend(args[cursor..cursor + map.captures.len()].iter().copied());
-        cursor += map.captures.len();
-        graph.intern_pure(
-            PureOp::Call(region.name.clone()),
-            call_args,
-            region.return_ty.clone(),
-            None,
-        )
-    } else {
-        args[1]
-    };
-    let pred_region = inner.region(filter.pred.region).expect("filter predicate region");
-    let mut pred_args = smallvec![value];
-    pred_args.extend(args[cursor..cursor + filter.pred.captures.len()].iter().copied());
-    cursor += filter.pred.captures.len();
-    let pred = graph.intern_pure(
-        PureOp::Call(pred_region.name.clone()),
-        pred_args,
-        pred_region.return_ty.clone(),
-        None,
-    );
-    let mut reduce_args = smallvec![args[0], value];
-    reduce_args.extend(args[cursor..].iter().copied());
-    let reduced = graph.intern_pure(
-        PureOp::Call(consumer.name.clone()),
-        reduce_args,
-        consumer.return_ty.clone(),
-        None,
-    );
-    conditional_return(&mut graph, pred, args[0], reduced, accumulator_ty);
-    let name = fresh_region_name(region_interner, &format!("{scope}_filter_reduce_{index}"));
-    let region = region_interner.intern(&name);
-    let function = SemanticFunc::new(region, name, span, None, params, consumer.return_ty, graph);
-    (SegBody { region, captures }, function)
-}
-
-fn count_operator(
-    inner: &Segmented,
-    region_interner: &mut RegionInterner,
-    scope: &str,
-    span: crate::ast::Span,
-    filter: &FilterParts,
-    count_ty: Type<TypeName>,
-    outer_types: &LookupMap<NodeId, Type<TypeName>>,
-) -> (screma::Operator, SemanticFunc, SemanticFunc) {
-    let captures: Vec<NodeId> = filter
-        .map
-        .iter()
-        .flat_map(|body| body.captures.iter())
-        .chain(&filter.pred.captures)
-        .copied()
-        .collect();
-    let capture_types = capture_types(outer_types, captures.iter());
-    let mut params = vec![
-        (count_ty.clone(), "count".to_string()),
-        (filter.input_elem_type.clone(), "element".to_string()),
-    ];
-    params.extend(
-        capture_types.iter().enumerate().map(|(capture, ty)| (ty.clone(), format!("capture_{capture}"))),
-    );
-    let mut graph = EGraph::new();
-    let args: Vec<_> =
-        params.iter().enumerate().map(|(param, (ty, _))| graph.add_func_param(param, ty.clone())).collect();
-    let mut cursor = 2;
-    let value = if let Some(map) = &filter.map {
-        let region = inner.region(map.region).expect("map region");
-        let mut call_args = smallvec![args[1]];
-        call_args.extend(args[cursor..cursor + map.captures.len()].iter().copied());
-        cursor += map.captures.len();
-        graph.intern_pure(
-            PureOp::Call(region.name.clone()),
-            call_args,
-            region.return_ty.clone(),
-            None,
-        )
-    } else {
-        args[1]
-    };
-    let pred_region = inner.region(filter.pred.region).expect("filter predicate region");
-    let mut pred_args = smallvec![value];
-    pred_args.extend(args[cursor..].iter().copied());
-    let pred = graph.intern_pure(
-        PureOp::Call(pred_region.name.clone()),
-        pred_args,
-        pred_region.return_ty.clone(),
-        None,
-    );
-    let one = integer_literal(&mut graph, "1", &count_ty);
-    let incremented = graph.intern_pure(
-        PureOp::BinOp("+".into()),
-        smallvec![args[0], one],
-        count_ty.clone(),
-        None,
-    );
-    conditional_return(&mut graph, pred, args[0], incremented, count_ty.clone());
-    let step_name = fresh_region_name(region_interner, &format!("{scope}_filter_count_step"));
-    let step_region = region_interner.intern(&step_name);
-    let step = SemanticFunc::new(
-        step_region,
-        step_name,
-        span,
-        None,
-        params,
-        count_ty.clone(),
-        graph,
-    );
-
-    let mut combine_graph = EGraph::new();
-    let left = combine_graph.add_func_param(0, count_ty.clone());
-    let right = combine_graph.add_func_param(1, count_ty.clone());
-    let sum = combine_graph.intern_pure(
-        PureOp::BinOp("+".into()),
-        smallvec![left, right],
-        count_ty.clone(),
-        None,
-    );
-    combine_graph.skeleton.blocks[combine_graph.skeleton.entry].term =
-        SkeletonTerminator::Return(Some(sum));
-    let combine_name = fresh_region_name(region_interner, &format!("{scope}_filter_count_combine"));
-    let combine_region = region_interner.intern(&combine_name);
-    let combine = SemanticFunc::new(
-        combine_region,
-        combine_name,
-        span,
-        None,
-        vec![
-            (count_ty.clone(), "left".to_string()),
-            (count_ty.clone(), "right".to_string()),
-        ],
-        count_ty.clone(),
-        combine_graph,
-    );
-    (
-        screma::Operator {
-            kind: screma::OperatorKind::Reduce,
-            step: SegBody {
-                region: step_region,
-                captures,
-            },
-            combine: SegBody {
-                region: combine_region,
-                captures: vec![],
-            },
-            input_indices: vec![screma::InputId(0)],
-            neutral: NodeId::default(),
-            shape: vec![],
-            commutative: true,
-            destination: SoacDestination::fresh(),
-            result_type: count_ty,
-        },
-        step,
-        combine,
-    )
-}
-
-fn conditional_return(
-    graph: &mut EGraph,
-    predicate: NodeId,
-    fallback: NodeId,
-    selected: NodeId,
-    ty: Type<TypeName>,
-) {
-    let entry = graph.skeleton.entry;
-    let then_block = graph.skeleton.create_block();
-    let merge = graph.skeleton.create_block();
-    let result = graph.add_block_param(merge, ty);
-    graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
-        cond: predicate,
-        then_target: then_block,
-        then_args: vec![],
-        else_target: merge,
-        else_args: vec![fallback],
-    };
-    graph.skeleton.blocks[then_block].term = SkeletonTerminator::Branch {
-        target: merge,
-        args: vec![selected],
-    };
-    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(result));
-    graph.skeleton.blocks[entry].control_header = Some(ControlHeader::Selection { merge });
 }

@@ -2540,8 +2540,13 @@ impl<'a, 'b> Converter<'a, 'b> {
             return Ok(self.emit_soac(
                 Soac::Filter(filter::Op {
                     body: filter::Body {
-                        input: filter::Input::Plain(SoacInputType { array: arr_ty }),
-                        predicate: pred_body,
+                        inputs: vec![SoacInputType { array: arr_ty }],
+                        map: screma::Lambda::identity(vec![output_elem_ty.clone()]),
+                        predicate: screma::Lambda::region(
+                            pred_body.clone(),
+                            vec![output_elem_ty.clone()],
+                            vec![Type::Constructed(TypeName::Bool, vec![])],
+                        ),
                     },
                     state: filter::RawState {
                         storage: filter::Output::Local {
@@ -2603,8 +2608,13 @@ impl<'a, 'b> Converter<'a, 'b> {
         Ok(self.emit_soac(
             Soac::Filter(filter::Op {
                 body: filter::Body {
-                    input: filter::Input::Plain(SoacInputType { array: arr_ty }),
-                    predicate: pred_body,
+                    inputs: vec![SoacInputType { array: arr_ty }],
+                    map: screma::Lambda::identity(vec![output_elem_ty.clone()]),
+                    predicate: screma::Lambda::region(
+                        pred_body,
+                        vec![output_elem_ty.clone()],
+                        vec![Type::Constructed(TypeName::Bool, vec![])],
+                    ),
                 },
                 state: filter::RawState {
                     storage: filter::Output::Runtime {

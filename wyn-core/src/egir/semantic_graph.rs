@@ -286,10 +286,17 @@ where
                 }
             }
             Soac::Filter(op) => {
-                if let filter::Input::Mapped { body, .. } = &op.body.input {
+                if let Some(body) = op.body.map.seg_body() {
                     verify_body("filter map", body)?;
                 }
-                verify_body("filter predicate", &op.body.predicate)?;
+                verify_body(
+                    "filter predicate",
+                    op.body
+                        .predicate
+                        .seg_body()
+                        .ok_or_else(|| format!("{scope}: filter predicate cannot be identity"))?,
+                )?;
+                op.body.validate().map_err(|error| format!("{scope}: {error}"))?;
             }
             Soac::Hist(op) => {
                 if let Some(body) = op.body.bucket.seg_body() {
@@ -361,8 +368,8 @@ where
                     SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => {
                         let _ = writeln!(
                             output,
-                            "{scope}: Filter state={:?} input={:?} predicate={:?}",
-                            op.state, op.body.input, op.body.predicate
+                            "{scope}: Filter state={:?} inputs={:?} map={:?} predicate={:?}",
+                            op.state, op.body.inputs, op.body.map, op.body.predicate
                         );
                     }
                     SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {

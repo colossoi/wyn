@@ -69,12 +69,7 @@ impl<P: WynSoacPhase> Soac<P> {
                 bodies
             }
             Self::Filter(op) => {
-                let mut bodies = Vec::with_capacity(2);
-                if let filter::Input::Mapped { body, .. } = &op.body.input {
-                    bodies.push(body);
-                }
-                bodies.push(&op.body.predicate);
-                bodies
+                op.body.map.seg_body().into_iter().chain(op.body.predicate.seg_body()).collect()
             }
             Self::Hist(op) => {
                 let mut bodies = op.body.bucket.seg_body().into_iter().collect::<Vec<_>>();
@@ -114,13 +109,16 @@ impl<P: WynSoacPhase> Soac<P> {
                 }
                 op.form.post.seg_body_mut().filter(|_| remaining == 0)
             }
-            Self::Filter(op) => match (&mut op.body.input, index) {
-                (filter::Input::Mapped { body, .. }, 0) => Some(body),
-                (filter::Input::Mapped { .. }, 1) | (filter::Input::Plain(_), 0) => {
-                    Some(&mut op.body.predicate)
+            Self::Filter(op) => {
+                let mut remaining = index;
+                if let Some(body) = op.body.map.seg_body_mut() {
+                    if remaining == 0 {
+                        return Some(body);
+                    }
+                    remaining -= 1;
                 }
-                _ => None,
-            },
+                op.body.predicate.seg_body_mut().filter(|_| remaining == 0)
+            }
             Self::Hist(op) => {
                 let mut remaining = index;
                 if let Some(body) = op.body.bucket.seg_body_mut() {

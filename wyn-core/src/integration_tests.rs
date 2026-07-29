@@ -384,7 +384,7 @@ entry stats(xs: []i32) [4]i32 =
     );
     assert_eq!(stats.reduce_operators, 3, "two reductions plus one shared count");
 
-    let operators = allocated
+    let op = allocated
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
@@ -392,23 +392,26 @@ entry stats(xs: []i32) [4]i32 =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            if !op.is_reduce() {
-                return None;
-            }
-            (op.form.reductions.len() == 3).then_some(op.form.reductions.as_slice())
+            (op.is_reduce() && op.form.reductions.len() == 3).then_some(op)
         })
         .expect("three-operator filtered SegRed");
-    let step_names: Vec<_> = operators
-        .iter()
-        .map(|operator| {
-            allocated.region(operator.operator.seg_body().unwrap().region).unwrap().name.as_str()
-        })
-        .collect();
-    assert!(step_names[0].contains("filter_reduce"));
-    assert!(step_names[1].contains("filter_reduce"));
+    let pre_name =
+        allocated.region(op.form.pre.seg_body().expect("masked pre-lambda").region).unwrap().name.as_str();
     assert!(
-        step_names[2].contains("filter_count"),
-        "count field stays last: {step_names:?}"
+        pre_name.contains("filter_pre"),
+        "masking belongs in the pre-lambda: {pre_name}"
+    );
+    let operator_names = op
+        .form
+        .reductions
+        .iter()
+        .map(|reduction| {
+            allocated.region(reduction.operator.seg_body().unwrap().region).unwrap().name.as_str()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        operator_names[2].contains("filter_count_combine"),
+        "the shared count reducer stays last: {operator_names:?}"
     );
 
     compile_to_spirv(source).expect("multi-consumer filtered reduction should lower");
@@ -452,20 +455,15 @@ entry pick(xs: []i32) ?k. [k]i32 =
         .entry_points
         .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
-        .any(|effect| {
-            matches!(
-                &effect.kind,
-                SideEffectKind::Soac(SoacEffect(
-                    _,
-                    Soac::Filter(filter::Op {
-                        body: filter::Body {
-                            input: filter::Input::Mapped { .. },
-                            ..
-                        },
-                        ..
-                    })
-                ))
-            )
+        .any(|effect| match &effect.kind {
+            SideEffectKind::Soac(SoacEffect(
+                _,
+                Soac::Filter(filter::Op {
+                    body: filter::Body { map, .. },
+                    ..
+                }),
+            )) => !map.is_identity(),
+            _ => false,
         });
     assert!(
         has_map_body,

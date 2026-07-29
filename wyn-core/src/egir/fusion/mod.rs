@@ -22,6 +22,8 @@ use crate::egir::types::{EGraph, NodeId};
 
 use crate::LookupMap;
 
+mod envelope;
+mod filter;
 mod histogram;
 mod horizontal;
 mod screma;
@@ -31,6 +33,8 @@ mod vertical;
 pub(super) enum Rewrite {
     Vertical(vertical::Candidate),
     Histogram(histogram::Candidate),
+    Envelope(envelope::Candidate),
+    Filter(filter::Candidate),
     Horizontal(horizontal::Candidate),
 }
 
@@ -40,6 +44,8 @@ pub(super) fn analyze(program: &Segmented, oracle: &SemanticGraph) -> Option<Rew
     vertical::analyze(program, oracle)
         .map(Rewrite::Vertical)
         .or_else(|| histogram::analyze(program, oracle).map(Rewrite::Histogram))
+        .or_else(|| envelope::analyze(program, oracle).map(Rewrite::Envelope))
+        .or_else(|| filter::analyze(program, oracle).map(Rewrite::Filter))
         .or_else(|| horizontal::analyze(program, oracle).map(Rewrite::Horizontal))
 }
 
@@ -48,6 +54,8 @@ pub(super) fn apply(program: Segmented, rewrite: Rewrite) -> Segmented {
     match rewrite {
         Rewrite::Vertical(candidate) => vertical::apply(program, candidate),
         Rewrite::Histogram(candidate) => histogram::apply(program, candidate),
+        Rewrite::Envelope(candidate) => envelope::apply(program, candidate),
+        Rewrite::Filter(candidate) => filter::apply(program, candidate),
         Rewrite::Horizontal(candidate) => horizontal::apply(program, candidate),
     }
 }

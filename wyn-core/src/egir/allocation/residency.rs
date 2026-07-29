@@ -1700,8 +1700,8 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                         .iter()
                         .find(|replacement| effect.operand_nodes[0] == replacement.project)
                     {
-                        let input = match &mut body.input {
-                            filter::Input::Plain(input) | filter::Input::Mapped { input, .. } => input,
+                        let Some(input) = body.inputs.first_mut() else {
+                            continue;
                         };
                         input.array = replacement.view_ty.clone();
                         let elem_ty = input.element();

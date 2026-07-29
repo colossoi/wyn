@@ -590,14 +590,12 @@ pub fn retarget_filter_output(
                     return Ok(false);
                 };
                 let scratch = *scratch;
-                let (input, output_elem_ty) = match &op.body.input {
-                    filter::Input::Plain(input) => (input, input.element()),
-                    filter::Input::Mapped {
-                        input,
-                        output_element_type,
-                        ..
-                    } => (input, output_element_type.clone()),
-                };
+                let input = op
+                    .body
+                    .inputs
+                    .first()
+                    .ok_or_else(|| ConvertError::Internal("Filter has no array input".into()))?;
+                let output_elem_ty = op.body.output_element_type();
                 let input_arr_ty = input.array.clone();
                 let input_elem_ty = input.element();
                 // Compact straight into the output resource; reuse the
