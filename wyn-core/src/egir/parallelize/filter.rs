@@ -140,6 +140,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             neutral: zero,
             scratch: scan_scratch,
             total_out: Some(self.candidate.storage.length.0),
+            reduction_output: None,
         };
         let mut combine =
             combine.build(self.lowering.semantic_ids, self.lowering.effect_ids).map_err(|error| {

@@ -89,7 +89,7 @@ impl RecipeTargets {
                             output_slots,
                             ..
                         } if !output_slots.is_empty()
-                            && (op.is_reduce() || op.is_scan_only())
+                            && (op.is_reduce() || !op.form.scans.is_empty())
                             && entry.execution_model.is_compute() =>
                         {
                             targets.promoted_folds.push(site);
@@ -504,10 +504,11 @@ fn analyze_reduce_recipe(
 fn analyze_scan_recipe(
     body: &crate::egir::program::PlannedEntry,
     endpoint: CompilerFlowEndpoint,
+    resources: &LogicalResourceArena,
     located: LocatedScrema<'_>,
 ) -> Result<(AnalyzedRecipe, Vec<ScratchRequest>)> {
     let serial = located.serial_recipe();
-    let Some(candidate) = super::analyze_scan_candidate(body, located)? else {
+    let Some(candidate) = super::analyze_scan_candidate(body, located, resources)? else {
         return Ok((AnalyzedRecipe::Serial(serial), Vec::new()));
     };
     let mut requests = Vec::with_capacity(2 + usize::from(candidate.prefix_scratch_type().is_some()));
@@ -554,13 +555,12 @@ fn analyze_projected_kernel(
             return Ok((kernel, requests));
         }
     }
-
     let (recipe, requests) = match targets.screma_site() {
         Some(site) => {
             let located = located_screma(&body, site)?;
             match capabilities::classify(located.op) {
                 Strategy::Reduce => analyze_reduce_recipe(&body, endpoint, resources, located)?,
-                Strategy::Scan => analyze_scan_recipe(&body, endpoint, located)?,
+                Strategy::Scan => analyze_scan_recipe(&body, endpoint, resources, located)?,
                 Strategy::Map => (AnalyzedRecipe::Map(located.segmented()?), Vec::new()),
                 Strategy::Serial => (AnalyzedRecipe::Serial(located.serial_recipe()), Vec::new()),
             }

@@ -131,15 +131,6 @@ fn sibling_fusable(
         return false;
     }
 
-    let has_scan = !left_op.form.scans.is_empty() || !right_op.form.scans.is_empty();
-    let has_reduce = !left_op.form.reductions.is_empty() || !right_op.form.reductions.is_empty();
-    if has_scan
-        && has_reduce
-        && (oracle.value_consumer_count(left_id) != 0 || oracle.value_consumer_count(right_id) != 0)
-    {
-        return false;
-    }
-
     if oracle.reachable_between(left_id, right_id) || oracle.reachable_between(right_id, left_id) {
         return false;
     }

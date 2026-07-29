@@ -496,14 +496,6 @@ impl<P: WynSoacPhase> Op<P> {
         self.form.scans.is_empty() && !self.form.reductions.is_empty()
     }
 
-    pub fn is_scan_only(&self) -> bool {
-        !self.form.scans.is_empty() && self.form.reductions.is_empty()
-    }
-
-    pub fn is_mixed(&self) -> bool {
-        !self.form.scans.is_empty() && !self.form.reductions.is_empty()
-    }
-
     pub fn result_count(&self) -> usize {
         self.form.result_count()
     }

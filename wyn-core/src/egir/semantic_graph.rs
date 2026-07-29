@@ -346,24 +346,16 @@ where
             for effect in &block.side_effects {
                 match &effect.kind {
                     SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
-                        let kind = if op.is_map() {
-                            "SegMap"
-                        } else if op.is_reduce() {
-                            "SegRed"
-                        } else if op.is_scan_only() {
-                            "SegScan"
-                        } else {
-                            "SegMixed"
-                        };
                         let _ = writeln!(
                             output,
-                            "{scope}: {kind} state={:?} inputs={:?} pre={:?} scans={:?} reductions={:?} post={:?}",
+                            "{scope}: Screma state={:?} inputs={:?} pre={:?} scans={:?} reductions={:?} post={:?}",
                             op.semantic_state(),
                             op.inputs,
                             op.form.pre,
                             op.form.scans,
                             op.form.reductions,
-                            op.form.post,                        );
+                            op.form.post,
+                        );
                     }
                     SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => {
                         let _ = writeln!(

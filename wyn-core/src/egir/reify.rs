@@ -314,8 +314,7 @@ fn entry_facts(entry: &RawEntry<RealizedOutputRoute>) -> HashMap<(BlockId, usize
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return false;
             };
-            !op.is_map()
-                && !op.is_mixed()
+            op.form.operator_input_count() != 0
                 && matches!(
                     facts_by_location.get(&(*block, *index)),
                     Some(Facts {

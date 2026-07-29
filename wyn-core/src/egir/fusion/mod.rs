@@ -174,11 +174,10 @@ mod tests {
         });
         let program = vertical::apply(program, vertical);
         let optimized = crate::egir::optimize_semantics(program);
-        crate::egir::plan_logical_resources(optimized)
-            .expect("allocate the vertically normalized composite Screma")
+        crate::egir::plan_logical_resources(optimized).expect("allocate the vertically normalized Screma")
     }
 
-    fn assert_composite_and_lower(allocated: crate::egir::ResourcesAllocated, scans: usize) {
+    fn assert_screma_and_lower(allocated: crate::egir::ResourcesAllocated, scans: usize) {
         let scremas = allocated
             .entry_points
             .iter()
@@ -197,8 +196,8 @@ mod tests {
         assert!(scremas[0].validate().is_ok());
 
         let planned = crate::egir::plan(allocated, crate::LoweringProfile::PORTABLE)
-            .expect("plan the vertically normalized composite Screma");
-        crate::lower_egir_to_ssa(planned).expect("lower the vertically normalized composite Screma");
+            .expect("plan the vertically normalized Screma");
+        crate::lower_egir_to_ssa(planned).expect("lower the vertically normalized Screma");
     }
 
     #[test]
@@ -213,7 +212,7 @@ entry redomap_then_map<[n]>(xs: [n]i32) (i32, [n]i32) =
   (total, consumed)
 "#,
         );
-        assert_composite_and_lower(allocated, 0);
+        assert_screma_and_lower(allocated, 0);
     }
 
     #[test]
@@ -228,6 +227,6 @@ entry scan_redomap_then_map<[n]>(xs: [n]i32) (i32, [n]i32) =
   (total, consumed)
 "#,
         );
-        assert_composite_and_lower(allocated, 1);
+        assert_screma_and_lower(allocated, 1);
     }
 }

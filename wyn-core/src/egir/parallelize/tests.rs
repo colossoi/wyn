@@ -146,7 +146,7 @@ fn reduction_keeps_canonical_operator_lambda_together() {
 }
 
 #[test]
-fn scan_kind_is_non_empty_by_construction() {
+fn scan_form_carries_operator_and_neutral() {
     let mut graph = EGraph::new();
     let neutral = neutral(&mut graph, 0);
     let unit = Type::Constructed(TypeName::Unit, vec![]);
@@ -163,12 +163,12 @@ fn scan_kind_is_non_empty_by_construction() {
         }],
         state: screma::SemanticState::Serial,
     };
-    assert!(op.is_scan_only());
+    assert!(!op.form.scans.is_empty() && op.form.reductions.is_empty());
     assert_eq!(op.form.scans.len(), 1);
 }
 
 #[test]
-fn mixed_reduce_and_scan_has_explicit_composite_kind() {
+fn screma_form_carries_scan_and_reduction_operators() {
     let mut graph = EGraph::new();
     let reduce_neutral = neutral(&mut graph, 0);
     let scan_neutral = neutral(&mut graph, 1);
@@ -191,7 +191,7 @@ fn mixed_reduce_and_scan_has_explicit_composite_kind() {
         ],
         state: screma::SemanticState::Serial,
     };
-    assert!(op.is_mixed());
+    assert!(!op.form.scans.is_empty() && !op.form.reductions.is_empty());
     assert_eq!(op.form.reductions.len(), 1);
     assert_eq!(op.form.scans.len(), 1);
 }
@@ -233,6 +233,7 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
             block_offsets: offsets,
         },
         total_out: None,
+        reduction_output: None,
     }
     .build(&mut semantic_ids, &mut effect_ids)
     .expect("phase2 synthesis");

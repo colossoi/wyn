@@ -50,7 +50,7 @@ struct SemanticSoacStats {
     seg_maps: usize,
     seg_reds: usize,
     seg_scans: usize,
-    seg_composites: usize,
+    mixed_scremas: usize,
     map_bodies: usize,
     reduce_operators: usize,
     scan_operators: usize,
@@ -75,11 +75,11 @@ fn semantic_soac_stats(allocated: &crate::egir::ResourcesAllocated) -> SemanticS
                     } else if op.is_reduce() {
                         stats.seg_reds += 1;
                         stats.reduce_operators += op.form.reductions.len();
-                    } else if op.is_scan_only() {
+                    } else if !op.form.scans.is_empty() && op.form.reductions.is_empty() {
                         stats.seg_scans += 1;
                         stats.scan_operators += op.form.scans.len();
                     } else {
-                        stats.seg_composites += 1;
+                        stats.mixed_scremas += 1;
                         stats.reduce_operators += op.form.reductions.len();
                         stats.scan_operators += op.form.scans.len();
                     }
@@ -213,7 +213,7 @@ entry paired<[n]>(xs: [n]i32) [n]i32 =
         stats.seg_maps, 1,
         "both producer fields route into one composed map"
     );
-    assert_eq!(stats.seg_composites, 0);
+    assert_eq!(stats.mixed_scremas, 0);
     compile_to_spirv(source).expect("multi-result vertical fusion lowers to SPIR-V");
 }
 #[test]
@@ -604,7 +604,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         allocated.data.core.resources.len() >= 2,
         "input and output resources are planned logically"
     );
-    assert!(allocated.semantic_ir().contains("SegRed"));
+
     assert!(allocated.semantic_ir().contains("ResourceLength"));
 
     // Residency allocation is target independent: the semantic operation does
@@ -1945,7 +1945,7 @@ fn single_stage_is_a_terminal_schedule_policy() {
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#;
     let allocated = compile_to_semantic_egir(source);
-    assert!(allocated.semantic_ir().contains("SegRed"));
+
     let lowered = lower_semantic_egir(
         allocated,
         crate::LoweringProfile::new(crate::CodegenTarget::Portable, crate::SchedulePolicy::Serial),
@@ -2524,7 +2524,7 @@ entry tuple_prefixes(xs: [8](i32, i32)) [8](i32, i32) =
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            op.is_scan_only().then_some(&op.form.scans)
+            (!op.form.scans.is_empty() && op.form.reductions.is_empty()).then_some(&op.form.scans)
         })
         .expect("tuple scan remains canonical");
     assert_eq!(scan.len(), 1);
@@ -4606,7 +4606,7 @@ entry gen(xs: []i32) ([]i32, []i32, [1]i32, []i32) =
         "the scan is represented by the mixed canonical Screma"
     );
     assert_eq!(
-        stats.seg_composites, 1,
+        stats.mixed_scremas, 1,
         "scan and reduction siblings share one canonical Screma"
     );
     assert_eq!(stats.reduce_operators, 1);
@@ -8242,19 +8242,34 @@ entry gen(xs: []i32) []i32 =
 /// into one shared buffer that both downstream SOACs read from.
 #[test]
 fn multi_consumer_scan_plus_reduce_lifts() {
-    compile_to_spirv(
-        "\
+    use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
+
+    let source = "\
 #[compute]
 entry gen(xs: []i32) []i32 =
   let counts  = map(|x: i32| x * 2, xs) in
   let total   = reduce(|a: i32, b: i32| a + b, 0, counts) in
   let offsets = scan(|a: i32, b: i32| a + b, 0, counts) in
   map(|i: i32| offsets[i % 8] + total, iota(64))
-",
-    )
-    .expect("multi-consumer (reduce + scan over the same counts) should lift + compile");
-}
+";
+    let allocated = compile_to_semantic_egir(source);
+    let handoff_kinds = allocated
+        .data
+        .core
+        .resources
+        .iter()
+        .filter_map(|resource| match &resource.origin {
+            ResourceOrigin::Compiler(compiler) => Some(compiler.kind),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(handoff_kinds.contains(&CompilerResourceKind::GatherHandoff));
+    assert!(handoff_kinds.contains(&CompilerResourceKind::ScalarHandoff));
 
+    let lowered = lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE);
+    crate::lower_ssa_to_spirv(lowered)
+        .expect("multi-consumer (reduce + scan over the same counts) should lift + compile");
+}
 /// `counts` consumed by both `scan(counts)` and a direct random gather
 /// `counts[i % 8]`. The scan's input is a SOAC edge in the producer graph;
 /// the `counts[i % 8]` reference inside the outer map's lambda body is *not*
@@ -9912,7 +9927,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
                     crate::egir::types::SideEffectKind::Soac(crate::egir::types::SoacEffect(
                         _,
                         crate::egir::types::Soac::Screma(op)
-                    )) if op.is_scan_only() && !op.form.post.is_identity() && op.form.post.result_types.len() == expected_outputs
+                    )) if !op.form.scans.is_empty() && op.form.reductions.is_empty() && !op.form.post.is_identity() && op.form.post.result_types.len() == expected_outputs
                 )
             });
         assert!(
@@ -9977,24 +9992,57 @@ entry paired_prefixes(xs: []i32) ([]i32, []i32) =
 fn scan_fuses_with_independent_consumer_collective() {
     let source = r#"
 #[compute]
-entry e(xs: [8]i32, ys: [8]i32) ([8]i32, [1]i32) =
+entry e(xs: []i32) ([]i32, [1]i32) =
   let prefixes = scan(|a: i32, b: i32| a + b, 0, xs) in
   let mapped = map(|x: i32| x * 2, prefixes) in
-  let total = reduce(|a: i32, b: i32| a + b, 0, ys) in
+  let total = reduce(|a: i32, b: i32| a + b, 0, xs) in
   (mapped, [total])
 "#;
 
     let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
     assert_eq!(
-        stats.seg_composites, 1,
+        stats.mixed_scremas, 1,
         "independent scan and reduction share one Screma"
     );
     assert_eq!(stats.scan_operators, 1);
     assert_eq!(stats.reduce_operators, 1);
     assert_eq!(stats.seg_maps + stats.seg_scans + stats.seg_reds, 0);
+    let planned = crate::egir::plan(compile_to_semantic_egir(source), crate::LoweringProfile::PORTABLE)
+        .expect("plan mixed scan/reduction");
+    assert_eq!(
+        planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        ["scan_phase1", "scan_block", "scan_apply_offsets"]
+    );
     compile_to_spirv(source).expect("middle-barrier-normalized Screma lowers to SPIR-V");
 }
 
+#[test]
+fn multiple_scans_and_reductions_share_one_parallel_product_recipe() {
+    let source = r#"
+#[compute]
+entry collective_product(xs: []i32, modes: []i32) ([2]i32, []i32, []i32) =
+  let total = reduce(
+    |a: i32, b: i32| if modes[0] > 0 then a + b else a * b,
+    1,
+    xs) in
+  let maximum = reduce(|a: i32, b: i32| if a > b then a else b, -2147483648, xs) in
+  let totals = scan(|a: i32, b: i32| a + b, 0, xs) in
+  let maxima = scan(|a: i32, b: i32| if a > b then a else b, -2147483648, xs) in
+  ([total, maximum], totals, maxima)
+"#;
+
+    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    assert_eq!(stats.mixed_scremas, 1);
+    assert_eq!(stats.scan_operators, 2);
+    assert_eq!(stats.reduce_operators, 2);
+    let planned = crate::egir::plan(compile_to_semantic_egir(source), crate::LoweringProfile::PORTABLE)
+        .expect("plan collective product");
+    assert_eq!(
+        planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        ["scan_phase1", "scan_block", "scan_apply_offsets"]
+    );
+    crate::compile_thru_spirv(source).expect("collective product compiles to SPIR-V");
+}
 #[test]
 fn dependent_scan_into_reduce_keeps_two_collective_barriers() {
     let source = r#"
@@ -10008,7 +10056,7 @@ entry e(xs: [8]i32) [1]i32 =
     let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
     assert_eq!(stats.seg_scans, 1, "the producer scan barrier remains");
     assert_eq!(stats.seg_reds, 1, "the dependent reduction barrier remains");
-    assert_eq!(stats.seg_composites, 0);
+    assert_eq!(stats.mixed_scremas, 0);
     compile_to_spirv(source).expect("unfused dependent barriers lower to SPIR-V");
 }
 /// An entry returning a scan and a fixed-size literal that indexes it must
