@@ -118,16 +118,11 @@ fn sibling_fusable(
     let left_inputs = &left_effect.operand_nodes[..left_op.inputs.len()];
     let right_inputs = &right_effect.operand_nodes[..right_op.inputs.len()];
     let shared_input = left_inputs.iter().any(|node| right_inputs.contains(node));
-    let shared_size = left_op.inputs.iter().any(|left| {
-        crate::types::array_size(&left.array).is_some_and(|left_size| {
-            right_op
-                .inputs
-                .iter()
-                .filter_map(|right| crate::types::array_size(&right.array))
-                .any(|right_size| right_size == left_size)
-        })
-    });
-    if !seg_space_fusable(left_space, right_space) && !shared_input && !shared_size {
+    // Horizontal fusion does not eliminate an intermediate array. Its reliable
+    // benefit is sharing one traversal of an actual input, which is also the
+    // candidate rule used by Futhark's SOAC fusion graph. Equal extents alone
+    // merely couple independent kernels and may increase resource pressure.
+    if !shared_input || !seg_space_fusable(left_space, right_space) {
         return false;
     }
 

@@ -104,6 +104,49 @@ fn semantic_soac_stats(allocated: &crate::egir::ResourcesAllocated) -> SemanticS
     stats
 }
 
+fn segmented_entry_maps(
+    program: &crate::egir::reify::Segmented,
+) -> Vec<&screma::Op<crate::egir::types::Semantic>> {
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
+
+    program
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+        .filter_map(|effect| {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
+                return None;
+            };
+            op.is_map().then_some(op)
+        })
+        .collect()
+}
+
+fn segmented_entry_map_output_fields(program: &crate::egir::reify::Segmented) -> Vec<usize> {
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
+
+    let entry = program.entry_points.first().expect("semantic test entry");
+    let result = entry
+        .graph
+        .skeleton
+        .blocks
+        .iter()
+        .flat_map(|(_, block)| &block.side_effects)
+        .find_map(|effect| {
+            matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if op.is_map())
+                .then_some(effect.result)
+                .flatten()
+        })
+        .expect("one observable map result");
+    entry
+        .routes()
+        .map(|route| {
+            crate::egir::graph_ops::root_projection_index(&entry.graph, route.source.value, result)
+                .expect("entry output route does not select a map result field")
+        })
+        .collect()
+}
+
 // These semantic-EGIR tests are the behavioral successors to the deleted
 // `tlc/fusion_tests.rs` suite. They assert the optimized operation graph rather
 // than TLC syntax, so the checks survive representation changes while still
@@ -255,6 +298,41 @@ entry siblings<[n]>(xs: [n]i32, ys: [n]i32) ([n]i32, [n]i32) =
 }
 
 #[test]
+fn egir_horizontal_fusion_preserves_shared_input_semantics() {
+    use crate::egir::semantic_exec::{execute_map_screma, Value};
+
+    let source = r#"
+#[compute]
+entry siblings(xs: []i32) ([]i32, []i32) =
+  let plus = map(|x: i32| x + 1, xs) in
+  let times = map(|x: i32| x * 2, xs) in
+  (plus, times)
+"#;
+    let before = compile_to_segmented_egir(source);
+    let after: crate::egir::reify::Segmented =
+        crate::egir::optimize_semantics(compile_to_segmented_egir(source)).retag();
+    let input = (0..8).map(Value::Int).collect::<Vec<_>>();
+
+    let before_maps = segmented_entry_maps(&before);
+    assert_eq!(before_maps.len(), 2, "unoptimized graph retains both siblings");
+    let plus = execute_map_screma(&before, before_maps[0], &[input.clone()]).unwrap();
+    let times = execute_map_screma(&before, before_maps[1], &[input.clone()]).unwrap();
+    let expected = vec![plus[0].clone(), times[0].clone()];
+
+    let after_maps = segmented_entry_maps(&after);
+    assert_eq!(after_maps.len(), 1, "shared-input siblings fuse horizontally");
+    let actual_fields = execute_map_screma(&after, after_maps[0], &[input]).unwrap();
+    let actual = segmented_entry_map_output_fields(&after)
+        .into_iter()
+        .map(|field| actual_fields[field].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "horizontal fusion must preserve both result lanes"
+    );
+}
+
+#[test]
 fn egir_vertical_fusion_preserves_escaping_producer_output() {
     let source = r#"
 #[compute]
@@ -287,6 +365,39 @@ entry shared(xs: []i32) ([]i32, []i32) =
 }
 
 #[test]
+fn egir_vertical_fusion_preserves_fanout_semantics() {
+    use crate::egir::semantic_exec::{execute_map_screma, Value};
+
+    let source = r#"
+#[compute]
+entry shared(xs: []i32) ([]i32, []i32) =
+  let produced = map(|x: i32| x + 1, xs) in
+  let left = map(|x: i32| x * 2, produced) in
+  let right = map(|x: i32| x - 3, produced) in
+  (left, right)
+"#;
+    let before = compile_to_segmented_egir(source);
+    let after: crate::egir::reify::Segmented =
+        crate::egir::optimize_semantics(compile_to_segmented_egir(source)).retag();
+    let input = (0..8).map(Value::Int).collect::<Vec<_>>();
+
+    let before_maps = segmented_entry_maps(&before);
+    assert_eq!(before_maps.len(), 3, "unoptimized graph retains the fan-out");
+    let produced = execute_map_screma(&before, before_maps[0], &[input.clone()]).unwrap();
+    let left = execute_map_screma(&before, before_maps[1], &[produced[0].clone()]).unwrap();
+    let right = execute_map_screma(&before, before_maps[2], &[produced[0].clone()]).unwrap();
+    let expected = vec![left[0].clone(), right[0].clone()];
+
+    let after_maps = segmented_entry_maps(&after);
+    assert_eq!(after_maps.len(), 1, "fan-out normalizes to one Screma");
+    let actual_fields = execute_map_screma(&after, after_maps[0], &[input]).unwrap();
+    let actual = segmented_entry_map_output_fields(&after)
+        .into_iter()
+        .map(|field| actual_fields[field].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "fan-out fusion must preserve both consumers");
+}
+#[test]
 fn egir_vertical_fusion_pushes_slice_onto_producer_inputs() {
     let source = r#"
 #[compute]
@@ -304,23 +415,7 @@ entry sliced(xs: []i32) [4]i32 =
 
 #[test]
 fn egir_vertical_fusion_preserves_slice_semantics() {
-    use crate::egir::reify::Segmented;
     use crate::egir::semantic_exec::{execute_map_screma, Value};
-    use crate::egir::types::{Semantic, SideEffectKind, Soac, SoacEffect};
-
-    fn entry_maps(program: &Segmented) -> Vec<&screma::Op<Semantic>> {
-        program
-            .entry_points
-            .iter()
-            .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
-            .filter_map(|effect| {
-                let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
-                    return None;
-                };
-                op.is_map().then_some(op)
-            })
-            .collect()
-    }
 
     let source = r#"
 #[compute]
@@ -329,10 +424,11 @@ entry sliced(xs: []i32) [4]i32 =
   map(|x: i32| x * 2, produced[2..6])
 "#;
     let before = compile_to_segmented_egir(source);
-    let after: Segmented = crate::egir::optimize_semantics(compile_to_segmented_egir(source)).retag();
+    let after: crate::egir::reify::Segmented =
+        crate::egir::optimize_semantics(compile_to_segmented_egir(source)).retag();
 
     let input = (0..8).map(Value::Int).collect::<Vec<_>>();
-    let before_maps = entry_maps(&before);
+    let before_maps = segmented_entry_maps(&before);
     assert_eq!(
         before_maps.len(),
         2,
@@ -342,7 +438,7 @@ entry sliced(xs: []i32) [4]i32 =
     let sliced = produced[0][2..6].to_vec();
     let expected = execute_map_screma(&before, before_maps[1], &[sliced.clone()]).unwrap();
 
-    let after_maps = entry_maps(&after);
+    let after_maps = segmented_entry_maps(&after);
     assert_eq!(after_maps.len(), 1, "optimization composes the two maps");
     let actual = execute_map_screma(&after, after_maps[0], &[input[2..6].to_vec()]).unwrap();
     assert_eq!(
@@ -5101,12 +5197,11 @@ entry gen(data: []f32) ([]f32, []f32) =
     }
 }
 
-/// Sibling maps over *different* buffers that share one size var
-/// (`<[n]>(xs, ys)`) fuse into a single parallel kernel: both lanes read their
-/// own input at the same `tid` under one guard and write both outputs. This is
-/// equal-domain fusion — the buffers differ but the domain `n` is shared.
+/// Futhark-style horizontal fusion requires siblings to share an input array.
+/// A common size variable establishes compatible dispatch domains, but does
+/// not justify coupling otherwise independent kernels.
 #[test]
-fn equal_domain_sibling_maps_fuse_to_one_stage() {
+fn equal_domain_independent_sibling_maps_remain_separate() {
     use crate::pipeline_descriptor::{DispatchSize, Pipeline};
     let lowered = crate::compile_thru_spirv(
         r#"
@@ -5125,10 +5220,14 @@ entry eqn<[n]>(xs: [n]f32, ys: [n]f32) ([n]f32, [n]f32) =
             _ => None,
         })
         .expect("one compute pipeline");
-    assert_eq!(compute.stages.len(), 1, "equal-domain slots fuse into one stage");
+    assert_eq!(
+        compute.stages.len(),
+        2,
+        "equal extents alone must not couple independent kernels"
+    );
     assert!(
-        matches!(compute.stages[0].dispatch_size, DispatchSize::DerivedFrom { .. }),
-        "the fused stage dispatches over the shared runtime length"
+        compute.stages.iter().all(|stage| matches!(stage.dispatch_size, DispatchSize::DerivedFrom { .. })),
+        "both stages dispatch over their runtime input lengths"
     );
 }
 
