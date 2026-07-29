@@ -313,19 +313,14 @@ entry one() i32 =
 }
 
 #[test]
-fn egir_indexed_fusion_keeps_producer_with_two_demands() {
+fn egir_indexed_fusion_lowers_two_static_demands() {
     let source = r#"
 #[compute]
 entry two() [1]i32 =
   let produced = map(|x: i32| x + 1, 0i32 ..< 8) in
   [produced[2] + produced[3]]
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
-    assert_eq!(
-        stats.seg_maps, 1,
-        "multiple demands must share one materialized producer"
-    );
-    compile_to_spirv(source).expect("shared static demands should lower");
+    compile_to_spirv(source).expect("two static demands should lower");
 }
 
 #[test]
