@@ -604,3 +604,52 @@ fn projection_does_not_resurrect_eliminated_block_parameters() {
         .verify_branch_arities()
         .expect("projection keeps eliminated parameter arity");
 }
+
+#[test]
+fn value_flow_projection_prunes_unrelated_cfg_lanes_and_parameters() {
+    let mut graph = EGraph::new();
+    let entry = graph.skeleton.entry;
+    let then_block = graph.skeleton.create_block();
+    let else_block = graph.skeleton.create_block();
+    let merge = graph.skeleton.create_block();
+    let cond = graph.add_func_param(0, bool_ty());
+    let then_value = graph.add_func_param(1, u32_ty());
+    let else_value = graph.add_func_param(2, u32_ty());
+    let unrelated = graph.add_func_param(3, u32_ty());
+    let selected = graph.add_block_param(merge, u32_ty());
+    let omitted = graph.add_block_param(merge, u32_ty());
+
+    graph.skeleton.blocks[entry].control_header = Some(ControlHeader::Selection { merge });
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
+        cond,
+        then_target: then_block,
+        then_args: vec![],
+        else_target: else_block,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[then_block].term = SkeletonTerminator::Branch {
+        target: merge,
+        args: vec![then_value, unrelated],
+    };
+    graph.skeleton.blocks[else_block].term = SkeletonTerminator::Branch {
+        target: merge,
+        args: vec![else_value, unrelated],
+    };
+    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(selected));
+
+    let projected =
+        GraphProjector::new(&graph).value_flow(vec![selected]).expect("pure value-flow projection");
+    let projected_merge = projected.block(merge).expect("projected merge");
+    assert_eq!(projected.graph.skeleton.blocks[projected_merge].params.len(), 1);
+    assert!(projected.node(selected).is_some());
+    assert!(projected.node(omitted).is_none());
+    assert!(projected.node(unrelated).is_none());
+    assert!(projected.node(cond).is_some());
+    assert!(projected.node(then_value).is_some());
+    assert!(projected.node(else_value).is_some());
+    projected
+        .graph
+        .skeleton
+        .verify_branch_arities()
+        .expect("value-flow projection keeps branch lanes aligned");
+}
