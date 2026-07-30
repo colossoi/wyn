@@ -555,12 +555,40 @@ fn is_view_array_ty(ty: &polytype::Type<TypeName>) -> bool {
     ty.array_variant().is_some_and(crate::types::is_array_variant_view)
 }
 
+fn atomic_storage_bindings(program: &crate::ssa::stage::WgslReady) -> LookupSet<BindingRef> {
+    fn collect(body: &FuncBody, bindings: &mut LookupSet<BindingRef>) {
+        for (_, atomic) in body.inner.insts.iter() {
+            let InstKind::Atomic { place, .. } = &atomic.data else {
+                continue;
+            };
+            let view = body.inner.insts.iter().find_map(|(_, inst)| match &inst.data {
+                InstKind::ViewIndex { view, result, .. } if result == place => view.as_ssa(),
+                _ => None,
+            });
+            if let Some(binding) =
+                view.and_then(|view| crate::types::array_view_buffer(body.get_value_type(view)))
+            {
+                bindings.insert(binding);
+            }
+        }
+    }
+
+    let mut bindings = LookupSet::new();
+    for function in &program.functions {
+        collect(&function.body, &mut bindings);
+    }
+    for entry in &program.entry_points {
+        collect(&entry.body, &mut bindings);
+    }
+    bindings
+}
 struct LowerCtx<'a> {
     program: &'a crate::ssa::stage::WgslReady,
     function_variants: StorageFunctionVariants,
     current_function_names: LookupMap<String, String>,
     current_storage_accesses: LookupMap<BindingRef, crate::ResourceAccess>,
     storage_access_variants: LookupMap<BindingRef, (bool, bool)>,
+    atomic_bindings: LookupSet<BindingRef>,
     type_emitter: TypeEmitter,
     lowered: LookupSet<String>,
     indent: usize,
@@ -625,12 +653,14 @@ impl<'a> LowerCtx<'a> {
                 }
             }
         }
+        let atomic_bindings = atomic_storage_bindings(program);
         Self {
             program,
             function_variants,
             current_function_names: LookupMap::new(),
             current_storage_accesses,
             storage_access_variants,
+            atomic_bindings,
             type_emitter: TypeEmitter::new(),
             lowered: LookupSet::new(),
             indent: 0,
@@ -871,6 +901,8 @@ impl<'a> LowerCtx<'a> {
         for ((br, writable), elem_ty) in synth_sorted {
             let (set, binding) = (br.set, br.binding);
             let access = if writable { "read_write" } else { "read" };
+            let elem_ty =
+                if self.atomic_bindings.contains(&br) { format!("atomic<{}>", elem_ty) } else { elem_ty };
             let mixed = self
                 .storage_access_variants
                 .get(&br)
@@ -1583,6 +1615,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         }
     }
 
+    fn is_atomic_place(&self, place: crate::ssa::types::PlaceId) -> bool {
+        self.body.inner.insts.iter().any(|(_, inst)| match &inst.data {
+            InstKind::ViewIndex { view, result, .. } if *result == place => view
+                .as_ssa()
+                .and_then(|view| crate::types::array_view_buffer(self.body.get_value_type(view)))
+                .is_some_and(|binding| self.ctx.atomic_bindings.contains(&binding)),
+            _ => false,
+        })
+    }
     /// Resolve a ValueRef to a compile-time integer, if possible. Returns
     /// None for runtime values. Used by storage-intrinsic dispatch where
     /// `set` and `binding` must be compile-time constants.
@@ -1959,6 +2000,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                     place
                                 )
                             })?;
+                            let target = if self.is_atomic_place(*place) {
+                                format!("atomicLoad(&{})", target)
+                            } else {
+                                target
+                            };
                             let ty =
                                 self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
                             let var = wgsl_var(result_id);
@@ -1988,7 +2034,77 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 )
                             })?;
                             let val = self.get_value(*value)?;
-                            writeln!(output, "{}{} = {};", self.ctx.indent_str(), target, val).unwrap();
+                            if self.is_atomic_place(*place) {
+                                writeln!(
+                                    output,
+                                    "{}atomicStore(&{}, {});",
+                                    self.ctx.indent_str(),
+                                    target,
+                                    val
+                                )
+                                .unwrap();
+                            } else {
+                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), target, val).unwrap();
+                            }
+                            continue;
+                        }
+
+                        InstKind::Atomic { place, op, values } => {
+                            use crate::ssa::types::AtomicOp;
+                            let result_id = inst.result.ok_or_else(|| {
+                                crate::err_wgsl_at!(self.blame_span(), "Atomic must have a result")
+                            })?;
+                            let target = self.place_targets.get(place).cloned().ok_or_else(|| {
+                                crate::err_wgsl_at!(
+                                    self.blame_span(),
+                                    "Atomic: place {:?} has no target expression",
+                                    place
+                                )
+                            })?;
+                            let values = values
+                                .iter()
+                                .map(|value| self.get_value(*value))
+                                .collect::<Result<Vec<_>>>()?;
+                            let expression = match (op, values.as_slice()) {
+                                (AtomicOp::Add, [value]) => format!("atomicAdd(&{target}, {value})"),
+                                (AtomicOp::SignedMin | AtomicOp::UnsignedMin, [value]) => {
+                                    format!("atomicMin(&{target}, {value})")
+                                }
+                                (AtomicOp::SignedMax | AtomicOp::UnsignedMax, [value]) => {
+                                    format!("atomicMax(&{target}, {value})")
+                                }
+                                (AtomicOp::And, [value]) => format!("atomicAnd(&{target}, {value})"),
+                                (AtomicOp::Or, [value]) => format!("atomicOr(&{target}, {value})"),
+                                (AtomicOp::Xor, [value]) => format!("atomicXor(&{target}, {value})"),
+                                (AtomicOp::Exchange, [value]) => {
+                                    format!("atomicExchange(&{target}, {value})")
+                                }
+                                (AtomicOp::CompareExchange, [comparison, replacement]) => format!(
+                                    "atomicCompareExchangeWeak(&{target}, {comparison}, {replacement}).old_value"
+                                ),
+                                _ => {
+                                    return Err(crate::err_wgsl_at!(
+                                        self.blame_span(),
+                                        "atomic {:?} received {} values",
+                                        op,
+                                        values.len()
+                                    ));
+                                }
+                            };
+                            let ty =
+                                self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
+                            let var = wgsl_var(result_id);
+                            writeln!(
+                                output,
+                                "{}let {}: {} = {};",
+                                self.ctx.indent_str(),
+                                var,
+                                ty,
+                                expression
+                            )
+                            .unwrap();
+                            self.declared.insert(var.clone());
+                            self.value_map.insert(result_id, ValueBinding::Alias(var));
                             continue;
                         }
 
@@ -2902,6 +3018,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             | InstKind::Alloca { .. }
             | InstKind::Load { .. }
             | InstKind::Store { .. }
+            | InstKind::Atomic { .. }
             | InstKind::ControlBarrier => Err(crate::err_wgsl_at!(
                 self.blame_span(),
                 "internal: {:?} should be handled in emit_nodes",

@@ -80,12 +80,22 @@ impl HistForm {
 pub struct RawState;
 
 #[derive(Clone, Debug)]
-pub enum State<R> {
+pub enum SemanticState<R> {
     Serial,
     Segmented(SegSpace<R>),
 }
 
-pub type PhysicalState = State<PhysicalResourceRef>;
+/// Target execution selected after reducer legality has been proven.
+#[derive(Clone, Debug)]
+pub enum ScheduledState<R> {
+    Serial,
+    Atomic {
+        space: SegSpace<R>,
+        operations: Vec<crate::ssa::types::AtomicOp>,
+    },
+}
+
+pub type PhysicalState = ScheduledState<PhysicalResourceRef>;
 
 #[derive(Clone, Debug)]
 pub struct Op<P: WynSoacPhase> {
@@ -244,7 +254,7 @@ impl<P: WynSoacPhase> Op<P> {
 impl<R: GraphResource> Op<Semantic<R>> {
     pub(crate) fn referenced_nodes_with_state(&self) -> Vec<NodeId> {
         let mut nodes = self.referenced_nodes();
-        if let State::Segmented(space) = &self.state {
+        if let SemanticState::Segmented(space) = &self.state {
             nodes.extend(space.referenced_nodes());
         }
         nodes
@@ -257,7 +267,7 @@ impl<R: GraphResource> Op<Semantic<R>> {
             state,
         } = self;
         let mut nodes = form_node_slots(form);
-        if let State::Segmented(space) = state {
+        if let SemanticState::Segmented(space) = state {
             nodes.extend(space.referenced_node_slots());
         }
         nodes

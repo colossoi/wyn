@@ -31,12 +31,27 @@ impl ParallelFilterPlan {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct ParallelHistPlan {
+    owner: super::super::program::SemanticOpId,
+    operations: Vec<crate::ssa::types::AtomicOp>,
+}
+
+impl ParallelHistPlan {
+    pub(super) fn new(
+        owner: super::super::program::SemanticOpId,
+        operations: Vec<crate::ssa::types::AtomicOp>,
+    ) -> Self {
+        Self { owner, operations }
+    }
+}
 pub(super) fn entry(
     entry: PlannedEntry<Semantic>,
     filter_plan: Option<ParallelFilterPlan>,
+    hist_plan: Option<ParallelHistPlan>,
 ) -> Result<PlannedEntry<Scheduled>, String> {
     entry.try_map_phase(|_, _, id, soac| {
-        schedule_soac_with_mode(soac, filter_plan, false).map(|soac| (id, soac))
+        schedule_soac_with_mode(id, soac, filter_plan, hist_plan.clone(), false).map(|soac| (id, soac))
     })
 }
 
@@ -44,12 +59,16 @@ pub(in crate::egir) fn graph(
     graph: EGraph<Semantic>,
     serial: bool,
 ) -> Result<(EGraph<Scheduled>, crate::LookupMap<BlockId, BlockId>), String> {
-    graph.try_map_phase(|_, _, id, soac| schedule_soac_with_mode(soac, None, serial).map(|soac| (id, soac)))
+    graph.try_map_phase(|_, _, id, soac| {
+        schedule_soac_with_mode(id, soac, None, None, serial).map(|soac| (id, soac))
+    })
 }
 
 fn schedule_soac_with_mode(
+    id: super::super::program::SemanticOpId,
     soac: Soac<Semantic>,
     filter_plan: Option<ParallelFilterPlan>,
+    hist_plan: Option<ParallelHistPlan>,
     serial: bool,
 ) -> Result<Soac<Scheduled>, String> {
     Ok(match soac {
@@ -85,10 +104,14 @@ fn schedule_soac_with_mode(
             Soac::Filter(filter::Op { body, state })
         }
         Soac::Hist(hist::Op { inputs, form, state }) => {
-            let state = match state {
-                hist::State::Serial => hist::State::Serial,
-                hist::State::Segmented(space) if !serial => hist::State::Segmented(space),
-                hist::State::Segmented(_) => hist::State::Serial,
+            let state = match (state, hist_plan) {
+                (hist::SemanticState::Segmented(space), Some(plan)) if !serial && plan.owner == id => {
+                    hist::ScheduledState::Atomic {
+                        space,
+                        operations: plan.operations,
+                    }
+                }
+                _ => hist::ScheduledState::Serial,
             };
             Soac::Hist(hist::Op { inputs, form, state })
         }
@@ -120,11 +143,18 @@ fn schedule_screma_state(
 pub(super) fn force_serial(graph: &mut EGraph<Scheduled>) {
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
-            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut effect.kind else {
-                continue;
-            };
-            if matches!(op.state, screma::ScheduledState::Segmented(_)) {
-                op.state = screma::ScheduledState::Serial;
+            match &mut effect.kind {
+                SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
+                    if matches!(op.state, screma::ScheduledState::Segmented(_)) =>
+                {
+                    op.state = screma::ScheduledState::Serial;
+                }
+                SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op)))
+                    if !matches!(op.state, hist::ScheduledState::Serial) =>
+                {
+                    op.state = hist::ScheduledState::Serial;
+                }
+                _ => {}
             }
         }
     }

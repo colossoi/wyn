@@ -642,6 +642,71 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 self.constructor.const_i32(0)
             }
 
+            InstKind::Atomic { place, op, values } => {
+                use crate::ssa::types::AtomicOp;
+                let ptr_id = self.place_ptr(*place)?;
+                let values =
+                    values.iter().map(|value| self.get_value_ref(*value)).collect::<Result<Vec<_>>>()?;
+                let scope = self.constructor.const_u32(spirv::Scope::Device as u32);
+                let semantics = self.constructor.const_u32(0);
+                match (op, values.as_slice()) {
+                    (AtomicOp::Add, [value]) => self
+                        .constructor
+                        .builder
+                        .atomic_i_add(result_ty, None, ptr_id, scope, semantics, *value)?,
+                    (AtomicOp::SignedMin, [value]) => self
+                        .constructor
+                        .builder
+                        .atomic_s_min(result_ty, None, ptr_id, scope, semantics, *value)?,
+                    (AtomicOp::UnsignedMin, [value]) => self
+                        .constructor
+                        .builder
+                        .atomic_u_min(result_ty, None, ptr_id, scope, semantics, *value)?,
+                    (AtomicOp::SignedMax, [value]) => self
+                        .constructor
+                        .builder
+                        .atomic_s_max(result_ty, None, ptr_id, scope, semantics, *value)?,
+                    (AtomicOp::UnsignedMax, [value]) => self
+                        .constructor
+                        .builder
+                        .atomic_u_max(result_ty, None, ptr_id, scope, semantics, *value)?,
+                    (AtomicOp::And, [value]) => self
+                        .constructor
+                        .builder
+                        .atomic_and(result_ty, None, ptr_id, scope, semantics, *value)?,
+                    (AtomicOp::Or, [value]) => self
+                        .constructor
+                        .builder
+                        .atomic_or(result_ty, None, ptr_id, scope, semantics, *value)?,
+                    (AtomicOp::Xor, [value]) => self
+                        .constructor
+                        .builder
+                        .atomic_xor(result_ty, None, ptr_id, scope, semantics, *value)?,
+                    (AtomicOp::Exchange, [value]) => self
+                        .constructor
+                        .builder
+                        .atomic_exchange(result_ty, None, ptr_id, scope, semantics, *value)?,
+                    (AtomicOp::CompareExchange, [comparison, replacement]) => {
+                        self.constructor.builder.atomic_compare_exchange(
+                            result_ty,
+                            None,
+                            ptr_id,
+                            scope,
+                            semantics,
+                            semantics,
+                            *replacement,
+                            *comparison,
+                        )?
+                    }
+                    _ => bail_spirv_at!(
+                        self.blame_span(),
+                        "atomic {:?} received {} values",
+                        op,
+                        values.len()
+                    ),
+                }
+            }
+
             InstKind::ViewIndex { view, index, result } => {
                 let view_id = self.get_value_ref(*view)?;
                 let index_id = self.get_value_ref(*index)?;

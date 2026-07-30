@@ -78,7 +78,7 @@ fn find_in_graph(graph: &EGraph, site: BodySite, oracle: &SemanticGraph) -> Opti
                 else {
                     continue;
                 };
-                let hist::State::Segmented(_) = &consumer_op.state else {
+                let hist::SemanticState::Segmented(_) = &consumer_op.state else {
                     continue;
                 };
                 if consumer.result.is_none() || oracle.conflicts(producer_id, consumer_id) {
@@ -191,7 +191,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     consumer_op.inputs = normalized.inputs;
     consumer_op.form.bucket = normalized.lambda;
     if candidate.routes.iter().any(|route| route.consumer_input == 0) {
-        consumer_op.state = hist::State::Segmented(producer.space.clone());
+        consumer_op.state = hist::SemanticState::Segmented(producer.space.clone());
     }
     let operands: SmallVec<[crate::egir::types::NodeId; 4]> = normalized.input_nodes.into_iter().collect();
     let synthesized = normalized.synthesized;

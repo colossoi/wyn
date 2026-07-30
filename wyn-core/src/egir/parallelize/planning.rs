@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use polytype::Type;
 
 use crate::ast::TypeName;
-use crate::egir::soac::screma;
+use crate::egir::soac::{hist, screma};
 use crate::egir::types::{EGraph, SideEffect, SideEffectKind, SideEffectSite, Soac, SoacEffect};
 
 use super::model::{CandidateSelection, ParallelizeError, Result};
@@ -18,6 +18,11 @@ use crate::egir::types::SegExtent;
 
 use super::capabilities::{self, Strategy};
 
+#[derive(Clone, Copy)]
+pub(super) struct LocatedHist<'a> {
+    pub owner: SemanticOpId,
+    pub op: &'a hist::Op<crate::egir::types::Semantic>,
+}
 #[derive(Clone, Copy)]
 pub(super) struct LocatedScrema<'a> {
     pub site: SideEffectSite,
@@ -65,6 +70,7 @@ impl LocatedScrema<'_> {
 #[derive(Default)]
 struct RecipeTargets {
     filters: Vec<SideEffectSite>,
+    hists: Vec<SideEffectSite>,
     kernel_scremas: Vec<SideEffectSite>,
     promoted_folds: Vec<SideEffectSite>,
 }
@@ -79,6 +85,11 @@ impl RecipeTargets {
                 let site = SideEffectSite { block, index };
                 match &effect.kind {
                     SideEffectKind::Soac(SoacEffect(_, Soac::Filter(_))) => targets.filters.push(site),
+                    SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op)))
+                        if matches!(op.state, hist::SemanticState::Segmented(_)) =>
+                    {
+                        targets.hists.push(site);
+                    }
                     SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => match op.semantic_state() {
                         screma::SemanticState::Segmented {
                             placement: screma::Placement::Kernel,
@@ -108,6 +119,7 @@ impl RecipeTargets {
             |source: &[SideEffectSite]| source.iter().filter_map(|site| sites.get(site).copied()).collect();
         Self {
             filters: remap(&self.filters),
+            hists: remap(&self.hists),
             kernel_scremas: remap(&self.kernel_scremas),
             promoted_folds: remap(&self.promoted_folds),
         }
@@ -121,6 +133,18 @@ impl RecipeTargets {
     }
 }
 
+fn located_hist(
+    entry: &crate::egir::program::PlannedEntry,
+    site: SideEffectSite,
+) -> Result<LocatedHist<'_>> {
+    let effect = entry.graph.skeleton.effect(site);
+    let SideEffectKind::Soac(SoacEffect(owner, Soac::Hist(op))) = &effect.kind else {
+        return Err(ParallelizeError::Invalid(format!(
+            "selected Hist site {site:?} no longer contains a Hist operation"
+        )));
+    };
+    Ok(LocatedHist { owner: *owner, op })
+}
 fn located_screma(
     entry: &crate::egir::program::PlannedEntry,
     site: SideEffectSite,
@@ -150,6 +174,7 @@ pub(super) fn make_screma_serial(graph: &mut EGraph, recipe: SerialScremaRecipe)
 /// payloads change type when scratch ids are bound; the recipe shape does not.
 pub(super) enum Recipe<Filter, Reduce, Scan> {
     Filter(Filter),
+    Hist(super::hist::HistCandidate),
     Reduce(Reduce),
     Scan(Scan),
     Map(screma::Segmented<crate::egir::program::SemanticResourceRef>),
@@ -369,6 +394,7 @@ impl AnalyzedPlan {
 fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBindings) -> PlannedKernel {
     let (body, output_projection, recipe) = kernel.into_parts();
     let recipe = match recipe {
+        AnalyzedRecipe::Hist(candidate) => PlannedRecipe::Hist(candidate),
         AnalyzedRecipe::Filter(candidate) => {
             PlannedRecipe::Filter(super::filter::BoundFilter::bind(candidate, resources))
         }
@@ -392,7 +418,7 @@ pub(super) fn analyze(inner: &ResourcesAllocated) -> Result<AnalyzedPlan> {
     let mut requests = Vec::new();
     for (endpoint, entry) in allocation::entries_with_endpoints(inner) {
         let (plan, endpoint_requests, required_elements) =
-            analyze_endpoint(entry, endpoint, &inner.data.core.resources)?;
+            analyze_endpoint(inner, entry, endpoint, &inner.data.core.resources)?;
         recipes.insert(endpoint, plan)?;
         if let Some(count) = required_elements {
             recipes.required_elements.insert(endpoint, count);
@@ -403,6 +429,7 @@ pub(super) fn analyze(inner: &ResourcesAllocated) -> Result<AnalyzedPlan> {
 }
 
 fn analyze_endpoint(
+    program: &ResourcesAllocated,
     entry: &crate::egir::program::SemanticEntry,
     endpoint: CompilerFlowEndpoint,
     resources: &LogicalResourceArena,
@@ -415,7 +442,8 @@ fn analyze_endpoint(
         CompilerFlowEndpoint::Materialization(_) => None,
     };
     let Some(split) = split else {
-        let (primary, requests) = analyze_projected_kernel(projected, None, endpoint, resources, targets)?;
+        let (primary, requests) =
+            analyze_projected_kernel(program, projected, None, endpoint, resources, targets)?;
         return Ok((
             EndpointPlan::new(primary, Vec::new()),
             requests,
@@ -424,6 +452,7 @@ fn analyze_endpoint(
     };
     let primary_targets = targets.remap(&split.primary.effect_sites);
     let (primary, mut requests) = analyze_projected_kernel(
+        program,
         split.primary.entry,
         Some(split.primary.semantic_slots),
         endpoint,
@@ -434,6 +463,7 @@ fn analyze_endpoint(
     for sibling in split.siblings {
         let sibling_targets = targets.remap(&sibling.effect_sites);
         let (sibling, sibling_requests) = analyze_projected_kernel(
+            program,
             sibling.entry,
             Some(sibling.semantic_slots),
             endpoint,
@@ -457,6 +487,16 @@ fn fixed_required_elements(
             return None;
         };
         &op.state.space
+    } else if targets.hists.len() == 1 {
+        let SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) =
+            &entry.graph.skeleton.effect(targets.hists[0]).kind
+        else {
+            return None;
+        };
+        let hist::SemanticState::Segmented(space) = &op.state else {
+            return None;
+        };
+        space
     } else {
         let site = targets.screma_site()?;
         let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &entry.graph.skeleton.effect(site).kind
@@ -540,6 +580,7 @@ fn analyze_scan_recipe(
 }
 
 fn analyze_projected_kernel(
+    program: &ResourcesAllocated,
     body: crate::egir::program::PlannedEntry,
     output_projection: Option<Vec<usize>>,
     endpoint: CompilerFlowEndpoint,
@@ -553,6 +594,13 @@ fn analyze_projected_kernel(
             let requests = filter_scratch_requests(endpoint, &candidate);
             let kernel = PlannedKernel::new(body, output_projection, AnalyzedRecipe::Filter(candidate));
             return Ok((kernel, requests));
+        }
+    }
+    if let [site] = targets.hists.as_slice() {
+        let located = located_hist(&body, *site)?;
+        if let Some(candidate) = super::hist::analyze_hist_candidate(program, &body.graph, located) {
+            let kernel = PlannedKernel::new(body, output_projection, AnalyzedRecipe::Hist(candidate));
+            return Ok((kernel, Vec::new()));
         }
     }
     let (recipe, requests) = match targets.screma_site() {

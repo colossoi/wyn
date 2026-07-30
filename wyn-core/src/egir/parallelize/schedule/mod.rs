@@ -122,6 +122,7 @@ pub(super) struct PhaseSpec {
     body: PlannedEntry,
     label: &'static str,
     filter_plan: Option<super::prepare::ParallelFilterPlan>,
+    hist_plan: Option<super::prepare::ParallelHistPlan>,
     expected_compute: bool,
     dispatch: KernelDispatch,
     resources: Vec<ScheduledResource>,
@@ -136,6 +137,7 @@ impl PhaseSpec {
             body,
             label,
             filter_plan: None,
+            hist_plan: None,
             expected_compute: true,
             dispatch,
             resources,
@@ -150,6 +152,7 @@ impl PhaseSpec {
             body,
             label: "graphics_passthrough",
             filter_plan: None,
+            hist_plan: None,
             expected_compute: false,
             dispatch,
             resources,
@@ -175,6 +178,7 @@ impl PhaseSpec {
             body,
             label,
             filter_plan: Some(super::prepare::ParallelFilterPlan::new(stage, config, storage)),
+            hist_plan: None,
             expected_compute: true,
             dispatch,
             resources,
@@ -183,6 +187,25 @@ impl PhaseSpec {
         }
     }
 
+    pub(super) fn hist(
+        body: PlannedEntry,
+        dispatch: KernelDispatch,
+        owner: super::super::program::SemanticOpId,
+        operations: Vec<crate::ssa::types::AtomicOp>,
+    ) -> Self {
+        let resources = declared_resources(&body.resource_declarations);
+        Self {
+            body,
+            label: "hist_atomic",
+            filter_plan: None,
+            hist_plan: Some(super::prepare::ParallelHistPlan::new(owner, operations)),
+            expected_compute: true,
+            dispatch,
+            resources,
+            serial_single_workgroup: false,
+            output_projection: None,
+        }
+    }
     pub(super) fn with_resources(mut self, resources: Vec<ScheduledResource>) -> Self {
         self.resources = resources;
         self
@@ -194,7 +217,7 @@ impl PhaseSpec {
     }
 
     fn prepare(self) -> Result<PreparedPhase, String> {
-        let entry = super::prepare::entry(self.body, self.filter_plan)?;
+        let entry = super::prepare::entry(self.body, self.filter_plan, self.hist_plan)?;
         if entry.execution_model.is_compute() != self.expected_compute {
             let expected = if self.expected_compute { "compute" } else { "graphics" };
             return Err(format!("entry `{}` cannot use a {expected} body", entry.name));

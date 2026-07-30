@@ -452,9 +452,12 @@ fn expand_one(
                 len_input,
                 result_node: result_nid,
             };
-            // General reducers and ordered overwrites remain serial until a
-            // backend atomic implementation can preserve their contracts.
-            build_hist_loop(graph, bid, idx, hist, next_effect, regions);
+            match &op.state {
+                hist::PhysicalState::Atomic { space, operations } => {
+                    build_hist_atomic(graph, bid, idx, hist, space, operations, next_effect, regions)
+                }
+                hist::PhysicalState::Serial => build_hist_loop(graph, bid, idx, hist, next_effect, regions),
+            }
         }
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
             if matches!(op.state, screma::PhysicalState::Segmented(_)) && op.is_map() =>
@@ -1146,6 +1149,171 @@ fn flatten_hist_index(graph: &mut EGraph, indices: &[NodeId], shape: &[NodeId]) 
     })
 }
 
+fn hist_index_in_bounds(graph: &mut EGraph, indices: &[NodeId], shape: &[NodeId]) -> NodeId {
+    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+    let bool_type = Type::Constructed(TypeName::Bool, vec![]);
+    let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_type, None);
+    indices.iter().copied().zip(shape.iter().copied()).fold(
+        graph.intern_pure(PureOp::Bool(true), smallvec![], bool_type.clone(), None),
+        |valid, (index, dimension)| {
+            let nonnegative = graph.intern_pure(
+                PureOp::BinOp(">=".into()),
+                smallvec![index, zero],
+                bool_type.clone(),
+                None,
+            );
+            let below = graph.intern_pure(
+                PureOp::BinOp("<".into()),
+                smallvec![index, dimension],
+                bool_type.clone(),
+                None,
+            );
+            let in_dimension = graph.intern_pure(
+                PureOp::BinOp("&&".into()),
+                smallvec![nonnegative, below],
+                bool_type.clone(),
+                None,
+            );
+            graph.intern_pure(
+                PureOp::BinOp("&&".into()),
+                smallvec![valid, in_dimension],
+                bool_type.clone(),
+                None,
+            )
+        },
+    )
+}
+
+/// One invocation processes one input element and issues a native atomic
+/// update for every operation. Candidate analysis has already proven that
+/// each operation is a one-component integer reduction matching its atomic.
+fn build_hist_atomic(
+    graph: &mut EGraph,
+    block: BlockId,
+    effect_index: usize,
+    spec: HistLoop,
+    space: &SegSpace,
+    atomic_operations: &[crate::ssa::types::AtomicOp],
+    next_effect: &mut crate::IdSource<EffectToken>,
+    regions: &RegionInterner,
+) {
+    use super::graph_ops::emit_atomic;
+
+    let HistLoop {
+        form,
+        read_inputs,
+        len_input,
+        result_node,
+    } = spec;
+    debug_assert_eq!(form.operations.len(), atomic_operations.len());
+    let after = graph.skeleton.split_block_before_effect(block, effect_index);
+    graph.replace_node_preserving_type(
+        result_node,
+        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+    );
+
+    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+    let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
+    let bool_type = Type::Constructed(TypeName::Bool, vec![]);
+    let thread = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: catalog().known().thread_id,
+            overload_idx: 0,
+        },
+        smallvec![],
+        u32_type,
+        None,
+    );
+    let bitcast = catalog().lookup_by_any_name("i32.u32").expect("catalog has i32.u32 bitcast");
+    let lane = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: bitcast.id,
+            overload_idx: 0,
+        },
+        smallvec![thread],
+        i32_type,
+        None,
+    );
+    let length = emit_seg_space_len(
+        graph,
+        space,
+        &len_input,
+        &Type::Constructed(TypeName::Int(32), vec![]),
+    );
+    let in_range = graph.intern_pure(
+        PureOp::BinOp("<".into()),
+        smallvec![lane, length],
+        bool_type,
+        None,
+    );
+    let body = graph.skeleton.create_block();
+    graph.skeleton.blocks[block].term = SkeletonTerminator::CondBranch {
+        cond: in_range,
+        then_target: body,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[block].control_header = Some(ControlHeader::Selection { merge: after });
+
+    let arguments = read_inputs
+        .iter()
+        .map(|(array, array_type, element_type)| {
+            emit_read_element(graph, body, *array, lane, array_type, element_type, next_effect)
+        })
+        .collect::<Vec<_>>();
+    let bucket_values = emit_screma_lambda(graph, regions, &form.bucket, arguments);
+    let (indices, values) = bucket_values.split_at(form.index_count());
+    let mut index_offset = 0;
+    let mut value_offset = 0;
+    let mut current = body;
+
+    for (operation, atomic) in form.operations.iter().zip(atomic_operations) {
+        let operation_indices = &indices[index_offset..index_offset + operation.index_count()];
+        let operation_values = &values[value_offset..value_offset + operation.value_count()];
+        index_offset += operation.index_count();
+        value_offset += operation.value_count();
+        let update = graph.skeleton.create_block();
+        let next = graph.skeleton.create_block();
+        let valid = hist_index_in_bounds(graph, operation_indices, &operation.shape);
+        graph.skeleton.blocks[current].term = SkeletonTerminator::CondBranch {
+            cond: valid,
+            then_target: update,
+            then_args: vec![],
+            else_target: next,
+            else_args: vec![],
+        };
+        graph.skeleton.blocks[current].control_header = Some(ControlHeader::Selection { merge: next });
+
+        let bucket_index = flatten_hist_index(graph, operation_indices, &operation.shape);
+        let value_type = operation.update.value_types()[0].clone();
+        let place = graph.intern_pure(
+            PureOp::ViewIndex,
+            smallvec![operation.destinations[0], bucket_index],
+            value_type.clone(),
+            None,
+        );
+        emit_atomic(
+            graph,
+            update,
+            place,
+            *atomic,
+            &[operation_values[0]],
+            value_type,
+            next_effect,
+            None,
+        );
+        graph.skeleton.blocks[update].term = SkeletonTerminator::Branch {
+            target: next,
+            args: vec![],
+        };
+        current = next;
+    }
+    graph.skeleton.blocks[current].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
+    };
+}
 /// Canonical serial histogram semantics. Bucket results are decoded in
 /// Futhark order: all operation indices, then all operation values. A
 /// multi-component reducer is invoked once with all previous components and

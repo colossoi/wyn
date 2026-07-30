@@ -7,6 +7,7 @@ use crate::ast::Span;
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
 use crate::interface::{EntryInput as InterfaceEntryInput, EntryOutput as InterfaceEntryOutput};
 use crate::op::OpTag;
+use crate::ssa::types::AtomicOp;
 use crate::types::ExternDecl;
 use crate::{LookupMap, LookupSet, SortedSet};
 
@@ -227,6 +228,7 @@ pub enum EffectOp<R, Ty> {
     },
     Load,
     Store,
+    Atomic(AtomicOp),
     ControlBarrier,
 }
 
@@ -235,7 +237,7 @@ impl<R, Ty> EffectOp<R, Ty> {
     pub fn referenced_resource(&self) -> Option<&R> {
         match self {
             Self::Op { tag } => tag.referenced_resource(),
-            Self::Alloca { .. } | Self::Load | Self::Store | Self::ControlBarrier => None,
+            Self::Alloca { .. } | Self::Load | Self::Store | Self::Atomic(_) | Self::ControlBarrier => None,
         }
     }
 
@@ -250,6 +252,7 @@ impl<R, Ty> EffectOp<R, Ty> {
             Self::Alloca { elem_ty } => EffectOp::Alloca { elem_ty },
             Self::Load => EffectOp::Load,
             Self::Store => EffectOp::Store,
+            Self::Atomic(op) => EffectOp::Atomic(op),
             Self::ControlBarrier => EffectOp::ControlBarrier,
         })
     }

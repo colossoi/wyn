@@ -798,7 +798,78 @@ entry accumulate(indices: []i32,
         histogram.form.operations[0].update,
         hist::Update::Reduce { .. }
     ));
-    compile_to_spirv(source).expect("map-reduce_by_index fusion should lower");
+    let planned = crate::egir::plan(compile_to_semantic_egir(source), crate::LoweringProfile::PORTABLE)
+        .expect("plan direct-atomic histogram");
+    assert_eq!(
+        planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        ["hist_atomic"]
+    );
+
+    let spirv = compile_to_spirv(source).expect("map-reduce_by_index fusion should lower");
+    let mut loader = wspirv::dr::Loader::new();
+    wspirv::binary::parse_words(&spirv, &mut loader).expect("parse atomic histogram SPIR-V");
+    assert!(
+        loader.module().functions.iter().any(|function| {
+            function.blocks.iter().any(|block| {
+                block.instructions.iter().any(|inst| inst.class.opcode == wspirv::spirv::Op::AtomicIAdd)
+            })
+        }),
+        "integer-add histogram must emit OpAtomicIAdd"
+    );
+
+    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+        compile_to_semantic_egir(source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    ))
+    .expect("atomic histogram lowers to WGSL");
+    assert!(
+        wgsl.contains("array<atomic<i32>>"),
+        "atomic storage declaration:\n{wgsl}"
+    );
+    assert!(wgsl.contains("atomicAdd("), "atomic histogram update:\n{wgsl}");
+}
+#[test]
+fn high_race_factor_histogram_keeps_serial_fallback_without_replication() {
+    use crate::egir::types::{PureOp, SideEffectKind, Soac, SoacEffect};
+    use smallvec::smallvec;
+
+    let source = r#"
+#[compute]
+entry accumulate(indices: []i32,
+                 values: []i32,
+                 #[storage(set=2, binding=0, access=write)] dest: *[]i32) () =
+  let _ = reduce_by_index(dest, |a: i32, b: i32| a + b, 0, indices, values) in
+  ()
+"#;
+    let mut allocated = compile_to_semantic_egir(source);
+    let (entry_index, race_factor) = allocated
+        .entry_points
+        .iter()
+        .enumerate()
+        .find_map(|(entry_index, entry)| {
+            entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects).find_map(
+                |effect| match &effect.kind {
+                    SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
+                        Some((entry_index, op.form.operations[0].race_factor))
+                    }
+                    _ => None,
+                },
+            )
+        })
+        .expect("semantic histogram race factor");
+    allocated.entry_points[entry_index].graph.replace_pure_node(
+        race_factor,
+        PureOp::Int("33".into()),
+        smallvec![],
+    );
+
+    let planned = crate::egir::plan(allocated, crate::LoweringProfile::PORTABLE)
+        .expect("plan high-contention histogram");
+    assert_eq!(
+        planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        ["serial_compute"],
+        "without replica storage, a high race-factor hint must not select the direct-atomic recipe"
+    );
 }
 #[test]
 fn egir_map_scatter_envelope_fuses_and_deduplicates_both_producers() {
@@ -4624,6 +4695,7 @@ fn inst_signature_multiset<Tag, GlobalContext>(
             InstKind::Alloca { .. } => "Alloca".to_string(),
             InstKind::Load { .. } => "Load".to_string(),
             InstKind::Store { .. } => "Store".to_string(),
+            InstKind::Atomic { op, .. } => format!("Atomic({op:?})"),
             InstKind::ViewIndex { .. } => "ViewIndex".to_string(),
             InstKind::PlaceIndex { .. } => "PlaceIndex".to_string(),
             InstKind::OutputSlot { .. } => "OutputSlot".to_string(),

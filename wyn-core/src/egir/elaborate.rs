@@ -423,6 +423,16 @@ impl<'a> Elaborator<'a> {
                     value: ValueRef::Ssa(value),
                 }
             }
+            EffectOp::Atomic(op) => {
+                let place = self.demand_place(se.operand_nodes[0]);
+                let values =
+                    se.operand_nodes[1..].iter().map(|&node| ValueRef::Ssa(self.demand(node))).collect();
+                InstKind::Atomic {
+                    place,
+                    op: *op,
+                    values,
+                }
+            }
             EffectOp::Op { tag } => {
                 let args: Vec<ValueId> = se.operand_nodes.iter().map(|&nid| self.demand(nid)).collect();
                 InstKind::Op {

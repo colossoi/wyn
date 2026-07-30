@@ -257,6 +257,139 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
     );
 }
 #[test]
+fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
+    use crate::egir::graph_ops;
+    use crate::egir::program::RegionInterner;
+    use crate::egir::types::{EffectOp, SegExtent, SegSpace, SideEffectKind};
+    use crate::ssa::types::AtomicOp;
+    use smallvec::{smallvec, SmallVec};
+
+    let mut graph = PhysicalEGraph::new();
+    let block = graph.skeleton.entry;
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let array_ty = plain_array_ty(i32_ty.clone());
+    let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone(), None);
+    let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), None);
+    let two = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty.clone(), None);
+    let four = graph.intern_pure(PureOp::Int("4".into()), smallvec![], i32_ty.clone(), None);
+    let mut inputs = SmallVec::<[NodeId; 4]>::new();
+    for _ in 0..5 {
+        inputs.push(graph.intern_pure(
+            PureOp::ArrayLit(4),
+            smallvec![zero, zero, zero, zero],
+            array_ty.clone(),
+            None,
+        ));
+    }
+    let destinations = (0..2)
+        .map(|binding| {
+            graph_ops::intern_storage_view(
+                &mut graph,
+                crate::BindingRef::new(2, binding),
+                i32_ty.clone(),
+                None,
+            )
+        })
+        .collect::<Vec<_>>();
+    let histogram = hist::Op::<Physical> {
+        inputs: (0..5)
+            .map(|_| SoacInputType {
+                array: array_ty.clone(),
+            })
+            .collect(),
+        form: hist::HistForm {
+            bucket: screma::Lambda::identity(vec![i32_ty.clone(); 5]),
+            operations: vec![
+                hist::HistOp {
+                    shape: vec![two, two],
+                    race_factor: one,
+                    destinations: vec![destinations[0]],
+                    update: hist::Update::Reduce {
+                        operator: screma::Lambda::region(
+                            crate::egir::types::SegBody {
+                                region: crate::egir::types::RegionId::from_index(0),
+                                captures: vec![],
+                            },
+                            vec![i32_ty.clone(); 2],
+                            vec![i32_ty.clone()],
+                        ),
+                        neutral: vec![zero],
+                    },
+                },
+                hist::HistOp {
+                    shape: vec![four],
+                    race_factor: one,
+                    destinations: vec![destinations[1]],
+                    update: hist::Update::Reduce {
+                        operator: screma::Lambda::region(
+                            crate::egir::types::SegBody {
+                                region: crate::egir::types::RegionId::from_index(1),
+                                captures: vec![],
+                            },
+                            vec![i32_ty.clone(); 2],
+                            vec![i32_ty.clone()],
+                        ),
+                        neutral: vec![zero],
+                    },
+                },
+            ],
+        },
+        state: hist::PhysicalState::Atomic {
+            space: SegSpace::from_dims(vec![SegExtent::Fixed(4)]).unwrap(),
+            operations: vec![AtomicOp::Add, AtomicOp::Xor],
+        },
+    };
+    let mut effect_ids = crate::IdSource::new();
+    graph_ops::emit_pending_soac(
+        &mut graph,
+        block,
+        SemanticOpId::for_test(0),
+        Soac::Hist(histogram),
+        inputs,
+        bool_ty,
+        &mut effect_ids,
+        None,
+    );
+
+    let graph = super::run_one_body(graph, &RegionInterner::default(), &mut effect_ids)
+        .expect("multi-operation atomic Hist should expand");
+    let atomics = graph
+        .skeleton
+        .blocks
+        .iter()
+        .flat_map(|(_, block)| &block.side_effects)
+        .filter(|effect| matches!(effect.kind, SideEffectKind::Effect(EffectOp::Atomic(_))))
+        .count();
+    assert_eq!(atomics, 2, "one atomic update per histogram operation");
+    assert!(graph.skeleton.blocks.iter().all(|(_, block)| {
+        block.side_effects.iter().all(|effect| {
+            !matches!(
+                effect.kind,
+                SideEffectKind::Effect(EffectOp::Load | EffectOp::Store) | SideEffectKind::Soac(_)
+            )
+        })
+    }));
+    assert!(graph.nodes.iter().any(|(_, node)| {
+        matches!(
+            &node.kind,
+            ENode::Pure {
+                op: PureOp::BinOp(op),
+                ..
+            } if op == ">="
+        )
+    }));
+    assert!(graph.nodes.iter().any(|(_, node)| {
+        matches!(
+            &node.kind,
+            ENode::Pure {
+                op: PureOp::BinOp(op),
+                ..
+            } if op == "*"
+        )
+    }));
+}
+#[test]
 fn map_array_of_mixed_tuple_emits_componentwise_array_with() {
     // Map output: [8](f32, i32, vec3f32).
     // After SoA, the output becomes ([8]f32, [8]i32, [8]vec3f32).

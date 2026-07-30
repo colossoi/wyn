@@ -999,10 +999,15 @@ fn physicalize_soac(
                 }
             }
             let state = match state {
-                hist::State::Serial => hist::State::Serial,
-                hist::State::Segmented(iteration_space) => {
-                    hist::State::Segmented(space(iteration_space, nodes, bindings)?)
-                }
+                hist::ScheduledState::Serial => hist::ScheduledState::Serial,
+
+                hist::ScheduledState::Atomic {
+                    space: iteration_space,
+                    operations,
+                } => hist::ScheduledState::Atomic {
+                    space: space(iteration_space, nodes, bindings)?,
+                    operations,
+                },
             };
             Soac::Hist(hist::Op { inputs, form, state })
         }

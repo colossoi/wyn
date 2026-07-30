@@ -342,6 +342,10 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
         InstKind::Store { place, value } => {
             let _ = write!(out, "store {}, {}", fmt_place(*place), format_ref(value));
         }
+        InstKind::Atomic { place, op, values } => {
+            let values = values.iter().map(format_ref).collect::<Vec<_>>().join(", ");
+            let _ = write!(out, "atomic {:?} {}, {}", op, fmt_place(*place), values);
+        }
         InstKind::ViewIndex { view, index, result } => {
             let _ = write!(
                 out,

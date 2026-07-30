@@ -185,7 +185,11 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
         Soac::Hist(op) => Soac::Hist(hist::Op {
             inputs: op.inputs,
             form: op.form,
-            state: if facts.entry { hist::State::Segmented(facts.space) } else { hist::State::Serial },
+            state: if facts.entry {
+                hist::SemanticState::Segmented(facts.space)
+            } else {
+                hist::SemanticState::Serial
+            },
         }),
     }
 }

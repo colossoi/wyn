@@ -679,6 +679,33 @@ pub fn emit_store<P: Family>(
     effect_out
 }
 
+/// Emit an atomic integer update through an addressable place. The returned
+/// node is the value observed before the update.
+pub fn emit_atomic<P: Family>(
+    graph: &mut EGraph<P>,
+    block: BlockId,
+    place_nid: NodeId,
+    op: crate::ssa::types::AtomicOp,
+    values: &[NodeId],
+    elem_ty: Type<TypeName>,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+    span: Option<Span>,
+) -> NodeId {
+    assert_eq!(values.len(), op.value_arity());
+    let effect_in = alloc_effect(effect_ids);
+    let effect_out = alloc_effect(effect_ids);
+    let result = graph.alloc_side_effect_result(elem_ty);
+    let mut operand_nodes = smallvec![place_nid];
+    operand_nodes.extend_from_slice(values);
+    graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::Atomic(op)),
+        operand_nodes,
+        result: Some(result),
+        effects: Some((effect_in, effect_out)),
+        span,
+    });
+    result
+}
 /// Emit a workgroup execution+memory barrier
 /// in `block`. No operands or result; the effect token keeps it ordered
 /// against the workgroup-shared loads/stores it synchronizes. Returns the

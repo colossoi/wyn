@@ -44,6 +44,7 @@ pub type Planned = super::program::Program<
 
 mod capabilities;
 mod filter;
+mod hist;
 mod kernel;
 mod model;
 mod planning;
@@ -138,6 +139,14 @@ impl BuiltPhase {
         schedule::PhaseSpec::compute(self.body, dispatch, label).with_resources(self.resources)
     }
 
+    fn hist(
+        self,
+        dispatch: schedule::KernelDispatch,
+        owner: SemanticOpId,
+        operations: Vec<crate::ssa::types::AtomicOp>,
+    ) -> schedule::PhaseSpec {
+        schedule::PhaseSpec::hist(self.body, dispatch, owner, operations).with_resources(self.resources)
+    }
     fn filter(
         self,
         dispatch: schedule::KernelDispatch,
@@ -250,6 +259,9 @@ impl planning::PlannedKernel {
     ) -> error::Result<()> {
         let (body, output_projection, recipe) = self.into_parts();
         match recipe {
+            planning::PlannedRecipe::Hist(candidate) => {
+                lowering.lower_parallel_hist(body, kernel, candidate, output_projection)?
+            }
             planning::PlannedRecipe::Filter(candidate) => {
                 lowering.lower_parallel_filter(body, kernel, candidate, output_projection)?
             }
@@ -448,6 +460,25 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         Ok(())
     }
 
+    fn lower_parallel_hist(
+        &mut self,
+        body: super::program::PlannedEntry,
+        kernel: schedule::KernelId,
+        candidate: hist::HistCandidate,
+        output_projection: Option<Vec<usize>>,
+    ) -> error::Result<()> {
+        let domain = schedule::domain_from_space(&candidate.space)
+            .unwrap_or(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+        let phase = BuiltPhase::from_declarations(body)
+            .hist(
+                schedule::KernelDispatch::inferred(domain),
+                candidate.owner,
+                candidate.operations,
+            )
+            .with_output_projection(output_projection);
+        self.schedule.commit_kernel(kernel, phase)?;
+        Ok(())
+    }
     fn lower_parallel_reduce(
         &mut self,
         body: super::program::PlannedEntry,

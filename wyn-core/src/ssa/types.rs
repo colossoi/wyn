@@ -142,6 +142,30 @@ impl TerminatorExt for Terminator {
 // Instructions
 // =============================================================================
 
+/// Atomic read-modify-write operations over a scalar integer place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AtomicOp {
+    Add,
+    SignedMin,
+    UnsignedMin,
+    SignedMax,
+    UnsignedMax,
+    And,
+    Or,
+    Xor,
+    Exchange,
+    CompareExchange,
+}
+
+impl AtomicOp {
+    pub const fn value_arity(self) -> usize {
+        match self {
+            Self::CompareExchange => 2,
+            _ => 1,
+        }
+    }
+}
+
 /// The kind of operation an instruction performs.
 ///
 /// Pure operations (literals, arithmetic, calls, intrinsics, view ops,
@@ -176,6 +200,15 @@ pub enum InstKind<R = crate::BindingRef> {
     Store {
         place: PlaceId,
         value: ValueRef,
+    },
+
+    /// Atomic integer read-modify-write. The instruction returns the value
+    /// observed before the update. `CompareExchange` takes
+    /// `[comparison, replacement]`; every other operation takes one value.
+    Atomic {
+        place: PlaceId,
+        op: AtomicOp,
+        values: Vec<ValueRef>,
     },
 
     /// Index into a storage view. Produces an addressable place
@@ -223,6 +256,7 @@ impl<R: Clone> InstKind<R> {
             | InstKind::Load { .. }
             | InstKind::ControlBarrier => vec![],
             InstKind::Store { value, .. } => vec![*value],
+            InstKind::Atomic { values, .. } => values.clone(),
             InstKind::ViewIndex { view, index, .. } => vec![*view, *index],
             InstKind::PlaceIndex { index, .. } => vec![*index],
         }
@@ -235,7 +269,7 @@ impl<R: Clone> InstKind<R> {
     pub fn place_uses(&self) -> Vec<PlaceId> {
         match self {
             InstKind::Load { place } => vec![*place],
-            InstKind::Store { place, .. } => vec![*place],
+            InstKind::Store { place, .. } | InstKind::Atomic { place, .. } => vec![*place],
             InstKind::PlaceIndex { place, .. } => vec![*place],
             _ => vec![],
         }
@@ -266,6 +300,7 @@ impl<R: Clone> InstKind<R> {
                 }
             }
             InstKind::Store { value, .. } => sub(value),
+            InstKind::Atomic { values, .. } => values.iter_mut().for_each(sub),
             InstKind::ViewIndex { view, index, .. } => {
                 sub(view);
                 sub(index);
@@ -283,7 +318,7 @@ impl<R: Clone> InstKind<R> {
     pub fn substitute_places(&mut self, sub: &mut impl FnMut(&mut PlaceId)) {
         match self {
             InstKind::Load { place } => sub(place),
-            InstKind::Store { place, .. } => sub(place),
+            InstKind::Store { place, .. } | InstKind::Atomic { place, .. } => sub(place),
             InstKind::Alloca { result, .. }
             | InstKind::OutputSlot { result, .. }
             | InstKind::ViewIndex { result, .. } => sub(result),
@@ -315,6 +350,7 @@ impl<R> InstKind<R> {
             InstKind::Alloca { elem_ty, result } => InstKind::Alloca { elem_ty, result },
             InstKind::Load { place } => InstKind::Load { place },
             InstKind::Store { place, value } => InstKind::Store { place, value },
+            InstKind::Atomic { place, op, values } => InstKind::Atomic { place, op, values },
             InstKind::ViewIndex { view, index, result } => InstKind::ViewIndex { view, index, result },
             InstKind::PlaceIndex { place, index, result } => InstKind::PlaceIndex { place, index, result },
             InstKind::OutputSlot { index, result } => InstKind::OutputSlot { index, result },

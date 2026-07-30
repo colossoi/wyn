@@ -245,7 +245,7 @@ impl<R: GraphResource> WynSoacPhase for Semantic<R> {
     type ScremaResults = Vec<screma::ResultState>;
     type ScremaState = screma::SemanticState<R>;
     type FilterState = filter::SemanticState<R>;
-    type HistState = hist::State<R>;
+    type HistState = hist::SemanticState<R>;
 }
 
 impl<R: GraphResource> Family for Scheduled<R> {
@@ -258,7 +258,7 @@ impl<R: GraphResource> WynSoacPhase for Scheduled<R> {
     type ScremaResults = Vec<screma::ResultState>;
     type ScremaState = screma::ScheduledState<R>;
     type FilterState = filter::ScheduledState<R>;
-    type HistState = hist::State<R>;
+    type HistState = hist::ScheduledState<R>;
 }
 
 impl Family for Physical {
@@ -582,8 +582,8 @@ impl<R: GraphResource> Soac<Semantic<R>> {
             },
             Self::Filter(op) => Some(&op.state.space),
             Self::Hist(op) => match &op.state {
-                hist::State::Serial => None,
-                hist::State::Segmented(space) => Some(space),
+                hist::SemanticState::Serial => None,
+                hist::SemanticState::Segmented(space) => Some(space),
             },
         }
     }
