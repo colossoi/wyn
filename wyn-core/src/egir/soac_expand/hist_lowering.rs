@@ -1,0 +1,443 @@
+//! Histogram expansion implementations.
+
+use super::array_io::{emit_read_element, emit_seg_space_len};
+use super::loop_builder::{expand_loop, LoopBody};
+use super::screma_lowering::emit_screma_lambda;
+use super::*;
+
+/// Inputs for canonical serial histogram expansion. The form owns all bucket
+/// result routing and operation metadata; the loop supplies co-iterated input
+/// elements and a domain length.
+pub(super) struct HistLoop {
+    pub(super) form: hist::HistForm,
+    /// `(array_nid, array_type, elem_type)` per input, read per iteration.
+    pub(super) read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,
+    /// Loop bound source -- the first input `(nid, array_type)`.
+    pub(super) len_input: (NodeId, Type<TypeName>),
+    pub(super) result_node: NodeId,
+}
+
+/// Convert one operation's multidimensional index to the row-major scalar
+/// offset used by Wyn storage views.
+fn flatten_hist_index(graph: &mut EGraph, indices: &[NodeId], shape: &[NodeId]) -> NodeId {
+    debug_assert_eq!(indices.len(), shape.len());
+    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+    let Some((&first, rest)) = indices.split_first() else {
+        return graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_type, None);
+    };
+    rest.iter().copied().zip(shape.iter().copied().skip(1)).fold(first, |linear, (index, dimension)| {
+        let scaled = graph.intern_pure(
+            PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+            smallvec![linear, dimension],
+            i32_type.clone(),
+            None,
+        );
+        graph.intern_pure(
+            PureOp::BinOp(crate::op::BinaryOperator::Add),
+            smallvec![scaled, index],
+            i32_type.clone(),
+            None,
+        )
+    })
+}
+
+fn hist_index_in_bounds(graph: &mut EGraph, indices: &[NodeId], shape: &[NodeId]) -> NodeId {
+    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+    let bool_type = Type::Constructed(TypeName::Bool, vec![]);
+    let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_type, None);
+    indices.iter().copied().zip(shape.iter().copied()).fold(
+        graph.intern_pure(PureOp::Bool(true), smallvec![], bool_type.clone(), None),
+        |valid, (index, dimension)| {
+            let nonnegative = graph.intern_pure(
+                PureOp::BinOp(crate::op::BinaryOperator::GreaterEqual),
+                smallvec![index, zero],
+                bool_type.clone(),
+                None,
+            );
+            let below = graph.intern_pure(
+                PureOp::BinOp(crate::op::BinaryOperator::Less),
+                smallvec![index, dimension],
+                bool_type.clone(),
+                None,
+            );
+            let in_dimension = graph.intern_pure(
+                PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
+                smallvec![nonnegative, below],
+                bool_type.clone(),
+                None,
+            );
+            graph.intern_pure(
+                PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
+                smallvec![valid, in_dimension],
+                bool_type.clone(),
+                None,
+            )
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_hist_atomic_update(
+    graph: &mut EGraph,
+    block: BlockId,
+    next: BlockId,
+    place: NodeId,
+    incoming: NodeId,
+    value_type: Type<TypeName>,
+    operation: &hist::HistOp,
+    plan: hist::AtomicUpdate,
+    next_effect: &mut crate::IdSource<EffectToken>,
+    regions: &ProgramIdentities,
+) {
+    use super::super::graph_ops::emit_atomic;
+    use crate::ssa::types::AtomicOp;
+
+    match plan {
+        hist::AtomicUpdate::Direct(atomic) => {
+            emit_atomic(
+                graph,
+                block,
+                place,
+                atomic,
+                &[incoming],
+                value_type,
+                next_effect,
+                None,
+            );
+            graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
+                target: next,
+                args: vec![],
+            };
+        }
+        hist::AtomicUpdate::CompareExchange => {
+            let hist::Update::Reduce { operator, .. } = &operation.update else {
+                unreachable!("atomic candidate analysis excludes ordered overwrite")
+            };
+            let initial = emit_atomic(
+                graph,
+                block,
+                place,
+                AtomicOp::Load,
+                &[],
+                value_type.clone(),
+                next_effect,
+                None,
+            );
+            let header = graph.skeleton.create_block();
+            let attempt = graph.skeleton.create_block();
+            let retry = graph.skeleton.create_block();
+            let done = graph.skeleton.create_block();
+            let expected = graph.add_block_param(header, value_type.clone());
+            let bool_type = Type::Constructed(TypeName::Bool, vec![]);
+            let retry_required = graph.add_block_param(header, bool_type.clone());
+            let initially_retry =
+                graph.intern_pure(PureOp::Bool(true), smallvec![], bool_type.clone(), None);
+            graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
+                target: header,
+                args: vec![initial, initially_retry],
+            };
+            graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
+                cond: retry_required,
+                then_target: attempt,
+                then_args: vec![],
+                else_target: done,
+                else_args: vec![],
+            };
+            graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+                merge: done,
+                continue_block: retry,
+            });
+
+            let desired = emit_screma_lambda(graph, regions, operator, vec![expected, incoming])[0];
+            let cas_type =
+                Type::Constructed(TypeName::Tuple(2), vec![value_type.clone(), bool_type.clone()]);
+            let result = emit_atomic(
+                graph,
+                attempt,
+                place,
+                AtomicOp::CompareExchange,
+                &[expected, desired],
+                cas_type,
+                next_effect,
+                None,
+            );
+            let observed =
+                graph.intern_pure(PureOp::Project { index: 0 }, smallvec![result], value_type, None);
+            let exchanged = graph.intern_pure(
+                PureOp::Project { index: 1 },
+                smallvec![result],
+                bool_type.clone(),
+                None,
+            );
+            let retry_after_attempt = graph.intern_pure(
+                PureOp::UnaryOp(crate::op::UnaryOperator::LogicalNot),
+                smallvec![exchanged],
+                bool_type,
+                None,
+            );
+            graph.skeleton.blocks[attempt].term = SkeletonTerminator::Branch {
+                target: retry,
+                args: vec![],
+            };
+            graph.skeleton.blocks[retry].term = SkeletonTerminator::Branch {
+                target: header,
+                args: vec![observed, retry_after_attempt],
+            };
+            graph.skeleton.blocks[done].term = SkeletonTerminator::Branch {
+                target: next,
+                args: vec![],
+            };
+        }
+    }
+}
+/// One invocation processes one input element and issues an atomic update
+/// for every operation. Candidate analysis has already proven that each
+/// operation is a one-component integer reduction. Structurally recognised
+/// operators use a native atomic; general reducers use a CAS retry loop.
+pub(super) fn build_hist_atomic(
+    graph: &mut EGraph,
+    block: BlockId,
+    effect_index: usize,
+    spec: HistLoop,
+    space: &SegSpace,
+    atomic_operations: &[hist::AtomicUpdate],
+    next_effect: &mut crate::IdSource<EffectToken>,
+    regions: &ProgramIdentities,
+) {
+    let HistLoop {
+        form,
+        read_inputs,
+        len_input,
+        result_node,
+    } = spec;
+    debug_assert_eq!(form.operations.len(), atomic_operations.len());
+    let after = graph.skeleton.split_block_before_effect(block, effect_index);
+    graph.replace_node_preserving_type(
+        result_node,
+        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+    );
+
+    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+    let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
+    let bool_type = Type::Constructed(TypeName::Bool, vec![]);
+    let thread = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: catalog().known().thread_id,
+            overload_idx: 0,
+        },
+        smallvec![],
+        u32_type,
+        None,
+    );
+    let bitcast = catalog()
+        .conversion(&TypeName::Int(32), &TypeName::UInt(32))
+        .expect("catalog has structural u32-to-i32 conversion");
+    let lane = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: bitcast,
+            overload_idx: 0,
+        },
+        smallvec![thread],
+        i32_type,
+        None,
+    );
+    let length = emit_seg_space_len(
+        graph,
+        space,
+        &len_input,
+        &Type::Constructed(TypeName::Int(32), vec![]),
+    );
+    let in_range = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        smallvec![lane, length],
+        bool_type,
+        None,
+    );
+    let body = graph.skeleton.create_block();
+    graph.skeleton.blocks[block].term = SkeletonTerminator::CondBranch {
+        cond: in_range,
+        then_target: body,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[block].control_header = Some(ControlHeader::Selection { merge: after });
+
+    let arguments = read_inputs
+        .iter()
+        .map(|(array, array_type, element_type)| {
+            emit_read_element(graph, body, *array, lane, array_type, element_type, next_effect)
+        })
+        .collect::<Vec<_>>();
+    let bucket_values = emit_screma_lambda(graph, regions, &form.bucket, arguments);
+    let (indices, values) = bucket_values.split_at(form.index_count());
+    let mut index_offset = 0;
+    let mut value_offset = 0;
+    let mut current = body;
+
+    for (operation, atomic) in form.operations.iter().zip(atomic_operations) {
+        let operation_indices = &indices[index_offset..index_offset + operation.index_count()];
+        let operation_values = &values[value_offset..value_offset + operation.value_count()];
+        index_offset += operation.index_count();
+        value_offset += operation.value_count();
+        let update = graph.skeleton.create_block();
+        let next = graph.skeleton.create_block();
+        let valid = hist_index_in_bounds(graph, operation_indices, &operation.shape);
+        graph.skeleton.blocks[current].term = SkeletonTerminator::CondBranch {
+            cond: valid,
+            then_target: update,
+            then_args: vec![],
+            else_target: next,
+            else_args: vec![],
+        };
+        graph.skeleton.blocks[current].control_header = Some(ControlHeader::Selection { merge: next });
+
+        let bucket_index = flatten_hist_index(graph, operation_indices, &operation.shape);
+        let value_type = operation.update.value_types()[0].clone();
+        let place = graph.intern_pure(
+            PureOp::ViewIndex,
+            smallvec![operation.destinations[0], bucket_index],
+            value_type.clone(),
+            None,
+        );
+        emit_hist_atomic_update(
+            graph,
+            update,
+            next,
+            place,
+            operation_values[0],
+            value_type,
+            operation,
+            *atomic,
+            next_effect,
+            regions,
+        );
+        current = next;
+    }
+    graph.skeleton.blocks[current].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
+    };
+}
+/// Canonical serial histogram semantics. Bucket results are decoded in
+/// Futhark order: all operation indices, then all operation values. A
+/// multi-component reducer is invoked once with all previous components and
+/// all incoming components, then its results are stored componentwise.
+pub(super) fn build_hist_loop(
+    graph: &mut EGraph,
+    bid: BlockId,
+    idx_in_block: usize,
+    spec: HistLoop,
+    next_effect: &mut crate::IdSource<EffectToken>,
+    regions: &ProgramIdentities,
+) {
+    use super::super::graph_ops::{emit_storage_store, emit_view_load};
+    let HistLoop {
+        form,
+        read_inputs,
+        len_input,
+        result_node,
+    } = spec;
+
+    let result = ResultBinding::DummyBool { result_node };
+
+    expand_loop(
+        graph,
+        bid,
+        idx_in_block,
+        &len_input,
+        &[],
+        &result,
+        next_effect,
+        true,
+        move |graph, next_effect, blk, i_nid, _carried| {
+            let mut arguments = Vec::with_capacity(read_inputs.len());
+            for (array, array_type, element_type) in &read_inputs {
+                arguments.push(emit_read_element(
+                    graph,
+                    blk,
+                    *array,
+                    i_nid,
+                    array_type,
+                    element_type,
+                    next_effect,
+                ));
+            }
+            let bucket_values = emit_screma_lambda(graph, regions, &form.bucket, arguments);
+            debug_assert_eq!(bucket_values.len(), form.index_count() + form.value_count());
+            let (indices, values) = bucket_values.split_at(form.index_count());
+            let mut index_offset = 0;
+            let mut value_offset = 0;
+
+            let mut current = blk;
+            for operation in &form.operations {
+                let operation_indices = &indices[index_offset..index_offset + operation.index_count()];
+                let operation_values = &values[value_offset..value_offset + operation.value_count()];
+                index_offset += operation.index_count();
+                value_offset += operation.value_count();
+
+                // Futhark Hist ignores an update unless every index component
+                // is in range. Keep both the destination load and store in
+                // the selected block so serial and atomic paths agree.
+                let update = graph.skeleton.create_block();
+                let next = graph.skeleton.create_block();
+                let valid = hist_index_in_bounds(graph, operation_indices, &operation.shape);
+                graph.skeleton.blocks[current].term = SkeletonTerminator::CondBranch {
+                    cond: valid,
+                    then_target: update,
+                    then_args: vec![],
+                    else_target: next,
+                    else_args: vec![],
+                };
+                graph.skeleton.blocks[current].control_header =
+                    Some(ControlHeader::Selection { merge: next });
+
+                let bucket_index = flatten_hist_index(graph, operation_indices, &operation.shape);
+                let value_types = operation.update.value_types();
+                let updated_values = match &operation.update {
+                    hist::Update::OrderedOverwrite { .. } => operation_values.to_vec(),
+                    hist::Update::Reduce { operator, .. } => {
+                        let mut reducer_arguments = Vec::with_capacity(operation.value_count() * 2);
+                        for (&destination, value_type) in operation.destinations.iter().zip(value_types) {
+                            reducer_arguments.push(emit_view_load(
+                                graph,
+                                update,
+                                destination,
+                                bucket_index,
+                                value_type.clone(),
+                                next_effect,
+                                None,
+                            ));
+                        }
+                        reducer_arguments.extend_from_slice(operation_values);
+                        emit_screma_lambda(graph, regions, operator, reducer_arguments)
+                    }
+                };
+                debug_assert_eq!(updated_values.len(), operation.destinations.len());
+                for ((&destination, value_type), updated) in
+                    operation.destinations.iter().zip(value_types).zip(updated_values)
+                {
+                    emit_storage_store(
+                        graph,
+                        update,
+                        destination,
+                        bucket_index,
+                        updated,
+                        value_type.clone(),
+                        next_effect,
+                        None,
+                    );
+                }
+                graph.skeleton.blocks[update].term = SkeletonTerminator::Branch {
+                    target: next,
+                    args: vec![],
+                };
+                current = next;
+            }
+            LoopBody {
+                tail: current,
+                carried: vec![],
+            }
+        },
+    );
+}
