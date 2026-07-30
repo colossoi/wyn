@@ -2065,7 +2065,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 .iter()
                                 .map(|value| self.get_value(*value))
                                 .collect::<Result<Vec<_>>>()?;
+                            let ty =
+                                self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
+                            let var = wgsl_var(result_id);
                             let expression = match (op, values.as_slice()) {
+                                (AtomicOp::Load, []) => format!("atomicLoad(&{target})"),
                                 (AtomicOp::Add, [value]) => format!("atomicAdd(&{target}, {value})"),
                                 (AtomicOp::SignedMin | AtomicOp::UnsignedMin, [value]) => {
                                     format!("atomicMin(&{target}, {value})")
@@ -2079,9 +2083,20 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 (AtomicOp::Exchange, [value]) => {
                                     format!("atomicExchange(&{target}, {value})")
                                 }
-                                (AtomicOp::CompareExchange, [comparison, replacement]) => format!(
-                                    "atomicCompareExchangeWeak(&{target}, {comparison}, {replacement}).old_value"
-                                ),
+                                (AtomicOp::CompareExchange, [comparison, replacement]) => {
+                                    let cas = format!("{var}_cas");
+                                    writeln!(
+                                        output,
+                                        "{}let {} = atomicCompareExchangeWeak(&{}, {}, {});",
+                                        self.ctx.indent_str(),
+                                        cas,
+                                        target,
+                                        comparison,
+                                        replacement,
+                                    )
+                                    .unwrap();
+                                    format!("{ty}({cas}.old_value, {cas}.exchanged)")
+                                }
                                 _ => {
                                     return Err(crate::err_wgsl_at!(
                                         self.blame_span(),
@@ -2091,9 +2106,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                     ));
                                 }
                             };
-                            let ty =
-                                self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
-                            let var = wgsl_var(result_id);
                             writeln!(
                                 output,
                                 "{}let {}: {} = {};",

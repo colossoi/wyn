@@ -337,7 +337,10 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
         },
         state: hist::PhysicalState::Atomic {
             space: SegSpace::from_dims(vec![SegExtent::Fixed(4)]).unwrap(),
-            operations: vec![AtomicOp::Add, AtomicOp::Xor],
+            operations: vec![
+                hist::AtomicUpdate::Direct(AtomicOp::Add),
+                hist::AtomicUpdate::Direct(AtomicOp::Xor),
+            ],
         },
     };
     let mut effect_ids = crate::IdSource::new();

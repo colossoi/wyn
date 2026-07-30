@@ -191,7 +191,7 @@ impl PhaseSpec {
         body: PlannedEntry,
         dispatch: KernelDispatch,
         owner: super::super::program::SemanticOpId,
-        operations: Vec<crate::ssa::types::AtomicOp>,
+        operations: Vec<crate::egir::soac::hist::AtomicUpdate>,
     ) -> Self {
         let resources = declared_resources(&body.resource_declarations);
         Self {

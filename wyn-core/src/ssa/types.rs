@@ -142,9 +142,10 @@ impl TerminatorExt for Terminator {
 // Instructions
 // =============================================================================
 
-/// Atomic read-modify-write operations over a scalar integer place.
+/// Atomic operations over a scalar integer place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AtomicOp {
+    Load,
     Add,
     SignedMin,
     UnsignedMin,
@@ -160,6 +161,7 @@ pub enum AtomicOp {
 impl AtomicOp {
     pub const fn value_arity(self) -> usize {
         match self {
+            Self::Load => 0,
             Self::CompareExchange => 2,
             _ => 1,
         }
@@ -202,9 +204,10 @@ pub enum InstKind<R = crate::BindingRef> {
         value: ValueRef,
     },
 
-    /// Atomic integer read-modify-write. The instruction returns the value
-    /// observed before the update. `CompareExchange` takes
-    /// `[comparison, replacement]`; every other operation takes one value.
+    /// Atomic integer operation. `Load` takes no values. `CompareExchange`
+    /// takes `[comparison, replacement]` and returns
+    /// `(observed_value, exchanged)`; every other operation takes one value
+    /// and returns the value observed before the update.
     Atomic {
         place: PlaceId,
         op: AtomicOp,

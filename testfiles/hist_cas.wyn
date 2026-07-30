@@ -1,0 +1,16 @@
+#[compute]
+entry compare_exchange_histogram(
+    indices: []i32,
+    values: []i32,
+    bias: i32,
+    #[storage(set=2, binding=0, access=write)] bins: *[]i32
+) () =
+  let _ =
+    reduce_by_index(
+      bins,
+      |old: i32, value: i32| old + value + bias,
+      -bias,
+      indices,
+      values,
+    )
+  in ()

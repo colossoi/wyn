@@ -85,13 +85,19 @@ pub enum SemanticState<R> {
     Segmented(SegSpace<R>),
 }
 
+/// Parallel update selected for one histogram operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtomicUpdate {
+    Direct(crate::ssa::types::AtomicOp),
+    CompareExchange,
+}
 /// Target execution selected after reducer legality has been proven.
 #[derive(Clone, Debug)]
 pub enum ScheduledState<R> {
     Serial,
     Atomic {
         space: SegSpace<R>,
-        operations: Vec<crate::ssa::types::AtomicOp>,
+        operations: Vec<AtomicUpdate>,
     },
 }
 

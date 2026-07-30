@@ -1184,21 +1184,130 @@ fn hist_index_in_bounds(graph: &mut EGraph, indices: &[NodeId], shape: &[NodeId]
     )
 }
 
-/// One invocation processes one input element and issues a native atomic
-/// update for every operation. Candidate analysis has already proven that
-/// each operation is a one-component integer reduction matching its atomic.
+#[allow(clippy::too_many_arguments)]
+fn emit_hist_atomic_update(
+    graph: &mut EGraph,
+    block: BlockId,
+    next: BlockId,
+    place: NodeId,
+    incoming: NodeId,
+    value_type: Type<TypeName>,
+    operation: &hist::HistOp,
+    plan: hist::AtomicUpdate,
+    next_effect: &mut crate::IdSource<EffectToken>,
+    regions: &RegionInterner,
+) {
+    use super::graph_ops::emit_atomic;
+    use crate::ssa::types::AtomicOp;
+
+    match plan {
+        hist::AtomicUpdate::Direct(atomic) => {
+            emit_atomic(
+                graph,
+                block,
+                place,
+                atomic,
+                &[incoming],
+                value_type,
+                next_effect,
+                None,
+            );
+            graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
+                target: next,
+                args: vec![],
+            };
+        }
+        hist::AtomicUpdate::CompareExchange => {
+            let hist::Update::Reduce { operator, .. } = &operation.update else {
+                unreachable!("atomic candidate analysis excludes ordered overwrite")
+            };
+            let initial = emit_atomic(
+                graph,
+                block,
+                place,
+                AtomicOp::Load,
+                &[],
+                value_type.clone(),
+                next_effect,
+                None,
+            );
+            let header = graph.skeleton.create_block();
+            let attempt = graph.skeleton.create_block();
+            let retry = graph.skeleton.create_block();
+            let done = graph.skeleton.create_block();
+            let expected = graph.add_block_param(header, value_type.clone());
+            let bool_type = Type::Constructed(TypeName::Bool, vec![]);
+            let retry_required = graph.add_block_param(header, bool_type.clone());
+            let initially_retry =
+                graph.intern_pure(PureOp::Bool(true), smallvec![], bool_type.clone(), None);
+            graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
+                target: header,
+                args: vec![initial, initially_retry],
+            };
+            graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
+                cond: retry_required,
+                then_target: attempt,
+                then_args: vec![],
+                else_target: done,
+                else_args: vec![],
+            };
+            graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
+                merge: done,
+                continue_block: retry,
+            });
+
+            let desired = emit_screma_lambda(graph, regions, operator, vec![expected, incoming])[0];
+            let cas_type =
+                Type::Constructed(TypeName::Tuple(2), vec![value_type.clone(), bool_type.clone()]);
+            let result = emit_atomic(
+                graph,
+                attempt,
+                place,
+                AtomicOp::CompareExchange,
+                &[expected, desired],
+                cas_type,
+                next_effect,
+                None,
+            );
+            let observed =
+                graph.intern_pure(PureOp::Project { index: 0 }, smallvec![result], value_type, None);
+            let exchanged = graph.intern_pure(
+                PureOp::Project { index: 1 },
+                smallvec![result],
+                bool_type.clone(),
+                None,
+            );
+            let retry_after_attempt =
+                graph.intern_pure(PureOp::UnaryOp("!".into()), smallvec![exchanged], bool_type, None);
+            graph.skeleton.blocks[attempt].term = SkeletonTerminator::Branch {
+                target: retry,
+                args: vec![],
+            };
+            graph.skeleton.blocks[retry].term = SkeletonTerminator::Branch {
+                target: header,
+                args: vec![observed, retry_after_attempt],
+            };
+            graph.skeleton.blocks[done].term = SkeletonTerminator::Branch {
+                target: next,
+                args: vec![],
+            };
+        }
+    }
+}
+/// One invocation processes one input element and issues an atomic update
+/// for every operation. Candidate analysis has already proven that each
+/// operation is a one-component integer reduction. Structurally recognised
+/// operators use a native atomic; general reducers use a CAS retry loop.
 fn build_hist_atomic(
     graph: &mut EGraph,
     block: BlockId,
     effect_index: usize,
     spec: HistLoop,
     space: &SegSpace,
-    atomic_operations: &[crate::ssa::types::AtomicOp],
+    atomic_operations: &[hist::AtomicUpdate],
     next_effect: &mut crate::IdSource<EffectToken>,
     regions: &RegionInterner,
 ) {
-    use super::graph_ops::emit_atomic;
-
     let HistLoop {
         form,
         read_inputs,
@@ -1293,20 +1402,18 @@ fn build_hist_atomic(
             value_type.clone(),
             None,
         );
-        emit_atomic(
+        emit_hist_atomic_update(
             graph,
             update,
+            next,
             place,
-            *atomic,
-            &[operation_values[0]],
+            operation_values[0],
             value_type,
+            operation,
+            *atomic,
             next_effect,
-            None,
+            regions,
         );
-        graph.skeleton.blocks[update].term = SkeletonTerminator::Branch {
-            target: next,
-            args: vec![],
-        };
         current = next;
     }
     graph.skeleton.blocks[current].term = SkeletonTerminator::Branch {

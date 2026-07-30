@@ -687,14 +687,14 @@ pub fn emit_atomic<P: Family>(
     place_nid: NodeId,
     op: crate::ssa::types::AtomicOp,
     values: &[NodeId],
-    elem_ty: Type<TypeName>,
+    result_ty: Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> NodeId {
     assert_eq!(values.len(), op.value_arity());
     let effect_in = alloc_effect(effect_ids);
     let effect_out = alloc_effect(effect_ids);
-    let result = graph.alloc_side_effect_result(elem_ty);
+    let result = graph.alloc_side_effect_result(result_ty);
     let mut operand_nodes = smallvec![place_nid];
     operand_nodes.extend_from_slice(values);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {

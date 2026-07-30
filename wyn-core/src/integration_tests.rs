@@ -829,6 +829,50 @@ entry accumulate(indices: []i32,
     assert!(wgsl.contains("atomicAdd("), "atomic histogram update:\n{wgsl}");
 }
 #[test]
+fn captured_integer_histogram_reducer_uses_compare_exchange_loop() {
+    let source = r#"
+#[compute]
+entry accumulate(indices: []i32,
+                 values: []i32,
+                 bias: i32,
+                 #[storage(set=2, binding=0, access=write)] dest: *[]i32) () =
+  let _ = reduce_by_index(dest, |a: i32, b: i32| a + b + bias, -bias, indices, values) in
+  ()
+"#;
+    let planned = crate::egir::plan(compile_to_semantic_egir(source), crate::LoweringProfile::PORTABLE)
+        .expect("plan compare-exchange histogram");
+    assert_eq!(
+        planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        ["hist_atomic"]
+    );
+
+    let spirv = compile_to_spirv(source).expect("CAS histogram compiles to SPIR-V");
+    let mut loader = wspirv::dr::Loader::new();
+    wspirv::binary::parse_words(&spirv, &mut loader).expect("parse CAS histogram SPIR-V");
+    assert!(
+        loader.module().functions.iter().any(|function| {
+            function.blocks.iter().any(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .any(|inst| inst.class.opcode == wspirv::spirv::Op::AtomicCompareExchange)
+            })
+        }),
+        "general scalar reducer must emit OpAtomicCompareExchange"
+    );
+
+    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+        compile_to_semantic_egir(source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    ))
+    .expect("CAS histogram lowers to WGSL");
+    assert!(
+        wgsl.contains("atomicCompareExchangeWeak("),
+        "CAS histogram update:\n{wgsl}"
+    );
+    assert!(wgsl.contains(".exchanged"), "weak-CAS retry condition:\n{wgsl}");
+}
+#[test]
 fn high_race_factor_histogram_keeps_serial_fallback_without_replication() {
     use crate::egir::types::{PureOp, SideEffectKind, Soac, SoacEffect};
     use smallvec::smallvec;

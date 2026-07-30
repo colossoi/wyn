@@ -1,4 +1,4 @@
-//! Direct-atomic lowering eligibility for canonical histograms.
+//! Atomic lowering eligibility for canonical histograms.
 
 use polytype::Type;
 
@@ -16,7 +16,7 @@ use super::planning::LocatedHist;
 pub(super) struct HistCandidate {
     pub owner: SemanticOpId,
     pub space: SegSpace,
-    pub operations: Vec<AtomicOp>,
+    pub operations: Vec<hist::AtomicUpdate>,
 }
 
 pub(super) fn analyze_hist_candidate(
@@ -45,12 +45,11 @@ fn analyze_operation(
     program: &ResourcesAllocated,
     graph: &crate::egir::types::EGraph<Semantic>,
     operation: &hist::HistOp,
-) -> Option<AtomicOp> {
+) -> Option<hist::AtomicUpdate> {
     // The race factor is a contention estimate. Until replicated histograms
-    // are available, direct atomics are selected only for bounded contention;
+    // are available, atomic recipes are selected only for bounded contention;
     // high or dynamic estimates retain the serial fallback.
     let race_factor = constant_i32(graph, operation.race_factor)?;
-
     if !(1..=32).contains(&race_factor) {
         return None;
     }
@@ -68,6 +67,14 @@ fn analyze_operation(
     };
     let body = operator.seg_body()?;
     let function = program.region(body.region)?;
+    let direct = recognize_direct_atomic(function, signed);
+    Some(direct.map_or(hist::AtomicUpdate::CompareExchange, hist::AtomicUpdate::Direct))
+}
+
+fn recognize_direct_atomic(
+    function: &crate::egir::program::SemanticFunc,
+    signed: bool,
+) -> Option<AtomicOp> {
     if function.graph.skeleton.blocks.len() != 1
         || function.graph.skeleton.blocks.values().any(|block| !block.side_effects.is_empty())
     {
@@ -81,7 +88,7 @@ fn analyze_operation(
     let ENode::Pure { op, operands } = &function.graph.nodes[result].kind else {
         return None;
     };
-    if !matches_parameter_pair(&function.graph, &operands) {
+    if !matches_parameter_pair(&function.graph, operands) {
         return None;
     }
     match op {
@@ -104,7 +111,6 @@ fn analyze_operation(
         _ => None,
     }
 }
-
 fn matches_parameter_pair(graph: &crate::egir::types::EGraph<Semantic>, operands: &[NodeId]) -> bool {
     let [left, right] = operands else {
         return false;

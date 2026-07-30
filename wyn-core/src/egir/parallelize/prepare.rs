@@ -34,13 +34,13 @@ impl ParallelFilterPlan {
 #[derive(Clone)]
 pub(super) struct ParallelHistPlan {
     owner: super::super::program::SemanticOpId,
-    operations: Vec<crate::ssa::types::AtomicOp>,
+    operations: Vec<crate::egir::soac::hist::AtomicUpdate>,
 }
 
 impl ParallelHistPlan {
     pub(super) fn new(
         owner: super::super::program::SemanticOpId,
-        operations: Vec<crate::ssa::types::AtomicOp>,
+        operations: Vec<crate::egir::soac::hist::AtomicUpdate>,
     ) -> Self {
         Self { owner, operations }
     }

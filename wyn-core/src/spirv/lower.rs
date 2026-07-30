@@ -650,6 +650,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let scope = self.constructor.const_u32(spirv::Scope::Device as u32);
                 let semantics = self.constructor.const_u32(0);
                 match (op, values.as_slice()) {
+                    (AtomicOp::Load, []) => {
+                        self.constructor.builder.atomic_load(result_ty, None, ptr_id, scope, semantics)?
+                    }
                     (AtomicOp::Add, [value]) => self
                         .constructor
                         .builder
@@ -687,8 +690,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         .builder
                         .atomic_exchange(result_ty, None, ptr_id, scope, semantics, *value)?,
                     (AtomicOp::CompareExchange, [comparison, replacement]) => {
-                        self.constructor.builder.atomic_compare_exchange(
-                            result_ty,
+                        let elem_ty = self.constructor.polytype_to_spirv(self.body.place_elem_ty(*place));
+                        let old = self.constructor.builder.atomic_compare_exchange(
+                            elem_ty,
                             None,
                             ptr_id,
                             scope,
@@ -696,7 +700,14 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             semantics,
                             *replacement,
                             *comparison,
-                        )?
+                        )?;
+                        let exchanged = self.constructor.builder.i_equal(
+                            self.constructor.bool_type,
+                            None,
+                            old,
+                            *comparison,
+                        )?;
+                        self.constructor.builder.composite_construct(result_ty, None, [old, exchanged])?
                     }
                     _ => bail_spirv_at!(
                         self.blame_span(),

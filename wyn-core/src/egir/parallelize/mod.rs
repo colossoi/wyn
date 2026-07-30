@@ -143,7 +143,7 @@ impl BuiltPhase {
         self,
         dispatch: schedule::KernelDispatch,
         owner: SemanticOpId,
-        operations: Vec<crate::ssa::types::AtomicOp>,
+        operations: Vec<crate::egir::soac::hist::AtomicUpdate>,
     ) -> schedule::PhaseSpec {
         schedule::PhaseSpec::hist(self.body, dispatch, owner, operations).with_resources(self.resources)
     }
