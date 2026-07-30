@@ -27,6 +27,7 @@ mod filter;
 mod histogram;
 mod horizontal;
 mod indexed;
+mod map_anchor;
 mod screma;
 mod space;
 mod support;
