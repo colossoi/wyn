@@ -26,7 +26,9 @@ use crate::flow::{BlockId, ControlHeader};
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
-use super::graph_ops::{alloc_effect, emit_alloca, emit_load, emit_place_index_store, emit_store};
+use super::graph_ops::{
+    alloc_effect, emit_alloca, emit_load, emit_place_index_store, emit_storage_store, emit_store,
+};
 use super::program::{
     PhysicalEGraph as EGraph, PhysicalFilterOutput, PhysicalFilterWorkBuffers as FilterWorkBuffers,
     PhysicalSegSpace as SegSpace, PhysicalSideEffect as SideEffect,
@@ -929,25 +931,18 @@ fn build_filter_loop(
     spec: FilterLoop,
     next_effect: &mut crate::IdSource<EffectToken>,
 ) {
-    let runtime_scratch = match &spec.output {
-        filter::Output::Runtime { scratch, .. } => Some(*scratch),
-        filter::Output::Local { .. } => None,
-    };
-    if let Some(scratch) = runtime_scratch {
-        build_runtime_filter_loop(graph, bid, idx_in_block, spec, scratch, next_effect);
+    if let filter::Output::Runtime { scratch, .. } = &spec.output {
+        build_runtime_filter_loop(graph, bid, idx_in_block, &spec, *scratch, next_effect);
         return;
     }
     let filter::Output::Local {
-        ref capacity,
+        capacity,
         destination,
     } = &spec.output
     else {
         unreachable!()
     };
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-    // Composite buffer type — the underlying storage of the Bounded result. It
-    // holds the kept (output) elements, so it is typed in `output_elem_ty`.
     let buf_ty = Type::Constructed(
         TypeName::Array,
         vec![
@@ -958,49 +953,16 @@ fn build_filter_loop(
         ],
     );
 
-    // Split `bid` into preheader (bid) + after. The suffix (side-effects
-    // that followed the Filter) is held in `suffix` until the buffer `Load`
-    // is emitted at the head of `after` — any suffix side-effect that
-    // references the filter result resolves through `Tuple(buf_load, count)`
-    // and must see `buf_load` already elaborated.
+    // Hold the suffix until the result buffer has been loaded at the head of
+    // `after`; suffix effects may consume the filter result.
     let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
     let suffix = graph.skeleton.blocks[after].side_effects.drain(..).collect::<Vec<_>>();
-
-    // `after` block param: the surviving count. The buffer place is
-    // referenced directly through `buf_place_nid`. Count is `i32`
-    // throughout — matches the index type taken by element-place stores,
-    // the result type of `length()` at the backend boundary, and
-    // `Bounded`'s on-disk `len` field.
-    let after_count_nid = graph.add_block_param(after, i32_ty.clone());
-
-    // Build header, body, then, else_, sel_merge, continue blocks. The
-    // SPIR-V structured-control-flow rules need the inner selection's
-    // merge to be distinct from the loop's continue target, so this loop
-    // uses a separate continue block that's just a forwarder back to the
-    // header.
-    let header = graph.skeleton.create_block();
-    let body = graph.skeleton.create_block();
-    let then_blk = graph.skeleton.create_block();
-    let else_blk = graph.skeleton.create_block();
-    let sel_merge = graph.skeleton.create_block();
-    let continue_blk = graph.skeleton.create_block();
-
-    // Header block params: count_in, i_in. The buffer place is referenced
-    // through `buf_place_nid` directly.
-    let count_in_nid = graph.add_block_param(header, i32_ty.clone());
-    let i_in_nid = graph.add_block_param(header, i32_ty.clone());
-
-    // Preheader: allocate the function-local buffer place; for an
-    // `InputBuffer` destination, seed it with the input array so the result
-    // observably aliases the input. `Fresh` skips the init store — every
-    // surviving element is written through `PlaceIndex` before `count`
-    // advances past it, so unread slots are never observed.
-    let buf_place_nid = emit_alloca(graph, bid, buf_ty.clone(), next_effect, None);
+    let buf_place = emit_alloca(graph, bid, buf_ty.clone(), next_effect, None);
     if destination.is_input_buffer() {
-        let _ = emit_store(
+        emit_store(
             graph,
             bid,
-            buf_place_nid,
+            buf_place,
             filter_primary_input(&spec).0,
             next_effect,
             None,
@@ -1008,117 +970,157 @@ fn build_filter_loop(
     } else if !destination.is_unplaced_fresh() {
         panic!("Filter[OutputView] not supported — see filter-consuming-input.md");
     }
-    let zero_i32_nid = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone(), None);
+
+    let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone(), None);
+    let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), None);
+    let after_count = build_serial_filter_cfg(
+        graph,
+        bid,
+        after,
+        &spec,
+        i32_ty,
+        zero,
+        one,
+        FilterSink::Local(buf_place),
+        next_effect,
+    );
+
+    let loaded = emit_load(graph, after, buf_place, buf_ty, next_effect, None);
+    graph.skeleton.blocks[after].side_effects.extend(suffix);
+    graph.replace_pure_node(spec.result_node, PureOp::Tuple(2), smallvec![loaded, after_count]);
+}
+
+#[derive(Clone, Copy)]
+enum FilterSink {
+    Local(NodeId),
+    Runtime(NodeId),
+}
+
+/// Build the counted serial compaction loop shared by local and runtime
+/// filters. Callers choose the index width, destination, and result format.
+fn build_serial_filter_cfg(
+    graph: &mut EGraph,
+    bid: BlockId,
+    after: BlockId,
+    spec: &FilterLoop,
+    index_ty: Type<TypeName>,
+    zero: NodeId,
+    one: NodeId,
+    sink: FilterSink,
+    next_effect: &mut crate::IdSource<EffectToken>,
+) -> NodeId {
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let after_count = graph.add_block_param(after, index_ty.clone());
+    let header = graph.skeleton.create_block();
+    let body = graph.skeleton.create_block();
+    let then_block = graph.skeleton.create_block();
+    let else_block = graph.skeleton.create_block();
+    let selection_merge = graph.skeleton.create_block();
+    let continue_block = graph.skeleton.create_block();
+    let count = graph.add_block_param(header, index_ty.clone());
+    let index = graph.add_block_param(header, index_ty.clone());
+
     graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![zero_i32_nid, zero_i32_nid],
+        args: vec![zero, zero],
     };
-
-    // Header → cond_br(i<N, body, after(count)). The buffer place is
-    // referenced through `buf_place_nid` directly, no block-param carry.
-    let len_nid = emit_length(
+    let length = emit_length(
         graph,
-        filter_primary_input(&spec).0,
-        &filter_primary_input(&spec).1,
-        &i32_ty,
+        filter_primary_input(spec).0,
+        &filter_primary_input(spec).1,
+        &index_ty,
     );
-    let cond_nid = graph.intern_pure(
+    let in_range = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Less),
-        smallvec![i_in_nid, len_nid],
+        smallvec![index, length],
         bool_ty.clone(),
         None,
     );
     graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
-        cond: cond_nid,
+        cond: in_range,
         then_target: body,
         then_args: vec![],
         else_target: after,
-        else_args: vec![count_in_nid],
+        else_args: vec![count],
     };
     graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
         merge: after,
-        continue_block: continue_blk,
+        continue_block,
     });
 
-    // Body: elem = arr[i]; pred = pred_func(elem, captures).
-    let kept_nid = filter_kept_value(graph, body, i_in_nid, &spec, next_effect);
-    let mut pred_operands: SmallVec<[NodeId; 4]> = smallvec![kept_nid];
+    let kept = filter_kept_value(graph, body, index, spec, next_effect);
+    let mut pred_operands: SmallVec<[NodeId; 4]> = smallvec![kept];
     pred_operands.extend(spec.captures.iter().copied());
-    let pred_nid = graph.intern_pure(
-        PureOp::Call(spec.pred_func.clone()),
-        pred_operands,
-        bool_ty.clone(),
-        None,
-    );
-
-    // Body → cond_br(pred, then, else_).
+    let predicate = graph.intern_pure(PureOp::Call(spec.pred_func), pred_operands, bool_ty, None);
     graph.skeleton.blocks[body].term = SkeletonTerminator::CondBranch {
-        cond: pred_nid,
-        then_target: then_blk,
+        cond: predicate,
+        then_target: then_block,
         then_args: vec![],
-        else_target: else_blk,
+        else_target: else_block,
         else_args: vec![],
     };
-    graph.skeleton.blocks[body].control_header = Some(ControlHeader::Selection { merge: sel_merge });
+    graph.skeleton.blocks[body].control_header = Some(ControlHeader::Selection {
+        merge: selection_merge,
+    });
 
-    // then: write the accepted value into `buf_place[count_in]`, bump
-    // count; Branch(sel_merge, [count_bumped]).
-    emit_place_index_store(
-        graph,
-        then_blk,
-        buf_place_nid,
-        count_in_nid,
-        kept_nid,
-        spec.output_elem_ty.clone(),
-        next_effect,
-        None,
-    );
-    let one_i32_nid = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), None);
-    let count_bumped_nid = graph.intern_pure(
+    match sink {
+        FilterSink::Local(place) => {
+            emit_place_index_store(
+                graph,
+                then_block,
+                place,
+                count,
+                kept,
+                spec.output_elem_ty.clone(),
+                next_effect,
+                None,
+            );
+        }
+        FilterSink::Runtime(view) => {
+            emit_storage_store(
+                graph,
+                then_block,
+                view,
+                count,
+                kept,
+                spec.output_elem_ty.clone(),
+                next_effect,
+                None,
+            );
+        }
+    }
+    let bumped_count = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Add),
-        smallvec![count_in_nid, one_i32_nid],
-        i32_ty.clone(),
+        smallvec![count, one],
+        index_ty.clone(),
         None,
     );
-    graph.skeleton.blocks[then_blk].term = SkeletonTerminator::Branch {
-        target: sel_merge,
-        args: vec![count_bumped_nid],
+    graph.skeleton.blocks[then_block].term = SkeletonTerminator::Branch {
+        target: selection_merge,
+        args: vec![bumped_count],
+    };
+    graph.skeleton.blocks[else_block].term = SkeletonTerminator::Branch {
+        target: selection_merge,
+        args: vec![count],
     };
 
-    // else_: Branch(sel_merge, [count_in]).
-    graph.skeleton.blocks[else_blk].term = SkeletonTerminator::Branch {
-        target: sel_merge,
-        args: vec![count_in_nid],
+    let next_count = graph.add_block_param(selection_merge, index_ty.clone());
+    graph.skeleton.blocks[selection_merge].term = SkeletonTerminator::Branch {
+        target: continue_block,
+        args: vec![next_count],
     };
-
-    // sel_merge: param count_next; Branch(continue, [count_next]).
-    let count_next_nid = graph.add_block_param(sel_merge, i32_ty.clone());
-    graph.skeleton.blocks[sel_merge].term = SkeletonTerminator::Branch {
-        target: continue_blk,
-        args: vec![count_next_nid],
-    };
-
-    // continue: param (count_for_continue);
-    // i_next = i+1; Branch(header, [count_for_continue, i_next]).
-    let cont_count_nid = graph.add_block_param(continue_blk, i32_ty.clone());
-    let next_i_nid = increment(graph, i_in_nid);
-    graph.skeleton.blocks[continue_blk].term = SkeletonTerminator::Branch {
-        target: header,
-        args: vec![cont_count_nid, next_i_nid],
-    };
-
-    // `after` opens with one whole-array `Load` of the buffer place,
-    // then the suffix (held back since the split) — so any suffix
-    // side-effect that demands the filter result finds `buf_loaded_nid`
-    // already elaborated. Rebind the original result NodeId to a
-    // `Tuple(buf, count)` matching the `Bounded` struct layout.
-    let buf_loaded_nid = emit_load(graph, after, buf_place_nid, buf_ty.clone(), next_effect, None);
-    graph.skeleton.blocks[after].side_effects.extend(suffix);
-    graph.replace_pure_node(
-        spec.result_node,
-        PureOp::Tuple(2),
-        smallvec![buf_loaded_nid, after_count_nid],
+    let continued_count = graph.add_block_param(continue_block, index_ty.clone());
+    let next_index = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        smallvec![index, one],
+        index_ty,
+        None,
     );
+    graph.skeleton.blocks[continue_block].term = SkeletonTerminator::Branch {
+        target: header,
+        args: vec![continued_count, next_index],
+    };
+    after_count
 }
 
 /// Runtime-sized `filter` lowering: a single-thread serial scatter into the
@@ -1951,167 +1953,50 @@ fn build_runtime_filter_loop(
     graph: &mut EGraph,
     bid: BlockId,
     idx_in_block: usize,
-    spec: FilterLoop,
+    spec: &FilterLoop,
     scratch_out: crate::BindingRef,
     next_effect: &mut crate::IdSource<EffectToken>,
 ) {
-    use super::graph_ops::{emit_storage_store, intern_storage_view, intern_u32};
+    use super::graph_ops::{intern_storage_view, intern_u32};
+
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-
-    // A view over the whole scratch buffer, for the per-iteration store. The
-    // scratch holds the kept (output) elements.
     let scratch_view = intern_storage_view(graph, scratch_out, spec.output_elem_ty.clone(), None);
-
-    // Split `bid` into preheader (bid) + after, moving the suffix + terminator.
     let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
-
-    // After-block param: the final surviving count.
-    let after_count_nid = graph.add_block_param(after, u32_ty.clone());
-
-    let header = graph.skeleton.create_block();
-    let body = graph.skeleton.create_block();
-    let then_blk = graph.skeleton.create_block();
-    let else_blk = graph.skeleton.create_block();
-    let sel_merge = graph.skeleton.create_block();
-    let continue_blk = graph.skeleton.create_block();
-
-    // Header params: count_in, i_in.
-    let count_in_nid = graph.add_block_param(header, u32_ty.clone());
-    let i_in_nid = graph.add_block_param(header, u32_ty.clone());
-
-    // Preheader → header(0, 0).
-    let zero_count_nid = intern_u32(graph, 0, None);
-    let zero_i_nid = intern_u32(graph, 0, None);
-    graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
-        target: header,
-        args: vec![zero_count_nid, zero_i_nid],
-    };
-
-    // Header → cond_br(i < len, body, after(count)).
-    let len_nid = emit_length(
+    let zero = intern_u32(graph, 0, None);
+    let one = intern_u32(graph, 1, None);
+    let after_count = build_serial_filter_cfg(
         graph,
-        filter_primary_input(&spec).0,
-        &filter_primary_input(&spec).1,
-        &u32_ty,
-    );
-    let cond_nid = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
-        smallvec![i_in_nid, len_nid],
-        bool_ty.clone(),
-        None,
-    );
-    graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
-        cond: cond_nid,
-        then_target: body,
-        then_args: vec![],
-        else_target: after,
-        else_args: vec![count_in_nid],
-    };
-    graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
-        merge: after,
-        continue_block: continue_blk,
-    });
-
-    // Body: elem = arr[i]; pred = pred_func(elem, captures); cond_br(pred, then, else).
-    let kept_nid = filter_kept_value(graph, body, i_in_nid, &spec, next_effect);
-    let mut pred_operands: SmallVec<[NodeId; 4]> = smallvec![kept_nid];
-    pred_operands.extend(spec.captures.iter().copied());
-    let pred_nid = graph.intern_pure(
-        PureOp::Call(spec.pred_func.clone()),
-        pred_operands,
-        bool_ty.clone(),
-        None,
-    );
-    graph.skeleton.blocks[body].term = SkeletonTerminator::CondBranch {
-        cond: pred_nid,
-        then_target: then_blk,
-        then_args: vec![],
-        else_target: else_blk,
-        else_args: vec![],
-    };
-    graph.skeleton.blocks[body].control_header = Some(ControlHeader::Selection { merge: sel_merge });
-
-    // then: scratch_out[count] = v; count_bumped = count + 1; Branch(sel_merge, [count_bumped]).
-    emit_storage_store(
-        graph,
-        then_blk,
-        scratch_view,
-        count_in_nid,
-        kept_nid,
-        spec.output_elem_ty.clone(),
+        bid,
+        after,
+        spec,
+        u32_ty.clone(),
+        zero,
+        one,
+        FilterSink::Runtime(scratch_view),
         next_effect,
-        None,
     );
-    let one_u32_nid = intern_u32(graph, 1, None);
-    let count_bumped_nid = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
-        smallvec![count_in_nid, one_u32_nid],
-        u32_ty.clone(),
-        None,
-    );
-    graph.skeleton.blocks[then_blk].term = SkeletonTerminator::Branch {
-        target: sel_merge,
-        args: vec![count_bumped_nid],
-    };
 
-    // else: Branch(sel_merge, [count_in]).
-    graph.skeleton.blocks[else_blk].term = SkeletonTerminator::Branch {
-        target: sel_merge,
-        args: vec![count_in_nid],
-    };
-
-    // sel_merge: param count_next; Branch(continue, [count_next]).
-    let count_next_nid = graph.add_block_param(sel_merge, u32_ty.clone());
-    graph.skeleton.blocks[sel_merge].term = SkeletonTerminator::Branch {
-        target: continue_blk,
-        args: vec![count_next_nid],
-    };
-
-    // continue: param cont_count; i_next = i + 1; Branch(header, [cont_count, i_next]).
-    let cont_count_nid = graph.add_block_param(continue_blk, u32_ty.clone());
-    let one_i_nid = intern_u32(graph, 1, None);
-    let next_i_nid = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
-        smallvec![i_in_nid, one_i_nid],
-        u32_ty.clone(),
-        None,
-    );
-    graph.skeleton.blocks[continue_blk].term = SkeletonTerminator::Branch {
-        target: header,
-        args: vec![cont_count_nid, next_i_nid],
-    };
-
-    // When the filter is a compute-entry output, store the final surviving
-    // count into the paired length cell `len_out[0]` so the host can read how
-    // many elements are valid in the (capacity-n) output buffer.
     if let filter::Output::Runtime {
-        length: filter::RuntimeLength::Stored(len_br),
+        length: filter::RuntimeLength::Stored(length),
         ..
     } = &spec.output
     {
-        let len_view = intern_storage_view(graph, *len_br, u32_ty.clone(), None);
-        let zero_idx = intern_u32(graph, 0, None);
+        let length_view = intern_storage_view(graph, *length, u32_ty.clone(), None);
         emit_storage_store(
             graph,
             after,
-            len_view,
-            zero_idx,
-            after_count_nid,
-            u32_ty.clone(),
+            length_view,
+            zero,
+            after_count,
+            u32_ty,
             next_effect,
             None,
         );
     }
-
-    // Rebind the original result NodeId to the runtime-length view
-    // `StorageView(scratch_out)[offset = 0, len = after_count]`. The node's
-    // type (carrying `Buffer(scratch_out)`) is preserved from emit_soac.
-    let zero_off_nid = intern_u32(graph, 0, None);
     graph.replace_pure_node(
         spec.result_node,
         PureOp::StorageView(crate::op::PureViewSource::Storage(scratch_out)),
-        smallvec![zero_off_nid, after_count_nid],
+        smallvec![zero, after_count],
     );
 }
 
