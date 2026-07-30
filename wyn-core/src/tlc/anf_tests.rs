@@ -3,7 +3,7 @@ use crate::ast::{Span, TypeName};
 use crate::tlc::{
     self, ArrayExpr, Def, DefMeta, Lambda, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
 };
-use crate::{LookupMap, SymbolId, SymbolTable};
+use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
 fn span() -> Span {
@@ -94,7 +94,6 @@ fn prog(body: Term, ids: TermIdSource) -> tlc::stage::SoacsAnfNormalized {
             return_diet: crate::types::Diet::observing(),
         }],
         SymbolTable::new(),
-        LookupMap::new(),
         ids,
         tlc::context::RewriteGlobal {
             known_defs: Default::default(),

@@ -3,7 +3,7 @@
 //! This module provides a generic API for extracting bindings from patterns,
 //! which can be used in type checking, code generation, and other passes.
 
-use crate::ast::{Pattern, PatternKind};
+use crate::ast::{BindingName, Pattern, PatternKind, RecordPatternTarget, TreeFamily};
 
 /// A binding extracted from a pattern: (name, value).
 pub type Binding<T> = (String, T);
@@ -48,8 +48,8 @@ pub enum PatternError {
 /// // Value: (1, (2, 3))
 /// // Result: [("x", 1), ("y", 2), ("z", 3)]
 /// ```
-pub fn extract_bindings<T: PatternValue, H, A>(
-    pattern: &Pattern<H, A>,
+pub fn extract_bindings<T: PatternValue, F: TreeFamily, A>(
+    pattern: &Pattern<F, A>,
     value: T,
 ) -> Result<Vec<Binding<T>>, PatternError> {
     let mut bindings = Vec::new();
@@ -57,14 +57,14 @@ pub fn extract_bindings<T: PatternValue, H, A>(
     Ok(bindings)
 }
 
-fn extract_bindings_inner<T: PatternValue, H, A>(
-    pattern: &Pattern<H, A>,
+fn extract_bindings_inner<T: PatternValue, F: TreeFamily, A>(
+    pattern: &Pattern<F, A>,
     value: T,
     bindings: &mut Vec<Binding<T>>,
 ) -> Result<(), PatternError> {
     match &pattern.kind {
         PatternKind::Name(name) => {
-            bindings.push((name.clone(), value));
+            bindings.push((name.source_name().to_owned(), value));
             Ok(())
         }
 
@@ -121,7 +121,7 @@ fn extract_bindings_inner<T: PatternValue, H, A>(
 /// Get all names bound by a pattern (without values).
 ///
 /// Useful for checking what variables a pattern introduces.
-pub fn bound_names<H, A>(pattern: &Pattern<H, A>) -> Vec<String> {
+pub fn bound_names<T: TreeFamily, A>(pattern: &Pattern<T, A>) -> Vec<String> {
     let mut names = Vec::new();
     collect_names(pattern, &mut names);
     names
@@ -137,6 +137,9 @@ pub struct BindingPath {
     pub name: String,
     /// Sequence of tuple indices to project from root to reach this binding.
     /// Empty if the pattern is just a name (no projection needed).
+    /// Stable semantic identity after name resolution. Source-only patterns
+    /// carry `None`; downstream semantic consumers require `Some`.
+    pub symbol: Option<crate::SymbolId>,
     pub path: ProjectionPath,
 }
 
@@ -154,17 +157,22 @@ pub struct BindingPath {
 /// //   BindingPath { name: "z", path: [1, 1] },
 /// // ]
 /// ```
-pub fn binding_paths<H, A>(pattern: &Pattern<H, A>) -> Vec<BindingPath> {
+pub fn binding_paths<T: TreeFamily, A>(pattern: &Pattern<T, A>) -> Vec<BindingPath> {
     let mut bindings = Vec::new();
     collect_binding_paths(pattern, &[], &mut bindings);
     bindings
 }
 
-fn collect_binding_paths<H, A>(pattern: &Pattern<H, A>, path: &[usize], bindings: &mut Vec<BindingPath>) {
+fn collect_binding_paths<T: TreeFamily, A>(
+    pattern: &Pattern<T, A>,
+    path: &[usize],
+    bindings: &mut Vec<BindingPath>,
+) {
     match &pattern.kind {
         PatternKind::Name(name) => {
             bindings.push(BindingPath {
-                name: name.clone(),
+                name: name.source_name().to_owned(),
+                symbol: name.symbol(),
                 path: path.to_vec(),
             });
         }
@@ -189,14 +197,15 @@ fn collect_binding_paths<H, A>(pattern: &Pattern<H, A>, path: &[usize], bindings
             for (i, field) in fields.iter().enumerate() {
                 let mut new_path = path.to_vec();
                 new_path.push(i);
-                if let Some(p) = &field.pattern {
-                    collect_binding_paths(p, &new_path, bindings);
-                } else {
-                    // Shorthand: field name is the binding
-                    bindings.push(BindingPath {
-                        name: field.field.clone(),
+                match &field.target {
+                    RecordPatternTarget::Pattern(pattern) => {
+                        collect_binding_paths(pattern, &new_path, bindings)
+                    }
+                    RecordPatternTarget::Shorthand(binding) => bindings.push(BindingPath {
+                        name: binding.source_name().to_owned(),
+                        symbol: binding.symbol(),
                         path: new_path,
-                    });
+                    }),
                 }
             }
         }
@@ -211,10 +220,10 @@ fn collect_binding_paths<H, A>(pattern: &Pattern<H, A>, path: &[usize], bindings
     }
 }
 
-fn collect_names<H, A>(pattern: &Pattern<H, A>, names: &mut Vec<String>) {
+fn collect_names<T: TreeFamily, A>(pattern: &Pattern<T, A>, names: &mut Vec<String>) {
     match &pattern.kind {
         PatternKind::Name(name) => {
-            names.push(name.clone());
+            names.push(name.source_name().to_owned());
         }
         PatternKind::Wildcard | PatternKind::Unit | PatternKind::Literal(_) => {}
         PatternKind::Tuple(patterns) | PatternKind::Vec(patterns) => {
@@ -227,11 +236,9 @@ fn collect_names<H, A>(pattern: &Pattern<H, A>, names: &mut Vec<String>) {
         }
         PatternKind::Record(fields) => {
             for field in fields {
-                if let Some(p) = &field.pattern {
-                    collect_names(p, names);
-                } else {
-                    // Shorthand: field name is the binding
-                    names.push(field.field.clone());
+                match &field.target {
+                    RecordPatternTarget::Pattern(pattern) => collect_names(pattern, names),
+                    RecordPatternTarget::Shorthand(binding) => names.push(binding.source_name().to_owned()),
                 }
             }
         }

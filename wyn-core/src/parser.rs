@@ -2196,7 +2196,14 @@ impl<'a> Parser<'a> {
                         } =>
                         {
                             let prefix = match self.peek() {
-                                Some(Token::BinOp(s)) => s.clone(),
+                                Some(Token::BinOp(s)) => crate::op::BinaryOperator::try_from(s.as_str())
+                                    .map_err(|_| {
+                                        err_parse_at!(
+                                            self.current_span(),
+                                            "Unsupported compound operator '{}'",
+                                            s
+                                        )
+                                    })?,
                                 _ => unreachable!("peek2 just matched BinOp"),
                             };
                             self.advance(); // consume binop
@@ -2321,8 +2328,15 @@ impl<'a> Parser<'a> {
                 }
             } else {
                 // Regular binary operation
+                let op = crate::op::BinaryOperator::try_from(op_string.as_str()).map_err(|_| {
+                    err_parse_at!(
+                        self.previous_span(),
+                        "Unsupported primitive operator '{}'",
+                        op_string
+                    )
+                })?;
                 self.node_counter.mk_node(
-                    ExprKind::BinaryOp(BinaryOp { op: op_string }, Box::new(left), Box::new(right)),
+                    ExprKind::BinaryOp(BinaryOp { op }, Box::new(left), Box::new(right)),
                     span,
                 )
             };
@@ -2481,7 +2495,12 @@ impl<'a> Parser<'a> {
                 Ok(match negated {
                     Some(kind) => self.node_counter.mk_node(kind, span),
                     None => self.node_counter.mk_node(
-                        ExprKind::UnaryOp(UnaryOp { op: "-".to_string() }, Box::new(operand)),
+                        ExprKind::UnaryOp(
+                            UnaryOp {
+                                op: crate::op::UnaryOperator::Negate,
+                            },
+                            Box::new(operand),
+                        ),
                         span,
                     ),
                 })
@@ -2492,7 +2511,12 @@ impl<'a> Parser<'a> {
                 let operand = self.parse_unary_expression()?; // Right-associative for chaining: !!x
                 let span = start_span.merge(&operand.h.span);
                 Ok(self.node_counter.mk_node(
-                    ExprKind::UnaryOp(UnaryOp { op: "!".to_string() }, Box::new(operand)),
+                    ExprKind::UnaryOp(
+                        UnaryOp {
+                            op: crate::op::UnaryOperator::LogicalNot,
+                        },
+                        Box::new(operand),
+                    ),
                     span,
                 ))
             }
@@ -2599,7 +2623,9 @@ impl<'a> Parser<'a> {
                 // Use peek2 to check if we have (BinOp, RightParen) pattern
                 // Desugar to lambda: (+) => \x y -> x + y
                 if let Some((Token::BinOp(op), Token::RightParen)) = self.peek2() {
-                    let op = op.clone();
+                    let op = crate::op::BinaryOperator::try_from(op.as_str()).map_err(|_| {
+                        err_parse_at!(self.current_span(), "Unsupported primitive operator '{}'", op)
+                    })?;
                     self.advance(); // consume operator
                     self.advance(); // consume )
                     let end_span = self.previous_span();
@@ -3129,9 +3155,11 @@ impl<'a> Parser<'a> {
                     // Backtrack and try as "for name < exp"
                     self.current = saved_pos;
                     let name = self.expect_identifier()?;
+                    let name_span = self.previous_span();
                     self.expect(Token::BinOp("<".to_string()))?;
                     let bound = Box::new(self.parse_expression()?);
-                    LoopForm::For(name, bound)
+                    let pattern = self.node_counter.mk_node(PatternKind::Name(name), name_span);
+                    LoopForm::For(pattern, bound)
                 }
             } else {
                 bail_parse_at!(self.current_span(), "Expected pattern in for loop");

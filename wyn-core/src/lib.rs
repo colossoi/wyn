@@ -95,6 +95,85 @@ pub struct IdSource<Id> {
     _phantom: PhantomData<Id>,
 }
 
+/// Stable compiler-internal identity of a callable body.
+///
+/// Allocated once while TLC is converted to EGIR and carried unchanged through
+/// EGIR, SSA, and backend lowering. Source-level callables use `SymbolId`
+/// through TLC; the conversion between the two realms is structural. Human-readable
+/// function names and extern linkage symbols are metadata only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FunctionId(u32);
+
+impl From<u32> for FunctionId {
+    fn from(index: u32) -> Self {
+        Self(index)
+    }
+}
+
+impl FunctionId {
+    #[cfg(test)]
+    pub(crate) const fn from_index(index: u32) -> Self {
+        Self(index)
+    }
+}
+
+impl std::fmt::Display for FunctionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "fn#{}", self.0)
+    }
+}
+
+/// Stable compiler-internal identity of a program-level constant.
+///
+/// Constants have their own realm because their source semantics are values;
+/// a backend may choose to implement one as a zero-argument function without
+/// turning it into a function identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GlobalId(u32);
+
+impl From<u32> for GlobalId {
+    fn from(index: u32) -> Self {
+        Self(index)
+    }
+}
+
+impl std::fmt::Display for GlobalId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "global#{}", self.0)
+    }
+}
+
+/// Stable compiler-internal identity of an entry point.
+///
+/// The entry's source/emitted name remains host-facing ABI metadata. Internal
+/// pipeline and scheduling edges use this ID after the descriptor has been
+/// resolved once at the frontend boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EntryId(u32);
+
+impl From<u32> for EntryId {
+    fn from(index: u32) -> Self {
+        Self(index)
+    }
+}
+
+impl EntryId {
+    #[cfg(test)]
+    pub(crate) const fn from_index(index: usize) -> Self {
+        Self(index as u32)
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl std::fmt::Display for EntryId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "entry#{}", self.0)
+    }
+}
+
 impl<Id: From<u32>> IdSource<Id> {
     pub fn new() -> Self {
         IdSource {

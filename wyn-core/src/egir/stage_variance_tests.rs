@@ -1,13 +1,13 @@
 use super::*;
 
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{semantic_program_for_test, RegionInterner, SemanticFunc};
-use crate::egir::types::{RegionId, Semantic, SkeletonTerminator};
+use crate::egir::program::{semantic_program_for_test, ProgramIdentities, SemanticFunc};
+use crate::egir::types::{Semantic, SkeletonTerminator};
 use crate::flow::ExecutionModel;
 use crate::interface::{EntryInput, IoDecoration};
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::types::ConstantValue;
-use crate::BindingRef;
+use crate::{BindingRef, EntryId, FunctionId};
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -18,18 +18,19 @@ fn u32_ty() -> Type<TypeName> {
 #[test]
 fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
     let ty = u32_ty();
+    let project = FunctionId::from_index(0);
     let mut graph = EGraph::<Semantic>::new();
     let uniform = graph.add_func_param(0, ty.clone());
     let stage_input = graph.add_func_param(1, ty.clone());
     let one = graph.intern_constant(ConstantValue::U32(1), ty.clone());
     let uniform_sum = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![uniform, one],
         ty.clone(),
         None,
     );
     let call = graph.intern_pure(
-        PureOp::Call("project".into()),
+        PureOp::Call(project),
         smallvec![stage_input, uniform_sum],
         ty.clone(),
         None,
@@ -56,12 +57,16 @@ fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
     ];
     let entry = SemanticEntry::new_with_resources(
         "vertex".into(),
+        EntryId::from_index(0),
         Span::dummy(),
         ExecutionModel::Vertex,
         inputs,
         vec![],
         vec![],
-        vec![(ty.clone(), "frame".into()), (ty.clone(), "position".into())],
+        vec![
+            (ty.clone(), "resolved_uniform".into()),
+            (ty.clone(), "resolved_position".into()),
+        ],
         ty,
         graph,
     );
@@ -86,7 +91,7 @@ fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
     );
 
     let call_variance = analysis.call_arguments(&entry.graph, call).unwrap();
-    assert_eq!(call_variance.callee, "project");
+    assert_eq!(call_variance.callee, project);
     assert_eq!(
         call_variance.arguments.as_slice(),
         &[
@@ -160,7 +165,7 @@ fn invariant_loop_carried_values_converge_through_the_cfg_cycle() {
     };
     let current = graph.add_block_param(header, ty.clone());
     let next = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![current, one],
         ty.clone(),
         None,
@@ -263,15 +268,17 @@ fn repeated_region_captures_are_analyzed_per_use() {
     let lane_value = region_graph.add_func_param(0, ty.clone());
     let capture = region_graph.add_func_param(1, ty.clone());
     let result = region_graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![lane_value, capture],
         ty.clone(),
         None,
     );
     region_graph.skeleton.blocks[region_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(result));
+    let mut identities = ProgramIdentities::default();
+    let region_id: FunctionId = identities.alloc_function("map_body".into());
     let region = SemanticFunc::new(
-        RegionId::from_index(0),
+        region_id,
         "map_body".into(),
         Span::dummy(),
         None,
@@ -285,9 +292,8 @@ fn repeated_region_captures_are_analyzed_per_use() {
         vec![],
         vec![],
         PipelineDescriptor::default(),
-        RegionInterner::default(),
+        identities,
     );
-    let region_id = program.data.region_interner.get("map_body").unwrap();
 
     let mut enclosing_graph = EGraph::<Semantic>::new();
     let invariant_capture = enclosing_graph.intern_constant(ConstantValue::U32(7), ty.clone());

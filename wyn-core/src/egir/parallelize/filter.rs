@@ -72,7 +72,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         })
     }
 
-    fn build_flags(&self) -> error::Result<BuiltPhase> {
+    fn build_flags(&mut self) -> error::Result<BuiltPhase> {
         use crate::interface::StorageRole;
 
         let mut storage = self
@@ -83,18 +83,17 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             .cloned()
             .collect::<Vec<_>>();
         storage.push(self.declaration(self.work.flags, StorageRole::Output));
-        let spec = ProjectionSpec::unit(
-            format!("{}_filter_flags", self.entry.name),
-            self.entry.execution_model.clone(),
-            storage,
-        );
+        let name = format!("{}_filter_flags", self.entry.name);
+        let id = self.lowering.identities.alloc_entry(name.clone());
+        let spec = ProjectionSpec::unit(name, self.entry.execution_model.clone(), storage);
         Ok(BuiltPhase::from_declarations(project_kernel_body(
             &self.entry,
+            id,
             spec,
         )?))
     }
 
-    fn build_scan(&self) -> error::Result<BuiltPhase> {
+    fn build_scan(&mut self) -> error::Result<BuiltPhase> {
         use crate::interface::StorageRole;
 
         let storage = [
@@ -105,8 +104,10 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         .into_iter()
         .map(|(resource, role)| self.declaration(resource, role))
         .collect();
+        let name = format!("{}_filter_scan", self.entry.name);
+        let id = self.lowering.identities.alloc_entry(name.clone());
         let spec = ProjectionSpec::unit(
-            format!("{}_filter_scan", self.entry.name),
+            name,
             ExecutionModel::Compute {
                 local_size: self.candidate.scan_grid.local_size(),
             },
@@ -114,6 +115,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         );
         Ok(BuiltPhase::from_declarations(project_kernel_body(
             &self.entry,
+            id,
             spec,
         )?))
     }
@@ -125,14 +127,13 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         let add_region = self.lowering.define_callable(add_name, |region, name| {
             synthesize_u32_add_function(region, name, span)
         })?;
-        let add_name = self.lowering.region_interner.resolve(add_region).clone();
         let scan_scratch = ScanScratch {
             block_sums: self.work.block_sums.0,
             block_offsets: self.work.block_offsets.0,
         };
         let combine = ScanPhase2Spec {
             entry_name: scan.body.name.clone(),
-            operator: add_name.clone(),
+            operator: add_region,
             elem_ty: self.elem_ty.clone(),
             source_graph: &scan.body.graph,
             operator_captures: &[],
@@ -142,8 +143,13 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             total_out: Some(self.candidate.storage.length.0),
             reduction_output: None,
         };
-        let mut combine =
-            combine.build(self.lowering.semantic_ids, self.lowering.effect_ids).map_err(|error| {
+        let mut combine = combine
+            .build(
+                &mut self.lowering.identities,
+                self.lowering.semantic_ids,
+                self.lowering.effect_ids,
+            )
+            .map_err(|error| {
                 format!(
                     "failed to synthesize filter scan for `{}`: {error}",
                     self.entry.name
@@ -153,7 +159,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         let swap_wrapper_name = format!("{}_filter_scan_add_offsets", self.entry.name);
         let elem_ty = self.elem_ty.clone();
         let swap_region = self.lowering.define_callable(swap_wrapper_name, |region, name| {
-            synthesize_swap_wrapper(region, name, add_name, elem_ty, Vec::new(), span)
+            synthesize_swap_wrapper(region, name, add_region, elem_ty, Vec::new(), span)
         })?;
         let apply_offsets = ScanPhase3Spec {
             entry_name: scan.body.name.clone(),
@@ -167,8 +173,11 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             width: self.candidate.scan_grid.workgroup_width(),
             post: None,
         };
-        let mut apply_offsets =
-            apply_offsets.build(self.lowering.semantic_ids, self.lowering.effect_ids)?;
+        let mut apply_offsets = apply_offsets.build(
+            &mut self.lowering.identities,
+            self.lowering.semantic_ids,
+            self.lowering.effect_ids,
+        )?;
         apply_manifest_resource_sizes(&mut apply_offsets.body, self.lowering.resources);
         Ok((combine, apply_offsets))
     }
@@ -188,6 +197,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         let spec = ProjectionSpec::preserving_interface(&self.entry, resources);
         Ok(BuiltPhase::from_declarations(project_kernel_body(
             &self.entry,
+            self.entry.id,
             spec,
         )?))
     }

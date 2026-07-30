@@ -649,8 +649,8 @@ entry stats(xs: []i32) [4]i32 =
             (op.is_reduce() && op.form.reductions.len() == 3).then_some(op)
         })
         .expect("three-operator filtered SegRed");
-    let pre_name =
-        allocated.region(op.form.pre.seg_body().expect("masked pre-lambda").region).unwrap().name.as_str();
+    let pre_region = op.form.pre.seg_body().expect("masked pre-lambda").region;
+    let pre_name = allocated.data.core.identities.function_name(pre_region);
     assert!(
         pre_name.contains("filter_pre"),
         "masking belongs in the pre-lambda: {pre_name}"
@@ -660,7 +660,7 @@ entry stats(xs: []i32) [4]i32 =
         .reductions
         .iter()
         .map(|reduction| {
-            allocated.region(reduction.operator.seg_body().unwrap().region).unwrap().name.as_str()
+            allocated.data.core.identities.function_name(reduction.operator.seg_body().unwrap().region)
         })
         .collect::<Vec<_>>();
     assert!(
@@ -2367,8 +2367,7 @@ fn terminal_scan_helpers_are_complete_region_arena_members() {
         .iter()
         .find(|function| function.name.ends_with("_scan_op_swap"))
         .expect("scan swap helper");
-    let region = physical.data.region_interner.get(&helper.name).expect("helper region id");
-    assert!(physical.contains_region(region));
+    assert!(physical.contains_region(helper.region));
 }
 
 /// Assert that a compute `reduce`-over-`map`-of-range `src` parallelizes and
@@ -4448,18 +4447,10 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::stage::Reachable, stage: &st
         }
     }
 
-    // `bound` = everything the TLC name-resolver considers a top-level
-    // symbol, not just things with bodies. `def_syms` holds the
-    // pre-allocated SymbolId for every prelude/user/sig top-level name.
-    let mut top_level: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
-    for sym in program.def_syms.values() {
-        top_level.insert(*sym);
-    }
-    // Catch any defs whose own SymbolId isn't already in `def_syms` —
-    // shouldn't happen by construction, but assert via union.
-    for d in &program.defs {
-        top_level.insert(d.name);
-    }
+    // Top-level TLC references retain their exact definition SymbolId. The
+    // reachable checkpoint stores only retained definitions, so their IDs are
+    // the complete top-level binding set at this stage.
+    let top_level = program.defs.iter().map(|def| def.name).collect::<HashSet<_>>();
     for def in &program.defs {
         let def_name = program.symbols.get(def.name).cloned().unwrap_or_default();
         walk(&def.body, &top_level, &program.symbols, stage, &def_name);
@@ -4514,16 +4505,10 @@ fn count_uninit_in_program<Tag, GlobalContext>(ssa: &Program<Tag, GlobalContext>
         for (_id, inst) in insts {
             if let crate::ssa::types::InstKind::Op { tag, .. } = &inst.data {
                 match tag {
-                    crate::op::OpTag::Call(f) => {
-                        if f == "_w_intrinsic_uninit" {
-                            count += 1;
-                        }
-                    }
-                    crate::op::OpTag::Intrinsic { id, .. } => {
-                        let name = crate::builtins::by_id(*id).raw.surface_name;
-                        if name == "_w_intrinsic_uninit" {
-                            count += 1;
-                        }
+                    crate::op::OpTag::Intrinsic { id, .. }
+                        if *id == crate::builtins::catalog().known().uninit =>
+                    {
+                        count += 1;
                     }
                     _ => {}
                 }
@@ -4655,10 +4640,9 @@ entry parallel_scan(a: []i32) []i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
         })
         .expect("swap wrapper body must contain a Call");
 
-    assert!(
-        !call.0.ends_with("_scan_op_swap"),
-        "swap wrapper should call the underlying op, not itself: got {}",
-        call.0
+    assert_ne!(
+        call.0, wrapper.id,
+        "swap wrapper should call the underlying operator, not itself"
     );
     let operands: Vec<_> = call.1.iter().map(|v| v.as_ssa()).collect();
     assert_eq!(
@@ -4752,8 +4736,8 @@ fn inst_signature_multiset<Tag, GlobalContext>(
                         let name = crate::builtins::by_id(*id).raw.surface_name;
                         format!("Intrinsic({})", name)
                     }
-                    OpTag::BinOp(s) => format!("BinOp({})", s),
-                    OpTag::UnaryOp(s) => format!("UnaryOp({})", s),
+                    OpTag::BinOp(op) => format!("BinOp({})", op.symbol()),
+                    OpTag::UnaryOp(op) => format!("UnaryOp({})", op.symbol()),
                     // Literal values intentionally NOT included in the
                     // signature — a constant-folding refactor shouldn't
                     // make the test flake. Variant name alone is the
@@ -4764,7 +4748,6 @@ fn inst_signature_multiset<Tag, GlobalContext>(
                     OpTag::Bool(_) => "Bool".to_string(),
                     OpTag::Unit => "Unit".to_string(),
                     OpTag::Global(_) => "Global".to_string(),
-                    OpTag::Extern(_) => "Extern".to_string(),
                     OpTag::Tuple(_) => "Tuple".to_string(),
                     OpTag::Vector(_) => "Vector".to_string(),
                     OpTag::Matrix { .. } => "Matrix".to_string(),
@@ -6912,30 +6895,22 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32
     for func in &ssa.functions {
         for (_id, inst) in &func.body.inner.insts {
             if let crate::ssa::types::InstKind::Op {
-                tag: crate::op::OpTag::Global(name),
+                tag: crate::op::OpTag::Global(_),
                 ..
             } = &inst.data
             {
-                assert_ne!(
-                    name, "PI",
-                    "Global @PI should have been inlined, but survived in function '{}'",
-                    func.name
-                );
+                panic!("a global reference survived in function '{}'", func.name);
             }
         }
     }
     for ep in &ssa.entry_points {
         for (_id, inst) in &ep.body.inner.insts {
             if let crate::ssa::types::InstKind::Op {
-                tag: crate::op::OpTag::Global(name),
+                tag: crate::op::OpTag::Global(_),
                 ..
             } = &inst.data
             {
-                assert_ne!(
-                    name, "PI",
-                    "Global @PI should have been inlined, but survived in entry '{}'",
-                    ep.name
-                );
+                panic!("a global reference survived in entry '{}'", ep.name);
             }
         }
     }
@@ -12543,10 +12518,25 @@ entry world_to_clip_loop_invariant(
 "#;
 
     let converted = crate::compile_thru_ssa(source).expect("camera LICM repro compiles to SSA");
+    let function_id = |name: &str| {
+        converted
+            .functions
+            .iter()
+            .find(|function| function.name == name)
+            .map(|function| function.id)
+            .unwrap_or_else(|| panic!("missing SSA function `{name}`"))
+    };
+    let world_to_clip = function_id("world_to_clip");
+    let camera_calls = [
+        (function_id("rotation"), "rotation"),
+        (function_id("look_at"), "look_at"),
+        (function_id("perspective"), "perspective"),
+    ];
+    let project_id = function_id("project_twenty_samples");
     let project = converted
         .functions
         .iter()
-        .find(|function| function.name == "project_twenty_samples")
+        .find(|function| function.id == project_id)
         .expect("project helper remains as an SSA function");
     let (loop_header, continue_block) = project
         .body
@@ -12568,21 +12558,21 @@ entry world_to_clip_loop_invariant(
         .values()
         .filter_map(|inst| match &inst.data {
             InstKind::Op {
-                tag: OpTag::Call(name),
+                tag: OpTag::Call(function),
                 ..
-            } => Some((name.as_str(), inst.parent)),
+            } => Some((*function, inst.parent)),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert!(
-        calls.iter().all(|(name, _)| *name != "world_to_clip"),
+        calls.iter().all(|(function, _)| *function != world_to_clip),
         "mixed call should be expanded, got {calls:?}"
     );
-    for camera_call in ["rotation", "look_at", "perspective"] {
+    for (camera_call, camera_name) in camera_calls {
         assert_eq!(
-            calls.iter().filter(|(name, _)| *name == camera_call).copied().collect::<Vec<_>>(),
+            calls.iter().filter(|(function, _)| *function == camera_call).copied().collect::<Vec<_>>(),
             vec![(camera_call, preheader)],
-            "`{camera_call}` should execute once in the loop preheader; calls: {calls:?}"
+            "`{camera_name}` should execute once in the loop preheader; calls: {calls:?}"
         );
     }
     assert!(

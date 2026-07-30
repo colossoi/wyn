@@ -47,7 +47,7 @@ fn builder_emits_minimal_valid_module() {
     // Add an OpTypeVoid + a no-op function so the assembled module
     // has *something* in it. Pure smoke test that the setup is right.
     let void = b.void_type();
-    let (_fn_id, _params, _code_block) = b.begin_function("main", &[], void).expect("begin_function");
+    let (_fn_id, _params, _code_block) = b.begin_function(None, &[], void).expect("begin_function");
     b.ret().expect("ret");
     b.end_function().expect("end_function");
     let module = b.into_module();

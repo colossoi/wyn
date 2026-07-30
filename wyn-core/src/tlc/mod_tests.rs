@@ -326,3 +326,45 @@ entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
         other => panic!("identity envelope body must be a 2-tuple, got {other:?}"),
     }
 }
+
+#[test]
+fn loop_initializer_and_domain_resolve_before_shadowing_binders() {
+    let program = compile_to_tlc_raw(
+        r#"
+def preserve(x: i32) i32 =
+  loop x = x for i < x do x
+"#,
+    );
+    let (inner, params) = extract_lambda_params_ref(find_def_body(&program, "preserve"));
+    let outer_x = params[0].0;
+    let TermKind::Loop {
+        loop_var,
+        init,
+        kind: LoopKind::ForRange { bound, .. },
+        body,
+        ..
+    } = &inner.kind
+    else {
+        panic!("expected range loop, got {:?}", inner.kind);
+    };
+
+    assert_ne!(
+        *loop_var, outer_x,
+        "the loop binder must shadow with a fresh SymbolId"
+    );
+    assert!(
+        matches!(&init.kind, TermKind::Var(VarRef::Symbol(symbol)) if *symbol == outer_x),
+        "initializer must reference the outer x: {:?}",
+        init.kind
+    );
+    assert!(
+        matches!(&bound.kind, TermKind::Var(VarRef::Symbol(symbol)) if *symbol == outer_x),
+        "iteration bound must reference the outer x: {:?}",
+        bound.kind
+    );
+    assert!(
+        matches!(&body.kind, TermKind::Var(VarRef::Symbol(symbol)) if *symbol == *loop_var),
+        "loop body must reference the loop-carried x: {:?}",
+        body.kind
+    );
+}

@@ -29,7 +29,7 @@ fn filter_smallvec_drops_masked_operands_preserving_order() {
     let n = fresh_nodes(3);
     let mut ops: SmallVec<[NodeId; 4]> = smallvec![n[0], n[1], n[2]];
     // Erase the middle operand (the storage-image argument).
-    filter_smallvec(&mut ops, &[false, true, false], "helper").unwrap();
+    filter_smallvec(&mut ops, &[false, true, false], &crate::FunctionId::from_index(0)).unwrap();
     assert_eq!(ops.as_slice(), &[n[0], n[2]]);
 }
 
@@ -37,6 +37,6 @@ fn filter_smallvec_drops_masked_operands_preserving_order() {
 fn filter_smallvec_rejects_arity_mismatch() {
     let n = fresh_nodes(2);
     let mut ops: SmallVec<[NodeId; 4]> = smallvec![n[0], n[1]];
-    let err = filter_smallvec(&mut ops, &[false], "helper").unwrap_err();
+    let err = filter_smallvec(&mut ops, &[false], &crate::FunctionId::from_index(0)).unwrap_err();
     assert!(matches!(err, ConvertError::Internal(_)));
 }

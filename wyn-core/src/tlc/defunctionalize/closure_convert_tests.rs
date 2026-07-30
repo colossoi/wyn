@@ -8,7 +8,6 @@ use crate::tlc::{
 };
 use crate::SymbolTable;
 use polytype::Type;
-use std::collections::HashMap;
 
 fn input_ae(boxed: Box<Term<Empty, Empty>>) -> crate::tlc::ArrayExpr<Empty, Empty> {
     use crate::tlc::{ArrayExpr, TermKind};
@@ -32,7 +31,6 @@ fn empty_program() -> crate::tlc::stage::RuntimeIndexProducersFloated {
     Program::from_parts(
         vec![],
         SymbolTable::new(),
-        HashMap::new(),
         TermIdSource::new(),
         crate::tlc::context::RewriteGlobal {
             known_defs: Default::default(),
@@ -45,7 +43,6 @@ fn empty_converted_program() -> Defunctionalized {
     Program::from_parts(
         vec![],
         SymbolTable::new(),
-        HashMap::new(),
         TermIdSource::new(),
         crate::tlc::context::PostClosureGlobal {
             auto_storage_binding_ids: crate::IdSource::new(),

@@ -97,7 +97,7 @@ pub fn is_irrefutable(pat: &ast::Pattern, ty: &Type) -> Result<(), RefutabilityE
         PatternKind::Record(fields) => {
             if let Type::Constructed(TypeName::Record(record_names), args) = ty {
                 for f in fields {
-                    if let Some(sub) = &f.pattern {
+                    if let crate::ast::RecordPatternTarget::Pattern(sub) = &f.target {
                         let idx = record_names.iter().position(|n| n == &f.field).ok_or_else(|| {
                             RefutabilityError {
                                 culprit: pat.h.span,

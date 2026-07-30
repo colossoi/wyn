@@ -51,7 +51,6 @@ pub fn pin_entry_buffers(program: Transformed) -> crate::error::Result<BuffersPi
     let Program {
         defs,
         symbols,
-        def_syms,
         mut term_ids,
         global_context,
         state: _,
@@ -64,7 +63,6 @@ pub fn pin_entry_buffers(program: Transformed) -> crate::error::Result<BuffersPi
     Ok(Program::from_parts(
         defs,
         symbols,
-        def_syms,
         term_ids,
         super::context::RewriteGlobal {
             known_defs: global_context.known_defs,

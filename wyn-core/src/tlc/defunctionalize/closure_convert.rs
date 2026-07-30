@@ -43,7 +43,7 @@ pub fn compute_free_vars<C, S>(
     term: &Term<C, S>,
     bound: &LookupSet<SymbolId>,
     top_level: &LookupSet<SymbolId>,
-    known_defs: &LookupSet<String>,
+    known_defs: &LookupSet<SymbolId>,
     symbols: &SymbolTable,
 ) -> Vec<Term<C, S>>
 where
@@ -60,7 +60,7 @@ fn collect_free_vars<C, S>(
     term: &Term<C, S>,
     bound: &LookupSet<SymbolId>,
     top_level: &LookupSet<SymbolId>,
-    known_defs: &LookupSet<String>,
+    known_defs: &LookupSet<SymbolId>,
     symbols: &SymbolTable,
     free: &mut Vec<Term<C, S>>,
     seen: &mut LookupSet<SymbolId>,
@@ -70,11 +70,9 @@ fn collect_free_vars<C, S>(
 {
     match &term.kind {
         TermKind::Var(VarRef::Symbol(sym)) => {
-            let name = symbols.get(*sym).expect("BUG: symbol not in table");
             if !bound.contains(sym)
                 && !top_level.contains(sym)
-                && !known_defs.contains(name)
-                && !name.starts_with("_w_")
+                && !known_defs.contains(sym)
                 && seen.insert(*sym)
             {
                 free.push(term.clone());
@@ -147,7 +145,7 @@ fn collect_free_vars_lambda<C, S>(
     lam: &Lambda<C, S>,
     bound: &LookupSet<SymbolId>,
     top_level: &LookupSet<SymbolId>,
-    known_defs: &LookupSet<String>,
+    known_defs: &LookupSet<SymbolId>,
     symbols: &SymbolTable,
     free: &mut Vec<Term<C, S>>,
     seen: &mut LookupSet<SymbolId>,
@@ -164,7 +162,7 @@ fn collect_free_vars_soac_body<C, S>(
     body: &SoacBody<C, S>,
     bound: &LookupSet<SymbolId>,
     top_level: &LookupSet<SymbolId>,
-    known_defs: &LookupSet<String>,
+    known_defs: &LookupSet<SymbolId>,
     symbols: &SymbolTable,
     free: &mut Vec<Term<C, S>>,
     seen: &mut LookupSet<SymbolId>,
@@ -182,7 +180,7 @@ fn collect_free_vars_soac<C, S>(
     soac: &SoacOp<C, S>,
     bound: &LookupSet<SymbolId>,
     top_level: &LookupSet<SymbolId>,
-    known_defs: &LookupSet<String>,
+    known_defs: &LookupSet<SymbolId>,
     symbols: &SymbolTable,
     free: &mut Vec<Term<C, S>>,
     seen: &mut LookupSet<SymbolId>,
@@ -234,7 +232,7 @@ fn collect_free_vars_array_expr<C, S>(
     array: &ArrayExpr<C, S>,
     bound: &LookupSet<SymbolId>,
     top_level: &LookupSet<SymbolId>,
-    known_defs: &LookupSet<String>,
+    known_defs: &LookupSet<SymbolId>,
     symbols: &SymbolTable,
     free: &mut Vec<Term<C, S>>,
     seen: &mut LookupSet<SymbolId>,
@@ -825,7 +823,6 @@ pub(super) fn run(program: crate::tlc::stage::RuntimeIndexProducersFloated) -> D
     let Program {
         defs,
         symbols,
-        def_syms,
         term_ids,
         global_context,
         state: _,
@@ -840,8 +837,7 @@ pub(super) fn run(program: crate::tlc::stage::RuntimeIndexProducersFloated) -> D
         .filter(|def| matches!(&def.ty, Type::Constructed(TypeName::Arrow, _)))
         .map(|def| def.name)
         .collect();
-    let known_def_symbols =
-        def_syms.iter().filter_map(|(name, symbol)| known_defs.contains(name).then_some(*symbol)).collect();
+    let known_def_symbols = known_defs;
     let mut converter = ClosureConverter {
         symbols,
         top_level,
@@ -857,7 +853,6 @@ pub(super) fn run(program: crate::tlc::stage::RuntimeIndexProducersFloated) -> D
     let program = Program::from_parts(
         defs,
         converter.symbols,
-        def_syms,
         converter.term_ids,
         crate::tlc::context::PostClosureGlobal {
             auto_storage_binding_ids,

@@ -81,6 +81,7 @@ fn reify_constant(
 ) -> ConstantDef<Semantic> {
     let facts = function_facts(&constant.graph);
     let ConstantDef {
+        id,
         name,
         span,
         return_ty,
@@ -88,6 +89,7 @@ fn reify_constant(
     } = constant;
     let (graph, _) = map_graph(graph, facts, semantic_ids);
     ConstantDef {
+        id,
         name,
         span,
         return_ty,

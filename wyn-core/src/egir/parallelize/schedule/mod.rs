@@ -376,6 +376,7 @@ impl KernelPlanSummary {
 #[derive(Clone, Debug)]
 pub struct KernelPhaseSummary {
     pub id: KernelId,
+    pub entry: crate::EntryId,
     pub entry_point: String,
     pub label: String,
     pub source_entry: Option<SemanticEntryId>,
@@ -398,6 +399,7 @@ impl KernelPhaseSummary {
     fn from_phase(id: KernelId, phase: &KernelPhase) -> Self {
         Self {
             id,
+            entry: phase.entry.id,
             entry_point: phase.entry_point().to_owned(),
             label: phase.label.to_owned(),
             source_entry: phase.source_entry,
@@ -516,33 +518,43 @@ impl KernelPlan {
 
     pub(super) fn from_descriptor(
         descriptor: &PipelineDescriptor,
+        stage_entries: &[Vec<crate::EntryId>],
         resources: &LogicalResourceArena,
         entries: &[SemanticEntry],
     ) -> Result<Self, String> {
         let host_resources = crate::egir::program::host_resource_map(resources);
         let mut seeded = vec![None; entries.len()];
-        let mut by_name = HashMap::new();
-        for (index, entry) in entries.iter().enumerate() {
-            let source = SemanticEntryId::from_index(index);
-            if by_name.insert(entry.name.as_str(), (source, entry)).is_some() {
-                return Err(format!("duplicate semantic entry `{}`", entry.name));
-            }
+        let entries_by_id = entries.iter().map(|entry| (entry.id, entry)).collect::<HashMap<_, _>>();
+        if stage_entries.len() != descriptor.pipelines.len() {
+            return Err("descriptor pipeline stages are missing structural entry associations".into());
         }
         let mut phases = Vec::new();
         let mut pipelines = Vec::new();
         let mut flow_sources = HashMap::new();
+        // Resolve descriptor ABI symbols while seeding. Subsequent plan
+        // membership and ownership use structural entry identities only.
+        let mut published_sources = HashSet::new();
         for (order, pipeline) in descriptor.pipelines.iter().enumerate() {
             let Pipeline::Compute(template) = pipeline else {
                 continue;
             };
             let pipeline_id = PipelineId(pipelines.len() as u32);
-            for (stage_order, stage) in template.stages.iter().enumerate() {
+            let associated_entries =
+                stage_entries.get(order).ok_or("compute pipeline has no stage associations")?;
+            if associated_entries.len() != template.stages.len() {
+                return Err("compute pipeline stage association count differs from descriptor".into());
+            }
+            for (stage_order, (stage, &source)) in
+                template.stages.iter().zip(associated_entries).enumerate()
+            {
                 let selection = domain_selection_from_stage(stage, &host_resources)?;
-                let (source, entry) = by_name.get(stage.entry_point.as_str()).ok_or_else(|| {
-                    format!("descriptor stage `{}` has no semantic entry", stage.entry_point)
-                })?;
+                let entry = entries_by_id
+                    .get(&source)
+                    .copied()
+                    .ok_or_else(|| format!("descriptor stage has unknown semantic entry {source:?}"))?;
+                published_sources.insert(source);
                 let phase = phase_from_entry(
-                    Some(*source),
+                    Some(source),
                     entry,
                     selection,
                     "serial_compute",
@@ -552,8 +564,8 @@ impl KernelPlan {
                     },
                 )?;
                 let id = KernelId(phases.len() as u32);
-                record_seeded_kernel(&mut seeded, *source, id, &entry.name)?;
-                flow_sources.insert(CompilerFlowEndpoint::Entry(*source), id);
+                record_seeded_kernel(&mut seeded, source, id, &entry.name)?;
+                flow_sources.insert(CompilerFlowEndpoint::Entry(source), id);
                 phases.push(phase);
             }
             pipelines.push(ScheduledPipeline {
@@ -563,16 +575,23 @@ impl KernelPlan {
             });
         }
         let mut graphics_order = 0;
-        for pipeline in &descriptor.pipelines {
+        for (pipeline_index, pipeline) in descriptor.pipelines.iter().enumerate() {
             let Pipeline::Graphics(graphics) = pipeline else {
                 continue;
             };
-            for stage in &graphics.stages {
-                let (source, entry) = by_name.get(stage.entry_point.as_str()).ok_or_else(|| {
-                    format!("graphics stage `{}` has no semantic entry", stage.entry_point)
-                })?;
+            let associated_entries =
+                stage_entries.get(pipeline_index).ok_or("graphics pipeline has no stage associations")?;
+            if associated_entries.len() != graphics.stages.len() {
+                return Err("graphics pipeline stage association count differs from descriptor".into());
+            }
+            for &source in associated_entries {
+                let entry = entries_by_id
+                    .get(&source)
+                    .copied()
+                    .ok_or_else(|| format!("graphics stage has unknown semantic entry {source:?}"))?;
+                published_sources.insert(source);
                 let phase = graphics_passthrough_phase(
-                    *source,
+                    source,
                     entry,
                     PhasePlacement {
                         group: PhaseGroup::Graphics,
@@ -581,27 +600,15 @@ impl KernelPlan {
                 )?;
                 graphics_order += 1;
                 let id = KernelId(phases.len() as u32);
-                record_seeded_kernel(&mut seeded, *source, id, &entry.name)?;
-                flow_sources.insert(CompilerFlowEndpoint::Entry(*source), id);
+                record_seeded_kernel(&mut seeded, source, id, &entry.name)?;
+                flow_sources.insert(CompilerFlowEndpoint::Entry(source), id);
                 phases.push(phase);
             }
         }
-        let published_names = descriptor
-            .pipelines
-            .iter()
-            .flat_map(|pipeline| match pipeline {
-                Pipeline::Compute(compute) => {
-                    compute.stages.iter().map(|stage| stage.entry_point.as_str()).collect::<Vec<_>>()
-                }
-                Pipeline::Graphics(graphics) => {
-                    graphics.stages.iter().map(|stage| stage.entry_point.as_str()).collect::<Vec<_>>()
-                }
-            })
-            .collect::<HashSet<_>>();
         let mut unpublished_order = 0;
-        for (index, entry) in entries.iter().enumerate() {
-            let source = SemanticEntryId::from_index(index);
-            if published_names.contains(entry.name.as_str()) {
+        for entry in entries {
+            let source = entry.id;
+            if published_sources.contains(&source) {
                 continue;
             }
             let placement = PhasePlacement {
@@ -635,9 +642,8 @@ impl KernelPlan {
             .collect::<Result<Vec<_>, _>>()?;
         let source_entries = entries
             .iter()
-            .enumerate()
-            .map(|(index, entry)| {
-                let source = SemanticEntryId::from_index(index);
+            .map(|entry| {
+                let source = entry.id;
                 let primary = seeded[source.index()];
                 SourceEntryPlan {
                     publication: PlannedPublication::from_semantic(entry),

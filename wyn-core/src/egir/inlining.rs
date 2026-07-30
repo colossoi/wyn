@@ -57,22 +57,23 @@ pub(crate) fn inline_pure_call<P: Family>(
     call: NodeId,
     callee: &Func<P, WynLanguage>,
 ) -> Result<NodeId, String> {
-    let (called_name, operands) = match caller.nodes.get(call).map(|node| &node.kind) {
+    let (called_function, operands) = match caller.nodes.get(call).map(|node| &node.kind) {
         Some(ENode::Pure {
-            op: PureOp::Call(name),
+            op: PureOp::Call(function),
             operands,
-        }) => (name.clone(), operands.clone()),
+        }) => (*function, operands.clone()),
         _ => return Err(format!("inline_pure_call: node {call:?} is not a pure call")),
     };
-    if called_name != callee.name {
+    if called_function != callee.region {
         return Err(format!(
-            "inline_pure_call: call targets `{called_name}` but callee is `{}`",
-            callee.name
+            "inline_pure_call: call targets {:?} but callee `{}` has identity {:?}",
+            called_function, callee.name, callee.region
         ));
     }
     if operands.len() != callee.params.len() {
         return Err(format!(
-            "inline_pure_call: `{called_name}` has {} call operands but {} parameters",
+            "inline_pure_call: `{}` has {} call operands but {} parameters",
+            callee.name,
             operands.len(),
             callee.params.len()
         ));
@@ -85,13 +86,18 @@ pub(crate) fn inline_pure_call<P: Family>(
             .ok_or_else(|| format!("inline_pure_call: operand {index} has no type"))?;
         if operand_ty != param_ty {
             return Err(format!(
-                "inline_pure_call: operand {index} of `{called_name}` has type {operand_ty:?}, expected {param_ty:?}"
+                "inline_pure_call: operand {index} of `{}` has type {operand_ty:?}, expected {param_ty:?}",
+                callee.name
             ));
         }
     }
 
-    let root = inlineable_return_root(callee)
-        .ok_or_else(|| format!("inline_pure_call: `{called_name}` is not a pure single-block value DAG"))?;
+    let root = inlineable_return_root(callee).ok_or_else(|| {
+        format!(
+            "inline_pure_call: `{}` is not a pure single-block value DAG",
+            callee.name
+        )
+    })?;
     let mut memo = LookupMap::new();
     let reachable =
         wyn_graph::reachable_from_ordered([root], wyn_graph::WalkOrder::DepthFirst, |node, out| {
@@ -101,7 +107,10 @@ pub(crate) fn inline_pure_call<P: Family>(
         let definition = &callee.graph.nodes[node].kind;
         if let ENode::FuncParam { index } = definition {
             let replacement = operands.get(*index).copied().ok_or_else(|| {
-                format!("inline_pure_call: `{called_name}` contains out-of-range FuncParam {index}")
+                format!(
+                    "inline_pure_call: `{}` contains out-of-range FuncParam {index}",
+                    callee.name
+                )
             })?;
             memo.insert(node, replacement);
         }
@@ -110,7 +119,8 @@ pub(crate) fn inline_pure_call<P: Family>(
     let inlined = clone_value_subgraph(&callee.graph, caller, root, &mut memo, ConstantCopy::Intern, true)?;
     if inlined == call {
         return Err(format!(
-            "inline_pure_call: inlining `{called_name}` reproduced the original call"
+            "inline_pure_call: inlining `{}` reproduced the original call",
+            callee.name
         ));
     }
     let result_ty = caller
@@ -125,7 +135,8 @@ pub(crate) fn inline_pure_call<P: Family>(
         .ok_or_else(|| format!("inline_pure_call: inlined root {inlined:?} has no type"))?;
     if result_ty != inlined_ty {
         return Err(format!(
-            "inline_pure_call: `{called_name}` inlined result has type {inlined_ty:?}, call expects {result_ty:?}"
+            "inline_pure_call: `{}` inlined result has type {inlined_ty:?}, call expects {result_ty:?}",
+            callee.name
         ));
     }
 

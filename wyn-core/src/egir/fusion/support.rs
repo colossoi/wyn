@@ -26,10 +26,10 @@ pub(super) fn invoke_lambda(
     let mut operands = Vec::with_capacity(arguments.len() + captures.len());
     operands.extend_from_slice(arguments);
     operands.extend_from_slice(captures);
-    let callee = lambda
-        .seg_body()
-        .map(|body| program.region(body.region).expect("SOAC lambda region is absent").name.as_str());
-    lambda_ops::emit_call(graph, lambda, callee, operands)
+    if let Some(body) = lambda.seg_body() {
+        debug_assert!(program.contains_region(body.region));
+    }
+    lambda_ops::emit_call(graph, lambda, operands)
 }
 pub(super) fn result_used_only_by_effect_pair(
     graph: &EGraph,

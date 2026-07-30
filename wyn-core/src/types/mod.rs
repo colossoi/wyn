@@ -75,8 +75,12 @@ pub type TypeScheme = polytype::TypeScheme<TypeName>;
 /// A bodyless external callable declaration shared by compiler IRs.
 #[derive(Clone, Debug)]
 pub struct ExternDecl<Ty = Type> {
+    pub id: crate::FunctionId,
+    /// Wyn-visible diagnostic/emitted name; calls use `id`.
     pub name: String,
     pub span: Span,
+    /// External linker ABI. This is intentionally textual but is never used as
+    /// compiler-internal callable identity.
     pub linkage_name: String,
     pub params: Vec<(Ty, String)>,
     pub return_ty: Ty,

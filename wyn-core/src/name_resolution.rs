@@ -18,6 +18,7 @@
 //! type checker handles them via scope/module lookup.
 
 use crate::LookupMap;
+use crate::{SymbolId, SymbolTable};
 
 use crate::ast::{Declaration, ExprKind, Expression, NodeId, Program};
 use crate::builtins::{BuiltinCatalog, BuiltinId};
@@ -31,9 +32,9 @@ pub type NamesResolved =
     Program<NamesResolvedTag, crate::elaborate_modules::ModulesElaboratedFamily, ModuleManager>;
 
 /// Insert every name bound by `pattern` into `scope`.
-fn collect_pattern_bindings<H, A>(pattern: &crate::ast::Pattern<H, A>, scope: &mut ScopeStack<()>)
+fn collect_pattern_bindings<T, A>(pattern: &crate::ast::Pattern<T, A>, scope: &mut ScopeStack<()>)
 where
-    H: Clone + std::fmt::Debug + PartialEq,
+    T: crate::ast::TreeFamily,
     A: Clone + std::fmt::Debug + PartialEq,
 {
     for_each_pattern_name(pattern, &mut |name| {
@@ -157,22 +158,24 @@ pub fn walk_expr<C: ResolveContext>(
             }
         }
         ExprKind::Loop(loop_expr) => {
-            scope.push_scope();
-            collect_pattern_bindings(&loop_expr.pattern, scope);
+            // The initializer and iteration domain are evaluated outside the
+            // loop scope. This matters when a loop binder shadows an outer
+            // value, as in `loop x = x ...`.
             if let Some(init) = &mut loop_expr.init {
                 walk_expr(init, context, scope)?;
             }
             match &mut loop_expr.form {
-                crate::ast::LoopForm::While(condition) => {
-                    walk_expr(condition, context, scope)?;
-                }
-                crate::ast::LoopForm::For(name, bound) => {
-                    scope.insert(name.clone(), ());
-                    walk_expr(bound, context, scope)?;
-                }
-                crate::ast::LoopForm::ForIn(pattern, iterable) => {
+                crate::ast::LoopForm::For(_, bound) => walk_expr(bound, context, scope)?,
+                crate::ast::LoopForm::ForIn(_, iterable) => walk_expr(iterable, context, scope)?,
+                crate::ast::LoopForm::While(_) => {}
+            }
+
+            scope.push_scope();
+            collect_pattern_bindings(&loop_expr.pattern, scope);
+            match &mut loop_expr.form {
+                crate::ast::LoopForm::While(condition) => walk_expr(condition, context, scope)?,
+                crate::ast::LoopForm::For(pattern, _) | crate::ast::LoopForm::ForIn(pattern, _) => {
                     collect_pattern_bindings(pattern, scope);
-                    walk_expr(iterable, context, scope)?;
                 }
             }
             walk_expr(&mut loop_expr.body, context, scope)?;
@@ -340,8 +343,10 @@ impl SoacKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedValueRef {
+    /// A lexical, top-level, module, or prelude value binding.
+    Symbol(SymbolId),
     /// Catalog entry matching this identifier's surface name.
     /// `overload_idx` is the index into `BuiltinDef::overloads()` chosen
     /// by the type checker after resolving the call against actual
@@ -362,14 +367,14 @@ pub enum ResolvedValueRef {
     /// The source component type comes from the typed arg at desugar
     /// time.
     VecConstructor {
-        /// `"vec2i32"`, `"vec3f32"`, etc. — the original call name.
-        target_name: String,
         /// Arity: 2, 3, or 4.
         arity: usize,
-        /// Per-component scalar target type name, e.g. `"i32"` for
-        /// `vec2i32`. The catalog entry `"<target_elem>.<source_elem>"`
-        /// is looked up at desugar time.
-        target_elem: String,
+        /// Structurally resolved per-component target type. Conversion
+        /// dispatch never reconstructs a catalog name from this value.
+        target_elem: crate::ast::TypeName,
+        /// Filled by type checking once the source component type is known.
+        /// Materialization rejects `None`.
+        component_conversion: Option<BuiltinId>,
     },
     /// A second-order array combinator (`map`/`reduce`/…) named by a
     /// bare, unshadowed identifier. Recorded only when the name resolves
@@ -379,15 +384,61 @@ pub enum ResolvedValueRef {
     Soac(SoacKind),
 }
 
+/// Program-wide context after all value binders and references have stable
+/// identities. `source` retains module/resource/type environments; `symbols`
+/// is the sole allocator and diagnostic-name table for source-level bindings.
+#[derive(Debug)]
+pub struct BindingsResolvedGlobal {
+    pub source: crate::resolve_placeholders::PlaceholdersResolvedGlobal,
+    pub symbols: SymbolTable,
+    pub support_definitions:
+        Vec<crate::ast::SupportDefinition<crate::ast::NameResolvedDefinition, crate::ast::ResolvedTree>>,
+}
+
+pub type BindingsResolvedFamily = crate::ast::AstFamily<
+    crate::ast::ResolvedTree,
+    crate::ast::NameResolvedDefinition,
+    crate::ast::NameResolvedEntry,
+    crate::interface::ResolvedAttribute,
+    crate::ast::NameResolvedExtern,
+    std::convert::Infallible,
+>;
+
+#[derive(Debug, Clone, Copy)]
+pub enum BindingsResolvedTag {}
+
+pub type BindingsResolved =
+    crate::ast::Program<BindingsResolvedTag, BindingsResolvedFamily, BindingsResolvedGlobal>;
+
 /// Side table populated by `build_name_resolution`. Maps Identifier
 /// NodeIds to their catalog classification. Identifiers not in the
 /// catalog (locals, top-level defs, module values) are absent.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct NameResolution {
     pub values: LookupMap<NodeId, ResolvedValueRef>,
+    /// Sole source-level identity arena. Names are diagnostic metadata.
+    pub symbols: SymbolTable,
+    /// Transient resolution-boundary lookup consumed while rebuilding
+    /// declarations into the ID-bearing typed AST.
+    pub definitions: LookupMap<String, SymbolId>,
+    /// Pattern-node/source-spelling to binder identity. This table is consumed
+    /// when resolved bindings are materialized in-tree.
+    pub bindings: LookupMap<(NodeId, String), SymbolId>,
+    /// Definition-node identity, kept separate from lexical name lookup so a
+    /// shadowed prelude definition never shares a `SymbolId` with user code.
+    pub declarations: LookupMap<(String, crate::ast::Span), SymbolId>,
 }
 
 impl NameResolution {
+    fn new() -> Self {
+        Self {
+            values: LookupMap::new(),
+            symbols: SymbolTable::new(),
+            definitions: LookupMap::new(),
+            bindings: LookupMap::new(),
+            declarations: LookupMap::new(),
+        }
+    }
     pub fn get(&self, id: NodeId) -> Option<&ResolvedValueRef> {
         self.values.get(&id)
     }
@@ -402,11 +453,9 @@ impl NameResolution {
                     *overload_idx = Some(idx);
                 }
                 ResolvedValueRef::VecConstructor { .. } => {
-                    // Vec constructors don't carry an overload index —
-                    // the desugaring picks the catalog entry by name
-                    // at to_tlc time. No-op.
+                    // Vec constructors don't carry a catalog overload index.
                 }
-                ResolvedValueRef::Soac(_) => {
+                ResolvedValueRef::Symbol(_) | ResolvedValueRef::Soac(_) => {
                     // SOACs aren't overloaded catalog entries. No-op.
                 }
             }
@@ -429,7 +478,7 @@ pub fn build_name_resolution(
     module_manager: &ModuleManager,
     catalog: &BuiltinCatalog,
 ) -> NameResolution {
-    let mut nr = NameResolution::default();
+    let mut nr = NameResolution::new();
     let mut top_level: ScopeStack<()> = ScopeStack::new();
     collect_top_level_names(&program.declarations, &mut top_level);
 
@@ -500,9 +549,314 @@ pub fn build_name_resolution(
         scope.pop_scope();
     }
 
+    assign_symbol_identities(program, module_manager, &mut nr);
     nr
 }
 
+fn intern_definition(nr: &mut NameResolution, name: String) -> SymbolId {
+    if let Some(symbol) = nr.definitions.get(&name) {
+        return *symbol;
+    }
+    let symbol = nr.symbols.alloc(name.clone());
+    nr.definitions.insert(name, symbol);
+    symbol
+}
+
+fn alloc_declaration(nr: &mut NameResolution, name: String, span: crate::ast::Span) -> SymbolId {
+    let symbol = nr.symbols.alloc(name.clone());
+    nr.declarations.insert((name, span), symbol);
+    symbol
+}
+
+fn bind_symbol_pattern<T, A>(
+    pattern: &crate::ast::Pattern<T, A>,
+    scope: &mut ScopeStack<SymbolId>,
+    nr: &mut NameResolution,
+) where
+    T: crate::ast::TreeFamily<
+        Header = crate::ast::Header,
+        Identifier = crate::ast::Identifier,
+        Binding = String,
+        TypeHole = crate::ast::TypeHole,
+    >,
+    A: Clone + std::fmt::Debug + PartialEq,
+{
+    use crate::ast::{PatternKind, RecordPatternTarget};
+
+    match &pattern.kind {
+        PatternKind::Name(name) => {
+            let symbol = nr.symbols.alloc(name.clone());
+            nr.bindings.insert((pattern.h.id, name.clone()), symbol);
+            scope.insert(name.clone(), symbol);
+        }
+        PatternKind::Tuple(patterns)
+        | PatternKind::Vec(patterns)
+        | PatternKind::Constructor(_, patterns) => {
+            for pattern in patterns {
+                bind_symbol_pattern(pattern, scope, nr);
+            }
+        }
+        PatternKind::Record(fields) => {
+            for field in fields {
+                match &field.target {
+                    RecordPatternTarget::Pattern(pattern) => bind_symbol_pattern(pattern, scope, nr),
+                    RecordPatternTarget::Shorthand(name) => {
+                        let symbol = nr.symbols.alloc(name.clone());
+                        nr.bindings.insert((pattern.h.id, name.clone()), symbol);
+                        scope.insert(name.clone(), symbol);
+                    }
+                }
+            }
+        }
+        PatternKind::Typed(pattern, _) | PatternKind::Attributed(_, pattern) => {
+            bind_symbol_pattern(pattern, scope, nr);
+        }
+        PatternKind::Wildcard | PatternKind::Literal(_) | PatternKind::Unit => {}
+    }
+}
+
+fn assign_symbol_identities(
+    program: &crate::resolve_opens::OpensResolved,
+    module_manager: &ModuleManager,
+    nr: &mut NameResolution,
+) {
+    for (module, definition) in module_manager.get_all_module_declarations() {
+        let name = format!("{}.{}", module, definition.name);
+        let symbol = alloc_declaration(nr, name.clone(), definition.name_span);
+        nr.definitions.entry(name).or_insert(symbol);
+    }
+    let prelude = module_manager.get_prelude_function_declarations();
+    for definition in &prelude {
+        let symbol = alloc_declaration(nr, definition.name.clone(), definition.name_span);
+        nr.definitions.entry(definition.name.clone()).or_insert(symbol);
+    }
+    for declaration in &program.declarations {
+        match declaration {
+            Declaration::Decl(definition) => {
+                let symbol = alloc_declaration(nr, definition.name.clone(), definition.name_span);
+                nr.definitions.insert(definition.name.clone(), symbol);
+            }
+            Declaration::Entry(entry) => {
+                let symbol = alloc_declaration(nr, entry.name.clone(), entry.name_span);
+                nr.definitions.insert(entry.name.clone(), symbol);
+            }
+            Declaration::Extern(external) => {
+                let symbol = alloc_declaration(nr, external.name.clone(), external.data.span);
+                nr.definitions.insert(external.name.clone(), symbol);
+            }
+            Declaration::Frontend(_) => {}
+        }
+    }
+
+    for declaration in &program.declarations {
+        match declaration {
+            Declaration::Decl(definition) => {
+                let mut scope = ScopeStack::new();
+                scope.push_scope();
+                for pattern in &definition.params {
+                    bind_symbol_pattern(pattern, &mut scope, nr);
+                }
+                assign_expr_symbols(&definition.body, &mut scope, nr);
+            }
+            Declaration::Entry(entry) => {
+                let mut scope = ScopeStack::new();
+                scope.push_scope();
+                for pattern in &entry.params {
+                    bind_symbol_pattern(pattern, &mut scope, nr);
+                }
+                assign_expr_symbols(&entry.body, &mut scope, nr);
+            }
+            Declaration::Extern(_) | Declaration::Frontend(_) => {}
+        }
+    }
+
+    for (module, elaborated) in module_manager.elaborated_modules.iter() {
+        let mut module_scope = ScopeStack::new();
+        for item in &elaborated.items {
+            if let crate::module_manager::ElaboratedItem::Decl(definition) = item {
+                let symbol = intern_definition(nr, format!("{}.{}", module, definition.name));
+                module_scope.insert(definition.name.clone(), symbol);
+            }
+        }
+        for item in &elaborated.items {
+            if let crate::module_manager::ElaboratedItem::Decl(definition) = item {
+                let mut scope = module_scope.clone();
+                scope.push_scope();
+                for pattern in &definition.params {
+                    bind_symbol_pattern(pattern, &mut scope, nr);
+                }
+                assign_expr_symbols(&definition.body, &mut scope, nr);
+            }
+        }
+    }
+
+    let mut prelude_scope = ScopeStack::new();
+    for definition in &prelude {
+        let symbol = intern_definition(nr, definition.name.clone());
+        prelude_scope.insert(definition.name.clone(), symbol);
+    }
+    for definition in &prelude {
+        let mut scope = prelude_scope.clone();
+        scope.push_scope();
+        for pattern in &definition.params {
+            bind_symbol_pattern(pattern, &mut scope, nr);
+        }
+        assign_expr_symbols(&definition.body, &mut scope, nr);
+    }
+}
+
+fn assign_expr_symbols<T>(
+    expression: &Expression<T>,
+    scope: &mut ScopeStack<SymbolId>,
+    nr: &mut NameResolution,
+) where
+    T: crate::ast::TreeFamily<
+        Header = crate::ast::Header,
+        Identifier = crate::ast::Identifier,
+        Binding = String,
+        TypeHole = crate::ast::TypeHole,
+    >,
+{
+    use crate::ast::LoopForm;
+
+    match &expression.kind {
+        ExprKind::Identifier(identifier) => {
+            if nr.values.contains_key(&expression.h.id) {
+                return;
+            }
+            let full_name = if identifier.qualifiers.is_empty() {
+                identifier.name.clone()
+            } else {
+                format!("{}.{}", identifier.qualifiers.join("."), identifier.name)
+            };
+            let symbol = if identifier.qualifiers.is_empty() {
+                scope.lookup(&identifier.name).copied().or_else(|| nr.definitions.get(&full_name).copied())
+            } else {
+                nr.definitions.get(&full_name).copied()
+            }
+            .unwrap_or_else(|| intern_definition(nr, full_name));
+            nr.values.insert(expression.h.id, ResolvedValueRef::Symbol(symbol));
+        }
+        ExprKind::Application(function, arguments) => {
+            assign_expr_symbols(function, scope, nr);
+            for argument in arguments {
+                assign_expr_symbols(argument, scope, nr);
+            }
+        }
+        ExprKind::Lambda(lambda) => {
+            scope.push_scope();
+            for pattern in &lambda.params {
+                bind_symbol_pattern(pattern, scope, nr);
+            }
+            assign_expr_symbols(&lambda.body, scope, nr);
+            scope.pop_scope();
+        }
+        ExprKind::LetIn(let_in) => {
+            assign_expr_symbols(&let_in.value, scope, nr);
+            scope.push_scope();
+            bind_symbol_pattern(&let_in.pattern, scope, nr);
+            assign_expr_symbols(&let_in.body, scope, nr);
+            scope.pop_scope();
+        }
+        ExprKind::If(if_expression) => {
+            assign_expr_symbols(&if_expression.condition, scope, nr);
+            assign_expr_symbols(&if_expression.then_branch, scope, nr);
+            assign_expr_symbols(&if_expression.else_branch, scope, nr);
+        }
+        ExprKind::FieldAccess(value, _) => assign_expr_symbols(value, scope, nr),
+        ExprKind::BinaryOp(_, left, right) => {
+            assign_expr_symbols(left, scope, nr);
+            assign_expr_symbols(right, scope, nr);
+        }
+        ExprKind::UnaryOp(_, operand) => assign_expr_symbols(operand, scope, nr),
+        ExprKind::Tuple(values) | ExprKind::ArrayLiteral(values) | ExprKind::VecMatLiteral(values) => {
+            for value in values {
+                assign_expr_symbols(value, scope, nr);
+            }
+        }
+        ExprKind::ArrayIndex(array, index) => {
+            assign_expr_symbols(array, scope, nr);
+            assign_expr_symbols(index, scope, nr);
+        }
+        ExprKind::ArrayWith { array, index, value } => {
+            assign_expr_symbols(array, scope, nr);
+            assign_expr_symbols(index, scope, nr);
+            assign_expr_symbols(value, scope, nr);
+        }
+        ExprKind::VecWith { target, value, .. } => {
+            assign_expr_symbols(target, scope, nr);
+            assign_expr_symbols(value, scope, nr);
+        }
+        ExprKind::RecordWith { record, value, .. } => {
+            assign_expr_symbols(record, scope, nr);
+            assign_expr_symbols(value, scope, nr);
+        }
+        ExprKind::RecordLiteral(fields) => {
+            for (_, value) in fields {
+                assign_expr_symbols(value, scope, nr);
+            }
+        }
+        ExprKind::Loop(loop_expression) => {
+            if let Some(init) = &loop_expression.init {
+                assign_expr_symbols(init, scope, nr);
+            }
+            match &loop_expression.form {
+                LoopForm::For(_, bound) => assign_expr_symbols(bound, scope, nr),
+                LoopForm::ForIn(_, iterable) => assign_expr_symbols(iterable, scope, nr),
+                LoopForm::While(_) => {}
+            }
+
+            scope.push_scope();
+            bind_symbol_pattern(&loop_expression.pattern, scope, nr);
+            match &loop_expression.form {
+                LoopForm::While(condition) => assign_expr_symbols(condition, scope, nr),
+                LoopForm::For(pattern, _) | LoopForm::ForIn(pattern, _) => {
+                    bind_symbol_pattern(pattern, scope, nr);
+                }
+            }
+            assign_expr_symbols(&loop_expression.body, scope, nr);
+            scope.pop_scope();
+        }
+        ExprKind::Match(match_expression) => {
+            assign_expr_symbols(&match_expression.scrutinee, scope, nr);
+            for case in &match_expression.cases {
+                scope.push_scope();
+                bind_symbol_pattern(&case.pattern, scope, nr);
+                assign_expr_symbols(&case.body, scope, nr);
+                scope.pop_scope();
+            }
+        }
+        ExprKind::TypeAscription(value, _) | ExprKind::TypeCoercion(value, _) => {
+            assign_expr_symbols(value, scope, nr);
+        }
+        ExprKind::Range(range) => {
+            assign_expr_symbols(&range.start, scope, nr);
+            if let Some(step) = &range.step {
+                assign_expr_symbols(step, scope, nr);
+            }
+            assign_expr_symbols(&range.end, scope, nr);
+        }
+        ExprKind::Slice(slice) => {
+            assign_expr_symbols(&slice.array, scope, nr);
+            if let Some(start) = &slice.start {
+                assign_expr_symbols(start, scope, nr);
+            }
+            if let Some(end) = &slice.end {
+                assign_expr_symbols(end, scope, nr);
+            }
+        }
+        ExprKind::Constructor(_, arguments) => {
+            for argument in arguments {
+                assign_expr_symbols(argument, scope, nr);
+            }
+        }
+        ExprKind::IntLiteral(_)
+        | ExprKind::FloatLiteral(_)
+        | ExprKind::BoolLiteral(_)
+        | ExprKind::Unit
+        | ExprKind::TypeHole(_) => {}
+    }
+}
 /// Walk a list of declarations (program-level or module-body), classifying
 /// every catalog reference in their bodies. `outer_scope` provides the
 /// shadowing context (top-level user names, or surrounding module's
@@ -667,20 +1021,21 @@ fn walk_resolution<T>(
         }
         ExprKind::Loop(loop_expr) => {
             use crate::ast::LoopForm;
-            scope.push_scope();
-            collect_pattern_bindings(&loop_expr.pattern, scope);
             if let Some(init) = &loop_expr.init {
                 walk_resolution(init, catalog, scope, nr);
             }
             match &loop_expr.form {
+                LoopForm::For(_, bound) => walk_resolution(bound, catalog, scope, nr),
+                LoopForm::ForIn(_, iter) => walk_resolution(iter, catalog, scope, nr),
+                LoopForm::While(_) => {}
+            }
+
+            scope.push_scope();
+            collect_pattern_bindings(&loop_expr.pattern, scope);
+            match &loop_expr.form {
                 LoopForm::While(cond) => walk_resolution(cond, catalog, scope, nr),
-                LoopForm::For(idx_var, bound) => {
-                    scope.insert(idx_var.clone(), ());
-                    walk_resolution(bound, catalog, scope, nr);
-                }
-                LoopForm::ForIn(elem_pat, iter) => {
-                    collect_pattern_bindings(elem_pat, scope);
-                    walk_resolution(iter, catalog, scope, nr);
+                LoopForm::For(pattern, _) | LoopForm::ForIn(pattern, _) => {
+                    collect_pattern_bindings(pattern, scope);
                 }
             }
             walk_resolution(&loop_expr.body, catalog, scope, nr);

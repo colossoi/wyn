@@ -1,5 +1,4 @@
-//! Tests for the region arena / interner invariants that the opaque
-//! `RegionId` representation depends on.
+//! Tests for stable program identity arenas and resource planning invariants.
 
 use super::*;
 use crate::ast::{Span, TypeName};
@@ -16,9 +15,9 @@ fn unit_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Unit, vec![])
 }
 
-fn empty_func(name: &str) -> SemanticFunc {
+fn empty_func(id: RegionId, name: &str) -> SemanticFunc {
     SemanticFunc::new(
-        RegionId::from_index(0),
+        id,
         name.to_string(),
         Span::dummy(),
         None,
@@ -28,9 +27,10 @@ fn empty_func(name: &str) -> SemanticFunc {
     )
 }
 
-fn empty_entry(name: &str) -> SemanticEntry {
+fn empty_entry(id: crate::EntryId, name: &str) -> SemanticEntry {
     SemanticEntry::new_with_resources(
         name.to_string(),
+        id,
         Span::dummy(),
         ExecutionModel::Compute {
             local_size: (1, 1, 1),
@@ -69,13 +69,15 @@ fn into_allocated(program: crate::egir::reify::Segmented) -> ResourcesAllocated 
 
 fn allocated_program(size: LogicalSize) -> ResourcesAllocated {
     let binding = crate::BindingRef::new(0, 7);
+    let mut identities = ProgramIdentities::default();
+    let main = identities.alloc_entry("main".into());
     let mut program = semantic_program_for_test(
         vec![],
         vec![],
-        vec![empty_entry("main")],
+        vec![empty_entry(main, "main")],
         vec![],
         PipelineDescriptor::default(),
-        RegionInterner::default(),
+        identities,
     );
     let resource = program.data.resources.allocate(ResourceOrigin::host(binding), unit_ty(), size);
     let resource_size = program.data.resources[resource].size.clone();
@@ -97,7 +99,7 @@ fn logical_allocation_introduces_the_allocated_sidecar() {
         vec![],
         vec![],
         PipelineDescriptor::default(),
-        RegionInterner::default(),
+        ProgramIdentities::default(),
     );
     semantic.data.resources.allocate(ResourceOrigin::host(binding), unit_ty(), LogicalSize::Unspecified);
 
@@ -110,18 +112,21 @@ fn logical_allocation_introduces_the_allocated_sidecar() {
 
 #[test]
 fn semantic_entry_identity_is_stable_and_reused_by_flow_endpoints() {
+    let mut identities = ProgramIdentities::default();
+    let first = identities.alloc_entry("first".into());
+    let second = identities.alloc_entry("second".into());
     let mut program = semantic_program_for_test(
         vec![],
         vec![],
-        vec![empty_entry("first"), empty_entry("second")],
+        vec![empty_entry(first, "first"), empty_entry(second, "second")],
         vec![],
         PipelineDescriptor::default(),
-        RegionInterner::default(),
+        identities,
     );
 
-    let before = (0..program.entry_points.len()).map(SemanticEntryId).collect::<Vec<_>>();
+    let before = program.entry_points.iter().map(|entry| entry.id).collect::<Vec<_>>();
     program.entry_points[0].name = "renamed".into();
-    let after = (0..program.entry_points.len()).map(SemanticEntryId).collect::<Vec<_>>();
+    let after = program.entry_points.iter().map(|entry| entry.id).collect::<Vec<_>>();
     assert_ne!(before[0], before[1]);
     assert_eq!(
         after, before,
@@ -262,90 +267,63 @@ fn allocated_resource_verifier_rejects_missing_size_source() {
 }
 
 #[test]
-fn interner_assigns_dense_indices_and_deduplicates_names() {
-    let mut interner = RegionInterner::default();
-    let foo = interner.intern("foo");
-    let bar = interner.intern("bar");
-    assert_eq!(
-        foo,
-        interner.intern("foo"),
-        "same name re-interns to the same index"
-    );
+fn function_identity_arena_allocates_distinct_stable_ids() {
+    let mut identities = ProgramIdentities::default();
+    let foo = identities.alloc_function("foo".into());
+    let bar = identities.alloc_function("bar".into());
+    let second_foo = identities.alloc_function("foo".into());
+
     assert_ne!(foo, bar);
-    assert_eq!(foo.index(), 0);
-    assert_eq!(bar.index(), 1);
-    assert_eq!(interner.resolve(foo), "foo");
-    assert_eq!(interner.resolve(bar), "bar");
-    assert_eq!(interner.get("foo"), Some(foo));
-    assert_eq!(interner.get("absent"), None);
+    assert_ne!(foo, second_foo, "names are metadata, not identity keys");
+    assert_eq!(identities.function_name(foo), "foo");
+    assert_eq!(identities.function_name(bar), "bar");
+    assert_eq!(identities.function_name(second_foo), "foo");
 }
 
-/// Correctness risk #1 — index agreement. A `SegBody` built during TLC→EGIR
-/// conversion interns its callee before the program builder walks the function
-/// list, and the callee may appear later in that list than other functions.
-/// The arena entry for the callee must still land on the index the `SegBody`
-/// already holds.
 #[test]
-fn segbody_index_resolves_to_its_arena_function() {
-    // `op` is referenced (interned) first, as a SegBody operator region would
-    // be, even though it is the *second* function in the program.
-    let mut interner = RegionInterner::default();
-    let op_id: RegionId = interner.intern("op");
+fn segbody_identity_selects_its_exact_function() {
+    let mut identities = ProgramIdentities::default();
+    let op_id = identities.alloc_function("op".into());
+    let main_id = identities.alloc_function("main".into());
 
     let inner = semantic_program_for_test(
-        vec![empty_func("main"), empty_func("op")],
+        vec![empty_func(main_id, "main"), empty_func(op_id, "op")],
         vec![],
         vec![],
         vec![],
         PipelineDescriptor::default(),
-        interner,
+        identities,
     );
 
-    // The pre-interned index is preserved and points at the right body.
-    assert_eq!(inner.data.region_interner.get("op"), Some(op_id));
-    assert!(inner.contains_region(op_id), "callee region must be in the arena");
+    assert!(inner.contains_region(op_id));
     assert_eq!(inner.region_name(op_id), "op");
     assert_eq!(inner.region(op_id).unwrap().name, "op");
-    // `main` was assigned its index by the program builder, after `op`.
-    let main_id = inner.data.region_interner.get("main").expect("main interned");
     assert_ne!(main_id, op_id);
     assert_eq!(inner.region_name(main_id), "main");
 }
 
-/// A synthesized region's index is its interned name, so a caller that reserved
-/// the index before building the body — as vertical fusion does, to reference it
-/// from the `SegBody` it is composing — gets that same index back from
-/// `define_region`, and the body lands under it.
 #[test]
-fn define_region_records_the_body_under_the_reserved_index() {
+fn reserved_function_identity_is_retained_by_synthesized_body() {
+    let mut identities = ProgramIdentities::default();
+    let main_id = identities.alloc_function("main".into());
     let mut inner = semantic_program_for_test(
-        vec![empty_func("main")],
+        vec![empty_func(main_id, "main")],
         vec![],
         vec![],
         vec![],
         PipelineDescriptor::default(),
-        RegionInterner::default(),
+        identities,
     );
 
-    let reserved = inner.data.region_interner.intern("composed");
-    assert!(
-        !inner.contains_region(reserved),
-        "reserving an index must not invent a body"
-    );
+    let reserved = inner.data.identities.alloc_function("composed".into());
+    assert!(!inner.contains_region(reserved));
 
-    let mut composed = empty_func("composed");
-    composed.region = reserved;
-    let defined = composed.region;
+    let composed = empty_func(reserved, "composed");
     inner = inner.extend_functions([composed]);
 
-    assert_eq!(defined, reserved, "define_region honors the reserved index");
-    assert_eq!(inner.region(defined).unwrap().name, "composed");
-    assert!(
-        inner.functions.iter().any(|function| function.name == "composed"),
-        "the region is callable"
-    );
+    assert_eq!(inner.region(reserved).unwrap().name, "composed");
+    assert!(inner.functions.iter().any(|function| function.region == reserved));
 }
-
 /// Materialization IDs make `{source}_{role}_{id}` unique among generated
 /// materializations, but an authored entry can still use that exact spelling.
 /// Replace this marker with a real collision test when entry-name allocation

@@ -9,7 +9,6 @@ use crate::tlc::data::PolymorphicDefinition;
 use crate::tlc::{Def, DefMeta, Program, Term, TermId, TermIdSource, TermKind};
 use crate::{IdSource, LookupSet, SymbolId, SymbolTable};
 use polytype::Type;
-use std::collections::HashMap;
 
 /// Test helper that manages symbol table and term ID generation.
 struct TestBuilder {
@@ -95,7 +94,6 @@ fn test_specialize_sign_f32() {
             return_diet: crate::types::Diet::observing(),
         }],
         symbols,
-        HashMap::new(),
         term_ids,
         RewriteGlobal {
             known_defs: LookupSet::new(),
@@ -184,7 +182,6 @@ fn test_specialize_min_i32() {
             return_diet: crate::types::Diet::observing(),
         }],
         symbols,
-        HashMap::new(),
         term_ids,
         RewriteGlobal {
             known_defs: LookupSet::new(),

@@ -5,7 +5,7 @@ pub(crate) mod rebuild;
 use crate::builtins::BuiltinId;
 use crate::interface::{Attribute, ComputeDispatchGrid, EntryKind, EntryOutputDecl, FeedbackPair};
 pub use crate::types::{Diet, RecordFields, Type, TypeName, TypeScheme};
-use crate::IdSource;
+use crate::{IdSource, SymbolId};
 
 /// Qualified name representing a path through modules to a name
 /// E.g., M.N.x is represented as QualName { qualifiers: ["M", "N"], name: "x" }
@@ -235,9 +235,25 @@ where
 /// reaches a pattern, the generic is peeled to the header type that patterns
 /// contain. Entry parameters separately expose their attribute type because
 /// resource resolution changes only that localized part of the tree.
+pub trait BindingName: Clone + std::fmt::Debug + PartialEq {
+    fn source_name(&self) -> &str;
+    fn symbol(&self) -> Option<SymbolId>;
+}
+
+impl BindingName for String {
+    fn source_name(&self) -> &str {
+        self
+    }
+    fn symbol(&self) -> Option<SymbolId> {
+        None
+    }
+}
+
 pub trait TreeFamily: Clone + std::fmt::Debug + PartialEq {
     type Header: Clone + std::fmt::Debug + PartialEq;
     type Identifier: Clone + std::fmt::Debug + PartialEq;
+    /// The representation of a lexically bound name in this phase.
+    type Binding: BindingName;
     type TypeHole: Clone + std::fmt::Debug + PartialEq;
 }
 
@@ -248,6 +264,31 @@ pub struct Identifier {
     pub name: String,
 }
 
+/// A source spelling paired with the binding identity assigned by name
+/// resolution. The spelling survives only for diagnostics and pretty-printing;
+/// every semantic edge uses `symbol`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedBinding {
+    pub symbol: SymbolId,
+    pub source: String,
+}
+
+impl BindingName for ResolvedBinding {
+    fn source_name(&self) -> &str {
+        &self.source
+    }
+    fn symbol(&self) -> Option<SymbolId> {
+        Some(self.symbol)
+    }
+}
+
+/// An identifier whose semantic target was fixed by name resolution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedIdentifier {
+    pub source: Identifier,
+    pub resolution: crate::name_resolution::ResolvedValueRef,
+}
+
 /// A type-checked identifier's semantic meaning.
 ///
 /// `Ordinary` is a real resolution result for locals and user/module
@@ -255,15 +296,14 @@ pub struct Identifier {
 /// unresolved-overload state remains private to type-checking.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IdentifierResolution {
-    Ordinary,
+    Symbol(SymbolId),
     Builtin {
         id: BuiltinId,
         overload_idx: usize,
     },
     VecConstructor {
-        target_name: String,
         arity: usize,
-        target_elem: String,
+        component_conversion: BuiltinId,
     },
     Soac(SoacKind),
 }
@@ -300,6 +340,19 @@ pub struct SourceTree;
 impl TreeFamily for SourceTree {
     type Header = Header;
     type Identifier = Identifier;
+    type Binding = String;
+    type TypeHole = TypeHole;
+}
+
+/// AST shape produced by semantic name resolution and consumed by type
+/// checking. Ordinary identifiers and every binder carry `SymbolId`s in-tree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResolvedTree;
+
+impl TreeFamily for ResolvedTree {
+    type Header = Header;
+    type Identifier = ResolvedIdentifier;
+    type Binding = ResolvedBinding;
     type TypeHole = TypeHole;
 }
 
@@ -309,6 +362,7 @@ pub struct TypedTree;
 impl TreeFamily for TypedTree {
     type Header = TypedHeader;
     type Identifier = TypedIdentifier;
+    type Binding = ResolvedBinding;
     type TypeHole = TypeHole;
 }
 
@@ -318,6 +372,7 @@ pub struct HolesResolvedTree;
 impl TreeFamily for HolesResolvedTree {
     type Header = TypedHeader;
     type Identifier = TypedIdentifier;
+    type Binding = ResolvedBinding;
     type TypeHole = std::convert::Infallible;
 }
 
@@ -413,11 +468,18 @@ pub struct DefinitionSyntax {
     pub attributes: Vec<Attribute>,
 }
 
-/// Typed definition data. The definition's polymorphic scheme used to be
-/// recovered from a name-keyed side table during AST-to-TLC lowering.
+/// Definition data immediately after semantic name resolution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NameResolvedDefinition {
+    pub syntax: DefinitionSyntax,
+    pub symbol: SymbolId,
+}
+
+/// Typed definition data. Identity is inherited from name resolution rather
+/// than allocated or recovered during AST-to-TLC lowering.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedDefinition {
-    pub syntax: DefinitionSyntax,
+    pub source: NameResolvedDefinition,
     pub scheme: TypeScheme,
 }
 
@@ -428,7 +490,7 @@ pub struct Decl<D = DefinitionSyntax, T: TreeFamily = SourceTree> {
     pub name_span: Span,
     pub size_params: Vec<String>, // Size parameters: [n], [m]
     pub type_params: Vec<String>, // Type parameters: 'a, 'b
-    pub params: Vec<Pattern<T::Header>>,
+    pub params: Vec<Pattern<T>>,
     pub ty: Option<Type>, // Return type for functions or type annotation for variables
     pub body: Expression<T>,
     pub param_diets: Vec<Diet>,
@@ -467,8 +529,15 @@ pub struct ExternSyntax {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedExtern {
-    pub syntax: ExternSyntax,
+    pub source: NameResolvedExtern,
     pub scheme: TypeScheme,
+}
+
+/// Internal identity plus the explicitly textual external ABI contract.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NameResolvedExtern {
+    pub syntax: ExternSyntax,
+    pub symbol: SymbolId,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -518,10 +587,18 @@ pub struct ResolvedEntry {
     pub feedback: Vec<FeedbackPair>,
 }
 
-/// Typed entry metadata, including the entry's inferred function scheme.
+/// Entry data immediately after semantic name resolution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NameResolvedEntry {
+    pub source: ResolvedEntry,
+    pub symbol: SymbolId,
+}
+
+/// Typed entry metadata, including the entry's inferred function scheme and
+/// the identity inherited from name resolution.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedEntry {
-    pub source: ResolvedEntry,
+    pub source: NameResolvedEntry,
     pub scheme: TypeScheme,
 }
 
@@ -532,7 +609,7 @@ pub struct EntryDecl<D = EntrySyntax, T: TreeFamily = SourceTree, A = Attribute>
     pub name_span: Span,
     pub size_params: Vec<String>,
     pub type_params: Vec<String>,
-    pub params: Vec<Pattern<T::Header, A>>,
+    pub params: Vec<Pattern<T, A>>,
     pub body: Expression<T>,
 }
 
@@ -556,6 +633,8 @@ pub struct SupportDefinition<D, T: TreeFamily> {
 #[derive(Debug, Clone)]
 pub struct TypedGlobal<D, T: TreeFamily> {
     pub support_definitions: Vec<SupportDefinition<D, T>>,
+    /// Sole source-binding identity arena, carried into TLC without reallocation.
+    pub symbols: crate::SymbolTable,
     pub warnings: Vec<crate::types::checker::TypeWarning>,
     pub builtin_names: Vec<String>,
 }
@@ -750,7 +829,7 @@ pub enum ExprKind<T: TreeFamily = SourceTree> {
         components: Vec<u8>,
         /// `None` for plain `=`. `Some(op)` for compound `op=`,
         /// where `op` is one of `"*"`, `"+"`, `"-"`, `"/"`.
-        op: Option<String>,
+        op: Option<crate::op::BinaryOperator>,
         value: Box<Expression<T>>,
     },
     /// Record field update: `r with x = e` or `r with a.x = e`.
@@ -785,26 +864,26 @@ pub enum ExprKind<T: TreeFamily = SourceTree> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LambdaExpr<T: TreeFamily = SourceTree> {
-    pub params: Vec<Pattern<T::Header>>,
+    pub params: Vec<Pattern<T>>,
     pub body: Box<Expression<T>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LetInExpr<T: TreeFamily = SourceTree> {
-    pub pattern: Pattern<T::Header>, // Can be Name, Tuple, etc.
-    pub ty: Option<Type>,            // Optional type annotation
+    pub pattern: Pattern<T>, // Can be Name, Tuple, etc.
+    pub ty: Option<Type>,    // Optional type annotation
     pub value: Box<Expression<T>>,
     pub body: Box<Expression<T>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BinaryOp {
-    pub op: String,
+    pub op: crate::op::BinaryOperator,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnaryOp {
-    pub op: String, // "-" or "!"
+    pub op: crate::op::UnaryOperator,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -816,7 +895,7 @@ pub struct IfExpr<T: TreeFamily = SourceTree> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoopExpr<T: TreeFamily = SourceTree> {
-    pub pattern: Pattern<T::Header>,      // loop variable pattern
+    pub pattern: Pattern<T>,              // loop variable pattern
     pub init: Option<Box<Expression<T>>>, // initial value (optional)
     pub form: LoopForm<T>,                // for/while condition
     pub body: Box<Expression<T>>,         // loop body
@@ -824,9 +903,9 @@ pub struct LoopExpr<T: TreeFamily = SourceTree> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LoopForm<T: TreeFamily = SourceTree> {
-    For(String, Box<Expression<T>>),               // for name < exp
-    ForIn(Pattern<T::Header>, Box<Expression<T>>), // for pat in exp
-    While(Box<Expression<T>>),                     // while exp
+    For(Pattern<T>, Box<Expression<T>>),   // for name < exp
+    ForIn(Pattern<T>, Box<Expression<T>>), // for pat in exp
+    While(Box<Expression<T>>),             // while exp
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -837,7 +916,7 @@ pub struct MatchExpr<T: TreeFamily = SourceTree> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchCase<T: TreeFamily = SourceTree> {
-    pub pattern: Pattern<T::Header>,
+    pub pattern: Pattern<T>,
     pub body: Box<Expression<T>>,
 }
 
@@ -869,30 +948,29 @@ pub struct SliceExpr<T: TreeFamily = SourceTree> {
 
 // Pattern types for match expressions and let bindings
 #[derive(Debug, Clone, PartialEq)]
-pub enum PatternKind<H = Header, A = Attribute> {
-    Name(String),              // Simple name binding
-    Wildcard,                  // _ wildcard
-    Literal(PatternLiteral),   // Literal patterns
-    Unit,                      // () unit pattern
-    Tuple(Vec<Pattern<H, A>>), // (pat1, pat2, ...)
-    Vec(Vec<Pattern<H, A>>),   // @[pat1, pat2, ...] — vec destructure
-
-    Record(Vec<RecordPatternField<H, A>>), // { field1, field2 = pat, ... }
-    Constructor(String, Vec<Pattern<H, A>>), // Constructor application
-    Typed(Box<Pattern<H, A>>, Type),       // pat : type
-    Attributed(Vec<A>, Box<Pattern<H, A>>), // #[attr] pat
+pub enum PatternKind<T: TreeFamily = SourceTree, A = Attribute> {
+    Name(T::Binding),
+    Wildcard,
+    Literal(PatternLiteral),
+    Unit,
+    Tuple(Vec<Pattern<T, A>>),
+    Vec(Vec<Pattern<T, A>>),
+    Record(Vec<RecordPatternField<T, A>>),
+    Constructor(String, Vec<Pattern<T, A>>),
+    Typed(Box<Pattern<T, A>>, Type),
+    Attributed(Vec<A>, Box<Pattern<T, A>>),
 }
 
-pub type Pattern<H = Header, A = Attribute> = Node<PatternKind<H, A>, H>;
+pub type Pattern<T = SourceTree, A = Attribute> = Node<PatternKind<T, A>, <T as TreeFamily>::Header>;
 
-impl<H, A> Node<PatternKind<H, A>, H> {
+impl<T: TreeFamily, A> Node<PatternKind<T, A>, T::Header> {
     /// Rebuild a pattern while changing only the attribute payload stored on
     /// its `Attributed` nodes. Entry resource resolution uses this localized
     /// operation without imposing an attribute axis on the expression tree.
     pub fn try_map_attributes<B, E>(
         self,
         map: &mut impl FnMut(A) -> Result<B, E>,
-    ) -> Result<Pattern<H, B>, E> {
+    ) -> Result<Pattern<T, B>, E> {
         let Node { h, kind } = self;
         let kind = match kind {
             PatternKind::Name(name) => PatternKind::Name(name),
@@ -917,10 +995,14 @@ impl<H, A> Node<PatternKind<H, A>, H> {
                     .map(|field| {
                         Ok(RecordPatternField {
                             field: field.field,
-                            pattern: field
-                                .pattern
-                                .map(|pattern| pattern.try_map_attributes(map))
-                                .transpose()?,
+                            target: match field.target {
+                                RecordPatternTarget::Shorthand(binding) => {
+                                    RecordPatternTarget::Shorthand(binding)
+                                }
+                                RecordPatternTarget::Pattern(pattern) => {
+                                    RecordPatternTarget::Pattern(pattern.try_map_attributes(map)?)
+                                }
+                            },
                         })
                     })
                     .collect::<Result<_, E>>()?,
@@ -950,7 +1032,7 @@ impl<H, A> Node<PatternKind<H, A>, H> {
     /// Returns None for complex patterns like tuples, records, etc.
     pub fn simple_name(&self) -> Option<&str> {
         match &self.kind {
-            PatternKind::Name(name) => Some(name),
+            PatternKind::Name(name) => Some(name.source_name()),
             PatternKind::Typed(inner, _) => inner.simple_name(),
             PatternKind::Attributed(_, inner) => inner.simple_name(),
             _ => None,
@@ -966,7 +1048,7 @@ impl<H, A> Node<PatternKind<H, A>, H> {
 
     fn collect_bound_names(&self, names: &mut Vec<String>) {
         match &self.kind {
-            PatternKind::Name(name) => names.push(name.clone()),
+            PatternKind::Name(name) => names.push(name.source_name().to_owned()),
             PatternKind::Typed(inner, _) => inner.collect_bound_names(names),
             PatternKind::Attributed(_, inner) => inner.collect_bound_names(names),
             PatternKind::Tuple(patterns) | PatternKind::Vec(patterns) => {
@@ -982,11 +1064,11 @@ impl<H, A> Node<PatternKind<H, A>, H> {
             }
             PatternKind::Record(fields) => {
                 for field in fields {
-                    if let Some(pat) = &field.pattern {
-                        pat.collect_bound_names(names);
-                    } else {
-                        // Shorthand: field name is the bound name
-                        names.push(field.field.clone());
+                    match &field.target {
+                        RecordPatternTarget::Shorthand(binding) => {
+                            names.push(binding.source_name().to_owned())
+                        }
+                        RecordPatternTarget::Pattern(pattern) => pattern.collect_bound_names(names),
                     }
                 }
             }
@@ -1025,7 +1107,7 @@ impl<H, A> Node<PatternKind<H, A>, H> {
     /// For nested patterns, recursively collects all names
     pub fn collect_names(&self) -> Vec<String> {
         match &self.kind {
-            PatternKind::Name(name) => vec![name.clone()],
+            PatternKind::Name(name) => vec![name.source_name().to_owned()],
             PatternKind::Tuple(patterns) | PatternKind::Vec(patterns) => {
                 patterns.iter().flat_map(|p| p.collect_names()).collect()
             }
@@ -1033,12 +1115,9 @@ impl<H, A> Node<PatternKind<H, A>, H> {
             PatternKind::Attributed(_, inner) => inner.collect_names(),
             PatternKind::Record(fields) => fields
                 .iter()
-                .flat_map(|f| {
-                    if let Some(ref pat) = f.pattern {
-                        pat.collect_names()
-                    } else {
-                        vec![f.field.clone()]
-                    }
+                .flat_map(|field| match &field.target {
+                    RecordPatternTarget::Shorthand(binding) => vec![binding.source_name().to_owned()],
+                    RecordPatternTarget::Pattern(pattern) => pattern.collect_names(),
                 })
                 .collect(),
             PatternKind::Constructor(_, patterns) => {
@@ -1057,7 +1136,15 @@ pub enum PatternLiteral {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct RecordPatternField<H = Header, A = Attribute> {
+pub enum RecordPatternTarget<T: TreeFamily = SourceTree, A = Attribute> {
+    /// `{x}` binds the field value. The binding is resolved in-tree.
+    Shorthand(T::Binding),
+    /// `{x = pattern}` uses an explicit nested pattern.
+    Pattern(Pattern<T, A>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordPatternField<T: TreeFamily = SourceTree, A = Attribute> {
     pub field: String,
-    pub pattern: Option<Pattern<H, A>>, // None means shorthand (just field name)
+    pub target: RecordPatternTarget<T, A>,
 }

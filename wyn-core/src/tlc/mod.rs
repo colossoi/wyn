@@ -274,14 +274,14 @@ pub mod context {
     /// their owning typed AST nodes during conversion.
     #[derive(Debug)]
     pub struct TransformedGlobal {
-        pub known_defs: LookupSet<String>,
+        pub known_defs: LookupSet<SymbolId>,
         pub auto_storage_binding_ids: crate::IdSource<u32>,
     }
 
     /// Global state shared by tree-rewriting TLC checkpoints.
     #[derive(Debug, Clone)]
     pub struct RewriteGlobal {
-        pub known_defs: LookupSet<String>,
+        pub known_defs: LookupSet<SymbolId>,
         pub auto_storage_binding_ids: crate::IdSource<u32>,
     }
 
@@ -1023,9 +1023,6 @@ pub struct Program<Tag, F: Family, GlobalContext> {
     pub defs: Vec<Def<F>>,
     /// Symbol table: maps SymbolId to original name (for errors/debugging).
     pub symbols: SymbolTable,
-    /// Canonical function name → def SymbolId mapping.
-    /// Used by fusion to resolve call-site SymbolIds to def SymbolIds.
-    pub def_syms: LookupMap<String, SymbolId>,
     /// The sole allocator for terms added to this program.
     term_ids: TermIdSource,
     /// Program-wide state available at this exact pipeline checkpoint.
@@ -1038,14 +1035,12 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
     pub(crate) fn from_parts(
         defs: Vec<Def<F>>,
         symbols: SymbolTable,
-        def_syms: LookupMap<String, SymbolId>,
         term_ids: TermIdSource,
         global_context: GlobalContext,
     ) -> Self {
         Self {
             defs,
             symbols,
-            def_syms,
             term_ids,
             global_context,
             state: std::marker::PhantomData,
@@ -1079,7 +1074,6 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
         let Program {
             defs,
             symbols,
-            def_syms,
             term_ids,
             global_context,
             state: _,
@@ -1087,7 +1081,6 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
         Program {
             defs,
             symbols,
-            def_syms,
             term_ids,
             global_context: map_global(global_context),
             state: std::marker::PhantomData,
@@ -1100,19 +1093,6 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
             let name = self.symbols.get(def.name).cloned().unwrap_or_else(|| format!("{:?}", def.name));
             def.body.assert_flat_apps_in(&name);
         }
-    }
-
-    /// Index of arity-0 `Function`-meta defs by their source name. These are
-    /// the top-level value bindings (`def foo = expr`) — candidates for being
-    /// hoisted to program scope as pure constants, and the resolution target
-    /// when a downstream `Var(sym)` reference has lost its symbol context and
-    /// needs to look the def up by name.
-    pub fn value_defs_by_name(&self) -> LookupMap<String, SymbolId> {
-        self.defs
-            .iter()
-            .filter(|d| d.arity == 0 && matches!(&d.meta, DefMeta::Function))
-            .filter_map(|d| self.symbols.get(d.name).map(|n| (n.clone(), d.name)))
-            .collect()
     }
 }
 
@@ -1128,11 +1108,10 @@ impl<F: Family> ProgramParts<F> {
     pub fn with_symbols<Tag, GlobalContext>(
         self,
         symbols: SymbolTable,
-        def_syms: LookupMap<String, SymbolId>,
         term_ids: TermIdSource,
         global_context: GlobalContext,
     ) -> Program<Tag, F, GlobalContext> {
-        Program::from_parts(self.defs, symbols, def_syms, term_ids, global_context)
+        Program::from_parts(self.defs, symbols, term_ids, global_context)
     }
 }
 
@@ -1149,7 +1128,6 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
         let Program {
             defs,
             symbols,
-            def_syms,
             mut term_ids,
             global_context,
             state: _,
@@ -1157,7 +1135,6 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
         Program {
             defs: defs.into_iter().map(|def| map_def(def, &mut term_ids)).collect(),
             symbols,
-            def_syms,
             term_ids,
             global_context: map_global(global_context),
             state: std::marker::PhantomData,
@@ -1182,7 +1159,6 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
         let Program {
             defs,
             symbols,
-            def_syms,
             mut term_ids,
             global_context,
             state: _,
@@ -1193,7 +1169,6 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
         Ok(Program {
             defs,
             symbols,
-            def_syms,
             term_ids,
             global_context,
             state: std::marker::PhantomData,

@@ -13,6 +13,7 @@ use super::{
 use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::builtins::{by_id, Purity};
+use crate::op::{BinaryOperator, UnaryOperator};
 use crate::LookupMap;
 use crate::LookupSet;
 use crate::SymbolId;
@@ -32,7 +33,6 @@ pub fn partial_eval(program: OwnershipValidated) -> PartialEvaled {
     let Program {
         defs,
         symbols,
-        def_syms,
         mut term_ids,
         global_context,
         state: _,
@@ -53,7 +53,7 @@ pub fn partial_eval(program: OwnershipValidated) -> PartialEvaled {
     let defs = defs.into_iter().map(|def| evaluator.evaluate_definition(def)).collect();
     drop(evaluator);
 
-    let program = Program::from_parts(defs, symbols, def_syms, term_ids, global_context);
+    let program = Program::from_parts(defs, symbols, term_ids, global_context);
     program.assert_flat_apps();
     program
 }
@@ -270,8 +270,11 @@ impl<'a> PartialEvaluator<'a> {
                 ))
             }
 
-            // Loop - residualize (not evaluating loops at compile time)
-            TermKind::Loop { .. } => Value::Unknown(term.clone()),
+            // Loops are not evaluated at compile time, but an enclosing
+            // dissolved binding may still occur in the initializer, domain,
+            // condition, or body. Residualize through the binder-aware
+            // substitution path so those values do not become free.
+            TermKind::Loop { .. } => self.residualize_unreduced(term),
 
             // Operators as values - residualize
             TermKind::BinOp(_) | TermKind::UnOp(_) => Value::Unknown(term.clone()),
@@ -530,51 +533,61 @@ impl<'a> PartialEvaluator<'a> {
     /// result matches runtime semantics (e.g. u32 multiply is mod 2^32). The
     /// fold is done in `i128` to avoid overflowing before the wrap.
     fn eval_binop(&self, op: &BinaryOp, lhs: &Value, rhs: &Value, ty: &Type<TypeName>) -> Option<Value> {
-        Some(match (op.op.as_str(), lhs, rhs) {
+        Some(match (op.op, lhs, rhs) {
             // Integer arithmetic (wrapped to the operand's bit width)
-            ("+", Value::Int(a), Value::Int(b)) => Value::Int(wrap_int(*a as i128 + *b as i128, ty)),
-            ("-", Value::Int(a), Value::Int(b)) => Value::Int(wrap_int(*a as i128 - *b as i128, ty)),
-            ("*", Value::Int(a), Value::Int(b)) => Value::Int(wrap_int(*a as i128 * *b as i128, ty)),
-            ("/", Value::Int(a), Value::Int(b)) if *b != 0 => match ty {
+            (BinaryOperator::Add, Value::Int(a), Value::Int(b)) => {
+                Value::Int(wrap_int(*a as i128 + *b as i128, ty))
+            }
+            (BinaryOperator::Subtract, Value::Int(a), Value::Int(b)) => {
+                Value::Int(wrap_int(*a as i128 - *b as i128, ty))
+            }
+            (BinaryOperator::Multiply, Value::Int(a), Value::Int(b)) => {
+                Value::Int(wrap_int(*a as i128 * *b as i128, ty))
+            }
+            (BinaryOperator::Divide, Value::Int(a), Value::Int(b)) if *b != 0 => match ty {
                 Type::Constructed(TypeName::UInt(_), _) => Value::Int(((*a as u64) / (*b as u64)) as i64),
                 _ => Value::Int(wrap_int(*a as i128 / *b as i128, ty)),
             },
-            ("%", Value::Int(a), Value::Int(b)) if *b != 0 => match ty {
+            (BinaryOperator::Remainder, Value::Int(a), Value::Int(b)) if *b != 0 => match ty {
                 Type::Constructed(TypeName::UInt(_), _) => Value::Int(((*a as u64) % (*b as u64)) as i64),
                 _ => Value::Int(wrap_int(*a as i128 % *b as i128, ty)),
             },
 
             // Float arithmetic
-            ("+", Value::Float(a), Value::Float(b)) => Value::Float(a + b),
-            ("-", Value::Float(a), Value::Float(b)) => Value::Float(a - b),
-            ("*", Value::Float(a), Value::Float(b)) => Value::Float(a * b),
-            ("/", Value::Float(a), Value::Float(b)) => Value::Float(a / b),
-            ("%", Value::Float(a), Value::Float(b)) => Value::Float(a % b),
+            (BinaryOperator::Add, Value::Float(a), Value::Float(b)) => Value::Float(a + b),
+            (BinaryOperator::Subtract, Value::Float(a), Value::Float(b)) => Value::Float(a - b),
+            (BinaryOperator::Multiply, Value::Float(a), Value::Float(b)) => Value::Float(a * b),
+            (BinaryOperator::Divide, Value::Float(a), Value::Float(b)) => Value::Float(a / b),
+            (BinaryOperator::Remainder, Value::Float(a), Value::Float(b)) => Value::Float(a % b),
 
             // Comparisons
-            ("==", Value::Int(a), Value::Int(b)) => Value::Bool(a == b),
-            ("!=", Value::Int(a), Value::Int(b)) => Value::Bool(a != b),
-            ("<", Value::Int(a), Value::Int(b)) => Value::Bool(a < b),
-            (">", Value::Int(a), Value::Int(b)) => Value::Bool(a > b),
-            ("<=", Value::Int(a), Value::Int(b)) => Value::Bool(a <= b),
-            (">=", Value::Int(a), Value::Int(b)) => Value::Bool(a >= b),
-            ("==", Value::Float(a), Value::Float(b)) => Value::Bool(a == b),
-            ("!=", Value::Float(a), Value::Float(b)) => Value::Bool(!a.is_nan() && !b.is_nan() && a != b),
-            ("<", Value::Float(a), Value::Float(b)) => Value::Bool(a < b),
-            (">", Value::Float(a), Value::Float(b)) => Value::Bool(a > b),
-            ("<=", Value::Float(a), Value::Float(b)) => Value::Bool(a <= b),
-            (">=", Value::Float(a), Value::Float(b)) => Value::Bool(a >= b),
-            ("&&", Value::Bool(a), Value::Bool(b)) => Value::Bool(*a && *b),
-            ("||", Value::Bool(a), Value::Bool(b)) => Value::Bool(*a || *b),
-            ("==", Value::Bool(a), Value::Bool(b)) => Value::Bool(a == b),
-            ("!=", Value::Bool(a), Value::Bool(b)) => Value::Bool(a != b),
+            (BinaryOperator::Equal, Value::Int(a), Value::Int(b)) => Value::Bool(a == b),
+            (BinaryOperator::NotEqual, Value::Int(a), Value::Int(b)) => Value::Bool(a != b),
+            (BinaryOperator::Less, Value::Int(a), Value::Int(b)) => Value::Bool(a < b),
+            (BinaryOperator::Greater, Value::Int(a), Value::Int(b)) => Value::Bool(a > b),
+            (BinaryOperator::LessEqual, Value::Int(a), Value::Int(b)) => Value::Bool(a <= b),
+            (BinaryOperator::GreaterEqual, Value::Int(a), Value::Int(b)) => Value::Bool(a >= b),
+            (BinaryOperator::Equal, Value::Float(a), Value::Float(b)) => Value::Bool(a == b),
+            (BinaryOperator::NotEqual, Value::Float(a), Value::Float(b)) => {
+                Value::Bool(!a.is_nan() && !b.is_nan() && a != b)
+            }
+            (BinaryOperator::Less, Value::Float(a), Value::Float(b)) => Value::Bool(a < b),
+            (BinaryOperator::Greater, Value::Float(a), Value::Float(b)) => Value::Bool(a > b),
+            (BinaryOperator::LessEqual, Value::Float(a), Value::Float(b)) => Value::Bool(a <= b),
+            (BinaryOperator::GreaterEqual, Value::Float(a), Value::Float(b)) => Value::Bool(a >= b),
+            (BinaryOperator::LogicalAnd, Value::Bool(a), Value::Bool(b)) => Value::Bool(*a && *b),
+            (BinaryOperator::LogicalOr, Value::Bool(a), Value::Bool(b)) => Value::Bool(*a || *b),
+            (BinaryOperator::Equal, Value::Bool(a), Value::Bool(b)) => Value::Bool(a == b),
+            (BinaryOperator::NotEqual, Value::Bool(a), Value::Bool(b)) => Value::Bool(a != b),
 
             // Algebraic identities (return a residual operand — a valid fold)
-            ("+", Value::Int(0), _) => rhs.clone(),
-            ("+", _, Value::Int(0)) => lhs.clone(),
-            ("*", Value::Int(1), _) => rhs.clone(),
-            ("*", _, Value::Int(1)) => lhs.clone(),
-            ("*", Value::Int(0), _) | ("*", _, Value::Int(0)) => Value::Int(0),
+            (BinaryOperator::Add, Value::Int(0), _) => rhs.clone(),
+            (BinaryOperator::Add, _, Value::Int(0)) => lhs.clone(),
+            (BinaryOperator::Multiply, Value::Int(1), _) => rhs.clone(),
+            (BinaryOperator::Multiply, _, Value::Int(1)) => lhs.clone(),
+            (BinaryOperator::Multiply, Value::Int(0), _) | (BinaryOperator::Multiply, _, Value::Int(0)) => {
+                Value::Int(0)
+            }
 
             _ => return None,
         })
@@ -582,10 +595,10 @@ impl<'a> PartialEvaluator<'a> {
 
     /// Evaluate a unary operation. `Some`/`None` as in `eval_binop`.
     fn eval_unop(&self, op: &UnaryOp, arg: &Value) -> Option<Value> {
-        Some(match (op.op.as_str(), arg) {
-            ("-", Value::Int(n)) => Value::Int(-n),
-            ("-", Value::Float(f)) => Value::Float(-f),
-            ("!", Value::Bool(b)) => Value::Bool(!b),
+        Some(match (op.op, arg) {
+            (UnaryOperator::Negate, Value::Int(n)) => Value::Int(-n),
+            (UnaryOperator::Negate, Value::Float(f)) => Value::Float(-f),
+            (UnaryOperator::LogicalNot, Value::Bool(b)) => Value::Bool(!b),
             _ => return None,
         })
     }

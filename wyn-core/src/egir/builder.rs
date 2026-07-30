@@ -18,6 +18,7 @@ use super::types::{
 
 pub struct EntryBuilder<'a> {
     graph: EGraph,
+    id: crate::EntryId,
     current_block: BlockId,
     name: String,
     span: Span,
@@ -35,13 +36,16 @@ impl<'a> EntryBuilder<'a> {
     pub fn new_compute(
         name: String,
         local_size: (u32, u32, u32),
+        identities: &mut super::program::ProgramIdentities,
         semantic_ids: &'a mut SemanticOpIdSource,
         effect_ids: &'a mut crate::IdSource<EffectToken>,
     ) -> Self {
+        let id = identities.alloc_entry(name.clone());
         let graph = EGraph::new();
         let current_block = graph.skeleton.entry;
         Self {
             graph,
+            id,
             current_block,
             name,
             span: Span::new(0, 0, 0, 0),
@@ -207,9 +211,13 @@ impl<'a> EntryBuilder<'a> {
     pub fn build(mut self) -> PlannedEntry {
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Return(None);
         PlannedEntry {
+            id: self.id,
             name: self.name,
             span: self.span,
             execution_model: self.execution_model,
+            parameter_inputs: (0..self.inputs.len())
+                .map(|index| vec![super::program::InputSlotId(index)])
+                .collect(),
             inputs: self
                 .inputs
                 .into_iter()

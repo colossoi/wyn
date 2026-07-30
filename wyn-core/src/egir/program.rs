@@ -23,9 +23,7 @@ use super::types::{
     Semantic, SideEffectKind, Soac, SoacEffect, WynLanguage,
 };
 
-pub use super::ir::{
-    OutputSlotId, OutputWriter, RealizedOutputRoute, RegionInterner, SlotSource, UnrealizedOutputRoute,
-};
+pub use super::ir::{OutputSlotId, OutputWriter, RealizedOutputRoute, SlotSource, UnrealizedOutputRoute};
 pub type ConstantDef<P = Semantic, Lang = WynLanguage> = super::ir::ConstantDef<P, Lang>;
 pub use crate::types::ExternDecl;
 pub type Func<P = Semantic, Lang = WynLanguage> = super::ir::Func<P, Lang>;
@@ -38,13 +36,14 @@ pub type Entry<
 pub type Program<Tag, Shape, GlobalContext, Lang = WynLanguage> =
     super::ir::Program<Tag, Shape, GlobalContext, Lang>;
 
-pub(crate) fn fresh_region_name(region_interner: &RegionInterner, base: &str) -> String {
-    if region_interner.get(base).is_none() {
+pub(crate) fn fresh_region_name(identities: &ProgramIdentities, base: &str) -> String {
+    let is_available = |candidate: &str| identities.function_names().all(|name| name != candidate);
+    if is_available(base) {
         return base.to_string();
     }
     for suffix in 1.. {
         let candidate = format!("{base}_{suffix}");
-        if region_interner.get(&candidate).is_none() {
+        if is_available(&candidate) {
             return candidate;
         }
     }
@@ -79,7 +78,7 @@ impl<Tag>
     >
 {
     pub fn region_name(&self, region: RegionId) -> &str {
-        self.data.region_interner.resolve(region)
+        self.data.identities.function_name(region)
     }
 }
 
@@ -177,23 +176,7 @@ impl ResourceId {
 /// Opaque index into the fixed semantic-entry table. Textual entry names are
 /// publication metadata and are deliberately not used to connect plans back
 /// to their source entries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SemanticEntryId(usize);
-
-impl SemanticEntryId {
-    pub(crate) const fn from_index(index: usize) -> Self {
-        Self(index)
-    }
-
-    pub(crate) const fn index(self) -> usize {
-        self.0
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn for_test(index: usize) -> Self {
-        Self(index)
-    }
-}
+pub type SemanticEntryId = crate::EntryId;
 
 /// Stable identity of a semantic requirement to materialize a shared value.
 /// It is deliberately distinct from `SemanticEntryId`: a requirement is not
@@ -1111,16 +1094,13 @@ pub type ScheduledEntry = Entry<Scheduled>;
 
 #[cfg(test)]
 pub(crate) fn semantic_program_for_test(
-    mut functions: Vec<SemanticFunc>,
+    functions: Vec<SemanticFunc>,
     externs: Vec<ExternDecl<Type<TypeName>>>,
     entry_points: Vec<SemanticEntry>,
     constants: Vec<ConstantDef<Semantic>>,
     pipeline: PipelineDescriptor,
-    mut region_interner: RegionInterner,
+    identities: ProgramIdentities,
 ) -> super::reify::Segmented {
-    for function in &mut functions {
-        function.region = region_interner.intern(&function.name);
-    }
     Program::from_parts(
         functions,
         externs,
@@ -1128,8 +1108,9 @@ pub(crate) fn semantic_program_for_test(
         constants,
         CoreProgramData {
             pipeline,
+            stage_entries: Vec::new(),
             resources: LogicalResourceArena::default(),
-            region_interner,
+            identities,
         },
         RewriteGlobal {
             binding_ids: crate::IdSource::new(),
@@ -1353,6 +1334,7 @@ pub type PlannedEntry<P = Semantic> =
 /// second copy of the semantic graph.
 #[derive(Clone, Debug)]
 pub struct PlannedPublication {
+    pub id: crate::EntryId,
     pub name: String,
     pub execution_model: ExecutionModel,
     pub inputs: Vec<EntryInput>,
@@ -1363,6 +1345,7 @@ pub struct PlannedPublication {
 impl PlannedPublication {
     pub fn from_semantic(entry: &SemanticEntry) -> Self {
         Self {
+            id: entry.id,
             name: entry.name.clone(),
             execution_model: entry.execution_model.clone(),
             inputs: entry.inputs.iter().map(|input| input.inner.clone()).collect(),
@@ -1373,6 +1356,7 @@ impl PlannedPublication {
 
     pub fn publication(&self, resources: &PhysicalResourceTable) -> Result<EntryPublication, String> {
         publish_entry(
+            self.id,
             &self.name,
             &self.execution_model,
             &self.inputs,
@@ -1389,10 +1373,12 @@ impl SemanticEntry {
             .all_with_values(entry.routes().map(|route| route.source.value).collect())?;
         Self::from_projection(
             projection,
+            entry.id,
             entry.name.clone(),
             entry.span,
             entry.execution_model.clone(),
             entry.inputs.clone(),
+            entry.parameter_inputs.clone(),
             entry.outputs.clone(),
             entry.resource_declarations.clone(),
             entry.params.clone(),
@@ -1403,10 +1389,12 @@ impl SemanticEntry {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_projection(
         projection: super::graph_projector::GraphProjection,
+        id: crate::EntryId,
         name: String,
         span: Span,
         execution_model: ExecutionModel,
         inputs: Vec<super::ir::EntryInput<SemanticResourceRef, WynLanguage>>,
+        parameter_inputs: Vec<Vec<InputSlotId>>,
         outputs: Vec<super::ir::EntryOutput<SemanticResourceRef, RealizedOutputRoute, WynLanguage>>,
         resource_declarations: Vec<SemanticResourceDecl>,
         params: Vec<(Type<TypeName>, String)>,
@@ -1420,10 +1408,12 @@ impl SemanticEntry {
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok(Self {
+            id,
             name,
             span,
             execution_model,
             inputs,
+            parameter_inputs,
             outputs,
             resource_declarations,
             params,
@@ -1442,6 +1432,7 @@ where
         let inputs = self.inputs.iter().map(|input| input.inner.clone()).collect::<Vec<_>>();
         let outputs = self.outputs.iter().map(|output| output.inner.clone()).collect::<Vec<_>>();
         publish_entry(
+            self.id,
             &self.name,
             &self.execution_model,
             &inputs,
@@ -1453,6 +1444,7 @@ where
 }
 
 fn publish_entry(
+    id: crate::EntryId,
     name: &str,
     execution_model: &ExecutionModel,
     inputs: &[EntryInput],
@@ -1472,6 +1464,7 @@ fn publish_entry(
         })
         .collect();
     Ok(EntryPublication {
+        id,
         name: name.to_string(),
         execution_model: execution_model.clone(),
         inputs: inputs.to_vec(),
@@ -1552,6 +1545,8 @@ impl MaterializationRequirement {
 
 #[derive(Clone, Debug)]
 pub struct EntryPublication {
+    /// Compiler identity. The name below remains emitted host ABI metadata.
+    pub id: crate::EntryId,
     pub name: String,
     pub execution_model: ExecutionModel,
     pub inputs: Vec<EntryInput>,
@@ -1625,11 +1620,80 @@ impl PhysicalResourceTable {
 }
 
 /// Program-owned EGIR data shared by logical and physical checkpoints.
+#[derive(Clone, Debug)]
+pub struct ProgramIdentities {
+    /// One identity realm for user, extern, lifted, and compiler-generated callables.
+    functions: super::ir::RegionArena,
+    /// Program-level values, independent of how a backend materializes them.
+    globals: super::ir::GlobalArena,
+    /// Entry identity separate from its host-visible symbol.
+    entries: super::ir::EntryArena,
+}
+
+impl ProgramIdentities {
+    pub(crate) fn new() -> Self {
+        Self {
+            functions: super::ir::RegionArena::default(),
+            globals: super::ir::GlobalArena::default(),
+            entries: super::ir::EntryArena::default(),
+        }
+    }
+    pub(crate) fn alloc_function(&mut self, name: String) -> crate::FunctionId {
+        self.functions.alloc(name)
+    }
+
+    pub(crate) fn alloc_global(&mut self, name: String) -> crate::GlobalId {
+        self.globals.alloc(name)
+    }
+
+    pub(crate) fn alloc_entry(&mut self, name: String) -> crate::EntryId {
+        self.entries.alloc(name)
+    }
+
+    pub(crate) fn function_name(&self, id: crate::FunctionId) -> &str {
+        self.functions.get(id).expect("unknown function identity")
+    }
+
+    pub(crate) fn global_name(&self, id: crate::GlobalId) -> &str {
+        self.globals.get(id).expect("unknown global identity")
+    }
+
+    pub(crate) fn entry_name(&self, id: crate::EntryId) -> &str {
+        self.entries.get(id).expect("unknown entry identity")
+    }
+
+    pub(crate) fn function_names(&self) -> impl Iterator<Item = &str> {
+        self.functions.values().map(String::as_str)
+    }
+
+    pub(crate) fn contains_function(&self, id: crate::FunctionId) -> bool {
+        self.functions.get(id).is_some()
+    }
+
+    pub(crate) fn contains_global(&self, id: crate::GlobalId) -> bool {
+        self.globals.get(id).is_some()
+    }
+
+    pub(crate) fn contains_entry(&self, id: crate::EntryId) -> bool {
+        self.entries.get(id).is_some()
+    }
+}
+
+#[cfg(test)]
+impl Default for ProgramIdentities {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+/// Program-owned EGIR data shared by logical and physical checkpoints.
 #[derive(Debug)]
 pub struct CoreProgramData {
     pub pipeline: PipelineDescriptor,
+    /// Structural entry identity for each descriptor pipeline stage.
+    pub stage_entries: Vec<Vec<crate::EntryId>>,
+
     pub resources: LogicalResourceArena,
-    pub region_interner: RegionInterner,
+    pub identities: ProgramIdentities,
 }
 
 /// Program-owned data after materialization requirements have been planned.
@@ -1703,6 +1767,7 @@ fn physicalize_constant(
     resources: &PhysicalResourceTable,
 ) -> Result<ConstantDef<Physical>, String> {
     let ConstantDef {
+        id,
         name,
         span,
         mut return_ty,
@@ -1712,6 +1777,7 @@ fn physicalize_constant(
     let (graph, _, _) = physicalize_graph_resources(graph, resources)?;
     physicalize_type_resources(&mut return_ty, resources);
     Ok(ConstantDef {
+        id,
         name,
         span,
         return_ty,
@@ -1724,10 +1790,12 @@ fn physicalize_entry(
     resources: &PhysicalResourceTable,
 ) -> Result<PhysicalEntry, String> {
     let super::ir::Entry {
+        id,
         name,
         span,
         execution_model,
         inputs,
+        parameter_inputs,
         outputs,
         resource_declarations: mut declarations,
         mut params,
@@ -1784,10 +1852,12 @@ fn physicalize_entry(
         })
         .collect();
     Ok(PhysicalEntry {
+        id,
         name,
         span,
         execution_model,
         inputs,
+        parameter_inputs,
         outputs,
         resource_declarations,
         params,
@@ -1832,8 +1902,9 @@ pub(in crate::egir) fn physicalize_program(
         constants,
         CoreProgramData {
             pipeline: data.core.pipeline,
+            stage_entries: data.core.stage_entries,
             resources: data.core.resources,
-            region_interner: data.core.region_interner,
+            identities: data.core.identities,
         },
         PlannedGlobal {
             kernel_plan,

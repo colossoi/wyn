@@ -249,7 +249,7 @@ impl<'a> OpenResolver<'a> {
         }
     }
 
-    fn bind_pattern<A>(&mut self, pat: &Pattern<ast::Header, A>) {
+    fn bind_pattern<A>(&mut self, pat: &Pattern<ast::SourceTree, A>) {
         let frame = self.locals.last_mut().unwrap();
         for n in pat.bound_names() {
             frame.insert(n);

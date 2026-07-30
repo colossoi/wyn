@@ -113,6 +113,7 @@ fn rebuild(
         node_ids,
         global_context: ast::TypedGlobal {
             support_definitions,
+            symbols: global_context.symbols,
             warnings: global_context.warnings,
             builtin_names: global_context.builtin_names,
         },
@@ -149,7 +150,7 @@ fn rebuild_definition(
         type_params,
         params: params
             .into_iter()
-            .map(|pattern| ast::rebuild::pattern(pattern, &mut Ok))
+            .map(|pattern| ast::rebuild::pattern(pattern, &mut Ok, &mut |_header, binding| Ok(binding)))
             .collect::<Result<_, std::convert::Infallible>>()
             .unwrap(),
         ty,
@@ -187,7 +188,7 @@ fn rebuild_entry(
         type_params,
         params: params
             .into_iter()
-            .map(|pattern| ast::rebuild::pattern(pattern, &mut Ok))
+            .map(|pattern| ast::rebuild::pattern(pattern, &mut Ok, &mut |_header, binding| Ok(binding)))
             .collect::<Result<_, std::convert::Infallible>>()
             .unwrap(),
         body: rebuild_expression(body, node_ids, hole)?,
@@ -207,6 +208,7 @@ fn rebuild_expression(
         expression,
         &mut Ok,
         &mut |_header, identifier| Ok(identifier),
+        &mut |_header, binding| Ok(binding),
         &mut |header, value| hole(header, value, node_ids),
     )
 }

@@ -6,6 +6,17 @@ use super::*;
 /// Lower an SSA entry point to SPIR-V.
 pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &EntryPoint) -> Result<()> {
     let body = &entry.body;
+    let params: Vec<ValueId> = body.params().map(|(id, _, _)| id).collect();
+    // A parameter can expand to multiple physical inputs (for example, a tuple
+    // of storage views). Only one-to-one parameter/input associations enter the
+    // value environment; multi-slot storage views are lowered from their pinned
+    // bindings and have no single SSA-value replacement.
+    let mut input_params = vec![None; entry.inputs.len()];
+    for (parameter_index, slots) in entry.parameter_inputs.iter().enumerate() {
+        if slots.len() == 1 {
+            input_params[slots[0]] = Some(params[parameter_index]);
+        }
+    }
     let is_compute = entry.execution_model.is_compute();
 
     // Create I/O variables for entry point
@@ -100,11 +111,12 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     // Handle inputs
     let mut location = 0u32;
     // Uniform-bound inputs need their access-chain + load deferred until
-    // after `begin_function`. Each entry here: (input.name, var_id,
+    // after `begin_function`. Each entry here: (SSA parameter, var_id,
     // value_type, member_types) — member_types is Some for a record
     // uniform whose fields are the block's members.
-    let mut uniform_loads: Vec<(String, spirv::Word, spirv::Word, Option<Vec<spirv::Word>>)> = Vec::new();
-    for input in &entry.inputs {
+    let mut uniform_loads: Vec<(ValueId, spirv::Word, spirv::Word, Option<Vec<spirv::Word>>)> = Vec::new();
+    for (input_index, input) in entry.inputs.iter().enumerate() {
+        let input_param = input_params[input_index];
         // Push constant inputs are handled separately above
         if input.push_constant().is_some() {
             continue;
@@ -114,7 +126,9 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             // Storage images are module-scope resources, never SSA values.
             // Binding-qualified image operations load this exact global.
             let var_id = constructor.create_storage_image(br, format, access);
-            constructor.env.insert(input.name.clone(), var_id);
+            if let Some(input_param) = input_param {
+                constructor.env.insert(input_param, var_id);
+            }
             interfaces.push(var_id);
             continue;
         }
@@ -170,7 +184,9 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
                 }
                 new_var
             };
-            constructor.env.insert(input.name.clone(), var_id);
+            if let Some(input_param) = input_param {
+                constructor.env.insert(input_param, var_id);
+            }
             if !interfaces.contains(&var_id) {
                 interfaces.push(var_id);
             }
@@ -225,7 +241,9 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
                 [Operand::LiteralBit32(br.binding)],
             );
             interfaces.push(var_id);
-            uniform_loads.push((input.name.clone(), var_id, input_type, member_types));
+            if let Some(input_param) = input_param {
+                uniform_loads.push((input_param, var_id, input_type, member_types));
+            }
         } else if let Some(br) = input.texture_binding().or(input.sampler_binding()) {
             // `#[texture]` / `#[sampler]` → opaque handle in UniformConstant
             // storage, decorated DescriptorSet/Binding. Unlike a uniform
@@ -248,7 +266,9 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
                 spirv::Decoration::Binding,
                 [Operand::LiteralBit32(br.binding)],
             );
-            constructor.env.insert(input.name.clone(), var_id);
+            if let Some(input_param) = input_param {
+                constructor.env.insert(input_param, var_id);
+            }
             interfaces.push(var_id);
         } else if let Some(br) = input.storage_binding() {
             let storage_use = constructor.storage_use(br);
@@ -281,7 +301,9 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, input_type);
             let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Input, None);
             constructor.builder.decorate(var_id, spirv::Decoration::Location, [Operand::LiteralBit32(loc)]);
-            constructor.env.insert(input.name.clone(), var_id);
+            if let Some(input_param) = input_param {
+                constructor.env.insert(input_param, var_id);
+            }
             interfaces.push(var_id);
         }
     }
@@ -392,17 +414,16 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     }
 
     // Store interfaces for entry point declaration
-    constructor.entry_point_interfaces.insert(entry.name.clone(), interfaces);
+    constructor.entry_point_interfaces.insert(entry.id, interfaces);
 
     // Set output variables for OutputPtr lowering
     constructor.current_entry_outputs = output_vars;
 
     // Begin void function for entry point — I/O is via variables, not params.
     let void_type = constructor.void_type;
-    let param_names: Vec<&str> = Vec::new();
     let param_types: Vec<spirv::Word> = Vec::new();
-    let (_, _, first_code_block) =
-        constructor.begin_function(&entry.name, &param_names, &param_types, void_type)?;
+    let (entry_func, _, first_code_block) = constructor.begin_function(None, &param_types, void_type)?;
+    constructor.entry_functions.insert(entry.id, entry_func);
 
     // Load push constant members via AccessChain from the push constant variable.
     if let Some(pc_var_id) = pc_var {
@@ -415,7 +436,9 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             let access_chain =
                 constructor.builder.access_chain(member_ptr_type, None, pc_var_id, [idx_const])?;
             let loaded = constructor.builder.load(member_type, None, access_chain, None, [])?;
-            constructor.env.insert(input.name.clone(), loaded);
+            if let Some(input_param) = input_params[input_idx] {
+                constructor.env.insert(input_param, loaded);
+            }
         }
     }
 
@@ -426,7 +449,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     // rather than OpCopyLogical: naga's SPIR-V frontend — which viz
     // feeds this module through — doesn't handle OpCopyLogical, and the
     // member loop mirrors the push-constant prologue above.)
-    for (name, var_id, value_type, member_types) in &uniform_loads {
+    for (input_param, var_id, value_type, member_types) in &uniform_loads {
         let loaded = match member_types {
             Some(member_types) => {
                 let mut members = Vec::with_capacity(member_types.len());
@@ -449,13 +472,13 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
                 constructor.builder.load(*value_type, None, access_chain, None, [])?
             }
         };
-        constructor.env.insert(name.clone(), loaded);
+        constructor.env.insert(*input_param, loaded);
     }
 
     // Load input values from their pointer variables.
     // Entry point inputs are SPIR-V Input variables (pointers), but the SSA body
     // expects loaded values. Load them now and update env with the loaded values.
-    for input in &entry.inputs {
+    for (input_index, input) in entry.inputs.iter().enumerate() {
         // Skip storage buffers, push constants, and uniforms — each
         // uses a different access pattern handled above.
         if input.storage_binding().is_some()
@@ -483,9 +506,11 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
         } else {
             constructor.polytype_to_spirv(&input.ty)
         };
-        if let Some(&var_id) = constructor.env.get(&input.name) {
-            let loaded = constructor.builder.load(input_type, None, var_id, None, [])?;
-            constructor.env.insert(input.name.clone(), loaded);
+        if let Some(input_param) = input_params[input_index] {
+            if let Some(&var_id) = constructor.env.get(&input_param) {
+                let loaded = constructor.builder.load(input_type, None, var_id, None, [])?;
+                constructor.env.insert(input_param, loaded);
+            }
         }
     }
 

@@ -20,7 +20,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             BuiltinLowering::LinkedSpirv(linkage_name) => {
                 let func_id = self
                     .constructor
-                    .linked_functions
+                    .linked_functions_by_linkage
                     .get(*linkage_name)
                     .copied()
                     .ok_or_else(|| err_spirv!("Unknown linked function: {}", linkage_name))?;

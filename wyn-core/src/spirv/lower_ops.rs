@@ -7,7 +7,7 @@ use super::*;
 impl<'a, 'b> LowerCtx<'a, 'b> {
     pub(super) fn lower_binop(
         &mut self,
-        op: &str,
+        op: &crate::op::BinaryOperator,
         lhs: spirv::Word,
         rhs: spirv::Word,
         lhs_ty: &PolyType<TypeName>,
@@ -18,8 +18,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         use TypeName::*;
 
         let bool_type = self.constructor.bool_type;
+        let op_symbol = op.symbol();
 
-        match (op, lhs_ty, rhs_ty) {
+        match (op_symbol, lhs_ty, rhs_ty) {
             // Scalar-left mixed-type ops (must precede scalar catch-alls)
             ("*", Constructed(Float(_), _), Constructed(Vec, _)) => {
                 Ok(self.constructor.builder.vector_times_scalar(result_ty, None, rhs, lhs)?)
@@ -223,7 +224,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let elem_ty = lhs_ty
                     .elem_type()
                     .ok_or_else(|| crate::err_spirv!("Vec type missing element type: {:?}", lhs_ty))?;
-                match (op, elem_ty) {
+                match (op_symbol, elem_ty) {
                     ("+", Constructed(Float(_), _)) => {
                         Ok(self.constructor.builder.f_add(result_ty, None, lhs, rhs)?)
                     }
@@ -280,7 +281,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             as u32;
                         let bvec_ty =
                             self.constructor.get_or_create_vec_type(self.constructor.bool_type, vec_size);
-                        let cmp = match (op, elem_ty) {
+                        let cmp = match (op_symbol, elem_ty) {
                             ("==", Constructed(Float(_), _)) => {
                                 self.constructor.builder.f_ord_equal(bvec_ty, None, lhs, rhs)?
                             }
@@ -301,7 +302,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             }
                             _ => bail_spirv!("Unsupported vector {} on element {:?}", op, elem_ty),
                         };
-                        if op == "==" {
+                        if op_symbol == "==" {
                             Ok(self.constructor.builder.all(result_ty, None, cmp)?)
                         } else {
                             Ok(self.constructor.builder.any(result_ty, None, cmp)?)
@@ -356,7 +357,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
     pub(super) fn lower_unaryop(
         &mut self,
-        op: &str,
+        op: &crate::op::UnaryOperator,
         operand: spirv::Word,
         operand_ty: &PolyType<TypeName>,
         result_ty: spirv::Word,
@@ -364,7 +365,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         use PolyType::*;
         use TypeName::*;
 
-        match (op, operand_ty) {
+        let op_symbol = op.symbol();
+
+        match (op_symbol, operand_ty) {
             ("-", Constructed(Float(_), _)) => {
                 Ok(self.constructor.builder.f_negate(result_ty, None, operand)?)
             }

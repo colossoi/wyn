@@ -17,25 +17,6 @@ use super::{
     as_arrow, bool_type, f32, function, i32, mat, no_buffer, record, sized_array, tuple, unit, vec, Diet,
 };
 
-/// Render a single swizzle slot index as its `xyzw` letter. Used by
-/// VecWith diagnostics so error messages match the user's source.
-/// Map a primitive scalar type to its surface module name
-/// (`Float(32)` → `"f32"`, `Bool` → `"bool"`, …). Used by the vec
-/// constructor dispatch to compute the per-component target type name
-/// it'll feed into the catalog lookup at to_tlc desugar time. Returns
-/// `None` for any non-primitive type (composite arrays, tuples, etc.)
-/// — the vec dispatch falls back to the standard undefined-name path
-/// for those.
-pub(crate) fn type_name_to_module(ty: &Type) -> Option<String> {
-    match ty {
-        Type::Constructed(TypeName::Bool, _) => Some("bool".to_string()),
-        Type::Constructed(TypeName::Float(b), _) => Some(format!("f{}", b)),
-        Type::Constructed(TypeName::Int(b), _) => Some(format!("i{}", b)),
-        Type::Constructed(TypeName::UInt(b), _) => Some(format!("u{}", b)),
-        _ => None,
-    }
-}
-
 /// Canonical, variable-insensitive signature of a resource type, used to
 /// decide whether two entries name the same buffer at a `(set, binding)`.
 /// Unbound type/size variables render as `_` so that two entries each
@@ -930,14 +911,14 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Create a new TypeChecker with a reference to a ModuleManager
-    pub fn new(module_manager: &'a ModuleManager) -> Self {
-        Self::with_type_table(module_manager, LookupMap::new())
+    /// Create a new TypeChecker with a reference to a ModuleManager.
+    pub fn new(module_manager: &'a ModuleManager, name_resolution: NameResolution) -> Self {
+        Self::with_type_table(module_manager, LookupMap::new(), name_resolution)
     }
 
-    /// Create a TypeChecker with an empty type table (for building prelude)
-    pub fn new_empty(module_manager: &'a ModuleManager) -> Self {
-        Self::with_type_table(module_manager, LookupMap::new())
+    /// Create a TypeChecker with an empty type table (for building prelude).
+    pub fn new_empty(module_manager: &'a ModuleManager, name_resolution: NameResolution) -> Self {
+        Self::with_type_table(module_manager, LookupMap::new(), name_resolution)
     }
 
     /// Create a TypeChecker with an existing Context and spec_schemes (from resolve_placeholders pass).
@@ -945,16 +926,30 @@ impl<'a> TypeChecker<'a> {
         module_manager: &'a ModuleManager,
         context: Context<TypeName>,
         spec_schemes: LookupMap<String, TypeScheme>,
+        name_resolution: NameResolution,
     ) -> Self {
-        Self::with_context_and_type_table(module_manager, context, LookupMap::new(), spec_schemes)
+        Self::with_context_and_type_table(
+            module_manager,
+            context,
+            LookupMap::new(),
+            spec_schemes,
+            name_resolution,
+        )
     }
 
     /// Create a TypeChecker with a given initial type table
     fn with_type_table(
         module_manager: &'a ModuleManager,
         type_table: LookupMap<NodeId, TypeScheme>,
+        name_resolution: NameResolution,
     ) -> Self {
-        Self::with_context_and_type_table(module_manager, Context::default(), type_table, LookupMap::new())
+        Self::with_context_and_type_table(
+            module_manager,
+            Context::default(),
+            type_table,
+            LookupMap::new(),
+            name_resolution,
+        )
     }
 
     /// Create a TypeChecker with both an existing Context and type table.
@@ -963,6 +958,7 @@ impl<'a> TypeChecker<'a> {
         context: Context<TypeName>,
         type_table: LookupMap<NodeId, TypeScheme>,
         spec_schemes: LookupMap<String, TypeScheme>,
+        name_resolution: NameResolution,
     ) -> Self {
         let mut globals = GlobalEnv::default();
         // Seed `globals.module_schemes` from the spec_schemes computed
@@ -987,16 +983,9 @@ impl<'a> TypeChecker<'a> {
             consuming_defs: crate::LookupSet::new(),
             skolem_ids: crate::IdSource::new(),
             current_module: None,
-            name_resolution: NameResolution::default(),
+            name_resolution,
             constructor_call_catalog_ids: LookupMap::new(),
         }
-    }
-
-    /// Inject the side table populated by `build_name_resolution`. Must
-    /// be called between construction and `check_program` for any
-    /// program that uses builtin identifiers.
-    pub fn set_name_resolution(&mut self, nr: NameResolution) {
-        self.name_resolution = nr;
     }
 
     /// Borrow the (post-inference) NameResolution. The checker writes
@@ -1581,7 +1570,7 @@ impl<'a> TypeChecker<'a> {
         &self,
         declarations: &[Declaration<crate::resolve_opens::OpensResolvedFamily>],
     ) -> Result<()> {
-        fn param_attrs<V>(p: &Pattern<Header, Attribute<V>>) -> &[Attribute<V>] {
+        fn param_attrs<V>(p: &Pattern<SourceTree, Attribute<V>>) -> &[Attribute<V>] {
             match &p.kind {
                 PatternKind::Attributed(attrs, _) => attrs,
                 PatternKind::Typed(inner, _) => param_attrs(inner),
@@ -1706,14 +1695,14 @@ impl<'a> TypeChecker<'a> {
 
     fn check_entry_with_params(
         &mut self,
-        params: &[Pattern<Header, crate::interface::ResolvedAttribute>],
+        params: &[Pattern<SourceTree, crate::interface::ResolvedAttribute>],
         body: &Expression,
         entry_kind: crate::interface::EntryKind,
     ) -> Result<(Vec<Type>, Type)> {
         self.check_function_with_params_inner(params, body, None, true, Some(entry_kind))
     }
 
-    fn record_parameter_pattern_type<V>(&mut self, pattern: &Pattern<Header, Attribute<V>>, ty: &Type) {
+    fn record_parameter_pattern_type<V>(&mut self, pattern: &Pattern<SourceTree, Attribute<V>>, ty: &Type) {
         match &pattern.kind {
             PatternKind::Typed(inner, _) | PatternKind::Attributed(_, inner) => {
                 self.record_parameter_pattern_type(inner, ty);
@@ -1725,7 +1714,7 @@ impl<'a> TypeChecker<'a> {
 
     fn check_function_with_params_inner<V>(
         &mut self,
-        params: &[Pattern<Header, Attribute<V>>],
+        params: &[Pattern<SourceTree, Attribute<V>>],
         body: &Expression,
         module_name: Option<&str>,
         is_entry: bool,
@@ -1768,7 +1757,7 @@ impl<'a> TypeChecker<'a> {
         if matches!(entry_stage, Some(crate::interface::EntryKind::Vertex)) {
             // `parse_entry_params` builds `Typed(Attributed([attrs], Name), ty)`
             // — `Typed` outermost — so peel through `Typed` to reach the attrs.
-            fn param_attrs<V>(p: &Pattern<Header, Attribute<V>>) -> &[Attribute<V>] {
+            fn param_attrs<V>(p: &Pattern<SourceTree, Attribute<V>>) -> &[Attribute<V>] {
                 match &p.kind {
                     PatternKind::Attributed(attrs, _) => attrs,
                     PatternKind::Typed(inner, _) => param_attrs(inner),
@@ -2709,6 +2698,7 @@ impl<'a> TypeChecker<'a> {
 
                     // Store resolved type in type table (apply substitutions)
                     let resolved = cand.ty.apply(&self.context);
+                    self.record_vec_constructor_dispatch(func.h.id, args);
                     self.type_table
                         .insert(func.h.id, TypeScheme::Monotype(resolved));
                     self.type_table
@@ -2818,8 +2808,8 @@ impl<'a> TypeChecker<'a> {
             ExprKind::UnaryOp(op, operand) => {
                 let operand_type = self.infer_expression(operand)?;
                 let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-                match op.op.as_str() {
-                    "-" => {
+                match op.op {
+                    crate::op::UnaryOperator::Negate => {
                         // Numeric negation - operand must be numeric
                         let resolved = operand_type.apply(&self.context);
                         if let Some(false) = Self::is_numeric_type(&resolved) {
@@ -2831,7 +2821,7 @@ impl<'a> TypeChecker<'a> {
                         }
                         Ok(resolved)
                     }
-                    "!" => {
+                    crate::op::UnaryOperator::LogicalNot => {
                         // Logical not - operand must be bool, returns bool
                         self.context.unify(&operand_type, &bool_ty).map_err(|_| {
                             err_type_at!(
@@ -2842,7 +2832,6 @@ impl<'a> TypeChecker<'a> {
                         })?;
                         Ok(bool_ty)
                     }
-                    _ => Err(err_type_at!(expr.h.span, "Unknown unary operator: {}", op.op)),
                 }
             }
 
@@ -2883,9 +2872,9 @@ impl<'a> TypeChecker<'a> {
                             )
                         })?;
                     }
-                    LoopForm::For(var_name, bound) => {
+                    LoopForm::For(pattern, bound) => {
                         // Iteration variable is i32
-                        self.define(var_name.clone(), IdentifierKind::Local, TypeScheme::Monotype(i32()));
+                        self.bind_irrefutable_pattern(pattern, &i32(), false)?;
 
                         // Bound must be integer
                         let bound_type = self.infer_expression(bound)?;
@@ -3302,7 +3291,10 @@ impl<'a> TypeChecker<'a> {
                         Type::Constructed(TypeName::Size(n), _) => *n,
                         _ => return None,
                     };
-                    let target_elem = type_name_to_module(&args[0])?;
+                    let target_elem = match &args[0] {
+                        Type::Constructed(name, args) if args.is_empty() => name.clone(),
+                        _ => return None,
+                    };
                     (arity, target_elem)
                 }
                 _ => return None,
@@ -3325,9 +3317,9 @@ impl<'a> TypeChecker<'a> {
             self.name_resolution.values.insert(
                 callee_node_id,
                 crate::name_resolution::ResolvedValueRef::VecConstructor {
-                    target_name: name.to_string(),
                     arity,
                     target_elem,
+                    component_conversion: None,
                 },
             );
 
@@ -3343,6 +3335,44 @@ impl<'a> TypeChecker<'a> {
     /// After `resolve_overload` picks a winning candidate in
     /// `infer_application`, record the corresponding catalog
     /// `BuiltinId` in `name_resolution.values` so downstream IR
+    /// Complete vector-constructor resolution once bidirectional checking has
+    /// fixed the argument's component type. The catalog maps structural type
+    /// pairs to a `BuiltinId`; no conversion name is reconstructed downstream.
+    fn record_vec_constructor_dispatch(&mut self, callee_node_id: NodeId, args: &[Expression]) {
+        let Some(crate::name_resolution::ResolvedValueRef::VecConstructor { target_elem, .. }) =
+            self.name_resolution.values.get(&callee_node_id)
+        else {
+            return;
+        };
+        let target_elem = target_elem.clone();
+        let argument = args.first().expect("BUG: vector constructor has no argument");
+        let argument_ty = match self.type_table.get(&argument.h.id) {
+            Some(TypeScheme::Monotype(ty)) => ty.apply(&self.context),
+            Some(TypeScheme::Polytype { .. }) => {
+                panic!("BUG: vector constructor argument retained a polymorphic type")
+            }
+            None => panic!("BUG: vector constructor argument has no inferred type"),
+        };
+        let source_elem = match argument_ty {
+            Type::Constructed(TypeName::Vec, type_args) if type_args.len() == 2 => match &type_args[0] {
+                Type::Constructed(name, args) if args.is_empty() => name.clone(),
+                other => panic!("BUG: vector component is not scalar: {other:?}"),
+            },
+            other => panic!("BUG: vector constructor argument is not a vector: {other:?}"),
+        };
+        let conversion =
+            crate::builtins::catalog().conversion(&target_elem, &source_elem).unwrap_or_else(|| {
+                panic!("BUG: no builtin conversion from {source_elem:?} to {target_elem:?}")
+            });
+        let Some(crate::name_resolution::ResolvedValueRef::VecConstructor {
+            component_conversion, ..
+        }) = self.name_resolution.values.get_mut(&callee_node_id)
+        else {
+            unreachable!()
+        };
+        *component_conversion = Some(conversion);
+    }
+
     /// (TLC `Var(Builtin)`, the SPIR-V dispatcher, …) can dispatch
     /// on the right per-type conversion entry. No-op when the
     /// callee wasn't a scalar constructor call.
@@ -3433,15 +3463,16 @@ impl<'a> TypeChecker<'a> {
     /// the type of `target.swizzle <op> rhs` without rebuilding an AST.
     fn infer_binop_result(
         &mut self,
-        op: &str,
+        op: &crate::op::BinaryOperator,
         left_type: Type,
         right_type: Type,
         span: Span,
     ) -> Result<Type> {
         let bool_ty = || Type::Constructed(TypeName::Bool, vec![]);
 
-        match op {
-            "==" | "!=" | "<" | ">" | "<=" | ">=" => {
+        use crate::op::BinaryOperator as B;
+        match *op {
+            B::Equal | B::NotEqual | B::Less | B::LessEqual | B::Greater | B::GreaterEqual => {
                 self.unify_or_err(
                     &left_type,
                     &right_type,
@@ -3450,17 +3481,27 @@ impl<'a> TypeChecker<'a> {
                 )?;
                 Ok(bool_ty())
             }
-            "&&" | "||" => {
+            B::LogicalAnd | B::LogicalOr => {
                 let bt = bool_ty();
                 let ctx = format!("Logical operator '{}' requires bool operands", op);
                 self.unify_or_err(&left_type, &bt, span, &ctx)?;
                 self.unify_or_err(&right_type, &bt, span, &ctx)?;
                 Ok(bt)
             }
-            "+" | "-" | "*" | "/" | "%" | "**" => {
-                self.infer_arith_op_result(op, left_type, right_type, span)
-            }
-            "&" | "|" | "^" | "<<" | ">>" => {
+            B::Add
+            | B::Subtract
+            | B::Multiply
+            | B::Divide
+            | B::Remainder
+            | B::FloorDivide
+            | B::FloorRemainder
+            | B::Power => self.infer_arith_op_result(op, left_type, right_type, span),
+            B::BitwiseAnd
+            | B::BitwiseOr
+            | B::BitwiseXor
+            | B::ShiftLeft
+            | B::ShiftRight
+            | B::ShiftRightLogical => {
                 self.unify_or_err(
                     &left_type,
                     &right_type,
@@ -3480,7 +3521,6 @@ impl<'a> TypeChecker<'a> {
                     )),
                 }
             }
-            _ => Err(err_type_at!(span, "Unknown binary operator: {}", op)),
         }
     }
 
@@ -3489,7 +3529,7 @@ impl<'a> TypeChecker<'a> {
     /// dispatch, and the numeric-elem check.
     fn infer_arith_op_result(
         &mut self,
-        op: &str,
+        op: &crate::op::BinaryOperator,
         left_type: Type,
         right_type: Type,
         span: Span,
@@ -3499,7 +3539,7 @@ impl<'a> TypeChecker<'a> {
 
         // `*` covers matrix products that don't reduce to plain
         // component-wise arithmetic. Try those first.
-        if op == "*" {
+        if matches!(op, crate::op::BinaryOperator::Multiply) {
             if let Some(ty) = self.try_mat_mul(&l, &r, span)? {
                 return Ok(ty);
             }
@@ -3529,7 +3569,7 @@ impl<'a> TypeChecker<'a> {
                 // any width. Result is the base's float type. See
                 // SPECIFICATION.md `x binop y`. The (Int base, Float exp) shape
                 // stays a same-typed error, matching the spec's wording.
-                if op == "**"
+                if matches!(op, crate::op::BinaryOperator::Power)
                     && matches!(l, Type::Constructed(TypeName::Float(_), _))
                     && matches!(
                         r,

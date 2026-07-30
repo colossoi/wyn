@@ -22,7 +22,7 @@ pub(super) struct ScanReductionOutputSpec<'a> {
 /// Build a single-invocation exclusive scan over block sums.
 pub(super) struct ScanPhase2Spec<'a> {
     pub entry_name: String,
-    pub operator: String,
+    pub operator: RegionId,
     pub elem_ty: Type<TypeName>,
     pub source_graph: &'a EGraph,
     pub operator_captures: &'a [NodeId],
@@ -36,6 +36,7 @@ pub(super) struct ScanPhase2Spec<'a> {
 impl ScanPhase2Spec<'_> {
     pub(super) fn build(
         self,
+        identities: &mut crate::egir::program::ProgramIdentities,
         semantic_ids: &mut crate::egir::program::SemanticOpIdSource,
         effect_ids: &mut crate::IdSource<EffectToken>,
     ) -> Result<BuiltPhase, String> {
@@ -77,6 +78,7 @@ impl ScanPhase2Spec<'_> {
         let mut builder = EntryBuilder::new_compute(
             format!("{}_phase2_scan_sums", self.entry_name),
             (1, 1, 1),
+            identities,
             semantic_ids,
             effect_ids,
         );
@@ -187,7 +189,8 @@ impl ScanPhase2Spec<'_> {
             target: header,
             args: vec![neutral, zero],
         };
-        let condition = graph_ops::intern_binop(graph, "<", index, len, bool_ty, None);
+        let condition =
+            graph_ops::intern_binop(graph, crate::op::BinaryOperator::Less, index, len, bool_ty, None);
         graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
             cond: condition,
             then_target: body,
@@ -225,7 +228,8 @@ impl ScanPhase2Spec<'_> {
         };
         let continued_accumulator =
             graph.add_block_param(continuation, graph.nodes[accumulator].ty.clone());
-        let next_index = graph_ops::intern_binop(graph, "+", index, one, u32_ty, None);
+        let next_index =
+            graph_ops::intern_binop(graph, crate::op::BinaryOperator::Add, index, one, u32_ty, None);
         graph.skeleton.blocks[continuation].term = SkeletonTerminator::Branch {
             target: header,
             args: vec![continued_accumulator, next_index],
@@ -277,6 +281,7 @@ pub(super) struct ScanPhase3Spec<'a> {
 impl ScanPhase3Spec<'_> {
     pub(super) fn build(
         self,
+        identities: &mut crate::egir::program::ProgramIdentities,
         semantic_ids: &mut crate::egir::program::SemanticOpIdSource,
         effect_ids: &mut crate::IdSource<EffectToken>,
     ) -> Result<BuiltPhase, String> {
@@ -318,6 +323,7 @@ impl ScanPhase3Spec<'_> {
         let mut builder = EntryBuilder::new_compute(
             format!("{}_phase3_add_offsets", self.entry_name),
             (self.width, 1, 1),
+            identities,
             semantic_ids,
             effect_ids,
         );
@@ -661,16 +667,9 @@ impl KernelPlanBuilder<'_, '_> {
             .collect::<Vec<_>>();
         let original_operators = scans
             .iter()
-            .map(|scan| &scan.operator)
-            .chain(reductions.iter().map(|reduction| &reduction.operator))
-            .map(|operator| {
-                let region = operator
-                    .seg_body()
-                    .ok_or_else(|| "parallel collective operator lost its region".to_owned())?
-                    .region;
-                Ok((operator.clone(), self.region_interner.resolve(region).clone()))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+            .map(|scan| scan.operator.clone())
+            .chain(reductions.iter().map(|reduction| reduction.operator.clone()))
+            .collect::<Vec<_>>();
         let phase_operator = if reductions.is_empty() && scans.len() == 1 && component_count == 1 {
             scans[0].operator.clone()
         } else {
@@ -706,7 +705,7 @@ impl KernelPlanBuilder<'_, '_> {
         };
         let operator_region =
             phase_operator.seg_body().expect("parallel scan phase operator has a region").region;
-        let combine_name = self.region_interner.resolve(operator_region).clone();
+        let combine_region = operator_region;
         let neutrals = scans
             .iter()
             .flat_map(|scan| scan.neutral.iter().copied())
@@ -727,7 +726,6 @@ impl KernelPlanBuilder<'_, '_> {
                 .collect::<Vec<_>>();
             let capture_types =
                 captures.iter().map(|capture| entry.graph.nodes[*capture].ty.clone()).collect::<Vec<_>>();
-            let callee = pre.seg_body().map(|body| self.region_interner.resolve(body.region).clone());
             let source = pre.clone();
             let parameter_types = pre.parameter_types.clone();
             let result_type = elem_ty.clone();
@@ -738,7 +736,6 @@ impl KernelPlanBuilder<'_, '_> {
                         region,
                         name,
                         source,
-                        callee,
                         capture_types,
                         component_count,
                         result_type,
@@ -763,8 +760,6 @@ impl KernelPlanBuilder<'_, '_> {
                 .collect::<Vec<_>>();
             let capture_types =
                 captures.iter().map(|capture| entry.graph.nodes[*capture].ty.clone()).collect::<Vec<_>>();
-            let pre_callee = pre.seg_body().map(|body| self.region_interner.resolve(body.region).clone());
-            let post_callee = post.seg_body().map(|body| self.region_interner.resolve(body.region).clone());
             let source_pre = pre.clone();
             let source_post = post.clone();
             let mut parameter_types = vec![elem_ty.clone()];
@@ -779,9 +774,7 @@ impl KernelPlanBuilder<'_, '_> {
                         region,
                         name,
                         source_pre,
-                        pre_callee,
                         source_post,
-                        post_callee,
                         post_component_types,
                         scan_component_count,
                         post_scratch_type,
@@ -978,7 +971,7 @@ impl KernelPlanBuilder<'_, '_> {
 
         let phase2 = ScanPhase2Spec {
             entry_name: entry.name.clone(),
-            operator: combine_name.clone(),
+            operator: combine_region,
             elem_ty: elem_ty.clone(),
             source_graph: &entry.graph,
             operator_captures: &operator_captures,
@@ -999,7 +992,7 @@ impl KernelPlanBuilder<'_, '_> {
                 },
             ),
         };
-        let mut phase2 = phase2.build(self.semantic_ids, self.effect_ids)?;
+        let mut phase2 = phase2.build(&mut self.identities, self.semantic_ids, self.effect_ids)?;
         apply_manifest_resource_sizes(&mut phase2.body, self.resources);
 
         let swap_elem_ty = elem_ty.clone();
@@ -1013,7 +1006,7 @@ impl KernelPlanBuilder<'_, '_> {
                 synthesize_swap_wrapper(
                     region,
                     name,
-                    combine_name,
+                    combine_region,
                     swap_elem_ty,
                     operator_capture_types,
                     span,
@@ -1051,7 +1044,7 @@ impl KernelPlanBuilder<'_, '_> {
             width: total_threads,
             post: post_phase,
         };
-        let mut phase3 = phase3.build(self.semantic_ids, self.effect_ids)?;
+        let mut phase3 = phase3.build(&mut self.identities, self.semantic_ids, self.effect_ids)?;
         apply_manifest_resource_sizes(&mut phase3.body, self.resources);
 
         phase1_resources = merge_scheduled_resources(
@@ -1077,7 +1070,7 @@ impl KernelPlanBuilder<'_, '_> {
 fn synthesize_packed_operator_function(
     region: RegionId,
     name: String,
-    operators: Vec<(screma::Lambda, String)>,
+    operators: Vec<screma::Lambda>,
     component_types: Vec<Type<TypeName>>,
     capture_types: Vec<Type<TypeName>>,
     scratch_type: Type<TypeName>,
@@ -1093,18 +1086,13 @@ fn synthesize_packed_operator_function(
     let mut component_cursor = 0;
     let mut capture_cursor = 2;
     let mut results = Vec::with_capacity(component_types.len());
-    for (operator, callee) in &operators {
+    for operator in &operators {
         let component_end = component_cursor + operator.result_types.len();
         let capture_end = capture_cursor + operator.capture_count();
         let mut operator_arguments = left[component_cursor..component_end].to_vec();
         operator_arguments.extend_from_slice(&right[component_cursor..component_end]);
         operator_arguments.extend_from_slice(&arguments[capture_cursor..capture_end]);
-        results.extend(lambda_ops::emit_call(
-            &mut graph,
-            operator,
-            Some(callee),
-            operator_arguments,
-        ));
+        results.extend(lambda_ops::emit_call(&mut graph, operator, operator_arguments));
         component_cursor = component_end;
         capture_cursor = capture_end;
     }
@@ -1129,7 +1117,6 @@ fn synthesize_scan_input_function(
     region: RegionId,
     name: String,
     pre: screma::Lambda,
-    callee: Option<String>,
     capture_types: Vec<Type<TypeName>>,
     component_count: usize,
     result_type: Type<TypeName>,
@@ -1140,7 +1127,7 @@ fn synthesize_scan_input_function(
     let params = lambda_ops::named_parameters(&parameter_types, "arg");
     let mut graph = EGraph::new();
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
-    let results = lambda_ops::emit_call(&mut graph, &pre, callee.as_deref(), arguments);
+    let results = lambda_ops::emit_call(&mut graph, &pre, arguments);
     let packed = lambda_ops::pack_results(
         &mut graph,
         &results[..component_count],
@@ -1164,9 +1151,7 @@ fn synthesize_scan_post_function(
     region: RegionId,
     name: String,
     pre: screma::Lambda,
-    pre_callee: Option<String>,
     post: screma::Lambda,
-    post_callee: Option<String>,
     component_types: Vec<Type<TypeName>>,
     scan_component_count: usize,
     scratch_type: Type<TypeName>,
@@ -1185,12 +1170,12 @@ fn synthesize_scan_post_function(
 
     let mut pre_arguments = arguments[1..element_count].to_vec();
     pre_arguments.extend_from_slice(&arguments[element_count..element_count + pre_capture_count]);
-    let pre_results = lambda_ops::emit_call(&mut graph, &pre, pre_callee.as_deref(), pre_arguments);
+    let pre_results = lambda_ops::emit_call(&mut graph, &pre, pre_arguments);
     let prefix_components = lambda_ops::unpack_results(&mut graph, arguments[0], &component_types);
     let mut post_arguments = prefix_components[..scan_component_count].to_vec();
     post_arguments.extend_from_slice(&pre_results[component_types.len()..]);
     post_arguments.extend_from_slice(&arguments[element_count + pre_capture_count..]);
-    let post_results = lambda_ops::emit_call(&mut graph, &post, post_callee.as_deref(), post_arguments);
+    let post_results = lambda_ops::emit_call(&mut graph, &post, post_arguments);
     let entry = graph.skeleton.entry;
     lambda_ops::finish_function(
         graph,

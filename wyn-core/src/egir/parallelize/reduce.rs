@@ -51,7 +51,7 @@ pub(super) struct BoundReduce {
 struct EmissionAccumulator {
     component_types: Vec<Type<TypeName>>,
     scratch_type: Type<TypeName>,
-    operator: String,
+    operator: RegionId,
     operator_captures: Vec<NodeId>,
     capture_inputs: Vec<SemanticResourceDecl>,
     neutrals: Vec<NodeId>,
@@ -320,7 +320,7 @@ impl KernelPlanBuilder<'_, '_> {
                 EmissionAccumulator {
                     component_types: accumulator.component_types,
                     scratch_type: accumulator.scratch_type,
-                    operator: self.region_interner.resolve(accumulator.combine_region).clone(),
+                    operator: accumulator.combine_region,
                     operator_captures: accumulator.combine_captures,
                     capture_inputs: accumulator.capture_inputs,
                     neutrals: accumulator.neutrals,
@@ -471,7 +471,7 @@ impl KernelPlanBuilder<'_, '_> {
                 output_declarations: &accumulator.outputs,
                 width: phase2_width,
             };
-            let phase2 = combine.build(self.semantic_ids, self.effect_ids)?;
+            let phase2 = combine.build(&mut self.identities, self.semantic_ids, self.effect_ids)?;
             phase2s.push(phase2);
         }
         // Scheduling consumed the semantic SegRed. Phase 1 is now an ordinary
@@ -509,7 +509,7 @@ impl KernelPlanBuilder<'_, '_> {
 /// The published compute stage must dispatch this same width.
 struct ReduceCombineSpec<'a> {
     name: String,
-    operator: String,
+    operator: RegionId,
     component_types: &'a [Type<TypeName>],
     elem_ty: Type<TypeName>,
     source_graph: &'a crate::egir::types::EGraph,
@@ -589,20 +589,43 @@ impl ReduceCombineSpec<'_> {
         // non-commutative operators.
         //   chunk = ceil(len / W);  start = lid * chunk;  end = min(start+chunk, len)
         let w_minus_1 = graph_ops::intern_u32(graph, w - 1, None);
-        let len_plus = graph_ops::intern_binop(graph, "+", len, w_minus_1, u32_ty.clone(), None);
-        let chunk = graph_ops::intern_binop(graph, "/", len_plus, w_nid, u32_ty.clone(), None);
-        let start = graph_ops::intern_binop(graph, "*", lid, chunk, u32_ty.clone(), None);
-        let start_plus = graph_ops::intern_binop(graph, "+", start, chunk, u32_ty.clone(), None);
-        let u32_min = catalog()
-            .lookup_by_any_name("u32.min")
-            .ok_or_else(|| "required builtin `u32.min` is missing from the catalog".to_string())?;
-        let end = graph_ops::intern_intrinsic(
+        let len_plus = graph_ops::intern_binop(
             graph,
-            u32_min.id,
-            smallvec![start_plus, len],
+            crate::op::BinaryOperator::Add,
+            len,
+            w_minus_1,
             u32_ty.clone(),
             None,
         );
+        let chunk = graph_ops::intern_binop(
+            graph,
+            crate::op::BinaryOperator::Divide,
+            len_plus,
+            w_nid,
+            u32_ty.clone(),
+            None,
+        );
+        let start = graph_ops::intern_binop(
+            graph,
+            crate::op::BinaryOperator::Multiply,
+            lid,
+            chunk,
+            u32_ty.clone(),
+            None,
+        );
+        let start_plus = graph_ops::intern_binop(
+            graph,
+            crate::op::BinaryOperator::Add,
+            start,
+            chunk,
+            u32_ty.clone(),
+            None,
+        );
+        let u32_min = catalog()
+            .specialize_numeric(catalog().known().min, &TypeName::UInt(32))
+            .ok_or_else(|| "u32 min specialization is missing from the catalog".to_string())?;
+        let end =
+            graph_ops::intern_intrinsic(graph, u32_min, smallvec![start_plus, len], u32_ty.clone(), None);
 
         // ---- blocks ----
         let grid_header = graph.skeleton.create_block();
@@ -629,7 +652,14 @@ impl ReduceCombineSpec<'_> {
         };
 
         // grid_header: i < end ? grid_body : grid_after(acc)
-        let grid_cond = graph_ops::intern_binop(graph, "<", i_in, end, bool_ty.clone(), None);
+        let grid_cond = graph_ops::intern_binop(
+            graph,
+            crate::op::BinaryOperator::Less,
+            i_in,
+            end,
+            bool_ty.clone(),
+            None,
+        );
         graph.skeleton.blocks[grid_header].term = SkeletonTerminator::CondBranch {
             cond: grid_cond,
             then_target: grid_body,
@@ -654,7 +684,14 @@ impl ReduceCombineSpec<'_> {
         // grid_cont(acc_c): i_next = i + W; → grid_header(acc_c, i_next)
         let acc_c = graph.add_block_param(grid_cont, elem_ty.clone());
         let one_u32 = graph_ops::intern_u32(graph, 1, None);
-        let i_next = graph_ops::intern_binop(graph, "+", i_in, one_u32, u32_ty.clone(), None);
+        let i_next = graph_ops::intern_binop(
+            graph,
+            crate::op::BinaryOperator::Add,
+            i_in,
+            one_u32,
+            u32_ty.clone(),
+            None,
+        );
         graph.skeleton.blocks[grid_cont].term = SkeletonTerminator::Branch {
             target: grid_header,
             args: vec![acc_c, i_next],
@@ -681,7 +718,14 @@ impl ReduceCombineSpec<'_> {
         // Grow an adjacent-pair tree from stride 1. This preserves source order
         // for associative, non-commutative operators.
         let stride_in = graph.add_block_param(tree_header, u32_ty.clone());
-        let stride_cond = graph_ops::intern_binop(graph, "<", stride_in, w_nid, bool_ty.clone(), None);
+        let stride_cond = graph_ops::intern_binop(
+            graph,
+            crate::op::BinaryOperator::Less,
+            stride_in,
+            w_nid,
+            bool_ty.clone(),
+            None,
+        );
         graph.skeleton.blocks[tree_header].term = SkeletonTerminator::CondBranch {
             cond: stride_cond,
             then_target: tree_body,
@@ -696,9 +740,30 @@ impl ReduceCombineSpec<'_> {
 
         // Only the first lane in each adjacent pair combines the two runs.
         let two = graph_ops::intern_u32(graph, 2, None);
-        let pair_width = graph_ops::intern_binop(graph, "*", stride_in, two, u32_ty.clone(), None);
-        let lane_in_pair = graph_ops::intern_binop(graph, "%", lid, pair_width, u32_ty.clone(), None);
-        let active = graph_ops::intern_binop(graph, "==", lane_in_pair, zero_u32, bool_ty.clone(), None);
+        let pair_width = graph_ops::intern_binop(
+            graph,
+            crate::op::BinaryOperator::Multiply,
+            stride_in,
+            two,
+            u32_ty.clone(),
+            None,
+        );
+        let lane_in_pair = graph_ops::intern_binop(
+            graph,
+            crate::op::BinaryOperator::Remainder,
+            lid,
+            pair_width,
+            u32_ty.clone(),
+            None,
+        );
+        let active = graph_ops::intern_binop(
+            graph,
+            crate::op::BinaryOperator::Equal,
+            lane_in_pair,
+            zero_u32,
+            bool_ty.clone(),
+            None,
+        );
         graph.skeleton.blocks[tree_body].term = SkeletonTerminator::CondBranch {
             cond: active,
             then_target: tree_then,
@@ -712,7 +777,14 @@ impl ReduceCombineSpec<'_> {
 
         // tree_then: shared[lid] = op(shared[lid], shared[lid+stride]); → tree_sel_merge
         let a = graph_ops::emit_view_load(graph, tree_then, shared_view, lid, elem_ty.clone(), eff, None);
-        let lid_plus = graph_ops::intern_binop(graph, "+", lid, stride_in, u32_ty.clone(), None);
+        let lid_plus = graph_ops::intern_binop(
+            graph,
+            crate::op::BinaryOperator::Add,
+            lid,
+            stride_in,
+            u32_ty.clone(),
+            None,
+        );
         let bb = graph_ops::emit_view_load(
             graph,
             tree_then,
@@ -746,14 +818,28 @@ impl ReduceCombineSpec<'_> {
 
         // tree_cont: barrier; stride_next = stride*2; → tree_header(stride_next)
         graph_ops::emit_workgroup_barrier(graph, tree_cont, eff);
-        let stride_next = graph_ops::intern_binop(graph, "*", stride_in, two, u32_ty.clone(), None);
+        let stride_next = graph_ops::intern_binop(
+            graph,
+            crate::op::BinaryOperator::Multiply,
+            stride_in,
+            two,
+            u32_ty.clone(),
+            None,
+        );
         graph.skeleton.blocks[tree_cont].term = SkeletonTerminator::Branch {
             target: tree_header,
             args: vec![stride_next],
         };
 
         // tree_after: lid == 0 ? write_blk : end_blk   (selection)
-        let is_zero = graph_ops::intern_binop(graph, "==", lid, zero_u32, bool_ty.clone(), None);
+        let is_zero = graph_ops::intern_binop(
+            graph,
+            crate::op::BinaryOperator::Equal,
+            lid,
+            zero_u32,
+            bool_ty.clone(),
+            None,
+        );
         graph.skeleton.blocks[tree_after].term = SkeletonTerminator::CondBranch {
             cond: is_zero,
             then_target: write_blk,
@@ -811,6 +897,7 @@ impl ReduceCombineSpec<'_> {
 impl ReduceCombineSpec<'_> {
     fn build(
         self,
+        identities: &mut crate::egir::program::ProgramIdentities,
         semantic_ids: &mut crate::egir::program::SemanticOpIdSource,
         effect_ids: &mut crate::IdSource<EffectToken>,
     ) -> Result<BuiltPhase, String> {
@@ -832,8 +919,13 @@ impl ReduceCombineSpec<'_> {
             }
         }));
         resources = crate::egir::ir::SegResourceAccess::merge(&resources, &[]);
-        let mut b =
-            EntryBuilder::new_compute(self.name.clone(), (self.width, 1, 1), semantic_ids, effect_ids);
+        let mut b = EntryBuilder::new_compute(
+            self.name.clone(),
+            (self.width, 1, 1),
+            identities,
+            semantic_ids,
+            effect_ids,
+        );
         b.declare_intermediate_storage_sized(
             self.partials,
             self.elem_ty.clone(),

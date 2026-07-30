@@ -13,7 +13,7 @@ use super::space::seg_space_fusable;
 use super::support;
 use crate::ast::{Span, TypeName};
 use crate::egir::ir::{splice_effect_tokens, BodySite};
-use crate::egir::program::{CoreProgramData, OutputSlotId, RegionInterner, SemanticFunc};
+use crate::egir::program::{CoreProgramData, OutputSlotId, ProgramIdentities, SemanticFunc};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
@@ -147,8 +147,8 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
         graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect::<LookupMap<_, _>>();
     let left = extract_screma(graph, candidate.block, candidate.left);
     let right = extract_screma(graph, candidate.block, candidate.right);
-    let mut interner = inner.data.region_interner.clone();
-    let plan = build_plan(&inner, &mut interner, &scope, span, &outer_types, left, right);
+    let mut identities = inner.data.identities.clone();
+    let plan = build_plan(&inner, &mut identities, &scope, span, &outer_types, left, right);
     let synthesized = plan.synthesized.clone();
 
     let rebuilt = inner.rewrite_body(candidate.site, |body| {
@@ -158,7 +158,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
         support::rewrite_body_graph(body, rewrite)
     });
     rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
-        region_interner: interner,
+        identities: identities,
         ..data
     })
 }
@@ -242,7 +242,7 @@ struct FusionPlan {
 #[allow(clippy::too_many_arguments)]
 fn build_plan(
     inner: &Segmented,
-    interner: &mut RegionInterner,
+    identities: &mut ProgramIdentities,
     scope: &str,
     span: Span,
     outer_types: &LookupMap<NodeId, Type<TypeName>>,
@@ -251,7 +251,7 @@ fn build_plan(
 ) -> FusionPlan {
     let mut context = fusion_screma::Context {
         program: inner,
-        interner,
+        identities,
         scope,
         span,
         outer_types,

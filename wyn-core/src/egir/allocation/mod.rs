@@ -96,22 +96,14 @@ pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, 
 pub(crate) fn entries_with_endpoints(
     program: &ResourcesAllocated,
 ) -> impl Iterator<Item = (CompilerFlowEndpoint, &SemanticEntry)> {
-    program
-        .entry_points
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            (
-                CompilerFlowEndpoint::Entry(SemanticEntryId::from_index(index)),
-                entry,
-            )
-        })
-        .chain(program.data.materializations.ids().map(|id| {
+    program.entry_points.iter().map(|entry| (CompilerFlowEndpoint::Entry(entry.id), entry)).chain(
+        program.data.materializations.ids().map(|id| {
             (
                 CompilerFlowEndpoint::Materialization(id),
                 program.data.materializations[id].entry(),
             )
-        }))
+        }),
+    )
 }
 
 /// Derived resource-flow edges consumed by target scheduling. They are not

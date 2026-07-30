@@ -4,11 +4,19 @@ impl KernelPlan {
     pub(super) fn validate(&self) -> Result<(), String> {
         let phases = self.phases_with_ids().collect::<Vec<_>>();
         let mut names = HashSet::new();
+        let mut entry_ids = HashSet::new();
         let mut placements = HashSet::new();
         let mut group_orders = HashMap::<PhaseGroup, Vec<usize>>::new();
         for (id, phase) in &phases {
             if !names.insert(phase.entry_point()) {
                 return Err(format!("duplicate physical entry `{}`", phase.entry_point()));
+            }
+            if !entry_ids.insert(phase.entry.id) {
+                return Err(format!(
+                    "physical entry `{}` reuses identity {:?}",
+                    phase.entry_point(),
+                    phase.entry.id
+                ));
             }
             if phase.dependencies.iter().any(|dependency| dependency == id) {
                 return Err(format!("kernel `{}` depends on itself", phase.entry_point()));

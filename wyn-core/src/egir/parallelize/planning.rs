@@ -219,6 +219,10 @@ impl<R> PlannedKernel<R> {
     pub(super) fn seed_body(&self) -> crate::egir::program::PlannedEntry {
         self.body.clone()
     }
+
+    pub(super) fn assign_entry_id(&mut self, id: crate::EntryId) {
+        self.body.id = id;
+    }
 }
 
 /// A non-empty endpoint plan. `primary` always reuses the seeded kernel;

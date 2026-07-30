@@ -51,12 +51,14 @@ fn empty_program() -> crate::ssa::stage::Bare {
 fn entry(name: &str) -> EntryPoint {
     let builder = FuncBuilder::new(vec![], Type::Constructed(TypeName::Unit, vec![]));
     EntryPoint {
+        id: crate::EntryId::from_index(0),
         name: name.into(),
         body: builder.finish_unchecked(),
         execution_model: ExecutionModel::Compute {
             local_size: (1, 1, 1),
         },
         inputs: Vec::new(),
+        parameter_inputs: Vec::new(),
         outputs: Vec::new(),
         storage_bindings: Vec::new(),
         pipeline_storage_accesses: LookupMap::new(),

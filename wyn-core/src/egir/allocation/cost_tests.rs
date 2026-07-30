@@ -63,6 +63,7 @@ fn stage_invariance_and_scalar_relocation_legality_remain_separate() {
     ];
     let entry = SemanticEntry::new_with_resources(
         "compute".into(),
+        crate::EntryId::from_index(0),
         Span::dummy(),
         ExecutionModel::Compute {
             local_size: (1, 1, 1),
@@ -161,7 +162,7 @@ fn canonical_fixed_range_loop_recovers_trip_count() {
         args: vec![zero],
     };
     let cond = graph.intern_pure(
-        PureOp::BinOp("<".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
         smallvec![index, bound],
         Type::Constructed(TypeName::Bool, vec![]),
         None,
@@ -173,7 +174,12 @@ fn canonical_fixed_range_loop_recovers_trip_count() {
         else_target: merge,
         else_args: vec![],
     };
-    let next = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![index, one], i32_ty(), None);
+    let next = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        smallvec![index, one],
+        i32_ty(),
+        None,
+    );
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: header,
         args: vec![next],

@@ -184,16 +184,17 @@ fn build_parallel_plan(
     let built = KernelPlanBuilder::new(
         &program.data.core.resources,
         &program.data.core.pipeline,
+        &program.data.core.stage_entries,
         &program.entry_points,
         flows,
         recipes,
         &mut program.global_context.semantic_ids,
         &mut program.global_context.effect_ids,
-        program.data.core.region_interner.clone(),
+        program.data.core.identities.clone(),
     )?
-    .build_parallel_schedule(&program.data.materializations, program.entry_points.len())?;
-    let (schedule, generated_callables, region_interner) = built.into_plan();
-    let program = install_generated_callables(program, generated_callables, region_interner);
+    .build_parallel_schedule(&program.data.materializations)?;
+    let (schedule, generated_callables, identities) = built.into_plan();
+    let program = install_generated_callables(program, generated_callables, identities);
     Ok((program, schedule))
 }
 
@@ -207,26 +208,27 @@ fn build_serial_plan(
     let built = KernelPlanBuilder::new(
         &program.data.core.resources,
         &program.data.core.pipeline,
+        &program.data.core.stage_entries,
         &program.entry_points,
         flows,
         recipes,
         &mut program.global_context.semantic_ids,
         &mut program.global_context.effect_ids,
-        program.data.core.region_interner.clone(),
+        program.data.core.identities.clone(),
     )?
     .build_serial_schedule(&program.data.materializations)?;
-    let (schedule, generated_callables, region_interner) = built.into_plan();
-    let program = install_generated_callables(program, generated_callables, region_interner);
+    let (schedule, generated_callables, identities) = built.into_plan();
+    let program = install_generated_callables(program, generated_callables, identities);
     Ok((program, schedule))
 }
 
 fn install_generated_callables(
     program: ResourcesAllocated,
     generated_callables: Vec<SemanticFunc>,
-    region_interner: super::program::RegionInterner,
+    identities: super::program::ProgramIdentities,
 ) -> ResourcesAllocated {
     program.extend_functions(generated_callables).map_data(|mut data| {
-        data.core.region_interner = region_interner;
+        data.core.identities = identities;
         data
     })
 }
@@ -239,13 +241,14 @@ struct KernelPlanBuilder<'resources, 'effects> {
     semantic_ids: &'effects mut super::program::SemanticOpIdSource,
     effect_ids: &'effects mut crate::IdSource<EffectToken>,
     generated_callables: Vec<SemanticFunc>,
-    region_interner: super::program::RegionInterner,
+    entry_ids: Vec<SemanticEntryId>,
+    identities: super::program::ProgramIdentities,
 }
 
 type BuiltPlan = (
     schedule::KernelPlan,
     Vec<SemanticFunc>,
-    super::program::RegionInterner,
+    super::program::ProgramIdentities,
 );
 
 impl planning::PlannedKernel {
@@ -305,7 +308,7 @@ impl planning::PlannedKernel {
 
 impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
     fn into_plan(self) -> BuiltPlan {
-        (self.schedule, self.generated_callables, self.region_interner)
+        (self.schedule, self.generated_callables, self.identities)
     }
 
     fn define_callable(
@@ -313,13 +316,13 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         name: String,
         build: impl FnOnce(RegionId, String) -> SemanticFunc,
     ) -> error::Result<RegionId> {
-        if self.region_interner.get(&name).is_some() {
+        if self.identities.function_names().any(|existing| existing == name) {
             return Err(error::ParallelizeError::Invalid(format!(
                 "planner-generated callable `{}` collides with an existing callable",
                 name
             )));
         }
-        let id = self.region_interner.intern(&name);
+        let id = self.identities.alloc_function(name.clone());
         let function = build(id, name);
         assert_eq!(
             function.region, id,
@@ -327,7 +330,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         );
         assert_eq!(
             &function.name,
-            self.region_interner.resolve(id),
+            self.identities.function_name(id),
             "planner-generated callable did not retain its reserved name"
         );
         self.generated_callables.push(function);
@@ -337,17 +340,19 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
     fn new(
         resources: &'resources LogicalResourceArena,
         descriptor: &crate::pipeline_descriptor::PipelineDescriptor,
+        stage_entries: &[Vec<crate::EntryId>],
         entries: &[SemanticEntry],
         flows: Vec<(ResourceId, allocation::CompilerResourceFlow)>,
         recipes: planning::RecipeIndex,
         semantic_ids: &'effects mut super::program::SemanticOpIdSource,
         effect_ids: &'effects mut crate::IdSource<EffectToken>,
-        region_interner: super::program::RegionInterner,
+        identities: super::program::ProgramIdentities,
     ) -> error::Result<Self> {
         let flows = model::ResourceFlowIndex::new(flows);
-        let mut schedule = schedule::KernelPlan::from_descriptor(descriptor, resources, entries)?;
-        for index in 0..entries.len() {
-            let source = SemanticEntryId::from_index(index);
+        let mut schedule =
+            schedule::KernelPlan::from_descriptor(descriptor, stage_entries, resources, entries)?;
+        for entry in entries {
+            let source = entry.id;
             let endpoint = CompilerFlowEndpoint::Entry(source);
             if let Some(count) = recipes.required_elements(endpoint) {
                 schedule.set_required_elements(endpoint, count);
@@ -361,17 +366,17 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
             semantic_ids,
             effect_ids,
             generated_callables: Vec::new(),
-            region_interner,
+            entry_ids: entries.iter().map(|entry| entry.id).collect(),
+            identities,
         })
     }
 
     fn build_parallel_schedule(
         mut self,
         materializations: &crate::IdArena<MaterializationId, MaterializationRequirement>,
-        entry_count: usize,
     ) -> error::Result<Self> {
         self.attach_materializations(materializations)?;
-        self.schedule_entries(entry_count)?;
+        self.schedule_entries()?;
         self.schedule.coalesce_resource_flows(self.flows.flows())?;
         Ok(self)
     }
@@ -386,9 +391,8 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         Ok(self)
     }
 
-    fn schedule_entries(&mut self, entry_count: usize) -> error::Result<()> {
-        for index in 0..entry_count {
-            let source = SemanticEntryId::from_index(index);
+    fn schedule_entries(&mut self) -> error::Result<()> {
+        for source in self.entry_ids.clone() {
             let kernel = self.schedule.primary_kernel(source);
             self.lower_endpoint(CompilerFlowEndpoint::Entry(source), kernel)?;
         }
@@ -448,7 +452,10 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         };
         let (primary, siblings) = plan.into_parts();
         primary.lower(self, kernel)?;
-        for sibling in siblings {
+        for mut sibling in siblings {
+            let seed = sibling.seed_body();
+            let id = self.identities.alloc_entry(seed.name.clone());
+            sibling.assign_entry_id(id);
             let phase = schedule::PhaseSpec::compute(
                 sibling.seed_body(),
                 schedule::KernelDispatch::inferred(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 }),

@@ -8,6 +8,7 @@
 
 use std::collections::HashSet;
 
+use crate::op::BinaryOperator;
 use crate::LookupMap;
 
 use super::types::{EGraph, ENode, Family, NodeId, PureOp};
@@ -96,7 +97,7 @@ const POW_COST: Cost = 8;
 /// Static cost per operation kind.
 fn op_cost<R>(op: &PureOp<R>) -> Cost {
     match op {
-        PureOp::BinOp(name) if name == "**" => POW_COST,
+        PureOp::BinOp(BinaryOperator::Power) => POW_COST,
         PureOp::ResourceLen(_) => 0,
         // Leaves / free operations:
         PureOp::Int(_)
@@ -105,7 +106,6 @@ fn op_cost<R>(op: &PureOp<R>) -> Cost {
         | PureOp::Bool(_)
         | PureOp::Unit
         | PureOp::Global(_)
-        | PureOp::Extern(_)
         | PureOp::Project { .. } => 0,
 
         // Single-instruction operations:

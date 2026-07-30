@@ -527,8 +527,12 @@ impl AstFormatter {
                     .map(|e| format!(" = {}", self.format_simple_expr(e)))
                     .unwrap_or_default();
                 let form = match &loop_expr.form {
-                    LoopForm::For(var, bound) => {
-                        format!("for {} < {}", var, self.format_simple_expr(bound))
+                    LoopForm::For(pattern, bound) => {
+                        format!(
+                            "for {} < {}",
+                            self.format_pattern(pattern),
+                            self.format_simple_expr(bound)
+                        )
                     }
                     LoopForm::ForIn(pat, iter) => format!(
                         "for {} in {}",
@@ -719,12 +723,11 @@ impl AstFormatter {
             PatternKind::Record(fields) => {
                 let items: Vec<String> = fields
                     .iter()
-                    .map(|f| {
-                        if let Some(pat) = &f.pattern {
-                            format!("{} = {}", f.field, self.format_pattern(pat))
-                        } else {
-                            f.field.clone()
+                    .map(|f| match &f.target {
+                        crate::ast::RecordPatternTarget::Pattern(pattern) => {
+                            format!("{} = {}", f.field, self.format_pattern(pattern))
                         }
+                        crate::ast::RecordPatternTarget::Shorthand(_) => f.field.clone(),
                     })
                     .collect();
                 format!("{{{}}}", items.join(", "))

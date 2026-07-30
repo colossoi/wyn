@@ -92,27 +92,70 @@ pub(super) fn emit_chunk_arithmetic(
     // grid rather than a fixed `total_threads`-wide one. `total_threads` is the
     // compile-time per-workgroup width.
     let wg_width = intern_index_lit(graph, total_threads, &index_ty);
-    let total = graph_ops::intern_binop(graph, "*", nwg_idx, wg_width, index_ty.clone(), None);
+    let total = graph_ops::intern_binop(
+        graph,
+        crate::op::BinaryOperator::Multiply,
+        nwg_idx,
+        wg_width,
+        index_ty.clone(),
+        None,
+    );
     let one = intern_index_lit(graph, 1, &index_ty);
-    let total_minus_one = graph_ops::intern_binop(graph, "-", total, one, index_ty.clone(), None);
-    let len_plus = graph_ops::intern_binop(graph, "+", input_len, total_minus_one, index_ty.clone(), None);
-    let chunk_size = graph_ops::intern_binop(graph, "/", len_plus, total, index_ty.clone(), None);
-    let raw_chunk_start = graph_ops::intern_binop(graph, "*", tid_idx, chunk_size, index_ty.clone(), None);
-    let min_name = if is_u32 { "u32.min" } else { "i32.min" };
-    let min_op =
-        catalog().lookup_by_any_name(min_name).ok_or_else(|| format!("{} not in catalog", min_name))?;
+    let total_minus_one = graph_ops::intern_binop(
+        graph,
+        crate::op::BinaryOperator::Subtract,
+        total,
+        one,
+        index_ty.clone(),
+        None,
+    );
+    let len_plus = graph_ops::intern_binop(
+        graph,
+        crate::op::BinaryOperator::Add,
+        input_len,
+        total_minus_one,
+        index_ty.clone(),
+        None,
+    );
+    let chunk_size = graph_ops::intern_binop(
+        graph,
+        crate::op::BinaryOperator::Divide,
+        len_plus,
+        total,
+        index_ty.clone(),
+        None,
+    );
+    let raw_chunk_start = graph_ops::intern_binop(
+        graph,
+        crate::op::BinaryOperator::Multiply,
+        tid_idx,
+        chunk_size,
+        index_ty.clone(),
+        None,
+    );
+    let scalar_type = if is_u32 { TypeName::UInt(32) } else { TypeName::Int(32) };
+    let min_id = catalog()
+        .specialize_numeric(catalog().known().min, &scalar_type)
+        .ok_or_else(|| format!("min specialization missing for {scalar_type:?}"))?;
     // Clamp idle workers to the end before subtraction. For n < workers this
     // produces `(start=n,len=0)` instead of underflowing `n-start`.
     let chunk_start = graph_ops::intern_intrinsic(
         graph,
-        min_op.id,
+        min_id,
         smallvec![raw_chunk_start, input_len],
         index_ty.clone(),
         None,
     );
-    let remaining = graph_ops::intern_binop(graph, "-", input_len, chunk_start, index_ty.clone(), None);
+    let remaining = graph_ops::intern_binop(
+        graph,
+        crate::op::BinaryOperator::Subtract,
+        input_len,
+        chunk_start,
+        index_ty.clone(),
+        None,
+    );
     let chunk_len =
-        graph_ops::intern_intrinsic(graph, min_op.id, smallvec![chunk_size, remaining], index_ty, None);
+        graph_ops::intern_intrinsic(graph, min_id, smallvec![chunk_size, remaining], index_ty, None);
     Ok((tid, chunk_start, chunk_len))
 }
 
@@ -136,12 +179,12 @@ fn cast_u32_to_index(
     match index_ty {
         Type::Constructed(TypeName::UInt(32), _) => Ok(v),
         Type::Constructed(TypeName::Int(32), _) => {
-            let conv = catalog()
-                .lookup_by_any_name("i32.u32")
-                .ok_or_else(|| "i32.u32 not in catalog".to_string())?;
+            let conversion = catalog()
+                .conversion(&TypeName::Int(32), &TypeName::UInt(32))
+                .ok_or_else(|| "u32-to-i32 conversion missing from catalog".to_string())?;
             Ok(graph_ops::intern_intrinsic(
                 graph,
-                conv.id,
+                conversion,
                 smallvec![v],
                 index_ty.clone(),
                 None,
@@ -192,7 +235,7 @@ fn synthesize_binary_fn(
 pub(super) fn synthesize_swap_wrapper(
     region: RegionId,
     wrapper_name: String,
-    inner_name: String,
+    inner_region: RegionId,
     elem_ty: Type<TypeName>,
     capture_types: Vec<Type<TypeName>>,
     span: crate::ast::Span,
@@ -205,7 +248,7 @@ pub(super) fn synthesize_swap_wrapper(
     let mut inner_arguments = vec![arguments[1], arguments[0]];
     inner_arguments.extend_from_slice(&arguments[2..]);
     let result = graph.intern_pure(
-        PureOp::Call(inner_name),
+        PureOp::Call(inner_region),
         inner_arguments.into_iter().collect(),
         elem_ty.clone(),
         None,
@@ -232,7 +275,7 @@ pub(super) fn synthesize_u32_add_function(
     let result_ty = u32_ty.clone();
     synthesize_binary_fn(region, name, u32_ty, span, move |graph, a_nid, b_nid| {
         graph.intern_pure(
-            PureOp::BinOp("+".into()),
+            PureOp::BinOp(crate::op::BinaryOperator::Add),
             smallvec![a_nid, b_nid],
             result_ty,
             None,
@@ -309,7 +352,14 @@ impl ChunkableView {
             Self::Range { len, .. } => len,
             Self::StorageSlice { start, end, .. } => {
                 let index_ty = graph.nodes[end].ty.clone();
-                graph_ops::intern_binop(graph, "-", end, start, index_ty, None)
+                graph_ops::intern_binop(
+                    graph,
+                    crate::op::BinaryOperator::Subtract,
+                    end,
+                    start,
+                    index_ty,
+                    None,
+                )
             }
         }
     }
@@ -338,7 +388,14 @@ impl ChunkableView {
                 overload_idx,
             } => {
                 let index_ty = graph.nodes[end].ty.clone();
-                let chunk_end = graph_ops::intern_binop(graph, "+", chunk_start, chunk_len, index_ty, None);
+                let chunk_end = graph_ops::intern_binop(
+                    graph,
+                    crate::op::BinaryOperator::Add,
+                    chunk_start,
+                    chunk_len,
+                    index_ty,
+                    None,
+                );
                 Ok(graph.intern_pure(
                     PureOp::Intrinsic {
                         id: catalog().known().slice,
@@ -357,11 +414,25 @@ impl ChunkableView {
                     .map(|node| node.ty.clone())
                     .ok_or_else(|| format!("phase1 {context}: range start has no type"))?;
                 let start_delta = if let Some(step) = step {
-                    graph_ops::intern_binop(graph, "*", chunk_start, step, start_ty.clone(), None)
+                    graph_ops::intern_binop(
+                        graph,
+                        crate::op::BinaryOperator::Multiply,
+                        chunk_start,
+                        step,
+                        start_ty.clone(),
+                        None,
+                    )
                 } else {
                     chunk_start
                 };
-                let new_start = graph_ops::intern_binop(graph, "+", start, start_delta, start_ty, None);
+                let new_start = graph_ops::intern_binop(
+                    graph,
+                    crate::op::BinaryOperator::Add,
+                    start,
+                    start_delta,
+                    start_ty,
+                    None,
+                );
                 let mut operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![new_start, chunk_len];
                 if let Some(step) = step {
                     operands.push(step);

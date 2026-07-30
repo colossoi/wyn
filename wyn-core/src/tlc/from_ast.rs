@@ -9,6 +9,7 @@ use super::{
 };
 use crate::ast::{self, Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};
+use crate::op::BinaryOperator;
 use crate::types::{SoacOwnership, TypeExt};
 use crate::{interface, LookupMap, SymbolId, SymbolTable};
 use polytype::Type;
@@ -41,85 +42,27 @@ pub(super) struct SumLayout {
 /// Context for transforming AST to TLC.
 pub(crate) struct Transformer<'a> {
     pub(super) term_ids: &'a mut TermIdSource,
-    /// Shared symbol table: maps SymbolId to original name (for errors/debugging).
+    /// Source-level identities arrive from name resolution. This arena is used
+    /// only to allocate compiler-synthesized TLC temporaries.
     symbols: &'a mut SymbolTable,
-    /// Current scope for name resolution: maps string name to SymbolId.
-    scope: LookupMap<String, SymbolId>,
-    /// Top-level symbols that persist across function transformations.
-    /// This ensures function references use the same SymbolId as the Def.
-    /// Shared across all transformers via mutable reference.
-    top_level_symbols: &'a mut LookupMap<String, SymbolId>,
-    /// Optional namespace prefix for definition names (e.g., "f32" -> "f32.pi")
-    namespace: Option<String>,
-    /// Shared placeholder symbol for pattern matching scrutinees.
-    /// Allocated once and reused to avoid polluting the symbol table.
+    /// Shared placeholder symbol for pattern-matching scrutinees.
     placeholder_sym: SymbolId,
 }
 
 impl<'a> Transformer<'a> {
-    pub fn new(
-        symbols: &'a mut SymbolTable,
-        top_level_symbols: &'a mut LookupMap<String, SymbolId>,
-        term_ids: &'a mut TermIdSource,
-    ) -> Self {
+    pub fn new(symbols: &'a mut SymbolTable, term_ids: &'a mut TermIdSource) -> Self {
         let placeholder_sym = symbols.alloc("_w_placeholder".to_string());
         Self {
             term_ids,
             symbols,
-            scope: LookupMap::new(),
-            top_level_symbols,
-            namespace: None,
             placeholder_sym,
         }
     }
 
-    /// Create a transformer with a namespace prefix for definition names.
-    pub fn with_namespace(
-        symbols: &'a mut SymbolTable,
-        top_level_symbols: &'a mut LookupMap<String, SymbolId>,
-        namespace: &str,
-        term_ids: &'a mut TermIdSource,
-    ) -> Self {
-        let placeholder_sym = symbols.alloc("_w_placeholder".to_string());
-        Self {
-            term_ids,
-            symbols,
-            scope: LookupMap::new(),
-            top_level_symbols,
-            namespace: Some(namespace.to_string()),
-            placeholder_sym,
-        }
-    }
-
-    /// Define a new symbol, returning its unique ID.
-    /// This adds the name to the symbol table and current scope.
-    pub(super) fn define(&mut self, name: &str) -> SymbolId {
-        let id = self.symbols.alloc(name.to_string());
-        self.scope.insert(name.to_string(), id);
-        id
-    }
-
-    /// Resolve a name to its SymbolId in current scope.
-    /// Returns None for unbound names (e.g., intrinsics, top-level functions).
-    fn resolve(&self, name: &str) -> Option<SymbolId> {
-        self.scope.get(name).copied()
-    }
-
-    /// Resolve a name to its SymbolId.
-    /// Checks local scope, then top-level symbols. A typed AST guarantees that
-    /// every remaining identifier has resolved successfully, so signature-only
-    /// module members and compiler intrinsics can be interned on first use even
-    /// when they have no body in `support_definitions`.
-    fn resolve_or_define(&mut self, name: &str) -> SymbolId {
-        if let Some(id) = self.resolve(name) {
-            id
-        } else if let Some(&id) = self.top_level_symbols.get(name) {
-            id
-        } else {
-            let id = self.symbols.alloc(name.to_string());
-            self.top_level_symbols.insert(name.to_string(), id);
-            id
-        }
+    /// Allocate an identity for a compiler-synthesized TLC value. Source
+    /// binders must use the `ResolvedBinding::symbol` already stored in-tree.
+    pub(super) fn fresh(&mut self, diagnostic_name: impl Into<String>) -> SymbolId {
+        self.symbols.alloc(diagnostic_name.into())
     }
 
     /// Transform an AST program to TLC.
@@ -129,44 +72,6 @@ impl<'a> Transformer<'a> {
         &mut self,
         program: &crate::ast_type_holes::HolesResolved,
     ) -> ProgramParts<run::UnpinnedPolymorphic> {
-        // First pass: register all top-level function names so that
-        // references within function bodies use the same SymbolId as
-        // the Def. Only allocate when the name isn't already pre-
-        // registered by the `NameRegistry` walk in `tlc::run` — that
-        // walk seeds `top_level_symbols` from the catalog / prelude
-        // / elaborated-module items, and a user `def map` that
-        // shadows the SOAC `map` must REUSE the existing symbol so
-        // module-body references (transformed earlier with the
-        // shared `top_level_symbols` map) point at the same Def.
-        for decl in &program.declarations {
-            match decl {
-                ast::Declaration::Decl(d) => {
-                    let name_str = match &self.namespace {
-                        Some(ns) => format!("{}.{}", ns, d.name),
-                        None => d.name.clone(),
-                    };
-                    if !self.top_level_symbols.contains_key(&name_str) {
-                        let sym = self.symbols.alloc(name_str.clone());
-                        self.top_level_symbols.insert(name_str, sym);
-                    }
-                }
-                ast::Declaration::Entry(e) => {
-                    if !self.top_level_symbols.contains_key(&e.name) {
-                        let sym = self.symbols.alloc(e.name.clone());
-                        self.top_level_symbols.insert(e.name.clone(), sym);
-                    }
-                }
-                ast::Declaration::Extern(e) => {
-                    if !self.top_level_symbols.contains_key(&e.name) {
-                        let sym = self.symbols.alloc(e.name.clone());
-                        self.top_level_symbols.insert(e.name.clone(), sym);
-                    }
-                }
-                ast::Declaration::Frontend(never) => match *never {},
-            }
-        }
-
-        // Second pass: transform function bodies (now resolve_or_define can find top-level symbols)
         let mut defs = Vec::new();
 
         for decl in &program.declarations {
@@ -182,27 +87,25 @@ impl<'a> Transformer<'a> {
                     }
                 }
                 ast::Declaration::Extern(e) => {
-                    // Use the pre-registered symbol
-                    let name_sym =
-                        *self.top_level_symbols.get(&e.name).expect("BUG: extern not pre-registered");
+                    let syntax = &e.data.source.syntax;
                     let ty = Self::lower_type(Self::extract_monotype(&e.data.scheme));
                     let body = self.mk_term(
                         ty.clone(),
-                        e.data.syntax.span,
-                        TermKind::Extern(e.data.syntax.linkage_name.clone()),
+                        syntax.span,
+                        TermKind::Extern(syntax.linkage_name.clone()),
                     );
                     let arity = count_function_arity(&ty);
                     defs.push(Def {
                         data: data::PolymorphicDefinition {
                             scheme: Some(e.data.scheme.clone()),
                         },
-                        name: name_sym,
+                        name: e.data.source.symbol,
                         ty,
                         body,
                         meta: DefMeta::Function,
                         arity,
-                        param_diets: e.data.syntax.param_diets.clone(),
-                        return_diet: e.data.syntax.return_diet.clone(),
+                        param_diets: syntax.param_diets.clone(),
+                        return_diet: syntax.return_diet.clone(),
                     });
                 }
                 ast::Declaration::Frontend(never) => match *never {},
@@ -216,33 +119,15 @@ impl<'a> Transformer<'a> {
         &mut self,
         decl: &ast::Decl<ast::TypedDefinition, ast::HolesResolvedTree>,
     ) -> Option<Def<run::UnpinnedPolymorphic>> {
-        // Clear scope for each definition to ensure fresh scope
-        self.scope.clear();
         let body_ty = Self::type_of(&decl.body.h);
         let full_ty = self.build_function_type(&decl.params, &body_ty);
         let body = self.transform_with_params(&decl.params, &decl.body, full_ty.clone());
-
-        // Apply namespace prefix if set (e.g., "f32" + "pi" -> "f32.pi")
-        let name_str = match &self.namespace {
-            Some(ns) => format!("{}.{}", ns, decl.name),
-            None => decl.name.clone(),
-        };
-
-        // Use pre-registered symbol if available, otherwise allocate and register a new one.
-        // Always ensure the symbol is in top_level_symbols for later transformers.
-        let name_sym = if let Some(&sym) = self.top_level_symbols.get(&name_str) {
-            sym
-        } else {
-            let sym = self.symbols.alloc(name_str.clone());
-            self.top_level_symbols.insert(name_str, sym);
-            sym
-        };
 
         Some(Def {
             data: data::PolymorphicDefinition {
                 scheme: Some(decl.data.scheme.clone()),
             },
-            name: name_sym,
+            name: decl.data.source.symbol,
             ty: full_ty,
             body,
             meta: DefMeta::Function,
@@ -256,53 +141,42 @@ impl<'a> Transformer<'a> {
         &mut self,
         entry: &ast::EntryDecl<ast::TypedEntry, ast::HolesResolvedTree, interface::ResolvedAttribute>,
     ) -> Option<Def<run::UnpinnedPolymorphic>> {
-        // Clear scope for each entry to ensure fresh scope
-        self.scope.clear();
         let body_ty = Self::type_of(&entry.body.h);
         let full_ty = self.build_function_type(&entry.params, &body_ty);
         let body = self.transform_with_params(&entry.params, &entry.body, full_ty.clone());
-
-        // Use pre-registered symbol if available, otherwise allocate and register a new one.
-        let name_sym = if let Some(&sym) = self.top_level_symbols.get(&entry.name) {
-            sym
-        } else {
-            let sym = self.symbols.alloc(entry.name.clone());
-            self.top_level_symbols.insert(entry.name.clone(), sym);
-            sym
-        };
 
         Some(Def {
             data: data::PolymorphicDefinition {
                 scheme: Some(entry.data.scheme.clone()),
             },
-            name: name_sym,
+            name: entry.data.source.symbol,
             ty: full_ty,
             body,
             meta: DefMeta::EntryPoint(EntryPoint {
                 declaration: Box::new(interface::EntryDecl {
-                    entry_kind: entry.data.source.syntax.entry_kind,
-                    compute_dispatch: entry.data.source.syntax.compute_dispatch.clone(),
+                    entry_kind: entry.data.source.source.syntax.entry_kind,
+                    compute_dispatch: entry.data.source.source.syntax.compute_dispatch.clone(),
                     name: entry.name.clone(),
                     name_span: entry.name_span,
                     size_params: entry.size_params.clone(),
                     type_params: entry.type_params.clone(),
                     params: entry.params.iter().map(Self::lower_entry_param).collect(),
-                    outputs: entry.data.source.syntax.outputs.clone(),
-                    feedback: entry.data.source.feedback.clone(),
-                    param_diets: entry.data.source.syntax.param_diets.clone(),
-                    return_diet: entry.data.source.syntax.return_diet.clone(),
+                    outputs: entry.data.source.source.syntax.outputs.clone(),
+                    feedback: entry.data.source.source.feedback.clone(),
+                    param_diets: entry.data.source.source.syntax.param_diets.clone(),
+                    return_diet: entry.data.source.source.syntax.return_diet.clone(),
                 }),
                 data: (),
             }),
             arity: entry.params.len(),
-            param_diets: entry.data.source.syntax.param_diets.clone(),
-            return_diet: entry.data.source.syntax.return_diet.clone(),
+            param_diets: entry.data.source.source.syntax.param_diets.clone(),
+            return_diet: entry.data.source.source.syntax.return_diet.clone(),
         })
     }
 
     fn build_function_type<A>(
         &self,
-        params: &[ast::Pattern<ast::TypedHeader, A>],
+        params: &[ast::Pattern<ast::HolesResolvedTree, A>],
         ret_ty: &Type<TypeName>,
     ) -> Type<TypeName> {
         let mut ty = ret_ty.clone();
@@ -315,7 +189,7 @@ impl<'a> Transformer<'a> {
         ty
     }
 
-    fn pattern_type<A>(&self, pattern: &ast::Pattern<ast::TypedHeader, A>) -> Type<TypeName> {
+    fn pattern_type<A>(&self, pattern: &ast::Pattern<ast::HolesResolvedTree, A>) -> Type<TypeName> {
         match &pattern.kind {
             // For attributed patterns, recurse into the inner pattern
             ast::PatternKind::Attributed(_, inner) => self.pattern_type(inner),
@@ -324,14 +198,14 @@ impl<'a> Transformer<'a> {
     }
 
     fn lower_entry_param(
-        pattern: &ast::Pattern<ast::TypedHeader, interface::ResolvedAttribute>,
+        pattern: &ast::Pattern<ast::HolesResolvedTree, interface::ResolvedAttribute>,
     ) -> interface::EntryParamDecl {
         fn metadata(
-            pattern: &ast::Pattern<ast::TypedHeader, interface::ResolvedAttribute>,
+            pattern: &ast::Pattern<ast::HolesResolvedTree, interface::ResolvedAttribute>,
             attributes: &mut Vec<interface::ResolvedAttribute>,
         ) -> Option<String> {
             match &pattern.kind {
-                ast::PatternKind::Name(name) => Some(name.clone()),
+                ast::PatternKind::Name(binding) => Some(binding.source.clone()),
                 ast::PatternKind::Attributed(found, inner) => {
                     attributes.extend(found.iter().cloned());
                     metadata(inner, attributes)
@@ -353,7 +227,7 @@ impl<'a> Transformer<'a> {
 
     fn transform_with_params<A>(
         &mut self,
-        params: &[ast::Pattern<ast::TypedHeader, A>],
+        params: &[ast::Pattern<ast::HolesResolvedTree, A>],
         body: &ast::Expression<ast::HolesResolvedTree>,
         full_ty: Type<TypeName>,
     ) -> Term {
@@ -366,7 +240,7 @@ impl<'a> Transformer<'a> {
     /// between nested lambdas, which is important for consistent capture analysis.
     fn build_lambda_chain<A>(
         &mut self,
-        params: &[ast::Pattern<ast::TypedHeader, A>],
+        params: &[ast::Pattern<ast::HolesResolvedTree, A>],
         body: &ast::Expression<ast::HolesResolvedTree>,
         full_ty: Type<TypeName>,
         span: Span,
@@ -502,22 +376,20 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::Unit => self.mk_term(ty, span, TermKind::UnitLit),
 
-            ast::ExprKind::Identifier(identifier) => {
-                if let ast::IdentifierResolution::Builtin { id, overload_idx } = identifier.resolution {
-                    return self.mk_term(ty, span, TermKind::Var(VarRef::Builtin { id, overload_idx }));
+            ast::ExprKind::Identifier(identifier) => match identifier.resolution {
+                ast::IdentifierResolution::Symbol(symbol) => {
+                    self.mk_term(ty, span, TermKind::Var(VarRef::Symbol(symbol)))
                 }
-                let resolved_name = if identifier.source.qualifiers.is_empty() {
-                    identifier.source.name.clone()
-                } else {
-                    format!(
-                        "{}.{}",
-                        identifier.source.qualifiers.join("."),
-                        identifier.source.name
+                ast::IdentifierResolution::Builtin { id, overload_idx } => {
+                    self.mk_term(ty, span, TermKind::Var(VarRef::Builtin { id, overload_idx }))
+                }
+                ast::IdentifierResolution::VecConstructor { .. } | ast::IdentifierResolution::Soac(_) => {
+                    panic!(
+                        "BUG: constructor/SOAC identifier reached TLC outside application at {:?}",
+                        expr.h.id
                     )
-                };
-                let sym = self.resolve_or_define(&resolved_name);
-                self.mk_term(ty, span, TermKind::Var(VarRef::Symbol(sym)))
-            }
+                }
+            },
 
             ast::ExprKind::ArrayLiteral(elements) => {
                 log::debug!("ArrayLiteral with {} elements", elements.len());
@@ -567,7 +439,7 @@ impl<'a> Transformer<'a> {
                 components,
                 op,
                 value,
-            } => self.transform_vec_with(target, components, op.as_deref(), value, ty, span),
+            } => self.transform_vec_with(target, components, *op, value, ty, span),
 
             ast::ExprKind::RecordWith { record, path, value } => {
                 self.transform_record_with(record, path, value, ty, span)
@@ -611,40 +483,25 @@ impl<'a> Transformer<'a> {
             ast::ExprKind::Application(func, args) => self.transform_application(func, args, ty, span),
 
             ast::ExprKind::LetIn(let_in) => {
-                // Snapshot scope so a nested let's bindings don't leak past
-                // the body. Without this, `let x = ... in let x = ... in ...; ... x ...`
-                // resolves the trailing `x` to the inner SymbolId because
-                // the inner `define` overwrote `scope["x"]`.
-                let saved_scope = self.scope.clone();
-                // Check pattern kind to avoid redundant transforms for simple patterns
-                let simple_name = self.simple_pattern_name(&let_in.pattern);
-
-                let result = if let Some(name_str) = simple_name {
-                    // Simple Name/Wildcard pattern - single Let binding
+                if let Some(name) = self.simple_pattern_symbol(&let_in.pattern) {
                     let rhs = self.transform_expr(&let_in.value);
-                    // Define the name (adds to scope) before transforming body
-                    let name_sym = self.define(&name_str);
                     let body = self.transform_expr(&let_in.body);
                     self.mk_term(
                         body.ty.clone(),
                         span,
                         TermKind::Let {
-                            name: name_sym,
+                            name,
                             name_ty: rhs.ty.clone(),
                             rhs: Box::new(rhs),
                             body: Box::new(body),
                         },
                     )
                 } else {
-                    // Complex pattern - use compute_pattern_bindings
                     let rhs = self.transform_expr(&let_in.value);
                     let (_, bindings) = self.compute_pattern_bindings(&let_in.pattern, rhs, span);
-                    // Note: bindings already added names to scope via define() in compute_pattern_bindings
                     let body = self.transform_expr(&let_in.body);
                     self.apply_bindings_around(bindings, body, span)
-                };
-                self.scope = saved_scope;
-                result
+                }
             }
 
             ast::ExprKind::FieldAccess(record, field) => {
@@ -692,7 +549,7 @@ impl<'a> Transformer<'a> {
                     let (base, wrap_let): (Term, Option<(SymbolId, Type<TypeName>, Term)>) = if needs_share
                     {
                         let t_id = self.term_ids.next_id();
-                        let t_sym = self.define(&format!("_w_swz_t_{}", t_id));
+                        let t_sym = self.fresh(&format!("_w_swz_t_{}", t_id));
                         let t_ty = rec.ty.clone();
                         let var = self.mk_term(t_ty.clone(), span, TermKind::Var(VarRef::Symbol(t_sym)));
                         (var, Some((t_sym, t_ty, rec)))
@@ -791,9 +648,15 @@ impl<'a> Transformer<'a> {
                 let end = self.transform_expr(&range.end);
                 let step = range.step.as_ref().map(|s| self.transform_expr(s));
                 let elem_ty = end.ty.clone();
-                let minus = ast::BinaryOp { op: "-".to_string() };
-                let plus = ast::BinaryOp { op: "+".to_string() };
-                let div = ast::BinaryOp { op: "/".to_string() };
+                let minus = ast::BinaryOp {
+                    op: BinaryOperator::Subtract,
+                };
+                let plus = ast::BinaryOp {
+                    op: BinaryOperator::Add,
+                };
+                let div = ast::BinaryOp {
+                    op: BinaryOperator::Divide,
+                };
 
                 // Element count per range kind:
                 //   `a..b`   (Exclusive)   → b - a
@@ -874,7 +737,7 @@ impl<'a> Transformer<'a> {
 
     fn transform_lambda(
         &mut self,
-        params: &[ast::Pattern<ast::TypedHeader>],
+        params: &[ast::Pattern<ast::HolesResolvedTree>],
         body: &ast::Expression<ast::HolesResolvedTree>,
         ty: Type<TypeName>,
         span: Span,
@@ -917,7 +780,8 @@ impl<'a> Transformer<'a> {
         // entry by the source-component type.
         if let ast::ExprKind::Identifier(identifier) = &func.kind {
             if let ast::IdentifierResolution::VecConstructor {
-                arity, target_elem, ..
+                arity,
+                component_conversion,
             } = &identifier.resolution
             {
                 debug_assert_eq!(
@@ -926,7 +790,7 @@ impl<'a> Transformer<'a> {
                     "BUG: vec constructor expected 1 arg, got {}",
                     args.len()
                 );
-                return self.transform_vec_constructor(&args[0], target_elem, *arity, ty, span);
+                return self.transform_vec_constructor(&args[0], *component_conversion, *arity, ty, span);
             }
         }
 
@@ -977,7 +841,7 @@ impl<'a> Transformer<'a> {
     fn transform_vec_constructor(
         &mut self,
         arg: &ast::Expression<ast::HolesResolvedTree>,
-        target_elem: &str,
+        component_conversion: BuiltinId,
         arity: usize,
         result_ty: Type<TypeName>,
         span: Span,
@@ -992,23 +856,6 @@ impl<'a> Transformer<'a> {
             .elem_type()
             .expect("vec constructor arg must be a vec — type checker enforces this")
             .clone();
-        let source_elem_name =
-            crate::types::checker::type_name_to_module(&source_elem_ty).unwrap_or_else(|| {
-                panic!(
-                    "BUG: vec constructor arg's component type {:?} has no surface module name",
-                    source_elem_ty
-                )
-            });
-        let conv_surface = format!("{}.{}", target_elem, source_elem_name);
-        let conv_builtin =
-            crate::builtins::catalog().lookup_by_surface_name(&conv_surface).unwrap_or_else(|| {
-                panic!(
-                    "BUG: vec constructor desugar can't find catalog entry `{}` — \
-                     target_elem `{}` source_elem `{}` arity {}",
-                    conv_surface, target_elem, source_elem_name, arity
-                )
-            });
-        let conv_id = conv_builtin.id;
         let target_elem_ty =
             result_ty.elem_type().expect("vec constructor result type is always a vec").clone();
 
@@ -1017,7 +864,7 @@ impl<'a> Transformer<'a> {
         // shared "sequence" sentinel — fine for unit-typed bindings
         // but here we want the value preserved, so allocate a fresh
         // name.
-        let arg_sym = self.symbols.alloc("_w_vec_conv_arg".to_string());
+        let arg_sym = self.fresh("_w_vec_conv_arg");
         let arg_ref = self.mk_term(arg_term.ty.clone(), span, TermKind::Var(VarRef::Symbol(arg_sym)));
 
         // Build N per-component conversion calls.
@@ -1031,7 +878,7 @@ impl<'a> Transformer<'a> {
                 ),
                 span,
                 TermKind::Var(VarRef::Builtin {
-                    id: conv_id,
+                    id: component_conversion,
                     overload_idx: 0,
                 }),
             );
@@ -1115,7 +962,7 @@ impl<'a> Transformer<'a> {
             TermKind::ArrayExpr(ae) => ae,
             _ => {
                 let ty = core.ty.clone();
-                let sym = self.symbols.alloc("_anf".to_string());
+                let sym = self.fresh("_anf");
                 binds.push((sym, ty.clone(), core));
                 ArrayExpr::Var(VarRef::Symbol(sym), ty)
             }
@@ -1305,7 +1152,7 @@ impl<'a> Transformer<'a> {
                 TermKind::Var(VarRef::Symbol(sym)) => sym.clone(),
                 _ => {
                     // Bind dest to a fresh name
-                    let fresh = self.define("_w_rbi_dest");
+                    let fresh = self.fresh("_w_rbi_dest");
                     fresh
                 }
             },
@@ -1351,15 +1198,15 @@ impl<'a> Transformer<'a> {
         let dest = Place {
             id: match &dest_term.kind {
                 TermKind::Var(VarRef::Symbol(sym)) => sym.clone(),
-                _ => self.define("_w_scatter_dest"),
+                _ => self.fresh("_w_scatter_dest"),
             },
             elem_ty: dest_elem_ty,
         };
 
         // Identity envelope `λ(i, v) → (i, v)`. Fusion composes producer
         // lambdas into this and splices their inputs in place of `is`/`vs`.
-        let i_sym = self.define("_w_scatter_i");
-        let v_sym = self.define("_w_scatter_v");
+        let i_sym = self.fresh("_w_scatter_i");
+        let v_sym = self.fresh("_w_scatter_v");
         let i_var = self.mk_term(idx_elem_ty.clone(), span, TermKind::Var(VarRef::Symbol(i_sym)));
         let v_var = self.mk_term(val_elem_ty.clone(), span, TermKind::Var(VarRef::Symbol(v_sym)));
         let tuple_ty =
@@ -1422,7 +1269,7 @@ impl<'a> Transformer<'a> {
                 let params: Vec<(SymbolId, Type<TypeName>)> = param_tys
                     .iter()
                     .enumerate()
-                    .map(|(i, ty)| (self.define(&format!("_soac_arg_{}", i)), ty.clone()))
+                    .map(|(i, ty)| (self.fresh(&format!("_soac_arg_{}", i)), ty.clone()))
                     .collect();
 
                 // Build flat App(f, [a, b, ...])
@@ -1470,10 +1317,12 @@ impl<'a> Transformer<'a> {
             self.build_loop_var_and_bindings(&loop_expr.pattern, &acc_ty, span);
 
         match &loop_expr.form {
-            ast::LoopForm::For(idx_var, bound) => {
+            ast::LoopForm::For(idx_pattern, bound) => {
                 let bound_term = self.transform_expr(bound);
                 let index_ty = Type::Constructed(TypeName::Int(32), vec![]);
-                let idx_var_sym = self.define(idx_var);
+                let idx_var_sym = self
+                    .simple_pattern_symbol(idx_pattern)
+                    .expect("BUG: range-loop binder must be a simple pattern");
 
                 // Transform body after defining the index variable
                 let body = self.transform_expr(&loop_expr.body);
@@ -1499,8 +1348,8 @@ impl<'a> Transformer<'a> {
             ast::LoopForm::ForIn(elem_pattern, iter) => {
                 let iter_term = self.transform_expr(iter);
                 let elem_ty = self.get_array_element_type(&iter_term.ty);
-                let elem_var_name = elem_pattern.simple_name().unwrap_or("_w_elem").to_string();
-                let elem_var_sym = self.define(&elem_var_name);
+                let elem_var_sym =
+                    self.simple_pattern_symbol(elem_pattern).unwrap_or_else(|| self.fresh("_w_elem"));
 
                 // Transform body after defining the element variable
                 let body = self.transform_expr(&loop_expr.body);
@@ -1548,21 +1397,20 @@ impl<'a> Transformer<'a> {
     /// Build loop variable name and init_bindings from a pattern.
     fn build_loop_var_and_bindings(
         &mut self,
-        pattern: &ast::Pattern<ast::TypedHeader>,
+        pattern: &ast::Pattern<ast::HolesResolvedTree>,
         acc_ty: &Type<TypeName>,
         span: Span,
     ) -> (SymbolId, Type<TypeName>, Vec<(SymbolId, Type<TypeName>, Term)>) {
         use crate::pattern::binding_paths;
 
         // For a simple name pattern, use it directly
-        if let ast::PatternKind::Name(name) = &pattern.kind {
-            let name_sym = self.define(name);
-            return (name_sym, acc_ty.clone(), vec![]);
+        if let ast::PatternKind::Name(binding) = &pattern.kind {
+            return (binding.symbol, acc_ty.clone(), vec![]);
         }
 
         // For complex patterns, create a fresh loop_var and build projections
         let loop_var_name = format!("_w_loop_{}", self.term_ids.next_id());
-        let loop_var_sym = self.define(&loop_var_name);
+        let loop_var_sym = self.fresh(&loop_var_name);
         let paths = binding_paths(pattern);
 
         let init_bindings = paths
@@ -1574,7 +1422,9 @@ impl<'a> Transformer<'a> {
                 } else {
                     let binding_ty = self.type_at_path(acc_ty, &bp.path);
                     let proj_term = self.build_projection_chain(loop_var_sym, acc_ty, &bp.path, span);
-                    let binding_sym = self.define(&bp.name);
+                    let binding_sym = bp.symbol.unwrap_or_else(|| {
+                        panic!("BUG: loop binding '{}' lacks its resolved identity", bp.name)
+                    });
                     Some((binding_sym, binding_ty, proj_term))
                 }
             })
@@ -1652,7 +1502,7 @@ impl<'a> Transformer<'a> {
         &mut self,
         target: &ast::Expression<ast::HolesResolvedTree>,
         components: &[u8],
-        op: Option<&str>,
+        op: Option<BinaryOperator>,
         value: &ast::Expression<ast::HolesResolvedTree>,
         result_ty: Type<TypeName>,
         span: Span,
@@ -1665,7 +1515,7 @@ impl<'a> Transformer<'a> {
         // Bind `_t = target` so each per-slot projection reads the
         // same evaluated value.
         let t_id = self.term_ids.next_id();
-        let t_sym = self.define(&format!("_w_vw_t_{}", t_id));
+        let t_sym = self.fresh(&format!("_w_vw_t_{}", t_id));
         let t_var = self.mk_term(target_ty.clone(), span, TermKind::Var(VarRef::Symbol(t_sym)));
 
         // Compute the RHS term. For plain `=`, that's just `value`.
@@ -1676,13 +1526,11 @@ impl<'a> Transformer<'a> {
         let v_term_raw = self.transform_expr(value);
         let rhs_term = match op {
             None => v_term_raw,
-            Some(binop_str) => {
+            Some(op) => {
                 let swizzle_read = self.build_swizzle_read(&t_var, components, &elem_ty, span);
                 let result_slot_ty = swizzle_read.ty.clone();
                 self.build_binop(
-                    ast::BinaryOp {
-                        op: binop_str.to_string(),
-                    },
+                    ast::BinaryOp { op },
                     swizzle_read,
                     v_term_raw,
                     result_slot_ty,
@@ -1693,7 +1541,7 @@ impl<'a> Transformer<'a> {
 
         // Bind `_r = <rhs>` so per-slot reads share one evaluation.
         let r_id = self.term_ids.next_id();
-        let r_sym = self.define(&format!("_w_vw_r_{}", r_id));
+        let r_sym = self.fresh(&format!("_w_vw_r_{}", r_id));
         let r_var = self.mk_term(rhs_term.ty.clone(), span, TermKind::Var(VarRef::Symbol(r_sym)));
 
         // Locate each component's position in `components` so we know
@@ -1763,7 +1611,7 @@ impl<'a> Transformer<'a> {
         let new_value = self.transform_expr(value);
 
         let r_id = self.term_ids.next_id();
-        let r_sym = self.define(&format!("_w_rw_r_{}", r_id));
+        let r_sym = self.fresh(&format!("_w_rw_r_{}", r_id));
         let r_var = self.mk_term(record_ty.clone(), span, TermKind::Var(VarRef::Symbol(r_sym)));
 
         let body = self.build_record_with_body(&r_var, &record_ty, path, new_value, span);
@@ -1803,7 +1651,7 @@ impl<'a> Transformer<'a> {
             let inner_ty = field_types[idx].clone();
             let inner_proj = self.build_proj(target, idx, &inner_ty, span);
             let inner_id = self.term_ids.next_id();
-            let inner_sym = self.define(&format!("_w_rw_inner_{}", inner_id));
+            let inner_sym = self.fresh(&format!("_w_rw_inner_{}", inner_id));
             let inner_var = self.mk_term(inner_ty.clone(), span, TermKind::Var(VarRef::Symbol(inner_sym)));
             let inner_body =
                 self.build_record_with_body(&inner_var, &inner_ty, &path[1..], new_value, span);

@@ -145,7 +145,7 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
         args: vec![zero, zero],
     };
     let cond = graph.intern_pure(
-        PureOp::BinOp("<".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
         smallvec![index, bound],
         bool_ty(),
         None,
@@ -157,8 +157,18 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
         else_target: continuation,
         else_args: vec![acc],
     };
-    let next_acc = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![acc, one], u32_ty(), None);
-    let next_index = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![index, one], u32_ty(), None);
+    let next_acc = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        smallvec![acc, one],
+        u32_ty(),
+        None,
+    );
+    let next_index = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        smallvec![index, one],
+        u32_ty(),
+        None,
+    );
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: header,
         args: vec![next_acc, next_index],
@@ -322,7 +332,7 @@ fn entry_recipe_reports_selected_effect_result_used_by_external_value() {
     });
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(None);
     let external = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![live_out, place],
         u32_ty(),
         None,
@@ -348,13 +358,13 @@ fn entry_recipe_projects_multiple_requested_values_as_one_component() {
     let parameter = graph.add_func_param(0, u32_ty());
     let one = graph.intern_constant(ConstantValue::U32(1), u32_ty());
     let first = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![parameter, one],
         u32_ty(),
         None,
     );
     let second = graph.intern_pure(
-        PureOp::BinOp("*".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Multiply),
         smallvec![parameter, first],
         u32_ty(),
         None,

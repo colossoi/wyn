@@ -25,7 +25,7 @@ use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::error::Result;
 use crate::interface::IoDecoration;
 use crate::ssa::layout::{buffer_array_strides, std430_alignment};
-use crate::ssa::storage_function_variants::StorageFunctionVariants;
+use crate::ssa::storage_function_variants::{FunctionEmissionId, StorageFunctionVariants};
 use crate::ssa::types::{
     BlockId, ConstantValue, ControlHeader, EntryPoint, ExecutionModel, FuncBody, Function, InstKind,
     Terminator, ValueId, ValueRef, WynInstNode,
@@ -80,12 +80,6 @@ struct Constructor {
     u32_type: spirv::Word,
     f32_type: spirv::Word,
 
-    // Per-entry-point name → loaded-value lookup. Populated by
-    // entry-point I/O setup (push constants / uniforms / locations
-    // load through here so the SSA body can fetch the value by the
-    // input's declared name).
-    env: LookupMap<String, spirv::Word>,
-
     // GLSL extended instruction set
     glsl_ext_inst_id: spirv::Word,
 
@@ -100,13 +94,19 @@ struct Constructor {
     interface_block_cache: LookupMap<InterfaceBlockKey, spirv::Word>,
 
     // Entry point interface tracking
-    entry_point_interfaces: LookupMap<String, Vec<spirv::Word>>,
+    entry_point_interfaces: LookupMap<crate::EntryId, Vec<spirv::Word>>,
 
     /// Access-qualified storage-buffer globals. The same descriptor slot can
     /// be writable in a compute prepass and read-only in a graphics entry.
     storage_buffers: LookupMap<StorageBufferUse, (spirv::Word, spirv::Word, spirv::Word)>,
     current_storage_accesses: LookupMap<BindingRef, crate::ResourceAccess>,
-    current_function_names: LookupMap<String, String>,
+    /// Per-entry bindings keyed by the SSA parameter they initialize.
+    /// Names are emitted/debug metadata only; they are never identity here.
+    env: LookupMap<ValueId, spirv::Word>,
+    current_functions: LookupMap<crate::FunctionId, spirv::Word>,
+    emitted_functions: LookupMap<FunctionEmissionId, spirv::Word>,
+    entry_functions: LookupMap<crate::EntryId, spirv::Word>,
+    globals: LookupMap<crate::GlobalId, spirv::Word>,
 
     /// Storage-image globals: (set, binding) -> (image `OpVariable`, image type).
     /// Predeclared from entry resource metadata before function bodies are
@@ -126,8 +126,10 @@ struct Constructor {
     /// Shared push constant variable (at most one per SPIR-V module)
     push_constant_var: Option<spirv::Word>,
 
-    /// Linked SPIR-V functions: linkage_name -> function_id
-    linked_functions: LookupMap<String, spirv::Word>,
+    /// Imported SPIR-V functions keyed by compiler-internal callable identity.
+    linked_functions: LookupMap<crate::FunctionId, spirv::Word>,
+    /// Imported functions indexed by their explicit external ABI linkage symbol.
+    linked_functions_by_linkage: LookupMap<String, spirv::Word>,
 
     /// Compiler-generated integer-pow helpers (see `spirv::pow`), keyed
     /// by `signed`. Emitted once per module after function forward
@@ -176,13 +178,17 @@ impl Constructor {
             entry_point_interfaces: LookupMap::new(),
             storage_buffers: LookupMap::new(),
             current_storage_accesses: LookupMap::new(),
-            current_function_names: LookupMap::new(),
+            current_functions: LookupMap::new(),
+            emitted_functions: LookupMap::new(),
+            entry_functions: LookupMap::new(),
+            globals: LookupMap::new(),
             storage_images: LookupMap::new(),
             global_invocation_id: None,
             local_invocation_id: None,
             num_workgroups: None,
             push_constant_var: None,
             linked_functions: LookupMap::new(),
+            linked_functions_by_linkage: LookupMap::new(),
             int_pow_functions: LookupMap::new(),
             current_entry_outputs: Vec::new(),
             buffer_vars: Vec::new(),
@@ -206,30 +212,33 @@ impl Constructor {
         self.storage_buffers.get(&self.storage_use(binding)).copied()
     }
 
-    fn select_function_names(&mut self, names: &LookupMap<String, String>) {
-        self.current_function_names.clone_from(names);
+    fn select_functions(&mut self, functions: &LookupMap<crate::FunctionId, FunctionEmissionId>) {
+        let externs = self.linked_functions.clone();
+        self.current_functions = externs;
+        for (&id, &emission) in functions {
+            // A storage-variant plan includes every callable, including
+            // linked externs. Those already have their structural SPIR-V id
+            // in `linked_functions`; only locally emitted functions belong in
+            // `emitted_functions`.
+            if self.linked_functions.contains_key(&id) {
+                continue;
+            }
+            let function =
+                self.emitted_functions.get(&emission).copied().unwrap_or_else(|| {
+                    panic!("local function {id:?} has no reserved emission {emission:?}")
+                });
+            self.current_functions.insert(id, function);
+        }
     }
-
-    fn emitted_function_name<'a>(&'a self, source_name: &'a str) -> &'a str {
-        self.current_function_names.get(source_name).map(String::as_str).unwrap_or(source_name)
-    }
-
-    /// Forward-declare a function (reserve ID without emitting body).
-    /// This allows functions to call each other regardless of order.
-    fn forward_declare_function(
-        &mut self,
-        name: &str,
-        _param_types: &[spirv::Word],
-        _return_type: spirv::Word,
-    ) -> spirv::Word {
-        *self.builder.forward_declare_function(name)
+    /// Reserve a SPIR-V id for a function whose body is emitted later.
+    fn reserve_function(&mut self) -> spirv::Word {
+        *self.builder.reserve_function()
     }
 
     /// Forward-declare a linked (extern) function with Import linkage.
     /// Creates a function stub with no body that will be resolved by spirv-link.
     fn forward_declare_linked_function(
         &mut self,
-        name: &str,
         linkage_name: &str,
         param_types: &[spirv::Word],
         return_type: spirv::Word,
@@ -237,7 +246,6 @@ impl Constructor {
         let param_types_typed: Vec<builder::TypeId> =
             param_types.iter().map(|&w| builder::TypeId::new(w)).collect();
         *self.builder.forward_declare_linked_function(
-            name,
             linkage_name,
             &param_types_typed,
             builder::TypeId::new(return_type),
@@ -247,15 +255,17 @@ impl Constructor {
     /// Begin a new function. Returns `(func_id, param_ids, first_code_block)`.
     fn begin_function(
         &mut self,
-        name: &str,
-        _param_names: &[&str],
+        reserved: Option<spirv::Word>,
         param_types: &[spirv::Word],
         return_type: spirv::Word,
     ) -> Result<(spirv::Word, Vec<spirv::Word>, spirv::Word)> {
         let param_types_typed: Vec<builder::TypeId> =
             param_types.iter().map(|&w| builder::TypeId::new(w)).collect();
-        let (func_id, param_ids, code_block) =
-            self.builder.begin_function(name, &param_types_typed, builder::TypeId::new(return_type))?;
+        let (func_id, param_ids, code_block) = self.builder.begin_function(
+            reserved.map(builder::FuncId::new),
+            &param_types_typed,
+            builder::TypeId::new(return_type),
+        )?;
         Ok((*func_id, param_ids, *code_block))
     }
 
@@ -421,19 +431,25 @@ fn lower_ssa_program_impl(program: &crate::ssa::stage::SpirvReady) -> Result<Vec
     let function_variants = StorageFunctionVariants::new(program);
 
     // Collect entry point info for later
-    let mut entry_info: Vec<(String, spirv::ExecutionModel, Option<(u32, u32, u32)>)> = Vec::new();
+    let mut entry_info: Vec<(
+        crate::EntryId,
+        String,
+        spirv::ExecutionModel,
+        Option<(u32, u32, u32)>,
+    )> = Vec::new();
 
     // Forward-declare all functions first (so they can call each other in any order)
     for emission in function_variants.emissions() {
-        let func = &program.functions[emission.function];
+        let func = program
+            .functions
+            .iter()
+            .find(|func| func.id == emission.function)
+            .expect("function emission refers to missing FunctionId");
         if func.linkage_name.is_some() {
             continue;
         }
-        let body = &func.body;
-        let param_types: Vec<spirv::Word> =
-            body.params().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
-        let return_type = constructor.polytype_to_spirv(&body.return_ty);
-        constructor.forward_declare_function(&emission.name, &param_types, return_type);
+        let id = constructor.reserve_function();
+        constructor.emitted_functions.insert(emission.id, id);
     }
 
     // Forward-declare program-level constants too. Each is a zero-arg
@@ -444,8 +460,8 @@ fn lower_ssa_program_impl(program: &crate::ssa::stage::SpirvReady) -> Result<Vec
     // initializer (function call etc.) references a hoisted pure
     // constant.
     for constant in &program.constants {
-        let return_type = constructor.polytype_to_spirv(&constant.body.return_ty);
-        constructor.forward_declare_function(&constant.name, &[], return_type);
+        let id = constructor.reserve_function();
+        constructor.globals.insert(constant.id, id);
     }
 
     // Forward-declare extern (linked) functions with Import linkage
@@ -455,13 +471,11 @@ fn lower_ssa_program_impl(program: &crate::ssa::stage::SpirvReady) -> Result<Vec
             let param_types: Vec<spirv::Word> =
                 body.params().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
             let return_type = constructor.polytype_to_spirv(&body.return_ty);
-            let func_id = constructor.forward_declare_linked_function(
-                &func.name,
-                linkage_name,
-                &param_types,
-                return_type,
-            );
-            constructor.linked_functions.insert(func.name.clone(), func_id);
+            let func_id =
+                constructor.forward_declare_linked_function(linkage_name, &param_types, return_type);
+            constructor.linked_functions.insert(func.id, func_id);
+            constructor.linked_functions_by_linkage.insert(linkage_name.clone(), func_id);
+            constructor.current_functions.insert(func.id, func_id);
         }
     }
 
@@ -535,7 +549,11 @@ fn lower_ssa_program_impl(program: &crate::ssa::stage::SpirvReady) -> Result<Vec
 
     // Now lower all function bodies.
     for emission in function_variants.emissions() {
-        let func = &program.functions[emission.function];
+        let func = program
+            .functions
+            .iter()
+            .find(|func| func.id == emission.function)
+            .expect("function emission refers to missing FunctionId");
         if func.linkage_name.is_some() {
             // Extern functions have no local body; the Import-linkage
             // declaration emitted above is the full handling, and
@@ -546,13 +564,8 @@ fn lower_ssa_program_impl(program: &crate::ssa::stage::SpirvReady) -> Result<Vec
 
         constructor
             .select_storage_accesses(&function_variants.accesses_for(program, emission.entry_context));
-        let names = emission
-            .entry_context
-            .map(|entry| function_variants.names_for_entry(entry))
-            .cloned()
-            .unwrap_or_default();
-        constructor.select_function_names(&names);
-        lower_ssa_function(&mut constructor, func, &emission.name)?;
+        constructor.select_functions(function_variants.emissions_for_context(emission.entry_context));
+        lower_ssa_function(&mut constructor, func, emission.id)?;
     }
 
     // Lower program-level constants as zero-arg functions. Their
@@ -560,11 +573,11 @@ fn lower_ssa_program_impl(program: &crate::ssa::stage::SpirvReady) -> Result<Vec
     // (the loop above ran before any body lowering); now emit the
     // body so calls to `Global(name)` from other functions resolve.
     constructor.select_storage_accesses(&function_variants.accesses_for(program, None));
-    constructor.select_function_names(&LookupMap::new());
+    constructor.select_functions(function_variants.emissions_for_context(None));
     for constant in &program.constants {
         let return_type = constructor.polytype_to_spirv(&constant.body.return_ty);
         let (_, param_ids, first_code_block) =
-            constructor.begin_function(&constant.name, &[], &[], return_type)?;
+            constructor.begin_function(Some(constructor.globals[&constant.id]), &[], return_type)?;
         lower::LowerCtx::new(
             &mut constructor,
             &constant.body,
@@ -581,16 +594,16 @@ fn lower_ssa_program_impl(program: &crate::ssa::stage::SpirvReady) -> Result<Vec
     // Lower each entry under its own storage-access map. When entries use the
     // same slot with different access, they reference distinct module globals
     // and storage-dependent helper variants selected above.
-    for (entry_index, entry) in program.entry_points.iter().enumerate() {
+    for entry in &program.entry_points {
         let (spirv_model, local_size) = match &entry.execution_model {
             ExecutionModel::Vertex => (spirv::ExecutionModel::Vertex, None),
             ExecutionModel::Fragment => (spirv::ExecutionModel::Fragment, None),
             ExecutionModel::Compute { local_size } => (spirv::ExecutionModel::GLCompute, Some(*local_size)),
         };
 
-        entry_info.push((entry.name.clone(), spirv_model, local_size));
+        entry_info.push((entry.id, entry.name.clone(), spirv_model, local_size));
         constructor.select_storage_accesses(&entry.shader_storage_accesses());
-        constructor.select_function_names(function_variants.names_for_entry(entry_index));
+        constructor.select_functions(function_variants.emissions_for_entry(entry.id));
         entry::lower_ssa_entry_point(&mut constructor, entry)?;
     }
 
@@ -603,10 +616,10 @@ fn lower_ssa_program_impl(program: &crate::ssa::stage::SpirvReady) -> Result<Vec
     let private_global_ids: Vec<spirv::Word> = constructor.builder.private_globals().map(|v| *v).collect();
 
     // Emit entry point declarations
-    for (name, model, local_size) in &entry_info {
-        if let Some(func_id) = constructor.builder.get_function(name) {
-            let func_id = *func_id;
-            let mut interfaces = constructor.entry_point_interfaces.get(name).cloned().unwrap_or_default();
+    for (entry_id, name, model, local_size) in &entry_info {
+        if let Some(&func_id) = constructor.entry_functions.get(entry_id) {
+            let mut interfaces =
+                constructor.entry_point_interfaces.get(entry_id).cloned().unwrap_or_default();
             for &var_id in &private_global_ids {
                 if !interfaces.contains(&var_id) {
                     interfaces.push(var_id);
@@ -616,7 +629,7 @@ fn lower_ssa_program_impl(program: &crate::ssa::stage::SpirvReady) -> Result<Vec
             // Add storage buffer variables that this entry point declares
             // (via its inputs/outputs). Don't add ALL storage vars — other
             // entry points may have buffers this one doesn't reference.
-            if let Some(entry) = program.entry_points.iter().find(|e| e.name == *name) {
+            if let Some(entry) = program.entry_points.iter().find(|e| e.id == *entry_id) {
                 constructor.select_storage_accesses(&entry.shader_storage_accesses());
                 for input in &entry.inputs {
                     if let Some(br) = input.storage_binding() {
@@ -672,18 +685,24 @@ fn lower_ssa_program_impl(program: &crate::ssa::stage::SpirvReady) -> Result<Vec
 }
 
 /// Lower an SSA function to SPIR-V.
-fn lower_ssa_function(constructor: &mut Constructor, func: &Function, emitted_name: &str) -> Result<()> {
+fn lower_ssa_function(
+    constructor: &mut Constructor,
+    func: &Function,
+    emission: FunctionEmissionId,
+) -> Result<()> {
     let body = &func.body;
 
-    // Extract parameter types and names, converting types to SPIR-V
-    let param_names: Vec<&str> = body.params().map(|(_, _, name)| name).collect();
+    // Convert function parameter types to their SPIR-V representations.
     let param_types: Vec<spirv::Word> =
         body.params().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
 
     let return_type = constructor.polytype_to_spirv(&body.return_ty);
 
-    let (_, param_ids, first_code_block) =
-        constructor.begin_function(emitted_name, &param_names, &param_types, return_type)?;
+    let (_, param_ids, first_code_block) = constructor.begin_function(
+        Some(constructor.emitted_functions[&emission]),
+        &param_types,
+        return_type,
+    )?;
     lower::LowerCtx::new(constructor, body, false, func.span, param_ids, first_code_block)
         .lower()
         .map_err(|e| err_spirv!("in function '{}': {}", func.name, e))?;

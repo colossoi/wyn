@@ -1,7 +1,6 @@
 use super::*;
 
 use crate::ast::{Span, TypeName};
-use crate::egir::types::RegionId;
 use crate::egir::types::SkeletonTerminator;
 use crate::flow::ControlHeader;
 use crate::ssa::types::ConstantValue;
@@ -14,18 +13,18 @@ fn u32_ty() -> Type<TypeName> {
 
 fn mixed_callee() -> PhysicalFunc {
     let ty = u32_ty();
-    let region = RegionId::from_index(0);
+    let region = crate::FunctionId::from_index(0);
     let mut graph = EGraph::<Physical>::new();
     let varying = graph.add_func_param(0, ty.clone());
     let invariant = graph.add_func_param(1, ty.clone());
     let invariant_square = graph.intern_pure(
-        PureOp::BinOp("*".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Multiply),
         smallvec![invariant, invariant],
         ty.clone(),
         None,
     );
     let result = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![varying, invariant_square],
         ty.clone(),
         None,
@@ -44,12 +43,12 @@ fn mixed_callee() -> PhysicalFunc {
 
 fn mixed_callee_without_invariant_subexpression() -> PhysicalFunc {
     let ty = u32_ty();
-    let region = RegionId::from_index(0);
+    let region = crate::FunctionId::from_index(0);
     let mut graph = EGraph::<Physical>::new();
     let varying = graph.add_func_param(0, ty.clone());
     let invariant = graph.add_func_param(1, ty.clone());
     let result = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![varying, invariant],
         ty.clone(),
         None,
@@ -103,7 +102,12 @@ fn loop_caller(shape: CallArgs) -> (EGraph<Physical>, NodeId, NodeId) {
         CallArgs::AllInvariant => smallvec![invariant, literal],
         CallArgs::AllVarying => smallvec![current, current],
     };
-    let call = graph.intern_pure(PureOp::Call("mixed".into()), operands, ty.clone(), None);
+    let call = graph.intern_pure(
+        PureOp::Call(crate::FunctionId::from_index(0)),
+        operands,
+        ty.clone(),
+        None,
+    );
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: header,
         args: vec![call],
@@ -121,7 +125,7 @@ fn loop_caller(shape: CallArgs) -> (EGraph<Physical>, NodeId, NodeId) {
 #[test]
 fn inlines_a_profitable_mixed_variance_call_in_a_loop() {
     let callee = mixed_callee();
-    let callees = [(callee.name.clone(), callee)].into_iter().collect();
+    let callees = [(callee.region, callee)].into_iter().collect();
     let (mut graph, call, invariant) = loop_caller(CallArgs::Mixed);
 
     let stats = inline_body(&mut graph, &callees).unwrap();
@@ -131,16 +135,16 @@ fn inlines_a_profitable_mixed_variance_call_in_a_loop() {
     assert!(graph.nodes.values().any(|node| matches!(
         &node.kind,
         ENode::Pure {
-            op: PureOp::BinOp(name),
+            op: PureOp::BinOp(crate::op::BinaryOperator::Multiply),
             operands
-        } if name == "*" && operands.as_slice() == [invariant, invariant]
+        } if operands.as_slice() == [invariant, invariant]
     )));
 }
 
 #[test]
 fn mixed_variance_alone_is_enough_for_the_bounded_policy() {
     let callee = mixed_callee_without_invariant_subexpression();
-    let callees = [(callee.name.clone(), callee)].into_iter().collect();
+    let callees = [(callee.region, callee)].into_iter().collect();
     let (mut graph, call, _) = loop_caller(CallArgs::Mixed);
 
     let stats = inline_body(&mut graph, &callees).unwrap();
@@ -152,7 +156,7 @@ fn mixed_variance_alone_is_enough_for_the_bounded_policy() {
 #[test]
 fn leaves_whole_call_licm_and_fully_varying_calls_alone() {
     let callee = mixed_callee();
-    let callees = [(callee.name.clone(), callee)].into_iter().collect();
+    let callees = [(callee.region, callee)].into_iter().collect();
 
     for shape in [CallArgs::AllInvariant, CallArgs::AllVarying] {
         let (mut graph, call, _) = loop_caller(shape);

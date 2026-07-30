@@ -156,6 +156,10 @@ pub struct BuiltinCatalog {
     /// type-var numbers their instantiation allocates — are reproducible.
     by_surface_name: StableMap<&'static str, BuiltinId>,
     by_internal_name: LookupMap<&'static str, BuiltinId>,
+    /// Type-directed dispatch tables built once beside the catalog's textual
+    /// declarations. Downstream phases select identities by resolved types.
+    numeric_specializations: LookupMap<(BuiltinId, crate::ast::TypeName), BuiltinId>,
+    conversions: LookupMap<(crate::ast::TypeName, crate::ast::TypeName), BuiltinId>,
     known: KnownBuiltinIds,
 }
 
@@ -215,10 +219,49 @@ impl BuiltinCatalog {
             image_with: resolve(N::INTRINSIC_IMAGE_WITH),
             image_load: resolve(N::INTRINSIC_IMAGE_LOAD),
         };
+        let scalar_types = [
+            (crate::ast::TypeName::Int(8), "i8"),
+            (crate::ast::TypeName::Int(16), "i16"),
+            (crate::ast::TypeName::Int(32), "i32"),
+            (crate::ast::TypeName::Int(64), "i64"),
+            (crate::ast::TypeName::UInt(8), "u8"),
+            (crate::ast::TypeName::UInt(16), "u16"),
+            (crate::ast::TypeName::UInt(32), "u32"),
+            (crate::ast::TypeName::UInt(64), "u64"),
+            (crate::ast::TypeName::Float(16), "f16"),
+            (crate::ast::TypeName::Float(32), "f32"),
+            (crate::ast::TypeName::Float(64), "f64"),
+        ];
+        let mut numeric_specializations = LookupMap::new();
+        for (generic, member) in [
+            (known.abs, "abs"),
+            (known.sign, "sign"),
+            (known.min, "min"),
+            (known.max, "max"),
+            (known.clamp, "clamp"),
+        ] {
+            for (ty, prefix) in &scalar_types {
+                if let Some(specialized) = by_surface_name.get(format!("{prefix}.{member}").as_str()) {
+                    numeric_specializations.insert((generic, ty.clone()), *specialized);
+                }
+            }
+        }
+        let mut conversions = LookupMap::new();
+        for (target, target_prefix) in &scalar_types {
+            for (source, source_prefix) in &scalar_types {
+                if let Some(conversion) =
+                    by_surface_name.get(format!("{target_prefix}.{source_prefix}").as_str())
+                {
+                    conversions.insert((target.clone(), source.clone()), *conversion);
+                }
+            }
+        }
 
         BuiltinCatalog {
             defs,
             by_surface_name,
+            numeric_specializations,
+            conversions,
             by_internal_name,
             known,
         }
@@ -231,6 +274,26 @@ impl BuiltinCatalog {
 
     pub fn defs(&self) -> &[BuiltinDef] {
         &self.defs
+    }
+
+    /// Resolve a polymorphic numeric builtin using the already-resolved scalar
+    /// argument type. No source spelling participates in downstream dispatch.
+    pub fn specialize_numeric(
+        &self,
+        generic: BuiltinId,
+        scalar: &crate::ast::TypeName,
+    ) -> Option<BuiltinId> {
+        self.numeric_specializations.get(&(generic, scalar.clone())).copied()
+    }
+
+    /// Resolve one scalar conversion by structural source and destination
+    /// types. The returned `BuiltinId` is the only identity carried onward.
+    pub fn conversion(
+        &self,
+        target: &crate::ast::TypeName,
+        source: &crate::ast::TypeName,
+    ) -> Option<BuiltinId> {
+        self.conversions.get(&(target.clone(), source.clone())).copied()
     }
 
     pub fn lookup_by_surface_name(&self, name: &str) -> Option<&BuiltinDef> {

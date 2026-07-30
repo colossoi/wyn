@@ -199,8 +199,6 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
             effect.result.expect("indexed map has no result"),
         )
     };
-    let callee =
-        pre.seg_body().map(|body| inner.region(body.region).expect("map pre-lambda region").name.clone());
 
     inner.rewrite_body(candidate.site, |body| {
         let rewrite_graph = |graph: &mut EGraph| {
@@ -219,7 +217,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
                     })
                     .collect::<Vec<_>>();
                 arguments.extend_from_slice(pre.captures());
-                let results = lambda_ops::emit_call(graph, &pre, callee.as_deref(), arguments);
+                let results = lambda_ops::emit_call(graph, &pre, arguments);
                 let scalar = results[demand.output];
                 graph_ops::replace_all_references(graph, demand.index, scalar);
                 replacements.push((demand.index, scalar));

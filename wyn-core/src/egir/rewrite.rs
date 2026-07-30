@@ -27,6 +27,7 @@ use polytype::Type;
 use smallvec::smallvec;
 
 use crate::ast::TypeName;
+use crate::op::BinaryOperator;
 
 use super::types::{EGraph, ENode, Family, NodeId, PureOp};
 
@@ -156,7 +157,7 @@ impl<P: Family> RewriteRule<P> for PowToMulChain {
         else {
             return RewriteResult::NoMatch;
         };
-        if name != "**" || operands.len() != 2 {
+        if *name != BinaryOperator::Power || operands.len() != 2 {
             return RewriteResult::NoMatch;
         }
         let (base, exp) = (operands[0], operands[1]);
@@ -185,7 +186,7 @@ impl<P: Family> RewriteRule<P> for PowToMulChain {
         let mut chain = base;
         for _ in 1..k {
             chain = graph.intern_pure(
-                PureOp::BinOp("*".into()),
+                PureOp::BinOp(BinaryOperator::Multiply),
                 smallvec![chain, base],
                 result_ty.clone(),
                 None,

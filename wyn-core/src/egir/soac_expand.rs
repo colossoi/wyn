@@ -30,15 +30,15 @@ use super::graph_ops::{alloc_effect, emit_alloca, emit_load, emit_place_index_st
 use super::program::{
     PhysicalEGraph as EGraph, PhysicalFilterOutput, PhysicalFilterWorkBuffers as FilterWorkBuffers,
     PhysicalSegSpace as SegSpace, PhysicalSideEffect as SideEffect,
-    PhysicalSideEffectKind as SideEffectKind, PhysicalSoac as Soac, RegionInterner,
+    PhysicalSideEffectKind as SideEffectKind, PhysicalSoac as Soac, ProgramIdentities,
 };
 use super::soac::{filter, hist, screma};
 use crate::ast::TypeName;
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
 use super::types::{
-    as_soa_tuple, soac_element_type, ENode, EffectOp, EffectToken, NodeId, PureOp, SkeletonTerminator,
-    SoacDestination, SoacEffect,
+    as_soa_tuple, soac_element_type, ENode, EffectOp, EffectToken, NodeId, PureOp, RegionId,
+    SkeletonTerminator, SoacDestination, SoacEffect,
 };
 
 /// Expand every graph-bearing body and rebuild the program at the
@@ -46,7 +46,7 @@ use super::types::{
 pub fn expand_soacs(program: super::parallelize::Planned) -> Result<SoacsExpanded, String> {
     program
         .try_map_graphs_with_state(|_, graph, data, context| {
-            run_one_body(graph, &data.region_interner, &mut context.effect_ids)
+            run_one_body(graph, &data.identities, &mut context.effect_ids)
         })
         .map(|program| program.retag())
 }
@@ -54,7 +54,7 @@ pub fn expand_soacs(program: super::parallelize::Planned) -> Result<SoacsExpande
 /// Expand every physical SOAC in the skeleton.
 pub fn run_one_body(
     mut graph: EGraph,
-    regions: &RegionInterner,
+    regions: &ProgramIdentities,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<EGraph, String> {
     // Collect (block, index) of every handleable Soac in a stable order.
@@ -162,7 +162,7 @@ fn expand_one(
     bid: BlockId,
     idx: usize,
     next_effect: &mut crate::IdSource<EffectToken>,
-    regions: &RegionInterner,
+    regions: &ProgramIdentities,
 ) -> Result<(), String> {
     let se = graph.skeleton.blocks[bid].side_effects.remove(idx);
     match &se.kind {
@@ -377,11 +377,11 @@ fn expand_one(
                 .map(|(node, input)| (node, input.array.clone(), input.element()))
                 .collect::<Vec<_>>();
             let map_body = op.body.map.seg_body();
-            let map_func = map_body.map(|body| regions.resolve(body.region).to_string());
+            let map_func = map_body.map(|body| body.region);
             let output_elem_ty = op.body.output_element_type();
             let predicate_body =
                 op.body.predicate.seg_body().expect("validated Filter predicate has a region");
-            let pred_func = regions.resolve(predicate_body.region).to_string();
+            let pred_func = predicate_body.region;
             let (output, plan) = match &op.state {
                 filter::ScheduledState::Loop { storage, .. } => (storage.clone(), filter::Plan::Loop),
                 filter::ScheduledState::Pipeline { storage, plan, .. } => {
@@ -515,7 +515,7 @@ fn expand_one(
 
 fn emit_screma_lambda(
     graph: &mut EGraph,
-    regions: &RegionInterner,
+    _regions: &ProgramIdentities,
     lambda: &screma::Lambda,
     mut arguments: Vec<NodeId>,
 ) -> Vec<NodeId> {
@@ -524,13 +524,14 @@ fn emit_screma_lambda(
         return arguments;
     }
     let body = lambda.seg_body().expect("non-identity Screma lambda has a region");
+    debug_assert!(_regions.contains_function(body.region));
     arguments.extend(body.captures.iter().copied());
     let result_type = match lambda.result_types.as_slice() {
         [result] => result.clone(),
         results => Type::Constructed(TypeName::Tuple(results.len()), results.to_vec()),
     };
     let result = graph.intern_pure(
-        PureOp::Call(regions.resolve(body.region).to_string()),
+        PureOp::Call(body.region),
         arguments.into_iter().collect(),
         result_type,
         None,
@@ -727,7 +728,7 @@ fn build_parallel_screma_map(
     output_views: &[NodeId],
     result_node: NodeId,
     next_effect: &mut crate::IdSource<EffectToken>,
-    regions: &RegionInterner,
+    regions: &ProgramIdentities,
 ) {
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
@@ -748,10 +749,12 @@ fn build_parallel_screma_map(
         u32_type,
         None,
     );
-    let bitcast = catalog().lookup_by_any_name("i32.u32").expect("catalog has i32.u32 bitcast");
+    let bitcast = catalog()
+        .conversion(&TypeName::Int(32), &TypeName::UInt(32))
+        .expect("catalog has structural u32-to-i32 conversion");
     let lane = graph.intern_pure(
         PureOp::Intrinsic {
-            id: bitcast.id,
+            id: bitcast,
             overload_idx: 0,
         },
         smallvec![thread],
@@ -760,7 +763,7 @@ fn build_parallel_screma_map(
     );
     let length = emit_seg_space_len(graph, space, &length_input, &i32_type);
     let condition = graph.intern_pure(
-        PureOp::BinOp("<".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
         smallvec![lane, length],
         bool_type,
         None,
@@ -839,7 +842,7 @@ fn emit_seg_space_len(
     };
     dimensions.into_iter().skip(1).fold(first, |product, dimension| {
         graph.intern_pure(
-            PureOp::BinOp("*".into()),
+            PureOp::BinOp(crate::op::BinaryOperator::Multiply),
             smallvec![product, dimension],
             i32_ty.clone(),
             None,
@@ -862,9 +865,9 @@ struct FilterLoop {
     output_elem_ty: Type<TypeName>,
     output: PhysicalFilterOutput,
     /// `None` denotes the validated one-input identity map.
-    map_func: Option<String>,
+    map_func: Option<RegionId>,
     map_captures: Vec<NodeId>,
-    pred_func: String,
+    pred_func: RegionId,
     captures: Vec<NodeId>,
     result_node: NodeId,
 }
@@ -893,12 +896,7 @@ fn filter_kept_value(
         Some(name) => {
             let mut operands = elements;
             operands.extend(spec.map_captures.iter().copied());
-            graph.intern_pure(
-                PureOp::Call(name.clone()),
-                operands,
-                spec.output_elem_ty.clone(),
-                None,
-            )
+            graph.intern_pure(PureOp::Call(*name), operands, spec.output_elem_ty.clone(), None)
         }
         None => {
             debug_assert_eq!(elements.len(), 1);
@@ -1007,7 +1005,7 @@ fn build_filter_loop(
         &i32_ty,
     );
     let cond_nid = graph.intern_pure(
-        PureOp::BinOp("<".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
         smallvec![i_in_nid, len_nid],
         bool_ty.clone(),
         None,
@@ -1059,7 +1057,7 @@ fn build_filter_loop(
     );
     let one_i32_nid = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), None);
     let count_bumped_nid = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![count_in_nid, one_i32_nid],
         i32_ty.clone(),
         None,
@@ -1135,13 +1133,13 @@ fn flatten_hist_index(graph: &mut EGraph, indices: &[NodeId], shape: &[NodeId]) 
     };
     rest.iter().copied().zip(shape.iter().copied().skip(1)).fold(first, |linear, (index, dimension)| {
         let scaled = graph.intern_pure(
-            PureOp::BinOp("*".into()),
+            PureOp::BinOp(crate::op::BinaryOperator::Multiply),
             smallvec![linear, dimension],
             i32_type.clone(),
             None,
         );
         graph.intern_pure(
-            PureOp::BinOp("+".into()),
+            PureOp::BinOp(crate::op::BinaryOperator::Add),
             smallvec![scaled, index],
             i32_type.clone(),
             None,
@@ -1157,25 +1155,25 @@ fn hist_index_in_bounds(graph: &mut EGraph, indices: &[NodeId], shape: &[NodeId]
         graph.intern_pure(PureOp::Bool(true), smallvec![], bool_type.clone(), None),
         |valid, (index, dimension)| {
             let nonnegative = graph.intern_pure(
-                PureOp::BinOp(">=".into()),
+                PureOp::BinOp(crate::op::BinaryOperator::GreaterEqual),
                 smallvec![index, zero],
                 bool_type.clone(),
                 None,
             );
             let below = graph.intern_pure(
-                PureOp::BinOp("<".into()),
+                PureOp::BinOp(crate::op::BinaryOperator::Less),
                 smallvec![index, dimension],
                 bool_type.clone(),
                 None,
             );
             let in_dimension = graph.intern_pure(
-                PureOp::BinOp("&&".into()),
+                PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
                 smallvec![nonnegative, below],
                 bool_type.clone(),
                 None,
             );
             graph.intern_pure(
-                PureOp::BinOp("&&".into()),
+                PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
                 smallvec![valid, in_dimension],
                 bool_type.clone(),
                 None,
@@ -1195,7 +1193,7 @@ fn emit_hist_atomic_update(
     operation: &hist::HistOp,
     plan: hist::AtomicUpdate,
     next_effect: &mut crate::IdSource<EffectToken>,
-    regions: &RegionInterner,
+    regions: &ProgramIdentities,
 ) {
     use super::graph_ops::emit_atomic;
     use crate::ssa::types::AtomicOp;
@@ -1277,8 +1275,12 @@ fn emit_hist_atomic_update(
                 bool_type.clone(),
                 None,
             );
-            let retry_after_attempt =
-                graph.intern_pure(PureOp::UnaryOp("!".into()), smallvec![exchanged], bool_type, None);
+            let retry_after_attempt = graph.intern_pure(
+                PureOp::UnaryOp(crate::op::UnaryOperator::LogicalNot),
+                smallvec![exchanged],
+                bool_type,
+                None,
+            );
             graph.skeleton.blocks[attempt].term = SkeletonTerminator::Branch {
                 target: retry,
                 args: vec![],
@@ -1306,7 +1308,7 @@ fn build_hist_atomic(
     space: &SegSpace,
     atomic_operations: &[hist::AtomicUpdate],
     next_effect: &mut crate::IdSource<EffectToken>,
-    regions: &RegionInterner,
+    regions: &ProgramIdentities,
 ) {
     let HistLoop {
         form,
@@ -1333,10 +1335,12 @@ fn build_hist_atomic(
         u32_type,
         None,
     );
-    let bitcast = catalog().lookup_by_any_name("i32.u32").expect("catalog has i32.u32 bitcast");
+    let bitcast = catalog()
+        .conversion(&TypeName::Int(32), &TypeName::UInt(32))
+        .expect("catalog has structural u32-to-i32 conversion");
     let lane = graph.intern_pure(
         PureOp::Intrinsic {
-            id: bitcast.id,
+            id: bitcast,
             overload_idx: 0,
         },
         smallvec![thread],
@@ -1350,7 +1354,7 @@ fn build_hist_atomic(
         &Type::Constructed(TypeName::Int(32), vec![]),
     );
     let in_range = graph.intern_pure(
-        PureOp::BinOp("<".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
         smallvec![lane, length],
         bool_type,
         None,
@@ -1431,7 +1435,7 @@ fn build_hist_loop(
     idx_in_block: usize,
     spec: HistLoop,
     next_effect: &mut crate::IdSource<EffectToken>,
-    regions: &RegionInterner,
+    regions: &ProgramIdentities,
 ) {
     use super::graph_ops::{emit_storage_store, emit_view_load};
     let HistLoop {
@@ -1555,7 +1559,7 @@ fn build_filter_flags(
         &u32_ty,
     );
     let bounded = graph.intern_pure(
-        PureOp::BinOp("<".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
         smallvec![gid, len],
         Type::Constructed(TypeName::Bool, vec![]),
         None,
@@ -1653,39 +1657,41 @@ fn build_filter_scan(
         None,
     );
     let total_threads = graph.intern_pure(
-        PureOp::BinOp("*".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Multiply),
         smallvec![nwg, wg_width],
         u32_ty.clone(),
         None,
     );
     let total_minus_one = graph.intern_pure(
-        PureOp::BinOp("-".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Subtract),
         smallvec![total_threads, one],
         u32_ty.clone(),
         None,
     );
     let len_plus = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![input_len, total_minus_one],
         u32_ty.clone(),
         None,
     );
     let chunk_size = graph.intern_pure(
-        PureOp::BinOp("/".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Divide),
         smallvec![len_plus, total_threads],
         u32_ty.clone(),
         None,
     );
     let raw_chunk_start = graph.intern_pure(
-        PureOp::BinOp("*".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Multiply),
         smallvec![gid, chunk_size],
         u32_ty.clone(),
         None,
     );
-    let u32_min = catalog().lookup_by_any_name("u32.min").expect("catalog has u32.min");
+    let u32_min = catalog()
+        .specialize_numeric(catalog().known().min, &TypeName::UInt(32))
+        .expect("catalog has u32 min specialization");
     let chunk_start = graph.intern_pure(
         PureOp::Intrinsic {
-            id: u32_min.id,
+            id: u32_min,
             overload_idx: 0,
         },
         smallvec![raw_chunk_start, input_len],
@@ -1693,14 +1699,14 @@ fn build_filter_scan(
         None,
     );
     let remaining = graph.intern_pure(
-        PureOp::BinOp("-".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Subtract),
         smallvec![input_len, chunk_start],
         u32_ty.clone(),
         None,
     );
     let chunk_len = graph.intern_pure(
         PureOp::Intrinsic {
-            id: u32_min.id,
+            id: u32_min,
             overload_idx: 0,
         },
         smallvec![chunk_size, remaining],
@@ -1714,7 +1720,7 @@ fn build_filter_scan(
     let i = graph.add_block_param(header, u32_ty.clone());
     let acc = graph.add_block_param(header, u32_ty.clone());
     let cond = graph.intern_pure(
-        PureOp::BinOp("<".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
         smallvec![i, chunk_len],
         Type::Constructed(TypeName::Bool, vec![]),
         None,
@@ -1733,7 +1739,7 @@ fn build_filter_scan(
     let flags = intern_storage_view(graph, work.flags, u32_ty.clone(), None);
     let offsets = intern_storage_view(graph, work.offsets, u32_ty.clone(), None);
     let global_i = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![chunk_start, i],
         u32_ty.clone(),
         None,
@@ -1746,7 +1752,7 @@ fn build_filter_scan(
     );
     let flag = emit_load(graph, body, flag_place, u32_ty.clone(), next_effect, None);
     let next = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![acc, flag],
         u32_ty.clone(),
         None,
@@ -1761,7 +1767,12 @@ fn build_filter_scan(
         next_effect,
         None,
     );
-    let next_i = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![i, one], u32_ty.clone(), None);
+    let next_i = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        smallvec![i, one],
+        u32_ty.clone(),
+        None,
+    );
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: header,
         args: vec![next_i, next],
@@ -1809,7 +1820,7 @@ fn build_filter_scatter(
         &u32_ty,
     );
     let bounded = graph.intern_pure(
-        PureOp::BinOp("<".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
         smallvec![gid, len],
         bool_ty.clone(),
         None,
@@ -1827,7 +1838,12 @@ fn build_filter_scatter(
     let flag_place = graph.intern_pure(PureOp::ViewIndex, smallvec![flags, gid], u32_ty.clone(), None);
     let flag = emit_load(graph, in_range, flag_place, u32_ty.clone(), next_effect, None);
     let one = intern_u32(graph, 1, None);
-    let keep = graph.intern_pure(PureOp::BinOp("==".into()), smallvec![flag, one], bool_ty, None);
+    let keep = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Equal),
+        smallvec![flag, one],
+        bool_ty,
+        None,
+    );
     graph.skeleton.blocks[in_range].term = SkeletonTerminator::CondBranch {
         cond: keep,
         then_target: write,
@@ -1839,7 +1855,7 @@ fn build_filter_scatter(
     let offset_place = graph.intern_pure(PureOp::ViewIndex, smallvec![offsets, gid], u32_ty.clone(), None);
     let inclusive = emit_load(graph, write, offset_place, u32_ty.clone(), next_effect, None);
     let output_index = graph.intern_pure(
-        PureOp::BinOp("-".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Subtract),
         smallvec![inclusive, one],
         u32_ty.clone(),
         None,
@@ -1937,7 +1953,7 @@ fn build_runtime_filter_loop(
         &u32_ty,
     );
     let cond_nid = graph.intern_pure(
-        PureOp::BinOp("<".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
         smallvec![i_in_nid, len_nid],
         bool_ty.clone(),
         None,
@@ -1986,7 +2002,7 @@ fn build_runtime_filter_loop(
     );
     let one_u32_nid = intern_u32(graph, 1, None);
     let count_bumped_nid = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![count_in_nid, one_u32_nid],
         u32_ty.clone(),
         None,
@@ -2013,7 +2029,7 @@ fn build_runtime_filter_loop(
     let cont_count_nid = graph.add_block_param(continue_blk, u32_ty.clone());
     let one_i_nid = intern_u32(graph, 1, None);
     let next_i_nid = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![i_in_nid, one_i_nid],
         u32_ty.clone(),
         None,
@@ -2172,7 +2188,7 @@ fn build_loop_skeleton(
     // Header terminator: condbr i<len -> body / after(result_carried).
     let len_nid = emit_length(graph, spec.len_input.0, &spec.len_input.1, &i32_ty);
     let cond_nid = graph.intern_pure(
-        PureOp::BinOp("<".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
         smallvec![idx_nid, len_nid],
         bool_ty,
         None,
@@ -2210,7 +2226,7 @@ fn increment(graph: &mut EGraph, idx_nid: NodeId) -> NodeId {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let one_nid = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), None);
     graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![idx_nid, one_nid],
         i32_ty,
         None,
@@ -2328,13 +2344,13 @@ fn emit_read_element(
             None,
         );
         let mul_nid = graph.intern_pure(
-            PureOp::BinOp("*".into()),
+            PureOp::BinOp(crate::op::BinaryOperator::Multiply),
             smallvec![idx_nid, step_nid],
             elem_ty.clone(),
             None,
         );
         graph.intern_pure(
-            PureOp::BinOp("+".into()),
+            PureOp::BinOp(crate::op::BinaryOperator::Add),
             smallvec![start_nid, mul_nid],
             elem_ty.clone(),
             None,

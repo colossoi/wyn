@@ -1,8 +1,9 @@
 use super::*;
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{semantic_program_for_test, RegionInterner, SemanticFunc};
+use crate::egir::program::{semantic_program_for_test, ProgramIdentities, SemanticFunc};
 use crate::egir::reify::Segmented;
 use crate::egir::types::{EGraph, PureOp, SkeletonTerminator};
+use crate::op::BinaryOperator;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use polytype::Type;
 use smallvec::smallvec;
@@ -26,18 +27,28 @@ fn affine_program() -> (RegionId, Segmented) {
     let lb = graph.intern_pure(PureOp::Project { index: 1 }, smallvec![left], int.clone(), None);
     let ra = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![right], int.clone(), None);
     let rb = graph.intern_pure(PureOp::Project { index: 1 }, smallvec![right], int.clone(), None);
-    let out_a = graph.intern_pure(PureOp::BinOp("*".into()), smallvec![la, ra], int.clone(), None);
-    let scaled = graph.intern_pure(PureOp::BinOp("*".into()), smallvec![la, rb], int.clone(), None);
+    let out_a = graph.intern_pure(
+        PureOp::BinOp(BinaryOperator::Multiply),
+        smallvec![la, ra],
+        int.clone(),
+        None,
+    );
+    let scaled = graph.intern_pure(
+        PureOp::BinOp(BinaryOperator::Multiply),
+        smallvec![la, rb],
+        int.clone(),
+        None,
+    );
     let out_b = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(BinaryOperator::Add),
         smallvec![scaled, lb],
         int.clone(),
         None,
     );
     let result = graph.intern_pure(PureOp::Tuple(2), smallvec![out_a, out_b], pair.clone(), None);
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
-    let mut regions = RegionInterner::default();
-    let region = regions.intern("affine_compose");
+    let mut identities = ProgramIdentities::default();
+    let region = identities.alloc_function("affine_compose".into());
     let function = SemanticFunc::new(
         region,
         "affine_compose".to_string(),
@@ -53,10 +64,9 @@ fn affine_program() -> (RegionId, Segmented) {
         vec![],
         vec![],
         PipelineDescriptor::default(),
-        regions,
+        identities,
     );
-    let id = program.data.region_interner.get("affine_compose").unwrap();
-    (id, program)
+    (region, program)
 }
 
 #[test]

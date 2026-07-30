@@ -18,7 +18,7 @@ fn test_func_body_params() {
     let sum = builder
         .push_inst(
             InstKind::Op {
-                tag: crate::op::OpTag::BinOp("+".to_string()),
+                tag: crate::op::OpTag::BinOp(crate::op::BinaryOperator::Add),
                 operands: vec![ValueRef::Ssa(x), ValueRef::Ssa(y)],
             },
             i32_ty(),

@@ -205,6 +205,7 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
     let graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
     let entry = super::super::ir::Entry::<TestPhase, u16, (), TestLanguage>::new_with_resources(
         "custom".to_string(),
+        crate::EntryId::from_index(0),
         crate::ast::Span::new(0, 0, 0, 0),
         crate::flow::ExecutionModel::Compute {
             local_size: (1, 1, 1),
@@ -250,6 +251,7 @@ fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
         .collect();
     let mut entry = super::super::ir::Entry::<TestPhase, (), (), TestLanguage>::new_with_resources(
         "compact".to_string(),
+        crate::EntryId::from_index(0),
         crate::ast::Span::dummy(),
         crate::flow::ExecutionModel::Compute {
             local_size: (1, 1, 1),
@@ -322,7 +324,7 @@ fn replace_all_references_does_not_leave_stale_hash_cons_key() {
     let a = graph.intern_pure(PureOp::Int("1".into()), smallvec::smallvec![], int.clone(), None);
     let b = graph.intern_pure(PureOp::Int("2".into()), smallvec::smallvec![], int.clone(), None);
     let old_call = graph.intern_pure(
-        PureOp::Call("__test_hash_cons".into()),
+        PureOp::Call(crate::FunctionId::from_index(0)),
         smallvec::smallvec![a, b],
         int.clone(),
         None,
@@ -331,7 +333,7 @@ fn replace_all_references_does_not_leave_stale_hash_cons_key() {
     crate::egir::graph_ops::replace_all_references(&mut graph, b, a);
 
     let reinterned_old_call = graph.intern_pure(
-        PureOp::Call("__test_hash_cons".into()),
+        PureOp::Call(crate::FunctionId::from_index(0)),
         smallvec::smallvec![a, b],
         int,
         None,
@@ -359,7 +361,7 @@ fn retype_node_does_not_leave_stale_hash_cons_key() {
     let uint = u32_ty();
     let arg = graph.intern_pure(PureOp::Int("1".into()), smallvec::smallvec![], int.clone(), None);
     let old_call = graph.intern_pure(
-        PureOp::Call("__test_hash_cons_retype".into()),
+        PureOp::Call(crate::FunctionId::from_index(1)),
         smallvec::smallvec![arg],
         int.clone(),
         None,
@@ -368,7 +370,7 @@ fn retype_node_does_not_leave_stale_hash_cons_key() {
     graph.retype_node(old_call, uint);
 
     let reinterned_old_call = graph.intern_pure(
-        PureOp::Call("__test_hash_cons_retype".into()),
+        PureOp::Call(crate::FunctionId::from_index(1)),
         smallvec::smallvec![arg],
         int,
         None,

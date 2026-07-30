@@ -497,10 +497,12 @@ where
         Q: WynSoacPhase<Resource = P::Resource>,
     {
         let super::ir::Entry {
+            id,
             name,
             span,
             execution_model,
             inputs,
+            parameter_inputs,
             mut outputs,
             resource_declarations,
             params,
@@ -512,10 +514,12 @@ where
             route.remap_block_ids(&blocks);
         }
         Ok(super::ir::Entry {
+            id,
             name,
             span,
             execution_model,
             inputs,
+            parameter_inputs,
             outputs,
             resource_declarations,
             params,

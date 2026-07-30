@@ -433,7 +433,12 @@ fn phi_elim_preserves_loop_header_param() {
     let acc = graph.add_block_param(header, i32_ty());
 
     // body_val = acc + 1 (a NodeId distinct from init)
-    let body_val = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![acc, one], i32_ty(), None);
+    let body_val = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        smallvec![acc, one],
+        i32_ty(),
+        None,
+    );
 
     // Entry unconditionally to header with init.
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {

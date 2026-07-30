@@ -6,27 +6,23 @@
 use super::data::Empty;
 use super::soa::SoaNormalized;
 use super::{RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter, VarRef};
-use crate::ast::TypeName;
-use crate::builtins::catalog::KnownBuiltinIds;
-use crate::builtins::{catalog, BuiltinId};
+use crate::builtins::catalog;
 use crate::types::TypeExt;
-use crate::SymbolTable;
 use polytype::Type;
 
 pub(super) fn run(program: &mut SoaNormalized) {
-    let (defs, symbols, term_ids) = (&mut program.defs, &program.symbols, &mut program.term_ids);
-    let mut specializer = IntrinsicSpecializer { symbols, term_ids };
+    let (defs, term_ids) = (&mut program.defs, &mut program.term_ids);
+    let mut specializer = IntrinsicSpecializer { term_ids };
     for def in defs {
         specializer.rewrite_tracked(&mut def.body);
     }
 }
 
-struct IntrinsicSpecializer<'symbols, 'ids> {
-    symbols: &'symbols SymbolTable,
+struct IntrinsicSpecializer<'ids> {
     term_ids: &'ids mut TermIdSource,
 }
 
-impl TermRewriter<Empty, Empty> for IntrinsicSpecializer<'_, '_> {
+impl TermRewriter<Empty, Empty> for IntrinsicSpecializer<'_> {
     fn next_term_id(&mut self) -> TermId {
         self.term_ids.next_id()
     }
@@ -41,58 +37,37 @@ impl TermRewriter<Empty, Empty> for IntrinsicSpecializer<'_, '_> {
 
         // A Symbol is always a user or compiler binding and may shadow a
         // catalog name. Only structural builtin references specialize.
-        let Some(id) = crate::tlc::var_term_builtin_id(func, self.symbols) else {
+        let TermKind::Var(VarRef::Builtin { id, .. }) = &func.kind else {
             return RewriteDecision::Unchanged;
         };
         let known = catalog().known();
 
         // Multiplication becomes a structural binary operator and needs no
         // overload-bearing callee.
-        if id == known.mul && args.len() == 2 {
-            func.kind = TermKind::BinOp(crate::ast::BinaryOp { op: "*".to_string() });
+        if *id == known.mul && args.len() == 2 {
+            func.kind = TermKind::BinOp(crate::ast::BinaryOp {
+                op: crate::op::BinaryOperator::Multiply,
+            });
             func.id = self.term_ids.next_id();
             return RewriteDecision::Changed;
         }
 
-        let Some(specialized_name) = specialize_name(id, known, &first_arg.ty) else {
+        let scalar_ty = first_arg.ty.elem_type().filter(|_| first_arg.ty.is_vec()).unwrap_or(&first_arg.ty);
+        let Type::Constructed(scalar, type_args) = scalar_ty else {
             return RewriteDecision::Unchanged;
         };
-        let def = catalog()
-            .lookup_by_surface_name(&specialized_name)
-            .unwrap_or_else(|| panic!("BUG: specialize emitted name '{specialized_name}' not in catalog"));
+        if !type_args.is_empty() {
+            return RewriteDecision::Unchanged;
+        }
+        let Some(specialized) = catalog().specialize_numeric(*id, scalar) else {
+            return RewriteDecision::Unchanged;
+        };
         func.kind = TermKind::Var(VarRef::Builtin {
-            id: def.id,
+            id: specialized,
             overload_idx: 0,
         });
         func.id = self.term_ids.next_id();
         RewriteDecision::Changed
-    }
-}
-
-fn specialize_name(id: BuiltinId, known: &KnownBuiltinIds, arg_ty: &Type<TypeName>) -> Option<String> {
-    let base = if id == known.abs {
-        "abs"
-    } else if id == known.sign {
-        "sign"
-    } else if id == known.min {
-        "min"
-    } else if id == known.max {
-        "max"
-    } else if id == known.clamp {
-        "clamp"
-    } else {
-        return None;
-    };
-    type_prefix(arg_ty).map(|prefix| format!("{prefix}.{base}"))
-}
-
-fn type_prefix(ty: &Type<TypeName>) -> Option<String> {
-    let elem_ty = ty.elem_type().filter(|_| ty.is_vec()).unwrap_or(ty);
-    match elem_ty {
-        Type::Constructed(TypeName::Float(bits), _) => Some(format!("f{bits}")),
-        Type::Constructed(TypeName::Int(bits), _) => Some(format!("i{bits}")),
-        Type::Constructed(TypeName::UInt(bits), _) => Some(format!("u{bits}")),
-        _ => None,
     }
 }
 

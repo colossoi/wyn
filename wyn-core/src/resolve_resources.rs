@@ -292,7 +292,7 @@ fn materialize_attribute(attribute: Attribute, span: ast::Span) -> Result<Resolv
     bail_type_at!(span, "view attributes are only valid on entry parameters")
 }
 
-fn materialize_pattern(pattern: Pattern) -> Result<Pattern<ast::Header, ResolvedAttribute>> {
+fn materialize_pattern(pattern: Pattern) -> Result<Pattern<ast::SourceTree, ResolvedAttribute>> {
     let span = pattern.h.span;
     pattern.try_map_attributes(&mut |attribute| materialize_attribute(attribute, span))
 }

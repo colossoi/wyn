@@ -42,6 +42,7 @@ fn empty_program() -> crate::ssa::stage::Bare {
 fn function_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) -> Function {
     let builder = FuncBuilder::new(params, return_ty);
     Function {
+        id: crate::FunctionId::from_index(0),
         name: "f".into(),
         body: builder.finish_unchecked(),
         span: crate::ast::Span::dummy(),
@@ -52,12 +53,14 @@ fn function_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName
 fn entry_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) -> EntryPoint {
     let builder = FuncBuilder::new(params, return_ty);
     EntryPoint {
+        id: crate::EntryId::from_index(0),
         name: "main".into(),
         body: builder.finish_unchecked(),
         execution_model: ExecutionModel::Compute {
             local_size: (64, 1, 1),
         },
         inputs: Vec::new(),
+        parameter_inputs: Vec::new(),
         outputs: Vec::new(),
         storage_bindings: Vec::new(),
         pipeline_storage_accesses: LookupMap::new(),

@@ -32,7 +32,7 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
     let current = graph.add_block_param(header, ty.clone());
     let one = graph.intern_constant(ConstantValue::U32(1), ty.clone());
     let next = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![current, one],
         ty.clone(),
         None,
@@ -51,7 +51,12 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
         else_args: vec![current],
     };
     graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(Some(merged));
-    let tail = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![merged, one], ty, None);
+    let tail = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        smallvec![merged, one],
+        ty,
+        None,
+    );
 
     let closure = value_producer_closure(&graph, [tail]);
 

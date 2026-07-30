@@ -44,12 +44,13 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> crate::ssa:
         state: _,
     } = inner;
     let pipeline = data.pipeline;
-    let pipeline_storage_accesses = pipeline_storage_accesses(&pipeline);
+    let pipeline_storage_accesses = pipeline_storage_accesses(&pipeline, &data.stage_entries);
     let functions: Vec<Function> = functions
         .into_iter()
         .map(|f| {
             let body = elaborate_one_body(f.graph, &f.params, f.return_ty);
             Function {
+                id: f.region,
                 name: f.name,
                 body,
                 span: f.span,
@@ -63,13 +64,18 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> crate::ssa:
         .into_iter()
         .map(|e| {
             let body = elaborate_one_body(e.graph, &e.params, e.return_ty);
-            let entry_pipeline_accesses =
-                pipeline_storage_accesses.get(&e.name).cloned().unwrap_or_default();
+            let entry_pipeline_accesses = pipeline_storage_accesses.get(&e.id).cloned().unwrap_or_default();
             EntryPoint {
+                id: e.id,
                 name: e.name,
                 body,
                 execution_model: e.execution_model,
                 inputs: e.inputs.into_iter().map(|input| input.inner).collect(),
+                parameter_inputs: e
+                    .parameter_inputs
+                    .into_iter()
+                    .map(|slots| slots.into_iter().map(|slot| slot.0).collect())
+                    .collect(),
                 outputs: e.outputs.into_iter().map(|output| output.inner).collect(),
                 storage_bindings: e.resource_declarations,
                 pipeline_storage_accesses: entry_pipeline_accesses,
@@ -81,6 +87,7 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> crate::ssa:
     let constants = constants
         .into_iter()
         .map(|constant| Constant {
+            id: constant.id,
             name: constant.name,
             body: elaborate_one_body(constant.graph, &[], constant.return_ty),
         })
@@ -105,20 +112,15 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> crate::ssa:
 /// elaboration consumes the physical program.
 fn pipeline_storage_accesses(
     descriptor: &PipelineDescriptor,
-) -> LookupMap<String, LookupMap<crate::BindingRef, crate::ResourceAccess>> {
+    stage_entries: &[Vec<crate::EntryId>],
+) -> LookupMap<crate::EntryId, LookupMap<crate::BindingRef, crate::ResourceAccess>> {
     use crate::pipeline_descriptor::{Access, Binding, Pipeline};
 
     let mut entries = LookupMap::new();
-    for pipeline in &descriptor.pipelines {
-        let (bindings, stage_names): (&[Binding], Vec<&str>) = match pipeline {
-            Pipeline::Compute(compute) => (
-                &compute.bindings,
-                compute.stages.iter().map(|stage| stage.entry_point.as_str()).collect(),
-            ),
-            Pipeline::Graphics(graphics) => (
-                &graphics.bindings,
-                graphics.stages.iter().map(|stage| stage.entry_point.as_str()).collect(),
-            ),
+    for (pipeline_index, pipeline) in descriptor.pipelines.iter().enumerate() {
+        let bindings: &[Binding] = match pipeline {
+            Pipeline::Compute(compute) => &compute.bindings,
+            Pipeline::Graphics(graphics) => &graphics.bindings,
         };
         let layout = bindings
             .iter()
@@ -137,8 +139,8 @@ fn pipeline_storage_accesses(
                 Some((crate::BindingRef::new(*set, *binding), access))
             })
             .collect::<LookupMap<_, _>>();
-        for name in stage_names {
-            let entry = entries.entry(name.to_string()).or_insert_with(LookupMap::new);
+        for &entry_id in stage_entries.get(pipeline_index).into_iter().flatten() {
+            let entry = entries.entry(entry_id).or_insert_with(LookupMap::new);
             for (&binding, &access) in &layout {
                 entry
                     .entry(binding)
@@ -153,6 +155,7 @@ fn pipeline_storage_accesses(
 fn elaborate_extern(declaration: ExternDecl<Type<TypeName>>) -> Function {
     let body = FuncBuilder::new(declaration.params, declaration.return_ty).finish_unchecked();
     Function {
+        id: declaration.id,
         name: declaration.name,
         body,
         span: declaration.span,

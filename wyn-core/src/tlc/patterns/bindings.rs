@@ -23,7 +23,7 @@ impl<'a> Transformer<'a> {
     /// bindings (caller wraps with a `Let` directly).
     pub(in crate::tlc) fn compute_pattern_bindings<A>(
         &mut self,
-        pattern: &ast::Pattern<ast::TypedHeader, A>,
+        pattern: &ast::Pattern<ast::HolesResolvedTree, A>,
         scrutinee: Term,
         span: Span,
     ) -> (SymbolId, Vec<PendingBinding>) {
@@ -35,14 +35,14 @@ impl<'a> Transformer<'a> {
     /// Nested Name/Wildcard DO create bindings (needed for component extraction).
     pub(in crate::tlc) fn compute_pattern_bindings_inner<A>(
         &mut self,
-        pattern: &ast::Pattern<ast::TypedHeader, A>,
+        pattern: &ast::Pattern<ast::HolesResolvedTree, A>,
         scrutinee: Term,
         span: Span,
         is_top_level: bool,
     ) -> (SymbolId, Vec<PendingBinding>) {
         match &pattern.kind {
             PatternKind::Name(name) => {
-                let sym = self.define(name);
+                let sym = name.symbol;
                 if is_top_level {
                     (sym, vec![])
                 } else {
@@ -56,7 +56,7 @@ impl<'a> Transformer<'a> {
             }
             PatternKind::Wildcard => {
                 let fresh_name = format!("_w_wild_{}", self.term_ids.next_id());
-                let sym = self.define(&fresh_name);
+                let sym = self.fresh(&fresh_name);
                 if is_top_level {
                     (sym, vec![])
                 } else {
@@ -73,7 +73,7 @@ impl<'a> Transformer<'a> {
             }
             PatternKind::Tuple(patterns) => {
                 let fresh_name = format!("_w_tup_{}", self.term_ids.next_id());
-                let fresh_sym = self.define(&fresh_name);
+                let fresh_sym = self.fresh(&fresh_name);
                 let tuple_ty = scrutinee.ty.clone();
                 let component_types = self.extract_tuple_types(&tuple_ty, patterns.len());
 
@@ -102,7 +102,7 @@ impl<'a> Transformer<'a> {
                 // projections for each sub-pattern. All sub-patterns
                 // share the same element type (vec's element).
                 let fresh_name = format!("_w_vec_{}", self.term_ids.next_id());
-                let fresh_sym = self.define(&fresh_name);
+                let fresh_sym = self.fresh(&fresh_name);
                 let vec_ty = scrutinee.ty.clone();
                 let elem_ty =
                     vec_ty.elem_type().cloned().expect("BUG: Vec pattern scrutinee is not a vec type");
@@ -124,7 +124,7 @@ impl<'a> Transformer<'a> {
             }
             PatternKind::Record(fields) => {
                 let fresh_name = format!("_w_rec_{}", self.term_ids.next_id());
-                let fresh_sym = self.define(&fresh_name);
+                let fresh_sym = self.fresh(&fresh_name);
                 let record_ty = scrutinee.ty.clone();
                 let field_types = self.extract_record_types(&record_ty);
 
@@ -152,17 +152,20 @@ impl<'a> Transformer<'a> {
                         span,
                     );
 
-                    if let Some(pat) = &field.pattern {
-                        let (_, sub_bindings) =
-                            self.compute_pattern_bindings_inner(pat, field_access, span, false);
-                        bindings.extend(sub_bindings);
-                    } else {
-                        let field_sym = self.define(&field.field);
-                        bindings.push(PendingBinding {
-                            name: field_sym,
-                            ty: field_ty,
-                            expr: field_access,
-                        });
+                    match &field.target {
+                        ast::RecordPatternTarget::Pattern(pattern) => {
+                            let (_, sub_bindings) =
+                                self.compute_pattern_bindings_inner(pattern, field_access, span, false);
+                            bindings.extend(sub_bindings);
+                        }
+                        ast::RecordPatternTarget::Shorthand(binding) => {
+                            let field_sym = binding.symbol;
+                            bindings.push(PendingBinding {
+                                name: field_sym,
+                                ty: field_ty,
+                                expr: field_access,
+                            });
+                        }
                     }
                 }
 
@@ -173,7 +176,7 @@ impl<'a> Transformer<'a> {
                 // scrutinee so any downstream `Let` chain has somewhere
                 // to anchor. No sub-bindings.
                 let fresh_name = format!("_w_unit_{}", self.term_ids.next_id());
-                let sym = self.define(&fresh_name);
+                let sym = self.fresh(&fresh_name);
                 if is_top_level {
                     (sym, vec![])
                 } else {
@@ -231,7 +234,7 @@ impl<'a> Transformer<'a> {
                 );
 
                 let fresh_name = format!("_w_ctor_{}", self.term_ids.next_id());
-                let fresh_sym = self.define(&fresh_name);
+                let fresh_sym = self.fresh(&fresh_name);
                 let mut bindings = vec![PendingBinding {
                     name: fresh_sym,
                     ty: sum_ty.clone(),
@@ -260,15 +263,18 @@ impl<'a> Transformer<'a> {
     /// wrapped versions), None for complex patterns that need
     /// destructuring. Used by `transform_expr`'s Let arm to fast-path
     /// `let x = …` without the full binding-list machinery.
-    pub(in crate::tlc) fn simple_pattern_name<A>(
+    pub(in crate::tlc) fn simple_pattern_symbol<A>(
         &mut self,
-        pattern: &ast::Pattern<ast::TypedHeader, A>,
-    ) -> Option<String> {
+        pattern: &ast::Pattern<ast::HolesResolvedTree, A>,
+    ) -> Option<SymbolId> {
         match &pattern.kind {
-            PatternKind::Name(name) => Some(name.clone()),
-            PatternKind::Wildcard => Some(format!("_w_wild_{}", self.term_ids.next_id())),
+            PatternKind::Name(binding) => Some(binding.symbol),
+            PatternKind::Wildcard => {
+                let id = self.term_ids.next_id();
+                Some(self.fresh(format!("_w_wild_{id}")))
+            }
             PatternKind::Typed(inner, _) | PatternKind::Attributed(_, inner) => {
-                self.simple_pattern_name(inner)
+                self.simple_pattern_symbol(inner)
             }
             PatternKind::Tuple(_)
             | PatternKind::Vec(_)

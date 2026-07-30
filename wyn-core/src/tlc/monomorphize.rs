@@ -42,13 +42,12 @@ pub fn monomorphize(mut program: SoaNormalized) -> Monomorphized {
     let Program {
         defs,
         mut symbols,
-        def_syms,
         mut term_ids,
         global_context,
         state: _,
     } = program;
     let defs = Monomorphizer::new(&mut symbols, defs, &mut term_ids).monomorphize();
-    let program = Program::from_parts(defs, symbols, def_syms, term_ids, global_context);
+    let program = Program::from_parts(defs, symbols, term_ids, global_context);
     program.assert_flat_apps();
     program
 }

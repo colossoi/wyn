@@ -8,7 +8,7 @@
 //!
 //! ## Operand layout per tag
 //!
-//! - `Int` / `Uint` / `Float` / `Bool` / `Unit` / `Global` / `Extern`: 0
+//! - `Int` / `Uint` / `Float` / `Bool` / `Unit` / `Global`: 0
 //! - `BinOp(_)`: `[lhs, rhs]`
 //! - `UnaryOp(_)`: `[operand]`
 //! - `Tuple(n)` / `Vector(n)` / `ArrayLit(n)`: `n` operands
@@ -18,7 +18,7 @@
 //! - `Index`: `[base, index]`
 //! - `Materialize`: `[value]`
 //! - `DynamicExtract`: `[base, index]`
-//! - `Call(name)` / `Intrinsic { .. }`: variable-arity arg list
+//! - `Call(function)` / `Intrinsic { .. }`: variable-arity arg list
 //! - `StorageImageLoad(resource)`: `[coord]`
 //! - `StorageImageStore(resource)`: `[coord, texel]`
 //! - `StorageView(Storage)`: `[offset, len]`
@@ -31,6 +31,137 @@
 
 use crate::BindingRef;
 
+/// Structurally resolved binary operator.
+///
+/// The parser may temporarily carry an operator token as text, but TLC and all
+/// later IRs use this closed representation. Backends dispatch on variants and
+/// use [`BinaryOperator::symbol`] only when rendering output or diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BinaryOperator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
+    FloorDivide,
+    FloorRemainder,
+    Power,
+    Equal,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    LogicalAnd,
+    LogicalOr,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    ShiftLeft,
+    ShiftRight,
+    ShiftRightLogical,
+}
+
+impl BinaryOperator {
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Subtract => "-",
+            Self::Multiply => "*",
+            Self::Divide => "/",
+            Self::Remainder => "%",
+            Self::FloorDivide => "//",
+            Self::FloorRemainder => "%%",
+            Self::Power => "**",
+            Self::Equal => "==",
+            Self::NotEqual => "!=",
+            Self::Less => "<",
+            Self::LessEqual => "<=",
+            Self::Greater => ">",
+            Self::GreaterEqual => ">=",
+            Self::LogicalAnd => "&&",
+            Self::LogicalOr => "||",
+            Self::BitwiseAnd => "&",
+            Self::BitwiseOr => "|",
+            Self::BitwiseXor => "^",
+            Self::ShiftLeft => "<<",
+            Self::ShiftRight => ">>",
+            Self::ShiftRightLogical => ">>>",
+        }
+    }
+}
+
+impl TryFrom<&str> for BinaryOperator {
+    type Error = ();
+
+    fn try_from(symbol: &str) -> Result<Self, Self::Error> {
+        Ok(match symbol {
+            "+" => Self::Add,
+            "-" => Self::Subtract,
+            "*" => Self::Multiply,
+            "/" => Self::Divide,
+            "%" => Self::Remainder,
+            "//" => Self::FloorDivide,
+            "%%" => Self::FloorRemainder,
+            "**" => Self::Power,
+            "==" => Self::Equal,
+            "!=" => Self::NotEqual,
+            "<" => Self::Less,
+            "<=" => Self::LessEqual,
+            ">" => Self::Greater,
+            ">=" => Self::GreaterEqual,
+            "&&" => Self::LogicalAnd,
+            "||" => Self::LogicalOr,
+            "&" => Self::BitwiseAnd,
+            "|" => Self::BitwiseOr,
+            "^" => Self::BitwiseXor,
+            "<<" => Self::ShiftLeft,
+            ">>" => Self::ShiftRight,
+            ">>>" => Self::ShiftRightLogical,
+            _ => return Err(()),
+        })
+    }
+}
+
+impl std::fmt::Display for BinaryOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.symbol())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum UnaryOperator {
+    Negate,
+    LogicalNot,
+}
+
+impl UnaryOperator {
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::Negate => "-",
+            Self::LogicalNot => "!",
+        }
+    }
+}
+
+impl TryFrom<&str> for UnaryOperator {
+    type Error = ();
+
+    fn try_from(symbol: &str) -> Result<Self, Self::Error> {
+        match symbol {
+            "-" => Ok(Self::Negate),
+            "!" => Ok(Self::LogicalNot),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for UnaryOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.symbol())
+    }
+}
+
 /// The operator identity shared by EGIR's pure nodes and SSA's `InstKind::Op`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum OpTag<R = BindingRef> {
@@ -41,10 +172,9 @@ pub enum OpTag<R = BindingRef> {
     Float(String),
     Bool(bool),
     Unit,
-    Global(String),
-    Extern(String),
-    BinOp(String),
-    UnaryOp(String),
+    Global(crate::GlobalId),
+    BinOp(BinaryOperator),
+    UnaryOp(UnaryOperator),
     Tuple(usize),
     Vector(usize),
     Matrix {
@@ -61,7 +191,7 @@ pub enum OpTag<R = BindingRef> {
     Index,
     Materialize,
     DynamicExtract,
-    Call(String),
+    Call(crate::FunctionId),
     Intrinsic {
         id: crate::builtins::BuiltinId,
         overload_idx: usize,
@@ -151,7 +281,6 @@ impl<R> OpTag<R> {
             OpTag::Bool(value) => OpTag::Bool(value),
             OpTag::Unit => OpTag::Unit,
             OpTag::Global(value) => OpTag::Global(value),
-            OpTag::Extern(value) => OpTag::Extern(value),
             OpTag::BinOp(value) => OpTag::BinOp(value),
             OpTag::UnaryOp(value) => OpTag::UnaryOp(value),
             OpTag::Tuple(value) => OpTag::Tuple(value),

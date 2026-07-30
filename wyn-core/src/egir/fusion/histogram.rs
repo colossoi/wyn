@@ -165,10 +165,10 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     let input_count = consumer_op.inputs.len();
     let input_nodes = consumer_effect.operand_nodes[..input_count].to_vec();
     let consumer_lambda = consumer_op.form.bucket.clone();
-    let mut interner = inner.data.region_interner.clone();
+    let mut identities = inner.data.identities.clone();
     let mut context = fusion_screma::Context {
         program: &inner,
-        interner: &mut interner,
+        identities: &mut identities,
         scope: &scope,
         span,
         outer_types: &outer_types,
@@ -212,7 +212,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
         support::rewrite_body_graph(body, rewrite)
     });
     rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
-        region_interner: interner,
+        identities: identities,
         ..data
     })
 }

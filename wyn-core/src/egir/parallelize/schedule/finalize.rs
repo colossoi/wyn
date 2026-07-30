@@ -8,7 +8,7 @@ use crate::egir::from_tlc::ConvertError;
 use crate::egir::program::{
     host_resource_names, physicalize_program, EntryPublication, PhysicalResourceTable, SemanticEntry,
 };
-use crate::egir::publish::PipelineDescriptorPublish;
+use crate::egir::publish::{PipelineDescriptorPublish, StageEntryAssociations};
 use crate::pipeline_descriptor::{
     ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor, StageBindingUses,
 };
@@ -58,10 +58,11 @@ impl KernelPlan {
         );
         let publications = self.publications(&physical_resources)?;
         let publication_refs = publications.iter().collect::<Vec<_>>();
-        program.data.core.pipeline.publish_implicit_bindings(&publication_refs)?;
-        program.data.core.pipeline.publish_graphics_io(&publication_refs);
+        let stage_entries = self.stage_entry_associations(&program.data.core.pipeline);
+        program.data.core.pipeline.publish_implicit_bindings(&publication_refs, &stage_entries)?;
+        program.data.core.pipeline.publish_graphics_io(&publication_refs, &stage_entries);
         self.publish(&mut program.data.core.pipeline, &physical_resources)?;
-        program.data.core.pipeline.publish_stage_binding_uses(&publication_refs);
+        program.data.core.pipeline.publish_stage_binding_uses(&publication_refs, &stage_entries);
         let input_names = host_resource_names(&program.data.core.resources);
         program.data.core.pipeline.relabel_input_storage_names(&input_names);
         program.data.core.pipeline.rebuild_frame_graph();
@@ -100,6 +101,34 @@ impl KernelPlan {
         Ok(publications)
     }
 
+    fn stage_entry_associations(&self, descriptor: &PipelineDescriptor) -> StageEntryAssociations {
+        let mut graphics = self.phase_ids_in(PhaseGroup::Graphics).into_iter();
+        descriptor
+            .pipelines
+            .iter()
+            .enumerate()
+            .map(|(index, pipeline)| match pipeline {
+                Pipeline::Compute(_) => self
+                    .pipelines
+                    .iter()
+                    .find(|scheduled| scheduled.order == index)
+                    .map(|scheduled| self.phase_ids_in(PhaseGroup::Pipeline(scheduled.id)))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|phase| self.phase(phase).entry.id)
+                    .collect(),
+                Pipeline::Graphics(graphics_pipeline) => graphics_pipeline
+                    .stages
+                    .iter()
+                    .map(|_| {
+                        self.phase(graphics.next().expect("graphics descriptor stage missing phase"))
+                            .entry
+                            .id
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
     fn install_phase_shells(&self, descriptor: &mut PipelineDescriptor) -> Result<(), String> {
         let mut rebuilt = descriptor
             .pipelines
@@ -142,12 +171,11 @@ impl KernelPlan {
     ) -> Result<(), String> {
         for scheduled in &self.pipelines {
             let phase_ids = self.phase_ids_in(PhaseGroup::Pipeline(scheduled.id));
-            let Some(Pipeline::Compute(compute)) = descriptor.pipelines.iter_mut().find(|pipeline| {
-                matches!(pipeline, Pipeline::Compute(candidate) if phase_ids.iter().any(|phase| {
-                    candidate.stages.iter().any(|stage| stage.entry_point == self.phase(*phase).entry_point())
-                }))
-            }) else {
-                return Err("scheduled compute pipeline was not installed".into());
+            let Some(Pipeline::Compute(compute)) = descriptor.pipelines.get_mut(scheduled.order) else {
+                return Err(
+                    "scheduled compute pipeline was not installed at its structural descriptor position"
+                        .into(),
+                );
             };
             let binding_index = compute
                 .bindings
@@ -220,7 +248,6 @@ impl KernelPlan {
     }
 
     fn check_explicit_dispatch_coverage(&self, entries: &[SemanticEntry]) -> Result<(), String> {
-        let by_name = entries.iter().map(|entry| (entry.name.as_str(), entry)).collect::<HashMap<_, _>>();
         for phase in
             self.phases.iter().filter(|phase| matches!(phase.placement.group, PhaseGroup::Pipeline(_)))
         {
@@ -231,9 +258,17 @@ impl KernelPlan {
             else {
                 continue;
             };
-            let Some(entry) = by_name.get(phase.entry_point()) else {
+            let Some(crate::egir::parallelize::CompilerFlowEndpoint::Entry(source_entry)) =
+                phase.flow_source
+            else {
                 continue;
             };
+            let entry = entries.get(source_entry.index()).ok_or_else(|| {
+                format!(
+                    "kernel `{}` refers to missing semantic entry {source_entry:?}",
+                    phase.entry_point()
+                )
+            })?;
             let Some(count) = phase.required_elements else {
                 continue;
             };

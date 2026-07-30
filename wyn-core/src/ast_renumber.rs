@@ -190,7 +190,14 @@ pub fn clone_pattern_fresh_ids(pat: &Pattern, nc: &mut NodeCounter) -> Pattern {
                 .iter()
                 .map(|f| crate::ast::RecordPatternField {
                     field: f.field.clone(),
-                    pattern: f.pattern.as_ref().map(|p| clone_pattern_fresh_ids(p, nc)),
+                    target: match &f.target {
+                        crate::ast::RecordPatternTarget::Shorthand(binding) => {
+                            crate::ast::RecordPatternTarget::Shorthand(binding.clone())
+                        }
+                        crate::ast::RecordPatternTarget::Pattern(pattern) => {
+                            crate::ast::RecordPatternTarget::Pattern(clone_pattern_fresh_ids(pattern, nc))
+                        }
+                    },
                 })
                 .collect(),
         ),

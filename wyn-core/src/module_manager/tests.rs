@@ -70,12 +70,7 @@ fn test_query_f32_sin_from_math_prelude() {
     } = program.global_context;
 
     // Use TypeChecker to get the function type schemes
-    let mut checker = TypeChecker::with_context_and_schemes(&manager, context, spec_schemes);
-    // After Phase 4 the type checker requires every catalog identifier
-    // to have a `NameResolution::Builtin` entry. Build the side table
-    // covering prelude module bodies — without it, bare references like
-    // `fract` inside `rand.init` resolve to an `UndefinedVariable`.
-    checker.set_name_resolution(nr);
+    let mut checker = TypeChecker::with_context_and_schemes(&manager, context, spec_schemes, nr);
     // Register the collection/SOAC builtins (`map`, `reduce`, ...) in scope, as
     // the real pipeline does (`types::run`). Prelude module bodies reference
     // them — e.g. `f32.sum` is `reduce(f32.(+), 0.0f32, x)`.

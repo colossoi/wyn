@@ -19,6 +19,7 @@
 use crate::ast::TypeName;
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::builtins::{by_id, Purity};
+use crate::op::{BinaryOperator, UnaryOperator};
 use crate::ssa::types::ConstantValue;
 use crate::types::TypeExt;
 use polytype::Type;
@@ -39,11 +40,11 @@ impl<P: Family> EGraph<P> {
             PureOp::Index if operands.len() == 2 => self.fold_index(operands[0], operands[1]),
             PureOp::BinOp(name) if operands.len() == 2 => {
                 let (a, b) = (operands[0], operands[1]);
-                self.fold_binop_identity(name, a, b)
-                    .or_else(|| self.fold_binop_const(name, a, b, result_ty))
-                    .or_else(|| self.fold_fdiv_const_to_mul(name, a, b, result_ty))
+                self.fold_binop_identity(*name, a, b)
+                    .or_else(|| self.fold_binop_const(*name, a, b, result_ty))
+                    .or_else(|| self.fold_fdiv_const_to_mul(*name, a, b, result_ty))
             }
-            PureOp::UnaryOp(name) if operands.len() == 1 => self.fold_unary(name, operands[0], result_ty),
+            PureOp::UnaryOp(name) if operands.len() == 1 => self.fold_unary(*name, operands[0], result_ty),
             PureOp::Intrinsic { id, overload_idx } => {
                 self.fold_intrinsic(*id, *overload_idx, operands, result_ty)
             }
@@ -87,16 +88,16 @@ impl<P: Family> EGraph<P> {
     }
 
     /// Identity and absorbing rules for `+`, `-`, `*`, `/`.
-    fn fold_binop_identity(&self, name: &str, a: NodeId, b: NodeId) -> Option<NodeId> {
+    fn fold_binop_identity(&self, name: BinaryOperator, a: NodeId, b: NodeId) -> Option<NodeId> {
         match name {
-            "+" if self.is_zero_literal(a) => Some(b),
-            "+" if self.is_zero_literal(b) => Some(a),
-            "-" if self.is_zero_literal(b) => Some(a),
-            "*" if self.is_one_literal(a) => Some(b),
-            "*" if self.is_one_literal(b) => Some(a),
-            "*" if self.is_zero_literal(a) => Some(a),
-            "*" if self.is_zero_literal(b) => Some(b),
-            "/" if self.is_one_literal(b) => Some(a),
+            BinaryOperator::Add if self.is_zero_literal(a) => Some(b),
+            BinaryOperator::Add if self.is_zero_literal(b) => Some(a),
+            BinaryOperator::Subtract if self.is_zero_literal(b) => Some(a),
+            BinaryOperator::Multiply if self.is_one_literal(a) => Some(b),
+            BinaryOperator::Multiply if self.is_one_literal(b) => Some(a),
+            BinaryOperator::Multiply if self.is_zero_literal(a) => Some(a),
+            BinaryOperator::Multiply if self.is_zero_literal(b) => Some(b),
+            BinaryOperator::Divide if self.is_one_literal(b) => Some(a),
             _ => None,
         }
     }
@@ -105,7 +106,7 @@ impl<P: Family> EGraph<P> {
     /// Dispatches on the result type; skips division by zero.
     fn fold_binop_const(
         &mut self,
-        name: &str,
+        name: BinaryOperator,
         a: NodeId,
         b: NodeId,
         result_ty: &Type<TypeName>,
@@ -140,7 +141,7 @@ impl<P: Family> EGraph<P> {
     /// for zero or a reciprocal-overflowing subnormal divisor.
     fn fold_fdiv_const_to_mul(
         &mut self,
-        name: &str,
+        name: BinaryOperator,
         value: NodeId,
         divisor: NodeId,
         result_ty: &Type<TypeName>,
@@ -151,7 +152,7 @@ impl<P: Family> EGraph<P> {
                 result_ty.elem_type(),
                 Some(Type::Constructed(TypeName::Float(32), _))
             );
-        if name != "/" || (!f32_result && !f32_vector_result) {
+        if name != BinaryOperator::Divide || (!f32_result && !f32_vector_result) {
             return None;
         }
 
@@ -167,7 +168,7 @@ impl<P: Family> EGraph<P> {
 
         let reciprocal = self.intern_constant(ConstantValue::from_f32(reciprocal), divisor_ty);
         Some(self.intern_pure(
-            PureOp::BinOp("*".into()),
+            PureOp::BinOp(BinaryOperator::Multiply),
             smallvec![value, reciprocal],
             result_ty.clone(),
             None,
@@ -182,11 +183,16 @@ impl<P: Family> EGraph<P> {
     /// operand and lowers to `OpCompositeConstruct` rebuilt per invocation —
     /// it can't become an `OpConstantComposite`, so it never hoists to a
     /// shared `Private` global. Folding the negation keeps the array constant.
-    fn fold_unary(&mut self, name: &str, inner: NodeId, result_ty: &Type<TypeName>) -> Option<NodeId> {
-        if name != "-" && name != "!" {
+    fn fold_unary(
+        &mut self,
+        name: UnaryOperator,
+        inner: NodeId,
+        result_ty: &Type<TypeName>,
+    ) -> Option<NodeId> {
+        if !matches!(name, UnaryOperator::Negate | UnaryOperator::LogicalNot) {
             return None;
         }
-        if name == "-" {
+        if name == UnaryOperator::Negate {
             if let Some(v) = self.as_i32(inner) {
                 return Some(self.intern_constant(ConstantValue::I32(v.wrapping_neg()), result_ty.clone()));
             }
@@ -203,7 +209,7 @@ impl<P: Family> EGraph<P> {
         else {
             return None;
         };
-        (inner_name == name && inner_ops.len() == 1).then(|| inner_ops[0])
+        (*inner_name == name && inner_ops.len() == 1).then(|| inner_ops[0])
     }
 
     fn fold_intrinsic(
@@ -316,7 +322,7 @@ impl<P: Family> EGraph<P> {
         }
     }
 
-    fn eval_const_predicate(&self, op: &str, a: NodeId, b: NodeId) -> Option<bool> {
+    fn eval_const_predicate(&self, op: BinaryOperator, a: NodeId, b: NodeId) -> Option<bool> {
         match &self.nodes.get(a)?.ty {
             Type::Constructed(TypeName::Int(32), _) => eval_i32_pred(op, self.as_i32(a)?, self.as_i32(b)?),
             Type::Constructed(TypeName::UInt(32), _) => eval_u32_pred(op, self.as_u32(a)?, self.as_u32(b)?),
@@ -403,87 +409,87 @@ impl<P: Family> EGraph<P> {
     }
 }
 
-fn eval_i32(op: &str, a: i32, b: i32) -> Option<i32> {
+fn eval_i32(op: BinaryOperator, a: i32, b: i32) -> Option<i32> {
     match op {
-        "+" => Some(a.wrapping_add(b)),
-        "-" => Some(a.wrapping_sub(b)),
-        "*" => Some(a.wrapping_mul(b)),
-        "/" if b != 0 => a.checked_div(b),
-        "%" if b != 0 => a.checked_rem(b),
-        "&" => Some(a & b),
-        "|" => Some(a | b),
-        "^" => Some(a ^ b),
+        BinaryOperator::Add => Some(a.wrapping_add(b)),
+        BinaryOperator::Subtract => Some(a.wrapping_sub(b)),
+        BinaryOperator::Multiply => Some(a.wrapping_mul(b)),
+        BinaryOperator::Divide if b != 0 => a.checked_div(b),
+        BinaryOperator::Remainder if b != 0 => a.checked_rem(b),
+        BinaryOperator::BitwiseAnd => Some(a & b),
+        BinaryOperator::BitwiseOr => Some(a | b),
+        BinaryOperator::BitwiseXor => Some(a ^ b),
         _ => None,
     }
 }
 
-fn eval_u32(op: &str, a: u32, b: u32) -> Option<u32> {
+fn eval_u32(op: BinaryOperator, a: u32, b: u32) -> Option<u32> {
     match op {
-        "+" => Some(a.wrapping_add(b)),
-        "-" => Some(a.wrapping_sub(b)),
-        "*" => Some(a.wrapping_mul(b)),
-        "/" if b != 0 => Some(a / b),
-        "%" if b != 0 => Some(a % b),
-        "&" => Some(a & b),
-        "|" => Some(a | b),
-        "^" => Some(a ^ b),
+        BinaryOperator::Add => Some(a.wrapping_add(b)),
+        BinaryOperator::Subtract => Some(a.wrapping_sub(b)),
+        BinaryOperator::Multiply => Some(a.wrapping_mul(b)),
+        BinaryOperator::Divide if b != 0 => Some(a / b),
+        BinaryOperator::Remainder if b != 0 => Some(a % b),
+        BinaryOperator::BitwiseAnd => Some(a & b),
+        BinaryOperator::BitwiseOr => Some(a | b),
+        BinaryOperator::BitwiseXor => Some(a ^ b),
         _ => None,
     }
 }
 
-fn eval_f32(op: &str, a: f32, b: f32) -> Option<f32> {
+fn eval_f32(op: BinaryOperator, a: f32, b: f32) -> Option<f32> {
     match op {
-        "+" => Some(a + b),
-        "-" => Some(a - b),
-        "*" => Some(a * b),
-        "/" => Some(a / b),
-        "%" => Some(a % b),
+        BinaryOperator::Add => Some(a + b),
+        BinaryOperator::Subtract => Some(a - b),
+        BinaryOperator::Multiply => Some(a * b),
+        BinaryOperator::Divide => Some(a / b),
+        BinaryOperator::Remainder => Some(a % b),
         _ => None,
     }
 }
 
-fn eval_i32_pred(op: &str, a: i32, b: i32) -> Option<bool> {
+fn eval_i32_pred(op: BinaryOperator, a: i32, b: i32) -> Option<bool> {
     Some(match op {
-        "==" => a == b,
-        "!=" => a != b,
-        "<" => a < b,
-        "<=" => a <= b,
-        ">" => a > b,
-        ">=" => a >= b,
+        BinaryOperator::Equal => a == b,
+        BinaryOperator::NotEqual => a != b,
+        BinaryOperator::Less => a < b,
+        BinaryOperator::LessEqual => a <= b,
+        BinaryOperator::Greater => a > b,
+        BinaryOperator::GreaterEqual => a >= b,
         _ => return None,
     })
 }
 
-fn eval_u32_pred(op: &str, a: u32, b: u32) -> Option<bool> {
+fn eval_u32_pred(op: BinaryOperator, a: u32, b: u32) -> Option<bool> {
     Some(match op {
-        "==" => a == b,
-        "!=" => a != b,
-        "<" => a < b,
-        "<=" => a <= b,
-        ">" => a > b,
-        ">=" => a >= b,
+        BinaryOperator::Equal => a == b,
+        BinaryOperator::NotEqual => a != b,
+        BinaryOperator::Less => a < b,
+        BinaryOperator::LessEqual => a <= b,
+        BinaryOperator::Greater => a > b,
+        BinaryOperator::GreaterEqual => a >= b,
         _ => return None,
     })
 }
 
-fn eval_f32_pred(op: &str, a: f32, b: f32) -> Option<bool> {
+fn eval_f32_pred(op: BinaryOperator, a: f32, b: f32) -> Option<bool> {
     Some(match op {
-        "==" => a == b,
-        "!=" => !a.is_nan() && !b.is_nan() && a != b,
-        "<" => a < b,
-        "<=" => a <= b,
-        ">" => a > b,
-        ">=" => a >= b,
+        BinaryOperator::Equal => a == b,
+        BinaryOperator::NotEqual => !a.is_nan() && !b.is_nan() && a != b,
+        BinaryOperator::Less => a < b,
+        BinaryOperator::LessEqual => a <= b,
+        BinaryOperator::Greater => a > b,
+        BinaryOperator::GreaterEqual => a >= b,
         _ => return None,
     })
 }
 
-fn eval_bool_pred(op: &str, a: bool, b: bool) -> Option<bool> {
+fn eval_bool_pred(op: BinaryOperator, a: bool, b: bool) -> Option<bool> {
     Some(match op {
-        "==" => a == b,
-        "!=" => a != b,
-        "&&" => a && b,
-        "||" => a || b,
+        BinaryOperator::Equal => a == b,
+        BinaryOperator::NotEqual => a != b,
+        BinaryOperator::LogicalAnd => a && b,
+        BinaryOperator::LogicalOr => a || b,
         _ => return None,
     })
 }

@@ -1,4 +1,4 @@
-//! Build source entry shells for EGIR scheduling.
+//! Build source entry shells and structural stage associations for EGIR scheduling.
 //!
 //! This conversion preserves source entry metadata without choosing generated
 //! entries, resources, output grouping, or dispatch phases.
@@ -6,16 +6,19 @@
 use crate::interface::EntryKind;
 use crate::pipeline_descriptor::*;
 use crate::tlc::DefMeta as GenericDefMeta;
+use crate::SymbolId;
 
 type Program = crate::tlc::stage::InputSliceBoundsInferred;
 type DefMeta = GenericDefMeta<crate::tlc::data::EntryInputBounds>;
 
 pub(super) struct PipelineSeed {
     pub pipeline: PipelineDescriptor,
+    pub stage_symbols: Vec<Vec<SymbolId>>,
 }
 
 pub(super) fn run(program: &Program) -> PipelineSeed {
     let mut pipelines = Vec::new();
+    let mut stage_symbols = Vec::new();
 
     for def in &program.defs {
         let DefMeta::EntryPoint(entry) = &def.meta else {
@@ -61,6 +64,7 @@ pub(super) fn run(program: &Program) -> PipelineSeed {
                 default_total_threads: None,
                 feedback,
             }));
+            stage_symbols.push(vec![def.name]);
         } else {
             let stage = if decl.entry_kind == EntryKind::Vertex {
                 ShaderStage::Vertex
@@ -79,6 +83,7 @@ pub(super) fn run(program: &Program) -> PipelineSeed {
                 fragment_outputs: Vec::new(),
                 feedback,
             }));
+            stage_symbols.push(vec![def.name]);
         }
     }
 
@@ -87,5 +92,6 @@ pub(super) fn run(program: &Program) -> PipelineSeed {
             pipelines,
             frame_graph: Default::default(),
         },
+        stage_symbols,
     }
 }

@@ -2,13 +2,13 @@
 
 use super::{partial_eval, VarRef};
 use crate::ast::{BinaryOp, Span, TypeName};
+use crate::op::BinaryOperator;
 use crate::tlc::context::RewriteGlobal;
 use crate::tlc::data::{Empty, PolymorphicDefinition};
 use crate::tlc::ownership::OwnershipValidated;
-use crate::tlc::{Def, DefMeta, Lambda, Program, Term, TermId, TermIdSource, TermKind};
+use crate::tlc::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermId, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
-use std::collections::HashMap;
 
 /// Test helper that manages symbol table and term ID generation.
 struct TestBuilder {
@@ -72,7 +72,6 @@ fn make_program(
             return_diet: crate::types::Diet::observing(),
         }],
         symbols,
-        HashMap::new(),
         term_ids,
         rewrite_global(),
     )
@@ -150,7 +149,7 @@ fn eval_float_builtin(name: &str, args: &[f32]) -> Term<Empty, Empty> {
 
 fn make_binop(
     ids: &mut TermIdSource,
-    op: &str,
+    op: BinaryOperator,
     lhs: Term<Empty, Empty>,
     rhs: Term<Empty, Empty>,
 ) -> Term<Empty, Empty> {
@@ -167,7 +166,7 @@ fn make_binop(
                 id: ids.next_id(),
                 ty: binop_ty,
                 span: make_span(),
-                kind: TermKind::BinOp(BinaryOp { op: op.to_string() }),
+                kind: TermKind::BinOp(BinaryOp { op }),
             }),
             args: vec![lhs, rhs],
         },
@@ -181,7 +180,7 @@ fn test_constant_folding_add() {
 
     let lhs = make_int(&mut b.ids, 2);
     let rhs = make_int(&mut b.ids, 3);
-    let term = make_binop(&mut b.ids, "+", lhs, rhs);
+    let term = make_binop(&mut b.ids, BinaryOperator::Add, lhs, rhs);
 
     let program = make_program(test_sym, term, b.finish());
 
@@ -201,7 +200,7 @@ fn test_constant_folding_mul() {
 
     let lhs = make_int(&mut b.ids, 4);
     let rhs = make_int(&mut b.ids, 7);
-    let term = make_binop(&mut b.ids, "*", lhs, rhs);
+    let term = make_binop(&mut b.ids, BinaryOperator::Multiply, lhs, rhs);
 
     let program = make_program(test_sym, term, b.finish());
 
@@ -302,7 +301,6 @@ fn scalar_glsl_math_folds_inside_lambda_body() {
             return_diet: crate::types::Diet::observing(),
         }],
         symbols,
-        HashMap::new(),
         term_ids,
         rewrite_global(),
     );
@@ -327,7 +325,7 @@ fn test_algebraic_add_zero() {
         kind: TermKind::Var(VarRef::Symbol(x_sym)),
     };
     let zero = make_int(&mut b.ids, 0);
-    let term = make_binop(&mut b.ids, "+", x, zero);
+    let term = make_binop(&mut b.ids, BinaryOperator::Add, x, zero);
 
     let program = make_program(test_sym, term, b.finish());
 
@@ -356,7 +354,7 @@ fn test_algebraic_mul_one() {
         span: b.span(),
         kind: TermKind::Var(VarRef::Symbol(x_sym)),
     };
-    let term = make_binop(&mut b.ids, "*", one, x);
+    let term = make_binop(&mut b.ids, BinaryOperator::Multiply, one, x);
 
     let program = make_program(test_sym, term, b.finish());
 
@@ -385,7 +383,7 @@ fn test_algebraic_mul_zero() {
         kind: TermKind::Var(VarRef::Symbol(x_sym)),
     };
     let zero = make_int(&mut b.ids, 0);
-    let term = make_binop(&mut b.ids, "*", x, zero);
+    let term = make_binop(&mut b.ids, BinaryOperator::Multiply, x, zero);
 
     let program = make_program(test_sym, term, b.finish());
 
@@ -473,7 +471,7 @@ fn test_let_constant_propagation() {
         kind: TermKind::Var(VarRef::Symbol(x_sym)),
     };
     let three = make_int(&mut b.ids, 3);
-    let body_expr = make_binop(&mut b.ids, "+", x_var, three);
+    let body_expr = make_binop(&mut b.ids, BinaryOperator::Add, x_var, three);
     let term = Term {
         id: b.next_id(),
         ty: Type::Constructed(TypeName::Int(32), vec![]),
@@ -523,7 +521,7 @@ fn test_function_inlining() {
         span: b.span(),
         kind: TermKind::Var(VarRef::Symbol(b_sym)),
     };
-    let a_plus_b = make_binop(&mut b.ids, "+", a_var, b_var);
+    let a_plus_b = make_binop(&mut b.ids, BinaryOperator::Add, a_var, b_var);
 
     let foo_body = Term {
         id: b.next_id(),
@@ -589,7 +587,6 @@ fn test_function_inlining() {
             },
         ],
         symbols,
-        HashMap::new(),
         term_ids,
         rewrite_global(),
     );
@@ -708,7 +705,6 @@ fn test_function_alias_inlining() {
             },
         ],
         symbols,
-        HashMap::new(),
         term_ids,
         rewrite_global(),
     );
@@ -831,7 +827,6 @@ fn test_function_alias_partial_application() {
             },
         ],
         symbols,
-        HashMap::new(),
         term_ids,
         rewrite_global(),
     );
@@ -915,7 +910,6 @@ fn test_intrinsic_alias_inlining() {
             return_diet: crate::types::Diet::observing(),
         }],
         symbols,
-        HashMap::new(),
         term_ids,
         rewrite_global(),
     );
@@ -1081,4 +1075,58 @@ fn let_bound_array_substituted_through_soac_input() {
 
     assert_eq!(result.defs.len(), 1);
     assert_no_free_reference_to(&result.defs[0].body, m_sym);
+}
+
+#[test]
+fn let_bound_value_is_substituted_through_residual_loop() {
+    let mut b = TestBuilder::new();
+    let n_sym = b.sym("n");
+    let acc_sym = b.sym("acc");
+    let index_sym = b.sym("i");
+    let test_sym = b.sym("test");
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+
+    let bound = Term {
+        id: b.next_id(),
+        ty: i32_ty.clone(),
+        span: b.span(),
+        kind: TermKind::Var(VarRef::Symbol(n_sym)),
+    };
+    let body = Term {
+        id: b.next_id(),
+        ty: i32_ty.clone(),
+        span: b.span(),
+        kind: TermKind::Var(VarRef::Symbol(acc_sym)),
+    };
+    let loop_term = Term {
+        id: b.next_id(),
+        ty: i32_ty.clone(),
+        span: b.span(),
+        kind: TermKind::Loop {
+            loop_var: acc_sym,
+            loop_var_ty: i32_ty.clone(),
+            init: Box::new(make_int(&mut b.ids, 0)),
+            init_bindings: vec![],
+            kind: LoopKind::ForRange {
+                var: index_sym,
+                var_ty: i32_ty.clone(),
+                bound: Box::new(bound),
+            },
+            body: Box::new(body),
+        },
+    };
+    let term = Term {
+        id: b.next_id(),
+        ty: i32_ty.clone(),
+        span: b.span(),
+        kind: TermKind::Let {
+            name: n_sym,
+            name_ty: i32_ty,
+            rhs: Box::new(make_int(&mut b.ids, 10)),
+            body: Box::new(loop_term),
+        },
+    };
+
+    let result = partial_eval(make_program(test_sym, term, b.finish()));
+    assert_no_free_reference_to(&result.defs[0].body, n_sym);
 }

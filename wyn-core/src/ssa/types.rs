@@ -579,6 +579,8 @@ impl Program<stage::BareTag, ()> {
 /// A program-level constant definition.
 #[derive(Debug, Clone)]
 pub struct Constant {
+    pub id: crate::GlobalId,
+    /// Diagnostic and emitted-symbol metadata.
     pub name: String,
     pub body: FuncBody,
 }
@@ -586,6 +588,8 @@ pub struct Constant {
 /// A function definition.
 #[derive(Debug, Clone)]
 pub struct Function {
+    pub id: crate::FunctionId,
+    /// Diagnostic and emitted-symbol metadata.
     pub name: String,
     pub body: FuncBody,
     pub span: Span,
@@ -596,10 +600,14 @@ pub struct Function {
 /// An entry point definition.
 #[derive(Debug, Clone)]
 pub struct EntryPoint {
+    pub id: crate::EntryId,
+    /// Host-facing entry symbol and diagnostic metadata.
     pub name: String,
     pub body: FuncBody,
     pub execution_model: ExecutionModel,
     pub inputs: Vec<interface::EntryInput<Type<TypeName>>>,
+    /// Structural source-parameter to ABI-input-slot association.
+    pub parameter_inputs: Vec<Vec<usize>>,
     pub outputs: Vec<interface::EntryOutput<Type<TypeName>>>,
     /// Compiler-introduced storage bindings the entry touches beyond its
     /// declared inputs/outputs (e.g. partials/intermediate buffers emitted

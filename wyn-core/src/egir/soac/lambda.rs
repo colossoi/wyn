@@ -9,7 +9,7 @@ use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{fresh_region_name, RegionInterner, SemanticFunc};
+use crate::egir::program::{fresh_region_name, ProgramIdentities, SemanticFunc};
 use crate::egir::types::{EGraph, ENode, NodeId, PureOp, RegionId, SegBody, SkeletonTerminator};
 use crate::flow::BlockId;
 
@@ -67,15 +67,15 @@ pub(crate) fn unpack_results(graph: &mut EGraph, result: NodeId, types: &[Type<T
 pub(crate) fn emit_call(
     graph: &mut EGraph,
     lambda: &screma::Lambda,
-    callee: Option<&str>,
     arguments: Vec<NodeId>,
 ) -> Vec<NodeId> {
     if lambda.is_identity() {
         debug_assert_eq!(arguments.len(), lambda.result_types.len());
         return arguments;
     }
+    let function = lambda.seg_body().expect("region lambda has no callable body").region;
     let result = graph.intern_pure(
-        PureOp::Call(callee.expect("region lambda has no resolved callee").to_owned()),
+        PureOp::Call(function),
         SmallVec::from_vec(arguments),
         result_type(&lambda.result_types),
         None,
@@ -101,7 +101,7 @@ pub(crate) fn finish_function(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finish_region_lambda(
-    interner: &mut RegionInterner,
+    identities: &mut ProgramIdentities,
     scope: &str,
     label: &str,
     span: Span,
@@ -128,8 +128,8 @@ pub(crate) fn finish_region_lambda(
         return (screma::Lambda::identity(parameter_types), None);
     }
 
-    let name = fresh_region_name(interner, &format!("{scope}_{label}"));
-    let region = interner.intern(&name);
+    let name = fresh_region_name(identities, &format!("{scope}_{label}"));
+    let region = identities.alloc_function(name.clone());
     let function = finish_function(
         graph,
         return_block,

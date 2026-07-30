@@ -219,18 +219,18 @@ impl Parser<'_> {
         loop {
             let field_name = self.expect_identifier()?;
 
-            let pattern = if self.check(&Token::Assign) {
+            let target = if self.check(&Token::Assign) {
                 // field = pat
                 self.advance();
-                Some(self.parse_pattern()?)
+                crate::ast::RecordPatternTarget::Pattern(self.parse_pattern()?)
             } else {
                 // Shorthand: just field name
-                None
+                crate::ast::RecordPatternTarget::Shorthand(field_name.clone())
             };
 
             fields.push(RecordPatternField {
                 field: field_name,
-                pattern,
+                target,
             });
 
             if !self.check(&Token::Comma) {

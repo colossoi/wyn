@@ -249,7 +249,6 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
             return_diet: crate::types::Diet::observing(),
         }],
         symbols,
-        std::collections::HashMap::new(),
         ids,
         tlc::context::RewriteGlobal {
             known_defs: Default::default(),

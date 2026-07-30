@@ -75,7 +75,7 @@ fn test_manual_scope_management() {
 // ---------------------------------------------------------------------------
 
 mod pattern_bound_names {
-    use crate::ast::{Header, NodeId, Pattern, PatternKind, RecordPatternField, Span};
+    use crate::ast::{Header, NodeId, Pattern, PatternKind, RecordPatternField, RecordPatternTarget, Span};
     use crate::scope::pattern_bound_names;
     use polytype::Type;
 
@@ -144,11 +144,11 @@ mod pattern_bound_names {
         let p = pat(PatternKind::Record(vec![
             RecordPatternField {
                 field: "a".into(),
-                pattern: Some(name("alias_a")),
+                target: RecordPatternTarget::Pattern(name("alias_a")),
             },
             RecordPatternField {
                 field: "b".into(),
-                pattern: Some(name("alias_b")),
+                target: RecordPatternTarget::Pattern(name("alias_b")),
             },
         ]));
         assert_eq!(pattern_bound_names(&p), vec!["alias_a", "alias_b"]);
@@ -161,11 +161,11 @@ mod pattern_bound_names {
         let p = pat(PatternKind::Record(vec![
             RecordPatternField {
                 field: "x".into(),
-                pattern: None,
+                target: RecordPatternTarget::Shorthand("x".into()),
             },
             RecordPatternField {
                 field: "y".into(),
-                pattern: Some(name("renamed_y")),
+                target: RecordPatternTarget::Pattern(name("renamed_y")),
             },
         ]));
         assert_eq!(pattern_bound_names(&p), vec!["x", "renamed_y"]);
@@ -180,7 +180,7 @@ mod pattern_bound_names {
             pat(PatternKind::Typed(
                 Box::new(pat(PatternKind::Record(vec![RecordPatternField {
                     field: "k".into(),
-                    pattern: None,
+                    target: RecordPatternTarget::Shorthand("k".into()),
                 }]))),
                 i32_ty(),
             )),

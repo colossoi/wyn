@@ -263,15 +263,13 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
                     format_ref(&operands[1])
                 );
             }
-            OpTag::Call(func) => {
-                let _ = write!(out, "call @{func}({})", format_refs(operands));
+            OpTag::Call(function) => {
+                let _ = write!(out, "call @{function}({})", format_refs(operands));
             }
-            OpTag::Global(name) => {
-                let _ = write!(out, "global @{name}");
+            OpTag::Global(global) => {
+                let _ = write!(out, "global @{global}");
             }
-            OpTag::Extern(name) => {
-                let _ = write!(out, "extern @{name}");
-            }
+
             OpTag::Intrinsic { id, overload_idx } => {
                 let name = crate::builtins::by_id(*id).dispatch_name();
                 let _ = write!(out, "intrinsic @{name}#{overload_idx}({})", format_refs(operands));

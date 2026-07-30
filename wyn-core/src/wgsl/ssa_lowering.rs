@@ -9,7 +9,7 @@
 //! - [`TypeEmitter`]: Wyn polytype → WGSL type string, with cached tuple structs.
 //! - [`lower`]: entry point.
 
-use crate::builtins::{by_id, catalog};
+use crate::builtins::{by_id, catalog, BuiltinId};
 use crate::{LookupMap, LookupSet};
 use std::fmt::Write as _;
 
@@ -585,7 +585,7 @@ fn atomic_storage_bindings(program: &crate::ssa::stage::WgslReady) -> LookupSet<
 struct LowerCtx<'a> {
     program: &'a crate::ssa::stage::WgslReady,
     function_variants: StorageFunctionVariants,
-    current_function_names: LookupMap<String, String>,
+    current_function_names: LookupMap<crate::FunctionId, String>,
     current_storage_accesses: LookupMap<BindingRef, crate::ResourceAccess>,
     storage_access_variants: LookupMap<BindingRef, (bool, bool)>,
     atomic_bindings: LookupSet<BindingRef>,
@@ -606,7 +606,7 @@ struct LowerCtx<'a> {
     /// one field per push-constant input; fields are keyed by the input
     /// index in `entry.inputs` so `lower_entry_point` can route the
     /// corresponding SSA `ValueId` to `<block_var>.<field_name>`.
-    pc_blocks: LookupMap<String, PcBlock>,
+    pc_blocks: LookupMap<crate::EntryId, PcBlock>,
     /// If the current compute entry's source declared its own
     /// `#[builtin(global_invocation_id)]` param, this holds that param's
     /// mangled WGSL name. `_w_intrinsic_thread_id()` lowering reads from
@@ -724,16 +724,18 @@ impl<'a> LowerCtx<'a> {
                 .entry_context
                 .map(|entry| self.function_variants.names_for_entry(entry).clone())
                 .unwrap_or_default();
-            self.lower_function(
-                &self.program.functions[emission.function],
-                &emission.name,
-                &mut code,
-            )?;
+            let function = self
+                .program
+                .functions
+                .iter()
+                .find(|function| function.id == emission.function)
+                .ok_or_else(|| crate::err_wgsl!("unknown function {}", emission.function))?;
+            self.lower_function(function, &emission.name, &mut code)?;
         }
 
         // Emit entry points.
-        for (entry_index, entry) in self.program.entry_points.iter().enumerate() {
-            self.current_function_names = self.function_variants.names_for_entry(entry_index).clone();
+        for entry in &self.program.entry_points {
+            self.current_function_names = self.function_variants.names_for_entry(entry.id).clone();
             self.lower_entry_point(entry, &mut code)?;
         }
 
@@ -1497,7 +1499,7 @@ impl<'a> LowerCtx<'a> {
         // Register the PC block (after emitting the fn body so state
         // additions can't accidentally leak into the fn emission).
         if let Some(pc) = pc_block {
-            self.pc_blocks.insert(entry.name.clone(), pc);
+            self.pc_blocks.insert(entry.id, pc);
         }
         Ok(())
     }
@@ -2489,9 +2491,16 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     // (u32 arrayLength result).
                     let l = self.coerce_operand_to_result_ty(lhs, result_ty.as_ref())?;
                     let r = self.coerce_operand_to_result_ty(rhs, result_ty.as_ref())?;
-                    match op.as_str() {
-                        "**" => Ok(format!("pow({}, {})", l, r)),
-                        _ => Ok(format!("({} {} {})", l, op, r)),
+                    match op {
+                        crate::op::BinaryOperator::Power => Ok(format!("pow({}, {})", l, r)),
+                        crate::op::BinaryOperator::FloorDivide
+                        | crate::op::BinaryOperator::FloorRemainder
+                        | crate::op::BinaryOperator::ShiftRightLogical => Err(crate::err_wgsl_at!(
+                            self.blame_span(),
+                            "binary operator '{}' has no direct WGSL lowering",
+                            op.symbol()
+                        )),
+                        _ => Ok(format!("({} {} {})", l, op.symbol(), r)),
                     }
                 }
 
@@ -2607,52 +2616,41 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     Ok(format!("{}[{}]", base_val, index_val))
                 }
 
-                crate::op::OpTag::Global(name) => {
-                    // Constants like iResolution/iTime are emitted at module scope
-                    // and referenced by their user-facing names (validated as
-                    // legal WGSL identifiers). Wyn-internal defs go through the
-                    // mangler.
-                    if self.ctx.program.constants.iter().any(|c| c.name == *name) {
-                        Ok(name.clone())
-                    } else {
-                        self.ctx.mangle_tracked(name)
-                    }
+                crate::op::OpTag::Global(global_id) => {
+                    let constant = self
+                        .ctx
+                        .program
+                        .constants
+                        .iter()
+                        .find(|constant| constant.id == *global_id)
+                        .ok_or_else(|| {
+                            crate::err_wgsl_at!(self.blame_span(), "unknown global constant {}", global_id)
+                        })?;
+                    self.ctx.mangle_tracked(&constant.name)
                 }
 
-                crate::op::OpTag::Call(func) => {
+                crate::op::OpTag::Call(function_id) => {
                     let args: &[ValueRef] = operands;
-                    // Route well-known builtins (type casts, math functions)
-                    // through the same dispatch as `OpTag::Intrinsic`; fall
-                    // back to a mangled user-function call.
                     let raw_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
                     let raw_strs = raw_strs?;
-                    // A user-defined function shadows any same-named builtin:
-                    // resolve the callee first and only fall back to builtin
-                    // dispatch when no user function owns this name. Without
-                    // this, a user `def step(...)` would be hijacked by the
-                    // builtin `step` lowering (matched purely by surface name).
-                    let callee = self.ctx.program.functions.iter().find(|f| f.name == *func);
-                    if callee.is_none() {
-                        // Structural dispatch: if this name is registered
-                        // in `impl_source`, route through the `BuiltinLowering`
-                        // so the qualifier prefix doesn't matter (`f32.cos`,
-                        // `vec.cos`, `_w_intrinsic_cos` all share a `PrimOp`).
-                        if let Some(lowered) =
-                            self.try_lower_via_impl_source(func, &raw_strs, result_ty.as_ref())?
-                        {
-                            return Ok(lowered);
-                        }
-                        if let Some(lowered) = try_lower_wgsl_builtin(func, &raw_strs) {
-                            return Ok(lowered);
-                        }
-                    }
-                    let arg_strs = raw_strs;
-                    let emitted =
-                        self.ctx.current_function_names.get(func).cloned().unwrap_or_else(|| func.clone());
+                    let callee = self
+                        .ctx
+                        .program
+                        .functions
+                        .iter()
+                        .find(|function| function.id == *function_id)
+                        .ok_or_else(|| {
+                            crate::err_wgsl_at!(self.blame_span(), "unknown function {}", function_id)
+                        })?;
+                    let emitted = self
+                        .ctx
+                        .current_function_names
+                        .get(function_id)
+                        .cloned()
+                        .unwrap_or_else(|| callee.name.clone());
                     let mangled = self.ctx.mangle_tracked(&emitted)?;
-                    Ok(format!("{}({})", mangled, arg_strs.join(", ")))
+                    Ok(format!("{}({})", mangled, raw_strs.join(", ")))
                 }
-
                 crate::op::OpTag::Intrinsic { id, overload_idx } => {
                     let args: &[ValueRef] = operands;
                     let known = catalog().known();
@@ -2897,8 +2895,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             "_w_intrinsic_length requires an SSA array argument"
                         ));
                     }
-                    let name = by_id(*id).dispatch_name();
-                    self.lower_intrinsic(name, &arg_strs, result_ty.as_ref())
+                    self.lower_intrinsic(*id, *overload_idx, &arg_strs, result_ty.as_ref())
                 }
 
                 crate::op::OpTag::StorageImageLoad(binding) => {
@@ -2913,12 +2910,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     let texel = self.get_value(operands[1])?;
                     Ok(format!("textureStore({}, {}, {})", image, coord, texel))
                 }
-
-                crate::op::OpTag::Extern(linkage) => Err(crate::err_wgsl_at!(
-                    self.blame_span(),
-                    "Extern functions are not supported in WGSL (linkage: {})",
-                    linkage
-                )),
 
                 crate::op::OpTag::ArrayRange { has_step } => {
                     let start = operands[0];
@@ -3041,56 +3032,55 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
     fn lower_intrinsic(
         &mut self,
-        name: &str,
+        id: BuiltinId,
+        overload_idx: usize,
         args: &[String],
         ret_ty: Option<&PolyType<TypeName>>,
     ) -> Result<String> {
-        if let Some(lowered) = self.try_lower_via_impl_source(name, args, ret_ty)? {
-            return Ok(lowered);
-        }
-        if let Some(lowered) = try_lower_wgsl_builtin(name, args) {
-            return Ok(lowered);
-        }
-        Err(crate::err_wgsl_at!(
-            self.blame_span(),
-            "intrinsic '{}' is not yet implemented in WGSL lowering",
-            name
-        ))
-    }
-
-    /// Look up `name` in `impl_source` and, if it's a `PrimOp`, lower
-    /// it via `lower_primop_wgsl`. Returns `Ok(None)` when the name
-    /// isn't registered or the impl isn't a `PrimOp` we lower (linked
-    /// SPIR-V functions and `Intrinsic`s are out of scope here).
-    fn try_lower_via_impl_source(
-        &mut self,
-        name: &str,
-        args: &[String],
-        result_ty: Option<&PolyType<TypeName>>,
-    ) -> Result<Option<String>> {
-        let Some(builtin) = catalog().lookup_lowering(name) else {
-            return Ok(None);
-        };
-        let prim_op = match builtin {
+        let builtin = by_id(id);
+        let overload = builtin.overloads().get(overload_idx).ok_or_else(|| {
+            crate::err_wgsl_at!(
+                self.blame_span(),
+                "builtin '{}' has no overload {}",
+                builtin.dispatch_name(),
+                overload_idx
+            )
+        })?;
+        let prim_op = match &overload.lowering {
             BuiltinLowering::PrimOp(p) => p,
             BuiltinLowering::LinkedSpirv(_)
             | BuiltinLowering::ByBuiltinId
             | BuiltinLowering::ExtInstSplat { .. }
-            | BuiltinLowering::NotLowered => return Ok(None),
+            | BuiltinLowering::NotLowered => {
+                return Err(crate::err_wgsl_at!(
+                    self.blame_span(),
+                    "builtin '{}' (id {:?}, overload {}) is not yet implemented in WGSL lowering",
+                    builtin.dispatch_name(),
+                    id,
+                    overload_idx
+                ));
+            }
         };
-        let result_ty_str = match result_ty {
+        let result_ty_str = match ret_ty {
             Some(ty) => Some(self.ctx.type_emitter.type_to_wgsl(ty)?),
             None => None,
         };
-        Ok(lower_primop_wgsl(prim_op, args, result_ty_str.as_deref()))
+        lower_primop_wgsl(prim_op, args, result_ty_str.as_deref()).ok_or_else(|| {
+            crate::err_wgsl_at!(
+                self.blame_span(),
+                "builtin '{}' (id {:?}, overload {}) is not yet implemented in WGSL lowering",
+                builtin.dispatch_name(),
+                id,
+                overload_idx
+            )
+        })
     }
 }
 
 /// Lower a `BuiltinLowering::PrimOp` to its WGSL expression. Mirrors the
-/// SPIR-V backend's `lower_primop` — both backends consume the same
-/// `BuiltinLowering` map from `impl_source`, so the qualifier prefix on the
-/// surface name (`f32.cos`, `vec.cos`, `_w_intrinsic_cos`) is invisible
-/// here: only the structural `PrimOp` matters.
+/// SPIR-V backend's `lower_primop`: both consume the chosen `BuiltinId`
+/// overload's lowering descriptor. Surface spellings such as `f32.cos` are
+/// diagnostic metadata only; emission depends solely on the structural `PrimOp`.
 ///
 /// `result_ty_str` is the WGSL spelling of the call's result type
 /// (e.g. `"f32"`, `"i32"`, `"vec3<f32>"`). Required for type-cast ops
@@ -3254,27 +3244,6 @@ fn lower_primop_wgsl(prim_op: &PrimOp, args: &[String], result_ty_str: Option<&s
         // clear "not yet implemented" error if one shows up.
         _ => None,
     }
-}
-
-/// Inline `f32.pi` / `f32.e` (and the `f64` analogues) as WGSL float
-/// literals. Those are prelude `def`s — not `PrimOp`s — so they can't
-/// dispatch through `lower_primop_wgsl`; without this shortcut they'd
-/// each compile to a mangled user-function call returning a constant.
-///
-/// Math operations, type casts, and vector operations route through
-/// `lower_primop_wgsl` via `impl_source.get(name)`; this shortcut therefore
-/// does not depend on qualifier prefixes such as `f32.cos`, `vec.cos`, or
-/// `_w_intrinsic_cos`.
-fn try_lower_wgsl_builtin(name: &str, _args: &[String]) -> Option<String> {
-    let (to, from) = name.split_once('.')?;
-    if matches!(to, "f32" | "f64") {
-        match from {
-            "pi" => return Some("3.14159265358979323846f".to_string()),
-            "e" => return Some("2.71828182845904523536f".to_string()),
-            _ => {}
-        }
-    }
-    None
 }
 
 #[cfg(test)]

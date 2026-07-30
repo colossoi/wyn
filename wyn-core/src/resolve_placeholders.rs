@@ -319,7 +319,7 @@ impl PlaceholderResolver {
         self.type_param_bindings.clear();
     }
 
-    fn resolve_pattern<A>(&mut self, pattern: &mut Pattern<ast::Header, A>) {
+    fn resolve_pattern<A>(&mut self, pattern: &mut Pattern<ast::SourceTree, A>) {
         match &mut pattern.kind {
             PatternKind::Typed(inner, ty) => {
                 self.resolve_pattern(inner);
@@ -335,8 +335,8 @@ impl PlaceholderResolver {
             }
             PatternKind::Record(fields) => {
                 for field in fields {
-                    if let Some(ref mut pat) = field.pattern {
-                        self.resolve_pattern(pat);
+                    if let crate::ast::RecordPatternTarget::Pattern(pattern) = &mut field.target {
+                        self.resolve_pattern(pattern);
                     }
                 }
             }

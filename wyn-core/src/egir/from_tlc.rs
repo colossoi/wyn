@@ -20,6 +20,7 @@ pub type Converted = super::program::Program<
 >;
 
 use crate::builtins::{catalog, Purity};
+use crate::op::BinaryOperator;
 use crate::tlc::VarRef;
 use crate::{LookupMap, LookupSet};
 
@@ -50,10 +51,9 @@ use thiserror::Error;
 
 use super::program::{
     CompilerResource, CompilerResourceKind, ConstantDef, CoreProgramData, LogicalResourceArenaBuilder,
-    LogicalSize, Program, RawEntry, RawFunc, RewriteGlobal, SemanticOpIdSource, SemanticResourceDecl,
-    SemanticResourceRef,
+    LogicalSize, Program, ProgramIdentities, RawEntry, RawFunc, RewriteGlobal, SemanticOpIdSource,
+    SemanticResourceDecl, SemanticResourceRef,
 };
-use super::publish::PipelineDescriptorPublish;
 use super::soac::{filter, hist, screma};
 use super::types::*;
 use crate::pipeline_descriptor::BufferLen;
@@ -244,28 +244,40 @@ fn summarize_definition_effects(
 /// keeping the per-call `clone()` inside one method.
 struct GlobalContext<'a> {
     top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
-    constants_by_name: &'a LookupMap<String, SymbolId>,
     symbols: &'a SymbolTable,
     pure_definitions: &'a LookupSet<SymbolId>,
 }
 
-#[derive(Default)]
 struct ConversionArenas {
-    regions: crate::egir::program::RegionInterner,
+    identities: ProgramIdentities,
+    function_ids: LookupMap<SymbolId, crate::FunctionId>,
+    global_ids: LookupMap<SymbolId, crate::GlobalId>,
+    entry_ids: LookupMap<SymbolId, crate::EntryId>,
     resources: LogicalResourceArenaBuilder,
+}
+
+impl ConversionArenas {
+    fn new() -> Self {
+        Self {
+            identities: ProgramIdentities::new(),
+            function_ids: LookupMap::new(),
+            global_ids: LookupMap::new(),
+            entry_ids: LookupMap::new(),
+            resources: LogicalResourceArenaBuilder::default(),
+        }
+    }
 }
 
 impl<'a> GlobalContext<'a> {
     fn new_converter<'b>(
         &self,
-        pure_constants: &LookupSet<String>,
+        pure_constants: &LookupSet<SymbolId>,
         binding_ids: &'b mut crate::IdSource<u32>,
         effect_ids: &'b mut crate::IdSource<EffectToken>,
         arenas: &'b mut ConversionArenas,
     ) -> Converter<'a, 'b> {
         Converter::new(
             self.top_level,
-            self.constants_by_name,
             self.symbols,
             pure_constants.clone(),
             self.pure_definitions.clone(),
@@ -289,21 +301,45 @@ pub fn run(
     mut binding_ids: crate::IdSource<u32>,
     mut effect_ids: crate::IdSource<EffectToken>,
 ) -> Result<Converted, ConvertError> {
-    let seed = super::pipeline_seed::run(program);
-    let pipeline = seed.pipeline;
+    let super::pipeline_seed::PipelineSeed {
+        pipeline,
+        stage_symbols,
+    } = super::pipeline_seed::run(program);
     let top_level: LookupMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
     let pure_definitions = infer_pure_definitions(program);
 
-    let constants_by_name = program.value_defs_by_name();
-
     // Program-level arenas are borrowed by one converter at a time, then
     // handed intact to the semantic program.
-    let mut arenas = ConversionArenas::default();
+    let mut arenas = ConversionArenas::new();
+    for def in &program.defs {
+        let name = symbol_name(symbols, def.name)?.to_owned();
+        match &def.meta {
+            DefMeta::EntryPoint(_) => {
+                let id = arenas.identities.alloc_entry(name);
+                arenas.entry_ids.insert(def.name, id);
+            }
+            DefMeta::Function | DefMeta::LiftedLambda => {
+                let id = arenas.identities.alloc_function(name);
+                arenas.function_ids.insert(def.name, id);
+            }
+        }
+    }
+
+    let stage_entries: Vec<Vec<crate::EntryId>> = stage_symbols
+        .into_iter()
+        .map(|stages| {
+            stages
+                .into_iter()
+                .map(|symbol| {
+                    *arenas.entry_ids.get(&symbol).expect("pipeline stage has no allocated entry identity")
+                })
+                .collect()
+        })
+        .collect();
 
     let ctx = GlobalContext {
         top_level: &top_level,
-        constants_by_name: &constants_by_name,
         symbols,
         pure_definitions: &pure_definitions,
     };
@@ -312,7 +348,7 @@ pub fn run(
     // through the full EGIR pipeline once (using a throwaway chain) to see if
     // it collapses to a purely-constant FuncBody. Constants are hoisted to
     // program scope and referenced by `PureOp::Global`.
-    let mut pure_constant_names: LookupSet<String> = LookupSet::new();
+    let mut pure_constant_symbols: LookupSet<SymbolId> = LookupSet::new();
     let mut constants = Vec::new();
 
     for def in &program.defs {
@@ -325,7 +361,7 @@ pub fn run(
         let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
 
         let mut converter = ctx.new_converter(
-            &pure_constant_names,
+            &pure_constant_symbols,
             &mut binding_ids,
             &mut effect_ids,
             &mut arenas,
@@ -336,8 +372,11 @@ pub fn run(
             let aliases = super::skel_opt::run_one_body(&mut graph);
             graph.install_aliases(aliases);
             if is_purely_constant_graph(&graph) {
-                pure_constant_names.insert(def_name.clone());
+                pure_constant_symbols.insert(def.name);
+                let id = arenas.identities.alloc_global(def_name.clone());
+                arenas.global_ids.insert(def.name, id);
                 constants.push(ConstantDef {
+                    id,
                     name: def_name,
                     span: def.body.span,
                     return_ty: def.body.ty.clone(),
@@ -356,14 +395,13 @@ pub fn run(
     for def in &program.defs {
         match &def.meta {
             DefMeta::Function | DefMeta::LiftedLambda => {
-                let def_name = symbols.get(def.name).expect("BUG: symbol not in table");
-                if pure_constant_names.contains(def_name) {
+                if pure_constant_symbols.contains(&def.name) {
                     continue;
                 }
                 match convert_function(
                     def,
                     &ctx,
-                    &pure_constant_names,
+                    &pure_constant_symbols,
                     &mut binding_ids,
                     &mut effect_ids,
                     &mut arenas,
@@ -373,13 +411,14 @@ pub fn run(
                 }
             }
             DefMeta::EntryPoint(entry) => {
-                let workgroup = pipeline.workgroup_size_of(&entry.declaration.name);
+                let workgroup =
+                    pipeline_workgroup_size(&pipeline, &stage_entries, arenas.entry_ids[&def.name]);
                 let ep = convert_entry_point(
                     def,
                     &entry.declaration,
                     &entry.data.param_bindings,
                     &ctx,
-                    &pure_constant_names,
+                    &pure_constant_symbols,
                     workgroup,
                     &entry.data.by_symbol,
                     &mut binding_ids,
@@ -391,7 +430,26 @@ pub fn run(
         }
     }
 
-    let ConversionArenas { regions, resources } = arenas;
+    debug_assert!(functions.iter().all(|function| {
+        arenas.identities.contains_function(function.region)
+            && arenas.identities.function_name(function.region) == function.name
+    }));
+    debug_assert!(externs.iter().all(|function| {
+        arenas.identities.contains_function(function.id)
+            && arenas.identities.function_name(function.id) == function.name
+    }));
+    debug_assert!(entry_points.iter().all(|entry| {
+        arenas.identities.contains_entry(entry.id) && arenas.identities.entry_name(entry.id) == entry.name
+    }));
+    debug_assert!(constants.iter().all(|constant| {
+        arenas.identities.contains_global(constant.id)
+            && arenas.identities.global_name(constant.id) == constant.name
+    }));
+    let ConversionArenas {
+        identities,
+        resources,
+        ..
+    } = arenas;
     let (by_binding, resources) = resources.finish().map_err(|resource| {
         ConvertError::Internal(format!(
             "semantic resource {resource:?} was referenced but never declared"
@@ -404,8 +462,9 @@ pub fn run(
         constants,
         CoreProgramData {
             pipeline,
+            stage_entries,
             resources,
-            region_interner: regions,
+            identities,
         },
         RewriteGlobal {
             binding_ids,
@@ -415,6 +474,29 @@ pub fn run(
     );
     super::program::finalize_converted_resources(&mut converted, &by_binding);
     Ok(converted)
+}
+
+fn pipeline_workgroup_size(
+    pipeline: &crate::pipeline_descriptor::PipelineDescriptor,
+    stage_entries: &[Vec<crate::EntryId>],
+    entry: crate::EntryId,
+) -> (u32, u32, u32) {
+    use crate::pipeline_descriptor::Pipeline;
+    pipeline
+        .pipelines
+        .iter()
+        .enumerate()
+        .find_map(|(pipeline_index, pipeline)| match pipeline {
+            Pipeline::Compute(compute) => {
+                compute.stages.iter().enumerate().find_map(|(stage_index, stage)| {
+                    (stage_entries.get(pipeline_index).and_then(|entries| entries.get(stage_index))
+                        == Some(&entry))
+                    .then_some(stage.workgroup_size)
+                })
+            }
+            Pipeline::Graphics(_) => None,
+        })
+        .unwrap_or((64, 1, 1))
 }
 
 enum ConvertedFunc {
@@ -429,13 +511,14 @@ enum ConvertedFunc {
 fn convert_function<'a>(
     def: &TlcDef,
     ctx: &GlobalContext<'a>,
-    pure_constants: &LookupSet<String>,
+    pure_constants: &LookupSet<SymbolId>,
     binding_ids: &'a mut crate::IdSource<u32>,
     effect_ids: &'a mut crate::IdSource<EffectToken>,
     arenas: &'a mut ConversionArenas,
 ) -> Result<ConvertedFunc, ConvertError> {
     let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?.to_string();
+    let function_id = arenas.function_ids[&def.name];
 
     // Extern functions are bodyless declarations; SSA lowering decides how
     // to represent the imported callable.
@@ -444,6 +527,7 @@ fn convert_function<'a>(
         let params: Vec<(Type<TypeName>, String)> =
             param_types.into_iter().enumerate().map(|(i, ty)| (ty, format!("arg{}", i))).collect();
         return Ok(ConvertedFunc::Extern(ExternDecl {
+            id: function_id,
             name: def_name,
             span: def.body.span,
             linkage_name: linkage_name.clone(),
@@ -461,6 +545,7 @@ fn convert_function<'a>(
         .collect::<Result<_, ConvertError>>()?;
 
     let mut converter = ctx.new_converter(pure_constants, binding_ids, effect_ids, arenas);
+
     for (i, (sym, ty)) in params.iter().enumerate() {
         let nid = converter.graph.add_func_param(i, ty.clone());
         converter.locals.insert(*sym, nid);
@@ -484,7 +569,7 @@ fn convert_function<'a>(
         )));
     }
 
-    let region = converter.region(&def_name);
+    let region = function_id;
     let graph = converter.into_graph();
     Ok(ConvertedFunc::Regular(RawFunc::new(
         region,
@@ -595,7 +680,7 @@ fn convert_entry_point(
     entry: &interface::EntryDecl,
     param_bindings: &[Option<EntryParamBinding>],
     ctx: &GlobalContext,
-    pure_constants: &LookupSet<String>,
+    pure_constants: &LookupSet<SymbolId>,
     workgroup: (u32, u32, u32),
     input_bounds: &LookupMap<SymbolId, BufferLen>,
     binding_ids: &mut crate::IdSource<u32>,
@@ -604,6 +689,7 @@ fn convert_entry_point(
 ) -> Result<RawEntry, ConvertError> {
     use crate::flow::ExecutionModel;
 
+    let entry_id = arenas.entry_ids[&def.name];
     let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?;
     let (inner_body, params) = crate::tlc::extract_lambda_params_ref(&def.body);
@@ -626,6 +712,8 @@ fn convert_entry_point(
     // array needs its own buffer). The body still references the original
     // tuple symbol, so we reconstruct it as a `Tuple(views…)` node.
     let mut inputs: Vec<EntryInput> = Vec::with_capacity(params.len());
+    // A source parameter can expand into multiple ABI slots (tuple views).
+    let mut input_parameter_indices = Vec::with_capacity(params.len());
     let mut pc_offset: u32 = 0;
 
     // The auto-storage binding layout is dense — same length as `params`,
@@ -690,6 +778,7 @@ fn convert_entry_point(
                         length: None,
                     },
                 });
+                input_parameter_indices.push(i);
                 view_nids.push(converter.emit_storage_view(slot.binding, field_ty.clone()));
             }
             let tuple_nid = converter.intern_pure(PureOp::Tuple(view_nids.len()), view_nids, ty.clone());
@@ -765,6 +854,7 @@ fn convert_entry_point(
             size_hint,
             kind,
         });
+        input_parameter_indices.push(i);
     }
 
     // The owning TLC entry carries its inferred per-parameter minimums.
@@ -839,6 +929,7 @@ fn convert_entry_point(
     let output_count = outputs.len();
     let mut entry = RawEntry::new_with_resources(
         def_name.to_string(),
+        entry_id,
         def.body.span,
         execution_model,
         inputs,
@@ -848,6 +939,10 @@ fn convert_entry_point(
         ret_type,
         graph,
     );
+    entry.parameter_inputs = vec![Vec::new(); entry.params.len()];
+    for (slot, parameter_index) in input_parameter_indices.into_iter().enumerate() {
+        entry.parameter_inputs[parameter_index].push(super::program::InputSlotId(slot));
+    }
     for (slot, sources) in slot_sources.into_iter().enumerate().take(output_count) {
         entry.outputs[slot]
             .routes
@@ -892,14 +987,12 @@ struct Converter<'a, 'b> {
     locals: LookupMap<SymbolId, NodeId>,
     /// Top-level definitions.
     top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
-    /// Arity-0 defs indexed by name.
-    constants_by_name: &'a LookupMap<String, SymbolId>,
     /// Symbol table.
     symbols: &'a SymbolTable,
     /// Cache for inlined constant bodies.
-    inlined_constants: LookupMap<String, NodeId>,
-    /// Names of hoisted pure constants.
-    pure_constants: LookupSet<String>,
+    inlined_constants: LookupMap<SymbolId, NodeId>,
+    /// Identities of hoisted pure constants.
+    pure_constants: LookupSet<SymbolId>,
     /// User definitions proven pure before EGIR construction.
     pure_definitions: LookupSet<SymbolId>,
     /// Program-wide identity source for effect-chain endpoints.
@@ -929,9 +1022,8 @@ struct Converter<'a, 'b> {
 impl<'a, 'b> Converter<'a, 'b> {
     fn new(
         top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
-        constants_by_name: &'a LookupMap<String, SymbolId>,
         symbols: &'a SymbolTable,
-        pure_constants: LookupSet<String>,
+        pure_constants: LookupSet<SymbolId>,
         pure_definitions: LookupSet<SymbolId>,
         binding_ids: &'b mut crate::IdSource<u32>,
         effect_ids: &'b mut crate::IdSource<EffectToken>,
@@ -944,7 +1036,6 @@ impl<'a, 'b> Converter<'a, 'b> {
             current_block: entry,
             locals: LookupMap::new(),
             top_level,
-            constants_by_name,
             symbols,
             inlined_constants: LookupMap::new(),
             pure_constants,
@@ -958,9 +1049,8 @@ impl<'a, 'b> Converter<'a, 'b> {
         }
     }
 
-    /// Resolve a callable name to its region index, interning it on first use.
-    fn region(&mut self, name: impl AsRef<str>) -> RegionId {
-        self.arenas.regions.intern(name.as_ref())
+    fn function_id(&self, symbol: SymbolId) -> crate::FunctionId {
+        self.arenas.function_ids[&symbol]
     }
 
     /// Intern a pure node, attaching the current term's span (if any).
@@ -1073,7 +1163,9 @@ impl<'a, 'b> Converter<'a, 'b> {
             }
 
             // --- Extern ---
-            TermKind::Extern(name) => Ok(self.intern_pure(PureOp::Extern(name.clone()), smallvec![], ty)),
+            TermKind::Extern(_) => Err(ConvertError::GraphError(
+                "extern declaration reached expression conversion".into(),
+            )),
 
             // --- If/else (Step 3) ---
             TermKind::If {
@@ -1281,40 +1373,27 @@ impl<'a, 'b> Converter<'a, 'b> {
     // ========================================================================
 
     fn convert_var(&mut self, sym: SymbolId, ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
-        // Local binding
         if let Some(&nid) = self.locals.get(&sym) {
             return Ok(nid);
         }
-
-        let name = self.symbols.get(sym).expect("BUG: symbol not in table").clone();
-
-        // Cached constant
-        if let Some(&nid) = self.inlined_constants.get(&name) {
+        if let Some(&nid) = self.inlined_constants.get(&sym) {
             return Ok(nid);
         }
-
-        // Hoisted pure constant → Global reference
-        if self.pure_constants.contains(&name) {
-            return Ok(self.intern_pure(PureOp::Global(name), smallvec![], ty));
+        if self.pure_constants.contains(&sym) {
+            let global = self.arenas.global_ids[&sym];
+            return Ok(self.intern_pure(PureOp::Global(global), smallvec![], ty));
         }
-
-        // Arity-0 constant def → inline its body
-        let const_def = self
-            .top_level
-            .get(&sym)
-            .filter(|d| d.arity == 0)
-            .or_else(|| self.constants_by_name.get(&name).and_then(|def_sym| self.top_level.get(def_sym)))
-            .copied();
-
-        if let Some(def) = const_def {
+        if let Some(def) = self.top_level.get(&sym).filter(|definition| definition.arity == 0).copied() {
             let body = def.body.clone();
             let nid = self.convert_term(&body)?;
-            self.inlined_constants.insert(name, nid);
+            self.inlined_constants.insert(sym, nid);
             return Ok(nid);
         }
+        let name = symbol_name(self.symbols, sym)?;
 
-        // Function reference → Global
-        Ok(self.intern_pure(PureOp::Global(name), smallvec![], ty))
+        Err(ConvertError::Unsupported(format!(
+            "callable `{name}` used as a first-class value after defunctionalization"
+        )))
     }
 
     // ========================================================================
@@ -1337,10 +1416,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 let operand = self.convert_term(&args[0])?;
                 Ok(self.intern_pure(PureOp::UnaryOp(op.op.clone()), smallvec![operand], ty))
             }
-            TermKind::Var(VarRef::Symbol(sym)) => {
-                let name = self.symbols.get(*sym).expect("BUG").clone();
-                self.convert_named_app(&name, *sym, args, ty)
-            }
+            TermKind::Var(VarRef::Symbol(sym)) => self.convert_named_app(*sym, args, ty),
             TermKind::Var(VarRef::Builtin { id, overload_idx }) => {
                 // Catalog-resolved builtin call. Most catalog entries lower
                 // to a pure `PureOp::Intrinsic` and the backend dispatches
@@ -1413,48 +1489,32 @@ impl<'a, 'b> Converter<'a, 'b> {
 
     fn convert_named_app(
         &mut self,
-        name: &str,
-        sym: SymbolId,
+        symbol: SymbolId,
         args: &[Term],
         ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        match name {
-            _ => {
-                // Function call
-                if let Some(def) = self.top_level.get(&sym) {
-                    if def.arity == args.len() {
-                        let arg_nids: SmallVec<[NodeId; 4]> =
-                            args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                        return Ok(self.emit_named_call(name, sym, arg_nids, ty));
-                    }
-                }
-                // Arity-0 constant applied to args? Inline the body.
-                let var_nid = self.convert_var(sym, ty.clone())?;
-                // If we got a Global, emit a call
-                if matches!(self.graph.nodes[var_nid].kind, ENode::Pure { ref op, .. } if matches!(op, PureOp::Global(_)))
-                {
-                    let arg_nids: SmallVec<[NodeId; 4]> =
-                        args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                    Ok(self.emit_named_call(name, sym, arg_nids, ty))
-                } else {
-                    Err(ConvertError::Unsupported(format!(
-                        "application of non-function: {}",
-                        name
-                    )))
-                }
+        if let Some(def) = self.top_level.get(&symbol) {
+            if def.arity == args.len() {
+                let operands: SmallVec<[NodeId; 4]> =
+                    args.iter().map(|argument| self.convert_term(argument)).collect::<Result<_, _>>()?;
+                return Ok(self.emit_named_call(symbol, operands, ty));
             }
         }
+        let name = symbol_name(self.symbols, symbol)?;
+        Err(ConvertError::Unsupported(format!(
+            "application of `{name}` with the wrong arity"
+        )))
     }
 
     fn emit_named_call(
         &mut self,
-        name: &str,
         symbol: SymbolId,
         operands: SmallVec<[NodeId; 4]>,
         ty: Type<TypeName>,
     ) -> NodeId {
+        let function = self.function_id(symbol);
         if self.pure_definitions.contains(&symbol) {
-            return self.intern_pure(PureOp::Call(name.to_string()), operands, ty);
+            return self.intern_pure(PureOp::Call(function), operands, ty);
         }
 
         let result = self.graph.alloc_side_effect_result(ty);
@@ -1462,7 +1522,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
             kind: SideEffectKind::Effect(EffectOp::Op {
-                tag: crate::op::OpTag::Call(name.to_string()),
+                tag: crate::op::OpTag::Call(function),
             }),
             operand_nodes: operands,
             result: Some(result),
@@ -1772,7 +1832,11 @@ impl<'a, 'b> Converter<'a, 'b> {
         self.current_block = header;
         self.bind_storage_image_loop_var(loop_var, loop_var_ty, init_bindings)?;
         self.locals.insert(index_var, idx_nid);
-        let cond_nid = self.intern_pure(PureOp::BinOp("<".into()), smallvec![idx_nid, bound_nid], bool_ty);
+        let cond_nid = self.intern_pure(
+            PureOp::BinOp(BinaryOperator::Less),
+            smallvec![idx_nid, bound_nid],
+            bool_ty,
+        );
         self.graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
             cond: cond_nid,
             then_target: body_block,
@@ -1784,7 +1848,11 @@ impl<'a, 'b> Converter<'a, 'b> {
         self.current_block = body_block;
         let _new_handle = self.convert_term(body)?;
         let one = self.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone());
-        let next_i = self.intern_pure(PureOp::BinOp("+".into()), smallvec![idx_nid, one], i32_ty);
+        let next_i = self.intern_pure(
+            PureOp::BinOp(BinaryOperator::Add),
+            smallvec![idx_nid, one],
+            i32_ty,
+        );
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
             args: vec![next_i],
@@ -1821,9 +1889,11 @@ impl<'a, 'b> Converter<'a, 'b> {
 
         let _init_nid = self.convert_term(init)?;
         let iter_nid = self.convert_term(iter)?;
-        let length_name = crate::builtins::by_id(catalog().known().length).dispatch_name();
         let len_nid = self.intern_pure(
-            PureOp::UnaryOp(length_name.into()),
+            PureOp::Intrinsic {
+                id: catalog().known().length,
+                overload_idx: 0,
+            },
             smallvec![iter_nid],
             i32_ty.clone(),
         );
@@ -1835,7 +1905,11 @@ impl<'a, 'b> Converter<'a, 'b> {
 
         self.current_block = header;
         self.bind_storage_image_loop_var(loop_var, loop_var_ty, init_bindings)?;
-        let cond_nid = self.intern_pure(PureOp::BinOp("<".into()), smallvec![idx_nid, len_nid], bool_ty);
+        let cond_nid = self.intern_pure(
+            PureOp::BinOp(BinaryOperator::Less),
+            smallvec![idx_nid, len_nid],
+            bool_ty,
+        );
         self.graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
             cond: cond_nid,
             then_target: body_block,
@@ -1849,7 +1923,11 @@ impl<'a, 'b> Converter<'a, 'b> {
         self.locals.insert(elem_var, elem_nid);
         let _new_handle = self.convert_term(body)?;
         let one = self.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone());
-        let next_i = self.intern_pure(PureOp::BinOp("+".into()), smallvec![idx_nid, one], i32_ty);
+        let next_i = self.intern_pure(
+            PureOp::BinOp(BinaryOperator::Add),
+            smallvec![idx_nid, one],
+            i32_ty,
+        );
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
             args: vec![next_i],
@@ -1974,7 +2052,11 @@ impl<'a, 'b> Converter<'a, 'b> {
             let val = self.convert_term(expr)?;
             self.locals.insert(*sym, val);
         }
-        let cond_nid = self.intern_pure(PureOp::BinOp("<".into()), smallvec![idx_nid, bound_nid], bool_ty);
+        let cond_nid = self.intern_pure(
+            PureOp::BinOp(BinaryOperator::Less),
+            smallvec![idx_nid, bound_nid],
+            bool_ty,
+        );
         self.graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
             cond: cond_nid,
             then_target: body_block,
@@ -1987,7 +2069,11 @@ impl<'a, 'b> Converter<'a, 'b> {
         self.current_block = body_block;
         let new_acc = self.convert_term(body)?;
         let one = self.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone());
-        let next_i = self.intern_pure(PureOp::BinOp("+".into()), smallvec![idx_nid, one], i32_ty);
+        let next_i = self.intern_pure(
+            PureOp::BinOp(BinaryOperator::Add),
+            smallvec![idx_nid, one],
+            i32_ty,
+        );
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
             args: vec![new_acc, next_i],
@@ -2040,9 +2126,11 @@ impl<'a, 'b> Converter<'a, 'b> {
         // Length intrinsic. PureOp::UnaryOp keys by op-name string;
         // the catalog-internal `_w_intrinsic_length` is the agreed
         // string the lowering layer dispatches on.
-        let length_name = crate::builtins::by_id(catalog().known().length).dispatch_name();
         let len_nid = self.intern_pure(
-            PureOp::UnaryOp(length_name.into()),
+            PureOp::Intrinsic {
+                id: catalog().known().length,
+                overload_idx: 0,
+            },
             smallvec![iter_nid],
             i32_ty.clone(),
         );
@@ -2059,7 +2147,11 @@ impl<'a, 'b> Converter<'a, 'b> {
             let val = self.convert_term(expr)?;
             self.locals.insert(*sym, val);
         }
-        let cond_nid = self.intern_pure(PureOp::BinOp("<".into()), smallvec![idx_nid, len_nid], bool_ty);
+        let cond_nid = self.intern_pure(
+            PureOp::BinOp(BinaryOperator::Less),
+            smallvec![idx_nid, len_nid],
+            bool_ty,
+        );
         self.graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
             cond: cond_nid,
             then_target: body_block,
@@ -2075,7 +2167,11 @@ impl<'a, 'b> Converter<'a, 'b> {
 
         let new_acc = self.convert_term(body)?;
         let one = self.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone());
-        let next_i = self.intern_pure(PureOp::BinOp("+".into()), smallvec![idx_nid, one], i32_ty);
+        let next_i = self.intern_pure(
+            PureOp::BinOp(BinaryOperator::Add),
+            smallvec![idx_nid, one],
+            i32_ty,
+        );
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
             args: vec![new_acc, next_i],
@@ -2125,11 +2221,9 @@ impl<'a, 'b> Converter<'a, 'b> {
         }
     }
 
-    fn lambda_fn_name(&self, lam: &Lambda) -> Result<String, ConvertError> {
+    fn lambda_fn_symbol(&self, lam: &Lambda) -> Result<SymbolId, ConvertError> {
         match &lam.body.kind {
-            TermKind::Var(VarRef::Symbol(sym)) => {
-                Ok(self.symbols.get(*sym).expect("BUG: symbol not in table").clone())
-            }
+            TermKind::Var(VarRef::Symbol(symbol)) => Ok(*symbol),
             _ => Err(ConvertError::GraphError(
                 "SOAC lambda body should be a function reference post-defunc".into(),
             )),
@@ -2164,7 +2258,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         destination: SoacDestination,
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        let f_name = self.lambda_fn_name(&sb.lam)?;
+        let f_symbol = self.lambda_fn_symbol(&sb.lam)?;
         let capture_nids: Vec<NodeId> =
             sb.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let input_nids: Vec<NodeId> =
@@ -2219,7 +2313,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         };
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
 
-        let map_region = self.region(f_name);
+        let map_region = self.function_id(f_symbol);
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op {
                 inputs: input_arr_types.into_iter().map(|array| SoacInputType { array }).collect(),
@@ -2259,7 +2353,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let dest_view = *self.locals.get(&dest.id).ok_or_else(|| {
             ConvertError::GraphError("reduce_by_index destination is not a bound #[storage] view".into())
         })?;
-        let operator_region = self.region(self.lambda_fn_name(&op.lam)?);
+        let operator_region = self.function_id(self.lambda_fn_symbol(&op.lam)?);
         let operator_captures = op
             .data
             .captures
@@ -2341,7 +2435,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         })?;
 
         // The envelope `(xs..) -> (index, value)` is a lifted function post-defunc.
-        let func = self.lambda_fn_name(&lam.lam)?;
+        let function = self.lambda_fn_symbol(&lam.lam)?;
         let (index_type, value_type) = match &lam.lam.ret_ty {
             Type::Constructed(TypeName::Tuple(2), args) => (args[0].clone(), args[1].clone()),
             other => {
@@ -2359,7 +2453,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             lam.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
 
         let operands: SmallVec<[NodeId; 4]> = input_nids.into_iter().collect();
-        let body_region = self.region(func);
+        let body_region = self.function_id(function);
         let destination_length = self.intern_pure(
             PureOp::Intrinsic {
                 id: catalog().known().length,
@@ -2406,7 +2500,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         input: &ArrayExpr,
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        let op_name = self.lambda_fn_name(&op.lam)?;
+        let operator_symbol = self.lambda_fn_symbol(&op.lam)?;
         let capture_nids: Vec<NodeId> =
             op.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let arr_nid = self.convert_array_expr_value(input)?;
@@ -2418,7 +2512,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         // reduce_op (phase 2 combiner).
         let operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
-        let op_region = self.region(op_name);
+        let op_region = self.function_id(operator_symbol);
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op {
                 inputs: vec![SoacInputType { array: arr_ty }],
@@ -2458,7 +2552,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         destination: SoacDestination,
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        let op_name = self.lambda_fn_name(&op.lam)?;
+        let operator_symbol = self.lambda_fn_symbol(&op.lam)?;
         let capture_nids: Vec<NodeId> =
             op.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let arr_nid = self.convert_array_expr_value(input)?;
@@ -2489,7 +2583,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         };
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
         let scan_elem_ty = soac_element_type(&project_ty);
-        let op_region = self.region(op_name);
+        let op_region = self.function_id(operator_symbol);
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op {
                 inputs: vec![SoacInputType { array: arr_ty }],
@@ -2525,7 +2619,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         destination: SoacDestination,
         _result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        let pred_name = self.lambda_fn_name(&pred.lam)?;
+        let predicate_symbol = self.lambda_fn_symbol(&pred.lam)?;
         let capture_nids: Vec<NodeId> =
             pred.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let elem_ty = self.array_expr_elem_type(input);
@@ -2534,7 +2628,7 @@ impl<'a, 'b> Converter<'a, 'b> {
 
         let output_elem_ty = elem_ty.clone();
         let pred_body = SegBody {
-            region: self.region(pred_name),
+            region: self.function_id(predicate_symbol),
             captures: capture_nids,
         };
 

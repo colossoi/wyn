@@ -20,6 +20,20 @@ fn test_simple_function() {
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
 }
+#[test]
+fn test_linked_extern_call_uses_structural_function_identity() {
+    let spirv = compile_to_spirv(
+        r#"
+#[linked("external_increment")]
+extern external_increment(x: i32) i32
+
+#[compute]
+entry main(x: i32) i32 = external_increment(x)
+"#,
+    )
+    .expect("linked extern call should lower to an import-linked SPIR-V function");
+    assert_eq!(spirv[0], 0x07230203);
+}
 
 #[test]
 fn test_let_binding() {

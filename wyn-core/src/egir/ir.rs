@@ -55,46 +55,22 @@ new_key_type! {
 
 }
 
-/// Stable identity stored directly on a callable region.
+/// A callable used as a structured SOAC region.
 ///
-/// Region *identity* is a checked arena index, never a re-derived string. A
-/// region still lowers to a named SSA function — that name is the call ABI and
-/// lives on the callable `Func`/the `RegionInterner`, recovered via the arena when a
-/// `PureOp::Call` is emitted. Semantic SegOps carry only this index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RegionId(u32);
+/// Regions and ordinary functions deliberately share one identity realm:
+/// every call target is a [`crate::FunctionId`]. The alias preserves the
+/// domain-specific vocabulary used by segmented operators without opening a
+/// second allocator.
+pub type RegionId = crate::FunctionId;
 
-impl RegionId {
-    #[cfg(test)]
-    pub const fn from_index(index: u32) -> Self {
-        Self(index)
-    }
-
-    #[cfg(test)]
-    pub const fn index(self) -> u32 {
-        self.0
-    }
-}
-
-impl std::fmt::Display for RegionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "#{}", self.0)
-    }
-}
-
-/// Name ↔ arena-index interner for callable regions.
+/// Program-owned identity arenas with names as one-way metadata.
 ///
-/// Region identity is the assigned `RegionId` (a dense index). The textual
-/// name is retained because it is the SSA `Call` ABI. Interning the same name
-/// twice returns the same index, so segmented-body construction and the
-/// function arena agree without a separate resolution pass.
-impl From<u32> for RegionId {
-    fn from(index: u32) -> Self {
-        Self(index)
-    }
-}
-
-pub type RegionInterner = crate::Interner<RegionId, String>;
+/// There is intentionally no name-to-ID lookup. All resolution happens before
+/// these arenas are built; their strings exist only for diagnostics, emitted
+/// symbols, and host-facing entry metadata.
+pub type RegionArena = crate::IdArena<RegionId, String>;
+pub type GlobalArena = crate::IdArena<crate::GlobalId, String>;
+pub type EntryArena = crate::IdArena<crate::EntryId, String>;
 
 // ---------------------------------------------------------------------------
 // PureOp — operator identity for hash-consing
@@ -1243,6 +1219,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 pub struct Func<P: Family, Lang: Language> {
     /// Stable identity used by segmented bodies that call this region.
     pub region: RegionId,
+    /// Diagnostic and emitted-symbol metadata; never used to resolve a call.
     pub name: String,
     pub span: Span,
     pub linkage_name: Option<String>,
@@ -1375,6 +1352,8 @@ impl<P: Family, Lang: Language> Func<P, Lang> {
 /// elaboration. Constant bodies have no parameters and must be proven pure.
 #[derive(Clone, Debug)]
 pub struct ConstantDef<P: Family, Lang: Language> {
+    pub id: crate::GlobalId,
+    /// Diagnostic and emitted-symbol metadata; never used to resolve a global.
     pub name: String,
     pub span: Span,
     pub return_ty: Lang::Ty,
@@ -1491,10 +1470,15 @@ impl<R, Route, Lang: Language> std::ops::DerefMut for EntryOutput<R, Route, Lang
 
 #[derive(Clone, Debug)]
 pub struct Entry<P: Family, ResourceDecl, Route, Lang: Language> {
+    pub id: crate::EntryId,
+    /// Host-facing entry symbol and diagnostic metadata.
     pub name: String,
     pub span: Span,
     pub execution_model: ExecutionModel,
     pub inputs: Vec<EntryInput<P::Resource, Lang>>,
+    /// Structural association from source parameter to its ABI input slots.
+    /// A parameter may expand into multiple slots (for example tuple views).
+    pub parameter_inputs: Vec<Vec<super::program::InputSlotId>>,
     pub outputs: Vec<EntryOutput<P::Resource, Route, Lang>>,
     pub resource_declarations: Vec<ResourceDecl>,
     pub params: Vec<(Lang::Ty, String)>,
@@ -1527,6 +1511,7 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_resources(
         name: String,
+        id: crate::EntryId,
         span: Span,
         execution_model: ExecutionModel,
         inputs: Vec<InterfaceEntryInput<Lang::Ty>>,
@@ -1536,7 +1521,13 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
         return_ty: Lang::Ty,
         graph: EGraph<P, Lang>,
     ) -> Self {
+        let parameter_inputs = (0..params.len())
+            .map(|index| {
+                (index < inputs.len()).then(|| vec![super::program::InputSlotId(index)]).unwrap_or_default()
+            })
+            .collect();
         Self {
+            id,
             name,
             span,
             execution_model,
@@ -1547,6 +1538,7 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
                     resource: None,
                 })
                 .collect(),
+            parameter_inputs,
             outputs: outputs
                 .into_iter()
                 .map(|inner| EntryOutput {
@@ -1577,7 +1569,29 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
         kept.sort_by_key(|(index, _)| *index);
         kept.dedup_by_key(|(index, _)| *index);
 
-        self.inputs = kept.iter().map(|(index, _)| self.inputs[*index].clone()).collect();
+        let kept_slots = kept
+            .iter()
+            .flat_map(|(index, _)| self.parameter_inputs[*index].iter().copied())
+            .collect::<LookupSet<_>>();
+        let mut remapped_slots = LookupMap::new();
+        self.inputs = std::mem::take(&mut self.inputs)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(old_index, input)| {
+                let old_slot = super::program::InputSlotId(old_index);
+                kept_slots.contains(&old_slot).then(|| {
+                    let new_slot = super::program::InputSlotId(remapped_slots.len());
+                    remapped_slots.insert(old_slot, new_slot);
+                    input
+                })
+            })
+            .collect();
+        self.parameter_inputs = kept
+            .iter()
+            .map(|(index, _)| {
+                self.parameter_inputs[*index].iter().map(|slot| remapped_slots[slot]).collect()
+            })
+            .collect();
         self.params = kept.iter().map(|(index, _)| self.params[*index].clone()).collect();
 
         let retained_nodes = kept.iter().map(|(_, node)| *node).collect::<LookupSet<_>>();
@@ -1615,9 +1629,11 @@ impl<P: Family, ResourceDecl, Route, Lang: Language> Entry<P, ResourceDecl, Rout
     pub fn map_output_routes<T>(self, mut map: impl FnMut(Route) -> T) -> Entry<P, ResourceDecl, T, Lang> {
         let Self {
             name,
+            id,
             span,
             execution_model,
             inputs,
+            parameter_inputs,
             outputs,
             resource_declarations,
             params,
@@ -1625,10 +1641,12 @@ impl<P: Family, ResourceDecl, Route, Lang: Language> Entry<P, ResourceDecl, Rout
             graph,
         } = self;
         Entry {
+            id,
             name,
             span,
             execution_model,
             inputs,
+            parameter_inputs,
             outputs: outputs
                 .into_iter()
                 .map(|output| EntryOutput {

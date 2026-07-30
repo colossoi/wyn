@@ -17,7 +17,7 @@ use crate::builtins::catalog;
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, BodySite, RealizedOutputRoute};
 use crate::egir::program::{
-    CoreProgramData, OutputWriter, RegionInterner, SemanticFunc, SemanticResourceRef,
+    CoreProgramData, OutputWriter, ProgramIdentities, SemanticFunc, SemanticResourceRef,
 };
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
@@ -27,6 +27,7 @@ use crate::egir::types::{
     SkeletonTerminator, Soac, SoacEffect,
 };
 use crate::flow::{BlockId, ControlHeader};
+use crate::op::BinaryOperator;
 use crate::LookupMap;
 
 #[derive(Clone)]
@@ -147,7 +148,6 @@ fn is_length_of(graph: &EGraph, node: NodeId, filter_result: NodeId) -> bool {
     }
     match op {
         PureOp::Intrinsic { id, .. } => *id == catalog().known().length,
-        PureOp::UnaryOp(name) => *name == crate::builtins::by_id(catalog().known().length).dispatch_name(),
         _ => false,
     }
 }
@@ -236,7 +236,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
         )
     };
     let filter = filter_parts(&filter_effect);
-    let mut interner = inner.data.region_interner.clone();
+    let mut identities = inner.data.identities.clone();
     let count_ty = candidate.lengths.first().map(|length| outer_types[length].clone());
     let consumer_form = consumer_effect.as_ref().map(|effect| {
         let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
@@ -246,7 +246,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     });
     let (pre, pre_function) = build_masked_pre(
         &inner,
-        &mut interner,
+        &mut identities,
         &scope,
         span,
         &filter,
@@ -256,7 +256,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     );
     let (count_reduction, count_function) = count_ty
         .as_ref()
-        .map(|ty| build_count_reduction(&mut interner, &scope, span, ty.clone()))
+        .map(|ty| build_count_reduction(&mut identities, &scope, span, ty.clone()))
         .map_or((None, None), |(reduction, function)| {
             (Some(reduction), Some(function))
         });
@@ -286,13 +286,13 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     };
     let synthesized = std::iter::once(pre_function).chain(count_function).collect::<Vec<_>>();
     rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
-        region_interner: interner,
+        identities: identities,
         ..data
     })
 }
 
 fn build_count_reduction(
-    interner: &mut RegionInterner,
+    identities: &mut ProgramIdentities,
     scope: &str,
     span: crate::ast::Span,
     count_ty: Type<TypeName>,
@@ -301,7 +301,7 @@ fn build_count_reduction(
     let left = graph.add_func_param(0, count_ty.clone());
     let right = graph.add_func_param(1, count_ty.clone());
     let sum = graph.intern_pure(
-        PureOp::BinOp("+".into()),
+        PureOp::BinOp(BinaryOperator::Add),
         smallvec![left, right],
         count_ty.clone(),
         None,
@@ -309,7 +309,7 @@ fn build_count_reduction(
     let entry = graph.skeleton.entry;
     let parameter_types = vec![count_ty.clone(), count_ty.clone()];
     let (operator, function) = lambda_ops::finish_region_lambda(
-        interner,
+        identities,
         scope,
         "filter_count_combine",
         span,
@@ -337,7 +337,7 @@ fn build_count_reduction(
 #[allow(clippy::too_many_arguments)]
 fn build_masked_pre(
     inner: &Segmented,
-    interner: &mut RegionInterner,
+    identities: &mut ProgramIdentities,
     scope: &str,
     span: crate::ast::Span,
     filter: &FilterParts,
@@ -418,7 +418,7 @@ fn build_masked_pre(
     let (return_block, results) =
         conditional_results(&mut graph, predicate[0], fallback, selected, &result_types);
     let (pre, function) = lambda_ops::finish_region_lambda(
-        interner,
+        identities,
         scope,
         "filter_pre",
         span,

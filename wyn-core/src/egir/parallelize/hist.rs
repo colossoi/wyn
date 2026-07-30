@@ -7,6 +7,7 @@ use crate::egir::allocation::ResourcesAllocated;
 use crate::egir::program::SemanticOpId;
 use crate::egir::soac::hist;
 use crate::egir::types::{ENode, NodeId, PureOp, SegSpace, Semantic, SkeletonTerminator};
+use crate::op::BinaryOperator;
 use crate::ssa::types::{AtomicOp, ConstantValue};
 
 use super::planning::LocatedHist;
@@ -92,16 +93,10 @@ fn recognize_direct_atomic(
         return None;
     }
     match op {
-        PureOp::BinOp(name) if name == "+" => Some(AtomicOp::Add),
-        PureOp::BinOp(name) if name == "&" => Some(AtomicOp::And),
-        PureOp::BinOp(name) if name == "|" => Some(AtomicOp::Or),
-        PureOp::BinOp(name) if name == "^" => Some(AtomicOp::Xor),
-        PureOp::Call(name) if name.ends_with(".min") => {
-            Some(if signed { AtomicOp::SignedMin } else { AtomicOp::UnsignedMin })
-        }
-        PureOp::Call(name) if name.ends_with(".max") => {
-            Some(if signed { AtomicOp::SignedMax } else { AtomicOp::UnsignedMax })
-        }
+        PureOp::BinOp(BinaryOperator::Add) => Some(AtomicOp::Add),
+        PureOp::BinOp(BinaryOperator::BitwiseAnd) => Some(AtomicOp::And),
+        PureOp::BinOp(BinaryOperator::BitwiseOr) => Some(AtomicOp::Or),
+        PureOp::BinOp(BinaryOperator::BitwiseXor) => Some(AtomicOp::Xor),
         PureOp::Intrinsic { id, .. } if *id == crate::builtins::catalog().known().min => {
             Some(if signed { AtomicOp::SignedMin } else { AtomicOp::UnsignedMin })
         }

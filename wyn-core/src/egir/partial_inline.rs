@@ -49,7 +49,7 @@ struct InliningStats {
 #[derive(Clone, Debug)]
 struct Candidate {
     call: NodeId,
-    callee: String,
+    callee: crate::FunctionId,
     callee_nodes: usize,
 }
 
@@ -61,8 +61,8 @@ pub fn partially_inline_calls(
     // Snapshot callable bodies so callers can be rewritten without aliasing
     // `program.functions`. A caller-local fixpoint handles calls revealed by a
     // clone, so snapshots do not need to be refreshed after each body.
-    let callees: LookupMap<String, PhysicalFunc> =
-        program.functions.iter().map(|function| (function.name.clone(), function.clone())).collect();
+    let callees: LookupMap<crate::FunctionId, PhysicalFunc> =
+        program.functions.iter().map(|function| (function.region, function.clone())).collect();
     program
         .try_map_graphs(|site, mut graph| {
             inline_body(&mut graph, &callees)
@@ -74,7 +74,7 @@ pub fn partially_inline_calls(
 
 fn inline_body(
     graph: &mut EGraph<Physical>,
-    callees: &LookupMap<String, PhysicalFunc>,
+    callees: &LookupMap<crate::FunctionId, PhysicalFunc>,
 ) -> Result<InliningStats, String> {
     let mut stats = InliningStats::default();
     while stats.calls_inlined < MAX_INLINES && stats.node_budget < MAX_INLINED_NODES {
@@ -92,7 +92,7 @@ fn inline_body(
 
 fn find_candidate(
     graph: &EGraph<Physical>,
-    callees: &LookupMap<String, PhysicalFunc>,
+    callees: &LookupMap<crate::FunctionId, PhysicalFunc>,
     remaining_budget: usize,
 ) -> Option<Candidate> {
     let loops = LoopAnalysis::build(&graph.skeleton);
@@ -148,7 +148,7 @@ fn find_candidate(
                 }
                 return Some(Candidate {
                     call: node,
-                    callee: callee_name.clone(),
+                    callee: *callee_name,
                     callee_nodes,
                 });
             }

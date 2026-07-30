@@ -5,13 +5,11 @@ use crate::ast::TypeName;
 use crate::tlc::{Def, DefMeta, Program, Term, TermIdSource, TermKind};
 use crate::SymbolTable;
 use polytype::Type;
-use std::collections::HashMap;
 
 fn empty_program() -> Defunctionalized {
     Program::from_parts(
         vec![],
         SymbolTable::new(),
-        HashMap::new(),
         TermIdSource::new(),
         crate::tlc::context::PostClosureGlobal {
             auto_storage_binding_ids: crate::IdSource::new(),

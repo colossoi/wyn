@@ -76,7 +76,6 @@ fn convert_simple_def(
 ) -> FuncBody {
     let symbols = SymbolTable::new();
     let top_level = HashMap::new();
-    let constants_by_name = HashMap::new();
     let pure_constants = HashSet::new();
 
     let ret_ty = body.ty.clone();
@@ -85,10 +84,9 @@ fn convert_simple_def(
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
-    let mut arenas = ConversionArenas::default();
+    let mut arenas = ConversionArenas::new();
     let mut converter = Converter::new(
         &top_level,
-        &constants_by_name,
         &symbols,
         pure_constants,
         HashSet::new(),
@@ -130,7 +128,9 @@ fn test_add_roundtrip() {
     let add_op = mk_term(
         &mut term_ids,
         i32_ty(), // simplified — real type would be arrow
-        TermKind::BinOp(crate::ast::BinaryOp { op: "+".into() }),
+        TermKind::BinOp(crate::ast::BinaryOp {
+            op: crate::op::BinaryOperator::Add,
+        }),
     );
     let app = mk_term(
         &mut term_ids,
@@ -142,15 +142,13 @@ fn test_add_roundtrip() {
     );
 
     let top_level = HashMap::new();
-    let constants_by_name = HashMap::new();
     let pure_constants = HashSet::new();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
-    let mut arenas = ConversionArenas::default();
+    let mut arenas = ConversionArenas::new();
     let mut converter = Converter::new(
         &top_level,
-        &constants_by_name,
         &symbols,
         pure_constants,
         HashSet::new(),
@@ -171,12 +169,15 @@ fn test_add_roundtrip() {
 
     let entry = func.get_block(func.entry_block());
     // Should have a BinOp(+) instruction.
-    assert!(
-        entry
-            .insts
-            .iter()
-            .any(|&iid| { matches!(&func.get_inst(iid).data, InstKind::Op { tag: crate::op::OpTag::BinOp(op), .. } if op == "+") })
-    );
+    assert!(entry.insts.iter().any(|&iid| {
+        matches!(
+            &func.get_inst(iid).data,
+            InstKind::Op {
+                tag: crate::op::OpTag::BinOp(crate::op::BinaryOperator::Add),
+                ..
+            }
+        )
+    }));
 }
 
 #[test]
@@ -225,15 +226,13 @@ fn test_gvn_via_let() {
     );
 
     let top_level = HashMap::new();
-    let constants_by_name = HashMap::new();
     let pure_constants = HashSet::new();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
-    let mut arenas = ConversionArenas::default();
+    let mut arenas = ConversionArenas::new();
     let mut converter = Converter::new(
         &top_level,
-        &constants_by_name,
         &symbols,
         pure_constants,
         HashSet::new(),
@@ -331,15 +330,13 @@ fn test_if_else_roundtrip() {
     );
 
     let top_level = HashMap::new();
-    let constants_by_name = HashMap::new();
     let pure_constants = HashSet::new();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
-    let mut arenas = ConversionArenas::default();
+    let mut arenas = ConversionArenas::new();
     let mut converter = Converter::new(
         &top_level,
-        &constants_by_name,
         &symbols,
         pure_constants,
         HashSet::new(),
@@ -626,6 +623,7 @@ entry e(xs: []i32) []i32 = map(wrapper, xs)
     let binding_ids = crate::IdSource::<u32>::new();
     let effect_ids = crate::IdSource::new();
     let raw = run(&tlc, binding_ids, effect_ids).expect("TLC-to-EGIR construction succeeds");
+    let choose = raw.functions.iter().find(|function| function.name == "choose").unwrap().region;
     let wrapper = raw.functions.iter().find(|function| function.name == "wrapper").unwrap();
 
     assert!(wrapper.graph.nodes.values().any(|node| matches!(
@@ -633,7 +631,7 @@ entry e(xs: []i32) []i32 = map(wrapper, xs)
         ENode::Pure {
             op: PureOp::Call(callee),
             ..
-        } if callee == "choose"
+        } if *callee == choose
     )));
     assert!(
         wrapper.graph.skeleton.blocks.values().all(|block| block.side_effects.iter().all(
@@ -717,14 +715,6 @@ fn construction_purity_propagates_effectful_builtin_calls() {
             },
         ],
         symbols,
-        [
-            ("pure_leaf".into(), pure_leaf),
-            ("reads_storage".into(), reads_storage),
-            ("calls_reader".into(), calls_reader),
-            ("array_consumer".into(), array_consumer),
-        ]
-        .into_iter()
-        .collect(),
         term_ids,
         crate::tlc::context::BackendGlobal {
             auto_storage_binding_ids: crate::IdSource::new(),

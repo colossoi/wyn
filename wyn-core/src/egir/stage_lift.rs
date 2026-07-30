@@ -90,12 +90,12 @@ fn run_with_stats(mut program: Segmented) -> Result<(Segmented, StageLiftStats)>
             break;
         };
         let scope = program.entry_points[site.entry].name.clone();
-        let mut region_interner = program.data.region_interner.clone();
+        let mut identities = program.data.identities.clone();
         let name = fresh_region_name(
-            &region_interner,
+            &identities,
             &format!("{}_{}_stage_lift", scope, prepared.function.name),
         );
-        let region = region_interner.intern(&name);
+        let region = identities.alloc_function(name.clone());
         let frontier_count = prepared.frontier.len();
         let calls_inlined = prepared.calls_inlined;
         let mut specialized = None;
@@ -119,10 +119,7 @@ fn run_with_stats(mut program: Segmented) -> Result<(Segmented, StageLiftStats)>
         })?;
         program = program
             .extend_functions([specialized.expect("stage-lift rewrite did not produce its region")])
-            .map_data(|data| CoreProgramData {
-                region_interner,
-                ..data
-            });
+            .map_data(|data| CoreProgramData { identities, ..data });
 
         stats.bodies_specialized += 1;
         stats.calls_inlined += calls_inlined;
@@ -281,7 +278,7 @@ fn inline_mixed_calls_in_graph(
             if !call.has_mixed_stage_variance() {
                 return None;
             }
-            let region = program.data.region_interner.get(&call.callee)?;
+            let region = call.callee;
             let callee = program.region(region)?;
             if callee.params.len() != call.arguments.len() {
                 return None;

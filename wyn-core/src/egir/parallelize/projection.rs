@@ -48,6 +48,7 @@ impl ProjectionSpec {
 
 pub(super) fn project_kernel_body(
     source: &program::PlannedEntry,
+    id: crate::EntryId,
     spec: ProjectionSpec,
 ) -> Result<program::PlannedEntry, String> {
     let ProjectionSpec {
@@ -62,10 +63,12 @@ pub(super) fn project_kernel_body(
     let projection = graph_projector::GraphProjector::new(&source.graph).all_with_values(route_values)?;
     program::PlannedEntry::from_projection(
         projection,
+        id,
         name,
         source.span,
         execution_model,
         source.inputs.clone(),
+        source.parameter_inputs.clone(),
         outputs,
         resource_declarations,
         source.params.clone(),
@@ -99,10 +102,12 @@ fn project_kernel_body_effects(
         source.parameter_indices_referenced_by_projection(&projection, &retained_resources);
     let mut entry = program::PlannedEntry::from_projection(
         projection,
+        source.id,
         name,
         source.span,
         execution_model,
         source.inputs.clone(),
+        source.parameter_inputs.clone(),
         outputs,
         resource_declarations,
         source.params.clone(),

@@ -35,6 +35,14 @@ use crate::pipeline_descriptor::{
 #[error("{0}")]
 pub struct DescriptorError(String);
 
+/// EGIR-owned companion to the host ABI descriptor. Each outer index is a
+/// descriptor pipeline index and each inner index is a stage index.
+pub(crate) type StageEntryAssociations = Vec<Vec<crate::EntryId>>;
+
+fn entries_by_id<'a>(entries: &[&'a EntryPublication]) -> LookupMap<crate::EntryId, &'a EntryPublication> {
+    entries.iter().map(|entry| (entry.id, *entry)).collect()
+}
+
 pub trait PipelineDescriptorPublish {
     /// Append `Binding::StorageBuffer` / `Uniform` / `PushConstant` /
     /// `Texture` / `Sampler` entries to the descriptor's per-pipeline
@@ -42,29 +50,29 @@ pub trait PipelineDescriptorPublish {
     /// `EntryInput`s, `EntryOutput`s, and `storage_bindings` (gather
     /// intermediates). Bindings already present (e.g. those a
     /// `MultiCompute` parallelization path pre-populated) are skipped.
-    fn publish_implicit_bindings(&mut self, entries: &[&EntryPublication]) -> Result<(), DescriptorError>;
+    fn publish_implicit_bindings(
+        &mut self,
+        entries: &[&EntryPublication],
+        associations: &StageEntryAssociations,
+    ) -> Result<(), DescriptorError>;
 
     /// Record storage-buffer access on the stage that performs it and
     /// reconcile each pipeline layout from its own stages.
-    fn publish_stage_binding_uses(&mut self, entries: &[&EntryPublication]);
+    fn publish_stage_binding_uses(
+        &mut self,
+        entries: &[&EntryPublication],
+        associations: &StageEntryAssociations,
+    );
 
     /// Populate `vertex_inputs` and `fragment_outputs` on graphics
     /// pipelines from a vertex entry's `#[vertex_slot(n)]` inputs and a
     /// fragment entry's `#[target(name)]` outputs.
-    fn publish_graphics_io(&mut self, entries: &[&EntryPublication]);
+    fn publish_graphics_io(&mut self, entries: &[&EntryPublication], associations: &StageEntryAssociations);
 
     /// Workgroup size the parallelizer chose for the compute entry
     /// `entry_name`, or `(64, 1, 1)` when the entry isn't in the
     /// descriptor (e.g. graphics entries — non-compute call sites skip
     /// this anyway).
-    fn workgroup_size_of(&self, entry_name: &str) -> (u32, u32, u32);
-
-    /// Restore source-parameter names onto input storage bindings. The
-    /// parallelization path names its storage inputs positionally
-    /// (`input_0`, `input_1`, …); `names` maps each `(set, binding)` back
-    /// to the name the source declared. Only `BufferUsage::Input` storage
-    /// buffers are touched, so outputs and intermediates keep their
-    /// synthesized names even if some other entry's input shares a slot.
     fn relabel_input_storage_names(&mut self, names: &LookupMap<(u32, u32), String>);
 }
 
@@ -130,78 +138,70 @@ fn reconcile_storage_binding_access<'a>(
     }
 }
 
-fn publish_pipeline_stage_uses(pipeline: &mut Pipeline, entries: &[&EntryPublication]) {
+fn publish_pipeline_stage_uses(
+    pipeline: &mut Pipeline,
+    entries: &[&EntryPublication],
+    stage_ids: &[crate::EntryId],
+) {
+    let entries = entries_by_id(entries);
     match pipeline {
         Pipeline::Compute(compute) => {
-            for stage in &mut compute.stages {
+            for (index, stage) in compute.stages.iter_mut().enumerate() {
                 if stage.uses.is_empty() {
-                    if let Some(entry) = entries.iter().find(|entry| entry.name == stage.entry_point) {
+                    if let Some(entry) = stage_ids.get(index).and_then(|id| entries.get(id).copied()) {
                         stage.uses = entry_stage_binding_uses(entry, &compute.bindings);
                     }
                 }
             }
-            // Stage uses remain scheduler-precise for the frame graph. The
-            // physical binding layout must additionally permit every access
-            // declared by an entry ABI, even when a projected stage narrows
-            // its actual reads/writes.
-            let declared_uses = compute
-                .stages
+            let declared = stage_ids
                 .iter()
-                .filter_map(|stage| {
-                    entries
-                        .iter()
-                        .find(|entry| entry.name == stage.entry_point)
-                        .map(|entry| entry_stage_binding_uses(entry, &compute.bindings))
-                })
+                .filter_map(|id| entries.get(id).copied())
+                .map(|entry| entry_stage_binding_uses(entry, &compute.bindings))
                 .collect::<Vec<_>>();
             reconcile_storage_binding_access(
                 &mut compute.bindings,
-                compute.stages.iter().map(|stage| &stage.uses).chain(declared_uses.iter()),
+                compute.stages.iter().map(|stage| &stage.uses).chain(declared.iter()),
             );
         }
         Pipeline::Graphics(graphics) => {
-            for stage in &mut graphics.stages {
+            for (index, stage) in graphics.stages.iter_mut().enumerate() {
                 if stage.uses.is_empty() {
-                    if let Some(entry) = entries.iter().find(|entry| entry.name == stage.entry_point) {
+                    if let Some(entry) = stage_ids.get(index).and_then(|id| entries.get(id).copied()) {
                         stage.uses = entry_stage_binding_uses(entry, &graphics.bindings);
                     }
                 }
             }
-            let declared_uses = graphics
-                .stages
+            let declared = stage_ids
                 .iter()
-                .filter_map(|stage| {
-                    entries
-                        .iter()
-                        .find(|entry| entry.name == stage.entry_point)
-                        .map(|entry| entry_stage_binding_uses(entry, &graphics.bindings))
-                })
+                .filter_map(|id| entries.get(id).copied())
+                .map(|entry| entry_stage_binding_uses(entry, &graphics.bindings))
                 .collect::<Vec<_>>();
             reconcile_storage_binding_access(
                 &mut graphics.bindings,
-                graphics.stages.iter().map(|stage| &stage.uses).chain(declared_uses.iter()),
+                graphics.stages.iter().map(|stage| &stage.uses).chain(declared.iter()),
             );
         }
     }
 }
-
 impl PipelineDescriptorPublish for PipelineDescriptor {
-    fn publish_implicit_bindings(&mut self, entries: &[&EntryPublication]) -> Result<(), DescriptorError> {
+    fn publish_implicit_bindings(
+        &mut self,
+        entries: &[&EntryPublication],
+        associations: &StageEntryAssociations,
+    ) -> Result<(), DescriptorError> {
         let mut layout = DescriptorLayout::from_pipeline(self)?;
 
         for entry in entries {
-            // Find the bindings list backing this entry. A compute
-            // entry matches any stage in a `Compute` (covers both the
-            // common single-stage case and multi-stage parallel
-            // reduce / scan / ordered-prefix schedules);
-            // graphics entries match a stage of a `Graphics`.
-            let bindings: &mut Vec<Binding> = match self.pipelines.iter_mut().find(|p| match p {
-                Pipeline::Compute(cp) => cp.stages.iter().any(|s| s.entry_point == entry.name),
-                Pipeline::Graphics(gp) => gp.stages.iter().any(|s| s.entry_point == entry.name),
-            }) {
-                Some(Pipeline::Compute(cp)) => &mut cp.bindings,
-                Some(Pipeline::Graphics(gp)) => &mut gp.bindings,
-                _ => continue,
+            // The descriptor keeps emitted names only. EGIR's companion map
+            // supplies the structural stage-to-entry association.
+            let Some((pipeline_index, _)) =
+                associations.iter().enumerate().find(|(_, stages)| stages.contains(&entry.id))
+            else {
+                continue;
+            };
+            let bindings: &mut Vec<Binding> = match &mut self.pipelines[pipeline_index] {
+                Pipeline::Compute(cp) => &mut cp.bindings,
+                Pipeline::Graphics(gp) => &mut gp.bindings,
             };
 
             let claimed_pc_offsets: LookupSet<u32> = bindings
@@ -411,31 +411,43 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
         Ok(())
     }
 
-    fn publish_stage_binding_uses(&mut self, entries: &[&EntryPublication]) {
-        for pipeline in &mut self.pipelines {
-            publish_pipeline_stage_uses(pipeline, entries);
+    fn publish_stage_binding_uses(
+        &mut self,
+        entries: &[&EntryPublication],
+        associations: &StageEntryAssociations,
+    ) {
+        for (index, pipeline) in self.pipelines.iter_mut().enumerate() {
+            publish_pipeline_stage_uses(
+                pipeline,
+                entries,
+                associations.get(index).map(Vec::as_slice).unwrap_or_default(),
+            );
         }
     }
 
-    fn publish_graphics_io(&mut self, entries: &[&EntryPublication]) {
-        for entry in entries {
-            match entry.execution_model {
-                ExecutionModel::Vertex => publish_vertex_inputs(self, entry),
-                ExecutionModel::Fragment => publish_fragment_outputs(self, entry),
-                _ => {}
-            }
-        }
-    }
-
-    fn workgroup_size_of(&self, entry_name: &str) -> (u32, u32, u32) {
-        for p in &self.pipelines {
-            if let Pipeline::Compute(cp) = p {
-                if let Some(stage) = cp.stages.iter().find(|s| s.entry_point == entry_name) {
-                    return stage.workgroup_size;
+    fn publish_graphics_io(
+        &mut self,
+        entries: &[&EntryPublication],
+        associations: &StageEntryAssociations,
+    ) {
+        let entries = entries_by_id(entries);
+        for (pipeline_index, stage_ids) in associations.iter().enumerate() {
+            let Some(Pipeline::Graphics(graphics)) = self.pipelines.get_mut(pipeline_index) else {
+                continue;
+            };
+            for id in stage_ids {
+                let Some(entry) = entries.get(id).copied() else {
+                    continue;
+                };
+                match entry.execution_model {
+                    ExecutionModel::Vertex => append_vertex_inputs(&mut graphics.vertex_inputs, entry),
+                    ExecutionModel::Fragment => {
+                        append_fragment_outputs(&mut graphics.fragment_outputs, entry)
+                    }
+                    _ => {}
                 }
             }
         }
-        (64, 1, 1)
     }
 
     fn relabel_input_storage_names(&mut self, names: &LookupMap<(u32, u32), String>) {
@@ -571,23 +583,13 @@ fn binding_shape(binding: &Binding) -> Option<DescriptorShape> {
 /// the input's type. The type checker guarantees every such input has a
 /// valid vertex format, so `vertex_format` returning `None` here is a
 /// compiler bug.
-fn publish_vertex_inputs(pipeline: &mut PipelineDescriptor, entry: &EntryPublication) {
-    let vertex_inputs = match pipeline.pipelines.iter_mut().find(|p| match p {
-        Pipeline::Graphics(gp) => gp.stages.iter().any(|s| s.entry_point == entry.name),
-        _ => false,
-    }) {
-        Some(Pipeline::Graphics(gp)) => &mut gp.vertex_inputs,
-        _ => return,
-    };
-
+fn append_vertex_inputs(vertex_inputs: &mut Vec<VertexAttribute>, entry: &EntryPublication) {
     for input in &entry.inputs {
         let Some(IoDecoration::Location(slot)) = input.decoration() else {
             continue;
         };
-        let format = crate::ssa::layout::vertex_format(&input.ty).expect(
-            "vertex #[vertex_slot] param must have a valid vertex format \
-             (the type checker enforces this)",
-        );
+        let format = crate::ssa::layout::vertex_format(&input.ty)
+            .expect("vertex #[vertex_slot] param must have a valid vertex format");
         vertex_inputs.push(VertexAttribute {
             slot,
             name: input.name.clone(),
@@ -596,30 +598,16 @@ fn publish_vertex_inputs(pipeline: &mut PipelineDescriptor, entry: &EntryPublica
     }
 }
 
-/// Populate `fragment_outputs` of the Graphics pipeline backing a
-/// fragment entry from its `#[target(name)]` outputs. Each targeted output
-/// becomes a `FragmentOutput` naming the render-target resource, with the
-/// color-attachment slot taken from the output's position in the return tuple.
-fn publish_fragment_outputs(pipeline: &mut PipelineDescriptor, entry: &EntryPublication) {
-    let fragment_outputs = match pipeline.pipelines.iter_mut().find(|p| match p {
-        Pipeline::Graphics(gp) => gp.stages.iter().any(|s| s.entry_point == entry.name),
-        _ => false,
-    }) {
-        Some(Pipeline::Graphics(gp)) => &mut gp.fragment_outputs,
-        _ => return,
-    };
-
+fn append_fragment_outputs(fragment_outputs: &mut Vec<FragmentOutput>, entry: &EntryPublication) {
     for (i, output) in entry.outputs.iter().enumerate() {
-        let Some(name) = output.target().map(str::to_owned) else {
-            continue;
-        };
-        fragment_outputs.push(FragmentOutput {
-            location: i as u32,
-            name,
-        });
+        if let Some(name) = output.target().map(str::to_owned) {
+            fragment_outputs.push(FragmentOutput {
+                location: i as u32,
+                name,
+            });
+        }
     }
 }
-
 /// std140 block size + member layout for a uniform binding's value
 /// type. Record uniforms publish one member per field (source field
 /// names); tuples publish `f0..fn`; bare scalars/vectors publish a

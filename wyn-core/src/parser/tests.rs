@@ -191,7 +191,7 @@ fn test_parse_negative_literal_is_a_literal() {
     // Negation of a non-literal stays a runtime unary op.
     let decl = single_decl("let z: i32 = -y");
     assert!(
-        matches!(decl.body.kind, ExprKind::UnaryOp(ref op, _) if op.op == "-"),
+        matches!(decl.body.kind, ExprKind::UnaryOp(ref op, _) if op.op == crate::op::UnaryOperator::Negate),
         "negation of a variable must stay a UnaryOp"
     );
 }
@@ -405,7 +405,7 @@ fn test_parse_division() {
     assert!(matches!(
         &decl.body.kind,
         ExprKind::BinaryOp(op, left, right)
-            if op.op == "/"
+            if op.op == crate::op::BinaryOperator::Divide
             && matches!(left.kind, ExprKind::FloatLiteral(135.0))
             && matches!(right.kind, ExprKind::FloatLiteral(255.0))
     ));
@@ -468,18 +468,18 @@ fn test_operator_precedence_and_associativity() {
     assert!(matches!(
         &decl.body.kind,
         ExprKind::BinaryOp(outer_op, outer_left, outer_right)
-            if outer_op.op == "+"
+            if outer_op.op == crate::op::BinaryOperator::Add
             && matches!(outer_right.kind, ExprKind::Identifier(crate::ast::Identifier { name: ref f, .. }) if f == "f")
             // Left: (a + (b * c)) - (d / e)
             && matches!(
                 &outer_left.kind,
                 ExprKind::BinaryOp(sub_op, sub_left, sub_right)
-                    if sub_op.op == "-"
+                    if sub_op.op == crate::op::BinaryOperator::Subtract
                     // Right of sub: d / e
                     && matches!(
                         &sub_right.kind,
                         ExprKind::BinaryOp(div_op, div_left, div_right)
-                            if div_op.op == "/"
+                            if div_op.op == crate::op::BinaryOperator::Divide
                             && matches!(div_left.kind, ExprKind::Identifier(crate::ast::Identifier { name: ref d, .. }) if d == "d")
                             && matches!(div_right.kind, ExprKind::Identifier(crate::ast::Identifier { name: ref e, .. }) if e == "e")
                     )
@@ -487,13 +487,13 @@ fn test_operator_precedence_and_associativity() {
                     && matches!(
                         &sub_left.kind,
                         ExprKind::BinaryOp(add_op, add_left, add_right)
-                            if add_op.op == "+"
+                            if add_op.op == crate::op::BinaryOperator::Add
                             && matches!(add_left.kind, ExprKind::Identifier(crate::ast::Identifier { name: ref a, .. }) if a == "a")
                             // Right: b * c
                             && matches!(
                                 &add_right.kind,
                                 ExprKind::BinaryOp(mul_op, mul_left, mul_right)
-                                    if mul_op.op == "*"
+                                    if mul_op.op == crate::op::BinaryOperator::Multiply
                                     && matches!(mul_left.kind, ExprKind::Identifier(crate::ast::Identifier { name: ref b, .. }) if b == "b")
                                     && matches!(mul_right.kind, ExprKind::Identifier(crate::ast::Identifier { name: ref c, .. }) if c == "c")
                             )
@@ -1023,7 +1023,7 @@ fn test_if_then_else_parsing() {
         &decl.body.kind,
         ExprKind::If(if_expr)
             if matches!(&if_expr.condition.kind, ExprKind::BinaryOp(op, left, right)
-                if op.op == "=="
+                if op.op == crate::op::BinaryOperator::Equal
                 && matches!(left.kind, ExprKind::Identifier(crate::ast::Identifier { ref name, .. }) if name == "x")
                 && matches!(right.kind, ExprKind::IntLiteral(ref n) if n.as_str() == "0")
             )
@@ -1402,10 +1402,16 @@ fn test_parse_pattern_record_shorthand() {
             assert_eq!(fields.len(), 2, "Expected 2 fields");
 
             assert_eq!(fields[0].field, "x");
-            assert!(fields[0].pattern.is_none(), "Expected shorthand (no pattern)");
+            assert!(
+                matches!(&fields[0].target, crate::ast::RecordPatternTarget::Shorthand(_)),
+                "Expected shorthand"
+            );
 
             assert_eq!(fields[1].field, "y");
-            assert!(fields[1].pattern.is_none(), "Expected shorthand (no pattern)");
+            assert!(
+                matches!(&fields[1].target, crate::ast::RecordPatternTarget::Shorthand(_)),
+                "Expected shorthand"
+            );
         }
         _ => panic!("Expected Record pattern, got {:?}", pattern.kind),
     }
@@ -1423,8 +1429,11 @@ fn test_parse_pattern_record_with_patterns() {
             assert_eq!(fields.len(), 2, "Expected 2 fields");
 
             assert_eq!(fields[0].field, "x");
-            assert!(fields[0].pattern.is_some(), "Expected pattern for x");
-            if let Some(ref pat) = fields[0].pattern {
+            assert!(
+                matches!(&fields[0].target, crate::ast::RecordPatternTarget::Pattern(_)),
+                "Expected pattern for x"
+            );
+            if let crate::ast::RecordPatternTarget::Pattern(pat) = &fields[0].target {
                 match &pat.kind {
                     PatternKind::Name(name) => assert_eq!(name, "a"),
                     _ => panic!("Expected Name pattern for x"),
@@ -1432,8 +1441,11 @@ fn test_parse_pattern_record_with_patterns() {
             }
 
             assert_eq!(fields[1].field, "y");
-            assert!(fields[1].pattern.is_some(), "Expected pattern for y");
-            if let Some(ref pat) = fields[1].pattern {
+            assert!(
+                matches!(&fields[1].target, crate::ast::RecordPatternTarget::Pattern(_)),
+                "Expected pattern for y"
+            );
+            if let crate::ast::RecordPatternTarget::Pattern(pat) = &fields[1].target {
                 match &pat.kind {
                     PatternKind::Name(name) => assert_eq!(name, "b"),
                     _ => panic!("Expected Name pattern for y"),
@@ -1456,10 +1468,16 @@ fn test_parse_pattern_record_mixed() {
             assert_eq!(fields.len(), 2, "Expected 2 fields");
 
             assert_eq!(fields[0].field, "x");
-            assert!(fields[0].pattern.is_none(), "Expected shorthand for x");
+            assert!(
+                matches!(&fields[0].target, crate::ast::RecordPatternTarget::Shorthand(_)),
+                "Expected shorthand for x"
+            );
 
             assert_eq!(fields[1].field, "y");
-            assert!(fields[1].pattern.is_some(), "Expected pattern for y");
+            assert!(
+                matches!(&fields[1].target, crate::ast::RecordPatternTarget::Pattern(_)),
+                "Expected pattern for y"
+            );
         }
         _ => panic!("Expected Record pattern, got {:?}", pattern.kind),
     }
@@ -1935,7 +1953,7 @@ fn test_ambiguity_negative_in_parens() {
     let decl = single_decl("def test: i32 = (-x)");
 
     assert!(matches!(&decl.body.kind, ExprKind::UnaryOp(op, operand)
-        if op.op == "-" && matches!(&operand.kind, ExprKind::Identifier(crate::ast::Identifier { name, .. }) if name == "x")));
+        if op.op == crate::op::UnaryOperator::Negate && matches!(&operand.kind, ExprKind::Identifier(crate::ast::Identifier { name, .. }) if name == "x")));
 }
 
 #[test]
@@ -1944,7 +1962,7 @@ fn test_ambiguity_prefix_binds_tighter_than_infix() {
     let decl = single_decl("def test: i32 = !x + y");
 
     assert!(matches!(&decl.body.kind, ExprKind::BinaryOp(op, left, _)
-        if op.op == "+" && matches!(&left.kind, ExprKind::UnaryOp(unary_op, _) if unary_op.op == "!")));
+        if op.op == crate::op::BinaryOperator::Add && matches!(&left.kind, ExprKind::UnaryOp(unary_op, _) if unary_op.op == crate::op::UnaryOperator::LogicalNot)));
 }
 
 #[test]
@@ -1953,7 +1971,7 @@ fn test_function_call_precedence_in_expression() {
     let decl = single_decl("def test: i32 = f(x) + y");
 
     assert!(matches!(&decl.body.kind, ExprKind::BinaryOp(op, left, _)
-        if op.op == "+" && matches!(&left.kind, ExprKind::Application(_, args) if args.len() == 1)));
+        if op.op == crate::op::BinaryOperator::Add && matches!(&left.kind, ExprKind::Application(_, args) if args.len() == 1)));
 }
 
 #[test]
@@ -1962,7 +1980,7 @@ fn test_ambiguity_let_extends_right() {
     let decl = single_decl("def test: i32 = let x = 1 in x + y");
 
     assert!(matches!(&decl.body.kind, ExprKind::LetIn(let_in)
-        if matches!(&let_in.body.kind, ExprKind::BinaryOp(op, _, _) if op.op == "+")));
+        if matches!(&let_in.body.kind, ExprKind::BinaryOp(op, _, _) if op.op == crate::op::BinaryOperator::Add)));
 }
 
 #[test]
@@ -1971,7 +1989,7 @@ fn test_ambiguity_if_extends_right() {
     let decl = single_decl("def test: i32 = if true then 1 else 2 + 3");
 
     assert!(matches!(&decl.body.kind, ExprKind::If(if_expr)
-        if matches!(&if_expr.else_branch.kind, ExprKind::BinaryOp(op, _, _) if op.op == "+")));
+        if matches!(&if_expr.else_branch.kind, ExprKind::BinaryOp(op, _, _) if op.op == crate::op::BinaryOperator::Add)));
 }
 
 #[test]
@@ -2059,7 +2077,7 @@ fn test_pipe_binds_looser_than_arithmetic() {
     assert!(matches!(&func.kind, ExprKind::Identifier(crate::ast::Identifier { name: f, .. }) if f == "f"));
     assert_eq!(args.len(), 1);
     assert!(
-        matches!(&args[0].kind, ExprKind::BinaryOp(op, _, _) if op.op == "+"),
+        matches!(&args[0].kind, ExprKind::BinaryOp(op, _, _) if op.op == crate::op::BinaryOperator::Add),
         "the piped value should be the whole `a + b` sum, got {:?}",
         &args[0].kind
     );
@@ -2654,7 +2672,11 @@ fn test_operator_section_in_expression() {
                     // Body should be x + y
                     match &lambda.body.kind {
                         ExprKind::BinaryOp(op, _, _) => {
-                            assert_eq!(op.op, "+", "Expected + operator in lambda body");
+                            assert_eq!(
+                                op.op,
+                                crate::op::BinaryOperator::Add,
+                                "Expected + operator in lambda body"
+                            );
                         }
                         other => panic!("Expected BinaryOp in lambda body, got {:?}", other),
                     }
@@ -2681,7 +2703,7 @@ fn test_operator_section_direct_application() {
                     assert_eq!(lambda.params.len(), 2, "Lambda should have 2 params");
                     match &lambda.body.kind {
                         ExprKind::BinaryOp(op, _, _) => {
-                            assert_eq!(op.op, "+", "Expected + operator");
+                            assert_eq!(op.op, crate::op::BinaryOperator::Add, "Expected + operator");
                         }
                         other => panic!("Expected BinaryOp in lambda body, got {:?}", other),
                     }
@@ -2713,7 +2735,11 @@ fn test_negation_of_array_index() {
     // Should be UnaryOp("-", ArrayIndex(s, 1))
     match &decl.body.kind {
         ExprKind::UnaryOp(op, operand) => {
-            assert_eq!(op.op, "-", "Expected negation operator");
+            assert_eq!(
+                op.op,
+                crate::op::UnaryOperator::Negate,
+                "Expected negation operator"
+            );
             match &operand.kind {
                 ExprKind::ArrayIndex(array, index) => {
                     assert!(
@@ -2750,7 +2776,7 @@ fn test_ambiguity_loop_body_extends_right() {
         ExprKind::Loop(loop_expr) => {
             // The body should be a binary op (the full x + 1 + 2)
             assert!(
-                matches!(&loop_expr.body.kind, ExprKind::BinaryOp(op, _, _) if op.op == "+"),
+                matches!(&loop_expr.body.kind, ExprKind::BinaryOp(op, _, _) if op.op == crate::op::BinaryOperator::Add),
                 "Loop body should extend to include full expression, got {:?}",
                 loop_expr.body.kind
             );
@@ -2805,9 +2831,13 @@ fn test_ambiguity_negation_prefix_binds_tighter_than_multiply() {
 
     match &decl.body.kind {
         ExprKind::BinaryOp(op, left, _right) => {
-            assert_eq!(op.op, "*", "Top-level should be multiplication");
+            assert_eq!(
+                op.op,
+                crate::op::BinaryOperator::Multiply,
+                "Top-level should be multiplication"
+            );
             assert!(
-                matches!(&left.kind, ExprKind::UnaryOp(unary_op, _) if unary_op.op == "-"),
+                matches!(&left.kind, ExprKind::UnaryOp(unary_op, _) if unary_op.op == crate::op::UnaryOperator::Negate),
                 "Left side should be negation, got {:?}",
                 left.kind
             );
@@ -3285,7 +3315,7 @@ fn test_parse_bitwise_or_operator() {
     let decl = single_decl("let x: u32 = 0x03u32 | 0x100u32");
     assert!(matches!(
         &decl.body.kind,
-        ExprKind::BinaryOp(op, _, _) if op.op == "|"
+        ExprKind::BinaryOp(op, _, _) if op.op == crate::op::BinaryOperator::BitwiseOr
     ));
 }
 
@@ -3297,8 +3327,8 @@ fn test_parse_bitwise_or_in_expression() {
     assert!(matches!(
         &decl.body.kind,
         ExprKind::BinaryOp(op, left, right)
-            if op.op == "|"
-            && matches!(&left.kind, ExprKind::BinaryOp(inner_op, _, _) if inner_op.op == "|")
+            if op.op == crate::op::BinaryOperator::BitwiseOr
+            && matches!(&left.kind, ExprKind::BinaryOp(inner_op, _, _) if inner_op.op == crate::op::BinaryOperator::BitwiseOr)
             && matches!(&right.kind, ExprKind::Identifier(crate::ast::Identifier { name, .. }) if name == "c")
     ));
 }
@@ -3310,7 +3340,7 @@ fn test_parse_bitwise_or_with_lambda() {
     let decl = single_decl("let result: u32 = x | y");
     assert!(matches!(
         &decl.body.kind,
-        ExprKind::BinaryOp(op, _, _) if op.op == "|"
+        ExprKind::BinaryOp(op, _, _) if op.op == crate::op::BinaryOperator::BitwiseOr
     ));
 }
 
@@ -3322,7 +3352,7 @@ fn test_parse_lambda_then_bitwise_or() {
     if let ExprKind::Lambda(lambda) = &decl.body.kind {
         assert!(matches!(
             &lambda.body.kind,
-            ExprKind::BinaryOp(op, _, _) if op.op == "|"
+            ExprKind::BinaryOp(op, _, _) if op.op == crate::op::BinaryOperator::BitwiseOr
         ));
     } else {
         panic!("Expected lambda, got {:?}", decl.body.kind);
@@ -3761,7 +3791,7 @@ fn test_parse_vec_with_swizzle_value_captures_full_binop() {
         } => {
             assert_eq!(components, &[1u8], "swizzle should be .y");
             match &value.kind {
-                ExprKind::BinaryOp(op, _, _) => assert_eq!(op.op, "+"),
+                ExprKind::BinaryOp(op, _, _) => assert_eq!(op.op, crate::op::BinaryOperator::Add),
                 other => panic!(
                     "value of `with .y =` must be the full `v.y + s` BinaryOp; \
                      got {:?} — the `+` leaked outside the VecWith",

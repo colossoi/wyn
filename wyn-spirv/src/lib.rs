@@ -181,9 +181,6 @@ pub struct SpirvBuilder {
     // (buffer-layout walks, `with []` lowering) can recover the elem
     // type id without re-deriving from the compiler-side PolyType.
     array_elem: HashMap<TypeId, TypeId>,
-    // Forward-declared function ids keyed by name, so a body emission
-    // can land on the id its callers already reference.
-    functions: HashMap<String, FuncId>,
     // Open-function block layout. Local variables hoist into the
     // variables block; the body emits into the code block; at function
     // close, an unconditional branch wires the former to the latter.
@@ -244,7 +241,6 @@ impl SpirvBuilder {
             nonwritable_decorated: HashSet::new(),
             buffer_layout_decorated: HashSet::new(),
             array_elem: HashMap::new(),
-            functions: HashMap::new(),
             variables_block: None,
             first_code_block: None,
         }
@@ -696,32 +692,15 @@ impl SpirvBuilder {
         self.array_elem.get(&arr).copied()
     }
 
-    /// Look up the SPIR-V id of a function declared via
-    /// `forward_declare_function` or already opened by `begin_function`.
-    pub fn get_function(&self, name: &str) -> Option<FuncId> {
-        self.functions.get(name).copied()
+    /// Reserve a SPIR-V id for a function whose body will be emitted later.
+    pub fn reserve_function(&mut self) -> FuncId {
+        FuncId::new(self.inner.id())
     }
 
-    /// Reserve a SPIR-V id for a function whose body comes later.
-    /// Idempotent on `name` — repeat calls return the same id, so
-    /// callers can resolve cross-function references without ordering
-    /// constraints.
-    pub fn forward_declare_function(&mut self, name: &str) -> FuncId {
-        if let Some(&id) = self.functions.get(name) {
-            return id;
-        }
-        let func_id = FuncId::new(self.inner.id());
-        self.functions.insert(name.to_string(), func_id);
-        func_id
-    }
-
-    /// Emit an extern function stub with `Import` linkage — body is
-    /// supplied at link time. Adds the `Linkage` capability on first
-    /// use. The id is registered under `name` so subsequent calls
-    /// resolve to it.
+    /// Emit an extern function stub with `Import` linkage. Its body is
+    /// supplied at link time and its returned id is its structural identity.
     pub fn forward_declare_linked_function(
         &mut self,
-        name: &str,
         linkage_name: &str,
         param_types: &[TypeId],
         return_type: TypeId,
@@ -745,40 +724,26 @@ impl SpirvBuilder {
                 dr::Operand::LinkageType(spirv::LinkageType::Import),
             ],
         );
-        let func_id = FuncId::new(func_id);
-        self.functions.insert(name.to_string(), func_id);
-        func_id
+        FuncId::new(func_id)
     }
 
-    /// Open a new function. Picks up the forward-declared id under
-    /// `name` if one exists, otherwise allocates fresh. Opens both
-    /// the variables block (where `declare_variable` hoists locals)
-    /// and the first code block (selected as the current emission
-    /// target on return).
-    ///
-    /// Returns `(func_id, param_ids, first_code_block)`.
+    /// Open a function, optionally using a previously reserved id. Opens both
+    /// the variables block (where `declare_variable` hoists locals) and the
+    /// first code block (selected as the current emission target on return).
     pub fn begin_function(
         &mut self,
-        name: &str,
+        reserved: Option<FuncId>,
         param_types: &[TypeId],
         return_type: TypeId,
     ) -> Result<(FuncId, Vec<spirv::Word>, BlockId), dr::Error> {
         let func_type =
             self.inner.type_function(*return_type, param_types.iter().map(|t| **t).collect::<Vec<_>>());
-        let func_id = if let Some(&pre_id) = self.functions.get(name) {
-            FuncId::new(self.inner.begin_function(
-                *return_type,
-                Some(*pre_id),
-                spirv::FunctionControl::NONE,
-                func_type,
-            )?)
-        } else {
-            let id =
-                self.inner.begin_function(*return_type, None, spirv::FunctionControl::NONE, func_type)?;
-            let fid = FuncId::new(id);
-            self.functions.insert(name.to_string(), fid);
-            fid
-        };
+        let func_id = FuncId::new(self.inner.begin_function(
+            *return_type,
+            reserved.map(|id| *id),
+            spirv::FunctionControl::NONE,
+            func_type,
+        )?);
 
         let mut param_ids = Vec::with_capacity(param_types.len());
         for &param_ty in param_types {
@@ -796,7 +761,6 @@ impl SpirvBuilder {
 
         Ok((func_id, param_ids, code_block_id))
     }
-
     /// Close the current function: branch the variables block to the
     /// first code block, emit `OpFunctionEnd`, and clear the
     /// open-function layout state.

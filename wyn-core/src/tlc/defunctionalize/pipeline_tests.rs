@@ -1,10 +1,10 @@
 use crate::ast::{BinaryOp, Span, TypeName};
+use crate::op::BinaryOperator;
 use crate::tlc::{
     Def, DefMeta, Family, Lambda, LoopKind, Payload, Program, Term, TermId, TermIdSource, TermKind, VarRef,
 };
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
-use std::collections::HashMap;
 
 /// End-to-end runner for the three internal defunctionalization algorithms. Mirrors what
 /// `tlc::defunctionalize` does in production.
@@ -215,7 +215,6 @@ fn test_defunc_simple_lambda_no_capture() {
             return_diet: crate::types::Diet::observing(),
         }],
         symbols,
-        HashMap::new(),
         term_ids,
         crate::tlc::context::RewriteGlobal {
             known_defs: Default::default(),
@@ -257,7 +256,9 @@ fn test_defunc_lambda_with_capture() {
                         id: b.next_id(),
                         ty: arrow(i32_ty(), arrow(i32_ty(), i32_ty())),
                         span: b.span(),
-                        kind: TermKind::BinOp(BinaryOp { op: "+".to_string() }),
+                        kind: TermKind::BinOp(BinaryOp {
+                            op: BinaryOperator::Add,
+                        }),
                     }),
                     args: vec![Term {
                         id: b.next_id(),
@@ -315,7 +316,6 @@ fn test_defunc_lambda_with_capture() {
             return_diet: crate::types::Diet::observing(),
         }],
         symbols,
-        HashMap::new(),
         term_ids,
         crate::tlc::context::RewriteGlobal {
             known_defs: Default::default(),
@@ -446,7 +446,9 @@ fn test_nested_hof_passthrough() {
                 id: b.next_id(),
                 ty: arrow(i32_ty(), arrow(i32_ty(), i32_ty())),
                 span,
-                kind: TermKind::BinOp(BinaryOp { op: "+".to_string() }),
+                kind: TermKind::BinOp(BinaryOp {
+                    op: BinaryOperator::Add,
+                }),
             }),
             args: vec![
                 Term {
@@ -546,7 +548,6 @@ fn test_nested_hof_passthrough() {
             },
         ],
         symbols,
-        HashMap::new(),
         term_ids,
         crate::tlc::context::RewriteGlobal {
             known_defs: Default::default(),
@@ -725,7 +726,6 @@ fn specialized_hof_preserves_consuming_data_param_diet() {
             },
         ],
         symbols,
-        HashMap::new(),
         term_ids,
         crate::tlc::context::RewriteGlobal {
             known_defs: Default::default(),

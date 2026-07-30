@@ -145,7 +145,10 @@ pub fn lower(pat: &ast::Pattern) -> CovPat {
             fields
                 .iter()
                 .map(|f| {
-                    let sub = f.pattern.as_ref().map(lower).unwrap_or(CovPat::Wild); // shorthand `{name}` binds without constraining
+                    let sub = match &f.target {
+                        ast::RecordPatternTarget::Shorthand(_) => CovPat::Wild,
+                        ast::RecordPatternTarget::Pattern(pattern) => lower(pattern),
+                    };
                     (f.field.clone(), sub)
                 })
                 .collect(),

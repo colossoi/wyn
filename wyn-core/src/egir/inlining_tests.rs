@@ -14,18 +14,22 @@ fn u32_ty() -> Type<TypeName> {
 #[test]
 fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     let ty = u32_ty();
-    let region = crate::egir::types::RegionId::from_index(0);
+    let region = crate::FunctionId::from_index(0);
     let mut callee_graph = EGraph::<Semantic>::new();
     let x = callee_graph.add_func_param(0, ty.clone());
     let invariant = callee_graph.add_func_param(1, ty.clone());
     let square = callee_graph.intern_pure(
-        PureOp::BinOp("*".into()),
+        PureOp::BinOp(crate::op::BinaryOperator::Multiply),
         smallvec![invariant, invariant],
         ty.clone(),
         None,
     );
-    let result =
-        callee_graph.intern_pure(PureOp::BinOp("+".into()), smallvec![x, square], ty.clone(), None);
+    let result = callee_graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        smallvec![x, square],
+        ty.clone(),
+        None,
+    );
     callee_graph.skeleton.blocks[callee_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(result));
     let callee = SemanticFunc::new(
@@ -41,7 +45,12 @@ fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     let mut caller = EGraph::<Semantic>::new();
     let two = caller.intern_constant(ConstantValue::U32(2), ty.clone());
     let seven = caller.intern_constant(ConstantValue::U32(7), ty.clone());
-    let call = caller.intern_pure(PureOp::Call("mixed".into()), smallvec![two, seven], ty, None);
+    let call = caller.intern_pure(
+        PureOp::Call(crate::FunctionId::from_index(0)),
+        smallvec![two, seven],
+        ty,
+        None,
+    );
 
     let inlined = inline_pure_call(&mut caller, call, &callee).expect("pure call inlines");
 
@@ -55,15 +64,15 @@ fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     let ENode::Pure { op, operands } = &caller.nodes[inlined].kind else {
         panic!("inlined root is not pure")
     };
-    assert!(matches!(op, PureOp::BinOp(name) if name == "+"));
+    assert!(matches!(op, PureOp::BinOp(crate::op::BinaryOperator::Add)));
     assert!(operands.contains(&two));
     let cloned_square = operands.iter().copied().find(|operand| *operand != two).unwrap();
     assert!(matches!(
         &caller.nodes[cloned_square].kind,
         ENode::Pure {
-            op: PureOp::BinOp(name),
+            op: PureOp::BinOp(crate::op::BinaryOperator::Multiply),
             operands
-        } if name == "*" && operands.as_slice() == [seven, seven]
+        } if operands.as_slice() == [seven, seven]
     ));
     assert!(caller.verify_hash_cons().is_ok());
 }

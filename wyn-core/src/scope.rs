@@ -211,14 +211,14 @@ impl<T: Clone> ScopeStack<ScopeEntry<T>> {
 /// constructors, typed/attributed wrappers) and reports every leaf
 /// `PatternKind::Name`, plus shorthand record fields (`{ name }` binds
 /// `name`). Wildcards, unit, and literal patterns contribute no names.
-pub fn for_each_pattern_name<H, A>(pattern: &crate::ast::Pattern<H, A>, f: &mut impl FnMut(&str))
+pub fn for_each_pattern_name<T, A>(pattern: &crate::ast::Pattern<T, A>, f: &mut impl FnMut(&str))
 where
-    H: Clone + std::fmt::Debug + PartialEq,
+    T: crate::ast::TreeFamily,
     A: Clone + std::fmt::Debug + PartialEq,
 {
-    use crate::ast::PatternKind;
+    use crate::ast::{BindingName, PatternKind, RecordPatternTarget};
     match &pattern.kind {
-        PatternKind::Name(name) => f(name),
+        PatternKind::Name(name) => f(name.source_name()),
         PatternKind::Tuple(pats) | PatternKind::Vec(pats) | PatternKind::Constructor(_, pats) => {
             for p in pats {
                 for_each_pattern_name(p, f);
@@ -226,10 +226,9 @@ where
         }
         PatternKind::Record(fields) => {
             for field in fields {
-                match &field.pattern {
-                    Some(p) => for_each_pattern_name(p, f),
-                    // Shorthand `{ name }` binds `name`.
-                    None => f(&field.field),
+                match &field.target {
+                    RecordPatternTarget::Pattern(pattern) => for_each_pattern_name(pattern, f),
+                    RecordPatternTarget::Shorthand(binding) => f(binding.source_name()),
                 }
             }
         }
@@ -241,9 +240,9 @@ where
 }
 
 /// Collect all names bound by `pattern` into a fresh `Vec`.
-pub fn pattern_bound_names<H, A>(pattern: &crate::ast::Pattern<H, A>) -> Vec<String>
+pub fn pattern_bound_names<T, A>(pattern: &crate::ast::Pattern<T, A>) -> Vec<String>
 where
-    H: Clone + std::fmt::Debug + PartialEq,
+    T: crate::ast::TreeFamily,
     A: Clone + std::fmt::Debug + PartialEq,
 {
     let mut names = Vec::new();

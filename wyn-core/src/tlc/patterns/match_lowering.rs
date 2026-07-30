@@ -31,7 +31,7 @@ impl<'a> Transformer<'a> {
         // Bind the scrutinee once so each arm reads it without
         // re-evaluating the source expression.
         let scrut_id = self.term_ids.next_id();
-        let scrut_sym = self.define(&format!("_w_match_scrut_{}", scrut_id));
+        let scrut_sym = self.fresh(&format!("_w_match_scrut_{}", scrut_id));
         let scrut_var = self.mk_term(scrut_ty.clone(), span, TermKind::Var(VarRef::Symbol(scrut_sym)));
 
         // Build right-to-left. Last arm's cond is elided: coverage
@@ -76,13 +76,13 @@ impl<'a> Transformer<'a> {
     pub(super) fn compile_pattern_test(
         &mut self,
         scrut: &Term,
-        pattern: &ast::Pattern<ast::TypedHeader>,
+        pattern: &ast::Pattern<ast::HolesResolvedTree>,
     ) -> (Term, Vec<PendingBinding>) {
         let span = pattern.h.span;
         match &pattern.kind {
             PatternKind::Wildcard => (self.bool_lit(true, span), Vec::new()),
             PatternKind::Name(name) => {
-                let sym = self.define(name);
+                let sym = name.symbol;
                 let bindings = vec![PendingBinding {
                     name: sym,
                     ty: scrut.ty.clone(),
@@ -97,7 +97,9 @@ impl<'a> Transformer<'a> {
             PatternKind::Literal(lit) => {
                 let lit_term = self.literal_term(lit, &scrut.ty, span);
                 let cond = self.build_binop(
-                    ast::BinaryOp { op: "==".to_string() },
+                    ast::BinaryOp {
+                        op: crate::op::BinaryOperator::Equal,
+                    },
                     scrut.clone(),
                     lit_term,
                     Self::bool_ty(),
@@ -164,7 +166,9 @@ impl<'a> Transformer<'a> {
                 let tag_proj = self.mk_tuple_proj(scrut.clone(), 0, u32_ty.clone(), span);
                 let tag_lit = self.mk_term(u32_ty, span, TermKind::IntLit(tag_value.to_string()));
                 let mut cond = self.build_binop(
-                    ast::BinaryOp { op: "==".to_string() },
+                    ast::BinaryOp {
+                        op: crate::op::BinaryOperator::Equal,
+                    },
                     tag_proj,
                     tag_lit,
                     Self::bool_ty(),
@@ -220,7 +224,9 @@ impl<'a> Transformer<'a> {
             return lhs;
         }
         self.build_binop(
-            ast::BinaryOp { op: "&&".to_string() },
+            ast::BinaryOp {
+                op: crate::op::BinaryOperator::LogicalAnd,
+            },
             lhs,
             rhs,
             Self::bool_ty(),

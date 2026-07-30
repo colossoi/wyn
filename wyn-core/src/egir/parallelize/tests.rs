@@ -9,6 +9,7 @@ use crate::egir::program::SlotSource;
 use crate::egir::soac::screma;
 use crate::egir::types::{EffectOp, EffectToken, Semantic};
 use crate::flow::ExecutionModel;
+use crate::FunctionId;
 
 pub(crate) const FILTER_SCAN_GROUPS: u32 = model::FILTER_SCAN_GROUPS;
 pub(crate) const REDUCE_PHASE1_WIDTH: u32 = model::REDUCE_PHASE1_WIDTH;
@@ -23,7 +24,7 @@ pub(crate) fn planned_callable_names(
 }
 
 /// Opaque region used by canonical operator-lambda fixtures.
-const OPERATOR_REGION: RegionId = RegionId::from_index(0);
+const OPERATOR_REGION: FunctionId = FunctionId::from_index(0);
 
 fn reduce_operator(neutral: NodeId, captures: Vec<NodeId>) -> screma::Reduce {
     let unit = Type::Constructed(TypeName::Unit, vec![]);
@@ -66,8 +67,10 @@ fn output_ownership_comes_from_explicit_route_writer() {
         effects: Some((EffectToken::from(8), writer)),
         span: None,
     });
+    let mut identities = crate::egir::program::ProgramIdentities::default();
     let mut entry = SemanticEntry::new_with_resources(
         "route_test".into(),
+        identities.alloc_entry("route_test".into()),
         Span::dummy(),
         ExecutionModel::Compute {
             local_size: (1, 1, 1),
@@ -220,9 +223,10 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
     let offsets = ResourceId::for_test(41);
     let mut semantic_ids = crate::egir::program::SemanticOpIdSource::default();
     let mut effect_ids = crate::IdSource::new();
+    let mut identities = crate::egir::program::ProgramIdentities::default();
     let phase2 = ScanPhase2Spec {
         entry_name: "prefix".into(),
-        operator: "combine".into(),
+        operator: identities.alloc_function("combine".into()),
         elem_ty,
         source_graph: &phase1,
         operator_captures: &[],
@@ -235,7 +239,7 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
         total_out: None,
         reduction_output: None,
     }
-    .build(&mut semantic_ids, &mut effect_ids)
+    .build(&mut identities, &mut semantic_ids, &mut effect_ids)
     .expect("phase2 synthesis");
 
     let stored_value = phase2

@@ -23,7 +23,6 @@ pub fn normalize_soacs_to_anf(
     let Program {
         defs,
         mut symbols,
-        def_syms,
         mut term_ids,
         global_context,
         state: _,
@@ -39,7 +38,7 @@ pub fn normalize_soacs_to_anf(
             ..def
         })
         .collect();
-    let program = Program::from_parts(defs, symbols, def_syms, term_ids, global_context);
+    let program = Program::from_parts(defs, symbols, term_ids, global_context);
     debug_assert!(
         verify_flattened(&program).is_ok(),
         "SOAC ANF normalization left a nested let rhs"

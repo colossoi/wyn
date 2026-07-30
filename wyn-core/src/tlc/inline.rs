@@ -369,41 +369,14 @@ fn find_small_candidates(
 /// After monomorphization, the same constant name may be referenced through
 /// different SymbolIds, so we index by name as well as by def SymbolId.
 fn find_all_constants(program: &RepSpecialized) -> LookupMap<SymbolId, Term<Empty, Empty>> {
-    // Find the canonical constant defs.
-    let mut by_sym: LookupMap<SymbolId, Term<Empty, Empty>> = LookupMap::new();
-    let mut by_name: LookupMap<String, Term<Empty, Empty>> = LookupMap::new();
-
-    for def in &program.defs {
-        if !matches!(def.meta, DefMeta::Function) {
-            continue;
-        }
-        if matches!(def.body.kind, TermKind::Extern(_)) {
-            continue;
-        }
-        if def.arity != 0 {
-            continue;
-        }
-        by_sym.insert(def.name, def.body.clone());
-        if let Some(name) = program.symbols.get(def.name) {
-            by_name.insert(name.clone(), def.body.clone());
-        }
-    }
-
-    // Also map any other SymbolId that resolves to a constant's name.
-    for def in &program.defs {
-        if let Some(name) = program.symbols.get(def.name) {
-            if let Some(body) = by_name.get(name) {
-                by_sym.entry(def.name).or_insert_with(|| body.clone());
-            }
-        }
-    }
-    for (name, body) in &by_name {
-        if let Some(&def_sym) = program.def_syms.get(name) {
-            by_sym.entry(def_sym).or_insert_with(|| body.clone());
-        }
-    }
-
-    by_sym
+    program
+        .defs
+        .iter()
+        .filter(|def| matches!(def.meta, DefMeta::Function))
+        .filter(|def| !matches!(def.body.kind, TermKind::Extern(_)))
+        .filter(|def| def.arity == 0)
+        .map(|def| (def.name, def.body.clone()))
+        .collect()
 }
 
 /// Check if a term contains control flow (If, Loop) or SOACs.

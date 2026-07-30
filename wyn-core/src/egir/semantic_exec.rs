@@ -144,23 +144,26 @@ impl<'a> RegionExecutor<'a> {
             },
             PureOp::BinOp(operator) => {
                 let values = ints()?;
-                match (operator.as_str(), values.as_slice()) {
-                    ("+", [left, right]) => Ok(Value::Int(left.wrapping_add(*right))),
-                    ("-", [left, right]) => Ok(Value::Int(left.wrapping_sub(*right))),
-                    ("*", [left, right]) => Ok(Value::Int(left.wrapping_mul(*right))),
-                    ("<", [left, right]) => Ok(Value::Bool(left < right)),
-                    ("==", [left, right]) => Ok(Value::Bool(left == right)),
+                match (operator, values.as_slice()) {
+                    (crate::op::BinaryOperator::Add, [left, right]) => {
+                        Ok(Value::Int(left.wrapping_add(*right)))
+                    }
+                    (crate::op::BinaryOperator::Subtract, [left, right]) => {
+                        Ok(Value::Int(left.wrapping_sub(*right)))
+                    }
+                    (crate::op::BinaryOperator::Multiply, [left, right]) => {
+                        Ok(Value::Int(left.wrapping_mul(*right)))
+                    }
+                    (crate::op::BinaryOperator::Less, [left, right]) => Ok(Value::Bool(left < right)),
+                    (crate::op::BinaryOperator::Equal, [left, right]) => Ok(Value::Bool(left == right)),
                     _ => Err(format!("unsupported integer operator `{operator}`")),
                 }
             }
             PureOp::Call(callee) => {
-                let region = self
-                    .program
-                    .data
-                    .region_interner
-                    .get(callee)
-                    .ok_or_else(|| format!("unknown EGIR region `{callee}`"))?;
-                self.call(&region, values)
+                if !self.program.contains_region(*callee) {
+                    return Err(format!("unknown EGIR region {callee:?}"));
+                }
+                self.call(callee, values)
             }
             _ => Err(format!("unsupported pure region operation {op:?}")),
         }

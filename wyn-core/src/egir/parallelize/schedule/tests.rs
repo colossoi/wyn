@@ -3,21 +3,37 @@
 use super::*;
 use crate::egir::builder::EntryBuilder;
 
-fn body(name: &str) -> PlannedEntry {
+fn body(name: &str, identities: &mut crate::egir::program::ProgramIdentities) -> PlannedEntry {
     let mut semantic_ids = crate::egir::program::SemanticOpIdSource::default();
     let mut effect_ids = crate::IdSource::new();
-    EntryBuilder::new_compute(name.to_string(), (1, 1, 1), &mut semantic_ids, &mut effect_ids).build()
+    EntryBuilder::new_compute(
+        name.to_string(),
+        (1, 1, 1),
+        identities,
+        &mut semantic_ids,
+        &mut effect_ids,
+    )
+    .build()
 }
 
-fn spec(name: &str, label: &'static str) -> PhaseSpec {
+fn spec(
+    name: &str,
+    label: &'static str,
+    identities: &mut crate::egir::program::ProgramIdentities,
+) -> PhaseSpec {
     PhaseSpec::compute(
-        body(name),
+        body(name, identities),
         KernelDispatch::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
         label,
     )
 }
 
-fn phase(name: &str, label: &'static str, order: usize) -> KernelPhase {
+fn phase(
+    name: &str,
+    label: &'static str,
+    order: usize,
+    identities: &mut crate::egir::program::ProgramIdentities,
+) -> KernelPhase {
     phase_from_body(
         None,
         None,
@@ -25,7 +41,7 @@ fn phase(name: &str, label: &'static str, order: usize) -> KernelPhase {
             group: PhaseGroup::Unpublished,
             order,
         },
-        spec(name, label),
+        spec(name, label, identities),
     )
     .unwrap()
 }
@@ -45,7 +61,8 @@ fn plan(mut phases: Vec<KernelPhase>) -> KernelPlan {
 
 #[test]
 fn body_preparation_retains_creator_supplied_facts() {
-    let prepared = spec("kernel", "diagnostic_label").prepare().unwrap();
+    let mut identities = crate::egir::program::ProgramIdentities::default();
+    let prepared = spec("kernel", "diagnostic_label", &mut identities).prepare().unwrap();
     assert_eq!(prepared.label, "diagnostic_label");
     assert_eq!(prepared.entry.name, "kernel");
     assert_eq!(
@@ -53,7 +70,7 @@ fn body_preparation_retains_creator_supplied_facts() {
         KernelDispatch::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 })
     );
 
-    let mut graphics = body("graphics");
+    let mut graphics = body("graphics", &mut identities);
     graphics.execution_model = ExecutionModel::Vertex;
     let prepared = PhaseSpec::graphics(
         graphics,
@@ -67,14 +84,15 @@ fn body_preparation_retains_creator_supplied_facts() {
 
 #[test]
 fn body_preparation_rejects_compute_graphics_mismatches() {
+    let mut identities = crate::egir::program::ProgramIdentities::default();
     assert!(PhaseSpec::graphics(
-        body("compute"),
+        body("compute", &mut identities),
         KernelDispatch::inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 })
     )
     .prepare()
     .is_err());
 
-    let mut graphics = body("graphics");
+    let mut graphics = body("graphics", &mut identities);
     graphics.execution_model = ExecutionModel::Fragment;
     assert!(PhaseSpec::compute(
         graphics,
@@ -87,16 +105,17 @@ fn body_preparation_rejects_compute_graphics_mismatches() {
 
 #[test]
 fn validator_rejects_duplicate_names_and_dependency_cycles() {
+    let mut identities = crate::egir::program::ProgramIdentities::default();
     let error = plan(vec![
-        phase("same", "serial_compute", 0),
-        phase("same", "serial_compute", 1),
+        phase("same", "serial_compute", 0, &mut identities),
+        phase("same", "serial_compute", 1, &mut identities),
     ])
     .validate()
     .unwrap_err();
     assert!(error.contains("duplicate physical entry"));
 
-    let mut first = phase("first", "serial_compute", 0);
-    let mut second = phase("second", "serial_compute", 1);
+    let mut first = phase("first", "serial_compute", 0, &mut identities);
+    let mut second = phase("second", "serial_compute", 1, &mut identities);
     first.dependencies.push(KernelId::for_test(1));
     second.dependencies.push(KernelId::for_test(0));
     assert!(plan(vec![first, second]).validate().unwrap_err().contains("cycle"));
@@ -104,16 +123,17 @@ fn validator_rejects_duplicate_names_and_dependency_cycles() {
 
 #[test]
 fn validator_rejects_duplicate_and_gapped_placements() {
+    let mut identities = crate::egir::program::ProgramIdentities::default();
     let mut duplicate = plan(vec![
-        phase("first", "serial_compute", 0),
-        phase("second", "serial_compute", 1),
+        phase("first", "serial_compute", 0, &mut identities),
+        phase("second", "serial_compute", 1, &mut identities),
     ]);
     duplicate.phases[1].placement.order = 0;
     assert!(duplicate.validate().unwrap_err().contains("duplicates placement"));
 
     let mut gapped = plan(vec![
-        phase("first", "serial_compute", 0),
-        phase("second", "serial_compute", 1),
+        phase("first", "serial_compute", 0, &mut identities),
+        phase("second", "serial_compute", 1, &mut identities),
     ]);
     gapped.phases[1].placement.order = 2;
     assert!(gapped.validate().unwrap_err().contains("has a gap"));
@@ -121,11 +141,12 @@ fn validator_rejects_duplicate_and_gapped_placements() {
 
 #[test]
 fn checked_dependency_insertion_preserves_the_dag() {
+    let mut identities = crate::egir::program::ProgramIdentities::default();
     let first = KernelId::for_test(0);
     let second = KernelId::for_test(1);
     let mut plan = plan(vec![
-        phase("first", "serial_compute", 0),
-        phase("second", "serial_compute", 1),
+        phase("first", "serial_compute", 0, &mut identities),
+        phase("second", "serial_compute", 1, &mut identities),
     ]);
 
     plan.add_dependency(first, second).expect("first dependency");
@@ -141,16 +162,17 @@ fn checked_dependency_insertion_preserves_the_dag() {
 
 #[test]
 fn dense_handles_survive_entry_changes_and_chain_insertions() {
+    let mut identities = crate::egir::program::ProgramIdentities::default();
     let root = KernelId::for_test(0);
-    let mut plan = plan(vec![phase("seeded", "serial_compute", 0)]);
+    let mut plan = plan(vec![phase("seeded", "serial_compute", 0, &mut identities)]);
 
     plan.replace_chain(
         root,
         Vec::new(),
-        spec("renamed", "serial_compute").with_output_projection(Some(Vec::new())),
+        spec("renamed", "serial_compute", &mut identities).with_output_projection(Some(Vec::new())),
         vec![
-            spec("child", "reduce_combine"),
-            spec("grandchild", "reduce_combine"),
+            spec("child", "reduce_combine", &mut identities),
+            spec("grandchild", "reduce_combine", &mut identities),
         ],
     )
     .unwrap();

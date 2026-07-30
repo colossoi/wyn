@@ -55,10 +55,8 @@ pub(super) fn emit_int_pow_helpers(c: &mut Constructor) -> Result<()> {
 /// stores under the appropriate `signed` key.
 fn emit_one(c: &mut Constructor, signed: bool) -> Result<spirv::Word> {
     let int_ty = if signed { c.i32_type } else { c.u32_type };
-    let name = if signed { "_w_int_pow_i32" } else { "_w_int_pow_u32" };
 
-    let (func_id, param_ids, _code_block) =
-        c.begin_function(name, &["base", "exp"], &[int_ty, int_ty], int_ty)?;
+    let (func_id, param_ids, _code_block) = c.begin_function(None, &[int_ty, int_ty], int_ty)?;
     let param_base = param_ids[0];
     let param_exp = param_ids[1];
 

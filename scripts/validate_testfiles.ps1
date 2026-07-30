@@ -21,13 +21,18 @@ Compile to WGSL and validate with viz instead of spirv-val.
 
 .PARAMETER Release
 Build and run release binaries instead of debug binaries.
+
+.PARAMETER TrackedOnly
+Validate only testfiles tracked by Git. Useful when a working tree contains
+local experiments that should not participate in a repository gate.
 #>
 [CmdletBinding()]
 param(
     [switch]$Keep,
     [string]$OutDir,
     [switch]$Wgsl,
-    [switch]$Release
+    [switch]$Release,
+    [switch]$TrackedOnly
 )
 
 Set-StrictMode -Version Latest
@@ -124,12 +129,30 @@ try {
         throw 'spirv-val is required for SPIR-V validation but was not found on PATH'
     }
 
-    $files = @(
-        Get-ChildItem -LiteralPath (Join-Path $workspace 'testfiles') -File |
-            Where-Object Extension -EQ '.wyn'
-        Get-ChildItem -LiteralPath (Join-Path $workspace 'testfiles/playground') -File |
-            Where-Object Extension -EQ '.wyn'
-    ) | Sort-Object FullName
+    $files = if ($TrackedOnly) {
+        $tracked = Invoke-NativeCaptured git @(
+            '-C', $workspace, 'ls-files', '--', 'testfiles/*.wyn', 'testfiles/playground/*.wyn'
+        )
+        if ($tracked.ExitCode -ne 0) {
+            throw "Git tracked-testfile discovery failed with exit code $($tracked.ExitCode)"
+        }
+        @(
+            $tracked.Output |
+                Where-Object {
+                    $_ -is [string] -and
+                    $_ -match '^(?:testfiles|testfiles/playground)/[^/]+\.wyn$'
+                } |
+                ForEach-Object { Get-Item -LiteralPath (Join-Path $workspace $_) -ErrorAction Stop }
+        )
+    } else {
+        @(
+            Get-ChildItem -LiteralPath (Join-Path $workspace 'testfiles') -File |
+                Where-Object Extension -EQ '.wyn'
+            Get-ChildItem -LiteralPath (Join-Path $workspace 'testfiles/playground') -File |
+                Where-Object Extension -EQ '.wyn'
+        )
+    }
+    $files = $files | Sort-Object FullName
 
     $passed = 0
     $failed = 0

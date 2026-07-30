@@ -496,10 +496,10 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
         graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect::<LookupMap<_, _>>();
     let producer = horizontal::extract_screma(graph, candidate.block, candidate.producer);
     let consumer = horizontal::extract_screma(graph, candidate.block, candidate.consumer);
-    let mut interner = inner.data.region_interner.clone();
+    let mut identities = inner.data.identities.clone();
     let mut context = fusion_screma::Context {
         program: &inner,
-        interner: &mut interner,
+        identities: &mut identities,
         scope: &scope,
         span,
         outer_types: &outer_types,
@@ -623,7 +623,7 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
         support::rewrite_body_graph(body, rewrite)
     });
     rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
-        region_interner: interner,
+        identities: identities,
         ..data
     })
 }

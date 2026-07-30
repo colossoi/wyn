@@ -520,13 +520,13 @@ pub fn intern_intrinsic<P: Family>(
 /// `"-"`, etc.) — matches the convention `from_tlc` uses.
 pub fn intern_binop<P: Family>(
     graph: &mut EGraph<P>,
-    op: &str,
+    op: crate::op::BinaryOperator,
     lhs: NodeId,
     rhs: NodeId,
     ty: Type<TypeName>,
     span: Option<Span>,
 ) -> NodeId {
-    graph.intern_pure(PureOp::BinOp(op.into()), smallvec![lhs, rhs], ty, span)
+    graph.intern_pure(PureOp::BinOp(op), smallvec![lhs, rhs], ty, span)
 }
 
 /// `StorageView(Storage(br))` with the default

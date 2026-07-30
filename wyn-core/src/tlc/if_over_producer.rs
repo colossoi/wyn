@@ -398,7 +398,7 @@ enum LenKey {
     Int(String),
     Symbol(SymbolId),
     Builtin(BuiltinId),
-    BinOp(String),
+    BinOp(crate::op::BinaryOperator),
     App(Box<LenKey>, Vec<LenKey>),
     ArrayLen(Box<LenKey>),
     Coerce(Box<LenKey>),
@@ -489,13 +489,13 @@ fn len_key(
             let args = args?;
             if let LenKey::BinOp(op) = &f {
                 if args.len() == 2 {
-                    if op == "-" && is_zero_len_key(&args[1]) {
+                    if *op == crate::op::BinaryOperator::Subtract && is_zero_len_key(&args[1]) {
                         return Some(args[0].clone());
                     }
-                    if op == "+" && is_zero_len_key(&args[1]) {
+                    if *op == crate::op::BinaryOperator::Add && is_zero_len_key(&args[1]) {
                         return Some(args[0].clone());
                     }
-                    if op == "+" && is_zero_len_key(&args[0]) {
+                    if *op == crate::op::BinaryOperator::Add && is_zero_len_key(&args[0]) {
                         return Some(args[1].clone());
                     }
                 }
@@ -531,7 +531,7 @@ fn len_key_sub(
         return Some(lhs);
     }
     Some(LenKey::App(
-        Box::new(LenKey::BinOp("-".to_string())),
+        Box::new(LenKey::BinOp(crate::op::BinaryOperator::Subtract)),
         vec![lhs, rhs],
     ))
 }
@@ -561,7 +561,11 @@ fn extract_iota_bound(term: &Term<Empty, Empty>) -> Option<Term<Empty, Empty>> {
         return None;
     };
     let arg_is_name = matches!(&arg.kind, TermKind::Var(VarRef::Symbol(sym)) if sym == name);
-    (op.op == "-" && is_zero_term(start) && is_zero_term(zero) && arg_is_name).then(|| (**rhs).clone())
+    (op.op == crate::op::BinaryOperator::Subtract
+        && is_zero_term(start)
+        && is_zero_term(zero)
+        && arg_is_name)
+        .then(|| (**rhs).clone())
 }
 
 fn is_builtin(term: &Term<Empty, Empty>, id: BuiltinId) -> bool {

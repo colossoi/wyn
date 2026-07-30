@@ -977,10 +977,16 @@ impl ModuleManager {
                     .iter()
                     .map(|field| crate::ast::RecordPatternField {
                         field: field.field.clone(),
-                        pattern: field
-                            .pattern
-                            .as_ref()
-                            .map(|p| self.substitute_in_pattern(p, substitutions)),
+                        target: match &field.target {
+                            crate::ast::RecordPatternTarget::Shorthand(binding) => {
+                                crate::ast::RecordPatternTarget::Shorthand(binding.clone())
+                            }
+                            crate::ast::RecordPatternTarget::Pattern(pattern) => {
+                                crate::ast::RecordPatternTarget::Pattern(
+                                    self.substitute_in_pattern(pattern, substitutions),
+                                )
+                            }
+                        },
                     })
                     .collect();
                 PatternKind::Record(new_fields)

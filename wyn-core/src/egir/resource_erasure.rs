@@ -35,12 +35,12 @@ use smallvec::SmallVec;
 pub fn erase_resources(
     program: super::skel_opt::SkeletonOptimized,
 ) -> Result<ResourcesErased, ConvertError> {
-    let erasures: LookupMap<String, Vec<bool>> = program
+    let erasures: LookupMap<crate::FunctionId, Vec<bool>> = program
         .functions
         .iter()
         .map(|function| {
             (
-                function.name.clone(),
+                function.region,
                 function.params.iter().map(|(ty, _)| is_storage_image(ty)).collect(),
             )
         })
@@ -83,7 +83,7 @@ fn is_storage_image(ty: &Type<TypeName>) -> bool {
 
 fn rewrite_graph<P: Family>(
     mut graph: EGraph<P>,
-    erasures: &LookupMap<String, Vec<bool>>,
+    erasures: &LookupMap<crate::FunctionId, Vec<bool>>,
 ) -> Result<EGraph<P>, ConvertError> {
     // Calls can be pure nodes or effect-anchored instructions. Rewrite both;
     // filtering by the callee's original signature keeps every positional ABI
@@ -95,7 +95,7 @@ fn rewrite_graph<P: Family>(
             ENode::Pure {
                 op: PureOp::Call(callee),
                 ..
-            } if erasures.contains_key(callee) => Some((nid, callee.clone())),
+            } if erasures.contains_key(callee) => Some((nid, *callee)),
             _ => None,
         })
         .collect();
@@ -128,11 +128,11 @@ fn rewrite_graph<P: Family>(
 fn filter_smallvec(
     operands: &mut SmallVec<[crate::egir::types::NodeId; 4]>,
     mask: &[bool],
-    callee: &str,
+    callee: &crate::FunctionId,
 ) -> Result<(), ConvertError> {
     if operands.len() != mask.len() {
         return Err(ConvertError::Internal(format!(
-            "call to `{callee}` has {} EGIR operands but its concrete signature has {} parameters",
+            "call to {callee:?} has {} EGIR operands but its concrete signature has {} parameters",
             operands.len(),
             mask.len()
         )));
@@ -148,7 +148,7 @@ fn filter_smallvec(
 
 fn erase_function_resources(
     function: PhysicalFunc,
-    erasures: &LookupMap<String, Vec<bool>>,
+    erasures: &LookupMap<crate::FunctionId, Vec<bool>>,
 ) -> Result<PhysicalFunc, ConvertError> {
     let crate::egir::ir::Func {
         region,

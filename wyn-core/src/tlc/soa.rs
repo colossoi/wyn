@@ -773,7 +773,6 @@ where
     let Program {
         defs,
         mut symbols,
-        def_syms,
         mut term_ids,
         global_context,
         state: _,
@@ -788,7 +787,7 @@ where
         })
         .collect();
     drop(transformer);
-    Program::from_parts(defs, symbols, def_syms, term_ids, global_context)
+    Program::from_parts(defs, symbols, term_ids, global_context)
 }
 
 // =============================================================================

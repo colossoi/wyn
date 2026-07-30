@@ -16,6 +16,7 @@ use super::ResourcesAllocated;
 use crate::builtins::{catalog, Purity};
 use crate::flow::{BlockId, ControlHeader};
 use crate::interface::{EntryInputKind, StorageAccess};
+use crate::op::BinaryOperator;
 use crate::op::OpTag;
 use crate::ssa::types::ConstantValue;
 
@@ -146,8 +147,8 @@ pub(crate) fn entry_parameter_is_scalar_relocatable(entry: &SemanticEntry, index
 fn effect_cost(
     program: &ResourcesAllocated,
     effect: &SideEffect,
-    summaries: &mut HashMap<String, u64>,
-    visiting: &mut HashSet<String>,
+    summaries: &mut HashMap<crate::FunctionId, u64>,
+    visiting: &mut HashSet<crate::FunctionId>,
 ) -> Option<u64> {
     match &effect.kind {
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(_)))
@@ -164,8 +165,8 @@ fn effect_cost(
 fn operation_cost(
     program: &ResourcesAllocated,
     op: &OpTag<super::super::program::SemanticResourceRef>,
-    summaries: &mut HashMap<String, u64>,
-    visiting: &mut HashSet<String>,
+    summaries: &mut HashMap<crate::FunctionId, u64>,
+    visiting: &mut HashSet<crate::FunctionId>,
 ) -> Option<u64> {
     match op {
         OpTag::Int(_)
@@ -195,7 +196,6 @@ fn operation_cost(
         OpTag::StorageView(PureViewSource::Workgroup { .. })
         | OpTag::PlaceIndex
         | OpTag::OutputSlot { .. }
-        | OpTag::Extern(_)
         | OpTag::StorageImageLoad(_)
         | OpTag::StorageImageStore(_) => None,
         OpTag::Intrinsic { id, .. } => {
@@ -225,20 +225,20 @@ fn operation_cost(
 
 fn function_cost(
     program: &ResourcesAllocated,
-    callee: &str,
-    summaries: &mut HashMap<String, u64>,
-    visiting: &mut HashSet<String>,
+    callee: &crate::FunctionId,
+    summaries: &mut HashMap<crate::FunctionId, u64>,
+    visiting: &mut HashSet<crate::FunctionId>,
 ) -> Option<u64> {
     if let Some(cost) = summaries.get(callee) {
         return Some(*cost);
     }
-    if !visiting.insert(callee.to_string()) {
+    if !visiting.insert(*callee) {
         return None;
     }
     let function = program
         .functions
         .iter()
-        .find(|function| function.name == callee && function.linkage_name.is_none())?;
+        .find(|function| function.region == *callee && function.linkage_name.is_none())?;
 
     let block_costs = graph_block_costs(program, &function.graph, &HashMap::new(), summaries, visiting)?;
     let cost = StructuredCost::new(&function.graph, &block_costs).path_cost(
@@ -247,7 +247,7 @@ fn function_cost(
         &mut HashSet::new(),
     )?;
     visiting.remove(callee);
-    summaries.insert(callee.to_string(), cost);
+    summaries.insert(*callee, cost);
     Some(cost)
 }
 
@@ -255,8 +255,8 @@ fn graph_block_costs(
     program: &ResourcesAllocated,
     graph: &EGraph,
     extra_roots: &HashMap<BlockId, Vec<NodeId>>,
-    summaries: &mut HashMap<String, u64>,
-    visiting: &mut HashSet<String>,
+    summaries: &mut HashMap<crate::FunctionId, u64>,
+    visiting: &mut HashSet<crate::FunctionId>,
 ) -> Option<HashMap<BlockId, u64>> {
     graph
         .skeleton
@@ -282,8 +282,8 @@ fn local_value_cost(
     program: &ResourcesAllocated,
     graph: &EGraph,
     roots: impl IntoIterator<Item = NodeId>,
-    summaries: &mut HashMap<String, u64>,
-    visiting: &mut HashSet<String>,
+    summaries: &mut HashMap<crate::FunctionId, u64>,
+    visiting: &mut HashSet<crate::FunctionId>,
 ) -> Option<u64> {
     let mut pending = roots.into_iter().collect::<Vec<_>>();
     let mut seen = HashSet::new();
@@ -449,7 +449,7 @@ pub(crate) fn fixed_loop_trip_count(
     else {
         return None;
     };
-    if operator != "<" || operands.len() != 2 {
+    if *operator != BinaryOperator::Less || operands.len() != 2 {
         return None;
     }
     let index = operands[0];
@@ -471,7 +471,7 @@ pub(crate) fn fixed_loop_trip_count(
     else {
         return None;
     };
-    if operator != "+" || operands.len() != 2 {
+    if *operator != BinaryOperator::Add || operands.len() != 2 {
         return None;
     }
     let step = if operands[0] == index {

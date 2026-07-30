@@ -100,14 +100,14 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         // Map function parameters to their SPIR-V values.
         // For regular functions, use positional mapping (param_ids) to avoid
         // name collisions when two params share a string name.
-        // For entry points (no param_ids), fall back to name-based env lookup.
+        // For entry points (no param_ids), use the structural SSA parameter id.
         if self.param_ids.len() == self.body.params().len() && !self.param_ids.is_empty() {
             for (i, (value_id, _, _)) in self.body.params().enumerate() {
                 self.value_map.insert(value_id, self.param_ids[i]);
             }
         } else {
-            for (value_id, _, name) in self.body.params() {
-                if let Some(&spirv_id) = self.constructor.env.get(name) {
+            for (value_id, _, _) in self.body.params() {
+                if let Some(&spirv_id) = self.constructor.env.get(&value_id) {
                     self.value_map.insert(value_id, spirv_id);
                 }
             }
@@ -365,39 +365,19 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     // identifiers — but plain names like `step` can, and
                     // checking the user table first lets the user's `def
                     // step` win the resolution.
-                    let emitted = self.constructor.emitted_function_name(func).to_string();
-                    if let Some(func_id) = self.constructor.builder.get_function(&emitted) {
-                        self.constructor.builder.function_call(result_ty, None, *func_id, arg_ids)?
-                    } else if let Some(def) = catalog().lookup_by_any_name(func) {
-                        let builtin_impl = &def.overloads()[0].lowering;
-                        self.lower_builtin_call(
-                            def.id,
-                            builtin_impl,
-                            func,
-                            &args,
-                            &arg_ids,
-                            result_ty,
-                            inst,
-                        )?
+                    if let Some(&func_id) = self.constructor.current_functions.get(func) {
+                        self.constructor.builder.function_call(result_ty, None, func_id, arg_ids)?
                     } else {
-                        bail_spirv_at!(self.blame_span(), "Unknown function: {}", func)
+                        bail_spirv_at!(self.blame_span(), "Unknown function id: {:?}", func)
                     }
                 }
 
-                crate::op::OpTag::Global(name) => {
-                    if let Some(func_id) = self.constructor.builder.get_function(name) {
-                        // Global constant function - call it with no args to get the value.
-                        // This handles `def verts: [3]vec4f32 = [...]` referenced as just `verts`.
-                        self.constructor.builder.function_call(result_ty, None, *func_id, [])?
-                    } else {
-                        bail_spirv_at!(self.blame_span(), "Unknown global: {}", name)
-                    }
-                }
-
-                crate::op::OpTag::Extern(linkage_name) => {
-                    self.constructor.linked_functions.get(linkage_name).copied().ok_or_else(|| {
-                        err_spirv_at!(self.blame_span(), "Unknown extern: {}", linkage_name)
-                    })?
+                crate::op::OpTag::Global(id) => {
+                    let func_id =
+                        self.constructor.globals.get(id).copied().ok_or_else(|| {
+                            err_spirv_at!(self.blame_span(), "Unknown global id: {:?}", id)
+                        })?;
+                    self.constructor.builder.function_call(result_ty, None, func_id, [])?
                 }
 
                 crate::op::OpTag::Intrinsic { id, overload_idx } => {

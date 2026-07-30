@@ -21,7 +21,7 @@ use super::ir::Family;
 use super::loop_analysis::LoopAnalysis;
 use super::program::SemanticEntry;
 use super::reify::Segmented;
-use super::types::{EGraph, ENode, NodeId, PureOp, PureViewSource, SegBody};
+use super::types::{EGraph, ENode, NodeId, PureOp, PureViewSource, RegionId, SegBody};
 
 #[cfg(test)]
 #[path = "stage_variance_tests.rs"]
@@ -137,7 +137,7 @@ impl StageDependence {
 /// Dependence of every argument at one pure user-call node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CallArgumentDependences {
-    pub(crate) callee: String,
+    pub(crate) callee: RegionId,
     pub(crate) arguments: SmallVec<[(NodeId, StageDependence); 4]>,
 }
 
@@ -361,8 +361,8 @@ fn seg_body_parameter_dependences(
 }
 
 pub(crate) fn entry_parameter_input_kind(entry: &SemanticEntry, index: usize) -> Option<&EntryInputKind> {
-    let name = &entry.params.get(index)?.1;
-    entry.inputs.iter().find(|input| input.name == *name).map(|input| &input.kind)
+    let slot = *entry.parameter_inputs.get(index)?.first()?;
+    entry.inputs.get(slot.0).map(|input| &input.kind)
 }
 
 pub(crate) fn entry_parameter_dependences(entry: &SemanticEntry) -> Vec<StageDependence> {

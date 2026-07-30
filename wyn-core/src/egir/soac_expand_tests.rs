@@ -16,7 +16,7 @@
 //! `arr` or `val` comes from the wrong projection.
 
 use crate::ast::TypeName;
-use crate::egir::program::{PhysicalEGraph, PhysicalSideEffectKind, SemanticOpId};
+use crate::egir::program::{PhysicalEGraph, PhysicalSideEffectKind, ProgramIdentities, SemanticOpId};
 use crate::egir::soac::{hist, screma};
 use crate::egir::types::{ENode, Family, NodeId, Physical, PureOp, Soac, SoacEffect, SoacInputType};
 use polytype::Type;
@@ -79,6 +79,8 @@ fn plain_array_ty(elem: Type<TypeName>) -> Type<TypeName> {
 
 #[test]
 fn scatter_handleability_checks_every_input() {
+    let mut identities = ProgramIdentities::default();
+    let bucket_region = identities.alloc_function("scatter_bucket".into());
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
     let bad_input_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty.clone(), f32_ty.clone()]);
@@ -94,7 +96,7 @@ fn scatter_handleability_checks_every_input() {
             form: hist::HistForm {
                 bucket: screma::Lambda::region(
                     crate::egir::types::SegBody {
-                        region: crate::egir::types::RegionId::from_index(0),
+                        region: bucket_region,
                         captures: vec![],
                     },
                     vec![i32_ty.clone(), f32_ty.clone()],
@@ -122,7 +124,7 @@ fn scatter_handleability_checks_every_input() {
 #[test]
 fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
     use crate::egir::graph_ops;
-    use crate::egir::program::RegionInterner;
+    use crate::egir::program::ProgramIdentities;
     use crate::egir::types::{EffectOp, SideEffectKind};
     use smallvec::{smallvec, SmallVec};
 
@@ -154,8 +156,8 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
             )
         })
         .collect::<Vec<_>>();
-    let mut regions = RegionInterner::default();
-    let reducer_region = regions.intern("hist_tuple_reducer");
+    let mut regions = ProgramIdentities::default();
+    let reducer_region = regions.alloc_function("hist_tuple_reducer".into());
     let histogram = hist::Op::<Physical> {
         inputs: (0..6)
             .map(|_| SoacInputType {
@@ -230,7 +232,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
                 ENode::Pure {
                     op: PureOp::Call(name),
                     operands,
-                } if name == "hist_tuple_reducer" && operands.len() == 4
+                } if *name == reducer_region && operands.len() == 4
             )
         })
         .count();
@@ -250,7 +252,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
                 ENode::Pure {
                     op: PureOp::BinOp(op),
                     ..
-                } if op == "*"
+                } if *op == crate::op::BinaryOperator::Multiply
             )
         }),
         "rank-2 indices must be flattened row-major"
@@ -259,7 +261,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
 #[test]
 fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
     use crate::egir::graph_ops;
-    use crate::egir::program::RegionInterner;
+    use crate::egir::program::ProgramIdentities;
     use crate::egir::types::{EffectOp, SegExtent, SegSpace, SideEffectKind};
     use crate::ssa::types::AtomicOp;
     use smallvec::{smallvec, SmallVec};
@@ -292,6 +294,9 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
             )
         })
         .collect::<Vec<_>>();
+    let mut regions = ProgramIdentities::default();
+    let first_reducer = regions.alloc_function("first_reducer".into());
+    let second_reducer = regions.alloc_function("second_reducer".into());
     let histogram = hist::Op::<Physical> {
         inputs: (0..5)
             .map(|_| SoacInputType {
@@ -308,7 +313,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
                     update: hist::Update::Reduce {
                         operator: screma::Lambda::region(
                             crate::egir::types::SegBody {
-                                region: crate::egir::types::RegionId::from_index(0),
+                                region: first_reducer,
                                 captures: vec![],
                             },
                             vec![i32_ty.clone(); 2],
@@ -324,7 +329,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
                     update: hist::Update::Reduce {
                         operator: screma::Lambda::region(
                             crate::egir::types::SegBody {
-                                region: crate::egir::types::RegionId::from_index(1),
+                                region: second_reducer,
                                 captures: vec![],
                             },
                             vec![i32_ty.clone(); 2],
@@ -355,7 +360,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
         None,
     );
 
-    let graph = super::run_one_body(graph, &RegionInterner::default(), &mut effect_ids)
+    let graph = super::run_one_body(graph, &regions, &mut effect_ids)
         .expect("multi-operation atomic Hist should expand");
     let atomics = graph
         .skeleton
@@ -379,7 +384,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
             ENode::Pure {
                 op: PureOp::BinOp(op),
                 ..
-            } if op == ">="
+            } if *op == crate::op::BinaryOperator::GreaterEqual
         )
     }));
     assert!(graph.nodes.iter().any(|(_, node)| {
@@ -388,7 +393,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
             ENode::Pure {
                 op: PureOp::BinOp(op),
                 ..
-            } if op == "*"
+            } if *op == crate::op::BinaryOperator::Multiply
         )
     }));
 }

@@ -21,6 +21,7 @@ use crate::ast::{
     Decl, Declaration, EntryDecl, ExprKind, Expression, IfExpr, LetInExpr, LoopExpr, LoopForm, MatchExpr,
     Program, RangeExpr, Type, TypeName,
 };
+use crate::op::{BinaryOperator, UnaryOperator};
 use crate::LookupMap;
 
 /// AST after integer constants needed by static-size inference are exposed.
@@ -362,31 +363,31 @@ impl AstConstFolder {
         }
     }
 
-    fn try_fold_binop(&self, op: &str, lhs: &Expression, rhs: &Expression) -> Option<i64> {
+    fn try_fold_binop(&self, op: &BinaryOperator, lhs: &Expression, rhs: &Expression) -> Option<i64> {
         let l = self.try_eval_const(lhs)?;
         let r = self.try_eval_const(rhs)?;
         self.eval_binop(op, l, r)
     }
 
-    fn try_fold_unaryop(&self, op: &str, operand: &Expression) -> Option<i64> {
+    fn try_fold_unaryop(&self, op: &UnaryOperator, operand: &Expression) -> Option<i64> {
         let v = self.try_eval_const(operand)?;
         self.eval_unaryop(op, v)
     }
 
-    fn eval_binop(&self, op: &str, l: i64, r: i64) -> Option<i64> {
+    fn eval_binop(&self, op: &BinaryOperator, l: i64, r: i64) -> Option<i64> {
         match op {
-            "+" => Some(l.wrapping_add(r)),
-            "-" => Some(l.wrapping_sub(r)),
-            "*" => Some(l.wrapping_mul(r)),
-            "/" if r != 0 => Some(l / r),
-            "%" if r != 0 => Some(l % r),
+            BinaryOperator::Add => Some(l.wrapping_add(r)),
+            BinaryOperator::Subtract => Some(l.wrapping_sub(r)),
+            BinaryOperator::Multiply => Some(l.wrapping_mul(r)),
+            BinaryOperator::Divide if r != 0 => Some(l / r),
+            BinaryOperator::Remainder if r != 0 => Some(l % r),
             _ => None,
         }
     }
 
-    fn eval_unaryop(&self, op: &str, v: i64) -> Option<i64> {
+    fn eval_unaryop(&self, op: &UnaryOperator, v: i64) -> Option<i64> {
         match op {
-            "-" => Some(-v),
+            UnaryOperator::Negate => Some(-v),
             _ => None,
         }
     }
@@ -431,14 +432,14 @@ impl AstConstFolder {
     fn try_algebraic_simplify(expr: &mut Expression) {
         // Check if any simplification applies
         let dominated_by_zero = if let ExprKind::BinaryOp(ref op, ref lhs, ref rhs) = expr.kind {
-            match op.op.as_str() {
-                "-" if Self::is_zero(lhs) => Some(()),
-                "+" if Self::is_zero(lhs) || Self::is_zero(rhs) => Some(()),
-                "-" if Self::is_zero(rhs) => Some(()),
-                "*" if Self::is_zero(lhs) || Self::is_zero(rhs) => Some(()),
-                "*" if Self::is_one(lhs) || Self::is_one(rhs) => Some(()),
-                "*" if Self::is_neg_one(lhs) || Self::is_neg_one(rhs) => Some(()),
-                "/" if Self::is_one(rhs) => Some(()),
+            match op.op {
+                BinaryOperator::Subtract if Self::is_zero(lhs) => Some(()),
+                BinaryOperator::Add if Self::is_zero(lhs) || Self::is_zero(rhs) => Some(()),
+                BinaryOperator::Subtract if Self::is_zero(rhs) => Some(()),
+                BinaryOperator::Multiply if Self::is_zero(lhs) || Self::is_zero(rhs) => Some(()),
+                BinaryOperator::Multiply if Self::is_one(lhs) || Self::is_one(rhs) => Some(()),
+                BinaryOperator::Multiply if Self::is_neg_one(lhs) || Self::is_neg_one(rhs) => Some(()),
+                BinaryOperator::Divide if Self::is_one(rhs) => Some(()),
                 _ => None,
             }
         } else {
@@ -452,31 +453,37 @@ impl AstConstFolder {
         // Take ownership and apply the rewrite
         let old_kind = std::mem::replace(&mut expr.kind, ExprKind::Unit);
         if let ExprKind::BinaryOp(binop, lhs, rhs) = old_kind {
-            expr.kind = match binop.op.as_str() {
+            expr.kind = match binop.op {
                 // 0 - x → -x
-                "-" if Self::is_zero(&lhs) => {
-                    let unop = UnaryOp { op: binop.op };
+                BinaryOperator::Subtract if Self::is_zero(&lhs) => {
+                    let unop = UnaryOp {
+                        op: UnaryOperator::Negate,
+                    };
                     ExprKind::UnaryOp(unop, rhs)
                 }
                 // 0 + x → x
-                "+" if Self::is_zero(&lhs) => rhs.kind,
+                BinaryOperator::Add if Self::is_zero(&lhs) => rhs.kind,
                 // x + 0, x - 0 → x
-                "+" | "-" if Self::is_zero(&rhs) => lhs.kind,
+                BinaryOperator::Add | BinaryOperator::Subtract if Self::is_zero(&rhs) => lhs.kind,
                 // 0 * x → 0, x * 0 → 0
-                "*" if Self::is_zero(&lhs) => lhs.kind,
-                "*" if Self::is_zero(&rhs) => rhs.kind,
+                BinaryOperator::Multiply if Self::is_zero(&lhs) => lhs.kind,
+                BinaryOperator::Multiply if Self::is_zero(&rhs) => rhs.kind,
                 // 1 * x → x
-                "*" if Self::is_one(&lhs) => rhs.kind,
+                BinaryOperator::Multiply if Self::is_one(&lhs) => rhs.kind,
                 // x * 1, x / 1 → x
-                "*" | "/" if Self::is_one(&rhs) => lhs.kind,
+                BinaryOperator::Multiply | BinaryOperator::Divide if Self::is_one(&rhs) => lhs.kind,
                 // -1 * x → -x
-                "*" if Self::is_neg_one(&lhs) => {
-                    let unop = UnaryOp { op: "-".to_string() };
+                BinaryOperator::Multiply if Self::is_neg_one(&lhs) => {
+                    let unop = UnaryOp {
+                        op: UnaryOperator::Negate,
+                    };
                     ExprKind::UnaryOp(unop, rhs)
                 }
                 // x * -1 → -x
-                "*" if Self::is_neg_one(&rhs) => {
-                    let unop = UnaryOp { op: "-".to_string() };
+                BinaryOperator::Multiply if Self::is_neg_one(&rhs) => {
+                    let unop = UnaryOp {
+                        op: UnaryOperator::Negate,
+                    };
                     ExprKind::UnaryOp(unop, lhs)
                 }
                 // Shouldn't reach here, but restore original if we do

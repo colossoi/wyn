@@ -4,6 +4,7 @@
 //! reached). End-to-end behavioral coverage happens via the
 //! testfile suite.
 
+use crate::op::BinaryOperator;
 use crate::tlc::{self, Term, TermKind};
 
 fn compile_to_tlc_raw(source: &str) -> tlc::stage::Transformed {
@@ -405,7 +406,7 @@ def go(t: #pair(#left(i32) | #right(i32)) | #solo(i32)) i32 =
     match &first_cond.kind {
         TermKind::App { func, .. } => {
             assert!(
-                matches!(&func.kind, TermKind::BinOp(op) if op.op == "&&"),
+                matches!(&func.kind, TermKind::BinOp(op) if op.op == BinaryOperator::LogicalAnd),
                 "first-arm cond should be `outer_tag == ... && inner_tag == ...`, got {:?}",
                 func.kind
             );

@@ -519,14 +519,24 @@ fn direct_stage_invocations(program: &ResourcesAllocated, entry: &SemanticEntry)
     let workgroup = u64::from(local_size.0.max(1))
         .saturating_mul(u64::from(local_size.1.max(1)))
         .saturating_mul(u64::from(local_size.2.max(1)));
-    let dispatch = program.data.core.pipeline.pipelines.iter().find_map(|pipeline| match pipeline {
-        Pipeline::Compute(compute) => compute
-            .stages
-            .iter()
-            .find(|stage| stage.entry_point == entry.name)
-            .map(|stage| &stage.dispatch_size),
-        Pipeline::Graphics(_) => None,
-    });
+    let dispatch =
+        program.data.core.pipeline.pipelines.iter().enumerate().find_map(|(pipeline_index, pipeline)| {
+            match pipeline {
+                Pipeline::Compute(compute) => {
+                    compute.stages.iter().enumerate().find_map(|(stage_index, stage)| {
+                        (program
+                            .data
+                            .core
+                            .stage_entries
+                            .get(pipeline_index)
+                            .and_then(|entries| entries.get(stage_index))
+                            == Some(&entry.id))
+                        .then_some(&stage.dispatch_size)
+                    })
+                }
+                Pipeline::Graphics(_) => None,
+            }
+        });
     if let Some(DispatchSize::Fixed {
         x,
         y,
@@ -866,6 +876,7 @@ fn materialize_operation_result(
     };
     let compact_inputs = !entry.execution_model.is_compute();
     let mut producer_entry = projected_materialization_entry(
+        &mut data.core.identities,
         materialization,
         entry,
         name_suffix,
@@ -978,6 +989,7 @@ fn materialize_runtime_array_result(
         },
     };
     let mut producer_entry = projected_materialization_entry(
+        &mut data.core.identities,
         materialization,
         entry,
         "materialize_filter",
@@ -1360,6 +1372,7 @@ fn materialize_stage_prelude(
         let entry = &entry_points[entry_index];
         let producer_resources = entry.resources_referenced_by_projection(&projection);
         projected_materialization_entry(
+            &mut data.core.identities,
             materialization,
             entry,
             "prepass_scalar",
@@ -1447,6 +1460,7 @@ fn materialize_stage_prelude(
 }
 
 fn projected_materialization_entry(
+    identities: &mut crate::egir::program::ProgramIdentities,
     materialization: MaterializationId,
     source: &SemanticEntry,
     name_suffix: &str,
@@ -1454,11 +1468,15 @@ fn projected_materialization_entry(
     resource_declarations: Vec<SemanticResourceDecl>,
     projection: GraphProjection,
 ) -> SemanticEntry {
+    let name = materialization.entry_name(&source.name, name_suffix);
+    let id = identities.alloc_entry(name.clone());
     SemanticEntry {
-        name: materialization.entry_name(&source.name, name_suffix),
+        id,
+        name,
         span: source.span,
         execution_model,
         inputs: source.inputs.clone(),
+        parameter_inputs: source.parameter_inputs.clone(),
         outputs: Vec::new(),
         resource_declarations,
         params: source.params.clone(),

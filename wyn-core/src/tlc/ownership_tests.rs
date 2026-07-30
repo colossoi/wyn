@@ -183,7 +183,6 @@ fn synth_program_with_alias_let() -> (tlc::stage::SoaNormalized, crate::SymbolId
     let program = Program::from_parts(
         vec![def],
         symbols,
-        Default::default(),
         ids,
         tlc::context::RewriteGlobal {
             known_defs: Default::default(),
@@ -1606,12 +1605,10 @@ fn synth_program_with_with_through_index() -> tlc::stage::SoaNormalized {
     use polytype::Type;
 
     let mut symbols = SymbolTable::new();
-    let mut def_syms = std::collections::HashMap::new();
     let mut ids = TermIdSource::new();
 
     // Top-level symbols
     let f_sym = symbols.alloc("f".to_string());
-    def_syms.insert("f".to_string(), f_sym);
     let array_with_id = catalog().known().array_with;
 
     // Local symbols
@@ -1739,7 +1736,6 @@ fn synth_program_with_with_through_index() -> tlc::stage::SoaNormalized {
     Program::from_parts(
         vec![f_def],
         symbols,
-        def_syms,
         ids,
         tlc::context::RewriteGlobal {
             known_defs: Default::default(),
@@ -1817,12 +1813,9 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
 
     let mut symbols = SymbolTable::new();
     let mut ids = TermIdSource::new();
-    let mut def_syms = std::collections::HashMap::new();
 
     let consume_sym = symbols.alloc("consume".to_string());
-    def_syms.insert("consume".to_string(), consume_sym);
     let main_sym = symbols.alloc("main".to_string());
-    def_syms.insert("main".to_string(), main_sym);
 
     let consume_arg_sym = symbols.alloc("x".to_string());
     let outer_sym = symbols.alloc("outer".to_string());
@@ -2020,7 +2013,6 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
     Program::from_parts(
         vec![consume_def, main_def],
         symbols,
-        def_syms,
         ids,
         tlc::context::PostClosureGlobal {
             auto_storage_binding_ids: Default::default(),
@@ -2199,7 +2191,6 @@ fn soac_capture_term_is_analyzed_for_liveness() {
     let program: tlc::stage::GeneratedLambdasFolded = Program::from_parts(
         vec![main_def],
         symbols,
-        std::collections::HashMap::new(),
         ids,
         tlc::context::PostClosureGlobal {
             auto_storage_binding_ids: Default::default(),

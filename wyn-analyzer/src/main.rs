@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use wyn_core::ast::{self, NodeCounter, Span};
+use wyn_core::ast::{self, BindingName, NodeCounter, Span};
 use wyn_core::interface;
 use wyn_core::lexer;
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
@@ -854,16 +854,16 @@ fn find_declaration_name_at(
             ast::Declaration::Decl(def) => {
                 let body_span = def.body.h.span;
                 if line == body_span.start_line && col < body_span.start_col {
-                    return Some((def.name.clone(), def.data.syntax.keyword));
+                    return Some((def.name.clone(), def.data.source.syntax.keyword));
                 }
                 if line < body_span.start_line && line >= body_span.start_line.saturating_sub(5) {
-                    return Some((def.name.clone(), def.data.syntax.keyword));
+                    return Some((def.name.clone(), def.data.source.syntax.keyword));
                 }
             }
             ast::Declaration::Entry(entry) => {
                 let body_span = entry.body.h.span;
                 if line == body_span.start_line && col < body_span.start_col {
-                    let kind = match entry.data.source.syntax.entry_kind {
+                    let kind = match entry.data.source.source.syntax.entry_kind {
                         interface::EntryKind::Vertex => "vertex",
                         interface::EntryKind::Fragment => "fragment",
                         interface::EntryKind::Compute => "compute",
@@ -919,7 +919,7 @@ fn find_name_at_position(
 }
 
 fn find_name_in_pattern<A>(
-    pat: &ast::Pattern<ast::TypedHeader, A>,
+    pat: &ast::Pattern<ast::TypedTree, A>,
     line: usize,
     col: usize,
 ) -> Option<String> {
@@ -927,7 +927,7 @@ fn find_name_in_pattern<A>(
         return None;
     }
     match &pat.kind {
-        ast::PatternKind::Name(name) => Some(name.clone()),
+        ast::PatternKind::Name(name) => Some(name.source_name().to_owned()),
         ast::PatternKind::Tuple(pats) => {
             for p in pats {
                 if let Some(name) = find_name_in_pattern(p, line, col) {
@@ -1113,9 +1113,9 @@ fn find_all_references(
     refs
 }
 
-fn collect_refs_in_pattern<A>(pat: &ast::Pattern<ast::TypedHeader, A>, target: &str, refs: &mut Vec<Span>) {
+fn collect_refs_in_pattern<A>(pat: &ast::Pattern<ast::TypedTree, A>, target: &str, refs: &mut Vec<Span>) {
     match &pat.kind {
-        ast::PatternKind::Name(name) if name == target => {
+        ast::PatternKind::Name(name) if name.source_name() == target => {
             refs.push(pat.h.span);
         }
         ast::PatternKind::Tuple(pats) | ast::PatternKind::Constructor(_, pats) => {
@@ -1452,7 +1452,7 @@ fn declaration_to_symbol(
             Some(DocumentSymbol {
                 name: def.name.clone(),
                 detail: Some(
-                    if def.data.syntax.keyword == "def" { "function" } else { "value" }.to_string(),
+                    if def.data.source.syntax.keyword == "def" { "function" } else { "value" }.to_string(),
                 ),
                 kind: if def.params.is_empty() { SymbolKind::VARIABLE } else { SymbolKind::FUNCTION },
                 tags: None,
@@ -1465,7 +1465,7 @@ fn declaration_to_symbol(
         ast::Declaration::Entry(entry) => {
             let span = entry.body.h.span;
             let range = span_to_range(span);
-            let kind_str = match entry.data.source.syntax.entry_kind {
+            let kind_str = match entry.data.source.source.syntax.entry_kind {
                 interface::EntryKind::Vertex => "vertex",
                 interface::EntryKind::Fragment => "fragment",
                 interface::EntryKind::Compute => "compute",

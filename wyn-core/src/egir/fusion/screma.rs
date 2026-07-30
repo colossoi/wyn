@@ -11,7 +11,7 @@ use super::{capture_types, deduplicate_array_inputs};
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_projector::GraphProjector;
 use crate::egir::inlining;
-use crate::egir::program::{fresh_region_name, RegionInterner, SemanticFunc};
+use crate::egir::program::{fresh_region_name, ProgramIdentities, SemanticFunc};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
 use crate::egir::types::{EGraph, ENode, NodeId, PureOp, SkeletonTerminator, SoacInputType};
@@ -60,7 +60,7 @@ fn result_post_output(form: &screma::ScremaForm, output: usize) -> Option<usize>
 
 pub(super) struct Context<'a> {
     pub program: &'a Segmented,
-    pub interner: &'a mut RegionInterner,
+    pub identities: &'a mut ProgramIdentities,
     pub scope: &'a str,
     pub span: Span,
     pub outer_types: &'a LookupMap<NodeId, Type<TypeName>>,
@@ -1025,14 +1025,13 @@ impl ProjectionBuilder<'_> {
     fn call(
         &mut self,
         caller: &SemanticFunc,
-        callee_name: &str,
+        callee: &crate::FunctionId,
         call_arguments: &[NodeId],
         result: Option<usize>,
         caller_arguments: &[Option<ProjectedValue>],
         caller_memo: &mut LookupMap<NodeId, ProjectedValue>,
     ) -> Option<ProjectedValue> {
-        let region = self.program.data.region_interner.get(callee_name)?;
-        let callee = self.program.region(region)?;
+        let callee = self.program.region(*callee)?;
         if call_arguments.len() != callee.params.len() {
             return None;
         }
@@ -1235,10 +1234,10 @@ impl ProjectionEmitter<'_, '_> {
         }
 
         let name = fresh_region_name(
-            self.context.interner,
+            self.context.identities,
             &format!("{}_{}", self.context.scope, self.label),
         );
-        let region = self.context.interner.intern(&name);
+        let region = self.context.identities.alloc_function(name.clone());
         let function = lambda_ops::finish_function(
             projection.graph,
             projected_return_block,
@@ -1250,7 +1249,7 @@ impl ProjectionEmitter<'_, '_> {
             &projected_results,
         );
         let result = self.graph.intern_pure(
-            PureOp::Call(name),
+            PureOp::Call(region),
             smallvec::SmallVec::from_vec(call_arguments),
             lambda_ops::result_type(&projected.result_types),
             None,
@@ -1297,7 +1296,7 @@ fn invoke_lambda(
     let body = lambda.seg_body().expect("region lambda");
     let callee = program.region(body.region).expect("Screma lambda region");
     let call = graph.intern_pure(
-        PureOp::Call(callee.name.clone()),
+        PureOp::Call(callee.region),
         smallvec::SmallVec::from_vec(arguments),
         lambda_ops::result_type(&lambda.result_types),
         None,
@@ -1587,7 +1586,7 @@ fn finish_lambda(
 ) -> (screma::Lambda, Option<SemanticFunc>) {
     let return_block = graph.skeleton.entry;
     lambda_ops::finish_region_lambda(
-        context.interner,
+        context.identities,
         context.scope,
         label,
         context.span,
@@ -1643,11 +1642,11 @@ entry conditional_map<[n]>(xs: [n]i32) [n]i32 =
             .into_iter()
             .map(Some)
             .collect::<Vec<_>>();
-        let mut interner = program.data.region_interner.clone();
+        let mut identities = program.data.identities.clone();
         let outer_types = LookupMap::new();
         let mut context = Context {
             program: &program,
-            interner: &mut interner,
+            identities: &mut identities,
             scope: "conditional_projection_test",
             span: Span::dummy(),
             outer_types: &outer_types,
