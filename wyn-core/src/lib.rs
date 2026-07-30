@@ -14,6 +14,7 @@ pub mod name_resolution;
 pub mod op;
 pub mod parser;
 pub mod pattern;
+mod scalar_eval;
 pub mod scope;
 pub mod ssa;
 pub mod types;

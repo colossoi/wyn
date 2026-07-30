@@ -20,6 +20,7 @@ use crate::ast::TypeName;
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::builtins::{by_id, Purity};
 use crate::op::{BinaryOperator, UnaryOperator};
+use crate::scalar_eval::{self, Scalar};
 use crate::ssa::types::ConstantValue;
 use crate::types::TypeExt;
 use polytype::Type;
@@ -111,28 +112,9 @@ impl<P: Family> EGraph<P> {
         b: NodeId,
         result_ty: &Type<TypeName>,
     ) -> Option<NodeId> {
-        if matches!(result_ty, Type::Constructed(TypeName::Bool, _)) {
-            let value = self.eval_const_predicate(name, a, b)?;
-            return Some(self.intern_constant(ConstantValue::Bool(value), result_ty.clone()));
-        }
-        match result_ty {
-            Type::Constructed(TypeName::Int(32), _) => {
-                let (ai, bi) = (self.as_i32(a)?, self.as_i32(b)?);
-                let v = eval_i32(name, ai, bi)?;
-                Some(self.intern_constant(ConstantValue::I32(v), result_ty.clone()))
-            }
-            Type::Constructed(TypeName::UInt(32), _) => {
-                let (au, bu) = (self.as_u32(a)?, self.as_u32(b)?);
-                let v = eval_u32(name, au, bu)?;
-                Some(self.intern_constant(ConstantValue::U32(v), result_ty.clone()))
-            }
-            Type::Constructed(TypeName::Float(32), _) => {
-                let (af, bf) = (self.as_f32(a)?, self.as_f32(b)?);
-                let v = eval_f32(name, af, bf)?;
-                Some(self.intern_constant(ConstantValue::F32(v.to_bits()), result_ty.clone()))
-            }
-            _ => None,
-        }
+        let operand_ty = self.nodes.get(a)?.ty.clone();
+        let value = scalar_eval::binary(name, self.as_scalar(a)?, self.as_scalar(b)?, &operand_ty)?;
+        self.intern_scalar(value, result_ty)
     }
 
     /// `x / c → x * (1 / c)` for a runtime f32 scalar/vector and a
@@ -192,15 +174,11 @@ impl<P: Family> EGraph<P> {
         if !matches!(name, UnaryOperator::Negate | UnaryOperator::LogicalNot) {
             return None;
         }
-        if name == UnaryOperator::Negate {
-            if let Some(v) = self.as_i32(inner) {
-                return Some(self.intern_constant(ConstantValue::I32(v.wrapping_neg()), result_ty.clone()));
-            }
-            if let Some(v) = self.as_f32(inner) {
-                return Some(self.intern_constant(ConstantValue::F32((-v).to_bits()), result_ty.clone()));
-            }
-        } else if let Some(v) = self.as_bool(inner) {
-            return Some(self.intern_constant(ConstantValue::Bool(!v), result_ty.clone()));
+        let operand_ty = self.nodes.get(inner)?.ty.clone();
+        if let Some(value) =
+            self.as_scalar(inner).and_then(|value| scalar_eval::unary(name, value, &operand_ty))
+        {
+            return self.intern_scalar(value, result_ty);
         }
         let ENode::Pure {
             op: PureOp::UnaryOp(inner_name),
@@ -322,18 +300,6 @@ impl<P: Family> EGraph<P> {
         }
     }
 
-    fn eval_const_predicate(&self, op: BinaryOperator, a: NodeId, b: NodeId) -> Option<bool> {
-        match &self.nodes.get(a)?.ty {
-            Type::Constructed(TypeName::Int(32), _) => eval_i32_pred(op, self.as_i32(a)?, self.as_i32(b)?),
-            Type::Constructed(TypeName::UInt(32), _) => eval_u32_pred(op, self.as_u32(a)?, self.as_u32(b)?),
-            Type::Constructed(TypeName::Float(32), _) => {
-                eval_f32_pred(op, self.as_f32(a)?, self.as_f32(b)?)
-            }
-            Type::Constructed(TypeName::Bool, _) => eval_bool_pred(op, self.as_bool(a)?, self.as_bool(b)?),
-            _ => None,
-        }
-    }
-
     // ---- literal predicates ------------------------------------------------
 
     fn is_zero_literal(&self, nid: NodeId) -> bool {
@@ -363,6 +329,33 @@ impl<P: Family> EGraph<P> {
     }
 
     // ---- value extractors --------------------------------------------------
+
+    fn as_scalar(&self, node: NodeId) -> Option<Scalar> {
+        match &self.nodes.get(node)?.ty {
+            Type::Constructed(TypeName::Int(32), _) => self.as_i32(node).map(|v| Scalar::Int(v as i64)),
+            Type::Constructed(TypeName::UInt(32), _) => self.as_u32(node).map(|v| Scalar::Int(v as i64)),
+            Type::Constructed(TypeName::Float(32), _) => self.as_f32(node).map(|v| Scalar::Float(v as f64)),
+            Type::Constructed(TypeName::Bool, _) => self.as_bool(node).map(Scalar::Bool),
+            _ => None,
+        }
+    }
+
+    fn intern_scalar(&mut self, value: Scalar, ty: &Type<TypeName>) -> Option<NodeId> {
+        let constant = match (value, ty) {
+            (Scalar::Int(value), Type::Constructed(TypeName::Int(32), _)) => {
+                ConstantValue::I32(value as i32)
+            }
+            (Scalar::Int(value), Type::Constructed(TypeName::UInt(32), _)) => {
+                ConstantValue::U32(value as u32)
+            }
+            (Scalar::Float(value), Type::Constructed(TypeName::Float(32), _)) => {
+                ConstantValue::from_f32(value as f32)
+            }
+            (Scalar::Bool(value), Type::Constructed(TypeName::Bool, _)) => ConstantValue::Bool(value),
+            _ => return None,
+        };
+        Some(self.intern_constant(constant, ty.clone()))
+    }
 
     pub(super) fn as_i32(&self, nid: NodeId) -> Option<i32> {
         match &self.nodes[nid].kind {
@@ -407,89 +400,4 @@ impl<P: Family> EGraph<P> {
             _ => None,
         }
     }
-}
-
-fn eval_i32(op: BinaryOperator, a: i32, b: i32) -> Option<i32> {
-    match op {
-        BinaryOperator::Add => Some(a.wrapping_add(b)),
-        BinaryOperator::Subtract => Some(a.wrapping_sub(b)),
-        BinaryOperator::Multiply => Some(a.wrapping_mul(b)),
-        BinaryOperator::Divide if b != 0 => a.checked_div(b),
-        BinaryOperator::Remainder if b != 0 => a.checked_rem(b),
-        BinaryOperator::BitwiseAnd => Some(a & b),
-        BinaryOperator::BitwiseOr => Some(a | b),
-        BinaryOperator::BitwiseXor => Some(a ^ b),
-        _ => None,
-    }
-}
-
-fn eval_u32(op: BinaryOperator, a: u32, b: u32) -> Option<u32> {
-    match op {
-        BinaryOperator::Add => Some(a.wrapping_add(b)),
-        BinaryOperator::Subtract => Some(a.wrapping_sub(b)),
-        BinaryOperator::Multiply => Some(a.wrapping_mul(b)),
-        BinaryOperator::Divide if b != 0 => Some(a / b),
-        BinaryOperator::Remainder if b != 0 => Some(a % b),
-        BinaryOperator::BitwiseAnd => Some(a & b),
-        BinaryOperator::BitwiseOr => Some(a | b),
-        BinaryOperator::BitwiseXor => Some(a ^ b),
-        _ => None,
-    }
-}
-
-fn eval_f32(op: BinaryOperator, a: f32, b: f32) -> Option<f32> {
-    match op {
-        BinaryOperator::Add => Some(a + b),
-        BinaryOperator::Subtract => Some(a - b),
-        BinaryOperator::Multiply => Some(a * b),
-        BinaryOperator::Divide => Some(a / b),
-        BinaryOperator::Remainder => Some(a % b),
-        _ => None,
-    }
-}
-
-fn eval_i32_pred(op: BinaryOperator, a: i32, b: i32) -> Option<bool> {
-    Some(match op {
-        BinaryOperator::Equal => a == b,
-        BinaryOperator::NotEqual => a != b,
-        BinaryOperator::Less => a < b,
-        BinaryOperator::LessEqual => a <= b,
-        BinaryOperator::Greater => a > b,
-        BinaryOperator::GreaterEqual => a >= b,
-        _ => return None,
-    })
-}
-
-fn eval_u32_pred(op: BinaryOperator, a: u32, b: u32) -> Option<bool> {
-    Some(match op {
-        BinaryOperator::Equal => a == b,
-        BinaryOperator::NotEqual => a != b,
-        BinaryOperator::Less => a < b,
-        BinaryOperator::LessEqual => a <= b,
-        BinaryOperator::Greater => a > b,
-        BinaryOperator::GreaterEqual => a >= b,
-        _ => return None,
-    })
-}
-
-fn eval_f32_pred(op: BinaryOperator, a: f32, b: f32) -> Option<bool> {
-    Some(match op {
-        BinaryOperator::Equal => a == b,
-        BinaryOperator::NotEqual => !a.is_nan() && !b.is_nan() && a != b,
-        BinaryOperator::Less => a < b,
-        BinaryOperator::LessEqual => a <= b,
-        BinaryOperator::Greater => a > b,
-        BinaryOperator::GreaterEqual => a >= b,
-        _ => return None,
-    })
-}
-
-fn eval_bool_pred(op: BinaryOperator, a: bool, b: bool) -> Option<bool> {
-    Some(match op {
-        BinaryOperator::Equal => a == b,
-        BinaryOperator::NotEqual => a != b,
-        BinaryOperator::LogicalAnd => a && b,
-        BinaryOperator::LogicalOr => a || b,
-        _ => return None,
-    })
 }

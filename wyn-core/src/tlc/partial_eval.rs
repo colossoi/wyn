@@ -13,7 +13,8 @@ use super::{
 use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::builtins::{by_id, Purity};
-use crate::op::{BinaryOperator, UnaryOperator};
+use crate::op::BinaryOperator;
+use crate::scalar_eval::{self, wrap_int, Scalar};
 use crate::LookupMap;
 use crate::LookupSet;
 use crate::SymbolId;
@@ -85,6 +86,23 @@ enum Value {
 impl Value {
     fn is_known(&self) -> bool {
         !matches!(self, Value::Unknown(_))
+    }
+
+    fn as_scalar(&self) -> Option<Scalar> {
+        match self {
+            Value::Int(value) => Some(Scalar::Int(*value)),
+            Value::Float(value) => Some(Scalar::Float(*value)),
+            Value::Bool(value) => Some(Scalar::Bool(*value)),
+            _ => None,
+        }
+    }
+
+    fn from_scalar(value: Scalar) -> Self {
+        match value {
+            Scalar::Int(value) => Value::Int(value),
+            Scalar::Float(value) => Value::Float(value),
+            Scalar::Bool(value) => Value::Bool(value),
+        }
     }
 }
 
@@ -360,7 +378,8 @@ impl<'a> PartialEvaluator<'a> {
             }
 
             TermKind::UnOp(op) => {
-                let folded = if !args.is_empty() { self.eval_unop(op, &args[0].0) } else { None };
+                let folded =
+                    if !args.is_empty() { self.eval_unop(op, &args[0].0, &args[0].1) } else { None };
                 folded.unwrap_or_else(|| self.residualize_unreduced(original))
             }
 
@@ -519,8 +538,6 @@ impl<'a> PartialEvaluator<'a> {
         self.eval(body)
     }
 
-    // (see `wrap_int` free fn below)
-
     /// Evaluate a binary operation. `Some` means a genuine fold or
     /// simplification was performed (a literal result, or an identity like
     /// `x + 0 → x` that returns a residual operand); `None` means it could
@@ -533,54 +550,13 @@ impl<'a> PartialEvaluator<'a> {
     /// result matches runtime semantics (e.g. u32 multiply is mod 2^32). The
     /// fold is done in `i128` to avoid overflowing before the wrap.
     fn eval_binop(&self, op: &BinaryOp, lhs: &Value, rhs: &Value, ty: &Type<TypeName>) -> Option<Value> {
+        if let (Some(lhs), Some(rhs)) = (lhs.as_scalar(), rhs.as_scalar()) {
+            if let Some(result) = scalar_eval::binary(op.op, lhs, rhs, ty) {
+                return Some(Value::from_scalar(result));
+            }
+        }
+
         Some(match (op.op, lhs, rhs) {
-            // Integer arithmetic (wrapped to the operand's bit width)
-            (BinaryOperator::Add, Value::Int(a), Value::Int(b)) => {
-                Value::Int(wrap_int(*a as i128 + *b as i128, ty))
-            }
-            (BinaryOperator::Subtract, Value::Int(a), Value::Int(b)) => {
-                Value::Int(wrap_int(*a as i128 - *b as i128, ty))
-            }
-            (BinaryOperator::Multiply, Value::Int(a), Value::Int(b)) => {
-                Value::Int(wrap_int(*a as i128 * *b as i128, ty))
-            }
-            (BinaryOperator::Divide, Value::Int(a), Value::Int(b)) if *b != 0 => match ty {
-                Type::Constructed(TypeName::UInt(_), _) => Value::Int(((*a as u64) / (*b as u64)) as i64),
-                _ => Value::Int(wrap_int(*a as i128 / *b as i128, ty)),
-            },
-            (BinaryOperator::Remainder, Value::Int(a), Value::Int(b)) if *b != 0 => match ty {
-                Type::Constructed(TypeName::UInt(_), _) => Value::Int(((*a as u64) % (*b as u64)) as i64),
-                _ => Value::Int(wrap_int(*a as i128 % *b as i128, ty)),
-            },
-
-            // Float arithmetic
-            (BinaryOperator::Add, Value::Float(a), Value::Float(b)) => Value::Float(a + b),
-            (BinaryOperator::Subtract, Value::Float(a), Value::Float(b)) => Value::Float(a - b),
-            (BinaryOperator::Multiply, Value::Float(a), Value::Float(b)) => Value::Float(a * b),
-            (BinaryOperator::Divide, Value::Float(a), Value::Float(b)) => Value::Float(a / b),
-            (BinaryOperator::Remainder, Value::Float(a), Value::Float(b)) => Value::Float(a % b),
-
-            // Comparisons
-            (BinaryOperator::Equal, Value::Int(a), Value::Int(b)) => Value::Bool(a == b),
-            (BinaryOperator::NotEqual, Value::Int(a), Value::Int(b)) => Value::Bool(a != b),
-            (BinaryOperator::Less, Value::Int(a), Value::Int(b)) => Value::Bool(a < b),
-            (BinaryOperator::Greater, Value::Int(a), Value::Int(b)) => Value::Bool(a > b),
-            (BinaryOperator::LessEqual, Value::Int(a), Value::Int(b)) => Value::Bool(a <= b),
-            (BinaryOperator::GreaterEqual, Value::Int(a), Value::Int(b)) => Value::Bool(a >= b),
-            (BinaryOperator::Equal, Value::Float(a), Value::Float(b)) => Value::Bool(a == b),
-            (BinaryOperator::NotEqual, Value::Float(a), Value::Float(b)) => {
-                Value::Bool(!a.is_nan() && !b.is_nan() && a != b)
-            }
-            (BinaryOperator::Less, Value::Float(a), Value::Float(b)) => Value::Bool(a < b),
-            (BinaryOperator::Greater, Value::Float(a), Value::Float(b)) => Value::Bool(a > b),
-            (BinaryOperator::LessEqual, Value::Float(a), Value::Float(b)) => Value::Bool(a <= b),
-            (BinaryOperator::GreaterEqual, Value::Float(a), Value::Float(b)) => Value::Bool(a >= b),
-            (BinaryOperator::LogicalAnd, Value::Bool(a), Value::Bool(b)) => Value::Bool(*a && *b),
-            (BinaryOperator::LogicalOr, Value::Bool(a), Value::Bool(b)) => Value::Bool(*a || *b),
-            (BinaryOperator::Equal, Value::Bool(a), Value::Bool(b)) => Value::Bool(a == b),
-            (BinaryOperator::NotEqual, Value::Bool(a), Value::Bool(b)) => Value::Bool(a != b),
-
-            // Algebraic identities (return a residual operand — a valid fold)
             (BinaryOperator::Add, Value::Int(0), _) => rhs.clone(),
             (BinaryOperator::Add, _, Value::Int(0)) => lhs.clone(),
             (BinaryOperator::Multiply, Value::Int(1), _) => rhs.clone(),
@@ -588,19 +564,13 @@ impl<'a> PartialEvaluator<'a> {
             (BinaryOperator::Multiply, Value::Int(0), _) | (BinaryOperator::Multiply, _, Value::Int(0)) => {
                 Value::Int(0)
             }
-
             _ => return None,
         })
     }
 
     /// Evaluate a unary operation. `Some`/`None` as in `eval_binop`.
-    fn eval_unop(&self, op: &UnaryOp, arg: &Value) -> Option<Value> {
-        Some(match (op.op, arg) {
-            (UnaryOperator::Negate, Value::Int(n)) => Value::Int(-n),
-            (UnaryOperator::Negate, Value::Float(f)) => Value::Float(-f),
-            (UnaryOperator::LogicalNot, Value::Bool(b)) => Value::Bool(!b),
-            _ => return None,
-        })
+    fn eval_unop(&self, op: &UnaryOp, arg: &Value, ty: &Type<TypeName>) -> Option<Value> {
+        scalar_eval::unary(op.op, arg.as_scalar()?, ty).map(Value::from_scalar)
     }
 
     /// Scalar catalog keyholes needed to finish constant defs and pure helper
@@ -885,7 +855,9 @@ impl TermRewriter<Empty, Empty> for ResidualConstantFolder<'_, '_> {
                 TermKind::BinOp(op) if args.len() >= 2 => {
                     self.evaluator.eval_binop(op, &args[0].0, &args[1].0, &args[0].1)
                 }
-                TermKind::UnOp(op) if !args.is_empty() => self.evaluator.eval_unop(op, &args[0].0),
+                TermKind::UnOp(op) if !args.is_empty() => {
+                    self.evaluator.eval_unop(op, &args[0].0, &args[0].1)
+                }
                 TermKind::Var(VarRef::Builtin { id, overload_idx }) => {
                     self.evaluator.eval_builtin(*id, *overload_idx, &args, &ty)
                 }
@@ -1093,28 +1065,6 @@ fn fold_scalar_bitcast(arg: &Value, arg_ty: &Type<TypeName>, result_ty: &Type<Ty
             Type::Constructed(TypeName::Int(32), _),
         ) => Some(Value::Int(*v)),
         _ => None,
-    }
-}
-
-/// Wrap an integer fold result to `ty`'s bit width and signedness, matching
-/// runtime two's-complement semantics (e.g. u32 arithmetic is mod 2^32). An
-/// `as` cast to a narrower / unsigned integer truncates to the low bits, which
-/// *is* the modular wrap (`300i128 as u8 == 44`, `-1i128 as u8 == 255`); the
-/// caller does the op in `i128` so it can't overflow before this truncation.
-/// Non-integer `ty` (a fresh var, etc.) falls back to a plain i64 truncation.
-/// `Value::Int` is i64, so u64 values `>= 2^63` round-trip as their
-/// two's-complement bit pattern.
-fn wrap_int(v: i128, ty: &Type<TypeName>) -> i64 {
-    match ty {
-        Type::Constructed(TypeName::UInt(8), _) => (v as u8) as i64,
-        Type::Constructed(TypeName::UInt(16), _) => (v as u16) as i64,
-        Type::Constructed(TypeName::UInt(32), _) => (v as u32) as i64,
-        Type::Constructed(TypeName::UInt(64), _) => (v as u64) as i64,
-        Type::Constructed(TypeName::Int(8), _) => (v as i8) as i64,
-        Type::Constructed(TypeName::Int(16), _) => (v as i16) as i64,
-        Type::Constructed(TypeName::Int(32), _) => (v as i32) as i64,
-        Type::Constructed(TypeName::Int(64), _) => v as i64,
-        _ => v as i64,
     }
 }
 
