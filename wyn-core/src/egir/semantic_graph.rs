@@ -268,6 +268,8 @@ where
         };
         match soac {
             Soac::Screma(op) => {
+                op.validate_with_nodes(|node| graph.nodes.get(node).map(|node| node.ty.clone()))
+                    .map_err(|error| format!("{scope}: {error}"))?;
                 if let Some(body) = op.form.pre.seg_body() {
                     verify_body("Screma pre-lambda", body)?;
                 }

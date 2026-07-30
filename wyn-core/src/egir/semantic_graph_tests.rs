@@ -1,7 +1,9 @@
 use super::*;
-use crate::ast::TypeName;
+use crate::ast::{Span, TypeName};
+use crate::egir::program::{semantic_program_for_test, ProgramIdentities, SemanticFunc};
 use crate::egir::soac::screma;
-use crate::egir::types::{RegionId, SegBody, Semantic, SoacDestination, SoacEffect};
+use crate::egir::types::{PureOp, RegionId, SegBody, Semantic, SoacDestination, SoacEffect};
+use crate::pipeline_descriptor::PipelineDescriptor;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -104,6 +106,119 @@ fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<Nod
     });
 }
 
+fn array(element: Type<TypeName>) -> Type<TypeName> {
+    Type::Constructed(
+        TypeName::Array,
+        vec![
+            element,
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            Type::Constructed(TypeName::Size(4), vec![]),
+            crate::types::no_buffer(),
+        ],
+    )
+}
+
+fn screma_verification_program(
+    operator: screma::Lambda,
+    neutral_is_bool: bool,
+) -> crate::egir::reify::Segmented {
+    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+    let array_type = array(i32_type.clone());
+    let result_type = Type::Constructed(TypeName::Tuple(1), vec![array_type.clone()]);
+    let mut graph = EGraph::new();
+    let input = graph.add_func_param(0, array_type.clone());
+    let neutral = if neutral_is_bool {
+        graph.intern_pure(
+            PureOp::Bool(false),
+            smallvec![],
+            Type::Constructed(TypeName::Bool, vec![]),
+            None,
+        )
+    } else {
+        graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_type.clone(), None)
+    };
+    let result = graph.alloc_side_effect_result(result_type.clone());
+    let block = graph.skeleton.entry;
+    graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        kind: SideEffectKind::Soac(SoacEffect(
+            op(0),
+            Soac::Screma(screma::Op {
+                inputs: vec![crate::egir::types::SoacInputType {
+                    array: array_type.clone(),
+                }],
+                form: screma::ScremaForm {
+                    pre: screma::Lambda::identity(vec![i32_type.clone()]),
+                    scans: vec![screma::Scan {
+                        operator,
+                        neutral: vec![neutral],
+                    }],
+                    reductions: vec![],
+                    post: screma::Lambda::identity(vec![i32_type]),
+                },
+                result_state: vec![screma::ResultState {
+                    destination: SoacDestination::fresh(),
+                }],
+                state: screma::SemanticState::Serial,
+            }),
+        )),
+        operand_nodes: smallvec![input],
+        result: Some(result),
+        effects: None,
+        span: None,
+    });
+
+    let mut identities = ProgramIdentities::default();
+    let region = identities.alloc_function("malformed_screma".into());
+    let function = SemanticFunc::new(
+        region,
+        "malformed_screma".to_string(),
+        Span::dummy(),
+        None,
+        vec![(array_type, "xs".into())],
+        result_type,
+        graph,
+    );
+    semantic_program_for_test(
+        vec![function],
+        vec![],
+        vec![],
+        vec![],
+        PipelineDescriptor::default(),
+        identities,
+    )
+}
+
+#[test]
+fn verifier_rejects_identity_screma_operator_without_panicking() {
+    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+    let program =
+        screma_verification_program(screma::Lambda::identity(vec![i32_type.clone(), i32_type]), false);
+
+    let error = verify(&program).expect_err("identity collective operator must be rejected");
+    assert!(
+        error.contains("scan 0 operator is identity"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn verifier_rejects_screma_neutral_type_mismatch() {
+    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+    let program = screma_verification_program(
+        screma::Lambda::region(
+            SegBody {
+                region: RegionId::from_index(0),
+                captures: vec![],
+            },
+            vec![i32_type.clone(), i32_type.clone()],
+            vec![i32_type],
+        ),
+        true,
+    );
+
+    let error = verify(&program).expect_err("neutral type mismatch must be rejected");
+    assert!(error.contains("neutral 0"), "unexpected error: {error}");
+}
 #[test]
 fn scheduled_operations_expose_shared_prelude_inputs() {
     let mut egir = EGraph::<Semantic>::new();

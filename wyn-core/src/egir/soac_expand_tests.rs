@@ -259,6 +259,95 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
     );
 }
 #[test]
+fn serial_hist_ignores_out_of_bounds_indices() {
+    use crate::egir::graph_ops;
+    use crate::egir::program::ProgramIdentities;
+    use crate::egir::types::SkeletonTerminator;
+    use smallvec::{smallvec, SmallVec};
+
+    let mut graph = PhysicalEGraph::new();
+    let block = graph.skeleton.entry;
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let array_ty = plain_array_ty(i32_ty.clone());
+    let negative_one = graph.intern_pure(PureOp::Int("-1".into()), smallvec![], i32_ty.clone(), None);
+    let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone(), None);
+    let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), None);
+    let four = graph.intern_pure(PureOp::Int("4".into()), smallvec![], i32_ty.clone(), None);
+    let indices = graph.intern_pure(
+        PureOp::ArrayLit(4),
+        smallvec![negative_one, zero, four, one],
+        array_ty.clone(),
+        None,
+    );
+    let values = graph.intern_pure(
+        PureOp::ArrayLit(4),
+        smallvec![one, one, one, one],
+        array_ty.clone(),
+        None,
+    );
+    let destination =
+        graph_ops::intern_storage_view(&mut graph, crate::BindingRef::new(2, 0), i32_ty.clone(), None);
+    let histogram = hist::Op::<Physical> {
+        inputs: vec![
+            SoacInputType {
+                array: array_ty.clone(),
+            },
+            SoacInputType {
+                array: array_ty.clone(),
+            },
+        ],
+        form: hist::HistForm {
+            bucket: screma::Lambda::identity(vec![i32_ty.clone(), i32_ty.clone()]),
+            operations: vec![hist::HistOp {
+                shape: vec![four],
+                race_factor: one,
+                destinations: vec![destination],
+                update: hist::Update::OrderedOverwrite {
+                    value_types: vec![i32_ty.clone()],
+                },
+            }],
+        },
+        state: hist::PhysicalState::Serial,
+    };
+    let mut effect_ids = crate::IdSource::new();
+    graph_ops::emit_pending_soac(
+        &mut graph,
+        block,
+        SemanticOpId::for_test(0),
+        Soac::Hist(histogram),
+        SmallVec::from_vec(vec![indices, values]),
+        bool_ty,
+        &mut effect_ids,
+        None,
+    );
+
+    let regions = ProgramIdentities::default();
+    let graph =
+        super::run_one_body(graph, &regions, &mut effect_ids).expect("serial histogram should expand");
+    assert!(
+        graph.nodes.iter().any(|(_, node)| {
+            matches!(
+                &node.kind,
+                ENode::Pure {
+                    op: PureOp::BinOp(op),
+                    ..
+                } if *op == crate::op::BinaryOperator::GreaterEqual
+            )
+        }),
+        "serial Hist must reject negative bucket indices"
+    );
+    assert!(
+        graph.skeleton.blocks.iter().any(|(_, block)| {
+            matches!(
+                block.control_header,
+                Some(crate::flow::ControlHeader::Selection { .. })
+            ) && matches!(block.term, SkeletonTerminator::CondBranch { .. })
+        }),
+        "serial Hist must branch around the load/store for invalid indices"
+    );
+}
+#[test]
 fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
     use crate::egir::graph_ops;
     use crate::egir::program::ProgramIdentities;

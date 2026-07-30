@@ -348,6 +348,30 @@ impl ScremaForm {
         Ok(())
     }
 
+    fn validate_neutral_types(
+        &self,
+        node_type: &mut impl FnMut(NodeId) -> Option<Type<TypeName>>,
+    ) -> Result<(), String> {
+        for (index, scan) in self.scans.iter().enumerate() {
+            validate_neutral_values(
+                "scan",
+                index,
+                &scan.neutral,
+                &scan.operator.result_types,
+                node_type,
+            )?;
+        }
+        for (index, reduction) in self.reductions.iter().enumerate() {
+            validate_neutral_values(
+                "reduction",
+                index,
+                &reduction.neutral,
+                &reduction.operator.result_types,
+                node_type,
+            )?;
+        }
+        Ok(())
+    }
     pub(crate) fn for_each_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
         self.pre.for_each_type_mut(visit);
         for scan in &mut self.scans {
@@ -379,6 +403,23 @@ impl ScremaForm {
     }
 }
 
+fn validate_neutral_values(
+    kind: &str,
+    index: usize,
+    neutral: &[NodeId],
+    types: &[Type<TypeName>],
+    node_type: &mut impl FnMut(NodeId) -> Option<Type<TypeName>>,
+) -> Result<(), String> {
+    for (component, (&node, expected)) in neutral.iter().zip(types).enumerate() {
+        let actual = node_type(node);
+        if actual.as_ref() != Some(expected) {
+            return Err(format!(
+                "Screma {kind} {index} neutral {component} has type {actual:?}, expected {expected:?}"
+            ));
+        }
+    }
+    Ok(())
+}
 fn validate_operator_lambda(
     kind: &str,
     index: usize,
@@ -528,6 +569,13 @@ impl<P: WynSoacPhase> Op<P> {
         Ok(())
     }
 
+    pub(crate) fn validate_with_nodes(
+        &self,
+        mut node_type: impl FnMut(NodeId) -> Option<Type<TypeName>>,
+    ) -> Result<(), String> {
+        self.validate()?;
+        self.form.validate_neutral_types(&mut node_type)
+    }
     pub(crate) fn for_each_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
         for input in &mut self.inputs {
             visit(&mut input.array);

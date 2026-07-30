@@ -364,7 +364,10 @@ fn expand_one(
                     }
                     next.extend(new_scans);
                     next.extend(new_reductions);
-                    next
+                    LoopBody {
+                        tail: body,
+                        carried: next,
+                    }
                 },
             );
         }
@@ -552,6 +555,13 @@ fn emit_screma_lambda(
             .collect(),
     }
 }
+/// One expanded-loop iteration. A body can finish in a different CFG block
+/// when its effectful work is conditionally executed.
+struct LoopBody {
+    tail: BlockId,
+    carried: Vec<NodeId>,
+}
+
 /// Emit a real loop via `build_loop_skeleton`, invoking `emit_body` in the
 /// body block to produce the new carried values, then wire the back-edge.
 fn build_loop<F>(
@@ -564,7 +574,7 @@ fn build_loop<F>(
     next_effect: &mut crate::IdSource<EffectToken>,
     mut emit_body: F,
 ) where
-    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, NodeId, &[NodeId]) -> Vec<NodeId>,
+    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, NodeId, &[NodeId]) -> LoopBody,
 {
     let handles = build_loop_skeleton(
         graph,
@@ -576,18 +586,18 @@ fn build_loop<F>(
             len_input: len_input.clone(),
         },
     );
-    let new_carried = emit_body(
+    let body = emit_body(
         graph,
         next_effect,
         handles.body,
         handles.idx_nid,
         &handles.carried,
     );
-    debug_assert_eq!(new_carried.len(), carried.len());
+    debug_assert_eq!(body.carried.len(), carried.len());
     let next_i_nid = increment(graph, handles.idx_nid);
-    let mut args = new_carried;
+    let mut args = body.carried;
     args.push(next_i_nid);
-    graph.skeleton.blocks[handles.body].term = SkeletonTerminator::Branch {
+    graph.skeleton.blocks[body.tail].term = SkeletonTerminator::Branch {
         target: handles.header,
         args,
     };
@@ -607,7 +617,7 @@ fn expand_loop<F>(
     allow_unroll: bool,
     mut emit_body: F,
 ) where
-    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, NodeId, &[NodeId]) -> Vec<NodeId>,
+    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, NodeId, &[NodeId]) -> LoopBody,
 {
     if allow_unroll
         && try_unroll(
@@ -635,13 +645,13 @@ fn expand_loop<F>(
     );
 }
 
-/// Generic small-loop unroller. Returns `true` if the loop was unrolled
-/// straight-line into `bid`; `false` if the trip count isn't statically
-/// known to be small, and the caller should fall back to emitting a real
-/// loop via `build_loop_skeleton`.
+/// Generic small-loop unroller. Returns `true` if the loop was unrolled into
+/// a short CFG chain rooted at `bid`; `false` if the trip count isn't
+/// statically known to be small, and the caller should fall back to emitting a
+/// real loop via `build_loop_skeleton`.
 ///
-/// `emit_body(graph, next_effect, bid, idx_const_nid, carried_in)` produces
-/// the `carried_out` NodeIds for one iteration, inlined into `bid`.
+/// `emit_body(graph, next_effect, block, idx_const_nid, carried_in)` produces
+/// the `carried_out` NodeIds and the block that continues the iteration.
 fn try_unroll<F>(
     graph: &mut EGraph,
     bid: BlockId,
@@ -653,7 +663,7 @@ fn try_unroll<F>(
     mut emit_body: F,
 ) -> bool
 where
-    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, NodeId, &[NodeId]) -> Vec<NodeId>,
+    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, NodeId, &[NodeId]) -> LoopBody,
 {
     const UNROLL_THRESHOLD: usize = 16;
 
@@ -674,16 +684,23 @@ where
 
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
 
-    // Stash side-effects that followed the (already-removed) Soac so any
-    // effectful reads/writes emitted by `emit_body` land at the Soac's
-    // original position.
+    // Stash side-effects and the original continuation. A body may introduce
+    // selections, so the suffix belongs to its final continuation block, not
+    // necessarily the original block.
     let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
+    let original_term = std::mem::replace(
+        &mut graph.skeleton.blocks[bid].term,
+        SkeletonTerminator::Unreachable,
+    );
 
     let mut carried_nids: Vec<NodeId> = carried.iter().map(|(_, init)| *init).collect();
+    let mut current = bid;
     for i in 0..n {
         let idx_nid = graph.intern_pure(PureOp::Int(i.to_string()), smallvec![], i32_ty.clone(), None);
-        carried_nids = emit_body(graph, next_effect, bid, idx_nid, &carried_nids);
-        debug_assert_eq!(carried_nids.len(), carried.len());
+        let body = emit_body(graph, next_effect, current, idx_nid, &carried_nids);
+        debug_assert_eq!(body.carried.len(), carried.len());
+        carried_nids = body.carried;
+        current = body.tail;
     }
 
     // Rebind the original SOAC result NodeId from the carried tuple.
@@ -706,7 +723,8 @@ where
         }
     }
 
-    graph.skeleton.blocks[bid].side_effects.extend(suffix);
+    graph.skeleton.blocks[current].side_effects.extend(suffix);
+    graph.skeleton.blocks[current].term = original_term;
     true
 }
 
@@ -1475,14 +1493,31 @@ fn build_hist_loop(
             let mut index_offset = 0;
             let mut value_offset = 0;
 
+            let mut current = blk;
             for operation in &form.operations {
                 let operation_indices = &indices[index_offset..index_offset + operation.index_count()];
                 let operation_values = &values[value_offset..value_offset + operation.value_count()];
                 index_offset += operation.index_count();
                 value_offset += operation.value_count();
+
+                // Futhark Hist ignores an update unless every index component
+                // is in range. Keep both the destination load and store in
+                // the selected block so serial and atomic paths agree.
+                let update = graph.skeleton.create_block();
+                let next = graph.skeleton.create_block();
+                let valid = hist_index_in_bounds(graph, operation_indices, &operation.shape);
+                graph.skeleton.blocks[current].term = SkeletonTerminator::CondBranch {
+                    cond: valid,
+                    then_target: update,
+                    then_args: vec![],
+                    else_target: next,
+                    else_args: vec![],
+                };
+                graph.skeleton.blocks[current].control_header =
+                    Some(ControlHeader::Selection { merge: next });
+
                 let bucket_index = flatten_hist_index(graph, operation_indices, &operation.shape);
                 let value_types = operation.update.value_types();
-
                 let updated_values = match &operation.update {
                     hist::Update::OrderedOverwrite { .. } => operation_values.to_vec(),
                     hist::Update::Reduce { operator, .. } => {
@@ -1490,7 +1525,7 @@ fn build_hist_loop(
                         for (&destination, value_type) in operation.destinations.iter().zip(value_types) {
                             reducer_arguments.push(emit_view_load(
                                 graph,
-                                blk,
+                                update,
                                 destination,
                                 bucket_index,
                                 value_type.clone(),
@@ -1508,7 +1543,7 @@ fn build_hist_loop(
                 {
                     emit_storage_store(
                         graph,
-                        blk,
+                        update,
                         destination,
                         bucket_index,
                         updated,
@@ -1517,8 +1552,16 @@ fn build_hist_loop(
                         None,
                     );
                 }
+                graph.skeleton.blocks[update].term = SkeletonTerminator::Branch {
+                    target: next,
+                    args: vec![],
+                };
+                current = next;
             }
-            vec![]
+            LoopBody {
+                tail: current,
+                carried: vec![],
+            }
         },
     );
 }
