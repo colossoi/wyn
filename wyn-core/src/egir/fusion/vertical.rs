@@ -133,22 +133,7 @@ pub(super) struct Candidate {
 }
 
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
-    for (index, entry) in inner.entry_points.iter().enumerate() {
-        if let Some(candidate) = find_in_graph(inner, &entry.graph, BodySite::Entry(index), oracle) {
-            return Some(candidate);
-        }
-    }
-    for function in &inner.functions {
-        if let Some(candidate) = find_in_graph(
-            inner,
-            &function.graph,
-            BodySite::Function(function.region),
-            oracle,
-        ) {
-            return Some(candidate);
-        }
-    }
-    None
+    super::bodies(inner).find_map(|(site, graph, _)| find_in_graph(inner, graph, site, oracle))
 }
 
 fn find_in_graph(

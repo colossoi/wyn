@@ -16,6 +16,7 @@ use polytype::Type;
 use crate::ast::{Span, TypeName};
 
 use crate::egir::ir::BodySite;
+use crate::egir::program::SemanticEntry;
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::types::{EGraph, NodeId};
@@ -73,6 +74,24 @@ pub(super) fn rewrite_once(program: Segmented, oracle: &SemanticGraph) -> (Segme
         Some(rewrite) => (apply(program, rewrite), true),
         None => (program, false),
     }
+}
+
+/// Iterate fusion candidates in entry-first priority order. Constant bodies
+/// are excluded because semantic fusion never targets them.
+pub(super) fn bodies(
+    program: &Segmented,
+) -> impl Iterator<Item = (BodySite, &EGraph, Option<&SemanticEntry>)> {
+    program
+        .entry_points
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (BodySite::Entry(index), &entry.graph, Some(entry)))
+        .chain(
+            program
+                .functions
+                .iter()
+                .map(|function| (BodySite::Function(function.region), &function.graph, None)),
+        )
 }
 
 pub(super) fn graph_and_span(program: &Segmented, site: BodySite) -> (&EGraph, Span, String) {

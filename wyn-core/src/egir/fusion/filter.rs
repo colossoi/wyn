@@ -48,21 +48,10 @@ struct FilterParts {
 }
 
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
-    for (index, entry) in inner.entry_points.iter().enumerate() {
-        let routes = entry.routes().cloned().collect::<Vec<_>>();
-        if let Some(candidate) = find_in_graph(&entry.graph, BodySite::Entry(index), oracle, Some(&routes))
-        {
-            return Some(candidate);
-        }
-    }
-    for function in &inner.functions {
-        if let Some(candidate) =
-            find_in_graph(&function.graph, BodySite::Function(function.region), oracle, None)
-        {
-            return Some(candidate);
-        }
-    }
-    None
+    super::bodies(inner).find_map(|(site, graph, entry)| {
+        let routes = entry.map(|entry| entry.routes().cloned().collect::<Vec<_>>());
+        find_in_graph(graph, site, oracle, routes.as_deref())
+    })
 }
 
 fn find_in_graph(

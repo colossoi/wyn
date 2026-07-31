@@ -36,26 +36,14 @@ pub(super) struct Candidate {
 }
 
 pub(super) fn analyze(inner: &Segmented) -> Option<Candidate> {
-    for (index, entry) in inner.entry_points.iter().enumerate() {
-        let output_resources = entry.outputs.iter().map(|output| output.resource).collect::<Vec<_>>();
-        let output_routes = entry.routes().cloned().collect::<Vec<_>>();
-        if let Some(candidate) = find_in_graph(
-            &entry.graph,
-            BodySite::Entry(index),
-            &output_resources,
-            &output_routes,
-        ) {
-            return Some(candidate);
-        }
-    }
-    for function in &inner.functions {
-        if let Some(candidate) =
-            find_in_graph(&function.graph, BodySite::Function(function.region), &[], &[])
-        {
-            return Some(candidate);
-        }
-    }
-    None
+    super::bodies(inner).find_map(|(site, graph, entry)| {
+        let output_resources = entry
+            .map(|entry| entry.outputs.iter().map(|output| output.resource).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let output_routes =
+            entry.map(|entry| entry.routes().cloned().collect::<Vec<_>>()).unwrap_or_default();
+        find_in_graph(graph, site, &output_resources, &output_routes)
+    })
 }
 
 fn find_in_graph(
