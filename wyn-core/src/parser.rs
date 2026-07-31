@@ -499,26 +499,14 @@ impl<'a> Parser<'a> {
     /// Returns (name, type) pairs.
     fn parse_extern_params(&mut self) -> Result<(Vec<(String, Type)>, Vec<Diet>)> {
         self.expect(Token::LeftParen)?;
-        let mut params = Vec::new();
-        let mut diets = Vec::new();
-
-        if !self.check(&Token::RightParen) {
-            loop {
-                let param_name = self.expect_identifier()?;
-                self.expect(Token::Colon)?;
-                let (ty, diet) = self.parse_type()?;
-                params.push((param_name, ty));
-                diets.push(diet);
-
-                if !self.check(&Token::Comma) {
-                    break;
-                }
-                self.advance(); // consume comma
-            }
-        }
-
+        let params = self.parse_delimited_list(&Token::RightParen, false, |parser| {
+            let param_name = parser.expect_identifier()?;
+            parser.expect(Token::Colon)?;
+            let (ty, diet) = parser.parse_type()?;
+            Ok(((param_name, ty), diet))
+        })?;
         self.expect(Token::RightParen)?;
-        Ok((params, diets))
+        Ok(params.into_iter().unzip())
     }
 
     /// Parse an entry point declaration.
@@ -638,52 +626,27 @@ impl<'a> Parser<'a> {
         trace!("parse_entry_params: next token = {:?}", self.peek());
         let _start_span = self.current_span();
         self.expect(Token::LeftParen)?;
-        let mut params = Vec::new();
-        let mut diets = Vec::new();
-
-        if !self.check(&Token::RightParen) {
-            loop {
-                let param_start = self.current_span();
-
-                // Parse optional attributes (can be multiple)
-                let attrs =
-                    if self.check(&Token::AttributeStart) { self.parse_attributes()? } else { vec![] };
-
-                // Must be an identifier
-                let name = self.expect_identifier()?;
-                let name_span = self.previous_span();
-
-                // Must have : type
-                self.expect(Token::Colon)?;
-                let (ty, diet) = self.parse_type()?;
-                diets.push(diet);
-
-                // Build pattern: if attrs present, Typed(Attributed(attrs, Name), ty)
-                // otherwise just Typed(Name, ty)
-                let name_pat = self.node_counter.mk_node(PatternKind::Name(name), name_span);
-
-                let inner_pat = if !attrs.is_empty() {
-                    let span = param_start.merge(&name_span);
-                    self.node_counter.mk_node(PatternKind::Attributed(attrs, Box::new(name_pat)), span)
-                } else {
-                    name_pat
-                };
-
-                let span = param_start.merge(&self.previous_span());
-                let typed_pat =
-                    self.node_counter.mk_node(PatternKind::Typed(Box::new(inner_pat), ty), span);
-
-                params.push(typed_pat);
-
-                if !self.check(&Token::Comma) {
-                    break;
-                }
-                self.advance(); // consume comma
-            }
-        }
-
+        let params = self.parse_delimited_list(&Token::RightParen, false, |parser| {
+            let param_start = parser.current_span();
+            let attrs =
+                if parser.check(&Token::AttributeStart) { parser.parse_attributes()? } else { vec![] };
+            let name = parser.expect_identifier()?;
+            let name_span = parser.previous_span();
+            parser.expect(Token::Colon)?;
+            let (ty, diet) = parser.parse_type()?;
+            let name_pat = parser.node_counter.mk_node(PatternKind::Name(name), name_span);
+            let inner_pat = if attrs.is_empty() {
+                name_pat
+            } else {
+                let span = param_start.merge(&name_span);
+                parser.node_counter.mk_node(PatternKind::Attributed(attrs, Box::new(name_pat)), span)
+            };
+            let span = param_start.merge(&parser.previous_span());
+            let typed_pat = parser.node_counter.mk_node(PatternKind::Typed(Box::new(inner_pat), ty), span);
+            Ok((typed_pat, diet))
+        })?;
         self.expect(Token::RightParen)?;
-        Ok((params, diets))
+        Ok(params.into_iter().unzip())
     }
 
     /// Parse return type with optional attributes, returning parallel arrays
@@ -694,42 +657,26 @@ impl<'a> Parser<'a> {
         // Check if it's a tuple: ([attr1] type1, [attr2] type2, ...)
         if self.check(&Token::LeftParen) {
             self.advance(); // consume '('
-            let mut types = Vec::new();
-            let mut attributes = Vec::new();
-            let mut diets = Vec::new();
-
-            if !self.check(&Token::RightParen) {
-                loop {
-                    // Parse optional #[attribute]
-                    let attr = if self.check(&Token::AttributeStart) {
-                        self.advance(); // consume '#['
-                        let attribute = self.parse_attribute()?;
-                        if matches!(attribute, Attribute::View(_)) {
-                            bail_parse_at!(
-                                self.current_span(),
-                                "#[view(...)] is only valid on entry-point parameters"
-                            );
-                        }
-                        Some(attribute)
-                    } else {
-                        None
-                    };
-
-                    // Parse the type
-                    let (ty, diet) = self.parse_type()?;
-
-                    types.push(ty);
-                    attributes.push(attr);
-                    diets.push(diet);
-
-                    if !self.check(&Token::Comma) {
-                        break;
+            let returns = self.parse_delimited_list(&Token::RightParen, false, |parser| {
+                let attribute = if parser.check(&Token::AttributeStart) {
+                    parser.advance(); // consume '#['
+                    let attribute = parser.parse_attribute()?;
+                    if matches!(attribute, Attribute::View(_)) {
+                        bail_parse_at!(
+                            parser.current_span(),
+                            "#[view(...)] is only valid on entry-point parameters"
+                        );
                     }
-                    self.advance(); // consume ','
-                }
-            }
-
+                    Some(attribute)
+                } else {
+                    None
+                };
+                let (ty, diet) = parser.parse_type()?;
+                Ok(((ty, attribute), diet))
+            })?;
             self.expect(Token::RightParen)?;
+            let (returns, diets): (Vec<_>, Vec<_>) = returns.into_iter().unzip();
+            let (types, attributes) = returns.into_iter().unzip();
             Ok((types, attributes, diets))
         } else if self.check(&Token::AttributeStart) {
             // Single attributed type: #[attribute] type
@@ -1401,23 +1348,11 @@ impl<'a> Parser<'a> {
     fn parse_comma_separated_params(&mut self) -> Result<(Vec<Pattern>, Vec<Diet>)> {
         trace!("parse_comma_separated_params: next token = {:?}", self.peek());
         self.expect(Token::LeftParen)?;
-        let mut params = Vec::new();
-        let mut diets = Vec::new();
-
-        if !self.check(&Token::RightParen) {
-            loop {
-                let (pat, diet) = self.parse_pattern_with_diet()?;
-                params.push(pat);
-                diets.push(diet);
-                if !self.check(&Token::Comma) {
-                    break;
-                }
-                self.advance(); // consume comma
-            }
-        }
-
+        let params = self.parse_delimited_list(&Token::RightParen, false, |parser| {
+            parser.parse_pattern_with_diet()
+        })?;
         self.expect(Token::RightParen)?;
-        Ok((params, diets))
+        Ok(params.into_iter().unzip())
     }
 
     fn parse_type(&mut self) -> Result<(Type, Diet)> {
@@ -1861,46 +1796,26 @@ impl<'a> Parser<'a> {
 
     fn parse_record_type(&mut self) -> Result<(Type, Diet)> {
         self.expect(Token::LeftBrace)?;
-        let mut fields = Vec::new();
-        let mut field_diets = Vec::new();
-
-        if !self.check(&Token::RightBrace) {
-            loop {
-                // Parse field identifier (can be a number or name)
-                let field_name = match self.peek() {
-                    Some(Token::Identifier(name)) => {
-                        let n = name.clone();
-                        self.advance();
-                        n
-                    }
-                    Some(Token::IntLiteral(n)) => {
-                        let num = n.to_string();
-                        self.advance();
-                        num
-                    }
-                    _ => {
-                        bail_parse_at!(self.current_span(), "Expected field name or number");
-                    }
-                };
-
-                self.expect(Token::Colon)?;
-                let (field_type, field_diet) = self.parse_type()?;
-                fields.push((field_name, field_type));
-                field_diets.push(field_diet);
-
-                if !self.check(&Token::Comma) {
-                    break;
+        let fields = self.parse_delimited_list(&Token::RightBrace, true, |parser| {
+            let field_name = match parser.peek() {
+                Some(Token::Identifier(name)) => {
+                    let name = name.clone();
+                    parser.advance();
+                    name
                 }
-                self.advance(); // consume ','
-
-                // Allow trailing comma
-                if self.check(&Token::RightBrace) {
-                    break;
+                Some(Token::IntLiteral(number)) => {
+                    let number = number.to_string();
+                    parser.advance();
+                    number
                 }
-            }
-        }
-
+                _ => bail_parse_at!(parser.current_span(), "Expected field name or number"),
+            };
+            parser.expect(Token::Colon)?;
+            let (field_type, field_diet) = parser.parse_type()?;
+            Ok(((field_name, field_type), field_diet))
+        })?;
         self.expect(Token::RightBrace)?;
+        let (fields, field_diets) = fields.into_iter().unzip();
         let diet = Diet::Aggregate {
             unique: false,
             components: field_diets,
@@ -1924,22 +1839,16 @@ impl<'a> Parser<'a> {
 
             // Optional payload list: `#name(t1, t2, ...)`. A bare `#name`
             // (no parens) is a nullary constructor.
-            let mut arg_types = Vec::new();
-            if self.check(&Token::LeftParen) {
+            let arg_types = if self.check(&Token::LeftParen) {
                 self.advance(); // consume `(`
-                if !self.check(&Token::RightParen) {
-                    loop {
-                        let (ty, _diet) = self.parse_type()?;
-                        arg_types.push(ty);
-                        if self.check(&Token::Comma) {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                }
+                let args = self.parse_delimited_list(&Token::RightParen, false, |parser| {
+                    parser.parse_type().map(|(ty, _)| ty)
+                })?;
                 self.expect(Token::RightParen)?;
-            }
+                args
+            } else {
+                Vec::new()
+            };
 
             variants.push((constructor_name, arg_types));
 
@@ -2356,27 +2265,7 @@ impl<'a> Parser<'a> {
     /// Returns empty vec for (), single element for (x), etc.
     fn parse_call_arguments(&mut self) -> Result<Vec<Expression>> {
         trace!("parse_call_arguments: next token = {:?}", self.peek());
-        let mut args = Vec::new();
-
-        // Handle empty argument list: f()
-        if self.check(&Token::RightParen) {
-            return Ok(args);
-        }
-
-        // Parse first argument
-        args.push(self.parse_expression()?);
-
-        // Parse remaining arguments separated by commas
-        while self.check(&Token::Comma) {
-            self.advance(); // consume ','
-                            // Allow trailing comma: f(x, y,)
-            if self.check(&Token::RightParen) {
-                break;
-            }
-            args.push(self.parse_expression()?);
-        }
-
-        Ok(args)
+        self.parse_delimited_list(&Token::RightParen, true, |parser| parser.parse_expression())
     }
 
     fn parse_postfix_expression(&mut self) -> Result<Expression> {
@@ -2588,21 +2477,16 @@ impl<'a> Parser<'a> {
                 self.advance();
                 // Optional payload: `#name(arg1, arg2, ...)`. A bare
                 // `#name` is a nullary constructor.
-                let mut args = Vec::new();
-                if self.check(&Token::LeftParen) {
+                let args = if self.check(&Token::LeftParen) {
                     self.advance(); // consume `(`
-                    if !self.check(&Token::RightParen) {
-                        loop {
-                            args.push(self.parse_expression()?);
-                            if self.check(&Token::Comma) {
-                                self.advance();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
+                    let args = self.parse_delimited_list(&Token::RightParen, false, |parser| {
+                        parser.parse_expression()
+                    })?;
                     self.expect(Token::RightParen)?;
-                }
+                    args
+                } else {
+                    Vec::new()
+                };
                 Ok(self.node_counter.mk_node(ExprKind::Constructor(name, args), span))
             }
             Some(Token::LeftBracket) | Some(Token::LeftBracketSpaced) => self.parse_array_literal(),
@@ -2673,13 +2557,10 @@ impl<'a> Parser<'a> {
                 if self.check(&Token::Comma) {
                     // It's a tuple
                     let mut elements = vec![first_expr];
-                    while self.check(&Token::Comma) {
-                        self.advance(); // consume ','
-                        if self.check(&Token::RightParen) {
-                            break; // Allow trailing comma
-                        }
-                        elements.push(self.parse_expression()?);
-                    }
+                    self.advance(); // consume first comma
+                    elements.extend(self.parse_delimited_list(&Token::RightParen, true, |parser| {
+                        parser.parse_expression()
+                    })?);
                     self.expect(Token::RightParen)?;
                     let end_span = self.previous_span();
                     let span = start_span.merge(&end_span);
@@ -2792,32 +2673,14 @@ impl<'a> Parser<'a> {
 
     /// Parse curry arguments, treating _ as a placeholder
     fn parse_curry_arguments(&mut self) -> Result<Vec<CurryArg>> {
-        let mut args = Vec::new();
-
-        // Handle empty argument list
-        if self.check(&Token::RightParen) {
-            return Ok(args);
-        }
-
-        loop {
-            if self.check(&Token::Underscore) {
-                self.advance();
-                args.push(CurryArg::Placeholder);
+        self.parse_delimited_list(&Token::RightParen, true, |parser| {
+            if parser.check(&Token::Underscore) {
+                parser.advance();
+                Ok(CurryArg::Placeholder)
             } else {
-                args.push(CurryArg::Expr(self.parse_expression()?));
+                Ok(CurryArg::Expr(parser.parse_expression()?))
             }
-
-            if !self.check(&Token::Comma) {
-                break;
-            }
-            self.advance();
-            // Allow trailing comma
-            if self.check(&Token::RightParen) {
-                break;
-            }
-        }
-
-        Ok(args)
+        })
     }
 
     /// Desugar curry expression to lambda
@@ -2879,21 +2742,8 @@ impl<'a> Parser<'a> {
             _ => bail_parse_at!(self.current_span(), "Expected '['"),
         }
 
-        let mut elements = Vec::new();
-        if !self.check(&Token::RightBracket) {
-            loop {
-                elements.push(self.parse_expression()?);
-                if !self.check(&Token::Comma) {
-                    break;
-                }
-                self.advance();
-                // Allow trailing comma before `]`.
-                if self.check(&Token::RightBracket) {
-                    break;
-                }
-            }
-        }
-
+        let elements =
+            self.parse_delimited_list(&Token::RightBracket, true, |parser| parser.parse_expression())?;
         self.expect(Token::RightBracket)?;
         let end_span = self.previous_span();
         let span = start_span.merge(&end_span);
@@ -2908,21 +2758,8 @@ impl<'a> Parser<'a> {
         let start_span = self.current_span();
         self.expect(Token::AtBracket)?;
 
-        let mut elements = Vec::new();
-        if !self.check(&Token::RightBracket) {
-            loop {
-                elements.push(self.parse_expression()?);
-                if !self.check(&Token::Comma) {
-                    break;
-                }
-                self.advance();
-                // Allow trailing comma before `]`.
-                if self.check(&Token::RightBracket) {
-                    break;
-                }
-            }
-        }
-
+        let elements =
+            self.parse_delimited_list(&Token::RightBracket, true, |parser| parser.parse_expression())?;
         self.expect(Token::RightBracket)?;
         let end_span = self.previous_span();
         let span = start_span.merge(&end_span);
@@ -2933,52 +2770,22 @@ impl<'a> Parser<'a> {
         trace!("parse_record_literal: next token = {:?}", self.peek());
         let start_span = self.current_span();
         self.expect(Token::LeftBrace)?;
-
-        let mut fields = Vec::new();
-
-        // Empty record: {}
-        if self.check(&Token::RightBrace) {
-            self.advance();
-            let end_span = self.previous_span();
-            let span = start_span.merge(&end_span);
-            return Ok(self.node_counter.mk_node(ExprKind::RecordLiteral(fields), span));
-        }
-
-        // Parse field: value pairs
-        loop {
-            // Parse field name
-            let field_name = if let Some(Token::Identifier(name)) = self.peek() {
+        let fields = self.parse_delimited_list(&Token::RightBrace, true, |parser| {
+            let field_name = if let Some(Token::Identifier(name)) = parser.peek() {
                 let name = name.clone();
-                self.advance();
+                parser.advance();
                 name
             } else {
                 bail_parse_at!(
-                    self.current_span(),
+                    parser.current_span(),
                     "Expected field name in record literal, got {:?} at {}",
-                    self.peek(),
-                    self.current_span()
+                    parser.peek(),
+                    parser.current_span()
                 );
             };
-
-            self.expect(Token::Assign)?;
-
-            // Parse field value
-            let field_value = self.parse_expression()?;
-
-            fields.push((field_name, field_value));
-
-            // Check for comma or end of record
-            if self.check(&Token::Comma) {
-                self.advance();
-                // Allow trailing comma
-                if self.check(&Token::RightBrace) {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-
+            parser.expect(Token::Assign)?;
+            Ok((field_name, parser.parse_expression()?))
+        })?;
         self.expect(Token::RightBrace)?;
         let end_span = self.previous_span();
         let span = start_span.merge(&end_span);
@@ -2996,18 +2803,7 @@ impl<'a> Parser<'a> {
             vec![] // empty params
         } else {
             self.expect(Token::Pipe)?; // Opening |
-
-            let mut params = Vec::new();
-            if !self.check(&Token::Pipe) {
-                loop {
-                    params.push(self.parse_pattern()?);
-                    if !self.check(&Token::Comma) {
-                        break;
-                    }
-                    self.advance(); // consume comma
-                }
-            }
-
+            let params = self.parse_delimited_list(&Token::Pipe, false, |parser| parser.parse_pattern())?;
             self.expect(Token::Pipe)?; // Closing |
             params
         };
@@ -3219,6 +3015,33 @@ impl<'a> Parser<'a> {
     }
 
     // Helper methods
+    /// Parse comma-separated elements up to (but not including) `closing`.
+    ///
+    /// The caller consumes both delimiters. Keeping the closing token in place
+    /// lets callers include it in their source span.
+    fn parse_delimited_list<T>(
+        &mut self,
+        closing: &Token,
+        allow_trailing_comma: bool,
+        mut parse_element: impl FnMut(&mut Self) -> Result<T>,
+    ) -> Result<Vec<T>> {
+        let mut elements = Vec::new();
+        if self.check(closing) {
+            return Ok(elements);
+        }
+        loop {
+            elements.push(parse_element(self)?);
+            if !self.check(&Token::Comma) {
+                break;
+            }
+            self.advance();
+            if allow_trailing_comma && self.check(closing) {
+                break;
+            }
+        }
+        Ok(elements)
+    }
+
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.current).map(|lt| &lt.token)
     }

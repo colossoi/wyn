@@ -202,15 +202,9 @@ impl Parser<'_> {
                 // Lambda: \ (params) [: sig] -> body
                 self.advance();
                 self.expect(Token::LeftParen)?;
-
-                let mut params = Vec::new();
-                while !self.check(&Token::RightParen) {
-                    params.push(self.parse_module_param()?);
-                    if !self.check(&Token::Comma) {
-                        break;
-                    }
-                    self.advance();
-                }
+                let params = self.parse_delimited_list(&Token::RightParen, false, |parser| {
+                    parser.parse_module_param()
+                })?;
                 self.expect(Token::RightParen)?;
 
                 let signature = if self.check(&Token::Colon) {

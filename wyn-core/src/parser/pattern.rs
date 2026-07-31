@@ -152,16 +152,10 @@ impl Parser<'_> {
         if self.check(&Token::Comma) {
             // Tuple pattern: (pat, pat, ...)
             let mut patterns = vec![first];
-
-            while self.check(&Token::Comma) {
-                self.advance();
-                // Allow trailing comma
-                if self.check(&Token::RightParen) {
-                    break;
-                }
-                patterns.push(self.parse_pattern()?);
-            }
-
+            self.advance(); // consume first comma
+            patterns.extend(
+                self.parse_delimited_list(&Token::RightParen, true, |parser| parser.parse_pattern())?,
+            );
             let end_span = self.current_span();
             self.expect(Token::RightParen)?;
             let span = start_span.merge(&end_span);
@@ -181,21 +175,8 @@ impl Parser<'_> {
         let start_span = self.current_span();
         self.expect(Token::AtBracket)?;
 
-        let mut patterns = Vec::new();
-        if !self.check(&Token::RightBracket) {
-            loop {
-                patterns.push(self.parse_pattern()?);
-                if !self.check(&Token::Comma) {
-                    break;
-                }
-                self.advance();
-                // Allow trailing comma before `]`.
-                if self.check(&Token::RightBracket) {
-                    break;
-                }
-            }
-        }
-
+        let patterns =
+            self.parse_delimited_list(&Token::RightBracket, true, |parser| parser.parse_pattern())?;
         let end_span = self.current_span();
         self.expect(Token::RightBracket)?;
         let span = start_span.merge(&end_span);
@@ -206,44 +187,21 @@ impl Parser<'_> {
         let start_span = self.current_span();
         self.expect(Token::LeftBrace)?;
 
-        if self.check(&Token::RightBrace) {
-            // {} empty record
-            let end_span = self.current_span();
-            self.advance();
-            let span = start_span.merge(&end_span);
-            return Ok(self.node_counter.mk_node(PatternKind::Record(vec![]), span));
-        }
-
-        let mut fields = Vec::new();
-
-        loop {
-            let field_name = self.expect_identifier()?;
-
-            let target = if self.check(&Token::Assign) {
+        let fields = self.parse_delimited_list(&Token::RightBrace, true, |parser| {
+            let field_name = parser.expect_identifier()?;
+            let target = if parser.check(&Token::Assign) {
                 // field = pat
-                self.advance();
-                crate::ast::RecordPatternTarget::Pattern(self.parse_pattern()?)
+                parser.advance();
+                crate::ast::RecordPatternTarget::Pattern(parser.parse_pattern()?)
             } else {
                 // Shorthand: just field name
                 crate::ast::RecordPatternTarget::Shorthand(field_name.clone())
             };
-
-            fields.push(RecordPatternField {
+            Ok(RecordPatternField {
                 field: field_name,
                 target,
-            });
-
-            if !self.check(&Token::Comma) {
-                break;
-            }
-            self.advance();
-
-            // Allow trailing comma
-            if self.check(&Token::RightBrace) {
-                break;
-            }
-        }
-
+            })
+        })?;
         let end_span = self.current_span();
         self.expect(Token::RightBrace)?;
         let span = start_span.merge(&end_span);
@@ -263,24 +221,17 @@ impl Parser<'_> {
 
         // Optional payload list: `#name(p1, p2, ...)`. Bare `#name` is
         // a nullary constructor pattern.
-        let mut args = Vec::new();
         let mut end_span = start_span;
-        if self.check(&Token::LeftParen) {
+        let args = if self.check(&Token::LeftParen) {
             self.advance(); // consume `(`
-            if !self.check(&Token::RightParen) {
-                loop {
-                    args.push(self.parse_pattern()?);
-                    if self.check(&Token::Comma) {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-            }
+            let args =
+                self.parse_delimited_list(&Token::RightParen, false, |parser| parser.parse_pattern())?;
             end_span = self.current_span();
             self.expect(Token::RightParen)?;
-        }
-
+            args
+        } else {
+            Vec::new()
+        };
         let span = start_span.merge(&end_span);
         Ok(self.node_counter.mk_node(PatternKind::Constructor(constructor, args), span))
     }
