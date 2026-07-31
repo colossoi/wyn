@@ -71,7 +71,8 @@ pub use schedule::{
 };
 use std::collections::{HashMap, HashSet};
 
-use crate::LookupMap;
+use crate::interface::StorageAccess;
+use crate::{LookupMap, ResourceAccess};
 
 use polytype::Type;
 use smallvec::smallvec;
@@ -584,13 +585,9 @@ fn segmented_resources(
 }
 
 fn declared_resources(declarations: &[SemanticResourceDecl]) -> Vec<schedule::ScheduledResource> {
-    let mut accesses: HashMap<ResourceId, crate::ResourceAccess> = HashMap::new();
+    let mut accesses: HashMap<ResourceId, ResourceAccess> = HashMap::new();
     for declaration in declarations {
-        let access = match declaration.role {
-            crate::interface::StorageRole::Input => crate::ResourceAccess::Read,
-            crate::interface::StorageRole::Output => crate::ResourceAccess::Write,
-            crate::interface::StorageRole::Intermediate => crate::ResourceAccess::ReadWrite,
-        };
+        let access = ResourceAccess::from(StorageAccess::from(declaration.role));
         accesses.entry(declaration.resource.0).and_modify(|old| *old = old.merge(access)).or_insert(access);
     }
 
@@ -608,7 +605,7 @@ fn declared_input_resources(declarations: &[SemanticResourceDecl]) -> Vec<schedu
         .filter(|declaration| declaration.role == crate::interface::StorageRole::Input)
         .map(|declaration| schedule::ScheduledResource {
             resource: declaration.resource.0,
-            access: crate::ResourceAccess::Read,
+            access: ResourceAccess::Read,
         })
         .collect()
 }

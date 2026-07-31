@@ -13,7 +13,7 @@
 
 use crate::ast::Span;
 use crate::types::Type;
-use crate::{BindingRef, SymbolId};
+use crate::{pipeline_descriptor::Access as DescriptorAccess, BindingRef, ResourceAccess, SymbolId};
 
 // ---------------------------------------------------------------------------
 // Shader-stage / parameter attributes
@@ -703,6 +703,53 @@ pub enum StorageAccess {
     #[default]
     ReadWrite,
 }
+impl StorageAccess {
+    pub fn reads(self) -> bool {
+        matches!(self, Self::ReadOnly | Self::ReadWrite)
+    }
+
+    pub fn writes(self) -> bool {
+        matches!(self, Self::WriteOnly | Self::ReadWrite)
+    }
+
+    pub fn merge(self, other: Self) -> Self {
+        if self == other {
+            self
+        } else {
+            Self::ReadWrite
+        }
+    }
+}
+
+impl From<StorageRole> for StorageAccess {
+    fn from(role: StorageRole) -> Self {
+        match role {
+            StorageRole::Input => Self::ReadOnly,
+            StorageRole::Output => Self::WriteOnly,
+            StorageRole::Intermediate => Self::ReadWrite,
+        }
+    }
+}
+
+impl From<StorageAccess> for ResourceAccess {
+    fn from(access: StorageAccess) -> Self {
+        match access {
+            StorageAccess::ReadOnly => Self::Read,
+            StorageAccess::WriteOnly => Self::Write,
+            StorageAccess::ReadWrite => Self::ReadWrite,
+        }
+    }
+}
+
+impl From<StorageAccess> for DescriptorAccess {
+    fn from(access: StorageAccess) -> Self {
+        match access {
+            StorageAccess::ReadOnly => Self::ReadOnly,
+            StorageAccess::WriteOnly => Self::WriteOnly,
+            StorageAccess::ReadWrite => Self::ReadWrite,
+        }
+    }
+}
 
 /// How a `#[view(resource, usage)]` accesses its backing resource. Each usage
 /// resolves to a concrete binding attribute on the viewing param: a
@@ -762,7 +809,7 @@ pub struct ResourceDecl {
 /// intermediate buffers (e.g. the `partials` buffer threaded between the
 /// two phases of a parallelized reduce). Intermediates are not source-level
 /// outputs — conflating them with `EntryOutput` would muddle semantics.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageRole {
     /// Entry reads from this buffer.
     Input,

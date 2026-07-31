@@ -28,9 +28,9 @@
 //! inspection of phi nodes to understand where values come from.
 
 use crate::ast::{Span, TypeName};
-use crate::interface;
+use crate::interface::{self, StorageAccess};
 use crate::op::OpTag;
-use crate::LookupMap;
+use crate::{LookupMap, ResourceAccess};
 use polytype::Type;
 use slotmap::SlotMap;
 
@@ -617,15 +617,15 @@ pub struct EntryPoint {
     /// Storage access required by the physical pipeline layout containing
     /// this entry. Unlike the entry-local interface above, this is unioned
     /// across every stage that shares the pipeline's binding table.
-    pub pipeline_storage_accesses: LookupMap<crate::BindingRef, crate::ResourceAccess>,
+    pub pipeline_storage_accesses: LookupMap<crate::BindingRef, ResourceAccess>,
     pub span: Span,
 }
 
 impl EntryPoint {
     /// Access each storage-buffer slot has in this entry alone. This folds
     /// existing interface metadata; it does not inspect the SSA body.
-    pub(crate) fn stage_storage_accesses(&self) -> LookupMap<crate::BindingRef, crate::ResourceAccess> {
-        let mut accesses: LookupMap<crate::BindingRef, crate::ResourceAccess> = LookupMap::new();
+    pub(crate) fn stage_storage_accesses(&self) -> LookupMap<crate::BindingRef, ResourceAccess> {
+        let mut accesses: LookupMap<crate::BindingRef, ResourceAccess> = LookupMap::new();
         let mut record = |binding, access| {
             accesses
                 .entry(binding)
@@ -637,24 +637,16 @@ impl EntryPoint {
             let Some(binding) = input.storage_binding() else {
                 continue;
             };
-            let access = match input.storage_access() {
-                Some(interface::StorageAccess::WriteOnly) => crate::ResourceAccess::Write,
-                Some(interface::StorageAccess::ReadWrite) => crate::ResourceAccess::ReadWrite,
-                Some(interface::StorageAccess::ReadOnly) | None => crate::ResourceAccess::Read,
-            };
+            let access = input.storage_access().map_or(ResourceAccess::Read, ResourceAccess::from);
             record(binding, access);
         }
         for output in &self.outputs {
             if let Some(binding) = output.storage_binding() {
-                record(binding, crate::ResourceAccess::Write);
+                record(binding, ResourceAccess::Write);
             }
         }
         for declaration in &self.storage_bindings {
-            let access = match declaration.role {
-                interface::StorageRole::Input => crate::ResourceAccess::Read,
-                interface::StorageRole::Output => crate::ResourceAccess::Write,
-                interface::StorageRole::Intermediate => crate::ResourceAccess::ReadWrite,
-            };
+            let access = ResourceAccess::from(StorageAccess::from(declaration.role));
             record(declaration.binding, access);
         }
         accesses
@@ -664,7 +656,7 @@ impl EntryPoint {
     /// entry. Descriptor-backed entries use the access union of their physical
     /// pipeline; bindings absent from that descriptor retain their local
     /// access as a conservative fallback for directly constructed SSA.
-    pub(crate) fn shader_storage_accesses(&self) -> LookupMap<crate::BindingRef, crate::ResourceAccess> {
+    pub(crate) fn shader_storage_accesses(&self) -> LookupMap<crate::BindingRef, ResourceAccess> {
         let mut accesses = self.stage_storage_accesses();
         for (&binding, &access) in &self.pipeline_storage_accesses {
             accesses

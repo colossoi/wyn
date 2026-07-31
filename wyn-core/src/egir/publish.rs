@@ -25,7 +25,7 @@ use crate::{BindingRef, LookupMap, LookupSet};
 
 use crate::egir::program::EntryPublication;
 use crate::flow::ExecutionModel;
-use crate::interface::{IoDecoration, TextureSource};
+use crate::interface::{IoDecoration, StorageAccess, TextureSource};
 use crate::pipeline_descriptor::{
     Access, BackingRef, Binding, BufferUsage, FragmentOutput, Pipeline, PipelineDescriptor,
     SamplerBindingType, StageBindingUses, TextureSampleType, TextureViewDimension, VertexAttribute,
@@ -93,11 +93,7 @@ fn entry_stage_binding_uses(entry: &EntryPublication, bindings: &[Binding]) -> S
         let Some(binding) = input.storage_binding() else {
             continue;
         };
-        let access = match input.storage_access() {
-            Some(crate::interface::StorageAccess::WriteOnly) => Access::WriteOnly,
-            Some(crate::interface::StorageAccess::ReadWrite) => Access::ReadWrite,
-            Some(crate::interface::StorageAccess::ReadOnly) | None => Access::ReadOnly,
-        };
+        let access = input.storage_access().map_or(Access::ReadOnly, Access::from);
         record(binding, access);
     }
     for output in &entry.outputs {
@@ -106,11 +102,7 @@ fn entry_stage_binding_uses(entry: &EntryPublication, bindings: &[Binding]) -> S
         }
     }
     for declaration in &entry.storage_bindings {
-        let access = match declaration.role {
-            crate::interface::StorageRole::Input => Access::ReadOnly,
-            crate::interface::StorageRole::Output => Access::WriteOnly,
-            crate::interface::StorageRole::Intermediate => Access::ReadWrite,
-        };
+        let access = Access::from(StorageAccess::from(declaration.role));
         record(declaration.binding, access);
     }
     uses
@@ -316,11 +308,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         binding: br.binding,
                         name: input.name.clone(),
                         format,
-                        access: match access {
-                            crate::interface::StorageAccess::ReadOnly => Access::ReadOnly,
-                            crate::interface::StorageAccess::WriteOnly => Access::WriteOnly,
-                            crate::interface::StorageAccess::ReadWrite => Access::ReadWrite,
-                        },
+                        access: access.into(),
                         size,
                         resource: input.storage_image_resource().map(str::to_owned),
                     };
@@ -343,11 +331,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
             // Output (it writes) and the consumer Input (it reads); both surface
             // as a compiler-managed `Intermediate`, with access from the role.
             for decl in &entry.storage_bindings {
-                let access = match decl.role {
-                    crate::interface::StorageRole::Output => Access::WriteOnly,
-                    crate::interface::StorageRole::Input => Access::ReadOnly,
-                    crate::interface::StorageRole::Intermediate => Access::ReadWrite,
-                };
+                let access = Access::from(StorageAccess::from(decl.role));
                 let binding = Binding::StorageBuffer {
                     set: decl.binding.set,
                     binding: decl.binding.binding,

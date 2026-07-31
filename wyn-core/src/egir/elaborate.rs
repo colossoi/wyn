@@ -20,7 +20,7 @@ use crate::ssa::types::{
     ValueRef,
 };
 use crate::types::ExternDecl;
-use crate::LookupMap;
+use crate::{BindingRef, EntryId, LookupMap, ResourceAccess};
 use polytype::Type;
 use smallvec::SmallVec;
 
@@ -112,8 +112,8 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> crate::ssa:
 /// elaboration consumes the physical program.
 fn pipeline_storage_accesses(
     descriptor: &PipelineDescriptor,
-    stage_entries: &[Vec<crate::EntryId>],
-) -> LookupMap<crate::EntryId, LookupMap<crate::BindingRef, crate::ResourceAccess>> {
+    stage_entries: &[Vec<EntryId>],
+) -> LookupMap<EntryId, LookupMap<BindingRef, ResourceAccess>> {
     use crate::pipeline_descriptor::{Access, Binding, Pipeline};
 
     let mut entries = LookupMap::new();
@@ -132,11 +132,11 @@ fn pipeline_storage_accesses(
                     return None;
                 };
                 let access = match access {
-                    Access::ReadOnly => crate::ResourceAccess::Read,
-                    Access::WriteOnly => crate::ResourceAccess::Write,
-                    Access::ReadWrite => crate::ResourceAccess::ReadWrite,
+                    Access::ReadOnly => ResourceAccess::Read,
+                    Access::WriteOnly => ResourceAccess::Write,
+                    Access::ReadWrite => ResourceAccess::ReadWrite,
                 };
-                Some((crate::BindingRef::new(*set, *binding), access))
+                Some((BindingRef::new(*set, *binding), access))
             })
             .collect::<LookupMap<_, _>>();
         for &entry_id in stage_entries.get(pipeline_index).into_iter().flatten() {
@@ -144,7 +144,7 @@ fn pipeline_storage_accesses(
             for (&binding, &access) in &layout {
                 entry
                     .entry(binding)
-                    .and_modify(|current: &mut crate::ResourceAccess| *current = current.merge(access))
+                    .and_modify(|current: &mut ResourceAccess| *current = current.merge(access))
                     .or_insert(access);
             }
         }
