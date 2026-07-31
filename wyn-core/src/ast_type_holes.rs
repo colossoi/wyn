@@ -75,49 +75,36 @@ fn rebuild(
         &mut ast::NodeCounter,
     ) -> crate::error::Result<ast::ExprKind<ast::HolesResolvedTree>>,
 ) -> crate::error::Result<HolesResolved> {
-    let ast::Program {
-        declarations,
-        mut node_ids,
-        global_context,
-        state: _,
-    } = program;
-    let declarations = declarations
-        .into_iter()
-        .map(|declaration| match declaration {
-            ast::Declaration::Decl(definition) => Ok(ast::Declaration::Decl(rebuild_definition(
-                definition,
-                &mut node_ids,
-                hole,
-            )?)),
-            ast::Declaration::Entry(entry) => Ok(ast::Declaration::Entry(rebuild_entry(
-                entry,
-                &mut node_ids,
-                hole,
-            )?)),
-            ast::Declaration::Extern(external) => Ok(ast::Declaration::Extern(external)),
-            ast::Declaration::Frontend(never) => match never {},
-        })
-        .collect::<crate::error::Result<_>>()?;
-    let support_definitions = global_context
-        .support_definitions
-        .into_iter()
-        .map(|support| {
-            Ok(ast::SupportDefinition {
-                namespace: support.namespace,
-                definition: rebuild_definition(support.definition, &mut node_ids, hole)?,
+    program.try_rebuild(|declarations, global_context, node_ids| {
+        let declarations = declarations
+            .into_iter()
+            .map(|declaration| match declaration {
+                ast::Declaration::Decl(definition) => Ok(ast::Declaration::Decl(rebuild_definition(
+                    definition, node_ids, hole,
+                )?)),
+                ast::Declaration::Entry(entry) => {
+                    Ok(ast::Declaration::Entry(rebuild_entry(entry, node_ids, hole)?))
+                }
+                ast::Declaration::Extern(external) => Ok(ast::Declaration::Extern(external)),
+                ast::Declaration::Frontend(never) => match never {},
             })
-        })
-        .collect::<crate::error::Result<_>>()?;
-    Ok(ast::Program {
-        declarations,
-        node_ids,
-        global_context: ast::TypedGlobal {
-            support_definitions,
-            symbols: global_context.symbols,
-            warnings: global_context.warnings,
-            builtin_names: global_context.builtin_names,
-        },
-        state: std::marker::PhantomData,
+            .collect::<crate::error::Result<_>>()?;
+        let support_definitions = global_context
+            .support_definitions
+            .into_iter()
+            .map(|support| {
+                support.try_map_definition(|definition| rebuild_definition(definition, node_ids, hole))
+            })
+            .collect::<crate::error::Result<_>>()?;
+        Ok((
+            declarations,
+            ast::TypedGlobal {
+                support_definitions,
+                symbols: global_context.symbols,
+                warnings: global_context.warnings,
+                builtin_names: global_context.builtin_names,
+            },
+        ))
     })
 }
 
@@ -130,34 +117,15 @@ fn rebuild_definition(
         &mut ast::NodeCounter,
     ) -> crate::error::Result<ast::ExprKind<ast::HolesResolvedTree>>,
 ) -> crate::error::Result<ast::Decl<ast::TypedDefinition, ast::HolesResolvedTree>> {
-    let ast::Decl {
-        data,
-        name,
-        name_span,
-        size_params,
-        type_params,
-        params,
-        ty,
-        body,
-        param_diets,
-        return_diet,
-    } = definition;
-    Ok(ast::Decl {
-        data,
-        name,
-        name_span,
-        size_params,
-        type_params,
-        params: params
-            .into_iter()
-            .map(|pattern| ast::rebuild::pattern(pattern, &mut Ok, &mut |_header, binding| Ok(binding)))
-            .collect::<Result<_, std::convert::Infallible>>()
-            .unwrap(),
-        ty,
-        body: rebuild_expression(body, node_ids, hole)?,
-        param_diets,
-        return_diet,
-    })
+    definition.try_rebuild(
+        |data, _, _| Ok(data),
+        |params, body| {
+            Ok((
+                params.into_iter().map(rebuild_pattern).collect(),
+                rebuild_expression(body, node_ids, hole)?,
+            ))
+        },
+    )
 }
 
 fn rebuild_entry(
@@ -171,28 +139,20 @@ fn rebuild_entry(
 ) -> crate::error::Result<
     ast::EntryDecl<ast::TypedEntry, ast::HolesResolvedTree, crate::interface::ResolvedAttribute>,
 > {
-    let ast::EntryDecl {
-        data,
-        name,
-        name_span,
-        size_params,
-        type_params,
-        params,
-        body,
-    } = entry;
-    Ok(ast::EntryDecl {
-        data,
-        name,
-        name_span,
-        size_params,
-        type_params,
-        params: params
-            .into_iter()
-            .map(|pattern| ast::rebuild::pattern(pattern, &mut Ok, &mut |_header, binding| Ok(binding)))
-            .collect::<Result<_, std::convert::Infallible>>()
-            .unwrap(),
-        body: rebuild_expression(body, node_ids, hole)?,
-    })
+    entry.try_rebuild(
+        |data, _, _| Ok(data),
+        |params, body| {
+            Ok((
+                params.into_iter().map(rebuild_pattern).collect(),
+                rebuild_expression(body, node_ids, hole)?,
+            ))
+        },
+    )
+}
+
+fn rebuild_pattern<A>(pattern: ast::Pattern<ast::TypedTree, A>) -> ast::Pattern<ast::HolesResolvedTree, A> {
+    ast::rebuild::pattern(pattern, &mut Ok, &mut |_header, binding| Ok(binding))
+        .unwrap_or_else(|never: std::convert::Infallible| match never {})
 }
 
 fn rebuild_expression(

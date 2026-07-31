@@ -520,32 +520,23 @@ pub fn run_in_module_with_index(
 }
 
 fn materialize(program: crate::resolve_placeholders::TypePlaceholdersResolved) -> Result<OpensResolved> {
-    let Program {
-        declarations,
-        node_ids,
-        global_context,
-        state: _,
-    } = program;
-    let declarations = declarations
-        .into_iter()
-        .filter_map(|declaration| match declaration {
-            Declaration::Decl(definition) => Some(Declaration::Decl(definition)),
-            Declaration::Entry(entry) => Some(Declaration::Entry(entry)),
-            Declaration::Extern(external) => Some(Declaration::Extern(external)),
-            Declaration::Frontend(ast::ResourcesResolvedFrontend::Sig(signature)) => {
-                Some(Declaration::Frontend(ast::OpensResolvedFrontend::Sig(signature)))
-            }
-            Declaration::Frontend(ast::ResourcesResolvedFrontend::TypeBind(binding)) => Some(
-                Declaration::Frontend(ast::OpensResolvedFrontend::TypeBind(binding)),
-            ),
-            Declaration::Frontend(ast::ResourcesResolvedFrontend::Open(_)) => None,
-        })
-        .collect();
-    Ok(Program {
-        declarations,
-        node_ids,
-        global_context,
-        state: std::marker::PhantomData,
+    program.try_rebuild(|declarations, global_context, _| {
+        let declarations = declarations
+            .into_iter()
+            .filter_map(|declaration| match declaration {
+                Declaration::Decl(definition) => Some(Declaration::Decl(definition)),
+                Declaration::Entry(entry) => Some(Declaration::Entry(entry)),
+                Declaration::Extern(external) => Some(Declaration::Extern(external)),
+                Declaration::Frontend(ast::ResourcesResolvedFrontend::Sig(signature)) => {
+                    Some(Declaration::Frontend(ast::OpensResolvedFrontend::Sig(signature)))
+                }
+                Declaration::Frontend(ast::ResourcesResolvedFrontend::TypeBind(binding)) => Some(
+                    Declaration::Frontend(ast::OpensResolvedFrontend::TypeBind(binding)),
+                ),
+                Declaration::Frontend(ast::ResourcesResolvedFrontend::Open(_)) => None,
+            })
+            .collect();
+        Ok((declarations, global_context))
     })
 }
 

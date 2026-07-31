@@ -24,46 +24,37 @@ pub type ModulesElaborated =
 pub fn elaborate_modules(
     program: crate::resolve_imports::ImportsResolved,
 ) -> crate::error::Result<ModulesElaborated> {
-    let ast::Program {
-        declarations,
-        mut node_ids,
-        mut global_context,
-        state: _,
-    } = program;
-    global_context.elaborate_modules(&declarations, &mut node_ids)?;
-
-    let declarations = declarations
-        .into_iter()
-        .filter_map(|declaration| {
-            Some(match declaration {
-                ast::Declaration::Decl(decl) => ast::Declaration::Decl(decl),
-                ast::Declaration::Entry(entry) => ast::Declaration::Entry(entry),
-                ast::Declaration::Extern(ext) => ast::Declaration::Extern(ext),
-                ast::Declaration::Frontend(frontend) => {
-                    let frontend = match frontend {
-                        ast::ImportsResolvedFrontend::Sig(sig) => ast::ModulesElaboratedFrontend::Sig(sig),
-                        ast::ImportsResolvedFrontend::TypeBind(bind) => {
-                            ast::ModulesElaboratedFrontend::TypeBind(bind)
-                        }
-                        ast::ImportsResolvedFrontend::Open(open) => {
-                            ast::ModulesElaboratedFrontend::Open(open)
-                        }
-                        ast::ImportsResolvedFrontend::Resource(resource) => {
-                            ast::ModulesElaboratedFrontend::Resource(resource)
-                        }
-                        ast::ImportsResolvedFrontend::Module(_)
-                        | ast::ImportsResolvedFrontend::ModuleTypeBind(_) => return None,
-                    };
-                    ast::Declaration::Frontend(frontend)
-                }
+    program.try_rebuild(|declarations, mut global_context, node_ids| {
+        global_context.elaborate_modules(&declarations, node_ids)?;
+        let declarations = declarations
+            .into_iter()
+            .filter_map(|declaration| {
+                Some(match declaration {
+                    ast::Declaration::Decl(decl) => ast::Declaration::Decl(decl),
+                    ast::Declaration::Entry(entry) => ast::Declaration::Entry(entry),
+                    ast::Declaration::Extern(ext) => ast::Declaration::Extern(ext),
+                    ast::Declaration::Frontend(frontend) => {
+                        let frontend = match frontend {
+                            ast::ImportsResolvedFrontend::Sig(sig) => {
+                                ast::ModulesElaboratedFrontend::Sig(sig)
+                            }
+                            ast::ImportsResolvedFrontend::TypeBind(bind) => {
+                                ast::ModulesElaboratedFrontend::TypeBind(bind)
+                            }
+                            ast::ImportsResolvedFrontend::Open(open) => {
+                                ast::ModulesElaboratedFrontend::Open(open)
+                            }
+                            ast::ImportsResolvedFrontend::Resource(resource) => {
+                                ast::ModulesElaboratedFrontend::Resource(resource)
+                            }
+                            ast::ImportsResolvedFrontend::Module(_)
+                            | ast::ImportsResolvedFrontend::ModuleTypeBind(_) => return None,
+                        };
+                        ast::Declaration::Frontend(frontend)
+                    }
+                })
             })
-        })
-        .collect();
-
-    Ok(ast::Program {
-        declarations,
-        node_ids,
-        global_context,
-        state: std::marker::PhantomData,
+            .collect();
+        Ok((declarations, global_context))
     })
 }

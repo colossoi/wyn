@@ -6,6 +6,10 @@ use super::{
     Pattern, PatternKind, RangeExpr, RecordPatternField, RecordPatternTarget, SliceExpr, TreeFamily,
 };
 
+#[cfg(test)]
+#[path = "rebuild_tests.rs"]
+mod tests;
+
 pub fn expression<From, To, E>(
     expression: Expression<From>,
     header: &mut impl FnMut(From::Header) -> Result<To::Header, E>,

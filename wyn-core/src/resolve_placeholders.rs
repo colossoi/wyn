@@ -49,22 +49,11 @@ pub fn resolve_type_placeholders(
     let mut resolver = PlaceholderResolver::new();
     resolver.resolve(&mut program.global_context, &mut program.declarations);
     let (context, spec_schemes) = resolver.into_parts();
-    let Program {
-        declarations,
-        node_ids,
-        global_context: module_manager,
-        state: _,
-    } = program;
-    Program {
-        declarations,
-        node_ids,
-        global_context: PlaceholdersResolvedGlobal {
-            module_manager,
-            context,
-            spec_schemes,
-        },
-        state: std::marker::PhantomData,
-    }
+    program.map_global_context(|module_manager| PlaceholdersResolvedGlobal {
+        module_manager,
+        context,
+        spec_schemes,
+    })
 }
 
 /// Resolver that transforms placeholder types into type variables.

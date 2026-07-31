@@ -263,36 +263,27 @@ impl<'a> ResolveContext for ProgramResolver<'a> {
 }
 
 /// Resolve qualified field accesses while consuming the old program stage.
-pub fn resolve_names(program: crate::elaborate_modules::ModulesElaborated) -> NamesResolved {
-    let Program {
-        mut declarations,
-        node_ids,
-        global_context,
-        state: _,
-    } = program;
-    let context = ProgramResolver {
-        known_modules: global_context.known_module_names(),
-    };
-    for declaration in &mut declarations {
-        let mut scope = ScopeStack::new();
-        match declaration {
-            Declaration::Decl(decl) => {
-                walk_expr(&mut decl.body, &context, &mut scope)
-                    .expect("name resolution visitor is infallible");
+pub fn resolve_names(mut program: crate::elaborate_modules::ModulesElaborated) -> NamesResolved {
+    {
+        let context = ProgramResolver {
+            known_modules: program.global_context.known_module_names(),
+        };
+        for declaration in &mut program.declarations {
+            let mut scope = ScopeStack::new();
+            match declaration {
+                Declaration::Decl(decl) => {
+                    walk_expr(&mut decl.body, &context, &mut scope)
+                        .expect("name resolution visitor is infallible");
+                }
+                Declaration::Entry(entry) => {
+                    walk_expr(&mut entry.body, &context, &mut scope)
+                        .expect("name resolution visitor is infallible");
+                }
+                Declaration::Extern(_) | Declaration::Frontend(_) => {}
             }
-            Declaration::Entry(entry) => {
-                walk_expr(&mut entry.body, &context, &mut scope)
-                    .expect("name resolution visitor is infallible");
-            }
-            Declaration::Extern(_) | Declaration::Frontend(_) => {}
         }
     }
-    Program {
-        declarations,
-        node_ids,
-        global_context,
-        state: std::marker::PhantomData,
-    }
+    program.retag()
 }
 
 /// Resolve names in a single Decl (for prelude functions).

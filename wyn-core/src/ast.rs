@@ -444,12 +444,52 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
     /// Change only the program's nominal state while retaining its exact tree
     /// representation and global context.
     pub fn retag<NewTag>(self) -> Program<NewTag, F, GlobalContext> {
+        self.map_global_context(std::convert::identity)
+    }
+
+    /// Change the program-wide context while preserving declarations and the
+    /// node allocator.
+    pub fn map_global_context<NewTag, NewGlobalContext>(
+        self,
+        map: impl FnOnce(GlobalContext) -> NewGlobalContext,
+    ) -> Program<NewTag, F, NewGlobalContext> {
         Program {
             declarations: self.declarations,
             node_ids: self.node_ids,
-            global_context: self.global_context,
+            global_context: map(self.global_context),
             state: std::marker::PhantomData,
         }
+    }
+
+    /// Rebuild a whole AST checkpoint while retaining its node allocator.
+    ///
+    /// The callback owns declaration cardinality and ordering, so the same
+    /// primitive supports ordinary maps, filtered frontend declarations, and
+    /// import expansion.
+    pub fn try_rebuild<NewTag, NewF, NewGlobalContext, E>(
+        self,
+        rebuild: impl FnOnce(
+            Vec<Declaration<F>>,
+            GlobalContext,
+            &mut NodeCounter,
+        ) -> Result<(Vec<Declaration<NewF>>, NewGlobalContext), E>,
+    ) -> Result<Program<NewTag, NewF, NewGlobalContext>, E>
+    where
+        NewF: Family,
+    {
+        let Program {
+            declarations,
+            mut node_ids,
+            global_context,
+            state: _,
+        } = self;
+        let (declarations, global_context) = rebuild(declarations, global_context, &mut node_ids)?;
+        Ok(Program {
+            declarations,
+            node_ids,
+            global_context,
+            state: std::marker::PhantomData,
+        })
     }
 }
 
@@ -495,6 +535,46 @@ pub struct Decl<D = DefinitionSyntax, T: TreeFamily = SourceTree> {
     pub body: Expression<T>,
     pub param_diets: Vec<Diet>,
     pub return_diet: Diet,
+}
+
+impl<D, T: TreeFamily> Decl<D, T> {
+    /// Rebuild declaration-owned data and recursive trees while carrying all
+    /// source-level signature fields through unchanged.
+    pub fn try_rebuild<NewD, NewT: TreeFamily, E>(
+        self,
+        rebuild_data: impl FnOnce(D, &str, Span) -> Result<NewD, E>,
+        rebuild_trees: impl FnOnce(
+            Vec<Pattern<T>>,
+            Expression<T>,
+        ) -> Result<(Vec<Pattern<NewT>>, Expression<NewT>), E>,
+    ) -> Result<Decl<NewD, NewT>, E> {
+        let Decl {
+            data,
+            name,
+            name_span,
+            size_params,
+            type_params,
+            params,
+            ty,
+            body,
+            param_diets,
+            return_diet,
+        } = self;
+        let data = rebuild_data(data, &name, name_span)?;
+        let (params, body) = rebuild_trees(params, body)?;
+        Ok(Decl {
+            data,
+            name,
+            name_span,
+            size_params,
+            type_params,
+            params,
+            ty,
+            body,
+            param_diets,
+            return_diet,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -544,6 +624,19 @@ pub struct NameResolvedExtern {
 pub struct ExternDecl<D = ExternSyntax> {
     pub name: String,
     pub data: D,
+}
+
+impl<D> ExternDecl<D> {
+    /// Rebuild extern-owned data while carrying its source name through.
+    pub fn try_map_data<NewD, E>(
+        self,
+        map: impl FnOnce(D, &str) -> Result<NewD, E>,
+    ) -> Result<ExternDecl<NewD>, E> {
+        Ok(ExternDecl {
+            data: map(self.data, &self.name)?,
+            name: self.name,
+        })
+    }
 }
 
 /// Source-owned interface fields of a shader entry declaration.
@@ -613,6 +706,40 @@ pub struct EntryDecl<D = EntrySyntax, T: TreeFamily = SourceTree, A = Attribute>
     pub body: Expression<T>,
 }
 
+impl<D, T: TreeFamily, A> EntryDecl<D, T, A> {
+    /// Rebuild entry-owned data and recursive trees while carrying its source
+    /// signature through unchanged.
+    pub fn try_rebuild<NewD, NewT: TreeFamily, NewA, E>(
+        self,
+        rebuild_data: impl FnOnce(D, &str, Span) -> Result<NewD, E>,
+        rebuild_trees: impl FnOnce(
+            Vec<Pattern<T, A>>,
+            Expression<T>,
+        ) -> Result<(Vec<Pattern<NewT, NewA>>, Expression<NewT>), E>,
+    ) -> Result<EntryDecl<NewD, NewT, NewA>, E> {
+        let EntryDecl {
+            data,
+            name,
+            name_span,
+            size_params,
+            type_params,
+            params,
+            body,
+        } = self;
+        let data = rebuild_data(data, &name, name_span)?;
+        let (params, body) = rebuild_trees(params, body)?;
+        Ok(EntryDecl {
+            data,
+            name,
+            name_span,
+            size_params,
+            type_params,
+            params,
+            body,
+        })
+    }
+}
+
 /// One elaborated module or prelude definition that participates in
 /// type-checking and lowering but is not a user-file top-level declaration.
 #[derive(Debug, Clone, PartialEq)]
@@ -621,6 +748,18 @@ pub struct SupportDefinition<D, T: TreeFamily> {
     /// automatically imported prelude definition.
     pub namespace: Option<String>,
     pub definition: Decl<D, T>,
+}
+
+impl<D, T: TreeFamily> SupportDefinition<D, T> {
+    pub fn try_map_definition<NewD, NewT: TreeFamily, E>(
+        self,
+        map: impl FnOnce(Decl<D, T>) -> Result<Decl<NewD, NewT>, E>,
+    ) -> Result<SupportDefinition<NewD, NewT>, E> {
+        Ok(SupportDefinition {
+            namespace: self.namespace,
+            definition: map(self.definition)?,
+        })
+    }
 }
 
 /// Program-wide typed frontend state that is not intrinsically owned by one

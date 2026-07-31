@@ -27,50 +27,46 @@ pub fn type_check(program: crate::resolve_opens::OpensResolved) -> Result<TypeCh
         &program.global_context.module_manager,
         crate::builtins::catalog(),
     );
-    let ast::Program {
-        declarations,
-        node_ids,
-        global_context,
-        state: _,
-    } = program;
-    let crate::resolve_placeholders::PlaceholdersResolvedGlobal {
-        module_manager,
-        context,
-        spec_schemes,
-    } = global_context;
+    program.try_rebuild(|declarations, global_context, _| {
+        let crate::resolve_placeholders::PlaceholdersResolvedGlobal {
+            module_manager,
+            context,
+            spec_schemes,
+        } = global_context;
+        let mut checker =
+            TypeChecker::with_context_and_schemes(&module_manager, context, spec_schemes, name_resolution);
+        checker.load_builtins()?;
+        let type_table = checker.check_program(&declarations)?;
+        let schemes = checker.get_function_schemes();
+        let builtin_names = checker.builtin_names();
+        let warnings: Vec<_> = checker.warnings().to_vec();
+        let name_resolution = checker.name_resolution().clone();
+        drop(checker);
 
-    let mut checker =
-        TypeChecker::with_context_and_schemes(&module_manager, context, spec_schemes, name_resolution);
-    checker.load_builtins()?;
-    let type_table = checker.check_program(&declarations)?;
-    let schemes = checker.get_function_schemes();
-    let builtin_names = checker.builtin_names();
-    let warnings: Vec<_> = checker.warnings().to_vec();
-    let name_resolution = checker.name_resolution().clone();
-    drop(checker);
-
-    materialize(
-        declarations,
-        node_ids,
-        module_manager,
-        type_table,
-        schemes,
-        warnings,
-        builtin_names,
-        name_resolution,
-    )
+        materialize(
+            declarations,
+            module_manager,
+            type_table,
+            schemes,
+            warnings,
+            builtin_names,
+            name_resolution,
+        )
+    })
 }
 
 fn materialize(
     declarations: Vec<Declaration<crate::resolve_opens::OpensResolvedFamily>>,
-    node_ids: ast::NodeCounter,
     module_manager: crate::module_manager::ModuleManager,
     mut type_table: crate::LookupMap<ast::NodeId, ast::TypeScheme>,
     schemes: crate::LookupMap<String, ast::TypeScheme>,
     warnings: Vec<TypeWarning>,
     builtin_names: Vec<String>,
     mut name_resolution: crate::name_resolution::NameResolution,
-) -> Result<TypeChecked> {
+) -> Result<(
+    Vec<Declaration<TypeCheckedFamily>>,
+    ast::TypedGlobal<ast::TypedDefinition, ast::TypedTree>,
+)> {
     let mut support_definitions = Vec::new();
     for (module_name, definition) in module_manager.get_all_module_declarations() {
         support_definitions.push(ast::SupportDefinition {
@@ -125,17 +121,15 @@ fn materialize(
         }
     }
 
-    Ok(ast::Program {
-        declarations: typed_declarations,
-        node_ids,
-        global_context: ast::TypedGlobal {
+    Ok((
+        typed_declarations,
+        ast::TypedGlobal {
             support_definitions,
             symbols: std::mem::take(&mut name_resolution.symbols),
             warnings,
             builtin_names,
         },
-        state: std::marker::PhantomData,
-    })
+    ))
 }
 
 fn materialize_definition(
@@ -145,52 +139,41 @@ fn materialize_definition(
     schemes: &crate::LookupMap<String, ast::TypeScheme>,
     name_resolution: &mut crate::name_resolution::NameResolution,
 ) -> Result<ast::Decl<ast::TypedDefinition, ast::TypedTree>> {
-    let ast::Decl {
-        data,
-        name,
-        name_span,
-        size_params,
-        type_params,
-        params,
-        ty,
-        body,
-        param_diets,
-        return_diet,
-    } = definition;
-    let scheme_name = if qualified_name.is_empty() { name.as_str() } else { qualified_name };
+    let scheme_name = if qualified_name.is_empty() { definition.name.as_str() } else { qualified_name };
     let scheme = schemes.get(scheme_name).cloned().ok_or_else(|| {
         crate::err_type_at!(
-            name_span,
+            definition.name_span,
             "type checker did not produce a scheme for '{}'",
             scheme_name
         )
     })?;
-    let symbol =
-        name_resolution.declarations.remove(&(scheme_name.to_owned(), name_span)).ok_or_else(|| {
+    let symbol = name_resolution
+        .declarations
+        .remove(&(scheme_name.to_owned(), definition.name_span))
+        .ok_or_else(|| {
             crate::err_type_at!(
-                name_span,
+                definition.name_span,
                 "name resolution did not assign an identity to '{}'",
                 scheme_name
             )
         })?;
-    Ok(ast::Decl {
-        data: ast::TypedDefinition {
-            source: ast::NameResolvedDefinition { syntax: data, symbol },
-            scheme,
+    definition.try_rebuild(
+        |syntax, _, _| {
+            Ok(ast::TypedDefinition {
+                source: ast::NameResolvedDefinition { syntax, symbol },
+                scheme,
+            })
         },
-        name,
-        name_span,
-        size_params,
-        type_params,
-        params: params
-            .into_iter()
-            .map(|pattern| materialize_pattern(pattern, type_table, name_resolution))
-            .collect::<Result<_>>()?,
-        ty,
-        body: materialize_expression(body, type_table, name_resolution)?,
-        param_diets,
-        return_diet,
-    })
+        |params, body| {
+            Ok((
+                params
+                    .into_iter()
+                    .map(|pattern| materialize_pattern(pattern, type_table, name_resolution))
+                    .collect::<Result<_>>()?,
+                materialize_expression(body, type_table, name_resolution)?,
+            ))
+        },
+    )
 }
 
 fn materialize_entry(
@@ -199,44 +182,38 @@ fn materialize_entry(
     schemes: &crate::LookupMap<String, ast::TypeScheme>,
     name_resolution: &mut crate::name_resolution::NameResolution,
 ) -> Result<ast::EntryDecl<ast::TypedEntry, ast::TypedTree, crate::interface::ResolvedAttribute>> {
-    let ast::EntryDecl {
-        data,
-        name,
-        name_span,
-        size_params,
-        type_params,
-        params,
-        body,
-    } = entry;
-    let scheme = schemes.get(&name).cloned().ok_or_else(|| {
+    let scheme = schemes.get(&entry.name).cloned().ok_or_else(|| {
         crate::err_type_at!(
-            name_span,
+            entry.name_span,
             "type checker did not produce a scheme for entry '{}'",
-            name
+            entry.name
         )
     })?;
-    let symbol = name_resolution.declarations.remove(&(name.clone(), name_span)).ok_or_else(|| {
-        crate::err_type_at!(
-            name_span,
-            "name resolution did not assign an identity to entry '{}'",
-            name
-        )
-    })?;
-    Ok(ast::EntryDecl {
-        data: ast::TypedEntry {
-            source: ast::NameResolvedEntry { source: data, symbol },
-            scheme,
+    let symbol =
+        name_resolution.declarations.remove(&(entry.name.clone(), entry.name_span)).ok_or_else(|| {
+            crate::err_type_at!(
+                entry.name_span,
+                "name resolution did not assign an identity to entry '{}'",
+                entry.name
+            )
+        })?;
+    entry.try_rebuild(
+        |source, _, _| {
+            Ok(ast::TypedEntry {
+                source: ast::NameResolvedEntry { source, symbol },
+                scheme,
+            })
         },
-        name,
-        name_span,
-        size_params,
-        type_params,
-        params: params
-            .into_iter()
-            .map(|pattern| materialize_pattern(pattern, type_table, name_resolution))
-            .collect::<Result<_>>()?,
-        body: materialize_expression(body, type_table, name_resolution)?,
-    })
+        |params, body| {
+            Ok((
+                params
+                    .into_iter()
+                    .map(|pattern| materialize_pattern(pattern, type_table, name_resolution))
+                    .collect::<Result<_>>()?,
+                materialize_expression(body, type_table, name_resolution)?,
+            ))
+        },
+    )
 }
 
 fn materialize_external(
@@ -261,15 +238,11 @@ fn materialize_external(
                 external.name
             )
         })?;
-    Ok(ast::ExternDecl {
-        name: external.name,
-        data: ast::TypedExtern {
-            source: ast::NameResolvedExtern {
-                syntax: external.data,
-                symbol,
-            },
+    external.try_map_data(|syntax, _| {
+        Ok(ast::TypedExtern {
+            source: ast::NameResolvedExtern { syntax, symbol },
             scheme,
-        },
+        })
     })
 }
 

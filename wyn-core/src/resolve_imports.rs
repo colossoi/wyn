@@ -38,19 +38,12 @@ pub type ImportsResolved =
 /// compilation. Diamond imports work; cycles are silently broken at the
 /// second encounter.
 pub fn resolve_imports(program: parser::Parsed, base_dir: &Path) -> Result<ImportsResolved> {
-    let ast::Program {
-        declarations,
-        mut node_ids,
-        global_context,
-        state: _,
-    } = program;
     let mut visited: LookupSet<PathBuf> = LookupSet::new();
-    let declarations = expand(declarations, base_dir, &mut node_ids, &mut visited)?;
-    Ok(ast::Program {
-        declarations,
-        node_ids,
-        global_context,
-        state: std::marker::PhantomData,
+    program.try_rebuild(|declarations, global_context, node_ids| {
+        Ok((
+            expand(declarations, base_dir, node_ids, &mut visited)?,
+            global_context,
+        ))
     })
 }
 

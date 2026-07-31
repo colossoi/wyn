@@ -255,33 +255,26 @@ fn materialize(
     program: crate::name_resolution::NamesResolved,
     mut entry_feedback: std::collections::VecDeque<Vec<FeedbackPair>>,
 ) -> Result<ResourcesResolved> {
-    let ast::Program {
-        declarations,
-        node_ids,
-        global_context,
-        state: _,
-    } = program;
-    let mut resolved = Vec::with_capacity(declarations.len());
-    for declaration in declarations {
-        let declaration = match declaration {
-            Declaration::Decl(definition) => Some(Declaration::Decl(definition)),
-            Declaration::Entry(entry) => Some(Declaration::Entry(materialize_entry(
-                entry,
-                entry_feedback.pop_front().expect("resource analysis records every entry"),
-            )?)),
-            Declaration::Extern(ext) => Some(Declaration::Extern(ext)),
-            Declaration::Frontend(frontend) => materialize_frontend(frontend).map(Declaration::Frontend),
-        };
-        if let Some(declaration) = declaration {
-            resolved.push(declaration);
+    program.try_rebuild(|declarations, global_context, _| {
+        let mut resolved = Vec::with_capacity(declarations.len());
+        for declaration in declarations {
+            let declaration = match declaration {
+                Declaration::Decl(definition) => Some(Declaration::Decl(definition)),
+                Declaration::Entry(entry) => Some(Declaration::Entry(materialize_entry(
+                    entry,
+                    entry_feedback.pop_front().expect("resource analysis records every entry"),
+                )?)),
+                Declaration::Extern(ext) => Some(Declaration::Extern(ext)),
+                Declaration::Frontend(frontend) => {
+                    materialize_frontend(frontend).map(Declaration::Frontend)
+                }
+            };
+            if let Some(declaration) = declaration {
+                resolved.push(declaration);
+            }
         }
-    }
-    debug_assert!(entry_feedback.is_empty());
-    Ok(ast::Program {
-        declarations: resolved,
-        node_ids,
-        global_context,
-        state: std::marker::PhantomData,
+        debug_assert!(entry_feedback.is_empty());
+        Ok((resolved, global_context))
     })
 }
 
@@ -301,25 +294,20 @@ fn materialize_entry(
     entry: ast::EntryDecl,
     feedback: Vec<FeedbackPair>,
 ) -> Result<ast::EntryDecl<ast::ResolvedEntry, ast::SourceTree, ResolvedAttribute>> {
-    let ast::EntryDecl {
-        data,
-        name,
-        name_span,
-        size_params,
-        type_params,
-        params,
-        body,
-    } = entry;
-    let syntax = data.try_map_attributes(|attribute| materialize_attribute(attribute, name_span))?;
-    Ok(ast::EntryDecl {
-        data: ast::ResolvedEntry { syntax, feedback },
-        name,
-        name_span,
-        size_params,
-        type_params,
-        params: params.into_iter().map(materialize_pattern).collect::<Result<_>>()?,
-        body,
-    })
+    entry.try_rebuild(
+        |data, _, name_span| {
+            Ok(ast::ResolvedEntry {
+                syntax: data.try_map_attributes(|attribute| materialize_attribute(attribute, name_span))?,
+                feedback,
+            })
+        },
+        |params, body| {
+            Ok((
+                params.into_iter().map(materialize_pattern).collect::<Result<_>>()?,
+                body,
+            ))
+        },
+    )
 }
 
 fn materialize_frontend(
