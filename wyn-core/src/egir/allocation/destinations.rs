@@ -58,7 +58,7 @@ use crate::flow::BlockId;
 use crate::types::TypeExt;
 
 /// Resolve every outstanding unique-input capability to a physical destination.
-pub(super) fn run(program: ResourcesAllocated) -> ResourcesAllocated {
+pub(super) fn resolve_destinations(program: ResourcesAllocated) -> ResourcesAllocated {
     program.map_graphs(|_, mut graph| {
         resolve_graph_destinations(&mut graph);
         graph

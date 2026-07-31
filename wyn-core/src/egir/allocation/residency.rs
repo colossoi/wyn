@@ -125,7 +125,7 @@ struct InputReplacement {
     resource: ResourceId,
 }
 
-pub fn run(mut program: ResourcesAllocated) -> Result<ResourcesAllocated, String> {
+pub fn resolve_residency(mut program: ResourcesAllocated) -> Result<ResourcesAllocated, String> {
     loop {
         let Some(plan) = next_materialization_plan(&program)? else {
             break;

@@ -83,8 +83,8 @@ pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, 
     );
 
     let program = classify_existing_compiler_resources(program);
-    let program = destinations::run(program);
-    let program = residency::run(program)?;
+    let program = destinations::resolve_destinations(program);
+    let program = residency::resolve_residency(program)?;
     let program = resolve_scratch_sizes(program);
     let program = strip_compiler_abi(program);
     if cfg!(debug_assertions) {
