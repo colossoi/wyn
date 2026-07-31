@@ -2,44 +2,14 @@
 
 use super::run;
 use super::VarRef;
-use crate::ast::{Span, TypeName};
+use crate::ast::TypeName;
 use crate::builtins::by_id;
 use crate::tlc::context::RewriteGlobal;
 use crate::tlc::data::PolymorphicDefinition;
-use crate::tlc::{Def, DefMeta, Program, Term, TermId, TermIdSource, TermKind};
-use crate::{IdSource, LookupSet, SymbolId, SymbolTable};
+use crate::tlc::test_support::TestBuilder;
+use crate::tlc::{Def, DefMeta, Program, Term, TermKind};
+use crate::{IdSource, LookupSet};
 use polytype::Type;
-
-/// Test helper that manages symbol table and term ID generation.
-struct TestBuilder {
-    symbols: SymbolTable,
-    ids: TermIdSource,
-}
-
-impl TestBuilder {
-    fn new() -> Self {
-        TestBuilder {
-            symbols: SymbolTable::new(),
-            ids: TermIdSource::new(),
-        }
-    }
-
-    fn sym(&mut self, name: &str) -> SymbolId {
-        self.symbols.alloc(name.to_string())
-    }
-
-    fn next_id(&mut self) -> TermId {
-        self.ids.next_id()
-    }
-
-    fn span(&self) -> Span {
-        Span::dummy()
-    }
-
-    fn finish(self) -> (SymbolTable, TermIdSource) {
-        (self.symbols, self.ids)
-    }
-}
 
 #[test]
 fn test_specialize_sign_f32() {

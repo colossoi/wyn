@@ -160,12 +160,12 @@ fn float_term(
                 let name = symbols.alloc("_runtime_gather".to_string());
                 let name_ty = array.ty.clone();
                 let array_span = array.span;
-                let var = Term {
-                    id: ids.next_id(),
-                    ty: name_ty.clone(),
-                    span: array_span,
-                    kind: TermKind::Var(VarRef::Symbol(name)),
-                };
+                let var = Term::fresh(
+                    ids,
+                    name_ty.clone(),
+                    array_span,
+                    TermKind::Var(VarRef::Symbol(name)),
+                );
                 let indexed = Term {
                     id,
                     ty,

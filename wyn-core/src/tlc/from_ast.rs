@@ -1974,12 +1974,7 @@ impl<'a> Transformer<'a> {
     }
 
     pub(super) fn mk_term(&mut self, ty: Type<TypeName>, span: Span, kind: TermKind) -> Term {
-        Term {
-            id: self.term_ids.next_id(),
-            ty,
-            span,
-            kind,
-        }
+        Term::fresh(self.term_ids, ty, span, kind)
     }
 
     fn mk_i32(&mut self, value: i32, span: Span) -> Term {

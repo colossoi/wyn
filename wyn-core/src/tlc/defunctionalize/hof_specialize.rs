@@ -496,18 +496,18 @@ impl HofSpecializer<'_> {
             let outer_name = crate::symbol_name_or_bug(self.symbols, outer_symbol);
             let fresh_symbol = self.symbols.alloc(format!("{specialized_name}__cap_{outer_name}"));
             new_params.push((fresh_symbol, capture.ty.clone()));
-            closure_captures.push(Term {
-                id: self.term_ids.next_id(),
-                ty: capture.ty.clone(),
-                span: capture.span,
-                kind: TermKind::Var(VarRef::Symbol(fresh_symbol)),
-            });
+            closure_captures.push(Term::fresh(
+                self.term_ids,
+                capture.ty.clone(),
+                capture.span,
+                TermKind::Var(VarRef::Symbol(fresh_symbol)),
+            ));
         }
-        let callable_term = Term {
-            id: self.term_ids.next_id(),
-            ty: arguments[function_param_index].ty.clone(),
-            span: arguments[function_param_index].span,
-            kind: if closure_captures.is_empty() {
+        let callable_term = Term::fresh(
+            self.term_ids,
+            arguments[function_param_index].ty.clone(),
+            arguments[function_param_index].span,
+            if closure_captures.is_empty() {
                 TermKind::Var(VarRef::Symbol(callable.code))
             } else {
                 TermKind::Closure(ExplicitClosure {
@@ -516,7 +516,7 @@ impl HofSpecializer<'_> {
                     param_count: callable.param_count,
                 })
             },
-        };
+        );
         let mut body = substitute_term(&inner_body, function_param, &callable_term, self.term_ids);
         self.rewrite_tracked(&mut body);
         let body = apply_type_subst_to_term(&body, &type_subst, self.term_ids);
@@ -626,12 +626,12 @@ impl HofSpecializer<'_> {
             .expect("new specialization must be indexed")
             .ty
             .clone();
-        *body.lam.body = Term {
-            id: self.term_ids.next_id(),
-            ty: specialized_ty,
-            span: body.lam.body.span,
-            kind: TermKind::Var(VarRef::Symbol(specialization.symbol)),
-        };
+        *body.lam.body = Term::fresh(
+            self.term_ids,
+            specialized_ty,
+            body.lam.body.span,
+            TermKind::Var(VarRef::Symbol(specialization.symbol)),
+        );
 
         let mut callable_group = 0;
         let captures = std::mem::take(&mut body.data.captures);
@@ -686,18 +686,18 @@ impl HofSpecializer<'_> {
                 let param = (symbol, capture.ty.clone());
                 new_params.push(param.clone());
                 params_for_callable.push(param);
-                closure_captures.push(Term {
-                    id: self.term_ids.next_id(),
-                    ty: capture.ty.clone(),
-                    span: capture.span,
-                    kind: TermKind::Var(VarRef::Symbol(symbol)),
-                });
+                closure_captures.push(Term::fresh(
+                    self.term_ids,
+                    capture.ty.clone(),
+                    capture.span,
+                    TermKind::Var(VarRef::Symbol(symbol)),
+                ));
             }
-            let replacement = Term {
-                id: self.term_ids.next_id(),
-                ty: captures[*index].1.clone(),
-                span: captures[*index].2.span,
-                kind: if closure_captures.is_empty() {
+            let replacement = Term::fresh(
+                self.term_ids,
+                captures[*index].1.clone(),
+                captures[*index].2.span,
+                if closure_captures.is_empty() {
                     TermKind::Var(VarRef::Symbol(callable.code))
                 } else {
                     TermKind::Closure(ExplicitClosure {
@@ -706,7 +706,7 @@ impl HofSpecializer<'_> {
                         param_count: callable.param_count,
                     })
                 },
-            };
+            );
             body = substitute_term(&body, local_callable, &replacement, self.term_ids);
             environment_params.push(params_for_callable);
         }

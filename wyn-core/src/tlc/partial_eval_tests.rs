@@ -6,40 +6,10 @@ use crate::op::BinaryOperator;
 use crate::tlc::context::RewriteGlobal;
 use crate::tlc::data::{Empty, PolymorphicDefinition};
 use crate::tlc::ownership::OwnershipValidated;
-use crate::tlc::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermId, TermIdSource, TermKind};
+use crate::tlc::test_support::TestBuilder;
+use crate::tlc::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
-
-/// Test helper that manages symbol table and term ID generation.
-struct TestBuilder {
-    symbols: SymbolTable,
-    ids: TermIdSource,
-}
-
-impl TestBuilder {
-    fn new() -> Self {
-        TestBuilder {
-            symbols: SymbolTable::new(),
-            ids: TermIdSource::new(),
-        }
-    }
-
-    fn sym(&mut self, name: &str) -> SymbolId {
-        self.symbols.alloc(name.to_string())
-    }
-
-    fn next_id(&mut self) -> TermId {
-        self.ids.next_id()
-    }
-
-    fn span(&self) -> Span {
-        Span::dummy()
-    }
-
-    fn finish(self) -> (SymbolTable, TermIdSource) {
-        (self.symbols, self.ids)
-    }
-}
 
 fn input_ae(boxed: Box<Term<Empty, Empty>>) -> crate::tlc::ArrayExpr<Empty, Empty> {
     use crate::tlc::{ArrayExpr, TermKind};

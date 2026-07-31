@@ -202,17 +202,17 @@ fn compose_map_into_branch(
     params.splice(slot..=slot, producer.params);
     Lambda {
         params,
-        body: Box::new(Term {
-            id: term_ids.next_id(),
-            ty: envelope.ret_ty.clone(),
+        body: Box::new(Term::fresh(
+            term_ids,
+            envelope.ret_ty.clone(),
             span,
-            kind: TermKind::Let {
+            TermKind::Let {
                 name: fresh_sym,
                 name_ty: slot_ty,
                 rhs: producer.body,
                 body: Box::new(body),
             },
-        }),
+        )),
         ret_ty: envelope.ret_ty,
     }
 }
@@ -286,21 +286,21 @@ fn build_fused_map_if(
     params.extend(else_lambda.params);
 
     let elem_ty = then_lambda.ret_ty.clone();
-    let body = Term {
-        id: term_ids.next_id(),
-        ty: elem_ty.clone(),
+    let body = Term::fresh(
+        term_ids,
+        elem_ty.clone(),
         span,
-        kind: TermKind::If {
+        TermKind::If {
             cond: Box::new(cond),
             then_branch: then_lambda.body,
             else_branch: else_lambda.body,
         },
-    };
-    let result = Term {
-        id: term_ids.next_id(),
-        ty: result_ty,
+    );
+    let result = Term::fresh(
+        term_ids,
+        result_ty,
         span,
-        kind: TermKind::Soac(SoacOp::Map {
+        TermKind::Soac(SoacOp::Map {
             lam: SoacBody {
                 lam: Lambda {
                     params,
@@ -312,7 +312,7 @@ fn build_fused_map_if(
             inputs,
             destination: crate::types::SoacOwnership::Fresh,
         }),
-    };
+    );
 
     let prefixes = then_map.prefix.into_iter().chain(else_map.prefix).collect();
     wrap_let_bindings(prefixes, result, term_ids)

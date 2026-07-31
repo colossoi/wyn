@@ -244,12 +244,12 @@ impl RepSpecializer<'_> {
         }
 
         let specialization = self.get_or_create_specialization(callee, &key);
-        **func = Term {
-            id: self.term_ids.next_id(),
-            ty: specialization.ty,
+        **func = Term::fresh(
+            self.term_ids,
+            specialization.ty,
             span,
-            kind: TermKind::Var(VarRef::Symbol(specialization.symbol)),
-        };
+            TermKind::Var(VarRef::Symbol(specialization.symbol)),
+        );
         true
     }
 

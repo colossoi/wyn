@@ -125,23 +125,18 @@ fn hoist_soac_arguments(
                 rhs: arg,
                 span,
             });
-            new_args.push(Term {
-                id: term_ids.next_id(),
+            new_args.push(Term::fresh(
+                term_ids,
                 ty,
                 span,
-                kind: TermKind::Var(VarRef::Symbol(name)),
-            });
+                TermKind::Var(VarRef::Symbol(name)),
+            ));
         } else {
             new_args.push(arg);
         }
     }
 
-    let app = Term {
-        id: term_ids.next_id(),
-        ty,
-        span,
-        kind: TermKind::App { func, args: new_args },
-    };
+    let app = Term::fresh(term_ids, ty, span, TermKind::App { func, args: new_args });
     (wrap_let_bindings(bindings, app, term_ids), true)
 }
 
@@ -192,17 +187,17 @@ fn flatten_nested_let(term: Term<Empty, Empty>, term_ids: &mut TermIdSource) -> 
         inner = *body;
     }
 
-    let mut result = Term {
-        id: term_ids.next_id(),
-        ty: ty.clone(),
+    let mut result = Term::fresh(
+        term_ids,
+        ty.clone(),
         span,
-        kind: TermKind::Let {
+        TermKind::Let {
             name,
             name_ty,
             rhs: Box::new(inner),
             body,
         },
-    };
+    );
     let binding_count = bindings.len();
     for (index, binding) in bindings.into_iter().rev().enumerate() {
         let binding_id = if index + 1 == binding_count { id } else { term_ids.next_id() };

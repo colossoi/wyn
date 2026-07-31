@@ -38,16 +38,17 @@ where
             let rhs = substitute_with(*rhs, old, make_replacement, term_ids);
             let body =
                 if name == old { *body } else { substitute_with(*body, old, make_replacement, term_ids) };
-            Term {
-                id: term_ids.next_id(),
-                kind: TermKind::Let {
+            Term::fresh(
+                term_ids,
+                term.ty,
+                term.span,
+                TermKind::Let {
                     name,
                     name_ty,
                     rhs: Box::new(rhs),
                     body: Box::new(body),
                 },
-                ..term
-            }
+            )
         }
         TermKind::Loop {
             loop_var,
@@ -79,9 +80,11 @@ where
             } else {
                 substitute_with(*body, old, make_replacement, term_ids)
             };
-            Term {
-                id: term_ids.next_id(),
-                kind: TermKind::Loop {
+            Term::fresh(
+                term_ids,
+                term.ty,
+                term.span,
+                TermKind::Loop {
                     loop_var,
                     loop_var_ty,
                     init: Box::new(init),
@@ -89,8 +92,7 @@ where
                     kind,
                     body: Box::new(body),
                 },
-                ..term
-            }
+            )
         }
         other => {
             let fresh_id = term_ids.next_id();
@@ -151,10 +153,13 @@ pub(crate) fn substitute_sym<C: Payload, S: Payload>(
     substitute_with(
         term,
         old,
-        &mut |occurrence, ids| Term {
-            id: ids.next_id(),
-            kind: TermKind::Var(VarRef::Symbol(new)),
-            ..occurrence
+        &mut |occurrence, ids| {
+            Term::fresh(
+                ids,
+                occurrence.ty,
+                occurrence.span,
+                TermKind::Var(VarRef::Symbol(new)),
+            )
         },
         term_ids,
     )

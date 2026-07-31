@@ -515,12 +515,7 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
         span: Span,
         kind: TermKind<Empty, Empty>,
     ) -> Term<Empty, Empty> {
-        Term {
-            id: self.term_ids.next_id(),
-            ty,
-            span,
-            kind,
-        }
+        Term::fresh(&mut self.term_ids, ty, span, kind)
     }
 
     /// Build a `TermKind::Tuple` term.
@@ -737,12 +732,7 @@ fn build_tuple_reconstruction(
             TermKind::Var(VarRef::Symbol(new_params[0].0))
         }
     };
-    Term {
-        id: term_ids.next_id(),
-        ty: tuple_ty.clone(),
-        span,
-        kind,
-    }
+    Term::fresh(term_ids, tuple_ty.clone(), span, kind)
 }
 
 // =============================================================================

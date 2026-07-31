@@ -803,12 +803,7 @@ impl<'a> PartialEvaluator<'a> {
         span: Span,
         kind: TermKind<Empty, Empty>,
     ) -> Term<Empty, Empty> {
-        Term {
-            id: self.term_ids.next_id(),
-            ty,
-            span,
-            kind,
-        }
+        Term::fresh(self.term_ids, ty, span, kind)
     }
 }
 

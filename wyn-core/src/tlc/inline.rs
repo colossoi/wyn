@@ -516,20 +516,6 @@ impl<C: Payload, S: Payload> TermRewriter<C, S> for FunctionInliner<'_, '_, C, S
 // Small helpers
 // =============================================================================
 
-fn mk<C: Payload, S: Payload>(
-    ids: &mut TermIdSource,
-    ty: Type<TypeName>,
-    span: Span,
-    kind: TermKind<C, S>,
-) -> Term<C, S> {
-    Term {
-        id: ids.next_id(),
-        ty,
-        span,
-        kind,
-    }
-}
-
 /// Build Let bindings to substitute params with args, wrapping the inlined body.
 ///
 /// The let's `name_ty` comes from the *arg*'s concrete type rather than the
@@ -573,7 +559,7 @@ pub(crate) fn build_inline_lets<C: Payload, S: Payload>(
             result = substitute_sym_and_retype(result, *sym, *arg_sym, &arg.ty, ids);
             continue;
         }
-        result = mk(
+        result = Term::fresh(
             ids,
             result.ty.clone(),
             span,
@@ -604,11 +590,13 @@ fn substitute_sym_and_retype<C: Payload, S: Payload>(
     super::subst::substitute_with(
         term,
         old,
-        &mut |occurrence, ids| Term {
-            id: ids.next_id(),
-            ty: new_ty.clone(),
-            kind: TermKind::Var(VarRef::Symbol(new)),
-            span: occurrence.span,
+        &mut |occurrence, ids| {
+            Term::fresh(
+                ids,
+                new_ty.clone(),
+                occurrence.span,
+                TermKind::Var(VarRef::Symbol(new)),
+            )
         },
         term_ids,
     )

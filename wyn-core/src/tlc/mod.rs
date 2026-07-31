@@ -27,6 +27,8 @@ pub mod soa;
 pub mod soac_anf;
 mod specialize;
 pub mod subst;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 mod traversal;
 
@@ -427,16 +429,16 @@ pub fn rebuild_nested_lam<C: Payload, S: Payload>(
 ) -> Term<C, S> {
     let ret_ty = body.ty.clone();
     let lam_ty = curried_function_type(params.iter().map(|(_, ty)| ty), &ret_ty);
-    Term {
-        id: term_ids.next_id(),
-        ty: lam_ty,
+    Term::fresh(
+        term_ids,
+        lam_ty,
         span,
-        kind: TermKind::Lambda(Lambda {
+        TermKind::Lambda(Lambda {
             params: params.to_vec(),
             body: Box::new(body),
             ret_ty,
         }),
-    }
+    )
 }
 
 /// Build `App(Var(func_sym), args)` with the function-position type implied
@@ -449,12 +451,7 @@ pub fn build_app_call<C: Payload, S: Payload>(
     term_ids: &mut TermIdSource,
 ) -> Term<C, S> {
     let fn_ty = curried_function_type(args.iter().map(|arg| &arg.ty), &result_ty);
-    let func_term = Term {
-        id: term_ids.next_id(),
-        ty: fn_ty,
-        span,
-        kind: TermKind::Var(VarRef::Symbol(func_sym)),
-    };
+    let func_term = Term::fresh(term_ids, fn_ty, span, TermKind::Var(VarRef::Symbol(func_sym)));
 
     if args.is_empty() {
         return Term {
@@ -463,15 +460,15 @@ pub fn build_app_call<C: Payload, S: Payload>(
         };
     }
 
-    Term {
-        id: term_ids.next_id(),
-        ty: result_ty,
+    Term::fresh(
+        term_ids,
+        result_ty,
         span,
-        kind: TermKind::App {
+        TermKind::App {
             func: Box::new(func_term),
             args,
         },
-    }
+    )
 }
 
 /// One pending `let` wrapper around a rebuilt term.
@@ -494,17 +491,17 @@ pub(crate) fn wrap_let_bindings<C: Payload, S: Payload>(
 ) -> Term<C, S> {
     for binding in bindings.into_iter().rev() {
         let body_ty = body.ty.clone();
-        body = Term {
-            id: term_ids.next_id(),
-            ty: body_ty,
-            span: binding.span,
-            kind: TermKind::Let {
+        body = Term::fresh(
+            term_ids,
+            body_ty,
+            binding.span,
+            TermKind::Let {
                 name: binding.name,
                 name_ty: binding.name_ty,
                 rhs: Box::new(binding.rhs),
                 body: Box::new(body),
             },
-        };
+        );
     }
     body
 }
@@ -624,6 +621,22 @@ pub struct Term<C: Payload = data::Empty, S: Payload = data::Empty> {
     pub ty: Type<TypeName>,
     pub span: Span,
     pub kind: TermKind<C, S>,
+}
+impl<C: Payload, S: Payload> Term<C, S> {
+    /// Construct a newly synthesized term with an ID from the owning program.
+    pub fn fresh(
+        term_ids: &mut TermIdSource,
+        ty: Type<TypeName>,
+        span: Span,
+        kind: TermKind<C, S>,
+    ) -> Self {
+        Self {
+            id: term_ids.next_id(),
+            ty,
+            span,
+            kind,
+        }
+    }
 }
 
 /// Reference target for a `Var` term.
@@ -1188,12 +1201,7 @@ pub fn atom_var_term<C: Payload, S: Payload>(
     ty: Type<TypeName>,
     term_ids: &mut TermIdSource,
 ) -> Term<C, S> {
-    Term {
-        id: term_ids.next_id(),
-        ty,
-        span: Span::new(0, 0, 0, 0),
-        kind: TermKind::Var(vr),
-    }
+    Term::fresh(term_ids, ty, Span::new(0, 0, 0, 0), TermKind::Var(vr))
 }
 
 pub(crate) fn synthetic_atom_var_term<C: Payload, S: Payload>(

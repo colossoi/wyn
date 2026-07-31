@@ -373,16 +373,16 @@ impl ClosureConverter {
         match kind {
             TermKind::Lambda(Lambda { params, body, ret_ty }) => {
                 let body = self.convert_def_body(*body);
-                Term {
-                    id: self.term_ids.next_id(),
+                Term::fresh(
+                    &mut self.term_ids,
                     ty,
                     span,
-                    kind: TermKind::Lambda(Lambda {
+                    TermKind::Lambda(Lambda {
                         params,
                         body: Box::new(body),
                         ret_ty,
                     }),
-                }
+                )
             }
             kind => self.convert_term(Term {
                 id: tlc::TermId::SYNTHETIC,
@@ -568,12 +568,7 @@ impl ClosureConverter {
         span: Span,
         kind: TermKind<ExplicitClosurePayload, ExplicitCapturesPayload>,
     ) -> Term<ExplicitClosurePayload, ExplicitCapturesPayload> {
-        Term {
-            id: self.term_ids.next_id(),
-            ty,
-            span,
-            kind,
-        }
+        Term::fresh(&mut self.term_ids, ty, span, kind)
     }
 
     fn is_callable(&self, term: &Term<ExplicitClosurePayload, ExplicitCapturesPayload>) -> bool {

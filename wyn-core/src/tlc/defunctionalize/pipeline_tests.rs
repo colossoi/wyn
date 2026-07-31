@@ -1,9 +1,8 @@
-use crate::ast::{BinaryOp, Span, TypeName};
+use crate::ast::{BinaryOp, TypeName};
 use crate::op::BinaryOperator;
-use crate::tlc::{
-    Def, DefMeta, Family, Lambda, LoopKind, Payload, Program, Term, TermId, TermIdSource, TermKind, VarRef,
-};
-use crate::{SymbolId, SymbolTable};
+use crate::tlc::test_support::TestBuilder;
+use crate::tlc::{Def, DefMeta, Family, Lambda, LoopKind, Payload, Program, Term, TermKind, VarRef};
+use crate::SymbolTable;
 use polytype::Type;
 
 /// End-to-end runner for the three internal defunctionalization algorithms. Mirrors what
@@ -12,37 +11,6 @@ fn defunctionalize(
     program: crate::tlc::stage::RuntimeIndexProducersFloated,
 ) -> crate::tlc::stage::Defunctionalized {
     super::defunctionalize(program)
-}
-
-/// Test helper that manages symbol table and term ID generation.
-struct TestBuilder {
-    symbols: SymbolTable,
-    ids: TermIdSource,
-}
-
-impl TestBuilder {
-    fn new() -> Self {
-        TestBuilder {
-            symbols: SymbolTable::new(),
-            ids: TermIdSource::new(),
-        }
-    }
-
-    fn sym(&mut self, name: &str) -> SymbolId {
-        self.symbols.alloc(name.to_string())
-    }
-
-    fn next_id(&mut self) -> TermId {
-        self.ids.next_id()
-    }
-
-    fn span(&self) -> Span {
-        Span::dummy()
-    }
-
-    fn finish(self) -> (SymbolTable, TermIdSource) {
-        (self.symbols, self.ids)
-    }
 }
 
 fn i32_ty() -> Type<TypeName> {
