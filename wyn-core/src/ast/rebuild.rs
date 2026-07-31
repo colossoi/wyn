@@ -3,7 +3,7 @@
 
 use super::{
     ExprKind, Expression, IfExpr, LambdaExpr, LetInExpr, LoopExpr, LoopForm, MatchCase, MatchExpr, Node,
-    Pattern, PatternKind, RangeExpr, RecordPatternField, RecordPatternTarget, SliceExpr, TreeFamily,
+    Pattern, PatternKind, RangeExpr, RecordPatternField, RecordPatternTarget, SliceExpr, TreeFamily, Type,
 };
 
 #[cfg(test)]
@@ -254,7 +254,26 @@ pub fn pattern<From: TreeFamily, To: TreeFamily, A, E>(
     header: &mut impl FnMut(From::Header) -> Result<To::Header, E>,
     binding: &mut impl FnMut(&From::Header, From::Binding) -> Result<To::Binding, E>,
 ) -> Result<Pattern<To, A>, E> {
+    pattern_with(
+        pattern,
+        header,
+        binding,
+        &mut |attribute| Ok::<_, E>(attribute),
+        &mut |ty| Ok::<_, E>(ty),
+    )
+}
+
+/// Rebuild a pattern while independently transforming its recursive payloads.
+/// Headers are transformed parent-first, before descending into child patterns.
+pub fn pattern_with<From: TreeFamily, To: TreeFamily, A, B, E>(
+    pattern: Pattern<From, A>,
+    header: &mut impl FnMut(From::Header) -> Result<To::Header, E>,
+    binding: &mut impl FnMut(&From::Header, From::Binding) -> Result<To::Binding, E>,
+    attribute: &mut impl FnMut(A) -> Result<B, E>,
+    map_type: &mut impl FnMut(Type) -> Result<Type, E>,
+) -> Result<Pattern<To, B>, E> {
     let Node { h, kind } = pattern;
+    let rebuilt_header = header(h.clone())?;
     let kind = match kind {
         PatternKind::Name(name) => PatternKind::Name(binding(&h, name)?),
         PatternKind::Wildcard => PatternKind::Wildcard,
@@ -263,13 +282,13 @@ pub fn pattern<From: TreeFamily, To: TreeFamily, A, E>(
         PatternKind::Tuple(patterns) => PatternKind::Tuple(
             patterns
                 .into_iter()
-                .map(|value| self::pattern(value, header, binding))
+                .map(|value| pattern_with(value, header, binding, attribute, map_type))
                 .collect::<Result<_, _>>()?,
         ),
         PatternKind::Vec(patterns) => PatternKind::Vec(
             patterns
                 .into_iter()
-                .map(|value| self::pattern(value, header, binding))
+                .map(|value| pattern_with(value, header, binding, attribute, map_type))
                 .collect::<Result<_, _>>()?,
         ),
         PatternKind::Record(fields) => PatternKind::Record(
@@ -282,9 +301,9 @@ pub fn pattern<From: TreeFamily, To: TreeFamily, A, E>(
                             RecordPatternTarget::Shorthand(value) => {
                                 RecordPatternTarget::Shorthand(binding(&h, value)?)
                             }
-                            RecordPatternTarget::Pattern(value) => {
-                                RecordPatternTarget::Pattern(self::pattern(value, header, binding)?)
-                            }
+                            RecordPatternTarget::Pattern(value) => RecordPatternTarget::Pattern(
+                                pattern_with(value, header, binding, attribute, map_type)?,
+                            ),
                         },
                     })
                 })
@@ -294,15 +313,23 @@ pub fn pattern<From: TreeFamily, To: TreeFamily, A, E>(
             name,
             patterns
                 .into_iter()
-                .map(|value| self::pattern(value, header, binding))
+                .map(|value| pattern_with(value, header, binding, attribute, map_type))
                 .collect::<Result<_, _>>()?,
         ),
-        PatternKind::Typed(pattern, ty) => {
-            PatternKind::Typed(Box::new(self::pattern(*pattern, header, binding)?), ty)
-        }
+        PatternKind::Typed(pattern, ty) => PatternKind::Typed(
+            Box::new(pattern_with(*pattern, header, binding, attribute, map_type)?),
+            map_type(ty)?,
+        ),
         PatternKind::Attributed(attributes, pattern) => {
-            PatternKind::Attributed(attributes, Box::new(self::pattern(*pattern, header, binding)?))
+            let attributes = attributes.into_iter().map(&mut *attribute).collect::<Result<_, _>>()?;
+            PatternKind::Attributed(
+                attributes,
+                Box::new(pattern_with(*pattern, header, binding, attribute, map_type)?),
+            )
         }
     };
-    Ok(Node { h: header(h)?, kind })
+    Ok(Node {
+        h: rebuilt_header,
+        kind,
+    })
 }

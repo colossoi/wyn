@@ -13,7 +13,7 @@
 
 use crate::ast::{
     Decl, ExprKind, Expression, Header, IfExpr, LambdaExpr, LetInExpr, LoopExpr, LoopForm, MatchCase,
-    MatchExpr, Node, NodeCounter, Pattern, PatternKind, RangeExpr, SliceExpr,
+    MatchExpr, Node, NodeCounter, Pattern, RangeExpr, SliceExpr,
 };
 
 fn fresh_header(src: &Header, nc: &mut NodeCounter) -> Header {
@@ -173,44 +173,15 @@ fn clone_loop_form(form: &LoopForm, nc: &mut NodeCounter) -> LoopForm {
 
 /// Deep-clone `pat` with every `Header.id` reallocated from `nc`.
 pub fn clone_pattern_fresh_ids(pat: &Pattern, nc: &mut NodeCounter) -> Pattern {
-    let h = fresh_header(&pat.h, nc);
-    let kind = match &pat.kind {
-        PatternKind::Name(s) => PatternKind::Name(s.clone()),
-        PatternKind::Wildcard => PatternKind::Wildcard,
-        PatternKind::Literal(lit) => PatternKind::Literal(lit.clone()),
-        PatternKind::Unit => PatternKind::Unit,
-        PatternKind::Tuple(pats) => {
-            PatternKind::Tuple(pats.iter().map(|p| clone_pattern_fresh_ids(p, nc)).collect())
-        }
-        PatternKind::Vec(pats) => {
-            PatternKind::Vec(pats.iter().map(|p| clone_pattern_fresh_ids(p, nc)).collect())
-        }
-        PatternKind::Record(fields) => PatternKind::Record(
-            fields
-                .iter()
-                .map(|f| crate::ast::RecordPatternField {
-                    field: f.field.clone(),
-                    target: match &f.target {
-                        crate::ast::RecordPatternTarget::Shorthand(binding) => {
-                            crate::ast::RecordPatternTarget::Shorthand(binding.clone())
-                        }
-                        crate::ast::RecordPatternTarget::Pattern(pattern) => {
-                            crate::ast::RecordPatternTarget::Pattern(clone_pattern_fresh_ids(pattern, nc))
-                        }
-                    },
-                })
-                .collect(),
-        ),
-        PatternKind::Constructor(name, sub_patterns) => PatternKind::Constructor(
-            name.clone(),
-            sub_patterns.iter().map(|p| clone_pattern_fresh_ids(p, nc)).collect(),
-        ),
-        PatternKind::Typed(inner, ty) => {
-            PatternKind::Typed(Box::new(clone_pattern_fresh_ids(inner, nc)), ty.clone())
-        }
-        PatternKind::Attributed(attrs, inner) => {
-            PatternKind::Attributed(attrs.clone(), Box::new(clone_pattern_fresh_ids(inner, nc)))
-        }
-    };
-    Node { h, kind }
+    let rebuilt: std::result::Result<Pattern, std::convert::Infallible> = crate::ast::rebuild::pattern_with(
+        pat.clone(),
+        &mut |header| Ok(fresh_header(&header, nc)),
+        &mut |_header, binding| Ok(binding),
+        &mut Ok,
+        &mut Ok,
+    );
+    match rebuilt {
+        Ok(pattern) => pattern,
+        Err(error) => match error {},
+    }
 }

@@ -1110,58 +1110,13 @@ impl<T: TreeFamily, A> Node<PatternKind<T, A>, T::Header> {
         self,
         map: &mut impl FnMut(A) -> Result<B, E>,
     ) -> Result<Pattern<T, B>, E> {
-        let Node { h, kind } = self;
-        let kind = match kind {
-            PatternKind::Name(name) => PatternKind::Name(name),
-            PatternKind::Wildcard => PatternKind::Wildcard,
-            PatternKind::Literal(value) => PatternKind::Literal(value),
-            PatternKind::Unit => PatternKind::Unit,
-            PatternKind::Tuple(patterns) => PatternKind::Tuple(
-                patterns
-                    .into_iter()
-                    .map(|pattern| pattern.try_map_attributes(map))
-                    .collect::<Result<_, _>>()?,
-            ),
-            PatternKind::Vec(patterns) => PatternKind::Vec(
-                patterns
-                    .into_iter()
-                    .map(|pattern| pattern.try_map_attributes(map))
-                    .collect::<Result<_, _>>()?,
-            ),
-            PatternKind::Record(fields) => PatternKind::Record(
-                fields
-                    .into_iter()
-                    .map(|field| {
-                        Ok(RecordPatternField {
-                            field: field.field,
-                            target: match field.target {
-                                RecordPatternTarget::Shorthand(binding) => {
-                                    RecordPatternTarget::Shorthand(binding)
-                                }
-                                RecordPatternTarget::Pattern(pattern) => {
-                                    RecordPatternTarget::Pattern(pattern.try_map_attributes(map)?)
-                                }
-                            },
-                        })
-                    })
-                    .collect::<Result<_, E>>()?,
-            ),
-            PatternKind::Constructor(name, patterns) => PatternKind::Constructor(
-                name,
-                patterns
-                    .into_iter()
-                    .map(|pattern| pattern.try_map_attributes(map))
-                    .collect::<Result<_, _>>()?,
-            ),
-            PatternKind::Typed(pattern, ty) => {
-                PatternKind::Typed(Box::new(pattern.try_map_attributes(map)?), ty)
-            }
-            PatternKind::Attributed(attributes, pattern) => PatternKind::Attributed(
-                attributes.into_iter().map(&mut *map).collect::<Result<_, _>>()?,
-                Box::new(pattern.try_map_attributes(map)?),
-            ),
-        };
-        Ok(Node { h, kind })
+        crate::ast::rebuild::pattern_with(
+            self,
+            &mut |header| Ok(header),
+            &mut |_header, binding| Ok(binding),
+            map,
+            &mut |ty| Ok(ty),
+        )
     }
 
     /// Extract the simple name from a pattern if possible

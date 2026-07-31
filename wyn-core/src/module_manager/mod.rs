@@ -2,8 +2,7 @@
 
 use crate::ast::{
     Decl, Declaration, Identifier, ImportsResolvedFrontend, ModuleExpression, ModuleTypeExpression,
-    NestedDeclaration, Node, NodeCounter, ParsedFrontend, Pattern, PatternKind, Spec, Type, TypeBind,
-    TypeLifting, TypeName,
+    NestedDeclaration, NodeCounter, ParsedFrontend, Pattern, Spec, Type, TypeBind, TypeLifting, TypeName,
 };
 use crate::error::Result;
 use crate::lexer;
@@ -961,52 +960,17 @@ impl ModuleManager {
     /// first via `clone_pattern_fresh_ids`; direct reuse would give distinct
     /// instances the same NodeId.
     fn substitute_in_pattern(&self, pattern: &Pattern, substitutions: &LookupMap<String, Type>) -> Pattern {
-        let new_kind = match &pattern.kind {
-            PatternKind::Typed(inner, ty) => {
-                let new_inner = Box::new(self.substitute_in_pattern(inner, substitutions));
-                let new_ty = self.substitute_in_type(ty, substitutions);
-                PatternKind::Typed(new_inner, new_ty)
-            }
-            PatternKind::Tuple(pats) => {
-                let new_pats: Vec<Pattern> =
-                    pats.iter().map(|p| self.substitute_in_pattern(p, substitutions)).collect();
-                PatternKind::Tuple(new_pats)
-            }
-            PatternKind::Record(fields) => {
-                let new_fields = fields
-                    .iter()
-                    .map(|field| crate::ast::RecordPatternField {
-                        field: field.field.clone(),
-                        target: match &field.target {
-                            crate::ast::RecordPatternTarget::Shorthand(binding) => {
-                                crate::ast::RecordPatternTarget::Shorthand(binding.clone())
-                            }
-                            crate::ast::RecordPatternTarget::Pattern(pattern) => {
-                                crate::ast::RecordPatternTarget::Pattern(
-                                    self.substitute_in_pattern(pattern, substitutions),
-                                )
-                            }
-                        },
-                    })
-                    .collect();
-                PatternKind::Record(new_fields)
-            }
-            PatternKind::Constructor(name, pats) => {
-                let new_pats: Vec<Pattern> =
-                    pats.iter().map(|p| self.substitute_in_pattern(p, substitutions)).collect();
-                PatternKind::Constructor(name.clone(), new_pats)
-            }
-            PatternKind::Attributed(attrs, inner) => {
-                let new_inner = self.substitute_in_pattern(inner, substitutions);
-                PatternKind::Attributed(attrs.clone(), Box::new(new_inner))
-            }
-            // Name, Wildcard, Literal, Unit don't contain types
-            _ => pattern.kind.clone(),
-        };
-
-        Node {
-            h: pattern.h.clone(),
-            kind: new_kind,
+        let rebuilt: std::result::Result<Pattern, std::convert::Infallible> =
+            crate::ast::rebuild::pattern_with(
+                pattern.clone(),
+                &mut Ok,
+                &mut |_header, binding| Ok(binding),
+                &mut Ok,
+                &mut |ty| Ok(self.substitute_in_type(&ty, substitutions)),
+            );
+        match rebuilt {
+            Ok(pattern) => pattern,
+            Err(error) => match error {},
         }
     }
 
