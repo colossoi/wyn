@@ -522,7 +522,6 @@ impl KernelPlan {
         resources: &LogicalResourceArena,
         entries: &[SemanticEntry],
     ) -> Result<Self, String> {
-        let host_resources = crate::egir::program::host_resource_map(resources);
         let mut seeded = vec![None; entries.len()];
         let entries_by_id = entries.iter().map(|entry| (entry.id, entry)).collect::<HashMap<_, _>>();
         if stage_entries.len() != descriptor.pipelines.len() {
@@ -547,7 +546,7 @@ impl KernelPlan {
             for (stage_order, (stage, &source)) in
                 template.stages.iter().zip(associated_entries).enumerate()
             {
-                let selection = domain_selection_from_stage(stage, &host_resources)?;
+                let selection = domain_selection_from_stage(stage, resources)?;
                 let entry = entries_by_id
                     .get(&source)
                     .copied()
@@ -1223,7 +1222,7 @@ fn execution_workgroup(model: &ExecutionModel) -> (u32, u32, u32) {
 
 fn domain_from_dispatch(
     dispatch: &DispatchSize,
-    host_resources: &HashMap<BindingRef, ResourceId>,
+    resources: &LogicalResourceArena,
 ) -> Result<KernelDomain, String> {
     Ok(match dispatch {
         DispatchSize::Fixed { x, y, z, .. } => KernelDomain::Fixed { x: *x, y: *y, z: *z },
@@ -1236,7 +1235,7 @@ fn domain_from_dispatch(
                 },
             ..
         } => KernelDomain::ResourceElements {
-            resource: *host_resources.get(&BindingRef::new(*set, *binding)).ok_or_else(|| {
+            resource: resources.host_resource(BindingRef::new(*set, *binding)).ok_or_else(|| {
                 format!("descriptor dispatch binding {set}:{binding} is absent from the resource manifest")
             })?,
             elem_bytes: *elem_bytes,
@@ -1247,9 +1246,9 @@ fn domain_from_dispatch(
 
 fn domain_selection_from_stage(
     stage: &ComputeStage,
-    host_resources: &HashMap<BindingRef, ResourceId>,
+    resources: &LogicalResourceArena,
 ) -> Result<KernelDispatch, String> {
-    let domain = domain_from_dispatch(&stage.dispatch_size, host_resources)?;
+    let domain = domain_from_dispatch(&stage.dispatch_size, resources)?;
     Ok(match stage.dispatch_size {
         // Honor the source's explicit intent: a user-pinned `#[dispatch]` grid
         // (including `1x1x1`) stays `Explicit` and is never re-inferred. Only

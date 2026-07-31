@@ -466,9 +466,7 @@ impl LogicalResourceArenaBuilder {
         resource
     }
 
-    pub(crate) fn finish(
-        self,
-    ) -> Result<(HashMap<crate::BindingRef, ResourceId>, LogicalResourceArena), ResourceId> {
+    pub(crate) fn finish(self) -> Result<LogicalResourceArena, ResourceId> {
         let Self {
             by_binding,
             compiler,
@@ -489,15 +487,11 @@ impl LogicalResourceArenaBuilder {
                     .ok_or(id)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let host = by_binding.clone();
-        Ok((
-            by_binding,
-            LogicalResourceArena {
-                resources,
-                host,
-                compiler,
-            },
-        ))
+        Ok(LogicalResourceArena {
+            resources,
+            host: by_binding,
+            compiler,
+        })
     }
 }
 
@@ -535,6 +529,14 @@ impl LogicalResourceArena {
             size,
         });
         id
+    }
+
+    pub(crate) fn host_resource(&self, binding: crate::BindingRef) -> Option<ResourceId> {
+        self.host.get(&binding).copied()
+    }
+
+    pub(crate) fn host_bindings(&self) -> impl Iterator<Item = crate::BindingRef> + '_ {
+        self.host.keys().copied()
     }
 
     #[cfg(test)]
@@ -627,10 +629,6 @@ impl<'a> IntoIterator for &'a mut LogicalResourceArena {
     }
 }
 
-pub(crate) fn host_resource_map(resources: &[LogicalResource]) -> HashMap<crate::BindingRef, ResourceId> {
-    resources.iter().filter_map(|resource| Some((resource.host_binding()?, resource.id))).collect()
-}
-
 pub(crate) fn host_resource_names(resources: &[LogicalResource]) -> LookupMap<(u32, u32), String> {
     resources
         .iter()
@@ -647,20 +645,23 @@ pub(crate) fn host_resource_names(resources: &[LogicalResource]) -> LookupMap<(u
 /// resource arena and replacing descriptor-shaped identities inside the
 /// just-built graphs and types. No later semantic pass is allowed to perform
 /// this rewrite or to introduce a binding-backed semantic resource.
-pub(crate) fn finalize_converted_resources(
-    inner: &mut super::from_tlc::Converted,
-    by_binding: &HashMap<crate::BindingRef, ResourceId>,
-) {
-    for entry in &mut inner.entry_points {
-        normalize_converted_graph_types(&mut entry.graph, by_binding);
+pub(crate) fn finalize_converted_resources(inner: &mut super::from_tlc::Converted) {
+    {
+        let by_binding = &inner.data.resources.host;
+        for entry in &mut inner.entry_points {
+            normalize_converted_graph_types(&mut entry.graph, by_binding);
+        }
+        for function in &mut inner.functions {
+            normalize_converted_graph_types(&mut function.graph, by_binding);
+        }
+        for constant in &mut inner.constants {
+            normalize_converted_graph_types(&mut constant.graph, by_binding);
+        }
     }
-    for function in &mut inner.functions {
-        normalize_converted_graph_types(&mut function.graph, by_binding);
-    }
-    for constant in &mut inner.constants {
-        normalize_converted_graph_types(&mut constant.graph, by_binding);
-    }
-    normalize_structural_resources(inner, by_binding);
+
+    normalize_structural_resources(inner);
+
+    let by_binding = &inner.data.resources.host;
     for entry in &mut inner.entry_points {
         for input in &mut entry.inputs {
             input.resource = input
@@ -694,11 +695,9 @@ fn normalize_converted_graph_types(
     rewrite_raw_graph_types(graph, |ty| normalize_type_resources(ty, by_binding));
 }
 
-fn normalize_structural_resources(
-    inner: &mut super::from_tlc::Converted,
-    by_binding: &HashMap<crate::BindingRef, ResourceId>,
-) {
-    for resource in &mut inner.data.resources {
+fn normalize_structural_resources(inner: &mut super::from_tlc::Converted) {
+    let by_binding = &inner.data.resources.host;
+    for resource in &mut inner.data.resources.resources {
         normalize_type_resources(&mut resource.elem_ty, by_binding);
     }
     for entry in &mut inner.entry_points {
@@ -1580,7 +1579,7 @@ impl PhysicalResourceTable {
         ids: &mut crate::IdSource<u32>,
         reserved: impl IntoIterator<Item = crate::BindingRef>,
     ) -> Self {
-        let mut used = host_resource_map(resources).into_keys().collect::<std::collections::HashSet<_>>();
+        let mut used = resources.host_bindings().collect::<std::collections::HashSet<_>>();
         used.extend(reserved);
         let mut bindings = Vec::with_capacity(resources.len());
         let mut compiler_owned = Vec::with_capacity(resources.len());

@@ -45,12 +45,9 @@ use ExecutionModel as _;
 use super::from_tlc::ConvertError;
 use super::ir::{RealizedOutputRoute, UnrealizedOutputRoute};
 use super::program::{
-    host_resource_map, Entry, LogicalResourceArena, OutputWriter, Program, RawEntry, SemanticResourceRef,
-    SlotSource,
+    Entry, LogicalResourceArena, OutputWriter, Program, RawEntry, SemanticResourceRef, SlotSource,
 };
 use super::types::{EGraph, EffectToken, NodeId, Raw, SkeletonTerminator, SoacEffect};
-use crate::ResourceId;
-use std::collections::HashMap;
 
 pub mod dispatch;
 pub mod reconcile;
@@ -68,7 +65,6 @@ pub fn realize_outputs(program: super::from_tlc::Converted) -> Result<OutputsRea
         mut global_context,
         state: _,
     } = program;
-    let by_binding = host_resource_map(&data.resources);
     let entry_points = entry_points
         .into_iter()
         .map(|entry| {
@@ -76,12 +72,7 @@ pub fn realize_outputs(program: super::from_tlc::Converted) -> Result<OutputsRea
                 source,
                 writers: Vec::new(),
             });
-            realize_entry(
-                entry,
-                &by_binding,
-                &mut data.resources,
-                &mut global_context.effect_ids,
-            )
+            realize_entry(entry, &mut data.resources, &mut global_context.effect_ids)
         })
         .collect::<Result<_, ConvertError>>()?;
     let program = Program::from_parts(functions, externs, entry_points, constants, data, global_context);
@@ -93,7 +84,6 @@ pub fn realize_outputs(program: super::from_tlc::Converted) -> Result<OutputsRea
 
 fn realize_entry(
     mut entry: RawEntry<RealizedOutputRoute>,
-    by_binding: &HashMap<crate::BindingRef, ResourceId>,
     resources: &mut LogicalResourceArena,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<RawEntry<RealizedOutputRoute>, ConvertError> {
@@ -104,7 +94,7 @@ fn realize_entry(
         if entry.routes().next().is_none() {
             synthesize_compute_routes(&mut entry);
         }
-        realize_compute_slots(&mut entry, by_binding, resources, effect_ids)?;
+        realize_compute_slots(&mut entry, resources, effect_ids)?;
         clear_compute_returns(&mut entry);
     } else {
         realize_graphics_returns(&mut entry, effect_ids)?;
@@ -128,7 +118,6 @@ fn clear_compute_returns(entry: &mut RawEntry<RealizedOutputRoute>) {
 /// share one view; runtime CFG picks which source's write fires.
 fn realize_compute_slots(
     entry: &mut RawEntry<RealizedOutputRoute>,
-    by_binding: &HashMap<crate::BindingRef, ResourceId>,
     resources: &mut LogicalResourceArena,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), ConvertError> {
@@ -144,7 +133,8 @@ fn realize_compute_slots(
 
     for (slot_index, output) in outputs.iter_mut().enumerate() {
         let binding = output.storage_binding().expect("BUG: compute output without storage binding");
-        let resource = *by_binding.get(&binding).expect("compute output must have a semantic resource");
+        let resource =
+            resources.host_resource(binding).expect("compute output must have a semantic resource");
         let sources: Vec<SlotSource> = output.routes.iter().map(|route| route.source).collect();
         if sources.is_empty() {
             return Err(ConvertError::Unsupported(format!(

@@ -450,7 +450,7 @@ pub fn run(
         resources,
         ..
     } = arenas;
-    let (by_binding, resources) = resources.finish().map_err(|resource| {
+    let resources = resources.finish().map_err(|resource| {
         ConvertError::Internal(format!(
             "semantic resource {resource:?} was referenced but never declared"
         ))
@@ -472,7 +472,7 @@ pub fn run(
             semantic_ids: SemanticOpIdSource::default(),
         },
     );
-    super::program::finalize_converted_resources(&mut converted, &by_binding);
+    super::program::finalize_converted_resources(&mut converted);
     Ok(converted)
 }
 
