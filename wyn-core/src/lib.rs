@@ -626,7 +626,7 @@ pub fn to_egraph(
     program: tlc::stage::InputSliceBoundsInferred,
 ) -> std::result::Result<egir::from_tlc::Converted, ConvertError> {
     let binding_ids = program.global_context.auto_storage_binding_ids.clone();
-    egir::from_tlc::run(&program, binding_ids, IdSource::new())
+    egir::from_tlc::convert_program(&program, binding_ids, IdSource::new())
 }
 
 // =============================================================================

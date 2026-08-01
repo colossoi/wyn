@@ -41,7 +41,7 @@ struct Retype {
     arg_ty: Type<TypeName>,
 }
 
-pub fn run<Tag, Shape, GlobalContext>(
+pub fn reconcile_representation_drift<Tag, Shape, GlobalContext>(
     program: Program<Tag, Shape, GlobalContext>,
 ) -> Result<Program<Tag, Shape, GlobalContext>, ConvertError>
 where

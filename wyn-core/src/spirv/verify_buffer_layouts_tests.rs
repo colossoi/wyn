@@ -96,7 +96,8 @@ fn accepts_runtime_array_of_concrete_scalar() {
     let mut program = empty_program();
     program.entry_points.push(e);
 
-    verify_buffer_layouts::run(&program).expect("runtime []u32 is the canonical legal storage shape");
+    verify_buffer_layouts::verify_buffer_layouts(&program)
+        .expect("runtime []u32 is the canonical legal storage shape");
 }
 
 #[test]
@@ -108,7 +109,8 @@ fn rejects_input_whose_elem_is_a_runtime_array() {
     let mut program = empty_program();
     program.entry_points.push(e);
 
-    let err = verify_buffer_layouts::run(&program).expect_err("nested-runtime elem must be rejected");
+    let err = verify_buffer_layouts::verify_buffer_layouts(&program)
+        .expect_err("nested-runtime elem must be rejected");
     match err {
         CompilerError::SpirvError(msg, _) => {
             assert!(msg.contains("bad_input"), "names the entry: {msg}");
@@ -132,7 +134,8 @@ fn rejects_output_whose_elem_is_a_runtime_array() {
     let mut program = empty_program();
     program.entry_points.push(e);
 
-    let err = verify_buffer_layouts::run(&program).expect_err("nested-runtime output must be rejected");
+    let err = verify_buffer_layouts::verify_buffer_layouts(&program)
+        .expect_err("nested-runtime output must be rejected");
     assert!(matches!(err, CompilerError::SpirvError(_, _)));
 }
 
@@ -152,7 +155,8 @@ fn rejects_compiler_introduced_binding_with_runtime_elem() {
     let mut program = empty_program();
     program.entry_points.push(e);
 
-    let err = verify_buffer_layouts::run(&program).expect_err("runtime-array elem must be rejected");
+    let err = verify_buffer_layouts::verify_buffer_layouts(&program)
+        .expect_err("runtime-array elem must be rejected");
     match err {
         CompilerError::SpirvError(msg, _) => {
             assert!(msg.contains("bad_intermediate") && msg.contains("set=3") && msg.contains("binding=4"));
@@ -163,5 +167,5 @@ fn rejects_compiler_introduced_binding_with_runtime_elem() {
 
 #[test]
 fn accepts_empty_program() {
-    verify_buffer_layouts::run(&empty_program()).expect("empty program passes");
+    verify_buffer_layouts::verify_buffer_layouts(&empty_program()).expect("empty program passes");
 }

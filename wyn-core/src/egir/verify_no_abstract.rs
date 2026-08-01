@@ -33,7 +33,7 @@ pub type Result<T> = std::result::Result<T, CompilerError>;
 /// _, _]`. The first offending value is returned as a `TypeError`; the
 /// message names the function/entry/constant and the value index so the
 /// user can locate the source span via `--output-mir`.
-pub fn run<Tag, GlobalContext>(program: &Program<Tag, GlobalContext>) -> Result<()> {
+pub fn verify_no_abstract_types<Tag, GlobalContext>(program: &Program<Tag, GlobalContext>) -> Result<()> {
     for func in &program.functions {
         check_body(&format!("function `{}`", func.name), &func.body)?;
     }

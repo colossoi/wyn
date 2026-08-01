@@ -2,7 +2,7 @@
 // Tests
 // ============================================================================
 
-use super::{run, ConversionArenas, Converter};
+use super::{convert_program, ConversionArenas, Converter};
 use crate::ast::TypeName;
 use crate::ssa::types::{FuncBody, InstKind};
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 /// SPIR-V-specific dynamic-index rewrites.
 fn compile_via_egir(src: &str) -> crate::ssa::stage::Elaborated {
     let tlc = crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(src));
-    let program = run(&tlc, crate::IdSource::<u32>::new(), crate::IdSource::new())
+    let program = convert_program(&tlc, crate::IdSource::<u32>::new(), crate::IdSource::new())
         .expect("egir::from_tlc conversion failed");
     let program = crate::egir::realize_outputs(program).expect("egir::realize_outputs failed");
     let program = crate::egir::reify_soacs(program);
@@ -622,7 +622,7 @@ entry e(xs: []i32) []i32 = map(wrapper, xs)
     let tlc = crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(source));
     let binding_ids = crate::IdSource::<u32>::new();
     let effect_ids = crate::IdSource::new();
-    let raw = run(&tlc, binding_ids, effect_ids).expect("TLC-to-EGIR construction succeeds");
+    let raw = convert_program(&tlc, binding_ids, effect_ids).expect("TLC-to-EGIR construction succeeds");
     let choose = raw.functions.iter().find(|function| function.name == "choose").unwrap().region;
     let wrapper = raw.functions.iter().find(|function| function.name == "wrapper").unwrap();
 
@@ -776,8 +776,8 @@ entry vertex_main(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: 
 
     let binding_ids = crate::IdSource::<u32>::new();
     let effect_ids = crate::IdSource::new();
-    let egir = super::run(&tlc_program, binding_ids, effect_ids)
-        .expect("from_tlc::run on graphics entry must succeed");
+    let egir = super::convert_program(&tlc_program, binding_ids, effect_ids)
+        .expect("from_tlc::convert_program on graphics entry must succeed");
     let entry =
         egir.entry_points.iter().find(|e| e.name == "vertex_main").expect("vertex_main SemanticEntry");
 

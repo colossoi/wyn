@@ -746,7 +746,7 @@ impl HofSpecializer<'_> {
     }
 }
 
-pub(super) fn run(program: &mut Defunctionalized) {
+pub(super) fn specialize_higher_order_functions(program: &mut Defunctionalized) {
     let hof_info = detect_hofs(&program.defs);
     let top_level = program.defs.iter().map(|def| def.name).collect();
 

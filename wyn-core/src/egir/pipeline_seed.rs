@@ -16,7 +16,7 @@ pub(super) struct PipelineSeed {
     pub stage_symbols: Vec<Vec<SymbolId>>,
 }
 
-pub(super) fn run(program: &Program) -> PipelineSeed {
+pub(super) fn build(program: &Program) -> PipelineSeed {
     let mut pipelines = Vec::new();
     let mut stage_symbols = Vec::new();
 

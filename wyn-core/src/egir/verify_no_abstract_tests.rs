@@ -76,7 +76,8 @@ fn rejects_abstract_on_function_param() {
     let mut program = empty_program();
     program.functions.push(function_with(vec![(abstract_array_ty(), "xs".into())], i32_ty()));
 
-    let err = verify_no_abstract::run(&program).expect_err("Abstract param must be rejected");
+    let err = verify_no_abstract::verify_no_abstract_types(&program)
+        .expect_err("Abstract param must be rejected");
     match err {
         CompilerError::TypeError(msg, _) => {
             assert!(
@@ -95,7 +96,8 @@ fn rejects_abstract_on_entry_param() {
     let mut program = empty_program();
     program.entry_points.push(entry_with(vec![(abstract_array_ty(), "xs".into())], i32_ty()));
 
-    let err = verify_no_abstract::run(&program).expect_err("Abstract entry param must be rejected");
+    let err = verify_no_abstract::verify_no_abstract_types(&program)
+        .expect_err("Abstract entry param must be rejected");
     assert!(matches!(err, CompilerError::TypeError(_, _)));
 }
 
@@ -108,7 +110,8 @@ fn rejects_abstract_nested_in_tuple() {
     let mut program = empty_program();
     program.functions.push(function_with(vec![(tuple_with_abstract, "t".into())], i32_ty()));
 
-    let err = verify_no_abstract::run(&program).expect_err("nested Abstract must be rejected");
+    let err = verify_no_abstract::verify_no_abstract_types(&program)
+        .expect_err("nested Abstract must be rejected");
     assert!(matches!(err, CompilerError::TypeError(_, _)));
 }
 
@@ -140,11 +143,12 @@ fn accepts_concrete_variants() {
     program.functions.push(function_with(vec![(view_arr, "v".into())], i32_ty()));
     program.functions.push(function_with(vec![(bounded_arr, "b".into())], i32_ty()));
 
-    verify_no_abstract::run(&program).expect("concrete variants must pass the verifier");
+    verify_no_abstract::verify_no_abstract_types(&program)
+        .expect("concrete variants must pass the verifier");
 }
 
 /// Empty program — trivially clean.
 #[test]
 fn accepts_empty_program() {
-    verify_no_abstract::run(&empty_program()).expect("empty program passes");
+    verify_no_abstract::verify_no_abstract_types(&empty_program()).expect("empty program passes");
 }

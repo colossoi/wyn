@@ -10,7 +10,7 @@ use crate::builtins::catalog;
 use crate::types::TypeExt;
 use polytype::Type;
 
-pub(super) fn run(program: &mut SoaNormalized) {
+pub(super) fn specialize_intrinsics(program: &mut SoaNormalized) {
     let (defs, term_ids) = (&mut program.defs, &mut program.term_ids);
     let mut specializer = IntrinsicSpecializer { term_ids };
     for def in defs {

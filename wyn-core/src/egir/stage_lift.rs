@@ -75,7 +75,7 @@ struct StageLiftCandidate {
     calls_inlined: usize,
 }
 
-pub(crate) fn run(program: Segmented) -> Result<Segmented> {
+pub(crate) fn lift_stage_uniform_values(program: Segmented) -> Result<Segmented> {
     run_with_stats(program).map(|(program, _)| program)
 }
 

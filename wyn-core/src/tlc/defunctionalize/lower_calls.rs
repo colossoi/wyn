@@ -140,7 +140,7 @@ impl TermRewriter<ExplicitClosurePayload, ExplicitCapturesPayload> for CallLower
     }
 }
 
-pub(super) fn run(program: &mut Defunctionalized) {
+pub(super) fn lower_closure_calls(program: &mut Defunctionalized) {
     let mut lowerer = CallLowerer {
         term_ids: &mut program.term_ids,
     };

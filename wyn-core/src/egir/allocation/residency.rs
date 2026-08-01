@@ -132,7 +132,7 @@ pub fn resolve_residency(mut program: ResourcesAllocated) -> Result<ResourcesAll
         };
         program = apply_materialization(program, plan)?;
     }
-    program = super::super::realize_outputs::reconcile::run(program)
+    program = super::super::realize_outputs::reconcile::reconcile_representation_drift(program)
         .map_err(|error| format!("materialized storage-view reconciliation failed: {error}"))?;
     if cfg!(debug_assertions) {
         super::super::realize_outputs::verify::check(&program).map_err(|error| error.to_string())?;

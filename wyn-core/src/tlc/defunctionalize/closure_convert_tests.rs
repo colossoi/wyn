@@ -410,7 +410,7 @@ fn reduce_with_operator(
         return_diet: crate::types::Diet::observing(),
     });
 
-    let result = run(program);
+    let result = convert_closures(program);
     (result, g, main)
 }
 

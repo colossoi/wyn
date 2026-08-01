@@ -814,7 +814,9 @@ impl ClosureConverter {
     }
 }
 
-pub(super) fn run(program: crate::tlc::stage::RuntimeIndexProducersFloated) -> Defunctionalized {
+pub(super) fn convert_closures(
+    program: crate::tlc::stage::RuntimeIndexProducersFloated,
+) -> Defunctionalized {
     let Program {
         defs,
         symbols,

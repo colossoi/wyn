@@ -56,8 +56,8 @@ pub fn optimize_semantics(program: Segmented) -> Optimized {
         break;
     }
 
-    program =
-        super::stage_lift::run(program).expect("stage-uniform region lifting must preserve semantic EGIR");
+    program = super::stage_lift::lift_stage_uniform_values(program)
+        .expect("stage-uniform region lifting must preserve semantic EGIR");
 
     if cfg!(debug_assertions) {
         if let Err(error) = super::semantic_graph::verify(&program) {

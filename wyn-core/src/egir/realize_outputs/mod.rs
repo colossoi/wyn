@@ -21,7 +21,7 @@
 //! materializes any runtime composite arrays exposed by non-output consumers;
 //! its verifier checks the completed representation boundary.
 //!
-//! Runs after `from_tlc::run`, before segmentation: the SOAC→OutputView
+//! Runs after `from_tlc::convert_program`, before segmentation: the SOAC→OutputView
 //! rewrite must precede SOAC wrapping/expansion.
 
 /// EGIR whose entry outputs own their realized writer routes.
@@ -79,7 +79,7 @@ pub fn realize_outputs(program: super::from_tlc::Converted) -> Result<OutputsRea
     // Output retargeting can rewrite a captured `map` result from a Composite
     // array to a storage view; sync each capturing region's parameter type so
     // the region body lowers consistently.
-    reconcile::run(program)
+    reconcile::reconcile_representation_drift(program)
 }
 
 fn realize_entry(

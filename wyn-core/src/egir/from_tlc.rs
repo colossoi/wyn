@@ -296,7 +296,7 @@ impl<'a> GlobalContext<'a> {
 /// point becomes a per-body `EGraph` + metadata, waiting for the caller to
 /// chain the pipeline (`expand_soacs → [materialize →] optimize_skeleton →
 /// elaborate`).
-pub fn run(
+pub fn convert_program(
     program: &TlcProgram,
     mut binding_ids: crate::IdSource<u32>,
     mut effect_ids: crate::IdSource<EffectToken>,
@@ -304,7 +304,7 @@ pub fn run(
     let super::pipeline_seed::PipelineSeed {
         pipeline,
         stage_symbols,
-    } = super::pipeline_seed::run(program);
+    } = super::pipeline_seed::build(program);
     let top_level: LookupMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
     let pure_definitions = infer_pure_definitions(program);

@@ -37,7 +37,7 @@ pub type Monomorphized = super::Program<MonomorphizedTag, Monomorphic, super::co
 /// Specialize intrinsic calls, then consume the polymorphic definition graph
 /// into its reachable monomorphic graph.
 pub fn monomorphize(mut program: SoaNormalized) -> Monomorphized {
-    super::specialize::run(&mut program);
+    super::specialize::specialize_intrinsics(&mut program);
 
     let Program {
         defs,

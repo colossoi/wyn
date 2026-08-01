@@ -32,9 +32,9 @@ pub type Defunctionalized =
     super::Program<DefunctionalizedTag, ClosureConverted, super::context::PostClosureGlobal>;
 
 pub fn defunctionalize(program: super::stage::RuntimeIndexProducersFloated) -> Defunctionalized {
-    let mut program = closure_convert::run(program);
-    hof_specialize::run(&mut program);
-    lower_calls::run(&mut program);
+    let mut program = closure_convert::convert_closures(program);
+    hof_specialize::specialize_higher_order_functions(&mut program);
+    lower_calls::lower_closure_calls(&mut program);
     program
 }
 

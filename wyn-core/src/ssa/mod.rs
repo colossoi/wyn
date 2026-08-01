@@ -32,8 +32,8 @@ pub fn prepare_spirv(program: stage::Elaborated) -> crate::error::Result<stage::
             "SSA was scheduled for WGSL and cannot be lowered as SPIR-V"
         ));
     }
-    crate::egir::verify_no_abstract::run(&program)?;
-    crate::spirv::verify_buffer_layouts::run(&program)?;
+    crate::egir::verify_no_abstract::verify_no_abstract_types(&program)?;
+    crate::spirv::verify_buffer_layouts::verify_buffer_layouts(&program)?;
     Ok(program.retag())
 }
 
@@ -45,7 +45,7 @@ pub fn prepare_wgsl(program: stage::Elaborated) -> crate::error::Result<stage::W
             "SSA was scheduled for SPIR-V and cannot be lowered as WGSL"
         ));
     }
-    crate::egir::verify_no_abstract::run(&program)?;
+    crate::egir::verify_no_abstract::verify_no_abstract_types(&program)?;
     Ok(program.retag())
 }
 

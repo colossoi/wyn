@@ -6388,7 +6388,7 @@ entry e() f32 = g(256)
 
 /// Named-callee HOF specialization must also rewrite lifted SOAC closures.
 /// `fbm2` closes over `noise` through a function-typed capture on its lifted
-/// definition. The cascade in `hof_specialize::run` walks reachable defs, finds
+/// definition. The cascade in `hof_specialize::specialize_higher_order_functions` walks reachable defs, finds
 /// `SoacBody`s whose captures include `(_, arrow_ty, Var(known_callable))`,
 /// clones the lifted def with the callable substituted into the body,
 /// and drops the callable param from its signature. Lets `lib/noise.wyn`
