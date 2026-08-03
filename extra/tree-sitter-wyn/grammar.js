@@ -46,7 +46,6 @@ module.exports = grammar({
 
   conflicts: $ => [
     [$.identifier, $.qualified_name],
-    [$.call_expression, $.curry_expression],
     [$.existential_type, $.function_type],
     [$.binary_expression],
   ],
@@ -628,7 +627,7 @@ module.exports = grammar({
     call_expression: $ => prec.left(PREC.CALL, seq(
       field('function', $._expression),
       '(',
-      commaSep($._expression),
+      commaSep(choice($._expression, $.call_placeholder)),
       ')',
     )),
 
@@ -653,7 +652,6 @@ module.exports = grammar({
       $.tuple_expression,
       $.record_expression,
       $.type_hole,
-      $.curry_expression,
       $.parenthesized_expression,
     ),
 
@@ -695,13 +693,7 @@ module.exports = grammar({
       $.identifier,
     ),
 
-    curry_expression: $ => seq(
-      '$',
-      field('function', $._expression),
-      '(',
-      commaSep(choice($._expression, '_')),
-      ')',
-    ),
+    call_placeholder: $ => '_',
 
     type_hole: $ => '???',
 

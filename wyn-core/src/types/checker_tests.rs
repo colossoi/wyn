@@ -48,6 +48,26 @@ fn test_simple_def() {
 }
 
 #[test]
+fn call_sections_typecheck_as_explicit_lambdas() {
+    typecheck_program(
+        r#"
+def add3(a: i32, b: i32, c: i32) i32 = a + b + c
+def result: i32 = add3(_, 5, _)(1, 2)
+"#,
+    );
+}
+
+#[test]
+fn pipe_can_apply_to_an_explicit_trailing_call_section() {
+    typecheck_program(
+        r#"
+def add3(a: i32, b: i32, c: i32) i32 = a + b + c
+def use_pipe(x: i32) i32 = x |> add3(1, 2, _)
+"#,
+    );
+}
+
+#[test]
 fn pipe_desugars_to_saturated_call_and_typechecks() {
     // `x |> f(a, b)` is the saturated call `f(a, b, x)` — no lambda, no
     // currying. It only type-checks because the piped value fills f's

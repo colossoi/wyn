@@ -1106,7 +1106,9 @@ is grouped before being piped: `a + b |> f` is `f(a + b)`, and
 `xs |> map(g) |> filter(p)` is `filter(p, map(g, xs))`. Appending as
 the last argument matches the array-last convention of the built-in
 array operators (`map(f, xs)`, `filter(p, xs)`, `reduce(op, z, xs)`,
-`scan(op, z, xs)`), so those read naturally in a pipeline.
+`scan(op, z, xs)`), so those read naturally in a pipeline. The
+explicit call-section form `x |> f(a, b, _)` is equivalent: the right
+operand is `|value| f(a, b, value)`, to which the pipe applies `x`.
 
 #### #c(x, y, z)
 Apply the sum type constructor `#c` to the payload `x`, `y`, and
@@ -1274,34 +1276,38 @@ This restriction applies uniformly to:
 - Built-in functions
 - Functions passed as higher-order arguments
 
-#### Explicit Currying with Placeholder Syntax
+#### Call Sections
 
-When a partially applied function is needed, use explicit placeholder
-syntax with `$`:
+When a function value with some argument positions left open is needed, use
+placeholder arguments:
 
 ```wyn
 def add(x: i32, y: i32, z: i32) i32 = x + y + z
 
 -- Create a 2-arity function that calls `add` with the middle arg
 -- fixed.
-def add_with_5 = $add(_, 5, _)        -- Produces (i32, i32) -> i32
+def add_with_5 = add(_, 5, _)        -- Produces (i32, i32) -> i32
 
 -- Create a 1-arity function with two of the three args fixed.
-def add_one = $add(_, 1, 0)           -- Produces i32 -> i32
+def add_one = add(_, 1, 0)           -- Produces i32 -> i32
 
 -- Usage
 def result = add_one(5)               -- Returns 6
 ```
 
-The `$func(args...)` syntax:
+A call containing `_` placeholders is a **call section**:
 
-- `_` marks placeholder positions that become parameters of the new
-  function.
-- Non-placeholder arguments are captured at the definition site.
+- Each `_` marks a placeholder position that becomes a distinct
+  parameter of the new function.
+- Non-placeholder arguments remain ordinary expressions in the generated
+  lambda body.
 - The resulting function has arity equal to the number of `_`
   placeholders.
 - The resulting function is itself non-curried (it requires all
   placeholders to be filled at once).
+- A placeholder belongs to its nearest containing call. Thus
+  `outer(inner(_))` is `outer(|x| inner(x))`, not
+  `|x| outer(inner(x))`.
 
 ---
 

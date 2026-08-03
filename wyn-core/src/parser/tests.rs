@@ -3439,13 +3439,13 @@ fn test_parse_def_constant_vs_function() {
 }
 
 // ============================================================
-// Curry/Partial Application Tests ($f(_, arg, _) syntax)
+// Call Section Tests (f(_, arg, _) syntax)
 // ============================================================
 
 #[test]
-fn test_curry_single_placeholder() {
-    // $f(_) should desugar to |_0_| f(_0_)
-    let decl = single_decl("def x = $f(_)");
+fn test_call_section_single_placeholder() {
+    // f(_) should desugar to |_0_| f(_0_)
+    let decl = single_decl("def x = f(_)");
     match &decl.body.kind {
         ExprKind::Lambda(lambda) => {
             assert_eq!(lambda.params.len(), 1);
@@ -3475,9 +3475,9 @@ fn test_curry_single_placeholder() {
 }
 
 #[test]
-fn test_curry_with_fixed_first_arg() {
-    // $f(1, _) should desugar to |_0_| f(1, _0_)
-    let decl = single_decl("def x = $f(1, _)");
+fn test_call_section_with_fixed_first_arg() {
+    // f(1, _) should desugar to |_0_| f(1, _0_)
+    let decl = single_decl("def x = f(1, _)");
     match &decl.body.kind {
         ExprKind::Lambda(lambda) => {
             assert_eq!(lambda.params.len(), 1);
@@ -3505,9 +3505,9 @@ fn test_curry_with_fixed_first_arg() {
 }
 
 #[test]
-fn test_curry_multiple_placeholders() {
-    // $f(_, _, 3) should desugar to |_0_, _1_| f(_0_, _1_, 3)
-    let decl = single_decl("def x = $f(_, _, 3)");
+fn test_call_section_multiple_placeholders() {
+    // f(_, _, 3) should desugar to |_0_, _1_| f(_0_, _1_, 3)
+    let decl = single_decl("def x = f(_, _, 3)");
     match &decl.body.kind {
         ExprKind::Lambda(lambda) => {
             assert_eq!(lambda.params.len(), 2);
@@ -3536,9 +3536,9 @@ fn test_curry_multiple_placeholders() {
 }
 
 #[test]
-fn test_curry_no_placeholder_is_normal_call() {
-    // $f(1, 2) with no placeholders should just be f(1, 2)
-    let decl = single_decl("def x = $f(1, 2)");
+fn test_call_without_placeholder_is_normal_call() {
+    // f(1, 2) with no placeholders should just be f(1, 2)
+    let decl = single_decl("def x = f(1, 2)");
     match &decl.body.kind {
         ExprKind::Application(func, args) => {
             assert_eq!(args.len(), 2);
@@ -3552,9 +3552,9 @@ fn test_curry_no_placeholder_is_normal_call() {
 }
 
 #[test]
-fn test_curry_with_field_access() {
-    // $foo.bar(_, 1) should work with field access
-    let decl = single_decl("def x = $foo.bar(_, 1)");
+fn test_call_section_with_field_access() {
+    // foo.bar(_, 1) should work with field access
+    let decl = single_decl("def x = foo.bar(_, 1)");
     match &decl.body.kind {
         ExprKind::Lambda(lambda) => {
             assert_eq!(lambda.params.len(), 1);
@@ -3579,6 +3579,43 @@ fn test_curry_with_field_access() {
         }
         other => panic!("Expected Lambda, got {:?}", other),
     }
+}
+
+#[test]
+fn call_section_placeholder_belongs_to_nearest_call() {
+    let decl = single_decl("def x = outer(inner(_))");
+    let ExprKind::Application(outer, outer_args) = &decl.body.kind else {
+        panic!("Expected outer application, got {:?}", decl.body.kind);
+    };
+    assert!(matches!(
+        &outer.kind,
+        ExprKind::Identifier(crate::ast::Identifier { name, .. }) if name == "outer"
+    ));
+    assert_eq!(outer_args.len(), 1);
+
+    let ExprKind::Lambda(section) = &outer_args[0].kind else {
+        panic!("Expected nested call section, got {:?}", outer_args[0].kind);
+    };
+    assert_eq!(section.params.len(), 1);
+    assert!(matches!(
+        &section.body.kind,
+        ExprKind::Application(inner, args)
+            if matches!(&inner.kind, ExprKind::Identifier(crate::ast::Identifier { name, .. }) if name == "inner")
+                && args.len() == 1
+    ));
+}
+
+#[test]
+fn call_section_accepts_an_arbitrary_callee_expression() {
+    let decl = single_decl("def x = (if true then f else g)(_)");
+    let ExprKind::Lambda(section) = &decl.body.kind else {
+        panic!("Expected call section, got {:?}", decl.body.kind);
+    };
+    assert!(matches!(
+        &section.body.kind,
+        ExprKind::Application(callee, args)
+            if matches!(&callee.kind, ExprKind::If(_)) && args.len() == 1
+    ));
 }
 
 // =============================================================================

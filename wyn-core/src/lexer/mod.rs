@@ -174,7 +174,6 @@ pub enum Token {
     QuestionMark, // ? for existential types
     TypeHole,     // ??? for type holes (placeholder expressions)
     At,           // @ for as-patterns (future)
-    DollarSign,   // $ for curried/partial application
 
     // Delimiters
     LeftParen,
@@ -336,7 +335,6 @@ fn parse_operator(input: &str) -> IResult<&str, Token> {
             value(Token::Bang, char('!')),
             value(Token::QuestionMark, char('?')),
             value(Token::At, char('@')),
-            value(Token::DollarSign, char('$')),
         )),
     ))(input)
 }

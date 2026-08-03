@@ -61,8 +61,9 @@ fn get_matrix_types() -> &'static LookupMap<String, Type> {
     MATRIX_TYPES.get_or_init(types::matrix_type_constructors)
 }
 
-/// Argument in a curry expression - either a placeholder (_) or a real expression
-enum CurryArg {
+/// Argument in a function call: either a call-section placeholder (`_`) or a
+/// regular expression.
+enum CallArg {
     Placeholder,
     Expr(Expression),
 }
@@ -2261,11 +2262,19 @@ impl<'a> Parser<'a> {
         self.parse_postfix_expression()
     }
 
-    /// Parse comma-separated arguments for function calls: (x, y, z)
-    /// Returns empty vec for (), single element for (x), etc.
-    fn parse_call_arguments(&mut self) -> Result<Vec<Expression>> {
+    /// Parse comma-separated arguments for function calls: `(x, y, z)`.
+    /// A bare `_` is a call-section placeholder owned by this call; underscores
+    /// inside a nested call are therefore consumed by that nested call instead.
+    fn parse_call_arguments(&mut self) -> Result<Vec<CallArg>> {
         trace!("parse_call_arguments: next token = {:?}", self.peek());
-        self.parse_delimited_list(&Token::RightParen, true, |parser| parser.parse_expression())
+        self.parse_delimited_list(&Token::RightParen, true, |parser| {
+            if parser.check(&Token::Underscore) {
+                parser.advance();
+                Ok(CallArg::Placeholder)
+            } else {
+                Ok(CallArg::Expr(parser.parse_expression()?))
+            }
+        })
     }
 
     fn parse_postfix_expression(&mut self) -> Result<Expression> {
@@ -2303,13 +2312,61 @@ impl<'a> Parser<'a> {
                     self.expect(Token::RightParen)?;
                     let end_span = self.previous_span();
                     let span = start_span.merge(&end_span);
-                    expr = self.node_counter.mk_node(ExprKind::Application(Box::new(expr), args), span);
+                    expr = self.build_call_or_section(expr, args, span);
                 }
                 _ => break,
             }
         }
 
         Ok(expr)
+    }
+
+    /// Build an ordinary call, or desugar a call containing placeholders into
+    /// a lambda. Each `_` introduces a distinct parameter in left-to-right
+    /// order:
+    ///
+    /// `f(a, _, c, _)` becomes `|_0_, _1_| f(a, _0_, c, _1_)`.
+    fn build_call_or_section(&mut self, func: Expression, args: Vec<CallArg>, span: Span) -> Expression {
+        if !args.iter().any(|arg| matches!(arg, CallArg::Placeholder)) {
+            let args = args
+                .into_iter()
+                .map(|arg| match arg {
+                    CallArg::Expr(expr) => expr,
+                    CallArg::Placeholder => unreachable!(),
+                })
+                .collect();
+            return self.node_counter.mk_node(ExprKind::Application(Box::new(func), args), span);
+        }
+
+        let mut params = Vec::new();
+        let mut next_param = 0;
+        let call_args = args
+            .into_iter()
+            .map(|arg| match arg {
+                CallArg::Placeholder => {
+                    let name = format!("_{}_", next_param);
+                    next_param += 1;
+                    params.push(self.node_counter.mk_node(PatternKind::Name(name.clone()), span));
+                    self.node_counter.mk_node(
+                        ExprKind::Identifier(Identifier {
+                            qualifiers: vec![],
+                            name,
+                        }),
+                        span,
+                    )
+                }
+                CallArg::Expr(expr) => expr,
+            })
+            .collect();
+
+        let body = self.node_counter.mk_node(ExprKind::Application(Box::new(func), call_args), span);
+        self.node_counter.mk_node(
+            ExprKind::Lambda(LambdaExpr {
+                params,
+                body: Box::new(body),
+            }),
+            span,
+        )
     }
 
     /// Parse either array indexing `a[i]` or array slicing `a[start..end]`
@@ -2578,157 +2635,11 @@ impl<'a> Parser<'a> {
             Some(Token::If) => self.parse_if_then_else(),
             Some(Token::Loop) => self.parse_loop(),
             Some(Token::Match) => self.parse_match(),
-            Some(Token::DollarSign) => self.parse_curry_expression(),
             _ => {
                 let span = self.current_span();
                 Err(err_parse_at!(span, "Expected expression, got {:?}", self.peek()))
             }
         }
-    }
-
-    /// Parse a curry expression: $expr(args) where args may contain _ placeholders
-    /// Desugars to a lambda if there are placeholders
-    fn parse_curry_expression(&mut self) -> Result<Expression> {
-        trace!("parse_curry_expression: next token = {:?}", self.peek());
-        let start_span = self.current_span();
-        self.expect(Token::DollarSign)?;
-
-        // Parse the function expression (identifier, field access, array index, but NOT call)
-        let func = self.parse_curry_base()?;
-
-        // Require parenthesized arguments
-        self.expect(Token::LeftParen)?;
-        let args = self.parse_curry_arguments()?;
-        self.expect(Token::RightParen)?;
-        let end_span = self.previous_span();
-        let span = start_span.merge(&end_span);
-
-        // Check for underscore placeholders
-        let placeholder_indices: Vec<usize> = args
-            .iter()
-            .enumerate()
-            .filter_map(
-                |(i, arg)| {
-                    if matches!(arg, CurryArg::Placeholder) {
-                        Some(i)
-                    } else {
-                        None
-                    }
-                },
-            )
-            .collect();
-
-        if placeholder_indices.is_empty() {
-            // No placeholders - just a normal application
-            let real_args: Vec<Expression> = args
-                .into_iter()
-                .map(|a| match a {
-                    CurryArg::Expr(e) => e,
-                    CurryArg::Placeholder => unreachable!(),
-                })
-                .collect();
-            return Ok(self.node_counter.mk_node(ExprKind::Application(Box::new(func), real_args), span));
-        }
-
-        // Desugar to lambda
-        self.desugar_curry(func, args, span)
-    }
-
-    /// Parse the base of a curry expression (function without the call)
-    /// Handles identifiers, field access, and array indexing, but stops before (
-    fn parse_curry_base(&mut self) -> Result<Expression> {
-        let mut expr = self.parse_primary_expression()?;
-
-        loop {
-            match self.peek() {
-                Some(Token::LeftBracket) => {
-                    // Array indexing: arr[0]
-                    let start_span = expr.h.span;
-                    self.advance();
-                    let index = self.parse_expression()?;
-                    self.expect(Token::RightBracket)?;
-                    let end_span = self.previous_span();
-                    let span = start_span.merge(&end_span);
-                    expr = self
-                        .node_counter
-                        .mk_node(ExprKind::ArrayIndex(Box::new(expr), Box::new(index)), span);
-                }
-                Some(Token::Dot) => {
-                    // Field access (v.x, t.0)
-                    let start_span = expr.h.span;
-                    self.advance();
-                    let field_name = self.expect_field_name()?;
-                    let end_span = self.previous_span();
-                    let span = start_span.merge(&end_span);
-                    expr =
-                        self.node_counter.mk_node(ExprKind::FieldAccess(Box::new(expr), field_name), span);
-                }
-                // Stop before ( - that's handled by parse_curry_expression
-                _ => break,
-            }
-        }
-
-        Ok(expr)
-    }
-
-    /// Parse curry arguments, treating _ as a placeholder
-    fn parse_curry_arguments(&mut self) -> Result<Vec<CurryArg>> {
-        self.parse_delimited_list(&Token::RightParen, true, |parser| {
-            if parser.check(&Token::Underscore) {
-                parser.advance();
-                Ok(CurryArg::Placeholder)
-            } else {
-                Ok(CurryArg::Expr(parser.parse_expression()?))
-            }
-        })
-    }
-
-    /// Desugar curry expression to lambda
-    /// $f(a, _, b, _) -> |_0_, _1_| f(a, _0_, b, _1_)
-    fn desugar_curry(&mut self, func: Expression, args: Vec<CurryArg>, span: Span) -> Result<Expression> {
-        // Generate lambda params: _0_, _1_, ...
-        let mut params = Vec::new();
-        let mut param_idx = 0;
-
-        for arg in &args {
-            if matches!(arg, CurryArg::Placeholder) {
-                let name = format!("_{}_", param_idx);
-                let param = self.node_counter.mk_node(PatternKind::Name(name), span);
-                params.push(param);
-                param_idx += 1;
-            }
-        }
-
-        // Build argument list, replacing placeholders with param references
-        let mut param_idx = 0;
-        let call_args: Vec<Expression> = args
-            .into_iter()
-            .map(|arg| match arg {
-                CurryArg::Placeholder => {
-                    let name = format!("_{}_", param_idx);
-                    param_idx += 1;
-                    self.node_counter.mk_node(
-                        ExprKind::Identifier(Identifier {
-                            qualifiers: vec![],
-                            name,
-                        }),
-                        span,
-                    )
-                }
-                CurryArg::Expr(e) => e,
-            })
-            .collect();
-
-        // Build the function call: func(args...)
-        let body = self.node_counter.mk_node(ExprKind::Application(Box::new(func), call_args), span);
-
-        // Build the lambda: |_0_, _1_, ...| body
-        let lambda = LambdaExpr {
-            params,
-            body: Box::new(body),
-        };
-
-        Ok(self.node_counter.mk_node(ExprKind::Lambda(lambda), span))
     }
 
     fn parse_array_literal(&mut self) -> Result<Expression> {
