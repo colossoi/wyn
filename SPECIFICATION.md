@@ -5,9 +5,7 @@
 Wyn is a functional, array-centric language for GPU programming.
 Function values are erased before execution, so programs run on GPU
 targets that have no first-class function pointers. The array surface
-unifies the several incompatible array kinds a GPU exposes —
-function-local arrays, vectors, storage buffers — into a single
-paradigm.
+provides one array kind for external inputs, intermediate values, and results.
 
 ### Design Goals
 
@@ -34,11 +32,9 @@ paradigm.
 - **Size-typed arrays**: array lengths participate in the type system;
   `def f(xs: [n]i32) [n]i32` declares a function whose output has the
   same length as its input.
-- **Attribute-driven shader interface**: attributes (`#[vertex_slot]`,
-  `#[varying]`, `#[target]`,
-  `#[builtin]`, `#[storage]`, `#[uniform]`, `#[texture]`, `#[sampler]`,
-  …) wire entry-point parameters and returns to GPU resources,
-  built-ins, and inter-stage I/O.
+- **Unified pipeline entries**: a host invokes one `entry`; ordinary
+  values connect the computations within it, and special invocation
+  forms introduce compute, vertex, rasterization, and fragment work.
 
 ### Program Structure
 
@@ -50,25 +46,21 @@ data-parallel organization of modern GPU hardware. Operators such as
 while function values specialize each operator invocation by
 capturing values from the surrounding scope.
 
-Most non-trivial programs are compositions of these operators. Rather
-than writing execution pipelines explicitly, programmers describe
-transformations of arrays; the compiler constructs GPU pipelines that
-preserve the program's semantics while exploiting the available
-parallelism. The programmer describes transformations; the compiler
-derives the pipeline.
+Most non-trivial programs are compositions of these operators. A program
+describes transformations of values rather than a sequence of storage
+operations. Parallel evaluation is permitted only where the relevant
+language construct permits it.
 
 A Wyn program is a sequence of declarations. The smallest interesting
-program is a single compute entry point:
+program is a single host-visible entry:
 
 ```wyn
-#[compute]
 entry double(arr: []f32) []f32 = map(|x| x * 2.0, arr)
 ```
 
-`entry` marks a function as visible to the host runtime; the
-`#[compute]` attribute (or `#[vertex]` / `#[fragment]`) selects the
-GPU pipeline stage. Anything that's not an entry point is an
-ordinary function or value, defined with `def`:
+`entry` marks the root operation visible to the host. It does not name
+a GPU pipeline stage. Anything that is not a root entry is an ordinary
+function or value, defined with `def`:
 
 ```wyn
 def gravity: f32 = 9.81
@@ -90,32 +82,27 @@ def normalize(xs: [n]f32) [n]f32 =
   map(|x| x / total, xs)
 ```
 
-A typical graphics program splits across two entry points — a vertex
-stage that emits per-vertex position and varyings, and a fragment
-stage that consumes the matched varyings and writes a color:
+A graphics entry contains the relationship among its compute, vertex,
+and fragment work. Stage callbacks are ordinary function expressions;
+their role follows from the special invocation form to which they are
+passed:
 
 ```wyn
-#[vertex]
-entry vs(#[builtin(vertex_index)] i: i32)
-  (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) =
-  let pos = if i == 0 then @[-0.5, -0.5, 0.0, 1.0]
-            else if i == 1 then @[ 0.5, -0.5, 0.0, 1.0]
-            else                 @[ 0.0,  0.5, 0.0, 1.0] in
-  let color: vec3f32 = @[1.0, 0.0, 0.0] in
-  (pos, color)
-
-#[fragment]
-entry fs(#[varying(0)] color: vec3f32) #[target(screen)] vec4f32 =
-  @[color.x, color.y, color.z, 1.0]
+entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      triangle_position(vertex.vertex_index),
+      @[1.0, 0.0, 0.0])) in
+  shade(target, covered,
+    |fragment| @[fragment.value.x,
+                  fragment.value.y,
+                  fragment.value.z,
+                  1.0])
 ```
 
-A single source entry may compile to multiple module entries. SOACs
-whose lowering requires more than one kernel — a parallel reduce that
-runs a per-workgroup partial fold followed by a tree-reduction across
-the partials, for example — split into separate entries that the host
-dispatches in sequence. The compiled module's pipeline descriptor
-names every entry it produced; hosts iterate the descriptor rather
-than the source.
+The observable operation is the source `entry` as a whole. See Unified
+Pipeline Entries and Stage Invocation.
 
 A Wyn program can span multiple files. Each file is implicitly a
 module: declarations at file scope are members of that module. Files
@@ -332,6 +319,7 @@ type ::= qualname
        | sum_type
        | function_type
        | type_application
+       | unique_type
        | existential_size
 
 tuple_type ::= "(" ")" | "(" type ("," type)+ [","] ")"
@@ -343,8 +331,9 @@ sum_variant ::= constructor [ "(" type ("," type)* [","] ")" ]
 
 record_type ::= "{" "}" | "{" fieldid ":" type ("," fieldid ":" type)* [","] "}"
 
-type_application ::= type type_arg | "*" type
-type_arg         ::= "[" [dim] "]" | type
+type_application ::= qualname "<" type_argument ("," type_argument)* ">"
+type_argument    ::= "[" [dim] "]" | type
+unique_type      ::= "*" type
 
 function_type ::= param_type "->" type
 param_type    ::= type | "(" name ":" type ")"
@@ -467,6 +456,22 @@ let r: { x: f32, y: f32 } = make_point() in r.x
 Functions are classified via function types, but they are not fully
 first class. See Higher-order functions for the details.
 
+#### Generic Type Applications
+
+A generic type application names a type constructor followed by a fully
+saturated, comma-separated argument list in angle brackets. Ordinary type
+arguments are types; size arguments are enclosed in brackets.
+
+```wyn
+pair<i32, bool>
+two_vecs<[4], f32>
+raster<vec2f32>
+```
+
+Type constructors are first-order. A type constructor cannot be used without
+its arguments, partially applied, passed as a value, or received through a
+type parameter. Each constructor fixes the number and kind of its arguments.
+
 #### String Literals
 
 Wyn has no first-class string type. A string literal (`"..."`) is a
@@ -514,7 +519,7 @@ by preceding declarations — forward references are not permitted.
 
 The five binding forms — `def_bind`, `type_bind`, `mod_bind`,
 `mod_type_bind`, and `entry_bind` — bind values (including functions),
-types, modules, module types, and shader entry points respectively.
+types, modules, module types, and host-visible pipeline roots respectively.
 Their syntax is detailed in the sections that follow.
 
 Names bound by a declaration inside a module are visible to users of
@@ -564,10 +569,8 @@ generics      ::= "<" generic_param ("," generic_param)* ">"
 generic_param ::= "[" name "]" | UpperName
 
 entry_bind    ::= "entry" name "(" [entry_param ("," entry_param)*] ")"
-                  entry_return "=" exp
-entry_param   ::= ["#[" attr "]"] name ":" type
-entry_return  ::= type | "(" entry_output ("," entry_output)* ")"
-entry_output  ::= ["#[" attr "]"] type
+                  type "=" exp
+entry_param   ::= name ":" type
 ```
 
 `UpperName` is an identifier whose first character is uppercase.
@@ -642,39 +645,26 @@ To simplify the handling of in-place updates (see In-place
 Updates), the value returned by a function may not alias any
 global variables.
 
-#### Shader Entry Points
+#### Pipeline Entries
 
-A shader entry point is declared with the `entry` keyword. It may
-be annotated with a `#[vertex]`, `#[fragment]`, or `#[compute]`
-attribute identifying the pipeline stage:
+An `entry` declaration defines a complete operation exposed to the
+host. It is not a function value and cannot be called by another Wyn
+declaration. Vertex, fragment, and explicitly dispatched compute work
+are introduced inside its expression by the special forms specified
+under Unified Pipeline Entries and Stage Invocation.
 
-```wyn
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
-    @[0.0, 0.0, 0.0, 1.0]
-
-#[fragment]
-entry fragment_main() #[target(screen)] vec4f32 =
-    @[1.0, 0.0, 0.0, 1.0]
-
-#[compute]
-entry double(arr: []f32) []f32 = map(|x| x * 2.0, arr)
-```
-
-Entry-point declarations differ from `def` in three ways:
+Entry declarations differ from `def` declarations in three ways:
 
 - Parameters require the `name: type` form; pattern destructuring
   is not allowed.
-- Parameters and return positions accept attributes
-  (`#[builtin(...)]`, `#[vertex_slot(n)]`, `#[varying(n)]`,
-  `#[target(name)]`, `#[storage]`, `#[uniform]`, `#[texture]`,
-  `#[sampler]`, `#[storage_image]`) that wire them to GPU resources,
-  built-ins, and inter-stage I/O.
+- Every parameter and result is part of the external interface of the
+  operation. Shader built-ins and intermediate values are not entry
+  parameters or results.
 - An empty parameter list still requires the parentheses:
   `entry foo() ret = ...`.
 
-The name of an entry point must not contain an apostrophe (`'`),
-even though apostrophes are otherwise permitted in identifiers.
+The name of an entry must not contain an apostrophe (`'`), even though
+apostrophes are otherwise permitted in identifiers.
 
 ---
 
@@ -1165,9 +1155,9 @@ of integral type.
 Numerical negation of `x`, which must be of numeric type.
 
 #### #[attr] e
-Apply the given attribute to the expression. Attributes are an ad-hoc
-and optional mechanism for providing extra information, directives,
-or hints to the implementation. See Attributes for more information.
+Apply an attribute defined for expression position. This specification defines
+no expression attributes, so every such expression is currently a static error.
+See Attributes.
 
 #### a with [i] = e
 Return `a`, but with the element at position `i` changed to contain
@@ -1989,214 +1979,42 @@ open import "file"
 
 ## Attributes
 
+Attributes attach narrowly defined metadata to declarations. An attribute is
+valid only on the syntactic form named by the section that defines it. An
+unknown attribute, an attribute in any other position, or an attribute with
+arguments of the wrong form is a static error.
+
+Attributes do not identify compute, vertex, or fragment stages and do not
+connect stage interfaces or resources. Stage roles and data flow are specified
+by the invocation operations under Unified Pipeline Entries and Stage
+Invocation.
+
 ### Grammar
 
 ```ebnf
-attr ::= "vertex" | "fragment" | "compute"
-         | "dispatch" "(" decimal ("," decimal ("," decimal)?)? ")"
-         | "builtin" "(" builtin_name ")"
-         | "vertex_slot" "(" decimal ")"
-         | "varying" "(" decimal ")"
-         | "target" "(" identifier ")"
-
-builtin_name ::= "position" | "vertex_index" | "instance_index"
-               | "front_facing" | "frag_depth" | "frag_coord"
-               | "global_invocation_id" | "local_invocation_id"
-               | "workgroup_id" | "num_workgroups"
+attr ::= "linked" "(" stringlit ")"
 ```
-
-Wyn supports an attribute system for shader interface specification. Attributes are written as `#[attr]` and can be applied to:
-
-- **Top-level `def` declarations** for shader identification
-- **Function parameters** for input interface specification  
-- **Return types** for output interface specification
-
-### Shader Interface Attributes
-
-Wyn uses attributes to define the interface between shader stages and the GPU pipeline.
-
-#### Shader Identification
-
-**`#[vertex]`** - Marks an `entry` declaration as a vertex shader entry point
-```wyn
-#[vertex]
-entry vs_main() #[builtin(position)] vec4f32 = result
-```
-
-**`#[fragment]`** - Marks an `entry` declaration as a fragment shader entry point
-```wyn
-#[fragment]
-entry fs_main() #[target(screen)] vec4f32 = result
-```
-
-**`#[compute]`** - Marks an `entry` declaration as a compute shader entry point
-```wyn
-#[compute]
-entry compute_main(data: []f32) []f32 = map(|x| x * 2.0, data)
-```
-
-**`#[dispatch(x[, y[, z]])]`** - On a `#[compute]` entry, declares a fixed
-compute launch grid in workgroup counts. Omitted axes default to `1`. If absent,
-the compiler infers the domain from the entry's SOACs, storage-image output, or
-the default serial shell. An explicit grid always wins over inference — even
-`#[dispatch(1, 1, 1)]`, which pins a single-invocation launch rather than being
-treated as the unspecified default.
-
-If the entry has a data-parallel domain whose size is known at compile time
-(e.g. `map` over `iota(100)`) and the declared grid launches fewer threads than
-that domain has elements, compilation fails — the grid would silently drop the
-tail. For domains whose size is only known at runtime the launch is not
-checked, so a grid that under-covers a runtime-sized `map` drops elements.
-
-```wyn
-#[compute]
-#[dispatch(16, 9)]
-entry paint(#[builtin(global_invocation_id)] gid: vec3u32) () = ()
-```
-
-#### Built-in Variables
-
-**`#[builtin(builtin_name)]`** - Maps parameters and return values to GPU built-in variables
-
-**Vertex Shader Built-ins:**
-- `#[builtin(vertex_index)]` - Vertex index
-- `#[builtin(instance_index)]` - Instance index
-- `#[builtin(position)]` - Output position
-
-**Fragment Shader Built-ins:**
-- `#[builtin(frag_coord)]` - Fragment coordinates
-- `#[builtin(front_facing)]` - Front-facing status
-- `#[builtin(frag_depth)]` - Fragment depth output
-
-**Compute Shader Built-ins:** all four are typed `vec3u32`, supplying
-3-D coordinates that the kernel may use as 1-D / 2-D as appropriate.
-
-- `#[builtin(global_invocation_id)]` — global thread coordinates across
-  the whole dispatch (`workgroup_id * workgroup_size + local_invocation_id`)
-- `#[builtin(local_invocation_id)]` — thread coordinates within the
-  enclosing workgroup
-- `#[builtin(workgroup_id)]` — workgroup coordinates within the
-  dispatched grid
-- `#[builtin(num_workgroups)]` — total dispatched workgroup count
-  along each axis (the value the host passed to `dispatch_workgroups`)
-
-#### Stage Interface
-
-Three attributes wire the graphics stage interface. Each names one role:
-
-**`#[vertex_slot(n)]`** — a vertex-entry input fed from vertex-buffer
-attribute slot `n`. Every non-builtin vertex input must carry one, and slots
-must be unique; the type must be a 32-bit scalar or a 2–4 wide vector of
-`f32`/`i32`/`u32`.
-
-**`#[varying(n)]`** — an interpolated channel passed vertex→fragment. A vertex
-output `#[varying(n)]` is matched to the fragment input `#[varying(n)]` with
-the same number.
-
-**`#[target(name)]`** — a fragment output routed to the render-target resource
-`name` (use `screen` for the swapchain). The color-attachment slot is taken
-from the output's position in the return tuple.
-
-```wyn
-#[vertex]
-entry vs(
-    #[builtin(vertex_index)] vid: i32,
-    #[vertex_slot(0)] pos: vec3f32
-) (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) = result
-
-#[fragment]
-entry fs(
-    #[varying(0)] color: vec3f32
-) #[target(screen)] vec4f32 = result
-```
-
-#### Resource Bindings
-
-Uniforms, storage buffers, textures, and samplers are bound to
-entry-point parameters via attributes (never to top-level `def`s).
-
-**`#[uniform(set=S, binding=B)]`** / **`#[storage(set=S, binding=B, ...)]`** —
-small read-only constants / arbitrary-size buffers. See *GPU Resources
-and Descriptor Set Layout* for set-numbering rules.
-
-**`#[texture(set=S, binding=B)]`** - binds a `texture2d` parameter to a
-sampled texture resource. `set` defaults to 1; `binding` is required.
-
-**`#[sampler(set=S, binding=B)]`** - binds a `sampler` parameter to a
-sampler resource. `set` defaults to 1; `binding` is required.
-
-```wyn
-#[fragment]
-entry fs(
-    #[varying(0)] uv: vec2f32,
-    #[texture(set=0, binding=0)] tex: texture2d,
-    #[sampler(set=0, binding=1)] samp: sampler
-) #[target(screen)] vec4f32 =
-    texture_sample(tex, samp, uv, 0.0)
-```
-
-See *Texture and Sampler Types* for the types and the
-`texture_load` / `texture_sample` operations.
 
 ### External Linkage
 
-**`#[linked("name")]`** — applied to an `extern` declaration, marks
-the function as resolved at SPIR-V link time. The string is the
-linkage name the host runtime's linker matches against an external
-SPIR-V module. The Wyn compiler emits a `LinkageAttributes` import
-decoration for the function and trusts the host to supply a body with
-a matching `Export` decoration.
+`#[linked("name")]` may be applied to an `extern` declaration. It declares
+that the function body is supplied by the execution environment under the
+given linkage name.
 
 ```wyn
 #[linked("sha256_compress")]
 extern sha256_compress(state: [8]u32, block: [16]u32) [8]u32
 ```
 
-The signature must match the externally-supplied function's type
-exactly. WGSL emission does not support this attribute — `#[linked]`
-is SPIR-V only.
-
-### Attribute Examples
-
-#### Complete Vertex Shader Interface
-```wyn
-#[vertex]
-entry vertex_main(
-    #[builtin(vertex_index)] vertex_id: i32,
-    #[builtin(instance_index)] instance_id: i32,
-    #[vertex_slot(0)] position: vec3f32,
-    #[vertex_slot(1)] normal: vec3f32
-) #[builtin(position)] vec4f32 =
-    transform_position(position, vertex_id)
-```
-
-#### Complete Fragment Shader Interface
-```wyn
-#[fragment]
-entry fragment_main(
-    #[varying(0)] world_pos: vec3f32,
-    #[varying(1)] normal: vec3f32,
-    #[builtin(front_facing)] is_front: bool
-) #[target(screen)] vec4f32 =
-    compute_color(world_pos, normal, is_front)
-```
-
-#### Complete Compute Shader Interface
-```wyn
-#[compute]
-entry process_data(
-    input: []f32,
-    factor: f32
-) []f32 =
-    map(|x| x * factor, input)
-```
+The supplied function must have exactly the declared Wyn function type. A
+program that uses a linked declaration for which the execution environment
+provides no matching definition cannot be executed.
 
 ## Vector Types
 
 In addition to arrays, Wyn provides fixed-width vector types. They are
-distinct from arrays — they have a fixed component count, different
-semantics, and are required for certain shader interfaces and built-in
-variables.
+distinct from arrays: they have a fixed component count and componentwise
+arithmetic.
 
 Vector types use the naming convention `vecNT` where:
 - `N` is the number of components (2, 3, or 4)
@@ -2215,14 +2033,8 @@ Vector types are distinct from array types and have different semantics:
 
 Example usage:
 ```wyn
--- Vector types for graphics operations (using @[...] literal syntax)
 let position: vec3f32 = @[1.0, 2.0, 3.0]
 let color: vec4f32 = @[1.0, 0.0, 0.0, 1.0]
-
--- Built-in variables often require vector types
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
-  @[0.0, 0.0, 0.0, 1.0]
 ```
 
 ### Vector Swizzles
@@ -2323,20 +2135,6 @@ For `*` specifically, matrix products (matrix×matrix, matrix×vector,
 vector×matrix, matrix×scalar) take priority over component-wise
 arithmetic; see [Matrix Types](#matrix-types).
 
-### Constraints
-
-- `vertex_slot` / `varying` numbers must be non-negative integers
-- Each shader stage has specific allowed built-ins
-
-### Type Safety
-
-The attribute system is statically type-checked:
-- Built-in attributes must be applied to compatible types
-- `vertex_slot` inputs must have a valid vertex-buffer format; `varying`
-  channels may be any serializable type
-- Shader stage compatibility is verified at compile time
-- Interface matching between vertex and fragment shaders is validated
-
 ---
 
 ## Matrix Types
@@ -2368,312 +2166,701 @@ let rot: mat2f32 = @[[c, s],
 
 Each inner array becomes one column of the matrix at SPIR-V emission — the literal above produces the GLSL equivalent `mat2(c, s, -s, c)` (column-major, matching GPU convention).
 
-### Matrices in Storage Buffers
+### Matrices in Arrays
 
-Matrix types are valid array elements, so `[][N][M]T` storage views and SOAC inputs all work over matrix values the same way they do over scalars.
+Matrix types are valid array elements, so `[][N][M]T` arrays and SOAC inputs
+work over matrix values in the same manner as they do over scalars.
 
 ---
 
-## Raster Stage Tokens
+## Unified Pipeline Entries and Stage Invocation
 
-`raster<V>` is a spellable, opaque, one-argument built-in type. It represents
-the compiler-owned primitive stream between rasterization and fragment
-processing; `V` is the vertex-to-fragment payload type. At the type-system
-level, `V` may be any ordinary type argument. Future rasterization and shading
-operations may impose additional payload-shape or interpolation restrictions.
+### Overall Architecture
 
-A raster token has no literal, constructor, destructor, arithmetic operation,
-or host representation. It is non-copyable and may flow only through ordinary
-function calls while the compiler is assembling a pipeline. In particular,
-`raster<V>` cannot be a parameter or result of today's platform-invoked
-`entry` declarations. Backend lowering treats a surviving raster token as a
-compiler error: a rasterization/shading operation must consume it first.
+A Wyn `entry` describes one complete operation invoked by the host. An entry
+is the root of a pipeline, not an individual compute, vertex, or fragment
+shader. Its parameters are the external inputs to the operation, its result is
+the external result of the operation, and its body describes all data
+dependencies within the operation.
 
-This section specifies the type-system facility. The producer and consumer
-operations that form the unified pipeline program are specified separately;
-introducing `raster<V>` does not itself add a rasterization operation.
+Work within an entry is expressed in two semantic contexts:
+
+- The **orchestration context** evaluates the entry body and any ordinary
+  functions called from it. It may use the stage invocation operations
+  specified in this section.
+- A **stage context** evaluates a callback passed to a stage invocation
+  operation. A stage context has an invocation value supplied by that
+  operation. It may call ordinary functions, but it may not initiate another
+  stage invocation.
+
+The context in which an ordinary `def` is evaluated follows its call site.
+A function containing a stage invocation operation can therefore be used as
+an orchestration helper, while a function that contains no such operation can
+usually be used in either context.
+
+An `entry` is not a function value. It cannot be named in an expression,
+passed as an argument, or called by another Wyn declaration. Multiple entries
+in one program denote independent operations exposed to the host.
+
+No stage-identification syntax is attached to declarations or lambdas.
+In particular, `#[compute]`, `#[vertex]`, and `#[fragment]` are not part of
+the unified pipeline language. The operation receiving a callback determines
+the callback's stage:
+
+| Invocation operation | Callback context | Callback argument | Result |
+|---|---|---|---|
+| `dispatch_1d`, `dispatch_2d`, `dispatch_3d` | compute | `compute_invocation` | array |
+| `dispatch_workgroups_*` | compute workgroup | `workgroup_invocation` | array |
+| `rasterize_*` | vertex | `vertex_invocation` | `raster<V>` |
+| `shade`, `shade_with` | fragment | `fragment_invocation<V>` | render target |
+
+These names denote predeclared operations with the special context rules above.
+Name resolution otherwise follows the ordinary rules: if a program shadows one
+of these names, a call to the shadowing declaration is an ordinary call and
+does not introduce a stage.
+
+### Entry Interfaces
+
+The syntax of an entry is:
+
+```ebnf
+entry_bind  ::= "entry" name "(" [entry_param ("," entry_param)*] ")"
+                type "=" exp
+entry_param ::= name ":" type
+```
+
+An entry parameter or result may contain ordinary scalar, array, tuple, record,
+and resource types. It may not contain an invocation type, `vertex<V>`,
+`raster<V>`, or `draw`. Those types describe relationships within one
+invocation of the entry and have no external value.
+
+External resources occur as values in the structural parameter and result
+types of the entry. They have no source-language binding numbers. In
+particular, attributes such as `#[storage(...)]`,
+`#[uniform(...)]`, `#[texture(...)]`, `#[sampler(...)]`, and
+`#[view(...)]` are not valid on an entry interface.
+
+An entry has ordinary value semantics. An external input can affect an
+external result only through the expression in the entry body. A resource
+that is updated by an entry is consumed and returned according to the usual
+uniqueness rules.
+
+### Ordinary Calls and Data Flow
+
+Ordinary function application is the only way to pass values into a helper or
+stage callback. Ordinary function results are the only way to pass values out.
+A callback may capture values from its surrounding orchestration expression;
+captures have the same meaning as explicit callback parameters.
+
+For example, these two vertex callbacks are equivalent:
+
+```wyn
+def make_vertex(points: []vec3f32, transform: mat4f32,
+                invocation: vertex_invocation) vertex<vec2f32> =
+  let p = points[i64(invocation.vertex_index)] in
+  vertex_output(transform * @[p.x, p.y, p.z, 1.0], p.xy)
+
+rasterize_triangles(draw, |invocation|
+  make_vertex(points, transform, invocation))
+
+rasterize_triangles(draw, make_vertex(points, transform, _))
+```
+
+The final expression uses a function call section. As specified under Call
+Sections, `make_vertex(points, transform, _)` is equivalent to
+`|invocation| make_vertex(points, transform, invocation)`.
+
+Passing an array, record, texture, or other value between two operations does
+not expose storage identity or an address. Those notions are not part of the
+semantics of a Wyn value.
+
+### Invocation and Pipeline Types
+
+The following built-in types are used by the invocation operations:
+
+| Type | Meaning | Constructible by user code |
+|---|---|---|
+| `compute_invocation` | coordinates of one logical compute invocation | no |
+| `workgroup_invocation` | coordinates of one invocation in an explicit workgroup | no |
+| `vertex_invocation` | indices for one requested vertex | no |
+| `vertex<V>` | clip position and vertex-to-fragment payload | only with `vertex_output` |
+| `raster<V>` | rasterized coverage carrying payload `V` | no |
+| `fragment_invocation<V>` | one covered fragment and its interpolated payload | no |
+| `fragment_output<C>` | color/depth/discard result of fragment processing | `#color`, `#depth`, `#discard` |
+| `draw` | a direct, indexed, or indirect draw description | only with draw operations |
+| `render_target<C>` | a render target with color shape `C` | no |
+
+Invocation types are spellable so that named helper functions can state their
+types. They have no literals or general constructors. An invocation value may
+be passed to and returned from ordinary helper calls within its current stage
+context, but it may not be stored in an array, included in an entry interface,
+or captured by a different stage callback.
+
+`vertex<V>`, `raster<V>`, `fragment_invocation<V>`, and
+`render_target<C>` are opaque, one-argument built-in generic types.
+`fragment_output<C>` is a predeclared generic sum type. Their arguments are
+ordinary type arguments and participate in type inference in the same manner
+as arguments to any other generic type.
+
+### Compute Invocation
+
+#### Logical Dispatch
+
+`dispatch_1d`, `dispatch_2d`, and `dispatch_3d` create a compute stage over a
+logical rectangular domain:
+
+```wyn
+dispatch_1d(count, callback)
+dispatch_2d(width, height, callback)
+dispatch_3d(width, height, depth, callback)
+```
+
+Every extent has type `u32`. Each operation invokes its callback once for each
+coordinate in its domain. Callback invocations have no specified execution
+order. The callback is pure and its return values form the result array.
+
+- `dispatch_1d(n, f)` returns an array of length `n` in increasing `x` order.
+- `dispatch_2d(w, h, f)` returns `[h][w]T`, indexed as `[y][x]`.
+- `dispatch_3d(w, h, d, f)` returns `[d][h][w]T`, indexed as `[z][y][x]`.
+
+When an extent is not statically known, the corresponding result size is
+existential. A zero extent produces an empty result and invokes no callback.
+
+A `compute_invocation` exposes these read-only fields:
+
+```wyn
+invocation.global_id : vec3u32
+invocation.domain    : vec3u32
+```
+
+Unused dimensions of `global_id` are zero; unused dimensions of `domain` are
+one. Thus a `dispatch_1d` invocation has `global_id = @[x, 0, 0]` and
+`domain = @[count, 1, 1]`.
+
+The result type `T` must be a valid array element type. Tuples and records
+allow one invocation to produce several logical output channels. Uniqueness
+rules apply independently to the resulting arrays.
+
+#### Explicit Workgroups
+
+The `dispatch_workgroups_1d`, `dispatch_workgroups_2d`, and
+`dispatch_workgroups_3d` forms expose a fixed workgroup decomposition:
+
+```wyn
+dispatch_workgroups_1d(groups, size, callback)
+dispatch_workgroups_2d(group_width, group_height,
+                       size_width, size_height, callback)
+dispatch_workgroups_3d(group_width, group_height, group_depth,
+                       size_width, size_height, size_depth, callback)
+```
+
+Each extent has type `u32`. The callback is evaluated once for each local
+coordinate of each group. A `workgroup_invocation` exposes:
+
+```wyn
+invocation.global_id      : vec3u32
+invocation.local_id       : vec3u32
+invocation.workgroup_id   : vec3u32
+invocation.workgroup_size : vec3u32
+invocation.workgroup_count: vec3u32
+```
+
+For each axis,
+`global_id = workgroup_id * workgroup_size + local_id`. Results use the same
+row-major coordinate order as logical dispatch and have an extent equal to
+`workgroup_count * workgroup_size` on each axis.
+
+Explicit workgroups do not by themselves introduce mutable shared memory or a
+barrier. Operations that provide workgroup collective semantics specify those
+semantics separately.
+
+#### Array Operators
+
+Second-order array operators such as `map`, `reduce`, `scan`, and `filter`
+retain their ordinary array semantics inside an entry. They do not expose a
+`compute_invocation`. Use a dispatch form only when the computation requires
+logical invocation coordinates or an explicit workgroup decomposition.
+
+### Draw Invocation
+
+A `draw` value describes which vertex invocations a rasterization operation
+requests. It has no fields and no user-defined literal. The following
+operations construct direct draws:
+
+```wyn
+direct_draw(vertex_count, instance_count)
+direct_draw_from(vertex_count, instance_count,
+                 first_vertex, first_instance)
+indexed_draw(indices, instance_count)
+indexed_draw_from(indices, index_count, instance_count,
+                  first_index, vertex_offset, first_instance)
+```
+
+Counts and non-negative indices have type `u32`; `vertex_offset` has type
+`i32`. `indices` must be a one-dimensional array of `u16` or `u32`.
+`indexed_draw` requests every element of `indices`; the `_from` form requests
+the stated subrange.
+
+A direct draw supplies `first_vertex + i` as `vertex_index`. An indexed draw
+reads the requested index element, adds `vertex_offset`, and supplies the
+result as `vertex_index`. A negative result or a result greater than the
+largest `u32` is a dynamic error. Both forms supply
+`first_instance + instance` as `instance_index`.
+
+Indirect draws obtain the counts and offsets from ordinary values:
+
+```wyn
+type draw_command = {
+  vertex_count: u32,
+  instance_count: u32,
+  first_vertex: u32,
+  first_instance: u32
+}
+
+type indexed_draw_command = {
+  index_count: u32,
+  instance_count: u32,
+  first_index: u32,
+  vertex_offset: i32,
+  first_instance: u32
+}
+
+indirect_draw(command)
+indexed_indirect_draw(indices, command)
+indirect_draws(commands)
+indexed_indirect_draws(indices, commands)
+```
+
+The plural forms describe one draw for each command in array order. Because a
+command is an ordinary record, it may be computed earlier in the same entry
+and passed directly to an indirect draw operation. Indirectness changes where
+the draw description comes from; it does not change the type or calling
+convention of the vertex callback.
+
+### Vertex Invocation
+
+A `vertex_invocation` exposes these read-only fields:
+
+```wyn
+invocation.vertex_index   : u32
+invocation.instance_index : u32
+invocation.draw_index     : u32
+```
+
+`draw_index` is zero for a singular draw and identifies the command for a
+plural indirect draw. All other vertex data is supplied by ordinary arguments
+or captures. There are no vertex-slot parameters.
+
+A vertex callback must return `vertex<V>`, constructed by:
+
+```wyn
+vertex_output(position: vec4f32, value: V) vertex<V>
+```
+
+`position` is the homogeneous clip-space position. `value` is the complete
+vertex-to-fragment payload. Returning one record or tuple is the way to pass
+multiple varying values:
+
+```wyn
+type varying = { uv: vec2f32, normal: vec3f32, material: u32 }
+
+vertex_output(clip_position,
+              { uv = uv, normal = normal, material = material })
+```
+
+A vertex callback is evaluated only by a rasterization operation. A named
+helper requiring `vertex_invocation` cannot be called in orchestration context
+because no expression in that context can construct the required argument.
+
+### Rasterization Invocation
+
+Topology is selected by the invocation operation rather than by an attribute
+or a separate topology value:
+
+```wyn
+rasterize_triangles(draw, callback)
+rasterize_triangle_strip(draw, callback)
+rasterize_lines(draw, callback)
+rasterize_line_strip(draw, callback)
+rasterize_points(draw, callback)
+```
+
+Each operation calls `callback` in vertex context for the invocations
+described by `draw`. If the callback returns `vertex<V>`, the operation returns
+`raster<V>`. An incomplete final primitive in a list topology is ignored.
+
+The corresponding `_with` forms take explicit rasterization state as their
+first argument:
+
+```wyn
+rasterize_triangles_with(state, draw, callback)
+rasterize_triangle_strip_with(state, draw, callback)
+rasterize_lines_with(state, draw, callback)
+rasterize_line_strip_with(state, draw, callback)
+rasterize_points_with(state, draw, callback)
+```
+
+`raster_state` is the following ordinary record type:
+
+```wyn
+type viewport = { origin: vec2f32, extent: vec2f32, depth: vec2f32 }
+type scissor = { origin: vec2i32, extent: vec2u32 }
+
+type raster_state = {
+  viewport: #target | #custom(viewport),
+  scissor: #target | #custom(scissor),
+  front_face: #clockwise | #counter_clockwise,
+  cull: #none | #front | #back,
+  fill: #fill | #line | #point
+}
+```
+
+`viewport.depth` contains the minimum and maximum depth. `#target` selects the
+full extent of the render target later supplied to `shade`. The forms without
+`_with` use `default_raster_state`, whose viewport and scissor are `#target`,
+whose front face is counter-clockwise, whose culling mode is `#none`, and
+whose fill mode is `#fill`.
+
+#### Varying Payloads
+
+The type argument `V` must be a varying payload. A varying payload is composed
+recursively from numeric and Boolean scalars, vectors, matrices, tuples, and
+records. It may not contain an array, sum, function, resource, invocation,
+`draw`, or any instantiation of `vertex` or `raster`. The unit type `()` is a
+valid payload when no user value is passed to the fragment callback.
+
+Floating-point components are perspective-correct interpolated. Integer and
+Boolean components are flat and take the first vertex's value. Matrix, tuple,
+and record payloads apply these rules componentwise.
+
+#### Raster Values
+
+`raster<V>` is opaque and non-copyable. It has no literal, constructor, field
+access, equality operation, or external representation. It may be bound to a
+name and passed through ordinary orchestration helpers, but it must be
+consumed exactly once by `shade` or `shade_with`. It cannot be placed in an
+array or returned from an entry.
+
+The `V` argument connects the vertex and fragment callbacks structurally.
+There are no numbered varying locations and no separate link step between two
+source declarations.
+
+### Fragment Invocation
+
+`shade` consumes rasterized coverage and a render target:
+
+```wyn
+shade(target, raster, callback)
+shade_with(state, target, raster, callback)
+```
+
+If `target` has type `render_target<C>` and `raster` has type `raster<V>`,
+the callback receives `fragment_invocation<V>` and returns `C` or
+`fragment_output<C>`. The result of either operation has type
+`render_target<C>`.
+
+`C` may itself be a tuple or record. Such a target contains one color
+attachment for each scalar or vector leaf, and the fragment callback returns
+the colors with the same structure. All attachments have the same dimensions
+and sample count. The target is consumed and its updated value is returned:
+
+```wyn
+let target' = shade(target, covered,
+  |fragment| fragment.value)
+```
+
+A `fragment_invocation<V>` exposes these read-only fields:
+
+```wyn
+invocation.value          : V
+invocation.position       : vec4f32
+invocation.front_facing   : bool
+invocation.primitive_index: u32
+invocation.sample_index   : u32
+invocation.sample_position: vec2f32
+```
+
+`value` is the payload after interpolation. `position.xy` is the target-space
+fragment position, `position.z` is depth, and `position.w` is the reciprocal
+homogeneous clip coordinate. `sample_position` is relative to the pixel in
+`[0, 1)²`; for a single-sample target, its value is `@[0.5, 0.5]` and
+`sample_index` is zero.
+
+A direct `C` return writes those colors using the interpolated raster depth.
+`fragment_output<C>` is the following predeclared generic sum type:
+
+```wyn
+type fragment_output<C> = #color(C) | #depth(C, f32) | #discard
+```
+
+`#color(colors)` is equivalent to returning `colors` directly.
+`#depth(colors, depth)` replaces the interpolated depth. `#discard` writes
+neither color nor depth. The expected callback result determines the otherwise
+ambiguous type of `#discard`.
+
+`fragment_state` is the following ordinary record type:
+
+```wyn
+type depth_test =
+  #disabled | #never | #less | #less_equal | #equal |
+  #greater_equal | #greater | #always
+
+type blend_mode = #replace | #source_over | #add
+
+type fragment_state = {
+  depth_test: depth_test,
+  depth_write: bool,
+  blend: blend_mode,
+  color_write: bool
+}
+```
+
+`#replace` writes the source color and `#add` adds source and destination
+componentwise. `#source_over` requires every color leaf of `C` to be a
+four-component floating-point vector. For each leaf it computes
+`result.rgb = source.rgb * source.a + destination.rgb * (1 - source.a)` and
+`result.a = source.a + destination.a * (1 - source.a)`.
+
+`shade_with` uses the supplied state. `shade` uses
+`default_fragment_state`, whose depth test is `#less`, whose depth and color
+writes are enabled, and whose blend mode is `#replace`. If a render target has
+no depth attachment, every depth test passes and depth writes have no effect.
+`#disabled` also makes every depth test pass and prevents a depth write.
+
+The fragment callback is evaluated once for every covered sample. Callback
+evaluations have no specified order. For each sample, the returned depth is
+tested against the target depth; if the test passes, enabled depth and color
+writes are applied. Fragments addressing the same sample are applied in
+`(draw_index, instance_index, primitive_index)` order.
+
+Textures, samplers, scalars, records, and any other read-only values used by a
+fragment callback are ordinary arguments or captures. There are no varying,
+target, texture, sampler, or built-in attributes on the callback.
+
+### Composition and Resource Flow
+
+The result of any ordinary expression or invocation operation may be passed to
+a later operation when its type permits. This includes:
+
+- an array returned by `dispatch_*` captured by a vertex callback;
+- a `draw_command` returned by compute work passed to `indirect_draw`;
+- a `raster<V>` returned by rasterization passed to `shade`; and
+- a render target returned by one shading operation passed to another.
+
+Within one entry invocation there is no syntax for assigning storage to an
+intermediate value or connecting two operations by binding number. Across
+entry invocations, persistent state is explicit: the host passes a prior
+result as a later argument. There is no implicit previous-frame value.
+
+### Static Restrictions
+
+The following programs are ill-typed:
+
+- a stage invocation operation evaluated in a stage context;
+- `vertex_output` evaluated outside a vertex context;
+- an invocation value constructed by a literal or constructor;
+- an invocation value stored in an array or included in an entry interface;
+- a vertex callback that does not return `vertex<V>`;
+- a varying payload that does not satisfy the payload restrictions;
+- a fragment callback whose result does not match its target color shape;
+- a `raster<V>` that is copied, discarded, or returned from an entry; and
+- an explicit resource-binding or inter-stage interface attribute.
+
+Ordinary helper calls do not introduce a new stage invocation. A helper that
+accepts the current invocation value remains part of that callback's stage
+context. This permits a vertex or fragment computation to be decomposed into
+arbitrarily many ordinary functions without turning those functions into
+separate root entries.
+
+### Complete Example
+
+The following entry contains one logical compute dispatch, one vertex
+callback, and one fragment callback:
+
+```wyn
+type particle = { position: vec3f32, velocity: vec3f32 }
+type varying = { uv: vec2f32, speed: f32 }
+
+def update(particles: []particle, dt: f32,
+           invocation: compute_invocation) particle =
+  let i = i64(invocation.global_id.x) in
+  let p = particles[i] in
+  { position = p.position + dt * p.velocity,
+    velocity = p.velocity }
+
+def particle_vertex(particles: []particle, view_projection: mat4f32,
+                    invocation: vertex_invocation) vertex<varying> =
+  let p = particles[i64(invocation.vertex_index)] in
+  vertex_output(
+    view_projection * @[p.position.x, p.position.y, p.position.z, 1.0],
+    { uv = particle_uv(invocation.vertex_index),
+      speed = length(p.velocity) })
+
+def particle_fragment(albedo: texture2d, sampling: sampler,
+                      invocation: fragment_invocation<varying>) vec4f32 =
+  let base = texture_sample(albedo, sampling, invocation.value.uv, 0.0) in
+  base * heat_tint(invocation.value.speed)
+
+entry frame(particles: []particle,
+            particle_count: u32,
+            dt: f32,
+            view_projection: mat4f32,
+            albedo: texture2d,
+            sampling: sampler,
+            target: render_target<vec4f32>)
+    ([]particle, render_target<vec4f32>) =
+  let updated = dispatch_1d(
+    particle_count,
+    update(particles, dt, _)) in
+  let covered = rasterize_triangles(
+    direct_draw(particle_count, 1u32),
+    particle_vertex(updated, view_projection, _)) in
+  let target' = shade(
+    target,
+    covered,
+    particle_fragment(albedo, sampling, _)) in
+  (updated, target')
+```
+
+`update(particles, dt, _)`, `particle_vertex(updated,
+view_projection, _)`, and `particle_fragment(albedo, sampling, _)` are
+function call sections. Their argument types and the invocation operations that
+receive them determine the compute, vertex, and fragment roles. None of the
+three helpers is an independently invocable root entry.
 
 ---
 
 ## Texture and Sampler Types
 
-Wyn has two opaque GPU-resource types for image sampling. They are
-*handles*, not values: they can't be constructed, copied, or used in
-arithmetic — only bound (via `#[texture]` / `#[sampler]` on an
-entry-point parameter) and passed to the texture operations below.
+Wyn has two opaque resource types for image sampling:
 
 | Type        | Meaning                                              |
 |-------------|------------------------------------------------------|
 | `texture2d` | A 2D, `f32`-sampled image.                           |
 | `sampler`   | A filtering sampler.                                 |
 
-(`texture2d` is monomorphic in this version — the sampled type is fixed
-to `f32`, matching the no-angle-bracket style of `vec4f32` / `mat4f32`.)
+`texture2d` and `sampler` values have no literals, equality, ordering, or
+arithmetic operations. They may be entry parameters, ordinary function
+arguments, or callback captures.
 
-### Texture operations
+`texture2d` is monomorphic: its sampled type is `vec4f32`.
 
-**`texture_load(tex: texture2d, coord: vec2i32, lod: i32) -> vec4f32`**
-— raw texel fetch at integer coordinate `coord` and mip level `lod`. No
+### Texture Operations
+
+`texture_load(tex: texture2d, coord: vec2i32, lod: i32) -> vec4f32`
+returns the texel at integer coordinate `coord` and mip level `lod` without
 filtering.
 
-**`texture_sample(tex: texture2d, samp: sampler, uv: vec2f32, lod: f32) -> vec4f32`**
-— filtered sample at UV `uv`, using sampler `samp`, at an **explicit**
-mip level `lod`.
+`texture_sample(tex: texture2d, samp: sampler, uv: vec2f32, lod: f32) -> vec4f32`
+returns a filtered sample at normalized coordinate `uv` and the
+explicit mip level `lod`.
 
-Both operations are *referentially transparent*: their result is a pure
-function of their arguments. In particular `texture_sample` takes an
-explicit `lod` rather than computing one from screen-space derivatives,
-so it has no hidden cross-invocation dependence and is valid in any
-shader stage. (Derivative-based automatic mip selection — and a
-referentially-transparent `texture_sample_grad` variant taking explicit
-gradients — is planned future work.)
+Both operations are referentially transparent. In particular,
+`texture_sample` does not derive a mip level from neighboring invocations and
+is valid in any stage context.
 
 ```wyn
-#[fragment]
-entry fs(
-    #[varying(0)] uv: vec2f32,
-    #[texture(set=0, binding=0)] tex: texture2d,
-    #[sampler(set=0, binding=1)] samp: sampler
-) #[target(screen)] vec4f32 =
-    let filtered = texture_sample(tex, samp, uv, 0.0) in
-    let texel    = texture_load(tex, @[0, 0], 0) in
-    filtered + texel
+def sample_surface(tex: texture2d, samp: sampler,
+                   fragment: fragment_invocation<vec2f32>) vec4f32 =
+  let filtered = texture_sample(tex, samp, fragment.value, 0.0) in
+  let texel = texture_load(tex, @[0, 0], 0) in
+  filtered + texel
 ```
 
 ---
 
-## GPU Resources and Descriptor Set Layout
+## External Resources
 
-Shaders read and write GPU memory through three kinds of bindings:
-**uniforms** (small, read-only constants), **storage buffers**
-(arbitrary-size, read or read-write arrays), and **push constants**
-(tiny, fast, write-once-per-dispatch). Wyn surfaces uniforms and
-storage buffers as **entry-point parameters** decorated with binding
-attributes; push constants are not user-declared (the compiler
-synthesizes them for non-array compute entry parameters that need to
-broadcast a scalar to every invocation).
+### Resource Values
 
-> Note: these attributes go on entry-point *parameters*, not on
-> top-level `def`s. `#[uniform(...)] def x: T` and `#[storage(...)]
-> def x: T` are compile-time errors ("only valid on entry-point
-> parameters").
+A resource value denotes data supplied at an entry boundary or returned from
+an entry. Resource values have no literals, ordering, arithmetic, or observable
+address. Except for operations defined for their resource type, they are
+passed to functions and callbacks in the same manner as other values.
 
-### Grammar
+The following resource types are defined:
 
-```ebnf
-binding_attr ::= "#[" "uniform" "(" set_param? "binding" "=" decimal ")" "]"
-               | "#[" "storage" "(" set_param? "binding" "=" decimal
-                 ("," "layout" "=" layout_kind)?
-                 ("," "access" "=" access_kind)?
-                 ")" "]"
-set_param    ::= "set" "=" decimal ","
-layout_kind  ::= "std430" | "std140"
-access_kind  ::= "read" | "write" | "readwrite"
-```
+| Type | Access |
+|---|---|
+| `texture2d` | read-only texel loading and sampling |
+| `sampler` | read-only sampling parameters |
+| `render_target<C>` | color output updated by fragment shading |
 
-A `binding_attr` prefixes an entry-point parameter:
-`binding_attr identifier ":" type`.
+Arrays are ordinary Wyn values rather than a distinct resource type. An array
+entry parameter may be read by any operation that captures or receives it, and
+an array entry result is an ordinary result. Scalar and record parameters are
+likewise ordinary values. The language does not distinguish uniform and
+storage parameters.
 
-Examples:
+### Render Targets
 
-```wyn
-#[fragment]
-entry main(
-    #[uniform(set=1, binding=0)] iResolution: vec3f32,
-    #[uniform(binding=1)]        iTime: f32,            -- set defaults to 1
-    #[builtin(frag_coord)]       fragCoord: vec4f32
-) #[target(screen)] vec4f32 = ...
+`render_target<C>` is an opaque generic resource type. `C` is a color shape:
+a numeric scalar or vector, or a tuple or record of color shapes. A render
+target contains one color attachment for each scalar or vector leaf of `C` and
+may also contain a depth attachment. It has no constructor, fields, or element
+indexing operation.
 
-#[compute]
-entry sim(
-    #[storage(set=2, binding=0, access=read)] particles: []vec4f32
-) ... = ...
-```
-
-### Uniform Blocks
-
-A `#[uniform]` parameter may be record-typed (inline or via a `type`
-alias): the record's fields become the members of one uniform block,
-so a group of related constants is a single binding instead of N.
+A render target is non-copyable. `shade` and `shade_with` consume a render
+target and return its updated value. The uniqueness rules therefore
+make the order of successive updates explicit:
 
 ```wyn
-type camera = { view_z: f32, tan_half_fov: vec2f32, origin: vec2f32 }
-
-#[compute]
-entry shade(
-    #[uniform(set=1, binding=0)] cam: camera,   -- one block, one binding
-    ...
-) ... = ... cam.tan_half_fov.x ...
+let target1 = shade(target0, background, background_fragment) in
+let target2 = shade(target1, foreground, foreground_fragment) in
+target2
 ```
 
-Uniform values are laid out **std140**. The supported member types are
-32-bit scalars (`f32`, `i32`, `u32`) and `vec2`/`vec3`/`vec4` of them;
-the uniform itself is one of those or a flat record/tuple of them.
-`bool`, matrices, arrays, and nested records are compile-time errors
-naming the rule.
+A target may be an entry parameter, an entry result, or a component of either.
+It may not be stored in an array.
 
-The pipeline descriptor publishes the block's layout so hosts fill it
-by name — the same contract push constants have:
+#### Reading a Render Target
 
-```json
-{
-  "type": "uniform", "set": 1, "binding": 0, "name": "cam",
-  "size": 32,
-  "members": [
-    { "name": "view_z",       "offset": 0,  "size": 4 },
-    { "name": "tan_half_fov", "offset": 8,  "size": 8 },
-    { "name": "origin",       "offset": 16, "size": 8 }
-  ]
-}
-```
-
-`size` is the std140 block size (rounded up to 16). Bare
-scalar/vector uniforms publish a single member at offset 0; tuple
-uniforms publish members named `f0..fn`.
-
-### Descriptor Set Layout
-
-Every binding lives in a numbered descriptor `set`; each set is a
-separate bind group at runtime. Wyn reserves the bottom of the set
-namespace for the compiler and gives the rest to the user:
-
-* **Set 0 is reserved for compiler-allocated storage.** Compute
-  entry-input and entry-output buffers (one per field of a tuple-of-
-  arrays input after SoA splitting), multi-stage SOAC intermediates
-  (e.g. partials buffers between phases of a parallelized `reduce`),
-  and graphical-entry-lift prepass results all live on set 0. The
-  compiler unconditionally allocates `(set=0, binding=N)` starting
-  at `binding=0`; it does not consult user state.
-* **Set 1 and higher are for user-declared `#[uniform]` and
-  `#[storage]`.** When `set` is omitted from one of those attributes,
-  it defaults to 1.
-* `#[uniform(set=0, ...)]` and `#[storage(set=0, ...)]` are
-  compile-time errors. The error names the offending decl's source
-  span.
-
-This split exists because the compiler's allocator and the user's
-decls are written without knowledge of each other. Splitting the set
-namespace removes the only failure mode where a host-runtime would
-silently bind two different resources to the same descriptor slot.
-
-The convention is enforced statically — there is no runtime fallback
-or "best-effort" behavior. The diagnostic guides users to renumber
-their decls; once the user keeps off set 0, no collision is possible.
-
-### Compiler-Allocated Bindings
-
-Set 0 holds the bindings derived from each entry point's parameters
-and return value. A tuple-of-arrays input is split into one binding
-per element. For example,
+The following operations read a render target without consuming it:
 
 ```wyn
-#[compute]
-entry price_options(
-    #[uniform(set=1, binding=0)] now: f32,
-    #[uniform(set=1, binding=1)] rfr: f32,
-    opts: [](f32, f32, i32, f32, f32)
-) []f32 = ...
+target_load(target: render_target<C>, coord: vec2i32, sample: u32) C
+target_sample(target: render_target<C>, sampler: sampler, uv: vec2f32) C
 ```
 
-allocates five storage bindings on set 0 for the SoA-split input
-(`opts_0` through `opts_4`) and one for the output (`<entry>_output`).
-The two user-declared uniforms remain on set 1 as written.
+`target_load` reads one sample without filtering. `target_sample` filters each
+color leaf of `C`; every leaf must have a floating-point scalar or vector type.
+A target read may be captured by a later fragment callback. The uniqueness
+rules reject a shading operation that both consumes a target and captures the
+same target as a read-only input.
 
----
+### External Aliasing
 
-## Resources and Views
+Two read-only resource parameters may denote the same external resource.
+Parameters whose types are unique or non-copyable must satisfy the aliasing
+rules for unique arguments. A program has no operation for testing whether two
+resource arguments denote the same external object.
 
-A multi-pass shader often binds one physical GPU resource into several entry
-points with different access — a compute pass writes an image, a later fragment
-pass samples it. Rather than repeat a `(set, binding)` on each param and rely on
-the numbers lining up, name the resource once with a top-level `resource`
-declaration and reference it from params as **views**.
+### Persistence Between Entry Invocations
 
-```
-resource color: image2d {
-  format = rgba8unorm
-  size   = 1024x1024          -- or `window` to track the swapchain
-  usages = [storage_write, sampled]
-  layout = binding(0, 0)      -- optional ABI pin; omit to auto-assign
-}
+Wyn provides no implicit persistent or previous-frame value. To preserve a
+value across entry invocations, an entry returns it and the host supplies that
+value as an argument to a later invocation. The same rule applies to arrays,
+render targets, and any other externally representable result.
 
-#[compute]
-entry paint(#[view(color, storage_write)] img: *storage_image, …) () =
-  img with [xy] = rgba
+### No Explicit Resource Layout
 
-#[fragment]
-entry show(#[view(color, sampled)] tex: texture2d,
-           #[sampler(set=0, binding=1)] samp: sampler, …) #[target(screen)] vec4f32 =
-  texture_sample(tex, samp, uv, 0.0)
-```
+Descriptor sets, binding numbers, storage classes, image layouts, and resource
+transitions are not part of the Wyn language. The following forms are
+therefore invalid:
 
-A `resource` names one backing image. Its fields:
-
-- `format` — pixel format (`rgba8unorm`, `rgba16float`, `rgba32float`, `r32float`).
-- `size` — `WxH` (e.g. `1024x1024`) or `window` (tracks the swapchain).
-- `usages` — the access kinds it may be viewed by: `storage_write`,
-  `storage_read`, `sampled`.
-- `layout = binding(set, binding)` — optional pin for the resource's primary
-  (storage) binding; omitted, the compiler assigns a free slot on a user set.
-- `history = 1` — see *Temporal feedback*.
-
-A `#[view(resource, usage)]` param references a resource. The compiler validates
-that `usage` is in the resource's `usages` and matches the param's handle type
-(`storage_write`/`storage_read` ⇒ `storage_image`, `sampled` ⇒ `texture2d`),
-then lowers the view to a descriptor binding with the resource's `format`/`size`.
-Each *view kind* gets its **own** `(set, binding)` — a storage-write view and a
-sampled view are different descriptor types and never share a slot. The compiler
-assigns one binding per view kind (storage, sampled, previous-sampled) and the
-host binds all of them to one backing image allocation, so each pipeline samples
-or writes the same image through its own descriptor.
-
-Because a resource is typed once, its views cannot disagree on the backing
-format — the cross-entry element-type conflict that raw `#[storage(...)]`
-buffers can still hit (`[]f32` in one entry, `[]vec4f32` in another) is
-unrepresentable for a resource.
-
-### Storage images
-
-A `storage_image` is an opaque 2D image handle a compute entry writes (and may
-point-read). Element type is fixed to `vec4f32`; the binding's `format` decides
-the on-GPU pixel format.
-
-- `img with [coord] = value`, where `img: *storage_image`,
-  `coord: vec2i32`, and `value: vec4f32`; returns the next
-  `*storage_image` handle
-- `image_load(img: storage_image, coord: vec2i32) -> vec4f32`
-
-The same physical image may be written as a `storage_image` in one pipeline and
-sampled as a `texture2d` in another. Each is a distinct descriptor binding of
-its own type; the runtime allocates one image and binds it through both. The
-`resource` form above is the recommended way to express that aliasing — a raw
-`#[storage_image]`/`#[texture]` pair that reuses one `(set, binding)` for both
-types is invalid.
-
-### Temporal feedback
-
-A `history = 1` resource is **double-buffered**: a `#[view(r, sampled,
-previous)]` reads the *previous frame's* contents while a `storage_write` view
-writes the current frame. The compiler auto-assigns the previous-frame sampled
-binding and records a feedback pair in the pipeline descriptor, so the runtime
-ping-pongs two textures and swaps them each frame.
-
-```
-resource buffer_a: image2d {
-  format   = rgba32float
-  size     = window
-  usages   = [storage_write, sampled]
-  history  = 1
-  -- bindings (current-storage, current-sampled, previous-sampled) auto-assign
-}
-
-#[compute]
-entry buffer_a(#[view(buffer_a, storage_write)]      out_a:  storage_image,
-               #[view(buffer_a, sampled, previous)]  prev_a: texture2d, …) () = …
+```wyn
+#[uniform(...)]
+#[storage(...)]
+#[texture(...)]
+#[sampler(...)]
+#[storage_image(...)]
+#[view(...)]
 ```
 
-This is the declarative form of the host-side `--feedback ENTRY:READ=WRITE`
-wiring: the previous-frame view *is* the feedback declaration.
+Resource use is determined solely by the typed operations applied to a value.
+Passing a resource to a helper, capturing it in a stage callback, or returning
+an updated resource expresses all source-language data flow involving that
+resource.
 
 ---
 
@@ -2794,4 +2981,5 @@ size argument distinguish it from an ordinary type argument.
 
 ---
 
-*This specification describes the current implementation of Wyn. The language is under active development and this specification may evolve.*
+*This specification defines the Wyn language. Implementations may be incomplete;
+the language remains under active development.*
