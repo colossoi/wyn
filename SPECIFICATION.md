@@ -154,7 +154,7 @@ This specification uses Extended Backus-Naur Form (EBNF) notation:
 ### Grammar
 
 ```ebnf
-name         ::= letter constituent* | "_" constituent*
+name         ::= letter constituent* | "_" constituent+
 constituent  ::= letter | digit | "_" | "'"
 quals        ::= (name ".")+
 qualname     ::= name | quals name
@@ -171,6 +171,10 @@ constructor  ::= "#" name
 A `name` is an unqualified identifier used at definition sites. A
 `qualname` is the dotted form used to reference something inside a
 module. A `symbol` (or `qualsymbol`) names an operator.
+
+A bare `_` is not a `name`. It is reserved for wildcard patterns and
+call-section placeholders. Identifiers beginning with `_`, such as
+`_value`, remain ordinary names.
 
 Constructor names of sum types are identifiers prefixed with `#`,
 with no whitespace between the `#` and the name. Record fields use
@@ -809,11 +813,11 @@ promises.
 ```ebnf
 atom        ::= literal
                 | qualname ("." fieldid)*
-                | qualname "(" [exp ("," exp)*] ")"
+                | qualname "(" [callarg ("," callarg)*] ")"
                 | qualname slice
                 | "(" ")"
                 | "(" exp ")" ("." fieldid)*
-                | "(" exp ")" "(" [exp ("," exp)*] ")"
+                | "(" exp ")" "(" [callarg ("," callarg)*] ")"
                 | "(" exp ")" slice
                 | "(" exp ("," exp)+ [","] ")"
                 | "{" "}"
@@ -849,6 +853,8 @@ exp         ::= atom
                 | exp "with" fieldid ("." fieldid)* "=" exp
                 | exp "with" "." swizzle assign_op exp
                 | "match" exp ("case" pat "->" exp)+
+
+callarg     ::= exp | "_"
 
 assign_op   ::= "=" | "*=" | "+=" | "-=" | "/="
 swizzle     ::= [xyzw]+    -- or [rgba]+; one set, distinct chars, len 1..4
@@ -1090,9 +1096,25 @@ Short-circuiting logical disjunction; both operands must be of type
 
 #### f(x, y, z)
 Apply the function `f` to the arguments `x`, `y`, and `z`. Function
-application is always fully saturated: every parameter of `f` is
-given a value at the call site. Partial application is not
-supported.
+application is always fully saturated: when a call contains no `_`
+placeholders, every parameter of `f` must be given a value at the call
+site. Supplying fewer arguments is an error; it does not produce a
+partially applied function.
+
+#### f(a, _, c, _)
+A call containing one or more `_` placeholders is a **call section**, not a
+function application. It is syntactic sugar for a lambda with one distinct
+parameter per placeholder, ordered from left to right. For example,
+
+```wyn
+f(a, _, c, _)
+```
+
+desugars to `|b, d| f(a, b, c, d)`.
+
+The call inside the generated lambda is fully saturated. Non-placeholder
+argument expressions remain in the lambda body and are evaluated when that
+lambda is invoked.
 
 #### x |> f(a, b)
 The pipe operator threads its left operand into the call on its
@@ -1257,8 +1279,10 @@ with higher-order functions.
 ### Function Arity and Partial Application
 
 Wyn functions are **not curried** by default. Every function has a
-fixed arity (number of arguments) and must be called with exactly
-that many arguments. Partial application is not allowed.
+fixed arity (number of arguments), and every function application must
+supply exactly that many arguments. Partial application is not allowed.
+Call sections do not relax this rule: they construct explicit lambdas whose
+bodies contain fully saturated applications.
 
 ```wyn
 def add(x: i32, y: i32) i32 = x + y
@@ -1296,6 +1320,12 @@ def result = add_one(5)               -- Returns 6
 ```
 
 A call containing `_` placeholders is a **call section**:
+
+```wyn
+add(_, 5, _)
+```
+
+This desugars to `|x, z| add(x, 5, z)`. No partial application is involved.
 
 - Each `_` marks a placeholder position that becomes a distinct
   parameter of the new function.
@@ -2652,7 +2682,11 @@ Evaluation is eager or call-by-value, like most non-Haskell languages. However, 
 
 The evaluation semantics are entirely sequential, with parallelism being solely an operational detail. Hence, race conditions are impossible. The Wyn compiler does not automatically go looking for parallelism. Only certain special constructs and built-in library functions (such as `map`, `reduce`, `scan`, and `filter`) may be executed in parallel.
 
-Functions have a fixed number of arguments and must be called with all of them (although functions are not fully first class; see Types below). Although the `assert` construct looks like a function, it is not.
+Functions have a fixed number of arguments and every application must supply
+all of them (although functions are not fully first class; see Types below).
+Call sections such as `f(_, y)` construct explicit lambdas rather than
+partially applying `f`. Although the `assert` construct looks like a function,
+it is not.
 
 Lambda terms are written as `|x| x + 2`.
 
