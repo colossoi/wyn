@@ -4056,15 +4056,28 @@ fn test_parse_type_bind_with_size_param_only() {
 }
 
 #[test]
-#[ignore = "explicit parametric type application at use sites not yet implemented (SPECIFICATION.md → Type Abbreviations)"]
 fn test_parse_type_application_with_generic_args() {
-    // A parameterised type abbreviation referenced with explicit
-    // arguments — `pair<[2]>` in type position. The spec says this
-    // should work; the parser currently does not handle the `<` token
-    // in `parse_type_application` and the application form fails.
-    // Unignore this test when the feature lands.
     let program = parse_ok("type pair<[n]> = ([n]i32, [n]i32)\ndef x: pair<[2]> = ([1, 2], [3, 4])");
     assert_eq!(program.declarations.len(), 2);
+}
+
+#[test]
+fn nested_type_applications_parse_without_spacing_closes() {
+    parse_ok(
+        "type wrapper<A> = A\ntype nested<A> = wrapper<wrapper<A>>\ndef x(v: nested<i32>) nested<i32> = v",
+    );
+}
+
+#[test]
+fn spellable_raster_type_parses() {
+    let program = parse_ok("def pass<V>(stream: raster<V>) raster<V> = stream");
+    let crate::ast::Declaration::Decl(decl) = &program.declarations[0] else {
+        panic!("expected a function declaration");
+    };
+    let Some(Type::Constructed(TypeName::Raster, args)) = &decl.ty else {
+        panic!("expected raster<V> return type, got {:?}", decl.ty);
+    };
+    assert_eq!(args.len(), 1);
 }
 
 #[test]

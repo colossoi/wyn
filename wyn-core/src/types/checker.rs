@@ -447,6 +447,9 @@ impl<'a> TypeChecker<'a> {
                 let arg_strs: Vec<String> = args.iter().map(|a| self.format_type(a)).collect();
                 format!("({})", arg_strs.join(", "))
             }
+            Type::Constructed(TypeName::Raster, args) if args.len() == 1 => {
+                format!("raster<{}>", self.format_type(&args[0]))
+            }
             Type::Constructed(name, args) if args.is_empty() => format!("{}", name),
             Type::Constructed(name, args) => {
                 let arg_strs: Vec<String> = args.iter().map(|a| self.format_type(a)).collect();
@@ -474,6 +477,21 @@ impl<'a> TypeChecker<'a> {
         match ty {
             Type::Constructed(TypeName::Existential(_), _) => true,
             Type::Constructed(_, args) => args.iter().any(Self::contains_existential),
+            Type::Variable(_) => false,
+        }
+    }
+
+    /// Raster streams are compiler-owned stage tokens. They may flow through
+    /// ordinary functions but cannot be supplied by or returned to the host
+    /// through today's platform-invoked `entry` interface.
+    fn contains_raster(ty: &Type) -> bool {
+        match ty {
+            Type::Constructed(TypeName::Raster, _) => true,
+            Type::Constructed(TypeName::Sum(variants), args) => {
+                variants.iter().any(|(_, payload)| payload.iter().any(Self::contains_raster))
+                    || args.iter().any(Self::contains_raster)
+            }
+            Type::Constructed(_, args) => args.iter().any(Self::contains_raster),
             Type::Variable(_) => false,
         }
     }
@@ -578,53 +596,179 @@ impl<'a> TypeChecker<'a> {
     ) -> Result<Type> {
         match ty {
             Type::Constructed(TypeName::Named(name), args) => {
-                // First resolve args recursively
-                let resolved_args: Result<Vec<Type>> = args
+                let resolved_args: Vec<Type> = args
                     .iter()
-                    .map(|a| self.resolve_type_aliases_impl(a, current_module, visited))
-                    .collect();
-                let resolved_args = resolved_args?;
+                    .map(|arg| self.resolve_type_aliases_impl(arg, current_module, visited))
+                    .collect::<Result<_>>()?;
 
-                // Build lookup keys based on qualification
                 let mut keys = Vec::new();
                 if name.contains('.') {
-                    // Already qualified - try as-is
                     keys.push(name.clone());
                 } else {
-                    if let Some(m) = current_module {
-                        keys.push(format!("{}.{}", m, name));
+                    if let Some(module) = current_module {
+                        keys.push(format!("{}.{}", module, name));
                     }
                     keys.push(name.clone());
                 }
 
                 for key in keys {
-                    // Check for cycles before resolving
-                    if let Some(cycle_err) = Self::check_alias_cycle(visited, &key) {
-                        return Err(cycle_err);
-                    }
-
-                    if let Some(underlying) = self.module_manager.resolve_type_alias(&key) {
-                        // Track this alias as visited
-                        visited.push(key);
-                        // Recursively resolve in same module context
-                        let result = self.resolve_type_aliases_impl(underlying, current_module, visited);
+                    if let Some(alias) = self.module_manager.resolve_type_alias_definition(&key) {
+                        if let Some(cycle_err) = Self::check_alias_cycle(visited, &key) {
+                            return Err(cycle_err);
+                        }
+                        let applied = Self::apply_type_alias(&key, alias, &resolved_args)?;
+                        visited.push(key.clone());
+                        // Unqualified aliases in a module's RHS resolve relative to
+                        // the module that defined the alias, not its use site.
+                        let defining_module = key.rsplit_once('.').map(|(module, _)| module);
+                        let result = self.resolve_type_aliases_impl(
+                            &applied,
+                            defining_module.or(current_module),
+                            visited,
+                        );
                         visited.pop();
                         return result;
                     }
                 }
 
-                // Not an alias - keep as-is with resolved args
+                // An unresolved name can be an abstract module type. Preserve
+                // its explicit arguments; concrete aliases are always expanded.
                 Ok(Type::Constructed(TypeName::Named(name.clone()), resolved_args))
             }
-            Type::Constructed(name, args) => {
-                // Non-Named constructor - just resolve args
-                let resolved_args: Result<Vec<Type>> = args
+            // Sum payloads live inside TypeName rather than the ordinary args.
+            Type::Constructed(TypeName::Sum(variants), args) => {
+                let variants = variants
                     .iter()
-                    .map(|a| self.resolve_type_aliases_impl(a, current_module, visited))
-                    .collect();
-                Ok(Type::Constructed(name.clone(), resolved_args?))
+                    .map(|(constructor, payload)| {
+                        let payload = payload
+                            .iter()
+                            .map(|arg| self.resolve_type_aliases_impl(arg, current_module, visited))
+                            .collect::<Result<_>>()?;
+                        Ok((constructor.clone(), payload))
+                    })
+                    .collect::<Result<_>>()?;
+                let args = args
+                    .iter()
+                    .map(|arg| self.resolve_type_aliases_impl(arg, current_module, visited))
+                    .collect::<Result<_>>()?;
+                Ok(Type::Constructed(TypeName::Sum(variants), args))
+            }
+            Type::Constructed(name, args) => {
+                let resolved_args: Vec<Type> = args
+                    .iter()
+                    .map(|arg| self.resolve_type_aliases_impl(arg, current_module, visited))
+                    .collect::<Result<_>>()?;
+                super::validate_type_args(name, &resolved_args)
+                    .map_err(|message| err_type!("malformed type '{}': {}", name, message))?;
+                Ok(Type::Constructed(name.clone(), resolved_args))
             }
             Type::Variable(id) => Ok(Type::Variable(*id)),
+        }
+    }
+
+    fn apply_type_alias(
+        name: &str,
+        alias: &crate::module_manager::TypeAliasDefinition,
+        args: &[Type],
+    ) -> Result<Type> {
+        if alias.type_params.len() != args.len() {
+            return Err(err_type!(
+                "type alias '{}' expects {} argument{}, got {}",
+                name,
+                alias.type_params.len(),
+                if alias.type_params.len() == 1 { "" } else { "s" },
+                args.len()
+            ));
+        }
+
+        let mut type_args = LookupMap::new();
+        let mut size_args = LookupMap::new();
+        for (index, (param, arg)) in alias.type_params.iter().zip(args).enumerate() {
+            match param {
+                TypeParam::Size(param_name) => {
+                    if !Self::is_size_type_argument(arg) {
+                        return Err(err_type!(
+                            "argument {} to type alias '{}' must be a size argument such as '[4]'",
+                            index + 1,
+                            name
+                        ));
+                    }
+                    size_args.insert(param_name.clone(), arg.clone());
+                }
+                TypeParam::Type(param_name)
+                | TypeParam::SizeType(param_name)
+                | TypeParam::LiftedType(param_name) => {
+                    if super::validate_type_args(&TypeName::Raster, &[arg.clone()]).is_err() {
+                        return Err(err_type!(
+                            "argument {} to type alias '{}' must be an ordinary type",
+                            index + 1,
+                            name
+                        ));
+                    }
+                    type_args.insert(param_name.clone(), arg.clone());
+                }
+            }
+        }
+
+        Ok(Self::substitute_alias_parameters(
+            &alias.definition,
+            &type_args,
+            &size_args,
+        ))
+    }
+
+    fn is_size_type_argument(arg: &Type) -> bool {
+        matches!(
+            arg,
+            Type::Variable(_)
+                | Type::Constructed(
+                    TypeName::Size(_)
+                        | TypeName::SizeVar(_)
+                        | TypeName::SizePlaceholder
+                        | TypeName::Skolem(_),
+                    _
+                )
+        )
+    }
+
+    fn substitute_alias_parameters(
+        ty: &Type,
+        type_args: &LookupMap<String, Type>,
+        size_args: &LookupMap<String, Type>,
+    ) -> Type {
+        match ty {
+            Type::Variable(id) => Type::Variable(*id),
+            Type::Constructed(TypeName::UserVar(name), _) => {
+                type_args.get(name).cloned().unwrap_or_else(|| ty.clone())
+            }
+            Type::Constructed(TypeName::SizeVar(name), _) => {
+                size_args.get(name).cloned().unwrap_or_else(|| ty.clone())
+            }
+            Type::Constructed(TypeName::Sum(variants), args) => {
+                let variants = variants
+                    .iter()
+                    .map(|(constructor, payload)| {
+                        (
+                            constructor.clone(),
+                            payload
+                                .iter()
+                                .map(|arg| Self::substitute_alias_parameters(arg, type_args, size_args))
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                let args = args
+                    .iter()
+                    .map(|arg| Self::substitute_alias_parameters(arg, type_args, size_args))
+                    .collect();
+                Type::Constructed(TypeName::Sum(variants), args)
+            }
+            Type::Constructed(name, args) => Type::Constructed(
+                name.clone(),
+                args.iter()
+                    .map(|arg| Self::substitute_alias_parameters(arg, type_args, size_args))
+                    .collect(),
+            ),
         }
     }
 
@@ -1730,9 +1874,16 @@ impl<'a> TypeChecker<'a> {
             param_types.push(self.instantiate_annotation_type(&ty, module_name)?);
         }
 
-        // For entry point parameters, constrain array address spaces to Storage
+        // Platform entries are host/shader ABI boundaries. A `raster<V>` is
+        // an internal stage token and therefore cannot cross this boundary.
         if is_entry {
-            for param_type in &param_types {
+            for (param, param_type) in params.iter().zip(&param_types) {
+                if Self::contains_raster(param_type) {
+                    bail_type_at!(
+                        param.h.span,
+                        "raster<V> is an internal stage token and cannot be an entry parameter"
+                    );
+                }
                 self.constrain_array_to_storage(param_type)?;
             }
         }
@@ -2073,6 +2224,12 @@ impl<'a> TypeChecker<'a> {
                 // residual array placeholders so an alias return like `world`
                 // unifies against the body's concrete `view`/`composite` arrays.
                 let expected_type = self.instantiate_annotation_type(&expected_type, None)?;
+                if Self::contains_raster(&expected_type) {
+                    bail_type_at!(
+                        entry.name_span,
+                        "raster<V> is an internal stage token and cannot be an entry result"
+                    );
+                }
 
                 // An existential return (`?k. T`) is *packed*: instantiate the
                 // declared bound size vars — and any existential the body
@@ -2122,7 +2279,7 @@ impl<'a> TypeChecker<'a> {
             }
             Declaration::Frontend(crate::ast::OpensResolvedFrontend::TypeBind(binding)) => {
                 debug!("Processing TypeBind: {}", binding.name);
-                Ok(())
+                self.resolve_type_aliases_scoped(&binding.definition, None).map(|_| ())
             }
         }
     }

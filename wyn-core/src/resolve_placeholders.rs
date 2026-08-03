@@ -152,8 +152,19 @@ impl PlaceholderResolver {
         match item {
             ElaboratedItem::Spec(spec) => self.resolve_spec_and_build_scheme(module_name, spec),
             ElaboratedItem::Decl(decl) => self.resolve_decl(decl),
-            ElaboratedItem::TypeAlias(_, ty) => {
-                *ty = self.resolve_type(ty);
+            ElaboratedItem::TypeAlias(_, alias) => {
+                self.type_param_bindings.clear();
+                for param in &alias.type_params {
+                    let name = match param {
+                        TypeParam::Size(name)
+                        | TypeParam::Type(name)
+                        | TypeParam::SizeType(name)
+                        | TypeParam::LiftedType(name) => name,
+                    };
+                    self.type_param_bindings.insert(name.clone(), self.context.new_variable());
+                }
+                alias.definition = self.resolve_type(&alias.definition);
+                self.type_param_bindings.clear();
             }
         }
     }

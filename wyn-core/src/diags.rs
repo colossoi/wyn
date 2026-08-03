@@ -168,6 +168,8 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::Texture2D => "texture2d".to_string(),
         TypeName::Sampler => "sampler".to_string(),
         TypeName::StorageTexture => "storage_image".to_string(),
+        TypeName::Raster if args.len() == 1 => format!("raster<{}>", format_type(&args[0])),
+        TypeName::Raster => "raster<?>".to_string(),
         TypeName::Skolem(id) => format!("{}", id),
     }
 }

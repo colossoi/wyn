@@ -747,10 +747,15 @@ def y: two_vecs<[2], i32> = ([1, 2], [3, 4])
 
 All declared size parameters must appear in the definition.
 
-> **Note:** Explicit parametric type application at use sites is not
-> yet supported by the reference implementation; an abbreviation with
-> parameters can be declared but cannot currently be referenced with
-> explicit arguments. The behaviour above is the intended spec.
+Type constructors are first-order. An application must supply exactly one
+argument for every declared parameter; type abbreviations cannot be partially
+applied, passed as values, or abstracted over as higher-kinded parameters.
+A size parameter accepts only a bracketed size argument such as `[4]`, `[n]`,
+or `[]`; an ordinary type parameter accepts a type. Arity and parameter-kind
+mismatches are type errors.
+
+Applications nest in the usual way. For example, `outer<inner<i32>>` is
+accepted without whitespace between the two closing `>` characters.
 
 ---
 
@@ -2369,6 +2374,27 @@ Matrix types are valid array elements, so `[][N][M]T` storage views and SOAC inp
 
 ---
 
+## Raster Stage Tokens
+
+`raster<V>` is a spellable, opaque, one-argument built-in type. It represents
+the compiler-owned primitive stream between rasterization and fragment
+processing; `V` is the vertex-to-fragment payload type. At the type-system
+level, `V` may be any ordinary type argument. Future rasterization and shading
+operations may impose additional payload-shape or interpolation restrictions.
+
+A raster token has no literal, constructor, destructor, arithmetic operation,
+or host representation. It is non-copyable and may flow only through ordinary
+function calls while the compiler is assembling a pipeline. In particular,
+`raster<V>` cannot be a parameter or result of today's platform-invoked
+`entry` declarations. Backend lowering treats a surviving raster token as a
+compiler error: a rasterization/shading operation must consume it first.
+
+This section specifies the type-system facility. The producer and consumer
+operations that form the unified pipeline program are specified separately;
+introducing `raster<V>` does not itself add a rasterization operation.
+
+---
+
 ## Texture and Sampler Types
 
 Wyn has two opaque GPU-resource types for image sampling. They are
@@ -2739,15 +2765,18 @@ type foo = (i32, i32)
 Type parameters are supported as well:
 
 ```wyn
-type pair 'a 'b = (a, b)
+type pair<A, B> = (A, B)
 ```
 
-As with everything else, they are structurally typed, so the types `pair i32 bool` and `(i32, bool)` are entirely interchangeable. Most unusually, this is also the case for sum types. The following two types are entirely interchangeable:
+As with everything else, they are structurally typed, so the types
+`pair<i32, bool>` and `(i32, bool)` are interchangeable. Most unusually,
+this is also the case for sum types. The following two types are
+interchangeable:
 
 ```wyn
-type maybe 'a = #just(a) | #nothing
+type maybe<A> = #just(A) | #nothing
 
-type option 'a = #nothing | #just(a)
+type option<A> = #nothing | #just(A)
 ```
 
 Only for abstract types, where the definition has been hidden via the module system, do type names have any significance.
@@ -2755,11 +2784,13 @@ Only for abstract types, where the definition has been hidden via the module sys
 Size parameters can also be passed:
 
 ```wyn
-type vector [n] t = [n]t
-type i32matrix [n][m] = [n] (vector [m] i32)
+type vector<[n], A> = [n]A
+type i32matrix<[n], [m]> = [n]vector<[m], i32>
 ```
 
-Note that for an actual array type, the dimensions come before the element type, but with a type abbreviation, a size is just another parameter. This easily becomes hard to read if you are not careful.
+Type applications are fully saturated and first-order: aliases cannot be
+partially applied and Wyn has no higher-kinded type parameters. Brackets on a
+size argument distinguish it from an ordinary type argument.
 
 ---
 

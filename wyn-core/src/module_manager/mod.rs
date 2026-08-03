@@ -12,6 +12,31 @@ use crate::StableMap;
 use crate::{bail_module, err_module, err_parse};
 use crate::{LookupMap, LookupSet};
 
+/// A first-order type abbreviation together with the parameters that its
+/// definition abstracts. Keeping the binder metadata in the module manager
+/// lets applications be checked and substituted at each use site.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeAliasDefinition {
+    pub type_params: Vec<crate::ast::TypeParam>,
+    pub definition: Type,
+}
+
+impl TypeAliasDefinition {
+    fn from_bind(binding: &TypeBind) -> Self {
+        Self {
+            type_params: binding.type_params.clone(),
+            definition: binding.definition.clone(),
+        }
+    }
+
+    fn monomorphic(definition: Type) -> Self {
+        Self {
+            type_params: Vec::new(),
+            definition,
+        }
+    }
+}
+
 /// Represents a single item in an elaborated module
 #[derive(Debug, Clone)]
 pub enum ElaboratedItem {
@@ -20,7 +45,7 @@ pub enum ElaboratedItem {
     /// A declaration (def/let) from module body with substitutions and resolved names
     Decl(Decl),
     /// A type alias from module body (e.g., `type state = f32`)
-    TypeAlias(String, Type),
+    TypeAlias(String, TypeAliasDefinition),
 }
 
 fn clone_items_fresh_ids(items: &[ElaboratedItem], node_counter: &mut NodeCounter) -> Vec<ElaboratedItem> {
@@ -73,8 +98,8 @@ pub struct PreElaboratedPrelude {
     pub(crate) elaborated_modules: StableMap<String, ElaboratedModule>,
     /// Set of known module names (for name resolution)
     pub known_modules: LookupSet<String>,
-    /// Type aliases from modules: "module.typename" -> underlying Type
-    pub type_aliases: LookupMap<String, Type>,
+    /// Type aliases from modules, including their first-order parameters.
+    pub type_aliases: LookupMap<String, TypeAliasDefinition>,
     /// Top-level prelude function declarations (auto-imported)
     /// Uses StableMap to preserve insertion order (file order) for proper type-checking
     pub prelude_functions: StableMap<String, Decl>,
@@ -96,8 +121,8 @@ pub struct ModuleManager {
     functor_modules: LookupMap<String, FunctorModule>,
     /// Set of known module names (for name resolution)
     known_modules: LookupSet<String>,
-    /// Type aliases from modules: "module.typename" -> underlying Type
-    type_aliases: LookupMap<String, Type>,
+    /// Type aliases from modules, including their first-order parameters.
+    type_aliases: LookupMap<String, TypeAliasDefinition>,
     /// Top-level prelude function declarations (auto-imported)
     /// Uses StableMap to preserve insertion order (file order) for proper type-checking
     prelude_functions: StableMap<String, Decl>,
@@ -198,8 +223,13 @@ impl ModuleManager {
         &self.known_modules
     }
 
-    /// Resolve a qualified type alias (e.g., "my_mod.state" -> underlying type)
+    /// Resolve a qualified type alias's underlying type.
     pub fn resolve_type_alias(&self, qualified_name: &str) -> Option<&Type> {
+        self.type_aliases.get(qualified_name).map(|alias| &alias.definition)
+    }
+
+    /// Resolve a qualified type alias together with its parameter binders.
+    pub fn resolve_type_alias_definition(&self, qualified_name: &str) -> Option<&TypeAliasDefinition> {
         self.type_aliases.get(qualified_name)
     }
 
@@ -289,7 +319,7 @@ impl ModuleManager {
                     if !already_present {
                         items.push(ElaboratedItem::TypeAlias(
                             type_name.clone(),
-                            underlying_type.clone(),
+                            TypeAliasDefinition::monomorphic(underlying_type.clone()),
                         ));
                     }
                 }
@@ -301,9 +331,9 @@ impl ModuleManager {
 
                 // Register type aliases from this module
                 for item in &elaborated.items {
-                    if let ElaboratedItem::TypeAlias(type_name, underlying_type) = item {
+                    if let ElaboratedItem::TypeAlias(type_name, alias) = item {
                         let qualified_name = format!("{}.{}", name, type_name);
-                        self.type_aliases.insert(qualified_name, underlying_type.clone());
+                        self.type_aliases.insert(qualified_name, alias.clone());
                     }
                 }
 
@@ -339,7 +369,7 @@ impl ModuleManager {
                     if self.type_aliases.contains_key(&tb.name) {
                         bail_module!("Top-level type alias '{}' is already defined", tb.name);
                     }
-                    self.type_aliases.insert(tb.name.clone(), tb.definition.clone());
+                    self.type_aliases.insert(tb.name.clone(), TypeAliasDefinition::from_bind(tb));
                 }
                 _ => {}
             }
@@ -787,7 +817,13 @@ impl ModuleManager {
                             // e.g., `type t = n.t` where n is a parameter
                             let substituted_ty =
                                 self.substitute_in_type(&type_bind.definition, substitutions);
-                            items.push(ElaboratedItem::TypeAlias(type_bind.name.clone(), substituted_ty));
+                            items.push(ElaboratedItem::TypeAlias(
+                                type_bind.name.clone(),
+                                TypeAliasDefinition {
+                                    type_params: type_bind.type_params.clone(),
+                                    definition: substituted_ty,
+                                },
+                            ));
                         }
                         _ => {
                             // Skip other declaration types (ModuleTypeBind, etc.)
@@ -851,18 +887,22 @@ impl ModuleManager {
 
                 // From TypeAlias items in the argument module
                 for item in &arg_module.items {
-                    if let ElaboratedItem::TypeAlias(type_name, underlying_type) = item {
-                        let param_qualified = format!("{}.{}", param_name, type_name);
-                        new_substitutions.insert(param_qualified, underlying_type.clone());
+                    if let ElaboratedItem::TypeAlias(type_name, alias) = item {
+                        if alias.type_params.is_empty() {
+                            let param_qualified = format!("{}.{}", param_name, type_name);
+                            new_substitutions.insert(param_qualified, alias.definition.clone());
+                        }
                     }
                 }
 
                 // From global type_aliases (for types registered at module level)
                 let arg_prefix = format!("{}.", arg_name);
-                for (qualified_name, underlying_type) in &self.type_aliases {
-                    if let Some(type_name) = qualified_name.strip_prefix(&arg_prefix) {
-                        let param_qualified = format!("{}.{}", param_name, type_name);
-                        new_substitutions.insert(param_qualified, underlying_type.clone());
+                for (qualified_name, alias) in &self.type_aliases {
+                    if alias.type_params.is_empty() {
+                        if let Some(type_name) = qualified_name.strip_prefix(&arg_prefix) {
+                            let param_qualified = format!("{}.{}", param_name, type_name);
+                            new_substitutions.insert(param_qualified, alias.definition.clone());
+                        }
                     }
                 }
 

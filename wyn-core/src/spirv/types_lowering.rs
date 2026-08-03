@@ -228,6 +228,12 @@ impl Constructor {
                         )
                     }
                     TypeName::Sampler => *self.builder.type_sampler(),
+                    TypeName::Raster => {
+                        panic!(
+                            "BUG: raster<V> reached runtime SPIR-V type lowering; \
+                             raster stage tokens must be eliminated before backend lowering"
+                        )
+                    }
                     TypeName::StorageTexture => {
                         panic!(
                             "BUG: StorageTexture reached runtime SPIR-V type lowering; \

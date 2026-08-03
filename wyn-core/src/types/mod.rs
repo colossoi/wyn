@@ -336,6 +336,12 @@ pub enum TypeName {
     /// monomorphization just like a storage-view array region.
     StorageTexture,
 
+    /// Opaque token representing the primitive stream produced by
+    /// rasterization. Its sole argument is the vertex-to-fragment payload
+    /// type. The token is spellable in source as `raster<V>` but has no
+    /// value constructors or runtime representation.
+    Raster,
+
     // --- Type system internals ---
     /// Rigid skolem constant for existential sizes.
     /// Created when opening existential types (?k. T). Unlike unification variables,
@@ -405,6 +411,7 @@ impl std::fmt::Display for TypeName {
             TypeName::Texture2D => write!(f, "texture2d"),
             TypeName::Sampler => write!(f, "sampler"),
             TypeName::StorageTexture => write!(f, "storage_image"),
+            TypeName::Raster => write!(f, "raster"),
             TypeName::Skolem(id) => write!(f, "{}", id),
         }
     }
@@ -472,6 +479,7 @@ impl polytype::Name for TypeName {
             TypeName::Texture2D => "texture2d".to_string(),
             TypeName::Sampler => "sampler".to_string(),
             TypeName::StorageTexture => "storage_image".to_string(),
+            TypeName::Raster => "raster".to_string(),
             TypeName::Skolem(id) => format!("{}", id),
         }
     }
@@ -1218,7 +1226,7 @@ pub fn is_copy(ty: &Type) -> bool {
             // Opaque GPU resource handles are not copyable values — they
             // must reach the backend as the original binding, not be
             // duplicated by ownership/move analysis.
-            TypeName::Texture2D | TypeName::Sampler | TypeName::StorageTexture => false,
+            TypeName::Texture2D | TypeName::Sampler | TypeName::StorageTexture | TypeName::Raster => false,
             _ => true,
         },
         Type::Variable(_) => true,
@@ -1515,6 +1523,9 @@ pub fn format_type(ty: &Type) -> String {
                 ),
             }
         }
+        Type::Constructed(TypeName::Raster, args) if args.len() == 1 => {
+            format!("raster<{}>", format_type(&args[0]))
+        }
         Type::Constructed(name, args) if args.is_empty() => format!("{}", name),
         Type::Constructed(name, args) => {
             let arg_strs: Vec<String> = args.iter().map(format_type).collect();
@@ -1548,6 +1559,13 @@ mod tests {
     }
     fn arrow(a: Type, b: Type) -> Type {
         Type::Constructed(TypeName::Arrow, vec![a, b])
+    }
+
+    #[test]
+    fn raster_formats_as_a_spellable_source_type() {
+        let raster = Type::Constructed(TypeName::Raster, vec![f32_ty()]);
+        assert_eq!(format_type(&raster), "raster<f32>");
+        assert_eq!(crate::diags::format_type(&raster), "raster<f32>");
     }
 
     fn hash_value<T: Hash>(value: &T) -> u64 {

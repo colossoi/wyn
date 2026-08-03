@@ -403,6 +403,10 @@ impl TypeEmitter {
                 // Opaque GPU resources (v1: 2D float texture + sampler).
                 TypeName::Texture2D => Ok("texture_2d<f32>".to_string()),
                 TypeName::Sampler => Ok("sampler".to_string()),
+                TypeName::Raster => Err(crate::err_wgsl!(
+                    "raster<V> reached runtime WGSL type lowering; raster stage tokens must be \
+                     eliminated before backend lowering"
+                )),
                 TypeName::StorageTexture => Err(crate::err_wgsl!(
                     "StorageTexture reached runtime WGSL type lowering; terminal EGIR resource \
                      erasure must remove image handles from SSA"

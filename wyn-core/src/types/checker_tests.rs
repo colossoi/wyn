@@ -3232,6 +3232,99 @@ def use_it(x: u32) u32 = fa.call(x, 1u32)
     );
 }
 
+// ---- parameterised type abbreviations and raster stage tokens -------------
+
+#[test]
+fn parameterised_type_aliases_expand_type_and_size_arguments() {
+    typecheck_program(
+        r#"
+type pair<A, B> = (A, B)
+type vector<[n], A> = [n]A
+type nested<A> = pair<pair<A, bool>, vector<[4], A>>
+type box<A> = A
+
+def keep_pair(x: pair<i32, bool>) pair<i32, bool> = x
+def keep_four(x: vector<[4], i32>) vector<[4], i32> = x
+def keep_nested(x: nested<i32>) nested<i32> = x
+def keep_array_arg(x: box<[4]i32>) box<[4]i32> = x
+"#,
+    );
+}
+
+#[test]
+fn parameterised_module_type_aliases_expand_at_qualified_use_sites() {
+    typecheck_program(
+        r#"
+module pairs = {
+  type pair<A, B> = (A, B)
+  def keep(x: pair<i32, bool>) pair<i32, bool> = x
+}
+def use(x: pairs.pair<i32, bool>) pairs.pair<i32, bool> = pairs.keep(x)
+"#,
+    );
+}
+
+#[test]
+fn type_alias_application_reports_arity_and_kind_errors() {
+    for (label, source, expected) in [
+        (
+            "arity",
+            "type pair<A, B> = (A, B)\ndef bad(x: pair<i32>) i32 = 0",
+            "expects 2 arguments, got 1",
+        ),
+        (
+            "size argument",
+            "type vector<[n], A> = [n]A\ndef bad(x: vector<i32, i32>) i32 = 0",
+            "must be a size argument",
+        ),
+        (
+            "ordinary type argument",
+            "type box<A> = A\ndef bad(x: box<[4]>) i32 = 0",
+            "must be an ordinary type",
+        ),
+    ] {
+        let error = try_typecheck_program(source).expect_err(label);
+        let message = format!("{:?}", error);
+        assert!(
+            message.contains(expected),
+            "{label}: expected '{expected}' in diagnostic, got {message}"
+        );
+    }
+}
+
+#[test]
+fn raster_is_a_spellable_opaque_generic_type_inside_functions() {
+    typecheck_program("def pass_raster<V>(stream: raster<V>) raster<V> = stream");
+}
+
+#[test]
+fn raster_requires_one_ordinary_type_argument() {
+    for (source, expected) in [
+        ("def bad(stream: raster) i32 = 0", "expects >= 1 args, got 0"),
+        ("def bad(stream: raster<[4]>) i32 = 0", "arg 0 must be Type"),
+    ] {
+        let error = try_typecheck_program(source).expect_err("malformed raster type");
+        let message = format!("{:?}", error);
+        assert!(
+            message.contains(expected),
+            "expected '{expected}' in diagnostic, got {message}"
+        );
+    }
+}
+
+#[test]
+fn raster_cannot_cross_the_current_platform_entry_boundary() {
+    let error = try_typecheck_program(
+        r#"
+#[compute]
+entry bad(stream: raster<vec4f32>) () = ()
+"#,
+    )
+    .expect_err("raster entry parameter should be rejected");
+    let message = format!("{:?}", error);
+    assert!(message.contains("internal stage token"), "got {message}");
+}
+
 // ---- uniform block type gate ----------------------------------------------
 
 /// Uniform params must have a std140 block layout: 32-bit scalars,

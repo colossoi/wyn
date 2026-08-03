@@ -1461,6 +1461,35 @@ impl<'a> Parser<'a> {
 
         let (mut base, base_diet) = self.parse_array_or_base_type()?;
 
+        // Explicit application of a parameterised type abbreviation or
+        // spellable generic builtin: `pair<i32, bool>`, `vector<[4], f32>`,
+        // or `raster<V>`. Constructors are first-order and applications must
+        // be saturated; arity and kinds are checked during alias expansion.
+        if self.check_binop("<") {
+            let args = self.parse_type_arguments()?;
+            match &mut base {
+                Type::Constructed(TypeName::Named(_), base_args)
+                | Type::Constructed(TypeName::Raster, base_args)
+                    if base_args.is_empty() =>
+                {
+                    *base_args = args;
+                }
+                Type::Constructed(name, _) => {
+                    bail_parse_at!(
+                        self.previous_span(),
+                        "type '{}' does not accept explicit type arguments",
+                        name
+                    );
+                }
+                Type::Variable(_) => {
+                    bail_parse_at!(
+                        self.previous_span(),
+                        "a type variable cannot be applied as a type constructor"
+                    );
+                }
+            }
+        }
+
         // Type application loop: keep applying type arguments
         // Grammar: type_application ::= type type_arg | "*" type
         //          type_arg         ::= "[" [dim] "]" | type
@@ -1542,6 +1571,90 @@ impl<'a> Parser<'a> {
 
         let diet = if wrapped_in_array { Diet::Leaf(base_diet.is_consuming()) } else { base_diet };
         Ok((base, diet))
+    }
+
+    /// Parse `<...>` arguments on a first-order type constructor.
+    /// Size arguments retain brackets so their kind remains explicit.
+    fn parse_type_arguments(&mut self) -> Result<Vec<Type>> {
+        self.expect_binop("<")?;
+        let mut args = Vec::new();
+        if !self.check_type_argument_close() {
+            loop {
+                args.push(self.parse_type_argument()?);
+                if !self.check(&Token::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+        }
+        self.expect_type_argument_close()?;
+        Ok(args)
+    }
+
+    fn parse_type_argument(&mut self) -> Result<Type> {
+        if self.check(&Token::LeftBracket) || self.check(&Token::LeftBracketSpaced) {
+            let start = self.current;
+            self.advance();
+            let size = match self.peek() {
+                Some(Token::RightBracket) => {
+                    self.advance();
+                    Type::Constructed(TypeName::SizePlaceholder, vec![])
+                }
+                Some(Token::Identifier(name)) => {
+                    let name = name.clone();
+                    self.advance();
+                    self.expect(Token::RightBracket)?;
+                    types::size_var(name)
+                }
+                Some(Token::IntLiteral(n)) => {
+                    let size = usize::try_from(n).map_err(|_| err_parse!("Invalid type size argument"))?;
+                    self.advance();
+                    self.expect(Token::RightBracket)?;
+                    Type::Constructed(TypeName::Size(size), vec![])
+                }
+                _ => bail_parse_at!(
+                    self.current_span(),
+                    "expected a size literal, size name, or ']' in type argument"
+                ),
+            };
+
+            // A bracketed token followed by comma/close is a size argument.
+            // If a type follows the bracket, rewind and parse the whole array
+            // type as one ordinary argument.
+            if self.check(&Token::Comma) || self.check_type_argument_close() || self.peek().is_none() {
+                Ok(size)
+            } else {
+                self.current = start;
+                self.parse_type().map(|(ty, _)| ty)
+            }
+        } else {
+            self.parse_type().map(|(ty, _)| ty)
+        }
+    }
+
+    // `>>` and `>>>` are lexer tokens for expression shifts. Inside nested
+    // type applications they are consecutive closes, so consume one `>` and
+    // leave the remainder for the enclosing application.
+    fn check_type_argument_close(&self) -> bool {
+        matches!(
+            self.peek(),
+            Some(Token::BinOp(op)) if !op.is_empty() && op.chars().all(|c| c == '>')
+        )
+    }
+
+    fn expect_type_argument_close(&mut self) -> Result<()> {
+        let Some(Token::BinOp(op)) = self.peek().cloned() else {
+            bail_parse_at!(self.current_span(), "expected '>' after type arguments");
+        };
+        if op.is_empty() || !op.chars().all(|c| c == '>') {
+            bail_parse_at!(self.current_span(), "expected '>' after type arguments");
+        }
+        if op.len() == 1 {
+            self.advance();
+        } else {
+            self.tokens[self.current].token = Token::BinOp(op[1..].to_string());
+        }
+        Ok(())
     }
 
     // Helper to check if current token can start a type
@@ -1710,6 +1823,7 @@ impl<'a> Parser<'a> {
                     // capture and monomorphization.
                     "texture2d" => TypeName::Texture2D,
                     "sampler" => TypeName::Sampler,
+                    "raster" => TypeName::Raster,
                     "storage_image" => {
                         return Ok((
                             Type::Constructed(
