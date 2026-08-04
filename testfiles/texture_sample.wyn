@@ -4,24 +4,32 @@
 -- both filtered-samples (`texture_sample`, explicit LOD) and raw-fetches
 -- (`texture_load`) the same texture, then sums the two. Exercises:
 --   * the `texture2d` / `sampler` opaque types,
---   * `#[texture(set, binding)]` / `#[sampler(set, binding)]` bindings,
+--   * texture and sampler values captured from the root entry,
 --   * `texture_sample(tex, samp, uv, lod)` — EXPLICIT LOD, so the result
 --     is a pure function of its arguments (referentially transparent;
 --     no screen-space-derivative dependence). See the texture plan's v2
 --     note for gradient-based filtering.
 --   * `texture_load(tex, coord, lod)` — raw texel fetch.
 
-#[vertex]
-entry vertex_main(#[vertex_slot(0)] pos: vec2f32)
-  (#[builtin(position)] vec4f32, #[varying(0)] vec2f32) =
-  (@[pos.x, pos.y, 0.0, 1.0], @[pos.x * 0.5 + 0.5, pos.y * 0.5 + 0.5])
+def vertex_main(positions: []vec2f32,
+                vertex: vertex_invocation) vertex<vec2f32> =
+  let pos = positions[i32(vertex.vertex_index)] in
+  vertex_output(
+    @[pos.x, pos.y, 0.0, 1.0],
+    @[pos.x * 0.5 + 0.5, pos.y * 0.5 + 0.5])
 
-#[fragment]
-entry fragment_main
-  ( #[varying(0)] uv: vec2f32
-  , #[texture(set=0, binding=0)] tex: texture2d
-  , #[sampler(set=0, binding=1)] samp: sampler
-  ) #[target(screen)] vec4f32 =
+def fragment_main(uv: vec2f32, tex: texture2d, samp: sampler) vec4f32 =
   let filtered = texture_sample(tex, samp, uv, 0.0)
   let texel = texture_load(tex, @[0, 0], 0) in
   filtered + texel
+
+entry texture_sample_demo(
+    positions: []vec2f32,
+    tex: texture2d,
+    samp: sampler,
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main(positions, _)) in
+  shade(screen, covered,
+    |fragment| fragment_main(fragment.value, tex, samp))

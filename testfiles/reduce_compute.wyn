@@ -1,7 +1,6 @@
 -- Reduce compute shader test
 -- Sums an array of f32 values using parallel reduction
 
-#[compute]
 entry sum_array(
     #[size_hint(1024)] data: []f32
 ) f32 =

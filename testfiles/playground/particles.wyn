@@ -1,28 +1,12 @@
--- A minimal boids-style particle simulator demonstrating storage-buffer
--- rasterization with self-clearing.
+-- A minimal boids-style particle simulator expressed as one root operation.
 --
--- `sim` (compute) is one entry that:
---   * evolves particle state from `prev_pos` (clumping + alignment
---     forces) and returns the new state via `sim_output` — fed back
---     into `prev_pos` next frame by the host.
---   * self-clears the framebuffer via `map(|_| black, fb)` over a
---     consuming `*[]vec4f32` and `scatter`s one white texel per
---     particle into the cleared buffer at its flattened pixel index.
---   * The returned `new_pos` and the scatter both consume the same
---     SOAC result — the compiler retargets the producer's writes
---     into the entry's output binding and rewrites the scatter's
---     input operand to read through that view
---     (`egir::realize_outputs::dispatch::rewrite_sibling_index_consumers`).
+-- sim returns the next particle array. The fragment callback captures that
+-- value directly and tests whether the current pixel contains a particle.
+-- The root returns the array for optional use as the next frame's input.
 --
--- `main_image` (fragment) samples the framebuffer at the pixel's
--- flat index, so per-pixel cost is O(1) instead of O(particles).
---
--- Exercises `filter(...)` piped into a user-defined size-polymorphic
--- helper (`center` calling `sum`) — the canonical "Abstract array
--- crosses a non-inlined call boundary" pattern that motivates
--- `rep_specialize`.
---
--- The initial particle state is generated in Wyn. Each particle index seeds
+-- Exercises filter piped into a size-polymorphic helper and same-frame
+-- array flow from ordinary computation into fragment processing.
+---- The initial particle state is generated in Wyn. Each particle index seeds
 -- an independent random-access stream from `lib/rng`; frame zero maps those
 -- draws into a starting position + velocity. Later frames consume the
 -- previous position buffer supplied by viz's feedback pair.
@@ -93,10 +77,7 @@ def wrap(coord: f32, vel: f32) f32 = (coord + UPDFACTOR * vel + f32(RES)) % f32(
 -- both `vec4f32`) into a row-major framebuffer index.
 def pixel_index(p: vec4f32) i32 = i32(p.y) * RES + i32(p.x)
 
-#[compute]
-entry sim(prev_pos: []vec4f32,
-          #[storage(set=2, binding=1, access=write)] fb: *[]vec4f32,
-          #[uniform(set=1, binding=3)] iFrame: u32) []vec4f32 =
+def sim(prev_pos: []vec4f32, iFrame: u32) []vec4f32 =
   let new_pos =
     if iFrame < 2u32 then
       map(initial_particle, 0i32..<N)
@@ -110,21 +91,33 @@ entry sim(prev_pos: []vec4f32,
       in
       map(|upd:vec4f32| @[wrap(upd.x, upd.z), wrap(upd.y, upd.w), upd.z, upd.w],
           accelerated) in
-  let cleared = map(|_p:vec4f32| @[0.0, 0.0, 0.0, 1.0], fb) in
-  let idxs = map(|p:vec4f32| pixel_index(p), new_pos) in
-  let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], new_pos) in
-  let _ = scatter(cleared, idxs, vals) in
   new_pos
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32)
-  #[builtin(position)] vec4f32 =
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  let vid = i32(vertex.vertex_index) in
   let x = if vid == 0 then -1.0 else if vid == 1 then 3.0 else -1.0 in
   let y = if vid == 0 then -1.0 else if vid == 1 then -1.0 else 3.0 in
-  @[x, y, 0.0, 1.0]
+  vertex_output(@[x, y, 0.0, 1.0], @[0.0, 0.0])
 
-#[fragment]
-entry main_image(#[storage(set=2, binding=1, access=read)] fb: []vec4f32,
-                 #[builtin(position)] fragCoord: vec4f32)
-  #[target(screen)] vec4f32 =
-  fb[pixel_index(fragCoord)]
+def main_image(positions: []vec4f32, fragCoord: vec4f32) vec4f32 =
+  let target = pixel_index(fragCoord) in
+  let hits = map(
+    |p: vec4f32| if pixel_index(p) == target then 1.0 else 0.0,
+    positions[0..N]) in
+  let lit = reduce(|a: f32, b: f32| max(a, b), 0.0, hits) in
+  @[lit, lit, lit, 1.0]
+
+entry particles(
+    prev_pos: []vec4f32,
+    iFrame: u32,
+    screen: render_target<vec4f32>)
+    ([]vec4f32, render_target<vec4f32>) =
+  let next = sim(prev_pos, iFrame) in
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main) in
+  let screen' = shade(
+    screen,
+    covered,
+    |fragment| main_image(next, fragment.position)) in
+  (next, screen')

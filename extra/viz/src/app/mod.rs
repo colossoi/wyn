@@ -30,7 +30,7 @@ use crate::gpu::{self, DeviceRequest, GpuContext};
 use render::DEPTH_FORMAT;
 use uniforms::{MouseUniform, ResolutionUniform};
 
-use wyn_pipeline_descriptor::PipelineDescriptor;
+use wyn_pipeline_descriptor::{DrawCall, PipelineDescriptor};
 
 // --- Pipeline spec passed to the app -----------------------------------------
 
@@ -74,7 +74,7 @@ pub struct InteractivePipelineSpec {
     pub validate: bool,
     pub present_mode: PresentMode,
     pub size: Option<(u32, u32)>,
-    pub vertex_count: u32,
+    pub draw: DrawCall,
     /// Primitive topology for the graphics pipeline.
     pub topology: wgpu::PrimitiveTopology,
     /// Directory of per-binding `.bin` files. The host loads each
@@ -91,7 +91,7 @@ pub struct InteractivePipelineSpec {
     /// Flat little-endian `u32` index buffer file. When present, the
     /// host binds it and dispatches `draw_indexed` with
     /// `file_size / 4` indices in place of the non-indexed
-    /// `draw(0..vertex_count)`.
+    /// draw published by the descriptor.
     pub index_buffer: Option<PathBuf>,
     /// Storage buffers to read back and dump as f32-array JSON when the
     /// run ends (`--output NAME:FILE`). Keyed by binding name → output
@@ -221,7 +221,7 @@ struct PipelineState {
     /// number). See `PipelineComputeStage.bind_groups_by_set` for the
     /// parity convention.
     render_bind_groups_by_set: [Vec<Option<BindGroup>>; 2],
-    vertex_count: u32,
+    draw: DrawCall,
     /// One vertex buffer per declared `#[location(n)]` attribute, in
     /// shader_location order. Empty for full-screen-triangle shaders.
     vertex_buffers: Vec<wgpu::Buffer>,
@@ -1125,7 +1125,7 @@ impl State {
             compute_stages,
             render_pipeline,
             render_bind_groups_by_set: g_bgs,
-            vertex_count: spec.vertex_count,
+            draw: spec.draw.clone(),
             vertex_buffers: vertex_buffer_pack.buffers,
             index_buffer,
             resolution_buffer: uniforms.resolution,
@@ -1665,13 +1665,23 @@ fn render_pipeline(
     for (slot, buf) in state.vertex_buffers.iter().enumerate() {
         rpass.set_vertex_buffer(slot as u32, buf.slice(..));
     }
+    let DrawCall::Direct {
+        vertex_count,
+        instance_count,
+        first_vertex,
+        first_instance,
+    } = &state.draw;
+    let instances = *first_instance..first_instance.saturating_add(*instance_count);
     match &state.index_buffer {
         Some((buf, count)) => {
             rpass.set_index_buffer(buf.slice(..), wgpu::IndexFormat::Uint32);
-            rpass.draw_indexed(0..*count, 0, 0..1);
+            rpass.draw_indexed(0..*count, 0, instances);
         }
         None => {
-            rpass.draw(0..state.vertex_count, 0..1);
+            rpass.draw(
+                *first_vertex..first_vertex.saturating_add(*vertex_count),
+                instances,
+            );
         }
     }
 }

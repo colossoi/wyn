@@ -34,8 +34,7 @@ fn collect_term_ids<C: crate::tlc::Payload, S: crate::tlc::Payload>(
 #[test]
 fn transition_reuses_entry_term_tree() {
     let src = r#"
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] xs: []i32) i32 =
+entry e(xs: []i32) i32 =
   length(xs)
 "#;
     let reachable = crate::test_pipeline::compile_to_reachable(src);
@@ -60,8 +59,7 @@ entry e(#[storage(set=2, binding=0, access=read)] xs: []i32) i32 =
 fn slice_only_param_gets_bound() {
     let src = r#"
 def N:i32 = 8
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] xs: []vec4f32) vec4f32 =
+entry e(xs: []vec4f32) vec4f32 =
   let xs = xs[0..N] in
   reduce(|a,b| a+b, @[0.0,0.0,0.0,0.0], xs)
 "#;
@@ -81,8 +79,7 @@ entry e(#[storage(set=2, binding=0, access=read)] xs: []vec4f32) vec4f32 =
 #[test]
 fn length_call_disqualifies() {
     let src = r#"
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] xs: []vec4f32) i32 =
+entry e(xs: []vec4f32) i32 =
   length(xs)
 "#;
     let prog = program_from(src);
@@ -102,8 +99,7 @@ entry e(#[storage(set=2, binding=0, access=read)] xs: []vec4f32) i32 =
 fn let_shadowing_does_not_disqualify_outer() {
     let src = r#"
 def N:i32 = 4
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] xs: []vec4f32) vec4f32 =
+entry e(xs: []vec4f32) vec4f32 =
   let xs = xs[0..N] in
   reduce(|a,b| a+b, @[0.0,0.0,0.0,0.0], xs)
 "#;
@@ -123,8 +119,7 @@ fn multiple_slices_take_max() {
     let src = r#"
 def SMALL:i32 = 4
 def BIG:i32 = 16
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] xs: []vec4f32) vec4f32 =
+entry e(xs: []vec4f32) vec4f32 =
   let a = xs[0..SMALL] in
   let b = xs[0..BIG] in
   reduce(|x,y| x+y, @[0.0,0.0,0.0,0.0], a) +

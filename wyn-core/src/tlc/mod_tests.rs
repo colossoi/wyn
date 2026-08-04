@@ -280,9 +280,8 @@ fn plain_scatter_carries_identity_envelope() {
     let program = compile_to_tlc_raw(
         r#"
 def N:i32 = 5
-#[compute]
-entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
-                #[storage(set=2, binding=1, access=write)] fb: []vec4f32) () =
+entry rasterize(positions: []vec4f32,
+                fb: []vec4f32) () =
   let pts  = positions[0..N] in
   let idxs = map(|p:vec4f32| i32.f32(p.y) * 512 + i32.f32(p.x), pts) in
   let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], pts) in

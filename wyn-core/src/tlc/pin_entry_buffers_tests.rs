@@ -30,7 +30,7 @@ fn single_view_param_pins_to_binding_zero() {
     // The lone `[]f32` storage param auto-allocates `(set 0, binding 0)`,
     // so after pinning its buffer slot is `Region(0, 0)` — concrete, not a
     // variable.
-    let program = pin("#[compute]\n\
+    let program = pin("\n\
          entry sum_array(data: []f32) f32 =\n\
          \x20   reduce(|a: f32, b: f32| a + b, 0.0, data)\n");
     let region = entry_param_buffer(&program, 0);
@@ -45,7 +45,7 @@ fn single_view_param_pins_to_binding_zero() {
 fn two_view_params_pin_to_distinct_bindings() {
     // Two storage params auto-allocate `(0,0)` and `(0,1)` in declaration
     // order; pinning records each region distinctly.
-    let program = pin("#[compute]\n\
+    let program = pin("\n\
          entry add(xs: []f32, ys: []f32) f32 =\n\
          \x20   reduce(|a: f32, b: f32| a + b, 0.0, xs) + reduce(|a: f32, b: f32| a + b, 0.0, ys)\n");
     assert_eq!(
@@ -55,18 +55,5 @@ fn two_view_params_pin_to_distinct_bindings() {
     assert_eq!(
         entry_param_buffer(&program, 1),
         Type::Constructed(TypeName::Buffer(crate::BindingRef::new(0, 1)), vec![]),
-    );
-}
-
-#[test]
-fn explicit_storage_attribute_pins_to_its_binding() {
-    // An explicit `#[storage(set, binding)]` wins over auto-allocation: the
-    // region is pinned to the attribute's `(2, 3)`.
-    let program = pin("#[compute]\n\
-         entry consume(#[storage(set=2, binding=3, access=read)] data: []f32) f32 =\n\
-         \x20   reduce(|a: f32, b: f32| a + b, 0.0, data)\n");
-    assert_eq!(
-        entry_param_buffer(&program, 0),
-        Type::Constructed(TypeName::Buffer(crate::BindingRef::new(2, 3)), vec![]),
     );
 }

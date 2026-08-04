@@ -89,49 +89,6 @@ macro_rules! assert_typed_param {
     };
 }
 
-/// Assert that a Pattern has given name, type, and attributes
-/// In new syntax: `#[attr] name: type` parses as Typed(Attributed(attrs, Name), type)
-macro_rules! assert_typed_param_with_attrs {
-    ($param:expr, $name:expr, $ty:expr, $attrs:expr) => {
-        assert_eq!(
-            $param.simple_name(),
-            Some($name),
-            "Expected param with name {:?}, got {:?}",
-            $name,
-            $param
-        );
-        assert_eq!(
-            $param.pattern_type(),
-            Some(&$ty),
-            "Expected param with type {:?}, got {:?}",
-            $ty,
-            $param.pattern_type()
-        );
-        // Pattern structure is Typed(Attributed(attrs, Name), type)
-        // The type annotation is on the outside
-        if let PatternKind::Typed(inner, _ty) = &$param.kind {
-            // Inner should be Attributed(attrs, Name)
-            if let PatternKind::Attributed(attrs, _name) = &inner.kind {
-                assert_eq!(
-                    attrs, &$attrs,
-                    "Expected attrs {:?}, got {:?}",
-                    $attrs, attrs
-                );
-            } else {
-                panic!(
-                    "Expected attributed pattern inside typed pattern, got {:?}",
-                    inner
-                );
-            }
-        } else {
-            panic!(
-                "Expected typed pattern with attributed inner, got {:?}",
-                $param
-            );
-        }
-    };
-}
-
 /// Assert that a value matches a pattern, showing actual value on failure
 macro_rules! assert_matches {
     ($expr:expr, $pattern:pat) => {
@@ -362,11 +319,22 @@ fn test_parse_array_type_unique_nested() {
 }
 
 #[test]
-fn test_parse_entry_point_decl() {
-    let entry = single_entry("#[vertex] entry main(x: i32, y: f32) [4]f32 = result");
+fn attribute_free_entry_is_a_unified_root() {
+    let entry = single_entry("entry main(xs: []i32) []i32 = xs");
 
     assert_eq!(entry.name, "main");
-    assert_eq!(entry.data.entry_kind, crate::interface::EntryKind::Vertex);
+    assert_eq!(entry.data.entry_kind, crate::interface::EntryKind::Root);
+    assert_eq!(entry.params.len(), 1);
+    assert_eq!(entry.data.outputs.len(), 1);
+    assert!(entry.data.compute_dispatch.is_none());
+}
+
+#[test]
+fn test_parse_entry_point_decl() {
+    let entry = single_entry(" entry main(x: i32, y: f32) [4]f32 = result");
+
+    assert_eq!(entry.name, "main");
+    assert_eq!(entry.data.entry_kind, crate::interface::EntryKind::Root);
     assert_eq!(entry.params.len(), 2);
 
     assert_typed_param!(&entry.params[0], "x", crate::types::i32());
@@ -412,48 +380,77 @@ fn test_parse_division() {
 }
 
 #[test]
-fn test_parse_vertex_attribute() {
-    let entry = single_entry("#[vertex] entry main() [4]f32 = result");
-    assert_eq!(entry.data.entry_kind, crate::interface::EntryKind::Vertex);
-    assert_eq!(entry.name, "main");
+fn stage_identification_and_dispatch_attributes_are_rejected() {
+    for source in [
+        "#[vertex] entry main() vec4f32 = result",
+        "#[fragment] entry main() vec4f32 = result",
+        "#[compute] entry main() () = ()",
+    ] {
+        expect_parse_error(source, |err| {
+            let msg = err.to_string();
+            if msg.contains("is not part of the language") && msg.contains("stage context is determined") {
+                Ok(())
+            } else {
+                Err(format!("unexpected error: {msg}"))
+            }
+        });
+    }
+
+    expect_parse_error("#[dispatch(4, 4)] entry main() () = ()", |err| {
+        let msg = err.to_string();
+        if msg.contains("#[dispatch(...)] is not part of the language")
+            && msg.contains("array operations determine their own execution")
+        {
+            Ok(())
+        } else {
+            Err(format!("unexpected error: {msg}"))
+        }
+    });
 }
 
 #[test]
-fn test_parse_fragment_attribute() {
-    let entry = single_entry("#[fragment] entry frag() [4]f32 = result");
-    assert_eq!(entry.data.entry_kind, crate::interface::EntryKind::Fragment);
-    assert_eq!(entry.name, "frag");
+fn explicit_resource_layout_and_stage_interface_attributes_are_rejected() {
+    for source in [
+        "entry main(#[uniform(binding=0)] x: f32) f32 = x",
+        "entry main(#[storage(binding=0)] xs: []f32) []f32 = xs",
+        "entry main(#[texture(binding=0)] image: texture2d) texture2d = image",
+        "entry main(#[sampler(binding=0)] sampling: sampler) sampler = sampling",
+        "entry main(#[storage_image(binding=0, format=rgba8unorm)] image: texture2d) texture2d = image",
+        "entry main(#[view(image, sampled)] image: texture2d) texture2d = image",
+        "entry main(#[builtin(vertex_index)] index: u32) u32 = index",
+        "entry main(#[vertex_slot(0)] position: vec3f32) vec3f32 = position",
+        "entry main(#[varying(0)] value: f32) f32 = value",
+        "entry main() #[target(screen)] vec4f32 = @[0.0, 0.0, 0.0, 1.0]",
+    ] {
+        expect_parse_error(source, |err| {
+            let msg = err.to_string();
+            if msg.contains("is not part of the language")
+                && (msg.contains("external resources")
+                    || msg.contains("invocation arguments, payloads, and render targets"))
+            {
+                Ok(())
+            } else {
+                Err(format!("unexpected error: {msg}"))
+            }
+        });
+    }
 }
 
 #[test]
-fn test_parse_compute_dispatch_attribute() {
-    let entry = single_entry("#[compute]\n#[dispatch(16, 9)] entry main() () = ()");
-    assert_eq!(entry.data.entry_kind, crate::interface::EntryKind::Compute);
-    assert_eq!(
-        entry.data.compute_dispatch,
-        Some(crate::interface::ComputeDispatchGrid { x: 16, y: 9, z: 1 })
+fn resource_declarations_are_rejected() {
+    expect_parse_error(
+        "resource image: image2d { format = rgba8unorm, size = window, usages = [sampled] }",
+        |err| {
+            let msg = err.to_string();
+            if msg.contains("resource declarations are not part of the language")
+                && msg.contains("entry parameters")
+            {
+                Ok(())
+            } else {
+                Err(format!("unexpected error: {msg}"))
+            }
+        },
     );
-}
-
-#[test]
-fn dispatch_attribute_is_compute_entry_only() {
-    expect_parse_error("#[vertex]\n#[dispatch(4, 4)] entry main() () = ()", |err| {
-        let msg = err.to_string();
-        if msg.contains("#[dispatch(...)] can only be used with #[compute] entries") {
-            Ok(())
-        } else {
-            Err(format!("unexpected error: {msg}"))
-        }
-    });
-
-    expect_parse_error("#[dispatch(4)] def x: i32 = 1", |err| {
-        let msg = err.to_string();
-        if msg.contains("#[dispatch(...)] is only valid on compute entry points") {
-            Ok(())
-        } else {
-            Err(format!("unexpected error: {msg}"))
-        }
-    });
 }
 
 #[test]
@@ -503,111 +500,11 @@ fn test_operator_precedence_and_associativity() {
 }
 
 #[test]
-fn test_parse_builtin_attribute_on_return_type() {
-    let entry = single_entry("#[vertex] entry main() #[builtin(position)] [4]f32 = result");
-
-    assert_eq!(entry.data.entry_kind, crate::interface::EntryKind::Vertex);
-    assert_eq!(entry.data.outputs.len(), 1);
-    assert_eq!(entry.data.outputs.len(), 1);
-    assert_eq!(
-        entry.data.outputs[0].attribute,
-        Some(Attribute::BuiltIn(spirv::BuiltIn::Position))
-    );
-    assert_eq!(
-        entry.data.outputs[0].ty,
-        crate::types::sized_array_placeholder(4, crate::types::f32())
-    );
-}
-
-#[test]
-fn test_parse_single_attributed_return_type() {
-    let entry = single_entry(
-        "#[vertex] entry vertex_main() #[builtin(position)] vec4 = vec4(0.0f32, 0.0f32, 0.0f32, 1.0f32)",
-    );
-
-    assert_eq!(entry.data.entry_kind, crate::interface::EntryKind::Vertex);
-    assert_eq!(entry.data.outputs.len(), 1);
-    assert_eq!(entry.data.outputs.len(), 1);
-    assert_eq!(
-        entry.data.outputs[0].attribute,
-        Some(Attribute::BuiltIn(spirv::BuiltIn::Position))
-    );
-    assert_matches!(
-        &entry.data.outputs[0].ty,
-        Type::Constructed(TypeName::Named(name), _) if name == "vec4"
-    );
-}
-
-#[test]
-fn test_parse_tuple_attributed_return_type() {
-    let entry = single_entry(
-        "#[vertex] entry vertex_main() (#[builtin(position)] vec4, #[varying(0)] vec3) = result",
-    );
-
-    assert_eq!(entry.data.outputs.len(), 2);
-    assert_eq!(entry.data.outputs.len(), 2);
-
-    // Check first element: [builtin(position)] vec4
-    assert_eq!(
-        entry.data.outputs[0].attribute,
-        Some(Attribute::BuiltIn(spirv::BuiltIn::Position))
-    );
-
-    // Check second element: [varying(0)] vec3
-    assert_eq!(entry.data.outputs[1].attribute, Some(Attribute::Varying(0)));
-}
-
-#[test]
 fn test_parse_unattributed_return_type() {
     let decl = single_decl("def helper: vec4 = vec4(1.0f32, 0.0f32, 0.0f32, 1.0f32)");
 
     let ty = decl.ty.as_ref().expect("Missing return type");
     assert_matches!(ty, Type::Constructed(TypeName::Named(name), _) if name == "vec4");
-}
-
-#[test]
-fn test_parse_target_attribute_on_return_type() {
-    let entry = single_entry("#[fragment] entry frag() #[target(screen)] [4]f32 = result");
-
-    assert_eq!(entry.data.entry_kind, crate::interface::EntryKind::Fragment);
-    assert_eq!(entry.data.outputs.len(), 1);
-    assert_eq!(entry.data.outputs.len(), 1);
-    assert_eq!(
-        entry.data.outputs[0].attribute,
-        Some(Attribute::Target("screen".to_string()))
-    );
-    assert_eq!(
-        entry.data.outputs[0].ty,
-        crate::types::sized_array_placeholder(4, crate::types::f32())
-    );
-}
-
-#[test]
-fn test_parse_parameter_with_builtin_attribute() {
-    let entry = single_entry("#[vertex] entry main(#[builtin(vertex_index)] vid: i32) [4]f32 = result");
-
-    assert_eq!(entry.params.len(), 1);
-    assert_typed_param_with_attrs!(
-        &entry.params[0],
-        "vid",
-        crate::types::i32(),
-        vec![Attribute::<crate::interface::ViewAttribute>::BuiltIn(
-            spirv::BuiltIn::VertexIndex
-        )]
-    );
-}
-
-#[test]
-fn test_parse_parameter_with_varying_attribute() {
-    let entry = single_entry("#[fragment] entry frag(#[varying(1)] color: [3]f32) [4]f32 = result");
-
-    assert_eq!(entry.params.len(), 1);
-    assert_typed_param_with_attrs!(
-        &entry.params[0],
-        "color",
-        crate::types::sized_array_placeholder(3, crate::types::f32()),
-        vec![Attribute::<crate::interface::ViewAttribute>::Varying(1)]
-    );
 }
 
 #[test]
@@ -638,43 +535,6 @@ fn test_parse_parameter_with_size_hint_attribute() {
     } else {
         panic!("Expected Typed pattern, got {:?}", param);
     }
-}
-
-#[test]
-fn test_parse_multiple_builtin_types() {
-    let entry = single_entry(
-        "#[vertex] entry main(#[builtin(vertex_index)] vid: i32, #[builtin(instance_index)] iid: i32) #[builtin(position)] [4]f32 = result",
-    );
-
-    assert_eq!(entry.params.len(), 2);
-
-    // First parameter
-    assert_typed_param_with_attrs!(
-        &entry.params[0],
-        "vid",
-        crate::types::i32(),
-        vec![Attribute::<crate::interface::ViewAttribute>::BuiltIn(
-            spirv::BuiltIn::VertexIndex
-        )]
-    );
-
-    // Second parameter
-    assert_typed_param_with_attrs!(
-        &entry.params[1],
-        "iid",
-        crate::types::i32(),
-        vec![Attribute::<crate::interface::ViewAttribute>::BuiltIn(
-            spirv::BuiltIn::InstanceIndex
-        )]
-    );
-
-    // Return type
-    assert_eq!(entry.data.outputs.len(), 1);
-    assert_eq!(entry.data.outputs.len(), 1);
-    assert_eq!(
-        entry.data.outputs[0].attribute,
-        Some(Attribute::BuiltIn(spirv::BuiltIn::Position))
-    );
 }
 
 #[test]
@@ -848,7 +708,7 @@ fn test_parse_lambda_application_with_type_hole() {
 #[test]
 fn test_parse_simple_let_in() {
     // Just verify it parses successfully - the structure is complex to validate in detail
-    let _entry = single_entry("#[vertex] entry main (x:i32) i32 = let y = 5 in y + x");
+    let _entry = single_entry(" entry main (x:i32) i32 = let y = 5 in y + x");
 }
 
 #[test]
@@ -864,7 +724,7 @@ fn test_parse_let_in_expression_only() {
 #[test]
 fn test_parse_let_in_with_lambda() {
     // Just verify it parses successfully - the lambda let..in structure is complex
-    let _entry = single_entry(r#"#[vertex] entry main (x:i32) i32 = let f = |y| y + x in f(10)"#);
+    let _entry = single_entry(r#" entry main (x:i32) i32 = let f = |y| y + x in f(10)"#);
 }
 
 #[test]
@@ -876,13 +736,13 @@ def verts: [3][4]f32 =
    [ 3.0f32, -1.0f32, 0.0f32, 1.0f32],
    [-1.0f32,  3.0f32, 0.0f32, 1.0f32]]
 
-#[vertex]
+
 entry vertex_main(vertex_id: i32) [4]f32 = verts[vertex_id]
 
 def SKY_RGBA: [4]f32 =
   [135.0f32/255.0f32, 206.0f32/255.0f32, 235.0f32/255.0f32, 1.0f32]
 
-#[fragment]
+
 entry fragment_main() [4]f32 = SKY_RGBA
 "#;
 
@@ -896,7 +756,7 @@ entry fragment_main() [4]f32 = SKY_RGBA
 
     // Second: vertex entry point
     assert!(
-        matches!(&program.declarations[1], Declaration::Entry(entry) if entry.name == "vertex_main" && entry.data.entry_kind == crate::interface::EntryKind::Vertex)
+        matches!(&program.declarations[1], Declaration::Entry(entry) if entry.name == "vertex_main" && entry.data.entry_kind == crate::interface::EntryKind::Root)
     );
 
     // Third: def SKY_RGBA
@@ -906,7 +766,7 @@ entry fragment_main() [4]f32 = SKY_RGBA
 
     // Fourth: fragment entry point
     assert!(
-        matches!(&program.declarations[3], Declaration::Entry(entry) if entry.name == "fragment_main" && entry.data.entry_kind == crate::interface::EntryKind::Fragment)
+        matches!(&program.declarations[3], Declaration::Entry(entry) if entry.name == "fragment_main" && entry.data.entry_kind == crate::interface::EntryKind::Root)
     );
 }
 
@@ -983,36 +843,6 @@ fn test_parse_vector_arithmetic() {
 }
 
 #[test]
-fn test_parse_multiple_shader_outputs() {
-    let entry = single_entry(
-        r#"
-            #[fragment] entry fragment_main() (#[target(albedo)] vec4, #[target(normal)] vec3) =
-              let color = vec4(1.0f32, 0.5f32, 0.2f32, 1.0f32) in
-              let normal = vec3(0.0f32, 1.0f32, 0.0f32) in
-              (color, normal)
-            "#,
-    );
-
-    assert_eq!(entry.name, "fragment_main");
-    assert_eq!(entry.data.entry_kind, crate::interface::EntryKind::Fragment);
-
-    assert_eq!(entry.data.outputs.len(), 2);
-    assert_eq!(entry.data.outputs.len(), 2);
-
-    // Check first output: [target(albedo)] vec4
-    assert_eq!(
-        entry.data.outputs[0].attribute,
-        Some(Attribute::Target("albedo".to_string()))
-    );
-
-    // Check second output: [target(normal)] vec3
-    assert_eq!(
-        entry.data.outputs[1].attribute,
-        Some(Attribute::Target("normal".to_string()))
-    );
-}
-
-#[test]
 fn test_if_then_else_parsing() {
     let decl = single_decl("def test: i32 = if x == 0 then 1 else 2");
 
@@ -1042,25 +872,9 @@ fn test_parse_unit_pattern_simple() {
 }
 
 #[test]
-fn test_parse_attributed_return_simple() {
-    let _ = env_logger::builder().is_test(true).try_init();
-    // Test parsing a single attributed return type - must be an entry point
-    let entry = single_entry(
-        "#[vertex] entry test() #[builtin(position)] vec4 = vec4(0.0f32, 0.0f32, 0.0f32, 1.0f32)",
-    );
-    println!("entry: {:?}", entry);
-    // In new syntax, empty () means 0 params, not a unit pattern
-    assert_eq!(entry.params.len(), 0);
-    assert_eq!(entry.data.outputs.len(), 1);
-    assert_eq!(entry.data.outputs.len(), 1);
-}
-
-#[test]
 fn test_array_literal() {
     // Just verify it parses successfully
-    let _entry = single_entry(
-        "#[vertex] entry test() #[builtin(position)] [4]f32 = [0.0f32, 0.5f32, 0.0f32, 1.0f32]",
-    );
+    let _entry = single_entry(" entry test() [4]f32 = [0.0f32, 0.5f32, 0.0f32, 1.0f32]");
 }
 
 #[test]
@@ -1103,21 +917,6 @@ fn test_parse_array_literal_rejects_junk_before_bracket() {
         parser.parse_expression().is_err(),
         "Expected parse error for `[1, 2, 3 f]`",
     );
-}
-
-#[test]
-fn test_parse_attributed_return_type() {
-    let entry = single_entry(
-        r#"#[vertex]
-entry test_vertex() #[builtin(position)] vec4 =
-  let angle = 1.0f32 in
-  let s = f32.sin(angle) in
-  vec4(s, s, 0.0f32, 1.0f32)"#,
-    );
-
-    assert_eq!(entry.name, "test_vertex");
-    assert_eq!(entry.data.outputs.len(), 1);
-    assert_eq!(entry.data.outputs.len(), 1);
 }
 
 #[test]
@@ -3921,72 +3720,6 @@ fn test_module_scope_storage_decl_rejected() {
 // the failure surfaces much later (or runs wrong on the GPU).
 
 #[test]
-fn test_parse_rejects_uniform_with_set_zero() {
-    let src = r#"
-#[fragment]
-entry frag(
-    #[uniform(set=0, binding=0)] iTime: f32,
-    #[builtin(position)] fragCoord: vec4f32
-) #[target(screen)] vec4f32 = @[0.0, 0.0, 0.0, 1.0]
-"#;
-    expect_parse_error(src, |err| match err {
-        CompilerError::ParseError(msg, _)
-            if msg.contains("set=0") && (msg.contains("reserved") || msg.contains("compiler")) =>
-        {
-            Ok(())
-        }
-        other => Err(format!("expected set=0 rejection, got {:?}", other)),
-    });
-}
-
-#[test]
-fn test_parse_rejects_storage_with_set_zero() {
-    let src = r#"
-#[compute]
-entry sim(
-    #[storage(set=0, binding=0, access=read)] data: []vec4f32
-) []vec4f32 = data
-"#;
-    expect_parse_error(src, |err| match err {
-        CompilerError::ParseError(msg, _)
-            if msg.contains("set=0") && (msg.contains("reserved") || msg.contains("compiler")) =>
-        {
-            Ok(())
-        }
-        other => Err(format!("expected set=0 rejection, got {:?}", other)),
-    });
-}
-
-#[test]
-fn test_parse_accepts_uniform_with_set_one() {
-    // Smoke: the positive case keeps working — only set=0 is rejected.
-    let src = r#"
-#[fragment]
-entry frag(
-    #[uniform(set=1, binding=0)] iTime: f32,
-    #[builtin(position)] fragCoord: vec4f32
-) #[target(screen)] vec4f32 = @[0.0, 0.0, 0.0, 1.0]
-"#;
-    let tokens = tokenize(src).expect("tokenize");
-    let mut nc = NodeCounter::new();
-    let mut parser = Parser::new(tokens, &mut nc);
-    parser.parse().expect("set=1 should parse cleanly");
-}
-
-// =============================================================================
-// Lifted type abbreviations: `type~` and `type^` (spec lines 445-499)
-// =============================================================================
-//
-// Surface syntax:
-//   type   T = ...    -- ordinary (no existential sizes, no functions in RHS)
-//   type~  T = ...    -- size-lifted: RHS may contain existential sizes ?[n]
-//   type^  T = ...    -- fully-lifted: RHS may contain function types
-//
-// The AST records the marker on each `TypeBind`. Type checking owns the
-// restrictions on arrays of lifted types and fully-lifted conditional or loop
-// results; ignored integration cases document restrictions not yet enforced.
-
-#[test]
 fn test_parse_type_bind_unlifted() {
     let src = "type pair = (i32, i32)";
     let program = parse_ok(src);
@@ -4081,6 +3814,16 @@ fn spellable_raster_type_parses() {
 }
 
 #[test]
+fn unified_pipeline_types_are_spellable() {
+    parse_ok(
+        "def vertex_help(v: vertex_invocation) vertex<vec4f32> = vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 0.0, 0.0, 1.0])\n\
+         def fragment_help(f: fragment_invocation<vec4f32>) fragment_output<vec4f32> = #color(f.value)\n\
+         def target_help(t: render_target<vec4f32>) render_target<vec4f32> = t\n\
+         def draw_help(d: draw) draw = d",
+    );
+}
+
+#[test]
 fn test_parse_let_in_chain_omits_inner_in() {
     // Chained let bindings can elide the `in` keyword when the body
     // is itself a `let` expression: `let x = 1 let y = 2 in x + y`.
@@ -4141,77 +3884,4 @@ fn test_parse_nested_abs_checkerboard_pattern() {
     // Does this parse? Mixed nested `abs` / `%` / `-` / `*` /
     // qualified-name (`f32.i32`) expression, no whitespace.
     parse_ok("def f(x: i32, y: i32) f32 = f32.i32(abs(abs((x%4)-1)-1)*abs(abs((y%4)-1)-1))");
-}
-
-#[test]
-fn test_parse_storage_image_size_fixed_wxh() {
-    // `size=512x512` lexes as `IntLit(512)` + `Ident("x512")`; the size parser
-    // accepts that token pair directly.
-    use crate::pipeline_descriptor::StorageTextureSize;
-    let src = "#[compute]\n\
-               entry e(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only, size=512x512)] img: storage_image) () = ()";
-    let program = parse_ok(src);
-    let entry = program
-        .declarations
-        .iter()
-        .find_map(|d| match d {
-            Declaration::Entry(e) => Some(e),
-            _ => None,
-        })
-        .expect("entry decl");
-    let attrs = match &entry.params[0].kind {
-        PatternKind::Typed(inner, _) => match &inner.kind {
-            PatternKind::Attributed(attrs, _) => attrs,
-            other => panic!("expected attributed inner pattern, got {:?}", other),
-        },
-        PatternKind::Attributed(attrs, _) => attrs,
-        other => panic!("expected attributed/typed param, got {:?}", other),
-    };
-    let size = attrs
-        .iter()
-        .find_map(|a| match a {
-            Attribute::StorageImage { size, .. } => Some(*size),
-            _ => None,
-        })
-        .expect("StorageImage attribute");
-    assert_eq!(
-        size,
-        StorageTextureSize::Fixed {
-            width: 512,
-            height: 512
-        }
-    );
-}
-
-#[test]
-fn test_parse_storage_image_size_window() {
-    // The bare `window` keyword still works (existing form).
-    use crate::pipeline_descriptor::StorageTextureSize;
-    let src = "#[compute]\n\
-               entry e(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only, size=window)] img: storage_image) () = ()";
-    let program = parse_ok(src);
-    let entry = program
-        .declarations
-        .iter()
-        .find_map(|d| match d {
-            Declaration::Entry(e) => Some(e),
-            _ => None,
-        })
-        .expect("entry decl");
-    let attrs = match &entry.params[0].kind {
-        PatternKind::Typed(inner, _) => match &inner.kind {
-            PatternKind::Attributed(attrs, _) => attrs,
-            other => panic!("expected attributed inner pattern, got {:?}", other),
-        },
-        PatternKind::Attributed(attrs, _) => attrs,
-        other => panic!("expected attributed/typed param, got {:?}", other),
-    };
-    let size = attrs
-        .iter()
-        .find_map(|a| match a {
-            Attribute::StorageImage { size, .. } => Some(*size),
-            _ => None,
-        })
-        .expect("StorageImage attribute");
-    assert_eq!(size, StorageTextureSize::SameAsWindow);
 }

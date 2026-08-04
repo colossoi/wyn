@@ -224,7 +224,6 @@ mod tests {
     fn cross_barrier_projection_handles_conditional_lambda_results() {
         let program = reified(
             r#"
-#[compute]
 entry scan_map_reduce(xs: [4]i32) ([4]i32, i32) =
   let prefixes = scan(|a: i32, b: i32| a + b, 0, xs) in
   let values = map(|x: i32| x + 1, xs) in
@@ -284,7 +283,6 @@ entry scan_map_reduce(xs: [4]i32) ([4]i32, i32) =
     fn vertical_normalization_accepts_a_reduction_bearing_producer() {
         let allocated = force_horizontal_then_vertical(
             r#"
-#[compute]
 entry redomap_then_map<[n]>(xs: [n]i32) (i32, [n]i32) =
   let mapped = map(|x: i32| x + 1, xs) in
   let total = reduce(|a: i32, b: i32| a + b, 0, xs) in
@@ -299,7 +297,6 @@ entry redomap_then_map<[n]>(xs: [n]i32) (i32, [n]i32) =
     fn vertical_normalization_accepts_a_scan_and_reduction_producer() {
         let allocated = force_horizontal_then_vertical(
             r#"
-#[compute]
 entry scan_redomap_then_map<[n]>(xs: [n]i32) (i32, [n]i32) =
   let prefixes = scan(|a: i32, b: i32| a + b, 0, xs) in
   let total = reduce(|a: i32, b: i32| a + b, 0, xs) in

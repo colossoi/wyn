@@ -28,6 +28,7 @@ pub fn lower_from_ast(mut ast: crate::ast_type_holes::HolesResolved) -> Transfor
     support_defs.append(&mut parts.defs);
     parts.defs = support_defs;
     let known_defs = parts.defs.iter().map(|definition| definition.name).collect();
+    super::stage_extract::extract(&mut parts, &mut symbols, &mut term_ids);
 
     parts.with_symbols::<TransformedTag, _>(
         symbols,

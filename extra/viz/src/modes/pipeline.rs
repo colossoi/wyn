@@ -47,8 +47,8 @@ pub struct InteractiveOpts {
     pub validate: bool,
     pub size: Option<(u32, u32)>,
     pub max_frames: Option<u32>,
-    pub vertex_count: u32,
-    pub topology: wgpu::PrimitiveTopology,
+    pub vertex_count: Option<u32>,
+    pub topology: Option<wgpu::PrimitiveTopology>,
     /// Image files to upload as host textures, by binding name (from
     /// `--image NAME:FILE`). Decoded eagerly on the interactive path.
     pub images: HashMap<String, PathBuf>,
@@ -308,24 +308,46 @@ fn run_pipeline_interactive(
     opts: InteractiveOpts,
     verbose: bool,
 ) -> Result<()> {
-    // Resolve the vertex and fragment entry-point names from the
-    // descriptor. Wyn emits one Graphics pipeline per entry point, so
-    // a vertex-only and a fragment-only pipeline coexist; we collect
-    // their stage names and re-merge here.
-    let stages: Vec<&wyn_pipeline_descriptor::GraphicsStage> = desc
+    let graphics = desc
         .pipelines
         .iter()
-        .filter_map(|p| if let Pipeline::Graphics(g) = p { Some(g) } else { None })
-        .flat_map(|g| g.stages.iter())
-        .collect();
-    let vertex_entry = stages
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Graphics(graphics)
+                if graphics
+                    .stages
+                    .iter()
+                    .any(|stage| matches!(stage.stage, ShaderStage::Vertex))
+                    && graphics
+                        .stages
+                        .iter()
+                        .any(|stage| matches!(stage.stage, ShaderStage::Fragment)) =>
+            {
+                Some(graphics)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("descriptor lacks a unified vertex/fragment graphics pipeline"))?;
+    let vertex_entry = graphics
+        .stages
         .iter()
         .find_map(|s| matches!(s.stage, ShaderStage::Vertex).then(|| s.entry_point.clone()))
         .ok_or_else(|| anyhow!("descriptor lacks a vertex stage"))?;
-    let fragment_entry = stages
+    let fragment_entry = graphics
+        .stages
         .iter()
         .find_map(|s| matches!(s.stage, ShaderStage::Fragment).then(|| s.entry_point.clone()))
         .ok_or_else(|| anyhow!("descriptor lacks a fragment stage"))?;
+    let mut draw = graphics.invocation.draw.clone();
+    if let Some(vertex_count) = opts.vertex_count {
+        let wyn_pipeline_descriptor::DrawCall::Direct {
+            vertex_count: published,
+            ..
+        } = &mut draw;
+        *published = vertex_count;
+    }
+    let topology = opts
+        .topology
+        .unwrap_or_else(|| wgpu_topology(graphics.invocation.topology));
 
     let resolved_buffer_inits = resolve_buffer_inits(
         &desc,
@@ -375,8 +397,8 @@ fn run_pipeline_interactive(
         validate: opts.validate,
         present_mode: opts.present_mode,
         size: opts.size,
-        vertex_count: opts.vertex_count,
-        topology: opts.topology,
+        draw,
+        topology,
         storage_dir: opts.storage_dir,
         buffer_inits: resolved_buffer_inits,
         index_buffer: opts.index_buffer,
@@ -390,6 +412,16 @@ fn run_pipeline_interactive(
     let mut app = App::new_pipeline(spec);
     event_loop.run_app(&mut app).map_err(|e| anyhow!(e)).context("winit event loop errored")?;
     Ok(())
+}
+
+fn wgpu_topology(topology: wyn_pipeline_descriptor::PrimitiveTopology) -> wgpu::PrimitiveTopology {
+    match topology {
+        wyn_pipeline_descriptor::PrimitiveTopology::TriangleList => wgpu::PrimitiveTopology::TriangleList,
+        wyn_pipeline_descriptor::PrimitiveTopology::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
+        wyn_pipeline_descriptor::PrimitiveTopology::LineList => wgpu::PrimitiveTopology::LineList,
+        wyn_pipeline_descriptor::PrimitiveTopology::LineStrip => wgpu::PrimitiveTopology::LineStrip,
+        wyn_pipeline_descriptor::PrimitiveTopology::PointList => wgpu::PrimitiveTopology::PointList,
+    }
 }
 
 /// Create wgpu buffers for a set of bindings. Returns a map from binding number

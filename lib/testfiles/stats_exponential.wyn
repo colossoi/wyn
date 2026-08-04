@@ -10,5 +10,4 @@ module sampler : SAMPLER = {
 }
 module gather = Stats(sampler)
 
-#[compute]
 entry stats_exponential() [6]f32 = gather.summarize(N)

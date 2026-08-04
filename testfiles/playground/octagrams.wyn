@@ -13,8 +13,8 @@ def verts: [3]vec4f32 =
    @[3.0,  -1.0, 0.0, 1.0],
    @[-1.0,  3.0, 0.0, 1.0]]
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- sdBox: signed distance to a box centered at origin with half-extents b
@@ -88,8 +88,7 @@ def scene_map(pos: vec3f32, gtime: f32) f32 =
 ------------------------------------------------------------
 -- Fragment shader
 ------------------------------------------------------------
-#[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
+def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 =
   -- Flip Y for Vulkan
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
   -- Normalized screen coords
@@ -226,3 +225,12 @@ entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform
 -- 	"model": "person"
 -- }
 -- */
+
+entry octagrams(
+    iResolution: vec3f32, iTime: f32,
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main) in
+  shade(screen, covered,
+    |fragment| fragment_main(iResolution, iTime, fragment.position))

@@ -1618,7 +1618,6 @@ mod tests {
     fn conditional_lambda_results_project_through_structured_cfg() {
         let program = reified(
             r#"
-#[compute]
 entry conditional_map<[n]>(xs: [n]i32) [n]i32 =
   map(|x: i32| if x < 0 then 0 - x else x, xs)
 "#,

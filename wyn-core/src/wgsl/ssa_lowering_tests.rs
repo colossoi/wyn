@@ -295,14 +295,17 @@ fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
 
 #[test]
 fn wgsl_fragment_trivial() {
-    // Minimal reachable program: a fragment entry that returns a
-    // constant color. Exercises: entry-point wrapping, OutputPtr +
-    // Store, vector/array construction, scalar literals.
     let wgsl = compile_to_wgsl(
         r#"
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
-    @[1.0, 0.5, 0.0, 1.0]
+entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+      else @[0.0, 0.5, 0.0, 1.0],
+      @[0.0, 0.0, 0.0])) in
+  shade(target, covered, |fragment| @[1.0, 0.5, 0.0, 1.0])
 "#,
     )
     .expect("compile");
@@ -311,12 +314,8 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32
     assert!(wgsl.contains("@builtin(position)"));
     assert!(wgsl.contains("@location(0)"));
 }
-
 #[test]
 fn wgsl_vertex_full_screen_triangle() {
-    // Vertex entry that indexes into a constant array using the
-    // vertex_index builtin. Exercises: @vertex attribute mapping,
-    // vertex_index builtin, array literal, array indexing.
     let wgsl = compile_to_wgsl(
         r#"
 def verts: [3]vec4f32 =
@@ -324,9 +323,13 @@ def verts: [3]vec4f32 =
    @[ 3.0, -1.0, 0.0, 1.0],
    @[-1.0,  3.0, 0.0, 1.0]]
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 =
-    verts[vertex_id]
+entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      verts[i32(vertex.vertex_index)],
+      @[0.0, 0.0, 0.0])) in
+  shade(target, covered, |fragment| @[1.0, 1.0, 1.0, 1.0])
 "#,
     )
     .expect("compile");
@@ -334,21 +337,18 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] 
     assert!(wgsl.contains("@vertex"));
     assert!(wgsl.contains("@builtin(vertex_index)"));
 }
-
 #[test]
 fn wgsl_vertex_multi_output_struct() {
-    // Multi-output vertex entry must be packed into a generated
-    // struct whose members carry the `@builtin(...)` / `@location(N)`
-    // attributes (WGSL disallows these on module-scope vars and
-    // accepts them only on struct members).
     let wgsl = compile_to_wgsl(
         r#"
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] idx: i32)
-  (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) =
-    let p: vec4f32 = @[0.0, 0.0, 0.0, 1.0] in
-    let c: vec3f32 = @[1.0, 0.0, 0.0] in
-    (p, c)
+entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      @[0.0, 0.0, 0.0, 1.0],
+      @[1.0, 0.0, 0.0])) in
+  shade(target, covered,
+    |fragment| @[fragment.value.x, fragment.value.y, fragment.value.z, 1.0])
 "#,
     )
     .expect("compile");
@@ -362,7 +362,6 @@ entry vertex_main(#[builtin(vertex_index)] idx: i32)
     assert!(wgsl.contains("_out_struct.f1 ="));
     assert!(wgsl.contains("return _out_struct;"));
 }
-
 #[test]
 fn wgsl_testfile_red_triangle() {
     validate_testfile_wgsl("testfiles/red_triangle.wyn");
@@ -472,22 +471,26 @@ fn wgsl_testfile_loopingspline() {
 }
 
 #[test]
-fn wgsl_uniforms_emit_bindings() {
-    // Uniforms become module-scope `@group(G) @binding(B)
-    // var<uniform> name: T;` declarations. Exercises the uniform
-    // emission path + Global reference resolution.
+fn wgsl_compiler_assigned_scalar_capture_emits_uniform_binding() {
     let wgsl = compile_to_wgsl(
         r#"
-#[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
-    @[iTime, 0.0, 0.0, 1.0]
+entry frame(i_time: f32,
+            target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      @[0.0, 0.0, 0.0, 1.0],
+      @[0.0, 0.0, 0.0])) in
+  shade(target, covered, |fragment| @[i_time, 0.0, 0.0, 1.0])
 "#,
     )
     .expect("compile");
     validate_wgsl(&wgsl);
-    assert!(wgsl.contains("@group(1) @binding(0) var<uniform> w_iTime: f32;"));
+    assert!(
+        wgsl.contains("var<uniform>"),
+        "expected a compiler-assigned uniform capture, got:\n{wgsl}"
+    );
 }
-
 #[test]
 fn wgsl_compute_reduce_writes_to_storage_buffer() {
     // A parallelized `reduce` compute shader's terminal write must hit
@@ -502,7 +505,6 @@ fn wgsl_compute_reduce_writes_to_storage_buffer() {
     //     v27_1 = v_accum;
     let wgsl = compile_to_wgsl(
         r#"
-#[compute]
 entry sum_array(#[size_hint(1024)] data: []f32) f32 =
     reduce(|a: f32, b: f32| a + b, 0.0, data)
 "#,
@@ -561,7 +563,6 @@ entry sum_array(#[size_hint(1024)] data: []f32) f32 =
 fn wgsl_i32_range_reduce_validates() {
     let wgsl = compile_to_wgsl(
         r#"
-#[compute]
 entry mn(n: i32) i32 =
   reduce(|a: i32, b: i32| if a < b then a else b, 2147483647, 0..<n)
 "#,
@@ -578,7 +579,6 @@ entry mn(n: i32) i32 =
 fn wgsl_u32_range_reduce_validates() {
     let wgsl = compile_to_wgsl(
         r#"
-#[compute]
 entry mn(n: u32) u32 =
   reduce(|a: u32, b: u32| if a < b then a else b, 4294967295u32, 0u32..<n)
 "#,
@@ -594,7 +594,6 @@ entry mn(n: u32) u32 =
 fn wgsl_i32_range_filter_then_map_validates() {
     let wgsl = compile_to_wgsl(
         r#"
-#[compute]
 entry filtered() []i32 =
   let kept = filter(|i| i % 2 == 0, iota(64)) in
   map(|i| i + 1, kept)
@@ -611,7 +610,6 @@ fn wgsl_compute_multi_output_runtime_sized_arrays() {
     // view.
     let wgsl = compile_to_wgsl(
         r#"
-#[compute]
 entry gen(src: []f32) ([]f32, []f32) =
     (map(|x: f32| x * 2.0, src), map(|x: f32| x * 3.0, src))
 "#,
@@ -632,26 +630,26 @@ entry gen(src: []f32) ([]f32, []f32) =
 
 #[test]
 fn wgsl_fragment_with_helper_function() {
-    // User-defined helper called from the entry point. Exercises:
-    // function emission + call, parameter passing, return value.
     let wgsl = compile_to_wgsl(
         r#"
 def brighten(c: vec4f32, amount: f32) vec4f32 =
-    @[c.x + amount, c.y + amount, c.z + amount, c.w]
+  @[c.x + amount, c.y + amount, c.z + amount, c.w]
 
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
-    brighten(@[0.1, 0.2, 0.3, 1.0], 0.5)
+entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      @[0.0, 0.0, 0.0, 1.0],
+      @[0.0, 0.0, 0.0])) in
+  shade(target, covered,
+    |fragment| brighten(@[0.1, 0.2, 0.3, 1.0], 0.5))
 "#,
     )
     .expect("compile");
     validate_wgsl(&wgsl);
-    // `brighten` may be inlined by `inline_small`; don't assert on its
-    // identifier appearing verbatim. The entry wrapper is always emitted.
     assert!(wgsl.contains("@fragment"));
     assert!(wgsl.contains("@location(0)"));
 }
-
 #[test]
 fn size_hint_large_bumps_workgroup_to_256() {
     // size_hint > 64K should pick a workgroup of 256 (per
@@ -659,7 +657,6 @@ fn size_hint_large_bumps_workgroup_to_256() {
     // `@workgroup_size` directive, not just the host descriptor.
     let wgsl = compile_to_wgsl(
         r#"
-#[compute]
 entry sum_array(#[size_hint(100000)] data: []f32) f32 =
     reduce(|a: f32, b: f32| a + b, 0.0, data)
 "#,
@@ -678,7 +675,6 @@ fn size_hint_default_stays_workgroup_64() {
     // No hint → workgroup remains the default 64 (current behaviour).
     let wgsl = compile_to_wgsl(
         r#"
-#[compute]
 entry sum_array(data: []f32) f32 =
     reduce(|a: f32, b: f32| a + b, 0.0, data)
 "#,
@@ -700,7 +696,6 @@ fn wgsl_gather_computed_array() {
     // gather intermediate (2).
     let wgsl = compile_to_wgsl(
         "\
-#[compute]
 entry gen(bh: []vec4f32) []i32 =
   let counts = map(|h:vec4f32| 4 + 5*(if h.x>4.0 then 3 else 1), bh) in
   map(|i:i32| counts[i % 256], iota(6144))
@@ -723,34 +718,6 @@ entry gen(bh: []vec4f32) []i32 =
     );
 }
 
-/// Compute entries that bind a `storage_image` and update it with `with`
-/// must lower to WGSL: a module-scope
-/// `var name: texture_storage_2d<format, access>` declaration plus a
-/// `textureStore(name, coord, value)` call.
-#[test]
-fn wgsl_compute_storage_image_with() {
-    let source = r#"
-#[compute]
-entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: *storage_image,
-            #[builtin(global_invocation_id)] gid: vec3u32) () =
-  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  img with [xy] = @[1.0, 0.0, 0.0, 1.0]
-"#;
-    let wgsl = compile_to_wgsl(source).expect("compile to WGSL");
-    assert!(
-        wgsl.contains("texture_storage_2d<rgba8unorm, write>"),
-        "WGSL must declare the storage image binding type:\n{wgsl}"
-    );
-    assert!(
-        wgsl.contains("@group(0) @binding(0)"),
-        "WGSL must declare the storage image at the right set/binding:\n{wgsl}"
-    );
-    assert!(
-        wgsl.contains("textureStore("),
-        "storage-image update must lower to textureStore:\n{wgsl}"
-    );
-}
-
 /// `scatter` into a `#[storage(access=write)]` framebuffer: the destination
 /// binding must be emitted `read_write` (WGSL requires it for the Store, and
 /// the declared `access=write` must propagate from the param), and the scatter
@@ -759,21 +726,21 @@ entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_on
 fn wgsl_scatter_into_storage_buffer() {
     let source = r#"
 def N:i32 = 5
-#[compute]
-entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
-                #[storage(set=2, binding=1, access=write)] fb: []vec4f32) () =
+entry rasterize(positions: []vec4f32,
+                fb: *[]vec4f32) *[]vec4f32 =
   let pts  = positions[0..N] in
   let idxs = map(|p:vec4f32| i32.f32(p.y) * 512 + i32.f32(p.x), pts) in
   let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], pts) in
-  let _ = scatter(fb, idxs, vals) in ()
+  let updated = scatter(fb, idxs, vals) in
+  map(|x: vec4f32| x, updated)
 "#;
     let wgsl = compile_to_wgsl(source).expect("compile to WGSL");
     assert!(
-        wgsl.contains("@group(2) @binding(1) var<storage, read_write>"),
+        wgsl.contains("@group(0) @binding(1) var<storage, read_write>"),
         "scatter destination must be read_write:\n{wgsl}"
     );
     assert!(
-        wgsl.contains("_buf_2_1["),
+        wgsl.contains("_buf_0_1["),
         "scatter must emit indexed stores into the framebuffer:\n{wgsl}"
     );
 }
@@ -782,19 +749,18 @@ entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
 fn wgsl_map_over_unique_storage_view_updates_backing_buffer() {
     let wgsl = compile_to_wgsl(
         r#"
-#[compute]
-entry draw(#[storage(set=2, binding=1, access=write)] fb: *[]vec4f32) () =
+entry draw(fb: *[]vec4f32) *[]vec4f32 =
   let cleared = map(|_p: vec4f32| @[0.0, 0.0, 0.0, 1.0], fb) in
   let idxs = map(|i: i32| i, 0i32 ..< 4i32) in
   let vals = map(|_i: i32| @[1.0, 1.0, 1.0, 1.0], 0i32 ..< 4i32) in
-  let _ = scatter(cleared, idxs, vals) in ()
+  scatter(cleared, idxs, vals)
 "#,
     )
     .expect("map/scatter over a unique storage view must lower");
 
     validate_wgsl(&wgsl);
     assert!(
-        wgsl.contains("_buf_2_1[") && wgsl.contains("] ="),
+        wgsl.contains("_buf_0_1[") && wgsl.contains("] ="),
         "in-place view updates must target the backing storage buffer:\n{wgsl}"
     );
 }
@@ -807,7 +773,7 @@ fn wgsl_const_array_dynamic_index_hoists_to_private_global() {
     // a per-call `var<function>` materialization.
     let wgsl = compile_to_wgsl(
         "def t: [4]i32 = [10, 20, 30, 40]\n\
-         #[compute]\n\
+         \n\
          entry pick() []i32 = map(|i| t[i % 4], iota(100))",
     )
     .expect("compile");
@@ -827,7 +793,7 @@ fn wgsl_const_array_hoist_is_deduped() {
     // The same constant array indexed at two sites shares one global.
     let wgsl = compile_to_wgsl(
         "def t: [4]i32 = [10, 20, 30, 40]\n\
-         #[compute]\n\
+         \n\
          entry pick() []i32 = map(|i| t[i % 4] + t[(i + 1) % 4], iota(100))",
     )
     .expect("compile");
@@ -840,74 +806,37 @@ fn wgsl_const_array_hoist_is_deduped() {
 }
 
 #[test]
-fn wgsl_record_uniform_emits_struct_var_and_validates() {
-    // A record uniform emits the shared positional struct as the
-    // `var<uniform>` type with no layout attributes: for the supported
-    // member set (32-bit scalars + vectors) WGSL's default layout
-    // equals the std140 offsets the SPIR-V backend decorates, and naga
-    // validation (uniform address space rules) is the gate proving it.
+fn wgsl_structural_capture_emits_uniform_struct_and_validates() {
     let wgsl = compile_to_wgsl(
         r#"
 type block = { radius: f32, tint: vec2f32, center: vec2f32 }
 
-#[compute]
-entry step(xs: []u32, #[uniform(set=1, binding=0)] c: block) []u32 =
-  map(|x| x + u32(c.radius), xs)
-
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32,
-                    #[uniform(set=1, binding=0)] c: block)
-  #[target(screen)] vec4f32 =
-  @[c.tint.x, c.tint.y, c.radius + c.center.x, 1.0]
+entry frame(c: block,
+            target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      @[0.0, 0.0, 0.0, 1.0],
+      @[0.0, 0.0, 0.0])) in
+  shade(target, covered,
+    |fragment| @[c.tint.x, c.tint.y, c.radius + c.center.x, 1.0])
 "#,
     )
     .expect("compile");
     validate_wgsl(&wgsl);
+    assert!(wgsl.contains("struct T0"));
     assert!(
-        wgsl.contains("var<uniform> w_c:"),
-        "record uniform must emit a module-scope var<uniform>, got:\n{wgsl}"
-    );
-    // Shared across entries: exactly one declaration (the cross-entry
-    // dedupe), pointing at a struct type.
-    assert_eq!(
-        wgsl.matches("var<uniform> w_c:").count(),
-        1,
-        "same (set, binding) uniform must dedupe to one declaration"
+        wgsl.contains("var<uniform>"),
+        "expected a compiler-assigned structural uniform capture, got:\n{wgsl}"
     );
 }
-
-#[test]
-fn wgsl_direct_record_uniform_registers_struct_before_bindings() {
-    let wgsl = compile_to_wgsl(
-        r#"
-type block = { tint: vec2f32 }
-
-#[compute]
-entry paint(#[storage_image(set=1, binding=1, format=rgba8unorm, access=write_only)] img: *storage_image,
-            #[uniform(set=1, binding=4)] c: block,
-            #[builtin(global_invocation_id)] gid: vec3u32) () =
-  img with [@[i32.u32(gid.x), i32.u32(gid.y)]] = @[c.tint.x, c.tint.y, 0.0, 1.0]
-"#,
-    )
-    .expect("directly used record uniform must lower");
-
-    validate_wgsl(&wgsl);
-    let struct_pos = wgsl.find("struct T0").expect("record struct declaration");
-    let uniform_pos = wgsl.find("var<uniform> w_c: T0").expect("record uniform declaration");
-    assert!(
-        struct_pos < uniform_pos,
-        "record struct must precede the uniform that uses it:\n{wgsl}"
-    );
-}
-
 #[test]
 fn wgsl_duplicate_source_parameter_names_are_uniquified() {
     let wgsl = compile_to_wgsl(
         r#"
 def advance(p: i32, i: i32, t: f32) i32 = p + i + i32.f32(t)
 
-#[compute]
-entry tick(prev: []i32, #[uniform(set=1, binding=0)] t: f32) []i32 =
+entry tick(prev: []i32, t: f32) []i32 =
   if t < 0.1 then
     map(|i: i32| i, 0i32 ..< 16i32)
   else

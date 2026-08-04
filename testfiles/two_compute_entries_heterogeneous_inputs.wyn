@@ -2,8 +2,6 @@
 -- distinct auto-allocated set-0 storage bindings. One module-wide IdSource
 -- spans pinned entry inputs, EGIR outputs, and scratch allocations.
 
-#[compute]
 entry a(xs: []u32) []u32 = map(|x| x, xs)
 
-#[compute]
 entry b(ys: []f32) []f32 = map(|y| y, ys)

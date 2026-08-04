@@ -19,10 +19,9 @@ def implied_vol(now: f32, rfr: f32, spot: f32, strike: f32, opt_type: i32, tte: 
   let g = |sigma: f32| crr_price(now, rfr, spot, strike, opt_type, tte, sigma) - market in
   secant(g, 0.10, 0.30, 1.0e-4, 30)
 
-#[compute]
 entry implied_vols(opts: [](f32, f32, i32, f32, f32),
-                   #[uniform(set=1, binding=0)] now: f32,
-                   #[uniform(set=1, binding=1)] rfr: f32) []f32 =
+                   now: f32,
+                   rfr: f32) []f32 =
   map(|(s, k, t, tte, mkt): (f32, f32, i32, f32, f32)|
         implied_vol(now, rfr, s, k, t, tte, mkt),
       opts)

@@ -1388,7 +1388,6 @@ fn non_unique_entry_input_is_not_a_reuse_candidate() {
     // Conservative skip.
     let program = compile_to_tlc(
         r#"
-#[compute]
 entry double(arr: []i32) []i32 = map(|x: i32| x + 1, arr)
 "#,
     );

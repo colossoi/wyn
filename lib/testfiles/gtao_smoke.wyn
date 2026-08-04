@@ -53,7 +53,6 @@ def viewspace_pos_err: f32 =
   let p = gtao.compute_viewspace_position(@[0.5f32, 0.5f32], 5.0f32, C) in
   magnitude(p - @[0.0f32, 0.0f32, 5.0f32])
 
-#[compute]
 entry gtao_smoke() [16]f32 =
   let noise = gtao.spatiotemporal_noise(@[0u32, 0u32], 1u32) in
   let flat_edges = gtao.calculate_edges(5.0f32, 5.0f32, 5.0f32, 5.0f32, 5.0f32) in

@@ -1,25 +1,29 @@
--- Smoke test for `viz pipeline --feedback ENTRY:READ=WRITE` when both
--- sides are storage buffers. The compute entry `tick` reads previous
--- frame's `prev` (set=0, binding=0) and writes this frame's `out`
--- (set=0, binding=1). Both are `[]u32` with a fixed dispatch length —
--- no input-binding-derived dispatch, so we exercise just the
--- bind-group / ping-pong plumbing without depending on
--- dispatch-from-feedback-input resolution (a separate gap).
-
-#[compute]
-entry tick(#[storage(set=2, binding=0, access=read)] prev: []u32,
-           #[uniform(set=1, binding=0)] iFrame: u32) []u32 =
+-- Same-frame value-flow smoke test. The root computes the next array value,
+-- captures it in the fragment callback, and returns both the array and target.
+-- A host may feed the returned array back as the next frame's input.
+def tick(prev: []u32, iFrame: u32) []u32 =
   map(|i: i32| prev[i] + 1u32, 0i32..<i32.u32(iFrame))
 
 -- Minimal graphics pair so viz takes the runnable (windowed) path
 -- where --feedback is honoured. The fragment shader is a constant
 -- colour — it doesn't actually display the buffer.
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32)
-  #[builtin(position)] vec4f32 =
-  @[0.0, 0.0, 0.0, 1.0]
+def vertex_main(_vertex: vertex_invocation) vertex<vec2f32> =
+  vertex_output(@[0.0, 0.0, 0.0, 1.0], @[0.0, 0.0])
 
-#[fragment]
-entry frag_main(#[builtin(position)] pos: vec4f32)
-  #[target(screen)] vec4f32 =
+def frag_main(_pos: vec4f32) vec4f32 =
   @[0.1, 0.1, 0.1, 1.0]
+
+entry feedback_buffer_smoke(
+    prev: []u32,
+    iFrame: u32,
+    screen: render_target<vec4f32>)
+    ([]u32, render_target<vec4f32>) =
+  let next = tick(prev, iFrame) in
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main) in
+  let screen' = shade(
+    screen,
+    covered,
+    |fragment| frag_main(fragment.position)) in
+  (next, screen')

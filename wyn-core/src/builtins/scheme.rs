@@ -347,6 +347,105 @@ pub fn u32_binary(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
 }
 
 // ---------------------------------------------------------------------------
+// Unified pipeline invocation
+// ---------------------------------------------------------------------------
+
+fn pipeline_ty(name: TypeName, args: Vec<Type>) -> Type {
+    Type::Constructed(name, args)
+}
+
+fn draw_ty() -> Type {
+    pipeline_ty(TypeName::Draw, vec![])
+}
+
+fn vertex_invocation_ty() -> Type {
+    pipeline_ty(TypeName::VertexInvocation, vec![])
+}
+
+/// u32 -> u32 -> draw ? a direct draw starting at vertex and instance zero.
+pub fn direct_draw_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let u = u32_ty();
+    TypeScheme::Monotype(arrow_chain(&[u.clone(), u], draw_ty()))
+}
+
+/// u32 -> u32 -> u32 -> u32 -> draw ? a direct draw with explicit first indices.
+pub fn direct_draw_from_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let u = u32_ty();
+    TypeScheme::Monotype(arrow_chain(&[u.clone(), u.clone(), u.clone(), u], draw_ty()))
+}
+
+/// forall v. vec4f32 -> v -> vertex<v>.
+pub fn vertex_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let v = ctx.new_variable();
+    let output = pipeline_ty(TypeName::Vertex, vec![v.clone()]);
+    quantify(arrow_chain(&[vec_n(f32_ty(), 4), v], output))
+}
+
+/// forall v. draw -> (vertex_invocation -> vertex<v>) -> raster<v>.
+pub fn rasterize_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let v = ctx.new_variable();
+    let callback = arrow_chain(
+        &[vertex_invocation_ty()],
+        pipeline_ty(TypeName::Vertex, vec![v.clone()]),
+    );
+    quantify(arrow_chain(
+        &[draw_ty(), callback],
+        pipeline_ty(TypeName::Raster, vec![v]),
+    ))
+}
+
+/// forall c v. render_target<c> -> raster<v> ->
+/// (fragment_invocation<v> -> c) -> render_target<c>.
+pub fn shade_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let c = ctx.new_variable();
+    let v = ctx.new_variable();
+    let target = pipeline_ty(TypeName::RenderTarget, vec![c.clone()]);
+    let raster = pipeline_ty(TypeName::Raster, vec![v.clone()]);
+    let callback = arrow_chain(&[pipeline_ty(TypeName::FragmentInvocation, vec![v])], c);
+    quantify(arrow_chain(&[target.clone(), raster, callback], target))
+}
+
+/// forall c v. render_target<c> -> raster<v> ->
+/// (fragment_invocation<v> -> fragment_output<c>) -> render_target<c>.
+pub fn shade_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let c = ctx.new_variable();
+    let v = ctx.new_variable();
+    let target = pipeline_ty(TypeName::RenderTarget, vec![c.clone()]);
+    let raster = pipeline_ty(TypeName::Raster, vec![v.clone()]);
+    let callback = arrow_chain(
+        &[pipeline_ty(TypeName::FragmentInvocation, vec![v])],
+        pipeline_ty(TypeName::FragmentOutput, vec![c]),
+    );
+    quantify(arrow_chain(&[target.clone(), raster, callback], target))
+}
+
+/// forall c. render_target<c> -> vec2i32 -> u32 -> c.
+pub fn target_load_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let c = ctx.new_variable();
+    quantify(arrow_chain(
+        &[
+            pipeline_ty(TypeName::RenderTarget, vec![c.clone()]),
+            vec_n(i32_ty(), 2),
+            u32_ty(),
+        ],
+        c,
+    ))
+}
+
+/// forall c. render_target<c> -> sampler -> vec2f32 -> c.
+pub fn target_sample_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let c = ctx.new_variable();
+    quantify(arrow_chain(
+        &[
+            pipeline_ty(TypeName::RenderTarget, vec![c.clone()]),
+            sampler_ty(),
+            vec_n(f32_ty(), 2),
+        ],
+        c,
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Textures / samplers
 // ---------------------------------------------------------------------------
 

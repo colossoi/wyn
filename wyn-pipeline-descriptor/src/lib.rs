@@ -447,12 +447,57 @@ impl std::ops::DerefMut for ComputeStage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphicsPipeline {
     pub stages: Vec<GraphicsStage>,
+    /// Primitive assembly and draw request selected by the unified invocation.
+    #[serde(default)]
+    pub invocation: GraphicsInvocation,
     pub bindings: Vec<Binding>,
     pub vertex_inputs: Vec<VertexAttribute>,
     pub fragment_outputs: Vec<FragmentOutput>,
     /// Ping-pong feedback pairs (see `ComputePipeline::feedback`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feedback: Vec<FeedbackPair>,
+}
+
+/// The source-level rasterization request associated with one graphics pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphicsInvocation {
+    pub topology: PrimitiveTopology,
+    pub draw: DrawCall,
+}
+
+impl Default for GraphicsInvocation {
+    fn default() -> Self {
+        Self {
+            topology: PrimitiveTopology::TriangleList,
+            draw: DrawCall::Direct {
+                vertex_count: 3,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: 0,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimitiveTopology {
+    TriangleList,
+    TriangleStrip,
+    LineList,
+    LineStrip,
+    PointList,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DrawCall {
+    Direct {
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    },
 }
 
 /// A stage in a graphics pipeline.
@@ -1309,6 +1354,20 @@ fn binding_extent(binding: &Binding) -> Option<FrameResourceExtent> {
 
 fn merge_extent(target: &mut Option<FrameResourceExtent>, candidate: Option<FrameResourceExtent>) {
     match candidate {
+        Some(FrameResourceExtent::StorageBuffer { length }) => match target {
+            None => *target = Some(FrameResourceExtent::StorageBuffer { length }),
+            Some(FrameResourceExtent::StorageBuffer { length: existing }) => match (&*existing, &length) {
+                (None, Some(_)) => *existing = length,
+                (Some(left), Some(right)) => {
+                    debug_assert_eq!(left, right, "two storage-buffer aliases disagree on length")
+                }
+                _ => {}
+            },
+            Some(existing) => debug_assert!(
+                matches!(existing, FrameResourceExtent::StorageBuffer { .. }),
+                "two bindings merging at one slot disagree on extent kind"
+            ),
+        },
         Some(FrameResourceExtent::StorageTexture { size }) => {
             // A sampled texture view aliases its storage-texture backing onto
             // one slot; the storage-texture extent wins. Distinct resources
@@ -1728,6 +1787,7 @@ mod tests {
                     feedback: vec![],
                 }),
                 Pipeline::Graphics(GraphicsPipeline {
+                    invocation: GraphicsInvocation::default(),
                     stages: vec![GraphicsStage {
                         entry_point: "shade".to_string(),
                         owner: "shade".to_string(),
@@ -1778,6 +1838,7 @@ mod tests {
         let mut descriptor = PipelineDescriptor {
             pipelines: vec![
                 Pipeline::Graphics(GraphicsPipeline {
+                    invocation: GraphicsInvocation::default(),
                     stages: vec![GraphicsStage {
                         entry_point: "scene_fragment".to_string(),
                         owner: "scene_fragment".to_string(),
@@ -1985,6 +2046,7 @@ mod tests {
         let mut descriptor = PipelineDescriptor {
             pipelines: vec![
                 Pipeline::Graphics(GraphicsPipeline {
+                    invocation: GraphicsInvocation::default(),
                     stages: vec![GraphicsStage {
                         entry_point: "frag".to_string(),
                         owner: "frag".to_string(),

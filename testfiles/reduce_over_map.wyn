@@ -3,6 +3,5 @@
 -- in-register runtime-sized Composite intermediate:
 --   reduce(op, ne, map(g, xs)) → redomap(op∘g, op, ne, xs)
 
-#[compute]
 entry sum_doubled(xs: []f32) f32 =
   reduce(|a: f32, b: f32| a + b, 0.0, map(|x: f32| x * 2.0, xs))

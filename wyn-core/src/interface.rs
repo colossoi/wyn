@@ -210,12 +210,14 @@ pub struct ComputeDispatchGrid {
     pub z: u32,
 }
 
-/// The only three attributes that can classify an entry declaration.
+/// The semantic role of an entry declaration.
 ///
-/// Keeping this distinct from [`Attribute`] makes invalid entry kinds
-/// unrepresentable after parsing.
+/// `Root` is the sole host-visible source form in the unified language.
+/// The shader-stage variants remain compiler IR roles while stage extraction
+/// is brought across from the legacy frontend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
+    Root,
     Vertex,
     Fragment,
     Compute,
@@ -596,6 +598,8 @@ pub struct EntryParamDecl {
 pub struct EntryDecl {
     pub entry_kind: EntryKind,
     pub compute_dispatch: Option<ComputeDispatchGrid>,
+    /// Present only on compiler-extracted graphics stages.
+    pub graphics_invocation: Option<crate::pipeline_descriptor::GraphicsInvocation>,
     pub name: String,
     pub name_span: Span,
     pub size_params: Vec<String>,

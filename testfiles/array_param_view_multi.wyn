@@ -3,5 +3,4 @@
 def first(arr: []i32) i32 = arr[0]
 def sum_firsts(x: []i32, y: []i32) i32 = x[0] + y[0]
 
-#[compute]
 entry main(a: []i32, b: []i32) []i32 = [first(a) + first(b) + sum_firsts(a, b)]

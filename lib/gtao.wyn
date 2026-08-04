@@ -3,9 +3,9 @@
 -- (extra/XeGTAO/Source/Rendering/Shaders/XeGTAO.h / XeGTAO.hlsli, MIT,
 -- Copyright (C) 2016-2021 Intel Corporation).
 --
--- Every function is pure — value in, value out. Resource declarations,
--- entry points, dispatch, image stores, and ping-pong wiring are the
--- caller's job. AO term only (no bent normals); f32 throughout.
+-- Every function is pure: value in, value out. A root entry supplies textures
+-- and calls these helpers from ordinary stage callbacks. AO term only (no
+-- bent normals); f32 throughout.
 --
 -- The API is layered:
 --
@@ -25,56 +25,15 @@
 --     memory traffic.
 --
 -- ---------------------------------------------------------------------
--- Usage: the minimal pipeline is TWO per-texel compute passes plus your
--- composite. Everything marked (optional) below can be dropped.
+-- Usage: pass an external view-space depth texture to an ordinary
+-- fragment helper called from shade. The helper can reconstruct normals,
+-- evaluate main_pass_single, optionally denoise values in ordinary
+-- computation, and return the final color. See
+-- lib/testfiles/gtao_demo.wyn for a complete root entry.
 --
---   def C: gtao.consts =
---     gtao.make_constants(@[1920.0f32, 1080.0f32], tan_half_fovy,
---                         near, far, 0u32, gtao.default_settings)
---
---   resource depth: image2d { format = r32float    size = 1920x1080
---                             usages = [storage_write, sampled] }
---   resource ao:    image2d { format = rgba16float size = 1920x1080
---                             usages = [storage_write, sampled] }
---
---   -- Pass 1: viewspace depth. From a raw depth buffer, linearize with
---   -- gtao.screen_to_viewspace_depth(ndc, C); any other source works as
---   -- long as texels are positive viewspace depth.
---   #[compute]
---   entry write_depth(#[view(depth, storage_write)] outd: *storage_image,
---                     #[builtin(global_invocation_id)] gid: vec3u32) () =
---     let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
---     outd with [xy] = @[gtao.clamp_depth(my_depth(xy)), 0.0f32, 0.0f32, 1.0f32]
---
---   -- Pass 2: AO. `.y` (packed edges) is only needed if you denoise.
---   #[compute]
---   entry ao_main(#[view(ao, storage_write)] outa: *storage_image,
---                 #[view(depth, sampled)] d: texture2d,
---                 #[builtin(global_invocation_id)] gid: vec3u32,
---                 #[uniform(set=1, binding=3)] iFrame: u32) () =
---     let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
---     -- (optional) use your G-buffer normals instead:
---     let n = gtao.compute_viewspace_normal(xy, d, C) in
---     -- (optional) pass 0u32 instead of the frame index without TAA:
---     let noise = gtao.spatiotemporal_noise(@[gid.x, gid.y], iFrame % 64u32) in
---     let (slices, steps) = gtao.preset_high in
---     let (vis, edges) = gtao.main_pass_single(xy, slices, steps, noise, n, C, d) in
---     outa with [xy] = @[vis, edges, 0.0f32, 1.0f32]
---
---   -- (optional) Denoise: 1-3 passes ping-ponging two ao-shaped
---   -- textures, `final_apply = true` on the last. Skipping denoise
---   -- entirely is fine — just `saturate` the raw term when compositing.
---   #[compute]
---   entry ao_denoise(#[view(ao_out, storage_write)] outa: *storage_image,
---                    #[view(ao, sampled)] a: texture2d,
---                    #[builtin(global_invocation_id)] gid: vec3u32) () =
---     let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
---     let (v, e) = gtao.denoise(xy, a, C, true) in
---     outa with [xy] = @[v, e, 0.0f32, 1.0f32]
---
---   -- Composite: sample the final texture, multiply the AO term in.
---
--- Storage note: the raw (pre-denoise) visibility can overshoot 1.0
+-- The texture-free kernel layer is also suitable when depth samples have
+-- already been computed as ordinary values earlier in the same entry.
+---- Storage note: the raw (pre-denoise) visibility can overshoot 1.0
 -- slightly; denoising averages it back down. Float formats
 -- (r32float/rgba16float) hold it as-is. Only if you pack into 8-bit
 -- UNORM do you need the `encode_visibility` / `decode_visibility` pair,
@@ -112,7 +71,7 @@ module gtao = {
     denoise_blur_beta = 1.2f32,
   }
 
-  -- | Per-dispatch constants — the GTAOConstants block. Build with
+  -- | Per-invocation constants — the GTAOConstants block. Build with
   -- `make_constants` (perspective projection from scalar camera
   -- parameters) or `make_constants_raw` (explicit depth-unpack /
   -- FOV terms for exotic projections).

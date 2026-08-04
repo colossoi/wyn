@@ -139,7 +139,6 @@ fn runtime_index_into_inlined_producer_becomes_let_bound_gather_shape() {
     let program = prepared(
         r#"
 def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
-#[compute]
 entry e(j: i32) [1]f32 = [g(256)[j]]
 "#,
     );

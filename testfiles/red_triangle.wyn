@@ -1,12 +1,21 @@
 -- Simple red triangle test
 
-#[vertex] entry vertex_main(#[builtin(vertex_index)] vertex_index: i32) (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) =
+def vertex_main(vertex: vertex_invocation) vertex<vec3f32> =
+  let vertex_index = vertex.vertex_index
   let position: vec4f32 =
-    if vertex_index == 0 then @[-0.5, -0.5, 0.0, 1.0]
-    else if vertex_index == 1 then @[0.5, -0.5, 0.0, 1.0]
+    if vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+    else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
     else @[0.0, 0.5, 0.0, 1.0]
   let color: vec3f32 = @[1.0, 0.0, 0.0] in
-  (position, color)
+  vertex_output(position, color)
 
-#[fragment] entry fragment_main(#[varying(0)] color: vec3f32) #[target(screen)] vec4f32 =
+def fragment_main(fragment: fragment_invocation<vec3f32>) vec4f32 =
+  let color = fragment.value in
   @[color.x, color.y, color.z, 1.0]
+
+entry red_triangle(
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main) in
+  shade(screen, covered, fragment_main)

@@ -43,7 +43,7 @@ use crate::tlc::{
     TermKind as GenericTermKind,
 };
 use crate::types::ExternDecl;
-use crate::types::{extract_function_signature, TypeExt};
+use crate::types::{extract_function_signature, Diet, TypeExt};
 use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
@@ -674,6 +674,27 @@ fn entry_resource_declarations(
     declarations
 }
 
+fn storage_access_from_diet(diet: Option<&Diet>) -> StorageAccess {
+    if diet.is_some_and(Diet::is_consuming) {
+        StorageAccess::ReadWrite
+    } else {
+        StorageAccess::ReadOnly
+    }
+}
+
+fn tuple_field_storage_access(diet: Option<&Diet>, field: usize) -> StorageAccess {
+    let consuming = diet.is_some_and(|diet| match diet {
+        Diet::Aggregate { unique: true, .. } => true,
+        Diet::Aggregate { components, .. } => components.get(field).is_some_and(Diet::is_consuming),
+        other => other.is_consuming(),
+    });
+    if consuming {
+        StorageAccess::ReadWrite
+    } else {
+        StorageAccess::ReadOnly
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn convert_entry_point(
     def: &TlcDef,
@@ -693,7 +714,10 @@ fn convert_entry_point(
     let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?;
     let (inner_body, params) = crate::tlc::extract_lambda_params_ref(&def.body);
-    let is_compute = entry.entry_kind == interface::EntryKind::Compute;
+    let is_compute = matches!(
+        entry.entry_kind,
+        interface::EntryKind::Root | interface::EntryKind::Compute
+    );
 
     // The converted body carries the specialized return representation; use it
     // rather than the parse-time entry declaration.
@@ -774,7 +798,7 @@ fn convert_entry_point(
                     size_hint: None,
                     kind: EntryInputKind::Storage {
                         exposure: BindingExposure::Host(slot.binding),
-                        access: StorageAccess::ReadOnly,
+                        access: tuple_field_storage_access(entry.param_diets.get(i), field_idx),
                         length: None,
                     },
                 });
@@ -821,7 +845,8 @@ fn convert_entry_point(
         let kind = if let Some(binding) = storage_binding {
             EntryInputKind::Storage {
                 exposure: BindingExposure::Host(binding),
-                access: storage_access.unwrap_or(StorageAccess::ReadOnly),
+                access: storage_access
+                    .unwrap_or_else(|| storage_access_from_diet(entry.param_diets.get(i))),
                 length: None,
             }
         } else if let Some(binding) = uniform_binding {
@@ -867,6 +892,9 @@ fn convert_entry_point(
         }
     }
     let execution_model = match entry.entry_kind {
+        interface::EntryKind::Root => ExecutionModel::Compute {
+            local_size: workgroup,
+        },
         interface::EntryKind::Vertex => ExecutionModel::Vertex,
         interface::EntryKind::Fragment => ExecutionModel::Fragment,
         interface::EntryKind::Compute => ExecutionModel::Compute {
@@ -2960,6 +2988,13 @@ fn target_of(attr: Option<&interface::ResolvedAttribute>) -> Option<String> {
 }
 
 /// Shape-preserving result type for a non-in-place `map`/`scan`.
+fn storage_output_binding(attr: Option<&interface::ResolvedAttribute>) -> Option<BindingRef> {
+    match attr {
+        Some(interface::Attribute::Storage { set, binding, .. }) => Some(BindingRef::new(*set, *binding)),
+        _ => None,
+    }
+}
+
 ///
 /// When the TLC `result_ty` carries an unresolved existential `Skolem` size —
 /// the type of a `filter`-produced input opened by `open_existential`, which the
@@ -3073,9 +3108,13 @@ fn build_entry_outputs(
             }
             Ok(None)
         };
-    let mut storage_binding_for = |ty: &Type<TypeName>, is_compute: bool| -> Option<BindingRef> {
+    let mut storage_binding_for = |ty: &Type<TypeName>,
+                                   is_compute: bool,
+                                   attribute: Option<&interface::ResolvedAttribute>|
+     -> Option<BindingRef> {
         if is_compute && !matches!(ty, Type::Constructed(TypeName::Unit, _)) {
-            Some(BindingRef::new(AUTO_STORAGE_SET, binding_ids.next_id()))
+            storage_output_binding(attribute)
+                .or_else(|| Some(BindingRef::new(AUTO_STORAGE_SET, binding_ids.next_id())))
         } else {
             None
         }
@@ -3104,7 +3143,8 @@ fn build_entry_outputs(
         if !matches!(ret_type, Type::Constructed(TypeName::Unit, _)) {
             let source_ty = slot_value_tys.first().and_then(Option::as_ref).unwrap_or(ret_type);
             let ty = crate::types::canonical_storage_buffer_ty(source_ty);
-            let storage_binding = storage_binding_for(&ty, is_compute);
+            let attribute = entry.outputs.first().and_then(|output| output.attribute.as_ref());
+            let storage_binding = storage_binding_for(&ty, is_compute, attribute);
             let length = length_for(storage_binding, &ty)?;
             Ok(vec![EntryOutput {
                 ty,
@@ -3120,9 +3160,9 @@ fn build_entry_outputs(
             .map(|(slot, ty)| {
                 let ty = slot_value_tys.get(slot).and_then(Option::as_ref).unwrap_or(ty);
                 let ty = crate::types::canonical_storage_buffer_ty(ty);
-                let storage_binding = storage_binding_for(&ty, is_compute);
-                let length = length_for(storage_binding, &ty)?;
                 let attribute = entry.outputs.get(slot).and_then(|output| output.attribute.as_ref());
+                let storage_binding = storage_binding_for(&ty, is_compute, attribute);
+                let length = length_for(storage_binding, &ty)?;
                 Ok(EntryOutput {
                     ty,
                     kind: entry_output_kind(
@@ -3137,9 +3177,9 @@ fn build_entry_outputs(
     } else {
         let source_ty = slot_value_tys.first().and_then(Option::as_ref).unwrap_or(ret_type);
         let ty = crate::types::canonical_storage_buffer_ty(source_ty);
-        let storage_binding = storage_binding_for(&ty, is_compute);
-        let length = length_for(storage_binding, &ty)?;
         let first_attr = entry.outputs.first().and_then(|o| o.attribute.as_ref());
+        let storage_binding = storage_binding_for(&ty, is_compute, first_attr);
+        let length = length_for(storage_binding, &ty)?;
         Ok(vec![EntryOutput {
             ty,
             kind: entry_output_kind(

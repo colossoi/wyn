@@ -1,12 +1,21 @@
--- Vertex-shader input attributes: #[vertex_slot(n)] params fed by
--- vertex buffers. The vertex entry takes per-vertex position + color
--- attributes; the fragment entry consumes the color as a varying.
+-- Vertex data is supplied as ordinary arrays. The vertex callback indexes
+-- those arrays with the invocation value and returns color as its payload.
 
-#[vertex]
-entry vertex_main(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: vec3f32)
-  (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) =
-  (@[position.x, position.y, position.z, 1.0], color)
+def vertex_main(positions: []vec3f32, colors: []vec3f32,
+                vertex: vertex_invocation) vertex<vec3f32> =
+  let i = i32(vertex.vertex_index) in
+  let position = positions[i] in
+  vertex_output(@[position.x, position.y, position.z, 1.0], colors[i])
 
-#[fragment]
-entry fragment_main(#[varying(0)] color: vec3f32) #[target(screen)] vec4f32 =
+def fragment_main(color: vec3f32) vec4f32 =
   @[color.x, color.y, color.z, 1.0]
+
+entry vertex_inputs(
+    positions: []vec3f32,
+    colors: []vec3f32,
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main(positions, colors, _)) in
+  shade(screen, covered,
+    |fragment| fragment_main(fragment.value))

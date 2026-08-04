@@ -1,4 +1,3 @@
 -- Simple compute shader test: double all elements in an array
 
-#[compute]
 entry double(arr: []f32) []f32 = map(|x| x * 2.0, arr)

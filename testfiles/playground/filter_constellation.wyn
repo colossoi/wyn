@@ -33,8 +33,8 @@ def verts: [3]vec4f32 =
    @[3.0, -1.0, 0.0, 1.0],
    @[-1.0, 3.0, 0.0, 1.0]]
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 = verts[vid]
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- Candidate set: 12 point indices.
@@ -58,8 +58,7 @@ def palette(t: f32) vec3f32 =
 ------------------------------------------------------------
 -- Fragment.
 ------------------------------------------------------------
-#[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
+def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 =
   let coord  = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let uv01   = coord / iResolution.xy in
   let aspect = iResolution.x / iResolution.y in
@@ -88,5 +87,15 @@ entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform
   let halo        = 0.04 / (200.0 * halo_band * halo_band + 0.7) in
 
   let tint   = palette(pulse * 0.5 + iTime * 0.06) in
+
   let bright = glow + halo in
+
   @[tint.x * bright, tint.y * bright, tint.z * bright, 1.0]
+entry filter_constellation(
+    iResolution: vec3f32, iTime: f32,
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main) in
+  shade(screen, covered,
+    |fragment| fragment_main(iResolution, iTime, fragment.position))

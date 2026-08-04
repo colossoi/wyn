@@ -21,9 +21,8 @@ def verts: [3]vec4f32 =
    @[3.0f32, -1.0f32, 0.0f32, 1.0f32],
    @[-1.0f32, 3.0f32, 0.0f32, 1.0f32]]
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 =
-  verts[vertex_id]
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 -- Four chained swizzle-with rotations on a `vec3`. Each step
 -- updates two slots in place; the third stays unchanged. The
@@ -35,8 +34,9 @@ def transform(dir0: vec3f32, mx: f32, my: f32, rotview1: mat2f32, rotview2: mat2
   let d3 = d2 with .yz *= rotview2 in
   d3 with .xz *= rotview1
 
-#[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
+def fragment_main(iResolution: vec3f32, iTime: f32,
+                  fragment: fragment_invocation<vec2f32>) vec4f32 =
+  let fragCoord = fragment.position
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y]
   let uv = @[coord.x / iResolution.x - 0.5f32, coord.y / iResolution.y - 0.5f32]
   let dir0 = @[uv.x * 0.8f32, uv.y * 0.8f32, 1.0f32]
@@ -48,3 +48,13 @@ entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform
 
   let d = transform(dir0, mx, my, view1, view2) in
   @[d.x * 0.5f32 + 0.5f32, d.y * 0.5f32 + 0.5f32, d.z * 0.5f32 + 0.5f32, 1.0f32]
+
+entry swizzle_demo(
+    iResolution: vec3f32,
+    iTime: f32,
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main) in
+  shade(screen, covered,
+    fragment_main(iResolution, iTime, _))

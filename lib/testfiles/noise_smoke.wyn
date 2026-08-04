@@ -5,7 +5,6 @@ import "../noise"
 -- see the stats drivers and any shader you wire `fhnoise` into.
 def SEED: u32 = 0x9e3779b9u32
 
-#[compute]
 entry noise_smoke() [5]f32 =
   let k = fasthash.seed(SEED) in
   let p : vec2f32 = @[3.5f32, 7.25f32] in

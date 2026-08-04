@@ -6,14 +6,10 @@
 -- glass chosen by the book's probabilities), and the three hero spheres,
 -- rendered through a thin-lens camera with defocus blur.
 --
--- Progressive accumulation: a `history = 1` resource double-buffers the
--- running Monte-Carlo sum. Each frame a compute pass adds SPP_PER_FRAME fresh
--- samples per pixel to the previous frame's sum (rgb = radiance sum,
--- w = sample count) and the fragment pass just displays sum / count. The
--- image sharpens over time and freezes once MAX_SPP samples have landed
--- (set MAX_SPP = 0 to refine forever).
---
--- Wyn-isms vs. the C++ book:
+-- Each fragment evaluates SPP_PER_FRAME samples and displays their average.
+-- The frame index participates in the random seed, so repeated root
+-- invocations produce independent estimates without source-visible history.
+---- Wyn-isms vs. the C++ book:
 --   * No recursion: `ray_color` is a `loop` over bounces threading
 --     (origin, direction, attenuation, accumulated color, rng seed).
 --   * No mutable RNG: a u32 PCG seed is threaded through every draw as
@@ -51,8 +47,8 @@ def verts: [3]vec4f32 =
    @[3.0, -1.0, 0.0, 1.0],
    @[-1.0, 3.0, 0.0, 1.0]]
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- RNG: PCG hash, seed threaded through every draw
@@ -305,36 +301,20 @@ def getRay(s: f32, t: f32, aspect: f32, seed: u32) (vec3f32, vec3f32, u32) =
   (ro, rd, s1)
 
 ------------------------------------------------------------
--- Progressive accumulation buffer: rgb = Monte-Carlo radiance sum,
--- w = sample count. `history = 1` double-buffers it so this frame
--- reads last frame's sum (`previous` view) and writes the new one.
+-- Per-fragment Monte-Carlo batch.
 ------------------------------------------------------------
 
-resource acc: image2d {
-  format  = rgba32float
-  size    = window
-  usages  = [storage_write, sampled]
-  history = 1
-}
-
-#[compute]
-entry accumulate(#[view(acc, storage_write)] out_acc: *storage_image,
-                 #[view(acc, sampled, previous)] prev_acc: texture2d,
-                 #[builtin(global_invocation_id)] gid: vec3u32,
-                 #[uniform(set=1, binding=0)] iResolution: vec3f32,
-                 #[uniform(set=1, binding=3)] iFrame: u32) () =
+def fragment_main(iResolution: vec3f32, iFrame: u32, pos_in: vec4f32) vec4f32 =
+  let gid = @[u32(i32(pos_in.x)), u32(i32(pos_in.y)), 0u32] in
   let xy = @[i32(gid.x), i32(gid.y)] in
-  let prev = texture_load(prev_acc, xy, 0) in
-  -- Startup (and window-resize) leaves no valid history: restart the sum.
-  let fresh = iFrame < 2u32 in
-  let sum0 = if fresh then @[0.0, 0.0, 0.0] else prev.xyz in
-  let count0 = if fresh then 0.0 else prev.w in
+  let sum0 = @[0.0, 0.0, 0.0] in
+  let count0 = 0.0 in
 
-  let converged = if MAX_SPP > 0 then count0 >= f32(MAX_SPP) else false in
+  let converged = false in
   -- Select the texel to write, store once at the tail. When converged the
   -- ping-pong still swaps buffers each frame, so carry the finished sum over.
   let texel =
-    if converged then prev
+    if converged then @[sum0.x, sum0.y, sum0.z, count0]
     else
       let aspect = iResolution.x / iResolution.y in
       let base = pcg(gid.x * 1973u32 + gid.y * 9277u32 + iFrame * 26699u32) in
@@ -351,16 +331,15 @@ entry accumulate(#[view(acc, storage_write)] out_acc: *storage_image,
       let sum = sum0 + batch.0 in
       @[sum.x, sum.y, sum.z, count0 + f32(SPP_PER_FRAME)]
   in
-  out_acc with [xy] = texel
-
-------------------------------------------------------------
--- Display pass: sum / count, gamma 2 (the book's sqrt write).
-------------------------------------------------------------
-
-#[fragment]
-entry fragment_main(#[builtin(position)] pos_in: vec4f32,
-                    #[view(acc, sampled)] tex_acc: texture2d) #[target(screen)] vec4f32 =
-  let xy = @[i32(pos_in.x), i32(pos_in.y)] in
-  let v = texture_load(tex_acc, xy, 0) in
-  let c = v.xyz * (1.0 / max(v.w, 1.0)) in
+  let c = texel.xyz * (1.0 / max(texel.w, 1.0)) in
   @[sqrt(c.x), sqrt(c.y), sqrt(c.z), 1.0]
+
+entry one_weekend(
+    iResolution: vec3f32,
+    iFrame: u32,
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main) in
+  shade(screen, covered,
+    |fragment| fragment_main(iResolution, iFrame, fragment.position))

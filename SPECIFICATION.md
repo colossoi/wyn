@@ -33,8 +33,8 @@ provides one array kind for external inputs, intermediate values, and results.
   `def f(xs: [n]i32) [n]i32` declares a function whose output has the
   same length as its input.
 - **Unified pipeline entries**: a host invokes one `entry`; ordinary
-  values connect the computations within it, and special invocation
-  forms introduce compute, vertex, rasterization, and fragment work.
+  values and array operators express computation within it, while special
+  invocation forms introduce rasterization and fragment processing.
 
 ### Program Structure
 
@@ -82,10 +82,10 @@ def normalize(xs: [n]f32) [n]f32 =
   map(|x| x / total, xs)
 ```
 
-A graphics entry contains the relationship among its compute, vertex,
-and fragment work. Stage callbacks are ordinary function expressions;
-their role follows from the special invocation form to which they are
-passed:
+A graphics entry contains the relationship among its array computation,
+vertex processing, rasterization, and fragment processing. Stage callbacks
+are ordinary function expressions; their role follows from the special
+invocation form to which they are passed:
 
 ```wyn
 entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
@@ -649,9 +649,10 @@ global variables.
 
 An `entry` declaration defines a complete operation exposed to the
 host. It is not a function value and cannot be called by another Wyn
-declaration. Vertex, fragment, and explicitly dispatched compute work
-are introduced inside its expression by the special forms specified
-under Unified Pipeline Entries and Stage Invocation.
+declaration. Array operators express ordinary data-parallel computation;
+vertex and fragment processing are introduced inside the entry expression
+by the special forms specified under Unified Pipeline Entries and Stage
+Invocation.
 
 Entry declarations differ from `def` declarations in three ways:
 
@@ -1334,6 +1335,11 @@ This desugars to `|x, z| add(x, 5, z)`. No partial application is involved.
   `outer(inner(_))` is `outer(|x| inner(x))`, not
   `|x| outer(inner(x))`.
 
+A section in which every argument is a placeholder is eta-equivalent to the
+bare function value. Thus `f(_)` and `f` are interchangeable when `f` has
+arity one, and `f(_, _)` and `f` are interchangeable when `f` has arity two.
+The bare form is normally clearer.
+
 ---
 
 ## Lambdas
@@ -1984,10 +1990,10 @@ valid only on the syntactic form named by the section that defines it. An
 unknown attribute, an attribute in any other position, or an attribute with
 arguments of the wrong form is a static error.
 
-Attributes do not identify compute, vertex, or fragment stages and do not
-connect stage interfaces or resources. Stage roles and data flow are specified
-by the invocation operations under Unified Pipeline Entries and Stage
-Invocation.
+Attributes do not identify execution stages and do not connect stage interfaces
+or resources. Vertex and fragment callback roles are specified by the invocation
+operations under Unified Pipeline Entries and Stage Invocation; all other data
+flow follows ordinary expression semantics.
 
 ### Grammar
 
@@ -2178,10 +2184,9 @@ work over matrix values in the same manner as they do over scalars.
 ### Overall Architecture
 
 A Wyn `entry` describes one complete operation invoked by the host. An entry
-is the root of a pipeline, not an individual compute, vertex, or fragment
-shader. Its parameters are the external inputs to the operation, its result is
-the external result of the operation, and its body describes all data
-dependencies within the operation.
+is the root of a pipeline, not an individual GPU shader. Its parameters are the
+external inputs to the operation, its result is the external result of the
+operation, and its body describes all data dependencies within the operation.
 
 Work within an entry is expressed in two semantic contexts:
 
@@ -2202,15 +2207,11 @@ An `entry` is not a function value. It cannot be named in an expression,
 passed as an argument, or called by another Wyn declaration. Multiple entries
 in one program denote independent operations exposed to the host.
 
-No stage-identification syntax is attached to declarations or lambdas.
-In particular, `#[compute]`, `#[vertex]`, and `#[fragment]` are not part of
-the unified pipeline language. The operation receiving a callback determines
-the callback's stage:
+A stage context is introduced when a stage invocation operation receives a
+callback. The operation determines the callback's context:
 
 | Invocation operation | Callback context | Callback argument | Result |
 |---|---|---|---|
-| `dispatch_1d`, `dispatch_2d`, `dispatch_3d` | compute | `compute_invocation` | array |
-| `dispatch_workgroups_*` | compute workgroup | `workgroup_invocation` | array |
 | `rasterize_*` | vertex | `vertex_invocation` | `raster<V>` |
 | `shade`, `shade_with` | fragment | `fragment_invocation<V>` | render target |
 
@@ -2280,8 +2281,6 @@ The following built-in types are used by the invocation operations:
 
 | Type | Meaning | Constructible by user code |
 |---|---|---|
-| `compute_invocation` | coordinates of one logical compute invocation | no |
-| `workgroup_invocation` | coordinates of one invocation in an explicit workgroup | no |
 | `vertex_invocation` | indices for one requested vertex | no |
 | `vertex<V>` | clip position and vertex-to-fragment payload | only with `vertex_output` |
 | `raster<V>` | rasterized coverage carrying payload `V` | no |
@@ -2302,84 +2301,37 @@ or captured by a different stage callback.
 ordinary type arguments and participate in type inference in the same manner
 as arguments to any other generic type.
 
-### Compute Invocation
+### Array Computation
 
-#### Logical Dispatch
+Ordinary computation within an entry is expressed with the same scalar,
+aggregate, and second-order array expressions used in any other Wyn function.
+There is no compute-stage callback, compute invocation value, or general
+dispatch operation in the unified pipeline language.
 
-`dispatch_1d`, `dispatch_2d`, and `dispatch_3d` create a compute stage over a
-logical rectangular domain:
-
-```wyn
-dispatch_1d(count, callback)
-dispatch_2d(width, height, callback)
-dispatch_3d(width, height, depth, callback)
-```
-
-Every extent has type `u32`. Each operation invokes its callback once for each
-coordinate in its domain. Callback invocations have no specified execution
-order. The callback is pure and its return values form the result array.
-
-- `dispatch_1d(n, f)` returns an array of length `n` in increasing `x` order.
-- `dispatch_2d(w, h, f)` returns `[h][w]T`, indexed as `[y][x]`.
-- `dispatch_3d(w, h, d, f)` returns `[d][h][w]T`, indexed as `[z][y][x]`.
-
-When an extent is not statically known, the corresponding result size is
-existential. A zero extent produces an empty result and invokes no callback.
-
-A `compute_invocation` exposes these read-only fields:
+For example, an element-wise update is an ordinary `map`:
 
 ```wyn
-invocation.global_id : vec3u32
-invocation.domain    : vec3u32
+def update_particle(dt: f32, p: particle) particle =
+  { position = p.position + dt * p.velocity,
+    velocity = p.velocity }
+
+let updated = map(update_particle(dt, _), particles)
 ```
 
-Unused dimensions of `global_id` are zero; unused dimensions of `domain` are
-one. Thus a `dispatch_1d` invocation has `global_id = @[x, 0, 0]` and
-`domain = @[count, 1, 1]`.
-
-The result type `T` must be a valid array element type. Tuples and records
-allow one invocation to produce several logical output channels. Uniqueness
-rules apply independently to the resulting arrays.
-
-#### Explicit Workgroups
-
-The `dispatch_workgroups_1d`, `dispatch_workgroups_2d`, and
-`dispatch_workgroups_3d` forms expose a fixed workgroup decomposition:
+When a computation needs an element index, the index is an ordinary value.
+It can be obtained from an index array rather than from a platform invocation:
 
 ```wyn
-dispatch_workgroups_1d(groups, size, callback)
-dispatch_workgroups_2d(group_width, group_height,
-                       size_width, size_height, callback)
-dispatch_workgroups_3d(group_width, group_height, group_depth,
-                       size_width, size_height, size_depth, callback)
+let selected = map(|i| values[i], iota(length(values)))
 ```
 
-Each extent has type `u32`. The callback is evaluated once for each local
-coordinate of each group. A `workgroup_invocation` exposes:
+The array operators determine the value, shape, and ordering semantics of
+their results. The language does not expose whether an array expression is
+executed by one compute shader, several compute shaders, or as part of another
+operation.
 
-```wyn
-invocation.global_id      : vec3u32
-invocation.local_id       : vec3u32
-invocation.workgroup_id   : vec3u32
-invocation.workgroup_size : vec3u32
-invocation.workgroup_count: vec3u32
-```
-
-For each axis,
-`global_id = workgroup_id * workgroup_size + local_id`. Results use the same
-row-major coordinate order as logical dispatch and have an extent equal to
-`workgroup_count * workgroup_size` on each axis.
-
-Explicit workgroups do not by themselves introduce mutable shared memory or a
-barrier. Operations that provide workgroup collective semantics specify those
-semantics separately.
-
-#### Array Operators
-
-Second-order array operators such as `map`, `reduce`, `scan`, and `filter`
-retain their ordinary array semantics inside an entry. They do not expose a
-`compute_invocation`. Use a dispatch form only when the computation requires
-logical invocation coordinates or an explicit workgroup decomposition.
+The unified pipeline language does not expose workgroup identifiers, fixed
+workgroup geometry, mutable workgroup storage, or workgroup barriers.
 
 ### Draw Invocation
 
@@ -2577,14 +2529,11 @@ invocation.position       : vec4f32
 invocation.front_facing   : bool
 invocation.primitive_index: u32
 invocation.sample_index   : u32
-invocation.sample_position: vec2f32
 ```
 
 `value` is the payload after interpolation. `position.xy` is the target-space
 fragment position, `position.z` is depth, and `position.w` is the reciprocal
-homogeneous clip coordinate. `sample_position` is relative to the pixel in
-`[0, 1)²`; for a single-sample target, its value is `@[0.5, 0.5]` and
-`sample_index` is zero.
+homogeneous clip coordinate. For a single-sample target, `sample_index` is zero.
 
 A direct `C` return writes those colors using the interpolated raster depth.
 `fragment_output<C>` is the following predeclared generic sum type:
@@ -2642,8 +2591,8 @@ target, texture, sampler, or built-in attributes on the callback.
 The result of any ordinary expression or invocation operation may be passed to
 a later operation when its type permits. This includes:
 
-- an array returned by `dispatch_*` captured by a vertex callback;
-- a `draw_command` returned by compute work passed to `indirect_draw`;
+- an array produced by ordinary array expressions captured by a vertex callback;
+- a `draw_command` produced earlier in the entry passed to `indirect_draw`;
 - a `raster<V>` returned by rasterization passed to `shade`; and
 - a render target returned by one shading operation passed to another.
 
@@ -2674,17 +2623,14 @@ separate root entries.
 
 ### Complete Example
 
-The following entry contains one logical compute dispatch, one vertex
-callback, and one fragment callback:
+The following entry contains an array transformation, one vertex callback,
+and one fragment callback:
 
 ```wyn
 type particle = { position: vec3f32, velocity: vec3f32 }
 type varying = { uv: vec2f32, speed: f32 }
 
-def update(particles: []particle, dt: f32,
-           invocation: compute_invocation) particle =
-  let i = i64(invocation.global_id.x) in
-  let p = particles[i] in
+def update_particle(dt: f32, p: particle) particle =
   { position = p.position + dt * p.velocity,
     velocity = p.velocity }
 
@@ -2709,9 +2655,7 @@ entry frame(particles: []particle,
             sampling: sampler,
             target: render_target<vec4f32>)
     ([]particle, render_target<vec4f32>) =
-  let updated = dispatch_1d(
-    particle_count,
-    update(particles, dt, _)) in
+  let updated = map(update_particle(dt, _), particles) in
   let covered = rasterize_triangles(
     direct_draw(particle_count, 1u32),
     particle_vertex(updated, view_projection, _)) in
@@ -2722,11 +2666,11 @@ entry frame(particles: []particle,
   (updated, target')
 ```
 
-`update(particles, dt, _)`, `particle_vertex(updated,
-view_projection, _)`, and `particle_fragment(albedo, sampling, _)` are
-function call sections. Their argument types and the invocation operations that
-receive them determine the compute, vertex, and fragment roles. None of the
-three helpers is an independently invocable root entry.
+`update_particle(dt, _)`, `particle_vertex(updated, view_projection, _)`, and
+`particle_fragment(albedo, sampling, _)` are function call sections. The first
+is an ordinary function value consumed by `map`. The invocation operations
+receiving the latter two determine their vertex and fragment contexts. None of
+the three helpers is an independently invocable root entry.
 
 ---
 

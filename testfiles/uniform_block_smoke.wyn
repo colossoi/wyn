@@ -1,6 +1,6 @@
 -- [SPEC: Resources and Views] Record-typed uniform block.
--- One `#[uniform]` record replaces N scalar uniforms: the block's
--- members are the record's fields, laid out std140, published to the
+-- One record parameter groups the values that vary per frame. Its
+-- members are laid out together and published to the
 -- descriptor as {name, offset, size} so hosts fill them by name.
 --
 -- A compute pass paints a disc of radius `c.radius` tinted `c.tint`
@@ -19,36 +19,26 @@ type block = {
   center: vec2f32,
 }
 
-resource canvas: image2d {
-  format = rgba8unorm
-  size   = 512x512
-  usages = [storage_write, sampled]
-}
-
-#[compute]
-entry paint(#[view(canvas, storage_write)] img: *storage_image,
-            #[uniform(set=1, binding=4)] c: block,
-            #[builtin(global_invocation_id)] gid: vec3u32) () =
-  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  let uv = @[f32.u32(gid.x) / 512.0f32, f32.u32(gid.y) / 512.0f32] in
-  let d = magnitude(uv - c.center) in
-  let color = if d < c.radius
-              then @[c.tint.x, c.tint.y, 0.25f32, 1.0f32]
-              else @[0.08f32, 0.08f32, 0.10f32, 1.0f32] in
-  img with [xy] = color
-
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  let vid = i32(vertex.vertex_index) in
   let verts = [@[-1.0, -1.0, 0.0, 1.0],
                @[3.0, -1.0, 0.0, 1.0],
                @[-1.0, 3.0, 0.0, 1.0]] in
-  verts[vid]
+  vertex_output(verts[vid], @[0.0, 0.0])
 
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32,
-                    #[view(canvas, sampled)] tex: texture2d,
-                    #[sampler(set=0, binding=1)] samp: sampler,
-                    #[uniform(set=1, binding=0)] iResolution: vec3f32)
-  #[target(screen)] vec4f32 =
+def fragment_main(c: block, iResolution: vec3f32, pos: vec4f32) vec4f32 =
   let uv = @[pos.x / iResolution.x, pos.y / iResolution.y] in
-  texture_sample(tex, samp, uv, 0.0f32)
+  let d = magnitude(uv - c.center) in
+  if d < c.radius
+  then @[c.tint.x, c.tint.y, 0.25f32, 1.0f32]
+  else @[0.08f32, 0.08f32, 0.10f32, 1.0f32]
+
+entry uniform_block_smoke(
+    c: block,
+    iResolution: vec3f32,
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main) in
+  shade(screen, covered,
+    |fragment| fragment_main(c, iResolution, fragment.position))

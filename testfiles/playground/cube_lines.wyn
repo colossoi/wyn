@@ -269,8 +269,8 @@ def verts: [3]vec4f32 =
    @[3.0, -1.0, 0.0, 1.0],
    @[-1.0, 3.0, 0.0, 1.0]]
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- The interior of one cube face: three rotated patches, shaded and
@@ -388,13 +388,7 @@ def insides(ro0: vec3f32, rd0: vec3f32, nor_c: vec3f32, l_dir0: vec3f32, iResolu
 ------------------------------------------------------------
 -- Fragment shader (mainImage)
 ------------------------------------------------------------
-#[fragment]
-entry fragment_main(
-  #[uniform(set=1, binding=0)] iResolution: vec3f32,
-  #[uniform(set=1, binding=1)] iTime: f32,
-  #[uniform(set=1, binding=5)] iMouse: vec4f32,
-  #[builtin(position)] fragCoord: vec4f32
-) #[target(screen)] vec4f32 =
+def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, fragCoord: vec4f32) vec4f32 =
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
 
   let l_dir = normalize(@[0.0, 1.0, 0.0]) * rotz(0.5) in
@@ -462,3 +456,12 @@ entry fragment_main(
   else
     let (bg, _) = background(eye, rd, l_dir) in
     @[bg.x, bg.y, bg.z, 0.15]
+
+entry cube_lines(
+    iResolution: vec3f32, iTime: f32, iMouse: vec4f32,
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main) in
+  shade(screen, covered,
+    |fragment| fragment_main(iResolution, iTime, iMouse, fragment.position))

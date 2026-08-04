@@ -27,7 +27,6 @@ fn test_linked_extern_call_uses_structural_function_identity() {
 #[linked("external_increment")]
 extern external_increment(x: i32) i32
 
-#[compute]
 entry main(x: i32) i32 = external_increment(x)
 "#,
     )
@@ -288,8 +287,8 @@ def minPair(hits: [4](f32, i32)) (f32, i32) =
 
 def testHits: [4](f32, i32) = [(1.0, 1), (2.0, 2), (0.5, 3), (3.0, 4)]
 
-#[fragment]
-entry fragment_main(#[builtin(frag_coord)] pos: vec4f32) #[target(screen)] vec4f32 =
+
+entry fragment_main(pos: vec4f32) vec4f32 =
   let (t, m) = minPair(testHits) in
   @[t, t, 0.0, 1.0]
 "#,
@@ -341,8 +340,8 @@ def helper(x: f32, iTime: f32) f32 =
     let weight = x * iTime in
     weight
 
-#[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
+
+entry fragment_main(iTime: f32, pos: vec4f32) vec4f32 =
     -- Create multiple locals to ensure LocalId collision
     let a = pos.x in
     let b = pos.y in
@@ -369,11 +368,11 @@ def verts: [3]vec4f32 =
    @[3.0, -1.0, 0.0, 1.0],
    @[-1.0, 3.0, 0.0, 1.0]]
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
 
-#[fragment]
-entry fragment_main() #[target(screen)] vec4f32 =
+entry vertex_main(vertex_id: i32) vec4f32 = verts[vertex_id]
+
+
+entry fragment_main() vec4f32 =
   let g = @[1.0, 2.0, 3.0] in
   let h = dot(g, @[127.1, 311.7, 74.7]) in
   @[h, h, h, 1.0]
@@ -390,8 +389,8 @@ fn test_nested_if_else_in_entry_point() {
     // nested conditionals.
     let result = compile_to_spirv(
         r#"
-#[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
+
+entry fragment_main(fragCoord: vec4f32) vec4f32 =
   let x = fragCoord.x in
   if x < 0.5 then @[1.0, 0.0, 0.0, 1.0]
   else if x < 1.5 then @[0.0, 1.0, 0.0, 1.0]
@@ -419,19 +418,17 @@ def verts: [3]vec4f32 =
    @[3.0, 0.0 - 1.0, 0.0, 1.0],
    @[0.0 - 1.0, 3.0, 0.0, 1.0]]
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32)
-  #[builtin(position)] vec4f32 = verts[vid]
 
-#[compute]
-entry a(#[builtin(global_invocation_id)] gid: vec3u32) () = ()
+entry vertex_main(vid: i32)
+  vec4f32 = verts[vid]
 
-#[compute]
-entry b(#[builtin(global_invocation_id)] gid: vec3u32) () = ()
+entry a(gid: vec3u32) () = ()
 
-#[fragment]
-entry fragment_main(#[builtin(position)] _p: vec4f32)
-  #[target(screen)] vec4f32 = @[0.0, 0.0, 0.0, 1.0]
+entry b(gid: vec3u32) () = ()
+
+
+entry fragment_main(_p: vec4f32)
+  vec4f32 = @[0.0, 0.0, 0.0, 1.0]
 ";
     let spirv = compile_to_spirv(src).expect("two-compute-entry shader should compile");
     // BuiltIn enum value for GlobalInvocationId is 28
@@ -475,9 +472,8 @@ fn scatter_into_storage_buffer_lowers() {
     let spirv = compile_to_spirv(
         r#"
 def N:i32 = 5
-#[compute]
-entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
-                #[storage(set=2, binding=1, access=write)] fb: []vec4f32) () =
+entry rasterize(positions: []vec4f32,
+                fb: []vec4f32) () =
   let pts  = positions[0..N] in
   let idxs = map(|p:vec4f32| i32.f32(p.y) * 512 + i32.f32(p.x), pts) in
   let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], pts) in
@@ -508,7 +504,7 @@ fn disasm(words: &[u32]) -> String {
 fn dynamic_const_array_index_hoists_to_private_global() {
     let spirv = compile_to_spirv(
         "def t: [4]i32 = [10, 20, 30, 40]\n\
-         #[compute]\n\
+         \n\
          entry pick() []i32 = map(|i| t[i % 4], iota(100))",
     )
     .unwrap();
@@ -540,7 +536,7 @@ fn dynamic_const_array_index_hoists_to_private_global() {
 fn const_array_hoist_is_deduped() {
     let spirv = compile_to_spirv(
         "def t: [4]i32 = [10, 20, 30, 40]\n\
-         #[compute]\n\
+         \n\
          entry pick() []i32 = map(|i| t[i % 4] + t[(i + 1) % 4], iota(100))",
     )
     .unwrap();

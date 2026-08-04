@@ -168,8 +168,18 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::Texture2D => "texture2d".to_string(),
         TypeName::Sampler => "sampler".to_string(),
         TypeName::StorageTexture => "storage_image".to_string(),
-        TypeName::Raster if args.len() == 1 => format!("raster<{}>", format_type(&args[0])),
-        TypeName::Raster => "raster<?>".to_string(),
+        TypeName::Raster
+        | TypeName::Vertex
+        | TypeName::FragmentInvocation
+        | TypeName::RenderTarget
+        | TypeName::FragmentOutput => {
+            if args.len() == 1 {
+                format!("{}<{}>", name, format_type(&args[0]))
+            } else {
+                format!("{}<?>", name)
+            }
+        }
+        TypeName::VertexInvocation | TypeName::Draw => name.to_string(),
         TypeName::Skolem(id) => format!("{}", id),
     }
 }
@@ -342,6 +352,7 @@ impl AstFormatter {
     fn write_entry(&mut self, entry: &EntryDecl<EntrySyntax, SourceTree>) {
         let entry_kind = match entry.data.entry_kind {
             crate::interface::EntryKind::Vertex => "vertex",
+            crate::interface::EntryKind::Root => "entry",
             crate::interface::EntryKind::Fragment => "fragment",
             crate::interface::EntryKind::Compute => "compute",
         };

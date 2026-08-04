@@ -11,11 +11,9 @@ def scale_all(data: []f32) []f32 = data |> map(double)
 
 -- Multi-stage chain: map then reduce.
 --   data |> map(double) |> reduce(add, 0.0)  ==  reduce(add, 0.0, map(double, data))
-#[compute]
 entry sum_doubled(data: []f32) f32 =
   data |> map(double) |> reduce(add, 0.0)
 
 -- Precedence: `|>` is looser than arithmetic, so the whole sum is piped.
 --   (n + 1) |> f32.i32  ==  f32.i32(n + 1)
-#[compute]
 entry piped_arith(n: i32) f32 = n + 1 |> f32.i32

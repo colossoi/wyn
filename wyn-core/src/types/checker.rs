@@ -447,8 +447,17 @@ impl<'a> TypeChecker<'a> {
                 let arg_strs: Vec<String> = args.iter().map(|a| self.format_type(a)).collect();
                 format!("({})", arg_strs.join(", "))
             }
-            Type::Constructed(TypeName::Raster, args) if args.len() == 1 => {
-                format!("raster<{}>", self.format_type(&args[0]))
+            Type::Constructed(name, args)
+                if matches!(
+                    name,
+                    TypeName::Raster
+                        | TypeName::Vertex
+                        | TypeName::FragmentInvocation
+                        | TypeName::FragmentOutput
+                        | TypeName::RenderTarget
+                ) && args.len() == 1 =>
+            {
+                format!("{}<{}>", name, self.format_type(&args[0]))
             }
             Type::Constructed(name, args) if args.is_empty() => format!("{}", name),
             Type::Constructed(name, args) => {
@@ -481,17 +490,24 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Raster streams are compiler-owned stage tokens. They may flow through
-    /// ordinary functions but cannot be supplied by or returned to the host
-    /// through today's platform-invoked `entry` interface.
-    fn contains_raster(ty: &Type) -> bool {
+    /// Invocation values may flow through ordinary helpers inside one root,
+    /// but they have no host representation and cannot cross an entry interface.
+    fn contains_internal_invocation(ty: &Type) -> bool {
         match ty {
-            Type::Constructed(TypeName::Raster, _) => true,
+            Type::Constructed(
+                TypeName::Raster
+                | TypeName::VertexInvocation
+                | TypeName::Vertex
+                | TypeName::FragmentInvocation
+                | TypeName::FragmentOutput
+                | TypeName::Draw,
+                _,
+            ) => true,
             Type::Constructed(TypeName::Sum(variants), args) => {
-                variants.iter().any(|(_, payload)| payload.iter().any(Self::contains_raster))
-                    || args.iter().any(Self::contains_raster)
+                variants.iter().any(|(_, payload)| payload.iter().any(Self::contains_internal_invocation))
+                    || args.iter().any(Self::contains_internal_invocation)
             }
-            Type::Constructed(_, args) => args.iter().any(Self::contains_raster),
+            Type::Constructed(_, args) => args.iter().any(Self::contains_internal_invocation),
             Type::Variable(_) => false,
         }
     }
@@ -1874,14 +1890,14 @@ impl<'a> TypeChecker<'a> {
             param_types.push(self.instantiate_annotation_type(&ty, module_name)?);
         }
 
-        // Platform entries are host/shader ABI boundaries. A `raster<V>` is
-        // an internal stage token and therefore cannot cross this boundary.
+        // Root entries are host boundaries. Invocation tokens have no external
+        // representation and therefore cannot cross this boundary.
         if is_entry {
             for (param, param_type) in params.iter().zip(&param_types) {
-                if Self::contains_raster(param_type) {
+                if Self::contains_internal_invocation(param_type) {
                     bail_type_at!(
                         param.h.span,
-                        "raster<V> is an internal stage token and cannot be an entry parameter"
+                        "invocation types are internal to one root and cannot be entry parameters"
                     );
                 }
                 self.constrain_array_to_storage(param_type)?;
@@ -2224,10 +2240,10 @@ impl<'a> TypeChecker<'a> {
                 // residual array placeholders so an alias return like `world`
                 // unifies against the body's concrete `view`/`composite` arrays.
                 let expected_type = self.instantiate_annotation_type(&expected_type, None)?;
-                if Self::contains_raster(&expected_type) {
+                if Self::contains_internal_invocation(&expected_type) {
                     bail_type_at!(
                         entry.name_span,
-                        "raster<V> is an internal stage token and cannot be an entry result"
+                        "invocation types are internal to one root and cannot be an entry result"
                     );
                 }
 
@@ -2483,6 +2499,12 @@ impl<'a> TypeChecker<'a> {
                         bail_type_at!(
                             expr.h.span,
                             "Arrays of functions are not permitted"
+                        );
+                    }
+                    if Self::contains_internal_invocation(&resolved_first) {
+                        bail_type_at!(
+                            expr.h.span,
+                            "Invocation values cannot be stored in arrays"
                         );
                     }
 
@@ -2852,6 +2874,7 @@ impl<'a> TypeChecker<'a> {
 
                     // Check for partial application AFTER application (when types are resolved)
                     self.ensure_not_partial(&result_ty, &expr.h.span)?;
+                    self.ensure_valid_pipeline_result(&result_ty, &expr.h.span)?;
 
                     // Store resolved type in type table (apply substitutions)
                     let resolved = cand.ty.apply(&self.context);
@@ -2879,6 +2902,7 @@ impl<'a> TypeChecker<'a> {
                     match resolved {
                         Ok(r) => {
                             self.ensure_not_partial(&r.return_type, &span)?;
+                            self.ensure_valid_pipeline_result(&r.return_type, &span)?;
                             let resolved_func_ty = candidate_tys[r.winner_index].apply(&self.context);
                             self.type_table
                                 .insert(func.h.id, TypeScheme::Monotype(resolved_func_ty));
@@ -3550,6 +3574,41 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    fn is_varying_payload(ty: &Type) -> bool {
+        match ty {
+            Type::Variable(_) => true,
+            Type::Constructed(
+                TypeName::Unit
+                | TypeName::Bool
+                | TypeName::Float(_)
+                | TypeName::UInt(_)
+                | TypeName::Int(_)
+                | TypeName::Vec
+                | TypeName::Mat,
+                _,
+            ) => true,
+            Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => {
+                fields.iter().all(Self::is_varying_payload)
+            }
+            _ => false,
+        }
+    }
+
+    fn ensure_valid_pipeline_result(&self, result_ty: &Type, call_span: &Span) -> Result<()> {
+        let result_ty = result_ty.apply(&self.context);
+        let payload = match &result_ty {
+            Type::Constructed(TypeName::Vertex | TypeName::Raster, args) if args.len() == 1 => &args[0],
+            _ => return Ok(()),
+        };
+        if !Self::is_varying_payload(payload) {
+            bail_type_at!(
+                *call_span,
+                "vertex-to-fragment payload must contain only scalar, vector, matrix, tuple, record, or unit values; got {}",
+                self.format_type(payload)
+            );
+        }
+        Ok(())
+    }
     /// Ensure the result type is not a function (no partial application).
     /// Note: () -> T is allowed (unit functions are not considered partial application).
     fn ensure_not_partial(&self, result_ty: &Type, call_span: &Span) -> Result<()> {
@@ -3952,6 +4011,39 @@ impl<'a> TypeChecker<'a> {
                 field,
                 fields.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
             );
+        }
+
+        // Platform-supplied invocation records are opaque except for their
+        // specified read-only fields.
+        if let Type::Constructed(TypeName::VertexInvocation, args) = base_ty {
+            if !args.is_empty() {
+                bail_type_at!(*span, "malformed vertex_invocation type");
+            }
+            return match field {
+                "vertex_index" | "instance_index" | "draw_index" => {
+                    Ok(Type::Constructed(TypeName::UInt(32), vec![]))
+                }
+                _ => bail_type_at!(*span, "vertex_invocation has no field '{}'", field),
+            };
+        }
+
+        if let Type::Constructed(TypeName::FragmentInvocation, args) = base_ty {
+            let Some(value_ty) = args.first() else {
+                bail_type_at!(*span, "malformed fragment_invocation type");
+            };
+            return match field {
+                "value" => Ok(value_ty.clone()),
+                "position" => Ok(Type::Constructed(
+                    TypeName::Vec,
+                    vec![
+                        Type::Constructed(TypeName::Float(32), vec![]),
+                        Type::Constructed(TypeName::Size(4), vec![]),
+                    ],
+                )),
+                "front_facing" => Ok(Type::Constructed(TypeName::Bool, vec![])),
+                "primitive_index" | "sample_index" => Ok(Type::Constructed(TypeName::UInt(32), vec![])),
+                _ => bail_type_at!(*span, "fragment_invocation has no field '{}'", field),
+            };
         }
 
         // 2. Tuple numeric index (.0, .1, etc.)

@@ -865,6 +865,7 @@ fn find_declaration_name_at(
                 if line == body_span.start_line && col < body_span.start_col {
                     let kind = match entry.data.source.source.syntax.entry_kind {
                         interface::EntryKind::Vertex => "vertex",
+                        interface::EntryKind::Root => "entry",
                         interface::EntryKind::Fragment => "fragment",
                         interface::EntryKind::Compute => "compute",
                     };
@@ -1467,12 +1468,13 @@ fn declaration_to_symbol(
             let range = span_to_range(span);
             let kind_str = match entry.data.source.source.syntax.entry_kind {
                 interface::EntryKind::Vertex => "vertex",
+                interface::EntryKind::Root => "pipeline",
                 interface::EntryKind::Fragment => "fragment",
                 interface::EntryKind::Compute => "compute",
             };
             Some(DocumentSymbol {
                 name: entry.name.clone(),
-                detail: Some(format!("{} shader", kind_str)),
+                detail: Some(format!("{} entry", kind_str)),
                 kind: SymbolKind::FUNCTION,
                 tags: None,
                 deprecated: None,

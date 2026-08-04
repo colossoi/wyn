@@ -156,6 +156,7 @@ impl<'a> Transformer<'a> {
                 declaration: Box::new(interface::EntryDecl {
                     entry_kind: entry.data.source.source.syntax.entry_kind,
                     compute_dispatch: entry.data.source.source.syntax.compute_dispatch.clone(),
+                    graphics_invocation: None,
                     name: entry.name.clone(),
                     name_span: entry.name_span,
                     size_params: entry.size_params.clone(),

@@ -1,22 +1,8 @@
--- Conway's Game of Life.
+-- Conway's Game of Life as one root operation.
 --
--- Two entry points:
---
---   `step`    (compute) — reads the current generation from a storage
---                         buffer, writes the next generation to the
---                         return buffer. The host dispatches this once
---                         per frame, ping-ponging input/output bindings.
---
---   `display` (fragment) — reads the most-recently-written buffer via a
---                          module-scope storage binding and colors each
---                          pixel by the cell it falls on.
---
--- The loop itself lives in the host: each frame it dispatches `step`
--- and then renders with `display`, swapping which physical buffer is
--- bound where. Nothing in Wyn is simulating "time" — the Wyn file
--- describes the per-step rule and the per-pixel rendering; the driver
--- iterates them.
-
+-- The next board is an ordinary array result. The same value is captured by
+-- the fragment callback for display, and is also returned so a host can pass
+-- it back as the following frame's board.
 -- ---------------------------------------------------------------
 -- Shared helpers
 -- ---------------------------------------------------------------
@@ -56,8 +42,7 @@ def step_cell(board: []i32, width: i32, height: i32, i: i32) i32 =
 -- Compute entry: one Conway step over the whole grid
 -- ---------------------------------------------------------------
 
-#[compute]
-entry step(board: []i32, width: i32, height: i32) []i32 =
+def step(board: []i32, width: i32, height: i32) []i32 =
     map(|i| step_cell(board, width, height, i), iota(length(board)))
 
 -- ---------------------------------------------------------------
@@ -69,12 +54,11 @@ def verts: [3]vec4f32 =
      @[ 3.0, -1.0, 0.0, 1.0],
      @[-1.0,  3.0, 0.0, 1.0]]
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 =
-    verts[vertex_id]
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+    vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
-#[fragment]
-entry display(#[uniform(set = 1, binding = 0)] iResolution: vec3f32, #[uniform(set = 1, binding = 1)] grid_width: i32, #[uniform(set = 1, binding = 2)] grid_height: i32, #[storage(set = 1, binding = 3, access = read)] display_board: []i32, #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
+def display(iResolution: vec3f32, grid_width: i32, grid_height: i32,
+            display_board: []i32, fragCoord: vec4f32) vec4f32 =
     -- Flip Y so (0, 0) renders at the top-left visually.
     let px = fragCoord.x in
     let py = iResolution.y - fragCoord.y in
@@ -91,3 +75,21 @@ entry display(#[uniform(set = 1, binding = 0)] iResolution: vec3f32, #[uniform(s
         let idx = gy * grid_width + gx in
         let alive = display_board[idx] == 1 in
         if alive then @[1.0, 1.0, 1.0, 1.0] else @[0.0, 0.0, 0.0, 1.0]
+
+entry conway(
+    board: []i32,
+    width: i32,
+    height: i32,
+    iResolution: vec3f32,
+    screen: render_target<vec4f32>)
+    ([]i32, render_target<vec4f32>) =
+  let next = step(board, width, height) in
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main) in
+  let screen' = shade(
+    screen,
+    covered,
+    |fragment|
+      display(iResolution, width, height, next, fragment.position)) in
+  (next, screen')

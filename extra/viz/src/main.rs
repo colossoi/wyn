@@ -53,9 +53,8 @@ impl From<PresentModeArg> for PresentMode {
     }
 }
 
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
 enum TopologyArg {
-    #[default]
     TriangleList,
     TriangleStrip,
     LineList,
@@ -243,16 +242,14 @@ enum Command {
         /// Maximum number of frames to render before exiting (for debugging)
         #[arg(long)]
         max_frames: Option<u32>,
-        /// Vertex count for the draw call. Default 3 matches a
-        /// fullscreen-triangle vertex shader; bump to the number of
-        /// invocations a `vertex_index`-driven vertex shader expects.
+        /// Override the vertex count published by the pipeline descriptor.
         /// Ignored when `--index-buffer` is supplied (the index file's
         /// length drives `draw_indexed` instead).
-        #[arg(long, default_value = "3")]
-        vertex_count: u32,
-        /// Primitive topology for the draw call.
-        #[arg(long, value_enum, default_value = "triangle-list")]
-        topology: TopologyArg,
+        #[arg(long)]
+        vertex_count: Option<u32>,
+        /// Override the primitive topology published by the pipeline descriptor.
+        #[arg(long, value_enum)]
+        topology: Option<TopologyArg>,
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -446,7 +443,7 @@ fn main() -> Result<()> {
                     size,
                     max_frames,
                     vertex_count,
-                    topology: topology.into(),
+                    topology: topology.map(Into::into),
                     images: image_map,
                     dump_textures: dump_texture_map,
                     uniform_values,

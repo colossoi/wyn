@@ -170,7 +170,7 @@ fn value_uses_does_not_traverse_places() {
 fn spirv_storage_write_chain_lowers_cleanly() {
     // Minimal compute shader: the map's `[]f32 → []f32` writeback forces
     // the MapInto path → ViewIndex (place) + Store.
-    let source = "#[compute]\nentry double(arr: []f32) []f32 = map(|x: f32| x * 2.0, arr)\n";
+    let source = "\nentry double(arr: []f32) []f32 = map(|x: f32| x * 2.0, arr)\n";
 
     let spirv = crate::compile_thru_spirv(source)
         .expect("SPIR-V lowering of StorageView → ViewIndex → Store chain must succeed");

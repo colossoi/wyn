@@ -14,8 +14,7 @@ if errorlevel 1 goto :fail
 echo OK: scene.spv built and validated
 echo.
 echo To render:
-echo   target\release\viz.exe vf testfiles\playground\acko_masthead\scene.spv ^
---topology triangle-list --shadertoy ^
+echo   target\release\viz.exe pipeline testfiles\playground\acko_masthead\scene.spv ^
 --storage-dir testfiles\playground\acko_masthead ^
 --index-buffer testfiles\playground\acko_masthead\indices.bin -v
 goto :eof

@@ -35,12 +35,13 @@ fn compile_to_expanded_egraph(input: &str) -> PhysicalEGraph {
     let program = crate::egir::plan(program, crate::LoweringProfile::PORTABLE).expect("terminal schedule");
     let program = crate::egir::expand_soacs(program).expect("physical SOAC expansion");
     let inner = &program;
-    assert_eq!(
-        inner.entry_points.len(),
-        1,
-        "test expects exactly one entry point"
-    );
-    inner.entry_points[0].graph.clone()
+    inner
+        .entry_points
+        .iter()
+        .find(|entry| entry.name.ends_with("__fragment"))
+        .expect("test expects an extracted fragment stage")
+        .graph
+        .clone()
 }
 
 /// Collect all `_w_intrinsic_array_with_inplace` nodes in the graph.
@@ -497,11 +498,20 @@ fn map_array_of_mixed_tuple_emits_componentwise_array_with() {
 def build(xs: [8]f32) [8](f32, i32, vec3f32) =
     map(|x: f32| (x + 1.0, 0, @[x, x, x]), xs)
 
-#[fragment]
-entry frag(c: vec4f32) vec4f32 =
+def fragment_main(fragment: fragment_invocation<vec4f32>) vec4f32 =
     let arr = build([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]) in
     let (a, _, v) = arr[3] in
     @[a, v.x, v.y, v.z]
+
+entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
+    let covered = rasterize_triangles(
+      direct_draw(3u32, 1u32),
+      |vertex| vertex_output(
+        if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+        else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+        else @[-1.0, 3.0, 0.0, 1.0],
+        @[0.0, 0.0, 0.0, 0.0])) in
+    shade(target, covered, fragment_main)
 "#;
     let graph = compile_to_expanded_egraph(source);
     let aw_nodes = array_with_nodes(&graph);

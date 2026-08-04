@@ -1,8 +1,6 @@
 use crate::ast::*;
 use crate::error::Result;
-use crate::interface::{
-    AttrExt, Attribute, EntryKind, EntryOutputDecl, StorageAccess, StorageLayout, ViewAttribute,
-};
+use crate::interface::{Attribute, EntryKind, EntryOutputDecl};
 use crate::lexer::{LocatedToken, Token};
 use crate::types;
 use crate::LookupMap;
@@ -148,13 +146,6 @@ impl<'a> Parser<'a> {
         trace!("parse_declaration: next token = {:?}", self.peek());
         // Parse optional attributes
         let attributes = self.parse_attributes()?;
-        if attributes.has_view() {
-            bail_parse_at!(
-                self.current_span(),
-                "#[view(...)] is only valid on entry-point parameters"
-            );
-        }
-
         match self.peek() {
             Some(Token::Let) => self.parse_decl("let", attributes),
             Some(Token::Def) => self.parse_decl("def", attributes),
@@ -201,9 +192,10 @@ impl<'a> Parser<'a> {
                 Ok(Declaration::Frontend(ParsedFrontend::Import(path)))
             }
             Some(Token::Extern) => self.parse_extern_decl(attributes),
-            Some(Token::Resource) => Ok(Declaration::Frontend(ParsedFrontend::Resource(
-                self.parse_resource_decl()?,
-            ))),
+            Some(Token::Resource) => Err(err_parse_at!(
+                self.current_span(),
+                "resource declarations are not part of the language; resources are values supplied through entry parameters"
+            )),
             _ => Err(err_parse_at!(
                 self.current_span(),
                 "Expected declaration, got {:?}",
@@ -246,51 +238,6 @@ impl<'a> Parser<'a> {
         attributes: Vec<Attribute>,
     ) -> Result<Declaration<ParsedFamily>> {
         trace!("parse_decl({}): next token = {:?}", keyword, self.peek());
-
-        // Check for special attributes that require specific declaration types
-        let has_entry_attr = attributes
-            .iter()
-            .any(|attr| matches!(attr, Attribute::Vertex | Attribute::Fragment | Attribute::Compute));
-
-        // Entry attributes require the 'entry' keyword, not 'def' or 'let'
-        if has_entry_attr {
-            bail_parse_at!(
-                self.current_span(),
-                "Entry point attributes (#[vertex], #[fragment], #[compute]) require 'entry' keyword, not '{}'",
-                keyword
-            );
-        }
-
-        if attributes.has_uniform() {
-            bail_parse_at!(
-                self.current_span(),
-                "#[uniform(...)] is only valid on entry-point parameters, not on top-level 'def' declarations"
-            );
-        }
-        if attributes.has_storage() {
-            bail_parse_at!(
-                self.current_span(),
-                "#[storage(...)] is only valid on entry-point parameters, not on top-level 'def' declarations"
-            );
-        }
-        if attributes.has_dispatch() {
-            bail_parse_at!(
-                self.current_span(),
-                "#[dispatch(...)] is only valid on compute entry points"
-            );
-        }
-        if attributes.has_texture() {
-            bail_parse_at!(
-                self.current_span(),
-                "#[texture(...)] is only valid on entry-point parameters, not on top-level 'def' declarations"
-            );
-        }
-        if attributes.has_sampler() {
-            bail_parse_at!(
-                self.current_span(),
-                "#[sampler(...)] is only valid on entry-point parameters, not on top-level 'def' declarations"
-            );
-        }
 
         {
             // Regular declaration (let or def)
@@ -510,46 +457,20 @@ impl<'a> Parser<'a> {
         Ok(params.into_iter().unzip())
     }
 
-    /// Parse an entry point declaration.
-    /// Entry points have restrictive syntax: only `id: type` parameters, not general patterns.
-    /// Syntax: `#[vertex|fragment|compute] [#[dispatch(x,y,z)]] entry name(id: type, ...) return_type = body`
+    /// Parse a host-visible root entry.
+    /// Entries have restrictive syntax: only `id: type` parameters, not general patterns.
+    /// Syntax is `entry name(id: type, ...) return_type = body`.
     fn parse_entry_decl(&mut self, attributes: Vec<Attribute>) -> Result<Declaration<ParsedFamily>> {
         trace!("parse_entry_decl: next token = {:?}", self.peek());
 
-        // Find the entry type attribute
-        let entry_kind = attributes
-            .iter()
-            .find_map(|attr| match attr {
-                Attribute::Vertex => Some(EntryKind::Vertex),
-                Attribute::Fragment => Some(EntryKind::Fragment),
-                Attribute::Compute => Some(EntryKind::Compute),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                err_parse!(
-                    "Entry declarations require #[vertex], #[fragment], or #[compute(...)] attribute"
-                )
-            })?;
-        let dispatches: Vec<_> = attributes
-            .iter()
-            .filter_map(|attr| match attr {
-                Attribute::Dispatch(grid) => Some(*grid),
-                _ => None,
-            })
-            .collect();
-        if dispatches.len() > 1 {
+        if !attributes.is_empty() {
             bail_parse_at!(
                 self.current_span(),
-                "entry point has more than one #[dispatch(...)] attribute"
+                "attributes are not valid on an entry declaration"
             );
         }
-        let compute_dispatch = dispatches.first().copied();
-        if compute_dispatch.is_some() && entry_kind != EntryKind::Compute {
-            bail_parse_at!(
-                self.current_span(),
-                "#[dispatch(...)] can only be used with #[compute] entries"
-            );
-        }
+        let entry_kind = EntryKind::Root;
+        let compute_dispatch = None;
 
         self.expect(Token::Entry)?;
         let name = self.expect_identifier()?;
@@ -562,12 +483,6 @@ impl<'a> Parser<'a> {
         // Parse restrictive parameters: (id: type, id: type, ...)
         // Only typed identifiers allowed, not general patterns
         let (params, param_diets) = self.parse_entry_params()?;
-
-        // Compute entry params are normally auto-bound (storage buffers
-        // numbered 0..N by `binding_layout`); an explicit
-        // `#[storage(set, binding, access)]` opts that param out of the
-        // auto-allocator and pins it to a host-wired slot (e.g. the
-        // keyboard state).
 
         // Parse return type (which may have optional attributes) - no arrow required
         let (return_types, return_attributes, return_diets) =
@@ -662,12 +577,6 @@ impl<'a> Parser<'a> {
                 let attribute = if parser.check(&Token::AttributeStart) {
                     parser.advance(); // consume '#['
                     let attribute = parser.parse_attribute()?;
-                    if matches!(attribute, Attribute::View(_)) {
-                        bail_parse_at!(
-                            parser.current_span(),
-                            "#[view(...)] is only valid on entry-point parameters"
-                        );
-                    }
                     Some(attribute)
                 } else {
                     None
@@ -683,12 +592,6 @@ impl<'a> Parser<'a> {
             // Single attributed type: #[attribute] type
             self.advance(); // consume '#['
             let attribute = self.parse_attribute()?;
-            if matches!(attribute, Attribute::View(_)) {
-                bail_parse_at!(
-                    self.current_span(),
-                    "#[view(...)] is only valid on entry-point parameters"
-                );
-            }
             let (ty, diet) = self.parse_type()?;
 
             Ok((vec![ty], vec![Some(attribute)], vec![diet]))
@@ -699,568 +602,32 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse the RHS of `size = …` in a `#[storage_image(...)]` attribute.
-    /// Accepted forms: `window` (single identifier) or `WxH` where the
-    /// lexer splits it into `IntLiteral(W)` followed by `Ident("xH")`.
-    fn parse_storage_texture_size(&mut self) -> Result<crate::pipeline_descriptor::StorageTextureSize> {
-        use crate::pipeline_descriptor::StorageTextureSize;
-        if let Some(Token::IntLiteral(n)) = self.peek().cloned() {
-            self.advance();
-            let w: u32 = n.0.parse().map_err(|_| err_parse!("storage_image size width: '{}'", n.0))?;
-            let suffix = self.expect_identifier()?;
-            let h_str = suffix
-                .strip_prefix('x')
-                .ok_or_else(|| err_parse!("storage_image size: expected WxH, got '{}{}'", n.0, suffix))?;
-            let h: u32 = h_str.parse().map_err(|_| err_parse!("storage_image size height: '{}'", h_str))?;
-            Ok(StorageTextureSize::Fixed { width: w, height: h })
-        } else {
-            let s = self.expect_identifier()?;
-            match s.as_str() {
-                "window" => Ok(StorageTextureSize::SameAsWindow),
-                other => bail_parse_at!(
-                    self.current_span(),
-                    "Unknown storage_image size: '{}'. Supported: window, WxH (e.g. 1024x1024)",
-                    other
-                ),
-            }
-        }
-    }
-
-    /// Parse a top-level `resource <name>: <kind> { format = …, size = …,
-    /// usages = [ … ], layout = binding(s, b) }` declaration.
-    fn parse_resource_decl(&mut self) -> Result<crate::interface::ResourceDecl> {
-        use crate::interface::{ResourceDecl, ResourceKind, ResourceUsage};
-        use crate::pipeline_descriptor::{StorageImageFormat, StorageTextureSize};
-        let start_span = self.current_span();
-        self.expect(Token::Resource)?;
-        let name = self.expect_identifier()?;
-        self.expect(Token::Colon)?;
-        let kind_name = self.expect_identifier()?;
-        let kind = match kind_name.as_str() {
-            "image2d" => ResourceKind::Image2d,
-            other => bail_parse_at!(
-                self.current_span(),
-                "Unknown resource kind: '{}'. Supported: image2d",
-                other
-            ),
-        };
-        self.expect(Token::LeftBrace)?;
-
-        let mut format: Option<StorageImageFormat> = None;
-        let mut size: StorageTextureSize = StorageTextureSize::default();
-        let mut usages: Vec<ResourceUsage> = Vec::new();
-        let mut layout: Option<crate::BindingRef> = None;
-        let mut history: u32 = 0;
-
-        while !self.check(&Token::RightBrace) {
-            let field = self.expect_identifier()?;
-            self.expect(Token::Assign)?;
-            match field.as_str() {
-                "format" => {
-                    let fmt = self.expect_identifier()?;
-                    format = Some(match fmt.as_str() {
-                        "rgba8unorm" => StorageImageFormat::Rgba8Unorm,
-                        "rgba16float" => StorageImageFormat::Rgba16Float,
-                        "rgba32float" => StorageImageFormat::Rgba32Float,
-                        "r32float" => StorageImageFormat::R32Float,
-                        other => bail_parse_at!(
-                            self.current_span(),
-                            "Unknown resource format: '{}'. Supported: rgba8unorm, rgba16float, rgba32float, r32float",
-                            other
-                        ),
-                    });
-                }
-                "size" => size = self.parse_storage_texture_size()?,
-                "usages" => usages = self.parse_resource_usages()?,
-                "layout" => layout = Some(self.parse_resource_layout()?),
-                "history" => history = self.expect_integer()?,
-                other => bail_parse_at!(
-                    self.current_span(),
-                    "Unknown resource field: '{}'. Supported: format, size, usages, layout, history",
-                    other
-                ),
-            }
-            if self.check(&Token::Comma) {
-                self.advance();
-            }
-        }
-        self.expect(Token::RightBrace)?;
-
-        let format = format.ok_or_else(|| err_parse!("resource '{}' requires a 'format' field", name))?;
-        if usages.is_empty() {
-            bail_parse_at!(
-                start_span,
-                "resource '{}' requires a non-empty 'usages' list",
-                name
-            );
-        }
-        if history > 1 {
-            bail_parse_at!(
-                start_span,
-                "resource '{}': history > 1 is not supported yet",
-                name
-            );
-        }
-        Ok(ResourceDecl {
-            name,
-            kind,
-            format,
-            size,
-            usages,
-            layout,
-            history,
-            span: start_span,
-        })
-    }
-
-    /// Parse `[storage_write, sampled, …]` for a resource's `usages` field.
-    fn parse_resource_usages(&mut self) -> Result<Vec<crate::interface::ResourceUsage>> {
-        use crate::interface::ResourceUsage;
-        // `[` may lex as bracketed-spaced after `usages = `.
-        if !(self.check(&Token::LeftBracket) || self.check(&Token::LeftBracketSpaced)) {
-            bail_parse_at!(self.current_span(), "expected `[` to open a usages list");
-        }
-        self.advance();
-        let mut usages = Vec::new();
-        while !self.check(&Token::RightBracket) {
-            let name = self.expect_identifier()?;
-            usages.push(match name.as_str() {
-                "storage_write" => ResourceUsage::StorageWrite,
-                "storage_read" => ResourceUsage::StorageRead,
-                "sampled" => ResourceUsage::Sampled,
-                other => bail_parse_at!(
-                    self.current_span(),
-                    "Unknown usage: '{}'. Supported: storage_write, storage_read, sampled",
-                    other
-                ),
-            });
-            if self.check(&Token::Comma) {
-                self.advance();
-            }
-        }
-        self.expect(Token::RightBracket)?;
-        Ok(usages)
-    }
-
-    /// Parse `binding(set, binding)` for a resource's `layout` field.
-    fn parse_resource_layout(&mut self) -> Result<crate::BindingRef> {
-        let kw = self.expect_identifier()?;
-        if kw != "binding" {
-            bail_parse_at!(
-                self.current_span(),
-                "expected `binding(set, binding)`, got '{}'",
-                kw
-            );
-        }
-        self.expect(Token::LeftParen)?;
-        let set = self.expect_integer()?;
-        self.expect(Token::Comma)?;
-        let binding = self.expect_integer()?;
-        self.expect(Token::RightParen)?;
-        Ok(crate::BindingRef::new(set, binding))
-    }
-
     fn parse_attribute(&mut self) -> Result<Attribute> {
         trace!("parse_attribute: next token = {:?}", self.peek());
         let attr_name = self.expect_identifier()?;
 
         match attr_name.as_str() {
-            "vertex" => {
-                self.expect(Token::RightBracket)?;
-                Ok(Attribute::Vertex)
+            "vertex" | "fragment" | "compute" => bail_parse_at!(
+                self.current_span(),
+                "#[{}] is not part of the language; a stage context is determined by the invocation operation receiving its callback",
+                attr_name
+            ),
+            "dispatch" => bail_parse_at!(
+                self.current_span(),
+                "#[dispatch(...)] is not part of the language; array operations determine their own execution",
+            ),
+            "uniform" | "storage" | "texture" | "sampler" | "storage_image" | "view" => {
+                bail_parse_at!(
+                    self.current_span(),
+                    "#[{}(...)] is not part of the language; external resources have no source-language bindings or views",
+                    attr_name
+                )
             }
-            "fragment" => {
-                self.expect(Token::RightBracket)?;
-                Ok(Attribute::Fragment)
-            }
-            "compute" => {
-                if self.check(&Token::LeftParen) {
-                    bail_parse_at!(self.current_span(), "#[compute] takes no parameters");
-                }
-                self.expect(Token::RightBracket)?;
-                Ok(Attribute::Compute)
-            }
-            "dispatch" => {
-                self.expect(Token::LeftParen)?;
-                let x = self.expect_nonzero_dispatch_dim("x")?;
-                let y = if self.check(&Token::Comma) {
-                    self.advance();
-                    self.expect_nonzero_dispatch_dim("y")?
-                } else {
-                    1
-                };
-                let z = if self.check(&Token::Comma) {
-                    self.advance();
-                    self.expect_nonzero_dispatch_dim("z")?
-                } else {
-                    1
-                };
-                self.expect(Token::RightParen)?;
-                self.expect(Token::RightBracket)?;
-                Ok(Attribute::Dispatch(crate::interface::ComputeDispatchGrid {
-                    x,
-                    y,
-                    z,
-                }))
-            }
-            "uniform" => {
-                // Parse uniform attribute: #[uniform(binding=N)] or #[uniform(set=M, binding=N)].
-                // Default `set` is 1 — set 0 is reserved for compiler-allocated storage
-                // (see SPECIFICATION.md "Descriptor Set Layout"). Explicit `set=0` errors at decl construction.
-                self.expect(Token::LeftParen)?;
-
-                let mut set: u32 = 1;
-                let mut binding: Option<u32> = None;
-
-                loop {
-                    let param_name = self.expect_identifier()?;
-                    self.expect(Token::Assign)?;
-
-                    match param_name.as_str() {
-                        "set" => {
-                            let span = self.current_span();
-                            let value = self.expect_integer()?;
-                            if value == 0 {
-                                bail_parse_at!(
-                                    span,
-                                    "set=0 is reserved for compiler-allocated storage; \
-                                     #[uniform(...)] must use set=1 or higher"
-                                );
-                            }
-                            set = value;
-                        }
-                        "binding" => {
-                            binding = Some(self.expect_integer()?);
-                        }
-                        _ => {
-                            bail_parse_at!(self.current_span(), "Unknown uniform parameter: {}", param_name)
-                        }
-                    }
-
-                    // Check for comma or end
-                    if self.check(&Token::Comma) {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-
-                self.expect(Token::RightParen)?;
-                self.expect(Token::RightBracket)?;
-
-                let binding =
-                    binding.ok_or_else(|| err_parse!("uniform attribute requires 'binding' parameter"))?;
-
-                Ok(Attribute::Uniform { set, binding })
-            }
-            "texture" | "sampler" => {
-                // `#[texture(set=M, binding=N)]` / `#[sampler(set=M, binding=N)]`.
-                // Same shape as `uniform`: default set 1, binding required.
-                let is_texture = attr_name == "texture";
-                self.expect(Token::LeftParen)?;
-
-                let mut set: u32 = 1;
-                let mut binding: Option<u32> = None;
-
-                loop {
-                    let param_name = self.expect_identifier()?;
-                    self.expect(Token::Assign)?;
-                    match param_name.as_str() {
-                        "set" => set = self.expect_integer()?,
-                        "binding" => binding = Some(self.expect_integer()?),
-                        _ => bail_parse_at!(
-                            self.current_span(),
-                            "Unknown {} parameter: {}",
-                            attr_name,
-                            param_name
-                        ),
-                    }
-                    if self.check(&Token::Comma) {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-
-                self.expect(Token::RightParen)?;
-                self.expect(Token::RightBracket)?;
-
-                let binding = binding
-                    .ok_or_else(|| err_parse!("{} attribute requires 'binding' parameter", attr_name))?;
-
-                if is_texture {
-                    Ok(Attribute::Texture {
-                        set,
-                        binding,
-                        backing: None,
-                        resource: None,
-                    })
-                } else {
-                    Ok(Attribute::Sampler { set, binding })
-                }
-            }
-            "storage_image" => {
-                // `#[storage_image(set=M, binding=N, format=FMT, access=ACC)]`.
-                // `format` is required (no sensible default — different
-                // shaders need different pixel formats). `access`
-                // defaults to `write_only`, the only mode every WebGPU
-                // adapter supports without a feature gate. `set`
-                // defaults to 1 to match texture/sampler convention.
-                use crate::interface::StorageAccess;
-                use crate::pipeline_descriptor::{StorageImageFormat, StorageTextureSize};
-                self.expect(Token::LeftParen)?;
-
-                let mut set: u32 = 1;
-                let mut binding: Option<u32> = None;
-                let mut format: Option<StorageImageFormat> = None;
-                let mut access: StorageAccess = StorageAccess::WriteOnly;
-                let mut size: StorageTextureSize = StorageTextureSize::default();
-
-                loop {
-                    let param_name = self.expect_identifier()?;
-                    self.expect(Token::Assign)?;
-                    match param_name.as_str() {
-                        "set" => set = self.expect_integer()?,
-                        "binding" => binding = Some(self.expect_integer()?),
-                        "format" => {
-                            let fmt_name = self.expect_identifier()?;
-                            format = Some(match fmt_name.as_str() {
-                                "rgba8unorm" => StorageImageFormat::Rgba8Unorm,
-                                "rgba16float" => StorageImageFormat::Rgba16Float,
-                                "rgba32float" => StorageImageFormat::Rgba32Float,
-                                "r32float" => StorageImageFormat::R32Float,
-                                other => bail_parse_at!(
-                                    self.current_span(),
-                                    "Unknown storage_image format: '{}'. Supported: rgba8unorm, rgba16float, rgba32float, r32float",
-                                    other
-                                ),
-                            });
-                        }
-                        "access" => {
-                            let acc_name = self.expect_identifier()?;
-                            access = match acc_name.as_str() {
-                                "read" | "read_only" => StorageAccess::ReadOnly,
-                                "write" | "write_only" => StorageAccess::WriteOnly,
-                                "readwrite" | "read_write" => StorageAccess::ReadWrite,
-                                other => bail_parse_at!(
-                                    self.current_span(),
-                                    "Unknown storage_image access mode: '{}'. Supported: read, write, readwrite",
-                                    other
-                                ),
-                            };
-                        }
-                        "size" => {
-                            size = self.parse_storage_texture_size()?;
-                        }
-                        _ => bail_parse_at!(
-                            self.current_span(),
-                            "Unknown storage_image parameter: {}",
-                            param_name
-                        ),
-                    }
-                    if self.check(&Token::Comma) {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-
-                self.expect(Token::RightParen)?;
-                self.expect(Token::RightBracket)?;
-
-                let binding = binding
-                    .ok_or_else(|| err_parse!("storage_image attribute requires 'binding' parameter"))?;
-                let format = format
-                    .ok_or_else(|| err_parse!("storage_image attribute requires 'format' parameter"))?;
-
-                Ok(Attribute::StorageImage {
-                    set,
-                    binding,
-                    format,
-                    access,
-                    size,
-                    resource: None,
-                })
-            }
-            "view" => {
-                // `#[view(resource_name, usage)]` — references a top-level
-                // `resource`. The resolution pass rewrites this into the
-                // concrete `StorageImage` / `Texture` binding attribute.
-                use crate::interface::ResourceUsage;
-                self.expect(Token::LeftParen)?;
-                let resource = self.expect_identifier()?;
-                self.expect(Token::Comma)?;
-                let usage_name = self.expect_identifier()?;
-                let usage = match usage_name.as_str() {
-                    "storage_write" => ResourceUsage::StorageWrite,
-                    "storage_read" => ResourceUsage::StorageRead,
-                    "sampled" => ResourceUsage::Sampled,
-                    other => bail_parse_at!(
-                        self.current_span(),
-                        "Unknown view usage: '{}'. Supported: storage_write, storage_read, sampled",
-                        other
-                    ),
-                };
-                // Optional temporal selector: `#[view(r, sampled, previous)]`.
-                let mut previous = false;
-                if self.check(&Token::Comma) {
-                    self.advance();
-                    let sel = self.expect_identifier()?;
-                    if sel != "previous" {
-                        bail_parse_at!(
-                            self.current_span(),
-                            "Unknown view selector: '{}'. Supported: previous",
-                            sel
-                        );
-                    }
-                    previous = true;
-                }
-                self.expect(Token::RightParen)?;
-                self.expect(Token::RightBracket)?;
-                Ok(Attribute::View(ViewAttribute {
-                    resource,
-                    usage,
-                    previous,
-                }))
-            }
-            "builtin" => {
-                self.expect(Token::LeftParen)?;
-                let builtin_name = self.expect_identifier()?;
-                self.expect(Token::RightParen)?;
-                self.expect(Token::RightBracket)?;
-
-                let builtin = match builtin_name.as_str() {
-                    // Vertex shader builtins
-                    "position" => spirv::BuiltIn::Position,
-                    "vertex_index" => spirv::BuiltIn::VertexIndex,
-                    "instance_index" => spirv::BuiltIn::InstanceIndex,
-                    // Fragment shader builtins
-                    "front_facing" => spirv::BuiltIn::FrontFacing,
-                    "frag_coord" => spirv::BuiltIn::FragCoord,
-                    "frag_depth" => spirv::BuiltIn::FragDepth,
-                    // Compute shader builtins
-                    "global_invocation_id" => spirv::BuiltIn::GlobalInvocationId,
-                    "local_invocation_id" => spirv::BuiltIn::LocalInvocationId,
-                    "workgroup_id" => spirv::BuiltIn::WorkgroupId,
-                    "num_workgroups" => spirv::BuiltIn::NumWorkgroups,
-                    _ => {
-                        bail_parse_at!(self.current_span(), "Unknown builtin: {}", builtin_name);
-                    }
-                };
-                Ok(Attribute::BuiltIn(builtin))
-            }
-            "target" => {
-                self.expect(Token::LeftParen)?;
-                let name = self.expect_identifier()?;
-                self.expect(Token::RightParen)?;
-                self.expect(Token::RightBracket)?;
-                Ok(Attribute::Target(name))
-            }
-            "vertex_slot" => {
-                self.expect(Token::LeftParen)?;
-                let slot = if let Some(Token::IntLiteral(slot)) = self.advance() {
-                    u32::try_from(slot).map_err(|_| err_parse!("Invalid vertex_slot number"))?
-                } else {
-                    bail_parse_at!(self.current_span(), "Expected vertex_slot number");
-                };
-                self.expect(Token::RightParen)?;
-                self.expect(Token::RightBracket)?;
-                Ok(Attribute::VertexSlot(slot))
-            }
-            "varying" => {
-                self.expect(Token::LeftParen)?;
-                let channel = if let Some(Token::IntLiteral(channel)) = self.advance() {
-                    u32::try_from(channel).map_err(|_| err_parse!("Invalid varying number"))?
-                } else {
-                    bail_parse_at!(self.current_span(), "Expected varying number");
-                };
-                self.expect(Token::RightParen)?;
-                self.expect(Token::RightBracket)?;
-                Ok(Attribute::Varying(channel))
-            }
-            "storage" => {
-                // Parse storage attribute: #[storage(binding=N)] or #[storage(set=M, binding=N)].
-                // Optional: layout=std430|std140, access=read|write|readwrite.
-                // Default `set` is 1 — set 0 is reserved for compiler-allocated storage
-                // (see SPECIFICATION.md "Descriptor Set Layout"). Explicit `set=0` errors at decl construction.
-                self.expect(Token::LeftParen)?;
-
-                let mut set: u32 = 1;
-                let mut binding: Option<u32> = None;
-                let mut layout = StorageLayout::default();
-                let mut access = StorageAccess::default();
-
-                loop {
-                    let param_name = self.expect_identifier()?;
-                    self.expect(Token::Assign)?;
-
-                    match param_name.as_str() {
-                        "set" => {
-                            let span = self.current_span();
-                            let value = self.expect_integer()?;
-                            if value == 0 {
-                                bail_parse_at!(
-                                    span,
-                                    "set=0 is reserved for compiler-allocated storage; \
-                                     #[storage(...)] must use set=1 or higher"
-                                );
-                            }
-                            set = value;
-                        }
-                        "binding" => {
-                            binding = Some(self.expect_integer()?);
-                        }
-                        "layout" => {
-                            let layout_name = self.expect_identifier()?;
-                            layout = match layout_name.as_str() {
-                                "std430" => StorageLayout::Std430,
-                                "std140" => StorageLayout::Std140,
-                                _ => bail_parse_at!(
-                                    self.current_span(),
-                                    "Unknown storage layout: {}",
-                                    layout_name
-                                ),
-                            };
-                        }
-                        "access" => {
-                            let access_name = self.expect_identifier()?;
-                            access = match access_name.as_str() {
-                                "read" => StorageAccess::ReadOnly,
-                                "write" => StorageAccess::WriteOnly,
-                                "readwrite" => StorageAccess::ReadWrite,
-                                _ => bail_parse_at!(
-                                    self.current_span(),
-                                    "Unknown storage access: {}",
-                                    access_name
-                                ),
-                            };
-                        }
-                        _ => {
-                            bail_parse_at!(self.current_span(), "Unknown storage parameter: {}", param_name)
-                        }
-                    }
-
-                    // Check for comma or end
-                    if self.check(&Token::Comma) {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-
-                self.expect(Token::RightParen)?;
-                self.expect(Token::RightBracket)?;
-
-                let binding =
-                    binding.ok_or_else(|| err_parse!("storage attribute requires 'binding' parameter"))?;
-
-                Ok(Attribute::Storage {
-                    set,
-                    binding,
-                    layout,
-                    access,
-                })
-            }
+            "builtin" | "target" | "vertex_slot" | "varying" => bail_parse_at!(
+                self.current_span(),
+                "#[{}(...)] is not part of the language; invocation arguments, payloads, and render targets are expressed by typed values",
+                attr_name
+            ),
             "size_hint" => {
                 // Parse size hint for dynamic arrays: #[size_hint(N)]
                 self.expect(Token::LeftParen)?;
@@ -1470,6 +837,10 @@ impl<'a> Parser<'a> {
             match &mut base {
                 Type::Constructed(TypeName::Named(_), base_args)
                 | Type::Constructed(TypeName::Raster, base_args)
+                | Type::Constructed(TypeName::Vertex, base_args)
+                | Type::Constructed(TypeName::FragmentInvocation, base_args)
+                | Type::Constructed(TypeName::FragmentOutput, base_args)
+                | Type::Constructed(TypeName::RenderTarget, base_args)
                     if base_args.is_empty() =>
                 {
                     *base_args = args;
@@ -1824,6 +1195,12 @@ impl<'a> Parser<'a> {
                     "texture2d" => TypeName::Texture2D,
                     "sampler" => TypeName::Sampler,
                     "raster" => TypeName::Raster,
+                    "vertex_invocation" => TypeName::VertexInvocation,
+                    "vertex" => TypeName::Vertex,
+                    "fragment_invocation" => TypeName::FragmentInvocation,
+                    "fragment_output" => TypeName::FragmentOutput,
+                    "draw" => TypeName::Draw,
+                    "render_target" => TypeName::RenderTarget,
                     "storage_image" => {
                         return Ok((
                             Type::Constructed(
@@ -3216,15 +2593,6 @@ impl<'a> Parser<'a> {
             }
             _ => Err(err_parse_at!(span, "Expected integer")),
         }
-    }
-
-    fn expect_nonzero_dispatch_dim(&mut self, axis: &str) -> Result<u32> {
-        let span = self.current_span();
-        let value = self.expect_integer()?;
-        if value == 0 {
-            bail_parse_at!(span, "dispatch {} dimension must be greater than zero", axis);
-        }
-        Ok(value)
     }
 
     fn is_at_end(&self) -> bool {

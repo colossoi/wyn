@@ -83,80 +83,53 @@ def scene_hit(rd: vec3f32) (f32, vec3f32, vec3f32) =
   (t, n, alb)
 
 ------------------------------------------------------------
--- Resources: one full-res viewspace-depth texture and the AO working
--- textures (.x = visibility term, .y = packed edges).
+-- Unified entry
+--
+-- The depth texture is an external value. AO reconstruction and scene
+-- shading happen in the fragment callback, so no source-visible images,
+-- passes, bindings, or dispatch geometry are needed.
 ------------------------------------------------------------
 
-resource depth: image2d { format = r32float  size = 1920x1080  usages = [storage_write, sampled] }
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  let vid = vertex.vertex_index in
+  let position =
+    if vid == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+    else if vid == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    else @[-1.0, 3.0, 0.0, 1.0] in
+  vertex_output(position,
+                @[position.x * 0.5 + 0.5, position.y * 0.5 + 0.5])
 
-resource ao_work:  image2d { format = rgba16float  size = 1920x1080  usages = [storage_write, sampled] }
-resource ao_ping:  image2d { format = rgba16float  size = 1920x1080  usages = [storage_write, sampled] }
-resource ao_final: image2d { format = rgba16float  size = 1920x1080  usages = [storage_write, sampled] }
-
--- Pass 1: raycast the scene, store viewspace depth. A real renderer
--- would instead linearize its depth buffer here with
--- gtao.screen_to_viewspace_depth.
-#[compute]
-entry derive_depth(#[view(depth, storage_write)] out0: *storage_image,
-                   #[builtin(global_invocation_id)] gid: vec3u32) () =
-  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  let sp = @[(f32.u32(gid.x) + 0.5f32) / W, (f32.u32(gid.y) + 0.5f32) / H] in
-  let (t, _, _) = scene_hit(ray_dir(sp)) in
-  out0 with [xy] = @[gtao.clamp_depth(t), 0.0f32, 0.0f32, 1.0f32]
-
--- Pass 2: the GTAO main pass (High preset), normals from depth.
-#[compute]
-entry gtao_main(#[view(ao_work, storage_write)] outw: *storage_image,
-                #[view(depth, sampled)] d: texture2d,
-                #[builtin(global_invocation_id)] gid: vec3u32,
-                #[uniform(set=1, binding=3)] iFrame: u32) () =
-  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  let normal = gtao.compute_viewspace_normal(xy, d, C) in
-  let noise = gtao.spatiotemporal_noise(@[gid.x, gid.y], iFrame % 64u32) in
-  let (slices, steps) = gtao.preset_high in
-  let (vis, edges) = gtao.main_pass_single(xy, slices, steps, noise, normal, C, d) in
-  outw with [xy] = @[vis, edges, 0.0f32, 1.0f32]
-
--- Passes 3-4: two denoise passes; the second saturates the final term.
-#[compute]
-entry denoise_a(#[view(ao_ping, storage_write)] outp: *storage_image,
-                #[view(ao_work, sampled)] work: texture2d,
-                #[builtin(global_invocation_id)] gid: vec3u32) () =
-  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  let (ao, edges) = gtao.denoise(xy, work, C, false) in
-  outp with [xy] = @[ao, edges, 0.0f32, 1.0f32]
-
-#[compute]
-entry denoise_b(#[view(ao_final, storage_write)] outf: *storage_image,
-                #[view(ao_ping, sampled)] ping: texture2d,
-                #[builtin(global_invocation_id)] gid: vec3u32) () =
-  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  let (ao, edges) = gtao.denoise(xy, ping, C, true) in
-  outf with [xy] = @[ao, edges, 0.0f32, 1.0f32]
-
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
-  let verts = [@[-1.0, -1.0, 0.0, 1.0],
-               @[3.0, -1.0, 0.0, 1.0],
-               @[-1.0, 3.0, 0.0, 1.0]] in
-  verts[vid]
-
--- Shade: raycast the same scene for albedo/normal, simple two-term
--- lighting with AO attenuating the ambient. Mouse-swept split: left of
--- the cursor ignores AO, right applies it.
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32,
-                    #[sampler(set=0, binding=3)] samp: sampler,
-                    #[view(ao_final, sampled)] ao_tex: texture2d,
-                    #[uniform(set=1, binding=0)] iResolution: vec3f32,
-                    #[uniform(set=1, binding=2)] iMouse: vec4f32)
-  #[target(screen)] vec4f32 =
+def fragment_main(fragment: fragment_invocation<vec2f32>,
+                  depth: texture2d,
+                  iResolution: vec3f32,
+                  iMouse: vec4f32,
+                  iFrame: u32) vec4f32 =
+  let pos = fragment.position in
+  let xy = @[i32(pos.x), i32(pos.y)] in
   let uv = @[pos.x / iResolution.x, pos.y / iResolution.y] in
-  let (_, n, alb) = scene_hit(ray_dir(uv)) in
-  let ao = texture_sample(ao_tex, samp, uv, 0.0f32).x in
+  let normal = gtao.compute_viewspace_normal(xy, depth, C) in
+  let noise = gtao.spatiotemporal_noise(
+    @[u32.i32(xy.x), u32.i32(xy.y)], iFrame % 64u32) in
+  let (slices, steps) = gtao.preset_high in
+  let (visibility, _) =
+    gtao.main_pass_single(xy, slices, steps, noise, normal, C, depth) in
+  let ao = gtao.saturate(visibility) in
+  let (_, n, albedo) = scene_hit(ray_dir(uv)) in
   let split = iMouse.x / iResolution.x in
   let ao = if uv.x < split then 1.0f32 else ao in
-  let l = normalize(@[0.0f32 - 0.3f32, 0.8f32, 0.0f32 - 0.5f32]) in
-  let ndl = f32.max(0.0f32, dot(n, l)) in
-  let lit = 0.55f32 * ao + 0.5f32 * ndl * ao in
-  @[alb.x * lit, alb.y * lit, alb.z * lit, 1.0]
+  let light = normalize(@[0.0f32 - 0.3f32, 0.8f32, 0.0f32 - 0.5f32]) in
+  let diffuse = f32.max(0.0f32, dot(n, light)) in
+  let lit = 0.55f32 * ao + 0.5f32 * diffuse * ao in
+  @[albedo.x * lit, albedo.y * lit, albedo.z * lit, 1.0f32]
+
+entry gtao_demo(depth: texture2d,
+                iResolution: vec3f32,
+                iMouse: vec4f32,
+                iFrame: u32,
+                screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main) in
+  shade(screen, covered,
+    |fragment| fragment_main(
+      fragment, depth, iResolution, iMouse, iFrame))

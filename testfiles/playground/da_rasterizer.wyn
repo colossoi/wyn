@@ -184,8 +184,8 @@ def verts: [3]vec4f32 =
    @[3.0, -1.0, 0.0, 1.0],
    @[-1.0, 3.0, 0.0, 1.0]]
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vertex_id:i32) #[builtin(position)] vec4f32 = verts[vertex_id]
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 -- Constants (using vector literals)
 def red: vec3f32 = @[1.0, 0.0, 0.0]
@@ -377,10 +377,17 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
 
   @[c_final.x, c_final.y, c_final.z, 1.0]
 
--- Fragment shader entry point
-#[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(frag_coord)] pos:vec4f32) #[target(screen)] vec4f32 =
+def fragment_main(iResolution: vec3f32, iTime: f32, pos: vec4f32) vec4f32 =
   let width = iResolution.x in
   let height = iResolution.y in
   let time = iTime in
   main_image(@[width, height], time, pos.xy)
+
+entry da_rasterizer(
+    iResolution: vec3f32, iTime: f32,
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main) in
+  shade(screen, covered,
+    |fragment| fragment_main(iResolution, iTime, fragment.position))

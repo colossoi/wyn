@@ -1,0 +1,18 @@
+-- A complete graphics operation expressed as one source entry.
+
+def triangle_position(vertex_index: u32) vec4f32 =
+  if vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+  else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+  else @[0.0, 0.5, 0.0, 1.0]
+
+entry triangle(screen: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      triangle_position(vertex.vertex_index),
+      @[1.0, 0.0, 0.0])) in
+  shade(screen, covered,
+    |fragment| @[fragment.value.x,
+                  fragment.value.y,
+                  fragment.value.z,
+                  1.0])

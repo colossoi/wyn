@@ -1,4 +1,4 @@
-//! Compute-entry auto-storage binding allocation. Walks an entry's
+//! Root-entry storage binding allocation. Walks an entry's
 //! params and decides which storage buffer each view-typed param
 //! occupies — bindings 0..N in declaration order, one per view-array
 //! param, N per tuple-of-views param (one per field).

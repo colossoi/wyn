@@ -159,9 +159,8 @@ fn let_bound_producer_then_named_consumer_is_anf() {
 /// Sanity that `check` passes on ordinary pipeline output.
 #[test]
 fn real_program_single_map_is_anf() {
-    let reachable =
-        crate::compile_thru_tlc("#[compute]\nentry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)\n")
-            .expect("compile_thru_tlc");
+    let reachable = crate::compile_thru_tlc("\nentry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)\n")
+        .expect("compile_thru_tlc");
     assert!(check(&reachable).is_ok(), "{}", check(&reachable).unwrap_err());
 }
 
@@ -171,7 +170,7 @@ fn real_program_single_map_is_anf() {
 #[test]
 fn real_program_inline_filter_over_map_is_anf() {
     let reachable = crate::compile_thru_tlc(
-        "open f32\n#[compute]\nentry e(xs: []u32) ?k. [k]u32 =\n  filter(|y: u32| y < 100u32, map(|x: u32| x + 1u32, xs))\n",
+        "open f32\n\nentry e(xs: []u32) ?k. [k]u32 =\n  filter(|y: u32| y < 100u32, map(|x: u32| x + 1u32, xs))\n",
     )
     .expect("compile_thru_tlc");
     assert!(check(&reachable).is_ok(), "{}", check(&reachable).unwrap_err());

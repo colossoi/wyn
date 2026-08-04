@@ -375,8 +375,8 @@ fn test_full_pipeline_simple() {
         r#"
 def add(a: i32, b: i32) i32 = a + b
 
-#[vertex]
-entry main() #[builtin(position)] vec4f32 =
+
+entry main() vec4f32 =
     let x = add(1, 2) in
     @[f32.i32(x), 0.0, 0.0, 1.0]
 "#,
@@ -391,8 +391,8 @@ fn test_full_pipeline_if_else() {
         r#"
 def pick(c: bool, a: i32, b: i32) i32 = if c then a else b
 
-#[vertex]
-entry main() #[builtin(position)] vec4f32 =
+
+entry main() vec4f32 =
     let x = pick(true, 1, 2) in
     @[f32.i32(x), 0.0, 0.0, 1.0]
 "#,
@@ -408,8 +408,8 @@ fn test_full_pipeline_loop() {
 def sum_to(n: i32) i32 =
     loop acc = 0 for i < n do acc + i
 
-#[vertex]
-entry main() #[builtin(position)] vec4f32 =
+
+entry main() vec4f32 =
     let x = sum_to(10) in
     @[f32.i32(x), 0.0, 0.0, 1.0]
 "#,
@@ -436,8 +436,8 @@ def is_even(x: i32) bool = x % 2 == 0
 def evens(arr: [4]i32) ?k. [k]i32 =
     filter(is_even, arr)
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let e = evens([1, 2, 3, 4]) in
     @[f32.i32(length(e)), 0.0, 0.0, 1.0]
 "#,
@@ -445,165 +445,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
     assert!(!program.entry_points.is_empty(), "Should have entry points");
 }
 
-// --- vertex_inputs population from #[vertex_slot(n)] params ------------
-
-#[test]
-fn vertex_inputs_populated_from_vertex_slot_params() {
-    use crate::pipeline_descriptor::{Pipeline, VertexFormat};
-
-    let src = "#[vertex]\n\
-               entry vs(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: vec3f32)\n\
-                 (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) =\n\
-                 (@[position.x, position.y, position.z, 1.0], color)\n\
-               #[fragment]\n\
-               entry fs(#[varying(0)] color: vec3f32) #[target(screen)] vec4f32 =\n\
-                 @[color.x, color.y, color.z, 1.0]";
-    let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
-
-    let find = |name: &str| {
-        converted.global_context.pipeline.pipelines.iter().find_map(|p| match p {
-            Pipeline::Graphics(gp) if gp.stages.iter().any(|s| s.entry_point == name) => Some(gp),
-            _ => None,
-        })
-    };
-
-    // Vertex stage: both #[vertex_slot] params surface as vertex_inputs.
-    let vs = find("vs").expect("vertex graphics pipeline");
-    assert_eq!(vs.vertex_inputs.len(), 2);
-    assert_eq!(vs.vertex_inputs[0].slot, 0);
-    assert_eq!(vs.vertex_inputs[0].name, "position");
-    assert_eq!(vs.vertex_inputs[0].format, VertexFormat::Float32x3);
-    assert_eq!(vs.vertex_inputs[1].slot, 1);
-    assert_eq!(vs.vertex_inputs[1].name, "color");
-    assert_eq!(vs.vertex_inputs[1].format, VertexFormat::Float32x3);
-
-    // Fragment stage: #[varying] params there are interpolants, not vertex
-    // buffers — vertex_inputs stays empty.
-    let fs = find("fs").expect("fragment graphics pipeline");
-    assert!(fs.vertex_inputs.is_empty());
-}
-
-// --- fragment_outputs population from #[target(name)] returns ----------
-
-#[test]
-fn fragment_outputs_populated_from_target_returns() {
-    use crate::pipeline_descriptor::Pipeline;
-
-    let src = "#[vertex]\n\
-               entry vs(#[vertex_slot(0)] position: vec3f32)\n\
-                 #[builtin(position)] vec4f32 =\n\
-                 @[position.x, position.y, position.z, 1.0]\n\
-               #[fragment]\n\
-               entry fs() #[target(screen)] vec4f32 =\n\
-                 @[1.0, 0.0, 0.0, 1.0]";
-    let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
-
-    let fs = converted
-        .global_context
-        .pipeline
-        .pipelines
-        .iter()
-        .find_map(|p| match p {
-            Pipeline::Graphics(gp) if gp.stages.iter().any(|s| s.entry_point == "fs") => Some(gp),
-            _ => None,
-        })
-        .expect("fragment graphics pipeline");
-
-    // The single #[target(screen)] return surfaces as one fragment output
-    // named for its resource, at position-derived slot 0.
-    assert_eq!(fs.fragment_outputs.len(), 1);
-    assert_eq!(fs.fragment_outputs[0].location, 0);
-    assert_eq!(fs.fragment_outputs[0].name, "screen");
-}
-
-// --- vertex shaders may read #[uniform] params -------------------------
-
-#[test]
-fn vertex_uniform_param_compiles_and_surfaces_binding() {
-    use crate::pipeline_descriptor::{Binding, Pipeline};
-
-    // A vertex shader reading a uniform is standard; the type checker
-    // must not reject the `#[uniform]` param as a missing vertex
-    // attribute, and the binding must surface in the descriptor.
-    let src = "#[vertex]\n\
-               entry vs(#[vertex_slot(0)] position: vec3f32,\n\
-                        #[uniform(set=1, binding=0)] scale: f32)\n\
-                 #[builtin(position)] vec4f32 =\n\
-                 @[position.x * scale, position.y * scale, position.z * scale, 1.0]\n\
-               #[fragment]\n\
-               entry fs() #[target(screen)] vec4f32 = @[1.0, 0.0, 0.0, 1.0]";
-    let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
-
-    let vs = converted
-        .global_context
-        .pipeline
-        .pipelines
-        .iter()
-        .find_map(|p| match p {
-            Pipeline::Graphics(gp) if gp.stages.iter().any(|s| s.entry_point == "vs") => Some(gp),
-            _ => None,
-        })
-        .expect("vertex graphics pipeline");
-
-    // `position` surfaces as a vertex input; `scale` as a uniform binding.
-    assert_eq!(vs.vertex_inputs.len(), 1);
-    assert_eq!(vs.vertex_inputs[0].name, "position");
-    assert!(
-        vs.bindings.iter().any(|b| matches!(
-            b,
-            Binding::Uniform { set: 1, binding: 0, name, .. } if name == "scale"
-        )),
-        "vertex uniform `scale` should surface as a binding, got {:?}",
-        vs.bindings
-    );
-}
-
-// --- texture + sampler bindings surface in the descriptor --------------
-
-#[test]
-fn texture_and_sampler_params_surface_bindings() {
-    use crate::pipeline_descriptor::{Binding, Pipeline};
-
-    let src = "#[vertex]\n\
-               entry vs(#[vertex_slot(0)] pos: vec2f32)\n\
-                 (#[builtin(position)] vec4f32, #[varying(0)] vec2f32) =\n\
-                 (@[pos.x, pos.y, 0.0, 1.0], pos)\n\
-               #[fragment]\n\
-               entry fs( #[varying(0)] uv: vec2f32\n\
-                       , #[texture(set=0, binding=0)] tex: texture2d\n\
-                       , #[sampler(set=0, binding=1)] samp: sampler\n\
-                       ) #[target(screen)] vec4f32 =\n\
-                 texture_sample(tex, samp, uv, 0.0) + texture_load(tex, @[0, 0], 0)";
-    let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
-
-    let fs = converted
-        .global_context
-        .pipeline
-        .pipelines
-        .iter()
-        .find_map(|p| match p {
-            Pipeline::Graphics(gp) if gp.stages.iter().any(|s| s.entry_point == "fs") => Some(gp),
-            _ => None,
-        })
-        .expect("fragment graphics pipeline");
-
-    assert!(
-        fs.bindings.iter().any(|b| matches!(
-            b,
-            Binding::Texture { set: 0, binding: 0, name, .. } if name == "tex"
-        )),
-        "texture `tex` should surface as a Texture binding, got {:?}",
-        fs.bindings
-    );
-    assert!(
-        fs.bindings.iter().any(|b| matches!(
-            b,
-            Binding::Sampler { set: 0, binding: 1, name, .. } if name == "samp"
-        )),
-        "sampler `samp` should surface as a Sampler binding, got {:?}",
-        fs.bindings
-    );
-}
+// --- vertex_inputs population from params ------------
 
 #[test]
 fn pure_user_calls_enter_egir_as_pure_nodes_during_construction() {
@@ -616,7 +458,6 @@ def choose(x: i32) i32 =
 def wrapper(x: i32) i32 =
   if x > 0 then choose(x) else choose(0 - x)
 
-#[compute]
 entry e(xs: []i32) []i32 = map(wrapper, xs)
 "#;
     let tlc = crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(source));
@@ -749,9 +590,9 @@ fn graphics_entry_ret_type_comes_from_inner_body_not_def_ty() {
     use crate::tlc::DefMeta;
 
     let src = r#"
-#[vertex]
-entry vertex_main(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: vec3f32)
-  (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) =
+
+entry vertex_main(position: vec3f32, color: vec3f32)
+  (vec4f32, vec3f32) =
   (@[position.x, position.y, position.z, 1.0], color)
 "#;
     let mut tlc_program =
@@ -817,7 +658,7 @@ fn wrap_arrow_return_in_marker(mut ty: &mut Type<TypeName>) {
 /// that path end to end.
 #[test]
 fn parallel_scan_synthesized_swap_region_is_name_recoverable() {
-    let src = "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)";
+    let src = " entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)";
     crate::compile_thru_ssa(src)
         .expect("parallel scan lowers, recovering its synthesized swap-wrapper region");
 }

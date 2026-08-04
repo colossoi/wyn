@@ -28,8 +28,8 @@ fn test_simple_slice() {
 def slice_array(arr: [10]i32) [5]i32 =
     arr[0..5]
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] in
     let sliced = slice_array(arr) in
     @[f32.i32(sliced[0]), f32.i32(sliced[1]), 0.0f32, 1.0f32]
@@ -44,8 +44,8 @@ fn test_slice_with_computed_indices() {
 def slice_computed(arr: [10]i32) [3]i32 =
     arr[1+1..2+3]
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] in
     let sliced = slice_computed(arr) in
     @[f32.i32(sliced[0]), 0.0f32, 0.0f32, 1.0f32]
@@ -63,8 +63,8 @@ fn test_slice_open_ended() {
 def slice_tail(arr: [10]i32) [7]i32 =
     arr[3..]
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] in
     let sliced = slice_tail(arr) in
     @[f32.i32(sliced[0]), f32.i32(sliced[1]), 0.0f32, 1.0f32]
@@ -82,8 +82,8 @@ fn test_slice_from_start() {
 def slice_head(arr: [10]i32) [4]i32 =
     arr[..4]
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] in
     let sliced = slice_head(arr) in
     @[f32.i32(sliced[0]), f32.i32(sliced[3]), 0.0f32, 1.0f32]
@@ -101,8 +101,8 @@ fn test_slice_full_array_syntax() {
 def slice_all(arr: [10]i32) [10]i32 =
     arr[..]
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] in
     let sliced = slice_all(arr) in
     @[f32.i32(sliced[0]), f32.i32(sliced[9]), 0.0f32, 1.0f32]
@@ -122,8 +122,8 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 #[test]
 fn test_simple_range() {
     let source = r#"
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let range = 0..<4 in
     @[f32.i32(range[0]), f32.i32(range[1]), f32.i32(range[2]), 1.0f32]
 "#;
@@ -136,8 +136,8 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 #[test]
 fn test_range_with_start() {
     let source = r#"
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let range = 1..<5 in
     @[f32.i32(range[0]), f32.i32(range[1]), f32.i32(range[2]), 1.0f32]
 "#;
@@ -150,8 +150,8 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 #[test]
 fn test_inclusive_range() {
     let source = r#"
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let range = 0...3 in
     @[f32.i32(range[0]), f32.i32(range[1]), f32.i32(range[2]), f32.i32(range[3])]
 "#;
@@ -178,8 +178,8 @@ def use_slice(arr: [10]i32) i32 =
     let _ = borrow(sliced) in
     arr[0]
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] in
     @[f32.i32(use_slice(arr)), 0.0f32, 0.0f32, 1.0f32]
 "#;
@@ -199,8 +199,8 @@ fn test_array_function_call() {
     let source = r#"
 def process(arr: [4]i32) [4]i32 = arr
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let h = process([1i32, 2i32, 3i32, 4i32]) in
     @[0.0f32, 0.0f32, 0.0f32, 1.0f32]
 "#;
@@ -223,8 +223,8 @@ def use_slices(arr: [10]i32) i32 =
     let _ = borrow(s1) in
     s2[0]
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] in
     @[f32.i32(use_slices(arr)), 0.0f32, 0.0f32, 1.0f32]
 "#;
@@ -247,8 +247,8 @@ def OFFSET: i32 = 2
 def slice_with_constants(arr: [10]i32) [5]i32 =
     arr[OFFSET..OFFSET+SIZE]
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] in
     let sliced = slice_with_constants(arr) in
     @[f32.i32(sliced[0]), 0.0f32, 0.0f32, 1.0f32]
@@ -262,8 +262,8 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 #[test]
 fn test_range_combined_with_map() {
     let source = r#"
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let doubled = map(|x| x * 2, 0..<4) in
     @[f32.i32(doubled[0]), f32.i32(doubled[1]), f32.i32(doubled[2]), 1.0f32]
 "#;
@@ -315,8 +315,8 @@ def test: [4]i32 = map(|x| x * 2, 0..<4)
 fn test_map_range_with_entry_point() {
     // Test map over range inside entry point
     let source = r#"
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let doubled = map(|x| x * 2, 0..<4) in
     @[1.0f32, 2.0f32, 3.0f32, 1.0f32]
 "#;
@@ -346,8 +346,8 @@ fn test_map_range_indirect_entry_point() {
     // TODO: Non-trivial constant expressions like `map(...)` require inlining at use sites
     // For now, test with map directly in the entry point
     let source = r#"
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let doubled = map(|x| x * 2, 0..<4) in
     @[f32.i32(doubled[0]), f32.i32(doubled[1]), f32.i32(doubled[2]), 1.0f32]
 "#;
@@ -362,8 +362,8 @@ fn test_map_with_named_function() {
     let source = r#"
 def double(x: i32) i32 = x * 2
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let doubled = map(double, 0..<4) in
     @[f32.i32(doubled[0]), f32.i32(doubled[1]), f32.i32(doubled[2]), 1.0f32]
 "#;
@@ -431,8 +431,8 @@ fn test_array_param_stack_overflow() {
         r#"
 def first(arr: [4]i32) i32 = arr[0]
 
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
+
+entry fragment_main(pos: vec4f32) vec4f32 =
     let x = first([1, 2, 3, 4]) in
     @[f32.i32(x), 0.0f32, 0.0f32, 1.0f32]
 "#,
@@ -449,7 +449,6 @@ fn test_view_array_param_stack_overflow() {
         r#"
 def first(arr: []i32) i32 = arr[0]
 
-#[compute]
 entry main(data: []i32) []i32 = [first(data)]
 "#,
     )

@@ -6,6 +6,5 @@
 -- an OpCompositeConstruct whose constituents don't match the struct
 -- (spirv-val rejects). See egir::parallelize::emit_chunk_arithmetic.
 
-#[compute]
 entry sum_doubled_iota(n: i32) f32 =
   reduce(|a: f32, b: f32| a + b, 0.0, map(|x: i32| f32.i32(x) * 2.0, 0..<n))

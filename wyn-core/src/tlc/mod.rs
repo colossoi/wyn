@@ -26,6 +26,7 @@ pub mod runtime_index_producers;
 pub mod soa;
 pub mod soac_anf;
 mod specialize;
+mod stage_extract;
 pub mod subst;
 #[cfg(test)]
 pub(crate) mod test_support;

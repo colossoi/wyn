@@ -14,7 +14,6 @@ fn filter_then_user_helper_static_capacity() {
     let src = r#"
 def sum<[n]>(arr: [n]i32) i32 = reduce(|a: i32, b: i32| a + b, 0, arr)
 def center(arr: []i32) i32 = sum(arr)
-#[compute]
 entry tick() i32 =
   let kept = filter(|x: i32| x > 0, [1, -2, 3, -4, 5]) in
   center(kept)
@@ -31,8 +30,7 @@ fn filter_then_user_helper_runtime_size() {
     let src = r#"
 def sum<[n]>(arr: [n]i32) i32 = reduce(|a: i32, b: i32| a + b, 0, arr)
 def center(arr: []i32) i32 = sum(arr)
-#[compute]
-entry tick(#[storage(set=2, binding=0, access=read)] xs: []i32) i32 =
+entry tick(xs: []i32) i32 =
   let kept = filter(|x: i32| x > 0, xs) in
   center(kept)
 "#;
@@ -50,7 +48,6 @@ def sum<[n]>(arr: [n]i32) i32 = reduce(|a: i32, b: i32| a + b, 0, arr)
 def center(arr: []i32) i32 =
   let s = sum(arr) in
   s + sum(arr)
-#[compute]
 entry tick() i32 =
   let kept = filter(|x: i32| x > 0, [1, -2, 3, -4, 5, -6]) in
   center(kept)
@@ -65,7 +62,6 @@ fn non_filter_let_binding_does_not_trigger_spec() {
     // verifier passes anyway because no Abstract surfaces.
     let src = r#"
 def double<[n]>(arr: [n]i32) i32 = reduce(|a: i32, b: i32| a + b, 0, arr)
-#[compute]
 entry tick() i32 =
   let xs = [1, 2, 3, 4] in
   double(xs)

@@ -58,6 +58,19 @@ def result: i32 = add3(_, 5, _)(1, 2)
 }
 
 #[test]
+fn all_placeholder_call_section_is_eta_equivalent_to_bare_function() {
+    typecheck_program(
+        r#"
+def add(a: i32, b: i32) i32 = a + b
+def apply_binary(f: i32 -> i32 -> i32) i32 = f(7, 5)
+def bare_result: i32 = apply_binary(add)
+def section_result: i32 = apply_binary(add(_, _))
+def results_agree: bool = bare_result == section_result
+"#,
+    );
+}
+
+#[test]
 fn pipe_can_apply_to_an_explicit_trailing_call_section() {
     typecheck_program(
         r#"
@@ -2014,7 +2027,7 @@ fn test_entry_output_with_qualified_alias() {
     // rand.state -> f32, so returning 1.0f32 should be valid
     typecheck_with_alias_fixture(
         r#"
-#[fragment]
+
 entry test(x: f32) rand.state =
     1.0f32
         "#,
@@ -2607,60 +2620,6 @@ fn builtin_step() {
     );
 }
 
-// --- Vertex-shader #[vertex_slot(n)] input attributes ------------------
-
-#[test]
-fn vertex_slot_inputs_typecheck() {
-    typecheck_program(
-        "#[vertex]\n\
-         entry vs(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: vec3f32)\n\
-           (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) =\n\
-           (@[position.x, position.y, position.z, 1.0], color)",
-    );
-}
-
-#[test]
-fn vertex_slot_duplicate_rejected() {
-    let result = try_typecheck_program(
-        "#[vertex]\n\
-         entry vs(#[vertex_slot(0)] a: vec3f32, #[vertex_slot(0)] b: vec3f32)\n\
-           #[builtin(position)] vec4f32 = @[a.x, a.y, a.z, 1.0]",
-    );
-    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
-}
-
-#[test]
-fn vertex_slot_non_format_type_rejected() {
-    // [4]f32 is not a valid vertex-buffer attribute format.
-    let result = try_typecheck_program(
-        "#[vertex]\n\
-         entry vs(#[vertex_slot(0)] a: [4]f32)\n\
-           #[builtin(position)] vec4f32 = @[a[0], a[1], a[2], 1.0]",
-    );
-    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
-}
-
-#[test]
-fn vertex_bare_param_rejected() {
-    // A vertex param with neither #[vertex_slot] nor #[builtin] is an error.
-    let result = try_typecheck_program(
-        "#[vertex]\n\
-         entry vs(a: vec3f32) #[builtin(position)] vec4f32 = @[a.x, a.y, a.z, 1.0]",
-    );
-    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
-}
-
-#[test]
-fn fragment_varying_still_typechecks() {
-    // A #[varying(n)] on a fragment param is an interpolated input, not a
-    // vertex attribute — the vertex-format restriction must not touch it.
-    typecheck_program(
-        "#[fragment]\n\
-         entry fs(#[varying(0)] color: vec3f32) #[target(screen)] vec4f32 =\n\
-           @[color.x, color.y, color.z, 1.0]",
-    );
-}
-
 // =============================================================================
 // Lifted-type restrictions (spec lines 458-465)
 // =============================================================================
@@ -2806,7 +2765,6 @@ fn aspiration_chained_multidim_slice() {
 fn storage_slice_with_literal_bounds_stays_view() {
     let checked = crate::compile_thru_frontend(
         r#"
-#[compute]
 entry e(data: []i32) i32 = length(data[0..4096])
 "#,
     )
@@ -3093,8 +3051,8 @@ fn filter_result_length_and_index_typecheck() {
     typecheck_program(
         r#"
 def is_even(x: i32) bool = x % 2 == 0
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry result() vec4f32 =
   let e = filter(is_even, [1, 2, 3, 4, 5, 6, 7, 8]) in
   @[f32.i32(length(e)), f32.i32(e[0]), 0.0, 1.0]
 "#,
@@ -3108,8 +3066,7 @@ fn filter_into_reduce_typechecks() {
     // representation selection chooses Bounded or View.
     typecheck_program(
         r#"
-#[compute]
-entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) f32 =
+entry tick(xs: []f32) f32 =
   let ys = filter(|x: f32| x > 0.0, xs) in
   reduce(|a: f32, b: f32| a + b, 0.0, ys)
 "#,
@@ -3128,7 +3085,6 @@ fn filter_array_and_its_length_from_one_entry() {
     typecheck_program(
         r#"
 open f32
-#[compute]
 entry both(xs: []u32) ?k. ([k]u32, [1]u32) =
   let v = filter(|x| x < 100u32, xs)
   let n = length(v) in
@@ -3146,7 +3102,6 @@ fn existential_entry_return_is_independent_of_variable_name() {
     typecheck_program(
         r#"
 open f32
-#[compute]
 entry f(xs: []u32) ?m. [m]u32 = filter(|x| x < 100u32, xs)
 "#,
     );
@@ -3313,82 +3268,95 @@ fn raster_requires_one_ordinary_type_argument() {
 }
 
 #[test]
-fn raster_cannot_cross_the_current_platform_entry_boundary() {
-    let error = try_typecheck_program(
-        r#"
-#[compute]
-entry bad(stream: raster<vec4f32>) () = ()
-"#,
-    )
-    .expect_err("raster entry parameter should be rejected");
+fn invocation_types_cannot_cross_a_root_entry_boundary() {
+    for ty in [
+        "raster<vec4f32>",
+        "vertex_invocation",
+        "vertex<vec4f32>",
+        "fragment_invocation<vec4f32>",
+        "fragment_output<vec4f32>",
+        "draw",
+    ] {
+        let source = format!("entry bad(value: (i32, {ty})) i32 = value.0");
+        let error = try_typecheck_program(&source)
+            .expect_err("an invocation type in an entry parameter should be rejected");
+        let message = format!("{:?}", error);
+        assert!(message.contains("invocation types are internal"), "got {message}");
+    }
+
+    let error = try_typecheck_program("entry bad() draw = direct_draw(3u32, 1u32)")
+        .expect_err("an invocation type in an entry result should be rejected");
     let message = format!("{:?}", error);
-    assert!(message.contains("internal stage token"), "got {message}");
+    assert!(message.contains("invocation types are internal"), "got {message}");
 }
 
-// ---- uniform block type gate ----------------------------------------------
-
-/// Uniform params must have a std140 block layout: 32-bit scalars,
-/// vec2/3/4 of them, or a flat record/tuple of those.
 #[test]
-fn uniform_block_accepts_flat_record_and_scalars() {
+fn vertex_payloads_reject_arrays_and_resources() {
+    for source in [
+        "def bad: vertex<[1]f32> = vertex_output(@[0.0, 0.0, 0.0, 1.0], [1.0])",
+        "def bad(tex: texture2d) vertex<texture2d> = vertex_output(@[0.0, 0.0, 0.0, 1.0], tex)",
+    ] {
+        let error =
+            try_typecheck_program(source).expect_err("an invalid vertex payload should be rejected");
+        let message = format!("{:?}", error);
+        assert!(message.contains("vertex-to-fragment payload"), "got {message}");
+    }
+}
+
+#[test]
+fn fragment_invocation_exposes_only_portable_fields() {
+    let error = try_typecheck_program("def bad(f: fragment_invocation<f32>) f32 = f.sample_position.x")
+        .expect_err("sample_position is not a portable fragment invocation field");
+    let message = format!("{:?}", error);
+    assert!(
+        message.contains("has no field 'sample_position'"),
+        "got {message}"
+    );
+}
+#[test]
+fn invocation_values_cannot_be_stored_in_arrays() {
+    let error = try_typecheck_program("def bad = [vertex_output(@[0.0, 0.0, 0.0, 1.0], 1.0)]")
+        .expect_err("an array of invocation values should be rejected");
+    let message = format!("{:?}", error);
+    assert!(message.contains("cannot be stored in arrays"), "got {message}");
+}
+#[test]
+fn structured_numeric_vertex_payload_is_valid() {
     typecheck_program(
         r#"
-type block = { radius: f32, tint: vec2f32, n: u32 }
-#[compute]
-entry e(xs: []u32,
-        #[uniform(set=1, binding=0)] c: block,
-        #[uniform(set=1, binding=1)] t: f32,
-        #[uniform(set=1, binding=2)] r: vec3f32) []u32 =
-  map(|x| x + u32(c.radius + t + r.x + c.tint.x) + c.n, xs)
+        type payload = { uv: vec2f32, material: u32, front: bool }
+        def good: vertex<payload> =
+          vertex_output(@[0.0, 0.0, 0.0, 1.0],
+                        { uv = @[0.0, 0.0], material = 1u32, front = true })
+        "#,
+    );
+}
+// Entry values have ordinary structural types; the language does not divide
+// parameters into source-level uniform and storage classes.
+#[test]
+fn entry_parameters_accept_structural_values_without_layout_attributes() {
+    typecheck_program(
+        r#"
+type block = { radius: f32, tint: vec2f32, nested: { enabled: bool } }
+entry e(xs: []u32, c: block, taps: [4]f32, transform: mat3f32) []u32 =
+  map(|x| if c.nested.enabled
+           then x + u32(c.radius + c.tint.x + taps[0])
+           else x,
+      xs)
 "#,
     );
 }
-
 #[test]
-fn uniform_block_rejects_unsupported_member_types() {
-    for (label, src) in [
-        (
-            "bool member",
-            r#"
-#[compute]
-entry e(xs: []u32, #[uniform(set=1, binding=0)] c: { flag: bool, x: f32 }) []u32 =
-  map(|v| if c.flag then v else u32(c.x), xs)
+fn unified_root_graphics_program_typechecks() {
+    typecheck_program(
+        r#"
+entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0],
+      @[1.0, 0.0, 0.0, 1.0])) in
+  shade(target, covered, |fragment| fragment.value)
 "#,
-        ),
-        (
-            "nested record",
-            r#"
-#[compute]
-entry e(xs: []u32, #[uniform(set=1, binding=0)] c: { inner: { x: f32 }, y: f32 }) []u32 =
-  map(|v| v + u32(c.inner.x + c.y), xs)
-"#,
-        ),
-        (
-            "fixed array member",
-            r#"
-#[compute]
-entry e(xs: []u32, #[uniform(set=1, binding=0)] c: { taps: [4]f32 }) []u32 =
-  map(|v| v + u32(c.taps[0]), xs)
-"#,
-        ),
-        (
-            "bare matrix",
-            r#"
-#[compute]
-entry e(xs: []u32, #[uniform(set=1, binding=0)] m: mat3f32) []u32 =
-  xs
-"#,
-        ),
-    ] {
-        let result = try_typecheck_program(src);
-        assert!(
-            matches!(result, Err(CompilerError::TypeError(_, _))),
-            "{label}: expected a uniform-block type error, got {result:?}"
-        );
-        let msg = format!("{:?}", result.unwrap_err());
-        assert!(
-            msg.contains("uniform block"),
-            "{label}: error should name the uniform-block rule, got {msg}"
-        );
-    }
+    );
 }

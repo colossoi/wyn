@@ -611,6 +611,25 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
             lowering: BuiltinLowering::ByBuiltinId,
         }],
     },
+    // ---- Unified pipeline invocation forms. These are type-checked as
+    // ordinary calls and consumed by stage extraction before backend lowering. ----
+    hof_intrinsic!("direct_draw", crate::builtins::scheme::direct_draw_scheme),
+    hof_intrinsic!(
+        "direct_draw_from",
+        crate::builtins::scheme::direct_draw_from_scheme
+    ),
+    hof_intrinsic!("vertex_output", crate::builtins::scheme::vertex_output_scheme),
+    hof_intrinsic!("rasterize_triangles", crate::builtins::scheme::rasterize_scheme),
+    hof_intrinsic!(
+        "rasterize_triangle_strip",
+        crate::builtins::scheme::rasterize_scheme
+    ),
+    hof_intrinsic!("rasterize_lines", crate::builtins::scheme::rasterize_scheme),
+    hof_intrinsic!("rasterize_line_strip", crate::builtins::scheme::rasterize_scheme),
+    hof_intrinsic!("rasterize_points", crate::builtins::scheme::rasterize_scheme),
+    hof_intrinsic!("shade", crate::builtins::scheme::shade_scheme),
+    hof_intrinsic!("target_load", crate::builtins::scheme::target_load_scheme),
+    hof_intrinsic!("target_sample", crate::builtins::scheme::target_sample_scheme),
     // ---- HOF / SOAC intrinsics: scheme only, lowered earlier in the pipeline ----
     hof_intrinsic!(
         "_w_intrinsic_replicate",

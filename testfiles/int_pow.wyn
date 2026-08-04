@@ -9,7 +9,6 @@
 def cube_i(x: i32) i32 = x ** 3
 def cube_u(x: u32) u32 = x ** 3u32
 
-#[compute]
 entry int_pow_test(input: []i32) []i32 =
     -- Cast through u32 → cube the unsigned magnitude → back to i32 →
     -- add the signed cube. Exercises both helpers from one entry

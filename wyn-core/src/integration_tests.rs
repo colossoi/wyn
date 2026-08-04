@@ -155,7 +155,6 @@ fn segmented_entry_map_output_fields(program: &crate::egir::reify::Segmented) ->
 #[test]
 fn egir_vertical_fusion_collapses_three_map_chain() {
     let source = r#"
-#[compute]
 entry chain(xs: []i32) []i32 =
   let a = map(|x: i32| x + 1, xs) in
   let b = map(|x: i32| x * 2, a) in
@@ -175,7 +174,6 @@ fn egir_vertical_fusion_preserves_multi_input_producer_sources() {
 
     let allocated = compile_to_semantic_egir(
         r#"
-#[compute]
 entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
   let pairs = zip(xs, ys) in
   let sums = map(|p: (i32, i32)| p.0 + p.1, pairs) in
@@ -215,7 +213,6 @@ fn egir_vertical_fusion_composes_one_slot_of_multi_input_consumer() {
 
     let allocated = compile_to_semantic_egir(
         r#"
-#[compute]
 entry mixed() [4]i32 =
   let produced = map(|x: i32| x + 1, [1, 2, 3, 4]) in
   map(|p: (i32, i32)| p.0 + p.1, zip(produced, [10, 20, 30, 40]))
@@ -250,7 +247,6 @@ entry mixed() [4]i32 =
 #[test]
 fn egir_vertical_fusion_routes_distinct_producer_results() {
     let source = r#"
-#[compute]
 entry paired<[n]>(xs: [n]i32) [n]i32 =
   let pair = map(|x: i32| (x + 1, x * 2), xs) in
   let (plus, times) = unzip(pair) in
@@ -271,7 +267,6 @@ fn egir_horizontal_fusion_deduplicates_shared_multi_input_vector() {
 
     let allocated = compile_to_semantic_egir(
         r#"
-#[compute]
 entry siblings<[n]>(xs: [n]i32, ys: [n]i32) ([n]i32, [n]i32) =
   let pairs = zip(xs, ys) in
   let sums = map(|p: (i32, i32)| p.0 + p.1, pairs) in
@@ -302,7 +297,6 @@ fn egir_horizontal_fusion_preserves_shared_input_semantics() {
     use crate::egir::semantic_exec::{execute_map_screma, Value};
 
     let source = r#"
-#[compute]
 entry siblings(xs: []i32) ([]i32, []i32) =
   let plus = map(|x: i32| x + 1, xs) in
   let times = map(|x: i32| x * 2, xs) in
@@ -335,7 +329,6 @@ entry siblings(xs: []i32) ([]i32, []i32) =
 #[test]
 fn egir_vertical_fusion_preserves_escaping_producer_output() {
     let source = r#"
-#[compute]
 entry both(xs: []i32) ([]i32, []i32) =
   let produced = map(|x: i32| x + 1, xs) in
   let consumed = map(|x: i32| x * 2, produced) in
@@ -349,7 +342,6 @@ entry both(xs: []i32) ([]i32, []i32) =
 #[test]
 fn egir_vertical_fusion_absorbs_multiple_consumers() {
     let source = r#"
-#[compute]
 entry shared(xs: []i32) ([]i32, []i32) =
   let produced = map(|x: i32| x + 1, xs) in
   let left = map(|x: i32| x * 2, produced) in
@@ -369,7 +361,6 @@ fn egir_vertical_fusion_preserves_fanout_semantics() {
     use crate::egir::semantic_exec::{execute_map_screma, Value};
 
     let source = r#"
-#[compute]
 entry shared(xs: []i32) ([]i32, []i32) =
   let produced = map(|x: i32| x + 1, xs) in
   let left = map(|x: i32| x * 2, produced) in
@@ -400,7 +391,6 @@ entry shared(xs: []i32) ([]i32, []i32) =
 #[test]
 fn egir_vertical_fusion_pushes_slice_onto_producer_inputs() {
     let source = r#"
-#[compute]
 entry sliced(xs: []i32) [4]i32 =
   let produced = map(|x: i32| x + 1, xs) in
   map(|x: i32| x * 2, produced[2..6])
@@ -418,7 +408,6 @@ fn egir_vertical_fusion_preserves_slice_semantics() {
     use crate::egir::semantic_exec::{execute_map_screma, Value};
 
     let source = r#"
-#[compute]
 entry sliced(xs: []i32) [4]i32 =
   let produced = map(|x: i32| x + 1, xs) in
   map(|x: i32| x * 2, produced[2..6])
@@ -449,7 +438,6 @@ entry sliced(xs: []i32) [4]i32 =
 #[test]
 fn egir_vertical_fusion_composes_nested_slices() {
     let source = r#"
-#[compute]
 entry sliced_twice(xs: []i32) [3]i32 =
   let produced = map(|x: i32| x + 1, xs) in
   map(|x: i32| x * 2, produced[1..7][2..5])
@@ -465,7 +453,6 @@ entry sliced_twice(xs: []i32) [3]i32 =
 #[test]
 fn egir_vertical_fusion_slices_every_producer_input() {
     let source = r#"
-#[compute]
 entry sliced_zip(xs: []i32, ys: []i32) [4]i32 =
   let produced = map(|pair: (i32, i32)| pair.0 + pair.1, zip(xs, ys)) in
   map(|x: i32| x * 2, produced[2..6])
@@ -481,7 +468,6 @@ entry sliced_zip(xs: []i32, ys: []i32) [4]i32 =
 #[test]
 fn egir_vertical_fusion_declines_incompatible_slice_routes() {
     let source = r#"
-#[compute]
 entry differently_sliced(xs: [8]i32) [4]i32 =
   let produced = map(|x: i32| x + 1, xs) in
   map(|pair: (i32, i32)| pair.0 + pair.1, zip(produced[0..4], produced[2..6]))
@@ -497,7 +483,6 @@ entry differently_sliced(xs: [8]i32) [4]i32 =
 #[test]
 fn egir_vertical_fusion_does_not_shrink_retained_producer_output() {
     let source = r#"
-#[compute]
 entry retained(xs: []i32) ([]i32, [4]i32) =
   let produced = map(|x: i32| x + 1, xs) in
   let sliced = map(|x: i32| x * 2, produced[2..6]) in
@@ -514,7 +499,6 @@ entry retained(xs: []i32) ([]i32, [4]i32) =
 #[test]
 fn egir_indexed_fusion_scalarizes_one_static_demand() {
     let source = r#"
-#[compute]
 entry one() [1]i32 =
   let produced = map(|x: i32| x + 1, 0i32 ..< 8) in
   [produced[3]]
@@ -530,7 +514,6 @@ entry one() [1]i32 =
 #[test]
 fn egir_indexed_fusion_rewrites_direct_output_route() {
     let source = r#"
-#[compute]
 entry one() i32 =
   let produced = map(|x: i32| x + 1, 0i32 ..< 8) in
   produced[3]
@@ -546,7 +529,6 @@ entry one() i32 =
 #[test]
 fn egir_indexed_fusion_lowers_two_static_demands() {
     let source = r#"
-#[compute]
 entry two() [1]i32 =
   let produced = map(|x: i32| x + 1, 0i32 ..< 8) in
   [produced[2] + produced[3]]
@@ -557,7 +539,6 @@ entry two() [1]i32 =
 #[test]
 fn egir_indexed_fusion_keeps_producer_that_is_also_returned() {
     let source = r#"
-#[compute]
 entry both() ([8]i32, [1]i32) =
   let produced = map(|x: i32| x + 1, 0i32 ..< 8) in
   (produced, [produced[3]])
@@ -572,7 +553,6 @@ entry both() ([8]i32, [1]i32) =
 #[test]
 fn egir_indexed_fusion_respects_fixed_domain_profitability() {
     let source = r#"
-#[compute]
 entry many(i: i32, j: i32, k: i32) [1]i32 =
   let produced = map(|x: i32| x + 1, [10, 20]) in
   [produced[i % 2] + produced[j % 2] + produced[k % 2]]
@@ -587,7 +567,6 @@ entry many(i: i32, j: i32, k: i32) [1]i32 =
 #[test]
 fn egir_indexed_fusion_bounds_unknown_domain_duplication() {
     let source = r#"
-#[compute]
 entry many(xs: []i32, i: i32, j: i32, k: i32) [1]i32 =
   let produced = map(|x: i32| x + 1, xs) in
   [produced[i] + produced[j] + produced[k]]
@@ -601,7 +580,6 @@ entry many(xs: []i32, i: i32, j: i32, k: i32) [1]i32 =
 #[test]
 fn egir_filter_length_only_becomes_count_reduction() {
     let source = r#"
-#[compute]
 entry count(xs: []i32) i32 =
   let kept = filter(|x: i32| x > 0, xs) in
   length(kept)
@@ -620,7 +598,6 @@ fn egir_filter_fusion_reuses_count_for_multiple_reductions() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let source = r#"
-#[compute]
 entry stats(xs: []i32) [4]i32 =
   let kept = filter(|x: i32| x > 0, xs) in
   let n1 = length(kept) in
@@ -674,7 +651,6 @@ entry stats(xs: []i32) [4]i32 =
 #[test]
 fn egir_filter_fusion_is_blocked_when_filtered_array_escapes() {
     let source = r#"
-#[compute]
 entry both(xs: []i32) ?k. ([k]i32, i32) =
   let kept = filter(|x: i32| x > 0, xs) in
   (kept, length(kept))
@@ -696,7 +672,6 @@ fn egir_map_filter_envelope_fuses_producer_into_escaping_filter() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let source = r#"
-#[compute]
 entry pick(xs: []i32) ?k. [k]i32 =
   let shifted = map(|x: i32| x + 1, xs) in
   filter(|x: i32| x > 0, shifted)
@@ -731,11 +706,10 @@ fn egir_reduce_by_index_is_a_general_histogram_and_lowers() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let source = r#"
-#[compute]
 entry accumulate(indices: []i32,
                  values: []i32,
                  bias: i32,
-                 #[storage(set=2, binding=0, access=write)] dest: *[]i32) () =
+                 dest: *[]i32) () =
   let updated = reduce_by_index(dest, |a: i32, b: i32| a + b + bias, -bias, indices, values) in
   let _ = scatter(updated, [0i32], [bias]) in
   ()
@@ -770,10 +744,9 @@ fn egir_map_into_reducing_histogram_fuses() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let source = r#"
-#[compute]
 entry accumulate(indices: []i32,
                  values: []i32,
-                 #[storage(set=2, binding=0, access=write)] dest: *[]i32) () =
+                 dest: *[]i32) () =
   let doubled = map(|value: i32| value * 2, values) in
   let _ = reduce_by_index(dest, |a: i32, b: i32| a + b, 0, indices, doubled) in
   ()
@@ -831,11 +804,10 @@ entry accumulate(indices: []i32,
 #[test]
 fn captured_integer_histogram_reducer_uses_compare_exchange_loop() {
     let source = r#"
-#[compute]
 entry accumulate(indices: []i32,
                  values: []i32,
                  bias: i32,
-                 #[storage(set=2, binding=0, access=write)] dest: *[]i32) () =
+                 dest: *[]i32) () =
   let _ = reduce_by_index(dest, |a: i32, b: i32| a + b + bias, -bias, indices, values) in
   ()
 "#;
@@ -878,10 +850,9 @@ fn high_race_factor_histogram_keeps_serial_fallback_without_replication() {
     use smallvec::smallvec;
 
     let source = r#"
-#[compute]
 entry accumulate(indices: []i32,
                  values: []i32,
-                 #[storage(set=2, binding=0, access=write)] dest: *[]i32) () =
+                 dest: *[]i32) () =
   let _ = reduce_by_index(dest, |a: i32, b: i32| a + b, 0, indices, values) in
   ()
 "#;
@@ -920,8 +891,7 @@ fn egir_map_scatter_envelope_fuses_and_deduplicates_both_producers() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let source = r#"
-#[compute]
-entry write(xs: []i32, #[storage(set=2, binding=0, access=write)] dest: *[]i32) () =
+entry write(xs: []i32, dest: *[]i32) () =
   let indices = map(|x: i32| x, xs) in
   let values = map(|x: i32| x * 2, xs) in
   let _ = scatter(dest, indices, values) in
@@ -956,7 +926,6 @@ fn semantic_segops_survive_optimization_and_logical_allocation() {
 
     let allocated = compile_to_semantic_egir(
         r#"
-#[compute]
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#,
     );
@@ -1021,7 +990,6 @@ fn same_space_reductions_fuse_into_one_multi_accumulator_op() {
     let allocated = compile_to_semantic_egir(
         r#"
 def N: i32 = 256
-#[compute]
 entry e() [4]f32 =
     let xs = map(|i: i32| f32.i32(i), 0i32 ..< N) in
     [f32.sum(xs), f32.product(xs), f32.minimum(xs), f32.maximum(xs)]
@@ -1081,7 +1049,6 @@ fn horizontal_fusion_does_not_cross_an_intervening_effect_token() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
     let allocated = compile_to_semantic_egir(
         r#"
-#[compute]
 entry e() [3]i32 =
     let xs = 0i32 ..< 8 in
     let ys = 0i32 ..< 4 in
@@ -1114,7 +1081,6 @@ entry e() [3]i32 =
 fn fused_accumulators_preserve_distinct_composed_steps_on_shared_input() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
     let source = r#"
-#[compute]
 entry e() [2]i32 =
   let xs = map(|i: i32| i + 1, 0i32 ..< 8) in
   let ys = map(|i: i32| i * 2, 0i32 ..< 8) in
@@ -1169,9 +1135,8 @@ fn target_planning_owns_parallel_work_scratch() {
             .collect::<std::collections::HashSet<_>>()
     };
 
-    let scan = compile_to_semantic_egir(
-        "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
-    );
+    let scan =
+        compile_to_semantic_egir(" entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)");
     let scan_kinds = kinds(scan.logical_resources());
     assert!(!scan_kinds.contains(&CompilerResourceKind::ScanBlockSums));
     assert!(!scan_kinds.contains(&CompilerResourceKind::ScanBlockOffsets));
@@ -1196,9 +1161,8 @@ fn target_planning_owns_parallel_work_scratch() {
         .count();
     assert_eq!(scan_resource_count, 2);
 
-    let filter = compile_to_semantic_egir(
-        "#[compute] entry evens(xs: []i32) []i32 = filter(|x: i32| x % 2 == 0, xs)",
-    );
+    let filter =
+        compile_to_semantic_egir(" entry evens(xs: []i32) []i32 = filter(|x: i32| x % 2 == 0, xs)");
     let host_abi = filter
         .logical_resources()
         .iter()
@@ -1237,7 +1201,6 @@ fn target_planning_owns_parallel_work_scratch() {
 
     let scalar_handoff = compile_to_semantic_egir(
         r#"
-#[compute]
 entry add_sum(xs: []i32) []i32 =
   let total = reduce(|a: i32, b: i32| a + b, 0, xs) in
   map(|x: i32| x + total, xs)
@@ -1252,9 +1215,7 @@ entry add_sum(xs: []i32) []i32 =
     }));
 
     let single = crate::egir::plan(
-        compile_to_semantic_egir(
-            "#[compute] entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)",
-        ),
+        compile_to_semantic_egir(" entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)"),
         crate::LoweringProfile::new(crate::CodegenTarget::Portable, crate::SchedulePolicy::Serial),
     )
     .expect("plan sequential reduction");
@@ -1264,7 +1225,7 @@ entry add_sum(xs: []i32) []i32 =
     );
 
     let fallback = compile_to_semantic_egir(
-        "#[compute] entry sum_from(xs: []i32, z: i32) i32 = reduce(|a: i32, b: i32| a + b, z, xs)",
+        " entry sum_from(xs: []i32, z: i32) i32 = reduce(|a: i32, b: i32| a + b, z, xs)",
     );
     let fallback = crate::egir::plan(fallback, crate::LoweringProfile::PORTABLE)
         .expect("plan reduction with a runtime neutral");
@@ -1312,9 +1273,7 @@ fn selected_recipes_allocate_exact_ordered_scratch() {
     };
 
     let scalar_reduce = crate::egir::plan(
-        compile_to_semantic_egir(
-            "#[compute] entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)",
-        ),
+        compile_to_semantic_egir(" entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)"),
         crate::LoweringProfile::PORTABLE,
     )
     .expect("plan scalar reduction");
@@ -1327,7 +1286,6 @@ fn selected_recipes_allocate_exact_ordered_scratch() {
 
     let multi_reduce = compile_to_semantic_egir(
         r#"
-#[compute]
 entry sums() (i32, i32) =
   let xs = map(|i: i32| i + 1, 0i32 ..< 8) in
   let ys = map(|i: i32| i * 2, 0i32 ..< 8) in
@@ -1366,9 +1324,7 @@ entry sums() (i32, i32) =
     );
 
     let scan = crate::egir::plan(
-        compile_to_semantic_egir(
-            "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
-        ),
+        compile_to_semantic_egir(" entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)"),
         crate::LoweringProfile::PORTABLE,
     )
     .expect("plan scan");
@@ -1393,9 +1349,7 @@ entry sums() (i32, i32) =
     );
 
     let filter = crate::egir::plan(
-        compile_to_semantic_egir(
-            "#[compute] entry evens(xs: []i32) []i32 = filter(|x: i32| x % 2 == 0, xs)",
-        ),
+        compile_to_semantic_egir(" entry evens(xs: []i32) []i32 = filter(|x: i32| x % 2 == 0, xs)"),
         crate::LoweringProfile::PORTABLE,
     )
     .expect("plan runtime filter");
@@ -1426,10 +1380,9 @@ entry sums() (i32, i32) =
 fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
     use crate::egir::parallelize::KernelDomain;
 
-    let reduce = crate::compile_thru_ssa(
-        "#[compute] entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)",
-    )
-    .expect("parallel reduction reaches SSA");
+    let reduce =
+        crate::compile_thru_ssa(" entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)")
+            .expect("parallel reduction reaches SSA");
     let phases = reduce.global_context.kernel_plan.phases().collect::<Vec<_>>();
     assert_eq!(
         phases.iter().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
@@ -1442,10 +1395,9 @@ fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
         KernelDomain::Fixed { x: 1, y: 1, z: 1 }
     ));
 
-    let scan = crate::compile_thru_ssa(
-        "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
-    )
-    .expect("parallel scan reaches SSA");
+    let scan =
+        crate::compile_thru_ssa(" entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)")
+            .expect("parallel scan reaches SSA");
     let phases = scan.global_context.kernel_plan.phases().collect::<Vec<_>>();
     assert_eq!(
         phases.iter().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
@@ -1465,19 +1417,19 @@ fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
 fn chunked_recipes_accept_empty_small_uneven_and_unsigned_ranges() {
     let cases = [
         (
-            "#[compute] entry empty() i32 = reduce(|a: i32, b: i32| a + b, 0, 0i32 ..< 0)",
+            " entry empty() i32 = reduce(|a: i32, b: i32| a + b, 0, 0i32 ..< 0)",
             "reduce_phase1",
         ),
         (
-            "#[compute] entry small() []i32 = scan(|a: i32, b: i32| a + b, 0, 0i32 ..< 7)",
+            " entry small() []i32 = scan(|a: i32, b: i32| a + b, 0, 0i32 ..< 7)",
             "scan_phase1",
         ),
         (
-            "#[compute] entry uneven() i32 = reduce(|a: i32, b: i32| a + b, 0, 0i32 ..< 70)",
+            " entry uneven() i32 = reduce(|a: i32, b: i32| a + b, 0, 0i32 ..< 70)",
             "reduce_phase1",
         ),
         (
-            "#[compute] entry unsigned() u32 = reduce(|a: u32, b: u32| a + b, 0u32, 0u32 ..< 70u32)",
+            " entry unsigned() u32 = reduce(|a: u32, b: u32| a + b, 0u32, 0u32 ..< 70u32)",
             "reduce_phase1",
         ),
     ];
@@ -1519,7 +1471,6 @@ fn associative_noncommutative_reduce_and_scan_keep_parallel_ordered_recipes() {
 
     let reduce = crate::compile_thru_ssa(
         r#"
-#[compute]
 entry compose_all(xs: []i32) i32 =
   reduce(
     |left: i32, right: i32|
@@ -1543,7 +1494,6 @@ entry compose_all(xs: []i32) i32 =
 
     let scan = crate::compile_thru_ssa(
         r#"
-#[compute]
 entry compose_prefix(xs: []i32) []i32 =
   scan(
     |left: i32, right: i32|
@@ -1574,7 +1524,6 @@ fn runtime_filter_lowers_to_flag_scan_scatter_pipeline() {
     use crate::ssa::types::InstKind;
 
     let r4 = r#"
-#[compute]
 entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
 "#;
     let converted = crate::compile_thru_ssa(r4).expect("runtime filter reaches SSA");
@@ -1634,7 +1583,6 @@ entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
     crate::compile_thru_spirv(r4).expect("three-stage filter emits SPIR-V");
 
     let r5 = r#"
-#[compute]
 entry r(xs: []u32) (?k. [k]u32, [1]u32) =
   let v = filter(|x| x < 100u32, xs)
   let n = length(v) in
@@ -1664,7 +1612,6 @@ fn mixed_map_filter_outputs_keep_complete_phase_family() {
     use crate::egir::program::OutputSlotId;
 
     let source = r#"
-#[compute]
 entry mixed() ([]i32, []i32) =
   let mapped = map(|i| i, iota(1))
   let compacted = filter(|i| true, iota(1)) in
@@ -1722,7 +1669,6 @@ fn assert_naga_accepts_spirv(words: &[u32]) {
 fn filter_over_iota_emits_well_typed_length_and_index_operations() {
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry compact_i32() []i32 =
   filter(|i| i % 2 == 0, iota(128))
 "#,
@@ -1737,7 +1683,6 @@ fn filter_iota_scan_apply_offsets_reuses_phase1_worker_grid() {
 
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry compact_iota() []i32 =
   filter(|i| i % 2 == 0, iota(39592))
 "#,
@@ -1780,7 +1725,6 @@ entry compact_iota() []i32 =
 fn map_over_filtered_array_emits_well_typed_dynamic_extent() {
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry compact_then_map() ([]i32, [1]u32) =
   let visible_indices = filter(|i| i % 2 == 0, iota(128))
   let live_props = map(|i| i + 1, visible_indices) in
@@ -1797,7 +1741,6 @@ fn filter_then_map_publishes_runtime_array_handoff() {
 
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry filter_then_map() []i32 =
   let kept = filter(|i| i % 2 == 0, iota(4096)) in
   map(|i| i + 1, kept)
@@ -1880,7 +1823,6 @@ entry filter_then_map() []i32 =
 fn filter_after_serial_prefix_detaches_its_parallel_producer() {
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry filter_after_serial_prefix(xs: []i32) ([1]i32, []i32, i32) =
   let prefix =
     loop acc = 0 for k < 4 do
@@ -1920,7 +1862,6 @@ fn fixed_output_serial_prefix_is_not_cloned_into_parallel_output_stage() {
 
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry filter_after_serial_prefix(xs: []i32) ([1]i32, []i32, i32) =
   let prefix =
     loop acc = 0 for k < 4 do
@@ -2007,7 +1948,6 @@ fn widened_filter_output_uses_output_element_size() {
 
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry r(bidx: []u32) ?k. [k]vec4f32 =
   let cand = map(|s| let i = i32(s) in @[f32(i), 0.0, f32(i), 1.0], bidx) in
   filter(|c| c.z > 0.0, cand)
@@ -2080,7 +2020,6 @@ fn multi_consumer_producer_survival_is_characterized() {
     // ys read by two elementwise maps (combined via zip).
     let two_maps = r#"
 def N: i32 = 8
-#[compute]
 entry e() [8]i32 =
     let ys = map(|i: i32| i + 1, 0i32 ..< N) in
     let a = map(|y: i32| y * 2, ys) in
@@ -2090,7 +2029,6 @@ entry e() [8]i32 =
     // ys read by a full reduce and then by a map (different consumer kinds).
     let reduce_then_map = r#"
 def N: i32 = 8
-#[compute]
 entry e() [8]i32 =
     let ys = map(|i: i32| i + 1, 0i32 ..< N) in
     let s = reduce(|a: i32, b: i32| a + b, 0, ys) in
@@ -2099,7 +2037,6 @@ entry e() [8]i32 =
     // ys read by two reductions with different operators (sum and max).
     let two_reduces = r#"
 def N: i32 = 8
-#[compute]
 entry e() i32 =
     let ys = map(|i: i32| i * i, 0i32 ..< N) in
     reduce(|a: i32, b: i32| a + b, 0, ys) * reduce(|a: i32, b: i32| if a > b then a else b, 0, ys)
@@ -2107,7 +2044,6 @@ entry e() i32 =
     // ys read by a full reduce and by a point index.
     let reduce_and_index = r#"
 def N: i32 = 8
-#[compute]
 entry e() i32 =
     let ys = map(|i: i32| i * i, 0i32 ..< N) in
     reduce(|a: i32, b: i32| a + b, 0, ys) + ys[0]
@@ -2116,7 +2052,6 @@ entry e() i32 =
     // iteration; the classic "materialize once, reuse" case.
     let reduce_in_nested_map = r#"
 def N: i32 = 8
-#[compute]
 entry e() [4]i32 =
     let ys = map(|i: i32| i + 1, 0i32 ..< N) in
     map(|j: i32| reduce(|a: i32, b: i32| a + b, 0, ys) + j, 0i32 ..< 4)
@@ -2278,7 +2213,6 @@ def f(x: i32) i32 = x + 1
 def g(x: i32) i32 = x * 2
 def h(x: i32) i32 = x - 3
 def k(x: i32) i32 = x * 5
-#[compute]
 entry e() ([8]i32, [8]i32) =
   (map(f, map(g, 0i32 ..< N)), map(h, map(k, 0i32 ..< N)))
 "#,
@@ -2289,7 +2223,6 @@ entry e() ([8]i32, [8]i32) =
 #[test]
 fn terminal_schedule_and_descriptor_are_atomic_and_deterministic() {
     let source = r#"
-#[compute]
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#;
     let allocated = compile_to_semantic_egir(source);
@@ -2318,7 +2251,6 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 #[test]
 fn single_stage_is_a_terminal_schedule_policy() {
     let source = r#"
-#[compute]
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#;
     let allocated = compile_to_semantic_egir(source);
@@ -2330,24 +2262,491 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
     assert_eq!(lowered.global_context.kernel_plan.phases().count(), 1);
     assert!(!lowered.entry_points.iter().any(|entry| entry.name.contains("phase2")));
 }
+#[test]
+fn unified_root_array_program_compiles_through_spirv() {
+    let lowered = crate::compile_thru_spirv("entry frame(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
+        .expect("attribute-free root entry lowers through the array planner");
+    assert_naga_accepts_spirv(&lowered.spirv);
+}
+
+#[test]
+fn unified_root_graphics_program_reaches_tlc() {
+    let program = crate::compile_thru_tlc(
+        r#"
+entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0],
+      @[1.0, 0.0, 0.0, 1.0])) in
+  shade(target, covered, |fragment| fragment.value)
+"#,
+    )
+    .expect("unified graphics entry reaches the stage-extraction boundary");
+    assert_eq!(program.defs.len(), 2);
+    assert!(program
+        .defs
+        .iter()
+        .all(|definition| matches!(definition.meta, crate::tlc::DefMeta::EntryPoint(_))));
+}
+
+#[test]
+fn unified_root_graphics_program_compiles_through_spirv() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_lines(
+    direct_draw_from(5u32, 2u32, 7u32, 3u32),
+    |vertex| vertex_output(
+      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0],
+      @[1.0, 0.0, 0.0, 1.0])) in
+  shade(target, covered, |fragment| fragment.value)
+"#,
+    )
+    .expect("unified graphics entry lowers through stage extraction");
+    assert_naga_accepts_spirv(&lowered.spirv);
+    assert_eq!(lowered.pipeline.pipelines.len(), 1);
+    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+        panic!("unified rasterization must publish a graphics pipeline");
+    };
+    assert_eq!(graphics.stages.len(), 2);
+    assert!(matches!(
+        graphics.stages[0].stage,
+        crate::pipeline_descriptor::ShaderStage::Vertex
+    ));
+    assert!(matches!(
+        graphics.stages[1].stage,
+        crate::pipeline_descriptor::ShaderStage::Fragment
+    ));
+    assert_eq!(
+        graphics.invocation.topology,
+        crate::pipeline_descriptor::PrimitiveTopology::LineList
+    );
+    assert_eq!(
+        graphics.invocation.draw,
+        crate::pipeline_descriptor::DrawCall::Direct {
+            vertex_count: 5,
+            instance_count: 2,
+            first_vertex: 7,
+            first_instance: 3,
+        }
+    );
+}
+
+#[test]
+fn unified_root_array_result_can_feed_vertex_callback() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+entry frame(points: []vec2f32,
+            target: render_target<vec4f32>)
+    ([]vec2f32, render_target<vec4f32>) =
+  let updated = map(|p: vec2f32| p * 0.5, points) in
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex|
+      let p = updated[i32(vertex.vertex_index)] in
+      vertex_output(@[p.x, p.y, 0.0, 1.0], p)) in
+  let target' = shade(
+    target,
+    covered,
+    |fragment| @[fragment.value.x,
+                  fragment.value.y,
+                  0.0,
+                  1.0]) in
+  (updated, target')
+"#,
+    )
+    .expect("an ordinary array result feeds a stage callback in one root");
+    assert_naga_accepts_spirv(&lowered.spirv);
+    assert_eq!(lowered.pipeline.pipelines.len(), 2);
+    let crate::pipeline_descriptor::Pipeline::Compute(compute) = &lowered.pipeline.pipelines[0] else {
+        panic!("array prefix must publish a compute pipeline");
+    };
+    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[1] else {
+        panic!("rasterization must publish a graphics pipeline");
+    };
+    let named_frame_output = |binding: &crate::pipeline_descriptor::Binding| {
+        matches!(
+            binding,
+            crate::pipeline_descriptor::Binding::StorageBuffer { name, .. }
+                if name == "frame_output"
+        )
+    };
+    let compute_output = compute.bindings.iter().any(named_frame_output);
+    let graphics_input = graphics.bindings.iter().any(named_frame_output);
+    assert!(
+        compute_output && graphics_input,
+        "intermediate binding was not shared: {:#?}",
+        lowered.pipeline
+    );
+    assert!(lowered.pipeline.frame_graph.passes.iter().any(|pass| !pass.depends_on.is_empty()));
+}
+
+#[test]
+fn unified_invocation_fields_compile_through_spirv() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+entry fields(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw_from(3u32, 1u32, 0u32, 0u32),
+    |vertex|
+      let index = vertex.vertex_index + vertex.instance_index + vertex.draw_index in
+      let x = if index == 0u32 then -1.0 else if index == 1u32 then 3.0 else -1.0 in
+      let y = if index == 0u32 then -1.0 else if index == 1u32 then -1.0 else 3.0 in
+      vertex_output(@[x, y, 0.0, 1.0], @[x, y])) in
+  shade(target, covered,
+    |fragment|
+      let sample = f32(fragment.sample_index) in
+      let primitive = f32(fragment.primitive_index) in
+      let face = if fragment.front_facing then 1.0 else 0.0 in
+      @[fragment.value.x + fragment.position.x * 0.0,
+        fragment.value.y, primitive + sample, face])
+"#,
+    )
+    .expect("all unified invocation fields lower through SPIR-V");
+    assert_naga_accepts_spirv(&lowered.spirv);
+}
+#[test]
+fn unified_graphics_captures_use_compiler_assigned_interfaces() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+entry triangle(points: []vec2f32, scale: f32,
+               target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex|
+      let p = points[i32(vertex.vertex_index)] in
+      vertex_output(
+        @[p.x * scale, p.y * scale, 0.0, 1.0],
+        @[1.0, 0.0, 0.0, 1.0])) in
+  shade(target, covered,
+    |fragment| @[fragment.value.x * scale,
+                  fragment.value.y,
+                  fragment.value.z,
+                  fragment.value.w])
+"#,
+    )
+    .expect("unified callback captures receive compiler-assigned interfaces");
+    assert_naga_accepts_spirv(&lowered.spirv);
+    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+        panic!("unified rasterization must publish a graphics pipeline");
+    };
+    assert!(graphics.bindings.iter().any(|binding| matches!(
+        binding,
+        crate::pipeline_descriptor::Binding::StorageBuffer {
+            set: 0,
+            binding: 0,
+            name,
+            ..
+        } if name.contains("points")
+    )));
+    assert!(graphics.bindings.iter().any(|binding| matches!(
+        binding,
+        crate::pipeline_descriptor::Binding::Uniform { name, .. } if name.contains("scale")
+    )));
+}
+
+#[test]
+fn unified_graphics_supports_structured_varyings_and_sampled_resources() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+type varying = { uv: vec2f32, tint: vec4f32 }
+
+entry textured(tex: texture2d, sampling: sampler,
+               target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex|
+      let index = vertex.vertex_index in
+      let position =
+        if index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+        else if index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+        else @[0.0, 0.5, 0.0, 1.0] in
+      vertex_output(position,
+        { uv = position.xy + @[0.5, 0.5],
+          tint = @[1.0, 0.8, 0.6, 1.0] })) in
+  shade(target, covered,
+    |fragment|
+      texture_sample(tex, sampling, fragment.value.uv, 0.0)
+        * fragment.value.tint)
+"#,
+    )
+    .expect("structured varyings and sampled resources lower through unified callbacks");
+    assert_naga_accepts_spirv(&lowered.spirv);
+    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+        panic!("unified rasterization must publish a graphics pipeline");
+    };
+    assert!(graphics.bindings.iter().any(|binding| matches!(
+        binding,
+        crate::pipeline_descriptor::Binding::Texture { binding: 0, .. }
+    )));
+    assert!(graphics.bindings.iter().any(|binding| matches!(
+        binding,
+        crate::pipeline_descriptor::Binding::Sampler { binding: 1, .. }
+    )));
+}
+
+#[test]
+fn unified_graphics_callbacks_may_call_named_helpers() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+def make_vertex(vertex: vertex_invocation) vertex<vec4f32> =
+  vertex_output(
+    if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+    else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+    else @[0.0, 0.5, 0.0, 1.0],
+    @[0.2, 0.6, 1.0, 1.0])
+
+def make_fragment(fragment: fragment_invocation<vec4f32>) vec4f32 =
+  fragment.value
+
+entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(direct_draw(3u32, 1u32), make_vertex) in
+  shade(target, covered, make_fragment)
+"#,
+    )
+    .expect("named helpers inherit their callback stage context");
+    assert_naga_accepts_spirv(&lowered.spirv);
+}
+
+#[test]
+fn unified_root_supports_successive_draws_into_one_target() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+def triangle_vertex(offset: f32, vertex: vertex_invocation) vertex<vec4f32> =
+  let x = if vertex.vertex_index == 0u32 then -0.5
+          else if vertex.vertex_index == 1u32 then 0.5
+          else 0.0 in
+  let y = if vertex.vertex_index == 2u32 then 0.5 else -0.5 in
+  vertex_output(@[x + offset, y, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])
+
+entry layered(target: render_target<vec4f32>) render_target<vec4f32> =
+  let background = rasterize_triangles(
+    direct_draw(3u32, 1u32), triangle_vertex(-0.25, _)) in
+  let target1 = shade(
+    target, background,
+    |fragment| fragment.value * @[0.2, 0.4, 0.8, 1.0]) in
+  let foreground = rasterize_triangles(
+    direct_draw(3u32, 1u32), triangle_vertex(0.25, _)) in
+  shade(
+    target1, foreground,
+    |fragment| fragment.value * @[0.9, 0.3, 0.1, 1.0])
+"#,
+    )
+    .expect("successive unified draws lower through stage extraction");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    let graphics = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .filter_map(|pipeline| match pipeline {
+            crate::pipeline_descriptor::Pipeline::Graphics(graphics) => Some(graphics),
+            crate::pipeline_descriptor::Pipeline::Compute(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(graphics.len(), 2, "one graphics pipeline per draw");
+    assert!(graphics
+        .iter()
+        .all(|pipeline| pipeline.fragment_outputs.iter().any(|output| output.name == "target")));
+
+    let fragment_passes = lowered
+        .pipeline
+        .frame_graph
+        .passes
+        .iter()
+        .filter(|pass| pass.kind == crate::pipeline_descriptor::FramePassKind::Fragment)
+        .collect::<Vec<_>>();
+    assert_eq!(fragment_passes.len(), 2);
+    assert!(
+        !fragment_passes[1].depends_on.is_empty(),
+        "the second target update must follow the first"
+    );
+}
+
+#[test]
+fn unified_root_orders_graphics_compute_graphics_operations() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+entry postprocess(values: []vec2i32,
+                  scene: render_target<vec4f32>,
+                  surface: render_target<vec4f32>)
+    ([]f32, render_target<vec4f32>, render_target<vec4f32>) =
+  let scene_raster = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+      else @[-1.0, 3.0, 0.0, 1.0],
+      1.0)) in
+  let scene1 = shade(
+    scene, scene_raster,
+    |fragment| @[fragment.value, 0.0, 0.0, 1.0]) in
+  let adjusted = map(
+    |coord: vec2i32| target_load(scene1, coord, 0u32).x * 0.5,
+    values) in
+  let resolve_raster = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+      else @[-1.0, 3.0, 0.0, 1.0],
+      ())) in
+  let surface1 = shade(
+    surface, resolve_raster,
+    |fragment|
+      let gain = adjusted[i32(fragment.position.x) % length(adjusted)] in
+      @[gain, gain, gain, 1.0]) in
+  (adjusted, scene1, surface1)
+"#,
+    )
+    .expect("a unified root may alternate graphics and ordinary computation");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    assert_eq!(lowered.pipeline.pipelines.len(), 3);
+    assert!(matches!(
+        lowered.pipeline.pipelines[0],
+        crate::pipeline_descriptor::Pipeline::Graphics(_)
+    ));
+    assert!(matches!(
+        lowered.pipeline.pipelines[1],
+        crate::pipeline_descriptor::Pipeline::Compute(_)
+    ));
+    let crate::pipeline_descriptor::Pipeline::Graphics(resolve) = &lowered.pipeline.pipelines[2] else {
+        panic!("the final operation must be the resolve graphics pipeline")
+    };
+    let compute_names = match &lowered.pipeline.pipelines[1] {
+        crate::pipeline_descriptor::Pipeline::Compute(compute) => compute
+            .bindings
+            .iter()
+            .filter_map(|binding| match binding {
+                crate::pipeline_descriptor::Binding::StorageBuffer { name, .. } => Some(name),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        _ => unreachable!(),
+    };
+    assert!(resolve.bindings.iter().any(|binding| {
+        matches!(
+            binding,
+            crate::pipeline_descriptor::Binding::StorageBuffer { name, .. }
+                if compute_names.contains(&name)
+        )
+    }));
+
+    let passes = &lowered.pipeline.frame_graph.passes;
+    let scene_fragment = passes
+        .iter()
+        .position(|pass| {
+            pass.pipeline_index == 0 && pass.kind == crate::pipeline_descriptor::FramePassKind::Fragment
+        })
+        .expect("scene fragment pass");
+    let compute =
+        passes.iter().position(|pass| pass.pipeline_index == 1).expect("intermediate compute pass");
+    let resolve_fragment = passes
+        .iter()
+        .position(|pass| {
+            pass.pipeline_index == 2 && pass.kind == crate::pipeline_descriptor::FramePassKind::Fragment
+        })
+        .expect("resolve fragment pass");
+    assert!(passes[compute].depends_on.contains(&scene_fragment));
+    assert!(passes[resolve_fragment].depends_on.contains(&compute));
+}
+
+#[test]
+fn unified_root_supports_structured_render_targets() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+type gbuffer = {
+  albedo: vec4f32,
+  normal: vec4f32,
+  depth: f32
+}
+
+entry deferred(coords: []vec2i32,
+               scene: render_target<gbuffer>,
+               surface: render_target<vec4f32>)
+    ([]f32, render_target<gbuffer>, render_target<vec4f32>) =
+  let geometry = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+      else @[-1.0, 3.0, 0.0, 1.0],
+      0.5)) in
+  let scene1 = shade(
+    scene, geometry,
+    |fragment| {
+      albedo = @[fragment.value, 0.2, 0.1, 1.0],
+      normal = @[0.0, 0.0, 1.0, 0.0],
+      depth = fragment.position.z
+    }) in
+  let depths = map(
+    |coord: vec2i32| target_load(scene1, coord, 0u32).depth,
+    coords) in
+  let fullscreen = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+      else @[-1.0, 3.0, 0.0, 1.0],
+      ())) in
+  let surface1 = shade(
+    surface, fullscreen,
+    |fragment|
+      let depth = depths[i32(fragment.position.x) % length(depths)] in
+      @[depth, depth, depth, 1.0]) in
+  (depths, scene1, surface1)
+"#,
+    )
+    .expect("structured render targets flow between graphics and compute");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    let crate::pipeline_descriptor::Pipeline::Graphics(geometry) = &lowered.pipeline.pipelines[0] else {
+        panic!("geometry pipeline")
+    };
+    assert_eq!(
+        geometry.fragment_outputs.iter().map(|output| output.name.as_str()).collect::<Vec<_>>(),
+        vec!["scene_albedo", "scene_normal", "scene_depth"]
+    );
+
+    let crate::pipeline_descriptor::Pipeline::Compute(depths) = &lowered.pipeline.pipelines[1] else {
+        panic!("depth processing pipeline")
+    };
+    let sampled_resources = depths
+        .bindings
+        .iter()
+        .filter_map(|binding| match binding {
+            crate::pipeline_descriptor::Binding::Texture {
+                resource: Some(resource),
+                ..
+            } => Some(resource.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sampled_resources,
+        vec!["scene_albedo", "scene_normal", "scene_depth"]
+    );
+}
 
 #[test]
 fn target_profiles_are_selected_before_ssa_lowering() {
-    let portable = crate::compile_thru_ssa("#[compute] entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
+    let portable = crate::compile_thru_ssa(" entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
         .expect("portable SSA");
     assert_eq!(
         portable.global_context.profile.target,
         crate::CodegenTarget::Portable
     );
 
-    let spirv = crate::compile_thru_spirv("#[compute] entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
+    let spirv = crate::compile_thru_spirv(" entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
         .expect("SPIR-V-targeted lowering");
     assert!(!spirv.spirv.is_empty());
 }
 
 #[test]
 fn terminal_scan_helpers_are_complete_region_arena_members() {
-    let source = "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)";
+    let source = " entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)";
     let allocated = compile_to_semantic_egir(source);
     assert!(
         !allocated.functions.iter().any(|function| function.name.ends_with("_scan_op_swap")),
@@ -2481,7 +2880,6 @@ fn assert_phase1_loop_depends_on_thread_id(src: &str) {
 fn compute_scalar_reduce_over_range_chunks_phase1() {
     assert_phase1_loop_depends_on_thread_id(
         r#"
-#[compute]
 entry mn(n: u32) u32 =
   let cands = map(|i: u32| i * 2654435761u32, 0u32..<n) in
   reduce(|a: u32, b: u32| if a < b then a else b, 4294967295u32, cands)
@@ -2497,7 +2895,6 @@ entry mn(n: u32) u32 =
 fn compute_soa_tuple_reduce_over_range_chunks_phase1() {
     assert_phase1_loop_depends_on_thread_id(
         r#"
-#[compute]
 entry mn(n: u32) (u32, [4]u32) =
   let cands = map(|i: u32| (i, [i, i, i, i]), 0u32..<n) in
   reduce(
@@ -2518,7 +2915,6 @@ fn tuple_reduce_writes_every_output_field() {
     use crate::pipeline_descriptor::{Binding, BufferUsage, Pipeline};
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry mn(n: u32) (u32, [4]u32) =
   let cands = map(|i: u32| (i, [i, i, i, i]), 0u32..<n) in
   reduce(
@@ -2582,7 +2978,6 @@ fn phase2_reduce_is_workgroup_parallel_tree() {
 
     let program = compile_to_ssa(
         r#"
-#[compute]
 entry sum(xs: []f32) f32 =
   reduce(|a: f32, b: f32| a + b, 0.0, xs)
 "#,
@@ -2634,7 +3029,6 @@ fn parallel_reduce_descriptor_wires_partials_and_original_output() {
     use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage, Pipeline};
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry sum(xs: []f32) f32 = reduce(|a: f32, b: f32| a + b, 0.0, xs)
 "#,
     )
@@ -2689,7 +3083,6 @@ fn mapped_reduce_with_phase1_capture_stays_parallel() {
     use crate::pipeline_descriptor::Pipeline;
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry scaled_sum(xs: []i32, scale: i32) i32 =
   reduce(|a: i32, b: i32| a + b, 0, map(|x: i32| x * scale, xs))
 "#,
@@ -2711,7 +3104,6 @@ fn captured_reduce_operator_stays_parallel() {
     use crate::pipeline_descriptor::Pipeline;
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry captured_reduce(xs: []i32, modes: []i32) i32 =
   reduce(
     |a: i32, b: i32| if modes[0] > 0 then a + b else a * b,
@@ -2742,7 +3134,6 @@ fn reduce_scalar_output_is_not_dispatch_sized() {
     use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage, Pipeline};
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry total(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#,
     )
@@ -2786,7 +3177,6 @@ fn parallel_scan_descriptor_wires_three_phases_and_scratch() {
     use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage, Pipeline};
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)
 "#,
     )
@@ -2837,7 +3227,6 @@ fn mapped_scan_with_phase1_capture_stays_parallel() {
     use crate::pipeline_descriptor::Pipeline;
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry scaled_prefix(xs: []i32, scale: i32) []i32 =
   scan(|a: i32, b: i32| a + b, 0, map(|x: i32| x * scale, xs))
 "#,
@@ -2859,7 +3248,6 @@ fn captured_scan_operator_stays_parallel() {
     use crate::pipeline_descriptor::Pipeline;
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry captured_scan(xs: []i32, modes: []i32) []i32 =
   scan(
     |a: i32, b: i32| if modes[0] > 0 then a + b else a * b,
@@ -2883,7 +3271,6 @@ fn tuple_element_scan_stays_parallel() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let source = r#"
-#[compute]
 entry tuple_prefixes(xs: [8](i32, i32)) [8](i32, i32) =
   scan(
     |(sum1, max1): (i32, i32), (sum2, max2): (i32, i32)|
@@ -2912,7 +3299,6 @@ fn range_map_dispatch_uses_range_length() {
     use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry generated() []i32 = map(|i: i32| i + 1, 0i32..<2048)
 "#,
     )
@@ -2947,7 +3333,6 @@ fn iota_map_returned_from_helper_keeps_dispatch_domain() {
 def f(n: i32) []f32 =
   map(|i| f32(i + n), iota(1024))
 
-#[compute]
 entry gen(events: []vec4f32) []f32 =
   f(0)
 "#;
@@ -2975,7 +3360,6 @@ fn scalar_prepass_and_consumer_share_one_scheduled_pipeline() {
     use crate::pipeline_descriptor::Pipeline;
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry add_sum(xs: []i32) []i32 =
   let total = reduce(|a: i32, b: i32| a + b, 0, xs) in
   map(|x: i32| x + total, xs)
@@ -3290,7 +3674,7 @@ fn assert_expensive_scalar_prefix_pipeline(lowered: &crate::Lowered, source_entr
 fn expensive_scalar_source_is_one_singleton_feeding_two_map_domains() {
     let source = format!(
         "{SCALAR_PRELUDE_FOLD}\n\
-         #[compute]\n\
+         \n\
          entry serial_prefix_before_maps(xs: []u32, ys: []u32, events: []u32) ([]u32, []u32) =\n\
            let state = fold_events(events)\n\
            let out_x = map(|x| x + state, xs)\n\
@@ -3305,7 +3689,6 @@ fn expensive_scalar_source_is_one_singleton_feeding_two_map_domains() {
 fn direct_loop_scalar_prefix_uses_the_general_residency_policy() {
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry direct_loop_prefix(xs: []u32, ys: []u32, events: []u32) ([]u32, []u32) =
   let state =
     loop state = 0u32 for k < 32 do
@@ -3329,7 +3712,6 @@ def serial_prefix(events: []i32) (i32, [1]i32) =
   loop (sum, last) = (0, [0]) for k < 32 do
     (sum + events[k], [events[k]])
 
-#[compute]
 entry serial_prefix_composite_two_maps(events: []i32) ([]i32, []i32) =
   let (sum, last) = serial_prefix(events) in
   (map(|i| i + sum + last[0], iota(1024)),
@@ -3396,7 +3778,6 @@ def serial_prefix(events: []i32) (i32, [1]i32) =
   loop (sum, last) = (0, [0]) for k < 32 do
     (sum + events[k], [events[k]])
 
-#[compute]
 entry serial_prefix_mixed_consumers(events: []i32)
   ([1]i32, []i32, []i32, [1]i32) =
   let (sum, last) = serial_prefix(events) in
@@ -3462,7 +3843,6 @@ fn mixed_fixed_parallel_output_preserves_independent_load_and_serial_prepass() {
 
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry mixed_fixed_parallel_prefix_ice(events: []i32) ([1]i32, []i32) =
   let sum = loop total = 0 for k < 1 do total + events[k] in
   ([events[0]], map(|i| i + sum, iota(1)))
@@ -3549,7 +3929,6 @@ def update_points(points_in: []i32, update: state_update, emitted: [2]i32)
 def update_items(items_in: []i32, update: state_update) []i32 =
   map(|i| items_in[i] + update.emit_count, iota(128))
 
-#[compute]
 entry mixed_fixed_parallel_prefix_ice(ui_in: []i32, points_in: []i32,
                                       items_in: []i32, head_in: []i32,
                                       events: []i32)
@@ -3624,7 +4003,7 @@ entry mixed_fixed_parallel_prefix_ice(ui_in: []i32, points_in: []i32,
 fn conditional_scalar_prefix_uses_the_general_residency_policy() {
     let source = format!(
         "{SCALAR_PRELUDE_FOLD}\n\
-         #[compute]\n\
+         \n\
          entry conditional_prefix(xs: []u32, ys: []u32, events: []u32) ([]u32, []u32) =\n\
            let state = if events[0] == 0u32\n\
                        then fold_events(events)\n\
@@ -3641,7 +4020,7 @@ fn conditional_scalar_prefix_uses_the_general_residency_policy() {
 fn expensive_scalar_source_is_profitable_for_one_map() {
     let source = format!(
         "{SCALAR_PRELUDE_FOLD}\n\
-         #[compute]\n\
+         \n\
          entry serial_prefix_one_map(xs: []u32, events: []u32) []u32 =\n\
            let state = fold_events(events) in\n\
            map(|x| x + state, xs)\n"
@@ -3650,467 +4029,6 @@ fn expensive_scalar_source_is_profitable_for_one_map() {
     let stages = &scalar_prelude_pipeline(&lowered, "serial_prefix_one_map").stages;
     assert_eq!(stages.len(), 2, "one singleton and one map stage");
     assert_eq!(stages.iter().filter(|stage| is_singleton_stage(stage)).count(), 1);
-}
-
-#[test]
-fn mixed_stage_call_lifts_its_uniform_subgraph_into_a_scalar_prepass() {
-    let lowered = crate::compile_thru_spirv(
-        r#"
-type frame_globals = { factor: i32 }
-
-def mix_lane_with_frame(x: i32, frame: frame_globals) i32 =
-  let a0 = frame.factor * 1664525 + 1013904223
-  let a1 = a0 * 1664525 + 1013904223
-  let a2 = a1 * 1664525 + 1013904223
-  let a3 = a2 * 1664525 + 1013904223
-  let a4 = a3 * 1664525 + 1013904223
-  let a5 = a4 * 1664525 + 1013904223
-  let a6 = a5 * 1664525 + 1013904223
-  let a7 = a6 * 1664525 + 1013904223
-  let a8 = a7 * 1664525 + 1013904223
-  let a9 = a8 * 1664525 + 1013904223
-  let a10 = a9 * 1664525 + 1013904223
-  let a11 = a10 * 1664525 + 1013904223 in
-  x ^ a11
-
-#[compute]
-entry mixed_stage_uniform_call(
-    #[uniform(set=1, binding=0)] frame: frame_globals) []i32 =
-  map(|i| mix_lane_with_frame(i, frame), iota(1024))
-"#,
-    )
-    .expect("mixed-stage pure call compiles");
-    let pipeline = scalar_prelude_pipeline(&lowered, "mixed_stage_uniform_call");
-    let stages = &pipeline.stages;
-    assert_eq!(stages.len(), 2, "one uniform producer and one map stage");
-    assert_eq!(stages.iter().filter(|stage| is_singleton_stage(stage)).count(), 1);
-    assert!(pipeline.bindings.iter().any(|binding| {
-        matches!(binding, crate::pipeline_descriptor::Binding::Uniform { name, .. } if name == "frame")
-    }));
-    let map = stages.iter().find(|stage| !is_singleton_stage(stage)).unwrap();
-    assert!(
-        !spirv_entry_interface_has_binding(&lowered.spirv, &map.entry_point, 1, 0),
-        "the consumer interface contains only the scalar handoff, not the original uniform"
-    );
-}
-
-#[test]
-fn direct_compute_mixed_stage_call_uses_a_generated_scalar_prepass() {
-    let source = r#"
-type frame_globals = { factor: f32 }
-
-def mix_compute_with_frame(gid: vec3u32, frame: frame_globals) vec4f32 =
-  let a0 = frame.factor * 1.01 + 0.01
-  let a1 = a0 * 1.01 + 0.01
-  let a2 = a1 * 1.01 + 0.01
-  let a3 = a2 * 1.01 + 0.01
-  let a4 = a3 * 1.01 + 0.01
-  let a5 = a4 * 1.01 + 0.01
-  let a6 = a5 * 1.01 + 0.01
-  let a7 = a6 * 1.01 + 0.01
-  let a8 = a7 * 1.01 + 0.01
-  let a9 = a8 * 1.01 + 0.01
-  let a10 = a9 * 1.01 + 0.01
-  let a11 = a10 * 1.01 + 0.01 in
-  @[a11 + f32(gid.x), f32(gid.y), 0.0, 1.0]
-
-resource compute_out: image2d {
-  format = rgba32float
-  size = 64x64
-  usages = [storage_write]
-}
-
-#[compute]
-entry compute_main(
-    #[builtin(global_invocation_id)] gid: vec3u32,
-    #[uniform(set=1, binding=0)] frame: frame_globals,
-    #[view(compute_out, storage_write)] output: *storage_image) () =
-  let xy = @[i32(gid.x), i32(gid.y)] in
-  output with [xy] = mix_compute_with_frame(gid, frame)
-"#;
-    let lowered = crate::compile_thru_spirv(source).expect("mixed-stage direct compute call compiles");
-
-    let pipeline = scalar_prelude_pipeline(&lowered, "compute_main");
-    assert_eq!(
-        pipeline.stages.len(),
-        2,
-        "one uniform producer and one compute stage"
-    );
-    let prepass = pipeline
-        .stages
-        .iter()
-        .find(|stage| is_singleton_stage(stage))
-        .expect("direct compute uniform work has a singleton prepass");
-    assert!(prepass.entry_point.contains("compute_main_prepass_scalar"));
-    assert!(spirv_entry_interface_has_binding(
-        &lowered.spirv,
-        &prepass.entry_point,
-        1,
-        0
-    ));
-    assert!(
-        !spirv_entry_interface_has_binding(&lowered.spirv, "compute_main", 1, 0),
-        "the compute stage receives only the scalar handoff"
-    );
-    assert_scalar_prefix_emits_valid_wgsl(source);
-}
-
-#[test]
-fn cheap_direct_compute_uniform_expression_stays_in_the_compute_stage() {
-    let lowered = crate::compile_thru_spirv(
-        r#"
-resource compute_out: image2d {
-  format = rgba32float
-  size = 64x64
-  usages = [storage_write]
-}
-
-#[compute]
-entry compute_main(
-    #[builtin(global_invocation_id)] gid: vec3u32,
-    #[uniform(set=1, binding=0)] factor: f32,
-    #[view(compute_out, storage_write)] output: *storage_image) () =
-  let xy = @[i32(gid.x), i32(gid.y)] in
-  output with [xy] = @[f32(gid.x) + factor, f32(gid.y), 0.0, 1.0]
-"#,
-    )
-    .expect("cheap uniform direct compute expression compiles");
-
-    let pipeline = scalar_prelude_pipeline(&lowered, "compute_main");
-    assert_eq!(pipeline.stages.len(), 1, "cheap work must not create a prepass");
-    assert!(spirv_entry_interface_has_binding(
-        &lowered.spirv,
-        "compute_main",
-        1,
-        0
-    ));
-}
-
-#[test]
-fn known_direct_compute_dispatch_makes_a_moderate_uniform_prefix_profitable() {
-    let lowered = crate::compile_thru_spirv(
-        r#"
-type frame_globals = { factor: f32 }
-
-def mix_compute_with_frame(gid: vec3u32, frame: frame_globals) vec4f32 =
-  let a0 = frame.factor * 1.01 + 0.01
-  let a1 = a0 * 1.01 + 0.01
-  let a2 = a1 * 1.01 + 0.01
-  let a3 = a2 * 1.01 + 0.01 in
-  @[a3 + f32(gid.x), f32(gid.y), 0.0, 1.0]
-
-resource compute_out: image2d {
-  format = rgba32float
-  size = window
-  usages = [storage_write]
-}
-
-#[compute]
-#[dispatch(8, 8)]
-entry compute_main(
-    #[builtin(global_invocation_id)] gid: vec3u32,
-    #[uniform(set=1, binding=0)] frame: frame_globals,
-    #[view(compute_out, storage_write)] output: *storage_image) () =
-  let xy = @[i32(gid.x), i32(gid.y)] in
-  output with [xy] = mix_compute_with_frame(gid, frame)
-"#,
-    )
-    .expect("known-dispatch direct compute call compiles");
-
-    let pipeline = scalar_prelude_pipeline(&lowered, "compute_main");
-    assert_eq!(
-        pipeline.stages.len(),
-        2,
-        "the known 8x8 workgroup grid should make the moderate prefix profitable"
-    );
-    assert_eq!(
-        pipeline.stages.iter().filter(|stage| is_singleton_stage(stage)).count(),
-        1
-    );
-}
-
-#[test]
-fn fragment_mixed_stage_call_uses_a_generated_scalar_prepass() {
-    use crate::pipeline_descriptor::{Access, Binding, BufferLen, BufferUsage, Pipeline};
-
-    let source = r#"
-type frame_globals = { light: vec3f32 }
-
-def mix_fragment_with_frame(pos: vec4f32, frame: frame_globals) vec4f32 =
-  let a0 = frame.light * 1.01 + @[0.01, 0.01, 0.01]
-  let a1 = a0 * 1.01 + @[0.01, 0.01, 0.01]
-  let a2 = a1 * 1.01 + @[0.01, 0.01, 0.01]
-  let a3 = a2 * 1.01 + @[0.01, 0.01, 0.01]
-  let a4 = a3 * 1.01 + @[0.01, 0.01, 0.01]
-  let a5 = a4 * 1.01 + @[0.01, 0.01, 0.01]
-  let a6 = a5 * 1.01 + @[0.01, 0.01, 0.01]
-  let a7 = a6 * 1.01 + @[0.01, 0.01, 0.01]
-  let a8 = a7 * 1.01 + @[0.01, 0.01, 0.01]
-  let a9 = a8 * 1.01 + @[0.01, 0.01, 0.01]
-  let a10 = a9 * 1.01 + @[0.01, 0.01, 0.01]
-  let a11 = a10 * 1.01 + @[0.01, 0.01, 0.01] in
-  pos + @[a11.x, a11.y, a11.z, 0.0]
-
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
-  if vid == 0 then @[-1.0, -1.0, 0.0, 1.0]
-  else if vid == 1 then @[3.0, -1.0, 0.0, 1.0]
-  else @[-1.0, 3.0, 0.0, 1.0]
-
-#[fragment]
-entry fragment_main(
-    #[uniform(set=1, binding=0)] frame: frame_globals,
-    #[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
-  mix_fragment_with_frame(pos, frame)
-"#;
-    let converted = crate::compile_thru_ssa(source).expect("mixed-stage fragment call compiles");
-    let prepass_phase = converted
-        .global_context
-        .kernel_plan
-        .phases()
-        .find(|phase| phase.entry_point.contains("fragment_main_prepass_scalar"))
-        .expect("kernel plan contains the fragment scalar prepass");
-    let consumer_phase = converted
-        .global_context
-        .kernel_plan
-        .phases()
-        .find(|phase| phase.entry_point == "fragment_main")
-        .expect("kernel plan contains the fragment consumer");
-    assert!(
-        consumer_phase.dependencies.contains(&prepass_phase.id),
-        "graphics consumer explicitly depends on its standalone compute prepass"
-    );
-    let lowered = crate::lower_ssa_to_spirv(converted).expect("mixed-stage fragment SSA lowers to SPIR-V");
-
-    let (prepass_pipeline, prepass) = lowered
-        .pipeline
-        .pipelines
-        .iter()
-        .find_map(|pipeline| match pipeline {
-            Pipeline::Compute(compute) => compute
-                .stages
-                .iter()
-                .find(|stage| stage.entry_point.contains("fragment_main_prepass_scalar"))
-                .map(|stage| (compute, stage)),
-            Pipeline::Graphics(_) => None,
-        })
-        .expect("fragment uniform work has a generated compute prepass");
-    assert_eq!(prepass.owner, "fragment_main");
-    assert!(prepass.entry_point.starts_with("fragment_main_"));
-    let graphics = lowered
-        .pipeline
-        .pipelines
-        .iter()
-        .find_map(|pipeline| match pipeline {
-            Pipeline::Graphics(graphics)
-                if graphics.stages.iter().any(|stage| stage.entry_point == "fragment_main") =>
-            {
-                Some(graphics)
-            }
-            _ => None,
-        })
-        .expect("fragment graphics pipeline");
-    let (handoff_index, handoff_set, handoff_binding, handoff_name, handoff_resource) = graphics
-        .bindings
-        .iter()
-        .enumerate()
-        .find_map(|(index, binding)| match binding {
-            Binding::StorageBuffer {
-                set,
-                binding,
-                usage: BufferUsage::Intermediate,
-                access: Access::ReadOnly,
-                name,
-                resource,
-                length: Some(BufferLen::Fixed { bytes: 16 }),
-                ..
-            } => Some((index, *set, *binding, name.clone(), resource.clone())),
-            _ => None,
-        })
-        .expect("graphics pipeline has a read-only scalar handoff");
-    let fragment_stage =
-        graphics.stages.iter().find(|stage| stage.entry_point == "fragment_main").expect("fragment stage");
-    assert_eq!(fragment_stage.owner, "fragment_main");
-    assert!(fragment_stage.reads.contains(&handoff_index));
-    assert!(!fragment_stage.writes.contains(&handoff_index));
-
-    let (producer_name, producer_resource) = prepass_pipeline
-        .bindings
-        .iter()
-        .find_map(|binding| match binding {
-            Binding::StorageBuffer {
-                set,
-                binding,
-                usage: BufferUsage::Intermediate,
-                name,
-                resource,
-                ..
-            } if (*set, *binding) == (handoff_set, handoff_binding) => Some((name, resource)),
-            _ => None,
-        })
-        .expect("prepass publishes the scalar handoff");
-    assert_ne!(producer_name, &handoff_name, "bindings retain entry-local names");
-    assert!(
-        handoff_resource.is_some(),
-        "compiler handoff has a logical resource"
-    );
-    assert_eq!(
-        producer_resource, &handoff_resource,
-        "producer and consumer share one resource"
-    );
-
-    let frame_graph = &lowered.pipeline.frame_graph;
-    let producer_pass = frame_graph
-        .passes
-        .iter()
-        .position(|pass| pass.name == prepass.entry_point)
-        .expect("prepass is published as a frame-graph pass");
-    let consumer_pass = frame_graph
-        .passes
-        .iter()
-        .position(|pass| pass.name == "fragment_main")
-        .expect("fragment is published as a frame-graph pass");
-    assert!(
-        frame_graph.passes[consumer_pass].depends_on.contains(&producer_pass),
-        "graphics consumer must depend on its scalar prepass"
-    );
-    let order = frame_graph.topological_order().expect("prepass/graphics frame graph is acyclic");
-    assert!(
-        order.iter().position(|pass| *pass == producer_pass)
-            < order.iter().position(|pass| *pass == consumer_pass),
-        "the producer must execute before the graphics consumer"
-    );
-
-    assert_eq!(
-        spirv_entry_storage_binding_is_writable(
-            &lowered.spirv,
-            &prepass.entry_point,
-            handoff_set,
-            handoff_binding,
-        ),
-        Some(true),
-        "the compute prepass must use the writable handoff variable"
-    );
-    assert_eq!(
-        spirv_entry_storage_binding_is_writable(
-            &lowered.spirv,
-            "fragment_main",
-            handoff_set,
-            handoff_binding,
-        ),
-        Some(false),
-        "the fragment entry must use a distinct NonWritable variable"
-    );
-
-    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
-        compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
-    ))
-    .expect("mixed-stage fragment call lowers to WGSL");
-    let read_name = format!("_buf_{handoff_set}_{handoff_binding}_read");
-    let write_name = format!("_buf_{handoff_set}_{handoff_binding}_read_write");
-    assert!(wgsl.contains(&format!("var<storage, read> {read_name}:")));
-    assert!(wgsl.contains(&format!("var<storage, read_write> {write_name}:")));
-    let module = naga::front::wgsl::parse_str(&wgsl)
-        .unwrap_or_else(|error| panic!("Naga rejected generated WGSL: {error:?}\n{wgsl}"));
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap_or_else(|error| panic!("Naga validation failed: {error:?}\n{wgsl}"));
-}
-
-#[test]
-fn cheap_fragment_uniform_expression_stays_in_the_fragment_stage() {
-    use crate::pipeline_descriptor::Pipeline;
-
-    let lowered = crate::compile_thru_spirv(
-        r#"
-#[fragment]
-entry fragment_main(
-    #[uniform(set=1, binding=0)] factor: f32,
-    #[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
-  pos + @[factor, factor, factor, 0.0]
-"#,
-    )
-    .expect("cheap uniform fragment expression compiles");
-    assert!(lowered.pipeline.pipelines.iter().all(|pipeline| {
-        !matches!(pipeline, Pipeline::Compute(compute)
-            if compute.stages.iter().any(|stage| stage.entry_point.contains("prepass_scalar")))
-    }));
-    assert!(spirv_entry_interface_has_binding(
-        &lowered.spirv,
-        "fragment_main",
-        1,
-        0
-    ));
-}
-
-#[test]
-fn sibling_fragment_uniform_roots_share_one_generated_prepass() {
-    use crate::pipeline_descriptor::Pipeline;
-
-    let lowered = crate::compile_thru_spirv(
-        r#"
-type frame_globals = { first: f32, second: f32 }
-
-def shade(pos: vec4f32, frame: frame_globals) vec4f32 =
-  let a0 = frame.first * 1.01 + 0.01
-  let a1 = a0 * 1.01 + 0.01
-  let a2 = a1 * 1.01 + 0.01
-  let a3 = a2 * 1.01 + 0.01
-  let a4 = a3 * 1.01 + 0.01
-  let a5 = a4 * 1.01 + 0.01
-  let a6 = a5 * 1.01 + 0.01
-  let a7 = a6 * 1.01 + 0.01
-  let b0 = frame.second * 1.02 + 0.02
-  let b1 = b0 * 1.02 + 0.02
-  let b2 = b1 * 1.02 + 0.02
-  let b3 = b2 * 1.02 + 0.02
-  let b4 = b3 * 1.02 + 0.02
-  let b5 = b4 * 1.02 + 0.02
-  let b6 = b5 * 1.02 + 0.02
-  let b7 = b6 * 1.02 + 0.02 in
-  @[pos.x * a7, pos.y * b7, pos.z, 1.0]
-
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
-  if vid == 0 then @[-1.0, -1.0, 0.0, 1.0]
-  else if vid == 1 then @[3.0, -1.0, 0.0, 1.0]
-  else @[-1.0, 3.0, 0.0, 1.0]
-
-#[fragment]
-entry fragment_main(
-    #[uniform(set=1, binding=0)] frame: frame_globals,
-    #[builtin(position)] pos: vec4f32,
-    #[texture(set=0, binding=0)] tex: texture2d,
-    #[sampler(set=0, binding=1)] samp: sampler) #[target(screen)] vec4f32 =
-  shade(pos, frame) + texture_sample(tex, samp, @[pos.x / 1024.0, pos.y / 1024.0], 0.0)
-"#,
-    )
-    .expect("fragment with sibling uniform roots compiles");
-
-    let prepasses = lowered
-        .pipeline
-        .pipelines
-        .iter()
-        .flat_map(|pipeline| match pipeline {
-            Pipeline::Compute(compute) => compute.stages.iter().collect::<Vec<_>>(),
-            Pipeline::Graphics(_) => Vec::new(),
-        })
-        .filter(|stage| stage.entry_point.contains("fragment_main_prepass_scalar"))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        prepasses.len(),
-        1,
-        "sibling roots should share one singleton launch"
-    );
-    assert_eq!(
-        prepasses[0].writes.len(),
-        2,
-        "the shared prepass publishes both roots"
-    );
 }
 
 fn assert_scalar_prefix_emits_valid_wgsl(source: &str) {
@@ -4133,7 +4051,7 @@ fn assert_scalar_prefix_emits_valid_wgsl(source: &str) {
 fn expensive_scalar_source_emits_valid_wgsl() {
     let source = format!(
         "{SCALAR_PRELUDE_FOLD}\n\
-         #[compute]\n\
+         \n\
          entry serial_prefix_wgsl(xs: []u32, events: []u32) []u32 =\n\
            let state = fold_events(events) in\n\
            map(|x| x + state, xs)\n"
@@ -4145,7 +4063,6 @@ fn expensive_scalar_source_emits_valid_wgsl() {
 fn structured_scalar_prefix_emits_valid_wgsl() {
     assert_scalar_prefix_emits_valid_wgsl(
         r#"
-#[compute]
 entry direct_loop_prefix_wgsl(xs: []u32, events: []u32) []u32 =
   let state =
     loop state = 0u32 for k < 32 do
@@ -4159,7 +4076,6 @@ entry direct_loop_prefix_wgsl(xs: []u32, events: []u32) []u32 =
 fn cheap_scalar_source_stays_cloned_into_two_maps() {
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry cheap_prefix(xs: []u32, ys: []u32, factor: u32) ([]u32, []u32) =
   let state = factor * 3u32
   let out_x = map(|x| x + state, xs)
@@ -4189,7 +4105,6 @@ fn scalar_prepass_flow_is_explicit_in_resource_manifest() {
 
     let allocated = compile_to_semantic_egir(
         r#"
-#[compute]
 entry add_sum(xs: []i32) []i32 =
   let total = reduce(|a: i32, b: i32| a + b, 0, xs) in
   map(|x: i32| x + total, xs)
@@ -4463,8 +4378,8 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::stage::Reachable, stage: &st
 #[test]
 fn let_binding_substitution_survives_partial_eval() {
     let source = r#"
-#[fragment]
-entry frag() #[target(screen)] vec4f32 =
+
+entry frag() vec4f32 =
     let range = [1, 2, 3, 4] in
     @[f32.i32(range[0]), 0.0, 0.0, 1.0]
 "#;
@@ -4540,8 +4455,8 @@ fn consuming_scan_skips_fresh_allocation() {
     // (which `force_inline_soac_helpers` would collapse).
     let dead_after_ssa = compile_to_ssa(
         r#"
-#[fragment]
-entry frag(c: vec4f32) #[target(screen)] vec4f32 =
+
+entry frag(c: vec4f32) vec4f32 =
     let xs = [1, 2, 3, 4, 5, 6, 7, 8] in
     let r = scan(|acc: i32, x: i32| acc + x, 0, xs) in
     @[f32.i32(r[0]), f32.i32(r[1]), 0.0, 0.0]
@@ -4555,8 +4470,8 @@ entry frag(c: vec4f32) #[target(screen)] vec4f32 =
 
     let aliased_ssa = compile_to_ssa(
         r#"
-#[fragment]
-entry frag(c: vec4f32) #[target(screen)] vec4f32 =
+
+entry frag(c: vec4f32) vec4f32 =
     let xs = [1, 2, 3, 4, 5, 6, 7, 8] in
     let r = scan(|acc: i32, x: i32| acc + x, 0, xs) in
     let j = i32.f32(c.x) % 8 in
@@ -4587,7 +4502,6 @@ fn consuming_scan_compute_entry_compiles_to_spirv() {
     //    extracting buffer_id from a runtime struct field.
     let spv = compile_to_spirv(
         r#"
-#[compute]
 entry scan_inplace(a: *[]i32) []i32 =
   scan(|acc: i32, x: i32| acc + x, 0, a)
 "#,
@@ -4607,7 +4521,6 @@ fn parallel_scan_emits_swap_wrapper_with_swapped_args() {
     // phase 3 through it; this test pins that wiring in SSA.
     let ssa = compile_to_ssa(
         r#"
-#[compute]
 entry parallel_scan(a: []i32) []i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
 "#,
     );
@@ -4678,7 +4591,7 @@ fn consuming_filter_skips_fresh_allocation() {
         r#"
 def keep_pos(a: *[8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
 
-#[fragment]
+
 entry frag(c: vec4f32) vec4f32 =
     let r = keep_pos([1, -2, 3, -4, 5, -6, 7, -8]) in
     @[f32.i32(r[0]), 0.0, 0.0, 1.0]
@@ -4694,7 +4607,7 @@ entry frag(c: vec4f32) vec4f32 =
         r#"
 def keep_pos(a: [8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
 
-#[fragment]
+
 entry frag(c: vec4f32) vec4f32 =
     let r = keep_pos([1, -2, 3, -4, 5, -6, 7, -8]) in
     @[f32.i32(r[0]), 0.0, 0.0, 1.0]
@@ -4794,8 +4707,8 @@ fn filter_length_is_runtime_count_not_static_capacity() {
     // not short-circuited to the literal capacity.
     let ssa = compile_to_ssa(
         r#"
-#[fragment]
-entry frag(c: vec4f32) #[target(screen)] vec4f32 =
+
+entry frag(c: vec4f32) vec4f32 =
     let r = filter(|x: i32| x > 0, [1, -2, 3, -4]) in
     @[f32.i32(length(r)), f32.i32(r[0]), f32.i32(r[1]), 1.0]
 "#,
@@ -4824,8 +4737,8 @@ def myMap(ro: f32, rd: f32) [4]f32 =
 def myReduce(hits: [4]f32) f32 =
   reduce(|acc: f32, x: f32| if acc < x then acc else x, 999.0, hits)
 
-#[fragment]
-entry fragment_main() #[target(screen)] vec4f32 =
+
+entry fragment_main() vec4f32 =
   let hits = myMap(1.0, 2.0) in
   let closest = myReduce(hits) in
   @[closest, 0.0, 0.0, 1.0]
@@ -4864,7 +4777,6 @@ fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
 #[test]
 fn test_screma_fusion_end_to_end() {
     let source = r#"
-#[compute]
 entry gen(xs: []i32) ([]i32, [1]i32) =
   let b = map(|x: i32| x + 1, xs) in
   let c = map(|y: i32| y * 2, b) in
@@ -4885,7 +4797,6 @@ entry gen(xs: []i32) ([]i32, [1]i32) =
 #[test]
 fn test_screma_scan_fusion_end_to_end() {
     let source = r#"
-#[compute]
 entry gen(xs: []i32) ([]i32, []i32) =
   let b = map(|x: i32| x + 1, xs) in
   let c = map(|y: i32| y * 2, b) in
@@ -4906,7 +4817,6 @@ entry gen(xs: []i32) ([]i32, []i32) =
 #[test]
 fn test_screma_multi_output_fusion_end_to_end() {
     let source = r#"
-#[compute]
 entry gen(xs: []i32) ([]i32, []i32, [1]i32, []i32) =
   let b = map(|x: i32| x + 1, xs) in
   let c = map(|y: i32| y * 2, b) in
@@ -4946,7 +4856,6 @@ entry gen(xs: []i32) ([]i32, []i32, [1]i32, []i32) =
 fn test_multi_output_compute_runtime_sized_arrays() {
     let _ssa = compile_to_ssa(
         r#"
-#[compute]
 entry gen(src: []f32) ([]f32, []f32) =
     (map(|x: f32| x * 2.0, src), map(|x: f32| x * 3.0, src))
 "#,
@@ -4965,7 +4874,6 @@ fn multidomain_split_with_shared_domain_map_pair_compiles() {
     use crate::pipeline_descriptor::Pipeline;
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry r(a: []u32, b: []u32, c: []u32, st: []f32)
   ([2]f32, []u32, []u32, []u32, []u32) =
   let g = st[0] in
@@ -5007,7 +4915,6 @@ fn captured_loop_bodied_sibling_maps_fuse_to_one_stage() {
 
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry geom(ids: []u32, params: []f32) ([]f32, []f32) =
   let scale = params[0] in
   let bias = params[1] in
@@ -5051,7 +4958,6 @@ entry geom(ids: []u32, params: []f32) ([]f32, []f32) =
 #[test]
 fn fused_sibling_maps_keep_each_lanes_own_body() {
     let source = r#"
-#[compute]
 entry two(ids: []u32, params: []f32) ([]f32, []f32) =
   let a = params[0] in
   let b = params[1] in
@@ -5094,8 +5000,7 @@ entry two(ids: []u32, params: []f32) ([]f32, []f32) =
 fn inplace_clear_feeding_scatter_stays_wired() {
     use crate::pipeline_descriptor::Pipeline;
     let src = r#"
-#[compute]
-entry sim(#[storage(set=2, binding=1, access=write)] fb: *[]u32, pos: []u32) []u32 =
+entry sim(fb: *[]u32, pos: []u32) []u32 =
   let cleared = map(|_p: u32| 0u32, fb) in
   let idxs = map(|p: u32| i32.u32(p), pos) in
   let vals = map(|_p: u32| 1u32, pos) in
@@ -5133,8 +5038,7 @@ fn multidomain_split_runs_shared_scatter_in_one_kernel() {
     use crate::pipeline_descriptor::Pipeline;
     use crate::ssa::types::ControlHeader;
     let src = r#"
-#[compute]
-entry r(a: []u32, b: []u32, #[storage(set=2, binding=0, access=write)] fb: *[]u32, pos: []u32)
+entry r(a: []u32, b: []u32, fb: *[]u32, pos: []u32)
   ([]u32, []u32) =
   let cleared = map(|_p: u32| 0u32, fb) in
   let idxs = map(|p: u32| i32.u32(p), pos) in
@@ -5191,7 +5095,6 @@ entry r(a: []u32, b: []u32, #[storage(set=2, binding=0, access=write)] fb: *[]u3
 fn multidomain_maps_split_into_per_domain_stages() {
     use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
     let source = r#"
-#[compute]
 entry two(a: []f32, b: []f32) ([]f32, []f32) =
     (map(|x: f32| x + 1.0, a), map(|x: f32| x + 2.0, b))
 "#;
@@ -5241,7 +5144,6 @@ fn multidomain_input_storage_keeps_nonwritable_decoration() {
 
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry gen(data: []f32) ([]f32, []f32) =
   (map(|i| data[i] + 1.0, iota(1024)),
    map(|i| data[i] * 2.0, iota(128)))
@@ -5307,7 +5209,6 @@ fn equal_domain_independent_sibling_maps_remain_separate() {
     use crate::pipeline_descriptor::{DispatchSize, Pipeline};
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry eqn<[n]>(xs: [n]f32, ys: [n]f32) ([n]f32, [n]f32) =
     (map(|x: f32| x + 1.0, xs), map(|y: f32| y + 2.0, ys))
 "#,
@@ -5342,7 +5243,6 @@ fn split_stage_reads_include_storage_behind_scalar_producer() {
     use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize, Pipeline};
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry cap(a: []f32, b: []f32, table: []f32) ([]f32, []f32) =
     let scalar = table[0] in
     (map(|x: f32| x + scalar, a), map(|y: f32| y + scalar, b))
@@ -5429,7 +5329,6 @@ fn same_symbol_sibling_maps_fuse_to_one_stage() {
     use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry same(xs: []f32) ([]f32, []f32) =
     (map(|x: f32| x + 1.0, xs), map(|x: f32| x + 2.0, xs))
 "#,
@@ -5477,8 +5376,8 @@ def with_if(x: bool) i32 = if x then 1 else 0
 
 def with_ops(x: i32, y: i32) i32 = x * y + x / y - (-x)
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let b = add(1, 2) in
     let c = with_let(3, 4) in
     let d = with_if(true) in
@@ -5511,8 +5410,8 @@ def nested_tuple: i32 =
 
 def array_index(arr: [4]i32, i: i32) i32 = arr[i]
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let a = arr[0] in
     let b = record.x in
     let c = tuple_destruct in
@@ -5542,8 +5441,8 @@ def sum_pair(t: (i32, i32)) i32 = t.0 + t.1
 def nested(t: ((i32, i32), f32)) i32 =
     let inner = t.0 in inner.0 + inner.1
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let t = (42, 3.14) in
     let a = first(t) in
     let b = sum_pair((1, 2)) in
@@ -5571,8 +5470,8 @@ def for_range_loop: i32 =
 def for_in_loop(arr: [5]i32) i32 =
     loop acc = 0 for x in arr do acc + x
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let a = while_loop in
     let b = for_range_loop in
     let c = for_in_loop([1, 2, 3, 4, 5]) in
@@ -5610,8 +5509,8 @@ def direct_call: i32 =
     let inc = |x: i32| x + 1 in
     inc(5)
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let b = with_capture(10) in
     let c = nested_lambda(100) in
     let d = tuple_param_lambda in
@@ -5657,8 +5556,8 @@ def filter_positive(arr: [5]i32) ?k. [k]i32 =
 def filter_lambda(arr: [4]i32) ?k. [k]i32 =
     filter(|x: i32| x % 2 == 0, arr)
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let a = map_named([1, 2, 3, 4]) in
     let b = map_lambda([1, 2, 3, 4]) in
     let c = map_with_capture([1, 2, 3, 4], 10) in
@@ -5704,8 +5603,8 @@ def hof_chain(scale: i32, offset: i32, arr: [4]i32) i32 =
     let shifted = map(|x: i32| x + offset, scaled) in
     reduce(|a: i32, b: i32| a + b, 0, shifted)
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let (a, b) = different_captures(1, 2, [1, 2, 3, 4]) in
     let c = nested_capture(10, [1, 2, 3, 4]) in
     let (d, e) = reused_lambda(5, [1, 2, 3, 4], [5, 6, 7, 8]) in
@@ -5773,7 +5672,6 @@ def f(seed: f32) [4]f32 =
             in (i + 1, arr')
     in out
 
-#[compute]
 entry main(x: []f32) [4]f32 = f(x[0])
 "#;
     compile_to_spirv(source).expect(
@@ -5793,9 +5691,9 @@ fn test_no_overhoist_fused_reduce_through_let_bound_dependency() {
     let source = r#"
 def cands: [12]i32 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
-#[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
-  #[target(screen)] vec4f32 =
+
+entry fragment_main(fragCoord: vec4f32)
+  vec4f32 =
   let uv = fragCoord.x in
   let glows = map(|i: i32| uv + f32.i32(i), cands) in
   let total = reduce(|a: f32, b: f32| a + b, 0.0, glows) in
@@ -5816,9 +5714,9 @@ fn test_graphical_fused_reduce_carries_local_scalar_into_prepass() {
     let source = r#"
 def globalData: [12]f32 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32)
-  #[builtin(position)] vec4f32 =
+
+entry vertex_main(vid: i32)
+  vec4f32 =
   let x = 2.0 in
   let total = reduce(
     |acc: f32, value: f32| acc + value,
@@ -5850,9 +5748,9 @@ def shade(lightDir: vec3f32) f32 =
     map(|value: f32| value * lightDir.x, globalData)
   )
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32)
-  #[builtin(position)] vec4f32 =
+
+entry vertex_main(vid: i32)
+  vec4f32 =
   let total = shade(lightDir) in
   @[total, 0.0, 0.0, 1.0]
 "#;
@@ -5873,63 +5771,13 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32)
 /// separate entry, it must re-declare the uniform as its own `#[uniform]`
 /// param; without that, codegen panics with `Unknown global: iTime`.
 #[test]
-fn test_uniform_driven_reduce_lifts_into_prepass() {
-    let source = r#"
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32)
-  #[builtin(position)] vec4f32 =
-  @[-1.0, -1.0, 0.0, 1.0]
-
-#[fragment]
-entry fragment_main(
-  #[uniform(set=1, binding=0)] iTime: f32,
-  #[builtin(position)] fragCoord: vec4f32
-) #[target(screen)] vec4f32 =
-  let samples = map(|i: i32| f32.cos(iTime + f32.i32(i)), 0..<64) in
-  let breath = reduce(|a: f32, b: f32| a + b, 0.0, samples) in
-  @[breath, 0.0, 0.0, 1.0]
-"#;
-
-    // The uniform-driven reduce becomes a compute pre-pass with phase1 and
-    // phase2 compute entries.
-    let ssa = compile_to_ssa_with_modules(source);
-    let compute_entries: Vec<&str> = ssa
-        .entry_points
-        .iter()
-        .filter(|e| {
-            matches!(
-                e.execution_model,
-                crate::ssa::types::ExecutionModel::Compute { .. }
-            )
-        })
-        .map(|e| e.name.as_str())
-        .collect();
-    assert!(
-        compute_entries.iter().any(|n| n.contains("prepass")),
-        "uniform-driven reduce should lift into a compute pre-pass; \
-         compute entries were {:?}",
-        compute_entries
-    );
-
-    // ...and the lifted result must still compile: the pre-pass re-declares
-    // iTime as its own uniform, so codegen resolves it (no `Unknown global`).
-    compile_to_spirv(source).expect(
-        "a fragment reduce depending only on a uniform must lift into a \
-         compute pre-pass that re-declares the uniform and compiles to SPIR-V",
-    );
-}
-
-/// Uniform discovery must include pulled local definitions, not only direct
-/// free variables of the reduction. Here the reduction captures `scale`, and
-/// only `scale`'s definition references the entry uniform.
-#[test]
 fn test_uniform_reached_through_local_prepass_dependency_is_redeclared() {
     let source = r#"
 def samples: [12]f32 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
 
-#[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32)
-  #[target(screen)] vec4f32 =
+
+entry fragment_main(iTime: f32)
+  vec4f32 =
   let scale = iTime * 2.0 in
   let total = reduce(
     |acc: f32, value: f32| acc + value,
@@ -5969,8 +5817,8 @@ def no_materialize_loop_tuple(arr: [10]i32) i32 =
         (acc + arr[i], i + 1)
     in sum
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let a = no_redundant_complex([1, 2, 3], 0) in
     let b = no_materialize_tuple(5) in
     let c = no_materialize_loop_tuple([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) in
@@ -6009,8 +5857,8 @@ def math_ops(x: f32) f32 =
 def vector_length(v: vec2f32) f32 =
     f32.sqrt(v.x * v.x + v.y * v.y)
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let a = conversions(1, 2i64) in
     let b = math_ops(1.0) in
     let c = vector_length(@[3.0, 4.0]) in
@@ -6035,8 +5883,8 @@ def test_mul(m1: mat4f32, m2: mat4f32, v: vec4f32) vec4f32 =
     let vec_result2 = mul(v, m1) in
     vec_result1
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let m = @[[1.0, 0.0, 0.0, 0.0],
               [0.0, 1.0, 0.0, 0.0],
               [0.0, 0.0, 1.0, 0.0],
@@ -6062,8 +5910,8 @@ def verts: [3]vec4f32 =
      @[3.0, -1.0, 0.0, 1.0],
      @[-1.0, 3.0, 0.0, 1.0]]
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 =
+
+entry vertex_main(vertex_id: i32) vec4f32 =
     verts[vertex_id]
 
 def translation(p: vec3f32) mat4f32 =
@@ -6093,8 +5941,8 @@ def main_image(res: vec2f32, time: f32, fragCoord: vec2f32) vec4f32 =
     let v4s = map(|v: vec3f32| @[v.x, v.y, v.z, 1.0] * mat, cube_corners) in
     v4s[0]
 
-#[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec2f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(frag_coord)] pos: vec4f32) #[target(screen)] vec4f32 =
+
+entry fragment_main(iResolution: vec2f32, iTime: f32, pos: vec4f32) vec4f32 =
     main_image(@[iResolution.x, iResolution.y], iTime, @[pos.x, pos.y])
 "#,
     );
@@ -6112,8 +5960,8 @@ fn test_function_call_with_array_arg() {
 def sum_first_two(arr: [4]i32) i32 =
     arr[0] + arr[1]
 
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
+
+entry vertex_main() vec4f32 =
     let result = sum_first_two([1, 2, 3, 4]) in
     @[f32.i32(result), 0.0, 0.0, 1.0]
 "#;
@@ -6130,7 +5978,6 @@ fn test_compute_shader_with_storage_slice() {
 def sum_first_two(arr: [4]i32) i32 =
     arr[0] + arr[1]
 
-#[compute]
 entry compute_main(data: []i32) i32 =
     let from_storage = sum_first_two(data[0..4]) in
     let from_literal = sum_first_two([1, 2, 3, 4]) in
@@ -6151,8 +5998,8 @@ def compute(x: f32, y: f32) f32 =
     let b = f32.cos(y) in
     a + b
 
-#[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
+
+entry fragment_main(iTime: f32, pos: vec4f32) vec4f32 =
     let s = compute(pos.x, pos.y) in
     @[s + iTime, 0.0, 0.0, 1.0]
 "#;
@@ -6175,7 +6022,6 @@ fn pow_float_base_int_exp_lowers_via_convert_then_pow() {
 
     let spirv = compile_to_spirv(
         "\
-#[compute]
 entry e(xs: []f32) []f32 = map(|x: f32| x ** 9, xs)
 ",
     )
@@ -6223,8 +6069,8 @@ fn mul_all_three_overloads_compile_to_spirv() {
 def m1 = @[[1.0f32, 0.0f32], [0.0f32, 1.0f32]]
 def m2 = @[[2.0f32, 0.0f32], [0.0f32, 2.0f32]]
 
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
+
+entry fragment_main(pos: vec4f32) vec4f32 =
     let a: mat2f32 = m1 in
     let b: mat2f32 = m2 in
     let v: vec2f32 = @[pos.x, pos.y] in
@@ -6255,7 +6101,6 @@ fn test_array_variant_monomorphization() {
 def sum_first_two(arr: [4]i32) i32 =
     arr[0] + arr[1]
 
-#[compute]
 entry compute_main(data: []i32) i32 =
     let from_storage = sum_first_two(data[0..4]) in
     let from_literal = sum_first_two([1, 2, 3, 4]) in
@@ -6340,7 +6185,6 @@ fn compile_to_ssa_with_modules(input: &str) -> crate::ssa::stage::Elaborated {
 fn returning_runtime_sized_array_from_fn_lowers() {
     let source = r#"
 def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
-#[compute]
 entry e() [1]f32 = [g(256)[3]]
 "#;
     compile_to_spirv(source).expect("returning a runtime-sized array should lower to SPIR-V");
@@ -6353,7 +6197,6 @@ entry e() [1]f32 = [g(256)[3]]
 fn runtime_index_into_nested_producer_scalarizes() {
     let source = r#"
 def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
-#[compute]
 entry e(j: i32) [1]f32 = [g(256)[j]]
 "#;
     let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
@@ -6379,7 +6222,6 @@ fn runtime_sized_array_with_multiple_consumers_lowers() {
 def g(n: i32) f32 =
     let xs = map(|i: i32| f32.i32(i), 0i32 ..< n) in
     f32.sum(xs) + f32.maximum(xs)
-#[compute]
 entry e() f32 = g(256)
 "#;
     compile_to_spirv(source)
@@ -6401,7 +6243,6 @@ def fbm2(noise: u32 -> vec2f32 -> f32, k: u32, p: vec2f32, n: i32) f32 =
   reduce(|a: f32, b: f32| a + b, 0.0f32,
     map(|i: i32| noise(k, p) * f32.i32(i), 0i32 ..< n))
 def fbm_perlin(k: u32, p: vec2f32, n: i32) f32 = fbm2(perlin2, k, p, n)
-#[compute]
 entry e() f32 = fbm_perlin(1u32, @[0.0f32, 0.0f32], 4i32)
 "#;
     compile_to_spirv(source)
@@ -6423,7 +6264,6 @@ def f(k: u32, p: f32) f32 =
   let g = |q: f32| q + f32.u32(k) in
   g(p) + g(p + 1.0f32)
 
-#[compute]
 entry e() f32 = f(3u32, 1.0f32)
 "#;
     compile_to_spirv(source).expect(
@@ -6439,12 +6279,9 @@ entry e() f32 = f(3u32, 1.0f32)
 #[test]
 fn reified_numeric_operators_lower_to_spirv() {
     let source = r#"
-#[compute]
 entry arith() i32 =
     i32.(+)(i32.(*)(i32.(-)(10i32, 3i32), 4i32), i32.(%)(9i32, 5i32))
-#[compute]
 entry bits() u32 = u32.(>>)(u32.(<<)(u32.(^)(u32.(&)(255u32, 15u32), 8u32), 2u32), 1u32)
-#[compute]
 entry cmp(x: f32, y: f32) i32 =
     let a = if f32.(==)(x, y) then 1i32 else 0i32 in
     let b = if f32.(!=)(x, y) then 2i32 else 0i32 in
@@ -6464,7 +6301,6 @@ entry cmp(x: f32, y: f32) i32 =
 #[test]
 fn reified_operator_passed_as_first_class_value() {
     let source = r#"
-#[compute]
 entry sum(xs: [16]i32) i32 = reduce(i32.(+), 0i32, xs)
 "#;
     compile_to_spirv(source).expect("a reified operator member should be passable to a HOF");
@@ -6480,7 +6316,6 @@ entry sum(xs: [16]i32) i32 = reduce(i32.(+), 0i32, xs)
 fn user_def_shadowing_soac_is_a_normal_call() {
     let source = r#"
 def map(x: i32) i32 = x + 1
-#[compute]
 entry e(xs: [8]i32) i32 = reduce(i32.(+), map(0i32), xs)
 "#;
     compile_to_spirv(source).expect("a user def shadowing a SOAC name should lower as a normal call");
@@ -6499,7 +6334,6 @@ entry e(xs: [8]i32) i32 = reduce(i32.(+), map(0i32), xs)
 fn user_def_shadowing_map_does_not_break_prelude_unzip() {
     let source = r#"
 def map(x: i32) i32 = x + 1
-#[compute]
 entry e(xs: [4](i32, i32)) i32 =
     let (xs0, xs1) = unzip(xs) in
     reduce(i32.(+), 0i32, xs0) + reduce(i32.(+), 0i32, xs1)
@@ -6520,7 +6354,6 @@ def map(xs: [4]i32) i32 = xs[0] + xs[1] + xs[2] + xs[3]
 module m = {
   def first_four_sum(xs: [4]i32) i32 = map(xs)
 }
-#[compute]
 entry e(xs: [4]i32) i32 = m.first_four_sum(xs)
 "#;
     compile_to_spirv(source).expect(
@@ -6540,7 +6373,6 @@ def map(x: i32) i32 = x * 2
 module m = {
   def first_doubled(xs: [4]i32) i32 = map(xs[0])
 }
-#[compute]
 entry e(xs: [4]i32) i32 = m.first_doubled(xs)
 "#;
     compile_to_spirv(source).expect(
@@ -6556,7 +6388,6 @@ entry e(xs: [4]i32) i32 = m.first_doubled(xs)
 fn numeric_array_reductions_lower_to_spirv() {
     let source = r#"
 def N: i32 = 256
-#[compute]
 entry e() [4]f32 =
     let xs = map(|i: i32| f32.i32(i), 0i32 ..< N) in
     [f32.sum(xs), f32.product(xs), f32.minimum(xs), f32.maximum(xs)]
@@ -6571,7 +6402,6 @@ entry e() [4]f32 =
 fn statistics_gatherer_lowers() {
     let source = r#"
 def N: i32 = 256
-#[compute]
 entry summarize() [6]f32 =
     let xs = map(|i: i32| f32.i32(i), 0i32 ..< N) in
     let n = f32.i32(N) in
@@ -6594,7 +6424,6 @@ entry summarize() [6]f32 =
 #[test]
 fn bitwise_in_deep_let_chain_feeding_if_lowers() {
     let source = r#"
-#[compute]
 entry t() i32 =
     let s = 2i32 + 3i32 in
     let p = s * 4i32 in
@@ -6611,7 +6440,6 @@ entry t() i32 =
 #[test]
 fn branch_with_let_terminal_into_output_slot_lowers() {
     let source = r#"
-#[compute]
 entry t(n: i32) i32 =
     let x = n + 1i32 in
     if x < 100i32 then x else 0i32
@@ -6632,8 +6460,8 @@ def choose(a: f32, b: f32, c: f32, sel1: i32, sel2: i32) f32 =
             else b in
     x + y
 
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
+
+entry fragment_main(pos: vec4f32) vec4f32 =
     let r = choose(pos.x, pos.y, pos.z, 1, 2) in
     @[r, 0.0, 0.0, 1.0]
 "#;
@@ -6655,8 +6483,8 @@ def combine(t: (f32, f32, f32, f32)) f32 =
     let (a, b, c, d) = t in
     a + b + c + d
 
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
+
+entry fragment_main(pos: vec4f32) vec4f32 =
     let result = process(pos.x, pos.y, pos.z, pos.w, 1) in
     let s = combine(result) in
     @[s, 0.0, 0.0, 1.0]
@@ -6673,7 +6501,6 @@ def selectValue(x: f32, flag: i32) f32 =
     else if flag == 1 then x + 1.0
     else x - 1.0
 
-#[compute]
 entry compute_main(data: [8]f32) [8]f32 =
     map(|x| selectValue(x, 1), data)
 "#;
@@ -6684,7 +6511,6 @@ entry compute_main(data: [8]f32) [8]f32 =
 #[test]
 fn test_spirv_multiple_maps_and_reduce() {
     let source = r#"
-#[compute]
 entry compute_main(data: [8](f32, f32)) [8]f32 =
     let first = map(|t| let (a, _) = t in a, data) in
     let second = map(|t| let (_, b) = t in b, data) in
@@ -6708,7 +6534,6 @@ def build(a: [4]f32, b: [4]f32, flags: [4]i32) [4]f32 =
         if flags[3] == 1 then b[3] else a[3]
     ]
 
-#[compute]
 entry compute_main(data: [4]f32) [4]f32 =
     let doubled = map(|x| x * 2.0, data) in
     let flags = [1, 0, 1, 0] in
@@ -6729,11 +6554,20 @@ fn test_spirv_map_array_of_mixed_tuple() {
 def build(xs: [8]f32) [8](f32, i32, vec3f32) =
     map(|x: f32| (x + 1.0, 0, @[x, x, x]), xs)
 
-#[fragment]
-entry frag(c: vec4f32) vec4f32 =
+def fragment_main(fragment: fragment_invocation<vec4f32>) vec4f32 =
     let arr = build([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]) in
     let (a, _, v) = arr[3] in
     @[a, v.x, v.y, v.z]
+
+entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
+    let covered = rasterize_triangles(
+      direct_draw(3u32, 1u32),
+      |vertex| vertex_output(
+        if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+        else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+        else @[-1.0, 3.0, 0.0, 1.0],
+        @[0.0, 0.0, 0.0, 0.0])) in
+    shade(target, covered, fragment_main)
 "#;
     compile_to_spirv(source).expect("map over [N](f32, i32, vec3f32) should compile to SPIR-V");
 }
@@ -6748,11 +6582,20 @@ fn test_spirv_map_array_of_nested_tuple() {
 def build(xs: [4]f32) [4](f32, [3]f32) =
     map(|x: f32| (x + 1.0, [x, x, x]), xs)
 
-#[fragment]
-entry frag(c: vec4f32) vec4f32 =
+def fragment_main(fragment: fragment_invocation<vec4f32>) vec4f32 =
     let arr = build([0.0, 1.0, 2.0, 3.0]) in
     let (a, inner) = arr[2] in
     @[a, inner[0], inner[1], inner[2]]
+
+entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
+    let covered = rasterize_triangles(
+      direct_draw(3u32, 1u32),
+      |vertex| vertex_output(
+        if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+        else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+        else @[-1.0, 3.0, 0.0, 1.0],
+        @[0.0, 0.0, 0.0, 0.0])) in
+    shade(target, covered, fragment_main)
 "#;
     compile_to_spirv(source).expect("map over [N](f32, [M]f32) should compile to SPIR-V");
 }
@@ -6775,7 +6618,6 @@ def f(seed: f32) [4]f32 =
       in (i + 1, arr')
   in out
 
-#[compute]
 entry main(x: []f32) [4]f32 = f(x[0])
 "#;
     compile_to_spirv(source).expect(
@@ -6816,8 +6658,8 @@ def scene(x: f32, y: f32) f32 =
   let closest = consumer(hits) in
   closest + ground
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+
+entry vertex_main(vid: i32) vec4f32 =
   let r = scene(1.0, 0.5) in
   @[r, 0.0, 0.0, 1.0]
 "#;
@@ -6841,14 +6683,14 @@ fn test_ssa_raytrace_well_formed() {
 
     // SOAC-bearing helpers such as `trace` are intentionally force-inlined
     // before SSA and then removed by DCE. Verify the durable contract instead:
-    // both graphical entry points survived and SSA construction completed.
+    // both extracted graphical stages survived and SSA construction completed.
     assert!(
-        ssa.entry_points.iter().any(|entry| entry.name == "vertex_main"),
-        "vertex_main should be in SSA output"
+        ssa.entry_points.iter().any(|entry| entry.name == "_w_stage_raytrace__vertex"),
+        "the extracted raytrace vertex stage should be in SSA output"
     );
     assert!(
-        ssa.entry_points.iter().any(|entry| entry.name == "fragment_main"),
-        "fragment_main should be in SSA output"
+        ssa.entry_points.iter().any(|entry| entry.name == "_w_stage_raytrace__fragment"),
+        "the extracted raytrace fragment stage should be in SSA output"
     );
 }
 
@@ -6864,8 +6706,8 @@ def PI: f32 = 3.14159265
 def TAU: f32 = PI * 2.0
 def QUARTER_TAU: f32 = TAU / 4.0
 
-#[fragment]
-entry frag(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
+
+entry frag(pos: vec4f32) vec4f32 =
   @[QUARTER_TAU, PI, TAU, 1.0]
 "#;
     compile_to_spirv(source).expect("constants referencing constants should compile");
@@ -6881,8 +6723,8 @@ def PI: f32 = 3.141592
 
 def use_pi(x: f32) f32 = x * PI
 
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
+
+entry fragment_main(pos: vec4f32) vec4f32 =
     let r = use_pi(pos.x) in
     @[r, 0.0, 0.0, 1.0]
 "#,
@@ -6973,7 +6815,6 @@ fn hof_closure_with_captures_lowers_to_valid_spirv() {
     let src = r#"
 def apply2(f: f32 -> f32, x0: f32, x1: f32) f32 = f(x0) + f(x1)
 
-#[compute]
 entry test(a: f32, b: f32) f32 =
   let g = |y: f32| y * y + a + b in
   apply2(g, 1.0f32, 2.0f32)
@@ -6989,7 +6830,6 @@ fn hof_no_capture_lambda_in_map_body_lowers_without_panic() {
     let src = r#"
 def apply2(f: f32 -> f32, x0: f32, x1: f32) f32 = f(x0) + f(x1)
 
-#[compute]
 entry test(in_arr: []f32) []f32 =
   map(|x: f32| apply2(|y: f32| y * y, x, x + 1.0f32), in_arr)
 "#;
@@ -7015,8 +6855,8 @@ def pick(v: #left(f32) | #right(f32)) f32 =
     case #left(x) -> x + 1.0f32
     case #right(y) -> y * 2.0f32
 
-#[fragment]
-entry main() #[target(screen)] vec4f32 =
+
+entry main() vec4f32 =
     let a = pick(#left(0.5f32)) in
     let b = pick(#right(0.25f32)) in
     @[a, b, 0.0f32, 1.0f32]
@@ -7036,8 +6876,8 @@ def length_sq(p: #point(f32, f32) | #origin) f32 =
     case #point(x, y) -> x * x + y * y
     case #origin -> 0.0f32
 
-#[fragment]
-entry main() #[target(screen)] vec4f32 =
+
+entry main() vec4f32 =
     let a = length_sq(#point(3.0f32, 4.0f32)) in
     let b = length_sq(#origin) in
     @[a, b, 0.0f32, 1.0f32]
@@ -7056,8 +6896,8 @@ fn swizzle_with_plain_assign_compiles_to_spirv() {
     let src = r#"
 def update(v: vec3f32, e: vec2f32) vec3f32 = v with .yz = e
 
-#[fragment]
-entry main() #[target(screen)] vec4f32 =
+
+entry main() vec4f32 =
     let v = update(@[1.0f32, 2.0f32, 3.0f32], @[20.0f32, 30.0f32]) in
     @[v.x, v.y, v.z, 1.0f32]
 "#;
@@ -7072,8 +6912,8 @@ fn swizzle_with_compound_mul_compiles_to_spirv() {
     let src = r#"
 def update(v: vec3f32, m: mat2f32) vec3f32 = v with .yz *= m
 
-#[fragment]
-entry main() #[target(screen)] vec4f32 =
+
+entry main() vec4f32 =
     let m: mat2f32 = @[[1.0f32, 0.0f32], [0.0f32, 1.0f32]] in
     let v = update(@[1.0f32, 2.0f32, 3.0f32], m) in
     @[v.x, v.y, v.z, 1.0f32]
@@ -7097,8 +6937,8 @@ def transform(dir0: vec3f32, mx: f32, my: f32) vec3f32 =
     let d3 = d2 with .yz *= rot(my) in
     d3 with .xz *= rot(mx)
 
-#[fragment]
-entry main() #[target(screen)] vec4f32 =
+
+entry main() vec4f32 =
     let d = transform(@[0.0f32, 0.0f32, 1.0f32], 0.5f32, 0.3f32) in
     @[d.x, d.y, d.z, 1.0f32]
 "#;
@@ -7298,7 +7138,6 @@ fn compute_map_loads_global_invocation_id() {
     use wspirv::dr::{Loader, Operand};
     use wspirv::spirv::Op;
     let src = r#"
-#[compute]
 entry sq(xs: []f32) []f32 = map(|x: f32| x * x, xs)
 "#;
     let spirv = compile_to_spirv(src).expect("map compute compiles");
@@ -7482,7 +7321,7 @@ fn assert_fixed_output_and_streamed_map_partition(source: &str, output_count: us
 #[test]
 fn fixed_output_before_streamed_map_still_shards() {
     assert_fixed_output_and_streamed_map_partition(
-        "#[compute]\nentry r(a: []u32) ([2]u32, []u32) = ([7u32, 9u32], map(|x| x + 1u32, a))\n",
+        "\nentry r(a: []u32) ([2]u32, []u32) = ([7u32, 9u32], map(|x| x + 1u32, a))\n",
         2,
     );
 }
@@ -7493,7 +7332,6 @@ fn fixed_output_before_streamed_map_still_shards() {
 fn let_bound_literal_fixed_output_with_multidomain_maps_shards() {
     let spirv = compile_to_spirv(
         r#"
-#[compute]
 entry r(a: []u32, b: []u32) ([2]u32, []u32, []u32) =
   let o0 = [1u32, 2u32] in
   (o0, map(|x| x + 1u32, a), map(|y| y + 2u32, b))
@@ -7510,7 +7348,6 @@ entry r(a: []u32, b: []u32) ([2]u32, []u32, []u32) =
 fn fixed_output_before_let_bound_map_still_shards() {
     assert_fixed_output_and_streamed_map_partition(
         r#"
-#[compute]
 entry r(a: []u32) ([2]u32, []u32) =
   let m = map(|x| x + 1u32, a) in
   ([1u32, 2u32], m)
@@ -7525,7 +7362,6 @@ entry r(a: []u32) ([2]u32, []u32) =
 fn fixed_output_with_let_bound_multidomain_maps_shards() {
     let spirv = compile_to_spirv(
         r#"
-#[compute]
 entry r(a: []u32, b: []u32) ([2]u32, []u32, []u32) =
   let ma = map(|x| x + 1u32, a) in
   let mb = map(|y| y + 2u32, b) in
@@ -7543,7 +7379,6 @@ entry r(a: []u32, b: []u32) ([2]u32, []u32, []u32) =
 fn let_bound_complex_same_domain_maps_shard() {
     assert_fixed_output_and_streamed_map_partition(
         r#"
-#[compute]
 entry r(tidx: []u32, src: []vec4f32, st: []f32) ([2]f32, []vec4f32, []vec4f32) =
   let g = st[0]
   let o0 = [g, g]
@@ -7561,7 +7396,7 @@ entry r(tidx: []u32, src: []vec4f32, st: []f32) ([2]f32, []vec4f32, []vec4f32) =
 #[test]
 fn fixed_output_with_multidomain_maps_shards() {
     let spirv = compile_to_spirv(
-        "#[compute]\nentry r(a: []u32, b: []u32) ([2]u32, []u32, []u32) = \
+        "\nentry r(a: []u32, b: []u32) ([2]u32, []u32, []u32) = \
          ([7u32, 9u32], map(|x| x + 1u32, a), map(|y| y + 2u32, b))\n",
     )
     .expect("fixed + multidomain maps compiles");
@@ -7581,7 +7416,6 @@ fn fixed_output_with_multidomain_maps_shards() {
 fn fixed_output_from_storage_scalar_with_multidomain_maps_shards() {
     let spirv = compile_to_spirv(
         r#"
-#[compute]
 entry r(a: []u32, b: []u32, st: []u32) ([2]u32, []u32, []u32) =
   let g = st[0] in
   ([g, g + 1u32], map(|x| x + 1u32, a), map(|y| y + 2u32, b))
@@ -7598,7 +7432,6 @@ entry r(a: []u32, b: []u32, st: []u32) ([2]u32, []u32, []u32) =
 fn fixed_output_and_map_share_storage_scalar_and_multidomain_maps_shard() {
     let spirv = compile_to_spirv(
         r#"
-#[compute]
 entry r(a: []u32, b: []u32, st: []u32) ([2]u32, []u32, []u32) =
   let g = st[0] in
   ([g, g + 1u32], map(|x| x + g, a), map(|y| y + 2u32, b))
@@ -7618,7 +7451,6 @@ fn compute_map_has_no_full_serial_loop() {
     use wspirv::dr::{Loader, Operand};
     use wspirv::spirv::Op;
     let src = r#"
-#[compute]
 entry sq(xs: []f32) []f32 = map(|x: f32| x * x, xs)
 "#;
     let spirv = compile_to_spirv(src).expect("map compute compiles");
@@ -7703,7 +7535,6 @@ fn compute_pointwise_screma_from_horizontal_maps_is_parallel() {
     use crate::op::OpTag;
     use crate::ssa::types::{ControlHeader, InstKind};
     let src = r#"
-#[compute]
 entry pair(xs: []f32) ([]f32, []f32) =
   let a = map(|x: f32| x * x, xs) in
   let b = map(|x: f32| x + 1.0, xs) in
@@ -7785,7 +7616,6 @@ fn compute_storage_buffers(
 fn gather_computed_array_materializes_to_shared_intermediate() {
     use crate::pipeline_descriptor::{Access, Binding, BufferLen, BufferUsage};
     let src = "\
-#[compute]
 entry gen(bh: []vec4f32) []i32 =
   let counts = map(|h:vec4f32| 4 + 5*(if h.x>4.0 then 3 else 1), bh) in
   map(|i:i32| counts[i % 256], iota(6144))
@@ -7936,7 +7766,6 @@ entry gen(bh: []vec4f32) []i32 =
 fn single_consumer_scan_compiles() {
     compile_to_spirv(
         "\
-#[compute]
 entry gen(xs: []i32) []i32 =
   let counts  = map(|x: i32| x * 2, xs) in
   let offsets = scan(|a: i32, b: i32| a + b, 0, counts) in
@@ -7954,7 +7783,6 @@ entry gen(xs: []i32) []i32 =
 fn nested_soac_captures_outer_scalar() {
     compile_to_spirv(
         "\
-#[compute]
 entry t(xs: []f32) []f32 =
   map(|i: i32|
         let pi = xs[i] in
@@ -7981,7 +7809,6 @@ fn filter_in_subroutine_length_compiles() {
         "\
 def evens(arr: [8]i32) ?k. [k]i32 = filter(|x: i32| x % 2i32 == 0i32, arr)
 
-#[compute]
 entry filt_count() i32 =
   let e = evens([1i32, 2i32, 3i32, 4i32, 5i32, 6i32, 7i32, 8i32]) in
   length(e)
@@ -7998,7 +7825,6 @@ entry filt_count() i32 =
 fn filter_runtime_length_compiles() {
     compile_to_spirv(
         "\
-#[compute]
 entry filt_count(xs: []i32) i32 =
   let e = filter(|x: i32| x % 2i32 == 0i32, xs) in
   length(e)
@@ -8032,7 +7858,6 @@ fn filter_runtime_in_subroutine_compiles() {
         "\
 def evens(arr: []i32) ?k. [k]i32 = filter(|x: i32| x % 2i32 == 0i32, arr)
 
-#[compute]
 entry filt_count(xs: []i32) i32 =
   let e = evens(xs) in
   length(e)
@@ -8048,7 +7873,6 @@ entry filt_count(xs: []i32) i32 =
 fn filter_into_reduce_compiles() {
     compile_to_spirv(
         "\
-#[compute]
 entry filt_reduce(xs: []i32) i32 =
   let kept = filter(|x: i32| x > 4i32, xs) in
   reduce(|a: i32, b: i32| a + b, 0i32, kept)
@@ -8060,7 +7884,6 @@ entry filt_reduce(xs: []i32) i32 =
 #[test]
 fn filter_runtime_scalar_consumers_fuse_to_screma_and_compile() {
     let source = "\
-#[compute]
 entry filt_stats(xs: []i32) (i32, i32) =
   let kept = filter(|x: i32| x > 4i32, xs) in
   (length(kept), reduce(|a: i32, b: i32| a + b, 0i32, kept))
@@ -8091,7 +7914,6 @@ fn filter_into_reduce_let_bound_crosses_call_boundary() {
     compile_to_spirv(
         "\
 def total(ys: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0i32, ys)
-#[compute]
 entry filt_reduce(xs: []i32) i32 =
   let kept = filter(|x: i32| x > 4i32, xs) in
   total(kept)
@@ -8111,7 +7933,6 @@ entry filt_reduce(xs: []i32) i32 =
 fn filter_into_reduce_inline_arg_opens_existential() {
     compile_to_spirv(
         "\
-#[compute]
 entry filt_reduce(xs: []i32) i32 =
   reduce(|a: i32, b: i32| a + b, 0i32, filter(|x: i32| x > 4i32, xs))
 ",
@@ -8140,7 +7961,6 @@ fn swizzle_on_nontrivial_base_does_not_duplicate_producer() {
         "\
 def sum2<[n]>(xs: [n]vec4f32) vec2f32 =
   reduce(|a: vec4f32, b: vec4f32| a + b, @[0.0f32, 0.0f32, 0.0f32, 0.0f32], xs).xy
-#[compute]
 entry e(xs: [8]vec4f32) vec2f32 = sum2(xs)
 ",
     )
@@ -8172,7 +7992,6 @@ fn is_two_phase_compute(pipeline: &crate::pipeline_descriptor::PipelineDescripto
 fn filter_into_reduce_fuses_to_parallel_screma() {
     let lowered = crate::compile_thru_spirv(
         "\
-#[compute]
 entry filt_reduce(xs: []i32) i32 =
   let kept = filter(|x: i32| x > 4i32, xs) in
   reduce(|a: i32, b: i32| a + b, 0i32, kept)
@@ -8194,7 +8013,6 @@ fn filter_into_reduce_fuses_across_functions() {
         "\
 def evens(xs: []i32) ?k. [k]i32 = filter(|x: i32| x % 2i32 == 0i32, xs)
 
-#[compute]
 entry filt_reduce(xs: []i32) i32 =
   let kept = evens(xs) in
   reduce(|a: i32, b: i32| a + b, 0i32, kept)
@@ -8235,7 +8053,6 @@ fn map_into_filter_is_one_wired_pipeline() {
     let lowered = compile_parallel(
         "\
 open f32
-#[compute]
 entry pick(xs: []u32) ?k. [k]u32 =
   let ys = map(|x| x + 1u32, xs) in
   filter(|y| y < 100u32, ys)
@@ -8260,7 +8077,6 @@ fn capturing_map_into_filter_is_one_pipeline() {
     let lowered = compile_parallel(
         "\
 open f32
-#[compute]
 entry pick(xs: []u32) ?k. [k]u32 =
   let bound = xs[0] in
   let ys = map(|x| x + bound, xs) in
@@ -8285,7 +8101,6 @@ fn inlined_filter_over_map_compiles() {
     compile_parallel(
         "\
 open f32
-#[compute]
 entry cmptest(idx: []u32) ?k. [k]vec4f32 =
   filter(|c| c.x < 100.0, map(|s| @[f32(i32(s)), 0.0, 0.0, 0.0], idx))
 ",
@@ -8302,7 +8117,6 @@ fn filter_array_and_length_existential_over_tuple_compiles() {
     compile_parallel(
         "\
 open f32
-#[compute]
 entry both(xs: []u32) ?k. ([k]u32, [1]u32) =
   let v = filter(|x| x < 100u32, xs) in
   let n = length(v) in
@@ -8320,7 +8134,6 @@ fn filter_array_and_length_per_component_existential_compiles() {
     compile_parallel(
         "\
 open f32
-#[compute]
 entry both(xs: []u32) (?k. [k]u32, [1]u32) =
   let v = filter(|x| x < 100u32, xs) in
   let n = length(v) in
@@ -8340,7 +8153,6 @@ fn two_filters_distinct_existential_lengths_compile() {
     compile_parallel(
         "\
 open f32
-#[compute]
 entry both2(xs: []u32) ?k. ?j. ([k]u32, [j]u32) =
   let v = filter(|x| x < 100u32, xs) in
   let w = filter(|x| x > 5u32, xs) in
@@ -8359,9 +8171,8 @@ entry both2(xs: []u32) ?k. ?j. ([k]u32, [j]u32) =
 #[test]
 fn map_filter_map_reduce_collapses_to_one_screma() {
     let source = "\
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] xs: []f32,
-        #[storage(set=2, binding=1, access=write)] out: *[]f32) []f32 =
+entry e(xs: []f32,
+        out: *[]f32) []f32 =
   let p = xs[0..512] in
   map(|x: f32|
         let ys = map(|v: f32| v - x, p) in
@@ -8386,7 +8197,6 @@ fn cross_function_scan_parallelizes() {
     let lowered = crate::compile_thru_spirv(
         "\
 def stencil(xs: []i32) []i32 = scan(|a: i32, b: i32| if a > b then a else b, 0i32, xs)
-#[compute]
 entry e(xs: []i32) []i32 = stencil(xs)
 ",
     )
@@ -8404,7 +8214,6 @@ entry e(xs: []i32) []i32 = stencil(xs)
 #[test]
 fn sized_composite_array_runtime_index_still_lowers() {
     let source = r#"
-#[compute]
 entry e(i: i32) i32 =
     let m: [4]i32 = [10, 20, 30, 40] in
     m[i]
@@ -8421,7 +8230,6 @@ fn per_element_helper_soac_stays_serial() {
     let lowered = crate::compile_thru_spirv(
         "\
 def rsum(x: i32) i32 = reduce(|a: i32, b: i32| a + b, 0i32, [x, x, x])
-#[compute]
 entry e(xs: []i32) []i32 = map(|x: i32| rsum(x), xs)
 ",
     )
@@ -8440,7 +8248,6 @@ entry e(xs: []i32) []i32 = map(|x: i32| rsum(x), xs)
 fn filter_result_as_compute_output_compiles() {
     compile_to_spirv(
         "\
-#[compute]
 entry filt_out(xs: []i32) ?k. [k]i32 =
   filter(|x: i32| x % 2i32 == 0i32, xs)
 ",
@@ -8457,7 +8264,6 @@ entry filt_out(xs: []i32) ?k. [k]i32 =
 fn filter_output_descriptor_has_paired_length_buffer() {
     use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage};
     let src = "\
-#[compute]
 entry filt_out(xs: []i32) ?k. [k]i32 =
   filter(|x: i32| x % 2i32 == 0i32, xs)
 ";
@@ -8544,7 +8350,6 @@ entry filt_out(xs: []i32) ?k. [k]i32 =
 fn single_consumer_reduce_compiles() {
     compile_to_spirv(
         "\
-#[compute]
 entry gen(xs: []i32) []i32 =
   let counts = map(|x: i32| x * 2, xs) in
   let total  = reduce(|a: i32, b: i32| a + b, 0, counts) in
@@ -8562,7 +8367,6 @@ fn multi_consumer_scan_plus_reduce_lifts() {
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
 
     let source = "\
-#[compute]
 entry gen(xs: []i32) []i32 =
   let counts  = map(|x: i32| x * 2, xs) in
   let total   = reduce(|a: i32, b: i32| a + b, 0, counts) in
@@ -8598,7 +8402,6 @@ entry gen(xs: []i32) []i32 =
 fn multi_consumer_scan_plus_gather_lifts() {
     compile_to_spirv(
         "\
-#[compute]
 entry gen(xs: []i32) []i32 =
   let counts  = map(|x: i32| x * 2, xs) in
   let offsets = scan(|a: i32, b: i32| a + b, 0, counts) in
@@ -8624,8 +8427,7 @@ def win_count(hw: f32) i32 =
 
 def box_count(hw: f32) i32 = 8 + 5 * win_count(hw)
 
-#[compute]
-entry gen(bh: []vec4f32, #[uniform(set=1,binding=0)] nb: i32) [1]i32 =
+entry gen(bh: []vec4f32, nb: i32) [1]i32 =
   let counts  = map(|h: vec4f32| box_count(h.x), bh) in
   let offsets = scan(|a: i32, b: i32| a + b, 0, counts) in
   [if nb <= 0 then 0 else offsets[nb - 1]]
@@ -8642,7 +8444,6 @@ entry gen(bh: []vec4f32, #[uniform(set=1,binding=0)] nb: i32) [1]i32 =
 fn multi_output_returns_scan_and_reads_it_by_index() {
     compile_to_spirv(
         "\
-#[compute]
 entry gen(xs: []i32) ([]i32, [1]i32) =
   let offsets = scan(|a: i32, b: i32| a + b, 0, xs) in
   (offsets, [offsets[0]])
@@ -8658,8 +8459,7 @@ entry gen(xs: []i32) ([]i32, [1]i32) =
 fn multi_output_returns_scan_and_reads_it_by_dynamic_index() {
     compile_to_spirv(
         "\
-#[compute]
-entry gen(xs: []i32, #[uniform(set=1,binding=0)] k: i32) ([]i32, [1]i32) =
+entry gen(xs: []i32, k: i32) ([]i32, [1]i32) =
   let offsets = scan(|a: i32, b: i32| a + b, 0, xs) in
   (offsets, [offsets[k]])
 ",
@@ -8673,7 +8473,6 @@ entry gen(xs: []i32, #[uniform(set=1,binding=0)] k: i32) ([]i32, [1]i32) =
 fn multi_output_returns_map_and_reads_it_by_index() {
     compile_to_spirv(
         "\
-#[compute]
 entry gen(xs: []i32) ([]i32, [1]i32) =
   let doubled = map(|x: i32| x * 2, xs) in
   (doubled, [doubled[0]])
@@ -8693,7 +8492,6 @@ entry gen(xs: []i32) ([]i32, [1]i32) =
 fn multi_output_returns_scan_in_two_slots_is_rejected() {
     let result = crate::compile_thru_spirv(
         "\
-#[compute]
 entry gen(xs: []i32) ([]i32, []i32) =
   let offsets = scan(|a: i32, b: i32| a + b, 0, xs) in
   (offsets, offsets)
@@ -8718,7 +8516,6 @@ entry gen(xs: []i32) ([]i32, []i32) =
 fn single_stage_vec4_map_gather_from_derived_array_repro() {
     let spirv = compile_to_spirv_single_stage(
         "\
-#[compute]
 entry gen(xs: []i32) []vec4f32 =
   let cs = map(|x: i32| x * 2, xs) in
   map(|i: i32| @[f32.i32(cs[i]), 0.0, 0.0, 1.0], iota(8))
@@ -8736,7 +8533,6 @@ fn intermediate_buffer_descriptor_access_repro() {
 
     let lowered = crate::compile_thru_spirv(
         "\
-#[compute]
 entry gen(xs: []i32) ([]i32, [1]i32) =
   let counts  = map(|x: i32| x * 2, xs) in
   let offsets = scan(|a: i32, b: i32| a + b, 0, counts) in
@@ -8781,7 +8577,6 @@ entry gen(xs: []i32) ([]i32, [1]i32) =
 fn gather_scan_producer_materializes_to_shared_intermediate() {
     use crate::pipeline_descriptor::{Access, Binding, BufferLen, BufferUsage, Pipeline};
     let src = "\
-#[compute]
 entry g(xs: []i32) []i32 =
   let o = scan(|a:i32,b:i32| a+b, 0, xs) in
   map(|i:i32| o[i % 256], iota(6144))
@@ -8954,11 +8749,9 @@ def slice_ab(a: []u32, b: []u32) ([]f32, []f32) =
 def slice_b(a: []u32, b: []u32) []f32 =
   map(|s| f32(s) * 3.0 + f32(a[0]), b)
 
-#[compute]
 entry go(xa: []u32, xb: []u32) ([]f32, []f32) =
   slice_ab(xa, xb)
 
-#[compute]
 entry go2(xc: []u32) []f32 =
   slice_b(xc, xc)
 
@@ -9022,7 +8815,6 @@ def update(w: world, pdom: []u32, idom: []u32) world =
   { pts = map(|s| w.pts[i32(s)] * 2.0, pdom),
     its = map(|s| w.its[i32(s)] + 1.0, idom) }
 
-#[compute]
 entry go(dom: []u32, pdom: []u32, idom: []u32, pts_in: []f32, its_in: []f32)
   ([]f32, []f32, []f32) =
   let w  = { pts = pts_in, its = its_in }
@@ -9045,7 +8837,6 @@ entry go(dom: []u32, pdom: []u32, idom: []u32, pts_in: []f32, its_in: []f32)
 fn fused_maps_are_placed_below_the_bindings_they_capture() {
     let src = "\
 open f32
-#[compute]
 entry go(dom: []u32, pts_in: []f32) ([]f32, []f32) =
   let k = pts_in[0] in
   (map(|s| pts_in[i32(s)] * 2.0, dom),
@@ -9081,7 +8872,6 @@ open f32
 type painted = { pts: []f32 }
 def sdf(sc: painted, x: f32) f32 = sc.pts[0] + x
 
-#[compute]
 entry go(dom: []u32, pts_in: []f32) ([]f32, []f32) =
   let sc = { pts = pts_in } in
   (map(|s| pts_in[i32(s)] * 2.0, dom),
@@ -9115,11 +8905,11 @@ def scene_sdf(sc: scene, x: f32) f32 =
     let it = sc.items[i % 2] in
     acc + p.x + p.y + it.x
 
-#[fragment]
-entry resolve_like(#[builtin(frag_coord)] fc: vec4f32,
+
+entry resolve_like(fc: vec4f32,
                    points: []vec2f32,
                    items: []vec4f32)
-  #[target(surface)] vec4f32 =
+  vec4f32 =
   let sc = { points = points, items = items }
   let v = scene_sdf(sc, fc.x) in
   @[v, v, v, 1.0]
@@ -9132,81 +8922,9 @@ entry resolve_like(#[builtin(frag_coord)] fc: vec4f32,
 /// arm writes, the other passes it through — so the alias checker must treat
 /// the branch as a single use of `small`.
 #[test]
-fn conditional_branch_threads_a_unique_storage_image_once() {
-    let src = "\
-open f32
-
-resource small_img: image2d {
-  format = rgba32float
-  size   = 16x16
-  usages = [storage_write]
-}
-
-resource big_img: image2d {
-  format = rgba32float
-  size   = window
-  usages = [storage_write]
-}
-
-#[compute]
-entry fused(#[builtin(global_invocation_id)] gid: vec3u32,
-            #[view(small_img, storage_write)] small: *storage_image,
-            #[view(big_img, storage_write)]   big: *storage_image)
-  () =
-  let xy = @[i32(gid.x), i32(gid.y)]
-  let small2 =
-    if xy.x < 16 && xy.y < 16 then small with [xy] = @[1.0, 0.0, 0.0, 1.0]
-    else small in
-  let _ = small2 in
-  big with [xy] = @[0.0, 1.0, 0.0, 1.0]
-";
-    crate::compile_thru_spirv(src)
-        .expect("a unique storage-image handle may be threaded through both arms of an if");
-}
-
-/// Threading a storage image through a branch consumes it. Reaching past the
-/// branch for the original handle is still a use-after-move.
-#[test]
-fn storage_image_consumed_by_a_branch_cannot_be_reused() {
-    let src = "\
-open f32
-
-resource img: image2d {
-  format = rgba32float
-  size   = 16x16
-  usages = [storage_write]
-}
-
-#[compute]
-entry one(#[builtin(global_invocation_id)] gid: vec3u32,
-          #[view(img, storage_write)] small: *storage_image) () =
-  let xy = @[i32(gid.x), i32(gid.y)]
-  let x = if xy.x < 16 then small with [xy] = @[1.0, 0.0, 0.0, 1.0] else small
-  let y = small with [xy] = @[0.0, 1.0, 0.0, 1.0] in
-  y
-";
-    match crate::compile_thru_spirv(src) {
-        Ok(_) => panic!("`small` is consumed by the branch and must not be usable after it"),
-        Err(err) => {
-            let msg = err.to_string();
-            assert!(
-                msg.contains("use of moved value"),
-                "expected a move error, got: {msg}"
-            );
-            assert!(msg.contains("small"), "the message names the handle: {msg}");
-        }
-    }
-}
-
-/// Multiple gathers of the *same* computed array coalesce to one buffer: the
-/// lift keys on the let-bound symbol and rewrites every `arr[..]` use to the
-/// same storage binding, so a single pre-pass materializes `arr` once no
-/// matter how many times (or in how many consumer maps) it's indexed.
-#[test]
 fn gather_same_array_coalesces_to_one_buffer() {
     use crate::pipeline_descriptor::{Binding, BufferUsage, Pipeline};
     let src = "\
-#[compute]
 entry gen(bh: []i32) []i32 =
   let arr = map(|x:i32| x + 1, bh) in
   map(|i:i32| arr[i % 256] + arr[(i + 1) % 256], iota(6144))
@@ -9263,13 +8981,11 @@ fn multidim_composite_local_const_and_runtime_index() {
     use crate::ssa::types::InstKind;
 
     let src = r#"
-        #[compute]
-        entry pick_const() i32 =
+                entry pick_const() i32 =
             let m: [3][2]i32 = [[1, 2], [3, 4], [5, 6]] in
             m[1][0]
 
-        #[compute]
-        entry pick_runtime(i: i32, j: i32) i32 =
+                entry pick_runtime(i: i32, j: i32) i32 =
             let m: [3][2]i32 = [[1, 2], [3, 4], [5, 6]] in
             m[i][j]
     "#;
@@ -9328,8 +9044,7 @@ fn multidim_composite_local_const_and_runtime_index() {
 fn multidim_view_inner_fixed_carries_subarray_elem_bytes() {
     use crate::pipeline_descriptor::{BufferLen, DispatchLen, DispatchSize, Pipeline};
     let src = r#"
-        #[compute]
-        entry row_sums(buf: []([4]u32)) []u32 =
+                entry row_sums(buf: []([4]u32)) []u32 =
             map(|row: [4]u32| row[0] + row[1] + row[2] + row[3], buf)
     "#;
     let lowered = crate::compile_thru_spirv(src).expect("compile_thru_spirv");
@@ -9397,9 +9112,8 @@ fn multidim_view_inner_fixed_carries_subarray_elem_bytes() {
 fn compute_if_over_two_maps_compiles_runtime_sized() {
     use crate::pipeline_descriptor::{BufferLen, Pipeline};
     let src = r#"
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] prev: []vec2f32,
-                   #[uniform(set=1, binding=1)] iTime: f32) []vec2f32 =
+                entry tick(prev: []vec2f32,
+                   iTime: f32) []vec2f32 =
           if iTime == 0.0
             then map(|p: vec2f32| @[1.0f32, 1.0f32], prev)
             else map(|p: vec2f32| @[p.x + 1.0f32, p.y + 1.0f32], prev)
@@ -9425,7 +9139,7 @@ fn compute_if_over_two_maps_compiles_runtime_sized() {
             elem_bytes,
             ..
         }) => {
-            assert_eq!(set, 2);
+            assert_eq!(set, 0);
             assert_eq!(binding, 0);
             assert_eq!(elem_bytes, 8); // vec2f32
         }
@@ -9438,9 +9152,8 @@ fn compute_if_over_two_maps_becomes_parallel_pointwise_map() {
     use crate::tlc::{SoacOp, TermKind};
 
     let src = r#"
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] prev: []vec2f32,
-                   #[uniform(set=1, binding=1)] iTime: f32) []vec2f32 =
+                entry tick(prev: []vec2f32,
+                   iTime: f32) []vec2f32 =
           if iTime == 0.0
             then map(|p: vec2f32| @[1.0f32, 1.0f32], prev)
             else map(|p: vec2f32| @[p.x + 1.0f32, p.y + 1.0f32], prev)
@@ -9475,9 +9188,8 @@ fn compute_if_over_two_maps_becomes_parallel_pointwise_map() {
 fn compute_if_over_range_and_let_wrapped_slice_map_parallelizes() {
     let src = r#"
         def N: i32 = 8
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] prev_pos: []vec4f32,
-                   #[uniform(set=1, binding=1)] iTime: f32) []vec4f32 =
+                entry tick(prev_pos: []vec4f32,
+                   iTime: f32) []vec4f32 =
           if iTime < 0.1 then
             map(|i:i32| @[f32.i32(i), 0.0, 0.0, 0.0], 0i32..<N)
           else
@@ -9509,8 +9221,7 @@ fn compute_if_over_different_runtime_sources_stays_branching() {
     use crate::tlc::TermKind;
 
     let src = r#"
-        #[compute]
-        entry pick(xs: []f32, ys: []f32, flag: bool) []f32 =
+                entry pick(xs: []f32, ys: []f32, flag: bool) []f32 =
           if flag
             then map(|x: f32| x + 1.0, xs)
             else map(|y: f32| y * 2.0, ys)
@@ -9539,9 +9250,8 @@ fn compute_if_over_different_runtime_sources_stays_branching() {
 #[test]
 fn compute_nested_if_over_three_maps_compiles_runtime_sized() {
     let src = r#"
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] prev: []vec2f32,
-                   #[uniform(set=1, binding=1)] iTime: f32) []vec2f32 =
+                entry tick(prev: []vec2f32,
+                   iTime: f32) []vec2f32 =
           if iTime < 0.0
             then map(|p: vec2f32| @[0.0f32, 0.0f32], prev)
             else if iTime == 0.0
@@ -9558,9 +9268,8 @@ fn compute_nested_if_over_three_maps_compiles_runtime_sized() {
 #[test]
 fn compute_let_wrapped_if_over_two_maps_compiles_runtime_sized() {
     let src = r#"
-        #[compute]
-        entry tick<[n]>(#[storage(set=2, binding=0, access=read)] prev: [n]vec2f32,
-                        #[uniform(set=1, binding=1)] iTime: f32) [n]vec2f32 =
+                entry tick<[n]>(prev: [n]vec2f32,
+                        iTime: f32) [n]vec2f32 =
           let nudge: f32 = iTime * 0.1f32 in
           if iTime == 0.0
             then map(|p: vec2f32| @[nudge, nudge], prev)
@@ -9577,9 +9286,8 @@ fn compute_let_wrapped_if_over_two_maps_compiles_runtime_sized() {
 fn compute_if_over_two_maps_compiles_fixed_size_different_sources() {
     let src = r#"
         def N: i32 = 2
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] prev_pos: []vec2f32,
-                   #[uniform(set=1, binding=1)] iTime: f32) []vec2f32 =
+                entry tick(prev_pos: [2]vec2f32,
+                   iTime: f32) [2]vec2f32 =
           if iTime == 0.0 then
             map(|i:i32| if i == 0 then @[2.0, 2.0] else @[15.0, 5.0], 0i32..<N)
           else
@@ -9596,9 +9304,8 @@ fn compute_if_over_two_maps_compiles_fixed_size_different_sources() {
 fn compute_if_over_two_maps_compiles_fixed_size_same_source() {
     let src = r#"
         def N: i32 = 2
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] prev_pos: []vec2f32,
-                   #[uniform(set=1, binding=1)] iTime: f32) []vec2f32 =
+                entry tick(prev_pos: [2]vec2f32,
+                   iTime: f32) [2]vec2f32 =
           if iTime == 0.0 then
             map(|i:i32| if i == 0 then @[2.0, 2.0] else @[15.0, 5.0], 0i32..<N)
           else
@@ -9614,9 +9321,8 @@ fn compute_if_over_two_maps_compiles_fixed_size_same_source() {
 #[test]
 fn compute_multi_output_tuple_of_ifs_compiles() {
     let src = r#"
-        #[compute]
-        entry tick<[n]>(#[storage(set=2, binding=0, access=read)] prev_pos: [n]vec2f32,
-                        #[uniform(set=1, binding=1)] iTime: f32) ([n]vec2f32, [n]f32) =
+                entry tick<[n]>(prev_pos: [n]vec2f32,
+                        iTime: f32) ([n]vec2f32, [n]f32) =
           (if iTime == 0.0
              then map(|p: vec2f32| @[0.0f32, 0.0f32], prev_pos)
              else map(|p: vec2f32| @[p.x + 1.0f32, p.y + 1.0f32], prev_pos),
@@ -9689,20 +9395,19 @@ fn assert_storage_descriptor_is_accessed(spirv_words: &[u32], set: u32, binding:
 }
 
 // View-array slice provenance through a SOAC capture: the lifted lambda's
-// `xs[0..3]` reads must come from `xs`'s descriptor (set=2, binding=0), not
+// `xs[0..3]` reads must come from `xs`'s compiler-assigned descriptor, not
 // the compiler-allocated output buffer.
 #[test]
 fn slice_view_inside_map_lambda_compiles_to_spirv() {
     let src = r#"
         def gather3(arr: [3]f32) f32 = arr[0] + arr[1] + arr[2]
 
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+                entry tick(xs: []f32) []f32 =
           map(|_:i32| gather3(xs[0..3]), 0i32..<3)
     "#;
     let lowered = crate::compile_thru_spirv(src)
         .expect("view-array slice inside a map lambda must preserve buffer provenance");
-    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
 }
 
 // ---- Buffer-provenance guards ------------------------------------------------
@@ -9717,12 +9422,11 @@ fn slice_view_inside_map_lambda_compiles_to_spirv() {
 #[test]
 fn view_index_in_map_lambda_reads_own_buffer() {
     let src = r#"
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+                entry tick(xs: []f32) []f32 =
           map(|i: i32| xs[i] + xs[0], 0i32..<4)
     "#;
     let lowered = crate::compile_thru_spirv(src).expect("captured-view index compiles");
-    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
 }
 
 /// Two captured views at distinct `(set, binding)` must each be read from
@@ -9731,16 +9435,15 @@ fn view_index_in_map_lambda_reads_own_buffer() {
 #[test]
 fn two_view_captures_read_distinct_buffers() {
     let src = r#"
-        #[compute]
-        entry tick(
-          #[storage(set=2, binding=0, access=read)] xs: []f32,
-          #[storage(set=2, binding=1, access=read)] ys: []f32
+                entry tick(
+          xs: []f32,
+          ys: []f32
         ) []f32 =
           map(|i: i32| xs[i] + ys[0], 0i32..<4)
     "#;
     let lowered = crate::compile_thru_spirv(src).expect("two captured views compile");
-    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
-    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 1);
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 1);
 }
 
 /// A captured view passed to a user function that itself indexes it (→
@@ -9750,12 +9453,11 @@ fn view_through_nested_fn_specialization_reads_own_buffer() {
     let src = r#"
         def firstx(zs: []f32) f32 = zs[0]
 
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+                entry tick(xs: []f32) []f32 =
           map(|_: i32| firstx(xs), 0i32..<4)
     "#;
     let lowered = crate::compile_thru_spirv(src).expect("nested view specialization compiles");
-    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
 }
 
 /// A view used directly as a `map` *input* (→ the entry walker
@@ -9763,12 +9465,11 @@ fn view_through_nested_fn_specialization_reads_own_buffer() {
 #[test]
 fn view_as_map_input_reads_own_buffer() {
     let src = r#"
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+                entry tick(xs: []f32) []f32 =
           map(|x: f32| x * 2.0, xs)
     "#;
     let lowered = crate::compile_thru_spirv(src).expect("view-as-map-input compiles");
-    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
 }
 
 /// Assert that some `OpArrayLength` queries the runtime-array length of the
@@ -9880,15 +9581,14 @@ fn assert_array_lengths_have_no_identity_bitcasts(spirv_words: &[u32]) {
 #[test]
 fn entry_length_queries_own_buffer() {
     let src = r#"
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+                entry tick(xs: []f32) []f32 =
           map(|i: i32| xs[i] * f32.i32(length(xs)), 0i32..<4)
     "#;
     let lowered = crate::compile_thru_spirv(src).expect("entry length(view) compiles");
-    assert_array_length_queried_on_descriptor(&lowered.spirv, 2, 0);
+    assert_array_length_queried_on_descriptor(&lowered.spirv, 0, 0);
     assert_array_lengths_have_no_identity_bitcasts(&lowered.spirv);
     // and the indexed read still hits the same descriptor
-    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
 }
 
 /// A `scan` over a view threads that view through loop-carried block params
@@ -9899,12 +9599,11 @@ fn entry_length_queries_own_buffer() {
 #[test]
 fn scan_over_view_reads_own_buffer() {
     let src = r#"
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+                entry tick(xs: []f32) []f32 =
           scan(|a: f32, b: f32| a + b, 0.0, xs)
     "#;
     let lowered = crate::compile_thru_spirv(src).expect("scan over a view compiles");
-    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
 }
 
 /// Merging two views at *distinct* descriptors — `if c then xs else ys` — has
@@ -9915,11 +9614,10 @@ fn scan_over_view_reads_own_buffer() {
 #[test]
 fn merge_of_distinct_buffers_is_a_type_error() {
     let src = r#"
-        #[compute]
-        entry tick(
-          #[storage(set=2, binding=0, access=read)] xs: []f32,
-          #[storage(set=2, binding=1, access=read)] ys: []f32,
-          #[uniform(set=1, binding=0)] c: u32
+                entry tick(
+          xs: []f32,
+          ys: []f32,
+          c: u32
         ) []f32 =
           map(|i: i32| (if c > 0u32 then xs else ys)[i], 0i32..<4)
     "#;
@@ -9943,9 +9641,8 @@ fn merge_of_distinct_buffers_is_a_type_error() {
 #[test]
 fn ctor_scalar_constructor_compiles_to_spirv() {
     let src = r#"
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32,
-                   #[uniform(set=1, binding=0)] n: u32) []i32 =
+                entry tick(xs: []f32,
+                   n: u32) []i32 =
           map(|x: f32| i32(x), xs)
     "#;
     crate::compile_thru_spirv(src).expect("i32(f32) constructor must compile to SPIR-V");
@@ -9954,15 +9651,13 @@ fn ctor_scalar_constructor_compiles_to_spirv() {
 #[test]
 fn ctor_scalar_constructor_matches_legacy_dot_form() {
     let new = r#"
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32,
-                   #[uniform(set=1, binding=0)] n: u32) []i32 =
+                entry tick(xs: []f32,
+                   n: u32) []i32 =
           map(|x: f32| i32(x), xs)
     "#;
     let legacy = r#"
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32,
-                   #[uniform(set=1, binding=0)] n: u32) []i32 =
+                entry tick(xs: []f32,
+                   n: u32) []i32 =
           map(|x: f32| i32.f32(x), xs)
     "#;
     // Constructor and dot-form compatibility syntax lower identically.
@@ -9973,9 +9668,8 @@ fn ctor_scalar_constructor_matches_legacy_dot_form() {
 #[test]
 fn ctor_vec2_constructor_compiles_to_spirv() {
     let src = r#"
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] xs: []vec2f32,
-                   #[uniform(set=1, binding=0)] n: u32) []vec2i32 =
+                entry tick(xs: []vec2f32,
+                   n: u32) []vec2i32 =
           map(|v: vec2f32| vec2i32(v), xs)
     "#;
     crate::compile_thru_spirv(src).expect("vec2i32(vec2f32) must compile to SPIR-V");
@@ -9984,15 +9678,13 @@ fn ctor_vec2_constructor_compiles_to_spirv() {
 #[test]
 fn ctor_vec3_and_vec4_constructors_compile_to_spirv() {
     let v3 = r#"
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] xs: []vec3i32,
-                   #[uniform(set=1, binding=0)] n: u32) []vec3f32 =
+                entry tick(xs: []vec3i32,
+                   n: u32) []vec3f32 =
           map(|v: vec3i32| vec3f32(v), xs)
     "#;
     let v4 = r#"
-        #[compute]
-        entry tick(#[storage(set=2, binding=0, access=read)] xs: []vec4u32,
-                   #[uniform(set=1, binding=0)] n: u32) []vec4f32 =
+                entry tick(xs: []vec4u32,
+                   n: u32) []vec4f32 =
           map(|v: vec4u32| vec4f32(v), xs)
     "#;
     crate::compile_thru_spirv(v3).expect("vec3f32(vec3i32) must compile");
@@ -10017,8 +9709,7 @@ fn filter_into_user_size_poly_helper_compiles() {
     let src = r#"
 def sum<[n]>(xs: [n]f32) f32 = reduce(|a: f32, b: f32| a + b, 0.0, xs)
 
-#[compute]
-entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) f32 =
+entry tick(xs: []f32) f32 =
   let kept = filter(|x: f32| x > 0.0, xs) in
   sum(kept)
 "#;
@@ -10033,7 +9724,6 @@ fn filter_into_user_size_poly_helper_static_capacity() {
     let src = r#"
 def sum<[n]>(xs: [n]f32) f32 = reduce(|a: f32, b: f32| a + b, 0.0, xs)
 
-#[compute]
 entry tick() f32 =
   let kept = filter(|x: f32| x > 0.0, [1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0]) in
   sum(kept)
@@ -10056,8 +9746,7 @@ def f(arr: []vec4f32) vec2f32 =
   let contributions = map(|d| d * 2.0, selected) in
   (reduce(|a, b| a + b, @[0.0, 0.0, 0.0, 0.0], contributions) * 0.1).xy
 
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] arr0: []vec4f32) []vec2f32 =
+entry e(arr0: []vec4f32) []vec2f32 =
   let arr = arr0[0..512] in
   map(|p: vec4f32| f(arr), arr)
 "#;
@@ -10081,9 +9770,8 @@ entry e(#[storage(set=2, binding=0, access=read)] arr0: []vec4f32) []vec2f32 =
 #[test]
 fn filter_into_map_compiles() {
     let src = r#"
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
-        #[storage(set=2, binding=1, access=write)] o: *[]f32) () =
+entry e(a: []f32,
+        o: *[]f32) () =
   let m = map(|x: f32| x * 2.0, filter(|x: f32| x > 0.0, a[0..256])) in
   let _ = scatter(o, [0i32], [m[0]]) in ()
 "#;
@@ -10100,8 +9788,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
 #[test]
 fn range_into_reduce_is_virtual_single_loop() {
     let src = r#"
-#[compute]
-entry e(#[storage(set=2, binding=0, access=write)] o: *[]i32) () =
+entry e(o: *[]i32) () =
   let s = reduce(|a: i32, b: i32| a + b, 0i32, 0i32 ..< 256) in
   let _ = scatter(o, [0i32], [s]) in ()
 "#;
@@ -10121,8 +9808,7 @@ entry e(#[storage(set=2, binding=0, access=write)] o: *[]i32) () =
 #[test]
 fn range_into_scan_compiles() {
     let src = r#"
-#[compute]
-entry e(#[storage(set=2, binding=0, access=write)] o: *[]i32) () =
+entry e(o: *[]i32) () =
   let s = scan(|a: i32, b: i32| a + b, 0i32, 0i32 ..< 256) in
   let _ = scatter(o, [0i32], [s[0]]) in ()
 "#;
@@ -10138,9 +9824,8 @@ entry e(#[storage(set=2, binding=0, access=write)] o: *[]i32) () =
 #[test]
 fn filter_into_scan_compiles() {
     let src = r#"
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
-        #[storage(set=2, binding=1, access=write)] o: *[]f32) () =
+entry e(a: []f32,
+        o: *[]f32) () =
   let s = scan(|x: f32, y: f32| x + y, 0.0, filter(|x: f32| x > 0.0, a[0..256])) in
   let _ = scatter(o, [0i32], [s[0]]) in ()
 "#;
@@ -10156,8 +9841,7 @@ fn scan_into_map_compiles() {
         (
             "scan-map",
             r#"
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
+entry e(a: []f32) []f32 =
   map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a))
 "#,
             true,
@@ -10167,8 +9851,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
         (
             "map-scan-map",
             r#"
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
+entry e(a: []f32) []f32 =
   map(
     |x: f32| x + 1.0,
     scan(|x: f32, y: f32| x + y, 0.0, map(|x: f32| x * 2.0, a)))
@@ -10180,8 +9863,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
         (
             "type-changing-scan-map",
             r#"
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []vec2f32 =
+entry e(a: []f32) []vec2f32 =
   map(|x: f32| @[x, x + 1.0], scan(|x: f32, y: f32| x + y, 0.0, a))
 "#,
             true,
@@ -10191,8 +9873,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []vec2f32 =
         (
             "sliced-scan-map",
             r#"
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
+entry e(a: []f32) []f32 =
   map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a[0..256]))
 "#,
             true,
@@ -10202,8 +9883,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
         (
             "multi-output-scan-map",
             r#"
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] a: []f32) ([]f32, []f32) =
+entry e(a: []f32) ([]f32, []f32) =
   let prefixes = scan(|x: f32, y: f32| x + y, 0.0, a) in
   (map(|x: f32| x + 1.0, prefixes), map(|x: f32| x * 2.0, prefixes))
 "#,
@@ -10214,8 +9894,7 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) ([]f32, []f32) =
         (
             "nested-sliced-scan-map",
             r#"
-#[compute]
-entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
+entry e(a: []f32) []f32 =
   map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a[0..512][0..256]))
 "#,
             false,
@@ -10288,7 +9967,6 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32) []f32 =
 #[test]
 fn independent_scans_use_one_parallel_product_recipe() {
     let source = r#"
-#[compute]
 entry paired_prefixes(xs: []i32) ([]i32, []i32) =
   (scan(|a: i32, b: i32| a + b, 0, xs),
    scan(|a: i32, b: i32| if a > b then a else b, 0, xs))
@@ -10308,7 +9986,6 @@ entry paired_prefixes(xs: []i32) ([]i32, []i32) =
 #[test]
 fn scan_fuses_with_independent_consumer_collective() {
     let source = r#"
-#[compute]
 entry e(xs: []i32) ([]i32, [1]i32) =
   let prefixes = scan(|a: i32, b: i32| a + b, 0, xs) in
   let mapped = map(|x: i32| x * 2, prefixes) in
@@ -10336,7 +10013,6 @@ entry e(xs: []i32) ([]i32, [1]i32) =
 #[test]
 fn multiple_scans_and_reductions_share_one_parallel_product_recipe() {
     let source = r#"
-#[compute]
 entry collective_product(xs: []i32, modes: []i32) ([2]i32, []i32, []i32) =
   let total = reduce(
     |a: i32, b: i32| if modes[0] > 0 then a + b else a * b,
@@ -10363,7 +10039,6 @@ entry collective_product(xs: []i32, modes: []i32) ([2]i32, []i32, []i32) =
 #[test]
 fn dependent_scan_into_reduce_keeps_two_collective_barriers() {
     let source = r#"
-#[compute]
 entry e(xs: [8]i32) [1]i32 =
   let prefixes = scan(|a: i32, b: i32| a + b, 0, xs) in
   let total = reduce(|a: i32, b: i32| a + b, 0, prefixes) in
@@ -10384,8 +10059,7 @@ fn entry_tuple_output_with_scan_indexed_literal_keeps_both_bindings() {
     use crate::pipeline_descriptor::{BufferUsage, Pipeline};
     let lowered = crate::compile_thru_spirv(
         "\
-#[compute]
-entry gen(xs: []i32, #[uniform(set=1,binding=0)] n: i32) ([]vec4f32, [5]i32) =
+entry gen(xs: []i32, n: i32) ([]vec4f32, [5]i32) =
   let offsets = scan(|a:i32,b:i32| a+b, 0, xs) in
   (map(|i:i32| @[f32.i32(i),0.0,0.0,1.0], iota(64)),
    [36, offsets[n - 1], 0, 0, 0])
@@ -10430,7 +10104,6 @@ fn bitwise_shift_ops_lower_to_spirv() {
 
     let spirv = compile_to_spirv(
         "\
-#[compute]
 entry e(xs: []u32) []u32 = map(|x: u32| (x ^ 5u32) << 1u32, xs)
 ",
     )
@@ -10477,7 +10150,6 @@ fn bitwise_fn_inlined_both_captured_and_in_soac_lambda_lowers() {
     compile_to_spirv(
         "\
 def f(v: u32) u32 = let w = v ^ 1u32 in (w >> 1u32) ^ w
-#[compute]
 entry e() []f32 =
   let k = f(7u32) in
   map(|i: i32| f32.u32(f(k + u32.i32(i))), 0i32 ..< 4)
@@ -10502,8 +10174,8 @@ def nested_lambda(x: i32) i32 =
     inner(a)
   in
   outer(5)
-#[vertex]
-entry v() #[builtin(position)] vec4f32 = @[f32.i32(nested_lambda(100)), 0.0, 0.0, 1.0]
+
+entry v() vec4f32 = @[f32.i32(nested_lambda(100)), 0.0, 0.0, 1.0]
 ",
     );
 }
@@ -10517,7 +10189,6 @@ fn folded_u32_arithmetic_wraps_to_width() {
     compile_to_spirv(
         "\
 def C: u32 = 2654435769u32
-#[compute]
 entry e() []u32 = map(|i: i32| C * 747796405u32 + 2891336453u32, 0i32 ..< 4)
 ",
     )
@@ -10553,7 +10224,6 @@ module g : RA = {
     (x0 + k0, x1 + k1)
   def at(k: key, p: u32) u32 = let (k0, k1) = k in let (r0, _) = block(p, 0u32, k0, k1) in r0
 }
-#[compute]
 entry e() []u32 = map(|i: i32| g.at((0x9e3779b9u32, 0x243f6a88u32), u32.i32(i)), 0i32 ..< 4)
 ",
     )
@@ -10600,9 +10270,7 @@ fn constructor_form_same_type_conversion_is_identity() {
 fn two_compute_entries_do_not_collide_on_auto_bindings() {
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry a(xs: []u32) []vec4f32 = map(|x| @[f32.u32(x), 0.0, 0.0, 0.0], xs)
-#[compute]
 entry b(xs: []u32) []f32 = map(|x| f32.u32(x), xs)
 "#,
     )
@@ -10624,9 +10292,7 @@ entry b(xs: []u32) []f32 = map(|x| f32.u32(x), xs)
 fn two_compute_entries_with_differently_typed_inputs_do_not_alias() {
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry a(xs: []u32) []u32 = map(|x| x, xs)
-#[compute]
 entry b(ys: []f32) []f32 = map(|y| y, ys)
 "#,
     )
@@ -10634,7 +10300,7 @@ entry b(ys: []f32) []f32 = map(|y| y, ys)
     assert!(!lowered.spirv.is_empty());
 }
 
-/// Two entries binding the *same* explicit `#[storage(set, binding)]`
+/// Two entries binding the *same* explicit ``
 /// slot to buffers with different element types (`[]f32` vs `[]vec4f32`)
 /// must be rejected at compile time. The compiler coalesces same-slot
 /// storage into one module-global whose type is the first declaration's;
@@ -10643,41 +10309,12 @@ entry b(ys: []f32) []f32 = map(|y| y, ys)
 /// base ...`. Reaching SPIR-V at all is the bug — the type checker must
 /// reject the conflicting interface first.
 #[test]
-fn conflicting_explicit_storage_binding_across_entries_is_rejected() {
-    let result = crate::compile_thru_spirv(
-        r#"
-#[compute]
-entry ent_a(idx: []u32, #[storage(set=1, binding=0, access=read)] buf: []f32) []f32 =
-  map(|s| buf[i32.u32(s)], idx)
-#[compute]
-entry ent_b(idx: []u32, #[storage(set=1, binding=0, access=read)] buf: []vec4f32) []f32 =
-  map(|s| buf[i32.u32(s)].x, idx)
-"#,
-    );
-    let msg = match result {
-        Ok(_) => panic!("a (set, binding) reused with a conflicting element type must be a compile error"),
-        Err(e) => e.to_string(),
-    };
-    assert!(
-        msg.contains("set=1, binding=0") && msg.contains("must use the same element type"),
-        "expected a buffer element-type conflict diagnostic, got: {msg}"
-    );
-}
-
-/// The dual of the rejection test: two entries may legitimately share an
-/// explicit `#[storage(set, binding)]` slot when they agree on the
-/// element type — that's how a pipeline wires one buffer into several
-/// stages. This must compile to one valid module, not trip the
-/// conflict check on the differing array-length variables.
-#[test]
 fn matching_explicit_storage_binding_across_entries_compiles() {
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
-entry ent_a(idx: []u32, #[storage(set=1, binding=0, access=read)] buf: []f32) []f32 =
+entry ent_a(idx: []u32, buf: []f32) []f32 =
   map(|s| buf[i32.u32(s)], idx)
-#[compute]
-entry ent_b(idx: []u32, #[storage(set=1, binding=0, access=read)] buf: []f32) []f32 =
+entry ent_b(idx: []u32, buf: []f32) []f32 =
   map(|s| buf[i32.u32(s)] * 2.0, idx)
 "#,
     )
@@ -10689,582 +10326,11 @@ entry ent_b(idx: []u32, #[storage(set=1, binding=0, access=read)] buf: []f32) []
 /// same descriptor slot. Use a named `resource` instead, which gives the
 /// sampled view a distinct texture descriptor with a backing reference.
 #[test]
-fn raw_cross_kind_image_aliasing_is_rejected() {
-    let result = crate::compile_thru_spirv(
-        r#"
-#[compute]
-entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: *storage_image,
-            #[builtin(global_invocation_id)] gid: vec3u32) () =
-  img with [@[i32.u32(gid.x), i32.u32(gid.y)]] = @[1.0, 0.0, 0.0, 1.0]
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
-  let verts = [@[-1.0, -1.0, 0.0, 1.0], @[3.0, -1.0, 0.0, 1.0], @[-1.0, 3.0, 0.0, 1.0]] in
-  verts[vid]
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32,
-                    #[texture(set=0, binding=0)] tex: texture2d,
-                    #[sampler(set=0, binding=1)] samp: sampler) #[target(screen)] vec4f32 =
-  texture_sample(tex, samp, @[pos.x / 1024.0, pos.y / 1024.0], 0.0)
-"#,
-    );
-    let msg = match result {
-        Ok(_) => panic!("storage_image + texture at one (set, binding) must be rejected"),
-        Err(e) => e.to_string(),
-    };
-    assert!(
-        msg.contains("set") && msg.contains("binding"),
-        "expected a descriptor collision diagnostic, got: {msg}"
-    );
-}
-
-/// A named `resource` viewed `storage_write` by a compute entry and `sampled`
-/// by a fragment entry compiles to one valid module — the resource/view form
-/// of the compute-write / fragment-sample handoff. The resource omits `layout`,
-/// so the compiler auto-assigns its binding.
-#[test]
-fn resource_view_ping_pong_compiles() {
-    let lowered = crate::compile_thru_spirv(
-        r#"
-resource color: image2d {
-  format = rgba8unorm
-  size   = 1024x1024
-  usages = [storage_write, sampled]
-}
-
-#[compute]
-entry paint(#[view(color, storage_write)] img: *storage_image,
-            #[builtin(global_invocation_id)] gid: vec3u32) () =
-  img with [@[i32.u32(gid.x), i32.u32(gid.y)]] = @[1.0, 0.0, 0.0, 1.0]
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
-  let verts = [@[-1.0, -1.0, 0.0, 1.0], @[3.0, -1.0, 0.0, 1.0], @[-1.0, 3.0, 0.0, 1.0]] in
-  verts[vid]
-#[fragment]
-entry show(#[builtin(position)] pos: vec4f32,
-           #[view(color, sampled)] tex: texture2d,
-           #[sampler(set=0, binding=1)] samp: sampler) #[target(screen)] vec4f32 =
-  texture_sample(tex, samp, @[pos.x / 1024.0, pos.y / 1024.0], 0.0)
-"#,
-    )
-    .expect("a resource viewed write+sampled across entries must compile");
-    assert!(!lowered.spirv.is_empty());
-}
-
-#[test]
-fn fragment_storage_read_resource_is_graphics_passthrough() {
-    let lowered = crate::compile_thru_spirv(
-        r#"
-open f32
-
-resource gbuf: image2d {
-  format = rgba8unorm
-  size   = window
-  usages = [storage_read]
-}
-
-#[fragment]
-entry fs(#[view(gbuf, storage_read)] g: storage_image)
-  #[target(surface)] vec4f32 =
-  image_load(g, @[0, 0])
-"#,
-    )
-    .expect("a fragment storage-read resource must remain a graphics passthrough");
-    assert!(!lowered.spirv.is_empty());
-}
-
-#[test]
-fn loop_bodied_map_uses_storage_image_globals_not_function_parameters() {
-    use std::collections::{HashMap, HashSet};
-    use wspirv::binary::parse_words;
-    use wspirv::dr::{Loader, Operand};
-    use wspirv::spirv::Op;
-
-    let lowered = crate::compile_thru_spirv(
-        r#"
-#[compute]
-entry r(xs: []u32,
-        #[storage_image(set=1, binding=0, format=r32float, access=read_only)] src: storage_image) []u32 =
-  map(|s|
-        let x = i32(s) in
-        let (_, total) = loop (j, total) = (0, 0.0) while j < 2 do
-          let px = image_load(src, @[x, j]) in
-          (j + 1, total + px.x) in
-        if total > 0.0 then 1u32 else 0u32,
-      xs)
-"#,
-    )
-    .expect("loop-bodied map with storage image compiles");
-
-    assert_no_runtime_storage_image_handles(&lowered.spirv);
-
-    let mut loader = Loader::new();
-    parse_words(&lowered.spirv, &mut loader).expect("parse generated SPIR-V");
-    let module = loader.module();
-    let parameters: HashSet<_> = module
-        .functions
-        .iter()
-        .flat_map(|function| function.parameters.iter().filter_map(|parameter| parameter.result_id))
-        .collect();
-    let loads: HashMap<_, _> = module
-        .functions
-        .iter()
-        .flat_map(|function| &function.blocks)
-        .flat_map(|block| &block.instructions)
-        .filter_map(|instruction| {
-            if instruction.class.opcode != Op::Load {
-                return None;
-            }
-            match (instruction.result_id, instruction.operands.first()) {
-                (Some(result), Some(Operand::IdRef(pointer))) => Some((result, *pointer)),
-                _ => None,
-            }
-        })
-        .collect();
-    let globals: HashSet<_> = module
-        .types_global_values
-        .iter()
-        .filter(|instruction| instruction.class.opcode == Op::Variable)
-        .filter_map(|instruction| instruction.result_id)
-        .collect();
-    let global_bindings: HashMap<_, _> = module
-        .annotations
-        .iter()
-        .filter_map(|instruction| match instruction.operands.as_slice() {
-            [Operand::IdRef(variable), Operand::Decoration(wspirv::spirv::Decoration::Binding), Operand::LiteralBit32(binding)] => {
-                Some((*variable, *binding))
-            }
-            _ => None,
-        })
-        .collect();
-    let mut image_ops = 0;
-    for instruction in module
-        .functions
-        .iter()
-        .flat_map(|function| &function.blocks)
-        .flat_map(|block| &block.instructions)
-        .filter(|instruction| matches!(instruction.class.opcode, Op::ImageRead | Op::ImageWrite))
-    {
-        image_ops += 1;
-        let Some(Operand::IdRef(image)) = instruction.operands.first() else {
-            panic!("image operation has no image operand")
-        };
-        assert!(
-            !parameters.contains(image),
-            "image operation targets OpFunctionParameter"
-        );
-        let global = loads.get(image).expect("image operand is loaded from its descriptor global");
-        assert!(
-            globals.contains(global),
-            "image load pointer is not a module-scope OpVariable"
-        );
-        assert_eq!(instruction.class.opcode, Op::ImageRead);
-        assert_eq!(global_bindings.get(global), Some(&0));
-    }
-    assert!(image_ops >= 1, "expected image_load");
-}
-
-/// A storage image shared across entries with mixed access — read in one entry,
-/// written in another — collapses to a single module global. Its access
-/// decoration must be the union of every view, so a read+write image carries
-/// neither `NonReadable` nor `NonWritable`. Naga validation ensures the writer's
-/// `OpImageWrite` is legal even when the reader entry appears first.
-#[test]
-fn storage_image_shared_read_and_write_across_entries_validates() {
-    let source = r#"
-#[compute]
-entry reader(xs: []u32,
-             #[storage_image(set=1, binding=0, format=r32float, access=read_only)] img: storage_image) []f32 =
-  map(|s| let p = image_load(img, @[i32(s), 0]) in p.x, xs)
-#[compute]
-entry writer(#[builtin(global_invocation_id)] gid: vec3u32,
-             #[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: *storage_image) () =
-  img with [@[i32.u32(gid.x), 0]] = @[1.0, 1.0, 1.0, 1.0]
-"#;
-    let lowered = crate::compile_thru_spirv(source).expect("shared read+write storage image compiles");
-    assert_no_runtime_storage_image_handles(&lowered.spirv);
-}
-
-/// Minimal `history = 1` feedback program shared by frame-graph tests: one
-/// compute entry writes a resource's current frame and samples its `previous`
-/// view.
-const HISTORY_FEEDBACK_SOURCE: &str = r#"
-resource acc: image2d {
-  format  = rgba32float
-  size    = 64x64
-  usages  = [storage_write, sampled]
-  history = 1
-}
-#[compute]
-entry step(#[view(acc, storage_write)] out_acc: *storage_image,
-           #[view(acc, sampled, previous)] prev_acc: texture2d,
-           #[builtin(global_invocation_id)] gid: vec3u32) () =
-  let xy = @[i32(gid.x), i32(gid.y)] in
-  let prev = texture_load(prev_acc, xy, 0) in
-  out_acc with [xy] = prev + @[1.0, 0.0, 0.0, 0.0]
-"#;
-
-/// The `FeedbackPair` a `previous` view of a `history` resource records must
-/// reach the published descriptor — it's what makes the runtime ping-pong the
-/// two textures. Every per-entry pipeline must carry the entry's feedback
-/// pairs.
-#[test]
-fn history_resource_feedback_pair_reaches_descriptor() {
-    use crate::pipeline_descriptor::Pipeline;
-
-    let lowered = crate::compile_thru_ssa(HISTORY_FEEDBACK_SOURCE).expect("history feedback compiles");
-    let has_feedback = lowered.global_context.pipeline.pipelines.iter().any(|pipeline| match pipeline {
-        Pipeline::Compute(compute) => !compute.feedback.is_empty(),
-        Pipeline::Graphics(graphics) => !graphics.feedback.is_empty(),
-    });
-    assert!(
-        has_feedback,
-        "no pipeline carries the previous-view feedback pair"
-    );
-}
-
-/// Resource/view metadata should publish an executable frame graph: storage
-/// texture allocations carry their size, feedback views are marked as
-/// previous-frame reads, and pass lifetimes come from descriptor resources.
-#[test]
-fn resource_dependencies_publish_frame_graph() {
-    use crate::pipeline_descriptor::{
-        FrameAccessRole, FrameHistoryRoleKind, FrameResourceExtent, FrameResourceKind, StorageTextureSize,
-    };
-
-    let lowered = crate::compile_thru_ssa(HISTORY_FEEDBACK_SOURCE).expect("history feedback compiles");
-    let graph = &lowered.global_context.pipeline.frame_graph;
-    assert!(!graph.passes.is_empty(), "frame graph has no passes");
-    assert!(!graph.resources.is_empty(), "frame graph has no resources");
-    assert_eq!(graph.feedback.len(), 1, "history pair should reach frame graph");
-
-    let step = graph.passes.iter().find(|pass| pass.name == "step").expect("step pass reaches frame graph");
-    assert!(
-        step.reads.iter().any(|access| access.role == FrameAccessRole::Previous),
-        "previous view should be a previous-frame read: {:?}",
-        step.reads
-    );
-    assert!(!step.writes.is_empty(), "storage image write should be visible");
-
-    let resource_index =
-        graph.feedback[0].write_resource.expect("feedback write should resolve to a frame resource");
-    let resource = &graph.resources[resource_index];
-    // Views of one `resource` collapse to a single texture-kind frame resource
-    // keyed by name; the storage allocation's size still rides on `extent`.
-    assert_eq!(resource.kind, FrameResourceKind::Texture);
-    assert_eq!(resource.first_pass, Some(0));
-    assert_eq!(resource.last_pass, Some(0));
-    assert!(matches!(
-        resource.extent.as_ref(),
-        Some(FrameResourceExtent::StorageTexture { size })
-            if *size == (StorageTextureSize::Fixed {
-                width: 64,
-                height: 64
-            })
-    ));
-    // The current-frame write and the previous-frame read are distinct
-    // ping-pong buffers → distinct resources, linked by the feedback pair: the
-    // write resource carries `WriteCurrent`, the read resource `ReadPrevious`.
-    assert!(resource.history.iter().any(|role| role.role == FrameHistoryRoleKind::WriteCurrent));
-    let read_index =
-        graph.feedback[0].read_resource.expect("feedback read should resolve to a frame resource");
-    let read_resource = &graph.resources[read_index];
-    assert!(read_resource.history.iter().any(|role| role.role == FrameHistoryRoleKind::ReadPrevious));
-}
-
-/// One `resource` written through a `storage_write` view and read through a
-/// `sampled` view is one frame-graph resource, so the write orders before the
-/// read. This is the write-then-sample pattern, and the only way to read a
-/// format a storage image cannot load.
-///
-/// Two `storage_*` views of one resource already unify; a sampled view must not
-/// key differently just because it also records the storage allocation it
-/// aliases.
-#[test]
-fn storage_write_and_sampled_views_of_one_resource_are_one_frame_resource() {
-    use crate::pipeline_descriptor::FrameResourceKind;
-
-    let src = "\
-open f32
-
-resource img: image2d {
-  format = rgba16float
-  size   = window
-  usages = [storage_write, sampled]
-}
-
-#[compute]
-entry produce(#[builtin(global_invocation_id)] gid: vec3u32,
-              #[view(img, storage_write)] o: *storage_image) () =
-  let xy = @[i32(gid.x) % 1280, i32(gid.x) / 1280] in
-  o with [xy] = @[1.0, 0.0, 0.0, 1.0]
-
-#[fragment]
-entry consume(#[builtin(frag_coord)] fc: vec4f32,
-              #[view(img, sampled)] t: texture2d)
-  #[target(surface)] vec4f32 =
-  texture_load(t, @[i32(fc.x), i32(fc.y)], 0)
-";
-    let lowered = crate::compile_thru_ssa(src).expect("write-then-sample compiles");
-    let graph = &lowered.global_context.pipeline.frame_graph;
-
-    let named: Vec<usize> = graph
-        .resources
-        .iter()
-        .enumerate()
-        .filter_map(|(index, resource)| (resource.name == "img").then_some(index))
-        .collect();
-    assert_eq!(
-        named.len(),
-        1,
-        "`img` must be one resource; resources are {:?}",
-        graph.resources.iter().map(|r| (r.name.clone(), r.kind)).collect::<Vec<_>>()
-    );
-    let img = named[0];
-
-    // Every view of one image resource is a texture; the storage allocation
-    // rides on `extent`, not on the kind.
-    assert_eq!(graph.resources[img].kind, FrameResourceKind::Texture);
-
-    let pass_index = |name: &str| {
-        graph.passes.iter().position(|pass| pass.name == name).unwrap_or_else(|| {
-            panic!(
-                "pass `{name}` missing: {:?}",
-                graph.passes.iter().map(|p| p.name.clone()).collect::<Vec<_>>()
-            )
-        })
-    };
-    let produce = pass_index("produce");
-    let consume = pass_index("consume");
-
-    assert!(
-        graph.passes[produce].writes.iter().any(|access| access.resource == img),
-        "the storage_write view writes `img`"
-    );
-    assert!(
-        graph.passes[consume].reads.iter().any(|access| access.resource == img),
-        "the sampled view reads `img`"
-    );
-    assert!(
-        graph.passes[consume].depends_on.contains(&produce),
-        "the sampled read must be ordered after the storage write, got depends_on {:?}",
-        graph.passes[consume].depends_on
-    );
-}
-
-/// Descriptor bindings must be slot-unique — a duplicated (set, binding)
-/// fails wgpu bind-group-layout creation ("Conflicting binding"). The
-/// publication pass's claimed-slot snapshot must include textures, samplers,
-/// and storage textures.
-#[test]
-fn history_resource_bindings_are_not_duplicated() {
-    use crate::pipeline_descriptor::Pipeline;
-
-    let lowered = crate::compile_thru_ssa(HISTORY_FEEDBACK_SOURCE).expect("history feedback compiles");
-    for pipeline in &lowered.global_context.pipeline.pipelines {
-        let Pipeline::Compute(compute) = pipeline else {
-            continue;
-        };
-        let mut seen = std::collections::HashSet::new();
-        for binding in &compute.bindings {
-            let key = serde_json::to_string(binding).expect("serialize binding");
-            assert!(
-                seen.insert(key),
-                "duplicate descriptor binding published: {binding:?}"
-            );
-        }
-    }
-}
-
-/// A compute entry that writes a `#[storage_image]` (and has no SOAC-derived
-/// domain) dispatches one thread per texel: `DerivedFrom { len: StorageImage }`,
-/// which the host resolves from the bound texture's extent. An incidental
-/// storage-buffer input (mountains' keyboard buffer) doesn't opt out — the
-/// image is the domain, so scheduling must replace the skeletal
-/// `Fixed {1,1,1}` dispatch.
-#[test]
-fn storage_image_entry_dispatch_derives_from_image() {
-    use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
-
-    // The mountains buffer_a shape: per-texel image pass that also reads a
-    // raw storage buffer.
-    let with_buffer_input = r#"
-resource acc: image2d {
-  format  = rgba32float
-  size    = 64x64
-  usages  = [storage_write, sampled]
-  history = 1
-}
-#[compute]
-entry step(#[view(acc, storage_write)] out_acc: *storage_image,
-           #[view(acc, sampled, previous)] prev_acc: texture2d,
-           #[storage(set=2, binding=0, access=read)] keyboard: []u32,
-           #[builtin(global_invocation_id)] gid: vec3u32) () =
-  let xy = @[i32(gid.x), i32(gid.y)] in
-  let prev = texture_load(prev_acc, xy, 0) in
-  let bump = if keyboard[0] != 0u32 then 1.0 else 0.0 in
-  out_acc with [xy] = prev + @[bump, 0.0, 0.0, 0.0]
-"#;
-    for source in [HISTORY_FEEDBACK_SOURCE, with_buffer_input] {
-        let lowered = crate::compile_thru_ssa(source).expect("per-texel image pass compiles");
-        let stage = lowered
-            .global_context
-            .pipeline
-            .pipelines
-            .iter()
-            .find_map(|pipeline| match pipeline {
-                Pipeline::Compute(compute) => {
-                    compute.stages.iter().find(|stage| stage.entry_point == "step")
-                }
-                _ => None,
-            })
-            .expect("step compute stage");
-        assert!(
-            matches!(
-                &stage.dispatch_size,
-                DispatchSize::DerivedFrom {
-                    len: DispatchLen::StorageImage { .. },
-                    ..
-                }
-            ),
-            "per-texel entry should dispatch from its storage image, got {:?}",
-            stage.dispatch_size
-        );
-    }
-}
-
-#[test]
-fn explicit_compute_dispatch_grid_overrides_image_domain_inference() {
-    use crate::pipeline_descriptor::{DispatchSize, Pipeline};
-
-    let lowered = crate::compile_thru_ssa(
-        r#"
-resource color: image2d {
-  format = rgba8unorm
-  size   = 64x64
-  usages = [storage_write]
-}
-
-#[compute]
-#[dispatch(4, 8)]
-entry paint(#[view(color, storage_write)] img: *storage_image,
-            #[builtin(global_invocation_id)] gid: vec3u32) () =
-  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  img with [xy] = @[1.0, 0.0, 0.0, 1.0]
-"#,
-    )
-    .expect("explicit-dispatch storage image pass compiles");
-
-    let stage = lowered
-        .global_context
-        .pipeline
-        .pipelines
-        .iter()
-        .find_map(|pipeline| match pipeline {
-            Pipeline::Compute(compute) => compute.stages.iter().find(|stage| stage.entry_point == "paint"),
-            _ => None,
-        })
-        .expect("paint compute stage");
-    assert_eq!(
-        stage.dispatch_size,
-        DispatchSize::Fixed {
-            x: 4,
-            y: 8,
-            z: 1,
-            explicit: true
-        },
-        "source-authored #[dispatch] should be an explicit launch domain"
-    );
-}
-
-/// A source `#[dispatch(1,1,1)]` is the one grid value that collides with the
-/// unspecified-default placeholder, yet it must still win over storage-image
-/// domain inference — the explicit bit, not the value, decides.
-#[test]
-fn explicit_dispatch_one_one_one_survives_image_domain_inference() {
-    use crate::pipeline_descriptor::{DispatchSize, Pipeline};
-
-    let lowered = crate::compile_thru_ssa(
-        r#"
-resource color: image2d {
-  format = rgba8unorm
-  size   = 64x64
-  usages = [storage_write]
-}
-
-#[compute]
-#[dispatch(1, 1, 1)]
-entry paint(#[view(color, storage_write)] img: *storage_image) () =
-  img with [@[0, 0]] = @[1.0, 0.0, 0.0, 1.0]
-"#,
-    )
-    .expect("explicit 1x1x1 storage image pass compiles");
-
-    let stage = lowered
-        .global_context
-        .pipeline
-        .pipelines
-        .iter()
-        .find_map(|pipeline| match pipeline {
-            Pipeline::Compute(compute) => compute.stages.iter().find(|stage| stage.entry_point == "paint"),
-            _ => None,
-        })
-        .expect("paint compute stage");
-    assert_eq!(
-        stage.dispatch_size,
-        DispatchSize::Fixed {
-            x: 1,
-            y: 1,
-            z: 1,
-            explicit: true
-        },
-        "explicit #[dispatch(1,1,1)] must stay a single invocation, not upgrade \
-         to the storage image's per-texel grid, got {:?}",
-        stage.dispatch_size
-    );
-}
-
-/// A `#[dispatch]` grid that provably under-covers a statically-sized
-/// data-parallel domain is rejected rather than silently dropping the tail.
-#[test]
-fn undercovering_dispatch_grid_is_rejected() {
-    // iota(100) is a fixed 100-element domain; #[dispatch(1,1,1)] at the
-    // default 64-wide workgroup launches only 64 threads, dropping 36.
-    let result = crate::compile_thru_ssa(
-        r#"
-#[compute]
-#[dispatch(1, 1, 1)]
-entry e() []i32 = map(|x| x * 2, iota(100))
-"#,
-    );
-    let msg = match result {
-        Ok(_) => panic!("under-covering #[dispatch] must be rejected"),
-        Err(e) => e.to_string(),
-    };
-    assert!(
-        msg.contains("would be dropped") && msg.contains("#[dispatch"),
-        "diagnostic should explain the dropped elements, got: {msg}"
-    );
-
-    // A grid that covers the domain (2 * 64 = 128 >= 100) compiles.
-    crate::compile_thru_ssa(
-        r#"
-#[compute]
-#[dispatch(2, 1, 1)]
-entry e() []i32 = map(|x| x * 2, iota(100))
-"#,
-    )
-    .expect("a covering #[dispatch] grid compiles");
-}
-
-/// Storage-image writes use place-update syntax; `image_store` is not a
-/// surface builtin.
-#[test]
 fn image_store_is_not_user_visible() {
     let result = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry r(xs: []u32,
-        #[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: storage_image) []u32 =
+        img: storage_image) []u32 =
   map(|s|
         let i = i32(s)
         let _ = image_store(img, @[i, 0], @[1.0, 1.0, 1.0, 1.0]) in
@@ -11283,289 +10349,10 @@ entry r(xs: []u32,
 }
 
 #[test]
-fn storage_image_with_tail_lowers_without_runtime_handle() {
-    let source = r#"
-#[compute]
-entry r(#[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: *storage_image,
-        #[builtin(global_invocation_id)] gid: vec3u32) () =
-  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  img with [xy] = @[1.0, 0.0, 0.0, 1.0]
-"#;
-    let lowered = crate::compile_thru_spirv(source).expect("linear image update compiles");
-    assert_no_runtime_storage_image_handles(&lowered.spirv);
-
-    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
-        compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
-    ))
-    .expect("WGSL lowering");
-    assert!(
-        wgsl.contains("textureStore("),
-        "linear image update did not lower to textureStore:\n{wgsl}"
-    );
-}
-
-#[test]
-fn storage_image_with_explicit_entry_handle_return_erases_to_unit() {
-    let source = r#"
-#[compute]
-entry r(#[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: *storage_image,
-        #[builtin(global_invocation_id)] gid: vec3u32) *storage_image =
-  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  img with [xy] = @[1.0, 0.0, 0.0, 1.0]
-"#;
-    let lowered = crate::compile_thru_spirv(source)
-        .expect("explicit storage-image handle entry return should erase to unit");
-    assert_no_runtime_storage_image_handles(&lowered.spirv);
-}
-
-#[test]
-fn storage_image_with_if_tail_has_no_void_phi() {
-    use wspirv::binary::parse_words;
-    use wspirv::dr::Loader;
-    use wspirv::spirv::Op;
-
-    let source = r#"
-#[compute]
-entry r(#[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: *storage_image,
-        #[builtin(global_invocation_id)] gid: vec3u32) () =
-  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  if gid.x < 32u32 then
-    img with [xy] = @[0.0, 0.0, 0.0, 1.0]
-  else
-    img with [xy] = @[1.0, 1.0, 1.0, 1.0]
-"#;
-    let lowered = crate::compile_thru_spirv(source).expect("linear image-update if compiles");
-    assert_no_runtime_storage_image_handles(&lowered.spirv);
-
-    let mut loader = Loader::new();
-    parse_words(&lowered.spirv, &mut loader).expect("parse generated SPIR-V");
-    let module = loader.module();
-    let void_ty = module
-        .types_global_values
-        .iter()
-        .find(|instruction| instruction.class.opcode == Op::TypeVoid)
-        .and_then(|instruction| instruction.result_id);
-    for function in &module.functions {
-        for block in &function.blocks {
-            for instruction in &block.instructions {
-                if instruction.class.opcode == Op::Phi {
-                    assert!(
-                        instruction.result_type != void_ty,
-                        "linear image-update if materialized an OpPhi %void"
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn storage_image_with_loop_tail_lowers_without_runtime_handle() {
-    let source = r#"
-#[compute]
-entry r(#[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: *storage_image,
-        #[builtin(global_invocation_id)] gid: vec3u32) () =
-  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  loop img = img for i < 2 do
-    img with [xy] = @[f32.i32(i), 0.0, 0.0, 1.0]
-"#;
-    let lowered = crate::compile_thru_spirv(source).expect("linear image-update loop compiles");
-    assert_no_runtime_storage_image_handles(&lowered.spirv);
-
-    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
-        compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
-    ))
-    .expect("WGSL lowering");
-    assert!(
-        wgsl.contains("textureStore("),
-        "linear image-update loop did not lower to textureStore:\n{wgsl}"
-    );
-    assert!(
-        !wgsl.lines().any(|line| line.starts_with("fn ") && line.contains("texture_storage_2d")),
-        "storage image survived in a WGSL helper signature:\n{wgsl}"
-    );
-    let module = naga::front::wgsl::parse_str(&wgsl)
-        .unwrap_or_else(|error| panic!("Naga rejected generated WGSL: {error:?}\n{wgsl}"));
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap_or_else(|error| panic!("Naga validation rejected generated WGSL: {error:?}\n{wgsl}"));
-}
-
-#[test]
-fn user_helper_specializes_storage_image_without_runtime_handle() {
-    let lowered = crate::compile_thru_spirv(
-        r#"
-def read_pixel(img: storage_image, x: i32) f32 =
-  let pixel = image_load(img, @[x, 0]) in pixel.x
-
-#[compute]
-entry r(xs: []u32,
-        #[storage_image(set=1, binding=0, format=r32float, access=read_only)] src: storage_image) []u32 =
-  map(|s| if read_pixel(src, i32(s)) > 0.0 then 1u32 else 0u32, xs)
-"#,
-    )
-    .expect("storage-image helper specializes by binding");
-    assert_no_runtime_storage_image_handles(&lowered.spirv);
-}
-
-fn assert_no_runtime_storage_image_handles(words: &[u32]) {
-    use std::collections::{HashMap, HashSet};
-    use wspirv::binary::parse_words;
-    use wspirv::dr::{Loader, Operand};
-    use wspirv::spirv::Op;
-
-    let mut loader = Loader::new();
-    parse_words(words, &mut loader).expect("parse generated SPIR-V");
-    let module = loader.module();
-    let image_types: HashSet<_> = module
-        .types_global_values
-        .iter()
-        .filter(|instruction| instruction.class.opcode == Op::TypeImage)
-        .filter_map(|instruction| instruction.result_id)
-        .collect();
-
-    for function_type in
-        module.types_global_values.iter().filter(|instruction| instruction.class.opcode == Op::TypeFunction)
-    {
-        for operand in &function_type.operands {
-            if let Operand::IdRef(ty) = operand {
-                assert!(
-                    !image_types.contains(ty),
-                    "OpTypeFunction contains a storage-image return or parameter type"
-                );
-            }
-        }
-    }
-
-    let mut value_types: HashMap<_, _> = HashMap::new();
-    for instruction in &module.types_global_values {
-        if let (Some(id), Some(ty)) = (instruction.result_id, instruction.result_type) {
-            value_types.insert(id, ty);
-        }
-    }
-    for function in &module.functions {
-        for parameter in &function.parameters {
-            if let (Some(id), Some(ty)) = (parameter.result_id, parameter.result_type) {
-                assert!(
-                    !image_types.contains(&ty),
-                    "storage image survived as OpFunctionParameter"
-                );
-                value_types.insert(id, ty);
-            }
-        }
-        for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
-            if let (Some(id), Some(ty)) = (instruction.result_id, instruction.result_type) {
-                value_types.insert(id, ty);
-            }
-        }
-    }
-
-    for call in module
-        .functions
-        .iter()
-        .flat_map(|function| &function.blocks)
-        .flat_map(|block| &block.instructions)
-        .filter(|instruction| instruction.class.opcode == Op::FunctionCall)
-    {
-        for operand in call.operands.iter().skip(1) {
-            if let Operand::IdRef(argument) = operand {
-                assert!(
-                    value_types.get(argument).is_none_or(|ty| !image_types.contains(ty)),
-                    "OpFunctionCall passes a storage-image argument"
-                );
-            }
-        }
-    }
-
-    let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
-    let naga_module = naga::front::spv::parse_u8_slice(&bytes, &naga::front::spv::Options::default())
-        .unwrap_or_else(|error| panic!("Naga rejected generated SPIR-V: {error:?}"));
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&naga_module)
-    .unwrap_or_else(|error| panic!("Naga validation rejected generated SPIR-V: {error:?}"));
-}
-
-/// A `#[view(...)]` naming a resource that doesn't exist is a compile error.
-#[test]
-fn view_of_unknown_resource_is_rejected() {
-    let result = crate::compile_thru_spirv(
-        r#"
-#[compute]
-entry paint(#[view(nope, storage_write)] img: *storage_image,
-            #[builtin(global_invocation_id)] gid: vec3u32) () =
-  img with [@[i32.u32(gid.x), i32.u32(gid.y)]] = @[1.0, 0.0, 0.0, 1.0]
-"#,
-    );
-    let msg = match result {
-        Ok(_) => panic!("a view of an undeclared resource must be a compile error"),
-        Err(e) => e.to_string(),
-    };
-    assert!(
-        msg.contains("unknown resource") && msg.contains("nope"),
-        "got: {msg}"
-    );
-}
-
-/// A raw `#[storage_image]` and `#[texture]` reusing one `(set, binding)` with
-/// different image types is invalid: it emits two descriptor variables of
-/// different types at one slot, which the runtime can't bind. The `resource`
-/// form makes this unrepresentable by giving sampled views their own descriptor
-/// slot plus a `backing` reference to the storage texture allocation.
-#[test]
-fn raw_cross_kind_same_binding_is_rejected() {
-    let result = crate::compile_thru_spirv(
-        r#"
-#[compute]
-entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: *storage_image,
-            #[builtin(global_invocation_id)] gid: vec3u32) () =
-  img with [@[i32.u32(gid.x), i32.u32(gid.y)]] = @[1.0, 0.0, 0.0, 1.0]
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
-  let verts = [@[-1.0, -1.0, 0.0, 1.0], @[3.0, -1.0, 0.0, 1.0], @[-1.0, 3.0, 0.0, 1.0]] in
-  verts[vid]
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32,
-                    #[texture(set=0, binding=0)] tex: texture2d,
-                    #[sampler(set=0, binding=1)] samp: sampler) #[target(screen)] vec4f32 =
-  texture_sample(tex, samp, @[pos.x / 1024.0, pos.y / 1024.0], 0.0)
-"#,
-    );
-    let msg = match result {
-        Ok(_) => panic!("storage_image + texture at one (set, binding) must be rejected"),
-        Err(e) => e.to_string(),
-    };
-    assert!(
-        msg.contains("set") && msg.contains("binding"),
-        "expected an incompatible-descriptor-kind error, got: {msg}"
-    );
-}
-
-/// An array-of-tuples entry input (`pts: [](f32, f32)`) is split by the
-/// SoA transform into a tuple-of-arrays whose component arrays share one
-/// outer length. Two maps over those components are therefore the same
-/// size class, so they must stay horizontally fused: one parallel kernel
-/// driving both maps as lanes over the shared length, not two separate
-/// dispatches. This is the SoA case that the size-class scheduling must
-/// keep together.
-///
-/// `#[ignore]`d: array-of-tuples *entry inputs* do not lower today — the
-/// input lowers to a storage buffer whose element type stays
-/// `Tuple(2, [Array, Array])`, which has no static size. Un-ignore once
-/// the SoA-input lowering and per-size-class scheduling land.
-#[test]
 #[ignore = "array-of-tuples entry input does not lower (element type Tuple(2) has no static size); blocks the SoA same-size-class case"]
 fn soa_array_of_tuples_components_stay_one_size_class() {
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry main(pts: [](f32, f32)) ([]f32, []f32) =
   (map(|p| p.0 + 1.0, pts), map(|p| p.1 + 2.0, pts))
 "#,
@@ -11588,8 +10375,8 @@ def rotm(a: f32) mat3f32 =
   @[[f32.cos(a), 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, f32.cos(a)]]
 def eye: vec3f32 = rotm(ELEV) * @[0.0, 0.0, DIST]
 def use_eye(p: vec3f32) vec3f32 = p + eye
-#[fragment]
-entry f() #[target(screen)] vec4f32 =
+
+entry f() vec4f32 =
   let q = use_eye(@[1.0, 2.0, 3.0]) in @[q.x, q.y, q.z, 1.0]
 "#,
     )
@@ -11607,7 +10394,6 @@ fn filter_scratch_binding_is_not_read_only() {
     let lowered = compile_parallel(
         r#"
 def keep(x: u32) bool = x != 0u32
-#[compute]
 entry filt(xs: []u32) ([]u32, [1]u32) =
   let ys = filter(keep, xs) in
   (ys, [u32.i32(length(ys))])
@@ -11663,8 +10449,7 @@ entry filt(xs: []u32) ([]u32, [1]u32) =
 fn inplace_write_to_returned_readwrite_storage_errors_gracefully() {
     let result = crate::compile_thru_spirv(
         r#"
-#[compute]
-entry tick(#[storage(set=2, binding=0, access=readwrite)] buf: *[]u32) *[]u32 =
+entry tick(buf: *[]u32) *[]u32 =
   buf with [0] = 42u32
 "#,
     );
@@ -11697,8 +10482,8 @@ fn structural_record_lowers_through_spirv() {
     crate::compile_thru_spirv(
         r#"
 type draw_args = {x: f32, y: f32, z: f32, w: f32}
-#[fragment]
-entry frag(#[uniform(set=1, binding=0)] iTime: f32) #[target(screen)] draw_args =
+
+entry frag(iTime: f32) draw_args =
   {x = iTime, y = 0.0, z = 0.0, w = 1.0}
 "#,
     )
@@ -11707,8 +10492,7 @@ entry frag(#[uniform(set=1, binding=0)] iTime: f32) #[target(screen)] draw_args 
     crate::compile_thru_spirv(
         r#"
 type point = {x: f32, y: f32}
-#[compute]
-entry e(#[storage(set=2, binding=1, access=write)] o: *[]point) () =
+entry e(o: *[]point) () =
   let _ = scatter(o, [0i32], [{x = 1.0, y = 2.0}]) in ()
 "#,
     )
@@ -11731,7 +10515,6 @@ def use_world(w: world, dom: []u32) ([]vec2f32, []vec4f32) =
   let it = map(|i| let j = i32(i) in w.items[j] * @[2.0, 2.0, 2.0, 2.0], dom) in
   (p, it)
 
-#[compute]
 entry step(dom: []u32, points_in: []vec2f32, items_in: []vec4f32)
   ([]vec2f32, []vec4f32) =
   use_world({ points = points_in, items = items_in }, dom)
@@ -11755,7 +10538,6 @@ def make_world(dom: []u32) world =
   let it = map(|i| @[f32(i), 0.0, 0.0, 1.0], dom) in
   { points = p, items = it }
 
-#[compute]
 entry step(dom: []u32) ([]vec2f32, []vec4f32) =
   let w = make_world(dom) in
   (w.points, w.items)
@@ -11771,7 +10553,6 @@ entry step(dom: []u32) ([]vec2f32, []vec4f32) =
 fn map_output_fed_and_returned_compiles() {
     crate::compile_thru_spirv(
         r#"
-#[compute]
 entry frame(occ_dom: []u32, sett_dom: []u32) ([]u32, []u32) =
   let occ = map(|i| i + 7u32, occ_dom)
   let setts = map(|i| let j = i32(i) in i + occ[j % 4], sett_dom) in
@@ -11793,7 +10574,6 @@ def build(occ_dom: []u32, sett_dom: []u32) []u32 =
   let setts = map(|i| let j = i32(i) in i + occ[j % 4], sett_dom) in
   setts
 
-#[compute]
 entry frame(occ_dom: []u32, sett_dom: []u32) []u32 =
   build(occ_dom, sett_dom)
 "#,
@@ -11817,7 +10597,6 @@ type world = { points: []vec2f32 }
 def build_geom(w: world, tdom: []u32) []vec4f32 =
   map(|i| let j = i32(i) in @[w.points[j % 8].x, 0.0, w.points[j % 8].y, 1.0], tdom)
 
-#[compute]
 entry step(pdom: []u32, tdom: []u32, points_in: []vec2f32)
   ([]vec2f32, []vec4f32) =
   let p = map(|i| let j = i32(i) in points_in[j] + @[1.0, 0.0], pdom)
@@ -11833,8 +10612,7 @@ entry step(pdom: []u32, tdom: []u32, points_in: []vec2f32)
 fn clear_then_scatter_on_consuming_write_storage_compiles() {
     crate::compile_thru_spirv(
         r#"
-#[compute]
-entry e(#[storage(set=2, binding=1, access=write)] fb: *[]vec4f32) () =
+entry e(fb: *[]vec4f32) () =
   let cleared = map(|_p:vec4f32| @[0.0, 0.0, 0.0, 1.0], fb) in
   let _ = scatter(cleared, [0i32, 1i32], [@[1.0,1.0,1.0,1.0], @[1.0,1.0,1.0,1.0]]) in ()
 "#,
@@ -11856,9 +10634,8 @@ fn compute_entry_returns_screma_result_and_scatters_through_it() {
 def N:i32 = 8
 def RES:i32 = 8
 
-#[compute]
-entry sim(#[storage(set=2, binding=0, access=read)] prev: []vec4f32,
-          #[storage(set=2, binding=1, access=write)] fb: []vec4f32) []vec4f32 =
+entry sim(prev: []vec4f32,
+          fb: []vec4f32) []vec4f32 =
   let new_pos = map(|x:vec4f32| @[x.x + 1.0, x.y + 1.0, x.z, x.w], prev) in
   let idxs = map(|p:vec4f32| i32.f32(p.y) * RES + i32.f32(p.x), new_pos) in
   let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], new_pos) in
@@ -12029,7 +10806,6 @@ fn f32_bit_reinterpret_members_lower_through_spirv() {
 def fsqrt(x: f32) f32 =
   f32.from_bits(0x1fbd1df5u32 + (f32.to_bits(x) >> 1u32))
 
-#[compute]
 entry e() [1]f32 = [fsqrt(4.0f32)]
 "#,
     )
@@ -12049,226 +10825,25 @@ entry e() [1]f32 = [fsqrt(4.0f32)]
 /// from the map/iota idiom (loop over shadow taps, then sample the AO
 /// result).
 #[test]
-fn texture_load_after_image_load_loop_in_map_lambda() {
-    crate::compile_thru_spirv(
-        r#"
-open f32
-resource src: image2d { format = r32float  size = window  usages = [storage_read, storage_write] }
-resource tex: image2d { format = r32float  size = window  usages = [storage_write, sampled] }
-
-#[compute]
-entry g6(pxl: []u32,
-         #[view(src, storage_read)]  s: storage_image,
-         #[view(tex, sampled)]       tx: texture2d)
-  []u32 =
-  map(|t|
-    let i = i32(t)  let x = i % 1280  let y = i / 1280
-    let acc =
-      loop acc = 0.0 for k < 8 do
-        let v = image_load(s, @[x, y]).x in
-        acc + v
-    let base = texture_load(tx, @[x, y], 0).x in
-    if acc + base > 0.0 then 1u32 else 0u32
-    , pxl)
-"#,
-    )
-    .expect("texture_load after an image_load loop inside a map lambda should lower");
-}
-
-/// A runtime filter whose host entry also binds a storage image schedules the
-/// filter scan over a fixed worker grid. The filter stages are clones of the
-/// host entry, so they inherit its storage-image input; the per-texel dispatch
-/// upgrade must not seize their domains and wire the scan to the unrelated
-/// image extent. Because the scan phase is scheduled `Explicit(Fixed)`, no
-/// domain inference can touch it.
-#[test]
-fn filter_scan_domain_ignores_storage_image_entry_binding() {
-    use crate::egir::parallelize::KernelDomain;
-    use crate::pipeline_descriptor::{DispatchSize, Pipeline};
-
-    let src = r#"
-resource occ: image2d { format = r32float  size = 256x256  usages = [storage_read, storage_write] }
-
-#[compute]
-entry cull(xs: []u32,
-           #[view(occ, storage_read)] od: storage_image) ?k. [k]u32 =
-  filter(|x|
-    let d = image_load(od, @[i32(x % 256u32), i32(x / 256u32)]).x in
-    d < 0.5
-    , xs)
-"#;
-    let converted = crate::compile_thru_ssa(src).expect("image-reading filter reaches SSA");
-    let scan = converted
-        .global_context
-        .kernel_plan
-        .phases()
-        .find(|phase| phase.entry_point == "cull_filter_scan")
-        .expect("scan phase scheduled");
-    assert!(
-        matches!(
-            scan.domain,
-            KernelDomain::Fixed {
-                x: crate::egir::parallelize::tests::FILTER_SCAN_GROUPS,
-                y: 1,
-                z: 1
-            }
-        ),
-        "scan domain must be the fixed worker grid, not the image extent, got {:?}",
-        scan.domain
-    );
-    assert_eq!(
-        scan.workgroup_size,
-        (crate::egir::parallelize::tests::REDUCE_PHASE1_WIDTH, 1, 1)
-    );
-
-    let lowered = crate::compile_thru_spirv(src).expect("image-reading filter emits SPIR-V");
-    let stage = lowered
-        .pipeline
-        .pipelines
-        .iter()
-        .find_map(|pipeline| match pipeline {
-            Pipeline::Compute(compute) => {
-                compute.stages.iter().find(|stage| stage.entry_point == "cull_filter_scan")
-            }
-            _ => None,
-        })
-        .expect("scan stage published");
-    assert!(
-        matches!(stage.dispatch_size, DispatchSize::Fixed { x: 4, y: 1, z: 1, .. }),
-        "scan dispatch must publish the fixed worker grid, got {:?}",
-        stage.dispatch_size
-    );
-}
-
-/// A record-typed `#[uniform]` param must reach SSA as ONE EntryInput
-/// carrying the Record type and the uniform binding — no TLC pass may
-/// flatten it into per-field params (the SPIR-V backend builds the
-/// uniform block from exactly this input).
-#[test]
-fn record_uniform_reaches_ssa_as_single_input() {
-    let lowered = crate::compile_thru_ssa(
-        r#"
-type block = { radius: f32, tint: vec2f32, center: vec2f32 }
-#[compute]
-entry e(xs: []u32, #[uniform(set=1, binding=0)] c: block) []u32 =
-  map(|x| x + u32(c.radius + c.tint.x + c.center.y), xs)
-"#,
-    )
-    .expect("record uniform reaches SSA");
-    let entry = lowered.entry_points.iter().find(|e| e.name == "e").expect("entry `e`");
-    let c: Vec<_> = entry.inputs.iter().filter(|i| i.name == "c").collect();
-    assert_eq!(c.len(), 1, "record uniform must stay one input, got {:?}", c);
-    assert!(
-        c[0].uniform_binding().is_some(),
-        "input `c` must carry the uniform binding"
-    );
-    assert!(
-        matches!(
-            &c[0].ty,
-            polytype::Type::Constructed(crate::ast::TypeName::Record(_), _)
-        ),
-        "input `c` must keep its Record type, got {:?}",
-        c[0].ty
-    );
-}
-
-/// The record uniform lowers to a Block-decorated struct whose members
-/// carry std140 Offsets, and the Uniform-class variable points at that
-/// laid-out struct (never at the shared plain record struct).
-#[test]
-fn record_uniform_emits_std140_offset_decorated_block() {
-    use std::collections::HashMap;
-    use wspirv::binary::parse_words;
-    use wspirv::dr::{Loader, Operand};
-    use wspirv::spirv::{Decoration, Op, StorageClass};
-
-    let lowered = crate::compile_thru_spirv(
-        r#"
-type block = { radius: f32, tint: vec2f32, center: vec2f32 }
-#[compute]
-entry e(xs: []u32, #[uniform(set=1, binding=0)] c: block) []u32 =
-  map(|x| x + u32(c.radius + c.tint.x + c.center.y), xs)
-"#,
-    )
-    .expect("record uniform emits SPIR-V");
-
-    let mut loader = Loader::new();
-    parse_words(&lowered.spirv, &mut loader).expect("parse spirv");
-    let module = loader.module();
-
-    // Member offsets per struct id, and the set of Block-decorated ids.
-    let mut offsets: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
-    let mut blocks: Vec<u32> = Vec::new();
-    for inst in &module.annotations {
-        match inst.class.opcode {
-            Op::MemberDecorate => {
-                let id = inst.operands[0].unwrap_id_ref();
-                let member = inst.operands[1].unwrap_literal_bit32();
-                if inst.operands[2] == Operand::Decoration(Decoration::Offset) {
-                    let off = inst.operands[3].unwrap_literal_bit32();
-                    offsets.entry(id).or_default().push((member, off));
-                }
-            }
-            Op::Decorate if inst.operands[1] == Operand::Decoration(Decoration::Block) => {
-                blocks.push(inst.operands[0].unwrap_id_ref());
-            }
-            _ => {}
-        }
-    }
-
-    // A Block struct with the record's std140 offsets exists...
-    let block_id = blocks
-        .iter()
-        .copied()
-        .find(|id| {
-            let mut o = offsets.get(id).cloned().unwrap_or_default();
-            o.sort_unstable();
-            o == vec![(0, 0), (1, 8), (2, 16)]
-        })
-        .expect("a Block struct with member offsets [0, 8, 16] must exist");
-
-    // ...and a Uniform-storage variable points at it (via its pointer type).
-    let pointee_of: HashMap<u32, u32> = module
-        .types_global_values
-        .iter()
-        .filter(|i| i.class.opcode == Op::TypePointer)
-        .filter_map(|i| Some((i.result_id?, i.operands[1].unwrap_id_ref())))
-        .collect();
-    let uniform_points_at_block = module.types_global_values.iter().any(|i| {
-        i.class.opcode == Op::Variable
-            && i.operands.first() == Some(&Operand::StorageClass(StorageClass::Uniform))
-            && i.result_type.and_then(|t| pointee_of.get(&t)).copied() == Some(block_id)
-    });
-    assert!(
-        uniform_points_at_block,
-        "a Uniform-class OpVariable must point at the laid-out block struct"
-    );
-}
-
-/// Two stages sharing the same record uniform (set, binding) compile —
-/// the interface-block cache prevents double Offset decoration and the
-/// cross-entry consistency check accepts the matching types.
-#[test]
 fn record_uniform_shared_across_stages_compiles() {
     crate::compile_thru_spirv(
         r#"
 type block = { radius: f32, tint: vec2f32 }
 
-#[compute]
-entry step(xs: []u32, #[uniform(set=1, binding=0)] c: block) []u32 =
+entry step(xs: []u32, c: block) []u32 =
   map(|x| x + u32(c.radius), xs)
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+
+entry vertex_main(vid: i32) vec4f32 =
   let verts = [@[-1.0, -1.0, 0.0, 1.0],
                @[3.0, -1.0, 0.0, 1.0],
                @[-1.0, 3.0, 0.0, 1.0]] in
   verts[vid]
 
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32,
-                    #[uniform(set=1, binding=0)] c: block)
-  #[target(screen)] vec4f32 =
+
+entry fragment_main(pos: vec4f32,
+                    c: block)
+  vec4f32 =
   @[c.tint.x, c.tint.y, c.radius, 1.0]
 "#,
     )
@@ -12287,10 +10862,9 @@ fn storage_matrix_elements_publish_std430_matrix_layout() {
 
     let lowered = crate::compile_thru_spirv(
         r#"
-#[compute]
 entry copy_matrix(
-    #[storage(set=2, binding=0, access=read)] input: []mat3f32,
-    #[storage(set=2, binding=1, access=write)] output: *[]mat3f32) () =
+    input: []mat3f32,
+    output: *[]mat3f32) () =
   let _ = scatter(output, [0i32], [input[0]]) in ()
 "#,
     )
@@ -12351,8 +10925,7 @@ fn storage_record_elements_get_std430_offsets_and_stride() {
     let lowered = crate::compile_thru_spirv(
         r#"
 type point = { w: f32, uv: vec2f32 }
-#[compute]
-entry e(#[storage(set=2, binding=1, access=write)] o: *[]point) () =
+entry e(o: *[]point) () =
   let _ = scatter(o, [0i32], [{w = 1.0, uv = @[2.0, 3.0]}]) in ()
 "#,
     )
@@ -12397,62 +10970,6 @@ entry e(#[storage(set=2, binding=1, access=write)] o: *[]point) () =
 /// layout: record fields under their source names, tuples as `f0..`,
 /// bare scalars/vectors as a single member at offset 0 — the same
 /// host contract push constants have.
-#[test]
-fn uniform_bindings_publish_size_and_members() {
-    use crate::pipeline_descriptor::{Binding, Pipeline};
-
-    let lowered = crate::compile_thru_spirv(
-        r#"
-type block = { radius: f32, tint: vec2f32, center: vec2f32 }
-#[compute]
-entry e(xs: []u32,
-        #[uniform(set=1, binding=0)] c: block,
-        #[uniform(set=1, binding=1)] pair: (f32, vec2f32),
-        #[uniform(set=1, binding=2)] t: f32) []u32 =
-  map(|x| x + u32(c.radius + c.tint.x + c.center.y + pair.0 + pair.1.x + t), xs)
-"#,
-    )
-    .expect("uniform shapes compile");
-
-    let uniforms: Vec<_> = lowered
-        .pipeline
-        .pipelines
-        .iter()
-        .flat_map(|p| match p {
-            Pipeline::Compute(cp) => cp.bindings.iter(),
-            Pipeline::Graphics(gp) => gp.bindings.iter(),
-        })
-        .filter_map(|b| match b {
-            Binding::Uniform {
-                binding,
-                name,
-                size,
-                members,
-                ..
-            } => Some((*binding, name.clone(), *size, members.clone())),
-            _ => None,
-        })
-        .collect();
-
-    let (_, _, size, members) = uniforms.iter().find(|(b, ..)| *b == 0).expect("record uniform");
-    assert_eq!(*size, 32);
-    let shape: Vec<_> = members.iter().map(|m| (m.name.as_str(), m.offset, m.size)).collect();
-    assert_eq!(shape, vec![("radius", 0, 4), ("tint", 8, 8), ("center", 16, 8)]);
-
-    let (_, _, size, members) = uniforms.iter().find(|(b, ..)| *b == 1).expect("tuple uniform");
-    assert_eq!(*size, 16);
-    let shape: Vec<_> = members.iter().map(|m| (m.name.as_str(), m.offset, m.size)).collect();
-    assert_eq!(shape, vec![("f0", 0, 4), ("f1", 8, 8)]);
-
-    let (_, _, size, members) = uniforms.iter().find(|(b, ..)| *b == 2).expect("scalar uniform");
-    assert_eq!(*size, 16);
-    assert_eq!(members.len(), 1);
-    assert_eq!((members[0].offset, members[0].size), (0, 4));
-}
-
-/// A pure call with both loop-varying and loop-invariant arguments must expose
-/// its callee DAG so ordinary EGIR LICM can hoist the invariant camera work.
-/// Distilled from Tinyporto's `world_to_clip` loop.
 #[test]
 fn mixed_variance_world_to_clip_call_exposes_camera_work_to_licm() {
     use crate::flow::ControlHeader;
@@ -12509,10 +11026,9 @@ def project_twenty_samples(base: vec3f32, resolution: vec3f32, o: orbit) vec4f32
     let fk = f32(k)
     let p = base + @[fk * 0.05, fk * 0.01, fk * 0.03] in
     total + world_to_clip(p, resolution, o)
-#[compute]
 entry world_to_clip_loop_invariant(
     points: []vec4f32,
-    #[uniform(set=1, binding=0)] frame: frame_globals) []vec4f32 =
+    frame: frame_globals) []vec4f32 =
   let o = cam(frame) in
   map(|i| project_twenty_samples(points[i].xyz, frame.resolution, o), iota(1024))
 "#;

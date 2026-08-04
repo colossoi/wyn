@@ -118,7 +118,6 @@ def pick_better(a: (u32, [8]u32), b: (u32, [8]u32)) (u32, [8]u32) =
 -- Reduces over nonce space: hash + check target on GPU,
 -- only propagate hits through the reduce.
 ------------------------------------------------------------
-#[compute]
 entry mine(header_base: [19]u32, target: [8]u32, n: u32, nonce_offset: u32) (u32, [8]u32) =
     -- The first compression block is header words 0-15 (the nonce is
     -- word 19, in the second block), so its compression is independent
