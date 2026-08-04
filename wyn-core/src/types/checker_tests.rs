@@ -3334,6 +3334,86 @@ def select_color(output: fragment_output<vec4f32>) vec4f32 =
 }
 
 #[test]
+fn vertex_output_is_restricted_to_vertex_callbacks() {
+    let error = try_typecheck_program(
+        r#"
+entry bad() i32 =
+  let _ = vertex_output(@[0.0, 0.0, 0.0, 1.0], 0i32) in
+  0i32
+"#,
+    )
+    .expect_err("vertex_output in orchestration context must be rejected");
+    let message = format!("{error:?}");
+    assert!(message.contains("vertex callback"), "got {message}");
+
+    let error = try_typecheck_program(
+        r#"
+entry bad_fragment(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      @[0.0, 0.0, 0.0, 1.0],
+      @[1.0, 1.0, 1.0, 1.0])) in
+  shade(target, covered,
+    |fragment|
+      let output = vertex_output in
+      let _ = output(@[0.0, 0.0, 0.0, 1.0], fragment.value) in
+      fragment.value)
+"#,
+    )
+    .expect_err("vertex_output in fragment context must be rejected");
+    let message = format!("{error:?}");
+    assert!(message.contains("fragment callback"), "got {message}");
+}
+
+#[test]
+fn stage_invocation_is_rejected_inside_fragment_callbacks() {
+    let error = try_typecheck_program(
+        r#"
+entry bad(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      @[0.0, 0.0, 0.0, 1.0],
+      @[1.0, 1.0, 1.0, 1.0])) in
+  shade(target, covered,
+    |fragment|
+      let nested_stage = rasterize_points in
+      let _ = nested_stage(
+        direct_draw(1u32, 1u32),
+        |vertex| vertex_output(
+          @[0.0, 0.0, 0.0, 1.0],
+          fragment.value)) in
+      fragment.value)
+"#,
+    )
+    .expect_err("a rasterization invocation inside a fragment callback must be rejected");
+    let message = format!("{error:?}");
+    assert!(message.contains("fragment callback"), "got {message}");
+}
+
+#[test]
+fn orchestration_helpers_may_forward_vertex_callbacks() {
+    typecheck_program(
+        r#"
+def invoke(draw_call: draw,
+           callback: vertex_invocation -> vertex<vec4f32>) raster<vec4f32> =
+  rasterize_triangles(draw_call, callback)
+
+def vertex_callback = |vertex: vertex_invocation|
+  vertex_output(
+    @[0.0, 0.0, 0.0, 1.0],
+    @[1.0, 1.0, 1.0, 1.0])
+
+entry valid(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = invoke(
+    direct_draw(3u32, 1u32),
+    vertex_callback) in
+  shade(target, covered, |fragment| fragment.value)
+"#,
+    );
+}
+#[test]
 fn invocation_types_cannot_cross_a_root_entry_boundary() {
     for ty in [
         "raster<vec4f32>",

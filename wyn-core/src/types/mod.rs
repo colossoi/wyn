@@ -8,6 +8,7 @@
 pub mod checker;
 pub mod patterns;
 pub mod run;
+mod stage_context;
 
 use crate::ast::Span;
 use crate::LookupMap;

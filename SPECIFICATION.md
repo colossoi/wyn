@@ -2469,9 +2469,9 @@ type raster_state = {
 
 `viewport.depth` contains the minimum and maximum depth. `#target` selects the
 full extent of the render target later supplied to `shade`. The forms without
-`_with` use `default_raster_state`, whose viewport and scissor are `#target`,
-whose front face is counter-clockwise, whose culling mode is `#none`, and
-whose fill mode is `#fill`.
+`_with` apply a default state whose viewport and scissor are `#target`, whose
+front face is counter-clockwise, whose culling mode is
+`#none`, and whose fill mode is `#fill`.
 
 #### Varying Payloads
 

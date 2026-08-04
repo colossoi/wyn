@@ -27,7 +27,7 @@ pub fn type_check(program: crate::resolve_opens::OpensResolved) -> Result<TypeCh
         &program.global_context.module_manager,
         crate::builtins::catalog(),
     );
-    program.try_rebuild(|declarations, global_context, _| {
+    let checked = program.try_rebuild(|declarations, global_context, _| {
         let crate::resolve_placeholders::PlaceholdersResolvedGlobal {
             module_manager,
             context,
@@ -52,7 +52,9 @@ pub fn type_check(program: crate::resolve_opens::OpensResolved) -> Result<TypeCh
             builtin_names,
             name_resolution,
         )
-    })
+    })?;
+    super::stage_context::validate(&checked)?;
+    Ok(checked)
 }
 
 fn materialize(
