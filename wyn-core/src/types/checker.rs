@@ -698,7 +698,7 @@ impl<'a> TypeChecker<'a> {
                 TypeParam::Type(param_name)
                 | TypeParam::SizeType(param_name)
                 | TypeParam::LiftedType(param_name) => {
-                    if super::validate_type_args(&TypeName::Raster, &[arg.clone()]).is_err() {
+                    if super::validate_type_args(&TypeName::Raster, std::slice::from_ref(arg)).is_err() {
                         return Err(err_type!(
                             "argument {} to type alias '{}' must be an ordinary type",
                             index + 1,

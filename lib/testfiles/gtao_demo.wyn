@@ -150,7 +150,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32,
                     #[view(ao_final, sampled)] ao_tex: texture2d,
                     #[uniform(set=1, binding=0)] iResolution: vec3f32,
                     #[uniform(set=1, binding=2)] iMouse: vec4f32)
-  #[location(0)] vec4f32 =
+  #[target(screen)] vec4f32 =
   let uv = @[pos.x / iResolution.x, pos.y / iResolution.y] in
   let (_, n, alb) = scene_hit(ray_dir(uv)) in
   let ao = texture_sample(ao_tex, samp, uv, 0.0f32).x in
