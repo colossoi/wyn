@@ -2521,6 +2521,11 @@ let target' = shade(target, covered,
   |fragment| fragment.value)
 ```
 
+Shading loads the current color and depth contents of the target. Samples for
+which no fragment write is applied retain their previous values; neither
+`shade` nor `shade_with` implicitly clears a target. A host may supply an
+initialized or cleared target value when invoking the entry.
+
 A `fragment_invocation<V>` exposes these read-only fields:
 
 ```wyn

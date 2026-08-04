@@ -77,6 +77,9 @@ fn i32_ty() -> Type {
 fn u32_ty() -> Type {
     Type::Constructed(TypeName::UInt(32), vec![])
 }
+fn bool_ty() -> Type {
+    Type::Constructed(TypeName::Bool, vec![])
+}
 
 // ---------------------------------------------------------------------------
 // Scalar shapes
@@ -374,6 +377,53 @@ pub fn direct_draw_from_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     TypeScheme::Monotype(arrow_chain(&[u.clone(), u.clone(), u.clone(), u], draw_ty()))
 }
 
+fn draw_command_ty() -> Type {
+    crate::types::record(vec![
+        ("vertex_count".to_string(), u32_ty()),
+        ("instance_count".to_string(), u32_ty()),
+        ("first_vertex".to_string(), u32_ty()),
+        ("first_instance".to_string(), u32_ty()),
+    ])
+}
+
+/// draw_command -> draw — a draw whose parameters are read from a command buffer.
+pub fn indirect_draw_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    TypeScheme::Monotype(arrow_chain(&[draw_command_ty()], draw_ty()))
+}
+
+fn depth_test_ty() -> Type {
+    crate::types::sum(
+        [
+            "disabled",
+            "never",
+            "less",
+            "less_equal",
+            "equal",
+            "greater_equal",
+            "greater",
+            "always",
+        ]
+        .into_iter()
+        .map(|name| (name.to_string(), vec![]))
+        .collect(),
+    )
+}
+
+fn blend_mode_ty() -> Type {
+    crate::types::sum(
+        ["replace", "source_over", "add"].into_iter().map(|name| (name.to_string(), vec![])).collect(),
+    )
+}
+
+fn fragment_state_ty() -> Type {
+    crate::types::record(vec![
+        ("depth_test".to_string(), depth_test_ty()),
+        ("depth_write".to_string(), bool_ty()),
+        ("blend".to_string(), blend_mode_ty()),
+        ("color_write".to_string(), bool_ty()),
+    ])
+}
+
 /// forall v. vec4f32 -> v -> vertex<v>.
 pub fn vertex_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let v = ctx.new_variable();
@@ -403,6 +453,20 @@ pub fn shade_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let raster = pipeline_ty(TypeName::Raster, vec![v.clone()]);
     let callback = arrow_chain(&[pipeline_ty(TypeName::FragmentInvocation, vec![v])], c);
     quantify(arrow_chain(&[target.clone(), raster, callback], target))
+}
+
+/// forall c v. fragment_state -> render_target<c> -> raster<v> ->
+/// (fragment_invocation<v> -> c) -> render_target<c>.
+pub fn shade_with_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let c = ctx.new_variable();
+    let v = ctx.new_variable();
+    let target = pipeline_ty(TypeName::RenderTarget, vec![c.clone()]);
+    let raster = pipeline_ty(TypeName::Raster, vec![v.clone()]);
+    let callback = arrow_chain(&[pipeline_ty(TypeName::FragmentInvocation, vec![v])], c);
+    quantify(arrow_chain(
+        &[fragment_state_ty(), target.clone(), raster, callback],
+        target,
+    ))
 }
 
 /// forall c v. render_target<c> -> raster<v> ->

@@ -77,6 +77,8 @@ pub struct InteractivePipelineSpec {
     pub draw: DrawCall,
     /// Primitive topology for the graphics pipeline.
     pub topology: wgpu::PrimitiveTopology,
+    pub fragment_state: wyn_pipeline_descriptor::FragmentState,
+    pub target_state: wyn_pipeline_descriptor::RenderTargetState,
     /// Directory of per-binding `.bin` files. The host loads each
     /// `vertex_inputs[i]` declared on the graphics pipeline into a
     /// vertex buffer, and each `storage_buffer` binding (other than
@@ -222,6 +224,8 @@ struct PipelineState {
     /// parity convention.
     render_bind_groups_by_set: [Vec<Option<BindGroup>>; 2],
     draw: DrawCall,
+    indirect_buffer: Option<wgpu::Buffer>,
+    target_state: wyn_pipeline_descriptor::RenderTargetState,
     /// One vertex buffer per declared `#[location(n)]` attribute, in
     /// shader_location order. Empty for full-screen-triangle shaders.
     vertex_buffers: Vec<wgpu::Buffer>,
@@ -1106,8 +1110,12 @@ impl State {
                 entry_point: Some(&spec.fragment_entry),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
+                    blend: Some(wgpu_blend_state(spec.fragment_state.blend)),
+                    write_mask: if spec.fragment_state.color_write {
+                        wgpu::ColorWrites::ALL
+                    } else {
+                        wgpu::ColorWrites::empty()
+                    },
                 })],
                 compilation_options: Default::default(),
             }),
@@ -1115,17 +1123,38 @@ impl State {
                 topology: spec.topology,
                 ..Default::default()
             },
-            depth_stencil: Some(render::default_depth_state()),
+            depth_stencil: Some(wgpu_depth_state(spec.fragment_state)),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
         });
+
+        let indirect_buffer = match &spec.draw {
+            DrawCall::Direct { .. } => None,
+            DrawCall::Indirect {
+                set,
+                binding,
+                name,
+                ..
+            } => Some(
+                host_buffers
+                    .get(&(*set, *binding))
+                    .map(|resource| resource.buffer.clone())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "indirect draw buffer `{name}` at set={set}, binding={binding} was not allocated"
+                        )
+                    })?,
+            ),
+        };
 
         let state = PipelineState {
             compute_stages,
             render_pipeline,
             render_bind_groups_by_set: g_bgs,
             draw: spec.draw.clone(),
+            indirect_buffer,
+            target_state: spec.target_state,
             vertex_buffers: vertex_buffer_pack.buffers,
             index_buffer,
             resolution_buffer: uniforms.resolution,
@@ -1515,6 +1544,58 @@ fn collect_graphics_bindings(desc: &PipelineDescriptor) -> Vec<wyn_pipeline_desc
 }
 
 #[allow(clippy::too_many_arguments)]
+fn wgpu_depth_state(state: wyn_pipeline_descriptor::FragmentState) -> wgpu::DepthStencilState {
+    use wyn_pipeline_descriptor::DepthTest;
+    let depth_compare = match state.depth_test {
+        DepthTest::Disabled | DepthTest::Always => wgpu::CompareFunction::Always,
+        DepthTest::Never => wgpu::CompareFunction::Never,
+        DepthTest::Less => wgpu::CompareFunction::Less,
+        DepthTest::LessEqual => wgpu::CompareFunction::LessEqual,
+        DepthTest::Equal => wgpu::CompareFunction::Equal,
+        DepthTest::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
+        DepthTest::Greater => wgpu::CompareFunction::Greater,
+    };
+    wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: state.depth_write && state.depth_test != DepthTest::Disabled,
+        depth_compare,
+        stencil: Default::default(),
+        bias: Default::default(),
+    }
+}
+
+fn wgpu_blend_state(mode: wyn_pipeline_descriptor::BlendMode) -> wgpu::BlendState {
+    match mode {
+        wyn_pipeline_descriptor::BlendMode::Replace => wgpu::BlendState::REPLACE,
+        wyn_pipeline_descriptor::BlendMode::SourceOver => wgpu::BlendState::ALPHA_BLENDING,
+        wyn_pipeline_descriptor::BlendMode::Add => {
+            let component = wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            };
+            wgpu::BlendState {
+                color: component,
+                alpha: component,
+            }
+        }
+    }
+}
+
+fn color_load_op(op: wyn_pipeline_descriptor::AttachmentLoadOp) -> LoadOp<Color> {
+    match op {
+        wyn_pipeline_descriptor::AttachmentLoadOp::Load => LoadOp::Load,
+        wyn_pipeline_descriptor::AttachmentLoadOp::Clear => LoadOp::Clear(Color::BLACK),
+    }
+}
+
+fn depth_load_op(op: wyn_pipeline_descriptor::AttachmentLoadOp) -> LoadOp<f32> {
+    match op {
+        wyn_pipeline_descriptor::AttachmentLoadOp::Load => LoadOp::Load,
+        wyn_pipeline_descriptor::AttachmentLoadOp::Clear => LoadOp::Clear(1.0),
+    }
+}
+
 fn render_pipeline(
     state: &PipelineState,
     view: &TextureView,
@@ -1641,7 +1722,7 @@ fn render_pipeline(
             view,
             resolve_target: None,
             ops: Operations {
-                load: LoadOp::Clear(Color::BLACK),
+                load: color_load_op(state.target_state.color_load),
                 store: StoreOp::Store,
             },
             depth_slice: None,
@@ -1649,7 +1730,7 @@ fn render_pipeline(
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: depth_view,
             depth_ops: Some(Operations {
-                load: LoadOp::Clear(1.0),
+                load: depth_load_op(state.target_state.depth_load),
                 store: StoreOp::Store,
             }),
             stencil_ops: None,
@@ -1665,23 +1746,33 @@ fn render_pipeline(
     for (slot, buf) in state.vertex_buffers.iter().enumerate() {
         rpass.set_vertex_buffer(slot as u32, buf.slice(..));
     }
-    let DrawCall::Direct {
-        vertex_count,
-        instance_count,
-        first_vertex,
-        first_instance,
-    } = &state.draw;
-    let instances = *first_instance..first_instance.saturating_add(*instance_count);
-    match &state.index_buffer {
-        Some((buf, count)) => {
-            rpass.set_index_buffer(buf.slice(..), wgpu::IndexFormat::Uint32);
-            rpass.draw_indexed(0..*count, 0, instances);
+    match &state.draw {
+        DrawCall::Direct {
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+        } => {
+            let instances = *first_instance..first_instance.saturating_add(*instance_count);
+            match &state.index_buffer {
+                Some((buf, count)) => {
+                    rpass.set_index_buffer(buf.slice(..), wgpu::IndexFormat::Uint32);
+                    rpass.draw_indexed(0..*count, 0, instances);
+                }
+                None => {
+                    rpass.draw(
+                        *first_vertex..first_vertex.saturating_add(*vertex_count),
+                        instances,
+                    );
+                }
+            }
         }
-        None => {
-            rpass.draw(
-                *first_vertex..first_vertex.saturating_add(*vertex_count),
-                instances,
-            );
+        DrawCall::Indirect { offset, .. } => {
+            let buffer = state
+                .indirect_buffer
+                .as_ref()
+                .expect("indirect draw buffer resolved during pipeline construction");
+            rpass.draw_indirect(buffer, *offset);
         }
     }
 }

@@ -313,14 +313,8 @@ fn run_pipeline_interactive(
         .iter()
         .find_map(|pipeline| match pipeline {
             Pipeline::Graphics(graphics)
-                if graphics
-                    .stages
-                    .iter()
-                    .any(|stage| matches!(stage.stage, ShaderStage::Vertex))
-                    && graphics
-                        .stages
-                        .iter()
-                        .any(|stage| matches!(stage.stage, ShaderStage::Fragment)) =>
+                if graphics.stages.iter().any(|stage| matches!(stage.stage, ShaderStage::Vertex))
+                    && graphics.stages.iter().any(|stage| matches!(stage.stage, ShaderStage::Fragment)) =>
             {
                 Some(graphics)
             }
@@ -339,15 +333,21 @@ fn run_pipeline_interactive(
         .ok_or_else(|| anyhow!("descriptor lacks a fragment stage"))?;
     let mut draw = graphics.invocation.draw.clone();
     if let Some(vertex_count) = opts.vertex_count {
-        let wyn_pipeline_descriptor::DrawCall::Direct {
-            vertex_count: published,
-            ..
-        } = &mut draw;
-        *published = vertex_count;
+        match &mut draw {
+            wyn_pipeline_descriptor::DrawCall::Direct {
+                vertex_count: published,
+                ..
+            } => *published = vertex_count,
+            wyn_pipeline_descriptor::DrawCall::Indirect { .. } => {
+                return Err(anyhow!(
+                    "--vertex-count cannot override a descriptor-driven indirect draw"
+                ));
+            }
+        }
     }
-    let topology = opts
-        .topology
-        .unwrap_or_else(|| wgpu_topology(graphics.invocation.topology));
+    let fragment_state = graphics.invocation.fragment_state;
+    let target_state = graphics.invocation.target_state;
+    let topology = opts.topology.unwrap_or_else(|| wgpu_topology(graphics.invocation.topology));
 
     let resolved_buffer_inits = resolve_buffer_inits(
         &desc,
@@ -399,6 +399,8 @@ fn run_pipeline_interactive(
         size: opts.size,
         draw,
         topology,
+        fragment_state,
+        target_state,
         storage_dir: opts.storage_dir,
         buffer_inits: resolved_buffer_inits,
         index_buffer: opts.index_buffer,

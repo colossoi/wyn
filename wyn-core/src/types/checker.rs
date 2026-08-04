@@ -539,9 +539,13 @@ impl<'a> TypeChecker<'a> {
                     let skolem = Type::Constructed(TypeName::Skolem(skolem_id), vec![]);
                     inner = Self::substitute_size_var(&inner, &var_name, &skolem);
                 }
-                inner
+                self.open_existential(inner)
             }
-            _ => ty,
+            Type::Constructed(name, args) => Type::Constructed(
+                name,
+                args.into_iter().map(|arg| self.open_existential(arg)).collect(),
+            ),
+            Type::Variable(_) => ty,
         }
     }
 
@@ -1217,6 +1221,35 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             ExprKind::Lambda(lambda) => self.type_lambda(lambda, Some(expected_type), expr),
+            ExprKind::RecordLiteral(fields) => {
+                let applied = expected_type.apply(&self.context);
+                let Type::Constructed(TypeName::Record(expected_fields), expected_types) = &applied else {
+                    let inferred = self.infer_expression(expr)?;
+                    self.unify_or_err_weakening(&inferred, expected_type, expr.h.span, "Type mismatch")?;
+                    return Ok(inferred);
+                };
+                if fields.len() != expected_fields.len() {
+                    bail_type_at!(
+                        expr.h.span,
+                        "record has {} fields, but expected {}",
+                        fields.len(),
+                        expected_fields.len()
+                    );
+                }
+                for (field_name, field_expr) in fields {
+                    let Some(index) = expected_fields.get_index(field_name) else {
+                        bail_type_at!(
+                            field_expr.h.span,
+                            "record field '{}' is not present in expected type {}",
+                            field_name,
+                            self.format_type(&applied)
+                        );
+                    };
+                    self.check_expression(field_expr, &expected_types[index])?;
+                }
+                self.type_table.insert(expr.h.id, TypeScheme::Monotype(expected_type.clone()));
+                Ok(expected_type.clone())
+            }
             // Sum-type constructor application uses the expected type to
             // resolve which sum type the constructor belongs to.
             // Bare-inference (`infer_expression`) can't disambiguate.
@@ -4220,7 +4253,10 @@ impl<'a> TypeChecker<'a> {
                 lambda_expected_types[i] = Some(expected_lambda_type);
 
                 func_type = result_type;
-            } else if matches!(&arg.kind, ExprKind::Constructor(_, _)) {
+            } else if matches!(
+                &arg.kind,
+                ExprKind::Constructor(_, _) | ExprKind::RecordLiteral(_)
+            ) {
                 // Constructor expressions need bidirectional checking against
                 // the expected parameter type to disambiguate which sum type
                 // they belong to — `infer_expression` produces an "ambiguous

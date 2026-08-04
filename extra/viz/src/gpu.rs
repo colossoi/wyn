@@ -238,7 +238,10 @@ pub fn create_binding_buffers(
         let buffer = device.create_buffer(&BufferDescriptor {
             label: Some(name),
             size: data.len() as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            usage: BufferUsages::STORAGE
+                | BufferUsages::INDIRECT
+                | BufferUsages::COPY_SRC
+                | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         queue.write_buffer(&buffer, 0, data);
@@ -1186,7 +1189,7 @@ pub fn create_host_buffers(
                 let buffer = device.create_buffer(&BufferDescriptor {
                     label: Some(&format!("host_buffer_{name}")),
                     size: byte_size,
-                    usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                    usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
                 out.insert(
@@ -1210,7 +1213,10 @@ pub fn create_host_buffers(
                 let buffer = device.create_buffer(&BufferDescriptor {
                     label: Some(&format!("host_buffer_{name}")),
                     size: init.bytes,
-                    usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                    usage: BufferUsages::STORAGE
+                        | BufferUsages::INDIRECT
+                        | BufferUsages::COPY_SRC
+                        | BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
                 queue.write_buffer(&buffer, 0, &buffer_init_bytes(init));
@@ -1237,7 +1243,10 @@ pub fn create_host_buffers(
             let buffer = device.create_buffer(&BufferDescriptor {
                 label: Some(&format!("host_buffer_{name}")),
                 size: byte_size,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+                usage: BufferUsages::STORAGE
+                    | BufferUsages::INDIRECT
+                    | BufferUsages::COPY_DST
+                    | BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
             queue.write_buffer(&buffer, 0, &data);
@@ -1370,7 +1379,10 @@ pub fn create_feedback_buffers(
             let buffer = device.create_buffer(&BufferDescriptor {
                 label: Some(&format!("feedback_buffer_{name}.slot{slot}")),
                 size: byte_size,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+                usage: BufferUsages::STORAGE
+                    | BufferUsages::INDIRECT
+                    | BufferUsages::COPY_DST
+                    | BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
             buffers.push(buffer);

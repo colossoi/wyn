@@ -19,9 +19,11 @@ use crate::{LookupMap, LookupSet, SymbolId, SymbolTable};
 struct InvocationBuiltins {
     direct_draw: crate::builtins::BuiltinId,
     direct_draw_from: crate::builtins::BuiltinId,
+    indirect_draw: crate::builtins::BuiltinId,
     vertex_output: crate::builtins::BuiltinId,
     rasterizers: Vec<crate::builtins::BuiltinId>,
     shade: crate::builtins::BuiltinId,
+    shade_with: crate::builtins::BuiltinId,
     target_load: crate::builtins::BuiltinId,
     texture_load: crate::builtins::BuiltinId,
 }
@@ -38,6 +40,7 @@ impl InvocationBuiltins {
         Self {
             direct_draw: id("direct_draw"),
             direct_draw_from: id("direct_draw_from"),
+            indirect_draw: id("indirect_draw"),
             vertex_output: id("vertex_output"),
             rasterizers: [
                 "rasterize_triangles",
@@ -50,6 +53,7 @@ impl InvocationBuiltins {
             .map(|name| id(name))
             .collect(),
             shade: id("shade"),
+            shade_with: id("shade_with"),
             target_load: id("target_load"),
             texture_load: id("texture_load"),
         }
@@ -130,8 +134,7 @@ struct ComputeOperation<'a> {
     ty: Type,
     rhs: &'a Term,
     entry_name: String,
-    output_name: String,
-    binding: u32,
+    outputs: Vec<ComputedLeaf>,
 }
 
 struct GraphicsOperation<'a> {
@@ -147,11 +150,17 @@ enum RootOperation<'a> {
 }
 
 #[derive(Clone)]
-struct ComputedValue {
-    symbol: SymbolId,
+struct ComputedLeaf {
+    path: Vec<usize>,
     ty: Type,
     output_name: String,
     binding: u32,
+}
+
+#[derive(Clone)]
+struct ComputedValue {
+    symbol: SymbolId,
+    leaves: Vec<ComputedLeaf>,
 }
 
 #[derive(Clone)]
@@ -244,8 +253,7 @@ fn extract_root(
             }
             RootOperation::Graphics(operation) => {
                 let (rasterizer, raster_args) = builtin_app(operation.raster_term, &builtins.rasterizers)?;
-                let shade_args =
-                    builtin_app_args(operation.shade_term, std::slice::from_ref(&builtins.shade))?;
+                let (shade_builtin, shade_args) = shade_app(operation.shade_term, builtins)?;
                 if raster_args.len() < 2 || shade_args.len() < 3 {
                     return None;
                 }
@@ -260,7 +268,20 @@ fn extract_root(
                 fragment_lambda.body =
                     Box::new(inline_stage_helpers(*fragment_lambda.body, helpers, term_ids));
 
-                let graphics_invocation = graphics_invocation(rasterizer, raster_args.first()?, builtins)?;
+                let fragment_state = if shade_builtin == builtins.shade_with {
+                    parse_fragment_state(shade_args.first()?)?
+                } else {
+                    Default::default()
+                };
+                let graphics_invocation = graphics_invocation(
+                    rasterizer,
+                    raster_args.first()?,
+                    fragment_state,
+                    root_lambda,
+                    root_entry,
+                    &shape.computed,
+                    builtins,
+                )?;
                 let owner = if graphics_count == 1 {
                     root_name.clone()
                 } else {
@@ -363,7 +384,7 @@ fn root_shape<'a>(
 
         if builtin_app(rhs, &builtins.rasterizers).is_some() {
             rasters.insert(*name, rhs.as_ref());
-        } else if builtin_app_args(rhs, std::slice::from_ref(&builtins.shade)).is_some() {
+        } else if shade_app(rhs, builtins).is_some() {
             let operation = graphics_operation(rhs, &mut rasters, &targets, builtins)?;
             targets.insert(
                 *name,
@@ -374,14 +395,13 @@ fn root_shape<'a>(
                 },
             );
             operations.push(RootOperation::Graphics(operation));
-        } else if matches!(name_ty, Type::Constructed(TypeName::Array, _)) {
+        } else if computed_leaf_types(name_ty).is_some() {
             operations.push(RootOperation::Compute(ComputeOperation {
                 symbol: *name,
                 ty: name_ty.clone(),
                 rhs: rhs.as_ref(),
                 entry_name: String::new(),
-                output_name: String::new(),
-                binding: 0,
+                outputs: vec![],
             }));
         } else {
             return None;
@@ -389,7 +409,7 @@ fn root_shape<'a>(
         current = body;
     }
 
-    if builtin_app_args(current, std::slice::from_ref(&builtins.shade)).is_some() {
+    if shade_app(current, builtins).is_some() {
         operations.push(RootOperation::Graphics(graphics_operation(
             current,
             &mut rasters,
@@ -404,6 +424,7 @@ fn root_shape<'a>(
     let compute_count =
         operations.iter().filter(|operation| matches!(operation, RootOperation::Compute(_))).count();
     let mut compute_index = 0usize;
+    let mut next_binding = root_lambda.params.len() as u32;
     let mut computed = Vec::with_capacity(compute_count);
     for operation in &mut operations {
         let RootOperation::Compute(operation) = operation else {
@@ -414,18 +435,35 @@ fn root_shape<'a>(
         } else {
             format!("{root_name}__compute_{compute_index}")
         };
-        operation.output_name = format!("{}_output", operation.entry_name);
-        operation.binding = root_lambda.params.len() as u32 + compute_index as u32;
+        let leaf_types = computed_leaf_types(&operation.ty)?;
+        let multiple = leaf_types.len() > 1;
+        operation.outputs = leaf_types
+            .into_iter()
+            .enumerate()
+            .map(|(index, (path, _label, ty))| {
+                let output_name = if multiple {
+                    format!("{}_output_{index}", operation.entry_name)
+                } else {
+                    format!("{}_output", operation.entry_name)
+                };
+                let leaf = ComputedLeaf {
+                    path,
+                    ty,
+                    output_name,
+                    binding: next_binding,
+                };
+                next_binding += 1;
+                leaf
+            })
+            .collect();
         computed.push(ComputedValue {
             symbol: operation.symbol,
-            ty: operation.ty.clone(),
-            output_name: operation.output_name.clone(),
-            binding: operation.binding,
+            leaves: operation.outputs.clone(),
         });
         compute_index += 1;
     }
 
-    let mut next_target_binding = root_lambda.params.len() as u32 + compute_count as u32;
+    let mut next_target_binding = next_binding;
     let mut target_bindings = LookupMap::new();
     for ((_, ty), declaration) in root_lambda.params.iter().zip(&root_entry.declaration.params) {
         let Some(color_ty) = render_target_color_type(ty) else {
@@ -451,9 +489,10 @@ fn graphics_operation<'a>(
     targets: &LookupMap<SymbolId, TargetValue>,
     builtins: &InvocationBuiltins,
 ) -> Option<GraphicsOperation<'a>> {
-    let shade_args = builtin_app_args(shade_term, std::slice::from_ref(&builtins.shade))?;
-    let target_symbol = term_symbol(shade_args.first()?)?;
-    let raster_symbol = term_symbol(shade_args.get(1)?)?;
+    let (shade_builtin, shade_args) = shade_app(shade_term, builtins)?;
+    let target_index = usize::from(shade_builtin == builtins.shade_with);
+    let target_symbol = term_symbol(shade_args.get(target_index)?)?;
+    let raster_symbol = term_symbol(shade_args.get(target_index + 1)?)?;
     let target_name = targets.get(&target_symbol)?.name.clone();
     let raster_term = rasters.remove(&raster_symbol)?;
     Some(GraphicsOperation {
@@ -464,9 +503,81 @@ fn graphics_operation<'a>(
     })
 }
 
+fn shade_app<'a>(
+    term: &'a Term,
+    builtins: &InvocationBuiltins,
+) -> Option<(crate::builtins::BuiltinId, &'a [Term])> {
+    builtin_app(term, &[builtins.shade, builtins.shade_with])
+}
+
+fn computed_leaf_types(ty: &Type) -> Option<Vec<(Vec<usize>, String, Type)>> {
+    fn collect(
+        ty: &Type,
+        path: &mut Vec<usize>,
+        labels: &mut Vec<String>,
+        leaves: &mut Vec<(Vec<usize>, String, Type)>,
+    ) -> bool {
+        match ty {
+            Type::Constructed(TypeName::Existential(_), args) if args.len() == 1 => {
+                collect(&args[0], path, labels, leaves)
+            }
+            Type::Constructed(TypeName::Array, _) => {
+                leaves.push((path.clone(), labels.join("_"), ty.clone()));
+                true
+            }
+            Type::Constructed(TypeName::Record(fields), components) => {
+                if components.is_empty() {
+                    return false;
+                }
+                for (index, (field, component)) in fields.iter().zip(components).enumerate() {
+                    path.push(index);
+                    labels.push(field.clone());
+                    if !collect(component, path, labels, leaves) {
+                        return false;
+                    }
+                    labels.pop();
+                    path.pop();
+                }
+                true
+            }
+            Type::Constructed(TypeName::Tuple(_), components) => {
+                if components.is_empty() {
+                    return false;
+                }
+                for (index, component) in components.iter().enumerate() {
+                    path.push(index);
+                    labels.push(index.to_string());
+                    if !collect(component, path, labels, leaves) {
+                        return false;
+                    }
+                    labels.pop();
+                    path.pop();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    let mut leaves = Vec::new();
+    collect(ty, &mut Vec::new(), &mut Vec::new(), &mut leaves).then_some(leaves)
+}
+
 fn term_symbol(term: &Term) -> Option<SymbolId> {
     match term.kind {
         TermKind::Var(VarRef::Symbol(symbol)) => Some(symbol),
+        _ => None,
+    }
+}
+
+fn projected_symbol_path(term: &Term) -> Option<(SymbolId, Vec<usize>)> {
+    match &term.kind {
+        TermKind::Var(VarRef::Symbol(symbol)) => Some((*symbol, vec![])),
+        TermKind::TupleProj { tuple, idx } => {
+            let (symbol, mut path) = projected_symbol_path(tuple)?;
+            path.push(*idx);
+            Some((symbol, path))
+        }
         _ => None,
     }
 }
@@ -488,9 +599,6 @@ fn builtin_app<'a>(
     candidates.contains(&id).then_some((id, args))
 }
 
-fn builtin_app_args<'a>(term: &'a Term, candidates: &[crate::builtins::BuiltinId]) -> Option<&'a [Term]> {
-    builtin_app(term, candidates).map(|(_, args)| args)
-}
 fn callback_lambda(
     callback: &Term,
     stage: &str,
@@ -536,6 +644,10 @@ fn callback_lambda(
 fn graphics_invocation(
     rasterizer: crate::builtins::BuiltinId,
     draw: &Term,
+    fragment_state: crate::pipeline_descriptor::FragmentState,
+    root_lambda: &Lambda,
+    root_entry: &EntryPoint<()>,
+    computed: &[ComputedValue],
     builtins: &InvocationBuiltins,
 ) -> Option<crate::pipeline_descriptor::GraphicsInvocation> {
     use crate::pipeline_descriptor::{DrawCall, GraphicsInvocation, PrimitiveTopology};
@@ -548,9 +660,16 @@ fn graphics_invocation(
         4 => PrimitiveTopology::PointList,
         _ => return None,
     };
-    let (constructor, args) = builtin_app(draw, &[builtins.direct_draw, builtins.direct_draw_from])?;
-    let values = args.iter().map(u32_literal).collect::<Option<Vec<_>>>()?;
+    let (constructor, args) = builtin_app(
+        draw,
+        &[
+            builtins.direct_draw,
+            builtins.direct_draw_from,
+            builtins.indirect_draw,
+        ],
+    )?;
     let draw = if constructor == builtins.direct_draw {
+        let values = args.iter().map(u32_literal).collect::<Option<Vec<_>>>()?;
         let [vertex_count, instance_count] = values.as_slice() else {
             return None;
         };
@@ -560,7 +679,8 @@ fn graphics_invocation(
             first_vertex: 0,
             first_instance: 0,
         }
-    } else {
+    } else if constructor == builtins.direct_draw_from {
+        let values = args.iter().map(u32_literal).collect::<Option<Vec<_>>>()?;
         let [vertex_count, instance_count, first_vertex, first_instance] = values.as_slice() else {
             return None;
         };
@@ -570,8 +690,106 @@ fn graphics_invocation(
             first_vertex: *first_vertex,
             first_instance: *first_instance,
         }
+    } else {
+        let [command] = args else {
+            return None;
+        };
+        let TermKind::Index { array, index } = &command.kind else {
+            return None;
+        };
+        let command_index = u32_literal(index)? as u64;
+        let (binding, name, resource) = draw_buffer_source(array, root_lambda, root_entry, computed)?;
+        DrawCall::Indirect {
+            set: crate::egir::from_tlc::AUTO_STORAGE_SET,
+            binding,
+            name,
+            resource,
+            offset: command_index * 16,
+        }
     };
-    Some(GraphicsInvocation { topology, draw })
+    Some(GraphicsInvocation {
+        topology,
+        draw,
+        fragment_state,
+        target_state: Default::default(),
+    })
+}
+
+fn draw_buffer_source(
+    array: &Term,
+    root_lambda: &Lambda,
+    root_entry: &EntryPoint<()>,
+    computed: &[ComputedValue],
+) -> Option<(u32, String, Option<String>)> {
+    let (symbol, path) = projected_symbol_path(array)?;
+    if path.is_empty() {
+        if let Some((index, _)) =
+            root_lambda.params.iter().enumerate().find(|(_, (candidate, _))| *candidate == symbol)
+        {
+            let name = root_entry.declaration.params.get(index)?.name.clone();
+            return Some((index as u32, name, None));
+        }
+    }
+    let value = computed.iter().find(|value| value.symbol == symbol)?;
+    let leaf = value.leaves.iter().find(|leaf| leaf.path == path)?;
+    Some((
+        leaf.binding,
+        leaf.output_name.clone(),
+        Some(leaf.output_name.clone()),
+    ))
+}
+
+fn parse_fragment_state(term: &Term) -> Option<crate::pipeline_descriptor::FragmentState> {
+    use crate::pipeline_descriptor::{BlendMode, DepthTest, FragmentState};
+
+    let depth_test = match sum_tag(record_component(term, "depth_test")?)? {
+        0 => DepthTest::Disabled,
+        1 => DepthTest::Never,
+        2 => DepthTest::Less,
+        3 => DepthTest::LessEqual,
+        4 => DepthTest::Equal,
+        5 => DepthTest::GreaterEqual,
+        6 => DepthTest::Greater,
+        7 => DepthTest::Always,
+        _ => return None,
+    };
+    let blend = match sum_tag(record_component(term, "blend")?)? {
+        0 => BlendMode::Replace,
+        1 => BlendMode::SourceOver,
+        2 => BlendMode::Add,
+        _ => return None,
+    };
+    Some(FragmentState {
+        depth_test,
+        depth_write: bool_literal(record_component(term, "depth_write")?)?,
+        blend,
+        color_write: bool_literal(record_component(term, "color_write")?)?,
+    })
+}
+
+fn record_component<'a>(term: &'a Term, field: &str) -> Option<&'a Term> {
+    let TermKind::Tuple(values) = &term.kind else {
+        return None;
+    };
+    let Type::Constructed(TypeName::Record(fields), _) = &term.ty else {
+        return None;
+    };
+    let index = fields.iter().position(|candidate| candidate == field)?;
+    values.get(index)
+}
+
+fn sum_tag(term: &Term) -> Option<u32> {
+    let TermKind::Tuple(values) = &term.kind else {
+        return None;
+    };
+    u32_literal(values.first()?)
+}
+
+fn bool_literal(term: &Term) -> Option<bool> {
+    match term.kind {
+        TermKind::BoolLit(value) => Some(value),
+        _ => None,
+    }
 }
 
 fn u32_literal(term: &Term) -> Option<u32> {
@@ -580,7 +798,6 @@ fn u32_literal(term: &Term) -> Option<u32> {
     };
     text.strip_suffix("u32").unwrap_or(text).replace('_', "").parse().ok()
 }
-
 #[derive(Clone)]
 struct TargetRead {
     color_ty: Type,
@@ -588,11 +805,12 @@ struct TargetRead {
 }
 
 type TargetReads = LookupMap<SymbolId, TargetRead>;
+type ExternalSubstitutions = LookupMap<(SymbolId, Vec<usize>), (SymbolId, Type)>;
 
 type StageCaptures = (
     Vec<(SymbolId, Type)>,
     Vec<interface::EntryParamDecl>,
-    LookupMap<SymbolId, (SymbolId, Type)>,
+    ExternalSubstitutions,
     TargetReads,
 );
 
@@ -658,7 +876,7 @@ fn append_root_captures(
     symbols: &mut SymbolTable,
     params: &mut Vec<(SymbolId, Type)>,
     declarations: &mut Vec<interface::EntryParamDecl>,
-    substitutions: &mut LookupMap<SymbolId, (SymbolId, Type)>,
+    substitutions: &mut ExternalSubstitutions,
 ) {
     for (binding, ((old_symbol, ty), declaration)) in
         root_lambda.params.iter().zip(&root_entry.declaration.params).enumerate()
@@ -669,7 +887,7 @@ fn append_root_captures(
         let binding = binding as u32;
         let new_symbol = symbols.alloc(declaration.name.clone());
         let external_ty = external_parameter_type(ty, binding);
-        substitutions.insert(*old_symbol, (new_symbol, external_ty.clone()));
+        substitutions.insert((*old_symbol, vec![]), (new_symbol, external_ty.clone()));
         params.push((new_symbol, external_ty.clone()));
         let mut declaration = declaration.clone();
         declaration.ty = external_ty.clone();
@@ -686,22 +904,25 @@ fn append_computed_captures(
     symbols: &mut SymbolTable,
     params: &mut Vec<(SymbolId, Type)>,
     declarations: &mut Vec<interface::EntryParamDecl>,
-    substitutions: &mut LookupMap<SymbolId, (SymbolId, Type)>,
+    substitutions: &mut ExternalSubstitutions,
 ) {
     for value in computed {
         if !used.contains(&value.symbol) {
             continue;
         }
-        append_external_param(
-            value.symbol,
-            &value.ty,
-            &value.output_name,
-            value.binding,
-            symbols,
-            params,
-            declarations,
-            substitutions,
-        );
+        for leaf in &value.leaves {
+            append_external_param(
+                value.symbol,
+                &leaf.path,
+                &leaf.ty,
+                &leaf.output_name,
+                leaf.binding,
+                symbols,
+                params,
+                declarations,
+                substitutions,
+            );
+        }
     }
 }
 
@@ -777,17 +998,18 @@ fn attachment_specs(target_name: &str, color_ty: &Type) -> Vec<(String, Type)> {
 
 fn append_external_param(
     old_symbol: SymbolId,
+    path: &[usize],
     ty: &Type,
     name: &str,
     binding: u32,
     symbols: &mut SymbolTable,
     params: &mut Vec<(SymbolId, Type)>,
     declarations: &mut Vec<interface::EntryParamDecl>,
-    substitutions: &mut LookupMap<SymbolId, (SymbolId, Type)>,
+    substitutions: &mut ExternalSubstitutions,
 ) {
     let external_ty = external_parameter_type(ty, binding);
     let new_symbol = symbols.alloc(name.to_string());
-    substitutions.insert(old_symbol, (new_symbol, external_ty.clone()));
+    substitutions.insert((old_symbol, path.to_vec()), (new_symbol, external_ty.clone()));
     params.push((new_symbol, external_ty.clone()));
     declarations.push(interface::EntryParamDecl {
         name: name.to_string(),
@@ -890,15 +1112,19 @@ fn build_compute_stage(
         texture_load: builtins.texture_load,
     }
     .rewrite_owned(body);
-    let outputs = vec![interface::EntryOutputDecl {
-        ty: operation.ty.clone(),
-        attribute: Some(Attribute::Storage {
-            set: crate::egir::from_tlc::AUTO_STORAGE_SET,
-            binding: operation.binding,
-            layout: interface::StorageLayout::Std430,
-            access: interface::StorageAccess::WriteOnly,
-        }),
-    }];
+    let outputs = operation
+        .outputs
+        .iter()
+        .map(|leaf| interface::EntryOutputDecl {
+            ty: leaf.ty.clone(),
+            attribute: Some(Attribute::Storage {
+                set: crate::egir::from_tlc::AUTO_STORAGE_SET,
+                binding: leaf.binding,
+                layout: interface::StorageLayout::Std430,
+                access: interface::StorageAccess::WriteOnly,
+            }),
+        })
+        .collect();
     Some(stage_def(
         operation.entry_name.clone(),
         EntryKind::Root,
@@ -915,7 +1141,7 @@ fn build_compute_stage(
 
 struct ExternalValueRewriter<'a> {
     term_ids: &'a mut TermIdSource,
-    substitutions: LookupMap<SymbolId, (SymbolId, Type)>,
+    substitutions: ExternalSubstitutions,
     target_reads: TargetReads,
     target_load: crate::builtins::BuiltinId,
     texture_load: crate::builtins::BuiltinId,
@@ -926,7 +1152,14 @@ impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
         self.term_ids.next_id()
     }
 
-    fn rewrite_owned_node_before_children(&mut self, term: Term) -> (Term, RewriteDecision) {
+    fn rewrite_owned_node_before_children(&mut self, mut term: Term) -> (Term, RewriteDecision) {
+        if let Some(key) = projected_symbol_path(&term) {
+            if let Some((replacement, ty)) = self.substitutions.get(&key) {
+                term.ty = ty.clone();
+                term.kind = TermKind::Var(VarRef::Symbol(*replacement));
+                return (term, RewriteDecision::Changed);
+            }
+        }
         let TermKind::App { func, args } = &term.kind else {
             return (term, RewriteDecision::Unchanged);
         };
@@ -950,18 +1183,6 @@ impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
         };
         replacement.id = term.id;
         (replacement, RewriteDecision::Changed)
-    }
-
-    fn rewrite_owned_node(&mut self, mut term: Term) -> (Term, RewriteDecision) {
-        if let TermKind::Var(VarRef::Symbol(symbol)) = term.kind {
-            if let Some((replacement, ty)) = self.substitutions.get(&symbol) {
-                term.ty = ty.clone();
-                term.kind = TermKind::Var(VarRef::Symbol(*replacement));
-                return (term, RewriteDecision::Changed);
-            }
-            term.kind = TermKind::Var(VarRef::Symbol(symbol));
-        }
-        (term, RewriteDecision::Unchanged)
     }
 }
 
@@ -1177,7 +1398,7 @@ fn build_vertex_stage(
     callback: &Lambda,
     external_params: Vec<(SymbolId, Type)>,
     external_decls: Vec<interface::EntryParamDecl>,
-    substitutions: LookupMap<SymbolId, (SymbolId, Type)>,
+    substitutions: ExternalSubstitutions,
     target_reads: TargetReads,
     builtins: &InvocationBuiltins,
     graphics_invocation: crate::pipeline_descriptor::GraphicsInvocation,
@@ -1281,7 +1502,7 @@ fn build_fragment_stage(
     callback: &Lambda,
     external_params: Vec<(SymbolId, Type)>,
     external_decls: Vec<interface::EntryParamDecl>,
-    substitutions: LookupMap<SymbolId, (SymbolId, Type)>,
+    substitutions: ExternalSubstitutions,
     target_reads: TargetReads,
     target_name: String,
     builtins: &InvocationBuiltins,

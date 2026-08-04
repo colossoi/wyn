@@ -2546,6 +2546,11 @@ entry layered(target: render_target<vec4f32>) render_target<vec4f32> =
         })
         .collect::<Vec<_>>();
     assert_eq!(graphics.len(), 2, "one graphics pipeline per draw");
+    assert!(graphics.iter().all(|pipeline| {
+        pipeline.invocation.target_state.color_load == crate::pipeline_descriptor::AttachmentLoadOp::Load
+            && pipeline.invocation.target_state.depth_load
+                == crate::pipeline_descriptor::AttachmentLoadOp::Load
+    }));
     assert!(graphics
         .iter()
         .all(|pipeline| pipeline.fragment_outputs.iter().any(|output| output.name == "target")));
@@ -2727,6 +2732,155 @@ entry deferred(coords: []vec2i32,
     assert_eq!(
         sampled_resources,
         vec!["scene_albedo", "scene_normal", "scene_depth"]
+    );
+}
+
+#[test]
+fn unified_root_accepts_explicit_fragment_state() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+entry depth_tested(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+      else @[0.0, 0.5, 0.0, 1.0],
+      @[1.0, 1.0, 1.0, 1.0])) in
+  shade_with(
+    { depth_test = #less_equal,
+      depth_write = true,
+      blend = #replace,
+      color_write = true },
+    target, covered, |fragment| fragment.value)
+"#,
+    )
+    .expect("shade_with accepts the specified structural fragment state");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+        panic!("graphics pipeline")
+    };
+    assert_eq!(
+        graphics.invocation.fragment_state.depth_test,
+        crate::pipeline_descriptor::DepthTest::LessEqual
+    );
+    assert!(graphics.invocation.fragment_state.depth_write);
+    assert_eq!(
+        graphics.invocation.fragment_state.blend,
+        crate::pipeline_descriptor::BlendMode::Replace
+    );
+    assert!(graphics.invocation.fragment_state.color_write);
+}
+
+#[test]
+fn unified_root_flattens_structured_compute_results() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+entry prepare_and_draw<[n]>(values: [n]vec4f32,
+                            target: render_target<vec4f32>)
+    ({ positions: [n]vec4f32, colors: [n]vec4f32 },
+     render_target<vec4f32>) =
+  let prepared = {
+    positions = map(|value: vec4f32| value, values),
+    colors = map(|value: vec4f32| value * 0.5, values)
+  } in
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex|
+      let i = i32(vertex.vertex_index) in
+      vertex_output(prepared.positions[i], prepared.colors[i])) in
+  let target1 = shade(target, covered, |fragment| fragment.value) in
+  (prepared, target1)
+"#,
+    )
+    .expect("records of compute arrays are flattened into stage resources");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    assert_eq!(lowered.pipeline.pipelines.len(), 2);
+    let crate::pipeline_descriptor::Pipeline::Compute(compute) = &lowered.pipeline.pipelines[0] else {
+        panic!("preparation compute pipeline")
+    };
+    let outputs = compute
+        .bindings
+        .iter()
+        .filter_map(|binding| match binding {
+            crate::pipeline_descriptor::Binding::StorageBuffer {
+                usage: crate::pipeline_descriptor::BufferUsage::Output,
+                name,
+                ..
+            } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outputs.len(), 2);
+
+    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[1] else {
+        panic!("draw graphics pipeline")
+    };
+    for output in outputs {
+        assert!(graphics.bindings.iter().any(|binding| {
+            matches!(binding, crate::pipeline_descriptor::Binding::StorageBuffer { name, .. } if name == output)
+        }));
+    }
+}
+
+#[test]
+fn unified_root_uses_computed_indirect_draw_command() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+type draw_command = {
+  vertex_count: u32,
+  instance_count: u32,
+  first_vertex: u32,
+  first_instance: u32
+}
+
+type prepared = { instances: []vec4f32, commands: [1]draw_command }
+
+entry compact_and_draw(values: []vec4f32,
+                       target: render_target<vec4f32>)
+    render_target<vec4f32> =
+  let prepared =
+    let live = filter(|value: vec4f32| value.w > 0.0, values) in
+    {
+      instances = live,
+      commands = [{
+        vertex_count = 3u32,
+        instance_count = u32(length(live)),
+        first_vertex = 0u32,
+        first_instance = 0u32
+      }]
+    } in
+  let covered = rasterize_triangles(
+    indirect_draw(prepared.commands[0]),
+    |vertex|
+      let p = prepared.instances[i32(vertex.instance_index)] in
+      let x = if vertex.vertex_index == 0u32 then -0.5
+              else if vertex.vertex_index == 1u32 then 0.5
+              else 0.0 in
+      let y = if vertex.vertex_index == 2u32 then 0.5 else -0.5 in
+      vertex_output(@[p.x + x, p.y + y, 0.0, 1.0], p)) in
+  shade(target, covered, |fragment| fragment.value)
+"#,
+    )
+    .expect("a computed command buffer can drive an indirect draw");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    assert_eq!(lowered.pipeline.pipelines.len(), 2);
+    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[1] else {
+        panic!("indirect graphics pipeline")
+    };
+    let crate::pipeline_descriptor::DrawCall::Indirect { resource, offset, .. } = &graphics.invocation.draw
+    else {
+        panic!("draw must be indirect")
+    };
+    assert_eq!(*offset, 0);
+    let resource = resource.as_ref().expect("computed draw resource");
+    assert!(
+        lowered.pipeline.frame_graph.indirect_draws.iter().any(|dependency| {
+            lowered.pipeline.frame_graph.resources[dependency.buffer_resource].name == *resource
+        })
     );
 }
 

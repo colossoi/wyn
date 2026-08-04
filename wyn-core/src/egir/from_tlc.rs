@@ -997,7 +997,7 @@ fn strip_existentials(mut ty: &Type<TypeName>) -> &Type<TypeName> {
 fn entry_output_arity(entry: &interface::EntryDecl, ret_type: &Type<TypeName>) -> usize {
     match strip_existentials(ret_type) {
         Type::Constructed(TypeName::Unit | TypeName::SideEffect | TypeName::StorageTexture, _) => 0,
-        Type::Constructed(TypeName::Tuple(_), fields) => fields.len(),
+        Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => fields.len(),
         _ => usize::from(!entry.outputs.is_empty()),
     }
 }
@@ -3153,7 +3153,9 @@ fn build_entry_outputs(
         } else {
             Ok(vec![])
         }
-    } else if let Type::Constructed(TypeName::Tuple(_), component_types) = logical_ret_type {
+    } else if let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), component_types) =
+        logical_ret_type
+    {
         component_types
             .iter()
             .enumerate()

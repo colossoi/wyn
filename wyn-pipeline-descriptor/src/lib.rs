@@ -43,8 +43,7 @@ pub struct FrameGraph {
     /// Ping-pong/history pairs resolved to logical frame-graph resources.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feedback: Vec<FrameFeedback>,
-    /// Reserved for future indirect draw command buffers. Keeping this in the
-    /// schema lets runtimes consume the descriptor as the scheduling contract.
+    /// Draw passes and the command buffers that supply their indirect parameters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indirect_draws: Vec<IndirectDrawDependency>,
 }
@@ -149,6 +148,13 @@ impl FrameGraph {
                             role: FrameAccessRole::Current,
                         })
                         .collect();
+                    let indirect_resource = match &graphics.invocation.draw {
+                        DrawCall::Indirect { name, resource, .. } => Some(builder.ensure_named(
+                            FrameResourceKind::StorageBuffer,
+                            resource.as_deref().unwrap_or(name),
+                        )),
+                        DrawCall::Direct { .. } => None,
+                    };
                     for (stage_index, stage) in graphics.stages.iter().enumerate() {
                         let accesses = builder.stage_accesses(
                             pipeline_index,
@@ -156,6 +162,16 @@ impl FrameGraph {
                             &stage.uses,
                             &feedback_reads,
                         );
+                        let is_vertex = matches!(stage.stage, ShaderStage::Vertex);
+                        let mut stage_reads = accesses.reads;
+                        if is_vertex {
+                            if let Some(resource) = indirect_resource {
+                                stage_reads.push(FrameAccess {
+                                    resource,
+                                    role: FrameAccessRole::Current,
+                                });
+                            }
+                        }
                         let mut stage_writes = accesses.writes;
                         if matches!(stage.stage, ShaderStage::Fragment) {
                             stage_writes.extend(target_writes.iter().cloned());
@@ -165,12 +181,20 @@ impl FrameGraph {
                             stage.entry_point.clone(),
                             pipeline_index,
                             stage_index,
-                            accesses.reads,
+                            stage_reads,
                             stage_writes,
                             accesses.produces,
                             &mut last_writer,
                             &mut last_readers,
                         );
+                        if is_vertex {
+                            if let Some(buffer_resource) = indirect_resource {
+                                builder.graph.indirect_draws.push(IndirectDrawDependency {
+                                    draw_pass: builder.graph.passes.len() - 1,
+                                    buffer_resource,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -463,6 +487,10 @@ pub struct GraphicsPipeline {
 pub struct GraphicsInvocation {
     pub topology: PrimitiveTopology,
     pub draw: DrawCall,
+    #[serde(default)]
+    pub fragment_state: FragmentState,
+    #[serde(default)]
+    pub target_state: RenderTargetState,
 }
 
 impl Default for GraphicsInvocation {
@@ -475,8 +503,72 @@ impl Default for GraphicsInvocation {
                 first_vertex: 0,
                 first_instance: 0,
             },
+            fragment_state: FragmentState::default(),
+            target_state: RenderTargetState::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenderTargetState {
+    pub color_load: AttachmentLoadOp,
+    pub depth_load: AttachmentLoadOp,
+}
+
+impl Default for RenderTargetState {
+    fn default() -> Self {
+        Self {
+            color_load: AttachmentLoadOp::Load,
+            depth_load: AttachmentLoadOp::Load,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentLoadOp {
+    Load,
+    Clear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FragmentState {
+    pub depth_test: DepthTest,
+    pub depth_write: bool,
+    pub blend: BlendMode,
+    pub color_write: bool,
+}
+
+impl Default for FragmentState {
+    fn default() -> Self {
+        Self {
+            depth_test: DepthTest::Less,
+            depth_write: true,
+            blend: BlendMode::Replace,
+            color_write: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DepthTest {
+    Disabled,
+    Never,
+    Less,
+    LessEqual,
+    Equal,
+    GreaterEqual,
+    Greater,
+    Always,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlendMode {
+    Replace,
+    SourceOver,
+    Add,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -497,6 +589,14 @@ pub enum DrawCall {
         instance_count: u32,
         first_vertex: u32,
         first_instance: u32,
+    },
+    Indirect {
+        set: u32,
+        binding: u32,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<String>,
+        offset: u64,
     },
 }
 
