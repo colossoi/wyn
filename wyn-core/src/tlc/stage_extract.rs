@@ -19,7 +19,12 @@ use crate::{LookupMap, LookupSet, SymbolId, SymbolTable};
 struct InvocationBuiltins {
     direct_draw: crate::builtins::BuiltinId,
     direct_draw_from: crate::builtins::BuiltinId,
+    indexed_draw: crate::builtins::BuiltinId,
+    indexed_draw_from: crate::builtins::BuiltinId,
     indirect_draw: crate::builtins::BuiltinId,
+    indirect_draws: crate::builtins::BuiltinId,
+    indexed_indirect_draw: crate::builtins::BuiltinId,
+    indexed_indirect_draws: crate::builtins::BuiltinId,
     vertex_output: crate::builtins::BuiltinId,
     rasterizers: Vec<crate::builtins::BuiltinId>,
     shade: crate::builtins::BuiltinId,
@@ -40,7 +45,12 @@ impl InvocationBuiltins {
         Self {
             direct_draw: id("direct_draw"),
             direct_draw_from: id("direct_draw_from"),
+            indexed_draw: id("indexed_draw"),
+            indexed_draw_from: id("indexed_draw_from"),
             indirect_draw: id("indirect_draw"),
+            indirect_draws: id("indirect_draws"),
+            indexed_indirect_draw: id("indexed_indirect_draw"),
+            indexed_indirect_draws: id("indexed_indirect_draws"),
             vertex_output: id("vertex_output"),
             rasterizers: [
                 "rasterize_triangles",
@@ -650,7 +660,7 @@ fn graphics_invocation(
     computed: &[ComputedValue],
     builtins: &InvocationBuiltins,
 ) -> Option<crate::pipeline_descriptor::GraphicsInvocation> {
-    use crate::pipeline_descriptor::{DrawCall, GraphicsInvocation, PrimitiveTopology};
+    use crate::pipeline_descriptor::{DrawCall, DrawCount, GraphicsInvocation, PrimitiveTopology};
 
     let topology = match builtins.rasterizers.iter().position(|id| *id == rasterizer)? {
         0 => PrimitiveTopology::TriangleList,
@@ -665,7 +675,12 @@ fn graphics_invocation(
         &[
             builtins.direct_draw,
             builtins.direct_draw_from,
+            builtins.indexed_draw,
+            builtins.indexed_draw_from,
             builtins.indirect_draw,
+            builtins.indirect_draws,
+            builtins.indexed_indirect_draw,
+            builtins.indexed_indirect_draws,
         ],
     )?;
     let draw = if constructor == builtins.direct_draw {
@@ -690,21 +705,74 @@ fn graphics_invocation(
             first_vertex: *first_vertex,
             first_instance: *first_instance,
         }
-    } else {
+    } else if constructor == builtins.indexed_draw {
+        let [indices, instance_count] = args else {
+            return None;
+        };
+        DrawCall::Indexed {
+            indices: draw_buffer_source(indices, root_lambda, root_entry, computed)?,
+            index_format: index_format(indices)?,
+            index_count: array_draw_count(indices)?,
+            instance_count: u32_literal(instance_count)?,
+            first_index: 0,
+            vertex_offset: 0,
+            first_instance: 0,
+        }
+    } else if constructor == builtins.indexed_draw_from {
+        let [indices, index_count, instance_count, first_index, vertex_offset, first_instance] = args
+        else {
+            return None;
+        };
+        DrawCall::Indexed {
+            indices: draw_buffer_source(indices, root_lambda, root_entry, computed)?,
+            index_format: index_format(indices)?,
+            index_count: DrawCount::Fixed(u32_literal(index_count)?),
+            instance_count: u32_literal(instance_count)?,
+            first_index: u32_literal(first_index)?,
+            vertex_offset: i32_literal(vertex_offset)?,
+            first_instance: u32_literal(first_instance)?,
+        }
+    } else if constructor == builtins.indirect_draw {
         let [command] = args else {
             return None;
         };
-        let TermKind::Index { array, index } = &command.kind else {
+        let (commands, offset) = indirect_command_source(command, 16, root_lambda, root_entry, computed)?;
+        DrawCall::Indirect {
+            commands,
+            offset,
+            draw_count: DrawCount::Fixed(1),
+        }
+    } else if constructor == builtins.indirect_draws {
+        let [commands] = args else {
             return None;
         };
-        let command_index = u32_literal(index)? as u64;
-        let (binding, name, resource) = draw_buffer_source(array, root_lambda, root_entry, computed)?;
         DrawCall::Indirect {
-            set: crate::egir::from_tlc::AUTO_STORAGE_SET,
-            binding,
-            name,
-            resource,
-            offset: command_index * 16,
+            commands: draw_buffer_source(commands, root_lambda, root_entry, computed)?,
+            offset: 0,
+            draw_count: array_draw_count(commands)?,
+        }
+    } else if constructor == builtins.indexed_indirect_draw {
+        let [indices, command] = args else {
+            return None;
+        };
+        let (commands, offset) = indirect_command_source(command, 20, root_lambda, root_entry, computed)?;
+        DrawCall::IndexedIndirect {
+            indices: draw_buffer_source(indices, root_lambda, root_entry, computed)?,
+            index_format: index_format(indices)?,
+            commands,
+            offset,
+            draw_count: DrawCount::Fixed(1),
+        }
+    } else {
+        let [indices, commands] = args else {
+            return None;
+        };
+        DrawCall::IndexedIndirect {
+            indices: draw_buffer_source(indices, root_lambda, root_entry, computed)?,
+            index_format: index_format(indices)?,
+            commands: draw_buffer_source(commands, root_lambda, root_entry, computed)?,
+            offset: 0,
+            draw_count: array_draw_count(commands)?,
         }
     };
     Some(GraphicsInvocation {
@@ -715,30 +783,85 @@ fn graphics_invocation(
     })
 }
 
+fn indirect_command_source(
+    command: &Term,
+    stride: u64,
+    root_lambda: &Lambda,
+    root_entry: &EntryPoint<()>,
+    computed: &[ComputedValue],
+) -> Option<(crate::pipeline_descriptor::DrawBufferRef, u64)> {
+    let TermKind::Index { array, index } = &command.kind else {
+        return None;
+    };
+    let command_index = u32_literal(index)? as u64;
+    Some((
+        draw_buffer_source(array, root_lambda, root_entry, computed)?,
+        command_index * stride,
+    ))
+}
+
 fn draw_buffer_source(
     array: &Term,
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
-) -> Option<(u32, String, Option<String>)> {
+) -> Option<crate::pipeline_descriptor::DrawBufferRef> {
     let (symbol, path) = projected_symbol_path(array)?;
     if path.is_empty() {
         if let Some((index, _)) =
             root_lambda.params.iter().enumerate().find(|(_, (candidate, _))| *candidate == symbol)
         {
-            let name = root_entry.declaration.params.get(index)?.name.clone();
-            return Some((index as u32, name, None));
+            return Some(crate::pipeline_descriptor::DrawBufferRef {
+                set: crate::egir::from_tlc::AUTO_STORAGE_SET,
+                binding: index as u32,
+                name: root_entry.declaration.params.get(index)?.name.clone(),
+                resource: None,
+            });
         }
     }
     let value = computed.iter().find(|value| value.symbol == symbol)?;
     let leaf = value.leaves.iter().find(|leaf| leaf.path == path)?;
-    Some((
-        leaf.binding,
-        leaf.output_name.clone(),
-        Some(leaf.output_name.clone()),
-    ))
+    Some(crate::pipeline_descriptor::DrawBufferRef {
+        set: crate::egir::from_tlc::AUTO_STORAGE_SET,
+        binding: leaf.binding,
+        name: leaf.output_name.clone(),
+        resource: Some(leaf.output_name.clone()),
+    })
+}
+fn array_type_parts(mut ty: &Type) -> Option<(&Type, &Type)> {
+    while let Type::Constructed(TypeName::Existential(_), args) = ty {
+        ty = args.first()?;
+    }
+    let Type::Constructed(TypeName::Array, args) = ty else {
+        return None;
+    };
+    Some((args.first()?, args.get(2)?))
 }
 
+fn array_draw_count(array: &Term) -> Option<crate::pipeline_descriptor::DrawCount> {
+    match array_type_parts(&array.ty).map(|(_, size)| size) {
+        Some(Type::Constructed(TypeName::Size(count), _)) => Some(
+            crate::pipeline_descriptor::DrawCount::Fixed(u32::try_from(*count).ok()?),
+        ),
+        Some(_) => Some(crate::pipeline_descriptor::DrawCount::BufferLength),
+        None => None,
+    }
+}
+
+fn index_format(array: &Term) -> Option<crate::pipeline_descriptor::IndexFormat> {
+    use crate::pipeline_descriptor::IndexFormat;
+    match array_type_parts(&array.ty)?.0 {
+        Type::Constructed(TypeName::UInt(16), _) => Some(IndexFormat::Uint16),
+        Type::Constructed(TypeName::UInt(32), _) => Some(IndexFormat::Uint32),
+        _ => None,
+    }
+}
+fn is_u16_array(ty: &Type) -> bool {
+    matches!(
+        array_type_parts(ty).map(|(element, _)| element),
+        Some(Type::Constructed(TypeName::UInt(16), _))
+    )
+}
 fn parse_fragment_state(term: &Term) -> Option<crate::pipeline_descriptor::FragmentState> {
     use crate::pipeline_descriptor::{BlendMode, DepthTest, FragmentState};
 
@@ -797,6 +920,12 @@ fn u32_literal(term: &Term) -> Option<u32> {
         return None;
     };
     text.strip_suffix("u32").unwrap_or(text).replace('_', "").parse().ok()
+}
+fn i32_literal(term: &Term) -> Option<i32> {
+    let TermKind::IntLit(text) = &term.kind else {
+        return None;
+    };
+    text.strip_suffix("i32").unwrap_or(text).replace('_', "").parse().ok()
 }
 #[derive(Clone)]
 struct TargetRead {
@@ -870,7 +999,7 @@ fn referenced_symbols(term: &Term) -> LookupSet<SymbolId> {
 }
 
 fn append_root_captures(
-    _used: &LookupSet<SymbolId>,
+    used: &LookupSet<SymbolId>,
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     symbols: &mut SymbolTable,
@@ -878,10 +1007,15 @@ fn append_root_captures(
     declarations: &mut Vec<interface::EntryParamDecl>,
     substitutions: &mut ExternalSubstitutions,
 ) {
+    // Preserve the root descriptor interface across generated stages: later
+    // scalar-prepass splitting relies on these occupied slots when allocating
+    // compiler handoff buffers. A draw-only u16 index array is the exception;
+    // portable shaders cannot expose u16 storage, and DrawCall reserves its
+    // non-shader buffer reference separately.
     for (binding, ((old_symbol, ty), declaration)) in
         root_lambda.params.iter().zip(&root_entry.declaration.params).enumerate()
     {
-        if is_render_target_type(ty) {
+        if is_render_target_type(ty) || (!used.contains(old_symbol) && is_u16_array(ty)) {
             continue;
         }
         let binding = binding as u32;

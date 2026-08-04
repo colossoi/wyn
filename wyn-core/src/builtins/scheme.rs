@@ -391,6 +391,87 @@ pub fn indirect_draw_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     TypeScheme::Monotype(arrow_chain(&[draw_command_ty()], draw_ty()))
 }
 
+fn indexed_draw_command_ty() -> Type {
+    crate::types::record(vec![
+        ("index_count".to_string(), u32_ty()),
+        ("instance_count".to_string(), u32_ty()),
+        ("first_index".to_string(), u32_ty()),
+        ("vertex_offset".to_string(), i32_ty()),
+        ("first_instance".to_string(), u32_ty()),
+    ])
+}
+
+fn array_of(ctx: &mut dyn TypeVarGenerator, element: Type) -> Type {
+    array_type(
+        element,
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+    )
+}
+
+fn indexed_draw_for(ctx: &mut dyn TypeVarGenerator, index: Type) -> TypeScheme {
+    let indices = array_of(ctx, index);
+    quantify(arrow_chain(&[indices, u32_ty()], draw_ty()))
+}
+
+pub fn indexed_draw_u16_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    indexed_draw_for(ctx, Type::Constructed(TypeName::UInt(16), vec![]))
+}
+
+pub fn indexed_draw_u32_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    indexed_draw_for(ctx, u32_ty())
+}
+
+fn indexed_draw_from_for(ctx: &mut dyn TypeVarGenerator, index: Type) -> TypeScheme {
+    let indices = array_of(ctx, index);
+    let u = u32_ty();
+    quantify(arrow_chain(
+        &[indices, u.clone(), u.clone(), u, i32_ty(), u32_ty()],
+        draw_ty(),
+    ))
+}
+
+pub fn indexed_draw_from_u16_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    indexed_draw_from_for(ctx, Type::Constructed(TypeName::UInt(16), vec![]))
+}
+
+pub fn indexed_draw_from_u32_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    indexed_draw_from_for(ctx, u32_ty())
+}
+
+pub fn indirect_draws_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let commands = array_of(ctx, draw_command_ty());
+    quantify(arrow_chain(&[commands], draw_ty()))
+}
+
+fn indexed_indirect_draw_for(ctx: &mut dyn TypeVarGenerator, index: Type) -> TypeScheme {
+    let indices = array_of(ctx, index);
+    quantify(arrow_chain(&[indices, indexed_draw_command_ty()], draw_ty()))
+}
+
+pub fn indexed_indirect_draw_u16_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    indexed_indirect_draw_for(ctx, Type::Constructed(TypeName::UInt(16), vec![]))
+}
+
+pub fn indexed_indirect_draw_u32_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    indexed_indirect_draw_for(ctx, u32_ty())
+}
+
+fn indexed_indirect_draws_for(ctx: &mut dyn TypeVarGenerator, index: Type) -> TypeScheme {
+    let indices = array_of(ctx, index);
+    let commands = array_of(ctx, indexed_draw_command_ty());
+    quantify(arrow_chain(&[indices, commands], draw_ty()))
+}
+
+pub fn indexed_indirect_draws_u16_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    indexed_indirect_draws_for(ctx, Type::Constructed(TypeName::UInt(16), vec![]))
+}
+
+pub fn indexed_indirect_draws_u32_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    indexed_indirect_draws_for(ctx, u32_ty())
+}
+
 fn depth_test_ty() -> Type {
     crate::types::sum(
         [

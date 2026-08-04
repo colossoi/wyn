@@ -1132,20 +1132,25 @@ impl State {
         let indirect_buffer = match &spec.draw {
             DrawCall::Direct { .. } => None,
             DrawCall::Indirect {
-                set,
-                binding,
-                name,
+                commands,
+                draw_count: wyn_pipeline_descriptor::DrawCount::Fixed(1),
                 ..
             } => Some(
                 host_buffers
-                    .get(&(*set, *binding))
+                    .get(&(commands.set, commands.binding))
                     .map(|resource| resource.buffer.clone())
                     .ok_or_else(|| {
                         anyhow!(
-                            "indirect draw buffer `{name}` at set={set}, binding={binding} was not allocated"
+                            "indirect draw buffer `{}` at set={}, binding={} was not allocated",
+                            commands.name,
+                            commands.set,
+                            commands.binding
                         )
                     })?,
             ),
+            DrawCall::Indexed { .. } | DrawCall::IndexedIndirect { .. } | DrawCall::Indirect { .. } => {
+                return Err(anyhow!("this descriptor draw form is not supported by extra/viz"));
+            }
         };
 
         let state = PipelineState {
@@ -1773,6 +1778,9 @@ fn render_pipeline(
                 .as_ref()
                 .expect("indirect draw buffer resolved during pipeline construction");
             rpass.draw_indirect(buffer, *offset);
+        }
+        DrawCall::Indexed { .. } | DrawCall::IndexedIndirect { .. } => {
+            unreachable!("unsupported descriptor draw rejected during pipeline construction")
         }
     }
 }

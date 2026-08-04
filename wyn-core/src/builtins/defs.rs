@@ -80,6 +80,23 @@ macro_rules! hof_intrinsic {
         }
     };
 }
+macro_rules! hof_intrinsic_overloaded {
+    ($name:expr, [$($scheme:expr),+ $(,)?]) => {
+        BuiltinDefRaw {
+            surface_name: $name,
+            intrinsic_source_names: &[$name],
+            impl_source_names: &[],
+            kind: BuiltinKind::InternalIntrinsic,
+            purity: Purity::Pure,
+            overloads: &[$(
+                BuiltinOverload {
+                    scheme: Some($scheme),
+                    lowering: BuiltinLowering::NotLowered,
+                }
+            ),+],
+        }
+    };
+}
 
 // Compiler-internal intrinsic: emitted by the codegen pipeline. The
 // `id_dispatched!` form sets `lowering = ByBuiltinId`, signalling that
@@ -618,7 +635,36 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         "direct_draw_from",
         crate::builtins::scheme::direct_draw_from_scheme
     ),
+    hof_intrinsic_overloaded!(
+        "indexed_draw",
+        [
+            crate::builtins::scheme::indexed_draw_u16_scheme,
+            crate::builtins::scheme::indexed_draw_u32_scheme,
+        ]
+    ),
+    hof_intrinsic_overloaded!(
+        "indexed_draw_from",
+        [
+            crate::builtins::scheme::indexed_draw_from_u16_scheme,
+            crate::builtins::scheme::indexed_draw_from_u32_scheme,
+        ]
+    ),
     hof_intrinsic!("indirect_draw", crate::builtins::scheme::indirect_draw_scheme),
+    hof_intrinsic!("indirect_draws", crate::builtins::scheme::indirect_draws_scheme),
+    hof_intrinsic_overloaded!(
+        "indexed_indirect_draw",
+        [
+            crate::builtins::scheme::indexed_indirect_draw_u16_scheme,
+            crate::builtins::scheme::indexed_indirect_draw_u32_scheme,
+        ]
+    ),
+    hof_intrinsic_overloaded!(
+        "indexed_indirect_draws",
+        [
+            crate::builtins::scheme::indexed_indirect_draws_u16_scheme,
+            crate::builtins::scheme::indexed_indirect_draws_u32_scheme,
+        ]
+    ),
     hof_intrinsic!("vertex_output", crate::builtins::scheme::vertex_output_scheme),
     hof_intrinsic!("rasterize_triangles", crate::builtins::scheme::rasterize_scheme),
     hof_intrinsic!(

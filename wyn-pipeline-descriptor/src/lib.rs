@@ -148,13 +148,12 @@ impl FrameGraph {
                             role: FrameAccessRole::Current,
                         })
                         .collect();
-                    let indirect_resource = match &graphics.invocation.draw {
-                        DrawCall::Indirect { name, resource, .. } => Some(builder.ensure_named(
-                            FrameResourceKind::StorageBuffer,
-                            resource.as_deref().unwrap_or(name),
-                        )),
-                        DrawCall::Direct { .. } => None,
-                    };
+                    let indirect_resource = graphics.invocation.draw.indirect_commands().map(|buffer| {
+                        builder.ensure_named(FrameResourceKind::StorageBuffer, buffer.frame_name())
+                    });
+                    let index_resource = graphics.invocation.draw.indices().map(|buffer| {
+                        builder.ensure_named(FrameResourceKind::StorageBuffer, buffer.frame_name())
+                    });
                     for (stage_index, stage) in graphics.stages.iter().enumerate() {
                         let accesses = builder.stage_accesses(
                             pipeline_index,
@@ -165,11 +164,13 @@ impl FrameGraph {
                         let is_vertex = matches!(stage.stage, ShaderStage::Vertex);
                         let mut stage_reads = accesses.reads;
                         if is_vertex {
-                            if let Some(resource) = indirect_resource {
-                                stage_reads.push(FrameAccess {
-                                    resource,
-                                    role: FrameAccessRole::Current,
-                                });
+                            for resource in [indirect_resource, index_resource].into_iter().flatten() {
+                                if !stage_reads.iter().any(|access| access.resource == resource) {
+                                    stage_reads.push(FrameAccess {
+                                        resource,
+                                        role: FrameAccessRole::Current,
+                                    });
+                                }
                             }
                         }
                         let mut stage_writes = accesses.writes;
@@ -581,6 +582,38 @@ pub enum PrimitiveTopology {
     PointList,
 }
 
+/// A descriptor-visible reference to an array buffer consumed by draw execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrawBufferRef {
+    pub set: u32,
+    pub binding: u32,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexFormat {
+    Uint16,
+    Uint32,
+}
+
+/// The number of index elements or indirect commands consumed by a draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "count", rename_all = "snake_case")]
+pub enum DrawCount {
+    Fixed(u32),
+    /// Use the logical element count of the referenced array, not its allocation capacity.
+    BufferLength,
+}
+
+impl Default for DrawCount {
+    fn default() -> Self {
+        Self::Fixed(1)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DrawCall {
@@ -590,14 +623,51 @@ pub enum DrawCall {
         first_vertex: u32,
         first_instance: u32,
     },
-    Indirect {
-        set: u32,
-        binding: u32,
-        name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        resource: Option<String>,
-        offset: u64,
+    Indexed {
+        indices: DrawBufferRef,
+        index_format: IndexFormat,
+        index_count: DrawCount,
+        instance_count: u32,
+        first_index: u32,
+        vertex_offset: i32,
+        first_instance: u32,
     },
+    Indirect {
+        commands: DrawBufferRef,
+        offset: u64,
+        #[serde(default)]
+        draw_count: DrawCount,
+    },
+    IndexedIndirect {
+        indices: DrawBufferRef,
+        index_format: IndexFormat,
+        commands: DrawBufferRef,
+        offset: u64,
+        #[serde(default)]
+        draw_count: DrawCount,
+    },
+}
+
+impl DrawBufferRef {
+    fn frame_name(&self) -> &str {
+        self.resource.as_deref().unwrap_or(&self.name)
+    }
+}
+
+impl DrawCall {
+    pub fn indirect_commands(&self) -> Option<&DrawBufferRef> {
+        match self {
+            Self::Indirect { commands, .. } | Self::IndexedIndirect { commands, .. } => Some(commands),
+            Self::Direct { .. } | Self::Indexed { .. } => None,
+        }
+    }
+
+    pub fn indices(&self) -> Option<&DrawBufferRef> {
+        match self {
+            Self::Indexed { indices, .. } | Self::IndexedIndirect { indices, .. } => Some(indices),
+            Self::Direct { .. } | Self::Indirect { .. } => None,
+        }
+    }
 }
 
 /// A stage in a graphics pipeline.

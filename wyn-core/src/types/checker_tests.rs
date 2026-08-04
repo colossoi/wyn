@@ -3268,6 +3268,31 @@ fn raster_requires_one_ordinary_type_argument() {
 }
 
 #[test]
+fn draw_operations_accept_only_supported_index_arrays() {
+    typecheck_program(
+        r#"
+type indexed_draw_command = {
+  index_count: u32,
+  instance_count: u32,
+  first_index: u32,
+  vertex_offset: i32,
+  first_instance: u32
+}
+
+def direct16(indices: []u16) draw = indexed_draw(indices, 1u32)
+def direct32(indices: []u32) draw =
+  indexed_draw_from(indices, 3u32, 1u32, 0u32, 0i32, 0u32)
+def indirect16(indices: []u16, command: indexed_draw_command) draw =
+  indexed_indirect_draw(indices, command)
+def indirect32(indices: []u32, commands: []indexed_draw_command) draw =
+  indexed_indirect_draws(indices, commands)
+"#,
+    );
+
+    try_typecheck_program("def bad(indices: []i32) draw = indexed_draw(indices, 1u32)")
+        .expect_err("signed index arrays are not valid index buffers");
+}
+#[test]
 fn invocation_types_cannot_cross_a_root_entry_boundary() {
     for ty in [
         "raster<vec4f32>",

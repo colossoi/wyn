@@ -51,6 +51,20 @@ impl KernelPlan {
                 .flat_map(|entry| &entry.inputs)
                 .filter_map(|input| input.descriptor_binding()),
         );
+        for pipeline in &program.data.core.pipeline.pipelines {
+            let Pipeline::Graphics(graphics) = pipeline else {
+                continue;
+            };
+            for buffer in [
+                graphics.invocation.draw.indices(),
+                graphics.invocation.draw.indirect_commands(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                reserved_bindings.insert(BindingRef::new(buffer.set, buffer.binding));
+            }
+        }
         let physical_resources = PhysicalResourceTable::allocate_avoiding(
             &program.data.core.resources,
             &mut program.global_context.binding_ids,

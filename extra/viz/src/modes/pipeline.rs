@@ -338,9 +338,11 @@ fn run_pipeline_interactive(
                 vertex_count: published,
                 ..
             } => *published = vertex_count,
-            wyn_pipeline_descriptor::DrawCall::Indirect { .. } => {
+            wyn_pipeline_descriptor::DrawCall::Indexed { .. }
+            | wyn_pipeline_descriptor::DrawCall::Indirect { .. }
+            | wyn_pipeline_descriptor::DrawCall::IndexedIndirect { .. } => {
                 return Err(anyhow!(
-                    "--vertex-count cannot override a descriptor-driven indirect draw"
+                    "--vertex-count can only override a descriptor direct draw"
                 ));
             }
         }

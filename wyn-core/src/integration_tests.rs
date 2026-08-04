@@ -2871,12 +2871,12 @@ entry compact_and_draw(values: []vec4f32,
     let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[1] else {
         panic!("indirect graphics pipeline")
     };
-    let crate::pipeline_descriptor::DrawCall::Indirect { resource, offset, .. } = &graphics.invocation.draw
+    let crate::pipeline_descriptor::DrawCall::Indirect { commands, offset, .. } = &graphics.invocation.draw
     else {
         panic!("draw must be indirect")
     };
     assert_eq!(*offset, 0);
-    let resource = resource.as_ref().expect("computed draw resource");
+    let resource = commands.resource.as_ref().expect("computed draw resource");
     assert!(
         lowered.pipeline.frame_graph.indirect_draws.iter().any(|dependency| {
             lowered.pipeline.frame_graph.resources[dependency.buffer_resource].name == *resource
@@ -2884,6 +2884,211 @@ entry compact_and_draw(values: []vec4f32,
     );
 }
 
+#[test]
+fn unified_root_publishes_indexed_draws() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+entry indexed(indices: [3]u32,
+              target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    indexed_draw(indices, 2u32),
+    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+  shade(target, covered, |fragment| fragment.value)
+"#,
+    )
+    .expect("indexed_draw is accepted by unified roots");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+        panic!("graphics pipeline")
+    };
+    let crate::pipeline_descriptor::DrawCall::Indexed {
+        indices,
+        index_count,
+        instance_count,
+        ..
+    } = &graphics.invocation.draw
+    else {
+        panic!("draw must be indexed")
+    };
+    assert_eq!(*index_count, crate::pipeline_descriptor::DrawCount::Fixed(3));
+    assert_eq!(*instance_count, 2);
+    let index_resource = indices.resource.as_ref().unwrap_or(&indices.name);
+    let vertex_pass = lowered
+        .pipeline
+        .frame_graph
+        .passes
+        .iter()
+        .find(|pass| pass.kind == crate::pipeline_descriptor::FramePassKind::Vertex)
+        .expect("vertex pass");
+    assert!(vertex_pass
+        .reads
+        .iter()
+        .any(|read| { lowered.pipeline.frame_graph.resources[read.resource].name == *index_resource }));
+}
+
+#[test]
+fn unified_root_publishes_indexed_and_plural_indirect_draws() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+type draw_command = {
+  vertex_count: u32,
+  instance_count: u32,
+  first_vertex: u32,
+  first_instance: u32
+}
+
+type indexed_draw_command = {
+  index_count: u32,
+  instance_count: u32,
+  first_index: u32,
+  vertex_offset: i32,
+  first_instance: u32
+}
+
+entry draw_many(indices: [3]u32,
+                target: render_target<vec4f32>) render_target<vec4f32> =
+  let commands = [
+    { vertex_count = 3u32, instance_count = 1u32,
+      first_vertex = 0u32, first_instance = 0u32 },
+    { vertex_count = 3u32, instance_count = 2u32,
+      first_vertex = 0u32, first_instance = 0u32 }
+  ] in
+  let indexed_commands = [{
+    index_count = 3u32, instance_count = 1u32,
+    first_index = 0u32, vertex_offset = 0i32, first_instance = 0u32
+  }] in
+  let many = rasterize_triangles(
+    indirect_draws(commands),
+    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 0.0, 0.0, 1.0])) in
+  let target1 = shade(target, many, |fragment| fragment.value) in
+  let indexed = rasterize_triangles(
+    indexed_indirect_draws(indices, indexed_commands),
+    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[0.0, 1.0, 0.0, 1.0])) in
+  shade(target1, indexed, |fragment| fragment.value)
+"#,
+    )
+    .expect("plural indirect draw forms are accepted");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    let graphics = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .filter_map(|pipeline| match pipeline {
+            crate::pipeline_descriptor::Pipeline::Graphics(graphics) => Some(graphics),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(graphics.len(), 2);
+    assert!(matches!(
+        graphics[0].invocation.draw,
+        crate::pipeline_descriptor::DrawCall::Indirect {
+            draw_count: crate::pipeline_descriptor::DrawCount::Fixed(2),
+            ..
+        }
+    ));
+    assert!(matches!(
+        graphics[1].invocation.draw,
+        crate::pipeline_descriptor::DrawCall::IndexedIndirect {
+            draw_count: crate::pipeline_descriptor::DrawCount::Fixed(1),
+            ..
+        }
+    ));
+}
+#[test]
+fn unified_root_publishes_offset_and_singular_indexed_draws() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+type indexed_draw_command = {
+  index_count: u32,
+  instance_count: u32,
+  first_index: u32,
+  vertex_offset: i32,
+  first_instance: u32
+}
+
+entry indexed_forms(indices: [4]u16,
+                    target: render_target<vec4f32>) render_target<vec4f32> =
+  let commands = [{
+    index_count = 3u32, instance_count = 2u32,
+    first_index = 1u32, vertex_offset = -1i32, first_instance = 4u32
+  }] in
+  let direct = rasterize_triangles(
+    indexed_draw_from(indices, 3u32, 2u32, 1u32, -1i32, 4u32),
+    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 0.0, 0.0, 1.0])) in
+  let target1 = shade(target, direct, |fragment| fragment.value) in
+  let indirect = rasterize_triangles(
+    indexed_indirect_draw(indices, commands[0]),
+    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[0.0, 1.0, 0.0, 1.0])) in
+  shade(target1, indirect, |fragment| fragment.value)
+"#,
+    )
+    .expect("offset and singular indexed draw forms are accepted");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    let graphics = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .filter_map(|pipeline| match pipeline {
+            crate::pipeline_descriptor::Pipeline::Graphics(graphics) => Some(graphics),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(graphics.len(), 2);
+    assert!(matches!(
+        graphics[0].invocation.draw,
+        crate::pipeline_descriptor::DrawCall::Indexed {
+            index_format: crate::pipeline_descriptor::IndexFormat::Uint16,
+            index_count: crate::pipeline_descriptor::DrawCount::Fixed(3),
+            vertex_offset: -1,
+            ..
+        }
+    ));
+    assert!(matches!(
+        graphics[1].invocation.draw,
+        crate::pipeline_descriptor::DrawCall::IndexedIndirect {
+            index_format: crate::pipeline_descriptor::IndexFormat::Uint16,
+            draw_count: crate::pipeline_descriptor::DrawCount::Fixed(1),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn unified_root_preserves_dynamic_indirect_draw_count() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+type draw_command = {
+  vertex_count: u32,
+  instance_count: u32,
+  first_vertex: u32,
+  first_instance: u32
+}
+
+entry draw_dynamic(commands: []draw_command,
+                   target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    indirect_draws(commands),
+    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+  shade(target, covered, |fragment| fragment.value)
+"#,
+    )
+    .expect("a runtime-sized command array remains runtime-sized in the descriptor");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+        panic!("graphics pipeline")
+    };
+    assert!(matches!(
+        graphics.invocation.draw,
+        crate::pipeline_descriptor::DrawCall::Indirect {
+            draw_count: crate::pipeline_descriptor::DrawCount::BufferLength,
+            ..
+        }
+    ));
+}
 #[test]
 fn target_profiles_are_selected_before_ssa_lowering() {
     let portable = crate::compile_thru_ssa(" entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
