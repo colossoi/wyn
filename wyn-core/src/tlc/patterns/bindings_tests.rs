@@ -7,7 +7,7 @@ use crate::tlc::{self, Term, TermKind};
 fn compile_to_tlc_raw(source: &str) -> tlc::stage::Transformed {
     let type_checked = crate::compile_thru_frontend(source).expect("type_check");
     let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
-    tlc::lower_from_ast(program)
+    tlc::lower_from_ast(program).expect("lower_from_ast")
 }
 
 fn find_def_body<'a>(program: &'a tlc::stage::Transformed, name: &str) -> &'a Term {

@@ -6,6 +6,7 @@ mod liveness;
 mod validate;
 
 pub use apply::{apply_ownership, OwnershipApplied};
+pub(crate) use validate::check_unextracted;
 pub use validate::{check, validate_ownership, OwnershipValidated};
 
 #[cfg(test)]

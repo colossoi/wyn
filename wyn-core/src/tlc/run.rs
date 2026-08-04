@@ -12,7 +12,7 @@ pub enum TransformedTag {}
 pub type Transformed =
     super::Program<TransformedTag, UnpinnedPolymorphic, super::context::TransformedGlobal>;
 
-pub fn lower_from_ast(mut ast: crate::ast_type_holes::HolesResolved) -> Transformed {
+pub fn lower_from_ast(mut ast: crate::ast_type_holes::HolesResolved) -> crate::error::Result<Transformed> {
     let mut symbols = std::mem::take(&mut ast.global_context.symbols);
     let mut term_ids = TermIdSource::new();
     let mut support_defs = Vec::new();
@@ -28,14 +28,25 @@ pub fn lower_from_ast(mut ast: crate::ast_type_holes::HolesResolved) -> Transfor
     support_defs.append(&mut parts.defs);
     parts.defs = support_defs;
     let known_defs = parts.defs.iter().map(|definition| definition.name).collect();
-    super::stage_extract::extract(&mut parts, &mut symbols, &mut term_ids);
-
-    parts.with_symbols::<TransformedTag, _>(
+    let program = parts.with_symbols::<TransformedTag, _>(
         symbols,
         term_ids,
         super::context::TransformedGlobal {
             known_defs,
             auto_storage_binding_ids: crate::IdSource::new(),
         },
-    )
+    );
+    super::ownership::check_unextracted(&program)?;
+
+    let super::Program {
+        defs,
+        mut symbols,
+        mut term_ids,
+        global_context,
+        state: _,
+    } = program;
+    let mut parts = super::ProgramParts { defs };
+    super::stage_extract::extract(&mut parts, &mut symbols, &mut term_ids);
+
+    Ok(parts.with_symbols::<TransformedTag, _>(symbols, term_ids, global_context))
 }

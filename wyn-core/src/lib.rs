@@ -789,7 +789,7 @@ pub fn compile_thru_frontend(source: &str) -> error::Result<types::run::TypeChec
 pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::stage::Reachable> {
     let type_checked = compile_thru_frontend(source)?;
     let program = ast_type_holes::reject_type_holes(type_checked)?;
-    let program = tlc::lower_from_ast(program);
+    let program = tlc::lower_from_ast(program)?;
     let program = tlc::pin_entry_buffers(program)?;
     let program = tlc::validate_ownership(program)?;
     Ok(optimize_tlc_for_test(program))

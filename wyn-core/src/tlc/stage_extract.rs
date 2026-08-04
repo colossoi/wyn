@@ -239,11 +239,16 @@ fn extract_root(
         return None;
     }
 
-    let TermKind::Lambda(root_lambda) = &definition.body.kind else {
+    let TermKind::Lambda(source_root_lambda) = &definition.body.kind else {
         return None;
     };
+    // Orchestration helpers have ordinary call semantics. Inline them before
+    // recognizing the operation chain so a helper can forward a raster or
+    // contain an invocation without becoming a separate host entry.
+    let mut root_lambda = source_root_lambda.clone();
+    root_lambda.body = Box::new(inline_stage_helpers(*root_lambda.body, helpers, term_ids));
     let root_name = root_entry_name(definition)?;
-    let shape = root_shape(root_lambda, root_entry, &root_name, builtins)?;
+    let shape = root_shape(&root_lambda, root_entry, &root_name, builtins)?;
     let graphics_count =
         shape.operations.iter().filter(|operation| matches!(operation, RootOperation::Graphics(_))).count();
     if graphics_count == 0 {
@@ -267,7 +272,7 @@ fn extract_root(
             RootOperation::Compute(operation) => {
                 stages.push(build_compute_stage(
                     definition,
-                    root_lambda,
+                    &root_lambda,
                     root_entry,
                     operation,
                     &shape.computed,
@@ -313,7 +318,7 @@ fn extract_root(
                     raster_args.get(draw_index)?,
                     raster_state,
                     fragment_state,
-                    root_lambda,
+                    &root_lambda,
                     root_entry,
                     &shape.computed,
                     builtins,
@@ -327,7 +332,7 @@ fn extract_root(
                 let (vertex_external, vertex_external_decls, vertex_substitutions, vertex_target_reads) =
                     stage_captures(
                         &vertex_lambda.body,
-                        root_lambda,
+                        &root_lambda,
                         root_entry,
                         &shape.computed,
                         &shape.targets,
@@ -341,7 +346,7 @@ fn extract_root(
                     fragment_target_reads,
                 ) = stage_captures(
                     &fragment_lambda.body,
-                    root_lambda,
+                    &root_lambda,
                     root_entry,
                     &shape.computed,
                     &shape.targets,
@@ -421,6 +426,12 @@ fn root_shape<'a>(
 
         if rasterizer_app(rhs, builtins).is_some() {
             rasters.insert(*name, rhs.as_ref());
+        } else if matches!(name_ty, Type::Constructed(TypeName::Raster, _)) {
+            let TermKind::Var(VarRef::Symbol(source)) = rhs.kind else {
+                return None;
+            };
+            let raster = rasters.remove(&source)?;
+            rasters.insert(*name, raster);
         } else if shade_app(rhs, builtins).is_some() {
             let operation = graphics_operation(rhs, &mut rasters, &targets, builtins)?;
             targets.insert(

@@ -2591,6 +2591,94 @@ entry layered(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 
 #[test]
+fn unified_root_can_transfer_raster_through_an_ordinary_helper() {
+    let source = r#"
+def pass_raster<V>(covered: raster<V>) raster<V> = covered
+
+entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+  shade(target, pass_raster(covered), |fragment| fragment.value)
+"#;
+    compile_to_spirv(source).expect("an ordinary helper may transfer a raster value");
+}
+
+#[test]
+fn unified_root_rejects_reusing_consumed_raster() {
+    let source = r#"
+entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+  let first = shade(target, covered, |fragment| fragment.value) in
+  shade(first, covered, |fragment| fragment.value)
+"#;
+    let error = crate::compile_thru_tlc(source).expect_err("a raster value is consumed by shade");
+    assert!(
+        error.to_string().contains("use of moved value `covered`"),
+        "unexpected diagnostic: {error}"
+    );
+}
+
+#[test]
+fn unified_root_rejects_reusing_consumed_render_target() {
+    let source = r#"
+entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
+  let first_raster = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+  let first = shade(target, first_raster, |fragment| fragment.value) in
+  let second_raster = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+  let second = shade(target, second_raster, |fragment| fragment.value) in
+  second
+"#;
+    let error = crate::compile_thru_tlc(source).expect_err("shade consumes its render target");
+    assert!(
+        error.to_string().contains("use of moved value `target`"),
+        "unexpected diagnostic: {error}"
+    );
+}
+
+#[test]
+fn unified_root_rejects_reading_target_from_its_own_fragment_callback() {
+    let source = r#"
+entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+  shade(target, covered,
+    |fragment| target_load(target, @[0, 0], fragment.sample_index))
+"#;
+    let error = crate::compile_thru_tlc(source)
+        .expect_err("a fragment callback must not read the target being consumed");
+    assert!(
+        error
+            .to_string()
+            .contains("fragment callback reads render target `target` while `shade` consumes it"),
+        "unexpected diagnostic: {error}"
+    );
+}
+
+#[test]
+fn unified_root_rejects_discarded_raster() {
+    let source = r#"
+entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+  target
+"#;
+    let error = crate::compile_thru_tlc(source).expect_err("a raster value must not be discarded");
+    assert!(
+        error.to_string().contains("raster value `covered` must be consumed exactly once"),
+        "unexpected diagnostic: {error}"
+    );
+}
+
+#[test]
 fn unified_root_orders_graphics_compute_graphics_operations() {
     let lowered = crate::compile_thru_spirv(
         r#"
@@ -7370,7 +7458,7 @@ entry fragment_main(pos: vec4f32) vec4f32 =
 fn compile_tlc_with_fill_holes(input: &str) -> crate::error::Result<crate::tlc::stage::Transformed> {
     let typed = crate::compile_thru_frontend(input)?;
     let filled = crate::ast_type_holes::fill_type_holes(typed)?;
-    Ok(crate::tlc::lower_from_ast(filled))
+    crate::tlc::lower_from_ast(filled)
 }
 
 #[test]

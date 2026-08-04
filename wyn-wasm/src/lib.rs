@@ -608,7 +608,10 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         Err(e) => return CompileResultWgsl::err(e),
     };
 
-    let program = wyn_core::tlc::lower_from_ast(program);
+    let program = match wyn_core::tlc::lower_from_ast(program) {
+        Ok(t) => t,
+        Err(e) => return CompileResultWgsl::err(e),
+    };
     let program = match wyn_core::tlc::pin_entry_buffers(program) {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err(e),

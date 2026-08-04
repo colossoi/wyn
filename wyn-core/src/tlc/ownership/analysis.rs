@@ -47,7 +47,7 @@ use polytype::Type;
 ///
 /// Variables aliasing an existing slot share the slot's owner (e.g.
 /// `let b = a in ...` registers `b → owner(a)`, no new owner created).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct OwnerId(u32);
 
 /// Component-sensitive alias information for aggregate values. Futhark tracks
@@ -202,6 +202,13 @@ pub(super) struct AnalysisState {
     /// params). Stored as (message, span) so we don't need
     /// `CompilerError: Clone`; the check function reconstructs.
     pub(super) build_errors: Vec<(String, Option<Span>)>,
+    /// Owners whose value type is `raster<V>`. Every such owner must
+    /// either be consumed or returned by an ordinary helper.
+    pub(super) raster_owners: LookupSet<OwnerId>,
+    /// Owners whose value type is `render_target<C>`.
+    pub(super) render_target_owners: LookupSet<OwnerId>,
+    /// Raster owners transferred through a definition's result.
+    pub(super) escaped_raster_owners: LookupSet<OwnerId>,
 }
 
 impl AnalysisState {
@@ -301,17 +308,35 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
     }
 
     /// Whether the callee consumes (moves out) its `index`-th argument.
-    /// Most builtins do not; `image_with` is the linear storage-image update
-    /// form and consumes its source handle.
-    fn callee_param_consumes(&self, func: &Term<C, S>, index: usize) -> bool {
-        if var_term_builtin_id(func, self.symbols) == Some(catalog().known().image_with) {
+    /// Most builtins do not. Linear resource operations and raster-valued
+    /// helper arguments have intrinsic consuming behavior.
+    fn callee_param_consumes(&self, func: &Term<C, S>, index: usize, arg: &Term<C, S>) -> bool {
+        let builtin = var_term_builtin_id(func, self.symbols);
+        if builtin == Some(catalog().known().image_with) {
             return index == 0;
         }
+
+        // Raster values are intrinsically linear: passing one to any helper
+        // transfers it, without requiring a source-level `*` annotation.
+        if is_raster_type(&arg.ty) {
+            return true;
+        }
+
+        // Shading consumes the render target as well as the raster. The
+        // state-taking form shifts both argument positions by one.
+        if builtin == builtin_id("shade") {
+            return index == 0 || index == 1;
+        }
+        if builtin == builtin_id("shade_with") {
+            return index == 1 || index == 2;
+        }
+
         self.callee_diet(func).and_then(|(p, _)| p.get(index)).map(Diet::is_consuming).unwrap_or(false)
     }
 
-    /// The callee's return diet — `Diet::observing()` when unknown.
-    fn callee_return_diet(&self, func: &Term<C, S>) -> Diet {
+    /// The callee's return diet. Pipeline handles have intrinsic transfer
+    /// semantics in addition to source-level `*` contracts.
+    fn callee_return_diet(&self, func: &Term<C, S>, n_args: usize) -> Diet {
         let known = catalog().known();
         if var_term_builtin_id(func, self.symbols) == Some(known.array_with) {
             // A functional `array_with` returns a fresh (alias-free) array.
@@ -321,9 +346,19 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
             // A storage-image update returns the next linear handle.
             return Diet::Leaf(true);
         }
+        if is_raster_type(&callee_return_type(&func.ty, n_args)) {
+            // Rasterization and raster-forwarding helpers produce the sole
+            // handle owned by their caller.
+            return Diet::Leaf(true);
+        }
+        if matches!(var_term_builtin_id(func, self.symbols), id if id == builtin_id("shade") || id == builtin_id("shade_with"))
+        {
+            // A shade call returns the next render-target handle after
+            // consuming the prior one.
+            return Diet::Leaf(true);
+        }
         self.callee_diet(func).map(|(_, r)| r.clone()).unwrap_or_else(Diet::observing)
     }
-
     fn fresh_owner(&mut self, origin: Origin) -> OwnerId {
         let id = OwnerId(self.next_owner);
         self.next_owner += 1;
@@ -347,6 +382,22 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
         }
         for owner in aliases {
             self.model.owner_to_var.entry(owner).or_insert(sym);
+        }
+    }
+
+    fn mark_pipeline_owners(&mut self, ty: &Type<TypeName>, value: &AliasValue) {
+        if is_raster_type(ty) {
+            self.model.raster_owners.extend(value.flattened());
+        } else if is_render_target_type(ty) {
+            self.model.render_target_owners.extend(value.flattened());
+        } else if let (
+            Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), component_types),
+            Some(components),
+        ) = (ty, &value.components)
+        {
+            for (component_ty, component) in component_types.iter().zip(components) {
+                self.mark_pipeline_owners(component_ty, component);
+            }
         }
     }
 
@@ -388,6 +439,7 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
             let introduced: LookupSet<OwnerId> = owners.difference(&inherited).copied().collect();
             self.model.defs.entry(def_site).or_default().extend(introduced);
         }
+        self.mark_pipeline_owners(ty, &value);
         self.bind_alias_value(sym, value);
     }
 
@@ -398,7 +450,7 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
         match &rhs.kind {
             TermKind::App { func, args } => (
                 callee_return_type(&func.ty, args.len()),
-                self.callee_return_diet(func),
+                self.callee_return_diet(func, args.len()),
             ),
             TermKind::Loop { .. } if matches!(rhs.ty, Type::Constructed(TypeName::StorageTexture, _)) => {
                 (rhs.ty.clone(), Diet::Leaf(true))
@@ -425,8 +477,15 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
             let is_entry = matches!(meta, DefMeta::EntryPoint(_));
             self.bind_params(lam, param_diets, is_entry);
             self.visit_term(&lam.body);
+            let returns_raster = is_raster_type(&lam.ret_ty);
+            if returns_raster {
+                let returned_owners = self.alias_value(&lam.body).flattened();
+                self.model.escaped_raster_owners.extend(returned_owners);
+            }
             if !is_entry {
-                self.check_alias_free_return(&lam.ret_ty, return_diet, &lam.body);
+                let effective_return_diet =
+                    if returns_raster { Diet::Leaf(true) } else { return_diet.clone() };
+                self.check_alias_free_return(&lam.ret_ty, &effective_return_diet, &lam.body);
             }
         } else {
             self.visit_term(body);
@@ -511,8 +570,10 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
             // non-consuming function param; an unsoundly-mutable
             // `Origin::Entry` here would let ownership rewrite non-tail
             // SOACs as unique-input candidates that could later clobber the caller.
-            let consuming = param_diets.get(index).map(Diet::is_consuming).unwrap_or(false);
-            let origin = if is_entry && consuming {
+            let declared_consuming = param_diets.get(index).map(Diet::is_consuming).unwrap_or(false);
+            let implicitly_consuming = is_raster_type(ty);
+            let consuming = declared_consuming || implicitly_consuming;
+            let origin = if is_entry && (consuming || is_render_target_type(ty)) {
                 Origin::Entry
             } else if consuming {
                 Origin::UniqueParam
@@ -520,6 +581,7 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
                 Origin::NonUniqueParam
             };
             let value = self.fresh_alias_value_for_type(ty, origin);
+            self.mark_pipeline_owners(ty, &value);
             self.bind_alias_value(*sym, value);
         }
     }
@@ -564,7 +626,7 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
                 let mut killed_this_call: LookupSet<OwnerId> = LookupSet::new();
                 for (arg_index, arg) in args.iter().enumerate() {
                     self.visit_term(arg);
-                    if self.callee_param_consumes(func, arg_index) {
+                    if self.callee_param_consumes(func, arg_index, arg) {
                         let aliases = self.alias_targets(arg);
                         if !aliases.is_empty() {
                             let rejected: Vec<OwnerId> = aliases
@@ -972,10 +1034,10 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
                 // an observing component aliases every argument passed to a
                 // non-consuming parameter.
                 let return_ty = callee_return_type(&func.ty, args.len());
-                let return_diet = self.callee_return_diet(func);
+                let return_diet = self.callee_return_diet(func, args.len());
                 let mut aliases = LookupSet::new();
                 for (index, arg) in args.iter().enumerate() {
-                    if !self.callee_param_consumes(func, index) {
+                    if !self.callee_param_consumes(func, index, arg) {
                         aliases.extend(self.alias_targets(arg));
                     }
                 }
@@ -1227,7 +1289,7 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
             // `*` return; otherwise it may alias storage reachable through
             // the callee (top-level constants, captured state) that no
             // argument-derived alias set can see.
-            TermKind::App { func, .. } => self.callee_return_diet(func).is_consuming(),
+            TermKind::App { func, args } => self.callee_return_diet(func, args.len()).is_consuming(),
             TermKind::Let { body, .. } => self.is_definitely_alias_free(body),
             TermKind::Coerce { inner, .. } => self.is_definitely_alias_free(inner),
             _ => false,
@@ -1298,6 +1360,18 @@ pub(super) fn alias_target_of<C: Payload, S: Payload>(
 /// after peeling `n_args` arrows. Ownership reads the callee signature's `*`
 /// return contract to decide whether a call produces a fresh value; the
 /// inferred call type supplies only its value shape.
+fn builtin_id(name: &str) -> Option<crate::builtins::BuiltinId> {
+    catalog().lookup_by_surface_name(name).map(|builtin| builtin.id)
+}
+
+fn is_raster_type(ty: &Type<TypeName>) -> bool {
+    matches!(ty, Type::Constructed(TypeName::Raster, _))
+}
+
+fn is_render_target_type(ty: &Type<TypeName>) -> bool {
+    matches!(ty, Type::Constructed(TypeName::RenderTarget, _))
+}
+
 fn callee_return_type(func_ty: &Type<TypeName>, n_args: usize) -> Type<TypeName> {
     let mut current = func_ty.clone();
     for _ in 0..n_args {

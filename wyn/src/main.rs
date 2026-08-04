@@ -292,7 +292,7 @@ fn compile_file(
 
     let FrontendFile { program } = type_check_frontend_file(&input, !fill_holes, verbose)?;
 
-    let program = time("to_tlc", verbose, || wyn_core::tlc::lower_from_ast(program));
+    let program = time("to_tlc", verbose, || wyn_core::tlc::lower_from_ast(program))?;
 
     // Output TLC if requested (before optimization)
     if let Some(ref tlc_path) = output_tlc {
@@ -466,7 +466,7 @@ fn check_file(input: PathBuf, verbose: bool) -> Result<(), DriverError> {
     }
 
     let FrontendFile { program } = type_check_frontend_file(&input, true, verbose)?;
-    let program = wyn_core::tlc::lower_from_ast(program);
+    let program = wyn_core::tlc::lower_from_ast(program)?;
     let program = wyn_core::tlc::pin_entry_buffers(program)?;
     wyn_core::tlc::validate_ownership(program)?;
 

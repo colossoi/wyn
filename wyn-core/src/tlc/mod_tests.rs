@@ -42,7 +42,7 @@ fn mapping_children_assigns_caller_provided_parent_id() {
 fn compile_to_tlc_raw(source: &str) -> stage::Transformed {
     let type_checked = crate::compile_thru_frontend(source).expect("type_check");
     let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
-    lower_from_ast(program)
+    lower_from_ast(program).expect("lower_from_ast")
 }
 
 fn find_def_body<'a>(program: &'a stage::Transformed, name: &str) -> &'a Term {

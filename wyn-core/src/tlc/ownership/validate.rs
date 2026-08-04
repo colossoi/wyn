@@ -3,14 +3,15 @@
 //! This pass runs before simplification and inlining can erase the call
 //! boundaries that carry source `*T` contracts. It does not rewrite TLC.
 
-use super::analysis::{analyze, owner_display_name, AnalysisState, Origin, OwnerId};
+use super::analysis::{alias_target_of, analyze, owner_display_name, AnalysisState, Origin, OwnerId};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::error::CompilerError;
 use crate::tlc::data::Empty;
 use crate::tlc::stage::BuffersPinned;
 use crate::tlc::{
-    var_term_builtin_id, ArrayExpr, LoopKind, SoacBody, SoacOp, Term, TermId, TermKind, VarRef,
+    var_term_builtin_id, ArrayExpr, Family, LoopKind, Program, SoacBody, SoacOp, Term, TermId, TermKind,
+    VarRef,
 };
 use crate::LookupSet;
 use polytype::Type;
@@ -26,6 +27,23 @@ pub type OwnershipValidated = crate::tlc::Program<
 pub fn validate_ownership(program: BuffersPinned) -> crate::error::Result<OwnershipValidated> {
     check(&program)?;
     Ok(program.retag())
+}
+
+/// Validate the linear pipeline handles before stage extraction consumes their
+/// orchestration calls. Ordinary buffer ownership is checked again after entry
+/// buffers have been pinned.
+pub(crate) fn check_unextracted(program: &crate::tlc::run::Transformed) -> crate::error::Result<()> {
+    let model = analyze(program);
+    if let Some(err) = check_shade_target_capture(program, &model) {
+        return Err(err);
+    }
+    if let Some(err) = check_pipeline_use_after_move(program, &model) {
+        return Err(err);
+    }
+    if let Some(err) = check_linear_rasters(program, &model) {
+        return Err(err);
+    }
+    Ok(())
 }
 
 /// Run the ownership analysis and report a use-after-move error if
@@ -48,7 +66,10 @@ pub fn check(program: &BuffersPinned) -> crate::error::Result<()> {
 /// Returns the first such violation as a CompilerError; later
 /// violations are not reported in this pass (one diagnostic per
 /// compile is consistent with how the rest of the pipeline reports).
-fn check_use_after_move(program: &BuffersPinned, model: &AnalysisState) -> Option<CompilerError> {
+fn check_use_after_move<Tag, F: Family, GlobalContext>(
+    program: &Program<Tag, F, GlobalContext>,
+    model: &AnalysisState,
+) -> Option<CompilerError> {
     use CompilerError;
     if let Some((msg, span)) = model.build_errors.first() {
         return Some(CompilerError::AliasError(msg.clone(), *span));
@@ -67,6 +88,138 @@ fn check_use_after_move(program: &BuffersPinned, model: &AnalysisState) -> Optio
     let var_name = owner_display_name(model, &program.symbols, owner);
     Some(CompilerError::AliasError(
         format!("use of moved value `{}`", var_name),
+        span,
+    ))
+}
+
+fn check_shade_target_capture<Tag, F: Family, GlobalContext>(
+    program: &Program<Tag, F, GlobalContext>,
+    model: &AnalysisState,
+) -> Option<CompilerError> {
+    for def in &program.defs {
+        if let Some(error) = check_shade_target_capture_in_term(&def.body, program, model) {
+            return Some(error);
+        }
+    }
+    None
+}
+
+fn check_shade_target_capture_in_term<Tag, F: Family, GlobalContext>(
+    term: &Term<F::ClosureData, F::SoacBodyData>,
+    program: &Program<Tag, F, GlobalContext>,
+    model: &AnalysisState,
+) -> Option<CompilerError> {
+    if let TermKind::App { func, args } = &term.kind {
+        let builtin = var_term_builtin_id(func, &program.symbols);
+        let shade = catalog().lookup_by_surface_name("shade").map(|entry| entry.id);
+        let shade_with = catalog().lookup_by_surface_name("shade_with").map(|entry| entry.id);
+        let target_index = if builtin == shade {
+            Some(0)
+        } else if builtin == shade_with {
+            Some(1)
+        } else {
+            None
+        };
+        if let Some(target_index) = target_index {
+            let target = args.get(target_index)?;
+            let callback = args.last()?;
+            if let Some(owner) = alias_target_of(target, model, &program.symbols) {
+                let callback_body = match &callback.kind {
+                    TermKind::Lambda(lambda) => Some(lambda.body.as_ref()),
+                    TermKind::Var(VarRef::Symbol(symbol)) => program
+                        .defs
+                        .iter()
+                        .find(|definition| definition.name == *symbol)
+                        .map(|definition| &definition.body),
+                    _ => None,
+                };
+                if callback_body.is_some_and(|body| term_tree_reads_owner(body, owner, model)) {
+                    let name = owner_display_name(model, &program.symbols, owner);
+                    return Some(CompilerError::AliasError(
+                        format!("fragment callback reads render target `{name}` while `shade` consumes it"),
+                        Some(term.span),
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut error = None;
+    term.for_each_child(&mut |child| {
+        if error.is_none() {
+            error = check_shade_target_capture_in_term(child, program, model);
+        }
+    });
+    error
+}
+
+fn term_tree_reads_owner<C: crate::tlc::Payload, S: crate::tlc::Payload>(
+    term: &Term<C, S>,
+    owner: OwnerId,
+    model: &AnalysisState,
+) -> bool {
+    if model.uses.get(&term.id).is_some_and(|owners| owners.contains(&owner)) {
+        return true;
+    }
+    let mut reads = false;
+    term.for_each_child(&mut |child| {
+        if !reads {
+            reads = term_tree_reads_owner(child, owner, model);
+        }
+    });
+    reads
+}
+
+fn check_pipeline_use_after_move<Tag, F: Family, GlobalContext>(
+    program: &Program<Tag, F, GlobalContext>,
+    model: &AnalysisState,
+) -> Option<CompilerError> {
+    let mut violations: Vec<(TermId, OwnerId)> = model
+        .kills
+        .iter()
+        .flat_map(|(id, killed)| {
+            let live = model.live_out.get(id);
+            killed
+                .iter()
+                .filter(move |owner| {
+                    (model.raster_owners.contains(owner) || model.render_target_owners.contains(owner))
+                        && live.map_or(false, |owners| owners.contains(owner))
+                })
+                .map(move |owner| (*id, *owner))
+        })
+        .collect();
+    violations.sort_by_key(|(id, _)| id.0);
+    let (term_id, owner) = violations.into_iter().next()?;
+    let span = model.term_spans.get(&term_id).copied();
+    let var_name = owner_display_name(model, &program.symbols, owner);
+    Some(CompilerError::AliasError(
+        format!("use of moved value `{var_name}`"),
+        span,
+    ))
+}
+
+fn check_linear_rasters<Tag, F: Family, GlobalContext>(
+    program: &Program<Tag, F, GlobalContext>,
+    model: &AnalysisState,
+) -> Option<CompilerError> {
+    let mut unconsumed = model
+        .raster_owners
+        .iter()
+        .copied()
+        .filter(|owner| !model.escaped_raster_owners.contains(owner))
+        .filter(|owner| !model.kills.values().any(|killed| killed.contains(owner)))
+        .collect::<Vec<_>>();
+    unconsumed.sort();
+    let owner = unconsumed.into_iter().next()?;
+    let var_name = owner_display_name(model, &program.symbols, owner);
+    let span = model
+        .defs
+        .iter()
+        .find(|(_, owners)| owners.contains(&owner))
+        .and_then(|(term, _)| model.term_spans.get(term))
+        .copied();
+    Some(CompilerError::AliasError(
+        format!("raster value `{var_name}` must be consumed exactly once by `shade` or `shade_with`"),
         span,
     ))
 }

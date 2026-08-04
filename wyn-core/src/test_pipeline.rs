@@ -12,7 +12,7 @@ use crate::tlc;
 fn front_end(src: &str) -> tlc::stage::OwnershipValidated {
     let type_checked = crate::compile_thru_frontend(src).expect("type_check");
     let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
-    let program = tlc::lower_from_ast(program);
+    let program = tlc::lower_from_ast(program).expect("lower_from_ast");
     let program = tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     tlc::validate_ownership(program).expect("validate_ownership")
 }
