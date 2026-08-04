@@ -117,7 +117,7 @@ pub fn is_irrefutable(pat: &ast::Pattern, ty: &Type) -> Result<(), RefutabilityE
             }
         }
         PatternKind::Constructor(name, sub) => {
-            if let Type::Constructed(TypeName::Sum(variants), _) = ty {
+            if let Some(variants) = crate::types::sum_variants(ty) {
                 if variants.len() == 1 {
                     let (only_name, payload_tys) = &variants[0];
                     if only_name != name {

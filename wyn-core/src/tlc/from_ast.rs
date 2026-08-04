@@ -616,6 +616,9 @@ impl<'a> Transformer<'a> {
                 let raw_sum_ty = Self::raw_type(&expr.h);
                 let variants = match &raw_sum_ty {
                     Type::Constructed(TypeName::Sum(v), _) => v.clone(),
+                    Type::Constructed(TypeName::FragmentOutput, args) if args.len() == 1 => {
+                        crate::types::fragment_output_variants(args[0].clone())
+                    }
                     _ => panic!("BUG: Constructor `#{}` has non-sum type {:?}", name, raw_sum_ty),
                 };
                 let layout = Self::sum_layout(&variants);
@@ -1935,6 +1938,11 @@ impl<'a> Transformer<'a> {
     pub(super) fn lower_type(ty: Type<TypeName>) -> Type<TypeName> {
         match ty {
             Type::Constructed(TypeName::Sum(variants), _) => {
+                let layout = Self::sum_layout(&variants);
+                Type::Constructed(TypeName::Tuple(layout.slot_types.len()), layout.slot_types)
+            }
+            Type::Constructed(TypeName::FragmentOutput, args) if args.len() == 1 => {
+                let variants = crate::types::fragment_output_variants(args[0].clone());
                 let layout = Self::sum_layout(&variants);
                 Type::Constructed(TypeName::Tuple(layout.slot_types.len()), layout.slot_types)
             }

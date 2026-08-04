@@ -3293,6 +3293,47 @@ def indirect32(indices: []u32, commands: []indexed_draw_command) draw =
         .expect_err("signed index arrays are not valid index buffers");
 }
 #[test]
+fn fragment_output_is_a_predeclared_generic_sum() {
+    typecheck_program(
+        r#"
+def color(value: vec4f32) fragment_output<vec4f32> = #color(value)
+def depth(value: vec4f32, z: f32) fragment_output<vec4f32> = #depth(value, z)
+def conditional(value: vec4f32, keep: bool) fragment_output<vec4f32> =
+  if keep then #color(value) else #discard
+"#,
+    );
+}
+
+#[test]
+fn fragment_output_supports_exhaustive_pattern_matching() {
+    typecheck_program(
+        r#"
+def select_color(output: fragment_output<vec4f32>) vec4f32 =
+  match output
+  case #color(value) -> value
+  case #depth(value, _) -> value
+  case #discard -> @[0.0, 0.0, 0.0, 0.0]
+"#,
+    );
+}
+
+#[test]
+fn fragment_output_pattern_matching_checks_coverage() {
+    let error = try_typecheck_program(
+        r#"
+def select_color(output: fragment_output<vec4f32>) vec4f32 =
+  match output
+  case #color(value) -> value
+  case #depth(value, _) -> value
+"#,
+    )
+    .expect_err("fragment_output matches must cover #discard");
+    let message = format!("{error:?}");
+    assert!(message.contains("non-exhaustive match"), "got {message}");
+    assert!(message.contains("#discard"), "got {message}");
+}
+
+#[test]
 fn invocation_types_cannot_cross_a_root_entry_boundary() {
     for ty in [
         "raster<vec4f32>",

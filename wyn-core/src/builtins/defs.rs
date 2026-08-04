@@ -694,8 +694,20 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         "rasterize_points_with",
         crate::builtins::scheme::rasterize_with_scheme
     ),
-    hof_intrinsic!("shade", crate::builtins::scheme::shade_scheme),
-    hof_intrinsic!("shade_with", crate::builtins::scheme::shade_with_scheme),
+    hof_intrinsic_overloaded!(
+        "shade",
+        [
+            crate::builtins::scheme::shade_scheme,
+            crate::builtins::scheme::shade_output_scheme,
+        ]
+    ),
+    hof_intrinsic_overloaded!(
+        "shade_with",
+        [
+            crate::builtins::scheme::shade_with_scheme,
+            crate::builtins::scheme::shade_with_output_scheme,
+        ]
+    ),
     hof_intrinsic!("target_load", crate::builtins::scheme::target_load_scheme),
     hof_intrinsic!("target_sample", crate::builtins::scheme::target_sample_scheme),
     // ---- HOF / SOAC intrinsics: scheme only, lowered earlier in the pipeline ----

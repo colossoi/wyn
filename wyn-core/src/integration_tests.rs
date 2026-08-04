@@ -1665,6 +1665,27 @@ fn assert_naga_accepts_spirv(words: &[u32]) {
     .unwrap_or_else(|error| panic!("Naga validation rejected generated SPIR-V: {error:?}"));
 }
 
+fn spirv_has_builtin(words: &[u32], builtin: spirv::BuiltIn) -> bool {
+    let mut index = 5usize;
+    while index < words.len() {
+        let instruction = words[index];
+        let word_count = (instruction >> 16) as usize;
+        let opcode = instruction & 0xffff;
+        if opcode == 71
+            && word_count >= 4
+            && words[index + 2] == spirv::Decoration::BuiltIn as u32
+            && words[index + 3] == builtin as u32
+        {
+            return true;
+        }
+        if word_count == 0 {
+            break;
+        }
+        index += word_count;
+    }
+    false
+}
+
 #[test]
 fn filter_over_iota_emits_well_typed_length_and_index_operations() {
     let lowered = crate::compile_thru_spirv(
@@ -2803,6 +2824,117 @@ entry deferred(coords: []vec2i32,
     );
 }
 
+#[test]
+fn fragment_output_helpers_can_destructure_the_predeclared_sum() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+def normalize_output(output: fragment_output<vec4f32>) fragment_output<vec4f32> =
+  match output
+  case #color(value) -> #color(value)
+  case #depth(value, depth) -> #depth(value, depth)
+  case #discard -> #discard
+
+def fragment_stage(fragment: fragment_invocation<vec4f32>) fragment_output<vec4f32> =
+  normalize_output(
+    if fragment.front_facing
+    then #depth(fragment.value, 0.25)
+    else #discard)
+
+entry helper(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+      else @[0.0, 0.5, 0.0, 1.0],
+      @[1.0, 0.5, 0.25, 1.0])) in
+  shade(target, covered, fragment_stage)
+"#,
+    )
+    .expect("fragment-output helpers can construct and match their predeclared sum");
+    assert_naga_accepts_spirv(&lowered.spirv);
+}
+
+#[test]
+fn direct_tuple_color_is_not_mistaken_for_fragment_output() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+entry tuple_color(target: render_target<(u32, vec4f32, vec4f32, f32)>)
+    render_target<(u32, vec4f32, vec4f32, f32)> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+      else @[0.0, 0.5, 0.0, 1.0],
+      (7u32, @[1.0, 0.0, 0.0, 1.0], @[0.0, 1.0, 0.0, 1.0], 0.5))) in
+  shade(target, covered, |fragment| fragment.value)
+"#,
+    )
+    .expect("a direct tuple color remains an ordinary color result");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+        panic!("graphics pipeline")
+    };
+    assert_eq!(graphics.fragment_outputs.len(), 4);
+    assert!(!spirv_has_builtin(&lowered.spirv, spirv::BuiltIn::FragDepth));
+    assert!(!spirv_has_builtin(&lowered.spirv, spirv::BuiltIn::SampleMask));
+}
+
+#[test]
+fn unified_root_supports_explicit_depth_and_conditional_discard() {
+    let source = r#"
+entry cutout(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+      else @[0.0, 0.5, 0.0, 1.0],
+      @[1.0, 0.5, 0.25, 1.0])) in
+  shade_with(
+    { depth_test = #less,
+      depth_write = true,
+      blend = #replace,
+      color_write = true },
+    target,
+    covered,
+    |fragment|
+      if fragment.front_facing
+      then #depth(fragment.value, 0.25)
+      else #discard)
+"#;
+    let lowered = crate::compile_thru_spirv(source)
+        .expect("fragment_output supports explicit depth and conditional discard");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+        panic!("graphics pipeline")
+    };
+    assert_eq!(
+        graphics.fragment_outputs.iter().map(|output| output.name.as_str()).collect::<Vec<_>>(),
+        vec!["target"]
+    );
+
+    assert!(spirv_has_builtin(&lowered.spirv, spirv::BuiltIn::FragDepth));
+    assert!(spirv_has_builtin(&lowered.spirv, spirv::BuiltIn::SampleMask));
+
+    let wgsl = crate::lower_ssa_to_wgsl(
+        crate::compile_thru_ssa(source).expect("fragment_output lowers to portable SSA"),
+    )
+    .expect("fragment_output lowers to WGSL");
+    assert!(wgsl.contains("@builtin(frag_depth)"), "{wgsl}");
+    assert!(wgsl.contains("@builtin(sample_mask)"), "{wgsl}");
+    let module = naga::front::wgsl::parse_str(&wgsl)
+        .unwrap_or_else(|error| panic!("Naga rejected fragment-output WGSL: {error:?}\n{wgsl}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("Naga validation rejected fragment-output WGSL: {error:?}\n{wgsl}"));
+}
 #[test]
 fn unified_root_accepts_explicit_fragment_state() {
     let lowered = crate::compile_thru_spirv(

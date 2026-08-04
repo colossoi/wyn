@@ -164,6 +164,7 @@ pub struct GlobalEnv {
     pub module_schemes: StableMap<String, TypeScheme>,
 }
 
+#[derive(Clone)]
 pub struct TypeChecker<'a> {
     scope_stack: ScopeStack<ScopeEntry<TypeScheme>>,
     /// Global namespaces consulted after local scope lookup.
@@ -1250,19 +1251,78 @@ impl<'a> TypeChecker<'a> {
                 self.type_table.insert(expr.h.id, TypeScheme::Monotype(expected_type.clone()));
                 Ok(expected_type.clone())
             }
+            ExprKind::If(if_expr) => {
+                let condition_ty = self.infer_expression(&if_expr.condition)?;
+                let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+                self.context.unify(&condition_ty, &bool_ty).map_err(|_| {
+                    err_type_at!(
+                        if_expr.condition.h.span,
+                        "If condition must be boolean, got: {}",
+                        self.format_type(&condition_ty)
+                    )
+                })?;
+                self.check_expression(&if_expr.then_branch, expected_type)?;
+                self.check_expression(&if_expr.else_branch, expected_type)?;
+                let result = expected_type.apply(&self.context);
+                if as_arrow(&result).is_some() {
+                    bail_type_at!(expr.h.span, "Functions cannot be returned from if expressions");
+                }
+                self.type_table.insert(expr.h.id, TypeScheme::Monotype(result.clone()));
+                Ok(result)
+            }
+
+            ExprKind::Match(match_expr) => {
+                let scrutinee_ty = self.infer_expression(&match_expr.scrutinee)?;
+                if match_expr.cases.is_empty() {
+                    bail_type_at!(expr.h.span, "match expression must have at least one arm");
+                }
+
+                for case in &match_expr.cases {
+                    self.scope_stack.push_scope();
+                    let case_result = self
+                        .bind_pattern(&case.pattern, &scrutinee_ty, false)
+                        .and_then(|_| self.check_expression(&case.body, expected_type));
+                    self.scope_stack.pop_scope();
+                    case_result?;
+                }
+
+                let arms: Vec<(Pattern, Span)> = match_expr
+                    .cases
+                    .iter()
+                    .map(|case| (case.pattern.clone(), case.pattern.h.span))
+                    .collect();
+                let scrutinee_applied = scrutinee_ty.apply(&self.context);
+                match check_match(&scrutinee_applied, &arms, expr.h.span) {
+                    Ok(()) => {}
+                    Err(CoverageError::NonExhaustive { missing, .. }) => bail_type_at!(
+                        expr.h.span,
+                        "non-exhaustive match: missing case {}",
+                        format_cov_pat(&missing)
+                    ),
+                    Err(CoverageError::Redundant { arm_span, .. }) => {
+                        bail_type_at!(arm_span, "unreachable match arm")
+                    }
+                }
+
+                let result = expected_type.apply(&self.context);
+                if as_arrow(&result).is_some() {
+                    bail_type_at!(expr.h.span, "Functions cannot be returned from match expressions");
+                }
+                self.type_table.insert(expr.h.id, TypeScheme::Monotype(result.clone()));
+                Ok(result)
+            }
             // Sum-type constructor application uses the expected type to
             // resolve which sum type the constructor belongs to.
             // Bare-inference (`infer_expression`) can't disambiguate.
             ExprKind::Constructor(name, args) => {
                 let applied = expected_type.apply(&self.context);
-                let variants = match &applied {
-                    Type::Constructed(TypeName::Sum(variants), _) => variants,
-                    _ => bail_type_at!(
+                let Some(variants) = super::sum_variants(&applied) else {
+                    bail_type_at!(
                         expr.h.span,
                         "constructor `#{}` requires a sum type from context, but expected {}",
                         name,
                         self.format_type(&applied)
-                    ),
+                    )
                 };
                 let payload_types = match variants.iter().find(|(n, _)| n == name) {
                     Some((_, payload)) => payload,
@@ -1463,20 +1523,20 @@ impl<'a> TypeChecker<'a> {
         expected: Option<&Type>,
         expr: &crate::ast::Expression,
     ) -> Result<Type> {
-        // Extract expected parameter types if we have an expected function type
-        let expected_param_types: Option<Vec<Type>> = expected.and_then(|exp| {
-            let mut result = Vec::new();
+        // Extract expected parameter and result types for bidirectional checking.
+        let expected_signature: Option<(Vec<Type>, Type)> = expected.and_then(|exp| {
+            let mut params = Vec::new();
             let mut ty = exp.clone();
             for _ in 0..lambda.params.len() {
                 let applied = ty.apply(&self.context);
                 if let Some((param_type, result_type)) = as_arrow(&applied) {
-                    result.push(param_type.clone());
+                    params.push(param_type.clone());
                     ty = result_type.clone();
                 } else {
-                    return None; // Expected type doesn't match lambda structure
+                    return None;
                 }
             }
-            Some(result)
+            Some((params, ty.apply(&self.context)))
         });
 
         self.scope_stack.push_scope();
@@ -1487,7 +1547,7 @@ impl<'a> TypeChecker<'a> {
             let param_type = if let Some(annotated_type) = param.pattern_type() {
                 // Explicit annotation takes precedence
                 self.normalize_annotation_type(annotated_type, self.current_module.as_deref())?
-            } else if let Some(ref expected_params) = expected_param_types {
+            } else if let Some((expected_params, _)) = &expected_signature {
                 // Use expected type from bidirectional checking
                 expected_params[i].clone()
             } else {
@@ -1501,10 +1561,13 @@ impl<'a> TypeChecker<'a> {
             self.bind_irrefutable_pattern(param, &param_type, false)?;
         }
 
-        // Type check the body
-        let body_type = self.infer_expression(&lambda.body)?;
+        let body_result = match &expected_signature {
+            Some((_, expected_result)) => self.check_expression(&lambda.body, expected_result),
+            None => self.infer_expression(&lambda.body),
+        };
 
         self.scope_stack.pop_scope();
+        let body_type = body_result?;
 
         // Build the function type
         let func_type = Self::arrow_chain(&param_types, body_type);
@@ -1882,8 +1945,9 @@ impl<'a> TypeChecker<'a> {
         params: &[Pattern],
         body: &Expression,
         module_name: Option<&str>,
+        expected_body: Option<&Type>,
     ) -> Result<(Vec<Type>, Type)> {
-        self.check_function_with_params_inner(params, body, module_name, false, None)
+        self.check_function_with_params_inner(params, body, module_name, false, None, expected_body)
     }
 
     fn check_entry_with_params(
@@ -1892,7 +1956,7 @@ impl<'a> TypeChecker<'a> {
         body: &Expression,
         entry_kind: crate::interface::EntryKind,
     ) -> Result<(Vec<Type>, Type)> {
-        self.check_function_with_params_inner(params, body, None, true, Some(entry_kind))
+        self.check_function_with_params_inner(params, body, None, true, Some(entry_kind), None)
     }
 
     fn record_parameter_pattern_type<V>(&mut self, pattern: &Pattern<SourceTree, Attribute<V>>, ty: &Type) {
@@ -1915,6 +1979,7 @@ impl<'a> TypeChecker<'a> {
         // when `is_entry`; `None` for ordinary functions. Drives
         // stage-specific parameter validation.
         entry_stage: Option<crate::interface::EntryKind>,
+        expected_body: Option<&Type>,
     ) -> Result<(Vec<Type>, Type)> {
         // Create type variables or use explicit types for parameters
         let mut param_types: Vec<Type> = Vec::with_capacity(params.len());
@@ -2059,11 +2124,16 @@ impl<'a> TypeChecker<'a> {
             self.define(param_name, IdentifierKind::Local, type_scheme);
         }
 
-        // Infer body type
-        let body_type = self.infer_expression(body)?;
+        // Check an ascribed body bidirectionally so constructors and other
+        // context-directed expressions see the declared result type.
+        let body_result = match expected_body {
+            Some(expected) => self.check_expression(body, expected),
+            None => self.infer_expression(body),
+        };
 
-        // Pop parameter scope
+        // Pop parameter scope even when checking the body fails.
         self.scope_stack.pop_scope();
+        let body_type = body_result?;
 
         Ok((param_types, body_type))
     }
@@ -2405,8 +2475,17 @@ impl<'a> TypeChecker<'a> {
                 self.consuming_defs.insert(decl.name.clone());
             }
 
-            let (param_types, body_type) =
-                self.check_function_with_params(&decl.params, &decl.body, module_name)?;
+            let declared_return_type = decl
+                .ty
+                .as_ref()
+                .map(|declared| self.instantiate_annotation_type(declared, module_name))
+                .transpose()?;
+            let (param_types, body_type) = self.check_function_with_params(
+                &decl.params,
+                &decl.body,
+                module_name,
+                declared_return_type.as_ref(),
+            )?;
             debug!(
                 "Successfully inferred body type for '{}': {:?}",
                 decl.name, body_type
@@ -2416,9 +2495,7 @@ impl<'a> TypeChecker<'a> {
             // the body's value type and the declared return shape-check
             // directly. Whether the body satisfies a `*` return is verified
             // by tlc::ownership from the diet.
-            let return_type = if let Some(declared_type) = &decl.ty {
-                let normalized_return_type =
-                    self.instantiate_annotation_type(declared_type, module_name)?;
+            let return_type = if let Some(normalized_return_type) = declared_return_type {
                 let ctx = if !decl.params.is_empty() {
                     format!("Function return type mismatch for '{}'", decl.name)
                 } else {
@@ -2918,14 +2995,58 @@ impl<'a> TypeChecker<'a> {
                         .insert(expr.h.id, TypeScheme::Monotype(result_ty.clone()));
                     Ok(result_ty)
                 } else {
-                    // Multiple candidates: infer argument types first, then try overloads
+                    let candidate_tys: Vec<Type> =
+                        callee.candidates.iter().map(|candidate| candidate.ty.clone()).collect();
+
+                    // A lambda may require its candidate's parameter and result
+                    // types before its body can be checked. Probe each overload
+                    // on a complete checker clone, then keep the unique winner.
+                    if args.iter().any(|arg| matches!(arg.kind, ExprKind::Lambda(_))) {
+                        let mut winners = Vec::new();
+                        for (index, candidate) in candidate_tys.iter().enumerate() {
+                            let mut trial = self.clone();
+                            // polytype clones substitutions deeply but shares its
+                            // path-compression cache. Clear that derived cache so
+                            // one speculative candidate cannot affect the next.
+                            let trial_context_len = trial.context.len();
+                            trial.context.rollback(trial_context_len);
+                            let probe = trial
+                                .apply_two_pass(candidate.clone(), args)
+                                .and_then(|result| {
+                                    trial.ensure_not_partial(&result, &expr.h.span)?;
+                                    trial.ensure_valid_pipeline_result(&result, &expr.h.span)?;
+                                    Ok(result)
+                                });
+                            if let Ok(result) = probe {
+                                winners.push((index, trial, result));
+                            }
+                        }
+                        let context_len = self.context.len();
+                        self.context.rollback(context_len);
+
+                        if winners.len() == 1 {
+                            let (winner_index, mut winner, return_type) =
+                                winners.pop().expect("one contextual overload winner");
+                            let resolved_func_ty = candidate_tys[winner_index].apply(&winner.context);
+                            winner
+                                .type_table
+                                .insert(func.h.id, TypeScheme::Monotype(resolved_func_ty));
+                            winner
+                                .type_table
+                                .insert(expr.h.id, TypeScheme::Monotype(return_type.clone()));
+                            winner.name_resolution.set_overload_idx(func.h.id, winner_index);
+                            winner.record_constructor_dispatch(func.h.id, winner_index);
+                            *self = winner;
+                            return Ok(return_type);
+                        }
+                    }
+                    // Multiple candidates without a unique contextual winner:
+                    // infer argument types first, then use ordinary overload resolution.
                     let mut arg_types = Vec::new();
                     for arg in args {
                         arg_types.push(self.infer_expression(arg)?);
                     }
 
-                    let candidate_tys: Vec<Type> =
-                        callee.candidates.iter().map(|c| c.ty.clone()).collect();
                     let span = expr.h.span;
                     let resolved = crate::builtins::overload::resolve_overload(
                         &candidate_tys,
@@ -4255,12 +4376,14 @@ impl<'a> TypeChecker<'a> {
                 func_type = result_type;
             } else if matches!(
                 &arg.kind,
-                ExprKind::Constructor(_, _) | ExprKind::RecordLiteral(_)
+                ExprKind::Constructor(_, _)
+                    | ExprKind::RecordLiteral(_)
+                    | ExprKind::If(_)
+                    | ExprKind::Match(_)
             ) {
-                // Constructor expressions need bidirectional checking against
-                // the expected parameter type to disambiguate which sum type
-                // they belong to — `infer_expression` produces an "ambiguous
-                // constructor" error.
+                // Context-directed expressions need bidirectional checking
+                // against the expected parameter type. This both disambiguates
+                // constructors and propagates that context through branches.
                 let param_var = self.context.new_variable();
                 let result_var = self.context.new_variable();
                 let arrow_type = Type::arrow(param_var.clone(), result_var.clone());

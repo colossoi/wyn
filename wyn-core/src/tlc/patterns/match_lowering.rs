@@ -143,19 +143,22 @@ impl<'a> Transformer<'a> {
                 (cond, bindings)
             }
             PatternKind::Constructor(name, sub_patterns) => {
-                let variants = match &scrut.ty {
-                    Type::Constructed(TypeName::Tuple(_), _) => {
-                        // Scrutinee already lowered from a sum to a
-                        // flat tuple. Re-derive the layout from the
-                        // raw type table — Constructor patterns carry
-                        // their sum's raw shape via the pattern's
-                        // type-table entry.
-                        self.lookup_sum_variants_for_pattern(&pattern.h).unwrap_or_else(|| {
-                            panic!("BUG: Constructor pattern without sum-type entry in type table")
-                        })
+                let variants = if let Some(variants) = crate::types::sum_variants(&scrut.ty) {
+                    variants
+                } else {
+                    match &scrut.ty {
+                        Type::Constructed(TypeName::Tuple(_), _) => {
+                            // Scrutinee already lowered from a sum to a
+                            // flat tuple. Re-derive the layout from the
+                            // raw type table — Constructor patterns carry
+                            // their sum's raw shape via the pattern's
+                            // type-table entry.
+                            self.lookup_sum_variants_for_pattern(&pattern.h).unwrap_or_else(|| {
+                                panic!("BUG: Constructor pattern without sum-type entry in type table")
+                            })
+                        }
+                        other => panic!("BUG: Constructor pattern against non-sum type {:?}", other),
                     }
-                    Type::Constructed(TypeName::Sum(v), _) => v.clone(),
-                    other => panic!("BUG: Constructor pattern against non-sum type {:?}", other),
                 };
                 let layout = Self::sum_layout(&variants);
                 let &(tag_value, payload_offset) =
@@ -253,10 +256,7 @@ impl<'a> Transformer<'a> {
         header: &ast::TypedHeader,
     ) -> Option<Vec<(String, Vec<Type<TypeName>>)>> {
         let raw = Self::raw_type(header);
-        match raw {
-            Type::Constructed(TypeName::Sum(v), _) => Some(v),
-            _ => None,
-        }
+        crate::types::sum_variants(&raw)
     }
 }
 

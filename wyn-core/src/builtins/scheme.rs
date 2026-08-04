@@ -623,9 +623,26 @@ pub fn shade_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let raster = pipeline_ty(TypeName::Raster, vec![v.clone()]);
     let callback = arrow_chain(
         &[pipeline_ty(TypeName::FragmentInvocation, vec![v])],
-        pipeline_ty(TypeName::FragmentOutput, vec![c]),
+        crate::types::fragment_output(c),
     );
     quantify(arrow_chain(&[target.clone(), raster, callback], target))
+}
+
+/// forall c v. fragment_state -> render_target<c> -> raster<v> ->
+/// (fragment_invocation<v> -> fragment_output<c>) -> render_target<c>.
+pub fn shade_with_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let c = ctx.new_variable();
+    let v = ctx.new_variable();
+    let target = pipeline_ty(TypeName::RenderTarget, vec![c.clone()]);
+    let raster = pipeline_ty(TypeName::Raster, vec![v.clone()]);
+    let callback = arrow_chain(
+        &[pipeline_ty(TypeName::FragmentInvocation, vec![v])],
+        crate::types::fragment_output(c),
+    );
+    quantify(arrow_chain(
+        &[fragment_state_ty(), target.clone(), raster, callback],
+        target,
+    ))
 }
 
 /// forall c. render_target<c> -> vec2i32 -> u32 -> c.

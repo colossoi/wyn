@@ -199,24 +199,26 @@ impl<'a> Transformer<'a> {
                 // sum; the tag is statically known and no test is
                 // emitted. Project each payload slot and bind it.
                 let sum_ty = scrutinee.ty.clone();
-                let variants = match &sum_ty {
-                    Type::Constructed(TypeName::Sum(v), _) => v.clone(),
-                    Type::Constructed(TypeName::Tuple(_), _) => {
-                        // Scrutinee already lowered from a sum to a flat
-                        // tuple. Recover the original variant list from
-                        // the pattern's type-table entry.
-                        match Self::raw_type(&pattern.h) {
-                            Type::Constructed(TypeName::Sum(v), _) => v,
-                            _ => panic!(
-                                "BUG: Constructor pattern lacks Sum type in type table for NodeId {:?}",
-                                pattern.h.id
-                            ),
+                let variants = if let Some(variants) = crate::types::sum_variants(&sum_ty) {
+                    variants
+                } else {
+                    match &sum_ty {
+                        Type::Constructed(TypeName::Tuple(_), _) => {
+                            // Scrutinee already lowered from a sum to a flat
+                            // tuple. Recover the original variant list from
+                            // the pattern's type-table entry.
+                            crate::types::sum_variants(&Self::raw_type(&pattern.h)).unwrap_or_else(|| {
+                                panic!(
+                                    "BUG: Constructor pattern lacks sum type in type table for NodeId {:?}",
+                                    pattern.h.id
+                                )
+                            })
                         }
+                        other => panic!(
+                            "BUG: Constructor pattern against non-sum scrutinee type {:?}",
+                            other
+                        ),
                     }
-                    other => panic!(
-                        "BUG: Constructor pattern against non-sum scrutinee type {:?}",
-                        other
-                    ),
                 };
                 let layout = Self::sum_layout(&variants);
                 let &(_tag, payload_offset) =

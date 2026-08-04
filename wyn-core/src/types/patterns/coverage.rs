@@ -72,8 +72,10 @@ pub enum Universe {
 impl Universe {
     /// Build a Universe from a (post-substitution) type.
     pub fn of(ty: &Type) -> Universe {
+        if let Some(variants) = crate::types::sum_variants(ty) {
+            return Universe::Sum(variants);
+        }
         match ty {
-            Type::Constructed(TypeName::Sum(variants), _) => Universe::Sum(variants.clone()),
             Type::Constructed(TypeName::Bool, _) => Universe::Bool,
             Type::Constructed(TypeName::Int(_), _) | Type::Constructed(TypeName::UInt(_), _) => {
                 Universe::IntLike
@@ -501,7 +503,7 @@ fn useful_wildcard(matrix: &[Vec<CovPat>], rest: &[CovPat], col_tys: &[Type]) ->
 }
 
 fn column_tys_for_ctor(name: &str, head_ty: &Type, rest: &[Type]) -> Vec<Type> {
-    if let Type::Constructed(TypeName::Sum(variants), _) = head_ty {
+    if let Some(variants) = crate::types::sum_variants(head_ty) {
         if let Some((_, payload)) = variants.iter().find(|(n, _)| n == name) {
             let mut out = payload.clone();
             out.extend(rest.iter().cloned());

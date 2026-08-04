@@ -167,6 +167,7 @@ struct GraphicsOperation<'a> {
     shade_term: &'a Term,
     target_symbol: SymbolId,
     target_name: String,
+    target_color_ty: Type,
 }
 
 enum RootOperation<'a> {
@@ -370,6 +371,7 @@ fn extract_root(
                     fragment_substitutions,
                     fragment_target_reads,
                     operation.target_name.clone(),
+                    operation.target_color_ty.clone(),
                     builtins,
                     symbols,
                     term_ids,
@@ -528,13 +530,16 @@ fn graphics_operation<'a>(
     let target_index = usize::from(shade_builtin == builtins.shade_with);
     let target_symbol = term_symbol(shade_args.get(target_index)?)?;
     let raster_symbol = term_symbol(shade_args.get(target_index + 1)?)?;
-    let target_name = targets.get(&target_symbol)?.name.clone();
+    let target = targets.get(&target_symbol)?;
+    let target_name = target.name.clone();
+    let target_color_ty = render_target_color_type(&target.ty)?.clone();
     let raster_term = rasters.remove(&raster_symbol)?;
     Some(GraphicsOperation {
         raster_term,
         shade_term,
         target_symbol,
         target_name,
+        target_color_ty,
     })
 }
 
@@ -1853,6 +1858,158 @@ fn build_vertex_stage(
     ))
 }
 
+fn fragment_output_color_type(ty: &Type) -> Option<Type> {
+    let Type::Constructed(TypeName::Tuple(4), components) = ty else {
+        return None;
+    };
+    let [tag, color, depth_color, depth] = components.as_slice() else {
+        return None;
+    };
+    if *tag != u32_ty() || color != depth_color || *depth != f32_ty() {
+        return None;
+    }
+    Some(color.clone())
+}
+
+fn fragment_output_projection(
+    result: SymbolId,
+    result_ty: &Type,
+    index: usize,
+    ty: Type,
+    span: Span,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    let value = Term::fresh(
+        term_ids,
+        result_ty.clone(),
+        span,
+        TermKind::Var(VarRef::Symbol(result)),
+    );
+    Term::fresh(
+        term_ids,
+        ty,
+        span,
+        TermKind::TupleProj {
+            tuple: Box::new(value),
+            idx: index,
+        },
+    )
+}
+
+fn fragment_tag_is(
+    result: SymbolId,
+    result_ty: &Type,
+    tag: u32,
+    span: Span,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    let tag_value = fragment_output_projection(result, result_ty, 0, u32_ty(), span, term_ids);
+    let expected = Term::fresh(term_ids, u32_ty(), span, TermKind::IntLit(format!("{tag}")));
+    let function = Term::fresh(
+        term_ids,
+        curried_function_type([u32_ty(), u32_ty()].iter(), &bool_ty()),
+        span,
+        TermKind::BinOp(crate::ast::BinaryOp {
+            op: crate::op::BinaryOperator::Equal,
+        }),
+    );
+    Term::fresh(
+        term_ids,
+        bool_ty(),
+        span,
+        TermKind::App {
+            func: Box::new(function),
+            args: vec![tag_value, expected],
+        },
+    )
+}
+
+fn selected_term(
+    condition: Term,
+    then_branch: Term,
+    else_branch: Term,
+    ty: Type,
+    span: Span,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    Term::fresh(
+        term_ids,
+        ty,
+        span,
+        TermKind::If {
+            cond: Box::new(condition),
+            then_branch: Box::new(then_branch),
+            else_branch: Box::new(else_branch),
+        },
+    )
+}
+
+fn lower_fragment_output(
+    result: Term,
+    color_ty: &Type,
+    implicit_depth: Term,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Option<Term> {
+    let span = result.span;
+    let result_ty = result.ty.clone();
+    let result_symbol = symbols.alloc("_w_fragment_output_value".to_string());
+
+    let color = selected_term(
+        fragment_tag_is(result_symbol, &result_ty, 0, span, term_ids),
+        fragment_output_projection(result_symbol, &result_ty, 1, color_ty.clone(), span, term_ids),
+        fragment_output_projection(result_symbol, &result_ty, 2, color_ty.clone(), span, term_ids),
+        color_ty.clone(),
+        span,
+        term_ids,
+    );
+    let explicit_depth = fragment_output_projection(result_symbol, &result_ty, 3, f32_ty(), span, term_ids);
+    let depth = selected_term(
+        fragment_tag_is(result_symbol, &result_ty, 1, span, term_ids),
+        explicit_depth,
+        implicit_depth,
+        f32_ty(),
+        span,
+        term_ids,
+    );
+    let discard_mask = Term::fresh(term_ids, u32_ty(), span, TermKind::IntLit("0".to_string()));
+    let keep_mask = Term::fresh(
+        term_ids,
+        u32_ty(),
+        span,
+        TermKind::IntLit("4294967295".to_string()),
+    );
+    let sample_mask = selected_term(
+        fragment_tag_is(result_symbol, &result_ty, 2, span, term_ids),
+        discard_mask,
+        keep_mask,
+        u32_ty(),
+        span,
+        term_ids,
+    );
+
+    let mut values = Vec::new();
+    flatten_varying_term(color, term_ids, &mut values);
+    values.push(depth);
+    values.push(sample_mask);
+    let value_ty = Type::Constructed(
+        TypeName::Tuple(values.len()),
+        values.iter().map(|value| value.ty.clone()).collect(),
+    );
+    let value = Term::fresh(term_ids, value_ty.clone(), span, TermKind::Tuple(values));
+    Some(Term::fresh(
+        term_ids,
+        value_ty,
+        span,
+        TermKind::Let {
+            name: result_symbol,
+            name_ty: result_ty,
+            rhs: Box::new(result),
+            body: Box::new(value),
+        },
+    ))
+}
+
 fn build_fragment_stage(
     root: &Def<UnpinnedPolymorphic>,
     owner: &str,
@@ -1862,6 +2019,7 @@ fn build_fragment_stage(
     substitutions: ExternalSubstitutions,
     target_reads: TargetReads,
     target_name: String,
+    target_color_ty: Type,
     builtins: &InvocationBuiltins,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
@@ -1872,7 +2030,19 @@ fn build_fragment_stage(
         _ => return None,
     };
 
-    let used = used_projection_indices(&callback.body, invocation_symbol, 5);
+    // The flattened representation of fragment_output<C> can coincide with
+    // an ordinary tuple color type. The target's C disambiguates the two:
+    // a direct callback returns C itself, while the sum representation wraps C.
+    let fragment_output = if callback.ret_ty == target_color_ty {
+        None
+    } else {
+        fragment_output_color_type(&callback.ret_ty).filter(|color| *color == target_color_ty)
+    };
+    let has_fragment_output = fragment_output.is_some();
+    let mut used = used_projection_indices(&callback.body, invocation_symbol, 5);
+    if has_fragment_output {
+        used[1] = true;
+    }
     let mut mapping = vec![None; 5];
     let mut invocation_params = Vec::new();
     let mut invocation_decls = Vec::new();
@@ -1899,6 +2069,7 @@ fn build_fragment_stage(
         )?));
     }
 
+    let mut position_symbol = None;
     let field_specs = [
         ("position", vec_ty(4, f32_ty()), spirv::BuiltIn::FragCoord),
         ("front_facing", bool_ty(), spirv::BuiltIn::FrontFacing),
@@ -1911,6 +2082,9 @@ fn build_fragment_stage(
             continue;
         }
         let symbol = symbols.alloc(format!("_w_fragment_{name}"));
+        if index == 1 {
+            position_symbol = Some(symbol);
+        }
         mapping[index] = Some(ProjectionReplacement::Symbol(symbol));
         invocation_params.push((symbol, ty.clone()));
         invocation_decls.push(interface_param(
@@ -1940,21 +2114,46 @@ fn build_fragment_stage(
         vertex_output: None,
     };
     body = rewriter.rewrite_owned(body);
-    let color_ty = body.ty.clone();
-    let attachments = attachment_specs(&target_name, &color_ty);
-    let mut color_values = Vec::new();
-    let body_span = body.span;
-    flatten_varying_term(body, term_ids, &mut color_values);
-    let body = if color_values.len() == 1 {
-        color_values.pop()?
-    } else {
-        let component_types = attachments.iter().map(|(_, ty)| ty.clone()).collect::<Vec<_>>();
-        Term::fresh(
+    let (color_ty, body) = if let Some(color_ty) = fragment_output {
+        let position_symbol = position_symbol?;
+        let position = Term::fresh(
             term_ids,
-            Type::Constructed(TypeName::Tuple(component_types.len()), component_types),
-            body_span,
-            TermKind::Tuple(color_values),
-        )
+            vec_ty(4, f32_ty()),
+            body.span,
+            TermKind::Var(VarRef::Symbol(position_symbol)),
+        );
+        let implicit_depth = Term::fresh(
+            term_ids,
+            f32_ty(),
+            body.span,
+            TermKind::TupleProj {
+                tuple: Box::new(position),
+                idx: 2,
+            },
+        );
+        let body = lower_fragment_output(body, &color_ty, implicit_depth, symbols, term_ids)?;
+        (color_ty, body)
+    } else {
+        (body.ty.clone(), body)
+    };
+    let attachments = attachment_specs(&target_name, &color_ty);
+    let body_span = body.span;
+    let body = if has_fragment_output {
+        body
+    } else {
+        let mut color_values = Vec::new();
+        flatten_varying_term(body, term_ids, &mut color_values);
+        if color_values.len() == 1 {
+            color_values.pop()?
+        } else {
+            let component_types = attachments.iter().map(|(_, ty)| ty.clone()).collect::<Vec<_>>();
+            Term::fresh(
+                term_ids,
+                Type::Constructed(TypeName::Tuple(component_types.len()), component_types),
+                body_span,
+                TermKind::Tuple(color_values),
+            )
+        }
     };
 
     let mut params = invocation_params;
@@ -1963,13 +2162,23 @@ fn build_fragment_stage(
     declarations.extend(external_decls);
 
     let stage_name = format!("_w_stage_{owner}__fragment");
-    let outputs = attachments
+    let mut outputs = attachments
         .into_iter()
         .map(|(name, ty)| interface::EntryOutputDecl {
             ty,
             attribute: Some(Attribute::Target(name)),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    if has_fragment_output {
+        outputs.push(interface::EntryOutputDecl {
+            ty: f32_ty(),
+            attribute: Some(Attribute::BuiltIn(spirv::BuiltIn::FragDepth)),
+        });
+        outputs.push(interface::EntryOutputDecl {
+            ty: u32_ty(),
+            attribute: Some(Attribute::BuiltIn(spirv::BuiltIn::SampleMask)),
+        });
+    }
     Some(stage_def(
         stage_name,
         EntryKind::Fragment,

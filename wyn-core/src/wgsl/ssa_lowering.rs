@@ -1519,6 +1519,7 @@ fn map_builtin_to_wgsl(b: &spirv::BuiltIn, _stage_is_fragment: bool) -> Option<&
         spirv::BuiltIn::InstanceIndex => "instance_index",
         spirv::BuiltIn::FrontFacing => "front_facing",
         spirv::BuiltIn::FragDepth => "frag_depth",
+        spirv::BuiltIn::SampleMask => "sample_mask",
         spirv::BuiltIn::PointSize => return None, // no WGSL equivalent
         spirv::BuiltIn::GlobalInvocationId => "global_invocation_id",
         spirv::BuiltIn::LocalInvocationId => "local_invocation_id",
@@ -1541,6 +1542,7 @@ fn wgsl_builtin_type(b: &spirv::BuiltIn) -> Option<&'static str> {
         spirv::BuiltIn::LocalInvocationIndex => "u32",
         spirv::BuiltIn::FrontFacing => "bool",
         spirv::BuiltIn::FragDepth => "f32",
+        spirv::BuiltIn::SampleMask => "u32",
         spirv::BuiltIn::GlobalInvocationId
         | spirv::BuiltIn::LocalInvocationId
         | spirv::BuiltIn::WorkgroupId

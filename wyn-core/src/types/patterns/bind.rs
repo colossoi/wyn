@@ -183,43 +183,41 @@ impl<'a> TypeChecker<'a> {
             }
             PatternKind::Constructor(name, args) => {
                 let expected_applied = expected_type.apply(&self.context);
-                match expected_applied {
-                    Type::Constructed(TypeName::Sum(ref variants), _) => {
-                        let payload_types = match variants.iter().find(|(n, _)| n == name) {
-                            Some((_, payload)) => payload,
-                            None => bail_type_at!(
-                                pattern.h.span,
-                                "constructor `#{}` not found in sum type {}",
-                                name,
-                                self.format_type(&expected_applied)
-                            ),
-                        };
-                        if args.len() != payload_types.len() {
-                            bail_type_at!(
-                                pattern.h.span,
-                                "constructor `#{}` expects {} payload value{}, got {}",
-                                name,
-                                payload_types.len(),
-                                if payload_types.len() == 1 { "" } else { "s" },
-                                args.len()
-                            );
-                        }
-                        for (sub_pattern, payload_ty) in args.iter().zip(payload_types.iter()) {
-                            self.bind_pattern(sub_pattern, payload_ty, generalize)?;
-                        }
-                        self.type_table.insert(
-                            pattern.h.id,
-                            TypeScheme::Monotype(expected_type.apply(&self.context)),
-                        );
-                        Ok(expected_type.clone())
-                    }
-                    _ => Err(err_type_at!(
+                let Some(variants) = super::super::sum_variants(&expected_applied) else {
+                    return Err(err_type_at!(
                         pattern.h.span,
                         "constructor pattern `#{}` requires a sum-typed scrutinee, got {}",
                         name,
                         self.format_type(&expected_applied)
-                    )),
+                    ));
+                };
+                let payload_types = match variants.iter().find(|(n, _)| n == name) {
+                    Some((_, payload)) => payload,
+                    None => bail_type_at!(
+                        pattern.h.span,
+                        "constructor `#{}` not found in sum type {}",
+                        name,
+                        self.format_type(&expected_applied)
+                    ),
+                };
+                if args.len() != payload_types.len() {
+                    bail_type_at!(
+                        pattern.h.span,
+                        "constructor `#{}` expects {} payload value{}, got {}",
+                        name,
+                        payload_types.len(),
+                        if payload_types.len() == 1 { "" } else { "s" },
+                        args.len()
+                    );
                 }
+                for (sub_pattern, payload_ty) in args.iter().zip(payload_types.iter()) {
+                    self.bind_pattern(sub_pattern, payload_ty, generalize)?;
+                }
+                self.type_table.insert(
+                    pattern.h.id,
+                    TypeScheme::Monotype(expected_type.apply(&self.context)),
+                );
+                Ok(expected_type.clone())
             }
             PatternKind::Literal(lit) => {
                 // Literal patterns bind no names; they constrain the

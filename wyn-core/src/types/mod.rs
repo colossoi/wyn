@@ -1111,6 +1111,33 @@ pub fn sum(variants: Vec<(String, Vec<Type>)>) -> Type {
     Type::Constructed(TypeName::Sum(variants), vec![])
 }
 
+/// Construct the predeclared `fragment_output<C>` generic sum token.
+pub fn fragment_output(color: Type) -> Type {
+    Type::Constructed(TypeName::FragmentOutput, vec![color])
+}
+
+/// The source-level constructors provided by `fragment_output<C>`.
+pub fn fragment_output_variants(color: Type) -> Vec<(String, Vec<Type>)> {
+    vec![
+        ("color".to_string(), vec![color.clone()]),
+        (
+            "depth".to_string(),
+            vec![color, Type::Constructed(TypeName::Float(32), vec![])],
+        ),
+        ("discard".to_string(), vec![]),
+    ]
+}
+
+/// Return the variants of an ordinary or predeclared generic sum type.
+pub fn sum_variants(ty: &Type) -> Option<Vec<(String, Vec<Type>)>> {
+    match ty {
+        Type::Constructed(TypeName::Sum(variants), _) => Some(variants.clone()),
+        Type::Constructed(TypeName::FragmentOutput, args) if args.len() == 1 => {
+            Some(fragment_output_variants(args[0].clone()))
+        }
+        _ => None,
+    }
+}
 /// Create an existential size type: ?k. type or ?k l. type
 pub fn existential(size_vars: Vec<String>, inner: Type) -> Type {
     Type::Constructed(TypeName::Existential(size_vars), vec![inner])

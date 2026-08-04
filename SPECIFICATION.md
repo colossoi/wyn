@@ -2575,9 +2575,9 @@ four-component floating-point vector. For each leaf it computes
 `result.rgb = source.rgb * source.a + destination.rgb * (1 - source.a)` and
 `result.a = source.a + destination.a * (1 - source.a)`.
 
-`shade_with` uses the supplied state. `shade` uses
-`default_fragment_state`, whose depth test is `#less`, whose depth and color
-writes are enabled, and whose blend mode is `#replace`. If a render target has
+`shade_with` uses the supplied state. `shade` applies a default state whose
+depth test is `#less`, whose depth and color writes are enabled, and whose
+blend mode is `#replace`. If a render target has
 no depth attachment, every depth test passes and depth writes have no effect.
 `#disabled` also makes every depth test pass and prevents a depth write.
 
