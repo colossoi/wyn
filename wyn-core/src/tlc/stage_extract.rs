@@ -31,7 +31,9 @@ struct InvocationBuiltins {
     shade: crate::builtins::BuiltinId,
     shade_with: crate::builtins::BuiltinId,
     target_load: crate::builtins::BuiltinId,
+    target_sample: crate::builtins::BuiltinId,
     texture_load: crate::builtins::BuiltinId,
+    texture_sample: crate::builtins::BuiltinId,
 }
 
 impl InvocationBuiltins {
@@ -76,7 +78,9 @@ impl InvocationBuiltins {
             shade: id("shade"),
             shade_with: id("shade_with"),
             target_load: id("target_load"),
+            target_sample: id("target_sample"),
             texture_load: id("texture_load"),
+            texture_sample: id("texture_sample"),
         }
     }
 }
@@ -1379,7 +1383,9 @@ fn build_compute_stage(
         substitutions,
         target_reads,
         target_load: builtins.target_load,
+        target_sample: builtins.target_sample,
         texture_load: builtins.texture_load,
+        texture_sample: builtins.texture_sample,
     }
     .rewrite_owned(body);
     let outputs = operation
@@ -1414,7 +1420,9 @@ struct ExternalValueRewriter<'a> {
     substitutions: ExternalSubstitutions,
     target_reads: TargetReads,
     target_load: crate::builtins::BuiltinId,
+    target_sample: crate::builtins::BuiltinId,
     texture_load: crate::builtins::BuiltinId,
+    texture_sample: crate::builtins::BuiltinId,
 }
 
 impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
@@ -1433,11 +1441,10 @@ impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
         let TermKind::App { func, args } = &term.kind else {
             return (term, RewriteDecision::Unchanged);
         };
-        if !matches!(
-            func.kind,
-            TermKind::Var(VarRef::Builtin { id, .. }) if id == self.target_load
-        ) || args.len() != 3
-        {
+        let TermKind::Var(VarRef::Builtin { id, .. }) = func.kind else {
+            return (term, RewriteDecision::Unchanged);
+        };
+        if args.len() != 3 || (id != self.target_load && id != self.target_sample) {
             return (term, RewriteDecision::Unchanged);
         }
         let Some(target_symbol) = term_symbol(&args[0]) else {
@@ -1446,9 +1453,19 @@ impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
         let Some(read) = self.target_reads.get(&target_symbol).cloned() else {
             return (term, RewriteDecision::Unchanged);
         };
-        let Some(mut replacement) =
+        let replacement = if id == self.target_load {
             build_target_load_value(&read, &args[1], term.span, self.texture_load, self.term_ids)
-        else {
+        } else {
+            build_target_sample_value(
+                &read,
+                &args[1],
+                &args[2],
+                term.span,
+                self.texture_sample,
+                self.term_ids,
+            )
+        };
+        let Some(mut replacement) = replacement else {
             return (term, RewriteDecision::Unchanged);
         };
         replacement.id = term.id;
@@ -1472,6 +1489,65 @@ fn build_target_load_value(
         .collect::<Option<Vec<_>>>()?
         .into_iter();
     rebuild_target_value(&read.color_ty, &mut leaves, span, term_ids)
+}
+
+fn build_target_sample_value(
+    read: &TargetRead,
+    sampler: &Term,
+    uv: &Term,
+    span: Span,
+    texture_sample: crate::builtins::BuiltinId,
+    term_ids: &mut TermIdSource,
+) -> Option<Term> {
+    let mut leaves = read
+        .leaves
+        .iter()
+        .map(|(texture, leaf_ty)| {
+            filtered_target_leaf(*texture, leaf_ty, sampler, uv, span, texture_sample, term_ids)
+        })
+        .collect::<Option<Vec<_>>>()?
+        .into_iter();
+    rebuild_target_value(&read.color_ty, &mut leaves, span, term_ids)
+}
+
+fn filtered_target_leaf(
+    texture: SymbolId,
+    leaf_ty: &Type,
+    sampler: &Term,
+    uv: &Term,
+    span: Span,
+    texture_sample: crate::builtins::BuiltinId,
+    term_ids: &mut TermIdSource,
+) -> Option<Term> {
+    let texture_ty = target_read_type();
+    let sampler_ty = Type::Constructed(TypeName::Sampler, vec![]);
+    let uv_ty = vec_ty(2, f32_ty());
+    let lod_ty = f32_ty();
+    let sampled_ty = vec_ty(4, f32_ty());
+    let function_params = [texture_ty.clone(), sampler_ty, uv_ty, lod_ty.clone()];
+    let function = Term::fresh(
+        term_ids,
+        curried_function_type(function_params.iter(), &sampled_ty),
+        span,
+        TermKind::Var(VarRef::Builtin {
+            id: texture_sample,
+            overload_idx: 0,
+        }),
+    );
+    let texture = Term::fresh(term_ids, texture_ty, span, TermKind::Var(VarRef::Symbol(texture)));
+    let sampler = clone_term_with_fresh_ids(sampler, term_ids);
+    let uv = clone_term_with_fresh_ids(uv, term_ids);
+    let lod = Term::fresh(term_ids, lod_ty, span, TermKind::FloatLit(0.0));
+    let sampled = Term::fresh(
+        term_ids,
+        sampled_ty.clone(),
+        span,
+        TermKind::App {
+            func: Box::new(function),
+            args: vec![texture, sampler, uv, lod],
+        },
+    );
+    target_leaf_from_vec4(sampled, leaf_ty, span, term_ids)
 }
 
 fn sampled_target_leaf(
@@ -1509,7 +1585,16 @@ fn sampled_target_leaf(
         },
     );
 
-    if *leaf_ty == sampled_ty {
+    target_leaf_from_vec4(sampled, leaf_ty, span, term_ids)
+}
+
+fn target_leaf_from_vec4(
+    sampled: Term,
+    leaf_ty: &Type,
+    span: Span,
+    term_ids: &mut TermIdSource,
+) -> Option<Term> {
+    if *leaf_ty == vec_ty(4, f32_ty()) {
         return Some(sampled);
     }
     if *leaf_ty == f32_ty() {
@@ -1724,7 +1809,9 @@ fn build_vertex_stage(
         substitutions,
         target_reads,
         target_load: builtins.target_load,
+        target_sample: builtins.target_sample,
         texture_load: builtins.texture_load,
+        texture_sample: builtins.texture_sample,
     }
     .rewrite_owned(body);
     let mut rewriter = StageBodyRewriter {
@@ -1840,7 +1927,9 @@ fn build_fragment_stage(
         substitutions,
         target_reads,
         target_load: builtins.target_load,
+        target_sample: builtins.target_sample,
         texture_load: builtins.texture_load,
+        texture_sample: builtins.texture_sample,
     }
     .rewrite_owned(body);
     let mut rewriter = StageBodyRewriter {

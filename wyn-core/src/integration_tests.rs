@@ -2659,6 +2659,74 @@ entry postprocess(values: []vec2i32,
 }
 
 #[test]
+fn unified_root_samples_a_prior_render_target_in_a_later_pass() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+entry resolve(sampling: sampler,
+              scene: render_target<vec4f32>,
+              surface: render_target<vec4f32>)
+    (render_target<vec4f32>, render_target<vec4f32>) =
+  let geometry = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+      else @[-1.0, 3.0, 0.0, 1.0],
+      @[0.25, 0.5, 0.75, 1.0])) in
+  let scene1 = shade(scene, geometry, |fragment| fragment.value) in
+  let fullscreen = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+      else @[-1.0, 3.0, 0.0, 1.0],
+      ())) in
+  let surface1 = shade(
+    surface,
+    fullscreen,
+    |fragment| target_sample(
+      scene1,
+      sampling,
+      fragment.position.xy / @[640.0, 480.0])) in
+  (scene1, surface1)
+"#,
+    )
+    .expect("a later graphics pass may filter a prior render target");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    assert_eq!(lowered.pipeline.pipelines.len(), 2);
+    let crate::pipeline_descriptor::Pipeline::Graphics(resolve) = &lowered.pipeline.pipelines[1] else {
+        panic!("resolve graphics pipeline")
+    };
+    assert!(resolve.bindings.iter().any(|binding| matches!(
+        binding,
+        crate::pipeline_descriptor::Binding::Texture {
+            resource: Some(resource),
+            ..
+        } if resource == "scene"
+    )));
+    assert!(resolve.bindings.iter().any(|binding| matches!(
+        binding,
+        crate::pipeline_descriptor::Binding::Sampler { name, .. } if name == "sampling"
+    )));
+
+    let passes = &lowered.pipeline.frame_graph.passes;
+    let scene_fragment = passes
+        .iter()
+        .position(|pass| {
+            pass.pipeline_index == 0 && pass.kind == crate::pipeline_descriptor::FramePassKind::Fragment
+        })
+        .expect("scene fragment pass");
+    let resolve_fragment = passes
+        .iter()
+        .position(|pass| {
+            pass.pipeline_index == 1 && pass.kind == crate::pipeline_descriptor::FramePassKind::Fragment
+        })
+        .expect("resolve fragment pass");
+    assert!(passes[resolve_fragment].depends_on.contains(&scene_fragment));
+}
+
+#[test]
 fn unified_root_supports_structured_render_targets() {
     let lowered = crate::compile_thru_spirv(
         r#"
