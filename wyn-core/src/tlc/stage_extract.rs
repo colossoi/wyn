@@ -27,6 +27,7 @@ struct InvocationBuiltins {
     indexed_indirect_draws: crate::builtins::BuiltinId,
     vertex_output: crate::builtins::BuiltinId,
     rasterizers: Vec<crate::builtins::BuiltinId>,
+    rasterizers_with: Vec<crate::builtins::BuiltinId>,
     shade: crate::builtins::BuiltinId,
     shade_with: crate::builtins::BuiltinId,
     target_load: crate::builtins::BuiltinId,
@@ -58,6 +59,16 @@ impl InvocationBuiltins {
                 "rasterize_lines",
                 "rasterize_line_strip",
                 "rasterize_points",
+            ]
+            .iter()
+            .map(|name| id(name))
+            .collect(),
+            rasterizers_with: [
+                "rasterize_triangles_with",
+                "rasterize_triangle_strip_with",
+                "rasterize_lines_with",
+                "rasterize_line_strip_with",
+                "rasterize_points_with",
             ]
             .iter()
             .map(|name| id(name))
@@ -262,13 +273,17 @@ fn extract_root(
                 )?);
             }
             RootOperation::Graphics(operation) => {
-                let (rasterizer, raster_args) = builtin_app(operation.raster_term, &builtins.rasterizers)?;
+                let (rasterizer, raster_args, has_raster_state) =
+                    rasterizer_app(operation.raster_term, builtins)?;
                 let (shade_builtin, shade_args) = shade_app(operation.shade_term, builtins)?;
-                if raster_args.len() < 2 || shade_args.len() < 3 {
+                let draw_index = usize::from(has_raster_state);
+                let callback_index = draw_index + 1;
+                if raster_args.len() <= callback_index || shade_args.len() < 3 {
                     return None;
                 }
 
-                let mut vertex_lambda = callback_lambda(raster_args.last()?, "vertex", symbols, term_ids)?;
+                let mut vertex_lambda =
+                    callback_lambda(raster_args.get(callback_index)?, "vertex", symbols, term_ids)?;
                 let mut fragment_lambda =
                     callback_lambda(shade_args.last()?, "fragment", symbols, term_ids)?;
                 if vertex_lambda.params.len() != 1 || fragment_lambda.params.len() != 1 {
@@ -278,6 +293,11 @@ fn extract_root(
                 fragment_lambda.body =
                     Box::new(inline_stage_helpers(*fragment_lambda.body, helpers, term_ids));
 
+                let raster_state = if has_raster_state {
+                    parse_raster_state(raster_args.first()?)?
+                } else {
+                    Default::default()
+                };
                 let fragment_state = if shade_builtin == builtins.shade_with {
                     parse_fragment_state(shade_args.first()?)?
                 } else {
@@ -285,7 +305,8 @@ fn extract_root(
                 };
                 let graphics_invocation = graphics_invocation(
                     rasterizer,
-                    raster_args.first()?,
+                    raster_args.get(draw_index)?,
+                    raster_state,
                     fragment_state,
                     root_lambda,
                     root_entry,
@@ -392,7 +413,7 @@ fn root_shape<'a>(
             break;
         };
 
-        if builtin_app(rhs, &builtins.rasterizers).is_some() {
+        if rasterizer_app(rhs, builtins).is_some() {
             rasters.insert(*name, rhs.as_ref());
         } else if shade_app(rhs, builtins).is_some() {
             let operation = graphics_operation(rhs, &mut rasters, &targets, builtins)?;
@@ -511,6 +532,16 @@ fn graphics_operation<'a>(
         target_symbol,
         target_name,
     })
+}
+
+fn rasterizer_app<'a>(
+    term: &'a Term,
+    builtins: &InvocationBuiltins,
+) -> Option<(crate::builtins::BuiltinId, &'a [Term], bool)> {
+    if let Some((id, args)) = builtin_app(term, &builtins.rasterizers) {
+        return Some((id, args, false));
+    }
+    builtin_app(term, &builtins.rasterizers_with).map(|(id, args)| (id, args, true))
 }
 
 fn shade_app<'a>(
@@ -654,6 +685,7 @@ fn callback_lambda(
 fn graphics_invocation(
     rasterizer: crate::builtins::BuiltinId,
     draw: &Term,
+    raster_state: crate::pipeline_descriptor::RasterState,
     fragment_state: crate::pipeline_descriptor::FragmentState,
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
@@ -662,7 +694,12 @@ fn graphics_invocation(
 ) -> Option<crate::pipeline_descriptor::GraphicsInvocation> {
     use crate::pipeline_descriptor::{DrawCall, DrawCount, GraphicsInvocation, PrimitiveTopology};
 
-    let topology = match builtins.rasterizers.iter().position(|id| *id == rasterizer)? {
+    let topology_index = builtins
+        .rasterizers
+        .iter()
+        .position(|id| *id == rasterizer)
+        .or_else(|| builtins.rasterizers_with.iter().position(|id| *id == rasterizer))?;
+    let topology = match topology_index {
         0 => PrimitiveTopology::TriangleList,
         1 => PrimitiveTopology::TriangleStrip,
         2 => PrimitiveTopology::LineList,
@@ -778,6 +815,7 @@ fn graphics_invocation(
     Some(GraphicsInvocation {
         topology,
         draw,
+        raster_state,
         fragment_state,
         target_state: Default::default(),
     })
@@ -862,6 +900,60 @@ fn is_u16_array(ty: &Type) -> bool {
         Some(Type::Constructed(TypeName::UInt(16), _))
     )
 }
+fn parse_raster_state(term: &Term) -> Option<crate::pipeline_descriptor::RasterState> {
+    use crate::pipeline_descriptor::{CullMode, FillMode, FrontFace, RasterState, Scissor, Viewport};
+
+    let viewport_term = record_component(term, "viewport")?;
+    let viewport = match sum_tag(viewport_term)? {
+        0 => Viewport::Target,
+        1 => {
+            let custom = sum_payload(viewport_term, 0)?;
+            Viewport::Custom {
+                origin: f32_vec2(record_component(custom, "origin")?)?,
+                extent: f32_vec2(record_component(custom, "extent")?)?,
+                depth: f32_vec2(record_component(custom, "depth")?)?,
+            }
+        }
+        _ => return None,
+    };
+    let scissor_term = record_component(term, "scissor")?;
+    let scissor = match sum_tag(scissor_term)? {
+        0 => Scissor::Target,
+        1 => {
+            let custom = sum_payload(scissor_term, 0)?;
+            Scissor::Custom {
+                origin: i32_vec2(record_component(custom, "origin")?)?,
+                extent: u32_vec2(record_component(custom, "extent")?)?,
+            }
+        }
+        _ => return None,
+    };
+    let front_face = match sum_tag(record_component(term, "front_face")?)? {
+        0 => FrontFace::Clockwise,
+        1 => FrontFace::CounterClockwise,
+        _ => return None,
+    };
+    let cull = match sum_tag(record_component(term, "cull")?)? {
+        0 => CullMode::None,
+        1 => CullMode::Front,
+        2 => CullMode::Back,
+        _ => return None,
+    };
+    let fill = match sum_tag(record_component(term, "fill")?)? {
+        0 => FillMode::Fill,
+        1 => FillMode::Line,
+        2 => FillMode::Point,
+        _ => return None,
+    };
+    Some(RasterState {
+        viewport,
+        scissor,
+        front_face,
+        cull,
+        fill,
+    })
+}
+
 fn parse_fragment_state(term: &Term) -> Option<crate::pipeline_descriptor::FragmentState> {
     use crate::pipeline_descriptor::{BlendMode, DepthTest, FragmentState};
 
@@ -906,6 +998,50 @@ fn sum_tag(term: &Term) -> Option<u32> {
         return None;
     };
     u32_literal(values.first()?)
+}
+
+fn sum_payload(term: &Term, index: usize) -> Option<&Term> {
+    let TermKind::Tuple(values) = &term.kind else {
+        return None;
+    };
+    values.get(index + 1)
+}
+
+fn f32_vec2(term: &Term) -> Option<[f32; 2]> {
+    let TermKind::VecLit(values) = &term.kind else {
+        return None;
+    };
+    let [x, y] = values.as_slice() else {
+        return None;
+    };
+    Some([f32_literal(x)?, f32_literal(y)?])
+}
+
+fn i32_vec2(term: &Term) -> Option<[i32; 2]> {
+    let TermKind::VecLit(values) = &term.kind else {
+        return None;
+    };
+    let [x, y] = values.as_slice() else {
+        return None;
+    };
+    Some([i32_literal(x)?, i32_literal(y)?])
+}
+
+fn u32_vec2(term: &Term) -> Option<[u32; 2]> {
+    let TermKind::VecLit(values) = &term.kind else {
+        return None;
+    };
+    let [x, y] = values.as_slice() else {
+        return None;
+    };
+    Some([u32_literal(x)?, u32_literal(y)?])
+}
+
+fn f32_literal(term: &Term) -> Option<f32> {
+    match term.kind {
+        TermKind::FloatLit(value) => Some(value),
+        _ => None,
+    }
 }
 
 fn bool_literal(term: &Term) -> Option<bool> {

@@ -512,6 +512,70 @@ pub fn vertex_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     quantify(arrow_chain(&[vec_n(f32_ty(), 4), v], output))
 }
 
+fn raster_state_ty() -> Type {
+    let viewport = crate::types::record(vec![
+        ("origin".to_string(), vec_n(f32_ty(), 2)),
+        ("extent".to_string(), vec_n(f32_ty(), 2)),
+        ("depth".to_string(), vec_n(f32_ty(), 2)),
+    ]);
+    let scissor = crate::types::record(vec![
+        ("origin".to_string(), vec_n(i32_ty(), 2)),
+        ("extent".to_string(), vec_n(u32_ty(), 2)),
+    ]);
+    crate::types::record(vec![
+        (
+            "viewport".to_string(),
+            crate::types::sum(vec![
+                ("target".to_string(), vec![]),
+                ("custom".to_string(), vec![viewport]),
+            ]),
+        ),
+        (
+            "scissor".to_string(),
+            crate::types::sum(vec![
+                ("target".to_string(), vec![]),
+                ("custom".to_string(), vec![scissor]),
+            ]),
+        ),
+        (
+            "front_face".to_string(),
+            crate::types::sum(vec![
+                ("clockwise".to_string(), vec![]),
+                ("counter_clockwise".to_string(), vec![]),
+            ]),
+        ),
+        (
+            "cull".to_string(),
+            crate::types::sum(vec![
+                ("none".to_string(), vec![]),
+                ("front".to_string(), vec![]),
+                ("back".to_string(), vec![]),
+            ]),
+        ),
+        (
+            "fill".to_string(),
+            crate::types::sum(vec![
+                ("fill".to_string(), vec![]),
+                ("line".to_string(), vec![]),
+                ("point".to_string(), vec![]),
+            ]),
+        ),
+    ])
+}
+
+/// forall v. raster_state -> draw -> (vertex_invocation -> vertex<v>) -> raster<v>.
+pub fn rasterize_with_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let v = ctx.new_variable();
+    let callback = arrow_chain(
+        &[vertex_invocation_ty()],
+        pipeline_ty(TypeName::Vertex, vec![v.clone()]),
+    );
+    quantify(arrow_chain(
+        &[raster_state_ty(), draw_ty(), callback],
+        pipeline_ty(TypeName::Raster, vec![v]),
+    ))
+}
+
 /// forall v. draw -> (vertex_invocation -> vertex<v>) -> raster<v>.
 pub fn rasterize_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let v = ctx.new_variable();

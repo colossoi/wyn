@@ -484,10 +484,12 @@ pub struct GraphicsPipeline {
 }
 
 /// The source-level rasterization request associated with one graphics pipeline.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphicsInvocation {
     pub topology: PrimitiveTopology,
     pub draw: DrawCall,
+    #[serde(default)]
+    pub raster_state: RasterState,
     #[serde(default)]
     pub fragment_state: FragmentState,
     #[serde(default)]
@@ -504,12 +506,77 @@ impl Default for GraphicsInvocation {
                 first_vertex: 0,
                 first_instance: 0,
             },
+            raster_state: RasterState::default(),
             fragment_state: FragmentState::default(),
             target_state: RenderTargetState::default(),
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RasterState {
+    pub viewport: Viewport,
+    pub scissor: Scissor,
+    pub front_face: FrontFace,
+    pub cull: CullMode,
+    pub fill: FillMode,
+}
+
+impl Default for RasterState {
+    fn default() -> Self {
+        Self {
+            viewport: Viewport::Target,
+            scissor: Scissor::Target,
+            front_face: FrontFace::CounterClockwise,
+            cull: CullMode::None,
+            fill: FillMode::Fill,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Viewport {
+    Target,
+    Custom {
+        origin: [f32; 2],
+        extent: [f32; 2],
+        depth: [f32; 2],
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Scissor {
+    Target,
+    Custom {
+        origin: [i32; 2],
+        extent: [u32; 2],
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrontFace {
+    Clockwise,
+    CounterClockwise,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CullMode {
+    None,
+    Front,
+    Back,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FillMode {
+    Fill,
+    Line,
+    Point,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderTargetState {
     pub color_load: AttachmentLoadOp,

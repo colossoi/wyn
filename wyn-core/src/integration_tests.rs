@@ -3090,6 +3090,52 @@ entry draw_dynamic(commands: []draw_command,
     ));
 }
 #[test]
+fn unified_root_publishes_explicit_raster_state() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+entry clipped(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles_with(
+    {
+      viewport = #custom({
+        origin = @[10.0, 20.0],
+        extent = @[640.0, 480.0],
+        depth = @[0.25, 0.75]
+      }),
+      scissor = #custom({ origin = @[4, 8], extent = @[320u32, 240u32] }),
+      front_face = #clockwise,
+      cull = #back,
+      fill = #line
+    },
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+  shade(target, covered, |fragment| fragment.value)
+"#,
+    )
+    .expect("rasterize_*_with accepts the specified raster state");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+        panic!("graphics pipeline")
+    };
+    assert_eq!(
+        graphics.invocation.raster_state,
+        crate::pipeline_descriptor::RasterState {
+            viewport: crate::pipeline_descriptor::Viewport::Custom {
+                origin: [10.0, 20.0],
+                extent: [640.0, 480.0],
+                depth: [0.25, 0.75],
+            },
+            scissor: crate::pipeline_descriptor::Scissor::Custom {
+                origin: [4, 8],
+                extent: [320, 240],
+            },
+            front_face: crate::pipeline_descriptor::FrontFace::Clockwise,
+            cull: crate::pipeline_descriptor::CullMode::Back,
+            fill: crate::pipeline_descriptor::FillMode::Line,
+        }
+    );
+}
+#[test]
 fn target_profiles_are_selected_before_ssa_lowering() {
     let portable = crate::compile_thru_ssa(" entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
         .expect("portable SSA");
