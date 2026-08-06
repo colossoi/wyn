@@ -19,7 +19,7 @@ pub(super) struct PipelineSeed {
 pub(super) fn build(program: &Program) -> PipelineSeed {
     let mut pipelines: Vec<Pipeline> = Vec::new();
     let mut stage_symbols: Vec<Vec<SymbolId>> = Vec::new();
-    let mut unified_graphics = crate::LookupMap::<String, usize>::new();
+    let mut unified_graphics = crate::LookupMap::<(SymbolId, u32), usize>::new();
 
     for def in &program.defs {
         let DefMeta::EntryPoint(entry) = &def.meta else {
@@ -38,7 +38,7 @@ pub(super) fn build(program: &Program) -> PipelineSeed {
             })
             .collect();
 
-        if matches!(decl.entry_kind, EntryKind::Root | EntryKind::Compute) {
+        if decl.entry_kind == EntryKind::Compute {
             let dispatch_size = decl
                 .compute_dispatch
                 .map(|grid| DispatchSize::Fixed {
@@ -66,10 +66,24 @@ pub(super) fn build(program: &Program) -> PipelineSeed {
                 feedback,
             }));
             stage_symbols.push(vec![def.name]);
-        } else if let Some((owner, stage)) = unified_stage_name(&name) {
-            if let Some(&pipeline_index) = unified_graphics.get(&owner) {
+        } else {
+            let group = decl
+                .graphics_group
+                .as_ref()
+                .expect("extracted graphics stage is missing its operation identity");
+            let key = (group.root, group.operation);
+            let owner = crate::symbol_name_or_bug(&program.symbols, group.root).to_string();
+            let stage = match decl.entry_kind {
+                EntryKind::Vertex => ShaderStage::Vertex,
+                EntryKind::Fragment => ShaderStage::Fragment,
+                EntryKind::Root | EntryKind::Compute => {
+                    unreachable!("non-graphics entry has a graphics operation identity")
+                }
+            };
+
+            if let Some(&pipeline_index) = unified_graphics.get(&key) {
                 let Pipeline::Graphics(graphics) = &mut pipelines[pipeline_index] else {
-                    unreachable!("unified graphics owner was registered as compute")
+                    unreachable!("graphics operation was registered as compute")
                 };
                 graphics.stages.push(GraphicsStage {
                     entry_point: name,
@@ -80,9 +94,9 @@ pub(super) fn build(program: &Program) -> PipelineSeed {
                 stage_symbols[pipeline_index].push(def.name);
             } else {
                 let pipeline_index = pipelines.len();
-                unified_graphics.insert(owner.clone(), pipeline_index);
+                unified_graphics.insert(key, pipeline_index);
                 pipelines.push(Pipeline::Graphics(GraphicsPipeline {
-                    invocation: decl.graphics_invocation.clone().unwrap_or_default(),
+                    invocation: group.invocation.clone(),
                     stages: vec![GraphicsStage {
                         entry_point: name,
                         owner,
@@ -96,26 +110,6 @@ pub(super) fn build(program: &Program) -> PipelineSeed {
                 }));
                 stage_symbols.push(vec![def.name]);
             }
-        } else {
-            let stage = if decl.entry_kind == EntryKind::Vertex {
-                ShaderStage::Vertex
-            } else {
-                ShaderStage::Fragment
-            };
-            pipelines.push(Pipeline::Graphics(GraphicsPipeline {
-                invocation: GraphicsInvocation::default(),
-                stages: vec![GraphicsStage {
-                    entry_point: name.clone(),
-                    owner: name,
-                    stage,
-                    uses: StageBindingUses::default(),
-                }],
-                bindings: Vec::new(),
-                vertex_inputs: Vec::new(),
-                fragment_outputs: Vec::new(),
-                feedback,
-            }));
-            stage_symbols.push(vec![def.name]);
         }
     }
 
@@ -126,15 +120,4 @@ pub(super) fn build(program: &Program) -> PipelineSeed {
         },
         stage_symbols,
     }
-}
-
-fn unified_stage_name(name: &str) -> Option<(String, ShaderStage)> {
-    let rest = name.strip_prefix("_w_stage_")?;
-    if let Some(owner) = rest.strip_suffix("__vertex") {
-        return Some((owner.to_string(), ShaderStage::Vertex));
-    }
-    if let Some(owner) = rest.strip_suffix("__fragment") {
-        return Some((owner.to_string(), ShaderStage::Fragment));
-    }
-    None
 }

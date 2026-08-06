@@ -78,7 +78,6 @@ pub struct InteractivePipelineSpec {
     /// Primitive topology for the graphics pipeline.
     pub topology: wgpu::PrimitiveTopology,
     pub fragment_state: wyn_pipeline_descriptor::FragmentState,
-    pub target_state: wyn_pipeline_descriptor::RenderTargetState,
     /// Directory of per-binding `.bin` files. The host loads each
     /// `vertex_inputs[i]` declared on the graphics pipeline into a
     /// vertex buffer, and each `storage_buffer` binding (other than
@@ -225,7 +224,6 @@ struct PipelineState {
     render_bind_groups_by_set: [Vec<Option<BindGroup>>; 2],
     draw: DrawCall,
     indirect_buffer: Option<wgpu::Buffer>,
-    target_state: wyn_pipeline_descriptor::RenderTargetState,
     /// One vertex buffer per declared `#[location(n)]` attribute, in
     /// shader_location order. Empty for full-screen-triangle shaders.
     vertex_buffers: Vec<wgpu::Buffer>,
@@ -1159,7 +1157,6 @@ impl State {
             render_bind_groups_by_set: g_bgs,
             draw: spec.draw.clone(),
             indirect_buffer,
-            target_state: spec.target_state,
             vertex_buffers: vertex_buffer_pack.buffers,
             index_buffer,
             resolution_buffer: uniforms.resolution,
@@ -1587,20 +1584,6 @@ fn wgpu_blend_state(mode: wyn_pipeline_descriptor::BlendMode) -> wgpu::BlendStat
     }
 }
 
-fn color_load_op(op: wyn_pipeline_descriptor::AttachmentLoadOp) -> LoadOp<Color> {
-    match op {
-        wyn_pipeline_descriptor::AttachmentLoadOp::Load => LoadOp::Load,
-        wyn_pipeline_descriptor::AttachmentLoadOp::Clear => LoadOp::Clear(Color::BLACK),
-    }
-}
-
-fn depth_load_op(op: wyn_pipeline_descriptor::AttachmentLoadOp) -> LoadOp<f32> {
-    match op {
-        wyn_pipeline_descriptor::AttachmentLoadOp::Load => LoadOp::Load,
-        wyn_pipeline_descriptor::AttachmentLoadOp::Clear => LoadOp::Clear(1.0),
-    }
-}
-
 fn render_pipeline(
     state: &PipelineState,
     view: &TextureView,
@@ -1727,7 +1710,7 @@ fn render_pipeline(
             view,
             resolve_target: None,
             ops: Operations {
-                load: color_load_op(state.target_state.color_load),
+                load: LoadOp::Load,
                 store: StoreOp::Store,
             },
             depth_slice: None,
@@ -1735,7 +1718,7 @@ fn render_pipeline(
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: depth_view,
             depth_ops: Some(Operations {
-                load: depth_load_op(state.target_state.depth_load),
+                load: LoadOp::Load,
                 store: StoreOp::Store,
             }),
             stencil_ops: None,

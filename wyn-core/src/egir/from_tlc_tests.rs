@@ -590,21 +590,38 @@ fn graphics_entry_ret_type_comes_from_inner_body_not_def_ty() {
     use crate::tlc::DefMeta;
 
     let src = r#"
-
-entry vertex_main(position: vec3f32, color: vec3f32)
-  (vec4f32, vec3f32) =
-  (@[position.x, position.y, position.z, 1.0], color)
+entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0],
+      @[1.0, 0.0, 0.0])) in
+  shade(target, covered,
+    |fragment| @[fragment.value.x, fragment.value.y, fragment.value.z, 1.0])
 "#;
     let mut tlc_program =
         crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(src));
 
     // Wrap only the vertex entry's signature return. `inner_body.ty` stays
     // unchanged, giving the test two deliberately divergent type sources.
+    let vertex_symbol = tlc_program
+        .defs
+        .iter()
+        .find(|definition| {
+            matches!(
+                &definition.meta,
+                DefMeta::EntryPoint(entry)
+                    if entry.declaration.entry_kind == crate::interface::EntryKind::Vertex
+            )
+        })
+        .map(|definition| definition.name)
+        .expect("extracted vertex definition");
+    let vertex_name = tlc_program.symbols.get(vertex_symbol).expect("vertex name").to_string();
     let def = tlc_program
         .defs
         .iter_mut()
-        .find(|d| tlc_program.symbols.get(d.name).map(|n| n == "vertex_main").unwrap_or(false))
-        .expect("vertex_main def");
+        .find(|definition| definition.name == vertex_symbol)
+        .expect("extracted vertex definition");
     assert!(
         matches!(
             &def.meta,
@@ -620,7 +637,7 @@ entry vertex_main(position: vec3f32, color: vec3f32)
     let egir = super::convert_program(&tlc_program, binding_ids, effect_ids)
         .expect("from_tlc::convert_program on graphics entry must succeed");
     let entry =
-        egir.entry_points.iter().find(|e| e.name == "vertex_main").expect("vertex_main SemanticEntry");
+        egir.entry_points.iter().find(|entry| entry.name == vertex_name).expect("vertex SemanticEntry");
 
     assert_eq!(
         entry.outputs.len(),

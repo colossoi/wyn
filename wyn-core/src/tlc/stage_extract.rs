@@ -84,6 +84,28 @@ impl InvocationBuiltins {
         }
     }
 }
+fn contains_graphics_invocation(term: &Term, builtins: &InvocationBuiltins) -> bool {
+    let mut found = false;
+    let mut visitor = |term: &Term| {
+        let is_invocation = matches!(
+            &term.kind,
+            TermKind::Var(VarRef::Builtin { id, .. })
+                if *id == builtins.shade
+                    || *id == builtins.shade_with
+                    || builtins.rasterizers.contains(id)
+                    || builtins.rasterizers_with.contains(id)
+        );
+        if is_invocation {
+            found = true;
+            WalkDecision::Prune
+        } else {
+            WalkDecision::Recurse
+        }
+    };
+    visitor.walk(term);
+    found
+}
+
 #[derive(Clone)]
 struct StageHelper {
     params: Vec<(SymbolId, Type)>,
@@ -208,21 +230,52 @@ pub(super) fn extract(
     parts: &mut ProgramParts<UnpinnedPolymorphic>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
-) {
+) -> crate::error::Result<()> {
     let builtins = InvocationBuiltins::get();
     let source_defs = std::mem::take(&mut parts.defs);
     let helpers = source_defs.iter().filter_map(stage_helper).collect::<LookupMap<_, _>>();
     let mut extracted = Vec::with_capacity(source_defs.len());
 
-    for definition in source_defs {
+    for mut definition in source_defs {
+        let is_root = matches!(
+            &definition.meta,
+            DefMeta::EntryPoint(entry) if entry.declaration.entry_kind == EntryKind::Root
+        );
+        if !is_root {
+            extracted.push(definition);
+            continue;
+        }
+
         if let Some(stages) = extract_root(&definition, &builtins, &helpers, symbols, term_ids) {
             extracted.extend(stages);
-        } else {
-            extracted.push(definition);
+            continue;
         }
+
+        let contains_invocation = match &definition.body.kind {
+            TermKind::Lambda(lambda) => {
+                let normalized = inline_stage_helpers((*lambda.body).clone(), &helpers, term_ids);
+                contains_graphics_invocation(&normalized, &builtins)
+            }
+            _ => false,
+        };
+        if contains_invocation {
+            let name = root_entry_name(&definition).unwrap_or_else(|| "<entry>".to_string());
+            return Err(crate::err_type_at!(
+                root_entry_span(&definition),
+                "entry `{}` contains a graphics invocation that cannot be planned as an ordered rasterization and shading operation",
+                name
+            ));
+        }
+
+        let DefMeta::EntryPoint(entry) = &mut definition.meta else {
+            unreachable!("root classification changed during stage extraction")
+        };
+        entry.declaration.entry_kind = EntryKind::Compute;
+        extracted.push(definition);
     }
 
     parts.defs = extracted;
+    Ok(())
 }
 
 fn extract_root(
@@ -246,7 +299,8 @@ fn extract_root(
     // recognizing the operation chain so a helper can forward a raster or
     // contain an invocation without becoming a separate host entry.
     let mut root_lambda = source_root_lambda.clone();
-    root_lambda.body = Box::new(inline_stage_helpers(*root_lambda.body, helpers, term_ids));
+    let body = inline_stage_helpers(*root_lambda.body, helpers, term_ids);
+    root_lambda.body = Box::new(normalize_root_bindings(body, builtins, term_ids));
     let root_name = root_entry_name(definition)?;
     let shape = root_shape(&root_lambda, root_entry, &root_name, builtins)?;
     let graphics_count =
@@ -323,6 +377,11 @@ fn extract_root(
                     &shape.computed,
                     builtins,
                 )?;
+                let graphics_group = interface::GraphicsStageGroup {
+                    root: definition.name,
+                    operation: graphics_index as u32,
+                    invocation: graphics_invocation,
+                };
                 let owner = if graphics_count == 1 {
                     root_name.clone()
                 } else {
@@ -363,7 +422,7 @@ fn extract_root(
                     vertex_substitutions,
                     vertex_target_reads,
                     builtins,
-                    graphics_invocation,
+                    graphics_group.clone(),
                     symbols,
                     term_ids,
                 )?);
@@ -378,6 +437,7 @@ fn extract_root(
                     operation.target_name.clone(),
                     operation.target_color_ty.clone(),
                     builtins,
+                    graphics_group,
                     symbols,
                     term_ids,
                 )?);
@@ -387,6 +447,54 @@ fn extract_root(
     }
 
     Some(stages)
+}
+
+/// Remove administrative root-level bindings by ordinary substitution so the
+/// planner sees the operation chain independently of local naming choices.
+fn normalize_root_bindings(term: Term, builtins: &InvocationBuiltins, term_ids: &mut TermIdSource) -> Term {
+    let Term { id, ty, span, kind } = term;
+    let TermKind::Let {
+        name,
+        name_ty,
+        rhs,
+        body,
+    } = kind
+    else {
+        return Term { id, ty, span, kind };
+    };
+
+    let is_operation = rasterizer_app(&rhs, builtins).is_some()
+        || matches!(name_ty, Type::Constructed(TypeName::Raster, _))
+        || shade_app(&rhs, builtins).is_some()
+        || computed_leaf_types(&name_ty).is_some();
+
+    if is_operation {
+        let body = normalize_root_bindings(*body, builtins, term_ids);
+        return Term {
+            id,
+            ty,
+            span,
+            kind: TermKind::Let {
+                name,
+                name_ty,
+                rhs,
+                body: Box::new(body),
+            },
+        };
+    }
+
+    let replacement = *rhs;
+    let body = super::subst::substitute_with(
+        *body,
+        name,
+        &mut |occurrence, ids| {
+            let mut value = clone_term_with_fresh_ids(&replacement, ids);
+            value.span = occurrence.span;
+            value
+        },
+        term_ids,
+    );
+    normalize_root_bindings(body, builtins, term_ids)
 }
 
 fn root_shape<'a>(
@@ -837,7 +945,6 @@ fn graphics_invocation(
         draw,
         raster_state,
         fragment_state,
-        target_state: Default::default(),
     })
 }
 
@@ -1419,7 +1526,7 @@ fn build_compute_stage(
         .collect();
     Some(stage_def(
         operation.entry_name.clone(),
-        EntryKind::Root,
+        EntryKind::Compute,
         params,
         declarations,
         outputs,
@@ -1772,7 +1879,7 @@ fn build_vertex_stage(
     substitutions: ExternalSubstitutions,
     target_reads: TargetReads,
     builtins: &InvocationBuiltins,
-    graphics_invocation: crate::pipeline_descriptor::GraphicsInvocation,
+    graphics_group: interface::GraphicsStageGroup,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Def<UnpinnedPolymorphic>> {
@@ -1862,7 +1969,7 @@ fn build_vertex_stage(
         declarations,
         outputs,
         body,
-        Some(graphics_invocation),
+        Some(graphics_group),
         root,
         symbols,
         term_ids,
@@ -2032,6 +2139,7 @@ fn build_fragment_stage(
     target_name: String,
     target_color_ty: Type,
     builtins: &InvocationBuiltins,
+    graphics_group: interface::GraphicsStageGroup,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Def<UnpinnedPolymorphic>> {
@@ -2197,7 +2305,7 @@ fn build_fragment_stage(
         declarations,
         outputs,
         body,
-        None,
+        Some(graphics_group),
         root,
         symbols,
         term_ids,
@@ -2219,7 +2327,7 @@ fn stage_def(
     param_decls: Vec<interface::EntryParamDecl>,
     outputs: Vec<interface::EntryOutputDecl<interface::ResolvedAttribute>>,
     body: Term,
-    graphics_invocation: Option<crate::pipeline_descriptor::GraphicsInvocation>,
+    graphics_group: Option<interface::GraphicsStageGroup>,
     root: &Def<UnpinnedPolymorphic>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
@@ -2242,7 +2350,7 @@ fn stage_def(
             declaration: Box::new(interface::EntryDecl {
                 entry_kind: kind,
                 compute_dispatch: None,
-                graphics_invocation,
+                graphics_group,
                 name,
                 name_span: span,
                 size_params: vec![],

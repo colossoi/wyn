@@ -223,6 +223,18 @@ pub enum EntryKind {
     Compute,
 }
 
+/// Identifies the graphics operation that owns an extracted vertex or
+/// fragment stage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphicsStageGroup {
+    /// The source root from which the operation was extracted.
+    pub root: SymbolId,
+    /// The operation's stable ordinal within that root.
+    pub operation: u32,
+    /// The invocation selected by the source rasterization operation.
+    pub invocation: crate::pipeline_descriptor::GraphicsInvocation,
+}
+
 pub trait AttrExt<V = ViewAttribute> {
     fn has<F: Fn(&Attribute<V>) -> bool>(&self, pred: F) -> bool;
     fn first_builtin(&self) -> Option<spirv::BuiltIn>;
@@ -598,8 +610,10 @@ pub struct EntryParamDecl {
 pub struct EntryDecl {
     pub entry_kind: EntryKind,
     pub compute_dispatch: Option<ComputeDispatchGrid>,
-    /// Present only on compiler-extracted graphics stages.
-    pub graphics_invocation: Option<crate::pipeline_descriptor::GraphicsInvocation>,
+    /// Present on every compiler-extracted stage belonging to one graphics
+    /// operation. This identity, rather than the generated stage name, relates
+    /// the vertex and fragment stages.
+    pub graphics_group: Option<GraphicsStageGroup>,
     pub name: String,
     pub name_span: Span,
     pub size_params: Vec<String>,

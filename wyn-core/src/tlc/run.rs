@@ -46,7 +46,7 @@ pub fn lower_from_ast(mut ast: crate::ast_type_holes::HolesResolved) -> crate::e
         state: _,
     } = program;
     let mut parts = super::ProgramParts { defs };
-    super::stage_extract::extract(&mut parts, &mut symbols, &mut term_ids);
+    super::stage_extract::extract(&mut parts, &mut symbols, &mut term_ids)?;
 
     Ok(parts.with_symbols::<TransformedTag, _>(symbols, term_ids, global_context))
 }

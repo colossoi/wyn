@@ -714,10 +714,7 @@ fn convert_entry_point(
     let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?;
     let (inner_body, params) = crate::tlc::extract_lambda_params_ref(&def.body);
-    let is_compute = matches!(
-        entry.entry_kind,
-        interface::EntryKind::Root | interface::EntryKind::Compute
-    );
+    let is_compute = entry.entry_kind == interface::EntryKind::Compute;
 
     // The converted body carries the specialized return representation; use it
     // rather than the parse-time entry declaration.
@@ -892,9 +889,11 @@ fn convert_entry_point(
         }
     }
     let execution_model = match entry.entry_kind {
-        interface::EntryKind::Root => ExecutionModel::Compute {
-            local_size: workgroup,
-        },
+        interface::EntryKind::Root => {
+            return Err(ConvertError::Internal(
+                "unextracted unified root reached EGIR".into(),
+            ))
+        }
         interface::EntryKind::Vertex => ExecutionModel::Vertex,
         interface::EntryKind::Fragment => ExecutionModel::Fragment,
         interface::EntryKind::Compute => ExecutionModel::Compute {

@@ -492,8 +492,6 @@ pub struct GraphicsInvocation {
     pub raster_state: RasterState,
     #[serde(default)]
     pub fragment_state: FragmentState,
-    #[serde(default)]
-    pub target_state: RenderTargetState,
 }
 
 impl Default for GraphicsInvocation {
@@ -508,7 +506,6 @@ impl Default for GraphicsInvocation {
             },
             raster_state: RasterState::default(),
             fragment_state: FragmentState::default(),
-            target_state: RenderTargetState::default(),
         }
     }
 }
@@ -576,27 +573,6 @@ pub enum FillMode {
     Fill,
     Line,
     Point,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RenderTargetState {
-    pub color_load: AttachmentLoadOp,
-    pub depth_load: AttachmentLoadOp,
-}
-
-impl Default for RenderTargetState {
-    fn default() -> Self {
-        Self {
-            color_load: AttachmentLoadOp::Load,
-            depth_load: AttachmentLoadOp::Load,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttachmentLoadOp {
-    Load,
-    Clear,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

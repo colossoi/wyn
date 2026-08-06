@@ -2289,6 +2289,18 @@ fn unified_root_array_program_compiles_through_spirv() {
         .expect("attribute-free root entry lowers through the array planner");
     assert_naga_accepts_spirv(&lowered.spirv);
 }
+#[test]
+fn unified_root_is_classified_before_egir() {
+    let program = crate::compile_thru_tlc("entry frame(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
+        .expect("root reaches TLC");
+    let entry_kind = program.defs.iter().find_map(|definition| {
+        let crate::tlc::DefMeta::EntryPoint(entry) = &definition.meta else {
+            return None;
+        };
+        Some(entry.declaration.entry_kind)
+    });
+    assert_eq!(entry_kind, Some(crate::interface::EntryKind::Compute));
+}
 
 #[test]
 fn unified_root_graphics_program_reaches_tlc() {
@@ -2309,6 +2321,18 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
         .defs
         .iter()
         .all(|definition| matches!(definition.meta, crate::tlc::DefMeta::EntryPoint(_))));
+    let groups = program
+        .defs
+        .iter()
+        .filter_map(|definition| {
+            let crate::tlc::DefMeta::EntryPoint(entry) = &definition.meta else {
+                return None;
+            };
+            entry.declaration.graphics_group.as_ref()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0], groups[1]);
 }
 
 #[test]
@@ -2353,7 +2377,37 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
         }
     );
 }
+#[test]
+fn unified_root_normalizes_ordinary_value_bindings_before_planning() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
+  let vertex_count = 3u32 in
+  let draw = direct_draw(vertex_count, 1u32) in
+  let covered = rasterize_triangles(
+    draw,
+    |vertex| vertex_output(
+      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0],
+      @[1.0, 0.0, 0.0, 1.0])) in
+  shade(target, covered, |fragment| fragment.value)
+"#,
+    )
+    .expect("ordinary value bindings do not change the root operation plan");
+    assert_naga_accepts_spirv(&lowered.spirv);
 
+    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+        panic!("graphics pipeline")
+    };
+    assert_eq!(
+        graphics.invocation.draw,
+        crate::pipeline_descriptor::DrawCall::Direct {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        }
+    );
+}
 #[test]
 fn unified_root_array_result_can_feed_vertex_callback() {
     let lowered = crate::compile_thru_spirv(
@@ -2567,11 +2621,6 @@ entry layered(target: render_target<vec4f32>) render_target<vec4f32> =
         })
         .collect::<Vec<_>>();
     assert_eq!(graphics.len(), 2, "one graphics pipeline per draw");
-    assert!(graphics.iter().all(|pipeline| {
-        pipeline.invocation.target_state.color_load == crate::pipeline_descriptor::AttachmentLoadOp::Load
-            && pipeline.invocation.target_state.depth_load
-                == crate::pipeline_descriptor::AttachmentLoadOp::Load
-    }));
     assert!(graphics
         .iter()
         .all(|pipeline| pipeline.fragment_outputs.iter().any(|output| output.name == "target")));

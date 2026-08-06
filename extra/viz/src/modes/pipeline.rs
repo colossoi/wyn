@@ -348,7 +348,6 @@ fn run_pipeline_interactive(
         }
     }
     let fragment_state = graphics.invocation.fragment_state;
-    let target_state = graphics.invocation.target_state;
     let topology = opts.topology.unwrap_or_else(|| wgpu_topology(graphics.invocation.topology));
 
     let resolved_buffer_inits = resolve_buffer_inits(
@@ -402,7 +401,6 @@ fn run_pipeline_interactive(
         draw,
         topology,
         fragment_state,
-        target_state,
         storage_dir: opts.storage_dir,
         buffer_inits: resolved_buffer_inits,
         index_buffer: opts.index_buffer,
