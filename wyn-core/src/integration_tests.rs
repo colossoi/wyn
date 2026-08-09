@@ -2333,6 +2333,20 @@ entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)
         3,
         "chunk scan, exclusive block scan, offset application"
     );
+    let graph = &lowered.pipeline.frame_graph;
+    assert_eq!(
+        graph.passes.iter().map(|pass| pass.name.as_str()).collect::<Vec<_>>(),
+        compute.stages.iter().map(|stage| stage.entry_point.as_str()).collect::<Vec<_>>(),
+        "standalone scan frame passes preserve pipeline stage order"
+    );
+    assert_eq!(graph.passes[0].depends_on, Vec::<usize>::new());
+    assert_eq!(graph.passes[1].depends_on, vec![0]);
+    assert_eq!(graph.passes[2].depends_on, vec![0, 1]);
+    assert_eq!(
+        graph.topological_order(),
+        Ok(vec![0, 1, 2]),
+        "standalone scan frame graph must be acyclic"
+    );
     let scratch: Vec<usize> = compute
         .bindings
         .iter()
@@ -7982,6 +7996,7 @@ entry filt_out(xs: []i32) ?k. [k]i32 =
   filter(|x: i32| x % 2i32 == 0i32, xs)
 ";
     let lowered = crate::compile_thru_spirv(src).expect("filter→output compiles");
+    lowered.pipeline.frame_graph.topological_order().expect("filter frame graph remains acyclic");
     let bufs = compute_storage_buffers(&lowered.pipeline, "filt_out");
 
     let output = bufs

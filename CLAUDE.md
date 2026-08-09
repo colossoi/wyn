@@ -74,7 +74,7 @@ cargo run --bin wyn -- check test.wyn
 
 ### Visualizing SPIR-V Output
 The viz runner lives in `extra/viz` and is driven by the pipeline descriptor
-JSON that `wyn compile` writes next to the `.spv` (a descriptor with a
+JSON that `wyn compile` writes next to the `.spv` or `.wgsl` (a descriptor with a
 graphics pipeline opens an interactive window and feeds the Shadertoy-style
 uniforms; a compute-only descriptor runs headless with `--input`/`--output`):
 ```bash

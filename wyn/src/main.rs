@@ -104,6 +104,9 @@ enum DriverError {
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
+    #[error("Failed to serialize pipeline descriptor: {0}")]
+    PipelineDescriptorSerialization(#[from] serde_json::Error),
+
     #[error("Compilation error: {0}")]
     CompilationError(#[from] wyn_core::error::CompilerError),
 
@@ -415,20 +418,7 @@ fn compile_file(
                 file.write_all(&word.to_le_bytes())?;
             }
 
-            // Write pipeline descriptor if there are any pipelines
-            if !lowered.pipeline.pipelines.is_empty() {
-                let descriptor_path = {
-                    let mut p = output_path.clone();
-                    p.set_extension("json");
-                    p
-                };
-                let json = serde_json::to_string_pretty(&lowered.pipeline)
-                    .map_err(|e| wyn_core::err_spirv!("Failed to serialize pipeline descriptor: {}", e))?;
-                fs::write(&descriptor_path, json)?;
-                if verbose {
-                    info!("Wrote pipeline descriptor to {}", descriptor_path.display());
-                }
-            }
+            write_pipeline_descriptor(&output_path, &lowered.pipeline, verbose)?;
 
             if verbose {
                 info!("Successfully compiled to {}", output_path.display());
@@ -436,11 +426,12 @@ fn compile_file(
             }
         }
         Target::Wgsl => {
-            let wgsl = time("wgsl_lower", verbose, || {
-                wyn_core::lower_ssa_to_wgsl(soac_lowered)
+            let lowered = time("wgsl_lower", verbose, || {
+                wyn_core::lower_ssa_to_wgsl_with_pipeline(soac_lowered)
             })?;
 
-            fs::write(&output_path, &wgsl)?;
+            fs::write(&output_path, &lowered.wgsl)?;
+            write_pipeline_descriptor(&output_path, &lowered.pipeline, verbose)?;
 
             if verbose {
                 info!("Successfully compiled to {}", output_path.display());
@@ -456,6 +447,26 @@ fn compile_file(
         output_path.display(),
         compile_start.elapsed().as_secs_f64()
     );
+
+    Ok(())
+}
+
+fn write_pipeline_descriptor(
+    output_path: &Path,
+    pipeline: &wyn_core::pipeline_descriptor::PipelineDescriptor,
+    verbose: bool,
+) -> Result<(), DriverError> {
+    if pipeline.pipelines.is_empty() {
+        return Ok(());
+    }
+
+    let mut descriptor_path = output_path.to_path_buf();
+    descriptor_path.set_extension("json");
+    let json = serde_json::to_string_pretty(pipeline)?;
+    fs::write(&descriptor_path, json)?;
+    if verbose {
+        info!("Wrote pipeline descriptor to {}", descriptor_path.display());
+    }
 
     Ok(())
 }

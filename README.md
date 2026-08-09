@@ -417,6 +417,11 @@ cargo run --bin wyn -- compile input.wyn --output-annotated out.ann  # Annotated
 cd viz && cargo run vf ../shader.spv --vertex vertex_main --fragment fragment_main
 ```
 
+Both SPIR-V and WGSL compilation emit a sibling `<output-stem>.json`
+pipeline descriptor whenever the program contains an executable pipeline. The
+descriptor records stage order, dispatch sizes, and shared bindings for host
+runtimes, including multi-stage WebGPU dispatch.
+
 ## Building and Testing
 
 ```bash

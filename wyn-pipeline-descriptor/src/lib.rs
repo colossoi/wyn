@@ -1,6 +1,6 @@
 //! Pipeline descriptor for compiled Wyn programs.
 //!
-//! The compiler emits a JSON pipeline descriptor alongside the SPIR-V module
+//! The compiler emits a JSON pipeline descriptor alongside the SPIR-V or WGSL module
 //! describing how to execute the program: which entry points to invoke, in
 //! what order, and what GPU resources (buffers, uniforms, push constants) each
 //! stage uses.
@@ -1065,6 +1065,9 @@ impl FrameGraphBuilder {
     /// whichever order the two passes are declared in. The hazard sweep can only
     /// see backwards, and would otherwise record a producer declared after its
     /// consumer as a write-after-read — the same dependency, inverted.
+    /// Within one pipeline, however, `stages` is already an ordered execution
+    /// contract. A later stage that finishes an output must not be mistaken for
+    /// the producer of a value read by an earlier read-modify-write stage.
     fn link_producers_to_consumers(&mut self) {
         for (resource, producers) in &self.producers {
             let Some(readers) = self.readers.get(resource) else {
@@ -1072,7 +1075,13 @@ impl FrameGraphBuilder {
             };
             for &consumer in readers {
                 for &producer in producers {
-                    if producer != consumer {
+                    let follows_stage_order = {
+                        let producer_pass = &self.graph.passes[producer];
+                        let consumer_pass = &self.graph.passes[consumer];
+                        producer_pass.pipeline_index != consumer_pass.pipeline_index
+                            || producer_pass.stage_index < consumer_pass.stage_index
+                    };
+                    if producer != consumer && follows_stage_order {
                         self.graph.passes[consumer].depends_on.push(producer);
                     }
                 }
@@ -1125,6 +1134,14 @@ impl FrameGraphBuilder {
         }
 
         let pass_index = self.graph.passes.len();
+        // A pipeline's stage list is an ordered host-execution contract even
+        // when two adjacent stages happen not to expose a resource hazard.
+        if stage_index > 0 {
+            let previous = pass_index.checked_sub(1).expect("non-first stage has a predecessor");
+            debug_assert_eq!(self.graph.passes[previous].pipeline_index, pipeline_index);
+            debug_assert_eq!(self.graph.passes[previous].stage_index + 1, stage_index);
+            depends_on.insert(previous);
+        }
         for resource in produces {
             self.producers.entry(resource).or_default().insert(pass_index);
         }
@@ -1907,6 +1924,77 @@ mod tests {
                 "producer_first={producer_first}: schedule runs the consumer first: {order:?}"
             );
         }
+    }
+
+    #[test]
+    fn frame_graph_respects_ordered_stages_that_update_one_output() {
+        let stage = |entry: &str| ComputeStage {
+            entry_point: entry.to_string(),
+            owner: "scan".to_string(),
+            workgroup_size: (64, 1, 1),
+            dispatch_size: DispatchSize::Fixed {
+                x: 1,
+                y: 1,
+                z: 1,
+                explicit: false,
+            },
+            uses: StageBindingUses {
+                reads: vec![0],
+                writes: vec![0],
+            },
+        };
+        let mut descriptor = PipelineDescriptor {
+            pipelines: vec![Pipeline::Compute(ComputePipeline {
+                bindings: vec![Binding::StorageBuffer {
+                    set: 0,
+                    binding: 0,
+                    access: Access::ReadWrite,
+                    usage: BufferUsage::Output,
+                    name: "scan_output".to_string(),
+                    resource: None,
+                    length: None,
+                }],
+                stages: vec![stage("scan_chunks"), stage("add_offsets")],
+                default_total_threads: None,
+                feedback: vec![],
+            })],
+            frame_graph: FrameGraph::default(),
+        };
+
+        descriptor.rebuild_frame_graph();
+        let graph = &descriptor.frame_graph;
+        assert_eq!(graph.passes[0].depends_on, Vec::<usize>::new());
+        assert_eq!(graph.passes[1].depends_on, vec![0]);
+        assert_eq!(graph.topological_order(), Ok(vec![0, 1]));
+    }
+
+    #[test]
+    fn frame_graph_encodes_stage_order_without_a_resource_hazard() {
+        let stage = |entry: &str| ComputeStage {
+            entry_point: entry.to_string(),
+            owner: "ordered".to_string(),
+            workgroup_size: (1, 1, 1),
+            dispatch_size: DispatchSize::Fixed {
+                x: 1,
+                y: 1,
+                z: 1,
+                explicit: true,
+            },
+            uses: StageBindingUses::default(),
+        };
+        let mut descriptor = PipelineDescriptor {
+            pipelines: vec![Pipeline::Compute(ComputePipeline {
+                bindings: vec![],
+                stages: vec![stage("first"), stage("second")],
+                default_total_threads: None,
+                feedback: vec![],
+            })],
+            frame_graph: FrameGraph::default(),
+        };
+
+        descriptor.rebuild_frame_graph();
+        assert_eq!(descriptor.frame_graph.passes[0].depends_on, Vec::<usize>::new());
+        assert_eq!(descriptor.frame_graph.passes[1].depends_on, vec![0]);
     }
 
     /// A consumer that also overwrites, this frame, the state its producer reads
