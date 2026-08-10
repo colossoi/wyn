@@ -227,6 +227,20 @@ fn collect_free_vars_soac<C, S>(
             collect_free_vars_array_expr(indices, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
         }
+        SoacOp::BucketScatter {
+            lam,
+            bucket_count,
+            capacity,
+            keys,
+            values,
+            ..
+        } => {
+            visit_body(lam);
+            collect_free_vars(bucket_count, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(capacity, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(keys, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
+        }
     }
 }
 
@@ -327,6 +341,7 @@ fn verify_no_nested_lambdas(
                 check(op)?
             }
             SoacOp::Filter { pred, .. } => check(pred)?,
+            SoacOp::BucketScatter { lam, .. } => check(lam)?,
         }
     }
     let mut result = Ok(());
@@ -773,6 +788,21 @@ impl ClosureConverter {
                 op: self.lift_soac_lambda(op.lam, span),
                 ne: Box::new(self.convert_term(*ne)),
                 indices: self.convert_array_expr(indices),
+                values: self.convert_array_expr(values),
+            },
+            SoacOp::BucketScatter {
+                dest,
+                lam,
+                bucket_count,
+                capacity,
+                keys,
+                values,
+            } => SoacOp::BucketScatter {
+                dest,
+                lam: self.lift_soac_lambda(lam.lam, span),
+                bucket_count: Box::new(self.convert_term(*bucket_count)),
+                capacity: Box::new(self.convert_term(*capacity)),
+                keys: self.convert_array_expr(keys),
                 values: self.convert_array_expr(values),
             },
         }

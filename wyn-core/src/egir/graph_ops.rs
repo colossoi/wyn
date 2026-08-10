@@ -681,6 +681,71 @@ pub fn emit_store<P: Family>(
     effect_out
 }
 
+/// Emit an internal atomic load from a `u32` place.
+pub fn emit_atomic_load<P: Family>(
+    graph: &mut EGraph<P>,
+    block: BlockId,
+    place_nid: NodeId,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+    span: Option<Span>,
+) -> NodeId {
+    let effect_in = alloc_effect(effect_ids);
+    let effect_out = alloc_effect(effect_ids);
+    let result = graph.alloc_side_effect_result(Type::Constructed(TypeName::UInt(32), vec![]));
+    graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::AtomicLoad),
+        operand_nodes: smallvec![place_nid],
+        result: Some(result),
+        effects: Some((effect_in, effect_out)),
+        span,
+    });
+    result
+}
+
+/// Emit an internal atomic fetch-add on a `u32` place and return the value
+/// observed before the addition.
+pub fn emit_atomic_add<P: Family>(
+    graph: &mut EGraph<P>,
+    block: BlockId,
+    place_nid: NodeId,
+    value_nid: NodeId,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+    span: Option<Span>,
+) -> NodeId {
+    let effect_in = alloc_effect(effect_ids);
+    let effect_out = alloc_effect(effect_ids);
+    let result = graph.alloc_side_effect_result(Type::Constructed(TypeName::UInt(32), vec![]));
+    graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::AtomicAdd),
+        operand_nodes: smallvec![place_nid, value_nid],
+        result: Some(result),
+        effects: Some((effect_in, effect_out)),
+        span,
+    });
+    result
+}
+
+/// Emit an internal atomic store to a `u32` place.
+pub fn emit_atomic_store<P: Family>(
+    graph: &mut EGraph<P>,
+    block: BlockId,
+    place_nid: NodeId,
+    value_nid: NodeId,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+    span: Option<Span>,
+) -> EffectToken {
+    let effect_in = alloc_effect(effect_ids);
+    let effect_out = alloc_effect(effect_ids);
+    graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::AtomicStore),
+        operand_nodes: smallvec![place_nid, value_nid],
+        result: None,
+        effects: Some((effect_in, effect_out)),
+        span,
+    });
+    effect_out
+}
+
 /// Emit a workgroup execution+memory barrier
 /// in `block`. No operands or result; the effect token keeps it ordered
 /// against the workgroup-shared loads/stores it synchronizes. Returns the

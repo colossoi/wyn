@@ -343,6 +343,35 @@ fn float_soac(
                 },
             )
         }
+        SoacOp::BucketScatter {
+            dest,
+            lam,
+            bucket_count,
+            capacity,
+            keys,
+            values,
+        } => {
+            let (mut floats, lam) = float_soac_body(lam, blocked, ids, symbols);
+            let (mut count_floats, bucket_count) = float_term(*bucket_count, blocked, ids, symbols, true);
+            let (mut capacity_floats, capacity) = float_term(*capacity, blocked, ids, symbols, true);
+            let (mut key_floats, keys) = float_array_expr(keys, blocked, ids, symbols);
+            let (mut value_floats, values) = float_array_expr(values, blocked, ids, symbols);
+            floats.append(&mut count_floats);
+            floats.append(&mut capacity_floats);
+            floats.append(&mut key_floats);
+            floats.append(&mut value_floats);
+            (
+                floats,
+                SoacOp::BucketScatter {
+                    dest,
+                    lam,
+                    bucket_count: Box::new(bucket_count),
+                    capacity: Box::new(capacity),
+                    keys,
+                    values,
+                },
+            )
+        }
     }
 }
 

@@ -39,6 +39,8 @@ pub type OutputsRealized = super::program::Program<
 >;
 
 use crate::flow::{BlockId, ExecutionModel};
+use crate::types::TypeExt;
+use polytype::Type;
 #[allow(unused_imports)]
 use ExecutionModel as _;
 
@@ -48,13 +50,49 @@ use super::program::{
     host_resource_map, Entry, LogicalResourceArena, OutputWriter, Program, RawEntry, SemanticResourceRef,
     SlotSource,
 };
-use super::types::{EGraph, EffectToken, NodeId, Raw, SkeletonTerminator, SoacEffect};
+use super::types::{
+    EGraph, ENode, EffectToken, NodeId, PureOp, Raw, SideEffectIndex, SideEffectKind, SkeletonTerminator,
+    Soac, SoacEffect,
+};
 use crate::ResourceId;
 use std::collections::HashMap;
 
 pub mod dispatch;
 pub mod reconcile;
 pub mod verify;
+
+fn bucket_array_output(
+    graph: &EGraph<Raw>,
+    effect_index: &SideEffectIndex,
+    source: NodeId,
+) -> Option<(SemanticResourceRef, NodeId, Option<NodeId>)> {
+    let ENode::Pure {
+        op: PureOp::Project { index },
+        operands,
+    } = &graph.nodes[source].kind
+    else {
+        return None;
+    };
+    if *index > 1 {
+        return None;
+    }
+    let [result] = operands.as_slice() else {
+        return None;
+    };
+    let effect = effect_index.effect(graph, *result)?;
+    let SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) = &effect.kind else {
+        return None;
+    };
+    let super::soac::hist::UpdatePolicy::BucketInsert { counts, .. } = op.body.update_policy else {
+        return None;
+    };
+    if *index == 0 {
+        let dest = super::graph_ops::extract_storage_view_source(graph, effect.operand_nodes[0])?;
+        Some((dest, *result, Some(effect.operand_nodes[0])))
+    } else {
+        Some((counts, *result, None))
+    }
+}
 
 /// Realize every entry's outputs into side-effect stores. After this
 /// pass, `verify::check` confirms the invariant.
@@ -143,8 +181,6 @@ fn realize_compute_slots(
     let effect_index = graph.side_effect_index();
 
     for (slot_index, output) in outputs.iter_mut().enumerate() {
-        let binding = output.storage_binding().expect("BUG: compute output without storage binding");
-        let resource = *by_binding.get(&binding).expect("compute output must have a semantic resource");
         let sources: Vec<SlotSource> = output.routes.iter().map(|route| route.source).collect();
         if sources.is_empty() {
             return Err(ConvertError::Unsupported(format!(
@@ -152,6 +188,58 @@ fn realize_compute_slots(
                  must derive at least one route for every declared output",
                 slot_index
             )));
+        }
+
+        // The two array fields of bucket_scatter are already resident: field
+        // zero aliases the caller-supplied destination and field one aliases
+        // the compiler-owned count buffer. Publishing another auto output and
+        // copying either view would both waste bandwidth and misinterpret the
+        // view's `(offset, len)` representation as array elements.
+        if sources.len() == 1 {
+            if let Some((resource, result, existing_view)) =
+                bucket_array_output(graph, &effect_index, sources[0].value)
+            {
+                let view = existing_view.unwrap_or_else(|| {
+                    super::graph_ops::intern_resource_view(
+                        graph,
+                        resource.0,
+                        Type::Constructed(crate::ast::TypeName::UInt(32), vec![]),
+                        None,
+                    )
+                });
+                let source_ty = graph.nodes[view].ty.clone();
+                let displaced_output = output.resource;
+                output.resource = Some(resource);
+                output.ty = source_ty.clone();
+                output.make_storage_internal();
+                output.routes[0].source.value = view;
+                output.routes[0].writers = vec![OutputWriter::Value(result)];
+                if displaced_output != Some(resource) {
+                    resource_declarations
+                        .retain(|declaration| Some(declaration.resource) != displaced_output);
+                }
+                continue;
+            }
+        }
+
+        let binding = output.storage_binding().expect("BUG: compute output without storage binding");
+        let resource = *by_binding.get(&binding).expect("compute output must have a semantic resource");
+
+        // An existential SOAC field can retain its source-level Abstract
+        // representation on the entry declaration even though the producer
+        // has already chosen a concrete view. Output realization operates on
+        // representation, so inherit that concrete source type before
+        // classifying fixed versus runtime arrays.
+        if sources.len() == 1
+            && matches!(
+                output.ty.array_variant(),
+                Some(Type::Constructed(crate::ast::TypeName::ArrayVariantAbstract, _))
+            )
+        {
+            let source_ty = graph.nodes[sources[0].value].ty.clone();
+            if source_ty.is_array() {
+                output.ty = source_ty;
+            }
         }
 
         // A runtime `filter` whose result is this output retargets directly:

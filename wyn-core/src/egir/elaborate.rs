@@ -423,6 +423,26 @@ impl<'a> Elaborator<'a> {
                     value: ValueRef::Ssa(value),
                 }
             }
+            EffectOp::AtomicLoad => {
+                let place = self.demand_place(se.operand_nodes[0]);
+                InstKind::AtomicLoad { place }
+            }
+            EffectOp::AtomicAdd => {
+                let place = self.demand_place(se.operand_nodes[0]);
+                let value = self.demand(se.operand_nodes[1]);
+                InstKind::AtomicAdd {
+                    place,
+                    value: ValueRef::Ssa(value),
+                }
+            }
+            EffectOp::AtomicStore => {
+                let place = self.demand_place(se.operand_nodes[0]);
+                let value = self.demand(se.operand_nodes[1]);
+                InstKind::AtomicStore {
+                    place,
+                    value: ValueRef::Ssa(value),
+                }
+            }
             EffectOp::Op { tag } => {
                 let args: Vec<ValueId> = se.operand_nodes.iter().map(|&nid| self.demand(nid)).collect();
                 InstKind::Op {

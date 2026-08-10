@@ -2,6 +2,7 @@
 //! `lower_ssa_body_for_entry` in `mod.rs`.
 
 use super::*;
+use crate::interface::{BindingExposure, EntryOutputKind};
 
 /// Lower an SSA entry point to SPIR-V.
 pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &EntryPoint) -> Result<()> {
@@ -290,6 +291,17 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     let mut output_vars = Vec::new();
     let mut output_location = 0u32;
     for output in &entry.outputs {
+        if matches!(
+            output.kind,
+            EntryOutputKind::Storage {
+                exposure: BindingExposure::Internal,
+                ..
+            }
+        ) {
+            // The aliased resource is declared through `storage_bindings` (or
+            // an input binding) below. It is not a shader-IO return value.
+            continue;
+        }
         if let Some(br) = output.storage_binding() {
             let storage_use = constructor.storage_use(br);
             let var_id =

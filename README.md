@@ -198,7 +198,7 @@ descriptor as one result. Its initial portable scheduler implements:
 
 ### SOAC Implementation Status
 
-TLC has six `SoacOp` variants; the table also lists Redomap, which is a fused
+TLC has seven `SoacOp` variants; the table also lists Redomap, which is a fused
 semantic EGIR form rather than a TLC constructor. "Serial" = correct sequential
 lowering through `soac_expand`. "Consuming-input DPS" = TLC records a uniqueness
 candidate and EGIR residency verifies post-fusion death before choosing in-place
@@ -213,6 +213,7 @@ fires on a compute-entry SOAC matching the strategy's shape.
 | `Scan`             | `scan op ne xs`                         | ✓      | ✓                   | ✓ (3-phase Blelloch-style) |
 | `Filter`           | `filter pred xs`                        | ✓ (static **and** runtime-sized) | ✓      | ✓ for escaping entry outputs (flags + scan + scatter); non-escaping consumers fuse semantically |
 | `Scatter`          | `scatter(dest, indices, values)`        | ✓ (sequential per-lane indexed store; envelope `(xs..) -> (index, value)` lets the fusion engine fuse map producers into the scatter) | ✓ (writes in place into the bound storage view) | ✗ |
+| `BucketScatter`    | `bucket_scatter(dest, bucket_count, capacity, keys, values)` | ✗ | ✓ (writes in place into the bound storage view) | ✓ (counter init + atomic insertion + overflow publication) |
 | `ReduceByIndex`    | histogram-style indexed reduction       | ✗ EGIR `convert_soac` rejects with `Unsupported` | n/a | ✗ (atomics not yet implemented) |
 
 Notes:
@@ -262,7 +263,9 @@ An escaping `SegFilter` uses the parallel map → flag scan → scatter algorith
 (`if flags[i] { out[offsets[i]-1] = xs[i] }`) and publishes the final count
 through the paired length cell. Ordered general-purpose `SegHist`/scatter
 lowering remains serial; the filter scheduler owns its guarded compaction
-scatter as part of the specialized filter phase model.
+scatter as part of the specialized filter phase model. `BucketScatter` is the
+exception: its deliberately unordered semantics permit a three-stage parallel
+histogram lowering with compiler-internal atomics.
 
 #### Remaining-work ordering
 

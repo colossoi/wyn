@@ -279,6 +279,20 @@ fn substitute_in_soac(
             substitute_in_array(indices, old_symbol, replacement, term_ids);
             substitute_in_array(values, old_symbol, replacement, term_ids);
         }
+        SoacOp::BucketScatter {
+            lam,
+            bucket_count,
+            capacity,
+            keys,
+            values,
+            ..
+        } => {
+            body(lam, old_symbol, replacement, term_ids);
+            substitute_in_place(bucket_count, old_symbol, replacement, term_ids);
+            substitute_in_place(capacity, old_symbol, replacement, term_ids);
+            substitute_in_array(keys, old_symbol, replacement, term_ids);
+            substitute_in_array(values, old_symbol, replacement, term_ids);
+        }
     }
 }
 
@@ -576,6 +590,7 @@ impl HofSpecializer<'_> {
                 self.cascade_specialize_soac_body(op)
             }
             SoacOp::Filter { pred, .. } => self.cascade_specialize_soac_body(pred),
+            SoacOp::BucketScatter { lam, .. } => self.cascade_specialize_soac_body(lam),
         }
     }
 

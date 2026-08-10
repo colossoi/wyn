@@ -47,6 +47,8 @@ mod integration_tests;
 mod test_pipeline;
 
 #[cfg(test)]
+mod bucket_scatter_tests;
+#[cfg(test)]
 mod slice_range_tests;
 
 use std::hash::Hash;

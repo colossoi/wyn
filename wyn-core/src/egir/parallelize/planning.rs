@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use polytype::Type;
 
 use crate::ast::TypeName;
-use crate::egir::soac::screma;
+use crate::egir::soac::{hist, screma};
 use crate::egir::types::{EGraph, SideEffect, SideEffectKind, SideEffectSite, Soac, SoacEffect};
 
 use super::model::{CandidateSelection, ParallelizeError, Result};
@@ -63,6 +63,7 @@ impl LocatedScrema<'_> {
 #[derive(Default)]
 struct RecipeTargets {
     filters: Vec<SideEffectSite>,
+    bucket_hists: Vec<SideEffectSite>,
     kernel_scremas: Vec<SideEffectSite>,
     promoted_folds: Vec<SideEffectSite>,
 }
@@ -77,6 +78,11 @@ impl RecipeTargets {
                 let site = SideEffectSite { block, index };
                 match &effect.kind {
                     SideEffectKind::Soac(SoacEffect(_, Soac::Filter(_))) => targets.filters.push(site),
+                    SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op)))
+                        if matches!(op.body.update_policy, hist::UpdatePolicy::BucketInsert { .. }) =>
+                    {
+                        targets.bucket_hists.push(site);
+                    }
                     SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => match op.semantic_state() {
                         screma::SemanticState::Segmented {
                             placement: screma::Placement::Kernel,
@@ -106,6 +112,7 @@ impl RecipeTargets {
             |source: &[SideEffectSite]| source.iter().filter_map(|site| sites.get(site).copied()).collect();
         Self {
             filters: remap(&self.filters),
+            bucket_hists: remap(&self.bucket_hists),
             kernel_scremas: remap(&self.kernel_scremas),
             promoted_folds: remap(&self.promoted_folds),
         }
@@ -146,20 +153,29 @@ pub(super) fn make_screma_serial(graph: &mut EGraph, recipe: SerialScremaRecipe)
 
 /// The target recipe selected for one projected physical kernel. Algorithm
 /// payloads change type when scratch ids are bound; the recipe shape does not.
-pub(super) enum Recipe<Filter, Reduce, Scan> {
+pub(super) enum Recipe<Filter, Reduce, Scan, Bucket> {
     Filter(Filter),
     Reduce(Reduce),
     Scan(Scan),
+    Bucket(Bucket),
     Map(screma::Segmented<crate::egir::program::SemanticResourceRef>),
     Serial(SerialScremaRecipe),
     Unchanged,
 }
 
-type AnalyzedRecipe =
-    Recipe<super::filter::FilterCandidate, super::reduce::ReduceCandidate, super::scan::ScanCandidate>;
+type AnalyzedRecipe = Recipe<
+    super::filter::FilterCandidate,
+    super::reduce::ReduceCandidate,
+    super::scan::ScanCandidate,
+    super::bucket::BucketCandidate,
+>;
 
-pub(super) type PlannedRecipe =
-    Recipe<super::filter::BoundFilter, super::reduce::BoundReduce, super::scan::BoundScan>;
+pub(super) type PlannedRecipe = Recipe<
+    super::filter::BoundFilter,
+    super::reduce::BoundReduce,
+    super::scan::BoundScan,
+    super::bucket::BucketCandidate,
+>;
 
 /// One projected physical kernel and its ownership of semantic output slots.
 pub(super) struct PlannedKernel<R = PlannedRecipe> {
@@ -376,6 +392,7 @@ fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBinding
         AnalyzedRecipe::Scan(candidate) => {
             PlannedRecipe::Scan(super::scan::BoundScan::bind(candidate, resources))
         }
+        AnalyzedRecipe::Bucket(candidate) => PlannedRecipe::Bucket(candidate),
         AnalyzedRecipe::Map(segment) => PlannedRecipe::Map(segment),
         AnalyzedRecipe::Serial(site) => PlannedRecipe::Serial(site),
         AnalyzedRecipe::Unchanged => PlannedRecipe::Unchanged,
@@ -448,7 +465,17 @@ fn fixed_required_elements(
     entry: &crate::egir::program::PlannedEntry,
     targets: &RecipeTargets,
 ) -> Option<u32> {
-    let space = if targets.filters.len() == 1 {
+    let space = if targets.bucket_hists.len() == 1 {
+        let SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) =
+            &entry.graph.skeleton.effect(targets.bucket_hists[0]).kind
+        else {
+            return None;
+        };
+        match &op.state {
+            hist::State::Segmented(space) => space,
+            _ => return None,
+        }
+    } else if targets.filters.len() == 1 {
         let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) =
             &entry.graph.skeleton.effect(targets.filters[0]).kind
         else {
@@ -539,6 +566,13 @@ fn analyze_projected_kernel(
     resources: &LogicalResourceArena,
     targets: RecipeTargets,
 ) -> Result<(PlannedKernel<AnalyzedRecipe>, Vec<ScratchRequest>)> {
+    if targets.bucket_hists.len() == 1 {
+        if let Some(candidate) = super::bucket::analyze_bucket_candidate(&body, targets.bucket_hists[0])? {
+            let kernel = PlannedKernel::new(body, output_projection, AnalyzedRecipe::Bucket(candidate));
+            return Ok((kernel, Vec::new()));
+        }
+    }
+
     if targets.filters.len() == 1 {
         if let Some(CandidateSelection::Selected(candidate)) =
             super::analyze_filter_candidate(&body, targets.filters[0])

@@ -311,6 +311,10 @@ pub enum CompilerResourceKind {
     FilterOffsets,
     FilterScanBlockSums,
     FilterScanBlockOffsets,
+    /// Per-bucket population counters produced by `bucket_scatter`.
+    BucketCounts,
+    /// One u32 cell used internally to publish `bucket_scatter` overflow.
+    BucketOverflow,
     /// Scalar result produced by a compiler-hoisted prepass and consumed by a
     /// later source entry phase.
     ScalarHandoff,
@@ -1037,13 +1041,41 @@ fn physicalize_soac(
             };
             Soac::Filter(filter::Op { body, state })
         }
-        Soac::Hist(hist::Op { mut body, state }) => {
-            body.body = seg_body(body.body, nodes);
+        Soac::Hist(hist::Op { body, state }) => {
+            let update_policy = match body.update_policy {
+                hist::UpdatePolicy::OrderedOverwrite => hist::UpdatePolicy::OrderedOverwrite,
+                hist::UpdatePolicy::BucketInsert {
+                    counts,
+                    overflow,
+                    bucket_count,
+                    capacity,
+                } => hist::UpdatePolicy::BucketInsert {
+                    counts: binding(counts, bindings),
+                    overflow: binding(overflow, bindings),
+                    bucket_count: nodes[&bucket_count],
+                    capacity: nodes[&capacity],
+                },
+            };
+            let body = hist::Body {
+                body: seg_body(body.body, nodes),
+                inputs: body.inputs,
+                index_type: body.index_type,
+                value_type: body.value_type,
+                dest_elem_type: body.dest_elem_type,
+                update_policy,
+            };
             let state = match state {
                 hist::State::Serial => hist::State::Serial,
                 hist::State::Segmented(iteration_space) => {
                     hist::State::Segmented(space(iteration_space, nodes, bindings)?)
                 }
+                hist::State::Pipeline {
+                    space: iteration_space,
+                    stage,
+                } => hist::State::Pipeline {
+                    space: space(iteration_space, nodes, bindings)?,
+                    stage,
+                },
             };
             Soac::Hist(hist::Op { body, state })
         }
@@ -1502,6 +1534,7 @@ fn publish_entry(
         .map(|declaration| interface::StorageBindingDecl {
             binding: resources.binding(declaration.resource.0),
             role: declaration.role.clone(),
+            host_output: resources.is_host_output(declaration.resource.0),
             logical_resource: resources.logical_name(declaration.resource.0),
             elem_ty: declaration.elem_ty.clone(),
             length: buffer_len(&declaration.size, resources),
@@ -1604,6 +1637,7 @@ pub type PhysicalEntry =
 pub struct PhysicalResourceTable {
     bindings: Vec<crate::BindingRef>,
     compiler_owned: Vec<bool>,
+    host_outputs: Vec<bool>,
 }
 
 impl PhysicalResourceTable {
@@ -1625,8 +1659,16 @@ impl PhysicalResourceTable {
         used.extend(reserved);
         let mut bindings = Vec::with_capacity(resources.len());
         let mut compiler_owned = Vec::with_capacity(resources.len());
+        let mut host_outputs = Vec::with_capacity(resources.len());
         for resource in resources {
             compiler_owned.push(matches!(resource.origin, ResourceOrigin::Compiler(_)));
+            host_outputs.push(matches!(
+                resource.origin,
+                ResourceOrigin::Compiler(CompilerResource {
+                    kind: CompilerResourceKind::BucketCounts,
+                    ..
+                })
+            ));
             let binding = match &resource.origin {
                 ResourceOrigin::Host(host) => host.binding,
                 ResourceOrigin::Compiler(_) => loop {
@@ -1642,6 +1684,7 @@ impl PhysicalResourceTable {
         Self {
             bindings,
             compiler_owned,
+            host_outputs,
         }
     }
 
@@ -1651,6 +1694,10 @@ impl PhysicalResourceTable {
 
     pub fn is_compiler(&self, resource: ResourceId) -> bool {
         self.compiler_owned[resource.index()]
+    }
+
+    pub fn is_host_output(&self, resource: ResourceId) -> bool {
+        self.host_outputs[resource.index()]
     }
 
     /// Descriptor-stable identity for one compiler-owned logical resource.
@@ -1814,6 +1861,7 @@ fn physicalize_entry(
         .map(|declaration| interface::StorageBindingDecl {
             binding: resources.binding(declaration.resource.0),
             role: declaration.role,
+            host_output: resources.is_host_output(declaration.resource.0),
             logical_resource: resources.logical_name(declaration.resource.0),
             elem_ty: declaration.elem_ty,
             length: buffer_len(&declaration.size, resources),

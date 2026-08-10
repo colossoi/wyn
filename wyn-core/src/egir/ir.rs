@@ -227,6 +227,18 @@ pub enum EffectOp<R, Ty> {
     },
     Load,
     Store,
+    /// Atomic load from an addressable `u32` place. Produces the observed
+    /// value and remains compiler-internal.
+    AtomicLoad,
+    /// Atomic fetch-add on an addressable `u32` place. Operand layout is
+    /// `[place, value]`; the side effect result is the value observed before
+    /// the addition. Compiler-generated parallel SOACs use this internally;
+    /// it is deliberately not a Wyn surface operation.
+    AtomicAdd,
+    /// Atomic store to an addressable `u32` place. Operand layout is
+    /// `[place, value]`. Kept distinct from `Store` so WGSL can give every
+    /// access to the backing buffer an atomic type.
+    AtomicStore,
     ControlBarrier,
 }
 
@@ -235,7 +247,13 @@ impl<R, Ty> EffectOp<R, Ty> {
     pub fn referenced_resource(&self) -> Option<&R> {
         match self {
             Self::Op { tag } => tag.referenced_resource(),
-            Self::Alloca { .. } | Self::Load | Self::Store | Self::ControlBarrier => None,
+            Self::Alloca { .. }
+            | Self::Load
+            | Self::Store
+            | Self::AtomicLoad
+            | Self::AtomicAdd
+            | Self::AtomicStore
+            | Self::ControlBarrier => None,
         }
     }
 
@@ -250,6 +268,9 @@ impl<R, Ty> EffectOp<R, Ty> {
             Self::Alloca { elem_ty } => EffectOp::Alloca { elem_ty },
             Self::Load => EffectOp::Load,
             Self::Store => EffectOp::Store,
+            Self::AtomicLoad => EffectOp::AtomicLoad,
+            Self::AtomicAdd => EffectOp::AtomicAdd,
+            Self::AtomicStore => EffectOp::AtomicStore,
             Self::ControlBarrier => EffectOp::ControlBarrier,
         })
     }

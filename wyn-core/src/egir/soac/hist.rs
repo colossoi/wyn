@@ -2,27 +2,36 @@ use polytype::Type;
 
 use crate::ast::TypeName;
 
-use super::super::program::PhysicalResourceRef;
+use super::super::program::{PhysicalResourceRef, SemanticResourceRef};
 use super::super::types::{
     GraphResource, NodeId, SegBody, SegSpace, Semantic, SoacInputType, WynSoacPhase,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UpdatePolicy {
+pub enum UpdatePolicy<R = SemanticResourceRef> {
     OrderedOverwrite,
+    /// Allocate a distinct slot with `atomicAdd(counts[key], 1)`, then write
+    /// the value when the returned slot is below `capacity`. `overflow` is a
+    /// one-element u32 resource set to one for invalid keys or full buckets.
+    BucketInsert {
+        counts: R,
+        overflow: R,
+        bucket_count: NodeId,
+        capacity: NodeId,
+    },
 }
 
 #[derive(Clone, Debug)]
-pub struct Body {
+pub struct Body<R = SemanticResourceRef> {
     pub body: SegBody,
     pub inputs: Vec<SoacInputType>,
     pub index_type: Type<TypeName>,
     pub value_type: Type<TypeName>,
     pub dest_elem_type: Type<TypeName>,
-    pub update_policy: UpdatePolicy,
+    pub update_policy: UpdatePolicy<R>,
 }
 
-impl Body {
+impl<R> Body<R> {
     pub(crate) fn for_each_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
         for input in &mut self.inputs {
             visit(&mut input.array);
@@ -36,25 +45,58 @@ impl Body {
         self.body.captures.clone()
     }
 
+    fn referenced_nodes(&self) -> Vec<NodeId> {
+        let mut nodes = self.capture_nodes();
+        if let UpdatePolicy::BucketInsert {
+            bucket_count,
+            capacity,
+            ..
+        } = self.update_policy
+        {
+            nodes.extend([bucket_count, capacity]);
+        }
+        nodes
+    }
+
     fn referenced_node_slots(&mut self) -> Vec<&mut NodeId> {
-        self.body.captures.iter_mut().collect()
+        let mut nodes = self.body.captures.iter_mut().collect::<Vec<_>>();
+        if let UpdatePolicy::BucketInsert {
+            bucket_count,
+            capacity,
+            ..
+        } = &mut self.update_policy
+        {
+            nodes.extend([bucket_count, capacity]);
+        }
+        nodes
     }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct RawState;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParallelStage {
+    Init,
+    Insert,
+    Finish,
+}
+
 #[derive(Clone, Debug)]
 pub enum State<R> {
     Serial,
     Segmented(SegSpace<R>),
+    Pipeline {
+        space: SegSpace<R>,
+        stage: ParallelStage,
+    },
 }
 
 pub type PhysicalState = State<PhysicalResourceRef>;
 
 #[derive(Clone, Debug)]
 pub struct Op<P: WynSoacPhase> {
-    pub body: Body,
+    pub body: Body<P::Resource>,
     pub state: P::HistState,
 }
 
@@ -64,9 +106,12 @@ impl<R: GraphResource> Op<Semantic<R>> {
     }
 
     pub(crate) fn referenced_nodes(&self) -> Vec<NodeId> {
-        let mut nodes = self.body.capture_nodes();
-        if let State::Segmented(space) = &self.state {
-            nodes.extend(space.referenced_nodes());
+        let mut nodes = self.body.referenced_nodes();
+        match &self.state {
+            State::Segmented(space) | State::Pipeline { space, .. } => {
+                nodes.extend(space.referenced_nodes());
+            }
+            State::Serial => {}
         }
         nodes
     }
@@ -74,8 +119,11 @@ impl<R: GraphResource> Op<Semantic<R>> {
     pub(crate) fn referenced_node_slots(&mut self) -> Vec<&mut NodeId> {
         let Self { body, state } = self;
         let mut nodes = body.referenced_node_slots();
-        if let State::Segmented(space) = state {
-            nodes.extend(space.referenced_node_slots());
+        match state {
+            State::Segmented(space) | State::Pipeline { space, .. } => {
+                nodes.extend(space.referenced_node_slots());
+            }
+            State::Serial => {}
         }
         nodes
     }

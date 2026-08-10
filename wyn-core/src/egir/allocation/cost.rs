@@ -155,9 +155,14 @@ fn effect_cost(
         | SideEffectKind::Soac(SoacEffect(_, Soac::Hist(_))) => None,
         SideEffectKind::Effect(EffectOp::Load) => Some(STORAGE_LOAD_COST),
         SideEffectKind::Effect(EffectOp::Op { tag }) => operation_cost(program, tag, summaries, visiting),
-        SideEffectKind::Effect(EffectOp::Alloca { .. } | EffectOp::Store | EffectOp::ControlBarrier) => {
-            None
-        }
+        SideEffectKind::Effect(
+            EffectOp::Alloca { .. }
+            | EffectOp::Store
+            | EffectOp::AtomicLoad
+            | EffectOp::AtomicAdd
+            | EffectOp::AtomicStore
+            | EffectOp::ControlBarrier,
+        ) => None,
     }
 }
 

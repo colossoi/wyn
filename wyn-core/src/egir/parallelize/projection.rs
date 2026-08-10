@@ -118,6 +118,14 @@ fn project_kernel_body_effects(
     Ok((entry, effect_sites))
 }
 
+pub(super) fn project_single_effect_body(
+    source: &program::PlannedEntry,
+    site: SideEffectSite,
+    spec: ProjectionSpec,
+) -> Result<program::PlannedEntry, String> {
+    project_kernel_body_effects(source, [site].into_iter().collect(), spec).map(|(entry, _)| entry)
+}
+
 /// Resolve side-effect ownership from explicit output routes.
 pub(super) fn side_effect_output_slots(entry: &program::PlannedEntry, effect: &SideEffect) -> Vec<usize> {
     if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind {

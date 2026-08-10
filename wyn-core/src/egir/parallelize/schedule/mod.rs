@@ -14,7 +14,7 @@ use crate::egir::program::{
     LogicalResourceArena, MaterializationId, MaterializationKind, MaterializationRequirement, OutputSlotId,
     PlannedEntry, PlannedPublication, SemanticEntry, SemanticEntryId, SemanticResourceRef,
 };
-use crate::egir::soac::filter;
+use crate::egir::soac::{filter, hist};
 use crate::egir::types::{Scheduled, SegExtent};
 use crate::flow::ExecutionModel;
 use crate::pipeline_descriptor::{
@@ -122,6 +122,7 @@ pub(super) struct PhaseSpec {
     body: PlannedEntry,
     label: &'static str,
     filter_plan: Option<super::prepare::ParallelFilterPlan>,
+    hist_plan: Option<super::prepare::ParallelHistPlan>,
     expected_compute: bool,
     dispatch: KernelDispatch,
     resources: Vec<ScheduledResource>,
@@ -136,6 +137,7 @@ impl PhaseSpec {
             body,
             label,
             filter_plan: None,
+            hist_plan: None,
             expected_compute: true,
             dispatch,
             resources,
@@ -150,6 +152,7 @@ impl PhaseSpec {
             body,
             label: "graphics_passthrough",
             filter_plan: None,
+            hist_plan: None,
             expected_compute: false,
             dispatch,
             resources,
@@ -175,6 +178,27 @@ impl PhaseSpec {
             body,
             label,
             filter_plan: Some(super::prepare::ParallelFilterPlan::new(stage, config, storage)),
+            hist_plan: None,
+            expected_compute: true,
+            dispatch,
+            resources,
+            serial_single_workgroup: false,
+            output_projection: None,
+        }
+    }
+
+    pub(super) fn bucket(body: PlannedEntry, dispatch: KernelDispatch, stage: hist::ParallelStage) -> Self {
+        let label = match stage {
+            hist::ParallelStage::Init => "bucket_scatter_init",
+            hist::ParallelStage::Insert => "bucket_scatter_insert",
+            hist::ParallelStage::Finish => "bucket_scatter_finish",
+        };
+        let resources = declared_resources(&body.resource_declarations);
+        Self {
+            body,
+            label,
+            filter_plan: None,
+            hist_plan: Some(super::prepare::ParallelHistPlan { stage }),
             expected_compute: true,
             dispatch,
             resources,
@@ -194,7 +218,7 @@ impl PhaseSpec {
     }
 
     fn prepare(self) -> Result<PreparedPhase, String> {
-        let entry = super::prepare::entry(self.body, self.filter_plan)?;
+        let entry = super::prepare::entry(self.body, self.filter_plan, self.hist_plan)?;
         if entry.execution_model.is_compute() != self.expected_compute {
             let expected = if self.expected_compute { "compute" } else { "graphics" };
             return Err(format!("entry `{}` cannot use a {expected} body", entry.name));

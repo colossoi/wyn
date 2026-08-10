@@ -798,6 +798,20 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
                 self.bind_reducer_params(&op.lam, values, soac_id);
                 self.visit_soac_body(op);
             }
+            SoacOp::BucketScatter {
+                lam,
+                bucket_count,
+                capacity,
+                keys,
+                values,
+                ..
+            } => {
+                self.visit_term(bucket_count);
+                self.visit_term(capacity);
+                self.visit_array_expr(keys);
+                self.visit_array_expr(values);
+                self.visit_soac_body(lam);
+            }
         }
     }
 
@@ -1181,6 +1195,14 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
             } => {
                 let mut aliases = self.alias_targets(ne);
                 aliases.extend(self.array_expr_aliases(indices));
+                aliases.extend(self.array_expr_aliases(values));
+                aliases
+            }
+            SoacOp::BucketScatter {
+                dest, keys, values, ..
+            } => {
+                let mut aliases = self.model.aliases_of(dest.id);
+                aliases.extend(self.array_expr_aliases(keys));
                 aliases.extend(self.array_expr_aliases(values));
                 aliases
             }

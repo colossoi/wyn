@@ -17,6 +17,11 @@ pub(super) struct ParallelFilterPlan {
     storage: filter::RuntimeStorage<SemanticResourceRef>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ParallelHistPlan {
+    pub(super) stage: hist::ParallelStage,
+}
+
 impl ParallelFilterPlan {
     pub(super) fn new(
         stage: filter::ParallelStage,
@@ -34,9 +39,10 @@ impl ParallelFilterPlan {
 pub(super) fn entry(
     entry: PlannedEntry<Semantic>,
     filter_plan: Option<ParallelFilterPlan>,
+    hist_plan: Option<ParallelHistPlan>,
 ) -> Result<PlannedEntry<Scheduled>, String> {
     entry.try_map_phase(|_, _, id, soac| {
-        schedule_soac_with_mode(soac, filter_plan, false).map(|soac| (id, soac))
+        schedule_soac_with_mode(soac, filter_plan, hist_plan, false).map(|soac| (id, soac))
     })
 }
 
@@ -44,12 +50,15 @@ pub(in crate::egir) fn graph(
     graph: EGraph<Semantic>,
     serial: bool,
 ) -> Result<(EGraph<Scheduled>, crate::LookupMap<BlockId, BlockId>), String> {
-    graph.try_map_phase(|_, _, id, soac| schedule_soac_with_mode(soac, None, serial).map(|soac| (id, soac)))
+    graph.try_map_phase(|_, _, id, soac| {
+        schedule_soac_with_mode(soac, None, None, serial).map(|soac| (id, soac))
+    })
 }
 
 fn schedule_soac_with_mode(
     soac: Soac<Semantic>,
     filter_plan: Option<ParallelFilterPlan>,
+    hist_plan: Option<ParallelHistPlan>,
     serial: bool,
 ) -> Result<Soac<Scheduled>, String> {
     Ok(match soac {
@@ -107,8 +116,17 @@ fn schedule_soac_with_mode(
         Soac::Hist(hist::Op { body, state }) => {
             let state = match state {
                 hist::State::Serial => hist::State::Serial,
-                hist::State::Segmented(space) if !serial => hist::State::Segmented(space),
+                hist::State::Segmented(space) if !serial => match hist_plan {
+                    Some(plan) => hist::State::Pipeline {
+                        space,
+                        stage: plan.stage,
+                    },
+                    None => hist::State::Segmented(space),
+                },
                 hist::State::Segmented(_) => hist::State::Serial,
+                hist::State::Pipeline { .. } => {
+                    return Err("histogram was scheduled more than once".into());
+                }
             };
             Soac::Hist(hist::Op { body, state })
         }

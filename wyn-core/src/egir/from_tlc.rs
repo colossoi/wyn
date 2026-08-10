@@ -1110,7 +1110,22 @@ impl<'a, 'b> Converter<'a, 'b> {
             }
             TermKind::TupleProj { tuple, idx } => {
                 let base = self.convert_term(tuple)?;
-                Ok(self.intern_pure(PureOp::Project { index: *idx as u32 }, smallvec![base], ty))
+                // Representation follows the produced tuple, not the logical
+                // TLC projection annotation. This matters for existential
+                // SOAC results such as bucket_scatter counts: the producer is
+                // a concrete storage view even though the source-level field
+                // is abstract until its existential size is opened.
+                let project_ty = match &self.graph.nodes[base].ty {
+                    Type::Constructed(TypeName::Tuple(_), fields) => {
+                        fields.get(*idx).cloned().unwrap_or(ty)
+                    }
+                    _ => ty,
+                };
+                Ok(self.intern_pure(
+                    PureOp::Project { index: *idx as u32 },
+                    smallvec![base],
+                    project_ty,
+                ))
             }
             TermKind::Index { array, index } => {
                 let base = self.convert_term(array)?;
@@ -2115,6 +2130,14 @@ impl<'a, 'b> Converter<'a, 'b> {
                 destination,
             } => self.convert_soac_filter(pred, input, (*destination).into(), ty),
             SoacOp::Scatter { dest, lam, inputs } => self.convert_soac_scatter(dest, lam, inputs, ty),
+            SoacOp::BucketScatter {
+                dest,
+                lam,
+                bucket_count,
+                capacity,
+                keys,
+                values,
+            } => self.convert_soac_bucket_scatter(dest, lam, bucket_count, capacity, keys, values, ty),
             // TODO(reduce_by_index): parallel path needs atomic-op emission
             // (atomicAdd/atomicMin/etc.) in spirv/wgsl backends — not yet wired.
             // Sequential lowering is straightforward (read-combine-write loop) but
@@ -2301,6 +2324,130 @@ impl<'a, 'b> Converter<'a, 'b> {
             }),
             operands,
             result_ty,
+        ))
+    }
+
+    /// Lower the functional bucket-insertion primitive to a histogram-shaped
+    /// semantic operation. The population and overflow cells are ordinary
+    /// compiler-owned resources; only the eventual physical lowering exposes
+    /// their atomic implementation.
+    fn convert_soac_bucket_scatter(
+        &mut self,
+        dest: &crate::tlc::Place,
+        lam: &SoacBody,
+        bucket_count: &Term,
+        capacity: &Term,
+        keys: &ArrayExpr,
+        values: &ArrayExpr,
+        _result_ty: Type<TypeName>,
+    ) -> Result<NodeId, ConvertError> {
+        let bucket_count_value = match &bucket_count.kind {
+            TermKind::IntLit(value) => value.parse::<u32>().ok().filter(|value| *value > 0),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            ConvertError::Unsupported(
+                "bucket_scatter currently requires a positive compile-time bucket_count".into(),
+            )
+        })?;
+        let counts_bytes = u64::from(bucket_count_value)
+            .checked_mul(4)
+            .ok_or_else(|| ConvertError::GraphError("bucket_scatter bucket_count is too large".into()))?;
+
+        let dest_view = *self.locals.get(&dest.id).ok_or_else(|| {
+            ConvertError::GraphError(
+                "bucket_scatter destination is not a bound #[storage] view (must be a storage param)"
+                    .into(),
+            )
+        })?;
+        let dest_view_ty = self.graph.nodes[dest_view].ty.clone();
+        let func = self.lambda_fn_name(&lam.lam)?;
+        let (index_type, value_type) = match &lam.lam.ret_ty {
+            Type::Constructed(TypeName::Tuple(2), args) => (args[0].clone(), args[1].clone()),
+            other => {
+                return Err(ConvertError::GraphError(format!(
+                    "bucket_scatter envelope must return a 2-tuple (key, value), got {other:?}"
+                )));
+            }
+        };
+        let key_nid = self.convert_array_expr_value(keys)?;
+        let value_nid = self.convert_array_expr_value(values)?;
+        let input_nids = [key_nid, value_nid];
+        let input_array_types = [
+            self.value_array_type(key_nid, keys),
+            self.value_array_type(value_nid, values),
+        ];
+        let bucket_count_nid = self.convert_term(bucket_count)?;
+        let capacity_nid = self.convert_term(capacity)?;
+        let capture_nids: Vec<NodeId> = lam
+            .data
+            .captures
+            .iter()
+            .map(|(_, _, term)| self.convert_term(term))
+            .collect::<Result<_, _>>()?;
+
+        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+        let counts_size = LogicalSize::FixedBytes(counts_bytes);
+        let counts = self.arenas.resources.allocate_compiler(
+            CompilerResource::new(CompilerResourceKind::BucketCounts, None, 0),
+            u32_ty.clone(),
+            counts_size.clone(),
+        );
+        let overflow_size = LogicalSize::FixedBytes(4);
+        let overflow = self.arenas.resources.allocate_compiler(
+            CompilerResource::new(CompilerResourceKind::BucketOverflow, None, 0),
+            u32_ty.clone(),
+            overflow_size.clone(),
+        );
+        self.extra_resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef(counts),
+            role: crate::interface::StorageRole::Output,
+            elem_ty: u32_ty.clone(),
+            size: counts_size,
+        });
+        self.extra_resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef(overflow),
+            role: crate::interface::StorageRole::Intermediate,
+            elem_ty: u32_ty.clone(),
+            size: overflow_size,
+        });
+
+        let counts_view_ty = crate::types::view_array_with_size(
+            &u32_ty,
+            Type::Constructed(TypeName::Size(bucket_count_value as usize), vec![]),
+            Type::Constructed(TypeName::Resource(counts), vec![]),
+        );
+        let overflow_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+        let actual_result_ty = Type::Constructed(
+            TypeName::Tuple(3),
+            vec![dest_view_ty, counts_view_ty, overflow_ty],
+        );
+        let mut operands: SmallVec<[NodeId; 4]> = smallvec![dest_view];
+        operands.extend(input_nids);
+        let body_region = self.region(func);
+
+        Ok(self.emit_soac(
+            Soac::Hist(hist::Op {
+                body: hist::Body {
+                    body: SegBody {
+                        region: body_region,
+                        captures: capture_nids,
+                    },
+                    inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
+                    index_type,
+                    value_type,
+                    dest_elem_type: dest.elem_ty.clone(),
+                    update_policy: hist::UpdatePolicy::BucketInsert {
+                        counts: SemanticResourceRef(counts),
+                        overflow: SemanticResourceRef(overflow),
+                        bucket_count: bucket_count_nid,
+                        capacity: capacity_nid,
+                    },
+                },
+                state: hist::RawState,
+            }),
+            operands,
+            actual_result_ty,
         ))
     }
 
@@ -2811,14 +2958,15 @@ fn build_entry_outputs(
     let output_arity = entry_output_arity(entry, ret_type);
     // Pick a `BufferLen` policy for the output binding, in order:
     //
-    //   1. Output type carries a compile-time-known `Size(n)` literal
+    //   1. A non-array output occupies one fixed storage element.
+    //   2. Output type carries a compile-time-known `Size(n)` literal
     //      → `Fixed { bytes: n * elem_bytes }`.
-    //   2. Output's size variable matches one of the entry's storage
+    //   3. Output's size variable matches one of the entry's storage
     //      inputs (the type checker has unified them) → `LikeInput`
     //      tracking that input.
-    //   3. A runtime array output route is sized from the finalized semantic
+    //   4. A runtime array output route is sized from the finalized semantic
     //      dispatch domain → `SameAsDispatch { elem_bytes }`.
-    //   4. None — the host falls back to its default sizing or, if it
+    //   5. None — the host falls back to its default sizing or, if it
     //      tried to allocate this buffer, surfaces a clean error.
     //
     // The size info is already in the (post-monomorphize) type — we
@@ -2828,6 +2976,17 @@ fn build_entry_outputs(
         |binding: Option<BindingRef>, ty: &Type<TypeName>| -> Result<Option<BufferLen>, ConvertError> {
             if binding.is_none() {
                 return Ok(None);
+            }
+            // Compute scalars/vectors/records are represented as one-element
+            // storage buffers. Publish that element's stride so a
+            // descriptor-driven runtime can allocate the output exactly.
+            if !ty.is_array() {
+                let bytes = crate::ssa::layout::storage_elem_stride(ty).ok_or_else(|| {
+                    ConvertError::Internal(format!("scalar output has no static storage layout: {ty:?}"))
+                })?;
+                return Ok(Some(BufferLen::Fixed {
+                    bytes: u64::from(bytes),
+                }));
             }
             let Some(elem_ty) = ty.elem_type() else {
                 return Ok(None);

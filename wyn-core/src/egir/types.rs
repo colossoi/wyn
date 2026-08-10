@@ -543,7 +543,7 @@ impl<R: GraphResource> Soac<Semantic<R>> {
             Self::Filter(op) => Some(&op.state.space),
             Self::Hist(op) => match &op.state {
                 hist::State::Serial => None,
-                hist::State::Segmented(space) => Some(space),
+                hist::State::Segmented(space) | hist::State::Pipeline { space, .. } => Some(space),
             },
         }
     }

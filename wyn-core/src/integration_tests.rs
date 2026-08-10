@@ -2257,8 +2257,9 @@ entry scaled_sum(xs: []i32, scale: i32) i32 =
 /// Output sizing (review finding #2): `build_entry_outputs` now sizes a runtime
 /// output to the dispatch domain (`SameAsDispatch`) per *output type*
 /// (`ty.is_array()`) instead of a per-*entry* `dispatch_sized` flag. A reduction
-/// returns a scalar, so its output buffer must NOT be dispatch-sized — that rule
-/// is only for one-element-per-thread map/scan arrays. (No source construct
+/// returns a scalar, so its output buffer is one fixed storage element rather
+/// than dispatch-sized. That rule is only for one-element-per-thread map/scan
+/// arrays. (No source construct
 /// currently yields a reduction whose result is a runtime-sized array; if one is
 /// added, this is where its sizing must be pinned.)
 #[test]
@@ -2297,12 +2298,11 @@ entry total(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         })
         .collect();
     assert!(!output_lengths.is_empty(), "reduce entry has an output buffer");
-    for length in output_lengths {
-        assert!(
-            !matches!(length, Some(BufferLen::SameAsDispatch { .. })),
-            "scalar reduction output must not be dispatch-sized, got {length:?}"
-        );
-    }
+    assert_eq!(
+        output_lengths,
+        [Some(BufferLen::Fixed { bytes: 4 })],
+        "an i32 reduction output is one four-byte storage element"
+    );
 }
 
 #[test]
@@ -3885,6 +3885,20 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::stage::Reachable, stage: &st
                 }
                 walk_lambda(&lam.lam, bound, symbols, stage, def_name);
             }
+            SoacOp::BucketScatter {
+                lam,
+                bucket_count,
+                capacity,
+                keys,
+                values,
+                ..
+            } => {
+                walk(bucket_count, bound, symbols, stage, def_name);
+                walk(capacity, bound, symbols, stage, def_name);
+                walk_array_expr(keys, bound, symbols, stage, def_name);
+                walk_array_expr(values, bound, symbols, stage, def_name);
+                walk_lambda(&lam.lam, bound, symbols, stage, def_name);
+            }
             SoacOp::ReduceByIndex {
                 op,
                 ne,
@@ -4264,6 +4278,9 @@ fn inst_signature_multiset<Tag, GlobalContext>(
             InstKind::Alloca { .. } => "Alloca".to_string(),
             InstKind::Load { .. } => "Load".to_string(),
             InstKind::Store { .. } => "Store".to_string(),
+            InstKind::AtomicLoad { .. } => "AtomicLoad".to_string(),
+            InstKind::AtomicAdd { .. } => "AtomicAdd".to_string(),
+            InstKind::AtomicStore { .. } => "AtomicStore".to_string(),
             InstKind::ViewIndex { .. } => "ViewIndex".to_string(),
             InstKind::PlaceIndex { .. } => "PlaceIndex".to_string(),
             InstKind::OutputSlot { .. } => "OutputSlot".to_string(),

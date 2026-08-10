@@ -642,6 +642,37 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 self.constructor.const_i32(0)
             }
 
+            InstKind::AtomicLoad { place } => {
+                let ptr_id = self.place_ptr(*place)?;
+                let scope = self.constructor.const_u32(spirv::Scope::Device as u32);
+                let semantics = self.constructor.const_u32(
+                    (spirv::MemorySemantics::UNIFORM_MEMORY | spirv::MemorySemantics::ACQUIRE).bits(),
+                );
+                self.constructor.builder.atomic_load(result_ty, None, ptr_id, scope, semantics)?
+            }
+
+            InstKind::AtomicAdd { place, value } => {
+                let ptr_id = self.place_ptr(*place)?;
+                let val_id = self.get_value_ref(*value)?;
+                let scope = self.constructor.const_u32(spirv::Scope::Device as u32);
+                let semantics = self.constructor.const_u32(
+                    (spirv::MemorySemantics::UNIFORM_MEMORY | spirv::MemorySemantics::ACQUIRE_RELEASE)
+                        .bits(),
+                );
+                self.constructor.builder.atomic_i_add(result_ty, None, ptr_id, scope, semantics, val_id)?
+            }
+
+            InstKind::AtomicStore { place, value } => {
+                let ptr_id = self.place_ptr(*place)?;
+                let val_id = self.get_value_ref(*value)?;
+                let scope = self.constructor.const_u32(spirv::Scope::Device as u32);
+                let semantics = self.constructor.const_u32(
+                    (spirv::MemorySemantics::UNIFORM_MEMORY | spirv::MemorySemantics::RELEASE).bits(),
+                );
+                self.constructor.builder.atomic_store(ptr_id, scope, semantics, val_id)?;
+                self.constructor.const_i32(0)
+            }
+
             InstKind::ViewIndex { view, index, result } => {
                 let view_id = self.get_value_ref(*view)?;
                 let index_id = self.get_value_ref(*index)?;

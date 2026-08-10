@@ -342,6 +342,15 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
         InstKind::Store { place, value } => {
             let _ = write!(out, "store {}, {}", fmt_place(*place), format_ref(value));
         }
+        InstKind::AtomicLoad { place } => {
+            let _ = write!(out, "atomic_load {}", fmt_place(*place));
+        }
+        InstKind::AtomicAdd { place, value } => {
+            let _ = write!(out, "atomic_add {}, {}", fmt_place(*place), format_ref(value));
+        }
+        InstKind::AtomicStore { place, value } => {
+            let _ = write!(out, "atomic_store {}, {}", fmt_place(*place), format_ref(value));
+        }
         InstKind::ViewIndex { view, index, result } => {
             let _ = write!(
                 out,

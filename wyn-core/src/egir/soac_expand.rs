@@ -32,7 +32,7 @@ use super::program::{
     PhysicalSegSpace as SegSpace, PhysicalSideEffect as SideEffect,
     PhysicalSideEffectKind as SideEffectKind, PhysicalSoac as Soac, RegionInterner,
 };
-use super::soac::{filter, screma};
+use super::soac::{filter, hist, screma};
 use crate::ast::TypeName;
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
@@ -623,10 +623,44 @@ fn expand_one(
                 len_input,
                 result_node: result_nid,
             };
-            // Ordered overwrite is non-commutative when indices conflict.
-            // Preserve source order until a future update policy proves a
-            // conflict-safe parallel implementation.
-            build_scatter_loop(graph, bid, idx, scatter, next_effect);
+            match (&op.body.update_policy, &op.state) {
+                (hist::UpdatePolicy::OrderedOverwrite, _) => {
+                    // Ordered overwrite is non-commutative when indices conflict.
+                    build_scatter_loop(graph, bid, idx, scatter, next_effect);
+                }
+                (
+                    hist::UpdatePolicy::BucketInsert {
+                        counts,
+                        overflow,
+                        bucket_count,
+                        capacity,
+                    },
+                    hist::State::Pipeline { stage, .. },
+                ) => {
+                    let spec = BucketScatter {
+                        scatter,
+                        counts: *counts,
+                        overflow: *overflow,
+                        bucket_count: *bucket_count,
+                        capacity: *capacity,
+                    };
+                    match stage {
+                        hist::ParallelStage::Init => build_bucket_init(graph, bid, idx, spec, next_effect),
+                        hist::ParallelStage::Insert => {
+                            build_bucket_insert(graph, bid, idx, spec, next_effect)
+                        }
+                        hist::ParallelStage::Finish => {
+                            build_bucket_finish(graph, bid, idx, spec, next_effect)
+                        }
+                    }
+                }
+                (hist::UpdatePolicy::BucketInsert { .. }, hist::State::Serial) => {
+                    return Err("serial bucket_scatter lowering is not available".into());
+                }
+                (hist::UpdatePolicy::BucketInsert { .. }, hist::State::Segmented(_)) => {
+                    return Err("parallel bucket_scatter was not split into its three stages".into());
+                }
+            }
         }
         SideEffectKind::Soac(SoacEffect(
             _,
@@ -1285,6 +1319,349 @@ struct ScatterLoop {
     /// Loop bound source — the first input `(nid, array_type)`.
     len_input: (NodeId, Type<TypeName>),
     result_node: NodeId,
+}
+
+struct BucketScatter {
+    scatter: ScatterLoop,
+    counts: crate::BindingRef,
+    overflow: crate::BindingRef,
+    bucket_count: NodeId,
+    capacity: NodeId,
+}
+
+fn bucket_atomic_place(graph: &mut EGraph, view: NodeId, index: NodeId, u32_ty: &Type<TypeName>) -> NodeId {
+    graph.intern_pure(PureOp::ViewIndex, smallvec![view, index], u32_ty.clone(), None)
+}
+
+fn build_bucket_init(
+    graph: &mut EGraph,
+    bid: BlockId,
+    idx: usize,
+    spec: BucketScatter,
+    next_effect: &mut crate::IdSource<EffectToken>,
+) {
+    use super::graph_ops::{emit_atomic_store, intern_storage_view, intern_u32};
+
+    let after = graph.skeleton.split_block_before_effect(bid, idx);
+    graph.replace_node_preserving_type(
+        spec.scatter.result_node,
+        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+    );
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let gid = filter_thread_index(graph);
+    let zero = intern_u32(graph, 0, None);
+    let i32_from_u32 = catalog().lookup_by_any_name("i32.u32").expect("catalog has i32.u32 bitcast");
+    let gid_i32 = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: i32_from_u32.id,
+            overload_idx: 0,
+        },
+        smallvec![gid],
+        i32_ty,
+        None,
+    );
+    let in_bounds = graph.intern_pure(
+        PureOp::BinOp("<".into()),
+        smallvec![gid_i32, spec.bucket_count],
+        Type::Constructed(TypeName::Bool, vec![]),
+        None,
+    );
+    let initialize = graph.skeleton.create_block();
+    graph.skeleton.blocks[bid].term = SkeletonTerminator::CondBranch {
+        cond: in_bounds,
+        then_target: initialize,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[bid].control_header = Some(ControlHeader::Selection { merge: after });
+    let counts_view = intern_storage_view(graph, spec.counts, u32_ty.clone(), None);
+    let count_place = bucket_atomic_place(graph, counts_view, gid, &u32_ty);
+    emit_atomic_store(graph, initialize, count_place, zero, next_effect, None);
+
+    // Init is dispatched once per bucket, so lane zero can also reset the
+    // single overflow cell without another kernel.
+    let overflow_view = intern_storage_view(graph, spec.overflow, u32_ty.clone(), None);
+    let overflow_place = bucket_atomic_place(graph, overflow_view, zero, &u32_ty);
+    let is_zero = graph.intern_pure(
+        PureOp::BinOp("==".into()),
+        smallvec![gid, zero],
+        Type::Constructed(TypeName::Bool, vec![]),
+        None,
+    );
+    let reset_overflow = graph.skeleton.create_block();
+    graph.skeleton.blocks[initialize].term = SkeletonTerminator::CondBranch {
+        cond: is_zero,
+        then_target: reset_overflow,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[initialize].control_header = Some(ControlHeader::Selection { merge: after });
+    emit_atomic_store(graph, reset_overflow, overflow_place, zero, next_effect, None);
+    graph.skeleton.blocks[reset_overflow].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
+    };
+}
+
+fn build_bucket_insert(
+    graph: &mut EGraph,
+    bid: BlockId,
+    idx: usize,
+    spec: BucketScatter,
+    next_effect: &mut crate::IdSource<EffectToken>,
+) {
+    use super::graph_ops::{
+        emit_atomic_add, emit_atomic_store, emit_storage_store, intern_storage_view, intern_u32,
+    };
+
+    let BucketScatter {
+        scatter:
+            ScatterLoop {
+                dest_view,
+                dest_elem_ty,
+                func,
+                read_inputs,
+                captures,
+                index_type,
+                value_type,
+                len_input,
+                result_node,
+            },
+        counts,
+        overflow,
+        bucket_count,
+        capacity,
+    } = spec;
+    let after = graph.skeleton.split_block_before_effect(bid, idx);
+    graph.replace_node_preserving_type(
+        result_node,
+        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+    );
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let gid = filter_thread_index(graph);
+    let input_len = emit_length(graph, len_input.0, &len_input.1, &u32_ty);
+    let in_bounds = graph.intern_pure(
+        PureOp::BinOp("<".into()),
+        smallvec![gid, input_len],
+        bool_ty.clone(),
+        None,
+    );
+    let in_range = graph.skeleton.create_block();
+    graph.skeleton.blocks[bid].term = SkeletonTerminator::CondBranch {
+        cond: in_bounds,
+        then_target: in_range,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[bid].control_header = Some(ControlHeader::Selection { merge: after });
+
+    let mut call_operands: SmallVec<[NodeId; 4]> = SmallVec::new();
+    for (array, array_ty, elem_ty) in &read_inputs {
+        call_operands.push(emit_read_element(
+            graph,
+            in_range,
+            *array,
+            gid,
+            array_ty,
+            elem_ty,
+            next_effect,
+        ));
+    }
+    call_operands.extend(captures);
+    let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![index_type.clone(), value_type.clone()]);
+    let pair = graph.intern_pure(PureOp::Call(func), call_operands, pair_ty, None);
+    let key = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![pair], index_type, None);
+    let value = graph.intern_pure(PureOp::Project { index: 1 }, smallvec![pair], value_type, None);
+    let zero_i32 = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone(), None);
+    let nonnegative = graph.intern_pure(
+        PureOp::BinOp(">=".into()),
+        smallvec![key, zero_i32],
+        bool_ty.clone(),
+        None,
+    );
+    let below_bucket_count = graph.intern_pure(
+        PureOp::BinOp("<".into()),
+        smallvec![key, bucket_count],
+        bool_ty.clone(),
+        None,
+    );
+    let valid_key = graph.intern_pure(
+        PureOp::BinOp("&&".into()),
+        smallvec![nonnegative, below_bucket_count],
+        bool_ty.clone(),
+        None,
+    );
+
+    let valid_bucket = graph.skeleton.create_block();
+    let invalid_bucket = graph.skeleton.create_block();
+    let element_done = graph.skeleton.create_block();
+    graph.skeleton.blocks[in_range].term = SkeletonTerminator::CondBranch {
+        cond: valid_key,
+        then_target: valid_bucket,
+        then_args: vec![],
+        else_target: invalid_bucket,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[in_range].control_header = Some(ControlHeader::Selection { merge: element_done });
+
+    let zero = intern_u32(graph, 0, None);
+    let one = intern_u32(graph, 1, None);
+    let overflow_view = intern_storage_view(graph, overflow, u32_ty.clone(), None);
+    let overflow_place = bucket_atomic_place(graph, overflow_view, zero, &u32_ty);
+    emit_atomic_store(graph, invalid_bucket, overflow_place, one, next_effect, None);
+    graph.skeleton.blocks[invalid_bucket].term = SkeletonTerminator::Branch {
+        target: element_done,
+        args: vec![],
+    };
+
+    let counts_view = intern_storage_view(graph, counts, u32_ty.clone(), None);
+    let count_place = bucket_atomic_place(graph, counts_view, key, &u32_ty);
+    let slot = emit_atomic_add(graph, valid_bucket, count_place, one, next_effect, None);
+    let i32_from_u32 = catalog().lookup_by_any_name("i32.u32").expect("catalog has i32.u32 bitcast");
+    let slot_i32 = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: i32_from_u32.id,
+            overload_idx: 0,
+        },
+        smallvec![slot],
+        i32_ty.clone(),
+        None,
+    );
+    let fits_bucket = graph.intern_pure(
+        PureOp::BinOp("<".into()),
+        smallvec![slot_i32, capacity],
+        bool_ty.clone(),
+        None,
+    );
+    let bucket_base = graph.intern_pure(
+        PureOp::BinOp("*".into()),
+        smallvec![key, capacity],
+        i32_ty.clone(),
+        None,
+    );
+    let destination = graph.intern_pure(
+        PureOp::BinOp("+".into()),
+        smallvec![bucket_base, slot_i32],
+        i32_ty.clone(),
+        None,
+    );
+    let dest_ty = graph.nodes[dest_view].ty.clone();
+    let dest_len = emit_length(graph, dest_view, &dest_ty, &i32_ty);
+    let destination_nonnegative = graph.intern_pure(
+        PureOp::BinOp(">=".into()),
+        smallvec![destination, zero_i32],
+        bool_ty.clone(),
+        None,
+    );
+    let fits_dest = graph.intern_pure(
+        PureOp::BinOp("<".into()),
+        smallvec![destination, dest_len],
+        bool_ty.clone(),
+        None,
+    );
+    let valid_destination = graph.intern_pure(
+        PureOp::BinOp("&&".into()),
+        smallvec![destination_nonnegative, fits_dest],
+        bool_ty.clone(),
+        None,
+    );
+    let can_write = graph.intern_pure(
+        PureOp::BinOp("&&".into()),
+        smallvec![fits_bucket, valid_destination],
+        bool_ty,
+        None,
+    );
+    let write = graph.skeleton.create_block();
+    let full = graph.skeleton.create_block();
+    let slot_done = graph.skeleton.create_block();
+    graph.skeleton.blocks[valid_bucket].term = SkeletonTerminator::CondBranch {
+        cond: can_write,
+        then_target: write,
+        then_args: vec![],
+        else_target: full,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[valid_bucket].control_header =
+        Some(ControlHeader::Selection { merge: slot_done });
+    emit_storage_store(
+        graph,
+        write,
+        dest_view,
+        destination,
+        value,
+        dest_elem_ty,
+        next_effect,
+        None,
+    );
+    graph.skeleton.blocks[write].term = SkeletonTerminator::Branch {
+        target: slot_done,
+        args: vec![],
+    };
+    emit_atomic_store(graph, full, overflow_place, one, next_effect, None);
+    graph.skeleton.blocks[full].term = SkeletonTerminator::Branch {
+        target: slot_done,
+        args: vec![],
+    };
+    graph.skeleton.blocks[slot_done].term = SkeletonTerminator::Branch {
+        target: element_done,
+        args: vec![],
+    };
+    graph.skeleton.blocks[element_done].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
+    };
+}
+
+fn build_bucket_finish(
+    graph: &mut EGraph,
+    bid: BlockId,
+    idx: usize,
+    spec: BucketScatter,
+    next_effect: &mut crate::IdSource<EffectToken>,
+) {
+    use super::graph_ops::{emit_atomic_load, intern_storage_view, intern_u32};
+
+    let after = graph.skeleton.split_block_before_effect(bid, idx);
+    let result = spec.scatter.result_node;
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let zero = intern_u32(graph, 0, None);
+    let overflow_view = intern_storage_view(graph, spec.overflow, u32_ty.clone(), None);
+    let overflow_place = bucket_atomic_place(graph, overflow_view, zero, &u32_ty);
+    let overflow = emit_atomic_load(graph, bid, overflow_place, next_effect, None);
+    // Array outputs were aliased to their resident views during output
+    // realization, so only field 2 needs a runtime value here. Rewrite its
+    // consumers directly and let the now-unused aggregate disappear in DCE;
+    // constructing a tuple of storage-view handles would not be a legal WGSL
+    // value representation for fixed-size array fields.
+    let overflow_projections = graph
+        .nodes
+        .iter()
+        .filter_map(|(node, value)| match &value.kind {
+            ENode::Pure {
+                op: PureOp::Project { index: 2 },
+                operands,
+            } if operands.as_slice() == [result] => Some(node),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for projection in overflow_projections {
+        graph.replace_node_references(projection, overflow);
+        graph.nodes[projection].alias = Some(overflow);
+    }
+    graph.replace_node_preserving_type(
+        result,
+        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+    );
+    graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
+    };
 }
 
 /// Sequential `scatter`: for each `i`, `dest_view[indices[i]] = values[i]`.

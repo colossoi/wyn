@@ -42,6 +42,7 @@ pub type Planned = super::program::Program<
     super::program::PlannedGlobal,
 >;
 
+mod bucket;
 mod filter;
 mod kernel;
 mod model;
@@ -61,7 +62,9 @@ use kernel::{
 use model as error;
 use model::{CandidateSelection, DisjointSets};
 use planning::{make_screma_serial, LocatedScrema, SerialScremaRecipe};
-use projection::{partition_entry_output_domains, project_kernel_body, ProjectionSpec};
+use projection::{
+    partition_entry_output_domains, project_kernel_body, project_single_effect_body, ProjectionSpec,
+};
 use reduce::{analyze_reduce_candidate, BoundReduce};
 use scan::{analyze_scan_candidate, BoundScan, ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
 pub use schedule::{
@@ -146,6 +149,14 @@ impl BuiltPhase {
     ) -> schedule::PhaseSpec {
         schedule::PhaseSpec::filter(self.body, dispatch, stage, config, storage)
             .with_resources(self.resources)
+    }
+
+    fn bucket(
+        self,
+        dispatch: schedule::KernelDispatch,
+        stage: super::soac::hist::ParallelStage,
+    ) -> schedule::PhaseSpec {
+        schedule::PhaseSpec::bucket(self.body, dispatch, stage).with_resources(self.resources)
     }
 }
 
@@ -257,6 +268,9 @@ impl planning::PlannedKernel {
             }
             planning::PlannedRecipe::Scan(candidate) => {
                 lowering.lower_parallel_scan(body, kernel, candidate, output_projection)?
+            }
+            planning::PlannedRecipe::Bucket(candidate) => {
+                lowering.lower_parallel_bucket(body, kernel, candidate, output_projection)?
             }
             planning::PlannedRecipe::Map(segment) => {
                 let domain = schedule::domain_from_space(&segment.space)

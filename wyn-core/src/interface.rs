@@ -779,6 +779,9 @@ pub enum StorageRole {
 pub struct StorageBindingDecl {
     pub binding: BindingRef,
     pub role: StorageRole,
+    /// This compiler-managed resource is part of the source entry's host
+    /// result rather than pipeline-only scratch storage.
+    pub host_output: bool,
     /// Stable identity of a compiler-managed logical resource. Entry-local
     /// binding names and descriptor slots are access paths, not identity.
     pub logical_resource: Option<String>,

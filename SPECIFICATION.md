@@ -1721,6 +1721,40 @@ def consumes_first_arg(a: *[]i32, b: []i32) i32 = ???
 For bulk in-place updates with multiple values, use the `scatter`
 function from the prelude.
 
+#### Bucket scatter
+
+`bucket_scatter` is the capacity-bounded, duplicate-key form of bulk
+insertion:
+
+```wyn
+bucket_scatter(dest, bucket_count, capacity, keys, values)
+  -> (buckets, counts, overflow)
+```
+
+Conceptually, for every valid key `keys[i]`, it assigns `values[i]` a
+distinct slot in that bucket. Bucket `b` occupies the flat destination range
+starting at `b * capacity`. The order of values within a bucket is
+unspecified. Unlike `scatter`, callers provide bucket keys rather than unique
+destination indices; the compiler assigns the per-bucket slots.
+
+The arguments and results have these roles:
+
+- `dest: *[p]A` supplies the complete, preinitialised destination. Unfilled
+  cells retain their old values, and the result `buckets` aliases this storage.
+- `bucket_count: i32` is the number of buckets. In the current implementation
+  it must be a positive compile-time integer literal.
+- `capacity: i32` is the maximum number of rows written per bucket.
+- `keys: [n]i32` and `values: [n]A` have the same length.
+- `counts: [bucket_count]u32` reports the total number of rows presented for
+  each valid bucket, including rows beyond its capacity.
+- `overflow: u32` is `1` if a key is invalid, a bucket exceeds `capacity`, or
+  its computed slot lies outside `dest`; otherwise it is `0`.
+
+The destination must currently be a bound storage parameter. The compiler
+lowers the operation to three GPU stages: initialise the counters, insert rows
+using compiler-internal atomics, and publish the overflow flag. Wyn source has
+no atomic or imperative-storage operations.
+
 ### Alias Analysis
 
 The rules used to determine aliasing are intuitive in the intra-

@@ -108,6 +108,16 @@ fn entry_stage_binding_uses(entry: &EntryPublication, bindings: &[Binding]) -> S
     uses
 }
 
+fn output_binding_name(entry: &EntryPublication, index: usize) -> String {
+    entry.outputs[index].target().map(str::to_owned).unwrap_or_else(|| {
+        if entry.outputs.len() == 1 {
+            format!("{}_output", entry.name)
+        } else {
+            format!("{}_output_{}", entry.name, index)
+        }
+    })
+}
+
 fn reconcile_storage_binding_access<'a>(
     bindings: &mut [Binding],
     stages: impl IntoIterator<Item = &'a StageBindingUses>,
@@ -336,8 +346,9 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
             }
 
             // Compiler-managed storage declarations, including gather buffers,
-            // scalar-prepass links, and EGIR-scheduled phase scratch. Emit these
-            // *before* outputs so
+            // scalar-prepass links, and EGIR-scheduled phase scratch. A small
+            // subset is explicitly marked for host readback (bucket counts).
+            // Emit these *before* ordinary outputs so
             // the producer's matching `EntryOutput` (same set/binding) doesn't
             // also claim it as a host-read `Output`. The producer declares it
             // Output (it writes) and the consumer Input (it reads); both surface
@@ -352,8 +363,10 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                     set: decl.binding.set,
                     binding: decl.binding.binding,
                     access,
-                    usage: BufferUsage::Intermediate,
-                    name: if decl.length.is_some() {
+                    usage: if decl.host_output { BufferUsage::Output } else { BufferUsage::Intermediate },
+                    name: if decl.host_output {
+                        format!("{}_counts", entry.name)
+                    } else if decl.length.is_some() {
                         format!("{}_gather_b{}", entry.name, decl.binding.binding)
                     } else {
                         format!("{}_intermediate_b{}", entry.name, decl.binding.binding)
@@ -381,13 +394,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                 // `#[target(name)]` sets it. Otherwise it is derived from the
                 // entry, with the position omitted when there is only one
                 // output.
-                let name = output.target().map(str::to_owned).unwrap_or_else(|| {
-                    if entry.outputs.len() == 1 {
-                        format!("{}_output", entry.name)
-                    } else {
-                        format!("{}_output_{}", entry.name, i)
-                    }
-                });
+                let name = output_binding_name(entry, i);
                 let binding = Binding::StorageBuffer {
                     set: br.set,
                     binding: br.binding,

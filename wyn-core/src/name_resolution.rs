@@ -322,6 +322,7 @@ pub enum SoacKind {
     Zip,
     ReduceByIndex,
     Scatter,
+    BucketScatter,
 }
 
 impl SoacKind {
@@ -335,6 +336,7 @@ impl SoacKind {
             "zip" | "zip2" | "zip3" | "zip4" | "zip5" => SoacKind::Zip,
             "reduce_by_index" => SoacKind::ReduceByIndex,
             "scatter" => SoacKind::Scatter,
+            "bucket_scatter" => SoacKind::BucketScatter,
             _ => return None,
         })
     }

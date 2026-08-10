@@ -178,6 +178,24 @@ pub enum InstKind<R = crate::BindingRef> {
         value: ValueRef,
     },
 
+    /// Compiler-internal `u32` atomic load.
+    AtomicLoad {
+        place: PlaceId,
+    },
+
+    /// Compiler-internal `u32` atomic fetch-add. Produces the value observed
+    /// before the addition.
+    AtomicAdd {
+        place: PlaceId,
+        value: ValueRef,
+    },
+
+    /// Compiler-internal `u32` atomic store.
+    AtomicStore {
+        place: PlaceId,
+        value: ValueRef,
+    },
+
     /// Index into a storage view. Produces an addressable place
     /// (see `PlaceId` — registered in `FuncBody.places` at emit time).
     ViewIndex {
@@ -221,8 +239,11 @@ impl<R: Clone> InstKind<R> {
             InstKind::Alloca { .. }
             | InstKind::OutputSlot { .. }
             | InstKind::Load { .. }
+            | InstKind::AtomicLoad { .. }
             | InstKind::ControlBarrier => vec![],
-            InstKind::Store { value, .. } => vec![*value],
+            InstKind::Store { value, .. }
+            | InstKind::AtomicAdd { value, .. }
+            | InstKind::AtomicStore { value, .. } => vec![*value],
             InstKind::ViewIndex { view, index, .. } => vec![*view, *index],
             InstKind::PlaceIndex { index, .. } => vec![*index],
         }
@@ -234,8 +255,10 @@ impl<R: Clone> InstKind<R> {
     /// `place_result()` for the latter.
     pub fn place_uses(&self) -> Vec<PlaceId> {
         match self {
-            InstKind::Load { place } => vec![*place],
-            InstKind::Store { place, .. } => vec![*place],
+            InstKind::Load { place } | InstKind::AtomicLoad { place } => vec![*place],
+            InstKind::Store { place, .. }
+            | InstKind::AtomicAdd { place, .. }
+            | InstKind::AtomicStore { place, .. } => vec![*place],
             InstKind::PlaceIndex { place, .. } => vec![*place],
             _ => vec![],
         }
@@ -265,7 +288,9 @@ impl<R: Clone> InstKind<R> {
                     sub(o);
                 }
             }
-            InstKind::Store { value, .. } => sub(value),
+            InstKind::Store { value, .. }
+            | InstKind::AtomicAdd { value, .. }
+            | InstKind::AtomicStore { value, .. } => sub(value),
             InstKind::ViewIndex { view, index, .. } => {
                 sub(view);
                 sub(index);
@@ -274,6 +299,7 @@ impl<R: Clone> InstKind<R> {
             InstKind::Alloca { .. }
             | InstKind::OutputSlot { .. }
             | InstKind::Load { .. }
+            | InstKind::AtomicLoad { .. }
             | InstKind::ControlBarrier => {}
         }
     }
@@ -282,8 +308,10 @@ impl<R: Clone> InstKind<R> {
     /// instruction (both operand places and the `result` place, if any).
     pub fn substitute_places(&mut self, sub: &mut impl FnMut(&mut PlaceId)) {
         match self {
-            InstKind::Load { place } => sub(place),
-            InstKind::Store { place, .. } => sub(place),
+            InstKind::Load { place } | InstKind::AtomicLoad { place } => sub(place),
+            InstKind::Store { place, .. }
+            | InstKind::AtomicAdd { place, .. }
+            | InstKind::AtomicStore { place, .. } => sub(place),
             InstKind::Alloca { result, .. }
             | InstKind::OutputSlot { result, .. }
             | InstKind::ViewIndex { result, .. } => sub(result),
@@ -314,7 +342,10 @@ impl<R> InstKind<R> {
             },
             InstKind::Alloca { elem_ty, result } => InstKind::Alloca { elem_ty, result },
             InstKind::Load { place } => InstKind::Load { place },
+            InstKind::AtomicLoad { place } => InstKind::AtomicLoad { place },
             InstKind::Store { place, value } => InstKind::Store { place, value },
+            InstKind::AtomicAdd { place, value } => InstKind::AtomicAdd { place, value },
+            InstKind::AtomicStore { place, value } => InstKind::AtomicStore { place, value },
             InstKind::ViewIndex { view, index, result } => InstKind::ViewIndex { view, index, result },
             InstKind::PlaceIndex { place, index, result } => InstKind::PlaceIndex { place, index, result },
             InstKind::OutputSlot { index, result } => InstKind::OutputSlot { index, result },
