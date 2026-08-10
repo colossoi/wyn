@@ -721,6 +721,15 @@ impl<'a> LowerCtx<'a> {
         // prepend accumulated tuple struct declarations and bindings.
         let mut code = String::new();
 
+        // Program constants are retained as `Global(name)` leaves in SSA.
+        // Lower the reachable dependency closure before ordinary bodies so
+        // their types participate in the module's struct preamble. The text
+        // itself is inserted after those struct declarations below.
+        let mut constant_code = String::new();
+        for index in self.referenced_constant_order()? {
+            self.lower_constant_declaration(index, &mut constant_code)?;
+        }
+
         // Emit storage-dependent helpers once per distinct entry access
         // signature; ordinary helpers still have exactly one emission.
         for emission in self.function_variants.emissions().to_vec() {
@@ -811,6 +820,8 @@ impl<'a> LowerCtx<'a> {
             writeln!(output, "}}").unwrap();
             writeln!(output).unwrap();
         }
+
+        output.push_str(&constant_code);
 
         // Compile-time-constant arrays hoisted to shared module-scope
         // `var<private>` globals (the WGSL analog of the SPIR-V Private-global
@@ -1104,6 +1115,104 @@ impl<'a> LowerCtx<'a> {
 
         output.push_str(&code);
         Ok(output)
+    }
+
+    /// Return referenced program constants in dependency-first order.
+    /// Unused constants are deliberately omitted: the reachable TLC program
+    /// can still contain constants whose types WGSL cannot represent.
+    fn referenced_constant_order(&self) -> Result<Vec<usize>> {
+        fn global_names(body: &FuncBody) -> Vec<&str> {
+            body.inner
+                .insts
+                .values()
+                .filter_map(|inst| match &inst.data {
+                    InstKind::Op {
+                        tag: crate::op::OpTag::Global(name),
+                        ..
+                    } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn visit(
+            index: usize,
+            constants: &[crate::ssa::types::Constant],
+            by_name: &LookupMap<&str, usize>,
+            state: &mut [u8],
+            order: &mut Vec<usize>,
+        ) -> Result<()> {
+            match state[index] {
+                2 => return Ok(()),
+                1 => {
+                    return Err(crate::err_wgsl!(
+                        "cyclic program constant dependency involving '{}'",
+                        constants[index].name
+                    ));
+                }
+                _ => {}
+            }
+            state[index] = 1;
+            for dependency in global_names(&constants[index].body) {
+                if let Some(&dependency_index) = by_name.get(dependency) {
+                    visit(dependency_index, constants, by_name, state, order)?;
+                }
+            }
+            state[index] = 2;
+            order.push(index);
+            Ok(())
+        }
+
+        let constants = &self.program.constants;
+        let by_name = constants
+            .iter()
+            .enumerate()
+            .map(|(index, constant)| (constant.name.as_str(), index))
+            .collect::<LookupMap<_, _>>();
+        let mut state = vec![0; constants.len()];
+        let mut order = Vec::new();
+        for body in self
+            .program
+            .functions
+            .iter()
+            .map(|function| &function.body)
+            .chain(self.program.entry_points.iter().map(|entry| &entry.body))
+        {
+            for name in global_names(body) {
+                if let Some(&index) = by_name.get(name) {
+                    visit(index, constants, &by_name, &mut state, &mut order)?;
+                }
+            }
+        }
+        Ok(order)
+    }
+
+    fn lower_constant_declaration(&mut self, index: usize, output: &mut String) -> Result<()> {
+        let constant = self.program.constants[index].clone();
+        let emitted_name = self.mangle_tracked(&constant.name)?;
+        let result = match constant.body.get_block(constant.body.entry_block()).term {
+            crate::flow::Terminator::Return(Some(value)) => value,
+            _ => {
+                return Err(crate::err_wgsl!(
+                    "program constant '{}' does not have a constant return expression",
+                    constant.name
+                ));
+            }
+        };
+        let initializer = {
+            let mut body = BodyLowerCtx::new(self, &constant.body, Span::new(0, 0, 0, 0));
+            if !body.is_const_value(ValueRef::Ssa(result)) {
+                return Err(crate::err_wgsl!(
+                    "program constant '{}' has a non-constant SSA initializer",
+                    constant.name
+                ));
+            }
+            body.const_expr_of(ValueRef::Ssa(result))?
+        };
+        let ty = self.type_emitter.type_to_wgsl(&constant.body.return_ty)?;
+        writeln!(output, "const {}: {} = {};", emitted_name, ty, initializer).unwrap();
+        writeln!(output).unwrap();
+        Ok(())
     }
 
     fn lower_function(&mut self, func: &Function, emitted_name: &str, output: &mut String) -> Result<()> {
@@ -1710,6 +1819,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 OpTag::Tuple(_) | OpTag::Vector(_) | OpTag::ArrayLit(_) | OpTag::Matrix { .. } => {
                     operands.iter().all(|o| self.is_const_value(*o))
                 }
+                OpTag::Global(name) => self.ctx.program.constants.iter().any(|c| c.name == *name),
                 _ => false,
             },
             _ => false,
@@ -1764,10 +1874,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 }
             }
             OpTag::Bool(b) => Ok((if *b { "true" } else { "false" }).to_string()),
-            OpTag::Vector(_) | OpTag::ArrayLit(_) | OpTag::Tuple(_) => {
+            OpTag::Vector(_) | OpTag::ArrayLit(_) | OpTag::Tuple(_) | OpTag::Matrix { .. } => {
                 let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(&result_ty)?;
                 let parts: Result<Vec<_>> = operands.iter().map(|o| self.const_expr_of(*o)).collect();
                 Ok(format!("{}({})", wgsl_ty, parts?.join(", ")))
+            }
+            OpTag::Global(name) if self.ctx.program.constants.iter().any(|c| c.name == *name) => {
+                self.ctx.mangle_tracked(name)
             }
             _ => Err(crate::err_wgsl_at!(
                 self.blame_span(),
@@ -2663,15 +2776,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 }
 
                 crate::op::OpTag::Global(name) => {
-                    // Constants like iResolution/iTime are emitted at module scope
-                    // and referenced by their user-facing names (validated as
-                    // legal WGSL identifiers). Wyn-internal defs go through the
-                    // mangler.
-                    if self.ctx.program.constants.iter().any(|c| c.name == *name) {
-                        Ok(name.clone())
-                    } else {
-                        self.ctx.mangle_tracked(name)
-                    }
+                    // Program constants and any remaining symbolic globals use
+                    // the same injective module-name mapping as their declarations.
+                    self.ctx.mangle_tracked(name)
                 }
 
                 crate::op::OpTag::Call(func) => {

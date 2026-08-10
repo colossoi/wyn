@@ -840,6 +840,68 @@ fn wgsl_const_array_hoist_is_deduped() {
 }
 
 #[test]
+fn wgsl_emits_referenced_top_level_constant_dependencies() {
+    let wgsl = compile_to_wgsl(
+        r#"
+type word64 = (u32, u32)
+
+def WORDS: [2]word64 = [
+  (0x11223344u32, 0x55667788u32),
+  (0x99aabbccu32, 0xddeeff00u32)
+]
+
+def COPIED_WORDS: [2]word64 = [WORDS[0], WORDS[1]]
+
+def select_word(words: [2]word64, index: i32) word64 = words[index]
+
+#[compute]
+entry composite_constant(index: u32) word64 =
+  select_word(COPIED_WORDS, i32.u32(index & 1u32))
+
+#[compute]
+entry composite_constant_direct(index: u32) word64 =
+  COPIED_WORDS[i32.u32(index & 1u32)]
+"#,
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+    assert_eq!(
+        wgsl.matches("const w_WORDS:").count(),
+        1,
+        "the shared source constant must have one module declaration:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains(" = w_WORDS;"),
+        "both copied-constant uses must resolve to the declaration:\n{wgsl}"
+    );
+}
+
+#[test]
+fn wgsl_mangles_forward_referenced_top_level_constant_names() {
+    let wgsl = compile_to_wgsl(
+        r#"
+def COPIED_TABLE: [2][2]u32 = [TABLE[0], TABLE[1]]
+def TABLE: [2][2]u32 = [BASE, BASE]
+def BASE: [2]u32 = [0x11223344u32, 0x55667788u32]
+
+#[compute]
+entry composite_constant(index: u32) [2]u32 =
+  COPIED_TABLE[i32.u32(index & 1u32)]
+"#,
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+    assert!(
+        wgsl.contains("const w_TABLE_Sv"),
+        "the versioned constant must use a legal mangled declaration:\n{wgsl}"
+    );
+    assert!(
+        !wgsl.contains("TABLE$v"),
+        "the internal source name must not leak into WGSL:\n{wgsl}"
+    );
+}
+
+#[test]
 fn wgsl_record_uniform_emits_struct_var_and_validates() {
     // A record uniform emits the shared positional struct as the
     // `var<uniform>` type with no layout attributes: for the supported
