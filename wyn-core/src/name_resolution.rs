@@ -322,7 +322,9 @@ pub enum SoacKind {
     Zip,
     ReduceByIndex,
     Scatter,
-    BucketScatter,
+    /// Capacity-bounded bucket insertion over a fixed-rank item array.
+    /// The payload is the source item rank (`1..=4`).
+    BucketScatter(u8),
 }
 
 impl SoacKind {
@@ -336,7 +338,10 @@ impl SoacKind {
             "zip" | "zip2" | "zip3" | "zip4" | "zip5" => SoacKind::Zip,
             "reduce_by_index" => SoacKind::ReduceByIndex,
             "scatter" => SoacKind::Scatter,
-            "bucket_scatter" => SoacKind::BucketScatter,
+            "bucket_scatter_1d" => SoacKind::BucketScatter(1),
+            "bucket_scatter_2d" => SoacKind::BucketScatter(2),
+            "bucket_scatter_3d" => SoacKind::BucketScatter(3),
+            "bucket_scatter_4d" => SoacKind::BucketScatter(4),
             _ => return None,
         })
     }

@@ -961,19 +961,18 @@ pub enum SoacOp<C: Payload = data::Empty, S: Payload = data::Empty> {
         lam: SoacBody<C, S>,
         inputs: Vec<ArrayExpr<C, S>>,
     },
-    /// Capacity-bounded bucket insertion. `dest` supplies the complete
-    /// initial bucket storage; `bucket_count * capacity` must not exceed its
-    /// length. Each input receives a distinct slot in its keyed bucket.
+    /// Capacity-bounded bucket insertion. `dest` has shape
+    /// `[bucket_count][capacity]a`; each leaf item receives a distinct slot in
+    /// its keyed bucket.
     BucketScatter {
         dest: Place,
         /// Per-element envelope yielding `(bucket_key, value)`. Plain surface
         /// calls use the identity envelope; producer fusion may compose into
         /// it exactly as for ordinary scatter.
         lam: SoacBody<C, S>,
-        bucket_count: Box<Term<C, S>>,
-        capacity: Box<Term<C, S>>,
-        keys: ArrayExpr<C, S>,
-        values: ArrayExpr<C, S>,
+        items: ArrayExpr<C, S>,
+        /// Number of array dimensions surrounding each `(key, value)` leaf.
+        input_rank: u8,
     },
     // TODO(reduce_by_index): produced by to_tlc but EGIR rejects
     // (`egir::from_tlc::convert_soac`). Sequential lowering would be a
@@ -1649,17 +1648,10 @@ where
             rewrite_array_expr_types(indices, map);
             rewrite_array_expr_types(values, map);
         }
-        SoacOp::BucketScatter {
-            dest,
-            lam,
-            keys,
-            values,
-            ..
-        } => {
+        SoacOp::BucketScatter { dest, lam, items, .. } => {
             dest.elem_ty = map(&dest.elem_ty);
             rewrite_soac_body_types(lam, map);
-            rewrite_array_expr_types(keys, map);
-            rewrite_array_expr_types(values, map);
+            rewrite_array_expr_types(items, map);
         }
     }
 }
@@ -1745,19 +1737,9 @@ where
             visit_array_expr_children(indices, f);
             visit_array_expr_children(values, f);
         }
-        SoacOp::BucketScatter {
-            lam,
-            bucket_count,
-            capacity,
-            keys,
-            values,
-            ..
-        } => {
+        SoacOp::BucketScatter { lam, items, .. } => {
             visit_soac_body_children(lam, f);
-            f(bucket_count);
-            f(capacity);
-            visit_array_expr_children(keys, f);
-            visit_array_expr_children(values, f);
+            visit_array_expr_children(items, f);
         }
     }
 }
@@ -1869,19 +1851,9 @@ where
             visit_array_expr_children_mut(indices, f);
             visit_array_expr_children_mut(values, f);
         }
-        SoacOp::BucketScatter {
-            lam,
-            bucket_count,
-            capacity,
-            keys,
-            values,
-            ..
-        } => {
+        SoacOp::BucketScatter { lam, items, .. } => {
             visit_soac_body_children_mut(lam, f);
-            f(bucket_count);
-            f(capacity);
-            visit_array_expr_children_mut(keys, f);
-            visit_array_expr_children_mut(values, f);
+            visit_array_expr_children_mut(items, f);
         }
     }
 }
@@ -2020,17 +1992,13 @@ where
         SoacOp::BucketScatter {
             dest,
             lam,
-            bucket_count,
-            capacity,
-            keys,
-            values,
+            items,
+            input_rank,
         } => SoacOp::BucketScatter {
             dest,
             lam: map_soac_body_children(lam, f),
-            bucket_count: Box::new(f(*bucket_count)),
-            capacity: Box::new(f(*capacity)),
-            keys: map_array_expr_children(keys, f),
-            values: map_array_expr_children(values, f),
+            items: map_array_expr_children(items, f),
+            input_rank,
         },
     }
 }

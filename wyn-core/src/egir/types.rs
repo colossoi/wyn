@@ -11,6 +11,7 @@ use crate::ast::TypeName;
 use crate::flow::{BlockId, ControlHeader};
 use crate::op::OpTag;
 use crate::ssa::types::ConstantValue;
+use crate::types::TypeExt;
 use crate::LookupMap;
 
 #[cfg(test)]
@@ -160,6 +161,31 @@ impl super::ir::SoacInputType<Type<TypeName>> {
     pub(crate) fn element(&self) -> Type<TypeName> {
         soac_element_type(&self.array)
     }
+}
+
+/// Descend through `rank` logical array dimensions, including SoA tuple
+/// representations, and return the leaf element type.
+pub(crate) fn soac_leaf_type(array: &Type<TypeName>, rank: u8) -> Type<TypeName> {
+    assert!(rank > 0, "SOAC input rank must be positive");
+    (0..rank).fold(array.clone(), |ty, _| soac_element_type(&ty))
+}
+
+/// Return the product of `rank` fixed dimensions. For a SoA tuple, every
+/// component has the same shape, so component zero is representative.
+pub(crate) fn fixed_array_leaf_count(array: &Type<TypeName>, rank: u8) -> Option<u32> {
+    let mut ty = array;
+    while let Some(components) = as_soa_tuple(ty) {
+        ty = components.first()?;
+    }
+    let mut count = 1u32;
+    for _ in 0..rank {
+        let Type::Constructed(TypeName::Size(size), _) = ty.array_size()? else {
+            return None;
+        };
+        count = count.checked_mul(u32::try_from(*size).ok()?)?;
+        ty = ty.elem_type()?;
+    }
+    Some(count)
 }
 
 #[derive(Clone, Copy, Debug, Default)]

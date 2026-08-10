@@ -282,7 +282,9 @@ fn materialize_expression(
                     crate::name_resolution::SoacKind::Zip => ast::SoacKind::Zip,
                     crate::name_resolution::SoacKind::ReduceByIndex => ast::SoacKind::ReduceByIndex,
                     crate::name_resolution::SoacKind::Scatter => ast::SoacKind::Scatter,
-                    crate::name_resolution::SoacKind::BucketScatter => ast::SoacKind::BucketScatter,
+                    crate::name_resolution::SoacKind::BucketScatter(rank) => {
+                        ast::SoacKind::BucketScatter(rank)
+                    }
                 }),
             };
             Ok(ast::TypedIdentifier {

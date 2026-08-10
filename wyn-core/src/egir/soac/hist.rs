@@ -18,6 +18,8 @@ pub enum UpdatePolicy<R = SemanticResourceRef> {
         overflow: R,
         bucket_count: NodeId,
         capacity: NodeId,
+        /// Number of nested input-array dimensions to flatten.
+        input_rank: u8,
     },
 }
 

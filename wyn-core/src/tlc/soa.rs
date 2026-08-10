@@ -500,6 +500,27 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
                         self.rewrite_array_lit_aot(elems, &comp_tys, &variant, &size, &region, span),
                     );
                 }
+                // A nested array-of-tuples changes representation even when
+                // this array's immediate element is itself an array. Its
+                // rewritten elements are tuples of component arrays, so
+                // transpose the enclosing literal as well. Otherwise a term
+                // such as `[row, row]` would incorrectly construct
+                // `Tuple(Array(Array(A)), Array(Array(B)))` from two whole
+                // `Tuple(Array(A), Array(B))` rows.
+                if orig_ty.is_array() {
+                    let transformed_elem =
+                        soa_type(orig_ty.elem_type().expect("array literal type has an element type"));
+                    if let Type::Constructed(TypeName::Tuple(_), comp_tys) = transformed_elem {
+                        let variant =
+                            orig_ty.array_variant().expect("array literal type has a variant").clone();
+                        let size = orig_ty.array_size().expect("array literal type has a size").clone();
+                        let region =
+                            orig_ty.array_buffer().expect("array literal type has a region").clone();
+                        return Some(
+                            self.rewrite_array_lit_aot(elems, &comp_tys, &variant, &size, &region, span),
+                        );
+                    }
+                }
             }
         }
         None

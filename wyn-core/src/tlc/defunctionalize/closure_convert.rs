@@ -227,19 +227,9 @@ fn collect_free_vars_soac<C, S>(
             collect_free_vars_array_expr(indices, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
         }
-        SoacOp::BucketScatter {
-            lam,
-            bucket_count,
-            capacity,
-            keys,
-            values,
-            ..
-        } => {
+        SoacOp::BucketScatter { lam, items, .. } => {
             visit_body(lam);
-            collect_free_vars(bucket_count, bound, top_level, known_defs, symbols, free, seen);
-            collect_free_vars(capacity, bound, top_level, known_defs, symbols, free, seen);
-            collect_free_vars_array_expr(keys, bound, top_level, known_defs, symbols, free, seen);
-            collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(items, bound, top_level, known_defs, symbols, free, seen);
         }
     }
 }
@@ -793,17 +783,13 @@ impl ClosureConverter {
             SoacOp::BucketScatter {
                 dest,
                 lam,
-                bucket_count,
-                capacity,
-                keys,
-                values,
+                items,
+                input_rank,
             } => SoacOp::BucketScatter {
                 dest,
                 lam: self.lift_soac_lambda(lam.lam, span),
-                bucket_count: Box::new(self.convert_term(*bucket_count)),
-                capacity: Box::new(self.convert_term(*capacity)),
-                keys: self.convert_array_expr(keys),
-                values: self.convert_array_expr(values),
+                items: self.convert_array_expr(items),
+                input_rank,
             },
         }
     }

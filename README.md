@@ -213,7 +213,7 @@ fires on a compute-entry SOAC matching the strategy's shape.
 | `Scan`             | `scan op ne xs`                         | ✓      | ✓                   | ✓ (3-phase Blelloch-style) |
 | `Filter`           | `filter pred xs`                        | ✓ (static **and** runtime-sized) | ✓      | ✓ for escaping entry outputs (flags + scan + scatter); non-escaping consumers fuse semantically |
 | `Scatter`          | `scatter(dest, indices, values)`        | ✓ (sequential per-lane indexed store; envelope `(xs..) -> (index, value)` lets the fusion engine fuse map producers into the scatter) | ✓ (writes in place into the bound storage view) | ✗ |
-| `BucketScatter`    | `bucket_scatter(dest, bucket_count, capacity, keys, values)` | ✗ | ✓ (writes in place into the bound storage view) | ✓ (counter init + atomic insertion + overflow publication) |
+| `BucketScatter`    | `bucket_scatter_1d` … `bucket_scatter_4d` over `(key, value)` leaves | ✗ | ✓ (writes in place into `[bucket][capacity]` bound storage) | ✓ (counter init + atomic insertion + overflow publication) |
 | `ReduceByIndex`    | histogram-style indexed reduction       | ✗ EGIR `convert_soac` rejects with `Unsupported` | n/a | ✗ (atomics not yet implemented) |
 
 Notes:

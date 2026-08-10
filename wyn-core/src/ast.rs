@@ -284,7 +284,9 @@ pub enum SoacKind {
     Zip,
     ReduceByIndex,
     Scatter,
-    BucketScatter,
+    /// Capacity-bounded bucket insertion over a fixed-rank item array.
+    /// The payload is the source item rank (`1..=4`).
+    BucketScatter(u8),
 }
 
 /// The source-level `???` expression.

@@ -1,9 +1,9 @@
 -- | Second-Order Array Combinators (SOACs) — derived wrappers around
 -- the array-builtin SOACs (`map`, `reduce`, `scan`, `filter`,
--- `scatter`, `zip`, `length`, `replicate`, `reduce_by_index`,
--- `iota`). The builtins themselves live in the type checker; the
--- functions here are written in Wyn and lower into the same
--- primitives.
+-- `scatter`, `bucket_scatter_1d` through `bucket_scatter_4d`, `zip`,
+-- `length`, `replicate`, `reduce_by_index`, `iota`). The builtins
+-- themselves live in the type checker; the functions here are
+-- written in Wyn and lower into the same primitives.
 --
 -- For SOACs that take an operator (`reduce`, `scan`, `reduce_by_index`
 -- and anything built on them) the operator must be **associative**

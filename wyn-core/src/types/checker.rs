@@ -1465,43 +1465,43 @@ impl<'a> TypeChecker<'a> {
         let body = Self::arrow_chain(&[dest_array.clone(), indices_array, values_array], dest_array);
         self.define_builtin("scatter", Self::generalize_closed(body));
 
-        // bucket_scatter:
-        //   ∀a p n s1 s2 s3. [p]a -> i32 -> i32 -> [n]i32 -> [n]a
-        //     -> ?b. ([p]a, [b]u32, u32)
+        // bucket_scatter_Nd:
+        //   ∀a b c d1..dN. [b][c]a -> [d1]..[dN](i32, a)
+        //     -> ([b][c]a, [b]u32, u32)
         //
-        // The first two scalars are the bucket count and per-bucket capacity.
-        // The destination is complete: cells not filled by an insertion retain
-        // their existing value. The counts length is existential because it is
-        // selected by the bucket-count argument rather than another array
-        // argument's static shape. EGIR currently requires that argument to be
-        // a positive integer literal so it can allocate the counts resource.
-        let (a, p, n) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
-        let (s1, s2, s3) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
-        let dest_array = self.array_ty(Self::var(a), s1, p);
-        let keys_array = self.array_ty(i32(), s2, n);
-        let values_array = self.array_ty(Self::var(a), s3, n);
-        let b = "bucket_count".to_string();
-        let b_size = Type::Constructed(TypeName::SizeVar(b.clone()), vec![]);
-        let counts_array = Type::Constructed(
-            TypeName::Array,
-            vec![
+        // The destination shape supplies the bucket count and capacity. Fixed
+        // rank entry points make the item shape expressible in Wyn's current
+        // type system while all four names lower to the same operation.
+        for rank in 1..=4 {
+            let (a, buckets, capacity) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+            let (dest_outer_variant, dest_inner_variant) = (self.fresh_var(), self.fresh_var());
+            let dest_inner = self.array_ty(Self::var(a), dest_inner_variant, capacity);
+            let dest_array = self.array_ty(dest_inner, dest_outer_variant, buckets);
+
+            let mut items = Type::Constructed(TypeName::Tuple(2), vec![i32(), Self::var(a)]);
+            let item_dims = (0..rank).map(|_| (self.fresh_var(), self.fresh_var())).collect::<Vec<_>>();
+            for &(variant, size) in item_dims.iter().rev() {
+                items = self.array_ty(items, variant, size);
+            }
+
+            let counts_variant = self.fresh_var();
+            let counts = self.array_ty(
                 Type::Constructed(TypeName::UInt(32), vec![]),
-                Type::Constructed(TypeName::ArrayVariantAbstract, vec![]),
-                b_size,
-                no_buffer(),
-            ],
-        );
-        let result = Type::Constructed(
-            TypeName::Tuple(3),
-            vec![
-                dest_array.clone(),
-                counts_array,
-                Type::Constructed(TypeName::UInt(32), vec![]),
-            ],
-        );
-        let result = Type::Constructed(TypeName::Existential(vec![b]), vec![result]);
-        let body = Self::arrow_chain(&[dest_array, i32(), i32(), keys_array, values_array], result);
-        self.define_builtin("bucket_scatter", Self::generalize_closed(body));
+                counts_variant,
+                buckets,
+            );
+            let result = Type::Constructed(
+                TypeName::Tuple(3),
+                vec![
+                    dest_array.clone(),
+                    counts,
+                    Type::Constructed(TypeName::UInt(32), vec![]),
+                ],
+            );
+            let body = Self::arrow_chain(&[dest_array, items], result);
+            let name = format!("bucket_scatter_{rank}d");
+            self.define_builtin(&name, Self::generalize_closed(body));
+        }
 
         // reduce_by_index: ∀a n m s1 s2 s3. Array[a, s1, n] -> (a -> a -> a) -> a -> Array[i32, s2, m] -> Array[a, s3, m] -> Array[a, s1, n]
         let (a, n, m) = (self.fresh_var(), self.fresh_var(), self.fresh_var());

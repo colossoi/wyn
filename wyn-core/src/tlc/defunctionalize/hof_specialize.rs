@@ -279,19 +279,9 @@ fn substitute_in_soac(
             substitute_in_array(indices, old_symbol, replacement, term_ids);
             substitute_in_array(values, old_symbol, replacement, term_ids);
         }
-        SoacOp::BucketScatter {
-            lam,
-            bucket_count,
-            capacity,
-            keys,
-            values,
-            ..
-        } => {
+        SoacOp::BucketScatter { lam, items, .. } => {
             body(lam, old_symbol, replacement, term_ids);
-            substitute_in_place(bucket_count, old_symbol, replacement, term_ids);
-            substitute_in_place(capacity, old_symbol, replacement, term_ids);
-            substitute_in_array(keys, old_symbol, replacement, term_ids);
-            substitute_in_array(values, old_symbol, replacement, term_ids);
+            substitute_in_array(items, old_symbol, replacement, term_ids);
         }
     }
 }

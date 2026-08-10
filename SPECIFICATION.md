@@ -1723,34 +1723,51 @@ function from the prelude.
 
 #### Bucket scatter
 
-`bucket_scatter` is the capacity-bounded, duplicate-key form of bulk
-insertion:
+The `bucket_scatter_1d` through `bucket_scatter_4d` family is the
+capacity-bounded, duplicate-key form of bulk insertion. Conceptually, define
+`bucket_item A = (i32, A)`. The four fixed-rank signatures are:
 
 ```wyn
-bucket_scatter(dest, bucket_count, capacity, keys, values)
-  -> (buckets, counts, overflow)
+bucket_scatter_1d(
+  dest: *[b][c]A, items: [d1](i32, A)
+) ([b][c]A, [b]u32, u32)
+
+bucket_scatter_2d(
+  dest: *[b][c]A, items: [d1][d2](i32, A)
+) ([b][c]A, [b]u32, u32)
+
+bucket_scatter_3d(
+  dest: *[b][c]A, items: [d1][d2][d3](i32, A)
+) ([b][c]A, [b]u32, u32)
+
+bucket_scatter_4d(
+  dest: *[b][c]A, items: [d1][d2][d3][d4](i32, A)
+) ([b][c]A, [b]u32, u32)
 ```
 
-Conceptually, for every valid key `keys[i]`, it assigns `values[i]` a
-distinct slot in that bucket. Bucket `b` occupies the flat destination range
-starting at `b * capacity`. The order of values within a bucket is
-unspecified. Unlike `scatter`, callers provide bucket keys rather than unique
-destination indices; the compiler assigns the per-bucket slots.
+Every leaf `(key, value)` receives a distinct slot in `dest[key]`. The order
+of values within a bucket is unspecified. Unlike `scatter`, callers provide
+bucket keys rather than unique destination indices; the compiler assigns the
+per-bucket slots. The ranked family is a temporary surface encoding of one
+rank-polymorphic operation: all four forms lower to the same internal SOAC,
+with their regular nested item arrays traversed in row-major order.
 
 The arguments and results have these roles:
 
-- `dest: *[p]A` supplies the complete, preinitialised destination. Unfilled
-  cells retain their old values, and the result `buckets` aliases this storage.
-- `bucket_count: i32` is the number of buckets. In the current implementation
-  it must be a positive compile-time integer literal.
-- `capacity: i32` is the maximum number of rows written per bucket.
-- `keys: [n]i32` and `values: [n]A` have the same length.
-- `counts: [bucket_count]u32` reports the total number of rows presented for
+- `dest: *[b][c]A` supplies the complete, preinitialised destination. Its
+  outer dimension `b` is the bucket count and its inner dimension `c` is the
+  per-bucket capacity. Unfilled cells retain their old values, and the result
+  `buckets` aliases this storage.
+- Each item-array leaf is `(key: i32, value: A)`.
+- `counts: [b]u32` reports the total number of rows presented for
   each valid bucket, including rows beyond its capacity.
-- `overflow: u32` is `1` if a key is invalid, a bucket exceeds `capacity`, or
-  its computed slot lies outside `dest`; otherwise it is `0`.
+- `overflow: u32` is `1` if a key is invalid or a bucket exceeds capacity;
+  otherwise it is `0`.
 
 The destination must currently be a bound storage parameter. The compiler
+also currently requires positive fixed destination dimensions and fixed inner
+item dimensions for ranks greater than one. Rank-1 map-produced items may fuse
+directly into insertion; materialisation is permitted for the other forms. It
 lowers the operation to three GPU stages: initialise the counters, insert rows
 using compiler-internal atomics, and publish the overflow flag. Wyn source has
 no atomic or imperative-storage operations.

@@ -201,19 +201,9 @@ impl<C: Payload, S: Payload> Liveness<'_, C, S> {
                 let after_indices = self.analyze_array_expr(indices, after_values);
                 self.analyze(ne, after_indices)
             }
-            SoacOp::BucketScatter {
-                lam,
-                bucket_count,
-                capacity,
-                keys,
-                values,
-                ..
-            } => {
+            SoacOp::BucketScatter { lam, items, .. } => {
                 let after_lam = self.soac_envelope_fixed_point(lam, &per_call_defs, live_after);
-                let after_values = self.analyze_array_expr(values, after_lam);
-                let after_keys = self.analyze_array_expr(keys, after_values);
-                let after_capacity = self.analyze(capacity, after_keys);
-                self.analyze(bucket_count, after_capacity)
+                self.analyze_array_expr(items, after_lam)
             }
         }
     }

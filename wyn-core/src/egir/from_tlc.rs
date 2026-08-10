@@ -2133,11 +2133,9 @@ impl<'a, 'b> Converter<'a, 'b> {
             SoacOp::BucketScatter {
                 dest,
                 lam,
-                bucket_count,
-                capacity,
-                keys,
-                values,
-            } => self.convert_soac_bucket_scatter(dest, lam, bucket_count, capacity, keys, values, ty),
+                items,
+                input_rank,
+            } => self.convert_soac_bucket_scatter(dest, lam, items, *input_rank, ty),
             // TODO(reduce_by_index): parallel path needs atomic-op emission
             // (atomicAdd/atomicMin/etc.) in spirv/wgsl backends — not yet wired.
             // Sequential lowering is straightforward (read-combine-write loop) but
@@ -2335,25 +2333,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         &mut self,
         dest: &crate::tlc::Place,
         lam: &SoacBody,
-        bucket_count: &Term,
-        capacity: &Term,
-        keys: &ArrayExpr,
-        values: &ArrayExpr,
+        items: &ArrayExpr,
+        input_rank: u8,
         _result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        let bucket_count_value = match &bucket_count.kind {
-            TermKind::IntLit(value) => value.parse::<u32>().ok().filter(|value| *value > 0),
-            _ => None,
-        }
-        .ok_or_else(|| {
-            ConvertError::Unsupported(
-                "bucket_scatter currently requires a positive compile-time bucket_count".into(),
-            )
-        })?;
-        let counts_bytes = u64::from(bucket_count_value)
-            .checked_mul(4)
-            .ok_or_else(|| ConvertError::GraphError("bucket_scatter bucket_count is too large".into()))?;
-
         let dest_view = *self.locals.get(&dest.id).ok_or_else(|| {
             ConvertError::GraphError(
                 "bucket_scatter destination is not a bound #[storage] view (must be a storage param)"
@@ -2361,6 +2344,27 @@ impl<'a, 'b> Converter<'a, 'b> {
             )
         })?;
         let dest_view_ty = self.graph.nodes[dest_view].ty.clone();
+        let fixed_size = |ty: &Type<TypeName>, dimension: &str| -> Result<u32, ConvertError> {
+            match ty.array_size() {
+                Some(Type::Constructed(TypeName::Size(size), _)) if *size > 0 => u32::try_from(*size)
+                    .map_err(|_| {
+                        ConvertError::Unsupported(format!(
+                            "bucket_scatter destination {dimension} is too large"
+                        ))
+                    }),
+                _ => Err(ConvertError::Unsupported(format!(
+                    "bucket_scatter currently requires a positive fixed destination {dimension}"
+                ))),
+            }
+        };
+        let bucket_count_value = fixed_size(&dest_view_ty, "bucket count")?;
+        let dest_row_ty = dest_view_ty.elem_type().ok_or_else(|| {
+            ConvertError::GraphError("bucket_scatter destination must have rank 2".into())
+        })?;
+        let capacity_value = fixed_size(dest_row_ty, "capacity")?;
+        let counts_bytes = u64::from(bucket_count_value)
+            .checked_mul(4)
+            .ok_or_else(|| ConvertError::GraphError("bucket_scatter bucket count is too large".into()))?;
         let func = self.lambda_fn_name(&lam.lam)?;
         let (index_type, value_type) = match &lam.lam.ret_ty {
             Type::Constructed(TypeName::Tuple(2), args) => (args[0].clone(), args[1].clone()),
@@ -2370,15 +2374,15 @@ impl<'a, 'b> Converter<'a, 'b> {
                 )));
             }
         };
-        let key_nid = self.convert_array_expr_value(keys)?;
-        let value_nid = self.convert_array_expr_value(values)?;
-        let input_nids = [key_nid, value_nid];
-        let input_array_types = [
-            self.value_array_type(key_nid, keys),
-            self.value_array_type(value_nid, values),
-        ];
-        let bucket_count_nid = self.convert_term(bucket_count)?;
-        let capacity_nid = self.convert_term(capacity)?;
+        let items_nid = self.convert_array_expr_value(items)?;
+        let input_array_type = self.value_array_type(items_nid, items);
+        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+        let bucket_count_nid = self.intern_pure(
+            PureOp::Int(bucket_count_value.to_string()),
+            smallvec![],
+            i32_ty.clone(),
+        );
+        let capacity_nid = self.intern_pure(PureOp::Int(capacity_value.to_string()), smallvec![], i32_ty);
         let capture_nids: Vec<NodeId> = lam
             .data
             .captures
@@ -2423,7 +2427,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             vec![dest_view_ty, counts_view_ty, overflow_ty],
         );
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![dest_view];
-        operands.extend(input_nids);
+        operands.push(items_nid);
         let body_region = self.region(func);
 
         Ok(self.emit_soac(
@@ -2433,7 +2437,9 @@ impl<'a, 'b> Converter<'a, 'b> {
                         region: body_region,
                         captures: capture_nids,
                     },
-                    inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
+                    inputs: vec![SoacInputType {
+                        array: input_array_type,
+                    }],
                     index_type,
                     value_type,
                     dest_elem_type: dest.elem_ty.clone(),
@@ -2442,6 +2448,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         overflow: SemanticResourceRef(overflow),
                         bucket_count: bucket_count_nid,
                         capacity: capacity_nid,
+                        input_rank,
                     },
                 },
                 state: hist::RawState,

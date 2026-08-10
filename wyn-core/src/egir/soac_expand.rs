@@ -37,8 +37,8 @@ use crate::ast::TypeName;
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
 use super::types::{
-    as_soa_tuple, soac_element_type, ENode, EffectOp, EffectToken, NodeId, PureOp, SkeletonTerminator,
-    SoacDestination, SoacEffect,
+    as_soa_tuple, soac_element_type, soac_leaf_type, ENode, EffectOp, EffectToken, NodeId, PureOp,
+    SkeletonTerminator, SoacDestination, SoacEffect,
 };
 
 /// Expand every graph-bearing body and rebuild the program at the
@@ -604,10 +604,19 @@ fn expand_one(
             let n_inputs = op.body.inputs.len();
             let input_nids = &se.operand_nodes[1..1 + n_inputs];
             let captures = op.body.body.captures.clone();
+            let ranked_input = match op.body.update_policy {
+                hist::UpdatePolicy::BucketInsert { input_rank, .. } => Some(input_rank),
+                hist::UpdatePolicy::OrderedOverwrite => None,
+            };
             let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
                 .iter()
                 .zip(op.body.inputs.iter())
-                .map(|(nid, input)| (*nid, input.array.clone(), input.element()))
+                .map(|(nid, input)| {
+                    let elem = ranked_input
+                        .map(|rank| soac_leaf_type(&input.array, rank))
+                        .unwrap_or_else(|| input.element());
+                    (*nid, input.array.clone(), elem)
+                })
                 .collect();
             let len_input = (input_nids[0], op.body.inputs[0].array.clone());
             let result_nid = se.result.expect("Scatter has a result");
@@ -634,6 +643,7 @@ fn expand_one(
                         overflow,
                         bucket_count,
                         capacity,
+                        input_rank,
                     },
                     hist::State::Pipeline { stage, .. },
                 ) => {
@@ -643,6 +653,7 @@ fn expand_one(
                         overflow: *overflow,
                         bucket_count: *bucket_count,
                         capacity: *capacity,
+                        input_rank: *input_rank,
                     };
                     match stage {
                         hist::ParallelStage::Init => build_bucket_init(graph, bid, idx, spec, next_effect),
@@ -1327,6 +1338,7 @@ struct BucketScatter {
     overflow: crate::BindingRef,
     bucket_count: NodeId,
     capacity: NodeId,
+    input_rank: u8,
 }
 
 fn bucket_atomic_place(graph: &mut EGraph, view: NodeId, index: NodeId, u32_ty: &Type<TypeName>) -> NodeId {
@@ -1413,9 +1425,7 @@ fn build_bucket_insert(
     spec: BucketScatter,
     next_effect: &mut crate::IdSource<EffectToken>,
 ) {
-    use super::graph_ops::{
-        emit_atomic_add, emit_atomic_store, emit_storage_store, intern_storage_view, intern_u32,
-    };
+    use super::graph_ops::{emit_atomic_add, emit_atomic_store, intern_storage_view, intern_u32};
 
     let BucketScatter {
         scatter:
@@ -1434,6 +1444,7 @@ fn build_bucket_insert(
         overflow,
         bucket_count,
         capacity,
+        input_rank,
     } = spec;
     let after = graph.skeleton.split_block_before_effect(bid, idx);
     graph.replace_node_preserving_type(
@@ -1444,7 +1455,7 @@ fn build_bucket_insert(
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let gid = filter_thread_index(graph);
-    let input_len = emit_length(graph, len_input.0, &len_input.1, &u32_ty);
+    let input_len = emit_flat_length(graph, len_input.0, &len_input.1, input_rank, &u32_ty);
     let in_bounds = graph.intern_pure(
         PureOp::BinOp("<".into()),
         smallvec![gid, input_len],
@@ -1463,13 +1474,14 @@ fn build_bucket_insert(
 
     let mut call_operands: SmallVec<[NodeId; 4]> = SmallVec::new();
     for (array, array_ty, elem_ty) in &read_inputs {
-        call_operands.push(emit_read_element(
+        call_operands.push(emit_read_ranked_element(
             graph,
             in_range,
             *array,
             gid,
             array_ty,
             elem_ty,
+            input_rank,
             next_effect,
         ));
     }
@@ -1539,49 +1551,11 @@ fn build_bucket_insert(
         bool_ty.clone(),
         None,
     );
-    let bucket_base = graph.intern_pure(
-        PureOp::BinOp("*".into()),
-        smallvec![key, capacity],
-        i32_ty.clone(),
-        None,
-    );
-    let destination = graph.intern_pure(
-        PureOp::BinOp("+".into()),
-        smallvec![bucket_base, slot_i32],
-        i32_ty.clone(),
-        None,
-    );
-    let dest_ty = graph.nodes[dest_view].ty.clone();
-    let dest_len = emit_length(graph, dest_view, &dest_ty, &i32_ty);
-    let destination_nonnegative = graph.intern_pure(
-        PureOp::BinOp(">=".into()),
-        smallvec![destination, zero_i32],
-        bool_ty.clone(),
-        None,
-    );
-    let fits_dest = graph.intern_pure(
-        PureOp::BinOp("<".into()),
-        smallvec![destination, dest_len],
-        bool_ty.clone(),
-        None,
-    );
-    let valid_destination = graph.intern_pure(
-        PureOp::BinOp("&&".into()),
-        smallvec![destination_nonnegative, fits_dest],
-        bool_ty.clone(),
-        None,
-    );
-    let can_write = graph.intern_pure(
-        PureOp::BinOp("&&".into()),
-        smallvec![fits_bucket, valid_destination],
-        bool_ty,
-        None,
-    );
     let write = graph.skeleton.create_block();
     let full = graph.skeleton.create_block();
     let slot_done = graph.skeleton.create_block();
     graph.skeleton.blocks[valid_bucket].term = SkeletonTerminator::CondBranch {
-        cond: can_write,
+        cond: fits_bucket,
         then_target: write,
         then_args: vec![],
         else_target: full,
@@ -1589,16 +1563,16 @@ fn build_bucket_insert(
     };
     graph.skeleton.blocks[valid_bucket].control_header =
         Some(ControlHeader::Selection { merge: slot_done });
-    emit_storage_store(
-        graph,
-        write,
-        dest_view,
-        destination,
-        value,
+    let dest_ty = graph.nodes[dest_view].ty.clone();
+    let dest_row_ty = dest_ty.elem_type().expect("bucket_scatter destination must have rank 2").clone();
+    let row_place = graph.intern_pure(PureOp::ViewIndex, smallvec![dest_view, key], dest_row_ty, None);
+    let destination = graph.intern_pure(
+        PureOp::PlaceIndex,
+        smallvec![row_place, slot_i32],
         dest_elem_ty,
-        next_effect,
         None,
     );
+    emit_store(graph, write, destination, value, next_effect, None);
     graph.skeleton.blocks[write].term = SkeletonTerminator::Branch {
         target: slot_done,
         args: vec![],
@@ -2584,6 +2558,171 @@ fn emit_length(
         result_ty.clone(),
         None,
     )
+}
+
+/// Emit the number of leaf elements in a regular nested array. The outer
+/// dimension may be runtime-sized; inner dimensions are fixed by the ranked
+/// bucket-scatter type.
+fn emit_flat_length(
+    graph: &mut EGraph,
+    arr_nid: NodeId,
+    arr_ty: &Type<TypeName>,
+    rank: u8,
+    result_ty: &Type<TypeName>,
+) -> NodeId {
+    let outer_len = emit_length(graph, arr_nid, arr_ty, result_ty);
+    if rank == 1 {
+        return outer_len;
+    }
+    let inner_count = ranked_inner_extents(arr_ty, rank)
+        .into_iter()
+        .try_fold(1u32, u32::checked_mul)
+        .expect("bucket_scatter inner dimensions are too large");
+    if inner_count == 1 {
+        return outer_len;
+    }
+    let inner_count = super::graph_ops::intern_u32(graph, inner_count, None);
+    graph.intern_pure(
+        PureOp::BinOp("*".into()),
+        smallvec![outer_len, inner_count],
+        result_ty.clone(),
+        None,
+    )
+}
+
+fn ranked_inner_extents(arr_ty: &Type<TypeName>, rank: u8) -> Vec<u32> {
+    let mut ty = arr_ty;
+    while let Some(components) = as_soa_tuple(ty) {
+        ty = components.first().expect("SoA tuple has a component");
+    }
+    let mut extents = Vec::with_capacity(rank.saturating_sub(1) as usize);
+    for dimension in 0..rank {
+        if dimension > 0 {
+            let Type::Constructed(TypeName::Size(size), _) =
+                ty.array_size().expect("bucket_scatter item rank exceeds its array type")
+            else {
+                panic!("bucket_scatter inner dimensions must be fixed");
+            };
+            extents.push(u32::try_from(*size).expect("bucket_scatter dimension is too large"));
+        }
+        ty = ty.elem_type().expect("bucket_scatter item rank exceeds its array type");
+    }
+    extents
+}
+
+/// Read the leaf at a flattened row-major index from a rank-N regular array.
+/// Nested storage is addressed as `ViewIndex` followed by `PlaceIndex` nodes,
+/// so the backend retains the declared multidimensional layout.
+fn emit_read_ranked_element(
+    graph: &mut EGraph,
+    body: BlockId,
+    arr_nid: NodeId,
+    idx_nid: NodeId,
+    arr_ty: &Type<TypeName>,
+    elem_ty: &Type<TypeName>,
+    rank: u8,
+    next_effect: &mut crate::IdSource<EffectToken>,
+) -> NodeId {
+    if rank == 1 {
+        return emit_read_element(graph, body, arr_nid, idx_nid, arr_ty, elem_ty, next_effect);
+    }
+    let actual_arr_ty = graph
+        .nodes
+        .get(arr_nid)
+        .map(|node| &node.ty)
+        .filter(|ty| is_plain_array_source(ty) || as_soa_tuple(ty).is_some())
+        .cloned();
+    let arr_ty = actual_arr_ty.as_ref().unwrap_or(arr_ty);
+    if let Some(components) = as_soa_tuple(arr_ty) {
+        let mut leaves: SmallVec<[NodeId; 4]> = SmallVec::with_capacity(components.len());
+        for (component_index, component_ty) in components.iter().enumerate() {
+            let component = graph.intern_pure(
+                PureOp::Project {
+                    index: component_index as u32,
+                },
+                smallvec![arr_nid],
+                component_ty.clone(),
+                None,
+            );
+            let component_leaf_ty = soac_leaf_type(component_ty, rank);
+            leaves.push(emit_read_ranked_element(
+                graph,
+                body,
+                component,
+                idx_nid,
+                component_ty,
+                &component_leaf_ty,
+                rank,
+                next_effect,
+            ));
+        }
+        return graph.intern_pure(PureOp::Tuple(components.len()), leaves, elem_ty.clone(), None);
+    }
+
+    let inner_extents = ranked_inner_extents(arr_ty, rank);
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let mut remaining = idx_nid;
+    let mut coordinates = SmallVec::<[NodeId; 4]>::with_capacity(rank as usize);
+    for dimension in 0..rank as usize {
+        if dimension + 1 == rank as usize {
+            coordinates.push(remaining);
+            continue;
+        }
+        let stride = inner_extents[dimension..]
+            .iter()
+            .copied()
+            .try_fold(1u32, u32::checked_mul)
+            .expect("bucket_scatter inner dimensions are too large");
+        let stride_nid = super::graph_ops::intern_u32(graph, stride, None);
+        let coordinate = graph.intern_pure(
+            PureOp::BinOp("/".into()),
+            smallvec![remaining, stride_nid],
+            u32_ty.clone(),
+            None,
+        );
+        coordinates.push(coordinate);
+        remaining = graph.intern_pure(
+            PureOp::BinOp("%".into()),
+            smallvec![remaining, stride_nid],
+            u32_ty.clone(),
+            None,
+        );
+    }
+
+    if is_view_source(arr_ty) {
+        let mut current_ty = arr_ty.clone();
+        let first_elem_ty =
+            current_ty.elem_type().expect("bucket_scatter item rank exceeds its array type").clone();
+        let mut place = graph.intern_pure(
+            PureOp::ViewIndex,
+            smallvec![arr_nid, coordinates[0]],
+            first_elem_ty.clone(),
+            None,
+        );
+        current_ty = first_elem_ty;
+        for coordinate in coordinates.iter().skip(1) {
+            let next_ty =
+                current_ty.elem_type().expect("bucket_scatter item rank exceeds its array type").clone();
+            place = graph.intern_pure(
+                PureOp::PlaceIndex,
+                smallvec![place, *coordinate],
+                next_ty.clone(),
+                None,
+            );
+            current_ty = next_ty;
+        }
+        return emit_load(graph, body, place, elem_ty.clone(), next_effect, None);
+    }
+
+    let mut value = arr_nid;
+    let mut current_ty = arr_ty.clone();
+    for coordinate in coordinates {
+        let next_ty =
+            current_ty.elem_type().expect("bucket_scatter item rank exceeds its array type").clone();
+        value = graph.intern_pure(PureOp::Index, smallvec![value, coordinate], next_ty.clone(), None);
+        current_ty = next_ty;
+    }
+    value
 }
 
 /// Emit a per-iteration read of `arr[idx]` at the given body block.

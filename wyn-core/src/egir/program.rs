@@ -1049,11 +1049,13 @@ fn physicalize_soac(
                     overflow,
                     bucket_count,
                     capacity,
+                    input_rank,
                 } => hist::UpdatePolicy::BucketInsert {
                     counts: binding(counts, bindings),
                     overflow: binding(overflow, bindings),
                     bucket_count: nodes[&bucket_count],
                     capacity: nodes[&capacity],
+                    input_rank,
                 },
             };
             let body = hist::Body {

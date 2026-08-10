@@ -391,25 +391,9 @@ fn check_linear_image_results_in_soac(
             .or_else(|| check_linear_image_results_in_array_expr(indices, program, model))
             .or_else(|| check_linear_image_results_in_array_expr(values, program, model))
             .or_else(|| check_body(op)),
-        SoacOp::BucketScatter {
-            lam,
-            bucket_count,
-            capacity,
-            keys,
-            values,
-            ..
-        } => check_linear_image_results_in_term(
-            bucket_count,
-            program,
-            model,
-            LinearImageUseContext::Discarded,
-        )
-        .or_else(|| {
-            check_linear_image_results_in_term(capacity, program, model, LinearImageUseContext::Discarded)
-        })
-        .or_else(|| check_linear_image_results_in_array_expr(keys, program, model))
-        .or_else(|| check_linear_image_results_in_array_expr(values, program, model))
-        .or_else(|| check_body(lam)),
+        SoacOp::BucketScatter { lam, items, .. } => {
+            check_linear_image_results_in_array_expr(items, program, model).or_else(|| check_body(lam))
+        }
     }
 }
 

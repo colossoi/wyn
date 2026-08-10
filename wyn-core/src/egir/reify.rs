@@ -370,10 +370,16 @@ fn semantic_facts(
     let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
         return None;
     };
-    let (input, operand_index, is_screma) = match soac {
-        Soac::Screma(op) => (op.lanes().inputs.first(), 0, true),
-        Soac::Filter(op) => (Some(filter_input_type(&op.body.input)), 0, false),
-        Soac::Hist(op) => (op.body.inputs.first(), 1, false),
+    let (input, operand_index, is_screma, flatten_rank) = match soac {
+        Soac::Screma(op) => (op.lanes().inputs.first(), 0, true, None),
+        Soac::Filter(op) => (Some(filter_input_type(&op.body.input)), 0, false, None),
+        Soac::Hist(op) => {
+            let rank = match op.body.update_policy {
+                hist::UpdatePolicy::BucketInsert { input_rank, .. } => Some(input_rank),
+                hist::UpdatePolicy::OrderedOverwrite => None,
+            };
+            (op.body.inputs.first(), 1, false, rank)
+        }
     };
     let output_slots = if is_screma {
         entry.map_or_else(Vec::new, |entry| output_slots(entry, effect))
@@ -383,7 +389,7 @@ fn semantic_facts(
     let resources =
         if is_screma { semantic_resources(graph, entry, effect, &output_slots) } else { Vec::new() };
     Some(Facts {
-        space: space(graph, entry, effect, input, operand_index),
+        space: space(graph, entry, effect, input, operand_index, flatten_rank),
         placement: requested_placement,
         output_slots,
         resources,
@@ -403,11 +409,24 @@ fn space(
     effect: &SideEffect<Raw>,
     input: Option<&SoacInputType>,
     operand_index: usize,
+    flatten_rank: Option<u8>,
 ) -> SegSpace<SemanticResourceRef> {
     let extent = effect.operand_nodes.get(operand_index).copied().map(|node| {
+        if let Some(rank) = flatten_rank {
+            if let Some(count) =
+                input.and_then(|input| super::types::fixed_array_leaf_count(&input.array, rank))
+            {
+                return SegExtent::Fixed(count);
+            }
+        }
         if let Some(resource) = graph_ops::extract_storage_view_source(graph, node) {
-            let elem_bytes = input
-                .and_then(|input| crate::ssa::layout::storage_elem_stride(&input.element()))
+            let elem_ty = input.map(|input| match flatten_rank {
+                Some(rank) => super::types::soac_leaf_type(&input.array, rank),
+                None => input.element(),
+            });
+            let elem_bytes = elem_ty
+                .as_ref()
+                .and_then(crate::ssa::layout::storage_elem_stride)
                 .expect("resource-backed SOAC input must have a storable element type");
             return SegExtent::ResourceLength {
                 node,

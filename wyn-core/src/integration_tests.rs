@@ -3885,18 +3885,8 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::stage::Reachable, stage: &st
                 }
                 walk_lambda(&lam.lam, bound, symbols, stage, def_name);
             }
-            SoacOp::BucketScatter {
-                lam,
-                bucket_count,
-                capacity,
-                keys,
-                values,
-                ..
-            } => {
-                walk(bucket_count, bound, symbols, stage, def_name);
-                walk(capacity, bound, symbols, stage, def_name);
-                walk_array_expr(keys, bound, symbols, stage, def_name);
-                walk_array_expr(values, bound, symbols, stage, def_name);
+            SoacOp::BucketScatter { lam, items, .. } => {
+                walk_array_expr(items, bound, symbols, stage, def_name);
                 walk_lambda(&lam.lam, bound, symbols, stage, def_name);
             }
             SoacOp::ReduceByIndex {
