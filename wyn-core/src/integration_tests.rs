@@ -1418,6 +1418,27 @@ entry dependent_rows(dest: *[4][8]i32) ([4][8]i32, [4]u32, u32) =
 }
 
 #[test]
+fn multiple_bucket_scatter_operations_are_rejected_without_panicking() {
+    let source = r#"
+entry two_buckets(
+    dest1: *[2][4]u32,
+    dest2: *[2][4]u32
+) (([2][4]u32, [2]u32, u32), ([2][4]u32, [2]u32, u32)) =
+  let first = bucket_scatter_1d(dest1, [(0, 10u32), (1, 11u32)])
+  let second = bucket_scatter_1d(dest2, [(0, 20u32), (1, 21u32)])
+  in (first, second)
+"#;
+
+    let Err(error) = crate::compile_thru_spirv(source) else {
+        panic!("multiple bucket scatters in one entry must be rejected")
+    };
+    assert!(
+        error.to_string().contains("bucket_scatter cannot currently share one entry pipeline"),
+        "unexpected multiple-bucket diagnostic: {error}"
+    );
+}
+
+#[test]
 fn egir_map_scatter_envelope_fuses_and_deduplicates_both_producers() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 

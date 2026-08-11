@@ -596,6 +596,31 @@ fn analyze_projected_kernel(
     resources: &LogicalResourceArena,
     targets: RecipeTargets,
 ) -> Result<(PlannedKernel<AnalyzedRecipe>, Vec<ScratchRequest>)> {
+    let mut bucket_histograms = 0usize;
+    for site in &targets.hists {
+        let located = located_hist(&body, *site)?;
+        if located
+            .op
+            .form
+            .operations
+            .iter()
+            .any(|operation| matches!(operation.update, hist::Update::BucketInsert { .. }))
+        {
+            bucket_histograms += 1;
+        }
+    }
+    if bucket_histograms != 0
+        && (targets.hists.len() != 1
+            || !targets.filters.is_empty()
+            || !targets.kernel_scremas.is_empty()
+            || !targets.promoted_folds.is_empty())
+    {
+        return Err(ParallelizeError::Invalid(
+            "bucket_scatter cannot currently share one entry pipeline with another filter, histogram, scan, or reduction; split the operations into separate entries"
+                .into(),
+        ));
+    }
+
     if targets.filters.len() == 1 {
         if let Some(CandidateSelection::Selected(candidate)) =
             super::analyze_filter_candidate(&body, targets.filters[0])
@@ -610,6 +635,11 @@ fn analyze_projected_kernel(
         if let Some(candidate) = super::hist::analyze_hist_candidate(program, &body, located) {
             let kernel = PlannedKernel::new(body, output_projection, AnalyzedRecipe::Hist(candidate));
             return Ok((kernel, Vec::new()));
+        }
+        if bucket_histograms != 0 {
+            return Err(ParallelizeError::Invalid(
+                "bucket_scatter could not be lowered to its required init/insert/finish pipeline".into(),
+            ));
         }
     }
     let (recipe, requests) = match targets.screma_site() {
