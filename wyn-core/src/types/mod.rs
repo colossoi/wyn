@@ -983,7 +983,14 @@ pub fn array_with_buffer(ty: &Type, region: Type) -> Type {
 /// descriptor from the type instead of a side-map.
 pub fn view_array_of(view_ty: &Type, region: Type) -> Type {
     match view_ty {
-        Type::Constructed(TypeName::Array, _) => array_with_buffer(view_ty, region),
+        Type::Constructed(TypeName::Array, _) => {
+            let mut view = array_with_buffer(view_ty, region);
+            let Type::Constructed(TypeName::Array, args) = &mut view else {
+                unreachable!()
+            };
+            args[1] = array_variant_view();
+            view
+        }
         elem => view_array_with_size(elem, Type::Constructed(TypeName::SizePlaceholder, vec![]), region),
     }
 }

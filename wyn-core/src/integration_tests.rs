@@ -1020,6 +1020,45 @@ entry descriptor_for_wgsl(dest: *[2][4]u32) ([2][4]u32, [2]u32, u32) =
 }
 
 #[test]
+fn ranked_bucket_scatter_named_helper_reads_fixed_storage_array() {
+    let source = r#"
+def item_from_source(
+    source: [64][64]u32,
+    row: i32,
+    column: i32
+) (i32, u32) =
+  ((row + column) % 4, source[row][column])
+
+entry named_storage_helper(
+    dest: *[4][8]u32,
+    source: [64][64]u32
+) ([4][8]u32, [4]u32, u32) =
+  let items: [2][2](i32, u32) =
+    map(|row: i32|
+      map(|column: i32|
+        item_from_source(source, row, column),
+        iota(2)),
+      iota(2))
+  in bucket_scatter_2d(dest, items)
+"#;
+
+    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+        compile_to_semantic_egir(source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    ))
+    .expect("named helper over a fixed storage array lowers to WGSL");
+
+    let module = naga::front::wgsl::parse_str(&wgsl)
+        .unwrap_or_else(|error| panic!("Naga rejected named-helper WGSL: {error:?}\n{wgsl}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("Naga validation rejected named-helper WGSL: {error:?}\n{wgsl}"));
+}
+
+#[test]
 fn ranked_bucket_scatter_reads_bound_rank_two_aos_items() {
     let source = r#"
 entry collision_shape_2d_bound(
