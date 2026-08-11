@@ -806,6 +806,34 @@ fn wgsl_const_array_hoist_is_deduped() {
 }
 
 #[test]
+fn wgsl_composite_constant_inlines_transitive_constant_dependencies() {
+    let wgsl = compile_to_wgsl(
+        r#"
+type word64 = (u32, u32)
+
+def WORDS: [2]word64 = [
+  (0x11223344u32, 0x55667788u32),
+  (0x99aabbccu32, 0xddeeff00u32)
+]
+
+def COPIED_WORDS: [2]word64 = [WORDS[0], WORDS[1]]
+
+def select_word(words: [2]word64, index: i32) word64 = words[index]
+
+entry composite_constant(index: u32) word64 =
+  select_word(COPIED_WORDS, i32.u32(index & 1u32))
+"#,
+    )
+    .expect("compile a composite constant with a constant dependency");
+
+    validate_wgsl(&wgsl);
+    assert!(
+        !wgsl.contains("w_WORDS"),
+        "transitive constants must be expanded before WGSL lowering:\n{wgsl}"
+    );
+}
+
+#[test]
 fn wgsl_structural_capture_emits_uniform_struct_and_validates() {
     let wgsl = compile_to_wgsl(
         r#"

@@ -414,7 +414,7 @@ impl TermRewriter<Empty, Empty> for ConstantInliner<'_, '_> {
         self.term_ids.next_id()
     }
 
-    fn rewrite_node(&mut self, term: &mut Term<Empty, Empty>) -> RewriteDecision {
+    fn rewrite_node_before_children(&mut self, term: &mut Term<Empty, Empty>) -> RewriteDecision {
         let TermKind::Var(VarRef::Symbol(symbol)) = &term.kind else {
             return RewriteDecision::Unchanged;
         };
