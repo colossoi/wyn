@@ -107,6 +107,9 @@ enum DriverError {
     #[error("Compilation error: {0}")]
     CompilationError(#[from] wyn_core::error::CompilerError),
 
+    #[error("Pipeline descriptor serialization error: {0}")]
+    DescriptorSerialization(#[from] serde_json::Error),
+
     // `ConvertError`'s own Display carries the right per-variant label
     // (EGraph/internal prefixes, or a clean user message for InvalidDispatch),
     // so render it directly rather than force one prefix onto every variant.
@@ -404,7 +407,7 @@ fn compile_file(
         path
     });
 
-    match target {
+    let pipeline = match target {
         Target::Spirv => {
             let lowered = time("lower", verbose, || wyn_core::lower_ssa_to_spirv(soac_lowered))?;
 
@@ -415,36 +418,38 @@ fn compile_file(
                 file.write_all(&word.to_le_bytes())?;
             }
 
-            // Write pipeline descriptor if there are any pipelines
-            if !lowered.pipeline.pipelines.is_empty() {
-                let descriptor_path = {
-                    let mut p = output_path.clone();
-                    p.set_extension("json");
-                    p
-                };
-                let json = serde_json::to_string_pretty(&lowered.pipeline)
-                    .map_err(|e| wyn_core::err_spirv!("Failed to serialize pipeline descriptor: {}", e))?;
-                fs::write(&descriptor_path, json)?;
-                if verbose {
-                    info!("Wrote pipeline descriptor to {}", descriptor_path.display());
-                }
-            }
-
             if verbose {
                 info!("Successfully compiled to {}", output_path.display());
                 info!("Generated {} words of SPIR-V", spirv_len);
             }
+
+            lowered.pipeline
         }
         Target::Wgsl => {
-            let wgsl = time("wgsl_lower", verbose, || {
-                wyn_core::lower_ssa_to_wgsl(soac_lowered)
+            let lowered = time("wgsl_lower", verbose, || {
+                wyn_core::lower_ssa_to_wgsl_with_pipeline(soac_lowered)
             })?;
 
-            fs::write(&output_path, &wgsl)?;
+            fs::write(&output_path, &lowered.wgsl)?;
 
             if verbose {
                 info!("Successfully compiled to {}", output_path.display());
             }
+
+            lowered.pipeline
+        }
+    };
+
+    // Both executable backends share the same planned runtime contract.
+    if !pipeline.pipelines.is_empty() {
+        let descriptor_path = {
+            let mut p = output_path.clone();
+            p.set_extension("json");
+            p
+        };
+        fs::write(&descriptor_path, serde_json::to_string_pretty(&pipeline)?)?;
+        if verbose {
+            info!("Wrote pipeline descriptor to {}", descriptor_path.display());
         }
     }
 

@@ -1000,6 +1000,26 @@ entry collision_shape_3d(dest: *[64][64]u32) ([64][64]u32, [64]u32, u32) =
 }
 
 #[test]
+fn wgsl_lowering_retains_the_pipeline_descriptor() {
+    let source = r#"
+entry descriptor_for_wgsl(dest: *[2][4]u32) ([2][4]u32, [2]u32, u32) =
+  bucket_scatter_1d(dest, [(0, 10u32), (1, 20u32)])
+"#;
+
+    let lowered = crate::lower_ssa_to_wgsl_with_pipeline(lower_semantic_egir(
+        compile_to_semantic_egir(source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    ))
+    .expect("bucket scatter lowers to WGSL with its descriptor");
+
+    assert!(lowered.wgsl.contains("@compute"));
+    assert!(
+        !lowered.pipeline.pipelines.is_empty(),
+        "WGSL output must retain the planned runtime pipeline"
+    );
+}
+
+#[test]
 fn ranked_bucket_scatter_reads_bound_rank_two_aos_items() {
     let source = r#"
 entry collision_shape_2d_bound(

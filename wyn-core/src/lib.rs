@@ -701,13 +701,29 @@ pub fn lower_ssa_to_spirv(program: ssa::stage::Elaborated) -> error::Result<Lowe
 
 /// Validate and lower elaborated SSA to WGSL.
 pub fn lower_ssa_to_wgsl(program: ssa::stage::Elaborated) -> error::Result<String> {
+    Ok(lower_ssa_to_wgsl_with_pipeline(program)?.wgsl)
+}
+
+/// Validate and lower elaborated SSA to WGSL while retaining its runtime
+/// pipeline descriptor.
+pub fn lower_ssa_to_wgsl_with_pipeline(program: ssa::stage::Elaborated) -> error::Result<LoweredWgsl> {
     let program = ssa::prepare_wgsl(program)?;
-    wgsl::lower(&program)
+    let wgsl = wgsl::lower(&program)?;
+    Ok(LoweredWgsl {
+        wgsl,
+        pipeline: program.global_context.pipeline,
+    })
 }
 
 /// Final SPIR-V output
 pub struct Lowered {
     pub spirv: Vec<u32>,
+    pub pipeline: pipeline_descriptor::PipelineDescriptor,
+}
+
+/// Final WGSL output and the runtime contract for dispatching it.
+pub struct LoweredWgsl {
+    pub wgsl: String,
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
 }
 
