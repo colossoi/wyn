@@ -233,6 +233,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         name: input.name.clone(),
                         resource: None,
                         length: input.storage_length().cloned(),
+                        members: Vec::new(),
                     };
                     let Some(slot) = binding_slot(&binding) else {
                         continue;
@@ -344,6 +345,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                     },
                     resource: decl.logical_resource.clone(),
                     length: decl.length.clone(),
+                    members: Vec::new(),
                 };
                 let Some(slot) = binding_slot(&binding) else {
                     continue;
@@ -380,6 +382,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                     name,
                     resource: None,
                     length: output.storage_length().cloned(),
+                    members: Vec::new(),
                 };
                 let Some(slot) = binding_slot(&binding) else {
                     continue;

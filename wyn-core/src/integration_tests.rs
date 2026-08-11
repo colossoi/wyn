@@ -1020,6 +1020,111 @@ entry descriptor_for_wgsl(dest: *[2][4]u32) ([2][4]u32, [2]u32, u32) =
 }
 
 #[test]
+fn wgsl_descriptor_publishes_scalar_inputs_as_the_emitted_storage_block() {
+    use crate::pipeline_descriptor::{Access, Binding, BufferLen, BufferUsage, Pipeline};
+
+    let source = r#"
+entry scalar_parameters(index: u32) u32 = index + 1u32
+"#;
+    let lowered = crate::lower_ssa_to_wgsl_with_pipeline(lower_semantic_egir(
+        compile_to_semantic_egir(source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    ))
+    .expect("scalar input lowers to WGSL with a WebGPU descriptor");
+
+    assert!(
+        lowered.wgsl.contains("@group(1) @binding(0) var<storage, read> _pc0"),
+        "WGSL must declare the parameter block at the published slot:\n{}",
+        lowered.wgsl
+    );
+    let Pipeline::Compute(compute) = &lowered.pipeline.pipelines[0] else {
+        panic!("scalar entry must publish a compute pipeline");
+    };
+    assert!(
+        compute.bindings.iter().all(|binding| !matches!(binding, Binding::PushConstant { .. })),
+        "WebGPU descriptors cannot expose push constants"
+    );
+    let parameter = compute
+        .bindings
+        .iter()
+        .find(|binding| {
+            matches!(
+                binding,
+                Binding::StorageBuffer {
+                    set: 1,
+                    binding: 0,
+                    ..
+                }
+            )
+        })
+        .expect("descriptor must publish the WGSL parameter block");
+    let Binding::StorageBuffer {
+        access,
+        usage,
+        name,
+        length,
+        members,
+        ..
+    } = parameter
+    else {
+        unreachable!()
+    };
+    assert_eq!((access, usage), (&Access::ReadOnly, &BufferUsage::Input));
+    assert_eq!(name, "index");
+    assert_eq!(*length, Some(BufferLen::Fixed { bytes: 4 }));
+    assert_eq!(members.len(), 1);
+    assert_eq!(
+        (members[0].name.as_str(), members[0].offset, members[0].size),
+        ("index", 0, 4)
+    );
+    assert_eq!(compute.stages[0].reads, vec![1]);
+
+    let spirv = crate::compile_thru_spirv(source).expect("SPIR-V still accepts the scalar entry");
+    let Pipeline::Compute(compute) = &spirv.pipeline.pipelines[0] else {
+        panic!("scalar entry must publish a compute pipeline");
+    };
+    assert!(
+        compute
+            .bindings
+            .iter()
+            .any(|binding| matches!(binding, Binding::PushConstant { offset: 0, size: 4, name } if name == "index")),
+        "SPIR-V must retain its native push-constant ABI"
+    );
+}
+
+#[test]
+fn wgsl_descriptor_reads_dynamic_dispatch_length_from_the_parameter_block() {
+    use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize, Pipeline};
+
+    let source = r#"
+entry dynamic_parameter(n: u32) []u32 =
+  map(|i: u32| i + 1u32, 0u32..<n)
+"#;
+    let lowered = crate::lower_ssa_to_wgsl_with_pipeline(lower_semantic_egir(
+        compile_to_semantic_egir(source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    ))
+    .expect("dynamic scalar input lowers to a WebGPU descriptor");
+    let Pipeline::Compute(compute) = &lowered.pipeline.pipelines[0] else {
+        panic!("map entry must publish a compute pipeline");
+    };
+    assert!(compute.bindings.iter().all(|binding| !matches!(binding, Binding::PushConstant { .. })));
+    assert!(compute.stages.iter().any(|stage| {
+        matches!(
+            stage.dispatch_size,
+            DispatchSize::DerivedFrom {
+                len: DispatchLen::StorageBuffer {
+                    set: 1,
+                    binding: 0,
+                    offset: 0
+                },
+                ..
+            }
+        )
+    }));
+}
+
+#[test]
 fn ranked_bucket_scatter_named_helper_reads_fixed_storage_array() {
     use crate::pipeline_descriptor::{Binding, BufferLen, Pipeline};
 

@@ -798,6 +798,13 @@ pub enum DispatchLen {
     PushConstant {
         offset: u32,
     },
+    /// A runtime u32 read from a packed, read-only storage parameter block.
+    /// WGSL/WebGPU uses this in place of `PushConstant`.
+    StorageBuffer {
+        set: u32,
+        binding: u32,
+        offset: u32,
+    },
     /// One iteration per texel of the storage texture at (`set`,
     /// `binding`) — used for compute entries whose primary output is a
     /// storage image update. The host reads the allocated
@@ -811,8 +818,10 @@ pub enum DispatchLen {
     },
 }
 
-/// One member of a uniform block: where the host writes the value.
-/// Mirrors the `PushConstant { offset, size }` contract, per member.
+/// One named member of a host-populated interface block: where the host writes
+/// the value. Uniform buffers always publish these members. A storage buffer
+/// publishes them when the WGSL backend uses it as the WebGPU replacement for
+/// an entry point's packed push-constant block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UniformMember {
     pub name: String,
@@ -836,11 +845,16 @@ pub enum Binding {
         /// and consumer bindings may have different local names and slots.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resource: Option<String>,
-        /// Sizing policy for compiler-managed buffers whose length isn't a
-        /// host-supplied input (e.g. a gather intermediate). `None` for
-        /// host inputs (sized from the supplied data) and ordinary outputs.
+        /// Sizing policy for compiler-managed buffers and fixed-size WGSL
+        /// parameter blocks. `None` for variable host inputs (sized from the
+        /// supplied data) and ordinary unsized outputs.
         #[serde(default)]
         length: Option<BufferLen>,
+        /// Named fields when this storage binding represents a packed
+        /// host-populated parameter block. Ordinary array buffers leave this
+        /// empty.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        members: Vec<UniformMember>,
     },
     /// Uniform buffer (descriptor set binding).
     Uniform {
@@ -1902,6 +1916,11 @@ mod tests {
             },
             DispatchLen::Fixed { count: 6144 },
             DispatchLen::PushConstant { offset: 8 },
+            DispatchLen::StorageBuffer {
+                set: 1,
+                binding: 0,
+                offset: 8,
+            },
         ] {
             let size = DispatchSize::DerivedFrom {
                 len: len.clone(),
@@ -1966,6 +1985,43 @@ mod tests {
             panic!("old-shape uniform must still parse");
         };
         assert_eq!(size, 0);
+        assert!(members.is_empty());
+    }
+
+    #[test]
+    fn storage_parameter_members_serde_round_trip() {
+        let binding = Binding::StorageBuffer {
+            set: 1,
+            binding: 0,
+            access: Access::ReadOnly,
+            usage: BufferUsage::Input,
+            name: "params".to_string(),
+            resource: None,
+            length: Some(BufferLen::Fixed { bytes: 8 }),
+            members: vec![
+                UniformMember {
+                    name: "x".to_string(),
+                    offset: 0,
+                    size: 4,
+                },
+                UniformMember {
+                    name: "y".to_string(),
+                    offset: 4,
+                    size: 4,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&binding).unwrap();
+        assert!(json.contains("\"members\""), "got: {json}");
+        let Binding::StorageBuffer { members, .. } = serde_json::from_str::<Binding>(&json).unwrap() else {
+            panic!("round trip changed the variant");
+        };
+        assert_eq!(members.len(), 2);
+
+        let old = r#"{"type":"storage_buffer","set":0,"binding":0,"access":"read_only","usage":"input","name":"xs","length":null}"#;
+        let Binding::StorageBuffer { members, .. } = serde_json::from_str::<Binding>(old).unwrap() else {
+            panic!("old-shape storage buffer must still parse");
+        };
         assert!(members.is_empty());
     }
 
@@ -2127,6 +2183,7 @@ mod tests {
             name: name.to_string(),
             resource: Some("inst".to_string()),
             length: None,
+            members: Vec::new(),
         };
         let stage = |entry: &str| ComputeStage {
             entry_point: entry.to_string(),
@@ -2196,6 +2253,7 @@ mod tests {
             name: "inst".to_string(),
             resource: None,
             length: None,
+            members: Vec::new(),
         };
         let occ = |access| Binding::StorageTexture {
             set: 1,

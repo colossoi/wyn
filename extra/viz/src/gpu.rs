@@ -23,6 +23,9 @@ use crate::json::{
 use crate::specs::PushConstantSpec;
 use wyn_pipeline_descriptor::StorageTextureSize;
 
+pub type StorageBuffers = HashMap<(u32, u32), (wgpu::Buffer, u64)>;
+pub type ParameterBlockBytes = HashMap<(u32, u32), Vec<u8>>;
+
 /// Bundle of the wgpu objects produced by a single
 /// `Instance::request_adapter` + `Adapter::request_device` cycle.
 /// `surface` is `Some` only when the caller asked for one (the
@@ -220,6 +223,84 @@ pub async fn create_headless_device(verbose: bool) -> Result<(Device, Queue)> {
     Ok(ctx.into_device_queue())
 }
 
+/// Pack CLI scalar values into the read-only storage parameter blocks emitted
+/// by the WGSL backend. Members retain their source names, so the existing
+/// `--push-constant name:type=value` spelling works for both native SPIR-V
+/// push constants and WebGPU storage-backed parameters.
+pub fn build_parameter_block_bytes(
+    bindings: &[Binding],
+    values: &[PushConstantSpec],
+    verbose: bool,
+) -> Result<ParameterBlockBytes> {
+    let supplied: HashMap<&str, &PushConstantSpec> =
+        values.iter().map(|value| (value.name.as_str(), value)).collect();
+    let mut blocks = ParameterBlockBytes::new();
+
+    for binding_desc in bindings {
+        let Binding::StorageBuffer {
+            set,
+            binding,
+            name,
+            length,
+            members,
+            ..
+        } = binding_desc
+        else {
+            continue;
+        };
+        if members.is_empty() {
+            continue;
+        }
+        let Some(wyn_pipeline_descriptor::BufferLen::Fixed { bytes }) = length else {
+            return Err(anyhow!(
+                "parameter block '{}' at ({}, {}) needs a fixed byte length",
+                name,
+                set,
+                binding
+            ));
+        };
+        let mut data = vec![0u8; *bytes as usize];
+        for member in members {
+            let Some(value) = supplied.get(member.name.as_str()) else {
+                continue;
+            };
+            if value.data.len() != member.size as usize {
+                return Err(anyhow!(
+                    "parameter '{}' expects {} bytes but got {} bytes from CLI",
+                    member.name,
+                    member.size,
+                    value.data.len()
+                ));
+            }
+            let start = member.offset as usize;
+            let end = start + value.data.len();
+            if end > data.len() {
+                return Err(anyhow!(
+                    "parameter '{}' at offset {} exceeds block '{}' ({} bytes)",
+                    member.name,
+                    member.offset,
+                    name,
+                    data.len()
+                ));
+            }
+            data[start..end].copy_from_slice(&value.data);
+            if verbose {
+                println!(
+                    "Parameter '{}' -> storage ({}, {}) offset {}: {} bytes",
+                    member.name,
+                    set,
+                    binding,
+                    member.offset,
+                    member.size
+                );
+            }
+        }
+        blocks.insert((*set, *binding), data);
+    }
+
+    Ok(blocks)
+}
+
 pub fn create_binding_buffers(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -227,8 +308,9 @@ pub fn create_binding_buffers(
     inputs: &HashMap<String, PathBuf>,
     dispatch: Option<&DispatchSize>,
     pc_bytes: &[u8],
+    parameter_bytes: &ParameterBlockBytes,
     verbose: bool,
-) -> Result<HashMap<u32, (wgpu::Buffer, u64)>> {
+) -> Result<StorageBuffers> {
     let mut buffers = HashMap::new();
     // (set, binding) -> byte size, so a length-policy buffer can be sized
     // relative to an already-allocated source buffer.
@@ -296,7 +378,7 @@ pub fn create_binding_buffers(
             };
             let byte_size = data_bytes.len() as u64;
             let buffer = make_buffer(device, queue, name, &data_bytes);
-            buffers.insert(*binding, (buffer, byte_size));
+            buffers.insert((*set, *binding), (buffer, byte_size));
             byte_sizes.insert((*set, *binding), byte_size);
         }
     }
@@ -305,13 +387,15 @@ pub fn create_binding_buffers(
     // intermediates), sized from their source buffer allocated in pass 1.
     for b in bindings {
         if let Binding::StorageBuffer {
+            set,
             binding,
             name,
             length: Some(len),
             ..
         } = b
         {
-            if buffers.contains_key(binding) {
+            let key = (*set, *binding);
+            if buffers.contains_key(&key) {
                 continue;
             }
             // A `SameAsDispatch` output holds one element per dispatched thread,
@@ -324,7 +408,8 @@ pub fn create_binding_buffers(
                         name
                     )
                 })?;
-                let (groups, _, _) = resolve_dispatch_size(dispatch, &buffers, pc_bytes);
+                let (groups, _, _) =
+                    resolve_dispatch_size_with_parameters(dispatch, &buffers, pc_bytes, parameter_bytes);
                 let wg = match dispatch {
                     DispatchSize::DerivedFrom { workgroup_size, .. } => *workgroup_size,
                     DispatchSize::Fixed { .. } => 1,
@@ -346,25 +431,60 @@ pub fn create_binding_buffers(
                     byte_size, name
                 );
             }
-            let buffer = make_buffer(device, queue, name, &vec![0u8; byte_size as usize]);
-            buffers.insert(*binding, (buffer, byte_size));
+            let data = parameter_bytes
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| vec![0u8; byte_size as usize]);
+            if data.len() as u64 != byte_size {
+                return Err(anyhow!(
+                    "parameter block '{}' provides {} bytes but its descriptor requires {}",
+                    name,
+                    data.len(),
+                    byte_size
+                ));
+            }
+            let buffer = make_buffer(device, queue, name, &data);
+            buffers.insert(key, (buffer, byte_size));
         }
     }
 
     Ok(buffers)
 }
 
-/// Build a bind group layout + bind group from binding descriptors.
-pub fn build_bind_group(
+/// Build one bind-group layout and bind group per descriptor set. Empty sets
+/// are retained so the vector index remains the WGSL `@group` number.
+pub fn build_bind_groups(
     device: &wgpu::Device,
     bindings: &[Binding],
-    buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
-) -> Result<(wgpu::BindGroupLayout, BindGroup)> {
-    let mut layout_entries = Vec::new();
-    let mut group_entries = Vec::new();
+    buffers: &StorageBuffers,
+) -> Result<(Vec<wgpu::BindGroupLayout>, Vec<BindGroup>)> {
+    let max_set = bindings
+        .iter()
+        .filter_map(|binding| match binding {
+            Binding::StorageBuffer { set, .. } => Some(*set),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let mut layouts = Vec::with_capacity((max_set + 1) as usize);
+    let mut groups = Vec::with_capacity((max_set + 1) as usize);
 
-    for b in bindings {
-        if let Binding::StorageBuffer { binding, access, .. } = b {
+    for set in 0..=max_set {
+        let mut layout_entries = Vec::new();
+        let mut group_entries = Vec::new();
+        for binding_desc in bindings {
+            let Binding::StorageBuffer {
+                set: binding_set,
+                binding,
+                access,
+                ..
+            } = binding_desc
+            else {
+                continue;
+            };
+            if *binding_set != set {
+                continue;
+            }
             let read_only = *access == Access::ReadOnly;
             layout_entries.push(BindGroupLayoutEntry {
                 binding: *binding,
@@ -377,31 +497,33 @@ pub fn build_bind_group(
                 count: None,
             });
 
-            let (buf, _) =
-                buffers.get(binding).ok_or_else(|| anyhow!("No buffer for binding {}", binding))?;
+            let (buffer, _) = buffers
+                .get(&(*binding_set, *binding))
+                .ok_or_else(|| anyhow!("No buffer for binding ({}, {})", binding_set, binding))?;
             group_entries.push(BindGroupEntry {
                 binding: *binding,
                 resource: BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: buf,
+                    buffer,
                     offset: 0,
                     size: None,
                 }),
             });
         }
+
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some(&format!("pipeline_bind_group_layout_{set}")),
+            entries: &layout_entries,
+        });
+        let group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some(&format!("pipeline_bind_group_{set}")),
+            layout: &layout,
+            entries: &group_entries,
+        });
+        layouts.push(layout);
+        groups.push(group);
     }
 
-    let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-        label: Some("pipeline_bind_group_layout"),
-        entries: &layout_entries,
-    });
-
-    let bind_group = device.create_bind_group(&BindGroupDescriptor {
-        label: Some("pipeline_bind_group"),
-        layout: &layout,
-        entries: &group_entries,
-    });
-
-    Ok((layout, bind_group))
+    Ok((layouts, groups))
 }
 
 /// Compute dispatch dimensions from a DispatchSize spec.
@@ -413,14 +535,30 @@ pub fn build_bind_group(
 /// storage image rely on this 2D path.
 pub fn resolve_dispatch_size(
     dispatch: &DispatchSize,
-    buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
+    buffers: &StorageBuffers,
     pc_bytes: &[u8],
+) -> (u32, u32, u32) {
+    resolve_dispatch_size_with_parameters(dispatch, buffers, pc_bytes, &ParameterBlockBytes::new())
+}
+
+pub fn resolve_dispatch_size_with_parameters(
+    dispatch: &DispatchSize,
+    buffers: &StorageBuffers,
+    pc_bytes: &[u8],
+    parameter_bytes: &ParameterBlockBytes,
 ) -> (u32, u32, u32) {
     // For the 1D-style sources, the pipeline workgroup_size triple
     // doesn't matter — only the x dim (carried inside `DerivedFrom`)
     // is consulted. The `StorageImage` source ignores this wrapper
     // and is routed through the explicit path instead.
-    resolve_dispatch_size_with_textures(dispatch, (1, 1, 1), buffers, pc_bytes, &HashMap::new())
+    resolve_dispatch_size_with_textures(
+        dispatch,
+        (1, 1, 1),
+        buffers,
+        pc_bytes,
+        parameter_bytes,
+        &HashMap::new(),
+    )
 }
 
 /// Like `resolve_dispatch_size` but knows how to size a `StorageImage`
@@ -436,8 +574,9 @@ pub fn resolve_dispatch_size(
 pub fn resolve_dispatch_size_with_textures(
     dispatch: &DispatchSize,
     pipeline_workgroup_size: (u32, u32, u32),
-    buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
+    buffers: &StorageBuffers,
     pc_bytes: &[u8],
+    parameter_bytes: &ParameterBlockBytes,
     storage_textures: &HashMap<(u32, u32), StorageTextureResource>,
 ) -> (u32, u32, u32) {
     match dispatch {
@@ -467,7 +606,7 @@ pub fn resolve_dispatch_size_with_textures(
                     }
                 }
                 _ => {
-                    let elements = resolve_dispatch_len(len, buffers, pc_bytes);
+                    let elements = resolve_dispatch_len(len, buffers, pc_bytes, parameter_bytes);
                     (elements.div_ceil(wg_x), 1, 1)
                 }
             }
@@ -477,23 +616,42 @@ pub fn resolve_dispatch_size_with_textures(
 
 /// Resolve a `DerivedFrom` dispatch's iteration count from its `DispatchLen`
 /// source: a buffer's element count, a compile-time constant, or a scalar read
-/// from the push-constant block.
+/// from the host-populated parameter bytes. WGSL describes the latter as a
+/// storage-buffer member; SPIR-V describes it as a push constant.
 ///
 /// `StorageImage` is handled by `resolve_dispatch_size_with_textures`
 /// directly (it's 2D, not 1D) and never reaches this helper.
 fn resolve_dispatch_len(
     len: &DispatchLen,
-    buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
+    buffers: &StorageBuffers,
     pc_bytes: &[u8],
+    parameter_bytes: &ParameterBlockBytes,
 ) -> u32 {
     match len {
         DispatchLen::InputBinding {
-            binding, elem_bytes, ..
-        } => buffers.get(binding).map(|(_, size)| (*size / *elem_bytes as u64) as u32).unwrap_or(0),
+            set,
+            binding,
+            elem_bytes,
+        } => buffers
+            .get(&(*set, *binding))
+            .map(|(_, size)| (*size / *elem_bytes as u64) as u32)
+            .unwrap_or(0),
         DispatchLen::Fixed { count } => *count,
         DispatchLen::PushConstant { offset } => {
             let o = *offset as usize;
             pc_bytes.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(0)
+        }
+        DispatchLen::StorageBuffer {
+            set,
+            binding,
+            offset,
+        } => {
+            let o = *offset as usize;
+            parameter_bytes
+                .get(&(*set, *binding))
+                .and_then(|bytes| bytes.get(o..o + 4))
+                .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                .unwrap_or(0)
         }
         DispatchLen::StorageImage { .. } => 1,
     }
@@ -1104,6 +1262,8 @@ pub enum HostBufferKind {
     /// The host doesn't rewrite the contents per frame — the shader
     /// reads whatever the file contained.
     FileLoaded,
+    /// Packed scalar parameters for a WGSL entry point.
+    Parameter,
 }
 
 /// How a `--buffer-init` allocation is seeded once at startup.
@@ -1165,6 +1325,7 @@ pub fn create_host_buffers(
     descriptor: &PipelineDescriptor,
     storage_dir: Option<&std::path::Path>,
     buffer_inits: &HashMap<String, BufferInit>,
+    parameter_bytes: &ParameterBlockBytes,
 ) -> Result<HashMap<(u32, u32), HostBufferResource>> {
     let mut out: HashMap<(u32, u32), HostBufferResource> = HashMap::new();
     for pipeline in &descriptor.pipelines {
@@ -1181,6 +1342,23 @@ pub fn create_host_buffers(
             };
             let key = (*set, *binding);
             if out.contains_key(&key) {
+                continue;
+            }
+            if let Some(data) = parameter_bytes.get(&key) {
+                let buffer = device.create_buffer(&BufferDescriptor {
+                    label: Some(&format!("parameter_buffer_{name}")),
+                    size: data.len() as u64,
+                    usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                queue.write_buffer(&buffer, 0, data);
+                out.insert(
+                    key,
+                    HostBufferResource {
+                        buffer,
+                        kind: HostBufferKind::Parameter,
+                    },
+                );
                 continue;
             }
             let lower = name.to_ascii_lowercase();
@@ -1805,4 +1983,67 @@ pub fn build_resource_bind_group_for_set(
         entries: &group_entries,
     });
     Ok((layout, bind_group))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wyn_pipeline_descriptor::{BufferLen, UniformMember};
+
+    #[test]
+    fn packs_wgsl_parameter_blocks_at_descriptor_offsets() {
+        let bindings = vec![Binding::StorageBuffer {
+            set: 1,
+            binding: 0,
+            access: Access::ReadOnly,
+            usage: BufferUsage::Input,
+            name: "params".to_string(),
+            resource: None,
+            length: Some(BufferLen::Fixed { bytes: 32 }),
+            members: vec![
+                UniformMember {
+                    name: "count".to_string(),
+                    offset: 0,
+                    size: 4,
+                },
+                UniformMember {
+                    name: "direction".to_string(),
+                    offset: 16,
+                    size: 12,
+                },
+            ],
+        }];
+        let values = vec![
+            PushConstantSpec {
+                name: "count".to_string(),
+                offset: 0,
+                data: 130u32.to_le_bytes().to_vec(),
+            },
+            PushConstantSpec {
+                name: "direction".to_string(),
+                offset: 0,
+                data: [1.0f32, 2.0, 3.0].into_iter().flat_map(f32::to_le_bytes).collect(),
+            },
+        ];
+
+        let blocks = build_parameter_block_bytes(&bindings, &values, false).unwrap();
+        let block = &blocks[&(1, 0)];
+        assert_eq!(&block[0..4], &130u32.to_le_bytes());
+        assert!(block[4..16].iter().all(|byte| *byte == 0));
+        assert_eq!(&block[16..28], values[1].data.as_slice());
+        assert!(block[28..32].iter().all(|byte| *byte == 0));
+
+        let dispatch = DispatchSize::DerivedFrom {
+            len: DispatchLen::StorageBuffer {
+                set: 1,
+                binding: 0,
+                offset: 0,
+            },
+            workgroup_size: 64,
+        };
+        assert_eq!(
+            resolve_dispatch_size_with_parameters(&dispatch, &StorageBuffers::new(), &[], &blocks),
+            (3, 1, 1)
+        );
+    }
 }

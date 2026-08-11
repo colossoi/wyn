@@ -708,11 +708,159 @@ pub fn lower_ssa_to_wgsl(program: ssa::stage::Elaborated) -> error::Result<Strin
 /// pipeline descriptor.
 pub fn lower_ssa_to_wgsl_with_pipeline(program: ssa::stage::Elaborated) -> error::Result<LoweredWgsl> {
     let program = ssa::prepare_wgsl(program)?;
-    let wgsl = wgsl::lower(&program)?;
+    let lowered = wgsl::ssa_lowering::lower_with_abi(&program)?;
+    let mut pipeline = program.global_context.pipeline;
+    adapt_pipeline_descriptor_for_wgsl(&mut pipeline, &lowered.parameter_blocks)?;
     Ok(LoweredWgsl {
-        wgsl,
-        pipeline: program.global_context.pipeline,
+        wgsl: lowered.source,
+        pipeline,
     })
+}
+
+/// Rewrite target-neutral push-constant contracts to the read-only storage
+/// blocks actually declared by the WGSL backend. SPIR-V lowering deliberately
+/// bypasses this adaptation and retains native push constants.
+fn adapt_pipeline_descriptor_for_wgsl(
+    descriptor: &mut pipeline_descriptor::PipelineDescriptor,
+    parameter_blocks: &[wgsl::ssa_lowering::ParameterBlock],
+) -> error::Result<()> {
+    use pipeline_descriptor::{
+        Access, Binding, BufferLen, BufferUsage, DispatchLen, DispatchSize, Pipeline,
+    };
+
+    for pipeline in &mut descriptor.pipelines {
+        let Pipeline::Compute(compute) = pipeline else {
+            continue;
+        };
+        let blocks = parameter_blocks
+            .iter()
+            .filter(|block| compute.stages.iter().any(|stage| stage.entry_point == block.entry_point))
+            .collect::<Vec<_>>();
+
+        let push_constants = compute
+            .bindings
+            .iter()
+            .filter_map(|binding| match binding {
+                Binding::PushConstant { offset, size, name } => Some((*offset, *size, name.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (offset, size, name) in &push_constants {
+            if !blocks.iter().any(|block| {
+                block.members.iter().any(|member| {
+                    member.push_constant_offset == *offset && member.name == *name && member.size == *size
+                })
+            }) {
+                return Err(crate::err_wgsl!(
+                    "pipeline push constant '{}' at offset {} has no WGSL storage parameter",
+                    name,
+                    offset
+                ));
+            }
+        }
+
+        let old_bindings = std::mem::take(&mut compute.bindings);
+        let mut old_to_new = vec![None; old_bindings.len()];
+        for (old_index, binding) in old_bindings.into_iter().enumerate() {
+            if matches!(binding, Binding::PushConstant { .. }) {
+                continue;
+            }
+            old_to_new[old_index] = Some(compute.bindings.len());
+            compute.bindings.push(binding);
+        }
+
+        let mut block_binding_indices = Vec::with_capacity(blocks.len());
+        for block in &blocks {
+            let binding_index = compute.bindings.len();
+            let name = if let [member] = block.members.as_slice() {
+                member.name.clone()
+            } else {
+                format!("{}_parameters", block.entry_point)
+            };
+            compute.bindings.push(Binding::StorageBuffer {
+                set: block.set,
+                binding: block.binding,
+                access: Access::ReadOnly,
+                usage: BufferUsage::Input,
+                name,
+                resource: None,
+                length: Some(BufferLen::Fixed {
+                    bytes: u64::from(block.size),
+                }),
+                members: block
+                    .members
+                    .iter()
+                    .map(|member| pipeline_descriptor::UniformMember {
+                        name: member.name.clone(),
+                        offset: member.offset,
+                        size: member.size,
+                    })
+                    .collect(),
+            });
+            block_binding_indices.push(binding_index);
+        }
+
+        for stage in &mut compute.stages {
+            stage.reads = stage
+                .reads
+                .iter()
+                .filter_map(|&old_index| old_to_new.get(old_index).copied().flatten())
+                .collect();
+            stage.writes = stage
+                .writes
+                .iter()
+                .filter_map(|&old_index| old_to_new.get(old_index).copied().flatten())
+                .collect();
+
+            for (block_index, block) in blocks.iter().enumerate() {
+                if block.entry_point == stage.entry_point {
+                    let binding_index = block_binding_indices[block_index];
+                    if !stage.reads.contains(&binding_index) {
+                        stage.reads.push(binding_index);
+                    }
+                }
+            }
+
+            if let DispatchSize::DerivedFrom { len, .. } = &mut stage.dispatch_size {
+                let DispatchLen::PushConstant { offset } = *len else {
+                    continue;
+                };
+                let Some((block, member)) = blocks.iter().find_map(|block| {
+                    (block.entry_point == stage.entry_point)
+                        .then(|| block.members.iter().find(|member| member.push_constant_offset == offset))
+                        .flatten()
+                        .map(|member| (*block, member))
+                }) else {
+                    return Err(crate::err_wgsl!(
+                        "entry '{}': dynamic dispatch push constant at offset {} has no WGSL storage parameter",
+                        stage.entry_point,
+                        offset
+                    ));
+                };
+                *len = DispatchLen::StorageBuffer {
+                    set: block.set,
+                    binding: block.binding,
+                    offset: member.offset,
+                };
+            }
+        }
+    }
+
+    if descriptor.pipelines.iter().any(|pipeline| match pipeline {
+        Pipeline::Compute(compute) => {
+            compute.bindings.iter().any(|binding| matches!(binding, Binding::PushConstant { .. }))
+        }
+        Pipeline::Graphics(graphics) => {
+            graphics.bindings.iter().any(|binding| matches!(binding, Binding::PushConstant { .. }))
+        }
+    }) {
+        return Err(crate::err_wgsl!(
+            "WGSL pipeline descriptor still contains a push constant with no WebGPU binding"
+        ));
+    }
+
+    descriptor.rebuild_frame_graph();
+    Ok(())
 }
 
 /// Final SPIR-V output

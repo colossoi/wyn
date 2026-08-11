@@ -6,6 +6,26 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use wgpu::ShaderModuleDescriptorPassthrough;
 
+/// Load either textual WGSL or SPIR-V according to the file extension.
+pub fn load_shader_module(device: &wgpu::Device, path: &Path) -> Result<wgpu::ShaderModule> {
+    if path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("wgsl")
+    }) {
+        let source = fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(&path.display().to_string()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        if let Some(error) = pollster::block_on(device.pop_error_scope()) {
+            return Err(anyhow!("WGSL shader validation failed: {error}"));
+        }
+        Ok(module)
+    } else {
+        load_spirv_module(device, path)
+    }
+}
+
 pub fn load_spirv_module(device: &wgpu::Device, path: &Path) -> Result<wgpu::ShaderModule> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
 

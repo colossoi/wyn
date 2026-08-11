@@ -13,12 +13,13 @@ use winit::event_loop::EventLoop;
 
 use crate::app::{App, InteractivePipelineSpec};
 use crate::gpu::{
-    build_bind_group, build_push_constant_bytes, create_binding_buffers, create_headless_device,
-    readback_buffer, resolve_dispatch_size, ComputeExecutor,
+    build_bind_groups, build_parameter_block_bytes, build_push_constant_bytes,
+    create_binding_buffers, create_headless_device, readback_buffer,
+    resolve_dispatch_size_with_parameters, ComputeExecutor,
 };
 use crate::json::{write_f32_json, Binding, BufferUsage, ComputePipeline, Pipeline, PipelineDescriptor};
 use crate::specs::PushConstantSpec;
-use crate::spirv::load_spirv_module;
+use crate::spirv::load_shader_module;
 use wyn_pipeline_descriptor::ShaderStage;
 
 /// Knobs that only mean anything on the interactive path. Bundled so
@@ -249,6 +250,7 @@ pub async fn run_pipeline(
             dispatch_overrides.clone(),
             feedback_specs.to_vec(),
             outputs,
+            push_constants.to_vec(),
             interactive_opts,
             verbose,
         );
@@ -267,7 +269,7 @@ pub async fn run_pipeline(
     }
 
     let (device, queue) = create_headless_device(verbose).await?;
-    let module = load_spirv_module(&device, &spv_path)?;
+    let module = load_shader_module(&device, &spv_path)?;
 
     for (pi, pipeline) in desc.pipelines.iter().enumerate() {
         match pipeline {
@@ -305,6 +307,7 @@ fn run_pipeline_interactive(
     dispatch_overrides: HashMap<String, (u32, u32, u32)>,
     feedback_specs: Vec<(String, String, String)>,
     outputs: HashMap<String, PathBuf>,
+    parameter_values: Vec<PushConstantSpec>,
     opts: InteractiveOpts,
     verbose: bool,
 ) -> Result<()> {
@@ -403,6 +406,7 @@ fn run_pipeline_interactive(
         fragment_state,
         storage_dir: opts.storage_dir,
         buffer_inits: resolved_buffer_inits,
+        parameter_values,
         index_buffer: opts.index_buffer,
         outputs,
         images,
@@ -451,8 +455,15 @@ fn run_compute(
         }
     }
 
-    // Build push constant data from CLI args matched against descriptor bindings
-    let pc_bytes = build_push_constant_bytes(&mp.bindings, push_constants, verbose)?;
+    let parameter_bytes = build_parameter_block_bytes(&mp.bindings, push_constants, verbose)?;
+    let has_native_push_constants = mp.bindings.iter().any(|binding| matches!(binding, Binding::PushConstant { .. }));
+    // Preserve the legacy descriptor-less sequential packing path only when
+    // this is not a WGSL storage-parameter pipeline.
+    let pc_bytes = if has_native_push_constants || parameter_bytes.is_empty() {
+        build_push_constant_bytes(&mp.bindings, push_constants, verbose)?
+    } else {
+        Vec::new()
+    };
     let total_pc_size = pc_bytes.len() as u32;
 
     // Stage-0's dispatch sizes any `SameAsDispatch` output bindings —
@@ -467,9 +478,10 @@ fn run_compute(
         inputs,
         dispatch_hint,
         &pc_bytes,
+        &parameter_bytes,
         verbose,
     )?;
-    let (layout, bind_group) = build_bind_group(device, &mp.bindings, &buffers)?;
+    let (layouts, bind_groups) = build_bind_groups(device, &mp.bindings, &buffers)?;
 
     let pc_ranges: Vec<wgpu::PushConstantRange> = if total_pc_size > 0 {
         vec![wgpu::PushConstantRange {
@@ -480,11 +492,13 @@ fn run_compute(
         vec![]
     };
 
+    let layout_refs = layouts.iter().collect::<Vec<_>>();
     let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: Some("multi_compute_layout"),
-        bind_group_layouts: &[&layout],
+        bind_group_layouts: &layout_refs,
         push_constant_ranges: &pc_ranges,
     });
+    let bind_group_refs = bind_groups.iter().collect::<Vec<_>>();
 
     // Execute stages in order
     for (si, stage) in mp.stages.iter().enumerate() {
@@ -497,7 +511,12 @@ fn run_compute(
             cache: None,
         });
 
-        let dispatch = resolve_dispatch_size(&stage.dispatch_size, &buffers, &pc_bytes);
+        let dispatch = resolve_dispatch_size_with_parameters(
+            &stage.dispatch_size,
+            &buffers,
+            &pc_bytes,
+            &parameter_bytes,
+        );
         if verbose {
             println!(
                 "Stage {} ({}): dispatch {} x {} x {}",
@@ -512,7 +531,7 @@ fn run_compute(
         ComputeExecutor {
             label: &stage_label,
             pipeline: &pipeline,
-            bind_groups: &[&bind_group],
+            bind_groups: &bind_group_refs,
             push_constant_bytes: &pc_bytes,
             dispatch,
             timestamps: None,
@@ -554,12 +573,16 @@ fn output_results(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     bindings: &[Binding],
-    buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
+    buffers: &crate::gpu::StorageBuffers,
     outputs: &HashMap<String, PathBuf>,
 ) -> Result<()> {
     for b in bindings {
         if let Binding::StorageBuffer {
-            binding, name, usage, ..
+            set,
+            binding,
+            name,
+            usage,
+            ..
         } = b
         {
             // Only read back output and intermediate buffers (skip inputs unless
@@ -570,7 +593,7 @@ fn output_results(
                 continue;
             }
 
-            if let Some((buf, size)) = buffers.get(binding) {
+            if let Some((buf, size)) = buffers.get(&(*set, *binding)) {
                 let data = readback_buffer(device, queue, buf, *size)?;
 
                 if let Some(path) = outputs.get(name.as_str()) {

@@ -218,6 +218,63 @@ pub struct BlockLayout {
     pub member_offsets: Vec<u32>,
 }
 
+/// Compute the natural WGSL/std430 layout of a storage-buffer struct whose
+/// fields have the supplied types. Unlike [`block_layout`], this accepts nested
+/// tuples/records, fixed arrays, and matrices because WGSL parameter blocks can
+/// contain any host-shareable composite accepted by the backend.
+pub(crate) fn std430_struct_layout(fields: &[&Type]) -> Option<BlockLayout> {
+    if fields.is_empty() {
+        return None;
+    }
+
+    let mut member_offsets = Vec::with_capacity(fields.len());
+    let mut offset = 0u32;
+    let mut align = 1u32;
+    for field in fields {
+        let (field_size, field_align) = std430_type_layout(field)?;
+        offset = offset.div_ceil(field_align) * field_align;
+        member_offsets.push(offset);
+        offset += field_size;
+        align = align.max(field_align);
+    }
+
+    Some(BlockLayout {
+        size: offset.div_ceil(align) * align,
+        align,
+        member_offsets,
+    })
+}
+
+fn std430_type_layout(ty: &Type) -> Option<(u32, u32)> {
+    match ty {
+        Type::Constructed(TypeName::Int(_), _)
+        | Type::Constructed(TypeName::UInt(_), _)
+        | Type::Constructed(TypeName::Float(_), _) => Some((type_byte_size(ty)?, std430_alignment(ty)?)),
+        _ if ty.is_vec() => Some((type_byte_size(ty)?, std430_alignment(ty)?)),
+        _ if ty.is_mat() => {
+            let columns = ty.mat_cols()? as u32;
+            let stride = std430_matrix_stride(ty)?;
+            Some((columns * stride, std430_alignment(ty)?))
+        }
+        _ if ty.is_array() => {
+            let count = match ty.array_size()? {
+                Type::Constructed(TypeName::Size(count), _) => *count as u32,
+                _ => return None,
+            };
+            let (element_size, element_align) = std430_type_layout(ty.elem_type()?)?;
+            let stride = element_size.div_ceil(element_align) * element_align;
+            Some((count * stride, element_align))
+        }
+        Type::Constructed(TypeName::Tuple(_), members)
+        | Type::Constructed(TypeName::Record(_), members) => {
+            let member_refs = members.iter().collect::<Vec<_>>();
+            let layout = std430_struct_layout(&member_refs)?;
+            Some((layout.size, layout.align))
+        }
+        _ => None,
+    }
+}
+
 /// Layout for an interface-block value: a 32-bit `f32`/`i32`/`u32`
 /// scalar, a vec2/3/4 of them, or a FLAT record/tuple of those. Under
 /// Std430 (storage buffers) a member may also be a fixed-size array of

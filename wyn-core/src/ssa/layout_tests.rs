@@ -103,8 +103,8 @@ fn vertex_format_rejects_aggregates() {
 // ---- block_layout ---------------------------------------------------------
 
 use super::{
-    block_layout, buffer_array_strides, std430_alignment, std430_matrix_stride, storage_elem_stride,
-    BlockLayout,
+    block_layout, buffer_array_strides, std430_alignment, std430_matrix_stride, std430_struct_layout,
+    storage_elem_stride, BlockLayout,
 };
 use crate::interface::StorageLayout;
 use crate::types::RecordFields;
@@ -163,6 +163,20 @@ fn std430_storage_element_stride_pads_vec3() {
     );
     assert_eq!(storage_elem_stride(&array), Some(64));
     assert_eq!(buffer_array_strides(&array), vec![16]);
+}
+
+#[test]
+fn std430_parameter_struct_layout_includes_inter_field_and_nested_padding() {
+    let scalar = f32t();
+    let vector = vecn(3);
+    let layout = std430_struct_layout(&[&scalar, &vector, &scalar]).expect("supported");
+    assert_eq!(layout.member_offsets, vec![0, 16, 28]);
+    assert_eq!((layout.size, layout.align), (32, 16));
+
+    let nested = record(&[("x", f32t()), ("v", vecn(3))]);
+    let outer = std430_struct_layout(&[&scalar, &nested]).expect("nested struct supported");
+    assert_eq!(outer.member_offsets, vec![0, 16]);
+    assert_eq!((outer.size, outer.align), (48, 16));
 }
 
 #[test]

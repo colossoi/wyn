@@ -30,8 +30,62 @@ use crate::BindingRef;
 /// points (distinguished by `@vertex` / `@fragment` / `@compute`
 /// attributes), module-scope types, bindings, and helper functions.
 pub fn lower(program: &crate::ssa::stage::WgslReady) -> Result<String> {
+    Ok(lower_with_abi(program)?.source)
+}
+
+/// WGSL source plus the WebGPU bindings synthesized while adapting backend
+/// features that WGSL does not expose directly.
+pub(crate) struct LoweredModule {
+    pub source: String,
+    pub parameter_blocks: Vec<ParameterBlock>,
+}
+
+/// A read-only storage block replacing one compute entry's push constants.
+#[derive(Clone, Debug)]
+pub(crate) struct ParameterBlock {
+    pub entry_point: String,
+    pub set: u32,
+    pub binding: u32,
+    pub size: u32,
+    pub members: Vec<ParameterMember>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ParameterMember {
+    pub name: String,
+    pub push_constant_offset: u32,
+    pub offset: u32,
+    pub size: u32,
+}
+
+pub(crate) fn lower_with_abi(program: &crate::ssa::stage::WgslReady) -> Result<LoweredModule> {
     let mut ctx = LowerCtx::new(program);
-    ctx.lower_program()
+    let source = ctx.lower_program()?;
+    let mut blocks = ctx.pc_blocks.values().collect::<Vec<_>>();
+    blocks.sort_by_key(|block| (block.set, block.binding));
+    let parameter_blocks = blocks
+        .into_iter()
+        .map(|block| ParameterBlock {
+            entry_point: block.entry_point.clone(),
+            set: block.set,
+            binding: block.binding,
+            size: block.size,
+            members: block
+                .fields
+                .iter()
+                .map(|field| ParameterMember {
+                    name: field.source_name.clone(),
+                    push_constant_offset: field.push_constant_offset,
+                    offset: field.offset,
+                    size: field.size,
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(LoweredModule {
+        source,
+        parameter_blocks,
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -605,8 +659,8 @@ struct LowerCtx<'a> {
     output_structs: LookupMap<String, (String, Vec<(String, String, String)>)>,
     output_struct_counter: usize,
     /// Push-constant block info per entry-point name. Compute entries
-    /// whose inputs carry `push_constant_offset` are backed by a uniform
-    /// block in WGSL (WebGPU has no push constants). Each block holds
+    /// whose inputs carry `push_constant_offset` are backed by a read-only
+    /// storage block in WGSL (WebGPU has no push constants). Each block holds
     /// one field per push-constant input; fields are keyed by the input
     /// index in `entry.inputs` so `lower_entry_point` can route the
     /// corresponding SSA `ValueId` to `<block_var>.<field_name>`.
@@ -626,16 +680,28 @@ struct LowerCtx<'a> {
     private_const_globals: LookupMap<String, (String, String)>,
 }
 
-/// Uniform-block stand-in for a compute entry's push-constant inputs.
+/// Read-only storage-block stand-in for a compute entry's push-constant inputs.
 struct PcBlock {
+    entry_point: String,
     struct_name: String,
     var_name: String,
     /// Synthesized `@group(set) @binding(binding)`.
     set: u32,
     binding: u32,
-    /// Per push-constant input: index into `entry.inputs`, the WGSL
-    /// field name, and the WGSL type string. Preserves input order.
-    fields: Vec<(usize, String, String)>,
+    /// Natural byte size of the emitted storage struct.
+    size: u32,
+    /// Per push-constant input, preserving source order.
+    fields: Vec<PcField>,
+}
+
+struct PcField {
+    input_index: usize,
+    source_name: String,
+    wgsl_name: String,
+    wgsl_type: String,
+    push_constant_offset: u32,
+    offset: u32,
+    size: u32,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -836,8 +902,8 @@ impl<'a> LowerCtx<'a> {
         blocks.sort_by_key(|b| (b.set, b.binding));
         for b in blocks {
             writeln!(output, "struct {} {{", b.struct_name).unwrap();
-            for (_, field_name, ty_str) in &b.fields {
-                writeln!(output, "    {}: {},", field_name, ty_str).unwrap();
+            for field in &b.fields {
+                writeln!(output, "    {}: {},", field.wgsl_name, field.wgsl_type).unwrap();
             }
             writeln!(output, "}}").unwrap();
             writeln!(output).unwrap();
@@ -1160,8 +1226,8 @@ impl<'a> LowerCtx<'a> {
         // Build a push-constant block for this entry if any input carries
         // `push_constant_offset`. SPIR-V packs these into a PushConstant
         // storage-class struct; WGSL has no push constants, so we emit
-        // a uniform block instead. Collected here so `lower_program`'s
-        // module-scope pass can emit the struct + `var<uniform>` decl.
+        // a read-only storage block instead. Collected here so
+        // `lower_program`'s module-scope pass can emit the struct + binding.
         let pc_inputs: Vec<(usize, &crate::interface::EntryInput)> =
             entry.inputs.iter().enumerate().filter(|(_, inp)| inp.push_constant().is_some()).collect();
         let pc_block: Option<PcBlock> = if !pc_inputs.is_empty() {
@@ -1172,8 +1238,15 @@ impl<'a> LowerCtx<'a> {
             let binding = self.pc_blocks.len() as u32;
             let struct_name = format!("_PcBlock{}", binding);
             let var_name = format!("_pc{}", binding);
-            let mut fields: Vec<(usize, String, String)> = Vec::new();
-            for (i, inp) in &pc_inputs {
+            let field_types = pc_inputs.iter().map(|(_, input)| &input.ty).collect::<Vec<_>>();
+            let layout = crate::ssa::layout::std430_struct_layout(&field_types).ok_or_else(|| {
+                crate::err_wgsl!(
+                    "entry '{}': push-constant inputs cannot be represented by a WGSL storage parameter block",
+                    entry.name
+                )
+            })?;
+            let mut fields = Vec::new();
+            for ((i, inp), &offset) in pc_inputs.iter().zip(&layout.member_offsets) {
                 let raw_name =
                     body.param(*i).map(|(_, _, name)| name.to_owned()).unwrap_or_else(|| inp.name.clone());
                 // Mangle through the same pass the rest of the backend
@@ -1181,13 +1254,24 @@ impl<'a> LowerCtx<'a> {
                 // words like `target` or `loop`.
                 let field_name = self.mangle_tracked(&raw_name)?;
                 let ty_str = self.type_emitter.type_to_wgsl(&inp.ty)?;
-                fields.push((*i, field_name, ty_str));
+                let slot = inp.push_constant().expect("pc_inputs contains only push constants");
+                fields.push(PcField {
+                    input_index: *i,
+                    source_name: inp.name.clone(),
+                    wgsl_name: field_name,
+                    wgsl_type: ty_str,
+                    push_constant_offset: slot.offset,
+                    offset,
+                    size: slot.size,
+                });
             }
             Some(PcBlock {
+                entry_point: entry.name.clone(),
                 struct_name,
                 var_name,
                 set: 1,
                 binding,
+                size: layout.size,
                 fields,
             })
         } else {
@@ -1469,9 +1553,9 @@ impl<'a> LowerCtx<'a> {
         // fields don't appear as function parameters in the emitted
         // WGSL; the body refers to them as `<pc_var>.<field>` instead.
         if let Some(pc) = &pc_block {
-            for (input_idx, field_name, _) in &pc.fields {
-                if let Some((value_id, _, _)) = body.param(*input_idx) {
-                    let expr = format!("{}.{}", pc.var_name, field_name);
+            for field in &pc.fields {
+                if let Some((value_id, _, _)) = body.param(field.input_index) {
+                    let expr = format!("{}.{}", pc.var_name, field.wgsl_name);
                     body_ctx.value_map.insert(value_id, ValueBinding::Alias(expr));
                 }
             }

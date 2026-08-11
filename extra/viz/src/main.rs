@@ -91,10 +91,10 @@ enum Command {
     /// Run a pipeline described by a JSON pipeline descriptor
     #[command(name = "pipeline", visible_alias = "run")]
     Pipeline {
-        /// Path to the SPIR-V module
+        /// Path to the SPIR-V or WGSL module
         path: PathBuf,
         /// Path to the pipeline descriptor JSON. Defaults to
-        /// `<spv-path>.json` (the file `wyn compile` writes next to
+        /// `<shader-path>.json` (the file `wyn compile` writes next to
         /// its output by default), so this only needs to be supplied
         /// when the descriptor lives somewhere else.
         #[arg(long, short)]
@@ -163,7 +163,9 @@ enum Command {
         /// Output file: name:file.json (repeatable, omit to print to stdout)
         #[arg(long = "output", value_name = "NAME:FILE")]
         outputs: Vec<String>,
-        /// Push constant (repeatable).
+        /// Scalar entry input (repeatable). Native SPIR-V pipelines use push
+        /// constants; WGSL pipelines populate descriptor-declared storage
+        /// parameter blocks.
         ///
         /// Format: `name:type=value`. Type is one of i32, u32, f32,
         /// or i32xN / u32xN / f32xN for fixed-size arrays.

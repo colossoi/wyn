@@ -89,6 +89,9 @@ pub struct InteractivePipelineSpec {
     /// shader writes but no `--input`/`--feedback` supplies (a scratch
     /// framebuffer, `0`) or reads as random initial state (`rng`).
     pub buffer_inits: HashMap<String, gpu::BufferInit>,
+    /// Scalar entry values supplied with `--push-constant`. For WGSL compute
+    /// pipelines these populate descriptor-declared storage parameter blocks.
+    pub parameter_values: Vec<crate::specs::PushConstantSpec>,
     /// Flat little-endian `u32` index buffer file. When present, the
     /// host binds it and dispatches `draw_indexed` with
     /// `file_size / 4` indices in place of the non-indexed
@@ -655,12 +658,32 @@ impl State {
             gpu::create_feedback_buffers(&device, &spec.descriptor, &buffer_feedback_pairs)?;
         let host_textures =
             gpu::create_host_textures(&device, &queue, &spec.descriptor, &storage_textures, &spec.images);
+        let mut parameter_bytes = gpu::ParameterBlockBytes::new();
+        for pipeline in &spec.descriptor.pipelines {
+            let DescPipeline::Compute(compute) = pipeline else {
+                continue;
+            };
+            for (key, data) in
+                gpu::build_parameter_block_bytes(&compute.bindings, &spec.parameter_values, spec.verbose)?
+            {
+                if let Some(previous) = parameter_bytes.insert(key, data.clone()) {
+                    if previous != data {
+                        return Err(anyhow!(
+                            "compute pipelines publish incompatible WGSL parameter blocks at ({}, {})",
+                            key.0,
+                            key.1
+                        ));
+                    }
+                }
+            }
+        }
         let host_buffers = gpu::create_host_buffers(
             &device,
             &queue,
             &spec.descriptor,
             spec.storage_dir.as_deref(),
             &spec.buffer_inits,
+            &parameter_bytes,
         )?;
 
         // Resolve `--output NAME:FILE` requests to concrete buffers now,
@@ -858,10 +881,10 @@ impl State {
             queue.write_buffer(buffer, offset as u64, &spec_value.data);
         }
 
-        // Load the SPIR-V module once; both compute and graphics
-        // pipelines reuse the same shader binary.
-        let module = crate::spirv::load_spirv_module(&device, &spec.shader_path)
-            .with_context(|| format!("load SPIR-V module {:?}", spec.shader_path))?;
+        // Load the SPIR-V or WGSL module once; both compute and graphics
+        // pipelines reuse it.
+        let module = crate::spirv::load_shader_module(&device, &spec.shader_path)
+            .with_context(|| format!("load shader module {:?}", spec.shader_path))?;
 
         // Buffer-size map for dispatch resolution. `DispatchLen::InputBinding`
         // queries this by binding number to compute element count from the
@@ -874,16 +897,19 @@ impl State {
         //     dispatching `DerivedFrom(InputBinding(host_buf))` (e.g. a
         //     framebuffer-clear lifted out as its own dispatch) gets the
         //     right per-element count.
-        let mut dispatch_buffer_sizes: HashMap<u32, (wgpu::Buffer, u64)> = HashMap::new();
+        let mut dispatch_buffer_sizes = gpu::StorageBuffers::new();
         for pair in &buffer_feedback_pairs {
             if let Some(res) = feedback_buffers.get(&(pair.write_set, pair.write_binding)) {
                 let buf = &res.buffers[0];
-                dispatch_buffer_sizes.insert(pair.read_binding, (buf.clone(), buf.size()));
+                dispatch_buffer_sizes.insert(
+                    (pair.read_set, pair.read_binding),
+                    (buf.clone(), buf.size()),
+                );
             }
         }
-        for ((_set, binding), res) in &host_buffers {
+        for ((set, binding), res) in &host_buffers {
             dispatch_buffer_sizes
-                .entry(*binding)
+                .entry((*set, *binding))
                 .or_insert_with(|| (res.buffer.clone(), res.buffer.size()));
         }
 
@@ -997,6 +1023,7 @@ impl State {
                         stage.workgroup_size,
                         &dispatch_buffer_sizes,
                         &[],
+                        &parameter_bytes,
                         &storage_textures,
                     )
                 };
@@ -1641,7 +1668,7 @@ fn render_pipeline(
                 queue.write_buffer(&res.buffer, 0, bytemuck::cast_slice(&as_u32));
             }
             // Loaded once at startup; the file contents are already on the GPU.
-            gpu::HostBufferKind::FileLoaded => {}
+            gpu::HostBufferKind::FileLoaded | gpu::HostBufferKind::Parameter => {}
         }
     }
     // Update Shadertoy-style uniforms when the graphics pipeline asked
