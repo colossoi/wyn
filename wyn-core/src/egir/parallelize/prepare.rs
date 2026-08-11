@@ -40,7 +40,10 @@ pub(super) struct ParallelHistPlan {
 #[derive(Clone)]
 enum ParallelHistKind {
     Atomic(Vec<crate::egir::soac::hist::AtomicUpdate>),
-    Bucket(crate::egir::soac::hist::ParallelStage),
+    Bucket {
+        stage: crate::egir::soac::hist::ParallelStage,
+        topology: Option<crate::egir::soac::hist::DispatchTopology>,
+    },
 }
 
 impl ParallelHistPlan {
@@ -57,10 +60,11 @@ impl ParallelHistPlan {
     pub(super) fn bucket(
         owner: super::super::program::SemanticOpId,
         stage: crate::egir::soac::hist::ParallelStage,
+        topology: Option<crate::egir::soac::hist::DispatchTopology>,
     ) -> Self {
         Self {
             owner,
-            kind: ParallelHistKind::Bucket(stage),
+            kind: ParallelHistKind::Bucket { stage, topology },
         }
     }
 }
@@ -129,7 +133,11 @@ fn schedule_soac_with_mode(
                         ParallelHistKind::Atomic(operations) => {
                             hist::ScheduledState::Atomic { space, operations }
                         }
-                        ParallelHistKind::Bucket(stage) => hist::ScheduledState::Bucket { space, stage },
+                        ParallelHistKind::Bucket { stage, topology } => hist::ScheduledState::Bucket {
+                            space,
+                            stage,
+                            topology,
+                        },
                     }
                 }
                 _ => hist::ScheduledState::Serial,

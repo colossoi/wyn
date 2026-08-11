@@ -182,14 +182,57 @@ fn constant_i32(graph: &crate::egir::types::EGraph<Semantic>, node: NodeId) -> O
     }
 }
 
-/// Map a fixed ranked row-major domain onto WebGPU's three dispatch axes.
-/// The innermost item dimension uses x, the next dimension uses y, and any
-/// remaining outer prefix is flattened onto z.
-fn tiled_bucket_domain(
+const MAX_WORKGROUPS_PER_AXIS: u64 = 65_535;
+
+#[cfg(test)]
+fn checked_axis_workgroups(extents: &[u32], local_size: u32) -> Option<u32> {
+    if local_size == 0 {
+        return None;
+    }
+    let items = extents.iter().try_fold(1u64, |product, extent| product.checked_mul(u64::from(*extent)))?;
+    let local_size = u64::from(local_size);
+    let workgroups = items.checked_add(local_size - 1)?.checked_div(local_size)?;
+    (workgroups <= MAX_WORKGROUPS_PER_AXIS).then(|| workgroups as u32)
+}
+
+#[derive(Clone, Copy)]
+enum AxisDispatch {
+    Direct(u32),
+    GridStride {
+        workgroups: u32,
+        items: u32,
+    },
+}
+
+fn plan_axis(extents: &[u32], local_size: u32) -> Option<AxisDispatch> {
+    if local_size == 0 {
+        return None;
+    }
+    let items = extents.iter().try_fold(1u64, |product, extent| product.checked_mul(u64::from(*extent)))?;
+    let local = u64::from(local_size);
+    let workgroups = items.checked_add(local - 1)?.checked_div(local)?;
+    if workgroups <= MAX_WORKGROUPS_PER_AXIS {
+        return Some(AxisDispatch::Direct(workgroups as u32));
+    }
+    let items = u32::try_from(items).ok()?;
+    if items > i32::MAX as u32 {
+        return None;
+    }
+    let physical_items = MAX_WORKGROUPS_PER_AXIS.checked_mul(local)?;
+    Some(AxisDispatch::GridStride {
+        workgroups: MAX_WORKGROUPS_PER_AXIS as u32,
+        items: u32::try_from(physical_items).ok()?,
+    })
+}
+
+/// Map a fixed row-major logical domain onto WebGPU's three dispatch axes.
+/// Logical dimensions remain contiguous within each physical axis. The
+/// innermost dimension is kept on x, while all legal divisions of the outer
+/// prefix between y and z are considered with checked wide arithmetic.
+fn bucket_dispatch_topology(
     space: &SegSpace,
     local_size: (u32, u32, u32),
-) -> Option<super::schedule::KernelDomain> {
-    const MAX_WORKGROUPS_PER_AXIS: u32 = 65_535;
+) -> Result<Option<(hist::DispatchTopology, super::schedule::KernelDomain)>, String> {
     let dimensions = space
         .dims()
         .iter()
@@ -197,22 +240,81 @@ fn tiled_bucket_domain(
             crate::egir::types::SegExtent::Fixed(count) => Some(*count),
             _ => None,
         })
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Option<Vec<_>>>();
+    let Some(dimensions) = dimensions else {
+        return Ok(None);
+    };
     let (local_x, local_y, local_z) = local_size;
-    if dimensions.len() < 2 || local_x == 0 || local_y == 0 || local_z == 0 {
-        return None;
+    if dimensions.is_empty() || local_x == 0 || local_y == 0 || local_z == 0 {
+        return Err("bucket_scatter requires a nonempty domain and nonzero compute local sizes".into());
     }
-    let x_items = *dimensions.last()?;
-    let y = dimensions[dimensions.len() - 2];
-    let z = dimensions[..dimensions.len() - 2]
-        .iter()
-        .try_fold(1u32, |product, count| product.checked_mul(*count))?;
-    let workgroups = |items: u32, local: u32| items.checked_add(local - 1)?.checked_div(local);
-    let x = workgroups(x_items, local_x)?;
-    let y = workgroups(y, local_y)?;
-    let z = workgroups(z, local_z)?;
-    (x <= MAX_WORKGROUPS_PER_AXIS && y <= MAX_WORKGROUPS_PER_AXIS && z <= MAX_WORKGROUPS_PER_AXIS)
-        .then_some(super::schedule::KernelDomain::Fixed { x, y, z })
+    let rank = dimensions.len();
+    let x_start = rank - 1;
+    let preferred_z_end = x_start.saturating_sub(1);
+    let z_ends = std::iter::once(preferred_z_end)
+        .chain((0..=x_start).filter(|candidate| *candidate != preferred_z_end));
+    let mut grid_stride = None;
+    for z_end in z_ends {
+        let Some(x) = plan_axis(&dimensions[x_start..], local_x) else {
+            continue;
+        };
+        let Some(y) = plan_axis(&dimensions[z_end..x_start], local_y) else {
+            continue;
+        };
+        let Some(z) = plan_axis(&dimensions[..z_end], local_z) else {
+            continue;
+        };
+        let mut topology = hist::DispatchTopology {
+            axes: [
+                hist::DispatchAxis {
+                    start: x_start,
+                    end: rank,
+                },
+                hist::DispatchAxis {
+                    start: z_end,
+                    end: x_start,
+                },
+                hist::DispatchAxis { start: 0, end: z_end },
+            ],
+            grid_stride: None,
+        };
+        let axes = [x, y, z];
+        let strided = axes
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, dispatch)| match dispatch {
+                AxisDispatch::GridStride { items, .. } => Some((axis, *items)),
+                AxisDispatch::Direct(_) => None,
+            })
+            .collect::<Vec<_>>();
+        if strided.len() > 1 {
+            continue;
+        }
+        let workgroups = axes.map(|dispatch| match dispatch {
+            AxisDispatch::Direct(workgroups) | AxisDispatch::GridStride { workgroups, .. } => workgroups,
+        });
+        let domain = super::schedule::KernelDomain::Fixed {
+            x: workgroups[0],
+            y: workgroups[1],
+            z: workgroups[2],
+        };
+        if let Some((axis, items)) = strided.first().copied() {
+            topology.grid_stride = Some(hist::GridStride { axis, items });
+            if grid_stride.is_none() {
+                grid_stride = Some((topology, domain));
+            }
+        } else {
+            return Ok(Some((topology, domain)));
+        }
+    }
+
+    if let Some(topology) = grid_stride {
+        return Ok(Some(topology));
+    }
+
+    Err(format!(
+        "bucket_scatter domain {dimensions:?} cannot be partitioned or strip-mined across WebGPU's x/y/z dispatch limits"
+    ))
 }
 
 impl super::KernelPlanBuilder<'_, '_> {
@@ -230,15 +332,22 @@ impl super::KernelPlanBuilder<'_, '_> {
             crate::flow::ExecutionModel::Compute { local_size } => *local_size,
             _ => (1, 1, 1),
         };
-        let tiled_domain = tiled_bucket_domain(&candidate.space, local_size);
-        let insert_domain = tiled_domain
-            .clone()
-            .or_else(|| super::schedule::domain_from_space(&candidate.space))
-            .unwrap_or(super::schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 });
-        let insert_stage = if tiled_domain.is_some() {
-            hist::ParallelStage::InsertTiled
+        let fixed_dispatch = bucket_dispatch_topology(&candidate.space, local_size)
+            .map_err(super::error::ParallelizeError::Invalid)?;
+        let (insert_domain, insert_topology) = if let Some((topology, domain)) = fixed_dispatch {
+            (domain, Some(topology))
+        } else if candidate.space.dims().len() == 1 {
+            let domain = super::schedule::domain_from_space(&candidate.space).ok_or_else(|| {
+                super::error::ParallelizeError::Invalid(
+                    "bucket_scatter dynamic rank-one domain is not host-dispatchable".into(),
+                )
+            })?;
+            (domain, None)
         } else {
-            hist::ParallelStage::Insert
+            return Err(super::error::ParallelizeError::Invalid(
+                "bucket_scatter resource-derived multidimensional dispatch is not representable in the current descriptor"
+                    .into(),
+            ));
         };
         let declarations = body.resource_declarations.clone();
 
@@ -271,6 +380,7 @@ impl super::KernelPlanBuilder<'_, '_> {
             )),
             candidate.owner,
             hist::ParallelStage::Init,
+            None,
         );
 
         let insert_name = format!("{}_bucket_insert", body.name);
@@ -308,7 +418,8 @@ impl super::KernelPlanBuilder<'_, '_> {
         .bucket(
             super::schedule::KernelDispatch::inferred(insert_domain),
             candidate.owner,
-            insert_stage,
+            hist::ParallelStage::Insert,
+            insert_topology,
         );
 
         let finish_body = project_kernel_body(
@@ -346,10 +457,24 @@ impl super::KernelPlanBuilder<'_, '_> {
             }),
             candidate.owner,
             hist::ParallelStage::Finish,
+            None,
         )
         .with_output_projection(output_projection);
 
         self.schedule.replace_chain(kernel, vec![init, insert], finish, Vec::new())?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::checked_axis_workgroups;
+
+    #[test]
+    fn axis_planning_uses_checked_wide_products_and_target_limits() {
+        assert_eq!(checked_axis_workgroups(&[4096, 16], 1), None);
+        assert_eq!(checked_axis_workgroups(&[4095, 16], 1), Some(65_520));
+        assert_eq!(checked_axis_workgroups(&[u32::MAX, u32::MAX, u32::MAX], 64), None);
+        assert_eq!(checked_axis_workgroups(&[2016], 64), Some(32));
     }
 }

@@ -1008,9 +1008,11 @@ fn physicalize_soac(
                 hist::ScheduledState::Bucket {
                     space: iteration_space,
                     stage,
+                    topology,
                 } => hist::ScheduledState::Bucket {
                     space: space(iteration_space, nodes, bindings)?,
                     stage,
+                    topology,
                 },
             };
             Soac::Hist(hist::Op { inputs, form, state })

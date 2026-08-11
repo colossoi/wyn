@@ -2641,9 +2641,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             let producers = super::graph_ops::value_producer_closure(&self.graph, [input_node]);
             let materialized_soac = self.graph.skeleton.blocks.values().any(|block| {
                 block.side_effects.iter().any(|effect| {
-                    effect
-                        .result
-                        .is_some_and(|result| producers.nodes.contains(&result))
+                    effect.result.is_some_and(|result| producers.nodes.contains(&result))
                         && matches!(effect.kind, SideEffectKind::Soac(_))
                 })
             });

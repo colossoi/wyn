@@ -128,8 +128,34 @@ pub enum AtomicUpdate {
 pub enum ParallelStage {
     Init,
     Insert,
-    InsertTiled,
     Finish,
+}
+
+/// A contiguous range of logical dimensions assigned to one physical
+/// dispatch axis. Empty ranges represent an unused axis whose logical extent
+/// is one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DispatchAxis {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Target-checked mapping from a row-major logical domain to WebGPU's x/y/z
+/// invocation grid. Axes are stored in physical x, y, z order; ranges are
+/// contiguous, disjoint, and together cover every logical dimension.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DispatchTopology {
+    pub axes: [DispatchAxis; 3],
+    /// One physical axis may be strip-mined when its logical extent exceeds
+    /// WebGPU's direct workgroup limit. Each invocation advances by this many
+    /// logical axis items until the full axis has been visited.
+    pub grid_stride: Option<GridStride>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridStride {
+    pub axis: usize,
+    pub items: u32,
 }
 
 /// Target execution selected after reducer legality has been proven.
@@ -143,6 +169,7 @@ pub enum ScheduledState<R> {
     Bucket {
         space: SegSpace<R>,
         stage: ParallelStage,
+        topology: Option<DispatchTopology>,
     },
 }
 

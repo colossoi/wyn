@@ -524,61 +524,68 @@ fn emit_thread_coordinate(graph: &mut EGraph, builtin: crate::builtins::BuiltinI
     )
 }
 
-fn emit_tiled_bucket_coordinates(
+fn emit_dispatch_axis_extent(
     graph: &mut EGraph,
     dimensions: &[NodeId],
     i32_type: &Type<TypeName>,
-    bool_type: &Type<TypeName>,
-) -> (Vec<NodeId>, NodeId) {
-    assert!(dimensions.len() >= 2, "tiled bucket domain must be ranked");
-    let x = emit_thread_coordinate(graph, catalog().known().thread_id);
-    let y = emit_thread_coordinate(graph, catalog().known().thread_id_y);
-    let z = emit_thread_coordinate(graph, catalog().known().thread_id_z);
-    let x_extent = dimensions[dimensions.len() - 1];
-    let y_extent = dimensions[dimensions.len() - 2];
+) -> NodeId {
     let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_type.clone(), None);
-    let z_extent = dimensions[..dimensions.len() - 2].iter().copied().fold(one, |product, dimension| {
+    dimensions.iter().copied().fold(one, |product, dimension| {
         graph.intern_pure(
             PureOp::BinOp(crate::op::BinaryOperator::Multiply),
             smallvec![product, dimension],
             i32_type.clone(),
             None,
         )
-    });
-    let mut coordinates =
-        emit_flat_domain_coordinates(graph, z, &dimensions[..dimensions.len() - 2], i32_type);
-    coordinates.extend([y, x]);
-    let x_in_range = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
-        smallvec![x, x_extent],
-        bool_type.clone(),
-        None,
-    );
-    let y_in_range = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
-        smallvec![y, y_extent],
-        bool_type.clone(),
-        None,
-    );
-    let z_in_range = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
-        smallvec![z, z_extent],
-        bool_type.clone(),
-        None,
-    );
-    let xy_in_range = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
-        smallvec![x_in_range, y_in_range],
-        bool_type.clone(),
-        None,
-    );
-    let tile_in_range = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
-        smallvec![xy_in_range, z_in_range],
-        bool_type.clone(),
-        None,
-    );
-    (coordinates, tile_in_range)
+    })
+}
+
+fn emit_ranked_bucket_coordinates(
+    graph: &mut EGraph,
+    dimensions: &[NodeId],
+    topology: &hist::DispatchTopology,
+    lanes: [NodeId; 3],
+    i32_type: &Type<TypeName>,
+    bool_type: &Type<TypeName>,
+) -> (Vec<NodeId>, NodeId) {
+    let mut coordinates = vec![None; dimensions.len()];
+    let mut in_range = None;
+    for (axis, lane) in topology.axes.iter().zip(lanes) {
+        assert!(
+            axis.start <= axis.end && axis.end <= dimensions.len(),
+            "planned bucket dispatch range is outside the logical domain"
+        );
+        let axis_dimensions = &dimensions[axis.start..axis.end];
+        let axis_extent = emit_dispatch_axis_extent(graph, axis_dimensions, i32_type);
+        let axis_in_range = graph.intern_pure(
+            PureOp::BinOp(crate::op::BinaryOperator::Less),
+            smallvec![lane, axis_extent],
+            bool_type.clone(),
+            None,
+        );
+        in_range = Some(match in_range {
+            None => axis_in_range,
+            Some(previous) => graph.intern_pure(
+                PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
+                smallvec![previous, axis_in_range],
+                bool_type.clone(),
+                None,
+            ),
+        });
+        for (offset, coordinate) in
+            emit_flat_domain_coordinates(graph, lane, axis_dimensions, i32_type).into_iter().enumerate()
+        {
+            coordinates[axis.start + offset] = Some(coordinate);
+        }
+    }
+    let coordinates = coordinates
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .expect("planned bucket dispatch topology covers every logical dimension");
+    (
+        coordinates,
+        in_range.expect("bucket dispatch topology has three physical axes"),
+    )
 }
 
 fn emit_overflow_flag(
@@ -707,7 +714,7 @@ pub(super) fn build_bucket_insert(
     effect_index: usize,
     spec: HistLoop,
     space: &SegSpace,
-    tiled: bool,
+    topology: Option<&hist::DispatchTopology>,
     next_effect: &mut crate::IdSource<EffectToken>,
     regions: &ProgramIdentities,
 ) {
@@ -730,10 +737,29 @@ pub(super) fn build_bucket_insert(
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let bool_type = Type::Constructed(TypeName::Bool, vec![]);
     let domain_dimensions = emit_seg_space_dimensions(graph, space, &spec.len_input, &i32_type);
-    let (domain_coordinates, in_range) = if tiled {
-        emit_tiled_bucket_coordinates(graph, &domain_dimensions, &i32_type, &bool_type)
+    let physical_lanes = [
+        emit_thread_coordinate(graph, catalog().known().thread_id),
+        emit_thread_coordinate(graph, catalog().known().thread_id_y),
+        emit_thread_coordinate(graph, catalog().known().thread_id_z),
+    ];
+    let mut lanes = physical_lanes;
+    let (coordinate_block, grid_loop) = if let Some(stride) = topology.and_then(|plan| plan.grid_stride) {
+        let header = graph.skeleton.create_block();
+        let continuation = graph.skeleton.create_block();
+        let lane = graph.add_block_param(header, i32_type.clone());
+        lanes[stride.axis] = lane;
+        graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
+            target: header,
+            args: vec![physical_lanes[stride.axis]],
+        };
+        (header, Some((continuation, lane, stride)))
     } else {
-        let lane = emit_thread_lane(graph);
+        (block, None)
+    };
+    let (domain_coordinates, mut in_range) = if let Some(topology) = topology {
+        emit_ranked_bucket_coordinates(graph, &domain_dimensions, topology, lanes, &i32_type, &bool_type)
+    } else {
+        let lane = physical_lanes[0];
         let coordinates = emit_flat_domain_coordinates(graph, lane, &domain_dimensions, &i32_type);
         let length = emit_seg_space_len(graph, space, &spec.len_input, &i32_type);
         let in_range = graph.intern_pure(
@@ -744,15 +770,56 @@ pub(super) fn build_bucket_insert(
         );
         (coordinates, in_range)
     };
+    if let Some((_, lane, _)) = grid_loop {
+        let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_type.clone(), None);
+        let did_not_wrap = graph.intern_pure(
+            PureOp::BinOp(crate::op::BinaryOperator::GreaterEqual),
+            smallvec![lane, zero],
+            bool_type.clone(),
+            None,
+        );
+        in_range = graph.intern_pure(
+            PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
+            smallvec![did_not_wrap, in_range],
+            bool_type.clone(),
+            None,
+        );
+    }
     let body = graph.skeleton.create_block();
-    graph.skeleton.blocks[block].term = SkeletonTerminator::CondBranch {
+    graph.skeleton.blocks[coordinate_block].term = SkeletonTerminator::CondBranch {
         cond: in_range,
         then_target: body,
         then_args: vec![],
         else_target: after,
         else_args: vec![],
     };
-    graph.skeleton.blocks[block].control_header = Some(ControlHeader::Selection { merge: after });
+    let work_done = if let Some((continuation, lane, stride)) = grid_loop {
+        graph.skeleton.blocks[coordinate_block].control_header = Some(ControlHeader::Loop {
+            merge: after,
+            continue_block: continuation,
+        });
+        let stride_value = graph.intern_pure(
+            PureOp::Int(stride.items.to_string()),
+            smallvec![],
+            i32_type.clone(),
+            None,
+        );
+        let next_lane = graph.intern_pure(
+            PureOp::BinOp(crate::op::BinaryOperator::Add),
+            smallvec![lane, stride_value],
+            i32_type.clone(),
+            None,
+        );
+        graph.skeleton.blocks[continuation].term = SkeletonTerminator::Branch {
+            target: coordinate_block,
+            args: vec![next_lane],
+        };
+        continuation
+    } else {
+        graph.skeleton.blocks[coordinate_block].control_header =
+            Some(ControlHeader::Selection { merge: after });
+        after
+    };
 
     let arguments = spec
         .read_inputs
@@ -787,10 +854,10 @@ pub(super) fn build_bucket_insert(
         cond: *active,
         then_target: check_bucket,
         else_args: vec![],
-        else_target: after,
+        else_target: work_done,
         then_args: vec![],
     };
-    graph.skeleton.blocks[body].control_header = Some(ControlHeader::Selection { merge: after });
+    graph.skeleton.blocks[body].control_header = Some(ControlHeader::Selection { merge: work_done });
 
     let valid_key = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Less),
@@ -807,10 +874,11 @@ pub(super) fn build_bucket_insert(
         else_target: invalid,
         else_args: vec![],
     };
-    graph.skeleton.blocks[check_bucket].control_header = Some(ControlHeader::Selection { merge: after });
+    graph.skeleton.blocks[check_bucket].control_header =
+        Some(ControlHeader::Selection { merge: work_done });
     emit_overflow_flag(graph, invalid, overflow, next_effect);
     graph.skeleton.blocks[invalid].term = SkeletonTerminator::Branch {
-        target: after,
+        target: work_done,
         args: vec![],
     };
 
@@ -854,10 +922,10 @@ pub(super) fn build_bucket_insert(
         else_target: full,
         else_args: vec![],
     };
-    graph.skeleton.blocks[allocate].control_header = Some(ControlHeader::Selection { merge: after });
+    graph.skeleton.blocks[allocate].control_header = Some(ControlHeader::Selection { merge: work_done });
     emit_overflow_flag(graph, full, overflow, next_effect);
     graph.skeleton.blocks[full].term = SkeletonTerminator::Branch {
-        target: after,
+        target: work_done,
         args: vec![],
     };
 
@@ -874,7 +942,7 @@ pub(super) fn build_bucket_insert(
     let place = graph.intern_pure(PureOp::PlaceIndex, smallvec![row, slot], leaf_ty, None);
     emit_store(graph, write, place, *value, next_effect, None);
     graph.skeleton.blocks[write].term = SkeletonTerminator::Branch {
-        target: after,
+        target: work_done,
         args: vec![],
     };
 }

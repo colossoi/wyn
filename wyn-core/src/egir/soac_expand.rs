@@ -485,14 +485,22 @@ fn expand_one(
                 hist::PhysicalState::Atomic { space, operations } => {
                     build_hist_atomic(graph, bid, idx, hist, space, operations, next_effect, regions)
                 }
-                hist::PhysicalState::Bucket { space, stage } => match stage {
+                hist::PhysicalState::Bucket {
+                    space,
+                    stage,
+                    topology,
+                } => match stage {
                     hist::ParallelStage::Init => build_bucket_init(graph, bid, idx, hist, next_effect),
-                    hist::ParallelStage::Insert => {
-                        build_bucket_insert(graph, bid, idx, hist, space, false, next_effect, regions)
-                    }
-                    hist::ParallelStage::InsertTiled => {
-                        build_bucket_insert(graph, bid, idx, hist, space, true, next_effect, regions)
-                    }
+                    hist::ParallelStage::Insert => build_bucket_insert(
+                        graph,
+                        bid,
+                        idx,
+                        hist,
+                        space,
+                        topology.as_ref(),
+                        next_effect,
+                        regions,
+                    ),
                     hist::ParallelStage::Finish => build_bucket_finish(graph, bid, idx, hist.result_node),
                 },
                 hist::PhysicalState::Serial => build_hist_loop(graph, bid, idx, hist, next_effect, regions),

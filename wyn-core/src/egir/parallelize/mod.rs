@@ -156,8 +156,10 @@ impl BuiltPhase {
         dispatch: schedule::KernelDispatch,
         owner: SemanticOpId,
         stage: crate::egir::soac::hist::ParallelStage,
+        topology: Option<crate::egir::soac::hist::DispatchTopology>,
     ) -> schedule::PhaseSpec {
-        schedule::PhaseSpec::bucket(self.body, dispatch, owner, stage).with_resources(self.resources)
+        schedule::PhaseSpec::bucket(self.body, dispatch, owner, stage, topology)
+            .with_resources(self.resources)
     }
     fn filter(
         self,

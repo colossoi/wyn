@@ -1064,6 +1064,100 @@ entry bucket_rank_4(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
 }
 
 #[test]
+fn ranked_bucket_scatter_regroups_logical_dimensions_to_fit_dispatch_limits() {
+    use crate::pipeline_descriptor::{DispatchSize, Pipeline};
+
+    let source = r#"
+entry regrouped_bucket_domain(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
+  let items: [256][256][2][2](i32, u32) =
+    map(|a: i32|
+      map(|b: i32|
+        map(|c: i32|
+          map(|d: i32| ((a + b + c + d) % 4, u32(a + b + c + d)), iota(2)),
+          iota(2)),
+        iota(256)),
+      iota(256))
+  in bucket_scatter_4d(dest, items)
+"#;
+
+    let lowered = crate::compile_thru_spirv(source).expect("regrouped bucket domain emits SPIR-V");
+    let insert = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) => compute
+                .stages
+                .iter()
+                .find(|stage| stage.entry_point == "regrouped_bucket_domain_bucket_insert"),
+            _ => None,
+        })
+        .expect("bucket insertion stage");
+    assert_eq!(
+        insert.dispatch_size,
+        DispatchSize::Fixed {
+            x: 1,
+            y: 512,
+            z: 256,
+            explicit: false,
+        },
+        "the invalid fixed z prefix [256][256] must be repartitioned"
+    );
+}
+
+#[test]
+fn ranked_bucket_scatter_grid_strides_an_oversized_axis() {
+    use crate::pipeline_descriptor::{DispatchSize, Pipeline};
+
+    let source = r#"
+entry strided_bucket_domain(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
+  let items = map(|i: i32| (i % 4, u32(i)), iota(4194241)) in
+  bucket_scatter_1d(dest, items)
+"#;
+
+    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+        compile_to_semantic_egir(source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    ))
+    .expect("grid-stride bucket scatter lowers to WGSL");
+    assert!(
+        wgsl.contains("loop {"),
+        "oversized insertion must contain a grid-stride loop:\n{wgsl}"
+    );
+    let module = naga::front::wgsl::parse_str(&wgsl)
+        .unwrap_or_else(|error| panic!("Naga rejected grid-stride bucket WGSL: {error:?}\n{wgsl}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("Naga validation rejected grid-stride bucket WGSL: {error:?}\n{wgsl}"));
+
+    let lowered = crate::compile_thru_spirv(source).expect("grid-stride bucket domain emits SPIR-V");
+    let insert = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) => compute
+                .stages
+                .iter()
+                .find(|stage| stage.entry_point == "strided_bucket_domain_bucket_insert"),
+            _ => None,
+        })
+        .expect("bucket insertion stage");
+    assert_eq!(
+        insert.dispatch_size,
+        DispatchSize::Fixed {
+            x: 65_535,
+            y: 1,
+            z: 1,
+            explicit: false,
+        }
+    );
+}
+
+#[test]
 fn guarded_bucket_scatter_semantics_discard_count_and_overflow_correctly() {
     use crate::egir::semantic_exec::{execute_bucket_hist, Value};
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
