@@ -96,6 +96,12 @@ fn float_term(
             inner_blocked.insert(name);
             let (mut body_floats, body) = float_term(*body, &inner_blocked, ids, symbols, collect);
 
+            if let Some((mut lifted, bucket)) = fuse_ranked_bucket_map(name, &rhs, &body) {
+                rhs_floats.append(&mut lifted);
+                rhs_floats.append(&mut body_floats);
+                return finish(rhs_floats, bucket, collect, ids);
+            }
+
             if collect {
                 rhs_floats.append(&mut body_floats);
                 (
@@ -216,6 +222,146 @@ fn float_term(
     }
 }
 
+struct RankedMapFusion {
+    params: Vec<(SymbolId, Type<TypeName>)>,
+    inputs: Vec<ArrayExpr<Empty, Empty>>,
+    input_dimensions: Vec<Vec<u8>>,
+    lifted: Vec<LetBinding<Empty, Empty>>,
+    leaf: Option<Term<Empty, Empty>>,
+}
+
+/// Compose a rectangular nest of generated maps directly into a ranked bucket
+/// scatter. The source-level `items` array then remains a semantic producer:
+/// no intermediate ranked array is allocated or materialized.
+fn fuse_ranked_bucket_map(
+    binding: SymbolId,
+    rhs: &Term<Empty, Empty>,
+    body: &Term<Empty, Empty>,
+) -> Option<(Vec<LetBinding<Empty, Empty>>, Term<Empty, Empty>)> {
+    let TermKind::Soac(SoacOp::BucketScatter {
+        dest,
+        inputs,
+        input_dimensions,
+        domain_rank,
+        ..
+    }) = &body.kind
+    else {
+        return None;
+    };
+    if inputs.len() != 1
+        || input_dimensions.as_slice() != [(0..*domain_rank).collect::<Vec<_>>()]
+        || !matches!(&inputs[0], ArrayExpr::Var(VarRef::Symbol(symbol), _) if *symbol == binding)
+    {
+        return None;
+    }
+
+    let mut fusion = RankedMapFusion {
+        params: Vec::new(),
+        inputs: Vec::new(),
+        input_dimensions: Vec::new(),
+        lifted: Vec::new(),
+        leaf: None,
+    };
+    let mut bound = LookupSet::new();
+    extract_ranked_map_level(rhs, 0, *domain_rank, &mut bound, &mut fusion)?;
+    let leaf = fusion.leaf?;
+    let ret_ty = leaf.ty.clone();
+    let lam = SoacBody {
+        lam: Lambda {
+            params: fusion.params,
+            body: Box::new(leaf),
+            ret_ty,
+        },
+        data: (),
+    };
+    let bucket = Term {
+        id: body.id,
+        ty: body.ty.clone(),
+        span: body.span,
+        kind: TermKind::Soac(SoacOp::BucketScatter {
+            dest: dest.clone(),
+            lam,
+            inputs: fusion.inputs,
+            input_dimensions: fusion.input_dimensions,
+            domain_rank: *domain_rank,
+        }),
+    };
+    Some((fusion.lifted, bucket))
+}
+
+fn extract_ranked_map_level(
+    term: &Term<Empty, Empty>,
+    depth: u8,
+    rank: u8,
+    bound: &mut LookupSet<SymbolId>,
+    fusion: &mut RankedMapFusion,
+) -> Option<()> {
+    if depth >= rank {
+        return None;
+    }
+    let term = peel_liftable_map_lets(term, bound, &mut fusion.lifted)?;
+    let TermKind::Soac(SoacOp::Map { lam, inputs, .. }) = &term.kind else {
+        return None;
+    };
+    if inputs.len() != lam.lam.params.len()
+        || inputs.iter().any(|input| array_expr_references_any(input, bound))
+    {
+        return None;
+    }
+
+    fusion.params.extend(lam.lam.params.iter().cloned());
+    fusion.inputs.extend(inputs.iter().cloned());
+    fusion.input_dimensions.extend((0..inputs.len()).map(|_| vec![depth]));
+    bound.extend(lam.lam.params.iter().map(|(symbol, _)| *symbol));
+
+    if depth + 1 == rank {
+        fusion.leaf = Some((*lam.lam.body).clone());
+        Some(())
+    } else {
+        extract_ranked_map_level(&lam.lam.body, depth + 1, rank, bound, fusion)
+    }
+}
+
+fn peel_liftable_map_lets<'a>(
+    mut term: &'a Term<Empty, Empty>,
+    bound: &LookupSet<SymbolId>,
+    lifted: &mut Vec<LetBinding<Empty, Empty>>,
+) -> Option<&'a Term<Empty, Empty>> {
+    while let TermKind::Let {
+        name,
+        name_ty,
+        rhs,
+        body,
+    } = &term.kind
+    {
+        if references_any(rhs, bound) {
+            return None;
+        }
+        lifted.push(LetBinding {
+            name: *name,
+            name_ty: name_ty.clone(),
+            rhs: (**rhs).clone(),
+            span: term.span,
+        });
+        term = body;
+    }
+    Some(term)
+}
+
+fn array_expr_references_any(ae: &ArrayExpr<Empty, Empty>, blocked: &LookupSet<SymbolId>) -> bool {
+    match ae {
+        ArrayExpr::Var(VarRef::Symbol(symbol), _) => blocked.contains(symbol),
+        ArrayExpr::Var(VarRef::Builtin { .. }, _) => false,
+        ArrayExpr::Zip(children) => children.iter().any(|child| array_expr_references_any(child, blocked)),
+        ArrayExpr::Literal(terms) => terms.iter().any(|term| references_any(term, blocked)),
+        ArrayExpr::Range { start, len, step } => {
+            references_any(start, blocked)
+                || references_any(len, blocked)
+                || step.as_deref().is_some_and(|step| references_any(step, blocked))
+        }
+    }
+}
+
 fn float_soac(
     soac: SoacOp<Empty, Empty>,
     blocked: &LookupSet<SymbolId>,
@@ -315,6 +461,33 @@ fn float_soac(
                     dest,
                     lam,
                     inputs: new_inputs,
+                },
+            )
+        }
+        SoacOp::BucketScatter {
+            dest,
+            lam,
+            inputs,
+            input_dimensions,
+            domain_rank,
+        } => {
+            let (mut floats, lam) = float_soac_body(lam, blocked, ids, symbols);
+            let inputs = inputs
+                .into_iter()
+                .map(|input| {
+                    let (mut input_floats, input) = float_array_expr(input, blocked, ids, symbols);
+                    floats.append(&mut input_floats);
+                    input
+                })
+                .collect();
+            (
+                floats,
+                SoacOp::BucketScatter {
+                    dest,
+                    lam,
+                    inputs,
+                    input_dimensions,
+                    domain_rank,
                 },
             )
         }

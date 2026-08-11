@@ -189,6 +189,13 @@ impl<C: Payload, S: Payload> Liveness<'_, C, S> {
                 }
                 live
             }
+            SoacOp::BucketScatter { lam, inputs, .. } => {
+                let mut live = self.soac_envelope_fixed_point(lam, &per_call_defs, live_after);
+                for input in inputs.iter().rev() {
+                    live = self.analyze_array_expr(input, live);
+                }
+                live
+            }
             SoacOp::ReduceByIndex {
                 op,
                 ne,

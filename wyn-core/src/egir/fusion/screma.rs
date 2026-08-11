@@ -107,7 +107,7 @@ pub(super) fn fuse_horizontal(
 
     Normalized {
         input_nodes,
-        inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
+        inputs: input_array_types.into_iter().map(SoacInputType::array).collect(),
         form: screma::ScremaForm {
             pre,
             scans: producer.form.scans.iter().chain(&consumer.form.scans).cloned().collect(),
@@ -259,7 +259,7 @@ pub(super) fn fuse_map_into_lambda(
 
     Some(NormalizedLambda {
         input_nodes,
-        inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
+        inputs: input_array_types.into_iter().map(SoacInputType::array).collect(),
         lambda,
         synthesized: function.into_iter().collect(),
     })
@@ -411,7 +411,7 @@ fn fuse_scanless_producer(
 
     Normalized {
         input_nodes,
-        inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
+        inputs: input_array_types.into_iter().map(SoacInputType::array).collect(),
         form: screma::ScremaForm {
             pre,
             scans: consumer.form.scans.clone(),
@@ -735,7 +735,7 @@ fn fuse_across_middle_barrier(
 
     Some(Normalized {
         input_nodes,
-        inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
+        inputs: input_array_types.into_iter().map(SoacInputType::array).collect(),
         form: screma::ScremaForm {
             pre,
             scans: producer.form.scans.iter().chain(&consumer.form.scans).cloned().collect(),

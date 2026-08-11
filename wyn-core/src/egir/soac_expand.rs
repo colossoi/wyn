@@ -53,7 +53,10 @@ use array_io::{emit_read_element, emit_write_element};
 use filter_lowering::{
     build_filter_flags, build_filter_loop, build_filter_scan, build_filter_scatter, FilterLoop,
 };
-use hist_lowering::{build_hist_atomic, build_hist_loop, HistLoop};
+use hist_lowering::{
+    build_bucket_finish, build_bucket_init, build_bucket_insert, build_hist_atomic, build_hist_loop,
+    HistLoop,
+};
 use loop_builder::{expand_loop, LoopBody, ResultBinding};
 use screma_lowering::{build_parallel_screma_map, emit_screma_lambda};
 
@@ -457,10 +460,17 @@ fn expand_one(
         SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
             let n_inputs = op.inputs.len();
             let input_nids = &se.operand_nodes[..n_inputs];
-            let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
+            let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>, Vec<u8>)> = input_nids
                 .iter()
                 .zip(op.inputs.iter())
-                .map(|(nid, input)| (*nid, input.array.clone(), input.element()))
+                .map(|(nid, input)| {
+                    (
+                        *nid,
+                        input.array.clone(),
+                        input.element(),
+                        input.dimensions.clone(),
+                    )
+                })
                 .collect();
             let len_input = (input_nids[0], op.inputs[0].array.clone());
             let result_nid = se.result.expect("Hist has a result");
@@ -475,6 +485,16 @@ fn expand_one(
                 hist::PhysicalState::Atomic { space, operations } => {
                     build_hist_atomic(graph, bid, idx, hist, space, operations, next_effect, regions)
                 }
+                hist::PhysicalState::Bucket { space, stage } => match stage {
+                    hist::ParallelStage::Init => build_bucket_init(graph, bid, idx, hist, next_effect),
+                    hist::ParallelStage::Insert => {
+                        build_bucket_insert(graph, bid, idx, hist, space, false, next_effect, regions)
+                    }
+                    hist::ParallelStage::InsertTiled => {
+                        build_bucket_insert(graph, bid, idx, hist, space, true, next_effect, regions)
+                    }
+                    hist::ParallelStage::Finish => build_bucket_finish(graph, bid, idx, hist.result_node),
+                },
                 hist::PhysicalState::Serial => build_hist_loop(graph, bid, idx, hist, next_effect, regions),
             }
         }

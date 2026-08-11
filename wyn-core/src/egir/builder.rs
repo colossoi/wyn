@@ -133,9 +133,7 @@ impl<'a> EntryBuilder<'a> {
         output_view: NodeId,
         output_view_ty: Type<TypeName>,
     ) -> NodeId {
-        let input = SoacInputType {
-            array: input_array_ty,
-        };
+        let input = SoacInputType::array(input_array_ty);
         let input_element_type = input.element();
         let pre = screma::Lambda::region(
             super::types::SegBody { region, captures },

@@ -20,6 +20,7 @@ use super::capabilities::{self, Strategy};
 
 #[derive(Clone, Copy)]
 pub(super) struct LocatedHist<'a> {
+    pub site: SideEffectSite,
     pub owner: SemanticOpId,
     pub op: &'a hist::Op<crate::egir::types::Semantic>,
 }
@@ -143,7 +144,11 @@ fn located_hist(
             "selected Hist site {site:?} no longer contains a Hist operation"
         )));
     };
-    Ok(LocatedHist { owner: *owner, op })
+    Ok(LocatedHist {
+        site,
+        owner: *owner,
+        op,
+    })
 }
 fn located_screma(
     entry: &crate::egir::program::PlannedEntry,
@@ -602,7 +607,7 @@ fn analyze_projected_kernel(
     }
     if let [site] = targets.hists.as_slice() {
         let located = located_hist(&body, *site)?;
-        if let Some(candidate) = super::hist::analyze_hist_candidate(program, &body.graph, located) {
+        if let Some(candidate) = super::hist::analyze_hist_candidate(program, &body, located) {
             let kernel = PlannedKernel::new(body, output_projection, AnalyzedRecipe::Hist(candidate));
             return Ok((kernel, Vec::new()));
         }

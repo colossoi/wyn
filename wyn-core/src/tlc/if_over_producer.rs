@@ -618,7 +618,9 @@ fn collect_symbol_refs_array(ae: &ArrayExpr<Empty, Empty>, out: &mut LookupSet<S
 fn collect_symbol_refs_in_soac_places(term: &Term<Empty, Empty>, out: &mut LookupSet<SymbolId>) {
     if let TermKind::Soac(soac) = &term.kind {
         match soac {
-            SoacOp::Scatter { dest, .. } | SoacOp::ReduceByIndex { dest, .. } => {
+            SoacOp::Scatter { dest, .. }
+            | SoacOp::BucketScatter { dest, .. }
+            | SoacOp::ReduceByIndex { dest, .. } => {
                 collect_symbol_refs_place(dest, out);
             }
             _ => {}

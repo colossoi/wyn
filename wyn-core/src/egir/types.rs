@@ -75,7 +75,7 @@ impl<P: WynSoacPhase> Soac<P> {
                 let mut bodies = op.form.bucket.seg_body().into_iter().collect::<Vec<_>>();
                 bodies.extend(
                     op.form.operations.iter().filter_map(|operation| match &operation.update {
-                        hist::Update::OrderedOverwrite { .. } => None,
+                        hist::Update::OrderedOverwrite { .. } | hist::Update::BucketInsert { .. } => None,
                         hist::Update::Reduce { operator, .. } => operator.seg_body(),
                     }),
                 );
@@ -204,9 +204,31 @@ pub(crate) fn soac_element_type(array: &Type<TypeName>) -> Type<TypeName> {
         .unwrap_or_else(|| panic!("expected an array or SoA tuple, got {array:?}"))
 }
 
+/// Derive the leaf type after descending `rank` regular array dimensions,
+/// preserving structure-of-arrays tuples at every level.
+pub(crate) fn soac_leaf_type(array: &Type<TypeName>, rank: u8) -> Type<TypeName> {
+    assert!(rank > 0, "SOAC input rank must be positive");
+    if as_soa_tuple(array).is_some() {
+        let Type::Constructed(TypeName::Tuple(arity), components) = array else {
+            unreachable!()
+        };
+        return Type::Constructed(
+            TypeName::Tuple(*arity),
+            components.iter().map(|component| soac_leaf_type(component, rank)).collect(),
+        );
+    }
+    let mut leaf = array.clone();
+    for _ in 0..rank {
+        leaf = crate::types::array_elem(&leaf)
+            .cloned()
+            .unwrap_or_else(|| panic!("SOAC input rank {rank} exceeds array type {array:?}"));
+    }
+    leaf
+}
+
 impl super::ir::SoacInputType<Type<TypeName>> {
     pub(crate) fn element(&self) -> Type<TypeName> {
-        soac_element_type(&self.array)
+        soac_leaf_type(&self.array, self.rank())
     }
 }
 

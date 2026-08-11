@@ -847,6 +847,20 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
                     self.visit_array_expr(input);
                 }
             }
+            SoacOp::BucketScatter { lam, inputs, .. } => {
+                for input in inputs {
+                    self.visit_array_expr(input);
+                }
+                for ((symbol, ty), input) in lam.lam.params.iter().zip(inputs.iter()) {
+                    if !types::is_copy(ty) {
+                        let origin = self.element_origin_from_input(input);
+                        let owner = self.fresh_owner(origin);
+                        self.bind(*symbol, owner);
+                        self.record_per_call_def(soac_id, owner);
+                    }
+                }
+                self.visit_soac_body(lam);
+            }
             SoacOp::ReduceByIndex {
                 op,
                 ne,
@@ -1233,6 +1247,7 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
         match op {
             SoacOp::Map { .. } | SoacOp::Filter { .. } | SoacOp::Scan { .. } => LookupSet::new(),
             SoacOp::Scatter { inputs, .. } => self.aliases_of_array_exprs(inputs),
+            SoacOp::BucketScatter { inputs, .. } => self.aliases_of_array_exprs(inputs),
             SoacOp::Reduce { ne, input, .. } => {
                 let mut aliases = self.alias_targets(ne);
                 aliases.extend(self.array_expr_aliases(input));

@@ -2238,6 +2238,13 @@ impl<'a, 'b> Converter<'a, 'b> {
                 destination,
             } => self.convert_soac_filter(pred, input, (*destination).into(), ty),
             SoacOp::Scatter { dest, lam, inputs } => self.convert_soac_scatter(dest, lam, inputs, ty),
+            SoacOp::BucketScatter {
+                dest,
+                lam,
+                inputs,
+                input_dimensions,
+                domain_rank,
+            } => self.convert_soac_bucket_scatter(dest, lam, inputs, input_dimensions, *domain_rank, ty),
             SoacOp::ReduceByIndex {
                 dest,
                 op,
@@ -2343,7 +2350,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let map_region = self.function_id(f_symbol);
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op {
-                inputs: input_arr_types.into_iter().map(|array| SoacInputType { array }).collect(),
+                inputs: input_arr_types.into_iter().map(SoacInputType::array).collect(),
                 form: screma::ScremaForm {
                     pre: screma::Lambda::region(
                         SegBody {
@@ -2420,8 +2427,8 @@ impl<'a, 'b> Converter<'a, 'b> {
         self.emit_soac(
             Soac::Hist(hist::Op {
                 inputs: vec![
-                    SoacInputType { array: index_array },
-                    SoacInputType { array: value_array },
+                    SoacInputType::array(index_array),
+                    SoacInputType::array(value_array),
                 ],
                 form: hist::HistForm {
                     bucket: screma::Lambda::identity(vec![index_type, value_type]),
@@ -2493,7 +2500,7 @@ impl<'a, 'b> Converter<'a, 'b> {
 
         self.emit_soac(
             Soac::Hist(hist::Op {
-                inputs: input_array_types.into_iter().map(|array| SoacInputType { array }).collect(),
+                inputs: input_array_types.into_iter().map(SoacInputType::array).collect(),
                 form: hist::HistForm {
                     bucket: screma::Lambda::region(
                         SegBody {
@@ -2520,6 +2527,191 @@ impl<'a, 'b> Converter<'a, 'b> {
         Ok(dest_view)
     }
 
+    /// Lower ranked capacity-bounded insertion to the canonical histogram
+    /// representation. Destination shape supplies bucket count and capacity;
+    /// the item rank remains explicit on the SOAC input.
+    fn convert_soac_bucket_scatter(
+        &mut self,
+        dest: &crate::tlc::Place,
+        lam: &SoacBody,
+        inputs: &[ArrayExpr],
+        input_dimensions: &[Vec<u8>],
+        domain_rank: u8,
+        _result_ty: Type<TypeName>,
+    ) -> Result<NodeId, ConvertError> {
+        let dest_view = *self.locals.get(&dest.id).ok_or_else(|| {
+            ConvertError::GraphError(
+                "bucket_scatter destination is not a bound storage view (must be a storage parameter)"
+                    .into(),
+            )
+        })?;
+        let dest_view_ty = self.graph.nodes[dest_view].ty.clone();
+        let fixed_size = |ty: &Type<TypeName>, dimension: &str| -> Result<u32, ConvertError> {
+            match ty.array_size() {
+                Some(Type::Constructed(TypeName::Size(size), _)) if *size > 0 => u32::try_from(*size)
+                    .map_err(|_| {
+                        ConvertError::Unsupported(format!(
+                            "bucket_scatter destination {dimension} is too large"
+                        ))
+                    }),
+                _ => Err(ConvertError::Unsupported(format!(
+                    "bucket_scatter requires a positive fixed destination {dimension}"
+                ))),
+            }
+        };
+        let bucket_count = fixed_size(&dest_view_ty, "bucket count")?;
+        let row_ty = dest_view_ty.elem_type().ok_or_else(|| {
+            ConvertError::GraphError("bucket_scatter destination must have rank two".into())
+        })?;
+        let capacity = fixed_size(row_ty, "capacity")?;
+
+        let function = self.lambda_fn_symbol(&lam.lam)?;
+        let (key_type, value_type) = match &lam.lam.ret_ty {
+            Type::Constructed(TypeName::Tuple(2), fields) => (fields[0].clone(), fields[1].clone()),
+            other => {
+                return Err(ConvertError::GraphError(format!(
+                    "bucket_scatter envelope must return (i32, value), got {other:?}"
+                )));
+            }
+        };
+        if inputs.len() != input_dimensions.len() {
+            return Err(ConvertError::Internal(
+                "bucket_scatter input/dimension metadata length mismatch".into(),
+            ));
+        }
+        if domain_rank == 0 {
+            return Err(ConvertError::Internal(
+                "bucket_scatter domain rank must be positive".into(),
+            ));
+        }
+        let input_nodes = inputs
+            .iter()
+            .map(|input| self.convert_array_expr_value(input))
+            .collect::<Result<Vec<_>, _>>()?;
+        let input_arrays = inputs
+            .iter()
+            .zip(&input_nodes)
+            .map(|(input, node)| self.value_array_type(*node, input))
+            .collect::<Vec<_>>();
+        let captures = lam
+            .data
+            .captures
+            .iter()
+            .map(|(_, _, term)| self.convert_term(term))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
+        let counts_size = LogicalSize::FixedBytes(u64::from(bucket_count) * 4);
+        let counts = self.arenas.resources.allocate_compiler(
+            CompilerResource::new(CompilerResourceKind::BucketCounts, None, 0),
+            u32_type.clone(),
+            counts_size.clone(),
+        );
+        let overflow_size = LogicalSize::FixedBytes(4);
+        let overflow = self.arenas.resources.allocate_compiler(
+            CompilerResource::new(CompilerResourceKind::BucketOverflow, None, 0),
+            u32_type.clone(),
+            overflow_size.clone(),
+        );
+        self.extra_resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef(counts),
+            role: crate::interface::StorageRole::Output,
+            elem_ty: u32_type.clone(),
+            size: counts_size,
+        });
+        self.extra_resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef(overflow),
+            role: crate::interface::StorageRole::Intermediate,
+            elem_ty: u32_type.clone(),
+            size: overflow_size,
+        });
+        let counts_type = crate::types::view_array_with_size(
+            &u32_type,
+            Type::Constructed(TypeName::Size(bucket_count as usize), vec![]),
+            Type::Constructed(TypeName::Resource(counts), vec![]),
+        );
+        let overflow_type = crate::types::view_array_with_size(
+            &u32_type,
+            Type::Constructed(TypeName::Size(1), vec![]),
+            Type::Constructed(TypeName::Resource(overflow), vec![]),
+        );
+        let counts_view =
+            super::graph_ops::intern_resource_view(&mut self.graph, counts, counts_type, self.current_span);
+        let overflow_view = super::graph_ops::intern_resource_view(
+            &mut self.graph,
+            overflow,
+            overflow_type,
+            self.current_span,
+        );
+        let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+        let bucket_count_node = self.intern_pure(
+            PureOp::Int(bucket_count.to_string()),
+            smallvec![],
+            i32_type.clone(),
+        );
+        let capacity_node =
+            self.intern_pure(PureOp::Int(capacity.to_string()), smallvec![], i32_type.clone());
+        let race_factor = self.intern_pure(PureOp::Int("1".into()), smallvec![], i32_type);
+        let body_region = self.function_id(function);
+        let placeholder_type = Type::Constructed(TypeName::Bool, vec![]);
+        let _placeholder = self.emit_soac(
+            Soac::Hist(hist::Op {
+                inputs: input_arrays
+                    .into_iter()
+                    .zip(input_dimensions)
+                    .map(|(array, dimensions)| SoacInputType::mapped(array, dimensions.clone()))
+                    .collect(),
+                form: hist::HistForm {
+                    bucket: screma::Lambda::region(
+                        SegBody {
+                            region: body_region,
+                            captures,
+                        },
+                        lam.lam.params.iter().map(|(_, ty)| ty.clone()).collect(),
+                        vec![key_type, value_type.clone()],
+                    ),
+                    operations: vec![hist::HistOp {
+                        shape: vec![bucket_count_node],
+                        race_factor,
+                        destinations: vec![dest_view],
+                        update: hist::Update::BucketInsert {
+                            value_types: vec![dest.elem_ty.clone()],
+                            counts: counts_view,
+                            overflow: overflow_view,
+                            capacity: capacity_node,
+                        },
+                    }],
+                },
+                state: hist::RawState,
+            }),
+            input_nodes.into_iter().collect(),
+            placeholder_type,
+        );
+
+        let zero = super::graph_ops::intern_u32(&mut self.graph, 0, self.current_span);
+        let overflow_value = super::graph_ops::emit_view_load(
+            &mut self.graph,
+            self.current_block,
+            overflow_view,
+            zero,
+            u32_type,
+            self.effect_ids,
+            self.current_span,
+        );
+        Ok(self.intern_pure(
+            PureOp::Tuple(3),
+            smallvec![dest_view, counts_view, overflow_value],
+            Type::Constructed(
+                TypeName::Tuple(3),
+                vec![
+                    dest_view_ty,
+                    self.graph.nodes[counts_view].ty.clone(),
+                    Type::Constructed(TypeName::UInt(32), vec![]),
+                ],
+            ),
+        ))
+    }
+
     fn convert_soac_reduce(
         &mut self,
         op: &SoacBody,
@@ -2542,7 +2734,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let op_region = self.function_id(operator_symbol);
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op {
-                inputs: vec![SoacInputType { array: arr_ty }],
+                inputs: vec![SoacInputType::array(arr_ty)],
                 form: screma::ScremaForm {
                     pre: screma::Lambda::identity(vec![result_ty.clone()]),
                     scans: Vec::new(),
@@ -2613,7 +2805,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let op_region = self.function_id(operator_symbol);
         let screma_nid = self.emit_soac(
             Soac::Screma(screma::Op {
-                inputs: vec![SoacInputType { array: arr_ty }],
+                inputs: vec![SoacInputType::array(arr_ty)],
                 form: screma::ScremaForm {
                     pre: screma::Lambda::identity(vec![scan_elem_ty.clone()]),
                     scans: vec![screma::Scan {
@@ -2686,7 +2878,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             return Ok(self.emit_soac(
                 Soac::Filter(filter::Op {
                     body: filter::Body {
-                        inputs: vec![SoacInputType { array: arr_ty }],
+                        inputs: vec![SoacInputType::array(arr_ty)],
                         map: screma::Lambda::identity(vec![output_elem_ty.clone()]),
                         predicate: screma::Lambda::region(
                             pred_body.clone(),
@@ -2754,7 +2946,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         Ok(self.emit_soac(
             Soac::Filter(filter::Op {
                 body: filter::Body {
-                    inputs: vec![SoacInputType { array: arr_ty }],
+                    inputs: vec![SoacInputType::array(arr_ty)],
                     map: screma::Lambda::identity(vec![output_elem_ty.clone()]),
                     predicate: screma::Lambda::region(
                         pred_body,
@@ -3057,7 +3249,12 @@ fn build_entry_outputs(
                 return Ok(None);
             }
             let Some(elem_ty) = ty.elem_type() else {
-                return Ok(None);
+                let bytes = crate::ssa::layout::type_byte_size(ty).ok_or_else(|| {
+                    ConvertError::Internal(format!("output has no static byte layout: {ty:?}"))
+                })?;
+                return Ok(Some(BufferLen::Fixed {
+                    bytes: u64::from(bytes),
+                }));
             };
             let elem_bytes = crate::ssa::layout::storage_elem_stride(elem_ty).ok_or_else(|| {
                 ConvertError::Internal(format!("output element has no static byte layout: {elem_ty:?}"))

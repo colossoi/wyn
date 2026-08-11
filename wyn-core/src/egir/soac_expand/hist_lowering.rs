@@ -1,6 +1,9 @@
 //! Histogram expansion implementations.
 
-use super::array_io::{emit_read_element, emit_seg_space_len};
+use super::array_io::{
+    emit_flat_domain_coordinates, emit_read_ranked_coordinates, emit_read_ranked_element,
+    emit_seg_space_dimensions, emit_seg_space_len,
+};
 use super::loop_builder::{expand_loop, LoopBody};
 use super::screma_lowering::emit_screma_lambda;
 use super::*;
@@ -10,8 +13,8 @@ use super::*;
 /// elements and a domain length.
 pub(super) struct HistLoop {
     pub(super) form: hist::HistForm,
-    /// `(array_nid, array_type, elem_type)` per input, read per iteration.
-    pub(super) read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,
+    /// `(array_nid, array_type, leaf_type, rank)` per input.
+    pub(super) read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>, Vec<u8>)>,
     /// Loop bound source -- the first input `(nid, array_type)`.
     pub(super) len_input: (NodeId, Type<TypeName>),
     pub(super) result_node: NodeId,
@@ -265,8 +268,17 @@ pub(super) fn build_hist_atomic(
 
     let arguments = read_inputs
         .iter()
-        .map(|(array, array_type, element_type)| {
-            emit_read_element(graph, body, *array, lane, array_type, element_type, next_effect)
+        .map(|(array, array_type, element_type, dimensions)| {
+            emit_read_ranked_element(
+                graph,
+                body,
+                *array,
+                lane,
+                array_type,
+                element_type,
+                u8::try_from(dimensions.len()).expect("SOAC input rank exceeds u8"),
+                next_effect,
+            )
         })
         .collect::<Vec<_>>();
     let bucket_values = emit_screma_lambda(graph, regions, &form.bucket, arguments);
@@ -352,14 +364,15 @@ pub(super) fn build_hist_loop(
         true,
         move |graph, next_effect, blk, i_nid, _carried| {
             let mut arguments = Vec::with_capacity(read_inputs.len());
-            for (array, array_type, element_type) in &read_inputs {
-                arguments.push(emit_read_element(
+            for (array, array_type, element_type, dimensions) in &read_inputs {
+                arguments.push(emit_read_ranked_element(
                     graph,
                     blk,
                     *array,
                     i_nid,
                     array_type,
                     element_type,
+                    u8::try_from(dimensions.len()).expect("SOAC input rank exceeds u8"),
                     next_effect,
                 ));
             }
@@ -396,6 +409,9 @@ pub(super) fn build_hist_loop(
                 let value_types = operation.update.value_types();
                 let updated_values = match &operation.update {
                     hist::Update::OrderedOverwrite { .. } => operation_values.to_vec(),
+                    hist::Update::BucketInsert { .. } => {
+                        unreachable!("bucket insertion must use its dedicated serial or pipeline lowering")
+                    }
                     hist::Update::Reduce { operator, .. } => {
                         let mut reducer_arguments = Vec::with_capacity(operation.value_count() * 2);
                         for (&destination, value_type) in operation.destinations.iter().zip(value_types) {
@@ -440,4 +456,413 @@ pub(super) fn build_hist_loop(
             }
         },
     );
+}
+
+fn emit_thread_lane(graph: &mut EGraph) -> NodeId {
+    emit_thread_coordinate(graph, catalog().known().thread_id)
+}
+
+fn emit_thread_coordinate(graph: &mut EGraph, builtin: crate::builtins::BuiltinId) -> NodeId {
+    let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
+    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+    let thread = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: builtin,
+            overload_idx: 0,
+        },
+        smallvec![],
+        u32_type,
+        None,
+    );
+    let convert = catalog()
+        .conversion(&TypeName::Int(32), &TypeName::UInt(32))
+        .expect("catalog has structural u32-to-i32 conversion");
+    graph.intern_pure(
+        PureOp::Intrinsic {
+            id: convert,
+            overload_idx: 0,
+        },
+        smallvec![thread],
+        i32_type,
+        None,
+    )
+}
+
+fn emit_tiled_bucket_coordinates(
+    graph: &mut EGraph,
+    dimensions: &[NodeId],
+    i32_type: &Type<TypeName>,
+    bool_type: &Type<TypeName>,
+) -> (Vec<NodeId>, NodeId) {
+    assert!(dimensions.len() >= 2, "tiled bucket domain must be ranked");
+    let x = emit_thread_coordinate(graph, catalog().known().thread_id);
+    let y = emit_thread_coordinate(graph, catalog().known().thread_id_y);
+    let z = emit_thread_coordinate(graph, catalog().known().thread_id_z);
+    let x_extent = dimensions[dimensions.len() - 1];
+    let y_extent = dimensions[dimensions.len() - 2];
+    let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_type.clone(), None);
+    let z_extent = dimensions[..dimensions.len() - 2].iter().copied().fold(one, |product, dimension| {
+        graph.intern_pure(
+            PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+            smallvec![product, dimension],
+            i32_type.clone(),
+            None,
+        )
+    });
+    let mut coordinates =
+        emit_flat_domain_coordinates(graph, z, &dimensions[..dimensions.len() - 2], i32_type);
+    coordinates.extend([y, x]);
+    let x_in_range = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        smallvec![x, x_extent],
+        bool_type.clone(),
+        None,
+    );
+    let y_in_range = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        smallvec![y, y_extent],
+        bool_type.clone(),
+        None,
+    );
+    let z_in_range = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        smallvec![z, z_extent],
+        bool_type.clone(),
+        None,
+    );
+    let xy_in_range = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
+        smallvec![x_in_range, y_in_range],
+        bool_type.clone(),
+        None,
+    );
+    let tile_in_range = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
+        smallvec![xy_in_range, z_in_range],
+        bool_type.clone(),
+        None,
+    );
+    (coordinates, tile_in_range)
+}
+
+fn emit_overflow_flag(
+    graph: &mut EGraph,
+    block: BlockId,
+    overflow: NodeId,
+    next_effect: &mut crate::IdSource<EffectToken>,
+) {
+    use crate::ssa::types::AtomicOp;
+    let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
+    let zero = super::super::graph_ops::intern_u32(graph, 0, None);
+    let one = super::super::graph_ops::intern_u32(graph, 1, None);
+    let place = graph.intern_pure(
+        PureOp::ViewIndex,
+        smallvec![overflow, zero],
+        u32_type.clone(),
+        None,
+    );
+    super::super::graph_ops::emit_atomic(
+        graph,
+        block,
+        place,
+        AtomicOp::Exchange,
+        &[one],
+        u32_type,
+        next_effect,
+        None,
+    );
+}
+
+pub(super) fn build_bucket_init(
+    graph: &mut EGraph,
+    block: BlockId,
+    effect_index: usize,
+    spec: HistLoop,
+    next_effect: &mut crate::IdSource<EffectToken>,
+) {
+    use crate::ssa::types::AtomicOp;
+    let after = graph.skeleton.split_block_before_effect(block, effect_index);
+    graph.replace_node_preserving_type(
+        spec.result_node,
+        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+    );
+    let operation = spec.form.operations.first().expect("bucket insertion has one operation");
+    let hist::Update::BucketInsert { counts, overflow, .. } = operation.update else {
+        unreachable!("bucket init requires bucket insertion")
+    };
+    let lane = emit_thread_lane(graph);
+    let bool_type = Type::Constructed(TypeName::Bool, vec![]);
+    let in_range = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        smallvec![lane, operation.shape[0]],
+        bool_type.clone(),
+        None,
+    );
+    let body = graph.skeleton.create_block();
+    graph.skeleton.blocks[block].term = SkeletonTerminator::CondBranch {
+        cond: in_range,
+        then_target: body,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[block].control_header = Some(ControlHeader::Selection { merge: after });
+
+    let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
+    let zero_u32 = super::super::graph_ops::intern_u32(graph, 0, None);
+    let count_place = graph.intern_pure(PureOp::ViewIndex, smallvec![counts, lane], u32_type.clone(), None);
+    super::super::graph_ops::emit_atomic(
+        graph,
+        body,
+        count_place,
+        AtomicOp::Exchange,
+        &[zero_u32],
+        u32_type,
+        next_effect,
+        None,
+    );
+    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+    let zero_i32 = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_type, None);
+    let first = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Equal),
+        smallvec![lane, zero_i32],
+        bool_type,
+        None,
+    );
+    let clear_overflow = graph.skeleton.create_block();
+    let done = graph.skeleton.create_block();
+    graph.skeleton.blocks[body].term = SkeletonTerminator::CondBranch {
+        cond: first,
+        then_target: clear_overflow,
+        then_args: vec![],
+        else_target: done,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[body].control_header = Some(ControlHeader::Selection { merge: done });
+    let overflow_place = graph.intern_pure(
+        PureOp::ViewIndex,
+        smallvec![overflow, zero_u32],
+        Type::Constructed(TypeName::UInt(32), vec![]),
+        None,
+    );
+    super::super::graph_ops::emit_atomic(
+        graph,
+        clear_overflow,
+        overflow_place,
+        AtomicOp::Exchange,
+        &[zero_u32],
+        Type::Constructed(TypeName::UInt(32), vec![]),
+        next_effect,
+        None,
+    );
+    graph.skeleton.blocks[clear_overflow].term = SkeletonTerminator::Branch {
+        target: done,
+        args: vec![],
+    };
+    graph.skeleton.blocks[done].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
+    };
+}
+
+pub(super) fn build_bucket_insert(
+    graph: &mut EGraph,
+    block: BlockId,
+    effect_index: usize,
+    spec: HistLoop,
+    space: &SegSpace,
+    tiled: bool,
+    next_effect: &mut crate::IdSource<EffectToken>,
+    regions: &ProgramIdentities,
+) {
+    use crate::ssa::types::AtomicOp;
+    let after = graph.skeleton.split_block_before_effect(block, effect_index);
+    graph.replace_node_preserving_type(
+        spec.result_node,
+        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+    );
+    let operation = spec.form.operations.first().expect("bucket insertion has one operation");
+    let hist::Update::BucketInsert {
+        counts,
+        overflow,
+        capacity,
+        ..
+    } = operation.update
+    else {
+        unreachable!("bucket insert stage requires bucket insertion")
+    };
+    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+    let bool_type = Type::Constructed(TypeName::Bool, vec![]);
+    let domain_dimensions = emit_seg_space_dimensions(graph, space, &spec.len_input, &i32_type);
+    let (domain_coordinates, in_range) = if tiled {
+        emit_tiled_bucket_coordinates(graph, &domain_dimensions, &i32_type, &bool_type)
+    } else {
+        let lane = emit_thread_lane(graph);
+        let coordinates = emit_flat_domain_coordinates(graph, lane, &domain_dimensions, &i32_type);
+        let length = emit_seg_space_len(graph, space, &spec.len_input, &i32_type);
+        let in_range = graph.intern_pure(
+            PureOp::BinOp(crate::op::BinaryOperator::Less),
+            smallvec![lane, length],
+            bool_type.clone(),
+            None,
+        );
+        (coordinates, in_range)
+    };
+    let body = graph.skeleton.create_block();
+    graph.skeleton.blocks[block].term = SkeletonTerminator::CondBranch {
+        cond: in_range,
+        then_target: body,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[block].control_header = Some(ControlHeader::Selection { merge: after });
+
+    let arguments = spec
+        .read_inputs
+        .iter()
+        .map(|(array, array_type, leaf_type, dimensions)| {
+            let input_coordinates = dimensions
+                .iter()
+                .map(|dimension| {
+                    domain_coordinates
+                        .get(usize::from(*dimension))
+                        .copied()
+                        .expect("SOAC input dimension is outside its domain")
+                })
+                .collect::<Vec<_>>();
+            emit_read_ranked_coordinates(
+                graph,
+                body,
+                *array,
+                &input_coordinates,
+                array_type,
+                leaf_type,
+                next_effect,
+            )
+        })
+        .collect::<Vec<_>>();
+    let results = emit_screma_lambda(graph, regions, &spec.form.bucket, arguments);
+    let [key, value] = results.as_slice() else {
+        unreachable!("bucket insertion envelope returns key and value")
+    };
+    let zero_i32 = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_type.clone(), None);
+    let discard = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        smallvec![*key, zero_i32],
+        bool_type.clone(),
+        None,
+    );
+    let check_bucket = graph.skeleton.create_block();
+    graph.skeleton.blocks[body].term = SkeletonTerminator::CondBranch {
+        cond: discard,
+        then_target: after,
+        then_args: vec![],
+        else_target: check_bucket,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[body].control_header = Some(ControlHeader::Selection { merge: after });
+
+    let valid_key = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        smallvec![*key, operation.shape[0]],
+        bool_type.clone(),
+        None,
+    );
+    let allocate = graph.skeleton.create_block();
+    let invalid = graph.skeleton.create_block();
+    graph.skeleton.blocks[check_bucket].term = SkeletonTerminator::CondBranch {
+        cond: valid_key,
+        then_target: allocate,
+        then_args: vec![],
+        else_target: invalid,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[check_bucket].control_header = Some(ControlHeader::Selection { merge: after });
+    emit_overflow_flag(graph, invalid, overflow, next_effect);
+    graph.skeleton.blocks[invalid].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
+    };
+
+    let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
+    let one = super::super::graph_ops::intern_u32(graph, 1, None);
+    let count_place = graph.intern_pure(PureOp::ViewIndex, smallvec![counts, *key], u32_type.clone(), None);
+    let slot_u32 = super::super::graph_ops::emit_atomic(
+        graph,
+        allocate,
+        count_place,
+        AtomicOp::Add,
+        &[one],
+        u32_type,
+        next_effect,
+        None,
+    );
+    let convert = catalog()
+        .conversion(&TypeName::Int(32), &TypeName::UInt(32))
+        .expect("catalog has structural u32-to-i32 conversion");
+    let slot = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: convert,
+            overload_idx: 0,
+        },
+        smallvec![slot_u32],
+        i32_type,
+        None,
+    );
+    let has_capacity = graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        smallvec![slot, capacity],
+        bool_type,
+        None,
+    );
+    let write = graph.skeleton.create_block();
+    let full = graph.skeleton.create_block();
+    graph.skeleton.blocks[allocate].term = SkeletonTerminator::CondBranch {
+        cond: has_capacity,
+        then_target: write,
+        then_args: vec![],
+        else_target: full,
+        else_args: vec![],
+    };
+    graph.skeleton.blocks[allocate].control_header = Some(ControlHeader::Selection { merge: after });
+    emit_overflow_flag(graph, full, overflow, next_effect);
+    graph.skeleton.blocks[full].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
+    };
+
+    let destination = operation.destinations[0];
+    let destination_ty = graph.nodes[destination].ty.clone();
+    let row_ty = destination_ty.elem_type().expect("bucket destination must have rank two").clone();
+    let row = graph.intern_pure(
+        PureOp::ViewIndex,
+        smallvec![destination, *key],
+        row_ty.clone(),
+        None,
+    );
+    let leaf_ty = row_ty.elem_type().expect("bucket destination must have rank two").clone();
+    let place = graph.intern_pure(PureOp::PlaceIndex, smallvec![row, slot], leaf_ty, None);
+    emit_store(graph, write, place, *value, next_effect, None);
+    graph.skeleton.blocks[write].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
+    };
+}
+
+pub(super) fn build_bucket_finish(
+    graph: &mut EGraph,
+    block: BlockId,
+    effect_index: usize,
+    result_node: NodeId,
+) {
+    let after = graph.skeleton.split_block_before_effect(block, effect_index);
+    graph.replace_node_preserving_type(
+        result_node,
+        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+    );
+    graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
+    };
 }

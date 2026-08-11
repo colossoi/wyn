@@ -404,10 +404,7 @@ impl ScanPhase3Spec<'_> {
                     .collect::<Result<Vec<_>, _>>()?;
             }
             let mut inputs = Vec::with_capacity(1 + post.inputs.len());
-            inputs.push((
-                chunked_output,
-                crate::egir::types::SoacInputType { array: arr_ty },
-            ));
+            inputs.push((chunked_output, crate::egir::types::SoacInputType::array(arr_ty)));
             for (index, (source, input)) in post.inputs.into_iter().enumerate() {
                 let cloned =
                     graph_ops::clone_pure_subgraph(post.source_graph, builder.graph_mut(), source)?;

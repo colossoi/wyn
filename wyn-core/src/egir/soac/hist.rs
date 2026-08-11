@@ -20,6 +20,15 @@ pub enum Update {
         operator: screma::Lambda,
         neutral: Vec<NodeId>,
     },
+    /// Capacity-bounded insertion. `counts` and `overflow` are storage-view
+    /// nodes over compiler resources, which keeps resource identity in the
+    /// graph even when every item input is produced by fused computation.
+    BucketInsert {
+        value_types: Vec<Type<TypeName>>,
+        counts: NodeId,
+        overflow: NodeId,
+        capacity: NodeId,
+    },
 }
 
 impl Update {
@@ -27,6 +36,7 @@ impl Update {
         match self {
             Self::OrderedOverwrite { value_types } => value_types,
             Self::Reduce { operator, .. } => &operator.result_types,
+            Self::BucketInsert { value_types, .. } => value_types,
         }
     }
 }
@@ -91,6 +101,15 @@ pub enum AtomicUpdate {
     Direct(crate::ssa::types::AtomicOp),
     CompareExchange,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParallelStage {
+    Init,
+    Insert,
+    InsertTiled,
+    Finish,
+}
+
 /// Target execution selected after reducer legality has been proven.
 #[derive(Clone, Debug)]
 pub enum ScheduledState<R> {
@@ -98,6 +117,10 @@ pub enum ScheduledState<R> {
     Atomic {
         space: SegSpace<R>,
         operations: Vec<AtomicUpdate>,
+    },
+    Bucket {
+        space: SegSpace<R>,
+        stage: ParallelStage,
     },
 }
 
@@ -124,6 +147,11 @@ impl<P: WynSoacPhase> Op<P> {
                     }
                 }
                 Update::Reduce { operator, .. } => operator.for_each_type_mut(visit),
+                Update::BucketInsert { value_types, .. } => {
+                    for ty in value_types {
+                        visit(ty);
+                    }
+                }
             }
         }
     }
@@ -146,6 +174,15 @@ impl<P: WynSoacPhase> Op<P> {
             nodes.extend(operation.destinations.iter().copied());
             if let Update::Reduce { neutral, .. } = &operation.update {
                 nodes.extend(neutral.iter().copied());
+            }
+            if let Update::BucketInsert {
+                counts,
+                overflow,
+                capacity,
+                ..
+            } = operation.update
+            {
+                nodes.extend([counts, overflow, capacity]);
             }
         }
         nodes
@@ -212,7 +249,14 @@ impl<P: WynSoacPhase> Op<P> {
                 operation.destinations.iter().zip(value_types).enumerate()
             {
                 let destination_type = node_type(destination);
-                let destination_element = destination_type.as_ref().and_then(crate::types::array_elem);
+                let destination_element = destination_type.as_ref().and_then(|ty| {
+                    let element = crate::types::array_elem(ty)?;
+                    if matches!(operation.update, Update::BucketInsert { .. }) {
+                        crate::types::array_elem(element)
+                    } else {
+                        Some(element)
+                    }
+                });
                 if destination_element != Some(value_type) {
                     return Err(format!(
                         "histogram operation {index} destination {component} element type {:?} does not match value type {:?}",
@@ -291,11 +335,20 @@ fn form_node_slots(form: &mut HistForm) -> Vec<&mut NodeId> {
         nodes.extend(operation.shape.iter_mut());
         nodes.push(&mut operation.race_factor);
         nodes.extend(operation.destinations.iter_mut());
-        if let Update::Reduce { operator, neutral } = &mut operation.update {
-            if let Some(body) = operator.seg_body_mut() {
-                nodes.extend(body.captures.iter_mut());
+        match &mut operation.update {
+            Update::Reduce { operator, neutral } => {
+                if let Some(body) = operator.seg_body_mut() {
+                    nodes.extend(body.captures.iter_mut());
+                }
+                nodes.extend(neutral.iter_mut());
             }
-            nodes.extend(neutral.iter_mut());
+            Update::BucketInsert {
+                counts,
+                overflow,
+                capacity,
+                ..
+            } => nodes.extend([counts, overflow, capacity]),
+            Update::OrderedOverwrite { .. } => {}
         }
     }
     nodes
@@ -345,9 +398,7 @@ mod tests {
             (node(10), array(bool_type.clone())),
         ]);
         let op = Op::<Raw> {
-            inputs: vec![SoacInputType {
-                array: array(i32_type.clone()),
-            }],
+            inputs: vec![SoacInputType::array(array(i32_type.clone()))],
             form: HistForm {
                 bucket: screma::Lambda::region(
                     SegBody {

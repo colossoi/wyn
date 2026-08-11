@@ -34,7 +34,13 @@ impl ParallelFilterPlan {
 #[derive(Clone)]
 pub(super) struct ParallelHistPlan {
     owner: super::super::program::SemanticOpId,
-    operations: Vec<crate::egir::soac::hist::AtomicUpdate>,
+    kind: ParallelHistKind,
+}
+
+#[derive(Clone)]
+enum ParallelHistKind {
+    Atomic(Vec<crate::egir::soac::hist::AtomicUpdate>),
+    Bucket(crate::egir::soac::hist::ParallelStage),
 }
 
 impl ParallelHistPlan {
@@ -42,7 +48,20 @@ impl ParallelHistPlan {
         owner: super::super::program::SemanticOpId,
         operations: Vec<crate::egir::soac::hist::AtomicUpdate>,
     ) -> Self {
-        Self { owner, operations }
+        Self {
+            owner,
+            kind: ParallelHistKind::Atomic(operations),
+        }
+    }
+
+    pub(super) fn bucket(
+        owner: super::super::program::SemanticOpId,
+        stage: crate::egir::soac::hist::ParallelStage,
+    ) -> Self {
+        Self {
+            owner,
+            kind: ParallelHistKind::Bucket(stage),
+        }
     }
 }
 pub(super) fn entry(
@@ -106,9 +125,11 @@ fn schedule_soac_with_mode(
         Soac::Hist(hist::Op { inputs, form, state }) => {
             let state = match (state, hist_plan) {
                 (hist::SemanticState::Segmented(space), Some(plan)) if !serial && plan.owner == id => {
-                    hist::ScheduledState::Atomic {
-                        space,
-                        operations: plan.operations,
+                    match plan.kind {
+                        ParallelHistKind::Atomic(operations) => {
+                            hist::ScheduledState::Atomic { space, operations }
+                        }
+                        ParallelHistKind::Bucket(stage) => hist::ScheduledState::Bucket { space, stage },
                     }
                 }
                 _ => hist::ScheduledState::Serial,

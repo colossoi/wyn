@@ -132,9 +132,6 @@ fn realize_compute_slots(
     let effect_index = graph.side_effect_index();
 
     for (slot_index, output) in outputs.iter_mut().enumerate() {
-        let binding = output.storage_binding().expect("BUG: compute output without storage binding");
-        let resource =
-            resources.host_resource(binding).expect("compute output must have a semantic resource");
         let sources: Vec<SlotSource> = output.routes.iter().map(|route| route.source).collect();
         if sources.is_empty() {
             return Err(ConvertError::Unsupported(format!(
@@ -142,6 +139,49 @@ fn realize_compute_slots(
                  must derive at least one route for every declared output",
                 slot_index
             )));
+        }
+
+        // Returning one concrete host storage view publishes that same
+        // resource. In particular, destination-passing operations such as
+        // bucket_scatter must not copy a fixed ranked destination into a
+        // second output buffer after mutating it in place.
+        if let [source] = sources.as_slice() {
+            if let Some(source_resource) =
+                super::graph_ops::extract_storage_view_source(graph, source.value)
+            {
+                if let Some(binding) = resources[source_resource.0].host_binding() {
+                    let old_output_resource = output.resource;
+                    let length = output.storage_length().cloned();
+                    output.kind = crate::interface::EntryOutputKind::Storage {
+                        exposure: crate::interface::BindingExposure::Host(binding),
+                        length,
+                    };
+                    output.resource = Some(source_resource);
+                    output.routes[0].writers = vec![OutputWriter::Value(source.value)];
+                    if let Some(old_output_resource) = old_output_resource {
+                        resource_declarations.retain(|declaration| {
+                            declaration.resource != old_output_resource
+                                || declaration.resource == source_resource
+                        });
+                    }
+                    continue;
+                }
+            }
+        }
+
+        let binding = output.storage_binding().expect("BUG: compute output without storage binding");
+        let resource =
+            resources.host_resource(binding).expect("compute output must have a semantic resource");
+
+        if let [source] = sources.as_slice() {
+            if let Some((old_resource, routed_source, writer)) =
+                dispatch::retarget_bucket_aux_output(graph, source.value, resource)
+            {
+                output.routes[0].source.value = routed_source;
+                output.routes[0].writers = vec![writer];
+                resource_declarations.retain(|declaration| declaration.resource.0 != old_resource);
+                continue;
+            }
         }
 
         // A runtime `filter` whose result is this output retargets directly:

@@ -165,9 +165,7 @@ fn rewrite_sibling_index_consumers_rejects_map_output_view_operand() {
         kind: SideEffectKind::Soac(SoacEffect(
             (),
             raw_map_soac(
-                SoacInputType {
-                    array: arr_ty.clone(),
-                },
+                SoacInputType::array(arr_ty.clone()),
                 SegBody {
                     region: RegionId::from_index(0),
                     captures: vec![],
@@ -219,7 +217,7 @@ fn rewrite_sibling_index_consumers_rewrites_hist_input_only() {
         kind: SideEffectKind::Soac(SoacEffect(
             (),
             raw_hist_soac(
-                vec![SoacInputType { array: arr_ty }],
+                vec![SoacInputType::array(arr_ty)],
                 vec![],
                 i32_ty,
                 elem.clone(),
@@ -265,9 +263,7 @@ fn rewrite_sibling_index_consumers_rejects_accumulator_output_view_operand() {
         kind: SideEffectKind::Soac(SoacEffect(
             (),
             Soac::Screma(screma::Op {
-                inputs: vec![SoacInputType {
-                    array: arr_ty.clone(),
-                }],
+                inputs: vec![SoacInputType::array(arr_ty.clone())],
                 form: screma::ScremaForm {
                     pre: screma::Lambda::identity(vec![elem.clone()]),
                     scans: vec![],

@@ -102,7 +102,7 @@ impl InputTransform {
                 None,
             );
         }
-        Some((node, SoacInputType { array }))
+        Some((node, SoacInputType::array(array)))
     }
 }
 

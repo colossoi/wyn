@@ -400,6 +400,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         && (*id == known.slice
                             || *id == known.storage_len
                             || *id == known.thread_id
+                            || *id == known.thread_id_y
+                            || *id == known.thread_id_z
                             || *id == known.local_id
                             || *id == known.num_workgroups
                             || *id == known.length

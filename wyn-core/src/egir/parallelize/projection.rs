@@ -78,6 +78,7 @@ pub(super) fn project_kernel_body(
 
 fn project_kernel_body_effects(
     source: &program::PlannedEntry,
+    id: crate::EntryId,
     selected: HashSet<SideEffectSite>,
     spec: ProjectionSpec,
 ) -> Result<(program::PlannedEntry, LookupMap<SideEffectSite, SideEffectSite>), String> {
@@ -102,7 +103,7 @@ fn project_kernel_body_effects(
         source.parameter_indices_referenced_by_projection(&projection, &retained_resources);
     let mut entry = program::PlannedEntry::from_projection(
         projection,
-        source.id,
+        id,
         name,
         source.span,
         execution_model,
@@ -121,6 +122,16 @@ fn project_kernel_body_effects(
         crate::interface::StorageRole::Intermediate => true,
     });
     Ok((entry, effect_sites))
+}
+
+pub(super) fn project_single_effect_body(
+    source: &program::PlannedEntry,
+    id: crate::EntryId,
+    site: SideEffectSite,
+    spec: ProjectionSpec,
+) -> Result<program::PlannedEntry, String> {
+    let (entry, _) = project_kernel_body_effects(source, id, HashSet::from([site]), spec)?;
+    Ok(entry)
 }
 
 /// Resolve side-effect ownership from explicit output routes.
@@ -376,7 +387,7 @@ fn project_output_group(
         return_ty: entry.return_ty.clone(),
     };
 
-    let (entry, effect_sites) = project_kernel_body_effects(entry, selected, spec)?;
+    let (entry, effect_sites) = project_kernel_body_effects(entry, entry.id, selected, spec)?;
     Ok(SplitEntry {
         entry,
         semantic_slots: group.slots.clone(),

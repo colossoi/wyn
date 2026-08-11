@@ -1,9 +1,9 @@
 -- | Second-Order Array Combinators (SOACs) — derived wrappers around
 -- the array-builtin SOACs (`map`, `reduce`, `scan`, `filter`,
--- `scatter`, `zip`, `length`, `replicate`, `reduce_by_index`,
--- `iota`). The builtins themselves live in the type checker; the
--- functions here are written in Wyn and lower into the same
--- primitives.
+-- `scatter`, `bucket_scatter_1d` through `bucket_scatter_4d`, `zip`,
+-- `length`, `replicate`, `reduce_by_index`, `iota`). The builtins
+-- themselves live in the type checker; the functions here are written
+-- in Wyn and lower into the same primitives.
 --
 -- For SOACs that take an operator (`reduce`, `scan`, `reduce_by_index`
 -- and anything built on them) the operator must be **associative**
@@ -114,6 +114,17 @@ def spread<[n], [m], A>(
 ------------------------------------------------------------
 -- Histogram
 ------------------------------------------------------------
+
+-- `bucket_scatter_1d` through `bucket_scatter_4d` insert ranked
+-- `(i32, A)` item leaves into a mutable `[bucket_count][capacity]A`
+-- destination. Each nonnegative key receives a distinct slot in its
+-- bucket; slot ordering is unspecified. Negative keys are discarded
+-- without changing counts or overflow. Counts report the full population
+-- of every valid bucket even when it exceeds capacity. A nonnegative key
+-- outside the destination or any item beyond capacity sets overflow.
+-- The result is `(destination, counts, overflow)` where overflow is 0 or 1.
+-- Generated nested maps fuse into the insertion pass; they do not require
+-- materialising the complete ranked item array.
 
 -- | Generalised histogram / scatter-with-combiner. For each `k`,
 -- combine `values[k]` into `dest[indices[k]]` using `op`. `op` must

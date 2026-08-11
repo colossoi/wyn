@@ -351,10 +351,10 @@ fn semantic_facts(
     let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
         return None;
     };
-    let (input, operand_index, is_screma) = match soac {
-        Soac::Screma(op) => (op.inputs.first(), 0, true),
-        Soac::Filter(op) => (op.body.inputs.first(), 0, false),
-        Soac::Hist(op) => (op.inputs.first(), 0, false),
+    let (inputs, is_screma) = match soac {
+        Soac::Screma(op) => (op.inputs.as_slice(), true),
+        Soac::Filter(op) => (op.body.inputs.as_slice(), false),
+        Soac::Hist(op) => (op.inputs.as_slice(), false),
     };
     let output_slots = if is_screma {
         entry.map_or_else(Vec::new, |entry| output_slots(entry, effect))
@@ -364,7 +364,7 @@ fn semantic_facts(
     let resources =
         if is_screma { semantic_resources(graph, entry, effect, &output_slots) } else { Vec::new() };
     Some(Facts {
-        space: space(graph, entry, effect, input, operand_index),
+        space: space(graph, entry, effect, inputs),
         placement: requested_placement,
         output_slots,
         resources,
@@ -376,31 +376,75 @@ fn space(
     graph: &EGraph<Raw>,
     entry: Option<&RawEntry<RealizedOutputRoute>>,
     effect: &SideEffect<Raw>,
-    input: Option<&SoacInputType>,
-    operand_index: usize,
+    inputs: &[SoacInputType],
 ) -> SegSpace<SemanticResourceRef> {
-    let extent = effect.operand_nodes.get(operand_index).copied().map(|node| {
-        if let Some(resource) = graph_ops::extract_storage_view_source(graph, node) {
-            let elem_bytes = input
-                .and_then(|input| crate::ssa::layout::storage_elem_stride(&input.element()))
+    let domain_rank = inputs
+        .iter()
+        .flat_map(|input| input.dimensions.iter().copied())
+        .max()
+        .map(|dimension| usize::from(dimension) + 1)
+        .expect("semantic SOAC must have a domain input");
+    let mut dims = Vec::with_capacity(domain_rank);
+    for logical_dimension in 0..domain_rank {
+        let (operand_index, input, array_axis) = inputs
+            .iter()
+            .enumerate()
+            .find_map(|(operand_index, input)| {
+                input
+                    .dimensions
+                    .iter()
+                    .position(|dimension| usize::from(*dimension) == logical_dimension)
+                    .map(|array_axis| (operand_index, input, array_axis))
+            })
+            .unwrap_or_else(|| panic!("SOAC domain dimension {logical_dimension} has no input"));
+        let node = effect.operand_nodes[operand_index];
+        let mut dimension_ty = &input.array;
+        while let Some(components) = super::types::as_soa_tuple(dimension_ty) {
+            dimension_ty = components.first().expect("structure-of-arrays tuple must have a component");
+        }
+        for _ in 0..array_axis {
+            dimension_ty = dimension_ty
+                .elem_type()
+                .unwrap_or_else(|| panic!("SOAC input rank exceeds array type {:?}", input.array));
+            while let Some(components) = super::types::as_soa_tuple(dimension_ty) {
+                dimension_ty = components.first().expect("structure-of-arrays tuple must have a component");
+            }
+        }
+        let extent = if array_axis == 0 {
+            if let Some(Type::Constructed(TypeName::Size(size), _)) = input.array.array_size() {
+                SegExtent::Fixed(u32::try_from(*size).expect("ranked SOAC dimension is too large"))
+            } else if let Some(resource) = graph_ops::extract_storage_view_source(graph, node) {
+                let elem_bytes = crate::ssa::layout::storage_elem_stride(
+                    input.array.elem_type().expect("resource-backed SOAC input must be an array"),
+                )
                 .expect("resource-backed SOAC input must have a storable element type");
-            return SegExtent::ResourceLength {
-                node,
-                resource,
-                elem_bytes,
+                SegExtent::ResourceLength {
+                    node,
+                    resource,
+                    elem_bytes,
+                }
+            } else if let Some((_, len, _)) = graph_ops::extract_array_range_operands(graph, node) {
+                extent_from_node(graph, entry, len)
+            } else {
+                SegExtent::Value(node)
+            }
+        } else {
+            let Type::Constructed(TypeName::Size(size), _) = dimension_ty
+            .array_size()
+            .unwrap_or_else(|| {
+                panic!(
+                    "ranked SOAC array axis {array_axis} has no size: input={:?}, dimension={dimension_ty:?}",
+                    input.array
+                )
+            })
+            else {
+                panic!("ranked SOAC inner dimensions must be fixed")
             };
-        }
-        if let Some((_, len, _)) = graph_ops::extract_array_range_operands(graph, node) {
-            return extent_from_node(graph, entry, len);
-        }
-        if let Some(Type::Constructed(TypeName::Size(size), _)) =
-            input.and_then(|input| input.array.array_size())
-        {
-            return SegExtent::Fixed(*size as u32);
-        }
-        SegExtent::Value(node)
-    });
-    SegSpace::new(extent.expect("semantic SOAC must have a domain operand"))
+            SegExtent::Fixed(u32::try_from(*size).expect("ranked SOAC dimension is too large"))
+        };
+        dims.push(extent);
+    }
+    SegSpace::from_dims(dims).expect("ranked SOAC space is non-empty")
 }
 
 fn extent_from_node(

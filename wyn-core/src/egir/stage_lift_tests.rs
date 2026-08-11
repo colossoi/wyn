@@ -294,9 +294,7 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
         kind: SideEffectKind::Soac(SoacEffect(
             SemanticOpId::for_test(0),
             Soac::Screma(screma::Op {
-                inputs: vec![SoacInputType {
-                    array: input_ty.clone(),
-                }],
+                inputs: vec![SoacInputType::array(input_ty.clone())],
                 form: screma::ScremaForm {
                     pre: screma::Lambda::region(
                         SegBody {

@@ -63,7 +63,9 @@ use kernel::{
 use model as error;
 use model::{CandidateSelection, DisjointSets};
 use planning::{make_screma_serial, LocatedScrema, SerialScremaRecipe};
-use projection::{partition_entry_output_domains, project_kernel_body, ProjectionSpec};
+use projection::{
+    partition_entry_output_domains, project_kernel_body, project_single_effect_body, ProjectionSpec,
+};
 use reduce::{analyze_reduce_candidate, BoundReduce};
 use scan::{analyze_scan_candidate, BoundScan, ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
 pub use schedule::{
@@ -148,6 +150,15 @@ impl BuiltPhase {
     ) -> schedule::PhaseSpec {
         schedule::PhaseSpec::hist(self.body, dispatch, owner, operations).with_resources(self.resources)
     }
+
+    fn bucket(
+        self,
+        dispatch: schedule::KernelDispatch,
+        owner: SemanticOpId,
+        stage: crate::egir::soac::hist::ParallelStage,
+    ) -> schedule::PhaseSpec {
+        schedule::PhaseSpec::bucket(self.body, dispatch, owner, stage).with_resources(self.resources)
+    }
     fn filter(
         self,
         dispatch: schedule::KernelDispatch,
@@ -204,6 +215,28 @@ fn build_parallel_plan(
 fn build_serial_plan(
     mut program: ResourcesAllocated,
 ) -> error::Result<(ResourcesAllocated, schedule::KernelPlan)> {
+    let has_bucket_scatter = program.entry_points.iter().any(|entry| {
+        entry.graph.skeleton.blocks.iter().any(|(_, block)| {
+            block.side_effects.iter().any(|effect| {
+                let super::types::SideEffectKind::Soac(super::types::SoacEffect(
+                    _,
+                    super::types::Soac::Hist(op),
+                )) = &effect.kind
+                else {
+                    return false;
+                };
+                op.form.operations.iter().any(|operation| {
+                    matches!(operation.update, super::soac::hist::Update::BucketInsert { .. })
+                })
+            })
+        })
+    });
+    if has_bucket_scatter {
+        return Err(error::ParallelizeError::Invalid(
+            "bucket_scatter requires its init/insert/finish pipeline and cannot be compiled with --single-stage"
+                .into(),
+        ));
+    }
     let recipes = planning::analyze(&program)?.serial_recipes();
     let flows = allocation::resource_flows(&program);
     let built = KernelPlanBuilder::new(
@@ -475,17 +508,24 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         candidate: hist::HistCandidate,
         output_projection: Option<Vec<usize>>,
     ) -> error::Result<()> {
-        let domain = schedule::domain_from_space(&candidate.space)
-            .unwrap_or(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 });
-        let phase = BuiltPhase::from_declarations(body)
-            .hist(
-                schedule::KernelDispatch::inferred(domain),
-                candidate.owner,
-                candidate.operations,
-            )
-            .with_output_projection(output_projection);
-        self.schedule.commit_kernel(kernel, phase)?;
-        Ok(())
+        match candidate {
+            hist::HistCandidate::Atomic(candidate) => {
+                let domain = schedule::domain_from_space(&candidate.space)
+                    .unwrap_or(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+                let phase = BuiltPhase::from_declarations(body)
+                    .hist(
+                        schedule::KernelDispatch::inferred(domain),
+                        candidate.owner,
+                        candidate.operations,
+                    )
+                    .with_output_projection(output_projection);
+                self.schedule.commit_kernel(kernel, phase)?;
+                Ok(())
+            }
+            hist::HistCandidate::Bucket(candidate) => {
+                self.lower_parallel_bucket(body, kernel, candidate, output_projection)
+            }
+        }
     }
     fn lower_parallel_reduce(
         &mut self,

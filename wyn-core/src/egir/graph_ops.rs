@@ -908,8 +908,8 @@ pub fn extract_storage_view_source<P: Family<Resource = super::program::Semantic
 }
 
 /// Find the storage resource beneath a semantic place expression.
-pub(crate) fn storage_resource_under(
-    graph: &EGraph,
+pub(crate) fn storage_resource_under<P: Family<Resource = super::program::SemanticResourceRef>>(
+    graph: &EGraph<P>,
     root: NodeId,
 ) -> Option<super::program::SemanticResourceRef> {
     wyn_graph::find_map_reachable(

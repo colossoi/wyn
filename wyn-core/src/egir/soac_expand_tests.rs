@@ -89,10 +89,8 @@ fn scatter_handleability_checks_every_input() {
         SemanticOpId::for_test(0),
         Soac::<Physical>::Hist(hist::Op {
             inputs: vec![
-                SoacInputType {
-                    array: plain_array_ty(i32_ty.clone()),
-                },
-                SoacInputType { array: bad_input_ty },
+                SoacInputType::array(plain_array_ty(i32_ty.clone())),
+                SoacInputType::array(bad_input_ty),
             ],
             form: hist::HistForm {
                 bucket: screma::Lambda::region(
@@ -160,11 +158,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
     let mut regions = ProgramIdentities::default();
     let reducer_region = regions.alloc_function("hist_tuple_reducer".into());
     let histogram = hist::Op::<Physical> {
-        inputs: (0..6)
-            .map(|_| SoacInputType {
-                array: array_ty.clone(),
-            })
-            .collect(),
+        inputs: (0..6).map(|_| SoacInputType::array(array_ty.clone())).collect(),
         form: hist::HistForm {
             bucket: screma::Lambda::identity(vec![i32_ty.clone(); 6]),
             operations: vec![
@@ -291,12 +285,8 @@ fn serial_hist_ignores_out_of_bounds_indices() {
         graph_ops::intern_storage_view(&mut graph, crate::BindingRef::new(2, 0), i32_ty.clone(), None);
     let histogram = hist::Op::<Physical> {
         inputs: vec![
-            SoacInputType {
-                array: array_ty.clone(),
-            },
-            SoacInputType {
-                array: array_ty.clone(),
-            },
+            SoacInputType::array(array_ty.clone()),
+            SoacInputType::array(array_ty.clone()),
         ],
         form: hist::HistForm {
             bucket: screma::Lambda::identity(vec![i32_ty.clone(), i32_ty.clone()]),
@@ -388,11 +378,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
     let first_reducer = regions.alloc_function("first_reducer".into());
     let second_reducer = regions.alloc_function("second_reducer".into());
     let histogram = hist::Op::<Physical> {
-        inputs: (0..5)
-            .map(|_| SoacInputType {
-                array: array_ty.clone(),
-            })
-            .collect(),
+        inputs: (0..5).map(|_| SoacInputType::array(array_ty.clone())).collect(),
         form: hist::HistForm {
             bucket: screma::Lambda::identity(vec![i32_ty.clone(); 5]),
             operations: vec![

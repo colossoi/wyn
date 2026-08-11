@@ -534,6 +534,10 @@ fn check_linear_image_results_in_soac(
             }
             check_body(lam)
         }
+        SoacOp::BucketScatter { lam, inputs, .. } => inputs
+            .iter()
+            .find_map(|input| check_linear_image_results_in_array_expr(input, program, model))
+            .or_else(|| check_body(lam)),
         SoacOp::ReduceByIndex {
             op,
             ne,

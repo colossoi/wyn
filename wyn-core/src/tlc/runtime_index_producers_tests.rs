@@ -16,6 +16,44 @@ fn input_ae(boxed: Box<crate::tlc::Term>) -> crate::tlc::ArrayExpr {
     }
 }
 
+#[test]
+fn ranked_bucket_scatter_fuses_nested_map_domain() {
+    let program = prepared(
+        r#"
+entry e(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
+  let items: [4][6](i32, u32) =
+    map(|bucket: i32|
+      map(|pair: i32| ((bucket + pair) % 4, u32(bucket + pair)), iota(6)),
+      iota(4))
+  in bucket_scatter_2d(dest, items)
+"#,
+    );
+    let program = float_runtime_index_nested_producers(program);
+    let body = entry_body(&program);
+    let mut maps = 0;
+    let mut bucket = None;
+    walk(body, &mut |term| match &term.kind {
+        TermKind::Soac(SoacOp::Map { .. }) => maps += 1,
+        TermKind::Soac(SoacOp::BucketScatter {
+            lam,
+            inputs,
+            input_dimensions,
+            domain_rank,
+            ..
+        }) => {
+            bucket = Some((
+                lam.lam.params.len(),
+                inputs.len(),
+                input_dimensions.clone(),
+                *domain_rank,
+            ));
+        }
+        _ => {}
+    });
+    assert_eq!(maps, 0, "the ranked producer must not remain materialized");
+    assert_eq!(bucket, Some((2, 2, vec![vec![0], vec![1]], 2)));
+}
+
 fn span() -> Span {
     Span::dummy()
 }

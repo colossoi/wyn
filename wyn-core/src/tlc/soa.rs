@@ -51,6 +51,11 @@ pub type InlinedSoaNormalized = super::Program<
 /// Other types are rewritten recursively but their top-level structure is preserved.
 pub fn soa_type(ty: &Type<TypeName>) -> Type<TypeName> {
     match ty {
+        // Entry-backed arrays retain their declared AoS representation. A
+        // single storage resource cannot be rewritten into a tuple of arrays
+        // without also changing its ABI into multiple buffers. Generated and
+        // function-local composite arrays remain eligible for SoA.
+        _ if is_storage_backed_array(ty) => ty.clone(),
         _ if ty.is_array() => {
             let elem = soa_type(ty.elem_type().expect("Array has elem"));
             let size = ty.array_size().expect("Array has size").clone();
@@ -95,6 +100,10 @@ pub fn soa_type(ty: &Type<TypeName>) -> Type<TypeName> {
     }
 }
 
+fn is_storage_backed_array(ty: &Type<TypeName>) -> bool {
+    matches!(ty.array_buffer(), Some(Type::Constructed(TypeName::Buffer(_), _)))
+}
+
 /// The BROAD predicate: will SoA expand this array's element into a tuple (so
 /// the array as a whole becomes a tuple-of-arrays)? True when the element is
 /// directly a tuple, OR becomes one after `soa_type` (a nested array-of-tuple
@@ -107,6 +116,9 @@ pub fn soa_type(ty: &Type<TypeName>) -> Type<TypeName> {
 /// components exist), so guarding with it and then unwrapping the parts panics.
 /// Guard with `array_of_tuple_parts` directly instead.
 fn soa_yields_tuple_arrays(ty: &Type<TypeName>) -> Option<usize> {
+    if is_storage_backed_array(ty) {
+        return None;
+    }
     let elem = ty.elem_type()?;
     if !ty.is_array() {
         return None;

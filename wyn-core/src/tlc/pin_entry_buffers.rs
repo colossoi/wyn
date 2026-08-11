@@ -94,6 +94,7 @@ fn pin_definition(
             let (_, params) = extract_lambda_params_ref(&body);
             let param_bindings = compute_entry_binding_layout(
                 &params,
+                &param_diets,
                 &entry.declaration,
                 crate::egir::from_tlc::AUTO_STORAGE_SET,
                 binding_ids,

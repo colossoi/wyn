@@ -206,6 +206,32 @@ impl PhaseSpec {
             output_projection: None,
         }
     }
+
+    pub(super) fn bucket(
+        body: PlannedEntry,
+        dispatch: KernelDispatch,
+        owner: super::super::program::SemanticOpId,
+        stage: crate::egir::soac::hist::ParallelStage,
+    ) -> Self {
+        let label = match stage {
+            crate::egir::soac::hist::ParallelStage::Init => "bucket_init",
+            crate::egir::soac::hist::ParallelStage::Insert
+            | crate::egir::soac::hist::ParallelStage::InsertTiled => "bucket_insert",
+            crate::egir::soac::hist::ParallelStage::Finish => "bucket_finish",
+        };
+        let resources = declared_resources(&body.resource_declarations);
+        Self {
+            body,
+            label,
+            filter_plan: None,
+            hist_plan: Some(super::prepare::ParallelHistPlan::bucket(owner, stage)),
+            expected_compute: true,
+            dispatch,
+            resources,
+            serial_single_workgroup: false,
+            output_projection: None,
+        }
+    }
     pub(super) fn with_resources(mut self, resources: Vec<ScheduledResource>) -> Self {
         self.resources = resources;
         self

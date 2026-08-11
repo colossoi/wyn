@@ -324,16 +324,16 @@ pub enum SegExtent<R> {
     Value(NodeId),
 }
 
-/// The parallel iteration space of a `Seg` op. wyn is 1-D: a flat global
-/// thread index ranging over `len` elements. The thread index node itself is
-/// bound during expansion (`build_parallel_maps`/`chunk_soac_inputs`), not at
-/// node-construction time.
+/// The parallel iteration space of a `Seg` op. Dimensions retain their
+/// logical shape until scheduling; lowerings may flatten them or map up to
+/// three dimensions directly onto a target invocation grid.
 #[derive(Clone, Debug)]
 pub struct SegSpace<R> {
     dims: Vec<SegExtent<R>>,
 }
 
 impl<R> SegSpace<R> {
+    #[cfg(test)]
     pub(crate) fn new(extent: SegExtent<R>) -> Self {
         Self { dims: vec![extent] }
     }
@@ -534,6 +534,36 @@ where
 #[derive(Clone, Debug)]
 pub struct SoacInputType<Ty> {
     pub array: Ty,
+    /// Logical consumer dimensions used by each regular array axis. `[0]` is
+    /// an ordinary one-dimensional input; `[0, 1]` is a rank-two input;
+    /// `[1]` is a one-dimensional generator varying along the second axis.
+    pub dimensions: Vec<u8>,
+}
+
+impl<Ty> SoacInputType<Ty> {
+    pub(crate) fn array(array: Ty) -> Self {
+        Self {
+            array,
+            dimensions: vec![0],
+        }
+    }
+
+    pub(crate) fn mapped(array: Ty, dimensions: Vec<u8>) -> Self {
+        assert!(!dimensions.is_empty(), "SOAC input dimensions must be non-empty");
+        let mut unique = dimensions.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            dimensions.len(),
+            "SOAC input dimensions must be unique"
+        );
+        Self { array, dimensions }
+    }
+
+    pub(crate) fn rank(&self) -> u8 {
+        u8::try_from(self.dimensions.len()).expect("SOAC input rank exceeds u8")
+    }
 }
 
 /// Terminator using NodeIds for value references.

@@ -296,6 +296,10 @@ pub enum CompilerResourceKind {
     FilterOffsets,
     FilterScanBlockSums,
     FilterScanBlockOffsets,
+    /// Per-bucket populations and the one-cell overflow flag used by
+    /// capacity-bounded bucket insertion.
+    BucketCounts,
+    BucketOverflow,
     /// Scalar result produced by a compiler-hoisted prepass and consumed by a
     /// later source entry phase.
     ScalarHandoff,
@@ -979,6 +983,17 @@ fn physicalize_soac(
                         *value = nodes[value];
                     }
                 }
+                if let hist::Update::BucketInsert {
+                    counts,
+                    overflow,
+                    capacity,
+                    ..
+                } = &mut operation.update
+                {
+                    *counts = nodes[counts];
+                    *overflow = nodes[overflow];
+                    *capacity = nodes[capacity];
+                }
             }
             let state = match state {
                 hist::ScheduledState::Serial => hist::ScheduledState::Serial,
@@ -989,6 +1004,13 @@ fn physicalize_soac(
                 } => hist::ScheduledState::Atomic {
                     space: space(iteration_space, nodes, bindings)?,
                     operations,
+                },
+                hist::ScheduledState::Bucket {
+                    space: iteration_space,
+                    stage,
+                } => hist::ScheduledState::Bucket {
+                    space: space(iteration_space, nodes, bindings)?,
+                    stage,
                 },
             };
             Soac::Hist(hist::Op { inputs, form, state })

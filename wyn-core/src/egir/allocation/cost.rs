@@ -202,6 +202,8 @@ fn operation_cost(
             let known = catalog().known();
             if [
                 known.thread_id,
+                known.thread_id_y,
+                known.thread_id_z,
                 known.local_id,
                 known.num_workgroups,
                 known.storage_store,

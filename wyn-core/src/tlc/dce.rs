@@ -50,7 +50,9 @@ fn collect_definition_references<C: Payload, S: Payload>(term: &Term<C, S>) -> V
         // cannot observe these symbol references.
         if let TermKind::Soac(soac) = &term.kind {
             let destination = match soac {
-                SoacOp::Scatter { dest, .. } | SoacOp::ReduceByIndex { dest, .. } => Some(dest),
+                SoacOp::Scatter { dest, .. }
+                | SoacOp::BucketScatter { dest, .. }
+                | SoacOp::ReduceByIndex { dest, .. } => Some(dest),
                 _ => None,
             };
             if let Some(destination) = destination {

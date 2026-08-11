@@ -977,6 +977,19 @@ pub enum SoacOp<C: Payload = data::Empty, S: Payload = data::Empty> {
         lam: SoacBody<C, S>,
         inputs: Vec<ArrayExpr<C, S>>,
     },
+    /// Capacity-bounded insertion into a `[bucket_count][capacity]a`
+    /// destination. Every ranked item leaf is `(bucket_key, value)`.
+    BucketScatter {
+        dest: Place,
+        /// Identity at the surface, then available for ordinary producer
+        /// composition just like Scatter's envelope.
+        lam: SoacBody<C, S>,
+        /// Arrays supplying the leaf generator. Each input records which
+        /// logical bucket-scatter dimensions index its own array axes.
+        inputs: Vec<ArrayExpr<C, S>>,
+        input_dimensions: Vec<Vec<u8>>,
+        domain_rank: u8,
+    },
     /// General histogram update. EGIR retains the reducer and neutral value;
     /// physical expansion currently emits a serial read-combine-write loop.
     ReduceByIndex {

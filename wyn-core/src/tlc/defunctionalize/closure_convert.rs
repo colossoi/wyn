@@ -213,6 +213,12 @@ fn collect_free_vars_soac<C, S>(
                 collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
             }
         }
+        SoacOp::BucketScatter { lam, inputs, .. } => {
+            visit_body(lam);
+            for input in inputs {
+                collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
+            }
+        }
         SoacOp::ReduceByIndex {
             op,
             ne,
@@ -320,7 +326,9 @@ fn verify_no_nested_lambdas(
             }
         };
         match soac {
-            SoacOp::Map { lam, .. } | SoacOp::Scatter { lam, .. } => check(lam)?,
+            SoacOp::Map { lam, .. } | SoacOp::Scatter { lam, .. } | SoacOp::BucketScatter { lam, .. } => {
+                check(lam)?
+            }
             SoacOp::Reduce { op, .. } | SoacOp::Scan { op, .. } | SoacOp::ReduceByIndex { op, .. } => {
                 check(op)?
             }
@@ -754,6 +762,19 @@ impl ClosureConverter {
                 dest,
                 lam: self.lift_soac_lambda(lam.lam, span),
                 inputs: inputs.into_iter().map(|input| self.convert_array_expr(input)).collect(),
+            },
+            SoacOp::BucketScatter {
+                dest,
+                lam,
+                inputs,
+                input_dimensions,
+                domain_rank,
+            } => SoacOp::BucketScatter {
+                dest,
+                lam: self.lift_soac_lambda(lam.lam, span),
+                inputs: inputs.into_iter().map(|input| self.convert_array_expr(input)).collect(),
+                input_dimensions,
+                domain_rank,
             },
             SoacOp::ReduceByIndex {
                 dest,

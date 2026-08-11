@@ -2707,6 +2707,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         let base = self.ctx.wgsl_gid_alias.as_deref().unwrap_or("_wgsl_gid");
                         return Ok(format!("{base}.x"));
                     }
+                    if *id == known.thread_id_y && args.is_empty() {
+                        let base = self.ctx.wgsl_gid_alias.as_deref().unwrap_or("_wgsl_gid");
+                        return Ok(format!("{base}.y"));
+                    }
+                    if *id == known.thread_id_z && args.is_empty() {
+                        let base = self.ctx.wgsl_gid_alias.as_deref().unwrap_or("_wgsl_gid");
+                        return Ok(format!("{base}.z"));
+                    }
                     // `_w_intrinsic_local_id()` → `_wgsl_lid.x` (also u32).
                     if *id == known.local_id && args.is_empty() {
                         return Ok("_wgsl_lid.x".to_string());

@@ -267,6 +267,12 @@ fn substitute_in_soac(
                 substitute_in_array(input, old_symbol, replacement, term_ids);
             }
         }
+        SoacOp::BucketScatter { lam, inputs, .. } => {
+            body(lam, old_symbol, replacement, term_ids);
+            for input in inputs {
+                substitute_in_array(input, old_symbol, replacement, term_ids);
+            }
+        }
         SoacOp::ReduceByIndex {
             op,
             ne,
@@ -571,7 +577,9 @@ impl HofSpecializer<'_> {
         soac: &mut SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>,
     ) -> bool {
         match soac {
-            SoacOp::Map { lam, .. } | SoacOp::Scatter { lam, .. } => self.cascade_specialize_soac_body(lam),
+            SoacOp::Map { lam, .. } | SoacOp::Scatter { lam, .. } | SoacOp::BucketScatter { lam, .. } => {
+                self.cascade_specialize_soac_body(lam)
+            }
             SoacOp::Reduce { op, .. } | SoacOp::Scan { op, .. } | SoacOp::ReduceByIndex { op, .. } => {
                 self.cascade_specialize_soac_body(op)
             }

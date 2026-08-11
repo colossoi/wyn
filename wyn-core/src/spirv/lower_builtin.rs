@@ -409,18 +409,25 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     } else {
                         Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
                     }
-                } else if id == known.thread_id {
+                } else if id == known.thread_id || id == known.thread_id_y || id == known.thread_id_z {
                     let gid_var = self
                         .constructor
                         .global_invocation_id
                         .ok_or_else(|| err_spirv!("GlobalInvocationId not set for compute shader"))?;
                     let uvec3_type = self.constructor.get_or_create_vec_type(self.constructor.u32_type, 3);
                     let gid = self.constructor.builder.load(uvec3_type, None, gid_var, None, [])?;
+                    let component = if id == known.thread_id {
+                        0
+                    } else if id == known.thread_id_y {
+                        1
+                    } else {
+                        2
+                    };
                     Ok(self.constructor.builder.composite_extract(
                         self.constructor.u32_type,
                         None,
                         gid,
-                        [0],
+                        [component],
                     )?)
                 } else if id == known.local_id {
                     let lid_var = self

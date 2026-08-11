@@ -324,6 +324,7 @@ pub enum SoacKind {
     Zip,
     ReduceByIndex,
     Scatter,
+    BucketScatter(u8),
 }
 
 /// The source-level `???` expression.

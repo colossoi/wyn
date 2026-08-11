@@ -422,6 +422,15 @@ where
                 rewrite_array_expr_types(input, map);
             }
         }
+        SoacOp::BucketScatter {
+            dest, lam, inputs, ..
+        } => {
+            dest.elem_ty = map(&dest.elem_ty);
+            rewrite_soac_body_types(lam, map);
+            for input in inputs {
+                rewrite_array_expr_types(input, map);
+            }
+        }
         SoacOp::ReduceByIndex {
             dest,
             op,
@@ -501,6 +510,12 @@ where
             visit_array_expr_children(input, f);
         }
         SoacOp::Scatter { lam, inputs, .. } => {
+            visit_soac_body_children(lam, f);
+            for input in inputs {
+                visit_array_expr_children(input, f);
+            }
+        }
+        SoacOp::BucketScatter { lam, inputs, .. } => {
             visit_soac_body_children(lam, f);
             for input in inputs {
                 visit_array_expr_children(input, f);
@@ -611,6 +626,12 @@ where
             visit_array_expr_children_mut(input, f);
         }
         SoacOp::Scatter { lam, inputs, .. } => {
+            visit_soac_body_children_mut(lam, f);
+            for input in inputs {
+                visit_array_expr_children_mut(input, f);
+            }
+        }
+        SoacOp::BucketScatter { lam, inputs, .. } => {
             visit_soac_body_children_mut(lam, f);
             for input in inputs {
                 visit_array_expr_children_mut(input, f);
@@ -748,6 +769,19 @@ where
             dest,
             lam: map_soac_body_children(lam, f),
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
+        },
+        SoacOp::BucketScatter {
+            dest,
+            lam,
+            inputs,
+            input_dimensions,
+            domain_rank,
+        } => SoacOp::BucketScatter {
+            dest,
+            lam: map_soac_body_children(lam, f),
+            inputs: inputs.into_iter().map(|input| map_array_expr_children(input, f)).collect(),
+            input_dimensions,
+            domain_rank,
         },
         SoacOp::ReduceByIndex {
             dest,

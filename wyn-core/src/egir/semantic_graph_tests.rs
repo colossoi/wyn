@@ -143,9 +143,7 @@ fn screma_verification_program(
         kind: SideEffectKind::Soac(SoacEffect(
             op(0),
             Soac::Screma(screma::Op {
-                inputs: vec![crate::egir::types::SoacInputType {
-                    array: array_type.clone(),
-                }],
+                inputs: vec![crate::egir::types::SoacInputType::array(array_type.clone())],
                 form: screma::ScremaForm {
                     pre: screma::Lambda::identity(vec![i32_type.clone()]),
                     scans: vec![screma::Scan {

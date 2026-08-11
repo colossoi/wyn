@@ -680,9 +680,7 @@ mod tests {
     fn valid_scan_op() -> Op<Raw> {
         let i32_type = scalar(TypeName::Int(32));
         Op {
-            inputs: vec![SoacInputType {
-                array: array(i32_type.clone()),
-            }],
+            inputs: vec![SoacInputType::array(array(i32_type.clone()))],
             form: ScremaForm {
                 pre: region(0, vec![i32_type.clone()], vec![i32_type.clone()]),
                 scans: vec![Scan {
@@ -751,7 +749,7 @@ mod tests {
             ),
         };
         let op = Op::<Raw> {
-            inputs: vec![SoacInputType { array }],
+            inputs: vec![SoacInputType::array(array)],
             form,
             result_state: vec![
                 ResultState {
@@ -789,7 +787,7 @@ mod tests {
         let bool_type = scalar(TypeName::Bool);
         let array = array(i32_type.clone());
         let op = Op::<Raw> {
-            inputs: vec![SoacInputType { array }],
+            inputs: vec![SoacInputType::array(array)],
             form: ScremaForm {
                 pre: region(0, vec![i32_type.clone()], vec![i32_type.clone()]),
                 scans: vec![],
@@ -832,9 +830,7 @@ mod tests {
     fn node_traversal_covers_every_lambda_and_neutral() {
         let unit = scalar(TypeName::Unit);
         let mut op = Op::<Semantic> {
-            inputs: vec![SoacInputType {
-                array: array(unit.clone()),
-            }],
+            inputs: vec![SoacInputType::array(array(unit.clone()))],
             form: ScremaForm {
                 pre: Lambda::region(
                     SegBody {

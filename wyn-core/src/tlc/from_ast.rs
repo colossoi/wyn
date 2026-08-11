@@ -942,6 +942,7 @@ impl<'a> Transformer<'a> {
             ast::SoacKind::Zip => self.transform_soac_zip(args, ty, span),
             ast::SoacKind::ReduceByIndex => self.transform_soac_reduce_by_index(args, ty, span),
             ast::SoacKind::Scatter => self.transform_soac_scatter(args, ty, span),
+            ast::SoacKind::BucketScatter(rank) => self.transform_soac_bucket_scatter(args, ty, span, rank),
         }
     }
 
@@ -1235,6 +1236,66 @@ impl<'a> Transformer<'a> {
                 dest,
                 lam,
                 inputs: vec![indices, values],
+            }),
+        );
+        self.wrap_binds(binds, soac, span)
+    }
+
+    /// Transform `bucket_scatter_Nd(dest, items)`, where every ranked item
+    /// leaf is a `(bucket_key, value)` pair.
+    fn transform_soac_bucket_scatter(
+        &mut self,
+        args: &[ast::Expression<ast::HolesResolvedTree>],
+        ty: Type<TypeName>,
+        span: Span,
+        input_rank: u8,
+    ) -> Term {
+        assert_eq!(args.len(), 2, "bucket_scatter_Nd requires 2 arguments");
+        let dest_term = self.transform_expr(&args[0]);
+        let items_term = self.transform_expr(&args[1]);
+
+        let dest_row_ty = self.get_array_element_type(&dest_term.ty);
+        let dest_elem_ty = self.get_array_element_type(&dest_row_ty);
+        let mut item_ty = items_term.ty.clone();
+        for _ in 0..input_rank {
+            item_ty = self.get_array_element_type(&item_ty);
+        }
+        let Type::Constructed(TypeName::Tuple(2), pair_types) = &item_ty else {
+            panic!("BUG: bucket_scatter_Nd item must be a (key, value) pair, got {item_ty:?}");
+        };
+        let pair_ty = Type::Constructed(
+            TypeName::Tuple(2),
+            vec![pair_types[0].clone(), pair_types[1].clone()],
+        );
+        let dest = Place {
+            id: match &dest_term.kind {
+                TermKind::Var(VarRef::Symbol(symbol)) => *symbol,
+                _ => self.fresh("_w_bucket_scatter_dest"),
+            },
+            elem_ty: dest_elem_ty,
+        };
+
+        let mut binds = Vec::new();
+        let items = self.soac_input(items_term, &mut binds);
+        let item = self.fresh("_w_bucket_scatter_item");
+        let body = self.mk_term(pair_ty.clone(), span, TermKind::Var(VarRef::Symbol(item)));
+        let lam = SoacBody {
+            lam: Lambda {
+                params: vec![(item, pair_ty.clone())],
+                body: Box::new(body),
+                ret_ty: pair_ty,
+            },
+            data: (),
+        };
+        let soac = self.mk_term(
+            ty,
+            span,
+            TermKind::Soac(SoacOp::BucketScatter {
+                dest,
+                lam,
+                inputs: vec![items],
+                input_dimensions: vec![(0..input_rank).collect()],
+                domain_rank: input_rank,
             }),
         );
         self.wrap_binds(binds, soac, span)

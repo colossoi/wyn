@@ -24,7 +24,7 @@ use crate::ResourceId;
 use super::super::from_tlc::ConvertError;
 use super::super::graph_ops;
 use super::super::program::OutputWriter;
-use super::super::soac::{filter, screma};
+use super::super::soac::{filter, hist, screma};
 use super::super::types::{
     EGraph, ENode, EffectToken, NodeId, PureOp, Raw, SideEffectIndex, SideEffectKind, SkeletonTerminator,
     Soac, SoacDestination, SoacEffect, SoacPlacement,
@@ -61,6 +61,80 @@ fn reachable_from_outputs(graph: &EGraph<Raw>) -> LookupSet<NodeId> {
 #[cfg(test)]
 #[path = "dispatch_tests.rs"]
 mod dispatch_tests;
+
+/// Route bucket-scatter bookkeeping directly into its declared output
+/// resource. Counts are already an array view and overflow is read through a
+/// one-cell view; copying either after the insertion stage is both redundant
+/// and, for fixed aggregate views, needlessly expands into per-field stores.
+pub(super) fn retarget_bucket_aux_output(
+    graph: &mut EGraph<Raw>,
+    source: NodeId,
+    output_resource: ResourceId,
+) -> Option<(ResourceId, NodeId, OutputWriter)> {
+    #[derive(Clone, Copy)]
+    enum Field {
+        Counts,
+        Overflow,
+    }
+
+    let effect_index = SideEffectIndex::build(graph);
+    let source_resource = graph_ops::storage_resource_under(graph, source).or_else(|| {
+        effect_index.effect(graph, source).and_then(|effect| {
+            effect
+                .operand_nodes
+                .iter()
+                .find_map(|operand| graph_ops::storage_resource_under(graph, *operand))
+        })
+    });
+    let mut found = None;
+    'effects: for (block, skeleton_block) in &graph.skeleton.blocks {
+        for (index, effect) in skeleton_block.side_effects.iter().enumerate() {
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) = &effect.kind else {
+                continue;
+            };
+            for operation in &op.form.operations {
+                let hist::Update::BucketInsert { counts, overflow, .. } = operation.update else {
+                    continue;
+                };
+                if counts == source {
+                    found = Some((block, index, Field::Counts, counts, effect.result?));
+                    break 'effects;
+                }
+                let overflow_resource = graph_ops::extract_storage_view_source(graph, overflow);
+                if source_resource.is_some() && source_resource == overflow_resource {
+                    found = Some((block, index, Field::Overflow, overflow, effect.result?));
+                    break 'effects;
+                }
+            }
+        }
+    }
+    let (block, index, field, old_view, result) = found?;
+    let old_resource = graph_ops::extract_storage_view_source(graph, old_view)?.0;
+    let view_ty = graph.nodes[old_view].ty.clone();
+    let new_view = graph_ops::intern_resource_view(graph, output_resource, view_ty, None);
+
+    let effect = &mut graph.skeleton.blocks[block].side_effects[index];
+    let SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) = &mut effect.kind else {
+        unreachable!("located bucket effect changed while retargeting output")
+    };
+    for operation in &mut op.form.operations {
+        let hist::Update::BucketInsert { counts, overflow, .. } = &mut operation.update else {
+            continue;
+        };
+        match field {
+            Field::Counts if *counts == old_view => *counts = new_view,
+            Field::Overflow if *overflow == old_view => *overflow = new_view,
+            _ => {}
+        }
+    }
+    graph.replace_node_references(old_view, new_view);
+    graph.nodes[old_view].alias = Some(new_view);
+    let routed_source = match field {
+        Field::Counts => new_view,
+        Field::Overflow => source,
+    };
+    Some((old_resource, routed_source, OutputWriter::Value(result)))
+}
 
 /// Realise one compute slot source as a DPS write into the slot's
 /// `OutputView { binding }`. Classification:

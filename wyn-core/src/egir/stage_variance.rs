@@ -396,7 +396,12 @@ fn pure_dependence<R>(
 ) -> StageDependence {
     let known = catalog().known();
     let intrinsic = match op {
-        PureOp::Intrinsic { id, .. } if *id == known.thread_id || *id == known.local_id => {
+        PureOp::Intrinsic { id, .. }
+            if *id == known.thread_id
+                || *id == known.thread_id_y
+                || *id == known.thread_id_z
+                || *id == known.local_id =>
+        {
             StageDependence::from_source(Uniformity::InvocationVarying, DependenceSource::InvocationBuiltin)
         }
         PureOp::Intrinsic { id, .. } if *id == known.num_workgroups => {

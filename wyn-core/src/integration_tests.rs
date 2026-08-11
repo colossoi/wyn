@@ -886,6 +886,170 @@ entry accumulate(indices: []i32,
         "without replica storage, a high race-factor hint must not select the direct-atomic recipe"
     );
 }
+
+#[test]
+fn ranked_bucket_scatter_fuses_generated_items_and_tiles_rank_three() {
+    use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage, DispatchSize, Pipeline};
+
+    let source = r#"
+entry collision_shape_3d(dest: *[64][64]u32) ([64][64]u32, [64]u32, u32) =
+  let items: [4096][658][2016](i32, u32) =
+    map(|bucket_y: i32|
+      map(|bucket_x: i32|
+        map(|pair: i32|
+          ((bucket_y + bucket_x + pair) % 64,
+           u32(bucket_y + bucket_x + pair)),
+          iota(2016)),
+        iota(658)),
+      iota(4096))
+  in bucket_scatter_3d(dest, items)
+"#;
+
+    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+        compile_to_semantic_egir(source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    ))
+    .expect("ranked bucket scatter lowers to WGSL");
+    assert!(
+        wgsl.contains("_wgsl_gid.y"),
+        "ranked insertion must use dispatch y:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("_wgsl_gid.z"),
+        "ranked insertion must use dispatch z:\n{wgsl}"
+    );
+    assert_eq!(
+        wgsl.matches("@compute").count(),
+        3,
+        "init, insert, and finish stages:\n{wgsl}"
+    );
+    let module = naga::front::wgsl::parse_str(&wgsl)
+        .unwrap_or_else(|error| panic!("Naga rejected bucket WGSL: {error:?}\n{wgsl}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("Naga validation rejected bucket WGSL: {error:?}\n{wgsl}"));
+
+    let lowered = crate::compile_thru_spirv(source).expect("ranked bucket scatter emits SPIR-V");
+    let compute = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute)
+                if compute
+                    .stages
+                    .iter()
+                    .any(|stage| stage.entry_point == "collision_shape_3d_bucket_insert") =>
+            {
+                Some(compute)
+            }
+            _ => None,
+        })
+        .expect("bucket compute pipeline");
+    assert_eq!(compute.stages.len(), 3, "bucket scatter has exactly three stages");
+    let output_lengths = compute
+        .bindings
+        .iter()
+        .filter_map(|binding| match binding {
+            Binding::StorageBuffer {
+                usage: BufferUsage::Output,
+                length,
+                ..
+            } => Some(length.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        output_lengths,
+        [
+            Some(BufferLen::Fixed { bytes: 256 }),
+            Some(BufferLen::Fixed { bytes: 4 }),
+        ],
+        "counts and scalar overflow outputs must both publish allocation sizes"
+    );
+    let insert = compute
+        .stages
+        .iter()
+        .find(|stage| stage.entry_point == "collision_shape_3d_bucket_insert")
+        .expect("bucket insertion stage");
+    assert_eq!(
+        insert.dispatch_size,
+        DispatchSize::Fixed {
+            x: 32,
+            y: 658,
+            z: 4096,
+            explicit: false,
+        }
+    );
+}
+
+#[test]
+fn ranked_bucket_scatter_reads_bound_rank_two_aos_items() {
+    let source = r#"
+entry collision_shape_2d_bound(
+    dest: *[64][64]u32,
+    items: [64][32](i32, u32)
+) ([64][64]u32, [64]u32, u32) =
+  bucket_scatter_2d(dest, items)
+"#;
+
+    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+        compile_to_semantic_egir(source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    ))
+    .expect("bound ranked bucket scatter lowers to WGSL");
+    assert!(
+        wgsl.contains("array<array<T0, 32>>"),
+        "bound item storage must retain its array-of-struct layout:\n{wgsl}"
+    );
+    let module = naga::front::wgsl::parse_str(&wgsl)
+        .unwrap_or_else(|error| panic!("Naga rejected bound bucket WGSL: {error:?}\n{wgsl}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("Naga rejected bound bucket layout: {error:?}\n{wgsl}"));
+    crate::compile_thru_spirv(source).expect("bound ranked bucket scatter emits SPIR-V");
+
+    let serial = crate::egir::plan(
+        compile_to_semantic_egir(source),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Serial),
+    );
+    let Err(error) = serial else {
+        panic!("single-stage bucket scatter must report its required pipeline")
+    };
+    assert!(
+        error.to_string().contains("requires its init/insert/finish pipeline"),
+        "unexpected single-stage diagnostic: {error}"
+    );
+}
+
+#[test]
+fn ranked_bucket_scatter_accepts_rank_one_and_rank_four_generated_domains() {
+    let source = r#"
+entry bucket_rank_1(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
+  let items = map(|i: i32| (i % 5 - 1, u32(i)), iota(16)) in
+  bucket_scatter_1d(dest, items)
+
+entry bucket_rank_4(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
+  let items: [2][2][2][2](i32, u32) =
+    map(|a: i32|
+      map(|b: i32|
+        map(|c: i32|
+          map(|d: i32| ((a + b + c + d) % 4, u32(a + b + c + d)), iota(2)),
+          iota(2)),
+        iota(2)),
+      iota(2))
+  in bucket_scatter_4d(dest, items)
+"#;
+
+    crate::compile_thru_spirv(source).expect("rank-one and rank-four bucket domains emit SPIR-V");
+}
+
 #[test]
 fn egir_map_scatter_envelope_fuses_and_deduplicates_both_producers() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
@@ -5052,6 +5216,12 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::stage::Reachable, stage: &st
                 walk_lambda(&pred.lam, bound, symbols, stage, def_name);
             }
             SoacOp::Scatter { lam, inputs, .. } => {
+                for i in inputs {
+                    walk_array_expr(i, bound, symbols, stage, def_name);
+                }
+                walk_lambda(&lam.lam, bound, symbols, stage, def_name);
+            }
+            SoacOp::BucketScatter { lam, inputs, .. } => {
                 for i in inputs {
                     walk_array_expr(i, bound, symbols, stage, def_name);
                 }

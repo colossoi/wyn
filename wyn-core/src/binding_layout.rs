@@ -44,17 +44,32 @@ pub fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<(&Type<TypeName>,
     Some((elem, elem_bytes))
 }
 
+/// Arrays larger than the portable push-constant budget are represented by a
+/// storage buffer even when every dimension is fixed. The outer element is
+/// the buffer element, so multidimensional shape and row stride remain part
+/// of the ordinary array type.
+fn storage_array_elem(ty: &Type<TypeName>, consuming: bool) -> Option<(&Type<TypeName>, u32)> {
+    if let Some(runtime) = runtime_sized_array_elem(ty) {
+        return Some(runtime);
+    }
+    const PORTABLE_PUSH_CONSTANT_BYTES: u32 = 128;
+    let elem = ty.elem_type()?;
+    let total_bytes = crate::ssa::layout::type_byte_size(ty)?;
+    (consuming || total_bytes > PORTABLE_PUSH_CONSTANT_BYTES)
+        .then(|| crate::ssa::layout::storage_elem_stride(elem).map(|stride| (elem, stride)))?
+}
+
 /// Walk an entry's params and produce the auto-storage binding layout.
 ///
-/// A runtime-sized array param can only be a storage buffer — no vertex
-/// attribute, varying, or builtin has that shape — so the rules are the same
-/// whatever stage the entry runs at:
-/// - Each view-array param (`[]T`, runtime size) gets one slot.
-/// - Each tuple-of-views param gets one slot per field. Skipped if
-///   the param is decorated `#[builtin(...)]` — builtins are not
+/// Runtime-sized arrays, fixed arrays larger than the portable push-constant
+/// budget, and consuming array parameters can only be storage buffers. The
+/// rules are the same whatever stage the entry runs at:
+/// - Each admitted array param gets one slot.
+/// - Each tuple whose fields are all admitted arrays gets one slot per field.
+///   This is skipped for `#[builtin(...)]` params because builtins are not
 ///   user-supplied storage buffers.
-/// - Other params (scalars, fixed-size arrays, structs) are skipped
-///   and will be routed to push constants by the caller.
+/// - Other params (scalars, small non-consuming fixed arrays, structs) are
+///   skipped and routed to push constants by the caller.
 ///
 /// The binding a param receives is written back into its view type by
 /// `pin_entry_buffers`, which is the only place a concrete
@@ -64,6 +79,7 @@ pub fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<(&Type<TypeName>,
 /// Binding numbers come from `binding_ids` in declaration order.
 pub fn compute_entry_binding_layout(
     body_params: &[(SymbolId, Type<TypeName>)],
+    param_diets: &[crate::types::Diet],
     entry: &EntryDecl,
     set: u32,
     binding_ids: &mut crate::IdSource<u32>,
@@ -71,6 +87,7 @@ pub fn compute_entry_binding_layout(
     let mut out: Vec<Option<EntryParamBinding>> = Vec::with_capacity(body_params.len());
 
     for (i, (sym, ty)) in body_params.iter().enumerate() {
+        let consuming = param_diets.get(i).is_some_and(crate::types::Diet::is_consuming);
         let decoration = entry.params.get(i).and_then(extract_io_decoration);
         let has_builtin = matches!(decoration, Some(IoDecoration::BuiltIn(_)));
 
@@ -87,13 +104,12 @@ pub fn compute_entry_binding_layout(
         // and `[]T` lower identically.
         let ty = ty;
 
-        // Tuple-of-views: one slot per field. Each field's elem type +
-        // byte size come from `runtime_sized_array_elem`, so the test
-        // that admits the tuple is the same call that delivers both.
+        // Tuple-of-arrays: one slot per field. The admission test also
+        // supplies the storage element type and stride.
         if let Type::Constructed(TypeName::Tuple(_), field_tys) = ty {
             if !has_builtin && !field_tys.is_empty() {
                 let field_elems: Option<Vec<(&Type<TypeName>, u32)>> =
-                    field_tys.iter().map(runtime_sized_array_elem).collect();
+                    field_tys.iter().map(|field| storage_array_elem(field, consuming)).collect();
                 if let Some(field_elems) = field_elems {
                     let fields = field_elems
                         .into_iter()
@@ -112,12 +128,12 @@ pub fn compute_entry_binding_layout(
             }
         }
 
-        // Plain view-array. `has_builtin` is intentionally not gated:
-        // a view-array param with a builtin decoration is malformed
+        // Plain admitted array. `has_builtin` is intentionally not gated:
+        // an array param with a builtin decoration is malformed
         // (no builtin produces an array), but the allocator still
         // assigns a binding rather than silently routing to push
         // constants where the type wouldn't fit.
-        if let Some((elem_ty, elem_bytes)) = runtime_sized_array_elem(ty) {
+        if let Some((elem_ty, elem_bytes)) = storage_array_elem(ty, consuming) {
             out.push(Some(EntryParamBinding {
                 param_sym: *sym,
                 kind: EntryParamBindingKind::Single {
