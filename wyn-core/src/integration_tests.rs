@@ -1021,6 +1021,8 @@ entry descriptor_for_wgsl(dest: *[2][4]u32) ([2][4]u32, [2]u32, u32) =
 
 #[test]
 fn ranked_bucket_scatter_named_helper_reads_fixed_storage_array() {
+    use crate::pipeline_descriptor::{Binding, BufferLen, Pipeline};
+
     let source = r#"
 def item_from_source(
     source: [64][64]u32,
@@ -1056,6 +1058,38 @@ entry named_storage_helper(
     )
     .validate(&module)
     .unwrap_or_else(|error| panic!("Naga validation rejected named-helper WGSL: {error:?}\n{wgsl}"));
+
+    let lowered = crate::compile_thru_spirv(source).expect("named helper emits a pipeline descriptor");
+    let Pipeline::Compute(compute) = lowered.pipeline.pipelines.first().expect("compute pipeline") else {
+        panic!("named helper must publish a compute pipeline")
+    };
+    let mut lengths = compute
+        .bindings
+        .iter()
+        .filter_map(|binding| match binding {
+            Binding::StorageBuffer { name, length, .. } => Some((name.as_str(), length.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    lengths.sort_by_key(|(_, length)| match length {
+        Some(BufferLen::Fixed { bytes }) => *bytes,
+        _ => u64::MAX,
+    });
+    assert_eq!(
+        lengths,
+        [
+            (
+                "named_storage_helper_output_2",
+                Some(BufferLen::Fixed { bytes: 4 })
+            ),
+            (
+                "named_storage_helper_output_1",
+                Some(BufferLen::Fixed { bytes: 16 })
+            ),
+            ("dest", Some(BufferLen::Fixed { bytes: 128 })),
+            ("source", Some(BufferLen::Fixed { bytes: 16_384 })),
+        ]
+    );
 }
 
 #[test]

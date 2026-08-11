@@ -909,6 +909,20 @@ fn convert_entry_point(
             *length = Some(len);
         }
     }
+    // A fixed storage parameter carries its complete byte size in the type.
+    // Preserve that ABI fact when no stronger slice-derived minimum was
+    // inferred. Runtime-sized views still have no static layout and remain
+    // host-sized (`None`).
+    for input in &mut inputs {
+        let EntryInputKind::Storage { length, .. } = &mut input.kind else {
+            continue;
+        };
+        if length.is_none() {
+            *length = crate::ssa::layout::type_byte_size(&input.ty).map(|bytes| BufferLen::Fixed {
+                bytes: u64::from(bytes),
+            });
+        }
+    }
     let execution_model = match entry.entry_kind {
         interface::EntryKind::Root => {
             return Err(ConvertError::Internal(

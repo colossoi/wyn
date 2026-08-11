@@ -7,4 +7,4 @@ SPIR-V-testfile, and WGSL/Naga-testfile gates pass.
 - [x] Emit transitive dependencies of composite top-level constants.
 - [x] Preserve WGSL argument types for large storage arrays passed through named helpers.
 - [x] Generate Naga-valid WGSL for ranked literal `bucket_scatter` inputs.
-- [ ] Report fixed byte lengths for fixed external arrays in pipeline descriptors.
+- [x] Report fixed byte lengths for fixed external arrays in pipeline descriptors.
