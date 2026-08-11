@@ -59,6 +59,49 @@ entry e(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
     assert_eq!(bucket, Some((2, 3, 2, vec![vec![0], vec![1]], 2)));
 }
 
+#[test]
+fn ranked_bucket_scatter_keeps_coordinate_dependent_scalar_lets_in_the_leaf() {
+    let program = prepared(
+        r#"
+entry e(dest: *[4][8]i32) ([4][8]i32, [4]u32, u32) =
+  let items: [4][6](i32, i32) =
+    map(|bucket: i32|
+      let offset = bucket * 2 in
+      map(|pair: i32| ((offset + pair) % 4, offset + pair), iota(6)),
+      iota(4))
+  in bucket_scatter_2d(dest, items)
+"#,
+    );
+    let program = float_runtime_index_nested_producers(program);
+    let body = entry_body(&program);
+    let mut maps = 0;
+    let mut bucket_lambdas = 0;
+    walk(body, &mut |term| match &term.kind {
+        TermKind::Soac(SoacOp::Map { .. }) => maps += 1,
+        TermKind::Soac(SoacOp::BucketScatter { lam, .. }) => {
+            bucket_lambdas += 1;
+            assert!(
+                count_lets(&lam.lam.body) >= 2,
+                "the coordinate-dependent scalar binding must remain inside the fused leaf"
+            );
+        }
+        _ => {}
+    });
+    assert_eq!(
+        maps, 0,
+        "dependent scalar computation must not force materialization"
+    );
+    assert_eq!(bucket_lambdas, 1);
+}
+
+fn count_lets(term: &Term) -> usize {
+    let mut count = 0;
+    walk(term, &mut |term| {
+        count += usize::from(matches!(term.kind, TermKind::Let { .. }))
+    });
+    count
+}
+
 fn span() -> Span {
     Span::dummy()
 }

@@ -2620,6 +2620,9 @@ impl<'a, 'b> Converter<'a, 'b> {
                 )));
             }
             let input_array_type = input.array_type();
+            if super::types::as_soa_tuple(&input_array_type).is_some() {
+                continue;
+            }
             let mut input_type = &input_array_type;
             for _ in dimensions {
                 input_type = input_type.elem_type().ok_or_else(|| {
@@ -2634,6 +2637,23 @@ impl<'a, 'b> Converter<'a, 'b> {
             .iter()
             .map(|input| self.convert_array_expr_value(input))
             .collect::<Result<Vec<_>, _>>()?;
+        for &input_node in &input_nodes {
+            let producers = super::graph_ops::value_producer_closure(&self.graph, [input_node]);
+            let materialized_soac = self.graph.skeleton.blocks.values().any(|block| {
+                block.side_effects.iter().any(|effect| {
+                    effect
+                        .result
+                        .is_some_and(|result| producers.nodes.contains(&result))
+                        && matches!(effect.kind, SideEffectKind::Soac(_))
+                })
+            });
+            if materialized_soac {
+                return Err(ConvertError::Unsupported(
+                    "bucket_scatter requires direct ranked producer composition; its generated item array could not be fused without materialization"
+                        .into(),
+                ));
+            }
+        }
         let input_arrays = inputs
             .iter()
             .zip(&input_nodes)

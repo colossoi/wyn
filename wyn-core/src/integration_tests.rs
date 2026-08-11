@@ -1146,6 +1146,26 @@ entry bucket_semantics(dest: *[2][2]i32) ([2][2]i32, [2]u32, u32) =
 }
 
 #[test]
+fn bucket_scatter_rejects_uncomposed_generated_item_storage() {
+    let source = r#"
+entry dependent_rows(dest: *[4][8]i32) ([4][8]i32, [4]u32, u32) =
+  let items: [4][6](i32, i32) =
+    map(|bucket: i32|
+      let shifted = map(|pair: i32| pair + bucket, iota(6)) in
+      map(|value: i32| (value % 4, value), shifted),
+      iota(4))
+  in bucket_scatter_2d(dest, items)
+"#;
+    let Err(error) = crate::compile_thru_spirv(source) else {
+        panic!("a non-composable generated candidate array must not be materialized")
+    };
+    assert!(
+        error.to_string().contains("requires direct ranked producer composition"),
+        "unexpected bucket producer diagnostic: {error}"
+    );
+}
+
+#[test]
 fn egir_map_scatter_envelope_fuses_and_deduplicates_both_producers() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 

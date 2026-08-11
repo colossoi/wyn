@@ -265,7 +265,7 @@ fn fuse_ranked_bucket_map(
         leaf: None,
     };
     let mut bound = LookupSet::new();
-    extract_ranked_map_level(rhs, 0, *domain_rank, &mut bound, &mut fusion)?;
+    extract_ranked_map_level(rhs, 0, *domain_rank, &mut bound, &mut fusion, ids)?;
     let leaf = guard_bucket_leaf(fusion.leaf?, ids, symbols)?;
     let ret_ty = leaf.ty.clone();
     let lam = SoacBody {
@@ -374,11 +374,13 @@ fn extract_ranked_map_level(
     rank: u8,
     bound: &mut LookupSet<SymbolId>,
     fusion: &mut RankedMapFusion,
+    ids: &mut TermIdSource,
 ) -> Option<()> {
     if depth >= rank {
         return None;
     }
-    let term = peel_liftable_map_lets(term, bound, &mut fusion.lifted)?;
+    let (term, scoped) = peel_ranked_map_lets(term, bound, &mut fusion.lifted);
+    bound.extend(scoped.iter().map(|binding| binding.name));
     let TermKind::Soac(SoacOp::Map { lam, inputs, .. }) = &term.kind else {
         return None;
     };
@@ -393,19 +395,32 @@ fn extract_ranked_map_level(
     fusion.input_dimensions.extend((0..inputs.len()).map(|_| vec![depth]));
     bound.extend(lam.lam.params.iter().map(|(symbol, _)| *symbol));
 
-    if depth + 1 == rank {
+    let fused = if depth + 1 == rank {
         fusion.leaf = Some((*lam.lam.body).clone());
         Some(())
     } else {
-        extract_ranked_map_level(&lam.lam.body, depth + 1, rank, bound, fusion)
+        extract_ranked_map_level(&lam.lam.body, depth + 1, rank, bound, fusion, ids)
+    };
+    fused?;
+    if !scoped.is_empty() {
+        let leaf = fusion.leaf.take()?;
+        fusion.leaf = Some(wrap_let_bindings(scoped, leaf, ids));
     }
+    Some(())
 }
 
-fn peel_liftable_map_lets<'a>(
+/// Hoist map-prefix lets that do not depend on outer logical coordinates.
+/// Coordinate-dependent scalar lets stay inside the fused leaf. Array inputs
+/// that depend on one of those scoped names are still rejected: representing
+/// them requires a true coordinate-addressed producer input rather than a
+/// value wrapper.
+fn peel_ranked_map_lets<'a>(
     mut term: &'a Term<Empty, Empty>,
     bound: &LookupSet<SymbolId>,
     lifted: &mut Vec<LetBinding<Empty, Empty>>,
-) -> Option<&'a Term<Empty, Empty>> {
+) -> (&'a Term<Empty, Empty>, Vec<LetBinding<Empty, Empty>>) {
+    let mut scoped = Vec::new();
+    let mut scope_bound = bound.clone();
     while let TermKind::Let {
         name,
         name_ty,
@@ -413,18 +428,21 @@ fn peel_liftable_map_lets<'a>(
         body,
     } = &term.kind
     {
-        if references_any(rhs, bound) {
-            return None;
-        }
-        lifted.push(LetBinding {
+        let binding = LetBinding {
             name: *name,
             name_ty: name_ty.clone(),
             rhs: (**rhs).clone(),
             span: term.span,
-        });
+        };
+        if references_any(rhs, &scope_bound) {
+            scope_bound.insert(*name);
+            scoped.push(binding);
+        } else {
+            lifted.push(binding);
+        }
         term = body;
     }
-    Some(term)
+    (term, scoped)
 }
 
 fn array_expr_references_any(ae: &ArrayExpr<Empty, Empty>, blocked: &LookupSet<SymbolId>) -> bool {
