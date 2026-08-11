@@ -2433,6 +2433,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 form: hist::HistForm {
                     bucket: screma::Lambda::identity(vec![index_type, value_type]),
                     operations: vec![hist::HistOp {
+                        emission: hist::Emission::Always,
                         shape: vec![destination_length],
                         race_factor,
                         destinations: vec![dest_view],
@@ -2511,6 +2512,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         vec![index_type, value_type],
                     ),
                     operations: vec![hist::HistOp {
+                        emission: hist::Emission::Always,
                         shape: vec![destination_length],
                         race_factor,
                         destinations: vec![dest_view],
@@ -2548,12 +2550,19 @@ impl<'a, 'b> Converter<'a, 'b> {
         let dest_view_ty = self.graph.nodes[dest_view].ty.clone();
         let fixed_size = |ty: &Type<TypeName>, dimension: &str| -> Result<u32, ConvertError> {
             match ty.array_size() {
-                Some(Type::Constructed(TypeName::Size(size), _)) if *size > 0 => u32::try_from(*size)
-                    .map_err(|_| {
+                Some(Type::Constructed(TypeName::Size(size), _)) if *size > 0 => {
+                    let size = u32::try_from(*size).map_err(|_| {
                         ConvertError::Unsupported(format!(
                             "bucket_scatter destination {dimension} is too large"
                         ))
-                    }),
+                    })?;
+                    if size > i32::MAX as u32 {
+                        return Err(ConvertError::Unsupported(format!(
+                            "bucket_scatter destination {dimension} exceeds the signed indexing limit"
+                        )));
+                    }
+                    Ok(size)
+                }
                 _ => Err(ConvertError::Unsupported(format!(
                     "bucket_scatter requires a positive fixed destination {dimension}"
                 ))),
@@ -2566,14 +2575,24 @@ impl<'a, 'b> Converter<'a, 'b> {
         let capacity = fixed_size(row_ty, "capacity")?;
 
         let function = self.lambda_fn_symbol(&lam.lam)?;
-        let (key_type, value_type) = match &lam.lam.ret_ty {
-            Type::Constructed(TypeName::Tuple(2), fields) => (fields[0].clone(), fields[1].clone()),
+        let (active_type, key_type, value_type) = match &lam.lam.ret_ty {
+            Type::Constructed(TypeName::Tuple(3), fields) => {
+                (fields[0].clone(), fields[1].clone(), fields[2].clone())
+            }
             other => {
                 return Err(ConvertError::GraphError(format!(
-                    "bucket_scatter envelope must return (i32, value), got {other:?}"
+                    "bucket_scatter envelope must return (bool, i32, value), got {other:?}"
                 )));
             }
         };
+        let bool_type = Type::Constructed(TypeName::Bool, vec![]);
+        let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+        if active_type != bool_type || key_type != i32_type || value_type != dest.elem_ty {
+            return Err(ConvertError::GraphError(format!(
+                "bucket_scatter envelope must return (bool, i32, {:?}), got {:?}",
+                dest.elem_ty, lam.lam.ret_ty
+            )));
+        }
         if inputs.len() != input_dimensions.len() {
             return Err(ConvertError::Internal(
                 "bucket_scatter input/dimension metadata length mismatch".into(),
@@ -2583,6 +2602,33 @@ impl<'a, 'b> Converter<'a, 'b> {
             return Err(ConvertError::Internal(
                 "bucket_scatter domain rank must be positive".into(),
             ));
+        }
+        for (input, dimensions) in inputs.iter().zip(input_dimensions) {
+            if dimensions.is_empty() {
+                return Err(ConvertError::GraphError(
+                    "bucket_scatter input has no logical dimensions".into(),
+                ));
+            }
+            let mut unique = dimensions.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            if unique.len() != dimensions.len()
+                || dimensions.iter().any(|dimension| *dimension >= domain_rank)
+            {
+                return Err(ConvertError::GraphError(format!(
+                    "bucket_scatter input dimensions {dimensions:?} are invalid for rank {domain_rank}"
+                )));
+            }
+            let input_array_type = input.array_type();
+            let mut input_type = &input_array_type;
+            for _ in dimensions {
+                input_type = input_type.elem_type().ok_or_else(|| {
+                    ConvertError::GraphError(format!(
+                        "bucket_scatter input rank exceeds its array type {:?}",
+                        input_array_type
+                    ))
+                })?;
+            }
         }
         let input_nodes = inputs
             .iter()
@@ -2643,7 +2689,6 @@ impl<'a, 'b> Converter<'a, 'b> {
             overflow_type,
             self.current_span,
         );
-        let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
         let bucket_count_node = self.intern_pure(
             PureOp::Int(bucket_count.to_string()),
             smallvec![],
@@ -2668,9 +2713,10 @@ impl<'a, 'b> Converter<'a, 'b> {
                             captures,
                         },
                         lam.lam.params.iter().map(|(_, ty)| ty.clone()).collect(),
-                        vec![key_type, value_type.clone()],
+                        vec![active_type, key_type, value_type.clone()],
                     ),
                     operations: vec![hist::HistOp {
+                        emission: hist::Emission::Guarded,
                         shape: vec![bucket_count_node],
                         race_factor,
                         destinations: vec![dest_view],

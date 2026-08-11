@@ -1263,10 +1263,9 @@ impl<'a> Transformer<'a> {
         let Type::Constructed(TypeName::Tuple(2), pair_types) = &item_ty else {
             panic!("BUG: bucket_scatter_Nd item must be a (key, value) pair, got {item_ty:?}");
         };
-        let pair_ty = Type::Constructed(
-            TypeName::Tuple(2),
-            vec![pair_types[0].clone(), pair_types[1].clone()],
-        );
+        let key_ty = pair_types[0].clone();
+        let value_ty = pair_types[1].clone();
+        let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![key_ty.clone(), value_ty.clone()]);
         let dest = Place {
             id: match &dest_term.kind {
                 TermKind::Var(VarRef::Symbol(symbol)) => *symbol,
@@ -1278,12 +1277,27 @@ impl<'a> Transformer<'a> {
         let mut binds = Vec::new();
         let items = self.soac_input(items_term, &mut binds);
         let item = self.fresh("_w_bucket_scatter_item");
-        let body = self.mk_term(pair_ty.clone(), span, TermKind::Var(VarRef::Symbol(item)));
+        let item_value = self.mk_term(pair_ty.clone(), span, TermKind::Var(VarRef::Symbol(item)));
+        let key = self.mk_tuple_proj(item_value.clone(), 0, key_ty.clone(), span);
+        let value = self.mk_tuple_proj(item_value, 1, value_ty.clone(), span);
+        let zero = self.mk_term(key_ty.clone(), span, TermKind::IntLit("0".into()));
+        let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+        let active = self.build_binop(
+            ast::BinaryOp {
+                op: crate::op::BinaryOperator::GreaterEqual,
+            },
+            key.clone(),
+            zero,
+            bool_ty.clone(),
+            span,
+        );
+        let emission_ty = Type::Constructed(TypeName::Tuple(3), vec![bool_ty, key_ty, value_ty]);
+        let body = self.mk_tuple(vec![active, key, value], emission_ty.clone(), span);
         let lam = SoacBody {
             lam: Lambda {
                 params: vec![(item, pair_ty.clone())],
                 body: Box::new(body),
-                ret_ty: pair_ty,
+                ret_ty: emission_ty,
             },
             data: (),
         };

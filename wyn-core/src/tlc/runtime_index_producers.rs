@@ -96,7 +96,7 @@ fn float_term(
             inner_blocked.insert(name);
             let (mut body_floats, body) = float_term(*body, &inner_blocked, ids, symbols, collect);
 
-            if let Some((mut lifted, bucket)) = fuse_ranked_bucket_map(name, &rhs, &body) {
+            if let Some((mut lifted, bucket)) = fuse_ranked_bucket_map(name, &rhs, &body, ids, symbols) {
                 rhs_floats.append(&mut lifted);
                 rhs_floats.append(&mut body_floats);
                 return finish(rhs_floats, bucket, collect, ids);
@@ -237,6 +237,8 @@ fn fuse_ranked_bucket_map(
     binding: SymbolId,
     rhs: &Term<Empty, Empty>,
     body: &Term<Empty, Empty>,
+    ids: &mut TermIdSource,
+    symbols: &mut crate::SymbolTable,
 ) -> Option<(Vec<LetBinding<Empty, Empty>>, Term<Empty, Empty>)> {
     let TermKind::Soac(SoacOp::BucketScatter {
         dest,
@@ -264,7 +266,7 @@ fn fuse_ranked_bucket_map(
     };
     let mut bound = LookupSet::new();
     extract_ranked_map_level(rhs, 0, *domain_rank, &mut bound, &mut fusion)?;
-    let leaf = fusion.leaf?;
+    let leaf = guard_bucket_leaf(fusion.leaf?, ids, symbols)?;
     let ret_ty = leaf.ty.clone();
     let lam = SoacBody {
         lam: Lambda {
@@ -287,6 +289,83 @@ fn fuse_ranked_bucket_map(
         }),
     };
     Some((fusion.lifted, bucket))
+}
+
+/// Adapt a generated `(key, value)` leaf to the canonical guarded histogram
+/// ABI `(active, key, value)`. The pair is let-bound so an expensive generated
+/// leaf is evaluated once even though its key feeds both the guard and output.
+fn guard_bucket_leaf(
+    pair: Term<Empty, Empty>,
+    ids: &mut TermIdSource,
+    symbols: &mut crate::SymbolTable,
+) -> Option<Term<Empty, Empty>> {
+    let Type::Constructed(TypeName::Tuple(2), fields) = &pair.ty else {
+        return None;
+    };
+    let key_ty = fields[0].clone();
+    let value_ty = fields[1].clone();
+    let pair_ty = pair.ty.clone();
+    let span = pair.span;
+    let binding = symbols.alloc("_w_bucket_emission".into());
+    let mut project = |index: usize, ty: Type<TypeName>| {
+        let tuple = Term::fresh(ids, pair_ty.clone(), span, TermKind::Var(VarRef::Symbol(binding)));
+        Term::fresh(
+            ids,
+            ty.clone(),
+            span,
+            TermKind::TupleProj {
+                tuple: Box::new(tuple),
+                idx: index,
+            },
+        )
+    };
+    let guard_key = project(0, key_ty.clone());
+    let key = project(0, key_ty.clone());
+    let value = project(1, value_ty.clone());
+    let zero = Term::fresh(ids, key_ty.clone(), span, TermKind::IntLit("0".into()));
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let operator_ty = Type::Constructed(
+        TypeName::Arrow,
+        vec![
+            key_ty.clone(),
+            Type::Constructed(TypeName::Arrow, vec![key_ty.clone(), bool_ty.clone()]),
+        ],
+    );
+    let operator = Term::fresh(
+        ids,
+        operator_ty,
+        span,
+        TermKind::BinOp(crate::ast::BinaryOp {
+            op: crate::op::BinaryOperator::GreaterEqual,
+        }),
+    );
+    let active = Term::fresh(
+        ids,
+        bool_ty.clone(),
+        span,
+        TermKind::App {
+            func: Box::new(operator),
+            args: vec![guard_key, zero],
+        },
+    );
+    let emission_ty = Type::Constructed(TypeName::Tuple(3), vec![bool_ty, key_ty, value_ty]);
+    let emission = Term::fresh(
+        ids,
+        emission_ty.clone(),
+        span,
+        TermKind::Tuple(vec![active, key, value]),
+    );
+    Some(Term::fresh(
+        ids,
+        emission_ty,
+        span,
+        TermKind::Let {
+            name: binding,
+            name_ty: pair_ty,
+            rhs: Box::new(pair),
+            body: Box::new(emission),
+        },
+    ))
 }
 
 fn extract_ranked_map_level(

@@ -5,7 +5,7 @@
 
 use crate::egir::program::SemanticFunc;
 use crate::egir::reify::Segmented;
-use crate::egir::soac::screma;
+use crate::egir::soac::{hist, screma};
 use crate::egir::types::{ENode, NodeId, PureOp, RegionId, Semantic, SkeletonTerminator};
 use crate::LookupMap;
 
@@ -25,6 +25,13 @@ pub enum Value {
 /// representation rather than parallel Rust closures alone.
 pub struct RegionExecutor<'a> {
     program: &'a Segmented,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BucketExecution {
+    pub buckets: Vec<Vec<Value>>,
+    pub counts: Vec<u32>,
+    pub overflow: bool,
 }
 
 impl<'a> RegionExecutor<'a> {
@@ -154,7 +161,13 @@ impl<'a> RegionExecutor<'a> {
                     (crate::op::BinaryOperator::Multiply, [left, right]) => {
                         Ok(Value::Int(left.wrapping_mul(*right)))
                     }
+                    (crate::op::BinaryOperator::Remainder, [left, right]) => {
+                        Ok(Value::Int(left.wrapping_rem(*right)))
+                    }
                     (crate::op::BinaryOperator::Less, [left, right]) => Ok(Value::Bool(left < right)),
+                    (crate::op::BinaryOperator::GreaterEqual, [left, right]) => {
+                        Ok(Value::Bool(left >= right))
+                    }
                     (crate::op::BinaryOperator::Equal, [left, right]) => Ok(Value::Bool(left == right)),
                     _ => Err(format!("unsupported integer operator `{operator}`")),
                 }
@@ -213,6 +226,129 @@ pub(crate) fn execute_map_screma(
         }
     }
     Ok(outputs)
+}
+
+/// Execute one canonical guarded bucket-insert histogram over a fixed ranked
+/// domain. Inputs are flattened in their own row-major coordinate spaces;
+/// `SoacInputType::dimensions` selects the logical coordinates visible to
+/// each input. This is a deterministic semantic oracle, not an ordering model
+/// for the parallel atomic implementation.
+pub(crate) fn execute_bucket_hist(
+    program: &Segmented,
+    op: &hist::Op<Semantic>,
+    domain: &[usize],
+    inputs: &[Vec<Value>],
+    mut buckets: Vec<Vec<Value>>,
+) -> Result<BucketExecution, String> {
+    let [operation] = op.form.operations.as_slice() else {
+        return Err("bucket executor requires exactly one histogram operation".into());
+    };
+    if !matches!(operation.update, hist::Update::BucketInsert { .. })
+        || !matches!(operation.emission, hist::Emission::Guarded)
+    {
+        return Err("bucket executor requires one guarded bucket insertion".into());
+    }
+    if inputs.len() != op.inputs.len() {
+        return Err(format!(
+            "bucket executor expects {} inputs, found {}",
+            op.inputs.len(),
+            inputs.len()
+        ));
+    }
+    if op.form.bucket.capture_count() != 0 {
+        return Err("bucket executor currently requires a capture-free envelope".into());
+    }
+    let capacity = buckets.first().map_or(0, Vec::len);
+    if buckets.iter().any(|bucket| bucket.len() != capacity) {
+        return Err("bucket destination rows have different capacities".into());
+    }
+    for (input, values) in op.inputs.iter().zip(inputs) {
+        let expected = input.dimensions.iter().try_fold(1usize, |product, dimension| {
+            let extent = domain
+                .get(usize::from(*dimension))
+                .copied()
+                .ok_or_else(|| format!("input dimension {} is outside rank {}", dimension, domain.len()))?;
+            product.checked_mul(extent).ok_or_else(|| "ranked input size overflows usize".to_string())
+        })?;
+        if values.len() != expected {
+            return Err(format!(
+                "ranked input {:?} has {} values, expected {expected}",
+                input.dimensions,
+                values.len()
+            ));
+        }
+    }
+
+    let lane_count = domain.iter().try_fold(1usize, |product, extent| {
+        product.checked_mul(*extent).ok_or_else(|| "ranked domain size overflows usize".to_string())
+    })?;
+    let executor = RegionExecutor::new(program);
+    let mut counts = vec![0u32; buckets.len()];
+    let mut overflow = false;
+    for lane in 0..lane_count {
+        let mut remaining = lane;
+        let mut coordinates = vec![0usize; domain.len()];
+        for dimension in (0..domain.len()).rev() {
+            let extent = domain[dimension];
+            if extent == 0 {
+                return Ok(BucketExecution {
+                    buckets,
+                    counts,
+                    overflow,
+                });
+            }
+            coordinates[dimension] = remaining % extent;
+            remaining /= extent;
+        }
+        let parameters = op
+            .inputs
+            .iter()
+            .zip(inputs)
+            .map(|(input, values)| {
+                let index = input.dimensions.iter().try_fold(0usize, |index, dimension| {
+                    let dimension = usize::from(*dimension);
+                    index
+                        .checked_mul(domain[dimension])
+                        .and_then(|index| index.checked_add(coordinates[dimension]))
+                        .ok_or_else(|| "ranked input index overflows usize".to_string())
+                })?;
+                values
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| format!("ranked input index {index} is out of bounds"))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let results = executor.call_lambda(&op.form.bucket, &parameters, &[])?;
+        let [Value::Bool(active), Value::Int(key), value] = results.as_slice() else {
+            return Err(format!(
+                "guarded bucket envelope returned incompatible values {results:?}"
+            ));
+        };
+        if !*active {
+            continue;
+        }
+        let Ok(bucket) = usize::try_from(*key) else {
+            overflow = true;
+            continue;
+        };
+        let Some(count) = counts.get_mut(bucket) else {
+            overflow = true;
+            continue;
+        };
+        let slot = *count;
+        *count = count.wrapping_add(1);
+        if let Some(destination) = buckets.get_mut(bucket).and_then(|bucket| bucket.get_mut(slot as usize))
+        {
+            *destination = value.clone();
+        } else {
+            overflow = true;
+        }
+    }
+    Ok(BucketExecution {
+        buckets,
+        counts,
+        overflow,
+    })
 }
 pub fn map<T, U>(input: &[T], f: impl Fn(&T) -> U) -> Vec<U> {
     input.iter().map(f).collect()

@@ -282,7 +282,13 @@ pub(super) fn build_hist_atomic(
         })
         .collect::<Vec<_>>();
     let bucket_values = emit_screma_lambda(graph, regions, &form.bucket, arguments);
+    debug_assert_eq!(
+        bucket_values.len(),
+        form.guard_count() + form.index_count() + form.value_count()
+    );
+    let (guards, bucket_values) = bucket_values.split_at(form.guard_count());
     let (indices, values) = bucket_values.split_at(form.index_count());
+    let mut guard_offset = 0;
     let mut index_offset = 0;
     let mut value_offset = 0;
     let mut current = body;
@@ -294,7 +300,19 @@ pub(super) fn build_hist_atomic(
         value_offset += operation.value_count();
         let update = graph.skeleton.create_block();
         let next = graph.skeleton.create_block();
-        let valid = hist_index_in_bounds(graph, operation_indices, &operation.shape);
+        let in_bounds = hist_index_in_bounds(graph, operation_indices, &operation.shape);
+        let valid = if matches!(operation.emission, hist::Emission::Guarded) {
+            let active = guards[guard_offset];
+            guard_offset += 1;
+            graph.intern_pure(
+                PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
+                smallvec![active, in_bounds],
+                Type::Constructed(TypeName::Bool, vec![]),
+                None,
+            )
+        } else {
+            in_bounds
+        };
         graph.skeleton.blocks[current].term = SkeletonTerminator::CondBranch {
             cond: valid,
             then_target: update,
@@ -332,9 +350,10 @@ pub(super) fn build_hist_atomic(
     };
 }
 /// Canonical serial histogram semantics. Bucket results are decoded in
-/// Futhark order: all operation indices, then all operation values. A
-/// multi-component reducer is invoked once with all previous components and
-/// all incoming components, then its results are stored componentwise.
+/// Canonical order: guards for guarded operations, all operation indices, then
+/// all operation values. A multi-component reducer is invoked once with all
+/// previous components and all incoming components, then its results are
+/// stored componentwise.
 pub(super) fn build_hist_loop(
     graph: &mut EGraph,
     bid: BlockId,
@@ -377,8 +396,13 @@ pub(super) fn build_hist_loop(
                 ));
             }
             let bucket_values = emit_screma_lambda(graph, regions, &form.bucket, arguments);
-            debug_assert_eq!(bucket_values.len(), form.index_count() + form.value_count());
+            debug_assert_eq!(
+                bucket_values.len(),
+                form.guard_count() + form.index_count() + form.value_count()
+            );
+            let (guards, bucket_values) = bucket_values.split_at(form.guard_count());
             let (indices, values) = bucket_values.split_at(form.index_count());
+            let mut guard_offset = 0;
             let mut index_offset = 0;
             let mut value_offset = 0;
 
@@ -394,7 +418,19 @@ pub(super) fn build_hist_loop(
                 // the selected block so serial and atomic paths agree.
                 let update = graph.skeleton.create_block();
                 let next = graph.skeleton.create_block();
-                let valid = hist_index_in_bounds(graph, operation_indices, &operation.shape);
+                let in_bounds = hist_index_in_bounds(graph, operation_indices, &operation.shape);
+                let valid = if matches!(operation.emission, hist::Emission::Guarded) {
+                    let active = guards[guard_offset];
+                    guard_offset += 1;
+                    graph.intern_pure(
+                        PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
+                        smallvec![active, in_bounds],
+                        Type::Constructed(TypeName::Bool, vec![]),
+                        None,
+                    )
+                } else {
+                    in_bounds
+                };
                 graph.skeleton.blocks[current].term = SkeletonTerminator::CondBranch {
                     cond: valid,
                     then_target: update,
@@ -743,23 +779,16 @@ pub(super) fn build_bucket_insert(
         })
         .collect::<Vec<_>>();
     let results = emit_screma_lambda(graph, regions, &spec.form.bucket, arguments);
-    let [key, value] = results.as_slice() else {
-        unreachable!("bucket insertion envelope returns key and value")
+    let [active, key, value] = results.as_slice() else {
+        unreachable!("guarded bucket insertion envelope returns active, key, and value")
     };
-    let zero_i32 = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_type.clone(), None);
-    let discard = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
-        smallvec![*key, zero_i32],
-        bool_type.clone(),
-        None,
-    );
     let check_bucket = graph.skeleton.create_block();
     graph.skeleton.blocks[body].term = SkeletonTerminator::CondBranch {
-        cond: discard,
-        then_target: after,
-        then_args: vec![],
-        else_target: check_bucket,
+        cond: *active,
+        then_target: check_bucket,
         else_args: vec![],
+        else_target: after,
+        then_args: vec![],
     };
     graph.skeleton.blocks[body].control_header = Some(ControlHeader::Selection { merge: after });
 

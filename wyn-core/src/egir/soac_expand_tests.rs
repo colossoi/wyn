@@ -102,6 +102,7 @@ fn scatter_handleability_checks_every_input() {
                     vec![i32_ty.clone(), f32_ty.clone()],
                 ),
                 operations: vec![hist::HistOp {
+                    emission: hist::Emission::Always,
                     shape: vec![NodeId::from(slotmap::KeyData::from_ffi(1))],
                     race_factor: NodeId::from(slotmap::KeyData::from_ffi(2)),
                     destinations: vec![NodeId::from(slotmap::KeyData::from_ffi(3))],
@@ -163,6 +164,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
             bucket: screma::Lambda::identity(vec![i32_ty.clone(); 6]),
             operations: vec![
                 hist::HistOp {
+                    emission: hist::Emission::Always,
                     shape: vec![two, two],
                     race_factor: one,
                     destinations: destinations[..2].to_vec(),
@@ -179,6 +181,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
                     },
                 },
                 hist::HistOp {
+                    emission: hist::Emission::Always,
                     shape: vec![four],
                     race_factor: one,
                     destinations: destinations[2..].to_vec(),
@@ -291,6 +294,7 @@ fn serial_hist_ignores_out_of_bounds_indices() {
         form: hist::HistForm {
             bucket: screma::Lambda::identity(vec![i32_ty.clone(), i32_ty.clone()]),
             operations: vec![hist::HistOp {
+                emission: hist::Emission::Always,
                 shape: vec![four],
                 race_factor: one,
                 destinations: vec![destination],
@@ -383,6 +387,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
             bucket: screma::Lambda::identity(vec![i32_ty.clone(); 5]),
             operations: vec![
                 hist::HistOp {
+                    emission: hist::Emission::Always,
                     shape: vec![two, two],
                     race_factor: one,
                     destinations: vec![destinations[0]],
@@ -399,6 +404,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
                     },
                 },
                 hist::HistOp {
+                    emission: hist::Emission::Always,
                     shape: vec![four],
                     race_factor: one,
                     destinations: vec![destinations[1]],

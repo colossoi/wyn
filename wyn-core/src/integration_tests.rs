@@ -970,6 +970,19 @@ entry collision_shape_3d(dest: *[64][64]u32) ([64][64]u32, [64]u32, u32) =
         ],
         "counts and scalar overflow outputs must both publish allocation sizes"
     );
+    let materialized_candidate_bytes = 4096u64 * 658 * 2016 * 8;
+    assert!(
+        compute.bindings.iter().all(|binding| {
+            !matches!(
+                binding,
+                Binding::StorageBuffer {
+                    length: Some(BufferLen::Fixed { bytes }),
+                    ..
+                } if *bytes == materialized_candidate_bytes
+            )
+        }),
+        "generated collision candidates must not receive a materialized storage binding"
+    );
     let insert = compute
         .stages
         .iter()
@@ -1002,7 +1015,7 @@ entry collision_shape_2d_bound(
     ))
     .expect("bound ranked bucket scatter lowers to WGSL");
     assert!(
-        wgsl.contains("array<array<T0, 32>>"),
+        wgsl.contains("@binding(1) var<storage, read> _buf_0_1: array<array<T"),
         "bound item storage must retain its array-of-struct layout:\n{wgsl}"
     );
     let module = naga::front::wgsl::parse_str(&wgsl)
@@ -1048,6 +1061,88 @@ entry bucket_rank_4(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
 "#;
 
     crate::compile_thru_spirv(source).expect("rank-one and rank-four bucket domains emit SPIR-V");
+}
+
+#[test]
+fn guarded_bucket_scatter_semantics_discard_count_and_overflow_correctly() {
+    use crate::egir::semantic_exec::{execute_bucket_hist, Value};
+    use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
+
+    let source = r#"
+entry bucket_semantics(dest: *[2][2]i32) ([2][2]i32, [2]u32, u32) =
+  let keys: [4]i32 = [-1, 0, 1, 2]
+  let values: [3]i32 = [10, 11, 12]
+  let items: [4][3](i32, i32) =
+    map(|key: i32| map(|value: i32| (key, value), values), keys)
+  in bucket_scatter_2d(dest, items)
+"#;
+    let program = compile_to_segmented_egir(source);
+    let operation = program
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+        .find_map(|effect| match &effect.kind {
+            SideEffectKind::Soac(SoacEffect(_, Soac::Hist(operation))) => Some(operation),
+            _ => None,
+        })
+        .expect("guarded bucket histogram");
+    assert_eq!(
+        operation.inputs.iter().map(|input| input.dimensions.clone()).collect::<Vec<_>>(),
+        [vec![0], vec![1]],
+        "the semantic oracle must exercise the fused ranked coordinate mapping"
+    );
+    let values = vec![Value::Int(10), Value::Int(11), Value::Int(12)];
+    let empty = || vec![vec![Value::Int(0); 2]; 2];
+
+    let discarded = execute_bucket_hist(
+        &program,
+        operation,
+        &[4, 3],
+        &[vec![Value::Int(-1); 4], values.clone()],
+        empty(),
+    )
+    .expect("execute negative-key bucket emissions");
+    assert_eq!(discarded.counts, [0, 0]);
+    assert!(
+        !discarded.overflow,
+        "inactive negative-key leaves must not set overflow"
+    );
+    assert_eq!(discarded.buckets, empty());
+
+    let invalid = execute_bucket_hist(
+        &program,
+        operation,
+        &[4, 3],
+        &[vec![Value::Int(2); 4], values.clone()],
+        empty(),
+    )
+    .expect("execute invalid-key bucket emissions");
+    assert_eq!(invalid.counts, [0, 0]);
+    assert!(
+        invalid.overflow,
+        "active nonnegative invalid keys must set overflow"
+    );
+
+    let full = execute_bucket_hist(
+        &program,
+        operation,
+        &[4, 3],
+        &[
+            vec![Value::Int(0), Value::Int(1), Value::Int(0), Value::Int(1)],
+            values,
+        ],
+        empty(),
+    )
+    .expect("execute capacity-limited bucket emissions");
+    assert_eq!(full.counts, [6, 6], "counts include leaves beyond capacity");
+    assert!(full.overflow, "capacity overflow must be reported");
+    assert_eq!(
+        full.buckets,
+        [
+            vec![Value::Int(10), Value::Int(11)],
+            vec![Value::Int(10), Value::Int(11)],
+        ]
+    );
 }
 
 #[test]

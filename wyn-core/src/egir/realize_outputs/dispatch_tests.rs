@@ -48,6 +48,7 @@ fn raw_hist_soac(
                 vec![index_type, value_type.clone()],
             ),
             operations: vec![hist::HistOp {
+                emission: hist::Emission::Always,
                 shape: vec![shape],
                 race_factor,
                 destinations: vec![destination],

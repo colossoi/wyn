@@ -31,6 +31,18 @@ pub enum Update {
     },
 }
 
+/// Whether one logical histogram emission participates in the update.
+///
+/// Guard values are produced by the bucket lambda before all indices and
+/// values. Keeping this in canonical histogram IR means discard is not tied
+/// to a sentinel key in the backend, and future filtered/expanded producers
+/// can use the same mechanism.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Emission {
+    Always,
+    Guarded,
+}
+
 impl Update {
     pub(crate) fn value_types(&self) -> &[Type<TypeName>] {
         match self {
@@ -48,6 +60,7 @@ impl Update {
 /// lowering hint and does not change serial semantics.
 #[derive(Clone, Debug)]
 pub struct HistOp {
+    pub emission: Emission,
     pub shape: Vec<NodeId>,
     pub race_factor: NodeId,
     pub destinations: Vec<NodeId>,
@@ -55,6 +68,10 @@ pub struct HistOp {
 }
 
 impl HistOp {
+    pub(crate) fn guard_count(&self) -> usize {
+        usize::from(matches!(self.emission, Emission::Guarded))
+    }
+
     pub(crate) fn index_count(&self) -> usize {
         self.shape.len()
     }
@@ -67,9 +84,10 @@ impl HistOp {
 /// The phase-independent meaning of a histogram.
 ///
 /// Inputs are co-iterated at one logical width. The bucket lambda receives one
-/// element from each input and returns all operation indices first, followed by
-/// all operation values. Operation order, and component order within each
-/// operation, define both portions of that result ABI.
+/// element from each input and returns guards for guarded operations first,
+/// followed by all operation indices and then all operation values. Operation
+/// order, and component order within each operation, define every portion of
+/// that result ABI.
 #[derive(Clone, Debug)]
 pub struct HistForm {
     pub bucket: screma::Lambda,
@@ -77,6 +95,10 @@ pub struct HistForm {
 }
 
 impl HistForm {
+    pub(crate) fn guard_count(&self) -> usize {
+        self.operations.iter().map(HistOp::guard_count).sum()
+    }
+
     pub(crate) fn index_count(&self) -> usize {
         self.operations.iter().map(HistOp::index_count).sum()
     }
@@ -201,7 +223,9 @@ impl<P: WynSoacPhase> Op<P> {
 
         let expected_parameters = self.inputs.iter().map(SoacInputType::element).collect::<Vec<_>>();
         let index_type = Type::Constructed(TypeName::Int(32), vec![]);
-        let expected_results = std::iter::repeat_n(index_type, self.form.index_count())
+        let bool_type = Type::Constructed(TypeName::Bool, vec![]);
+        let expected_results = std::iter::repeat_n(bool_type, self.form.guard_count())
+            .chain(std::iter::repeat_n(index_type, self.form.index_count()))
             .chain(
                 self.form
                     .operations
@@ -417,6 +441,7 @@ mod tests {
                 ),
                 operations: vec![
                     HistOp {
+                        emission: Emission::Always,
                         shape: vec![node(1), node(2)],
                         race_factor: node(3),
                         destinations: vec![node(4), node(5)],
@@ -438,6 +463,7 @@ mod tests {
                         },
                     },
                     HistOp {
+                        emission: Emission::Always,
                         shape: vec![node(8)],
                         race_factor: node(9),
                         destinations: vec![node(10)],

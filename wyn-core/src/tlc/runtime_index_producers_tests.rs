@@ -41,8 +41,13 @@ entry e(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
             domain_rank,
             ..
         }) => {
+            let result_arity = match &lam.lam.ret_ty {
+                Type::Constructed(TypeName::Tuple(arity), _) => *arity,
+                other => panic!("guarded bucket lambda must return a tuple, got {other:?}"),
+            };
             bucket = Some((
                 lam.lam.params.len(),
+                result_arity,
                 inputs.len(),
                 input_dimensions.clone(),
                 *domain_rank,
@@ -51,7 +56,7 @@ entry e(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
         _ => {}
     });
     assert_eq!(maps, 0, "the ranked producer must not remain materialized");
-    assert_eq!(bucket, Some((2, 2, vec![vec![0], vec![1]], 2)));
+    assert_eq!(bucket, Some((2, 3, 2, vec![vec![0], vec![1]], 2)));
 }
 
 fn span() -> Span {
