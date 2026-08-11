@@ -237,10 +237,20 @@ pub(super) fn emit_read_ranked_element(
     arr_ty: &Type<TypeName>,
     leaf_ty: &Type<TypeName>,
     rank: u8,
+    layout: &ArrayLayout,
     next_effect: &mut crate::IdSource<EffectToken>,
 ) -> NodeId {
     if rank == 1 {
-        return emit_read_element(graph, body, arr_nid, flat_index, arr_ty, leaf_ty, next_effect);
+        return emit_read_ranked_coordinates(
+            graph,
+            body,
+            arr_nid,
+            &[flat_index],
+            arr_ty,
+            leaf_ty,
+            layout,
+            next_effect,
+        );
     }
     let inner_extents = ranked_inner_extents(arr_ty, rank);
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
@@ -276,7 +286,16 @@ pub(super) fn emit_read_ranked_element(
         );
     }
 
-    emit_read_ranked_coordinates(graph, body, arr_nid, &coordinates, arr_ty, leaf_ty, next_effect)
+    emit_read_ranked_coordinates(
+        graph,
+        body,
+        arr_nid,
+        &coordinates,
+        arr_ty,
+        leaf_ty,
+        layout,
+        next_effect,
+    )
 }
 
 /// Read one leaf using an explicit coordinate for every regular array axis.
@@ -288,10 +307,11 @@ pub(super) fn emit_read_ranked_coordinates(
     coordinates: &[NodeId],
     arr_ty: &Type<TypeName>,
     leaf_ty: &Type<TypeName>,
+    layout: &ArrayLayout,
     next_effect: &mut crate::IdSource<EffectToken>,
 ) -> NodeId {
     assert!(!coordinates.is_empty(), "ranked SOAC read requires a coordinate");
-    if coordinates.len() == 1 {
+    if coordinates.len() == 1 && !matches!(layout, ArrayLayout::StorageAos) {
         return emit_read_element(graph, body, arr_nid, coordinates[0], arr_ty, leaf_ty, next_effect);
     }
     let actual_arr_ty =
@@ -319,13 +339,14 @@ pub(super) fn emit_read_ranked_coordinates(
                 coordinates,
                 component_ty,
                 &component_leaf,
+                &ArrayLayout::Composite,
                 next_effect,
             ));
         }
         return graph.intern_pure(PureOp::Tuple(components.len()), leaves, leaf_ty.clone(), None);
     }
 
-    if is_view_node(graph, arr_nid, arr_ty) {
+    if matches!(layout, ArrayLayout::StorageAos) || is_view_node(graph, arr_nid, arr_ty) {
         let mut current_ty = arr_ty.clone();
         let first_ty = current_ty.elem_type().expect("ranked SOAC input must be an array").clone();
         let mut place = graph.intern_pure(

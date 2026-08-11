@@ -68,6 +68,27 @@ type Term = GenericTerm<ClosureData, SoacBodyData>;
 type TermKind = GenericTermKind<ClosureData, SoacBodyData>;
 type Lambda = GenericLambda<ClosureData, SoacBodyData>;
 type LoopKind = GenericLoopKind<ClosureData, SoacBodyData>;
+
+fn contains_storage_view_type(ty: &Type<TypeName>) -> bool {
+    crate::types::is_array_variant_view(ty)
+        || super::types::as_soa_tuple(ty)
+            .is_some_and(|components| components.iter().any(contains_storage_view_type))
+}
+
+fn strided_fields_layout(array: &Type<TypeName>, rank: usize) -> Option<ArrayLayout> {
+    let components = super::types::as_soa_tuple(array)?;
+    let mut offset = 0u32;
+    let mut field_offsets = Vec::with_capacity(components.len());
+    for component in components {
+        let leaf = super::types::soac_leaf_type(component, u8::try_from(rank).ok()?);
+        field_offsets.push(offset);
+        offset = offset.checked_add(crate::ssa::layout::type_byte_size(&leaf)?)?;
+    }
+    Some(ArrayLayout::StridedFields {
+        element_stride_bytes: offset,
+        field_offsets_bytes: field_offsets,
+    })
+}
 type ArrayExpr = GenericArrayExpr<ClosureData, SoacBodyData>;
 type SoacBody = GenericSoacBody<ClosureData, SoacBodyData>;
 type SoacOp = GenericSoacOp<ClosureData, SoacBodyData>;
@@ -2657,6 +2678,63 @@ impl<'a, 'b> Converter<'a, 'b> {
             .zip(&input_nodes)
             .map(|(input, node)| self.value_array_type(*node, input))
             .collect::<Vec<_>>();
+        let input_layouts = input_nodes
+            .iter()
+            .zip(&input_arrays)
+            .zip(input_dimensions)
+            .map(|((node, array), dimensions)| {
+                let producers = super::graph_ops::value_producer_closure(&self.graph, [*node]);
+                let storage_type = producers.nodes.iter().find_map(|producer| {
+                    matches!(
+                        self.graph.nodes[*producer].kind,
+                        ENode::Pure {
+                            op: PureOp::StorageView(_),
+                            ..
+                        }
+                    )
+                    .then(|| self.graph.nodes[*producer].ty.clone())
+                });
+                if super::types::as_soa_tuple(array).is_some() {
+                    if contains_storage_view_type(array) {
+                        return strided_fields_layout(array, dimensions.len())
+                            .unwrap_or(ArrayLayout::StructureOfArrays);
+                    }
+                    if let Some(mut leaf) = storage_type {
+                        for _ in dimensions {
+                            let Some(element) = leaf.elem_type().cloned() else {
+                                return ArrayLayout::StructureOfArrays;
+                            };
+                            leaf = element;
+                        }
+                        if let Type::Constructed(TypeName::Tuple(_), fields) = leaf {
+                            let mut offset = 0u32;
+                            let mut field_offsets = Vec::with_capacity(fields.len());
+                            for field in &fields {
+                                field_offsets.push(offset);
+                                let Some(size) = crate::ssa::layout::type_byte_size(field) else {
+                                    return ArrayLayout::StructureOfArrays;
+                                };
+                                let Some(next) = offset.checked_add(size) else {
+                                    return ArrayLayout::StructureOfArrays;
+                                };
+                                offset = next;
+                            }
+                            return ArrayLayout::StridedFields {
+                                element_stride_bytes: offset,
+                                field_offsets_bytes: field_offsets,
+                            };
+                        }
+                    }
+                    ArrayLayout::StructureOfArrays
+                } else if storage_type.is_some() {
+                    ArrayLayout::StorageAos
+                } else if crate::types::is_virtual_array(array) {
+                    ArrayLayout::Generated
+                } else {
+                    ArrayLayout::Composite
+                }
+            })
+            .collect::<Vec<_>>();
         let captures = lam
             .data
             .captures
@@ -2721,8 +2799,11 @@ impl<'a, 'b> Converter<'a, 'b> {
             Soac::Hist(hist::Op {
                 inputs: input_arrays
                     .into_iter()
+                    .zip(input_layouts)
                     .zip(input_dimensions)
-                    .map(|(array, dimensions)| SoacInputType::mapped(array, dimensions.clone()))
+                    .map(|((array, layout), dimensions)| {
+                        SoacInputType::mapped(array, dimensions.clone()).with_layout(layout)
+                    })
                     .collect(),
                 form: hist::HistForm {
                     bucket: screma::Lambda::region(

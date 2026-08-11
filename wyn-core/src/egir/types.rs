@@ -169,6 +169,7 @@ pub type SideEffectKind<P = Semantic, Lang = WynLanguage> = super::ir::SideEffec
 pub type SkeletonBlock<P = Semantic, Lang = WynLanguage> = super::ir::SkeletonBlock<P, Lang>;
 pub type Skeleton<P = Semantic, Lang = WynLanguage> = super::ir::Skeleton<P, Lang>;
 pub type SoacInputType<Ty = Type<TypeName>> = super::ir::SoacInputType<Ty>;
+pub type ArrayLayout = super::ir::ArrayLayout;
 pub type EGraph<P = Semantic, Lang = WynLanguage> = super::ir::EGraph<P, Lang>;
 
 /// If `ty` is a structure-of-arrays tuple, return its array component types.

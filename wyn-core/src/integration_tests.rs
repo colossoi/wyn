@@ -1042,6 +1042,58 @@ entry collision_shape_2d_bound(
 }
 
 #[test]
+fn ranked_bucket_scatter_records_layout_independently_of_logical_rank() {
+    use crate::egir::types::{ArrayLayout, SideEffectKind, Soac, SoacEffect};
+
+    fn bucket_layouts(source: &str) -> Vec<ArrayLayout> {
+        let program = compile_to_semantic_egir(source);
+        program
+            .entry_points
+            .iter()
+            .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+            .find_map(|effect| match &effect.kind {
+                SideEffectKind::Soac(SoacEffect(_, Soac::Hist(operation))) => {
+                    Some(operation.inputs.iter().map(|input| input.layout.clone()).collect())
+                }
+                _ => None,
+            })
+            .expect("bucket histogram")
+    }
+
+    let bound = r#"
+entry bound_layout(dest: *[4][8]u32, items: [64][32](i32, u32))
+    ([4][8]u32, [4]u32, u32) =
+  bucket_scatter_2d(dest, items)
+"#;
+    assert_eq!(bucket_layouts(bound), [ArrayLayout::StorageAos]);
+
+    let generated = r#"
+entry generated_layout(dest: *[4][8]u32, offset: u32)
+    ([4][8]u32, [4]u32, u32) =
+  let items: [2][2](i32, u32) =
+    map(|row: i32|
+      map(|column: i32| ((row + column) % 4, u32(row + column) + offset), iota(2)),
+      iota(2))
+  in bucket_scatter_2d(dest, items)
+"#;
+    assert_eq!(
+        bucket_layouts(generated),
+        [ArrayLayout::Generated, ArrayLayout::Generated]
+    );
+    crate::compile_thru_spirv(generated)
+        .expect("generated layout with a mixed scalar capture emits SPIR-V");
+
+    let literal = r#"
+entry literal_layout(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
+  let items: [2][2](i32, u32) =
+    [[(0, 10u32), (1, 11u32)], [(2, 12u32), (3, 13u32)]]
+  in bucket_scatter_2d(dest, items)
+"#;
+    assert_eq!(bucket_layouts(literal), [ArrayLayout::StructureOfArrays]);
+    crate::compile_thru_spirv(literal).expect("literal SoA layout emits SPIR-V");
+}
+
+#[test]
 fn ranked_bucket_scatter_accepts_rank_one_and_rank_four_generated_domains() {
     let source = r#"
 entry bucket_rank_1(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =

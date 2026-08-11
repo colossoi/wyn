@@ -39,7 +39,7 @@ use crate::ast::TypeName;
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
 use super::types::{
-    as_soa_tuple, soac_element_type, ENode, EffectOp, EffectToken, NodeId, PureOp, RegionId,
+    as_soa_tuple, soac_element_type, ArrayLayout, ENode, EffectOp, EffectToken, NodeId, PureOp, RegionId,
     SkeletonTerminator, SoacDestination, SoacEffect,
 };
 
@@ -460,18 +460,20 @@ fn expand_one(
         SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
             let n_inputs = op.inputs.len();
             let input_nids = &se.operand_nodes[..n_inputs];
-            let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>, Vec<u8>)> = input_nids
-                .iter()
-                .zip(op.inputs.iter())
-                .map(|(nid, input)| {
-                    (
-                        *nid,
-                        input.array.clone(),
-                        input.element(),
-                        input.dimensions.clone(),
-                    )
-                })
-                .collect();
+            let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>, Vec<u8>, ArrayLayout)> =
+                input_nids
+                    .iter()
+                    .zip(op.inputs.iter())
+                    .map(|(nid, input)| {
+                        (
+                            *nid,
+                            input.array.clone(),
+                            input.element(),
+                            input.dimensions.clone(),
+                            input.layout.clone(),
+                        )
+                    })
+                    .collect();
             let len_input = (input_nids[0], op.inputs[0].array.clone());
             let result_nid = se.result.expect("Hist has a result");
 

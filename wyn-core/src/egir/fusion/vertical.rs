@@ -102,7 +102,9 @@ impl InputTransform {
                 None,
             );
         }
-        Some((node, SoacInputType::array(array)))
+        let mut input = input.clone();
+        input.array = array;
+        Some((node, input))
     }
 }
 

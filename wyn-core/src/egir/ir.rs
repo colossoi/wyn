@@ -531,6 +531,27 @@ where
     type ProgramData = ProgramData;
 }
 
+/// Physical representation selected for one SOAC input. Logical rank and
+/// coordinate mappings are intentionally separate from this choice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArrayLayout {
+    /// An ordinary composite array value. Tuple elements are stored AoS.
+    Composite,
+    /// A storage view whose tuple element is loaded as one AoS record.
+    StorageAos,
+    /// A tuple of component arrays.
+    StructureOfArrays,
+    /// A virtual or fused generator with no materialized element storage.
+    Generated,
+    /// Field views into interleaved records. No current frontend creates this
+    /// form, but representing its byte geometry prevents future SoA rewrites
+    /// from erasing the backing AoS stride.
+    StridedFields {
+        element_stride_bytes: u32,
+        field_offsets_bytes: Vec<u32>,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct SoacInputType<Ty> {
     pub array: Ty,
@@ -538,6 +559,7 @@ pub struct SoacInputType<Ty> {
     /// an ordinary one-dimensional input; `[0, 1]` is a rank-two input;
     /// `[1]` is a one-dimensional generator varying along the second axis.
     pub dimensions: Vec<u8>,
+    pub layout: ArrayLayout,
 }
 
 impl<Ty> SoacInputType<Ty> {
@@ -545,6 +567,7 @@ impl<Ty> SoacInputType<Ty> {
         Self {
             array,
             dimensions: vec![0],
+            layout: ArrayLayout::Composite,
         }
     }
 
@@ -558,7 +581,16 @@ impl<Ty> SoacInputType<Ty> {
             dimensions.len(),
             "SOAC input dimensions must be unique"
         );
-        Self { array, dimensions }
+        Self {
+            array,
+            dimensions,
+            layout: ArrayLayout::Composite,
+        }
+    }
+
+    pub(crate) fn with_layout(mut self, layout: ArrayLayout) -> Self {
+        self.layout = layout;
+        self
     }
 
     pub(crate) fn rank(&self) -> u8 {

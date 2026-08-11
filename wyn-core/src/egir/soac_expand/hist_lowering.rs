@@ -14,7 +14,7 @@ use super::*;
 pub(super) struct HistLoop {
     pub(super) form: hist::HistForm,
     /// `(array_nid, array_type, leaf_type, rank)` per input.
-    pub(super) read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>, Vec<u8>)>,
+    pub(super) read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>, Vec<u8>, ArrayLayout)>,
     /// Loop bound source -- the first input `(nid, array_type)`.
     pub(super) len_input: (NodeId, Type<TypeName>),
     pub(super) result_node: NodeId,
@@ -268,7 +268,7 @@ pub(super) fn build_hist_atomic(
 
     let arguments = read_inputs
         .iter()
-        .map(|(array, array_type, element_type, dimensions)| {
+        .map(|(array, array_type, element_type, dimensions, layout)| {
             emit_read_ranked_element(
                 graph,
                 body,
@@ -277,6 +277,7 @@ pub(super) fn build_hist_atomic(
                 array_type,
                 element_type,
                 u8::try_from(dimensions.len()).expect("SOAC input rank exceeds u8"),
+                layout,
                 next_effect,
             )
         })
@@ -383,7 +384,7 @@ pub(super) fn build_hist_loop(
         true,
         move |graph, next_effect, blk, i_nid, _carried| {
             let mut arguments = Vec::with_capacity(read_inputs.len());
-            for (array, array_type, element_type, dimensions) in &read_inputs {
+            for (array, array_type, element_type, dimensions, layout) in &read_inputs {
                 arguments.push(emit_read_ranked_element(
                     graph,
                     blk,
@@ -392,6 +393,7 @@ pub(super) fn build_hist_loop(
                     array_type,
                     element_type,
                     u8::try_from(dimensions.len()).expect("SOAC input rank exceeds u8"),
+                    layout,
                     next_effect,
                 ));
             }
@@ -824,7 +826,7 @@ pub(super) fn build_bucket_insert(
     let arguments = spec
         .read_inputs
         .iter()
-        .map(|(array, array_type, leaf_type, dimensions)| {
+        .map(|(array, array_type, leaf_type, dimensions, layout)| {
             let input_coordinates = dimensions
                 .iter()
                 .map(|dimension| {
@@ -841,6 +843,7 @@ pub(super) fn build_bucket_insert(
                 &input_coordinates,
                 array_type,
                 leaf_type,
+                layout,
                 next_effect,
             )
         })

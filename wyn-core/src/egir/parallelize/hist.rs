@@ -9,6 +9,7 @@ use crate::egir::soac::hist;
 use crate::egir::types::{ENode, NodeId, PureOp, SegSpace, Semantic, SkeletonTerminator};
 use crate::op::BinaryOperator;
 use crate::ssa::types::{AtomicOp, ConstantValue};
+use crate::types::TypeExt;
 use std::collections::HashSet;
 
 use super::planning::LocatedHist;
@@ -225,22 +226,43 @@ fn plan_axis(extents: &[u32], local_size: u32) -> Option<AxisDispatch> {
     })
 }
 
+fn fixed_array_extent(ty: &Type<TypeName>) -> Option<u32> {
+    if let Some(components) = crate::egir::types::as_soa_tuple(ty) {
+        return components.first().and_then(|component| fixed_array_extent(component));
+    }
+    match ty.array_size()? {
+        Type::Constructed(TypeName::Size(size), _) => u32::try_from(*size).ok(),
+        _ => None,
+    }
+}
+
+fn fixed_seg_extent(
+    graph: &crate::egir::types::EGraph<Semantic>,
+    extent: &crate::egir::types::SegExtent,
+) -> Option<u32> {
+    match extent {
+        crate::egir::types::SegExtent::Fixed(count) => Some(*count),
+        crate::egir::types::SegExtent::Value(node) => constant_i32(graph, *node)
+            .and_then(|value| u32::try_from(value).ok())
+            .or_else(|| fixed_array_extent(&graph.nodes[*node].ty)),
+        crate::egir::types::SegExtent::ResourceLength { node, .. } => {
+            fixed_array_extent(&graph.nodes[*node].ty)
+        }
+        crate::egir::types::SegExtent::PushConstant { .. } => None,
+    }
+}
+
 /// Map a fixed row-major logical domain onto WebGPU's three dispatch axes.
 /// Logical dimensions remain contiguous within each physical axis. The
 /// innermost dimension is kept on x, while all legal divisions of the outer
 /// prefix between y and z are considered with checked wide arithmetic.
 fn bucket_dispatch_topology(
+    graph: &crate::egir::types::EGraph<Semantic>,
     space: &SegSpace,
     local_size: (u32, u32, u32),
 ) -> Result<Option<(hist::DispatchTopology, super::schedule::KernelDomain)>, String> {
-    let dimensions = space
-        .dims()
-        .iter()
-        .map(|extent| match extent {
-            crate::egir::types::SegExtent::Fixed(count) => Some(*count),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>();
+    let dimensions =
+        space.dims().iter().map(|extent| fixed_seg_extent(graph, extent)).collect::<Option<Vec<_>>>();
     let Some(dimensions) = dimensions else {
         return Ok(None);
     };
@@ -332,7 +354,7 @@ impl super::KernelPlanBuilder<'_, '_> {
             crate::flow::ExecutionModel::Compute { local_size } => *local_size,
             _ => (1, 1, 1),
         };
-        let fixed_dispatch = bucket_dispatch_topology(&candidate.space, local_size)
+        let fixed_dispatch = bucket_dispatch_topology(&body.graph, &candidate.space, local_size)
             .map_err(super::error::ParallelizeError::Invalid)?;
         let (insert_domain, insert_topology) = if let Some((topology, domain)) = fixed_dispatch {
             (domain, Some(topology))
