@@ -1150,6 +1150,19 @@ entry literal_layout(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
 "#;
     assert_eq!(bucket_layouts(literal), [ArrayLayout::StructureOfArrays]);
     crate::compile_thru_spirv(literal).expect("literal SoA layout emits SPIR-V");
+    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+        compile_to_semantic_egir(literal),
+        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+    ))
+    .expect("literal SoA layout emits WGSL");
+    let module = naga::front::wgsl::parse_str(&wgsl)
+        .unwrap_or_else(|error| panic!("Naga rejected literal bucket WGSL: {error:?}\n{wgsl}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("Naga validation rejected literal bucket WGSL: {error:?}\n{wgsl}"));
 }
 
 #[test]

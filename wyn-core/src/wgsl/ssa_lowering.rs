@@ -1744,7 +1744,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 }
             }
             OpTag::Bool(b) => Ok((if *b { "true" } else { "false" }).to_string()),
-            OpTag::Vector(_) | OpTag::ArrayLit(_) | OpTag::Tuple(_) => {
+            OpTag::ArrayLit(_) => {
+                let parts: Result<Vec<_>> = operands.iter().map(|o| self.const_expr_of(*o)).collect();
+                self.array_literal_expr(&result_ty, &parts?)
+            }
+            OpTag::Vector(_) | OpTag::Tuple(_) => {
                 let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(&result_ty)?;
                 let parts: Result<Vec<_>> = operands.iter().map(|o| self.const_expr_of(*o)).collect();
                 Ok(format!("{}({})", wgsl_ty, parts?.join(", ")))
@@ -1754,6 +1758,28 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 "const hoist: unsupported op"
             )),
         }
+    }
+
+    /// Build an array constructor, transposing nested structure-of-arrays
+    /// values when the SSA result is a tuple of array components.
+    fn array_literal_expr(
+        &mut self,
+        result_ty: &PolyType<TypeName>,
+        elements: &[String],
+    ) -> Result<String> {
+        let Some(components) = crate::egir::types::as_soa_tuple(result_ty) else {
+            let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(result_ty)?;
+            return Ok(format!("{}({})", wgsl_ty, elements.join(", ")));
+        };
+
+        let mut fields = Vec::with_capacity(components.len());
+        for (field, component_ty) in components.iter().enumerate() {
+            let projected =
+                elements.iter().map(|element| format!("({element}).f{field}")).collect::<Vec<_>>();
+            fields.push(self.array_literal_expr(component_ty, &projected)?);
+        }
+        let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(result_ty)?;
+        Ok(format!("{}({})", wgsl_ty, fields.join(", ")))
     }
 
     /// Resolve a storage binding (set, binding) to its module-scope name.
@@ -2544,9 +2570,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     let ty = result_ty.as_ref().ok_or_else(|| {
                         crate::err_wgsl_at!(self.blame_span(), "ArrayLit must have a result type")
                     })?;
-                    let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(ty)?;
-                    // `array<T, N>(e0, e1, ...)` constructor.
-                    Ok(format!("{}({})", wgsl_ty, parts?.join(", ")))
+                    self.array_literal_expr(ty, &parts?)
                 }
 
                 crate::op::OpTag::Project { index } => {
