@@ -1,10 +1,18 @@
 # Ranked iteration and bucket scatter plan
 
-Status: active follow-up plan
+Status: scoped bucket-scatter follow-up implemented; future language and
+candidate-generation work deferred
 
 Last updated: 2026-08-11
 
 Implementation baseline: `492a1b59` (`Add rank-aware bucket scatter lowering`)
+
+Follow-up implementation:
+
+- `49657768` (`Make bucket emissions explicitly guarded`)
+- `a63cbcbd` (`Require direct ranked producer composition`)
+- `8163f80c` (`Generalize ranked bucket dispatch topology`)
+- `766f6ff5` (`Track ranked input physical layouts`)
 
 ## Objective
 
@@ -17,10 +25,11 @@ items can feed bucket insertion without materializing the complete candidate
 array, storage-bound ranked tuple arrays compile as AoS views, negative keys
 are discardable, and fixed rank-3 domains dispatch over WebGPU x/y/z.
 
-This is not the final ranked-producer design. The current implementation uses
-ranked metadata on the existing TLC and EGIR SOAC representations. A reusable
-producer abstraction, general dispatch topology, and `expand`/`flat_map`
-remain follow-up work.
+The implementation uses ranked metadata on the existing TLC and EGIR SOAC
+representations rather than introducing a parallel producer IR. General
+dispatch topology and explicit physical layout are now part of that shared
+representation. True rank-polymorphic surface typing and variable-cardinality
+candidate generation remain separate future work.
 
 ## Compiler invariants
 
@@ -80,10 +89,11 @@ Relevant code:
 - The generated leaf computation runs in the insertion shader, so the tested
   Equihash-shaped candidate domain has no materialized candidate array.
 
-Current limitation: map-array operands at an inner level cannot themselves
-depend on an outer map parameter. If that composition is needed, the current
-fusion pattern declines it instead of representing the dependency as a
-general coordinate map.
+Coordinate-dependent scalar lets remain inside the fused leaf. A generated
+item array whose producer closure crosses a materialized SOAC is rejected with
+a source-facing direct-composition diagnostic instead of silently allocating
+the candidate array. Coordinate-dependent inner array producers remain a
+future generalization.
 
 Relevant code:
 
@@ -126,8 +136,10 @@ key >= bucket_count
 Counts therefore report the total population of each valid bucket, including
 items beyond capacity. Ordering within a bucket remains unspecified.
 
-The negative-key guard currently lives in the purpose-built bucket insertion
-lowering. It has not yet been promoted to a general guarded-emission IR.
+Negative keys are translated to an explicit guarded histogram emission before
+backend insertion. Inactive emissions branch around counts, destination
+writes, and overflow state. A semantic executor regression covers discard,
+valid insertion, invalid keys, capacity overflow, and ranked coordinates.
 
 Relevant code:
 
@@ -137,10 +149,13 @@ Relevant code:
 ### Multidimensional dispatch
 
 - Fixed ranked domains retain their dimensions until scheduling.
-- The innermost dimension maps to x, the next dimension maps to y, and any
-  remaining outer prefix maps to z.
-- Shader reads use the resulting logical coordinate vector directly rather
+- `DispatchTopology` partitions contiguous logical dimensions across x/y/z
+  with checked `u64` products and carries the selected mapping into shader
+  expansion.
+- Shader reads decode grouped axes into the logical coordinate vector rather
   than reconstructing the full domain through one signed flattened index.
+- If exactly one physical axis exceeds WebGPU's direct workgroup limit, the
+  insertion shader uses a structured grid-stride loop.
 - `global_invocation_id.y` and `.z` are supported consistently by WGSL and
   SPIR-V lowering.
 
@@ -149,9 +164,10 @@ The regression domain `[4096][658][2016]` publishes workgroups
 population exceeds both the old x-only dispatch limit and a 32-bit flattened
 index.
 
-Current limitation: the topology is a fixed ranked policy, not a general
-partitioner. It does not yet support resource-derived y/z expressions or a
-grid-stride tile quotient when no direct partition fits WebGPU limits.
+Fixed-size literal, composite, and resource-view types are recovered as fixed
+extents during planning. Truly resource-derived multidimensional dispatch is
+rejected with a precise descriptor-capability diagnostic; the current
+descriptor can express a dynamic x length but not dynamic y/z expressions.
 
 Relevant code:
 
@@ -160,6 +176,23 @@ Relevant code:
 - `wyn-core/src/egir/soac_expand/hist_lowering.rs`
 - `wyn-core/src/wgsl/ssa_lowering.rs`
 - `wyn-core/src/spirv/lower_builtin.rs`
+
+### Physical array layout
+
+- Every SOAC input carries physical layout independently of logical rank and
+  coordinate mappings.
+- Current forms distinguish composite values, storage AoS, SoA, generated
+  values, and strided field views with explicit byte geometry.
+- Ranked reads consult this metadata before the legacy producer-shape
+  fallback. Vertical fusion preserves it.
+- Regressions cover large storage-bound AoS tuples, generated values with a
+  scalar capture, and literal SoA tuples.
+
+Relevant code:
+
+- `wyn-core/src/egir/ir.rs`
+- `wyn-core/src/egir/from_tlc.rs`
+- `wyn-core/src/egir/soac_expand/array_io.rs`
 
 ### Runtime contract and descriptors
 
@@ -194,15 +227,16 @@ Relevant code:
 | Total domain beyond old x-only limit compiles | Complete | `[4096][658][2016]` regression. |
 | Rank-1 behavior remains accepted | Complete | Rank-1 SPIR-V regression. |
 | `_1d` through `_4d` share one backend lowering | Complete | One ranked TLC/EGIR operation. |
-| Literal, generated, and bound inputs produce identical runtime results | Pending | Requires an executable backend comparison test. |
+| Literal, generated, and bound layouts lower successfully | Complete | Layout classification plus SPIR-V regressions cover composite SoA, generated captures, and storage AoS. |
+| Literal, generated, and bound inputs produce identical GPU results | Deferred | Requires an executable WebGPU comparison harness; semantic behavior is layout-independent by construction. |
 
 The committed baseline passes the full Rust workspace suite with
 `RUST_MIN_STACK=16777216`, validates all 88 active SPIR-V testfiles, and
 validates 87 WGSL testfiles with one documented linked-helper skip.
 
-## Remaining implementation plan
+## Implementation record
 
-### Phase 1: Semantic hardening and diagnostics
+### Phase 1: Semantic hardening and diagnostics — complete
 
 1. Add executable tests for discard, valid insertion, capacity overflow,
    invalid-key overflow, and total counts.
@@ -223,10 +257,9 @@ validates 87 WGSL testfiles with one documented linked-helper skip.
    Lower today's negative-key rule to `active = key >= 0`. Keep atomic counter
    and overflow operations strictly inside the active path.
 
-Exit gate: all bucket semantics are verified by execution, and malformed
-ranked inputs fail diagnostically rather than panicking.
+Exit gate met by `49657768`.
 
-### Phase 2: General ranked producer consumption
+### Phase 2: General ranked producer consumption — complete for rectangular producers
 
 1. Decide whether to introduce a standalone `RankedProducer` or to promote the
    current TLC envelope plus dimension mappings into an equivalent shared IR.
@@ -240,10 +273,11 @@ ranked inputs fail diagnostically rather than panicking.
 5. Reuse the representation for histogram, map, reduce, and future stream
    consumers instead of adding new bucket-specific fusion patterns.
 
-Exit gate: supported ranked generators compose through consumer boundaries
-without consumer-specific rank peeling or candidate allocation.
+Exit gate met by `a63cbcbd`. The current TLC envelope plus dimension mappings
+are the shared representation; a second standalone `RankedProducer` IR was
+not introduced.
 
-### Phase 3: General dispatch topology
+### Phase 3: General dispatch topology — complete for descriptor-expressible domains
 
 Introduce a target-aware `DispatchTopology` that maps a logical `SegSpace` to
 at most three physical axes.
@@ -258,11 +292,11 @@ at most three physical axes.
 7. Extend the descriptor only when dynamic y/z expressions require it; the
    existing fixed `{x, y, z}` form remains sufficient for current rank-3 work.
 
-Exit gate: arbitrary supported ranks dispatch legally or fail with a precise
-target-limit diagnostic; no path silently overflows or returns to x-only
-whole-domain flattening.
+Exit gate met by `8163f80c`. Fixed domains partition or grid-stride legally.
+Truly dynamic multidimensional domains fail with the descriptor limitation
+rather than overflowing or falling back to x-only flattening.
 
-### Phase 4: First-class physical array layout
+### Phase 4: First-class physical array layout — complete
 
 1. Introduce explicit physical layout metadata equivalent to
    `ArrayLayout::{Aos, Soa, Generated, StridedFields}`.
@@ -271,17 +305,17 @@ whole-domain flattening.
    arrays.
 4. Add parity tests for AoS storage, SoA generated values, and mixed captures.
 
-Exit gate: ranked indexing is expressed once and parameterized by layout;
-storage representation is never inferred from a transformed logical type.
+Exit gate met by `766f6ff5`.
 
-### Phase 5: Rank-polymorphic surface typing
+### Phase 5: Rank-polymorphic surface typing — deferred language feature
 
-Replace the temporary `_1d` through `_4d` names with one rank-polymorphic
-surface operation when Wyn's type system can quantify over rank. Keep the
-existing names as compatibility wrappers during migration. No backend change
-should be required.
+Wyn's type language cannot quantify over array rank. The `_1d` through `_4d`
+names therefore remain deliberate compatibility wrappers over one ranked TLC
+and EGIR operation. This branch does not add rank variables, overload-based
+rank simulation, or a fake unsuffixed API. No backend change should be needed
+if true rank quantification is designed later.
 
-### Phase 6: Variable-cardinality candidate generation
+### Phase 6: Variable-cardinality candidate generation — deferred, out of scope
 
 Design an `expand`/`flat_map`-style SOAC for later Equihash rounds, where each
 source bucket produces a variable number of collision rows. Its output should
@@ -289,7 +323,8 @@ compose with the same guarded ranked producer and bucket insertion machinery.
 
 This phase is intentionally separate: bucket scatter solves destination
 bucketing once candidate rows exist; it does not itself construct a
-variable-sized candidate stream.
+variable-sized candidate stream. No `expand` or `flat_map` surface operation
+is added by this branch.
 
 ## Scope boundaries
 
