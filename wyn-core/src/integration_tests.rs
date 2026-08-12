@@ -11157,6 +11157,67 @@ entry main(roots: [1][1024]u32) [4]u32 =
         .expect("mapped-helper ranked-index regression panicked");
 }
 
+/// A map lambda that captures a small fixed array used to receive the complete
+/// array by value and then materialize another local copy for its dynamic
+/// index. The physical inliner must remove that per-lane call boundary.
+#[test]
+fn mapped_helper_inlines_fixed_array_capture_before_dynamic_extract() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+def expand_2(values: [2]u32) [4]u32 =
+  map(|i: i32| values[i / 2i32], iota(4))
+
+entry main(root: [2]u32) [4]u32 =
+  expand_2(root)
+"#;
+
+            let ssa = lower_semantic_egir(
+                compile_to_semantic_egir(source),
+                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+            );
+            let entry = ssa.entry_points.iter().find(|entry| entry.name == "main").expect("main entry");
+            assert!(
+                entry.body.inner.insts.values().all(|inst| !matches!(
+                    inst.data,
+                    crate::ssa::types::InstKind::Op {
+                        tag: crate::op::OpTag::Call(_),
+                        ..
+                    }
+                )),
+                "fixed-array capture must be propagated into the mapped entry instead of passed by value"
+            );
+            assert_eq!(
+                entry
+                    .body
+                    .inner
+                    .insts
+                    .values()
+                    .filter(|inst| matches!(
+                        inst.data,
+                        crate::ssa::types::InstKind::Op {
+                            tag: crate::op::OpTag::Materialize,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1,
+                "the inlined entry keeps only the one addressable copy required by dynamic extraction"
+            );
+
+            let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("fixed-array capture lowers to WGSL");
+            let main = wgsl.split("fn main(").nth(1).expect("WGSL main body");
+            assert!(
+                !main.contains("w_Uw_Ulambda_U0("),
+                "WGSL main must not pass the fixed array through a per-lane helper:\n{wgsl}"
+            );
+        })
+        .expect("spawn fixed-array capture regression")
+        .join()
+        .expect("fixed-array capture regression panicked");
+}
+
 /// A view used directly as a `map` *input* (→ the entry walker
 /// `rewrite_term` / SOAC-input path, not a capture) must read from its buffer.
 #[test]

@@ -1,13 +1,16 @@
-//! Partial-inlining policy for calls in repeated CFG regions.
+//! Partial-inlining policy for calls that hide profitable placement or copy
+//! elimination opportunities.
 //!
 //! The inlining mechanism itself is context-independent; this module supplies
-//! only the profitability decision for calls repeatedly evaluated by an
-//! explicit CFG loop. EGIR elaboration already hoists every pure node,
-//! including a `PureOp::Call`, when all of its operands are loop-invariant. A
-//! mixed-variance call is opaque, however, so invariant work inside the callee
-//! cannot reach the preheader until the call is inlined.
+//! the profitability decision. Calls that pass a concrete composite array are
+//! inlined so the caller can propagate that value into the callee instead of
+//! transporting the complete array through a by-value function parameter.
+//! Calls repeatedly evaluated by an explicit CFG loop are also inlined when
+//! they mix invariant and varying operands: EGIR elaboration hoists every pure
+//! node, including a `PureOp::Call`, when all operands are invariant, but a
+//! mixed call hides invariant work inside the callee until it is inlined.
 
-/// Physical EGIR after loop-sensitive partial inlining.
+/// Physical EGIR after copy- and placement-sensitive partial inlining.
 #[derive(Debug, Clone, Copy)]
 pub enum PartiallyInlinedTag {}
 pub type PartiallyInlined = super::program::Program<
@@ -21,6 +24,7 @@ pub type PartiallyInlined = super::program::Program<
     super::program::PlannedGlobal,
 >;
 
+use crate::types::TypeExt;
 use crate::LookupMap;
 
 use super::inlining;
@@ -95,6 +99,53 @@ fn find_candidate(
     callees: &LookupMap<crate::FunctionId, PhysicalFunc>,
     remaining_budget: usize,
 ) -> Option<Candidate> {
+    // A composite fixed array is an SSA value, so leaving it behind a call
+    // boundary passes the complete aggregate by value. Map kernels make this
+    // especially costly: every lane calls the helper, which commonly
+    // materializes the parameter again for a dynamic index. Inline these
+    // calls even without an explicit CFG loop so substitution exposes the
+    // original array directly to placement and copy elimination.
+    for (_, block) in &graph.skeleton.blocks {
+        let roots = block
+            .side_effects
+            .iter()
+            .flat_map(|effect| effect.operand_nodes.iter().copied())
+            .chain(block.term.referenced_nodes());
+        let reachable =
+            wyn_graph::reachable_from_ordered(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
+                if let Some(definition) = graph.nodes.get(node) {
+                    out.extend(definition.children());
+                }
+            });
+        for node in reachable {
+            let ENode::Pure {
+                op: PureOp::Call(callee_name),
+                operands,
+            } = &graph.nodes[node].kind
+            else {
+                continue;
+            };
+            let Some(callee) = callees.get(callee_name) else {
+                continue;
+            };
+            if operands.len() != callee.params.len()
+                || !callee.params.iter().any(|(ty, _)| is_fixed_composite_array(ty))
+            {
+                continue;
+            }
+            let Some(callee_nodes) = inlining::inlineable_node_count(callee) else {
+                continue;
+            };
+            if callee_nodes <= MAX_CALLEE_NODES && callee_nodes <= remaining_budget {
+                return Some(Candidate {
+                    call: node,
+                    callee: *callee_name,
+                    callee_nodes,
+                });
+            }
+        }
+    }
+
     let loops = LoopAnalysis::build(&graph.skeleton);
 
     // Iterate in skeleton order for deterministic code growth. Recompute after
@@ -155,4 +206,12 @@ fn find_candidate(
         }
     }
     None
+}
+
+fn is_fixed_composite_array(ty: &polytype::Type<crate::ast::TypeName>) -> bool {
+    ty.array_variant().is_some_and(crate::types::is_array_variant_composite)
+        && matches!(
+            ty.array_size(),
+            Some(polytype::Type::Constructed(crate::ast::TypeName::Size(_), _))
+        )
 }

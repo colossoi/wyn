@@ -11,6 +11,22 @@ fn u32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::UInt(32), vec![])
 }
 
+fn i32_ty() -> Type<TypeName> {
+    Type::Constructed(TypeName::Int(32), vec![])
+}
+
+fn fixed_u32_array_ty(size: usize) -> Type<TypeName> {
+    Type::Constructed(
+        TypeName::Array,
+        vec![
+            u32_ty(),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            Type::Constructed(TypeName::Size(size), vec![]),
+            crate::types::no_buffer(),
+        ],
+    )
+}
+
 fn mixed_callee() -> PhysicalFunc {
     let ty = u32_ty();
     let region = crate::FunctionId::from_index(0);
@@ -170,4 +186,37 @@ fn leaves_whole_call_licm_and_fully_varying_calls_alone() {
             }
         ));
     }
+}
+
+#[test]
+fn inlines_fixed_array_parameters_outside_loops() {
+    let scalar = u32_ty();
+    let array = fixed_u32_array_ty(4);
+    let region = crate::FunctionId::from_index(0);
+    let mut callee_graph = EGraph::<Physical>::new();
+    let values = callee_graph.add_func_param(0, array.clone());
+    let zero = callee_graph.intern_constant(ConstantValue::I32(0), i32_ty());
+    let result = callee_graph.intern_pure(PureOp::Index, smallvec![values, zero], scalar.clone(), None);
+    callee_graph.skeleton.blocks[callee_graph.skeleton.entry].term =
+        SkeletonTerminator::Return(Some(result));
+    let callee = PhysicalFunc::new(
+        region,
+        "fixed_array_element".into(),
+        Span::dummy(),
+        None,
+        vec![(array.clone(), "values".into())],
+        scalar.clone(),
+        callee_graph,
+    );
+    let callees = [(region, callee)].into_iter().collect();
+
+    let mut caller = EGraph::<Physical>::new();
+    let values = caller.add_func_param(0, array);
+    let call = caller.intern_pure(PureOp::Call(region), smallvec![values], scalar, None);
+    caller.skeleton.blocks[caller.skeleton.entry].term = SkeletonTerminator::Return(Some(call));
+
+    let stats = inline_body(&mut caller, &callees).unwrap();
+
+    assert_eq!(stats.calls_inlined, 1);
+    assert!(matches!(caller.nodes[call].kind, ENode::Union { .. }));
 }
