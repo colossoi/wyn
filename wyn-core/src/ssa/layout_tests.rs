@@ -9,6 +9,14 @@ fn scalar(tn: TypeName) -> Type {
     Type::Constructed(tn, vec![])
 }
 
+#[test]
+fn u64_storage_layout_matches_emulated_wgsl_vec2u32() {
+    let ty = scalar(TypeName::UInt(64));
+    assert_eq!(type_byte_size(&ty), Some(8));
+    assert_eq!(std430_alignment(&ty), Some(8));
+    assert_eq!(storage_elem_stride(&ty), Some(8));
+}
+
 fn vec(elem: TypeName, n: usize) -> Type {
     Type::Constructed(
         TypeName::Vec,
@@ -104,7 +112,7 @@ fn vertex_format_rejects_aggregates() {
 
 use super::{
     block_layout, buffer_array_strides, std430_alignment, std430_matrix_stride, std430_struct_layout,
-    storage_elem_stride, BlockLayout,
+    storage_elem_stride, type_byte_size, BlockLayout,
 };
 use crate::interface::StorageLayout;
 use crate::types::RecordFields;

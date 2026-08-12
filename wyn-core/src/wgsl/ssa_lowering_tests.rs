@@ -317,8 +317,9 @@ def rotr16(x: u64) u64 =
 entry rotate_and_add(xs: []u32) []u32 =
   map(|x: u32|
     let wide = u64.u32(x) + 81985529216486895u64
-    let rotated = rotr16(wide) ^ 18446744073709551615u64 in
-    if rotated != 0u64 then u32.u64(rotated) else 0u32,
+    let rotated = rotr16(wide) ^ 18446744073709551615u64
+    let shifted = rotated >> u64.u32(x & 63u32) in
+    if shifted != 0u64 then u32.u64(shifted) else 0u32,
     xs)
 "#;
 
@@ -329,7 +330,7 @@ entry rotate_and_add(xs: []u32) []u32 =
     validate_wgsl(&wgsl);
     assert!(wgsl.contains("fn _wyn_u64_add"));
     assert!(!wgsl.contains("fn _wyn_u64_shl"));
-    assert!(!wgsl.contains("fn _wyn_u64_shr"));
+    assert!(wgsl.contains("fn _wyn_u64_shr"));
     assert!(wgsl.contains("vec2<u32>(2309737967u, 19088743u)"));
     assert!(wgsl.contains("any("));
 }

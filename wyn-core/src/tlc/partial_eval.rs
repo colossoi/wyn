@@ -83,6 +83,22 @@ enum Value {
     Unknown(Term<Empty, Empty>),
 }
 
+fn parse_integer_value(spelling: &str, ty: &Type<TypeName>) -> Result<i64, String> {
+    if matches!(ty, Type::Constructed(TypeName::UInt(_), _)) {
+        return spelling
+            .parse::<u64>()
+            .map(|value| scalar_eval::wrap_int(value as i128, ty))
+            .or_else(|unsigned_error| {
+                spelling.parse::<i64>().map_err(|signed_error| {
+                    format!(
+                        "unsigned parse failed: {unsigned_error}; signed residual parse failed: {signed_error}"
+                    )
+                })
+            });
+    }
+    spelling.parse::<i64>().map_err(|error| error.to_string())
+}
+
 impl Value {
     fn is_known(&self) -> bool {
         !matches!(self, Value::Unknown(_))
@@ -149,9 +165,11 @@ impl<'a> PartialEvaluator<'a> {
     fn eval(&mut self, term: &Term<Empty, Empty>) -> Value {
         match &term.kind {
             // Literals → known values
-            TermKind::IntLit(s) => Value::Int(
-                s.parse().unwrap_or_else(|_| panic!("BUG: invalid integer literal from lexer: {}", s)),
-            ),
+            TermKind::IntLit(s) => {
+                Value::Int(parse_integer_value(s, &term.ty).unwrap_or_else(|error| {
+                    panic!("BUG: invalid integer literal from lexer: {s}: {error}")
+                }))
+            }
             TermKind::FloatLit(f) => Value::Float(*f as f64),
             TermKind::BoolLit(b) => Value::Bool(*b),
             TermKind::UnitLit => Value::Unknown(term.clone()),
@@ -595,11 +613,14 @@ impl<'a> PartialEvaluator<'a> {
 
     fn literal_value(&self, term: &Term<Empty, Empty>) -> Option<Value> {
         match &term.kind {
-            TermKind::IntLit(s) => {
-                Some(Value::Int(s.parse().unwrap_or_else(|e| {
-                    panic!("lexer-produced IntLit `{s}` failed to parse as i64: {e}")
-                })))
-            }
+            TermKind::IntLit(s) => Some(Value::Int(parse_integer_value(s, &term.ty).unwrap_or_else(
+                |error| {
+                    panic!(
+                        "lexer-produced IntLit `{s}` failed to parse for {:?}: {error}",
+                        term.ty
+                    )
+                },
+            ))),
             TermKind::FloatLit(f) => Some(Value::Float(*f as f64)),
             TermKind::BoolLit(b) => Some(Value::Bool(*b)),
             _ => None,

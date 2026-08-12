@@ -20,7 +20,6 @@ fn input_ae(boxed: Box<Term<Empty, Empty>>) -> crate::tlc::ArrayExpr<Empty, Empt
         other => panic!("test SOAC input must be a variable or array expr, got {other:?}"),
     }
 }
-
 fn make_span() -> Span {
     Span::dummy()
 }
@@ -1099,4 +1098,29 @@ fn let_bound_value_is_substituted_through_residual_loop() {
 
     let result = partial_eval(make_program(test_sym, term, b.finish()));
     assert_no_free_reference_to(&result.defs[0].body, n_sym);
+}
+
+#[test]
+fn parses_full_u64_literal_range_as_bit_patterns() {
+    let ty = Type::Constructed(TypeName::UInt(64), vec![]);
+    assert_eq!(super::parse_integer_value("0", &ty).unwrap(), 0);
+    assert_eq!(
+        super::parse_integer_value("9223372036854775808", &ty).unwrap(),
+        i64::MIN
+    );
+    assert_eq!(
+        super::parse_integer_value("18446744073709551615", &ty).unwrap(),
+        -1
+    );
+    assert_eq!(super::parse_integer_value("-1", &ty).unwrap(), -1);
+}
+
+#[test]
+fn signed_literals_keep_signed_range_checks() {
+    let ty = Type::Constructed(TypeName::Int(64), vec![]);
+    assert_eq!(
+        super::parse_integer_value(i64::MAX.to_string().as_str(), &ty).unwrap(),
+        i64::MAX
+    );
+    assert!(super::parse_integer_value("18446744073709551615", &ty).is_err());
 }

@@ -443,6 +443,9 @@ cargo run --bin wyn -- compile input.wyn -o output.spv
 # Compile to WGSL
 cargo run --bin wyn -- compile input.wyn -o output.wgsl -t wgsl
 
+# Opt in to backend-local u64 emulation for WGSL
+cargo run --bin wyn -- compile input.wyn -o output.wgsl -t wgsl --wgsl-emulate-u64
+
 # Type check without generating code
 cargo run --bin wyn -- check input.wyn
 
@@ -518,6 +521,13 @@ def zip_arrays(xs, ys) = zip(xs, ys)
 
 - Module system covers the common path (`open`, qualified access, multi-file imports — see `testfiles/open_module_demo.wyn`); some advanced features remain unimplemented.
 - `match` expressions work for literals, wildcards, and sum-type constructors (`testfiles/match_*.wyn`, `testfiles/sum_demo.wyn`); guards and nested patterns are pending.
+
+- WGSL has no concrete 64-bit integer type. The WGSL backend rejects `u64` by
+  default and can optionally emulate the BLAKE2b-oriented subset with
+  `--wgsl-emulate-u64`: wrapping addition/subtraction, bitwise operations,
+  shifts, comparisons, and `u32`/`i32` conversions. Multiplication, division,
+  remainder, floating-point conversions, signed `i64`, and 64-bit atomics are
+  not emulated.
 
 ## Design Choices
 
