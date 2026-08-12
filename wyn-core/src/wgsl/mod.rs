@@ -12,6 +12,7 @@
 //! entry-point emission) is WGSL-specific and written against the WGSL
 //! spec.
 
+mod int64_emulation;
 pub mod ssa_lowering;
 
 pub use ssa_lowering::{lower, lower_with_options};

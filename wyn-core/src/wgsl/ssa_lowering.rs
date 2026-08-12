@@ -24,20 +24,19 @@ use crate::ssa::types::{
     EntryPoint, ExecutionModel, FuncBody, Function, InstKind, ValueId, ValueRef, WynInstNode,
 };
 use crate::types::TypeExt;
+use crate::wgsl::int64_emulation::{self, U64Emulation};
+use crate::wgsl::{WgslInt64Mode, WgslOptions};
 use crate::BindingRef;
 
 /// Lower an SSA program to a WGSL module. The module contains all entry
 /// points (distinguished by `@vertex` / `@fragment` / `@compute`
 /// attributes), module-scope types, bindings, and helper functions.
 pub fn lower(program: &crate::ssa::stage::WgslReady) -> Result<String> {
-    lower_with_options(program, crate::wgsl::WgslOptions::default())
+    lower_with_options(program, WgslOptions::default())
 }
 
 /// Lower an SSA program using an explicit WGSL backend policy.
-pub fn lower_with_options(
-    program: &crate::ssa::stage::WgslReady,
-    options: crate::wgsl::WgslOptions,
-) -> Result<String> {
+pub fn lower_with_options(program: &crate::ssa::stage::WgslReady, options: WgslOptions) -> Result<String> {
     Ok(lower_with_abi(program, options)?.source)
 }
 
@@ -68,9 +67,9 @@ pub(crate) struct ParameterMember {
 
 pub(crate) fn lower_with_abi(
     program: &crate::ssa::stage::WgslReady,
-    _options: crate::wgsl::WgslOptions,
+    options: WgslOptions,
 ) -> Result<LoweredModule> {
-    let mut ctx = LowerCtx::new(program);
+    let mut ctx = LowerCtx::new(program, options);
     let source = ctx.lower_program()?;
     let mut blocks = ctx.pc_blocks.values().collect::<Vec<_>>();
     blocks.sort_by_key(|block| (block.set, block.binding));
@@ -408,6 +407,7 @@ pub struct TypeEmitter {
     /// `(struct_name, elem_ty, capacity)` for emission.
     pub bounded_structs: Vec<(String, String, u32)>,
     bounded_counter: usize,
+    int64_mode: WgslInt64Mode,
 }
 
 impl Default for TypeEmitter {
@@ -418,6 +418,10 @@ impl Default for TypeEmitter {
 
 impl TypeEmitter {
     pub fn new() -> Self {
+        Self::with_options(WgslOptions::default())
+    }
+
+    pub fn with_options(options: WgslOptions) -> Self {
         Self {
             tuple_type_cache: LookupMap::new(),
             tuple_structs: LookupMap::new(),
@@ -428,6 +432,7 @@ impl TypeEmitter {
             bounded_cache: LookupMap::new(),
             bounded_structs: Vec::new(),
             bounded_counter: 0,
+            int64_mode: options.int64_mode,
         }
     }
 
@@ -464,6 +469,9 @@ impl TypeEmitter {
                 TypeName::Float(32) => Ok("f32".to_string()),
                 TypeName::Int(32) => Ok("i32".to_string()),
                 TypeName::UInt(32) => Ok("u32".to_string()),
+                TypeName::UInt(64) if self.int64_mode == WgslInt64Mode::EmulateU64 => {
+                    Ok(int64_emulation::WGSL_U64_TYPE.to_string())
+                }
                 TypeName::Bool => Ok("bool".to_string()),
                 // Opaque GPU resources (v1: 2D float texture + sampler).
                 TypeName::Texture2D => Ok("texture_2d<f32>".to_string()),
@@ -689,6 +697,8 @@ struct LowerCtx<'a> {
     /// which is already value-deduped, so equal arrays collapse to one
     /// global. Value is `(global_name, wgsl_type)`.
     private_const_globals: LookupMap<String, (String, String)>,
+    int64_mode: WgslInt64Mode,
+    u64_emulation: U64Emulation,
 }
 
 /// Read-only storage-block stand-in for a compute entry's push-constant inputs.
@@ -716,7 +726,7 @@ struct PcField {
 }
 
 impl<'a> LowerCtx<'a> {
-    fn new(program: &'a crate::ssa::stage::WgslReady) -> Self {
+    fn new(program: &'a crate::ssa::stage::WgslReady, options: WgslOptions) -> Self {
         let function_variants = StorageFunctionVariants::new(program);
         let mut current_storage_accesses = LookupMap::new();
         let mut storage_access_variants = LookupMap::new();
@@ -742,7 +752,7 @@ impl<'a> LowerCtx<'a> {
             current_storage_accesses,
             storage_access_variants,
             atomic_bindings,
-            type_emitter: TypeEmitter::new(),
+            type_emitter: TypeEmitter::with_options(options),
             lowered: LookupSet::new(),
             indent: 0,
             mangled_names: LookupMap::new(),
@@ -751,6 +761,8 @@ impl<'a> LowerCtx<'a> {
             pc_blocks: LookupMap::new(),
             wgsl_gid_alias: None,
             private_const_globals: LookupMap::new(),
+            int64_mode: options.int64_mode,
+            u64_emulation: U64Emulation::default(),
         }
     }
 
@@ -873,6 +885,11 @@ impl<'a> LowerCtx<'a> {
             writeln!(output, "}}").unwrap();
             writeln!(output).unwrap();
         }
+
+        // Helpers are registered while lowering reachable bodies above. No
+        // emulation support is emitted for ordinary WGSL modules or for u64
+        // programs rejected under the default backend policy.
+        self.u64_emulation.emit_helpers(&mut output);
 
         // Entry-point output struct declarations — each field carries
         // its `@builtin(...)` or `@location(N)` attribute inline,
@@ -1825,7 +1842,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         };
         match &tag {
             OpTag::Int(s) | OpTag::Uint(s) => {
-                if matches!(result_ty, PolyType::Constructed(TypeName::UInt(32), _)) {
+                if self.ctx.int64_mode == WgslInt64Mode::EmulateU64 && int64_emulation::is_u64(&result_ty) {
+                    int64_emulation::lower_literal(s)
+                        .map_err(|message| crate::err_wgsl_at!(self.blame_span(), "{message}"))
+                } else if matches!(result_ty, PolyType::Constructed(TypeName::UInt(32), _)) {
                     Ok(format!("{}u", s))
                 } else {
                     Ok(format!("{}i", s))
@@ -1953,6 +1973,18 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         }
     }
 
+    fn logical_value_type(&self, value: ValueRef) -> PolyType<TypeName> {
+        use crate::ssa::types::ConstantValue;
+
+        match value {
+            ValueRef::Ssa(id) => self.body.get_value_type(id).clone(),
+            ValueRef::Const(ConstantValue::I32(_)) => PolyType::Constructed(TypeName::Int(32), vec![]),
+            ValueRef::Const(ConstantValue::U32(_)) => PolyType::Constructed(TypeName::UInt(32), vec![]),
+            ValueRef::Const(ConstantValue::F32(_)) => PolyType::Constructed(TypeName::Float(32), vec![]),
+            ValueRef::Const(ConstantValue::Bool(_)) => PolyType::Constructed(TypeName::Bool, vec![]),
+        }
+    }
+
     fn get_value_ref(&self, id: ValueId) -> Result<String> {
         self.binding(id).map(|b| b.expr().to_string())
     }
@@ -1974,6 +2006,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         let operand_ty = self.body.get_value_type(id);
         if operand_ty == result_ty {
             return Ok(expr);
+        }
+        if self.ctx.int64_mode == WgslInt64Mode::EmulateU64
+            && (int64_emulation::is_u64(operand_ty) || int64_emulation::is_u64(result_ty))
+        {
+            return Err(crate::err_wgsl_at!(
+                self.blame_span(),
+                "implicit coercion between {operand_ty:?} and {result_ty:?} cannot use WGSL u64 emulation; use an explicit conversion"
+            ));
         }
         let both_scalar = matches!(
             result_ty,
@@ -2590,6 +2630,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 //   int conversion, so respecting the SSA value's type is
                 //   load-bearing for subsequent uses.
                 crate::op::OpTag::Int(s) | crate::op::OpTag::Uint(s) => match result_ty.as_ref() {
+                    Some(ty)
+                        if self.ctx.int64_mode == WgslInt64Mode::EmulateU64
+                            && int64_emulation::is_u64(ty) =>
+                    {
+                        int64_emulation::lower_literal(s)
+                            .map_err(|message| crate::err_wgsl_at!(self.blame_span(), "{message}"))
+                    }
                     Some(PolyType::Constructed(TypeName::UInt(32), _)) => Ok(format!("{}u", s)),
                     Some(PolyType::Constructed(TypeName::Int(32), _)) | _ => Ok(format!("{}i", s)),
                 },
@@ -2610,6 +2657,32 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 crate::op::OpTag::BinOp(op) => {
                     let lhs = operands[0];
                     let rhs = operands[1];
+                    let lhs_ty = self.logical_value_type(lhs);
+                    let rhs_ty = self.logical_value_type(rhs);
+                    if self.ctx.int64_mode == WgslInt64Mode::EmulateU64
+                        && (int64_emulation::is_u64(&lhs_ty) || int64_emulation::is_u64(&rhs_ty))
+                    {
+                        if !int64_emulation::is_u64(&lhs_ty) || !int64_emulation::is_u64(&rhs_ty) {
+                            return Err(crate::err_wgsl_at!(
+                                self.blame_span(),
+                                "mixed-width u64 operation requires explicit conversions (left {lhs_ty:?}, right {rhs_ty:?})"
+                            ));
+                        }
+                        let left = self.get_value(lhs)?;
+                        let right = self.get_value(rhs)?;
+                        if let Some(count) = self.resolve_const_u32(rhs) {
+                            if let Some(expression) =
+                                self.ctx.u64_emulation.lower_constant_shift(*op, &left, count)
+                            {
+                                return Ok(expression);
+                            }
+                        }
+                        return self
+                            .ctx
+                            .u64_emulation
+                            .lower_binary(*op, &left, &right)
+                            .map_err(|message| crate::err_wgsl_at!(self.blame_span(), "{message}"));
+                    }
                     // WGSL has no implicit numeric coercion (`i32 + u32` is an
                     // error), so when an operand's type doesn't match the
                     // BinOp's declared result type we wrap it in an explicit
@@ -2633,6 +2706,26 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
                 crate::op::OpTag::UnaryOp(op) => {
                     let inner = self.get_value(operands[0])?;
+                    let operand_ty = self.logical_value_type(operands[0]);
+                    if self.ctx.int64_mode == WgslInt64Mode::EmulateU64
+                        && int64_emulation::is_u64(&operand_ty)
+                    {
+                        return match op {
+                            crate::op::UnaryOperator::Negate => self
+                                .ctx
+                                .u64_emulation
+                                .lower_binary(
+                                    crate::op::BinaryOperator::Subtract,
+                                    "vec2<u32>(0u, 0u)",
+                                    &inner,
+                                )
+                                .map_err(|message| crate::err_wgsl_at!(self.blame_span(), "{message}")),
+                            crate::op::UnaryOperator::LogicalNot => Err(crate::err_wgsl_at!(
+                                self.blame_span(),
+                                "logical negation is not defined for emulated u64 values"
+                            )),
+                        };
+                    }
                     Ok(format!("({}{})", op, inner))
                 }
 
@@ -3028,7 +3121,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             "_w_intrinsic_length requires an SSA array argument"
                         ));
                     }
-                    self.lower_intrinsic(*id, *overload_idx, &arg_strs, result_ty.as_ref())
+                    self.lower_intrinsic(*id, *overload_idx, &arg_strs, args, result_ty.as_ref())
                 }
 
                 crate::op::OpTag::StorageImageLoad(binding) => {
@@ -3168,6 +3261,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         id: BuiltinId,
         overload_idx: usize,
         args: &[String],
+        arg_refs: &[ValueRef],
         ret_ty: Option<&PolyType<TypeName>>,
     ) -> Result<String> {
         let builtin = by_id(id);
@@ -3194,6 +3288,18 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 ));
             }
         };
+        if self.ctx.int64_mode == WgslInt64Mode::EmulateU64
+            && matches!(prim_op, PrimOp::SConvert | PrimOp::UConvert | PrimOp::Bitcast)
+            && args.len() == 1
+            && arg_refs.len() == 1
+        {
+            if let Some(target_ty) = ret_ty {
+                let source_ty = self.logical_value_type(arg_refs[0]);
+                if let Some(lowered) = int64_emulation::lower_conversion(&source_ty, target_ty, &args[0]) {
+                    return lowered.map_err(|message| crate::err_wgsl_at!(self.blame_span(), "{message}"));
+                }
+            }
+        }
         let result_ty_str = match ret_ty {
             Some(ty) => Some(self.ctx.type_emitter.type_to_wgsl(ty)?),
             None => None,

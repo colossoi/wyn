@@ -160,6 +160,16 @@ fn type_f64_rejected() {
 }
 
 #[test]
+fn type_u64_requires_explicit_emulation_policy() {
+    let ty = scalar_ty(TypeName::UInt(64));
+    let mut default_emitter = TypeEmitter::new();
+    assert!(default_emitter.type_to_wgsl(&ty).is_err());
+
+    let mut emulating = TypeEmitter::with_options(crate::wgsl::WgslOptions::U64_EMULATION);
+    assert_eq!(emulating.type_to_wgsl(&ty).unwrap(), "vec2<u32>");
+}
+
+#[test]
 fn type_vec3f32() {
     let mut e = TypeEmitter::new();
     let ty = PolyType::Constructed(
@@ -291,6 +301,37 @@ fn validate_wgsl(source: &str) {
 fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
     let program = crate::compile_thru_ssa(source).map_err(|e| crate::err_spirv!("{}", e))?;
     crate::lower_ssa_to_wgsl(program)
+}
+
+fn compile_to_wgsl_with_u64_emulation(source: &str) -> crate::error::Result<String> {
+    let program = crate::compile_thru_ssa(source).map_err(|e| crate::err_spirv!("{}", e))?;
+    crate::lower_ssa_to_wgsl_with_options(program, crate::wgsl::WgslOptions::U64_EMULATION)
+}
+
+#[test]
+fn wgsl_u64_emulation_is_opt_in_and_naga_valid() {
+    let source = r#"
+def rotr16(x: u64) u64 =
+  (x >> 16u64) | (x << 48u64)
+
+entry rotate_and_add(xs: []u32) []u32 =
+  map(|x: u32|
+    let wide = u64.u32(x) + 81985529216486895u64
+    let rotated = rotr16(wide) ^ 18446744073709551615u64 in
+    if rotated != 0u64 then u32.u64(rotated) else 0u32,
+    xs)
+"#;
+
+    let default_error = compile_to_wgsl(source).expect_err("default WGSL policy must reject u64");
+    assert!(default_error.to_string().contains("64-bit scalars"));
+
+    let wgsl = compile_to_wgsl_with_u64_emulation(source).expect("emulated u64 compile");
+    validate_wgsl(&wgsl);
+    assert!(wgsl.contains("fn _wyn_u64_add"));
+    assert!(!wgsl.contains("fn _wyn_u64_shl"));
+    assert!(!wgsl.contains("fn _wyn_u64_shr"));
+    assert!(wgsl.contains("vec2<u32>(2309737967u, 19088743u)"));
+    assert!(wgsl.contains("any("));
 }
 
 #[test]
