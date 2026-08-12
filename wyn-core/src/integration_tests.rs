@@ -10959,16 +10959,33 @@ entry nested_view(
   map(|i: i32| expand(roots[i], table), iota(4))
 "#;
 
-            let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+            let ssa = lower_semantic_egir(
                 compile_to_semantic_egir(source),
                 crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
-            ))
-            .expect("nested fixed storage view lowers to WGSL");
-            let leaf_signature =
-                wgsl.lines().find(|line| line.starts_with("fn w_leaf")).expect("leaf helper is emitted");
+            );
+            let leaf =
+                ssa.functions.iter().find(|function| function.name.contains("leaf")).unwrap_or_else(|| {
+                    panic!(
+                        "leaf reaches elaborated SSA before definition reachability; functions: {:?}",
+                        ssa.functions.iter().map(|function| &function.name).collect::<Vec<_>>()
+                    )
+                });
+            let (_, table_ty, _) = leaf.body.param(0).expect("leaf table parameter");
             assert!(
-                leaf_signature.contains("w_table: vec2<u32>"),
-                "leaf must retain the storage-view ABI:\n{wgsl}"
+                crate::types::array_view_buffer(table_ty).is_some(),
+                "leaf must retain the storage-view ABI before late inlining makes it unreachable"
+            );
+
+            let reachable = crate::ssa::filter_reachable(ssa.clone());
+            assert!(
+                reachable.functions.iter().all(|function| !function.name.contains("leaf")),
+                "the fully inlined leaf helper must be removed before backend lowering"
+            );
+
+            let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("nested fixed storage view lowers to WGSL");
+            assert!(
+                !wgsl.lines().any(|line| line.starts_with("fn w_leaf")),
+                "WGSL must not emit the fully inlined leaf helper:\n{wgsl}"
             );
             let module = naga::front::wgsl::parse_str(&wgsl)
                 .unwrap_or_else(|error| panic!("Naga rejected nested-view WGSL: {error:?}\n{wgsl}"));
@@ -11377,6 +11394,50 @@ entry main(input: [1]u32) ([1]u32, [1]([2]u32)) =
         .expect("spawn unzip/map aggregate-projection regression")
         .join()
         .expect("unzip/map aggregate-projection regression panicked");
+}
+
+/// Physical inlining can consume every call to synthesized map/projection
+/// helpers. Final SSA reachability must then remove the orphan definitions so
+/// WGSL does not validate or emit bodies that no entry can call.
+#[test]
+fn ssa_reachability_removes_fully_inlined_unzip_map_helpers() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+entry main(input: [1]u32) ([1]u32, [1]u32) =
+  unzip(map(|i: i32| (input[i], input[i] + 1u32), iota(1)))
+"#;
+
+            let ssa = lower_semantic_egir(
+                compile_to_semantic_egir(source),
+                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+            );
+            assert!(
+                !ssa.functions.is_empty(),
+                "reproducer must reach SSA with helpers orphaned by physical inlining"
+            );
+
+            let reachable = crate::ssa::filter_reachable(ssa.clone());
+            assert!(
+                reachable.functions.is_empty(),
+                "the fully inlined entry must not retain any callable definitions"
+            );
+
+            let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("reachable unzip/map SSA lowers to WGSL");
+            assert_eq!(
+                wgsl.lines().filter(|line| line.starts_with("fn ")).count(),
+                1,
+                "WGSL must contain only the live entry function:\n{wgsl}"
+            );
+            assert!(
+                !wgsl.contains("vertical_Upre") && !wgsl.contains("lambda"),
+                "WGSL must omit orphan map, projection, and vertical-pre helpers:\n{wgsl}"
+            );
+        })
+        .expect("spawn SSA reachability regression")
+        .join()
+        .expect("SSA reachability regression panicked");
 }
 
 /// A view used directly as a `map` *input* (→ the entry walker

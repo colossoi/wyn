@@ -161,8 +161,9 @@ impl StorageFunctionVariants {
         }
 
         // Every direct `OpTag::Call` must remain resolvable while lowering
-        // module-context/dead helpers. The selected entry map below overrides
-        // this deterministic fallback for every live entry path.
+        // helpers reached through module-level constant bodies. The selected
+        // entry map below overrides this deterministic fallback for every
+        // direct live entry path.
         for emission in &emissions {
             fallback_emissions.entry(emission.function).or_insert(emission.id);
         }

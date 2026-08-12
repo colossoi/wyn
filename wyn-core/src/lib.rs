@@ -565,6 +565,7 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //       lower_egir_to_ssa(...)            -> ssa::stage::Elaborated
 //
 // Backend:
+//       ssa::filter_reachable(...)         -> ssa::stage::Reachable
 //       lower_ssa_to_spirv(program) | lower_ssa_to_wgsl(program)
 //
 // Tests should prefer the `compile_thru_*` helpers below, which subsume
@@ -691,6 +692,7 @@ pub fn lower_egir_to_ssa(
 
 /// Validate and lower elaborated SSA to SPIR-V.
 pub fn lower_ssa_to_spirv(program: ssa::stage::Elaborated) -> error::Result<Lowered> {
+    let program = ssa::filter_reachable(program);
     let program = ssa::prepare_spirv(program)?;
     let spirv = spirv::lower_ssa_program(&program)?;
     Ok(Lowered {
@@ -725,6 +727,7 @@ pub fn lower_ssa_to_wgsl_with_pipeline_and_options(
     program: ssa::stage::Elaborated,
     options: wgsl::WgslOptions,
 ) -> error::Result<LoweredWgsl> {
+    let program = ssa::filter_reachable(program);
     let program = ssa::prepare_wgsl(program)?;
     let lowered = wgsl::ssa_lowering::lower_with_abi(&program, options)?;
     let mut pipeline = program.global_context.pipeline;

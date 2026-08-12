@@ -509,6 +509,12 @@ pub mod stage {
     pub enum ElaboratedTag {}
     pub type Elaborated = Program<ElaboratedTag, BackendGlobal>;
 
+    /// SSA whose top-level function and constant definitions are reachable
+    /// from at least one entry point.
+    #[derive(Clone, Copy, Debug)]
+    pub enum ReachableTag {}
+    pub type Reachable = Program<ReachableTag, BackendGlobal>;
+
     /// SSA validated for SPIR-V lowering.
     #[derive(Clone, Copy, Debug)]
     pub enum SpirvReadyTag {}

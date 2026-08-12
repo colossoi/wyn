@@ -194,13 +194,14 @@ typestate exposes only its single next pass.
 | Pass | Description |
 |------|-------------|
 | `egir::elaborate` | The validated physical program has been demand-elaborated to SSA while retaining its published schedule and descriptor |
+| `ssa::filter_reachable` | Remove final SSA functions and constants not reachable from an entry point |
 | `ssa::prepare_spirv` | Run `verify_no_abstract_types` and `verify_buffer_layouts`, recording both checks in the typestate |
 | `ssa::prepare_wgsl` | Run `verify_no_abstract_types` and record WGSL readiness in the typestate |
 | `spirv::lower_ssa_program` / `wgsl::lower` | Emit SPIR-V words or WGSL source from backend-ready SSA |
 
-SSA is intentionally minimal: all mid-end machinery (effect tokens,
-canonicalization, verification, generic transform passes) lives in
-EGIR. A generic CFG-with-block-params representation is provided in
+SSA is intentionally minimal: optimization and canonicalization live in EGIR;
+SSA performs only final definition reachability and target validation. A
+generic CFG-with-block-params representation is provided in
 `ssa::framework`; the concrete instantiation lives in `ssa::types`.
 
 Key properties:
