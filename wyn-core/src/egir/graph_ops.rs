@@ -962,7 +962,15 @@ pub fn clone_pure_subgraph<P: Family>(
     root: NodeId,
 ) -> Result<NodeId, String> {
     let mut memo: LookupMap<NodeId, NodeId> = LookupMap::new();
-    clone_value_subgraph(src, dst, root, &mut memo, ConstantCopy::Intern, false)
+    clone_value_subgraph(
+        src,
+        dst,
+        root,
+        &mut memo,
+        ConstantCopy::Intern,
+        false,
+        PureCopy::Preserve,
+    )
 }
 
 /// Clone a pure subgraph of `src` into `dst`, but substitute the given `src`
@@ -977,13 +985,29 @@ pub fn clone_pure_subgraph_substituting<P: Family>(
     subs: &[(NodeId, NodeId)],
 ) -> Result<NodeId, String> {
     let mut memo: LookupMap<NodeId, NodeId> = subs.iter().copied().collect();
-    clone_value_subgraph(src, dst, root, &mut memo, ConstantCopy::Intern, false)
+    clone_value_subgraph(
+        src,
+        dst,
+        root,
+        &mut memo,
+        ConstantCopy::Intern,
+        false,
+        PureCopy::Preserve,
+    )
 }
 
 #[derive(Clone, Copy)]
 pub(crate) enum ConstantCopy {
     Intern,
     PreserveIdentity,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PureCopy {
+    /// Reproduce the source DAG exactly apart from hash-consing.
+    Preserve,
+    /// Re-run algebraic folds after operands have been substituted.
+    Fold,
 }
 
 pub(crate) fn clone_value_subgraph<P: Family>(
@@ -993,6 +1017,7 @@ pub(crate) fn clone_value_subgraph<P: Family>(
     memo: &mut LookupMap<NodeId, NodeId>,
     constants: ConstantCopy,
     allow_unions: bool,
+    pure: PureCopy,
 ) -> Result<NodeId, String> {
     if let Some(&existing) = memo.get(&nid) {
         return Ok(existing);
@@ -1015,13 +1040,23 @@ pub(crate) fn clone_value_subgraph<P: Family>(
         ENode::Pure { op, operands, .. } => {
             let new_ops: SmallVec<[NodeId; 4]> = operands
                 .iter()
-                .map(|&operand| clone_value_subgraph(src, dst, operand, memo, constants, allow_unions))
+                .map(|&operand| {
+                    clone_value_subgraph(src, dst, operand, memo, constants, allow_unions, pure)
+                })
                 .collect::<Result<_, _>>()?;
-            dst.intern_pure(op.clone(), new_ops, ty, source.span)
+            if matches!(pure, PureCopy::Fold) {
+                if let Some(folded) = dst.try_algebraic_fold(op, &new_ops, &ty) {
+                    folded
+                } else {
+                    dst.intern_pure(op.clone(), new_ops, ty, source.span)
+                }
+            } else {
+                dst.intern_pure(op.clone(), new_ops, ty, source.span)
+            }
         }
         ENode::Union { left, right } if allow_unions => {
-            let left = clone_value_subgraph(src, dst, *left, memo, constants, allow_unions)?;
-            let right = clone_value_subgraph(src, dst, *right, memo, constants, allow_unions)?;
+            let left = clone_value_subgraph(src, dst, *left, memo, constants, allow_unions, pure)?;
+            let right = clone_value_subgraph(src, dst, *right, memo, constants, allow_unions, pure)?;
             dst.add_union(left, right)
         }
         other => {

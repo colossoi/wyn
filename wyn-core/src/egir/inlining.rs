@@ -6,7 +6,7 @@
 
 use crate::LookupMap;
 
-use super::graph_ops::{clone_value_subgraph, ConstantCopy};
+use super::graph_ops::{clone_value_subgraph, ConstantCopy, PureCopy};
 use super::ir::{Family, Func};
 use super::types::{EGraph, ENode, NodeId, PureOp, SkeletonTerminator, WynLanguage};
 
@@ -116,7 +116,15 @@ pub(crate) fn inline_pure_call<P: Family>(
         }
     }
 
-    let inlined = clone_value_subgraph(&callee.graph, caller, root, &mut memo, ConstantCopy::Intern, true)?;
+    let inlined = clone_value_subgraph(
+        &callee.graph,
+        caller,
+        root,
+        &mut memo,
+        ConstantCopy::Intern,
+        true,
+        PureCopy::Fold,
+    )?;
     if inlined == call {
         return Err(format!(
             "inline_pure_call: inlining `{}` reproduced the original call",

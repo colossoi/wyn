@@ -11218,6 +11218,74 @@ entry main(root: [2]u32) [4]u32 =
         .expect("fixed-array capture regression panicked");
 }
 
+/// `unzip(map(...))` becomes two projected map consumers. Fusion must fold
+/// projections through the inlined producer tuples instead of forwarding the
+/// complete aggregate through nested wrapper tuples.
+#[test]
+fn unzip_map_fixed_array_item_folds_aggregate_projection_carriers() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+entry main(input: [1]u32) ([1]u32, [1]([2]u32)) =
+  unzip(map(|i: i32| (input[i], [input[i], input[i] + 1u32]), iota(1)))
+"#;
+
+            let ssa = lower_semantic_egir(
+                compile_to_semantic_egir(source),
+                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+            );
+            let helper = ssa
+                .functions
+                .iter()
+                .find(|function| function.name.contains("main_vertical_pre_1"))
+                .expect("second unzip projection fusion helper");
+            let projects = helper
+                .body
+                .inner
+                .insts
+                .values()
+                .filter(|inst| {
+                    matches!(
+                        inst.data,
+                        crate::ssa::types::InstKind::Op {
+                            tag: crate::op::OpTag::Project { .. },
+                            ..
+                        }
+                    )
+                })
+                .count();
+            let tuples = helper
+                .body
+                .inner
+                .insts
+                .values()
+                .filter(|inst| {
+                    matches!(
+                        inst.data,
+                        crate::ssa::types::InstKind::Op {
+                            tag: crate::op::OpTag::Tuple(_),
+                            ..
+                        }
+                    )
+                })
+                .count();
+            assert_eq!(
+                projects, 0,
+                "fused unzip helper must not project through aggregate carriers"
+            );
+            assert_eq!(
+                tuples, 1,
+                "fused unzip helper constructs only its final ([2]u32, u32) result"
+            );
+
+            crate::lower_ssa_to_wgsl(ssa).expect("simplified unzip/map aggregate lowers to WGSL");
+        })
+        .expect("spawn unzip/map aggregate-projection regression")
+        .join()
+        .expect("unzip/map aggregate-projection regression panicked");
+}
+
 /// A view used directly as a `map` *input* (→ the entry walker
 /// `rewrite_term` / SOAC-input path, not a capture) must read from its buffer.
 #[test]

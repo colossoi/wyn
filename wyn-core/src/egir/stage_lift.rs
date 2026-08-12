@@ -13,7 +13,7 @@ use smallvec::smallvec;
 use crate::ast::TypeName;
 use crate::{LookupSet, SortedSet};
 
-use super::graph_ops::{self, ConstantCopy};
+use super::graph_ops::{self, ConstantCopy, PureCopy};
 use super::inlining;
 use super::ir::{Body, BodySite as ProgramBodySite};
 use super::program::{fresh_region_name, CoreProgramData, SemanticFunc};
@@ -399,6 +399,7 @@ fn apply_lift(enclosing: &mut EGraph, mut prepared: StageLiftCandidate) -> Resul
             &mut memo,
             ConstantCopy::Intern,
             true,
+            PureCopy::Preserve,
         )?);
         types.push(prepared.function.graph.nodes[root].ty.clone());
     }

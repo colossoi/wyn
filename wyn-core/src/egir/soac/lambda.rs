@@ -49,12 +49,11 @@ pub(crate) fn unpack_results(graph: &mut EGraph, result: NodeId, types: &[Type<T
             .iter()
             .enumerate()
             .map(|(index, ty)| {
-                graph.intern_pure(
-                    PureOp::Project { index: index as u32 },
-                    smallvec![result],
-                    ty.clone(),
-                    None,
-                )
+                let op = PureOp::Project { index: index as u32 };
+                let operands = smallvec![result];
+                graph
+                    .try_algebraic_fold(&op, &operands, ty)
+                    .unwrap_or_else(|| graph.intern_pure(op, operands, ty.clone(), None))
             })
             .collect(),
     }

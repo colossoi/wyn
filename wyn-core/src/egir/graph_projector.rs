@@ -492,6 +492,7 @@ impl<'a> GraphProjector<'a> {
                 &mut shell.nodes,
                 super::graph_ops::ConstantCopy::PreserveIdentity,
                 true,
+                super::graph_ops::PureCopy::Preserve,
             )?;
         }
         let (effects, effect_sites) = self.clone_effects(&selection, &mut shell)?;
