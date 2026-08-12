@@ -701,14 +701,32 @@ pub fn lower_ssa_to_spirv(program: ssa::stage::Elaborated) -> error::Result<Lowe
 
 /// Validate and lower elaborated SSA to WGSL.
 pub fn lower_ssa_to_wgsl(program: ssa::stage::Elaborated) -> error::Result<String> {
-    Ok(lower_ssa_to_wgsl_with_pipeline(program)?.wgsl)
+    lower_ssa_to_wgsl_with_options(program, wgsl::WgslOptions::default())
+}
+
+/// Validate and lower elaborated SSA to WGSL using an explicit backend
+/// legalization policy.
+pub fn lower_ssa_to_wgsl_with_options(
+    program: ssa::stage::Elaborated,
+    options: wgsl::WgslOptions,
+) -> error::Result<String> {
+    Ok(lower_ssa_to_wgsl_with_pipeline_and_options(program, options)?.wgsl)
 }
 
 /// Validate and lower elaborated SSA to WGSL while retaining its runtime
 /// pipeline descriptor.
 pub fn lower_ssa_to_wgsl_with_pipeline(program: ssa::stage::Elaborated) -> error::Result<LoweredWgsl> {
+    lower_ssa_to_wgsl_with_pipeline_and_options(program, wgsl::WgslOptions::default())
+}
+
+/// Validate and lower elaborated SSA to WGSL while retaining its runtime
+/// pipeline descriptor and using an explicit backend legalization policy.
+pub fn lower_ssa_to_wgsl_with_pipeline_and_options(
+    program: ssa::stage::Elaborated,
+    options: wgsl::WgslOptions,
+) -> error::Result<LoweredWgsl> {
     let program = ssa::prepare_wgsl(program)?;
-    let lowered = wgsl::ssa_lowering::lower_with_abi(&program)?;
+    let lowered = wgsl::ssa_lowering::lower_with_abi(&program, options)?;
     let mut pipeline = program.global_context.pipeline;
     adapt_pipeline_descriptor_for_wgsl(&mut pipeline, &lowered.parameter_blocks)?;
     Ok(LoweredWgsl {

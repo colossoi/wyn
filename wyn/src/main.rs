@@ -72,6 +72,11 @@ enum Commands {
         #[arg(long)]
         single_stage: bool,
 
+        /// Enable software emulation of unsigned 64-bit integers in WGSL.
+        /// This option is invalid for the SPIR-V target.
+        #[arg(long)]
+        wgsl_emulate_u64: bool,
+
         /// Treat any `???` type hole as a default value of its inferred
         /// type and continue compilation. Default: holes are a hard
         /// error (exit code 2). Default fills: numeric 0, bool false,
@@ -115,6 +120,9 @@ enum DriverError {
     // so render it directly rather than force one prefix onto every variant.
     #[error("{0}")]
     EgirConversionError(#[from] wyn_core::egir::from_tlc::ConvertError),
+
+    #[error("invalid command-line option: {0}")]
+    InvalidOption(String),
 }
 
 struct FrontendFile {
@@ -222,9 +230,15 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             output_tlc,
             output_mir,
             single_stage,
+            wgsl_emulate_u64,
             fill_holes,
             verbose,
         } => {
+            if wgsl_emulate_u64 && !matches!(target, Target::Wgsl) {
+                return Err(DriverError::InvalidOption(
+                    "--wgsl-emulate-u64 requires --target wgsl".to_string(),
+                ));
+            }
             // Output handling:
             //   omitted            → each output written next to its input
             //   existing directory → DIR/<input-stem>.<ext> per file
@@ -263,6 +277,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
                     output_tlc.clone(),
                     output_mir.clone(),
                     single_stage,
+                    wgsl_emulate_u64,
                     fill_holes,
                     verbose,
                 )?;
@@ -283,6 +298,7 @@ fn compile_file(
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
     single_stage: bool,
+    wgsl_emulate_u64: bool,
     fill_holes: bool,
     verbose: bool,
 ) -> Result<(), DriverError> {
@@ -426,8 +442,13 @@ fn compile_file(
             lowered.pipeline
         }
         Target::Wgsl => {
+            let options = if wgsl_emulate_u64 {
+                wyn_core::wgsl::WgslOptions::U64_EMULATION
+            } else {
+                wyn_core::wgsl::WgslOptions::default()
+            };
             let lowered = time("wgsl_lower", verbose, || {
-                wyn_core::lower_ssa_to_wgsl_with_pipeline(soac_lowered)
+                wyn_core::lower_ssa_to_wgsl_with_pipeline_and_options(soac_lowered, options)
             })?;
 
             fs::write(&output_path, &lowered.wgsl)?;

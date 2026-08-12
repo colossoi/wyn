@@ -30,7 +30,15 @@ use crate::BindingRef;
 /// points (distinguished by `@vertex` / `@fragment` / `@compute`
 /// attributes), module-scope types, bindings, and helper functions.
 pub fn lower(program: &crate::ssa::stage::WgslReady) -> Result<String> {
-    Ok(lower_with_abi(program)?.source)
+    lower_with_options(program, crate::wgsl::WgslOptions::default())
+}
+
+/// Lower an SSA program using an explicit WGSL backend policy.
+pub fn lower_with_options(
+    program: &crate::ssa::stage::WgslReady,
+    options: crate::wgsl::WgslOptions,
+) -> Result<String> {
+    Ok(lower_with_abi(program, options)?.source)
 }
 
 /// WGSL source plus the WebGPU bindings synthesized while adapting backend
@@ -58,7 +66,10 @@ pub(crate) struct ParameterMember {
     pub size: u32,
 }
 
-pub(crate) fn lower_with_abi(program: &crate::ssa::stage::WgslReady) -> Result<LoweredModule> {
+pub(crate) fn lower_with_abi(
+    program: &crate::ssa::stage::WgslReady,
+    _options: crate::wgsl::WgslOptions,
+) -> Result<LoweredModule> {
     let mut ctx = LowerCtx::new(program);
     let source = ctx.lower_program()?;
     let mut blocks = ctx.pc_blocks.values().collect::<Vec<_>>();
