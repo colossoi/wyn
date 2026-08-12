@@ -54,6 +54,7 @@ struct InliningStats {
 #[derive(Clone, Debug)]
 struct Candidate {
     call: NodeId,
+    block: crate::flow::BlockId,
     callee: crate::FunctionId,
     callee_nodes: usize,
 }
@@ -166,7 +167,7 @@ fn inline_body(
             break;
         };
         let callee = &callees[&candidate.callee];
-        inlining::inline_pure_call(graph, candidate.call, callee)?;
+        inlining::inline_call_at_block(graph, candidate.call, candidate.block, callee)?;
         stats.calls_inlined += 1;
         stats.node_budget += candidate.callee_nodes;
     }
@@ -184,7 +185,7 @@ fn find_candidate(
     // materializes the parameter again for a dynamic index. Inline these
     // calls even without an explicit CFG loop so substitution exposes the
     // original array directly to placement and copy elimination.
-    for (_, block) in &graph.skeleton.blocks {
+    for (block_id, block) in &graph.skeleton.blocks {
         let roots = block
             .side_effects
             .iter()
@@ -218,6 +219,7 @@ fn find_candidate(
             if callee_nodes <= MAX_CALLEE_NODES && callee_nodes <= remaining_budget {
                 return Some(Candidate {
                     call: node,
+                    block: block_id,
                     callee: *callee_name,
                     callee_nodes,
                 });
@@ -278,6 +280,7 @@ fn find_candidate(
                 }
                 return Some(Candidate {
                     call: node,
+                    block: block_id,
                     callee: *callee_name,
                     callee_nodes,
                 });

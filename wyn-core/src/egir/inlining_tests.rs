@@ -3,6 +3,7 @@ use super::*;
 use crate::ast::{Span, TypeName};
 use crate::egir::program::SemanticFunc;
 use crate::egir::types::{EGraph, ENode, PureOp, Semantic, SkeletonTerminator};
+use crate::flow::ControlHeader;
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
 use smallvec::smallvec;
@@ -150,5 +151,117 @@ fn inline_pure_call_propagates_caller_projection_of_returned_aggregate() {
         caller.nodes[selected].kind,
         ENode::Union { left, right } if left == seven && right == seven
     ));
+    assert!(caller.verify_hash_cons().is_ok());
+}
+
+#[test]
+fn inline_call_at_block_splices_a_scalar_selection_cfg() {
+    let ty = u32_ty();
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let region = crate::FunctionId::from_index(0);
+    let mut callee_graph = EGraph::<Semantic>::new();
+    let value = callee_graph.add_func_param(0, ty.clone());
+    let choose_left = callee_graph.add_func_param(1, bool_ty.clone());
+    let entry = callee_graph.skeleton.entry;
+    let left = callee_graph.skeleton.create_block();
+    let right = callee_graph.skeleton.create_block();
+    let merge = callee_graph.skeleton.create_block();
+    callee_graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
+        cond: choose_left,
+        then_target: left,
+        then_args: vec![],
+        else_target: right,
+        else_args: vec![],
+    };
+    callee_graph.skeleton.blocks[entry].control_header = Some(ControlHeader::Selection { merge });
+    let one = callee_graph.intern_constant(ConstantValue::U32(1), ty.clone());
+    let two = callee_graph.intern_constant(ConstantValue::U32(2), ty.clone());
+    let left_value = callee_graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        smallvec![value, one],
+        ty.clone(),
+        None,
+    );
+    let right_value = callee_graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        smallvec![value, two],
+        ty.clone(),
+        None,
+    );
+    callee_graph.skeleton.blocks[left].term = SkeletonTerminator::Branch {
+        target: merge,
+        args: vec![left_value],
+    };
+    callee_graph.skeleton.blocks[right].term = SkeletonTerminator::Branch {
+        target: merge,
+        args: vec![right_value],
+    };
+    let selected = callee_graph.add_block_param(merge, ty.clone());
+    callee_graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(selected));
+    let callee = SemanticFunc::new(
+        region,
+        "choose_offset".into(),
+        Span::dummy(),
+        None,
+        vec![
+            (ty.clone(), "value".into()),
+            (bool_ty.clone(), "choose_left".into()),
+        ],
+        ty.clone(),
+        callee_graph,
+    );
+
+    let mut caller = EGraph::<Semantic>::new();
+    let actual = caller.add_func_param(0, ty.clone());
+    let condition = caller.add_func_param(1, bool_ty);
+    let call = caller.intern_pure(
+        PureOp::Call(region),
+        smallvec![actual, condition],
+        ty.clone(),
+        None,
+    );
+    let three = caller.intern_constant(ConstantValue::U32(3), ty.clone());
+    let final_value = caller.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+        smallvec![call, three],
+        ty,
+        None,
+    );
+    let caller_entry = caller.skeleton.entry;
+    caller.skeleton.blocks[caller_entry].term = SkeletonTerminator::Return(Some(final_value));
+
+    let inlined =
+        inline_call_at_block(&mut caller, call, caller_entry, &callee).expect("selection CFG inlines");
+
+    assert!(matches!(
+        caller.nodes[call].kind,
+        ENode::Pure {
+            op: PureOp::Call(_),
+            ..
+        }
+    ));
+    assert!(matches!(
+        &caller.nodes[final_value].kind,
+        ENode::Pure { operands, .. } if operands[0] == inlined
+    ));
+    assert!(caller
+        .skeleton
+        .blocks
+        .values()
+        .any(|block| matches!(block.control_header, Some(ControlHeader::Selection { .. }))));
+    assert!(matches!(
+        caller.skeleton.blocks[caller_entry].term,
+        SkeletonTerminator::Branch { .. }
+    ));
+    assert_eq!(
+        caller
+            .skeleton
+            .blocks
+            .values()
+            .filter(|block| matches!(block.term, SkeletonTerminator::Return(Some(_))))
+            .count(),
+        1
+    );
+    caller.skeleton.verify_branch_arities().expect("inlined CFG branch arities");
     assert!(caller.verify_hash_cons().is_ok());
 }

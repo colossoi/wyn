@@ -20,7 +20,7 @@ use crate::ssa::types::{
     ValueRef,
 };
 use crate::types::{ExternDecl, TypeExt};
-use crate::{BindingRef, EntryId, LookupMap, ResourceAccess};
+use crate::{BindingRef, EntryId, LookupMap, LookupSet, ResourceAccess};
 use polytype::Type;
 use smallvec::SmallVec;
 
@@ -201,14 +201,7 @@ pub fn elaborate_graph(
 ) -> FuncBody {
     // Phase 1: cost-based extraction.
     let mut best = extract::extract(graph);
-    // Preserve transitivity through any extraction winner already selected
-    // for the alias target.
-    for (node, definition) in &graph.nodes {
-        if let Some(alias) = definition.alias {
-            let target = best.get(&alias).copied().unwrap_or(alias);
-            best.insert(node, target);
-        }
-    }
+    close_extraction_over_aliases(graph, &mut best);
 
     // Loop analysis over the skeleton, used by LICM placement.
     let loop_analysis = LoopAnalysis::build(&graph.skeleton);
@@ -814,6 +807,36 @@ impl<'a> Elaborator<'a> {
     }
 }
 
+/// Compose extraction winners with CFG aliases to a fixed point. A union may
+/// have selected a block parameter before skeleton optimization strips that
+/// parameter; forwarding only the parameter itself would leave the union's
+/// winner pointing at a definition that is no longer in its block signature.
+fn close_extraction_over_aliases<P: Family>(graph: &EGraph<P>, best: &mut LookupMap<NodeId, NodeId>) {
+    let extracted = best.clone();
+    let resolve = |start| {
+        let mut current = start;
+        let mut seen = LookupSet::new();
+        loop {
+            assert!(
+                seen.insert(current),
+                "cycle while composing extraction and CFG aliases from {start:?}"
+            );
+            let chosen = extracted.get(&current).copied().unwrap_or(current);
+            if chosen != current {
+                current = chosen;
+                continue;
+            }
+            let Some(alias) = graph.nodes[current].alias else {
+                return current;
+            };
+            current = alias;
+        }
+    };
+    for node in graph.nodes.keys() {
+        best.insert(node, resolve(node));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Conversion: ENode → InstKind
 // ---------------------------------------------------------------------------
@@ -847,5 +870,34 @@ fn pure_to_inst_kind(op: &PhysicalPureOp, args: &[ValueId]) -> InstKind {
     InstKind::Op {
         tag: op.clone(),
         operands: args.iter().map(|&id| ValueRef::Ssa(id)).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ssa::types::ConstantValue;
+
+    #[test]
+    fn extraction_winners_follow_eliminated_block_parameter_aliases() {
+        let ty = Type::Constructed(TypeName::UInt(32), vec![]);
+        let mut graph = EGraph::<Physical>::new();
+        let merge = graph.skeleton.create_block();
+        let selected = graph.add_block_param(merge, ty.clone());
+        let replacement = graph.intern_constant(ConstantValue::U32(7), ty.clone());
+        let call = graph.intern_pure(
+            PureOp::Call(crate::FunctionId::from_index(0)),
+            SmallVec::new(),
+            ty,
+            None,
+        );
+        graph.subsume_pure_in_place(call, selected);
+        graph.nodes[selected].alias = Some(replacement);
+
+        let mut best = extract::extract(&graph);
+        close_extraction_over_aliases(&graph, &mut best);
+
+        assert_eq!(best[&call], replacement);
+        assert_eq!(best[&selected], replacement);
     }
 }
