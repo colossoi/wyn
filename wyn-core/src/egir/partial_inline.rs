@@ -28,6 +28,7 @@ use crate::types::TypeExt;
 use crate::LookupMap;
 
 use super::inlining;
+use super::ir::{EffectOp, SideEffectKind};
 use super::loop_analysis::{LoopAnalysis, LoopInvariance};
 use super::program::PhysicalFunc;
 use super::types::{EGraph, ENode, NodeId, Physical, PureOp};
@@ -67,13 +68,91 @@ pub fn partially_inline_calls(
     // clone, so snapshots do not need to be refreshed after each body.
     let callees: LookupMap<crate::FunctionId, PhysicalFunc> =
         program.functions.iter().map(|function| (function.region, function.clone())).collect();
+    let callees = prepare_fixed_array_callees(callees)?;
     program
         .try_map_graphs(|site, mut graph| {
+            inline_prerequisite_effect_calls(&mut graph, &callees, MAX_INLINED_NODES)
+                .map_err(|error| format!("effect-call inlining in {site:?} failed: {error}"))?;
             inline_body(&mut graph, &callees)
                 .map_err(|error| format!("partial inlining in {site:?} failed: {error}"))?;
             Ok(graph)
         })
         .map(|program| program.retag())
+}
+
+/// Resource erasure conservatively anchors a call that carries a storage view
+/// in the effect skeleton. If that call targets a pure indexing DAG, inline it
+/// first so a surrounding helper with a by-value fixed-array parameter can
+/// itself become an ordinary pure inlining candidate.
+fn prepare_fixed_array_callees(
+    mut callees: LookupMap<crate::FunctionId, PhysicalFunc>,
+) -> Result<LookupMap<crate::FunctionId, PhysicalFunc>, String> {
+    for _ in 0..MAX_INLINES {
+        let snapshot = callees.clone();
+        let mut changed = false;
+        for callee in callees.values_mut() {
+            changed |=
+                inline_prerequisite_effect_calls(&mut callee.graph, &snapshot, MAX_INLINED_NODES)? > 0;
+        }
+        if !changed {
+            return Ok(callees);
+        }
+    }
+    Ok(callees)
+}
+
+fn inline_prerequisite_effect_calls(
+    graph: &mut EGraph<Physical>,
+    callees: &LookupMap<crate::FunctionId, PhysicalFunc>,
+    node_budget: usize,
+) -> Result<usize, String> {
+    if !graph
+        .nodes
+        .values()
+        .any(|node| matches!(node.kind, ENode::FuncParam { .. }) && is_fixed_composite_array(&node.ty))
+    {
+        return Ok(0);
+    }
+
+    let mut inlined_nodes = 0;
+    loop {
+        let candidate = graph.skeleton.blocks.iter().find_map(|(block, body)| {
+            body.side_effects.iter().enumerate().find_map(|(index, effect)| {
+                let SideEffectKind::Effect(EffectOp::Op {
+                    tag: PureOp::Call(callee),
+                }) = &effect.kind
+                else {
+                    return None;
+                };
+                let result = effect.result?;
+                let target = callees.get(callee)?;
+                let nodes = inlining::inlineable_node_count(target)?;
+                (nodes <= MAX_CALLEE_NODES && nodes <= node_budget - inlined_nodes)
+                    .then(|| (block, index, *callee, effect.operand_nodes.clone(), result, nodes))
+            })
+        });
+        let Some((block, index, callee, operands, result, nodes)) = candidate else {
+            break;
+        };
+        inlining::inline_effect_call_to_pure_callee(graph, result, &operands, &callees[&callee])?;
+        let removed_effects = graph.skeleton.blocks[block].side_effects[index].effects;
+        graph.skeleton.blocks[block].side_effects.remove(index);
+        if let Some((input, output)) = removed_effects {
+            for effect in &mut graph.skeleton.blocks[block].side_effects[index..] {
+                if let Some((effect_input, _)) = &mut effect.effects {
+                    if *effect_input == output {
+                        *effect_input = input;
+                        break;
+                    }
+                }
+            }
+        }
+        inlined_nodes += nodes;
+        if inlined_nodes == node_budget {
+            break;
+        }
+    }
+    Ok(inlined_nodes)
 }
 
 fn inline_body(

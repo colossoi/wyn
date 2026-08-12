@@ -11218,6 +11218,74 @@ entry main(root: [2]u32) [4]u32 =
         .expect("fixed-array capture regression panicked");
 }
 
+/// A storage-view call is conservatively effect-classified before partial
+/// inlining. It must not prevent propagation of a fixed-array capture through
+/// the surrounding map helper.
+#[test]
+fn mapped_helper_inlines_fixed_array_capture_alongside_storage_view() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+def lookup(table: [1024][2]u32, reference: u32, child: i32) u32 =
+  table[i32.u32(reference)][child]
+
+def expand_2(root: [2]u32, table: [1024][2]u32) [4]u32 =
+  map(|i: i32| lookup(table, root[i / 2i32], i % 2i32), iota(4))
+
+entry main(root: [2]u32, table: [1024][2]u32) [4]u32 =
+  expand_2(root, table)
+"#;
+
+            let ssa = lower_semantic_egir(
+                compile_to_semantic_egir(source),
+                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+            );
+            let entry = ssa.entry_points.iter().find(|entry| entry.name == "main").expect("main entry");
+            assert!(
+                entry.body.inner.insts.values().all(|inst| !matches!(
+                    inst.data,
+                    crate::ssa::types::InstKind::Op {
+                        tag: crate::op::OpTag::Call(_),
+                        ..
+                    }
+                )),
+                "the mapped entry must not pass the fixed array through a helper call"
+            );
+            assert_eq!(
+                entry
+                    .body
+                    .inner
+                    .insts
+                    .values()
+                    .filter(|inst| matches!(
+                        inst.data,
+                        crate::ssa::types::InstKind::Op {
+                            tag: crate::op::OpTag::Materialize,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1,
+                "the entry keeps only the addressable copy required by root's dynamic index"
+            );
+
+            let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("mixed capture lowers to WGSL");
+            let main = wgsl.split("fn main(").nth(1).expect("WGSL main body");
+            assert!(
+                !main.contains("w_Uw_Ulambda_U0("),
+                "WGSL main must not pass root by value through the map helper:\n{wgsl}"
+            );
+            assert!(
+                main.lines().any(|line| line.contains("_buf_0_0[") && line.contains("][")),
+                "WGSL main must preserve direct ranked storage indexing after inlining:\n{wgsl}"
+            );
+        })
+        .expect("spawn mixed fixed-array/storage-view capture regression")
+        .join()
+        .expect("mixed fixed-array/storage-view capture regression panicked");
+}
+
 /// `unzip(map(...))` becomes two projected map consumers. Fusion must fold
 /// projections through the inlined producer tuples instead of forwarding the
 /// complete aggregate through nested wrapper tuples.

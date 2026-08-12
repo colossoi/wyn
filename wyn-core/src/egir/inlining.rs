@@ -70,9 +70,77 @@ pub(crate) fn inline_pure_call<P: Family>(
             called_function, callee.name, callee.region
         ));
     }
+    let inlined = clone_callee_result(caller, &operands, callee)?;
+    let result_ty = caller
+        .nodes
+        .get(call)
+        .map(|node| &node.ty)
+        .ok_or_else(|| format!("inline_pure_call: call {call:?} has no result type"))?;
+    let inlined_ty = caller
+        .nodes
+        .get(inlined)
+        .map(|node| &node.ty)
+        .ok_or_else(|| format!("inline_pure_call: inlined root {inlined:?} has no type"))?;
+    if result_ty != inlined_ty {
+        return Err(format!(
+            "inline_pure_call: `{}` inlined result has type {inlined_ty:?}, call expects {result_ty:?}",
+            callee.name
+        ));
+    }
+
+    if inlined == call {
+        return Err(format!(
+            "inline_pure_call: inlining `{}` reproduced the original call",
+            callee.name
+        ));
+    }
+    caller.subsume_pure_in_place(call, inlined);
+    Ok(inlined)
+}
+
+/// Replace the result of an effect-classified call with a cloned pure callee
+/// DAG. Resource erasure conservatively anchors calls that carry storage
+/// views, even when the specialized callee contains only index operations.
+/// Removing that wrapper lets a containing fixed-array helper become a pure
+/// value DAG and participate in ordinary call inlining.
+pub(crate) fn inline_effect_call_to_pure_callee<P: Family>(
+    caller: &mut EGraph<P>,
+    result: NodeId,
+    operands: &[NodeId],
+    callee: &Func<P, WynLanguage>,
+) -> Result<NodeId, String> {
+    if !matches!(
+        caller.nodes.get(result).map(|node| &node.kind),
+        Some(ENode::SideEffectResult)
+    ) {
+        return Err(format!(
+            "inline_effect_call_to_pure_callee: result {result:?} is not a side-effect result"
+        ));
+    }
+    let inlined = clone_callee_result(caller, operands, callee)?;
+    let result_ty = &caller.nodes[result].ty;
+    let inlined_ty = &caller.nodes[inlined].ty;
+    if result_ty != inlined_ty {
+        return Err(format!(
+            "inline_effect_call_to_pure_callee: `{}` inlined result has type {inlined_ty:?}, effect expects {result_ty:?}",
+            callee.name
+        ));
+    }
+    caller.nodes[result].kind = ENode::Union {
+        left: inlined,
+        right: inlined,
+    };
+    Ok(inlined)
+}
+
+fn clone_callee_result<P: Family>(
+    caller: &mut EGraph<P>,
+    operands: &[NodeId],
+    callee: &Func<P, WynLanguage>,
+) -> Result<NodeId, String> {
     if operands.len() != callee.params.len() {
         return Err(format!(
-            "inline_pure_call: `{}` has {} call operands but {} parameters",
+            "clone_callee_result: `{}` has {} call operands but {} parameters",
             callee.name,
             operands.len(),
             callee.params.len()
@@ -83,10 +151,10 @@ pub(crate) fn inline_pure_call<P: Family>(
             .nodes
             .get(*operand)
             .map(|node| &node.ty)
-            .ok_or_else(|| format!("inline_pure_call: operand {index} has no type"))?;
+            .ok_or_else(|| format!("clone_callee_result: operand {index} has no type"))?;
         if operand_ty != param_ty {
             return Err(format!(
-                "inline_pure_call: operand {index} of `{}` has type {operand_ty:?}, expected {param_ty:?}",
+                "clone_callee_result: operand {index} of `{}` has type {operand_ty:?}, expected {param_ty:?}",
                 callee.name
             ));
         }
@@ -94,7 +162,7 @@ pub(crate) fn inline_pure_call<P: Family>(
 
     let root = inlineable_return_root(callee).ok_or_else(|| {
         format!(
-            "inline_pure_call: `{}` is not a pure single-block value DAG",
+            "clone_callee_result: `{}` is not a pure single-block value DAG",
             callee.name
         )
     })?;
@@ -125,29 +193,16 @@ pub(crate) fn inline_pure_call<P: Family>(
         true,
         PureCopy::Fold,
     )?;
-    if inlined == call {
-        return Err(format!(
-            "inline_pure_call: inlining `{}` reproduced the original call",
-            callee.name
-        ));
-    }
-    let result_ty = caller
-        .nodes
-        .get(call)
-        .map(|node| &node.ty)
-        .ok_or_else(|| format!("inline_pure_call: call {call:?} has no result type"))?;
     let inlined_ty = caller
         .nodes
         .get(inlined)
         .map(|node| &node.ty)
-        .ok_or_else(|| format!("inline_pure_call: inlined root {inlined:?} has no type"))?;
-    if result_ty != inlined_ty {
+        .ok_or_else(|| format!("clone_callee_result: inlined root {inlined:?} has no type"))?;
+    if &callee.return_ty != inlined_ty {
         return Err(format!(
-            "inline_pure_call: `{}` inlined result has type {inlined_ty:?}, call expects {result_ty:?}",
-            callee.name
+            "clone_callee_result: `{}` inlined result has type {inlined_ty:?}, function returns {:?}",
+            callee.name, callee.return_ty
         ));
     }
-
-    caller.subsume_pure_in_place(call, inlined);
     Ok(inlined)
 }
