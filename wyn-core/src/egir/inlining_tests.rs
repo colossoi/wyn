@@ -116,3 +116,39 @@ fn inline_pure_call_folds_projection_of_substituted_aggregate() {
         ENode::Union { left, right } if left == seven && right == seven
     ));
 }
+
+#[test]
+fn inline_pure_call_propagates_caller_projection_of_returned_aggregate() {
+    let ty = u32_ty();
+    let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![ty.clone(), ty.clone()]);
+    let region = crate::FunctionId::from_index(0);
+    let mut callee_graph = EGraph::<Semantic>::new();
+    let left = callee_graph.add_func_param(0, ty.clone());
+    let right = callee_graph.add_func_param(1, ty.clone());
+    let pair = callee_graph.intern_pure(PureOp::Tuple(2), smallvec![left, right], pair_ty.clone(), None);
+    callee_graph.skeleton.blocks[callee_graph.skeleton.entry].term = SkeletonTerminator::Return(Some(pair));
+    let callee = SemanticFunc::new(
+        region,
+        "make_pair".into(),
+        Span::dummy(),
+        None,
+        vec![(ty.clone(), "left".into()), (ty.clone(), "right".into())],
+        pair_ty.clone(),
+        callee_graph,
+    );
+
+    let mut caller = EGraph::<Semantic>::new();
+    let two = caller.intern_constant(ConstantValue::U32(2), ty.clone());
+    let seven = caller.intern_constant(ConstantValue::U32(7), ty.clone());
+    let call = caller.intern_pure(PureOp::Call(region), smallvec![two, seven], pair_ty, None);
+    let selected = caller.intern_pure(PureOp::Project { index: 1 }, smallvec![call], ty, None);
+    caller.skeleton.blocks[caller.skeleton.entry].term = SkeletonTerminator::Return(Some(selected));
+
+    inline_pure_call(&mut caller, call, &callee).expect("aggregate call inlines");
+
+    assert!(matches!(
+        caller.nodes[selected].kind,
+        ENode::Union { left, right } if left == seven && right == seven
+    ));
+    assert!(caller.verify_hash_cons().is_ok());
+}

@@ -95,7 +95,40 @@ pub(crate) fn inline_pure_call<P: Family>(
         ));
     }
     caller.subsume_pure_in_place(call, inlined);
+    fold_project_consumers(caller, call, inlined);
     Ok(inlined)
+}
+
+/// Revisit projections that already existed in the caller before an aggregate
+/// call was inlined. Substitution can expose a tuple beneath the call, but
+/// those consumers are not rebuilt by [`clone_value_subgraph`], so eagerly
+/// propagate their selected components and any nested projections here.
+fn fold_project_consumers<P: Family>(graph: &mut EGraph<P>, source: NodeId, replacement: NodeId) {
+    let mut pending = vec![(source, replacement)];
+    while let Some((source, replacement)) = pending.pop() {
+        let consumers = graph
+            .nodes
+            .iter()
+            .filter_map(|(node, definition)| match &definition.kind {
+                ENode::Pure {
+                    op: PureOp::Project { index },
+                    operands,
+                } if operands.as_slice() == [source] => Some((node, *index, definition.ty.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (project, index, ty) in consumers {
+            let Some(selected) = graph.try_algebraic_fold(&PureOp::Project { index }, &[replacement], &ty)
+            else {
+                continue;
+            };
+            if selected == project {
+                continue;
+            }
+            graph.subsume_pure_in_place(project, selected);
+            pending.push((project, selected));
+        }
+    }
 }
 
 /// Replace the result of an effect-classified call with a cloned pure callee

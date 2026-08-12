@@ -11347,7 +11347,32 @@ entry main(input: [1]u32) ([1]u32, [1]([2]u32)) =
                 "fused unzip helper constructs only its final ([2]u32, u32) result"
             );
 
-            crate::lower_ssa_to_wgsl(ssa).expect("simplified unzip/map aggregate lowers to WGSL");
+            let entry = ssa.entry_points.iter().find(|entry| entry.name == "main").expect("main entry");
+            assert_eq!(
+                entry
+                    .body
+                    .inner
+                    .insts
+                    .values()
+                    .filter(|inst| matches!(
+                        inst.data,
+                        crate::ssa::types::InstKind::Op {
+                            tag: crate::op::OpTag::Tuple(_),
+                            ..
+                        }
+                    ))
+                    .count(),
+                0,
+                "entry stores projected unzip components directly without repacking the helper result"
+            );
+
+            let wgsl =
+                crate::lower_ssa_to_wgsl(ssa).expect("simplified unzip/map aggregate lowers to WGSL");
+            let main = wgsl.split("fn main(").nth(1).expect("WGSL main body");
+            assert!(
+                !main.lines().any(|line| line.contains(": T") && line.contains(" = T")),
+                "WGSL entry must not construct the final aggregate carrier:\n{wgsl}"
+            );
         })
         .expect("spawn unzip/map aggregate-projection regression")
         .join()
