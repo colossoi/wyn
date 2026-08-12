@@ -1000,6 +1000,44 @@ entry collision_shape_3d(dest: *[64][64]u32) ([64][64]u32, [64]u32, u32) =
 }
 
 #[test]
+fn bucket_scatter_accepts_named_constant_destination_dimensions() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+def BUCKETS = 1i32
+def CAPACITY = 4i32
+
+entry scatter_with_named_shape(
+    dest: *[BUCKETS][CAPACITY]u32
+) ([BUCKETS][CAPACITY]u32, [BUCKETS]u32, u32) =
+  let items = map(|i: i32| (0i32, u32.i32(i)), iota(CAPACITY)) in
+  bucket_scatter_1d(dest, items)
+"#;
+
+            let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+                compile_to_semantic_egir(source),
+                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+            ))
+            .expect("named bucket dimensions lower to WGSL");
+            let module = naga::front::wgsl::parse_str(&wgsl).unwrap_or_else(|error| {
+                panic!("Naga rejected named-dimension bucket WGSL: {error:?}\n{wgsl}")
+            });
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| {
+                panic!("Naga validation rejected named-dimension bucket WGSL: {error:?}\n{wgsl}")
+            });
+        })
+        .expect("spawn named-dimension bucket regression")
+        .join()
+        .expect("named-dimension bucket regression panicked");
+}
+
+#[test]
 fn wgsl_lowering_retains_the_pipeline_descriptor() {
     let source = r#"
 entry descriptor_for_wgsl(dest: *[2][4]u32) ([2][4]u32, [2]u32, u32) =
@@ -10898,6 +10936,130 @@ fn view_through_nested_fn_specialization_reads_own_buffer() {
     "#;
     let lowered = crate::compile_thru_spirv(src).expect("nested view specialization compiles");
     assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
+}
+
+/// A fixed array large enough for storage enters EGIR as a view even though
+/// its source-level named-helper ABI was composite. That view representation
+/// must cross both lifted-map capture boundaries and the final ordinary call
+/// into `leaf`; otherwise WGSL passes a `vec2<u32>` view handle to a helper
+/// expecting `array<array<u32, 64>, 64>`.
+#[test]
+fn fixed_view_through_two_named_helpers_emits_valid_wgsl() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+def leaf(table: [64][64]u32, index: i32) u32 = table[0][index]
+def expand(seed: [2]u32, table: [64][64]u32) [4]u32 =
+  map(|i: i32| seed[i / 2i32] + leaf(table, i), iota(4))
+entry nested_view(
+    roots: [4][2]u32,
+    table: [64][64]u32
+) [4][4]u32 =
+  map(|i: i32| expand(roots[i], table), iota(4))
+"#;
+
+            let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+                compile_to_semantic_egir(source),
+                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+            ))
+            .expect("nested fixed storage view lowers to WGSL");
+            let leaf_signature =
+                wgsl.lines().find(|line| line.starts_with("fn w_leaf")).expect("leaf helper is emitted");
+            assert!(
+                leaf_signature.contains("w_table: vec2<u32>"),
+                "leaf must retain the storage-view ABI:\n{wgsl}"
+            );
+            let module = naga::front::wgsl::parse_str(&wgsl)
+                .unwrap_or_else(|error| panic!("Naga rejected nested-view WGSL: {error:?}\n{wgsl}"));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("Naga validation rejected nested-view WGSL: {error:?}\n{wgsl}"));
+        })
+        .expect("spawn nested-view WGSL regression")
+        .join()
+        .expect("nested-view WGSL regression panicked");
+}
+
+/// A directly nested index into a ranked storage view must remain an address
+/// chain through the selected leaf. Loading after the first coordinate copies
+/// the complete row into function-local storage before selecting one scalar.
+#[test]
+fn ranked_storage_index_loads_only_the_selected_leaf() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+entry main(roots: [1][1024]u32) [1]u32 =
+  [roots[0][7i32]]
+"#;
+
+            let ssa = lower_semantic_egir(
+                compile_to_semantic_egir(source),
+                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+            );
+            let entry = ssa.entry_points.iter().find(|entry| entry.name == "main").expect("main entry");
+            let mut view_places = Vec::new();
+            let mut place_indices = Vec::new();
+            let mut load_places = Vec::new();
+            let mut array_loads = 0;
+            for inst in entry.body.inner.insts.values() {
+                match &inst.data {
+                    crate::ssa::types::InstKind::ViewIndex { result, .. } => view_places.push(*result),
+                    crate::ssa::types::InstKind::PlaceIndex { place, result, .. } => {
+                        place_indices.push((*result, *place));
+                    }
+                    crate::ssa::types::InstKind::Load { place } => {
+                        load_places.push(*place);
+                        let result = inst.result.expect("Load has a result");
+                        if matches!(
+                            entry.body.get_value_type(result),
+                            polytype::Type::Constructed(crate::ast::TypeName::Array, _)
+                        ) {
+                            array_loads += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(load_places.len(), 1, "ranked read performs one final leaf Load");
+            assert_eq!(array_loads, 0, "ranked read must not load an intermediate row");
+            let (_, parent_place) = place_indices
+                .iter()
+                .find(|(result, _)| *result == load_places[0])
+                .expect("the leaf Load reads through a PlaceIndex");
+            assert!(
+                view_places.contains(parent_place),
+                "the leaf PlaceIndex must extend the input ViewIndex"
+            );
+
+            let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("ranked storage index lowers to WGSL");
+            assert!(
+                !wgsl.lines().any(|line| line.contains("var ") && line.contains(": array<u32, 1024>")),
+                "WGSL must not materialize the complete row in a local variable:\n{wgsl}"
+            );
+            assert!(
+                wgsl.lines().any(|line| line.contains(": u32 = _buf_0_0[") && line.contains("][")),
+                "WGSL scalar load must index both storage coordinates directly:\n{wgsl}"
+            );
+
+            let module = naga::front::wgsl::parse_str(&wgsl)
+                .unwrap_or_else(|error| panic!("Naga rejected ranked-index WGSL: {error:?}\n{wgsl}"));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| {
+                panic!("Naga validation rejected ranked-index WGSL: {error:?}\n{wgsl}")
+            });
+        })
+        .expect("spawn ranked-storage-index regression")
+        .join()
+        .expect("ranked-storage-index regression panicked");
 }
 
 /// A view used directly as a `map` *input* (→ the entry walker

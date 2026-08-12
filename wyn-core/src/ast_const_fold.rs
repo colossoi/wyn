@@ -9,6 +9,7 @@
 //! literal bounds:
 //! - inline i32 constants: `def N = 256; 0..<N` → `0..<256` → `Size(256)`
 //! - fold integer arithmetic: `0..<(2 + 4)` → `0..<6` → `Size(6)`
+//! - resolve named type dimensions: `[N]u32` → `[256]u32`
 //!
 //! It is deliberately limited to **i32** constants, because array sizes are
 //! i32. A u32/i64 constant can never be a size, and inlining one as a bare
@@ -19,7 +20,7 @@
 use crate::ast::UnaryOp;
 use crate::ast::{
     Decl, Declaration, EntryDecl, ExprKind, Expression, IfExpr, LetInExpr, LoopExpr, LoopForm, MatchExpr,
-    Program, RangeExpr, Type, TypeName,
+    Pattern, PatternKind, Program, RangeExpr, Type, TypeName,
 };
 use crate::op::{BinaryOperator, UnaryOperator};
 use crate::LookupMap;
@@ -64,7 +65,7 @@ impl AstConstFolder {
     ///
     /// Two passes:
     /// 1. Collect top-level constant definitions (parameterless defs with integer values)
-    /// 2. Fold and inline in all expressions
+    /// 2. Fold and inline in expressions and type dimensions
     pub fn fold_program(&mut self, program: &mut crate::resolve_resources::ResourcesResolved) {
         // First pass: collect top-level constant definitions
         for decl in &program.declarations {
@@ -96,13 +97,37 @@ impl AstConstFolder {
         match decl {
             Declaration::Decl(d) => self.fold_decl(d),
             Declaration::Entry(e) => self.fold_entry_decl(e),
-            // Uniform, Sig, TypeBind, ModuleBind, etc. don't contain expressions to fold
-            _ => {}
+            Declaration::Extern(e) => {
+                self.fold_type(&mut e.data.ty, &e.data.size_params);
+            }
+            Declaration::Frontend(frontend) => match frontend {
+                crate::ast::ResourcesResolvedFrontend::Sig(sig) => {
+                    self.fold_type(&mut sig.ty, &sig.size_params);
+                }
+                crate::ast::ResourcesResolvedFrontend::TypeBind(bind) => {
+                    let bound_sizes = bind
+                        .type_params
+                        .iter()
+                        .filter_map(|param| match param {
+                            crate::ast::TypeParam::Size(name) => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    self.fold_type(&mut bind.definition, &bound_sizes);
+                }
+                crate::ast::ResourcesResolvedFrontend::Open(_) => {}
+            },
         }
     }
 
     fn fold_decl(&mut self, d: &mut Decl) {
-        self.fold_expr(&mut d.body);
+        for param in &mut d.params {
+            self.fold_pattern(param, &d.size_params);
+        }
+        if let Some(ty) = &mut d.ty {
+            self.fold_type(ty, &d.size_params);
+        }
+        self.fold_expr_scoped(&mut d.body, &d.size_params);
     }
 
     fn fold_entry_decl(
@@ -113,12 +138,91 @@ impl AstConstFolder {
             crate::interface::ResolvedAttribute,
         >,
     ) {
-        self.fold_expr(&mut e.body);
+        for param in &mut e.params {
+            self.fold_pattern(param, &e.size_params);
+        }
+        for output in &mut e.data.syntax.outputs {
+            self.fold_type(&mut output.ty, &e.size_params);
+        }
+        self.fold_expr_scoped(&mut e.body, &e.size_params);
+    }
+
+    /// Replace named type dimensions with static sizes when they refer to a
+    /// known top-level i32 constant. Declaration size parameters and
+    /// existential binders take precedence over constants with the same name.
+    fn fold_type(&self, ty: &mut Type, bound_sizes: &[String]) {
+        let Type::Constructed(name, args) = ty else {
+            return;
+        };
+
+        if let TypeName::SizeVar(size_name) = name {
+            if !bound_sizes.contains(size_name) {
+                if let Some(size) =
+                    self.constants.get(size_name).and_then(|value| usize::try_from(*value).ok())
+                {
+                    *name = TypeName::Size(size);
+                }
+            }
+        }
+
+        match name {
+            TypeName::Sum(variants) => {
+                for (_, payload) in variants {
+                    for payload_ty in payload {
+                        self.fold_type(payload_ty, bound_sizes);
+                    }
+                }
+                for arg in args {
+                    self.fold_type(arg, bound_sizes);
+                }
+            }
+            TypeName::Existential(vars) => {
+                let mut nested_bound_sizes = bound_sizes.to_vec();
+                nested_bound_sizes.extend(vars.iter().cloned());
+                for arg in args {
+                    self.fold_type(arg, &nested_bound_sizes);
+                }
+            }
+            _ => {
+                for arg in args {
+                    self.fold_type(arg, bound_sizes);
+                }
+            }
+        }
+    }
+
+    fn fold_pattern<A>(&self, pattern: &mut Pattern<crate::ast::SourceTree, A>, bound_sizes: &[String]) {
+        match &mut pattern.kind {
+            PatternKind::Tuple(patterns)
+            | PatternKind::Vec(patterns)
+            | PatternKind::Constructor(_, patterns) => {
+                for pattern in patterns {
+                    self.fold_pattern(pattern, bound_sizes);
+                }
+            }
+            PatternKind::Record(fields) => {
+                for field in fields {
+                    if let crate::ast::RecordPatternTarget::Pattern(pattern) = &mut field.target {
+                        self.fold_pattern(pattern, bound_sizes);
+                    }
+                }
+            }
+            PatternKind::Typed(inner, ty) => {
+                self.fold_pattern(inner, bound_sizes);
+                self.fold_type(ty, bound_sizes);
+            }
+            PatternKind::Attributed(_, inner) => self.fold_pattern(inner, bound_sizes),
+            PatternKind::Name(_) | PatternKind::Wildcard | PatternKind::Literal(_) | PatternKind::Unit => {}
+        }
     }
 
     /// Recursively fold constants in an expression.
     /// Modifies the expression in place.
     pub fn fold_expr(&mut self, expr: &mut Expression) {
+        self.fold_expr_scoped(expr, &[]);
+    }
+
+    fn fold_expr_scoped(&mut self, expr: &mut Expression, bound_sizes: &[String]) {
         match &mut expr.kind {
             ExprKind::IntLiteral(_)
             | ExprKind::FloatLiteral(_)
@@ -138,8 +242,8 @@ impl AstConstFolder {
             }
 
             ExprKind::BinaryOp(ref op, ref mut lhs, ref mut rhs) => {
-                self.fold_expr(lhs);
-                self.fold_expr(rhs);
+                self.fold_expr_scoped(lhs, bound_sizes);
+                self.fold_expr_scoped(rhs, bound_sizes);
                 // Try to fold after children are folded
                 if let Some(val) = self.try_fold_binop(&op.op, lhs, rhs) {
                     expr.kind = ExprKind::IntLiteral(val.to_string().into());
@@ -150,7 +254,7 @@ impl AstConstFolder {
             }
 
             ExprKind::UnaryOp(op, operand) => {
-                self.fold_expr(operand);
+                self.fold_expr_scoped(operand, bound_sizes);
                 // Try to fold after child is folded
                 if let Some(val) = self.try_fold_unaryop(&op.op, operand) {
                     expr.kind = ExprKind::IntLiteral(val.to_string().into());
@@ -159,105 +263,114 @@ impl AstConstFolder {
 
             ExprKind::ArrayLiteral(elements) | ExprKind::VecMatLiteral(elements) => {
                 for elem in elements {
-                    self.fold_expr(elem);
+                    self.fold_expr_scoped(elem, bound_sizes);
                 }
             }
 
             ExprKind::ArrayIndex(arr, idx) => {
-                self.fold_expr(arr);
-                self.fold_expr(idx);
+                self.fold_expr_scoped(arr, bound_sizes);
+                self.fold_expr_scoped(idx, bound_sizes);
             }
 
             ExprKind::ArrayWith {
                 array, index, value, ..
             } => {
-                self.fold_expr(array);
-                self.fold_expr(index);
-                self.fold_expr(value);
+                self.fold_expr_scoped(array, bound_sizes);
+                self.fold_expr_scoped(index, bound_sizes);
+                self.fold_expr_scoped(value, bound_sizes);
             }
 
             ExprKind::VecWith { target, value, .. } => {
-                self.fold_expr(target);
-                self.fold_expr(value);
+                self.fold_expr_scoped(target, bound_sizes);
+                self.fold_expr_scoped(value, bound_sizes);
             }
 
             ExprKind::RecordWith { record, value, .. } => {
-                self.fold_expr(record);
-                self.fold_expr(value);
+                self.fold_expr_scoped(record, bound_sizes);
+                self.fold_expr_scoped(value, bound_sizes);
             }
 
             ExprKind::Tuple(elements) => {
                 for elem in elements {
-                    self.fold_expr(elem);
+                    self.fold_expr_scoped(elem, bound_sizes);
                 }
             }
 
             ExprKind::Constructor(_, args) => {
                 for arg in args {
-                    self.fold_expr(arg);
+                    self.fold_expr_scoped(arg, bound_sizes);
                 }
             }
 
             ExprKind::RecordLiteral(fields) => {
                 for (_name, value) in fields {
-                    self.fold_expr(value);
+                    self.fold_expr_scoped(value, bound_sizes);
                 }
             }
 
             ExprKind::Lambda(lambda) => {
-                self.fold_expr(&mut lambda.body);
+                for param in &mut lambda.params {
+                    self.fold_pattern(param, bound_sizes);
+                }
+                self.fold_expr_scoped(&mut lambda.body, bound_sizes);
             }
 
             ExprKind::Application(func, args) => {
-                self.fold_expr(func);
+                self.fold_expr_scoped(func, bound_sizes);
                 for arg in args {
-                    self.fold_expr(arg);
+                    self.fold_expr_scoped(arg, bound_sizes);
                 }
             }
 
             ExprKind::LetIn(let_in) => {
-                self.fold_let_in(let_in);
+                self.fold_let_in(let_in, bound_sizes);
             }
 
             ExprKind::FieldAccess(obj, _field) => {
-                self.fold_expr(obj);
+                self.fold_expr_scoped(obj, bound_sizes);
             }
 
             ExprKind::If(if_expr) => {
-                self.fold_if(if_expr);
+                self.fold_if(if_expr, bound_sizes);
             }
 
             ExprKind::Loop(loop_expr) => {
-                self.fold_loop(loop_expr);
+                self.fold_loop(loop_expr, bound_sizes);
             }
 
             ExprKind::Match(match_expr) => {
-                self.fold_match(match_expr);
+                self.fold_match(match_expr, bound_sizes);
             }
 
             ExprKind::Range(range) => {
-                self.fold_range(range);
+                self.fold_range(range, bound_sizes);
             }
 
             ExprKind::Slice(slice) => {
-                self.fold_expr(&mut slice.array);
+                self.fold_expr_scoped(&mut slice.array, bound_sizes);
                 if let Some(start) = &mut slice.start {
-                    self.fold_expr(start);
+                    self.fold_expr_scoped(start, bound_sizes);
                 }
                 if let Some(end) = &mut slice.end {
-                    self.fold_expr(end);
+                    self.fold_expr_scoped(end, bound_sizes);
                 }
             }
 
-            ExprKind::TypeAscription(inner, _) | ExprKind::TypeCoercion(inner, _) => {
-                self.fold_expr(inner);
+            ExprKind::TypeAscription(inner, ty) | ExprKind::TypeCoercion(inner, ty) => {
+                self.fold_expr_scoped(inner, bound_sizes);
+                self.fold_type(ty, bound_sizes);
             }
         }
     }
 
-    fn fold_let_in(&mut self, let_in: &mut LetInExpr) {
+    fn fold_let_in(&mut self, let_in: &mut LetInExpr, bound_sizes: &[String]) {
+        self.fold_pattern(&mut let_in.pattern, bound_sizes);
+        if let Some(ty) = &mut let_in.ty {
+            self.fold_type(ty, bound_sizes);
+        }
+
         // Fold the value first
-        self.fold_expr(&mut let_in.value);
+        self.fold_expr_scoped(&mut let_in.value, bound_sizes);
 
         // Check if this introduces a constant
         // For simplicity, only handle simple name patterns
@@ -277,7 +390,7 @@ impl AstConstFolder {
         }
 
         // Fold the body
-        self.fold_expr(&mut let_in.body);
+        self.fold_expr_scoped(&mut let_in.body, bound_sizes);
 
         // Remove the temporary binding (it's scoped to this let)
         if let Some((name, _)) = const_binding {
@@ -285,40 +398,47 @@ impl AstConstFolder {
         }
     }
 
-    fn fold_if(&mut self, if_expr: &mut IfExpr) {
-        self.fold_expr(&mut if_expr.condition);
-        self.fold_expr(&mut if_expr.then_branch);
-        self.fold_expr(&mut if_expr.else_branch);
+    fn fold_if(&mut self, if_expr: &mut IfExpr, bound_sizes: &[String]) {
+        self.fold_expr_scoped(&mut if_expr.condition, bound_sizes);
+        self.fold_expr_scoped(&mut if_expr.then_branch, bound_sizes);
+        self.fold_expr_scoped(&mut if_expr.else_branch, bound_sizes);
     }
 
-    fn fold_loop(&mut self, loop_expr: &mut LoopExpr) {
+    fn fold_loop(&mut self, loop_expr: &mut LoopExpr, bound_sizes: &[String]) {
+        self.fold_pattern(&mut loop_expr.pattern, bound_sizes);
         if let Some(init) = &mut loop_expr.init {
-            self.fold_expr(init);
+            self.fold_expr_scoped(init, bound_sizes);
         }
         match &mut loop_expr.form {
-            LoopForm::For(_var, bound) => {
-                self.fold_expr(bound);
+            LoopForm::For(var, bound) => {
+                self.fold_pattern(var, bound_sizes);
+                self.fold_expr_scoped(bound, bound_sizes);
             }
-            LoopForm::ForIn(_pat, iter) => {
-                self.fold_expr(iter);
+            LoopForm::ForIn(pattern, iter) => {
+                self.fold_pattern(pattern, bound_sizes);
+                self.fold_expr_scoped(iter, bound_sizes);
             }
             LoopForm::While(cond) => {
-                self.fold_expr(cond);
+                self.fold_expr_scoped(cond, bound_sizes);
             }
         }
-        self.fold_expr(&mut loop_expr.body);
+        self.fold_expr_scoped(&mut loop_expr.body, bound_sizes);
     }
 
-    fn fold_match(&mut self, match_expr: &mut MatchExpr) {
-        self.fold_expr(&mut match_expr.scrutinee);
+    fn fold_match(&mut self, match_expr: &mut MatchExpr, bound_sizes: &[String]) {
+        self.fold_expr_scoped(&mut match_expr.scrutinee, bound_sizes);
         for case in &mut match_expr.cases {
-            self.fold_expr(&mut case.body);
+            self.fold_pattern(&mut case.pattern, bound_sizes);
+            self.fold_expr_scoped(&mut case.body, bound_sizes);
         }
     }
 
-    fn fold_range(&mut self, range: &mut RangeExpr) {
-        self.fold_expr(&mut range.start);
-        self.fold_expr(&mut range.end);
+    fn fold_range(&mut self, range: &mut RangeExpr, bound_sizes: &[String]) {
+        self.fold_expr_scoped(&mut range.start, bound_sizes);
+        if let Some(step) = &mut range.step {
+            self.fold_expr_scoped(step, bound_sizes);
+        }
+        self.fold_expr_scoped(&mut range.end, bound_sizes);
     }
 
     /// Whether a constant is an i32, and therefore eligible to inline as a

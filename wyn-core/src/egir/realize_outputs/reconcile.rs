@@ -16,7 +16,8 @@
 //!     from their operands so the aggregate reflects the view (`Record([view])`).
 //!   * **Call boundaries.** A `Seg` body capture — the record `w` passed to a
 //!     downstream `map`, or a bare array read by another `map` — binds a callee
-//!     parameter. The parameter type must equal the argument type, so retype the
+//!     parameter. Ordinary named-function arguments are call boundaries too.
+//!     The parameter type must equal the argument type, so retype the
 //!     callee (its callable `Func` and the body's `FuncParam` node) and
 //!     re-propagate inside the callee. An `Index` over a
 //!     view — bare or projected out of a record parameter — then lowers as a
@@ -28,7 +29,7 @@ use super::super::from_tlc::ConvertError;
 use super::super::ir::{Body, BodySite, ProgramShape};
 use super::super::program::{Func, Program};
 use super::super::types::{
-    EGraph, ENode, NodeId, PureOp, RegionId, SideEffectKind, SoacEffect, WynSoacPhase,
+    EGraph, ENode, EffectOp, NodeId, PureOp, RegionId, SideEffectKind, SoacEffect, WynSoacPhase,
 };
 use crate::ast::TypeName;
 
@@ -86,16 +87,35 @@ where
     Ok(program)
 }
 
-/// Scan every `Seg` body in `graphs` for a capture whose type has drifted
-/// view-ward from the callee parameter it binds, pushing a retype for each.
+/// Scan every `Seg` body and direct named call in `graphs` for an argument
+/// whose type has drifted view-ward from the callee parameter it binds,
+/// pushing a retype for each.
 fn collect_drifts<'a, P: WynSoacPhase + 'a>(
     graphs: impl Iterator<Item = &'a EGraph<P>>,
     functions: &[Func<P>],
     out: &mut Vec<Retype>,
 ) {
     for graph in graphs {
+        for (_, node) in &graph.nodes {
+            let ENode::Pure {
+                op: PureOp::Call(region),
+                operands,
+            } = &node.kind
+            else {
+                continue;
+            };
+            collect_call_drifts(graph, functions, *region, operands, out);
+        }
+
         for (_, block) in &graph.skeleton.blocks {
             for se in &block.side_effects {
+                if let SideEffectKind::Effect(EffectOp::Op {
+                    tag: crate::op::OpTag::Call(region),
+                }) = &se.kind
+                {
+                    collect_call_drifts(graph, functions, *region, &se.operand_nodes, out);
+                }
+
                 let SideEffectKind::Soac(SoacEffect(_, soac)) = &se.kind else {
                     continue;
                 };
@@ -128,6 +148,34 @@ fn collect_drifts<'a, P: WynSoacPhase + 'a>(
                     }
                 }
             }
+        }
+    }
+}
+
+fn collect_call_drifts<P: WynSoacPhase>(
+    graph: &EGraph<P>,
+    functions: &[Func<P>],
+    region: RegionId,
+    arguments: &[NodeId],
+    out: &mut Vec<Retype>,
+) {
+    let Some(callee) = functions.iter().find(|function| function.region == region) else {
+        return;
+    };
+    for (param_index, &argument) in arguments.iter().enumerate() {
+        let Some(arg_ty) = graph.nodes.get(argument).map(|node| &node.ty) else {
+            continue;
+        };
+        let Some(param_ty) = callee.params.get(param_index).map(|(ty, _)| ty) else {
+            continue;
+        };
+        if is_view_ward_drift(param_ty, arg_ty) {
+            out.push(Retype {
+                region,
+                name: callee.name.clone(),
+                param_index,
+                arg_ty: arg_ty.clone(),
+            });
         }
     }
 }

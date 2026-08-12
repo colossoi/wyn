@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOp, ExprKind, Expression, Header, Identifier, NodeId, Span};
+use crate::ast::{BinaryOp, ExprKind, Expression, Header, Identifier, NodeId, Span, Type, TypeName};
 use crate::ast_const_fold::AstConstFolder;
 use crate::op::{BinaryOperator, UnaryOperator};
 
@@ -38,6 +38,58 @@ fn make_float(n: f32) -> Expression {
         h: test_header(),
         kind: ExprKind::FloatLiteral(n),
     }
+}
+
+fn size_var(name: &str) -> Type {
+    Type::Constructed(TypeName::SizeVar(name.to_string()), vec![])
+}
+
+#[test]
+fn test_fold_named_sizes_recursively() {
+    let mut folder = AstConstFolder::new();
+    folder.add_constant("BUCKETS", 1);
+    folder.add_constant("CAPACITY", 4);
+    let mut ty = Type::Constructed(
+        TypeName::Tuple(2),
+        vec![
+            size_var("BUCKETS"),
+            Type::Constructed(TypeName::Tuple(1), vec![size_var("CAPACITY")]),
+        ],
+    );
+
+    folder.fold_type(&mut ty, &[]);
+
+    assert_eq!(
+        ty,
+        Type::Constructed(
+            TypeName::Tuple(2),
+            vec![
+                Type::Constructed(TypeName::Size(1), vec![]),
+                Type::Constructed(
+                    TypeName::Tuple(1),
+                    vec![Type::Constructed(TypeName::Size(4), vec![])]
+                ),
+            ],
+        )
+    );
+}
+
+#[test]
+fn test_fold_named_sizes_respects_size_binders() {
+    let mut folder = AstConstFolder::new();
+    folder.add_constant("N", 4);
+
+    let mut parameter_size = size_var("N");
+    folder.fold_type(&mut parameter_size, &["N".to_string()]);
+    assert_eq!(parameter_size, size_var("N"));
+
+    let mut existential =
+        Type::Constructed(TypeName::Existential(vec!["N".to_string()]), vec![size_var("N")]);
+    folder.fold_type(&mut existential, &[]);
+    assert_eq!(
+        existential,
+        Type::Constructed(TypeName::Existential(vec!["N".to_string()]), vec![size_var("N")])
+    );
 }
 
 #[test]

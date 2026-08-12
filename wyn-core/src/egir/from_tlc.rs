@@ -1118,10 +1118,23 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// Intern a pure node, attaching the current term's span (if any).
     /// Use in preference to `self.graph.intern_pure` so spans flow through.
     fn intern_pure(&mut self, op: PureOp, operands: SmallVec<[NodeId; 4]>, ty: Type<TypeName>) -> NodeId {
+        self.intern_pure_at(op, operands, ty, self.current_span)
+    }
+
+    /// Intern a pure node with an explicit source span. Index-spine lowering
+    /// uses this to retain the span of each nested source index while handling
+    /// the complete spine in one conversion step.
+    fn intern_pure_at(
+        &mut self,
+        op: PureOp,
+        operands: SmallVec<[NodeId; 4]>,
+        ty: Type<TypeName>,
+        span: Option<Span>,
+    ) -> NodeId {
         if let Some(folded) = self.graph.try_algebraic_fold(&op, &operands, &ty) {
             return folded;
         }
-        self.graph.intern_pure(op, operands, ty, self.current_span)
+        self.graph.intern_pure(op, operands, ty, span)
     }
 
     fn alloc_effect(&mut self) -> EffectToken {
@@ -1177,6 +1190,78 @@ impl<'a, 'b> Converter<'a, 'b> {
         let result = self.convert_term_kind(term, ty);
         self.current_span = saved_span;
         result
+    }
+
+    /// Convert a directly nested source index expression as one address chain.
+    ///
+    /// Recursively converting `view[i][j]` would convert `view[i]` first and
+    /// therefore emit a `Load` of the complete row before the outer `[j]` is
+    /// visible. Keep the nested indices together instead: composite values use
+    /// ordinary `Index` nodes, while the first index into a storage view starts
+    /// a `ViewIndex` place and every remaining coordinate extends that place
+    /// with `PlaceIndex`. Only the final selected value is loaded.
+    ///
+    /// This applies only to a syntactically direct index spine. If an
+    /// intermediate row escapes through a let binding, its standalone index is
+    /// still converted normally and materialized as a value.
+    fn convert_index_spine(
+        &mut self,
+        term: &Term,
+        final_ty: Type<TypeName>,
+    ) -> Result<NodeId, ConvertError> {
+        let mut levels = SmallVec::<[(&Term, Type<TypeName>, Span); 4]>::new();
+        let mut root = term;
+        while let TermKind::Index { array, index } = &root.kind {
+            levels.push((index.as_ref(), root.ty.clone(), root.span));
+            root = array.as_ref();
+        }
+        levels.reverse();
+
+        let mut value = self.convert_term(root)?;
+        let mut current_ty = self.graph.nodes[value].ty.clone();
+        let mut place = None;
+
+        for (index, result_ty, span) in levels {
+            let index = self.convert_term(index)?;
+            if let Some(parent_place) = place {
+                let next_place = self.intern_pure_at(
+                    PureOp::PlaceIndex,
+                    smallvec![parent_place, index],
+                    result_ty.clone(),
+                    Some(span),
+                );
+                place = Some(next_place);
+            } else if current_ty.array_variant().is_some_and(crate::types::is_array_variant_view) {
+                let next_place = self.intern_pure_at(
+                    PureOp::ViewIndex,
+                    smallvec![value, index],
+                    result_ty.clone(),
+                    Some(span),
+                );
+                place = Some(next_place);
+            } else {
+                value = self.intern_pure_at(
+                    PureOp::Index,
+                    smallvec![value, index],
+                    result_ty.clone(),
+                    Some(span),
+                );
+            }
+            current_ty = result_ty;
+        }
+
+        if let Some(place) = place {
+            Ok(super::graph_ops::emit_load(
+                &mut self.graph,
+                self.current_block,
+                place,
+                final_ty,
+                self.effect_ids,
+                Some(term.span),
+            ))
+        } else {
+            Ok(value)
+        }
     }
 
     fn convert_term_kind(&mut self, term: &Term, ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
@@ -1266,35 +1351,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 let base = self.convert_term(tuple)?;
                 Ok(self.intern_pure(PureOp::Project { index: *idx as u32 }, smallvec![base], ty))
             }
-            TermKind::Index { array, index } => {
-                let base = self.convert_term(array)?;
-                let idx = self.convert_term(index)?;
-                // View-variant arrays index via OpAccessChain into the
-                // backing storage buffer — `Materialize + DynamicExtract`
-                // (the path the materialize pass would generate for a
-                // pure `Index`) tries to spill the view's `{offset,len}`
-                // struct to a function-local array, which crashes the
-                // SPIR-V backend. Emit `ViewIndex + Load` directly so
-                // the side-effect pipeline handles it.
-                let arr_ty = self.graph.nodes[base].ty.clone();
-                let is_view =
-                    arr_ty.array_variant().map(crate::types::is_array_variant_view).unwrap_or(false);
-                if is_view {
-                    let place_nid = self.intern_pure(PureOp::ViewIndex, smallvec![base, idx], ty.clone());
-                    Ok(super::graph_ops::emit_load(
-                        &mut self.graph,
-                        self.current_block,
-                        place_nid,
-                        ty.clone(),
-                        self.effect_ids,
-                        self.current_span,
-                    ))
-                } else {
-                    // Keep the semantic index explicit. EGIR residency planning
-                    // decides whether its producer needs a storage handoff.
-                    Ok(self.intern_pure(PureOp::Index, smallvec![base, idx], ty))
-                }
-            }
+            TermKind::Index { .. } => self.convert_index_spine(term, ty),
             TermKind::VecLit(parts) => {
                 let operands: SmallVec<[NodeId; 4]> =
                     parts.iter().map(|p| self.convert_term(p)).collect::<Result<_, _>>()?;
