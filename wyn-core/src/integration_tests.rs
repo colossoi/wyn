@@ -11062,6 +11062,101 @@ entry main(roots: [1][1024]u32) [1]u32 =
         .expect("ranked-storage-index regression panicked");
 }
 
+/// View specialization of a mapped helper happens after its source body was
+/// first converted as a composite-array program. Generalizing the helper's
+/// parameter to `View` must also recover the ranked address chain in its body;
+/// otherwise the dynamic leaf coordinate materializes the complete row.
+#[test]
+fn mapped_helper_ranked_storage_index_loads_only_the_selected_leaf() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+def leaf(rows: [1][1024]u32, index: i32) u32 =
+  rows[0][index]
+
+entry main(roots: [1][1024]u32) [4]u32 =
+  map(|index: i32| leaf(roots, index), iota(4))
+"#;
+
+            let ssa = lower_semantic_egir(
+                compile_to_semantic_egir(source),
+                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+            );
+            let helper = ssa
+                .functions
+                .iter()
+                .find(|function| {
+                    function
+                        .body
+                        .inner
+                        .insts
+                        .values()
+                        .any(|inst| matches!(inst.data, crate::ssa::types::InstKind::PlaceIndex { .. }))
+                })
+                .expect("mapped helper contains the recovered ranked place chain");
+            let mut view_places = Vec::new();
+            let mut place_indices = Vec::new();
+            let mut load_places = Vec::new();
+            let mut array_loads = 0;
+            for inst in helper.body.inner.insts.values() {
+                match &inst.data {
+                    crate::ssa::types::InstKind::ViewIndex { result, .. } => view_places.push(*result),
+                    crate::ssa::types::InstKind::PlaceIndex { place, result, .. } => {
+                        place_indices.push((*result, *place));
+                    }
+                    crate::ssa::types::InstKind::Load { place } => {
+                        load_places.push(*place);
+                        let result = inst.result.expect("Load has a result");
+                        if matches!(
+                            helper.body.get_value_type(result),
+                            polytype::Type::Constructed(crate::ast::TypeName::Array, _)
+                        ) {
+                            array_loads += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(load_places.len(), 1, "mapped helper performs one final leaf Load");
+            assert_eq!(array_loads, 0, "mapped helper must not load an intermediate row");
+            let (_, parent_place) = place_indices
+                .iter()
+                .find(|(result, _)| *result == load_places[0])
+                .expect("mapped helper's leaf Load reads through PlaceIndex");
+            assert!(
+                view_places.contains(parent_place),
+                "mapped helper's leaf PlaceIndex extends its specialized ViewIndex"
+            );
+
+            let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("mapped ranked storage index lowers to WGSL");
+            assert!(
+                !wgsl.lines().any(|line| line.contains("var ") && line.contains(": array<u32, 1024>")),
+                "mapped-helper WGSL must not materialize the complete row:\n{wgsl}"
+            );
+            assert!(
+                wgsl.lines().any(|line| line.contains(": u32 = _buf_0_0[") && line.contains("][")),
+                "mapped-helper WGSL scalar load must index both storage coordinates directly:\n{wgsl}"
+            );
+            let module = naga::front::wgsl::parse_str(&wgsl)
+                .unwrap_or_else(|error| panic!("Naga rejected mapped-helper WGSL: {error:?}\n{wgsl}"));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| {
+                panic!("Naga validation rejected mapped-helper WGSL: {error:?}\n{wgsl}")
+            });
+
+            crate::compile_thru_spirv(source)
+                .expect("mapped helper's storage-rooted PlaceIndex chain lowers to valid SPIR-V");
+        })
+        .expect("spawn mapped-helper ranked-index regression")
+        .join()
+        .expect("mapped-helper ranked-index regression panicked");
+}
+
 /// A view used directly as a `map` *input* (→ the entry walker
 /// `rewrite_term` / SOAC-input path, not a capture) must read from its buffer.
 #[test]

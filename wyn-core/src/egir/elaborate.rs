@@ -19,7 +19,7 @@ use crate::ssa::types::{
     BlockId, Constant, ControlHeader, EntryPoint, FuncBody, Function, InstKind, PlaceId, Program, ValueId,
     ValueRef,
 };
-use crate::types::ExternDecl;
+use crate::types::{ExternDecl, TypeExt};
 use crate::{BindingRef, EntryId, LookupMap, ResourceAccess};
 use polytype::Type;
 use smallvec::SmallVec;
@@ -545,6 +545,95 @@ impl<'a> Elaborator<'a> {
         place
     }
 
+    /// Recover a direct `Index(...Index(view, i)..., j)` spine after
+    /// representation specialization has changed its root to a storage view.
+    /// Each entry is `(index-result node, coordinate node)` in base-to-leaf
+    /// order. Stopping at the first view-typed base preserves any value
+    /// operations that precede the storage address chain.
+    fn view_index_spine(&self, nid: NodeId) -> Option<(NodeId, SmallVec<[(NodeId, NodeId); 4]>)> {
+        let mut steps = SmallVec::<[(NodeId, NodeId); 4]>::new();
+        let mut current = self.resolve(nid);
+        loop {
+            let ENode::Pure {
+                op: PureOp::Index,
+                operands,
+            } = &self.graph.nodes[current].kind
+            else {
+                return None;
+            };
+            if operands.len() != 2 {
+                return None;
+            }
+            let base = self.resolve(operands[0]);
+            let index = self.resolve(operands[1]);
+            steps.push((current, index));
+            if self.graph.nodes[base].ty.array_variant().is_some_and(crate::types::is_array_variant_view) {
+                steps.reverse();
+                return Some((base, steps));
+            }
+            current = base;
+        }
+    }
+
+    /// Elaborate a view-rooted index spine as one address calculation followed
+    /// by one leaf load. This is the late counterpart of TLC index-spine
+    /// lowering: it handles helper parameters that become views only after
+    /// call/capture representation reconciliation.
+    fn demand_view_index_spine(
+        &mut self,
+        view_node: NodeId,
+        steps: SmallVec<[(NodeId, NodeId); 4]>,
+    ) -> (ValueId, SkelBlockId) {
+        let result_node = steps.last().expect("view index spine has at least one coordinate").0;
+        let (view, view_placed) = self.demand_placed(view_node);
+        let index_values = steps
+            .iter()
+            .map(|(_, index)| self.demand_placed(*index))
+            .collect::<SmallVec<[(ValueId, SkelBlockId); 4]>>();
+        let mut operand_placements = SmallVec::<[(ValueId, SkelBlockId); 4]>::new();
+        operand_placements.push((view, view_placed));
+        operand_placements.extend(index_values.iter().copied());
+        let placed = self.choose_placement(&operand_placements);
+        let out_bid = self.block_map[&placed];
+
+        let mut place = None;
+        for ((step_node, _), (index, _)) in steps.iter().zip(&index_values) {
+            let next = self.builder.new_place(self.graph.nodes[*step_node].ty.clone());
+            let kind = if let Some(parent) = place {
+                InstKind::PlaceIndex {
+                    place: parent,
+                    index: ValueRef::Ssa(*index),
+                    result: next,
+                }
+            } else {
+                InstKind::ViewIndex {
+                    view: ValueRef::Ssa(view),
+                    index: ValueRef::Ssa(*index),
+                    result: next,
+                }
+            };
+            self.builder.func_mut().append_void_inst_with_span(
+                out_bid,
+                kind,
+                self.graph.nodes[*step_node].span,
+            );
+            place = Some(next);
+        }
+
+        let ty = self.graph.nodes[result_node].ty.clone();
+        let span = self.graph.nodes[result_node].span;
+        let value = self.emit_at(
+            placed,
+            InstKind::Load {
+                place: place.expect("view index spine produced a leaf place"),
+            },
+            ty,
+            span,
+        );
+        self.record_placement(result_node, value, placed);
+        (value, placed)
+    }
+
     /// Demand a node and return both the ValueId and the skeleton block it
     /// was placed in.
     fn demand_placed(&mut self, nid: NodeId) -> (ValueId, SkelBlockId) {
@@ -567,6 +656,11 @@ impl<'a> Elaborator<'a> {
                 (vid, placed)
             }
             ENode::Pure { op, operands } => {
+                if matches!(op, PureOp::Index) {
+                    if let Some((view, steps)) = self.view_index_spine(resolved) {
+                        return self.demand_view_index_spine(view, steps);
+                    }
+                }
                 if matches!(
                     op,
                     PureOp::ViewIndex | PureOp::PlaceIndex | PureOp::OutputSlot { .. }

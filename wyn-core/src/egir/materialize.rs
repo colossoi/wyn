@@ -13,12 +13,12 @@
 //! Two `Index` nodes with the same array share a single `Materialize` node
 //! via hash-consing, so we don't need a separate dedup step either.
 //!
-//! Storage-view arrays are exempt: they are memory-backed already, so
-//! `lower_index` reads them with a dynamic `OpAccessChain` into the backing
-//! buffer (`lower_view_index`). Spilling a view to a Function-local composite
-//! and `DynamicExtract`ing it would both be wrong (a runtime-sized view has no
-//! in-register form) and invalid SPIR-V (a dynamic index into that spilled
-//! struct). Only in-register composites need the rewrite.
+//! Storage-view arrays and index spines rooted in them are exempt: they are
+//! memory-backed already, so elaboration retains their coordinates as one
+//! address chain into the backing buffer. Spilling an intermediate row to a
+//! Function-local composite would both lose that chain and copy data that the
+//! source never selected. Only genuinely in-register composites need the
+//! rewrite.
 
 use smallvec::smallvec;
 
@@ -68,7 +68,7 @@ fn run_one_body<P: Family>(graph: &mut EGraph<P>) {
             } if operands.len() == 2 => {
                 let arr = operands[0];
                 let idx = operands[1];
-                if is_const_int(graph, idx) || is_view(graph, arr) {
+                if is_const_int(graph, idx) || index_spine_reaches_view(graph, nid) {
                     None
                 } else {
                     Some((nid, arr, idx))
@@ -101,6 +101,31 @@ fn is_view<P: Family>(graph: &EGraph<P>, nid: NodeId) -> bool {
             Some(Type::Constructed(TypeName::ArrayVariantView, _))
         )
     })
+}
+
+/// True when `nid` is an `Index` whose base chain eventually reaches a
+/// storage view without crossing any non-index value operation. View
+/// specialization can happen after TLC → EGIR conversion, leaving a helper
+/// body shaped as `Index(Index(view, row), column)`. The outer base has a
+/// composite row type, but materializing it would destroy the storage address
+/// chain before elaboration has a chance to recover it.
+fn index_spine_reaches_view<P: Family>(graph: &EGraph<P>, mut nid: NodeId) -> bool {
+    loop {
+        let Some(ENode::Pure {
+            op: PureOp::Index,
+            operands,
+        }) = graph.nodes.get(nid).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        let Some(&base) = operands.first() else {
+            return false;
+        };
+        if is_view(graph, base) {
+            return true;
+        }
+        nid = base;
+    }
 }
 
 /// Is this NodeId a compile-time integer constant? Includes both the inline

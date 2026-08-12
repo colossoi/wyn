@@ -29,6 +29,10 @@ pub(super) struct LowerCtx<'a, 'b> {
     /// Populated by place-producing instructions (`OutputSlot`,
     /// `ViewIndex`, `Alloca`) and read by `Load` / `Store`.
     pub(super) place_ptr_id: LookupMap<crate::ssa::types::PlaceId, spirv::Word>,
+    /// Storage class of each place pointer. `PlaceIndex` must inherit this
+    /// from its parent: view-rooted place chains address `StorageBuffer` (or
+    /// `Workgroup`) memory, while local materializations use `Function`.
+    pub(super) place_storage_class: LookupMap<crate::ssa::types::PlaceId, spirv::StorageClass>,
     /// Span of the instruction currently being lowered (set by `lower_inst`).
     /// Consumed via `blame_span()` so backend errors blame the source line of
     /// the originating expression.
@@ -63,6 +67,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             phi_inputs: Vec::new(),
             workgroup_view: LookupMap::new(),
             place_ptr_id: LookupMap::new(),
+            place_storage_class: LookupMap::new(),
             current_span: None,
             func_span,
             param_ids,
@@ -607,6 +612,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let elem_spirv_ty = self.constructor.polytype_to_spirv(elem_ty);
                 let ptr = self.constructor.declare_variable("_alloca", elem_spirv_ty)?;
                 self.place_ptr_id.insert(*result, ptr);
+                self.place_storage_class.insert(*result, spirv::StorageClass::Function);
                 // Void instruction — no value result; return a harmless dummy.
                 self.constructor.const_i32(0)
             }
@@ -733,6 +739,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         [actual_index],
                     )?;
                     self.place_ptr_id.insert(*result, ptr);
+                    self.place_storage_class.insert(*result, spirv::StorageClass::Workgroup);
                     return Ok(());
                 }
 
@@ -753,6 +760,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     [zero, actual_index],
                 )?;
                 self.place_ptr_id.insert(*result, ptr);
+                self.place_storage_class.insert(*result, spirv::StorageClass::StorageBuffer);
                 // Void instruction.
                 self.constructor.const_i32(0)
             }
@@ -766,11 +774,18 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let index_id = self.get_value_ref(*index)?;
                 let place_elem = self.body.place_elem_ty(*result).clone();
                 let elem_ty_id = self.constructor.polytype_to_spirv(&place_elem);
-                let elem_ptr_type =
-                    self.constructor.get_or_create_ptr_type(spirv::StorageClass::Function, elem_ty_id);
+                let storage_class = self.place_storage_class.get(place).copied().ok_or_else(|| {
+                    err_spirv_at!(
+                        self.blame_span(),
+                        "PlaceIndex: parent place {:?} has no storage-class provenance",
+                        place
+                    )
+                })?;
+                let elem_ptr_type = self.constructor.get_or_create_ptr_type(storage_class, elem_ty_id);
                 let ptr =
                     self.constructor.builder.access_chain(elem_ptr_type, None, base_ptr, [index_id])?;
                 self.place_ptr_id.insert(*result, ptr);
+                self.place_storage_class.insert(*result, storage_class);
                 // Void instruction.
                 self.constructor.const_i32(0)
             }
@@ -788,6 +803,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
                 let ptr = self.constructor.current_entry_outputs[*index];
                 self.place_ptr_id.insert(*result, ptr);
+                self.place_storage_class.insert(*result, spirv::StorageClass::Output);
                 // Void instruction.
                 self.constructor.const_i32(0)
             }
