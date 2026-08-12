@@ -8245,6 +8245,41 @@ entry test(in_arr: []f32) []f32 =
     assert_spirv_call_arities_match(&bytes);
 }
 
+/// A fixed-size fallback built with `replicate` must stay an array producer,
+/// not become a function-typed capture on the lifted outer map. The latter
+/// used to leave `_w_lambda_1` higher-order and panic in the post-DCE HOF
+/// verifier. The large storage captures mirror proof recovery in Equihash.
+#[test]
+fn nested_map_with_large_storage_captures_and_replicate_lowers() {
+    let src = r#"
+def recover_one(root: [2]u32,
+                r0: [262144][24]u32, r1: [262144][24]u32,
+                r2: [262144][24]u32, r3: [262144][24]u32,
+                r4: [262144][24]u32, r5: [262144][24]u32,
+                r6: [262144][24]u32, r7: [262144][24]u32) (u32, [512]u32) =
+  let leaves = map(|i: i32|
+    root[i % 2i32]
+    + r0[0][0] + r1[0][0] + r2[0][0] + r3[0][0]
+    + r4[0][0] + r5[0][0] + r6[0][0] + r7[0][0],
+    iota(512))
+  in (1u32, leaves)
+
+entry recover_shape(roots: [1][1024][2]u32,
+                    count: [1]u32,
+                    r0: [262144][24]u32, r1: [262144][24]u32,
+                    r2: [262144][24]u32, r3: [262144][24]u32,
+                    r4: [262144][24]u32, r5: [262144][24]u32,
+                    r6: [262144][24]u32, r7: [262144][24]u32)
+                    ([1024]u32, [1024][512]u32) =
+  unzip(map(|i: i32|
+    if i < i32.u32(count[0])
+    then recover_one(roots[0][i], r0, r1, r2, r3, r4, r5, r6, r7)
+    else (0u32, replicate(512, 0u32)),
+    iota(1024)))
+"#;
+    compile_to_spirv(src).expect("proof-recovery map shape should compile without a HOF panic");
+}
+
 // =============================================================================
 // Sum-type lowering integration tests
 // =============================================================================

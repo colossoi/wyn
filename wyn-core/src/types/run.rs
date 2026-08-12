@@ -306,6 +306,7 @@ fn materialize_expression(
                     })?,
                 },
                 ResolvedValueRef::Soac(kind) => ast::IdentifierResolution::Soac(match kind {
+                    crate::name_resolution::SoacKind::Replicate => ast::SoacKind::Replicate,
                     crate::name_resolution::SoacKind::Map => ast::SoacKind::Map,
                     crate::name_resolution::SoacKind::Reduce => ast::SoacKind::Reduce,
                     crate::name_resolution::SoacKind::Scan => ast::SoacKind::Scan,

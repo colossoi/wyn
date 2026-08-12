@@ -255,6 +255,49 @@ def use_it(y: i32) i32 = map(y)
     }
 }
 
+#[test]
+fn replicate_lowers_to_a_map_over_a_range() {
+    let program = compile_to_tlc_raw("entry fill() [4]u32 = replicate(4, 7u32)");
+    let body = find_def_body(&program, "fill");
+    let TermKind::Let { rhs, body: map, .. } = &body.kind else {
+        panic!(
+            "replicate should bind its value before the map, got {:?}",
+            body.kind
+        );
+    };
+    assert!(matches!(&rhs.kind, TermKind::IntLit(value) if value == "7"));
+    let TermKind::Soac(SoacOp::Map { lam, inputs, .. }) = &map.kind else {
+        panic!("replicate should lower to a map, got {:?}", map.kind);
+    };
+    assert_eq!(lam.lam.params.len(), 1);
+    assert!(matches!(lam.lam.body.kind, TermKind::Var(VarRef::Symbol(_))));
+    assert!(matches!(
+        inputs.as_slice(),
+        [ArrayExpr::Range { start, len, step: None }]
+            if matches!(start.kind, TermKind::IntLit(ref value) if value == "0")
+                && matches!(len.kind, TermKind::IntLit(ref value) if value == "4")
+    ));
+}
+
+#[test]
+fn user_def_shadowing_replicate_is_a_normal_call() {
+    let program = compile_to_tlc_raw(
+        r#"
+def replicate(x: i32) i32 = x
+def use_it(y: i32) i32 = replicate(y)
+"#,
+    );
+    let body = find_def_body(&program, "use_it");
+    let call = match &body.kind {
+        TermKind::Lambda(lam) => &lam.body,
+        other => panic!("expected `use_it` to be a Lambda, got {:?}", other),
+    };
+    assert!(matches!(
+        &call.kind,
+        TermKind::App { func, .. } if matches!(func.kind, TermKind::Var(VarRef::Symbol(_)))
+    ));
+}
+
 /// Walk a let-chain body to the first `scatter` SOAC.
 fn find_scatter(mut t: &Term) -> &SoacOp {
     loop {

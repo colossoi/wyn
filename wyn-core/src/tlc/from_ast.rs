@@ -935,6 +935,7 @@ impl<'a> Transformer<'a> {
         span: Span,
     ) -> Term {
         match kind {
+            ast::SoacKind::Replicate => self.transform_replicate(args, ty, span),
             ast::SoacKind::Map => self.transform_soac_map(args, ty, span),
             ast::SoacKind::Reduce => self.transform_soac_reduce(args, ty, span),
             ast::SoacKind::Scan => self.transform_soac_scan(args, ty, span),
@@ -944,6 +945,61 @@ impl<'a> Transformer<'a> {
             ast::SoacKind::Scatter => self.transform_soac_scatter(args, ty, span),
             ast::SoacKind::BucketScatter(rank) => self.transform_soac_bucket_scatter(args, ty, span, rank),
         }
+    }
+
+    /// Transform `replicate(n, value)` into a map over the index range
+    /// `[0, n)`. Binding `value` outside the map preserves ordinary argument
+    /// evaluation and makes nested-array replication an explicit capture
+    /// instead of recomputing its producer in every logical work item.
+    fn transform_replicate(
+        &mut self,
+        args: &[ast::Expression<ast::HolesResolvedTree>],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        assert_eq!(args.len(), 2, "replicate requires 2 arguments");
+        let size = self.transform_expr(&args[0]);
+        let value = self.transform_expr(&args[1]);
+        let value_ty = value.ty.clone();
+        let value_name = self.fresh("_w_replicate_value");
+        let value_ref = self.mk_term(
+            value_ty.clone(),
+            value.span,
+            TermKind::Var(VarRef::Symbol(value_name)),
+        );
+        let index_ty = Type::Constructed(TypeName::Int(32), vec![]);
+        let index = self.fresh("_w_replicate_index");
+        let zero = self.mk_term(index_ty.clone(), span, TermKind::IntLit("0".into()));
+        let map = self.mk_term(
+            ty.clone(),
+            span,
+            TermKind::Soac(SoacOp::Map {
+                lam: SoacBody {
+                    lam: Lambda {
+                        params: vec![(index, index_ty)],
+                        body: Box::new(value_ref),
+                        ret_ty: value_ty.clone(),
+                    },
+                    data: (),
+                },
+                inputs: vec![ArrayExpr::Range {
+                    start: Box::new(zero),
+                    len: Box::new(size),
+                    step: None,
+                }],
+                destination: SoacOwnership::Fresh,
+            }),
+        );
+        self.mk_term(
+            ty,
+            span,
+            TermKind::Let {
+                name: value_name,
+                name_ty: value_ty,
+                rhs: Box::new(value),
+                body: Box::new(map),
+            },
+        )
     }
 
     /// Convert a transformed array-argument term into an ANF SOAC input. A bare

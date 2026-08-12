@@ -309,6 +309,7 @@ pub fn resolve_decl(
 /// mistaken for the SOAC by a downstream string match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SoacKind {
+    Replicate,
     Map,
     Reduce,
     Scan,
@@ -323,6 +324,7 @@ impl SoacKind {
     /// The SOAC denoted by an unqualified identifier, if it names one.
     pub fn from_name(name: &str) -> Option<SoacKind> {
         Some(match name {
+            "replicate" => SoacKind::Replicate,
             "map" => SoacKind::Map,
             "reduce" => SoacKind::Reduce,
             "scan" => SoacKind::Scan,

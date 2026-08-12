@@ -317,6 +317,7 @@ pub struct TypedIdentifier {
 /// Which second-order array combinator a resolved identifier denotes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SoacKind {
+    Replicate,
     Map,
     Reduce,
     Scan,
