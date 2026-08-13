@@ -1214,6 +1214,7 @@ impl<'a> LowerCtx<'a> {
         let mut body_ctx = BodyLowerCtx::new(self, body, func.span);
         for (value_id, emitted_name) in param_names {
             body_ctx.declared.insert(emitted_name.clone());
+            body_ctx.addressable.insert(emitted_name.clone());
             body_ctx.value_map.insert(value_id, ValueBinding::Alias(emitted_name));
         }
         let result = body_ctx.lower(output)?;
@@ -1688,15 +1689,38 @@ impl ValueBinding {
     }
 }
 
+fn is_scalar_literal(inst: &WynInstNode) -> bool {
+    matches!(
+        inst.data,
+        InstKind::Op {
+            tag: crate::op::OpTag::Int(_)
+                | crate::op::OpTag::Uint(_)
+                | crate::op::OpTag::Float(_)
+                | crate::op::OpTag::Bool(_),
+            ..
+        }
+    )
+}
+
 struct BodyLowerCtx<'a, 'b> {
     ctx: &'a mut LowerCtx<'b>,
     body: &'a FuncBody,
     /// Emitted WGSL expression (or var name) per ValueId, tagged with
     /// its value category (rvalue-safe alias vs. lvalue place).
     value_map: LookupMap<ValueId, ValueBinding>,
-    /// Set of addressable function parameters and names declared with
-    /// `let`/`var` in the current scope.
+    /// Names already introduced with a parameter, `let`, or `var` in
+    /// the current scope.
     declared: LookupSet<String>,
+    /// Names that can be used as addressable storage. Ordinary SSA
+    /// results are immutable `let` bindings and deliberately absent.
+    addressable: LookupSet<String>,
+    /// Addressable names that can also appear on the left-hand side of
+    /// an assignment. Function parameters are addressable but immutable.
+    writable: LookupSet<String>,
+    /// SSA values whose storage is updated by `array_with_in_place`.
+    /// These must be introduced with `var`, even though SSA itself does
+    /// not reassign the ValueId.
+    needs_mutable_binding: LookupSet<ValueId>,
     /// Workgroup view name (`_wg_<id>`) keyed by `StorageView` result ValueId.
     /// Storage views recover their buffer name from the type's region; only
     /// workgroup views (whose `_wg_<id>` isn't in any type) need this.
@@ -1723,11 +1747,28 @@ struct BodyLowerCtx<'a, 'b> {
 
 impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     fn new(ctx: &'a mut LowerCtx<'b>, body: &'a FuncBody, func_span: Span) -> Self {
+        let array_with_in_place = catalog().known().array_with_in_place;
+        let needs_mutable_binding = body
+            .inner
+            .insts
+            .iter()
+            .filter_map(|(_, inst)| match &inst.data {
+                InstKind::Op {
+                    tag: crate::op::OpTag::Intrinsic { id, .. },
+                    operands,
+                } if *id == array_with_in_place => operands.first()?.as_ssa(),
+                _ => None,
+            })
+            .filter(|value| !is_view_array_ty(body.get_value_type(*value)))
+            .collect();
         Self {
             ctx,
             body,
             value_map: LookupMap::new(),
             declared: LookupSet::new(),
+            addressable: LookupSet::new(),
+            writable: LookupSet::new(),
+            needs_mutable_binding,
             workgroup_view_name: LookupMap::new(),
             place_targets: LookupMap::new(),
             uses_output_ptrs: false,
@@ -1745,6 +1786,19 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 .is_some_and(|binding| self.ctx.atomic_bindings.contains(&binding)),
             _ => false,
         })
+    }
+
+    fn emit_ssa_binding(&mut self, output: &mut String, result: ValueId, ty: &str, expr: &str) {
+        let var = wgsl_var(result);
+        if self.needs_mutable_binding.contains(&result) {
+            writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, expr).unwrap();
+            self.addressable.insert(var.clone());
+            self.writable.insert(var.clone());
+        } else {
+            writeln!(output, "{}let {}: {} = {};", self.ctx.indent_str(), var, ty, expr).unwrap();
+        }
+        self.declared.insert(var.clone());
+        self.value_map.insert(result, ValueBinding::Alias(var));
     }
     /// Resolve a ValueRef to a compile-time integer, if possible. Returns
     /// None for runtime values. Used by storage-intrinsic dispatch where
@@ -2074,7 +2128,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             }
             let mangled = self.ctx.mangle_tracked(name)?;
             self.value_map.insert(value_id, ValueBinding::Alias(mangled.clone()));
-            self.declared.insert(mangled);
+            self.declared.insert(mangled.clone());
+            self.addressable.insert(mangled);
         }
 
         // Structured walk via the shared structurize pass.
@@ -2103,6 +2158,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             let var = wgsl_place(*result);
                             writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty).unwrap();
                             self.declared.insert(var.clone());
+                            self.addressable.insert(var.clone());
+                            self.writable.insert(var.clone());
                             self.place_targets.insert(*result, var);
                             continue;
                         }
@@ -2158,8 +2215,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         }
 
                         // Load: materialize the place's current value
-                        // into a cached `var` so subsequent uses go
-                        // through a stable binding.
+                        // into a stable binding. It remains immutable
+                        // unless an in-place array update consumes it.
                         InstKind::Load { place } => {
                             let result_id = inst.result.ok_or_else(|| {
                                 crate::err_wgsl_at!(self.blame_span(), "Load must have a result")
@@ -2178,18 +2235,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             };
                             let ty =
                                 self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
-                            let var = wgsl_var(result_id);
-                            writeln!(
-                                output,
-                                "{}var {}: {} = {};",
-                                self.ctx.indent_str(),
-                                var,
-                                ty,
-                                target
-                            )
-                            .unwrap();
-                            self.declared.insert(var.clone());
-                            self.value_map.insert(result_id, ValueBinding::Alias(var));
+                            self.emit_ssa_binding(output, result_id, &ty, &target);
                             continue;
                         }
 
@@ -2315,6 +2361,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             let var = wgsl_var(result_id);
                             writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty).unwrap();
                             self.declared.insert(var.clone());
+                            self.addressable.insert(var.clone());
+                            self.writable.insert(var.clone());
                             self.value_map.insert(result_id, ValueBinding::Alias(var));
                             continue;
                         }
@@ -2353,19 +2401,66 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 crate::err_wgsl_at!(self.blame_span(), "{} must have a result", func_name)
                             })?;
                             if is_inplace {
-                                let target = match operands[0].as_ssa() {
+                                let view_target = match operands[0].as_ssa() {
                                     Some(array_id)
                                         if is_view_array_ty(self.body.get_value_type(array_id)) =>
                                     {
                                         let buffer_name = self.view_buffer_name(array_id)?;
-                                        format!("{}[(i32(({}).x)) + (i32({}))]", buffer_name, arr_src, idx)
+                                        Some(format!(
+                                            "{}[(i32(({}).x)) + (i32({}))]",
+                                            buffer_name, arr_src, idx
+                                        ))
                                     }
-                                    _ => format!("{}[{}]", arr_src, idx),
+                                    _ => None,
                                 };
-                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), target, val).unwrap();
-                                // Alias-only: the result is the
-                                // (now-mutated) source array.
-                                self.value_map.insert(result_id, ValueBinding::Alias(arr_src));
+                                if let Some(target) = view_target {
+                                    writeln!(output, "{}{} = {};", self.ctx.indent_str(), target, val)
+                                        .unwrap();
+                                    self.value_map.insert(result_id, ValueBinding::Alias(arr_src));
+                                } else {
+                                    let writable_alias = operands[0].as_ssa().and_then(|array_id| {
+                                        self.value_map
+                                            .get(&array_id)
+                                            .map(ValueBinding::expr)
+                                            .filter(|name| self.writable.contains(*name))
+                                            .map(str::to_owned)
+                                    });
+                                    let target = if let Some(alias) = writable_alias {
+                                        alias
+                                    } else {
+                                        // Parameters and immutable expressions cannot
+                                        // be updated in place in WGSL. Materialize the
+                                        // logical result as writable storage instead.
+                                        let ty = self
+                                            .ctx
+                                            .type_emitter
+                                            .type_to_wgsl(self.body.get_value_type(result_id))?;
+                                        let var = wgsl_var(result_id);
+                                        writeln!(
+                                            output,
+                                            "{}var {}: {} = {};",
+                                            self.ctx.indent_str(),
+                                            var,
+                                            ty,
+                                            arr_src
+                                        )
+                                        .unwrap();
+                                        self.declared.insert(var.clone());
+                                        self.addressable.insert(var.clone());
+                                        self.writable.insert(var.clone());
+                                        var
+                                    };
+                                    writeln!(
+                                        output,
+                                        "{}{}[{}] = {};",
+                                        self.ctx.indent_str(),
+                                        target,
+                                        idx,
+                                        val
+                                    )
+                                    .unwrap();
+                                    self.value_map.insert(result_id, ValueBinding::Alias(target));
+                                }
                             } else {
                                 let ty = self
                                     .ctx
@@ -2384,6 +2479,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 writeln!(output, "{}{}[{}] = {};", self.ctx.indent_str(), var, idx, val)
                                     .unwrap();
                                 self.declared.insert(var.clone());
+                                self.addressable.insert(var.clone());
+                                self.writable.insert(var.clone());
                                 self.value_map.insert(result_id, ValueBinding::Alias(var));
                             }
                             continue;
@@ -2437,7 +2534,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                         .value_map
                                         .get(&value_id)
                                         .map(ValueBinding::expr)
-                                        .filter(|name| self.declared.contains(*name))
+                                        .filter(|name| self.addressable.contains(*name))
                                         .map(str::to_owned),
                                     ValueRef::Const(_) => None,
                                 };
@@ -2456,6 +2553,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                     )
                                     .unwrap();
                                     self.declared.insert(var.clone());
+                                    self.addressable.insert(var.clone());
+                                    self.writable.insert(var.clone());
                                     self.value_map.insert(result_id, ValueBinding::Alias(var));
                                 }
                             }
@@ -2496,17 +2595,17 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             writeln!(output, "{}{};", self.ctx.indent_str(), expr).unwrap();
                             continue;
                         }
-                        let var = wgsl_var(result);
+                        if is_scalar_literal(inst) {
+                            self.value_map.insert(result, ValueBinding::Alias(expr));
+                            continue;
+                        }
                         let ty = self.ctx.type_emitter.type_to_wgsl(result_ty)?;
-                        writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, expr)
-                            .unwrap();
-                        self.declared.insert(var.clone());
-                        self.value_map.insert(result, ValueBinding::Alias(var));
+                        self.emit_ssa_binding(output, result, &ty, &expr);
                     }
                 }
 
                 Node::Assign { target, value } => {
-                    let val = self.get_value_ref(*value)?;
+                    let val = self.get_value(*value)?;
                     let var = wgsl_var(*target);
                     if self.declared.contains(&var) {
                         writeln!(output, "{}{} = {};", self.ctx.indent_str(), var, val).unwrap();
@@ -2515,6 +2614,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, val)
                             .unwrap();
                         self.declared.insert(var.clone());
+                        self.addressable.insert(var.clone());
+                        self.writable.insert(var.clone());
                     }
                     self.value_map.insert(*target, ValueBinding::Alias(var));
                 }
@@ -2536,16 +2637,18 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(*param))?;
                             writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty).unwrap();
                             self.declared.insert(var.clone());
+                            self.addressable.insert(var.clone());
+                            self.writable.insert(var.clone());
                         }
                         self.value_map.insert(*param, ValueBinding::Alias(var));
                     }
 
-                    let cond_val = self.get_value_ref(*cond)?;
+                    let cond_val = self.get_value(*cond)?;
                     writeln!(output, "{}if {} {{", self.ctx.indent_str(), cond_val).unwrap();
                     self.ctx.indent += 1;
                     self.emit_nodes(then_body, output)?;
                     for (param, arg) in merge_params.iter().zip(then_args.iter()) {
-                        let arg_val = self.get_value_ref(*arg)?;
+                        let arg_val = self.get_value(*arg)?;
                         let var = wgsl_var(*param);
                         writeln!(output, "{}{} = {};", self.ctx.indent_str(), var, arg_val).unwrap();
                     }
@@ -2554,7 +2657,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     self.ctx.indent += 1;
                     self.emit_nodes(else_body, output)?;
                     for (param, arg) in merge_params.iter().zip(else_args.iter()) {
-                        let arg_val = self.get_value_ref(*arg)?;
+                        let arg_val = self.get_value(*arg)?;
                         let var = wgsl_var(*param);
                         writeln!(output, "{}{} = {};", self.ctx.indent_str(), var, arg_val).unwrap();
                     }
@@ -2572,7 +2675,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 } => {
                     // Initialize loop state as `var`.
                     for (var, init) in state_vars.iter().zip(init_args.iter()) {
-                        let init_val = self.get_value_ref(*init)?;
+                        let init_val = self.get_value(*init)?;
                         let var_name = wgsl_var(*var);
                         let ty = self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(*var))?;
                         writeln!(
@@ -2585,6 +2688,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         )
                         .unwrap();
                         self.declared.insert(var_name.clone());
+                        self.addressable.insert(var_name.clone());
+                        self.writable.insert(var_name.clone());
                         self.value_map.insert(*var, ValueBinding::Alias(var_name));
                     }
                     writeln!(output, "{}loop {{", self.ctx.indent_str()).unwrap();
@@ -2604,16 +2709,16 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 self.value_map.insert(result, ValueBinding::Alias(expr));
                                 continue;
                             }
-                            let var = wgsl_var(result);
+                            if is_scalar_literal(inst) {
+                                self.value_map.insert(result, ValueBinding::Alias(expr));
+                                continue;
+                            }
                             let ty =
                                 self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result))?;
-                            writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, expr)
-                                .unwrap();
-                            self.declared.insert(var.clone());
-                            self.value_map.insert(result, ValueBinding::Alias(var));
+                            self.emit_ssa_binding(output, result, &ty, &expr);
                         }
                     }
-                    let cond_val = self.get_value_ref(*cond)?;
+                    let cond_val = self.get_value(*cond)?;
                     if *cond_is_continue {
                         // cond is "continue condition"; break when it's false.
                         writeln!(output, "{}if !({}) {{ break; }}", self.ctx.indent_str(), cond_val)
@@ -2629,7 +2734,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
                 Node::Return(value) => {
                     result_var = match value {
-                        Some(v) => self.get_value_ref(*v)?,
+                        Some(v) => self.get_value(*v)?,
                         None => String::new(),
                     };
                 }

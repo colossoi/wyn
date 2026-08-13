@@ -839,7 +839,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         match term {
             Terminator::Branch { target, args } => {
                 for (param_idx, &arg) in args.iter().enumerate() {
-                    let arg_id = self.get_value(arg)?;
+                    let arg_id = self.get_value_ref(arg)?;
                     self.phi_inputs.push((*target, param_idx, arg_id, current_block));
                 }
 
@@ -854,16 +854,16 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 else_target,
                 else_args,
             } => {
-                let cond_id = self.get_value(*cond)?;
+                let cond_id = self.get_value_ref(*cond)?;
                 let then_label = self.block_map[then_target];
                 let else_label = self.block_map[else_target];
 
                 for (param_idx, &arg) in then_args.iter().enumerate() {
-                    let arg_id = self.get_value(arg)?;
+                    let arg_id = self.get_value_ref(arg)?;
                     self.phi_inputs.push((*then_target, param_idx, arg_id, current_block));
                 }
                 for (param_idx, &arg) in else_args.iter().enumerate() {
-                    let arg_id = self.get_value(arg)?;
+                    let arg_id = self.get_value_ref(arg)?;
                     self.phi_inputs.push((*else_target, param_idx, arg_id, current_block));
                 }
 
@@ -902,7 +902,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                          and must use OutputPtr+Store then ReturnUnit"
                     );
                 }
-                let value_id = self.get_value(*value)?;
+                let value_id = self.get_value_ref(*value)?;
                 self.constructor.builder.ret_value(value_id)?;
             }
 

@@ -24,7 +24,7 @@ fn test_func_body_params() {
             i32_ty(),
         )
         .unwrap();
-    builder.terminate(Terminator::Return(Some(sum))).unwrap();
+    builder.terminate(Terminator::Return(Some(ValueRef::Ssa(sum)))).unwrap();
 
     let body = builder.finish().unwrap();
 

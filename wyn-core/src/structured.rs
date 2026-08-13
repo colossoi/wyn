@@ -8,7 +8,7 @@
 
 use crate::flow::{BlockId, ControlHeader};
 use crate::ssa::framework::InstId;
-use crate::ssa::types::{FuncBody, Terminator, ValueId};
+use crate::ssa::types::{FuncBody, Terminator, ValueId, ValueRef};
 use crate::LookupSet;
 
 /// A node in the structured control flow tree.
@@ -20,11 +20,11 @@ pub enum Node {
     /// `if (cond) { then_body } else { else_body }`
     /// `merge_params` are declared before the if; each branch assigns to them.
     If {
-        cond: ValueId,
+        cond: ValueRef,
         then_body: Vec<Node>,
-        then_args: Vec<ValueId>,
+        then_args: Vec<ValueRef>,
         else_body: Vec<Node>,
-        else_args: Vec<ValueId>,
+        else_args: Vec<ValueRef>,
         merge_params: Vec<ValueId>,
     },
 
@@ -33,11 +33,11 @@ pub enum Node {
         /// Header block params (the loop state variables).
         state_vars: Vec<ValueId>,
         /// Initial values for state vars (from the branch into the loop).
-        init_args: Vec<ValueId>,
+        init_args: Vec<ValueRef>,
         /// Instructions in the header that compute the condition.
         header_insts: Vec<InstId>,
         /// The condition value.
-        cond: ValueId,
+        cond: ValueRef,
         /// Whether the condition is "continue when true" (false = invert).
         cond_is_continue: bool,
         /// The loop body.
@@ -45,12 +45,12 @@ pub enum Node {
     },
 
     /// `return expr;`
-    Return(Option<ValueId>),
+    Return(Option<ValueRef>),
 
     /// Assign a value to a variable (used for loop state updates, etc.).
     Assign {
         target: ValueId,
-        value: ValueId,
+        value: ValueRef,
     },
 }
 
@@ -71,10 +71,10 @@ struct StructCtx<'a> {
 impl<'a> StructCtx<'a> {
     /// Lower starting from a block, producing a sequence of nodes.
     /// `args` are the values to bind to the block's params.
-    fn lower_from(&self, block_id: BlockId, args: &[ValueId]) -> Vec<Node> {
+    fn lower_from(&self, block_id: BlockId, args: &[ValueRef]) -> Vec<Node> {
         let mut nodes = Vec::new();
         let mut current = block_id;
-        let mut current_args: Vec<ValueId> = args.to_vec();
+        let mut current_args: Vec<ValueRef> = args.to_vec();
         let mut visited = LookupSet::new();
 
         loop {
@@ -89,7 +89,7 @@ impl<'a> StructCtx<'a> {
             // Bind block params from args (emit as Assign for non-entry blocks).
             // Textual emitters handle these: first occurrence declares, later assigns.
             for (param, arg) in block.params.iter().zip(current_args.iter()) {
-                if *param != *arg {
+                if ValueRef::Ssa(*param) != *arg {
                     nodes.push(Node::Assign {
                         target: *param,
                         value: *arg,
@@ -165,11 +165,11 @@ impl<'a> StructCtx<'a> {
 
     fn emit_if(
         &self,
-        cond: ValueId,
+        cond: ValueRef,
         then_target: BlockId,
-        then_args: &[ValueId],
+        then_args: &[ValueRef],
         else_target: BlockId,
-        else_args: &[ValueId],
+        else_args: &[ValueRef],
         merge_id: BlockId,
         nodes: &mut Vec<Node>,
     ) {
@@ -192,10 +192,10 @@ impl<'a> StructCtx<'a> {
 
     /// Lower a branch arm, stopping when we reach `stop_at` block.
     /// Returns the body nodes and the args passed to the stop block.
-    fn lower_arm(&self, start: BlockId, args: &[ValueId], stop_at: BlockId) -> (Vec<Node>, Vec<ValueId>) {
+    fn lower_arm(&self, start: BlockId, args: &[ValueRef], stop_at: BlockId) -> (Vec<Node>, Vec<ValueRef>) {
         let mut nodes = Vec::new();
         let mut current = start;
-        let mut current_args: Vec<ValueId> = args.to_vec();
+        let mut current_args: Vec<ValueRef> = args.to_vec();
         let mut visited = LookupSet::new();
         let d = self.depth.get();
         self.depth.set(d + 1);
@@ -219,7 +219,7 @@ impl<'a> StructCtx<'a> {
 
             // Bind block params
             for (param, arg) in block.params.iter().zip(current_args.iter()) {
-                if *param != *arg {
+                if ValueRef::Ssa(*param) != *arg {
                     nodes.push(Node::Assign {
                         target: *param,
                         value: *arg,
@@ -294,7 +294,7 @@ impl<'a> StructCtx<'a> {
     fn emit_loop(
         &self,
         header_id: BlockId,
-        init_args: &[ValueId],
+        init_args: &[ValueRef],
         merge_id: BlockId,
         continue_id: BlockId,
         nodes: &mut Vec<Node>,

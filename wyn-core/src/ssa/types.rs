@@ -116,7 +116,7 @@ impl TerminatorExt for Terminator {
         match self {
             Terminator::Branch { target, args } => Terminator::Branch {
                 target: rb(*target),
-                args: args.iter().copied().map(rv).collect(),
+                args: args.iter().map(|value| value.map_ssa(rv)).collect(),
             },
             Terminator::CondBranch {
                 cond,
@@ -125,13 +125,13 @@ impl TerminatorExt for Terminator {
                 else_target,
                 else_args,
             } => Terminator::CondBranch {
-                cond: rv(*cond),
+                cond: cond.map_ssa(rv),
                 then_target: rb(*then_target),
-                then_args: then_args.iter().copied().map(rv).collect(),
+                then_args: then_args.iter().map(|value| value.map_ssa(rv)).collect(),
                 else_target: rb(*else_target),
-                else_args: else_args.iter().copied().map(rv).collect(),
+                else_args: else_args.iter().map(|value| value.map_ssa(rv)).collect(),
             },
-            Terminator::Return(Some(v)) => Terminator::Return(Some(rv(*v))),
+            Terminator::Return(Some(value)) => Terminator::Return(Some(value.map_ssa(rv))),
             Terminator::Return(None) => Terminator::Return(None),
             Terminator::Unreachable => Terminator::Unreachable,
         }

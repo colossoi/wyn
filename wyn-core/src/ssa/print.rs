@@ -78,10 +78,6 @@ fn fmt_place(p: crate::ssa::types::PlaceId) -> String {
     format!("@{:?}", p)
 }
 
-fn format_values(vals: &[ValueId]) -> String {
-    vals.iter().map(|v| fmt_val(*v)).collect::<Vec<_>>().join(", ")
-}
-
 fn fmt_block(b: BlockId) -> String {
     format!("{:?}", b)
 }
@@ -377,7 +373,7 @@ fn format_terminator(out: &mut String, term: &Terminator) {
             if args.is_empty() {
                 let _ = write!(out, "br {}", fmt_block(*target));
             } else {
-                let _ = write!(out, "br {}({})", fmt_block(*target), format_values(args));
+                let _ = write!(out, "br {}({})", fmt_block(*target), format_refs(args));
             }
         }
         Terminator::CondBranch {
@@ -387,26 +383,20 @@ fn format_terminator(out: &mut String, term: &Terminator) {
             else_target,
             else_args,
         } => {
-            let then_args_str = if then_args.is_empty() {
-                String::new()
-            } else {
-                format!("({})", format_values(then_args))
-            };
-            let else_args_str = if else_args.is_empty() {
-                String::new()
-            } else {
-                format!("({})", format_values(else_args))
-            };
+            let then_args_str =
+                if then_args.is_empty() { String::new() } else { format!("({})", format_refs(then_args)) };
+            let else_args_str =
+                if else_args.is_empty() { String::new() } else { format!("({})", format_refs(else_args)) };
             let _ = write!(
                 out,
                 "br_if {} then {}{then_args_str} else {}{else_args_str}",
-                fmt_val(*cond),
+                format_ref(cond),
                 fmt_block(*then_target),
                 fmt_block(*else_target),
             );
         }
         Terminator::Return(Some(val)) => {
-            let _ = write!(out, "return {}", fmt_val(*val));
+            let _ = write!(out, "return {}", format_ref(val));
         }
         Terminator::Return(None) => {
             let _ = write!(out, "return ()");

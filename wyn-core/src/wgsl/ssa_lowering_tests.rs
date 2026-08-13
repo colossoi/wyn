@@ -332,6 +332,12 @@ entry rotate_and_add(xs: []u32) []u32 =
     assert!(!wgsl.contains("fn _wyn_u64_shl"));
     assert!(wgsl.contains("fn _wyn_u64_shr"));
     assert!(wgsl.contains("vec2<u32>(2309737967u, 19088743u)"));
+    assert!(
+        !wgsl.lines().any(|line| {
+            line.trim_start().starts_with("var v") && line.contains("vec2<u32>(2309737967u, 19088743u)")
+        }),
+        "residual typed literal should be substituted directly at its uses:\n{wgsl}"
+    );
     assert!(wgsl.contains("any("));
 }
 
@@ -691,6 +697,10 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     validate_wgsl(&wgsl);
     assert!(wgsl.contains("@fragment"));
     assert!(wgsl.contains("@location(0)"));
+    assert!(
+        wgsl.lines().any(|line| line.trim_start().starts_with("let v")),
+        "ordinary immutable SSA results should use let bindings:\n{wgsl}"
+    );
 }
 #[test]
 fn size_hint_large_bumps_workgroup_to_256() {

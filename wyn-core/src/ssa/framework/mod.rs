@@ -69,7 +69,7 @@ pub enum ValueDef {
     },
 }
 
-pub type Terminator = crate::flow::Terminator<ValueId>;
+pub type Terminator = crate::flow::Terminator<crate::ssa::types::ValueRef>;
 
 pub type Successors = SmallVec<[BlockId; 2]>;
 

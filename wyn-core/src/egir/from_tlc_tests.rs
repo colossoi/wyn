@@ -4,7 +4,7 @@
 
 use super::{convert_program, ConversionArenas, Converter};
 use crate::ast::TypeName;
-use crate::ssa::types::{FuncBody, InstKind};
+use crate::ssa::types::{ConstantValue, FuncBody, InstKind, ValueRef};
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::VarRef;
 use crate::tlc::{Term, TermKind};
@@ -109,10 +109,14 @@ fn test_int_literal_roundtrip() {
     let body = mk_term(&mut term_ids, i32_ty(), TermKind::IntLit("42".into()));
     let func = convert_simple_def(body, vec![]);
     let entry = func.get_block(func.entry_block());
-    // Should have one Int instruction.
-    assert!(entry.insts.iter().any(|&iid| {
-        matches!(&func.get_inst(iid).data, InstKind::Op { tag: crate::op::OpTag::Int(s), .. } if s == "42")
-    }));
+    assert!(
+        entry.insts.is_empty(),
+        "a representable literal needs no SSA instruction"
+    );
+    assert!(matches!(
+        entry.term,
+        crate::ssa::framework::Terminator::Return(Some(ValueRef::Const(ConstantValue::I32(42))))
+    ));
 }
 
 #[test]
@@ -246,17 +250,35 @@ fn test_gvn_via_let() {
     let func = elaborate_converter(converter, &[], pair_ty);
 
     let entry = func.get_block(func.entry_block());
-    // GVN: should have only ONE Int("42") instruction, not two.
-    let const_count = entry
+    // The hash-consed constant reaches both tuple fields directly; EGIR
+    // elaboration must not expand either occurrence back into an instruction.
+    let tuple_operands = entry
         .insts
         .iter()
-        .filter(|&&iid| matches!(&func.get_inst(iid).data, InstKind::Op { tag: crate::op::OpTag::Int(s), .. } if s == "42"))
-        .count();
+        .find_map(|&iid| match &func.get_inst(iid).data {
+            InstKind::Op {
+                tag: crate::op::OpTag::Tuple(2),
+                operands,
+            } => Some(operands),
+            _ => None,
+        })
+        .expect("tuple construction should remain in SSA");
     assert_eq!(
-        const_count, 1,
-        "GVN should deduplicate: found {} copies of 42",
-        const_count
+        tuple_operands,
+        &[
+            ValueRef::Const(ConstantValue::I32(42)),
+            ValueRef::Const(ConstantValue::I32(42)),
+        ]
     );
+    assert!(!entry.insts.iter().any(|&iid| {
+        matches!(
+            &func.get_inst(iid).data,
+            InstKind::Op {
+                tag: crate::op::OpTag::Int(_),
+                ..
+            }
+        )
+    }));
 }
 
 #[test]

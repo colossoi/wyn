@@ -4279,7 +4279,7 @@ fn assert_phase1_loop_depends_on_thread_id(src: &str) {
         .iter()
         .filter(|(_, block)| matches!(block.control_header, Some(ControlHeader::Loop { .. })))
         .filter_map(|(_, block)| match &block.term {
-            Terminator::CondBranch { cond, .. } => Some(*cond),
+            Terminator::CondBranch { cond, .. } => cond.as_ssa(),
             _ => None,
         })
         .collect();
