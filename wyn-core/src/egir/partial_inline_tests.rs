@@ -220,3 +220,106 @@ fn inlines_fixed_array_parameters_outside_loops() {
     assert_eq!(stats.calls_inlined, 1);
     assert!(matches!(caller.nodes[call].kind, ENode::Union { .. }));
 }
+
+#[test]
+fn inlines_fixed_array_parameters_through_a_selection_cfg() {
+    let scalar = u32_ty();
+    let index_ty = i32_ty();
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let array = fixed_u32_array_ty(4);
+    let region = crate::FunctionId::from_index(0);
+    let mut callee_graph = EGraph::<Physical>::new();
+    let index = callee_graph.add_func_param(0, index_ty.clone());
+    let values = callee_graph.add_func_param(1, array.clone());
+    let materialized =
+        callee_graph.intern_pure(PureOp::Materialize, smallvec![values], array.clone(), None);
+    let element = callee_graph.intern_pure(
+        PureOp::DynamicExtract,
+        smallvec![materialized, index],
+        scalar.clone(),
+        None,
+    );
+    let entry = callee_graph.skeleton.entry;
+    let left = callee_graph.skeleton.create_block();
+    let right = callee_graph.skeleton.create_block();
+    let merge = callee_graph.skeleton.create_block();
+    let zero = callee_graph.intern_constant(ConstantValue::I32(0), index_ty.clone());
+    let condition = callee_graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Equal),
+        smallvec![index, zero],
+        bool_ty,
+        None,
+    );
+    callee_graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
+        cond: condition,
+        then_target: left,
+        then_args: vec![],
+        else_target: right,
+        else_args: vec![],
+    };
+    callee_graph.skeleton.blocks[entry].control_header = Some(ControlHeader::Selection { merge });
+    callee_graph.skeleton.blocks[left].term = SkeletonTerminator::Branch {
+        target: merge,
+        args: vec![element],
+    };
+    let one = callee_graph.intern_constant(ConstantValue::U32(1), scalar.clone());
+    let incremented = callee_graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        smallvec![element, one],
+        scalar.clone(),
+        None,
+    );
+    callee_graph.skeleton.blocks[right].term = SkeletonTerminator::Branch {
+        target: merge,
+        args: vec![incremented],
+    };
+    let selected = callee_graph.add_block_param(merge, scalar.clone());
+    callee_graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(selected));
+    let callee = PhysicalFunc::new(
+        region,
+        "conditional_fixed_array_element".into(),
+        Span::dummy(),
+        None,
+        vec![
+            (index_ty.clone(), "index".into()),
+            (array.clone(), "values".into()),
+        ],
+        scalar.clone(),
+        callee_graph,
+    );
+    let callees = [(region, callee)].into_iter().collect();
+
+    let mut caller = EGraph::<Physical>::new();
+    let actual_index = caller.add_func_param(0, index_ty);
+    let actual_values = caller.add_func_param(1, array);
+    let call = caller.intern_pure(
+        PureOp::Call(region),
+        smallvec![actual_index, actual_values],
+        scalar,
+        None,
+    );
+    caller.skeleton.blocks[caller.skeleton.entry].term = SkeletonTerminator::Return(Some(call));
+
+    let stats = inline_body(&mut caller, &callees).unwrap();
+
+    assert_eq!(stats.calls_inlined, 1);
+    assert_eq!(stats.block_budget, 5);
+    assert!(matches!(
+        caller.nodes[call].kind,
+        ENode::Pure {
+            op: PureOp::Call(_),
+            ..
+        }
+    ));
+    assert!(caller
+        .skeleton
+        .blocks
+        .values()
+        .any(|block| { matches!(block.term, SkeletonTerminator::Return(Some(result)) if result != call) }));
+    assert!(caller
+        .skeleton
+        .blocks
+        .values()
+        .any(|block| matches!(block.control_header, Some(ControlHeader::Selection { .. }))));
+    caller.skeleton.verify_branch_arities().expect("structured fixed-array inline arities");
+}

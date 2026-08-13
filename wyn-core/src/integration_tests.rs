@@ -11303,6 +11303,106 @@ entry main(root: [2]u32, table: [1024][2]u32) [4]u32 =
         .expect("mixed fixed-array/storage-view capture regression panicked");
 }
 
+/// A selection inside the element helper used to block fixed-array capture
+/// propagation. The mapped owner then called a helper that copied `root` by
+/// value in both branches. Structured inlining must splice the selection into
+/// the owner loop and let placement keep its one addressable root copy in the
+/// loop preheader. Exercise both the minimal reproducer and an Equihash-sized
+/// fixed array so profitability does not accidentally scale with type width.
+#[test]
+fn mapped_helper_inlines_fixed_array_capture_through_selection_cfg() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            for width in [2, 256] {
+                let source = format!(
+                    r#"
+def expand(root: [{width}]u32, table: [1024][2]u32) [{width}]u32 =
+  map(|i: i32|
+    let reference = root[i]
+    in if i == 0i32
+       then table[i32.u32(reference)][0]
+       else table[i32.u32(reference)][1],
+    iota({width}))
+
+entry main(roots: [1]([{width}]u32), table: [1024][2]u32) [1]([{width}]u32) =
+  map(|i: i32| expand(roots[i], table), iota(1))
+"#
+                );
+
+                let ssa = lower_semantic_egir(
+                    compile_to_semantic_egir(&source),
+                    crate::LoweringProfile::new(
+                        crate::CodegenTarget::Wgsl,
+                        crate::SchedulePolicy::Parallel,
+                    ),
+                );
+                let owner = ssa
+                    .functions
+                    .iter()
+                    .find(|function| function.name.contains("lambda_1"))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "mapped owner missing for width {width}; functions: {:?}",
+                            ssa.functions.iter().map(|function| &function.name).collect::<Vec<_>>()
+                        )
+                    });
+                assert!(
+                    owner.body.inner.insts.values().all(|inst| !matches!(
+                        inst.data,
+                        crate::ssa::types::InstKind::Op {
+                            tag: crate::op::OpTag::Call(_),
+                            ..
+                        }
+                    )),
+                    "width-{width} owner must not pass root through a per-element helper"
+                );
+                let entry_insts = &owner.body.get_block(owner.body.entry_block()).insts;
+                let materializes = owner
+                    .body
+                    .inner
+                    .insts
+                    .iter()
+                    .filter_map(|(id, inst)| {
+                        matches!(
+                            inst.data,
+                            crate::ssa::types::InstKind::Op {
+                                tag: crate::op::OpTag::Materialize,
+                                ..
+                            }
+                        )
+                        .then_some(id)
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    !materializes.is_empty() && materializes.iter().all(|id| entry_insts.contains(id)),
+                    "width-{width} root materialization must be hoisted outside the owner loop"
+                );
+
+                let wgsl = crate::lower_ssa_to_wgsl(ssa)
+                    .unwrap_or_else(|error| panic!("width-{width} capture lowers to WGSL: {error}"));
+                assert!(
+                    !wgsl.contains("fn w_Uw_Ulambda_U0("),
+                    "width-{width} WGSL must not emit the inlined per-element helper:\n{wgsl}"
+                );
+                let module = naga::front::wgsl::parse_str(&wgsl).unwrap_or_else(|error| {
+                    panic!("Naga rejected width-{width} capture WGSL: {error:?}\n{wgsl}")
+                });
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                )
+                .validate(&module)
+                .unwrap_or_else(|error| {
+                    panic!("Naga validation rejected width-{width} capture WGSL: {error:?}\n{wgsl}")
+                });
+            }
+        })
+        .expect("spawn structured fixed-array capture regression")
+        .join()
+        .expect("structured fixed-array capture regression panicked");
+}
+
 /// `unzip(map(...))` becomes two projected map consumers. Fusion must fold
 /// projections through the inlined producer tuples instead of forwarding the
 /// complete aggregate through nested wrapper tuples.

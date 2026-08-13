@@ -40,8 +40,13 @@ mod partial_inline_tests;
 /// A single inline may expose at most this many callee nodes. This is an
 /// upper bound before caller-side hash-consing, so actual growth is often less.
 const MAX_CALLEE_NODES: usize = 128;
+/// A structured callee may add at most this many blocks, including its return
+/// continuation. Ordinary DAG inlining adds zero blocks.
+const MAX_CALLEE_BLOCKS: usize = 8;
 /// Aggregate per-body upper bound across the fixpoint.
 const MAX_INLINED_NODES: usize = 512;
+/// Aggregate skeleton-growth bound across the fixpoint.
+const MAX_INLINED_BLOCKS: usize = 32;
 /// Independent guard against a long chain of tiny wrappers.
 const MAX_INLINES: usize = 32;
 
@@ -49,6 +54,7 @@ const MAX_INLINES: usize = 32;
 struct InliningStats {
     calls_inlined: usize,
     node_budget: usize,
+    block_budget: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +63,7 @@ struct Candidate {
     block: crate::flow::BlockId,
     callee: crate::FunctionId,
     callee_nodes: usize,
+    callee_blocks: usize,
 }
 
 /// Inline profitable mixed-variance calls in every physical body. The ordinary
@@ -161,15 +168,20 @@ fn inline_body(
     callees: &LookupMap<crate::FunctionId, PhysicalFunc>,
 ) -> Result<InliningStats, String> {
     let mut stats = InliningStats::default();
-    while stats.calls_inlined < MAX_INLINES && stats.node_budget < MAX_INLINED_NODES {
-        let remaining = MAX_INLINED_NODES - stats.node_budget;
-        let Some(candidate) = find_candidate(graph, callees, remaining) else {
+    while stats.calls_inlined < MAX_INLINES
+        && stats.node_budget < MAX_INLINED_NODES
+        && stats.block_budget < MAX_INLINED_BLOCKS
+    {
+        let remaining_nodes = MAX_INLINED_NODES - stats.node_budget;
+        let remaining_blocks = MAX_INLINED_BLOCKS - stats.block_budget;
+        let Some(candidate) = find_candidate(graph, callees, remaining_nodes, remaining_blocks) else {
             break;
         };
         let callee = &callees[&candidate.callee];
         inlining::inline_call_at_block(graph, candidate.call, candidate.block, callee)?;
         stats.calls_inlined += 1;
         stats.node_budget += candidate.callee_nodes;
+        stats.block_budget += candidate.callee_blocks;
     }
     Ok(stats)
 }
@@ -177,7 +189,8 @@ fn inline_body(
 fn find_candidate(
     graph: &EGraph<Physical>,
     callees: &LookupMap<crate::FunctionId, PhysicalFunc>,
-    remaining_budget: usize,
+    remaining_nodes: usize,
+    remaining_blocks: usize,
 ) -> Option<Candidate> {
     // A composite fixed array is an SSA value, so leaving it behind a call
     // boundary passes the complete aggregate by value. Map kernels make this
@@ -213,15 +226,20 @@ fn find_candidate(
             {
                 continue;
             }
-            let Some(callee_nodes) = inlining::inlineable_node_count(callee) else {
+            let Some(cost) = inlining::inlineable_call_cost_at_block(graph, node, block_id, callee) else {
                 continue;
             };
-            if callee_nodes <= MAX_CALLEE_NODES && callee_nodes <= remaining_budget {
+            if cost.nodes <= MAX_CALLEE_NODES
+                && cost.nodes <= remaining_nodes
+                && cost.blocks <= MAX_CALLEE_BLOCKS
+                && cost.blocks <= remaining_blocks
+            {
                 return Some(Candidate {
                     call: node,
                     block: block_id,
                     callee: *callee_name,
-                    callee_nodes,
+                    callee_nodes: cost.nodes,
+                    callee_blocks: cost.blocks,
                 });
             }
         }
@@ -272,17 +290,23 @@ fn find_candidate(
                 {
                     continue;
                 }
-                let Some(callee_nodes) = inlining::inlineable_node_count(callee) else {
+                let Some(cost) = inlining::inlineable_call_cost_at_block(graph, node, block_id, callee)
+                else {
                     continue;
                 };
-                if callee_nodes > MAX_CALLEE_NODES || callee_nodes > remaining_budget {
+                if cost.nodes > MAX_CALLEE_NODES
+                    || cost.nodes > remaining_nodes
+                    || cost.blocks > MAX_CALLEE_BLOCKS
+                    || cost.blocks > remaining_blocks
+                {
                     continue;
                 }
                 return Some(Candidate {
                     call: node,
                     block: block_id,
                     callee: *callee_name,
-                    callee_nodes,
+                    callee_nodes: cost.nodes,
+                    callee_blocks: cost.blocks,
                 });
             }
         }
