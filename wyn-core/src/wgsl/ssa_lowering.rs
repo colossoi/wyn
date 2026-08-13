@@ -1213,6 +1213,7 @@ impl<'a> LowerCtx<'a> {
 
         let mut body_ctx = BodyLowerCtx::new(self, body, func.span);
         for (value_id, emitted_name) in param_names {
+            body_ctx.declared.insert(emitted_name.clone());
             body_ctx.value_map.insert(value_id, ValueBinding::Alias(emitted_name));
         }
         let result = body_ctx.lower(output)?;
@@ -1693,7 +1694,8 @@ struct BodyLowerCtx<'a, 'b> {
     /// Emitted WGSL expression (or var name) per ValueId, tagged with
     /// its value category (rvalue-safe alias vs. lvalue place).
     value_map: LookupMap<ValueId, ValueBinding>,
-    /// Set of names declared with `let`/`var` in the current scope.
+    /// Set of addressable function parameters and names declared with
+    /// `let`/`var` in the current scope.
     declared: LookupSet<String>,
     /// Workgroup view name (`_wg_<id>`) keyed by `StorageView` result ValueId.
     /// Storage views recover their buffer name from the type's region; only
@@ -2387,13 +2389,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             continue;
                         }
 
-                        // Materialize: `var<function> x: T = expr;` so
-                        // the value becomes subscriptable via
-                        // DynamicExtract's `x[i]`. WGSL forbids dynamic
-                        // indexing of `let`-bound values, so this must
-                        // be a `var`. A *constant* array is hoisted once
-                        // to a shared module-scope `var<private>` instead
-                        // of being rebuilt per occurrence.
+                        // Materialize: make a value addressable so
+                        // DynamicExtract can subscript it with `x[i]`.
+                        // Function parameters and previously declared local
+                        // `var`s are already addressable, so alias them rather
+                        // than copying an entire fixed array. A *constant*
+                        // array is still hoisted once to a shared module-scope
+                        // `var<private>`. Only a non-addressable expression
+                        // needs a fresh function-local `var`.
                         InstKind::Op {
                             tag: crate::op::OpTag::Materialize,
                             operands,
@@ -2429,12 +2432,32 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 };
                                 self.value_map.insert(result_id, ValueBinding::Alias(name));
                             } else {
-                                let var = wgsl_var(result_id);
-                                let val = self.get_value(operands[0])?;
-                                writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, val)
+                                let addressable_alias = match operands[0] {
+                                    ValueRef::Ssa(value_id) => self
+                                        .value_map
+                                        .get(&value_id)
+                                        .map(ValueBinding::expr)
+                                        .filter(|name| self.declared.contains(*name))
+                                        .map(str::to_owned),
+                                    ValueRef::Const(_) => None,
+                                };
+                                if let Some(alias) = addressable_alias {
+                                    self.value_map.insert(result_id, ValueBinding::Alias(alias));
+                                } else {
+                                    let var = wgsl_var(result_id);
+                                    let val = self.get_value(operands[0])?;
+                                    writeln!(
+                                        output,
+                                        "{}var {}: {} = {};",
+                                        self.ctx.indent_str(),
+                                        var,
+                                        ty,
+                                        val
+                                    )
                                     .unwrap();
-                                self.declared.insert(var.clone());
-                                self.value_map.insert(result_id, ValueBinding::Alias(var));
+                                    self.declared.insert(var.clone());
+                                    self.value_map.insert(result_id, ValueBinding::Alias(var));
+                                }
                             }
                             continue;
                         }

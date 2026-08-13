@@ -831,6 +831,91 @@ fn wgsl_const_array_dynamic_index_hoists_to_private_global() {
 }
 
 #[test]
+fn wgsl_dynamic_index_reuses_addressable_fixed_array_values() {
+    // Both the captured function parameter and the row extracted from it are
+    // already backed by WGSL references. Materialize must alias those values
+    // instead of producing full-array copies before each dynamic index.
+    let wgsl = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            compile_to_wgsl(
+                r#"
+def expand(root: [2]u32, table: [1024][2]u32) [2]u32 =
+  map(|i: i32|
+    let reference = root[i]
+    in if i == 0i32
+       then table[i32.u32(reference)][0]
+       else table[i32.u32(reference)][1],
+    iota(2))
+
+entry pick(roots: [1]([2]u32), table: [1024][2]u32) [1]([2]u32) =
+  map(|i: i32| expand(roots[i], table), iota(1))
+"#,
+            )
+        })
+        .expect("spawn fixed-array regression compiler thread")
+        .join()
+        .expect("fixed-array regression compiler thread panicked")
+        .expect("compile dynamic indexing of captured fixed arrays");
+
+    validate_wgsl(&wgsl);
+    assert!(
+        wgsl.contains("w_roots[w_i]"),
+        "the dynamic index should address the captured parameter directly:\n{wgsl}"
+    );
+    assert!(
+        !wgsl.lines().any(|line| {
+            line.trim_start().starts_with("var ") && line.contains("array<") && line.contains(" = w_roots;")
+        }),
+        "Materialize must not copy the captured fixed array parameter:\n{wgsl}"
+    );
+}
+
+#[test]
+fn wgsl_distinctness_indexes_512_element_parameter_without_copying_it() {
+    let wgsl = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            compile_to_wgsl(
+                r#"
+def indices_distinct(indices: [512]u32) bool =
+  loop unique = true for i < 512 do
+    let duplicate = loop found = false for j < i do
+      found || indices[i] == indices[j]
+    in unique && !duplicate
+
+entry check(inputs: [1]([512]u32)) [1]u32 =
+  map(|i: i32|
+    if indices_distinct(inputs[i]) then 1u32 else 0u32,
+    iota(1))
+"#,
+            )
+        })
+        .expect("spawn distinctness regression compiler thread")
+        .join()
+        .expect("distinctness regression compiler thread panicked")
+        .expect("compile 512-element distinctness check");
+
+    validate_wgsl(&wgsl);
+    let start = wgsl
+        .find("fn w_indices_Udistinct")
+        .unwrap_or_else(|| panic!("expected a distinctness helper:\n{wgsl}"));
+    let helper_tail = &wgsl[start..];
+    let end = helper_tail
+        .find("\n}\n")
+        .unwrap_or_else(|| panic!("expected the end of the distinctness helper:\n{helper_tail}"));
+    let helper = &helper_tail[..end];
+    assert!(
+        helper.contains("w_indices["),
+        "distinctness should index its parameter directly:\n{helper}"
+    );
+    assert!(
+        !helper.lines().any(|line| line.contains("array<u32, 512> = w_indices;")),
+        "distinctness must not copy its 512-element parameter:\n{helper}"
+    );
+}
+
+#[test]
 fn wgsl_const_array_hoist_is_deduped() {
     // The same constant array indexed at two sites shares one global.
     let wgsl = compile_to_wgsl(
