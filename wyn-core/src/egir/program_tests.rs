@@ -209,14 +209,14 @@ fn physicalization_rebuilds_resource_nodes_as_binding_nodes() {
     let mapped_view = node_map[&view];
     assert!(matches!(
         &physical.nodes[mapped_view].kind,
-        crate::egir::types::ENode::Pure {
+        crate::egir::types::ValueKind::Pure {
             op: crate::egir::types::PureOp::StorageView(crate::op::PureViewSource::Storage(found)),
             ..
         } if *found == binding
     ));
     assert!(physical.nodes.values().all(|node| !matches!(
         &node.kind,
-        crate::egir::types::ENode::Pure {
+        crate::egir::types::ValueKind::Pure {
             op: crate::egir::types::PureOp::ResourceLen(_),
             ..
         }

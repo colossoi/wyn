@@ -9,9 +9,9 @@ pub(super) struct ReduceCandidate {
     pub site: SideEffectSite,
     pub owner: SemanticOpId,
     serial: SerialScremaRecipe,
-    input_views: Vec<(NodeId, Type<TypeName>)>,
+    input_views: Vec<(ValueId, Type<TypeName>)>,
     map_output_view_operands: Vec<usize>,
-    result: NodeId,
+    result: ValueId,
     accumulators: Vec<ReductionAccumulator>,
     phase1_width: u32,
     phase2_width: u32,
@@ -22,9 +22,9 @@ struct ReductionAccumulator {
     component_types: Vec<Type<TypeName>>,
     scratch_type: Type<TypeName>,
     combine_region: RegionId,
-    combine_captures: Vec<NodeId>,
+    combine_captures: Vec<ValueId>,
     capture_inputs: Vec<SemanticResourceDecl>,
-    neutrals: Vec<NodeId>,
+    neutrals: Vec<ValueId>,
     stores: Vec<ReductionOutputStore>,
     outputs: Vec<(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)>,
 }
@@ -36,8 +36,8 @@ pub(super) struct ReductionRouting {
 
 pub(super) struct RoutedReductionStore {
     pub(super) location: (BlockId, usize),
-    pub(super) place: NodeId,
-    pub(super) value: NodeId,
+    pub(super) place: ValueId,
+    pub(super) value: ValueId,
     pub(super) writer: Option<crate::egir::types::EffectToken>,
     accumulators: Vec<usize>,
     output: (ResourceId, Type<TypeName>, crate::egir::program::LogicalSize),
@@ -52,18 +52,18 @@ struct EmissionAccumulator {
     component_types: Vec<Type<TypeName>>,
     scratch_type: Type<TypeName>,
     operator: RegionId,
-    operator_captures: Vec<NodeId>,
+    operator_captures: Vec<ValueId>,
     capture_inputs: Vec<SemanticResourceDecl>,
-    neutrals: Vec<NodeId>,
-    stores: Vec<(NodeId, NodeId)>,
+    neutrals: Vec<ValueId>,
+    stores: Vec<(ValueId, ValueId)>,
     outputs: Vec<(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)>,
     partial: ResourceId,
 }
 
 struct ReductionOutputStore {
     location: (BlockId, usize),
-    place: NodeId,
-    value: NodeId,
+    place: ValueId,
+    value: ValueId,
     writer: Option<crate::egir::types::EffectToken>,
 }
 
@@ -109,7 +109,7 @@ fn analyze_reduction_operators(
 pub(super) fn analyze_reduction_routing(
     entry: &crate::egir::program::PlannedEntry,
     op: &screma::Op<crate::egir::types::Semantic>,
-    result: NodeId,
+    result: ValueId,
     resources: &crate::egir::program::LogicalResourceArena,
 ) -> Option<ReductionRouting> {
     let field_accumulators = op
@@ -187,7 +187,7 @@ pub(super) fn analyze_reduction_routing(
 fn analyze_reduction_accumulators(
     entry: &crate::egir::program::PlannedEntry,
     op: &screma::Op<crate::egir::types::Semantic>,
-    result: NodeId,
+    result: ValueId,
     resources: &crate::egir::program::LogicalResourceArena,
 ) -> Option<Vec<ReductionAccumulator>> {
     let mut accumulators = analyze_reduction_operators(entry, op)?;
@@ -513,12 +513,12 @@ struct ReduceCombineSpec<'a> {
     component_types: &'a [Type<TypeName>],
     elem_ty: Type<TypeName>,
     source_graph: &'a crate::egir::types::EGraph,
-    operator_captures: &'a [NodeId],
+    operator_captures: &'a [ValueId],
     capture_inputs: &'a [SemanticResourceDecl],
-    neutrals: &'a [NodeId],
+    neutrals: &'a [ValueId],
     partials: ResourceId,
-    accumulator_components: &'a [NodeId],
-    output_stores: &'a [(NodeId, NodeId)],
+    accumulator_components: &'a [ValueId],
+    output_stores: &'a [(ValueId, ValueId)],
     output_declarations: &'a [(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)],
     width: u32,
 }
@@ -527,10 +527,10 @@ impl ReduceCombineSpec<'_> {
     fn emit_operator(
         &self,
         graph: &mut EGraph,
-        left: NodeId,
-        right: NodeId,
-        captures: &[NodeId],
-    ) -> NodeId {
+        left: ValueId,
+        right: ValueId,
+        captures: &[ValueId],
+    ) -> ValueId {
         let mut operands = lambda_ops::unpack_results(graph, left, self.component_types);
         operands.extend(lambda_ops::unpack_results(graph, right, self.component_types));
         operands.extend_from_slice(captures);
@@ -545,8 +545,8 @@ impl ReduceCombineSpec<'_> {
     fn emit_tree(
         &self,
         b: &mut crate::egir::builder::EntryBuilder,
-        init_nid: NodeId,
-        operator_captures: &[NodeId],
+        init_nid: ValueId,
+        operator_captures: &[ValueId],
     ) -> Result<(), String> {
         let elem_ty = self.elem_ty.clone();
         let partials_resource = self.partials;

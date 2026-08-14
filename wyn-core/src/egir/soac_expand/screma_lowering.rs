@@ -7,8 +7,8 @@ pub(super) fn emit_screma_lambda(
     graph: &mut EGraph,
     _regions: &ProgramIdentities,
     lambda: &screma::Lambda,
-    mut arguments: Vec<NodeId>,
-) -> Vec<NodeId> {
+    mut arguments: Vec<ValueId>,
+) -> Vec<ValueId> {
     if lambda.is_identity() {
         debug_assert_eq!(arguments.len(), lambda.result_types.len());
         return arguments;
@@ -55,11 +55,11 @@ pub(super) fn build_parallel_screma_map(
     block: BlockId,
     effect_index: usize,
     space: &SegSpace,
-    length_input: (NodeId, Type<TypeName>),
-    read_inputs: &[(NodeId, Type<TypeName>, Type<TypeName>)],
+    length_input: (ValueId, Type<TypeName>),
+    read_inputs: &[(ValueId, Type<TypeName>, Type<TypeName>)],
     pre: &screma::Lambda,
-    output_views: &[NodeId],
-    result_node: NodeId,
+    output_views: &[ValueId],
+    result_node: ValueId,
     next_effect: &mut crate::IdSource<EffectToken>,
     regions: &ProgramIdentities,
 ) {
@@ -69,7 +69,7 @@ pub(super) fn build_parallel_screma_map(
     let after = graph.skeleton.split_block_before_effect(block, effect_index);
     graph.replace_node_preserving_type(
         result_node,
-        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+        ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
     );
     let body = graph.skeleton.create_block();
     let known = catalog().known();

@@ -1,7 +1,7 @@
 //! Tests for cost-arbitrated rewrite rules and their union resolution.
 
 use super::super::extract;
-use super::super::types::{EGraph as GenericEGraph, ENode, NodeId, PureOp};
+use super::super::types::{EGraph as GenericEGraph, PureOp, ValueId, ValueKind};
 use super::default_rewrites;
 use crate::ast::TypeName;
 use crate::ssa::types::ConstantValue;
@@ -22,7 +22,7 @@ fn vec3f32_ty() -> Type<TypeName> {
     crate::types::vec(3, f32_ty())
 }
 
-fn pow(g: &mut EGraph, base: NodeId, exp: ConstantValue, exp_ty: Type<TypeName>) -> NodeId {
+fn pow(g: &mut EGraph, base: ValueId, exp: ConstantValue, exp_ty: Type<TypeName>) -> ValueId {
     let result_ty = g.nodes[base].ty.clone();
     let exp = g.intern_constant(exp, exp_ty);
     g.intern_pure(
@@ -35,13 +35,13 @@ fn pow(g: &mut EGraph, base: NodeId, exp: ConstantValue, exp_ty: Type<TypeName>)
 
 /// Apply the default rules to `node` (asserting one fired) and return
 /// extraction's pick for it.
-fn apply_and_extract(g: &mut EGraph, node: NodeId) -> NodeId {
+fn apply_and_extract(g: &mut EGraph, node: ValueId) -> ValueId {
     assert!(
         default_rewrites().apply_to_node(g, node),
         "expected a rewrite to fire"
     );
     assert!(
-        matches!(g.nodes[node].kind, ENode::Union { .. }),
+        matches!(g.nodes[node].kind, ValueKind::Union { .. }),
         "expected the node to become a union in place"
     );
     let best = extract::extract(g);
@@ -51,14 +51,14 @@ fn apply_and_extract(g: &mut EGraph, node: NodeId) -> NodeId {
 /// Count chained multiplies starting at `nid`. Returns `Some(n)` if the
 /// node is `x * x * … * x` (left-to-right) with `n` total mul ops over
 /// the same base, `None` otherwise.
-fn chain_len_over_same_base(graph: &EGraph, nid: NodeId, base: NodeId) -> Option<usize> {
+fn chain_len_over_same_base(graph: &EGraph, nid: ValueId, base: ValueId) -> Option<usize> {
     let mut current = nid;
     let mut muls = 0usize;
     loop {
         if current == base {
             return Some(muls);
         }
-        let ENode::Pure { op, operands } = &graph.nodes[current].kind else {
+        let ValueKind::Pure { op, operands } = &graph.nodes[current].kind else {
             return None;
         };
         match op {
@@ -74,10 +74,10 @@ fn chain_len_over_same_base(graph: &EGraph, nid: NodeId, base: NodeId) -> Option
     }
 }
 
-fn is_pow(graph: &EGraph, nid: NodeId) -> bool {
+fn is_pow(graph: &EGraph, nid: ValueId) -> bool {
     matches!(
         &graph.nodes[nid].kind,
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::BinOp(crate::op::BinaryOperator::Power),
             ..
         }
@@ -226,7 +226,7 @@ fn consumers_see_the_rewrite_through_the_original_id() {
 
     // The consumer still references the original id, which extraction now
     // resolves to the chain.
-    let ENode::Pure { operands, .. } = &g.nodes[consumer].kind else {
+    let ValueKind::Pure { operands, .. } = &g.nodes[consumer].kind else {
         panic!("expected pure consumer")
     };
     assert_eq!(operands[0], p);

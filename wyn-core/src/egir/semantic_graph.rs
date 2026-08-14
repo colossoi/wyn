@@ -17,8 +17,8 @@ use super::ir::ProgramShape;
 use super::program::{Program, SemanticOpId};
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, NodeId, ResourceAccess, SegResourceAccess, Semantic, SideEffect, SideEffectKind,
-    SideEffectSite, Soac, SoacEffect,
+    EGraph, ResourceAccess, SegResourceAccess, Semantic, SideEffect, SideEffectKind, SideEffectSite, Soac,
+    SoacEffect, ValueId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -61,7 +61,7 @@ where
                 let indexed = graph.nodes.iter().any(|(_, node)| {
                     matches!(
                         &node.kind,
-                        super::types::ENode::Pure {
+                        super::types::ValueKind::Pure {
                             op: super::types::PureOp::Index,
                             operands,
                         } if operands.first().is_some_and(|base| {
@@ -113,7 +113,7 @@ where
 fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<SemanticDependency>) {
     struct Record<'a> {
         id: SemanticOpId,
-        result: NodeId,
+        result: ValueId,
         effect: &'a SideEffect,
         resources: Vec<SegResourceAccess>,
     }
@@ -410,8 +410,8 @@ pub struct SemanticGraph {
     /// Reverse capture edges, built when captures are first recorded so
     /// residency does not have to rediscover shared captured values by
     /// scanning every operation.
-    capture_succ: HashMap<NodeId, Vec<usize>>,
-    capture_sources: Vec<NodeId>,
+    capture_succ: HashMap<ValueId, Vec<usize>>,
+    capture_sources: Vec<ValueId>,
     /// Stable-for-this-snapshot operation locations. Fusion does not require
     /// these; scheduling policies use them to inspect and rewrite consumers.
     operation_sites: Vec<Option<SideEffectSite>>,
@@ -488,12 +488,12 @@ impl SemanticGraph {
 
     /// Graph-local values captured by at least one semantic operation, in
     /// source discovery order.
-    pub(crate) fn captured_values(&self) -> impl Iterator<Item = NodeId> + '_ {
+    pub(crate) fn captured_values(&self) -> impl Iterator<Item = ValueId> + '_ {
         self.capture_sources.iter().copied()
     }
 
     /// Semantic operations directly capturing `source`.
-    pub(crate) fn capture_consumers(&self, source: NodeId) -> impl Iterator<Item = SemanticOpId> + '_ {
+    pub(crate) fn capture_consumers(&self, source: ValueId) -> impl Iterator<Item = SemanticOpId> + '_ {
         self.capture_succ
             .get(&source)
             .into_iter()

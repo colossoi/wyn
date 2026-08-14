@@ -24,9 +24,9 @@ use super::super::semantic_graph::SemanticGraph;
 use super::super::soac::{filter, screma};
 use super::super::stage_variance::StageDependenceAnalysis;
 use super::super::types::{
-    EGraph, ENode, EffectToken, NodeId, PureOp, ResourceAccess, SegExtent, SegResourceAccess, SegSpace,
-    Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect,
-    SoacPlacement,
+    EGraph, EffectToken, PureOp, ResourceAccess, SegExtent, SegResourceAccess, SegSpace, Semantic,
+    SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect, SoacPlacement,
+    ValueId, ValueKind,
 };
 use super::ResourcesAllocated;
 use crate::ast::TypeName;
@@ -40,7 +40,7 @@ enum MaterializationPlan {
         entry: usize,
         kind: FixedMaterializationKind,
         operation: ProjectedOperation,
-        projected_result: NodeId,
+        projected_result: ValueId,
         outputs: Vec<OutputSpec>,
     },
     RuntimeArray {
@@ -75,7 +75,7 @@ impl FixedMaterializationKind {
 }
 
 struct ProjectedOperation {
-    result: NodeId,
+    result: ValueId,
     producer: SemanticOpId,
     source_site: SideEffectSite,
     projected_site: SideEffectSite,
@@ -92,13 +92,13 @@ struct RuntimeArrayHandoff {
 }
 
 struct ParallelPrelude {
-    root: NodeId,
+    root: ValueId,
     consumers: Vec<SemanticOpId>,
 }
 
 struct StagePreludeOutput {
-    source: NodeId,
-    projected: NodeId,
+    source: ValueId,
+    projected: ValueId,
     elem_ty: Type<TypeName>,
     size: LogicalSize,
 }
@@ -119,8 +119,8 @@ struct OutputSpec {
 }
 
 struct InputReplacement {
-    project: NodeId,
-    view: NodeId,
+    project: ValueId,
+    view: ValueId,
     view_ty: Type<TypeName>,
     resource: ResourceId,
 }
@@ -251,7 +251,7 @@ fn filter_runtime_array_plan(
     entry_index: usize,
     entry: &SemanticEntry,
     op: &filter::Op<Semantic>,
-    result: NodeId,
+    result: ValueId,
     producer: SemanticOpId,
     source_site: SideEffectSite,
     consumers: Option<&HashSet<SemanticOpId>>,
@@ -303,7 +303,7 @@ fn filter_runtime_array_plan(
 fn operation_result_residency(
     entry: &SemanticEntry,
     op: &screma::Op<Semantic>,
-    result: NodeId,
+    result: ValueId,
     site: SideEffectSite,
     consumers: Option<&HashSet<SemanticOpId>>,
     requires_array_storage: bool,
@@ -344,7 +344,7 @@ fn operation_result_residency(
 
 fn array_result_residency(
     entry: &SemanticEntry,
-    result: NodeId,
+    result: ValueId,
     consumers: Option<&HashSet<SemanticOpId>>,
     requires_array_storage: bool,
 ) -> Option<FixedMaterializationKind> {
@@ -363,7 +363,7 @@ fn operation_result_plan(
     entry_index: usize,
     entry: &SemanticEntry,
     op: &screma::Op<Semantic>,
-    result: NodeId,
+    result: ValueId,
     producer: SemanticOpId,
     source_site: SideEffectSite,
     kind: FixedMaterializationKind,
@@ -582,9 +582,9 @@ fn direct_stage_invocations(program: &ResourcesAllocated, entry: &SemanticEntry)
 fn direct_stage_value_is_liftable(
     entry: &SemanticEntry,
     analysis: &StageDependenceAnalysis,
-    node: NodeId,
+    node: ValueId,
 ) -> bool {
-    let Some(ENode::Pure { op, .. }) = entry.graph.nodes.get(node).map(|node| &node.kind) else {
+    let Some(ValueKind::Pure { op, .. }) = entry.graph.nodes.get(node).map(|node| &node.kind) else {
         return false;
     };
     if matches!(
@@ -610,7 +610,7 @@ fn direct_stage_value_is_liftable(
 /// source effects.
 fn stage_prelude_outputs(
     entry: &SemanticEntry,
-    roots: impl IntoIterator<Item = NodeId>,
+    roots: impl IntoIterator<Item = ValueId>,
     recipe: &ProjectedValueRecipe,
 ) -> Option<Vec<StagePreludeOutput>> {
     let mut sources = roots.into_iter().collect::<Vec<_>>();
@@ -633,7 +633,7 @@ fn stage_prelude_outputs(
 
 fn parallel_preludes(entry: &SemanticEntry, dependencies: &SemanticGraph) -> Vec<ParallelPrelude> {
     let mut preludes = Vec::<ParallelPrelude>::new();
-    let mut by_root = HashMap::<NodeId, usize>::new();
+    let mut by_root = HashMap::<ValueId, usize>::new();
     for capture in dependencies.captured_values() {
         for operation in dependencies.capture_consumers(capture) {
             let Some(site) = dependencies.operation_site(&operation) else {
@@ -669,8 +669,8 @@ fn parallel_preludes(entry: &SemanticEntry, dependencies: &SemanticGraph) -> Vec
 fn parallel_prelude_boundary_root(
     entry: &SemanticEntry,
     consumer: SideEffectSite,
-    capture: NodeId,
-) -> NodeId {
+    capture: ValueId,
+) -> ValueId {
     let params = &entry.graph.skeleton.blocks[consumer.block].params;
     let mut roots =
         params.iter().copied().filter(|param| graph_ops::pure_depends_on(&entry.graph, capture, *param));
@@ -701,7 +701,7 @@ fn supports_parallel_prefix_consumer(entry: &SemanticEntry, site: SideEffectSite
 fn source_is_observed_only_by_consumers_or_outputs(
     entry: &SemanticEntry,
     uses: &graph_ops::ValueUseIndex,
-    root: NodeId,
+    root: ValueId,
     consumers: &HashSet<SideEffectSite>,
 ) -> bool {
     // Realized output stores are valid additional observers: residency
@@ -787,7 +787,7 @@ fn has_matching_consumer(
 
 fn scalar_result_is_used(
     uses: &graph_ops::ValueUseIndex,
-    result: NodeId,
+    result: ValueId,
     producer: SideEffectSite,
 ) -> bool {
     let observers = uses.value_observers(result);
@@ -805,7 +805,8 @@ fn invocation_invariant(entry: &SemanticEntry, block_id: BlockId, effects: &Hash
     }
     let reachable = graph_ops::execution_value_producer_closure(&entry.graph, roots).nodes;
     reachable.into_iter().all(|node| {
-        let Some(ENode::FuncParam { index }) = entry.graph.nodes.get(node).map(|node| &node.kind) else {
+        let Some(ValueKind::FuncParam { index }) = entry.graph.nodes.get(node).map(|node| &node.kind)
+        else {
             return true;
         };
         dependence.dependence(node).is_stage_invariant()
@@ -835,7 +836,7 @@ fn materialize_operation_result(
     entry_index: usize,
     kind: FixedMaterializationKind,
     operation: ProjectedOperation,
-    projected_result: NodeId,
+    projected_result: ValueId,
     output_specs: Vec<OutputSpec>,
 ) -> Result<ResourcesAllocated, String> {
     let Program {
@@ -1064,7 +1065,7 @@ fn materialize_runtime_array_result(
 
 fn rewrite_runtime_array_source(
     entry: &mut SemanticEntry,
-    result: NodeId,
+    result: ValueId,
     source_site: SideEffectSite,
     handoff: &RuntimeArrayHandoff,
     effect_ids: &mut crate::IdSource<EffectToken>,
@@ -1119,7 +1120,7 @@ fn rewrite_runtime_array_source(
 fn configure_operation_materialization(
     producer: &mut SemanticEntry,
     producer_site: SideEffectSite,
-    producer_result: NodeId,
+    producer_result: ValueId,
     output_resources: &[ResourceId],
     output_specs: &[OutputSpec],
     source_output_resources: &HashSet<ResourceId>,
@@ -1157,7 +1158,7 @@ fn configure_operation_materialization(
 fn configure_materialized_soac(
     graph: &mut EGraph,
     producer_site: SideEffectSite,
-    output_views: &[NodeId],
+    output_views: &[ValueId],
     output_resources: &[ResourceId],
     output_specs: &[OutputSpec],
     source_output_resources: &HashSet<ResourceId>,
@@ -1211,8 +1212,8 @@ fn configure_materialized_soac(
 fn configure_materialized_result(
     graph: &mut EGraph,
     block: BlockId,
-    result: NodeId,
-    output_views: &[NodeId],
+    result: ValueId,
+    output_views: &[ValueId],
     output_specs: &[OutputSpec],
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
@@ -1255,7 +1256,7 @@ fn configure_materialized_result(
 
 fn rewrite_materialized_operation_source(
     entry: &mut SemanticEntry,
-    result: NodeId,
+    result: ValueId,
     producer_site: SideEffectSite,
     output_resources: &[ResourceId],
     output_specs: &[OutputSpec],
@@ -1488,8 +1489,8 @@ fn projected_materialization_entry(
 fn emit_scalar_handoff_store(
     graph: &mut EGraph,
     block: BlockId,
-    output_view: NodeId,
-    value: NodeId,
+    output_view: ValueId,
+    value: ValueId,
     elem_ty: &Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
@@ -1508,10 +1509,10 @@ fn emit_scalar_handoff_store(
 
 fn detached_scalar_handoff_load(
     graph: &mut EGraph,
-    view: NodeId,
+    view: ValueId,
     elem_ty: &Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
-) -> (NodeId, SideEffect) {
+) -> (ValueId, SideEffect) {
     let zero = graph_ops::intern_u32(graph, 0, None);
     let place = graph.intern_pure(
         PureOp::ViewIndex,
@@ -1559,7 +1560,7 @@ fn replace_structured_prefix_with_load(
     entry: &mut SemanticEntry,
     producer_effects: &HashSet<SideEffectSite>,
     continuation: BlockId,
-    loaded: NodeId,
+    loaded: ValueId,
     load_effects: Vec<SideEffect>,
 ) {
     entry.graph.skeleton.remove_effect_sites(producer_effects.iter().copied());
@@ -1576,7 +1577,7 @@ fn replace_structured_prefix_with_load(
 
 fn output_specs(
     graph: &EGraph,
-    result: NodeId,
+    result: ValueId,
     materialization: FixedMaterializationKind,
     space: &SegSpace,
     op: &screma::Op<Semantic>,
@@ -1615,7 +1616,7 @@ fn output_specs(
         .collect()
 }
 
-fn refresh_resource_reads_for_values(graph: &mut EGraph, values: &[NodeId]) {
+fn refresh_resource_reads_for_values(graph: &mut EGraph, values: &[ValueId]) {
     let mut sites = Vec::<SideEffectSite>::new();
     for (block_id, block) in &graph.skeleton.blocks {
         for (index, effect) in block.side_effects.iter().enumerate() {

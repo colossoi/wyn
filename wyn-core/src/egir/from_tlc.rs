@@ -747,7 +747,7 @@ fn convert_entry_point(
 
     let mut converter = ctx.new_converter(pure_constants, binding_ids, effect_ids, arenas);
 
-    // Build entry inputs alongside the symbol → NodeId bindings. A compute
+    // Build entry inputs alongside the symbol → ValueId bindings. A compute
     // entry param that's a tuple-of-unsized-arrays gets one storage binding
     // per field (SoA lowered the source `[]T` of tuples into a tuple of
     // `[]T`s, but entry I/O can't carry a tuple handle — each runtime-sized
@@ -808,7 +808,7 @@ fn convert_entry_point(
                     field_tys.len(),
                 )));
             }
-            let mut view_nids: SmallVec<[NodeId; 4]> = SmallVec::new();
+            let mut view_nids: SmallVec<[ValueId; 4]> = SmallVec::new();
             for (field_idx, (field_ty, slot)) in field_tys.iter().zip(fields.iter()).enumerate() {
                 inputs.push(EntryInput {
                     name: format!("{}_{}", name, field_idx),
@@ -1046,13 +1046,13 @@ struct Converter<'a, 'b> {
     /// Current skeleton block for side effects and terminators.
     current_block: BlockId,
     /// TLC variable → EGraph node mapping.
-    locals: LookupMap<SymbolId, NodeId>,
+    locals: LookupMap<SymbolId, ValueId>,
     /// Top-level definitions.
     top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
     /// Symbol table.
     symbols: &'a SymbolTable,
     /// Cache for inlined constant bodies.
-    inlined_constants: LookupMap<SymbolId, NodeId>,
+    inlined_constants: LookupMap<SymbolId, ValueId>,
     /// Identities of hoisted pure constants.
     pure_constants: LookupSet<SymbolId>,
     /// User definitions proven pure before EGIR construction.
@@ -1117,7 +1117,7 @@ impl<'a, 'b> Converter<'a, 'b> {
 
     /// Intern a pure node, attaching the current term's span (if any).
     /// Use in preference to `self.graph.intern_pure` so spans flow through.
-    fn intern_pure(&mut self, op: PureOp, operands: SmallVec<[NodeId; 4]>, ty: Type<TypeName>) -> NodeId {
+    fn intern_pure(&mut self, op: PureOp, operands: SmallVec<[ValueId; 4]>, ty: Type<TypeName>) -> ValueId {
         self.intern_pure_at(op, operands, ty, self.current_span)
     }
 
@@ -1127,10 +1127,10 @@ impl<'a, 'b> Converter<'a, 'b> {
     fn intern_pure_at(
         &mut self,
         op: PureOp,
-        operands: SmallVec<[NodeId; 4]>,
+        operands: SmallVec<[ValueId; 4]>,
         ty: Type<TypeName>,
         span: Option<Span>,
-    ) -> NodeId {
+    ) -> ValueId {
         if let Some(folded) = self.graph.try_algebraic_fold(&op, &operands, &ty) {
             return folded;
         }
@@ -1142,13 +1142,13 @@ impl<'a, 'b> Converter<'a, 'b> {
     }
 
     /// Set the return terminator on the current block.
-    fn set_return(&mut self, result: Option<NodeId>) {
+    fn set_return(&mut self, result: Option<ValueId>) {
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Return(result);
     }
 
     // -- Entry-point emission helpers (thin delegations to `graph_ops`) --
 
-    fn emit_storage_view(&mut self, binding: BindingRef, view_ty: Type<TypeName>) -> NodeId {
+    fn emit_storage_view(&mut self, binding: BindingRef, view_ty: Type<TypeName>) -> ValueId {
         let elem_ty = view_ty.elem_type().cloned().unwrap_or_else(|| view_ty.clone());
         let resource = self.arenas.resources.declare_host(binding, elem_ty, LogicalSize::Unspecified);
         super::graph_ops::intern_resource_view(&mut self.graph, resource, view_ty, self.current_span)
@@ -1156,9 +1156,9 @@ impl<'a, 'b> Converter<'a, 'b> {
 
     fn emit_storage_store(
         &mut self,
-        view_nid: NodeId,
-        index_nid: NodeId,
-        value_nid: NodeId,
+        view_nid: ValueId,
+        index_nid: ValueId,
+        value_nid: ValueId,
         elem_ty: Type<TypeName>,
     ) {
         let span = self.current_span;
@@ -1183,7 +1183,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     // Term conversion
     // ========================================================================
 
-    fn convert_term(&mut self, term: &Term) -> Result<NodeId, ConvertError> {
+    fn convert_term(&mut self, term: &Term) -> Result<ValueId, ConvertError> {
         let ty = term.ty.clone();
         let saved_span = self.current_span;
         self.current_span = Some(term.span);
@@ -1208,7 +1208,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         &mut self,
         term: &Term,
         final_ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         let mut levels = SmallVec::<[(&Term, Type<TypeName>, Span); 4]>::new();
         let mut root = term;
         while let TermKind::Index { array, index } = &root.kind {
@@ -1264,7 +1264,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         }
     }
 
-    fn convert_term_kind(&mut self, term: &Term, ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
+    fn convert_term_kind(&mut self, term: &Term, ty: Type<TypeName>) -> Result<ValueId, ConvertError> {
         match &term.kind {
             // --- Literals ---
             TermKind::IntLit(s) => {
@@ -1342,7 +1342,7 @@ impl<'a, 'b> Converter<'a, 'b> {
 
             // --- Projection / construction operators ---
             TermKind::Tuple(parts) => {
-                let operands: SmallVec<[NodeId; 4]> =
+                let operands: SmallVec<[ValueId; 4]> =
                     parts.iter().map(|p| self.convert_term(p)).collect::<Result<_, _>>()?;
                 let n = operands.len();
                 Ok(self.intern_pure(PureOp::Tuple(n), operands, ty))
@@ -1353,7 +1353,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             }
             TermKind::Index { .. } => self.convert_index_spine(term, ty),
             TermKind::VecLit(parts) => {
-                let operands: SmallVec<[NodeId; 4]> =
+                let operands: SmallVec<[ValueId; 4]> =
                     parts.iter().map(|p| self.convert_term(p)).collect::<Result<_, _>>()?;
                 let n = operands.len();
                 Ok(self.intern_pure(PureOp::Vector(n), operands, ty))
@@ -1404,7 +1404,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             } => {
                 // Bind `rhs` at the current block (it produces a value;
                 // for unit-valued RHS like a side-effect call, the
-                // resulting NodeId is just the Unit constant). The
+                // resulting ValueId is just the Unit constant). The
                 // binding survives the branch fork in `body`.
                 let rhs_nid = self.convert_term(rhs)?;
                 self.locals.insert(*name, rhs_nid);
@@ -1466,7 +1466,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         &mut self,
         term: &Term,
         output_count: usize,
-    ) -> Result<Option<NodeId>, ConvertError> {
+    ) -> Result<Option<ValueId>, ConvertError> {
         match &term.kind {
             TermKind::Let { name, rhs, body, .. } => {
                 let rhs_nid = self.convert_term(rhs)?;
@@ -1491,7 +1491,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     // Variable resolution
     // ========================================================================
 
-    fn convert_var(&mut self, sym: SymbolId, ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
+    fn convert_var(&mut self, sym: SymbolId, ty: Type<TypeName>) -> Result<ValueId, ConvertError> {
         if let Some(&nid) = self.locals.get(&sym) {
             return Ok(nid);
         }
@@ -1524,7 +1524,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         func: &Term,
         args: &[Term],
         ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         match &func.kind {
             TermKind::BinOp(op) => {
                 let lhs = self.convert_term(&args[0])?;
@@ -1559,7 +1559,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                             ty,
                         ))
                     } else {
-                        let arg_nids: SmallVec<[NodeId; 4]> =
+                        let arg_nids: SmallVec<[ValueId; 4]> =
                             args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
                         Ok(self.intern_pure(
                             PureOp::Intrinsic {
@@ -1583,7 +1583,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     let coord = self.convert_term(&args[1])?;
                     Ok(self.intern_pure(PureOp::StorageImageLoad(resource), smallvec![coord], ty))
                 } else {
-                    let arg_nids: SmallVec<[NodeId; 4]> =
+                    let arg_nids: SmallVec<[ValueId; 4]> =
                         args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
                     Ok(self.intern_pure(
                         PureOp::Intrinsic {
@@ -1598,7 +1598,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             _ => {
                 // General application: convert func, then call
                 let _func_nid = self.convert_term(func)?;
-                let _arg_nids: Vec<NodeId> =
+                let _arg_nids: Vec<ValueId> =
                     args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
                 // TODO: emit Call side effect
                 Err(ConvertError::Unsupported("general application".into()))
@@ -1611,10 +1611,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         symbol: SymbolId,
         args: &[Term],
         ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         if let Some(def) = self.top_level.get(&symbol) {
             if def.arity == args.len() {
-                let operands: SmallVec<[NodeId; 4]> =
+                let operands: SmallVec<[ValueId; 4]> =
                     args.iter().map(|argument| self.convert_term(argument)).collect::<Result<_, _>>()?;
                 return Ok(self.emit_named_call(symbol, operands, ty));
             }
@@ -1628,9 +1628,9 @@ impl<'a, 'b> Converter<'a, 'b> {
     fn emit_named_call(
         &mut self,
         symbol: SymbolId,
-        operands: SmallVec<[NodeId; 4]>,
+        operands: SmallVec<[ValueId; 4]>,
         ty: Type<TypeName>,
-    ) -> NodeId {
+    ) -> ValueId {
         let function = self.function_id(symbol);
         if self.pure_definitions.contains(&symbol) {
             return self.intern_pure(PureOp::Call(function), operands, ty);
@@ -1656,7 +1656,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     // dispatch on `BuiltinLowering::Intrinsic(StorageIndex|StorageStore)`.
     // ========================================================================
 
-    fn lower_storage_index(&mut self, args: &[Term], ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
+    fn lower_storage_index(&mut self, args: &[Term], ty: Type<TypeName>) -> Result<ValueId, ConvertError> {
         let binding = literal_binding(args, "_w_intrinsic_storage_index")?;
         let index_nid = self.convert_term(&args[2])?;
         let view_nid = self.emit_storage_view(binding, ty.clone());
@@ -1671,7 +1671,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         ))
     }
 
-    fn lower_storage_store(&mut self, args: &[Term]) -> Result<NodeId, ConvertError> {
+    fn lower_storage_store(&mut self, args: &[Term]) -> Result<ValueId, ConvertError> {
         let binding = literal_binding(args, "_w_intrinsic_storage_store")?;
         let index_nid = self.convert_term(&args[2])?;
         let value_nid = self.convert_term(&args[3])?;
@@ -1686,7 +1686,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// the backend storage-image store, returning a compile-time-only placeholder for the next
     /// linear image handle. The image handle itself has no runtime payload; the
     /// concrete descriptor binding is carried by `args[0].ty`.
-    fn lower_image_with(&mut self, args: &[Term], ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
+    fn lower_image_with(&mut self, args: &[Term], ty: Type<TypeName>) -> Result<ValueId, ConvertError> {
         let binding = crate::types::storage_image_buffer(&args[0].ty).ok_or_else(|| {
             ConvertError::GraphError(
                 "storage-image update operand has no concrete storage-image binding after monomorphization"
@@ -1694,7 +1694,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             )
         })?;
         let resource = SemanticResourceRef(self.arenas.resources.host_id(binding));
-        let arg_nids: SmallVec<[NodeId; 4]> =
+        let arg_nids: SmallVec<[ValueId; 4]> =
             args[1..].iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let effect_result = self.graph.alloc_side_effect_result(unit_ty);
@@ -1722,7 +1722,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         then_branch: &Term,
         else_branch: &Term,
         ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         let cond_nid = self.convert_term(cond)?;
 
         let then_block = self.graph.skeleton.create_block();
@@ -1784,7 +1784,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         kind: &LoopKind,
         body: &Term,
         _result_ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         if matches!(loop_var_ty, Type::Constructed(TypeName::StorageTexture, _)) {
             return match kind {
                 LoopKind::While { cond } => self.convert_storage_image_while_loop(
@@ -1844,7 +1844,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         }
     }
 
-    fn storage_image_placeholder(&mut self, ty: &Type<TypeName>) -> NodeId {
+    fn storage_image_placeholder(&mut self, ty: &Type<TypeName>) -> ValueId {
         self.intern_pure(PureOp::Unit, smallvec![], ty.clone())
     }
 
@@ -1878,7 +1878,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         init_bindings: &[(SymbolId, Type<TypeName>, Term)],
         cond: &Term,
         body: &Term,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         let header = self.graph.skeleton.create_block();
         let body_block = self.graph.skeleton.create_block();
         let exit = self.graph.skeleton.create_block();
@@ -1927,7 +1927,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         _index_var_ty: &Type<TypeName>,
         bound: &Term,
         body: &Term,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
         let header = self.graph.skeleton.create_block();
@@ -1993,7 +1993,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         elem_ty: &Type<TypeName>,
         iter: &Term,
         body: &Term,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
         let header = self.graph.skeleton.create_block();
@@ -2066,7 +2066,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         init_bindings: &[(SymbolId, Type<TypeName>, Term)],
         cond: &Term,
         body: &Term,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         let acc_ty = loop_var_ty.clone();
 
         // Create blocks: header, body, exit
@@ -2134,7 +2134,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         _index_var_ty: &Type<TypeName>,
         bound: &Term,
         body: &Term,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         let acc_ty = loop_var_ty.clone();
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
@@ -2218,7 +2218,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         elem_ty: &Type<TypeName>,
         iter: &Term,
         body: &Term,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         // For-in is like for-range but indexes into the iterator.
         // TODO: SoA-aware soa_length / soa_index
         let acc_ty = loop_var_ty.clone();
@@ -2310,7 +2310,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     // SOACs
     // ========================================================================
 
-    fn convert_soac(&mut self, soac: &SoacOp, ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
+    fn convert_soac(&mut self, soac: &SoacOp, ty: Type<TypeName>) -> Result<ValueId, ConvertError> {
         match soac {
             SoacOp::Map {
                 lam,
@@ -2357,13 +2357,13 @@ impl<'a, 'b> Converter<'a, 'b> {
     }
 
     /// Emit a SOAC placeholder as a side effect in the skeleton. Returns the
-    /// result NodeId that `soac_expand` will rebind during expansion.
+    /// result ValueId that `soac_expand` will rebind during expansion.
     fn emit_soac(
         &mut self,
         soac: Soac<Raw>,
-        operands: SmallVec<[NodeId; 4]>,
+        operands: SmallVec<[ValueId; 4]>,
         ty: Type<TypeName>,
-    ) -> NodeId {
+    ) -> ValueId {
         let span = self.current_span;
         super::graph_ops::emit_pending_soac(
             &mut self.graph,
@@ -2383,11 +2383,11 @@ impl<'a, 'b> Converter<'a, 'b> {
         inputs: &[ArrayExpr],
         destination: SoacDestination,
         result_ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         let f_symbol = self.lambda_fn_symbol(&sb.lam)?;
-        let capture_nids: Vec<NodeId> =
+        let capture_nids: Vec<ValueId> =
             sb.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
-        let input_nids: Vec<NodeId> =
+        let input_nids: Vec<ValueId> =
             inputs.iter().map(|ae| self.convert_array_expr_value(ae)).collect::<Result<_, _>>()?;
         let input_arr_types: Vec<Type<TypeName>> =
             inputs.iter().zip(input_nids.iter()).map(|(ae, nid)| self.value_array_type(*nid, ae)).collect();
@@ -2413,7 +2413,7 @@ impl<'a, 'b> Converter<'a, 'b> {
 
         // Operands carry positional data flow only; captures live on the
         // `SegBody` below.
-        let mut operands: SmallVec<[NodeId; 4]> = SmallVec::new();
+        let mut operands: SmallVec<[ValueId; 4]> = SmallVec::new();
         operands.extend_from_slice(&input_nids);
 
         // Emit as a singleton Screma + project field 0. For consuming
@@ -2475,7 +2475,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         indices: &ArrayExpr,
         values: &ArrayExpr,
         result_ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         let dest_view = *self.locals.get(&dest.id).ok_or_else(|| {
             ConvertError::GraphError("reduce_by_index destination is not a bound #[storage] view".into())
         })?;
@@ -2552,7 +2552,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         lam: &SoacBody,
         inputs: &[ArrayExpr],
         result_ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         let dest_sym = dest.id;
         let dest_elem_ty = dest.elem_ty.clone();
         let dest_view = *self.locals.get(&dest_sym).ok_or_else(|| {
@@ -2572,14 +2572,14 @@ impl<'a, 'b> Converter<'a, 'b> {
             }
         };
 
-        let input_nids: Vec<NodeId> =
+        let input_nids: Vec<ValueId> =
             inputs.iter().map(|ae| self.convert_array_expr_value(ae)).collect::<Result<_, _>>()?;
         let input_array_types: Vec<Type<TypeName>> =
             inputs.iter().zip(input_nids.iter()).map(|(ae, nid)| self.value_array_type(*nid, ae)).collect();
-        let capture_nids: Vec<NodeId> =
+        let capture_nids: Vec<ValueId> =
             lam.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
 
-        let operands: SmallVec<[NodeId; 4]> = input_nids.into_iter().collect();
+        let operands: SmallVec<[ValueId; 4]> = input_nids.into_iter().collect();
         let body_region = self.function_id(function);
         let destination_length = self.intern_pure(
             PureOp::Intrinsic {
@@ -2632,7 +2632,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         input_dimensions: &[Vec<u8>],
         domain_rank: u8,
         _result_ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         let dest_view = *self.locals.get(&dest.id).ok_or_else(|| {
             ConvertError::GraphError(
                 "bucket_scatter destination is not a bound storage view (must be a storage parameter)"
@@ -2758,7 +2758,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 let storage_type = producers.nodes.iter().find_map(|producer| {
                     matches!(
                         self.graph.nodes[*producer].kind,
-                        ENode::Pure {
+                        ValueKind::Pure {
                             op: PureOp::StorageView(_),
                             ..
                         }
@@ -2934,9 +2934,9 @@ impl<'a, 'b> Converter<'a, 'b> {
         ne: &Term,
         input: &ArrayExpr,
         result_ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         let operator_symbol = self.lambda_fn_symbol(&op.lam)?;
-        let capture_nids: Vec<NodeId> =
+        let capture_nids: Vec<ValueId> =
             op.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let arr_nid = self.convert_array_expr_value(input)?;
         let arr_ty = self.value_array_type(arr_nid, input);
@@ -2945,7 +2945,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         // Emit as Screma { 0 maps, 1 Reduce accumulator } + project field
         // 0. Reduce's `op` is both the step (per-element) and the
         // reduce_op (phase 2 combiner).
-        let operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
+        let operands: SmallVec<[ValueId; 4]> = smallvec![arr_nid];
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
         let op_region = self.function_id(operator_symbol);
         let screma_nid = self.emit_soac(
@@ -2986,15 +2986,15 @@ impl<'a, 'b> Converter<'a, 'b> {
         input: &ArrayExpr,
         destination: SoacDestination,
         result_ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         let operator_symbol = self.lambda_fn_symbol(&op.lam)?;
-        let capture_nids: Vec<NodeId> =
+        let capture_nids: Vec<ValueId> =
             op.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let arr_nid = self.convert_array_expr_value(input)?;
         let arr_ty = self.value_array_type(arr_nid, input);
         let init_nid = self.convert_term(ne)?;
 
-        let operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
+        let operands: SmallVec<[ValueId; 4]> = smallvec![arr_nid];
 
         // Emit as Screma { 0 maps, 1 Scan acc } + project field 0. For
         // consuming scan the result aliases the input, so the Project's
@@ -3053,9 +3053,9 @@ impl<'a, 'b> Converter<'a, 'b> {
         input: &ArrayExpr,
         destination: SoacDestination,
         _result_ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
+    ) -> Result<ValueId, ConvertError> {
         let predicate_symbol = self.lambda_fn_symbol(&pred.lam)?;
-        let capture_nids: Vec<NodeId> =
+        let capture_nids: Vec<ValueId> =
             pred.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let elem_ty = self.array_expr_elem_type(input);
         let arr_ty = self.array_expr_type(input);
@@ -3068,7 +3068,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         };
 
         // `[input]` only — map/pred captures live on their `SegBody`s.
-        let operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
+        let operands: SmallVec<[ValueId; 4]> = smallvec![arr_nid];
 
         // The TLC-level result type is an existential `?k. [k]T`; after
         // `open_existential` its size is a `Skolem(k)`. Two lowerings,
@@ -3188,7 +3188,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     // ArrayExpr
     // ========================================================================
 
-    fn convert_array_expr(&mut self, ae: &ArrayExpr, ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
+    fn convert_array_expr(&mut self, ae: &ArrayExpr, ty: Type<TypeName>) -> Result<ValueId, ConvertError> {
         match ae {
             ArrayExpr::Var(vr, var_ty) => {
                 let t = crate::tlc::synthetic_atom_var_term(*vr, var_ty.clone());
@@ -3201,7 +3201,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             // inlined into a non-`Map` consumer (e.g. `reduce`) still arrives as
             // a `Zip` here.
             ArrayExpr::Zip(children) => {
-                let operands: SmallVec<[NodeId; 4]> =
+                let operands: SmallVec<[ValueId; 4]> =
                     children.iter().map(|c| self.convert_array_expr_value(c)).collect::<Result<_, _>>()?;
                 let component_tys: Vec<Type<TypeName>> =
                     children.iter().map(|c| self.array_expr_type(c)).collect();
@@ -3210,7 +3210,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 Ok(self.intern_pure(PureOp::Tuple(n), operands, tuple_ty))
             }
             ArrayExpr::Literal(terms) => {
-                let operands: SmallVec<[NodeId; 4]> =
+                let operands: SmallVec<[ValueId; 4]> =
                     terms.iter().map(|t| self.convert_term(t)).collect::<Result<_, _>>()?;
                 let n = operands.len();
                 Ok(self.intern_pure(PureOp::ArrayLit(n), operands, ty))
@@ -3218,7 +3218,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             ArrayExpr::Range { start, len, step } => {
                 let start_nid = self.convert_term(start)?;
                 let len_nid = self.convert_term(len)?;
-                let mut operands: SmallVec<[NodeId; 4]> = smallvec![start_nid, len_nid];
+                let mut operands: SmallVec<[ValueId; 4]> = smallvec![start_nid, len_nid];
                 let has_step = if let Some(step_term) = step {
                     operands.push(self.convert_term(step_term)?);
                     true
@@ -3230,7 +3230,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         }
     }
 
-    fn convert_array_expr_value(&mut self, ae: &ArrayExpr) -> Result<NodeId, ConvertError> {
+    fn convert_array_expr_value(&mut self, ae: &ArrayExpr) -> Result<ValueId, ConvertError> {
         let ty = self.array_expr_type(ae);
         self.convert_array_expr(ae, ty)
     }
@@ -3276,7 +3276,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// back to the TLC-derived `array_expr_type` when the node isn't a concrete
     /// array (e.g. an opaque tuple handle). Mirrors how `length` dispatches on
     /// the value type rather than the source type.
-    fn value_array_type(&self, nid: NodeId, fallback: &ArrayExpr) -> Type<TypeName> {
+    fn value_array_type(&self, nid: ValueId, fallback: &ArrayExpr) -> Type<TypeName> {
         if let Some(node) = self.graph.nodes.get(nid) {
             if matches!(&node.ty, Type::Constructed(TypeName::Array, _)) || as_soa_tuple(&node.ty).is_some()
             {
@@ -3333,7 +3333,7 @@ fn is_purely_constant_graph(graph: &EGraph<Raw>) -> bool {
     })
 }
 
-fn is_constant_node(graph: &EGraph<Raw>, mut node: NodeId, memo: &mut LookupMap<NodeId, bool>) -> bool {
+fn is_constant_node(graph: &EGraph<Raw>, mut node: ValueId, memo: &mut LookupMap<ValueId, bool>) -> bool {
     while let Some(replacement) = graph.nodes[node].alias {
         node = replacement;
     }
@@ -3341,8 +3341,8 @@ fn is_constant_node(graph: &EGraph<Raw>, mut node: NodeId, memo: &mut LookupMap<
         return *result;
     }
     let result = match &graph.nodes[node].kind {
-        ENode::Constant(_) => true,
-        ENode::Pure { op, operands } => {
+        ValueKind::Constant(_) => true,
+        ValueKind::Pure { op, operands } => {
             matches!(
                 op,
                 PureOp::Int(_)
@@ -3357,10 +3357,10 @@ fn is_constant_node(graph: &EGraph<Raw>, mut node: NodeId, memo: &mut LookupMap<
                     | PureOp::Global(_)
             ) && operands.iter().copied().all(|operand| is_constant_node(graph, operand, memo))
         }
-        ENode::Union { left, right } => {
+        ValueKind::Union { left, right } => {
             is_constant_node(graph, *left, memo) && is_constant_node(graph, *right, memo)
         }
-        ENode::FuncParam { .. } | ENode::BlockParam { .. } | ENode::SideEffectResult => false,
+        ValueKind::FuncParam { .. } | ValueKind::BlockParam { .. } | ValueKind::SideEffectResult => false,
     };
     memo.insert(node, result);
     result

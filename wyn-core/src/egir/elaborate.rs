@@ -16,8 +16,8 @@ use crate::op::OpTag;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{
-    BlockId, Constant, ControlHeader, EntryPoint, FuncBody, Function, InstKind, PlaceId, Program, ValueId,
-    ValueRef,
+    BlockId, Constant, ControlHeader, EntryPoint, FuncBody, Function, InstKind, PlaceId, Program,
+    ValueId as SsaValueId, ValueRef,
 };
 use crate::types::{ExternDecl, TypeExt};
 use crate::{BindingRef, EntryId, LookupMap, LookupSet, ResourceAccess};
@@ -221,12 +221,12 @@ pub fn elaborate_graph(
         current_skel_block: None,
     };
 
-    // Map function params: NodeId → (ValueId, skel entry block).
+    // Map function params: ValueId → (ValueId, skel entry block).
     let skel_entry = graph.skeleton.entry;
     for i in 0..elab.builder.num_params() {
         let vid = elab.builder.get_param(i);
         for (nid, node) in &graph.nodes {
-            if matches!(&node.kind, ENode::FuncParam { index } if *index == i) {
+            if matches!(&node.kind, ValueKind::FuncParam { index } if *index == i) {
                 let resolved = elab.resolve(nid);
                 elab.elaborated.insert(resolved, (vid, skel_entry));
                 break;
@@ -294,20 +294,20 @@ struct LoopStackEntry {
 
 struct Elaborator<'a> {
     graph: &'a PhysicalEGraph,
-    best: LookupMap<NodeId, NodeId>,
+    best: LookupMap<ValueId, ValueId>,
     domtree: &'a wyn_graph::DominatorTree<SkelBlockId>,
     loop_analysis: &'a LoopAnalysis,
     loop_stack: SmallVec<[LoopStackEntry; 4]>,
-    /// NodeId → (ValueId, skeleton block where it was placed) for
+    /// EGIR value → (SSA value, skeleton block where it was placed) for
     /// value-producing nodes.
-    elaborated: ScopedMap<NodeId, (ValueId, SkelBlockId)>,
-    /// NodeId → (PlaceId, skeleton block) for place-producing nodes
+    elaborated: ScopedMap<ValueId, (SsaValueId, SkelBlockId)>,
+    /// ValueId → (PlaceId, skeleton block) for place-producing nodes
     /// (`ViewIndex`, `OutputSlot`). Separate from `elaborated` because
     /// places are not interchangeable with values, and because identity
     /// matters: two hashconsed `ViewIndex` nodes still get distinct places
     /// when demanded from unrelated scopes (the `ScopedMap` already
     /// handles that via its scope-depth pop).
-    elaborated_places: ScopedMap<NodeId, (PlaceId, SkelBlockId)>,
+    elaborated_places: ScopedMap<ValueId, (PlaceId, SkelBlockId)>,
     builder: FuncBuilder,
     block_map: LookupMap<SkelBlockId, BlockId>,
     current_block: Option<BlockId>,
@@ -393,7 +393,7 @@ impl<'a> Elaborator<'a> {
         // `PlaceIndex` / `Load` / `Store` consumers resolve it via `demand_place`.
         if let EffectOp::Alloca { elem_ty } = effect {
             let result_nid =
-                se.result.expect("Alloca side-effect must carry a result NodeId for its place");
+                se.result.expect("Alloca side-effect must carry a result ValueId for its place");
             let place = self.builder.new_place(elem_ty.clone());
             let kind = InstKind::Alloca {
                 elem_ty: elem_ty.clone(),
@@ -454,13 +454,13 @@ impl<'a> Elaborator<'a> {
     /// Demand a node as an instruction operand. Canonical 32-bit scalar
     /// constants stay inline instead of being expanded into nullary SSA
     /// instructions; values that need an SSA identity use `demand_placed`.
-    fn demand_ref(&mut self, nid: NodeId) -> ValueRef {
+    fn demand_ref(&mut self, nid: ValueId) -> ValueRef {
         self.demand_ref_placed(nid).0
     }
 
     /// Operand form plus the block that defines an SSA operand. Constants
     /// have no placement dependency and therefore carry `None`.
-    fn demand_ref_placed(&mut self, nid: NodeId) -> (ValueRef, Option<SkelBlockId>) {
+    fn demand_ref_placed(&mut self, nid: ValueId) -> (ValueRef, Option<SkelBlockId>) {
         let resolved = self.resolve(nid);
         if let Some(value) = self.inline_constant(resolved) {
             return (ValueRef::Const(value), None);
@@ -472,38 +472,47 @@ impl<'a> Elaborator<'a> {
     /// Convert only constants whose type is fully represented by
     /// `ConstantValue`. Wider/narrower numeric literals retain an SSA result
     /// so their explicit result type is not lost.
-    fn inline_constant(&self, nid: NodeId) -> Option<ConstantValue> {
+    fn inline_constant(&self, nid: ValueId) -> Option<ConstantValue> {
         let node = &self.graph.nodes[nid];
         match (&node.kind, &node.ty) {
-            (ENode::Constant(value @ ConstantValue::I32(_)), Type::Constructed(TypeName::Int(32), _))
-            | (ENode::Constant(value @ ConstantValue::U32(_)), Type::Constructed(TypeName::UInt(32), _))
-            | (ENode::Constant(value @ ConstantValue::F32(_)), Type::Constructed(TypeName::Float(32), _))
-            | (ENode::Constant(value @ ConstantValue::Bool(_)), Type::Constructed(TypeName::Bool, _)) => {
+            (
+                ValueKind::Constant(value @ ConstantValue::I32(_)),
+                Type::Constructed(TypeName::Int(32), _),
+            )
+            | (
+                ValueKind::Constant(value @ ConstantValue::U32(_)),
+                Type::Constructed(TypeName::UInt(32), _),
+            )
+            | (
+                ValueKind::Constant(value @ ConstantValue::F32(_)),
+                Type::Constructed(TypeName::Float(32), _),
+            )
+            | (ValueKind::Constant(value @ ConstantValue::Bool(_)), Type::Constructed(TypeName::Bool, _)) => {
                 Some(*value)
             }
             (
-                ENode::Pure {
+                ValueKind::Pure {
                     op: PureOp::Int(value),
                     operands,
                 },
                 Type::Constructed(TypeName::Int(32), _),
             ) if operands.is_empty() => value.parse().ok().map(ConstantValue::I32),
             (
-                ENode::Pure {
+                ValueKind::Pure {
                     op: PureOp::Uint(value),
                     operands,
                 },
                 Type::Constructed(TypeName::UInt(32), _),
             ) if operands.is_empty() => value.parse().ok().map(ConstantValue::U32),
             (
-                ENode::Pure {
+                ValueKind::Pure {
                     op: PureOp::Float(value),
                     operands,
                 },
                 Type::Constructed(TypeName::Float(32), _),
             ) if operands.is_empty() => value.parse().ok().map(ConstantValue::from_f32),
             (
-                ENode::Pure {
+                ValueKind::Pure {
                     op: PureOp::Bool(value),
                     operands,
                 },
@@ -515,7 +524,7 @@ impl<'a> Elaborator<'a> {
 
     /// Demand the place defined by `nid`. Only valid for nodes whose
     /// `PureOp` produces a `PlaceId` (`ViewIndex`, `OutputSlot`).
-    fn demand_place(&mut self, nid: NodeId) -> PlaceId {
+    fn demand_place(&mut self, nid: ValueId) -> PlaceId {
         let resolved = self.resolve(nid);
 
         if let Some((place, _)) = self.elaborated_places.get(&resolved) {
@@ -523,7 +532,7 @@ impl<'a> Elaborator<'a> {
         }
 
         let node = self.graph.nodes[resolved].clone();
-        let ENode::Pure { op, operands } = &node.kind else {
+        let ValueKind::Pure { op, operands } = &node.kind else {
             panic!(
                 "demand_place({:?}): expected a place-producing Pure node, got {:?}",
                 resolved, node
@@ -598,11 +607,11 @@ impl<'a> Elaborator<'a> {
     /// Each entry is `(index-result node, coordinate node)` in base-to-leaf
     /// order. Stopping at the first view-typed base preserves any value
     /// operations that precede the storage address chain.
-    fn view_index_spine(&self, nid: NodeId) -> Option<(NodeId, SmallVec<[(NodeId, NodeId); 4]>)> {
-        let mut steps = SmallVec::<[(NodeId, NodeId); 4]>::new();
+    fn view_index_spine(&self, nid: ValueId) -> Option<(ValueId, SmallVec<[(ValueId, ValueId); 4]>)> {
+        let mut steps = SmallVec::<[(ValueId, ValueId); 4]>::new();
         let mut current = self.resolve(nid);
         loop {
-            let ENode::Pure {
+            let ValueKind::Pure {
                 op: PureOp::Index,
                 operands,
             } = &self.graph.nodes[current].kind
@@ -629,9 +638,9 @@ impl<'a> Elaborator<'a> {
     /// call/capture representation reconciliation.
     fn demand_view_index_spine(
         &mut self,
-        view_node: NodeId,
-        steps: SmallVec<[(NodeId, NodeId); 4]>,
-    ) -> (ValueId, SkelBlockId) {
+        view_node: ValueId,
+        steps: SmallVec<[(ValueId, ValueId); 4]>,
+    ) -> (SsaValueId, SkelBlockId) {
         let result_node = steps.last().expect("view index spine has at least one coordinate").0;
         let (view, view_placed) = self.demand_ref_placed(view_node);
         let index_values = steps
@@ -682,9 +691,9 @@ impl<'a> Elaborator<'a> {
         (value, placed)
     }
 
-    /// Demand a node and return both the ValueId and the skeleton block it
+    /// Demand an EGIR value and return both the SSA value and the skeleton block it
     /// was placed in.
-    fn demand_placed(&mut self, nid: NodeId) -> (ValueId, SkelBlockId) {
+    fn demand_placed(&mut self, nid: ValueId) -> (SsaValueId, SkelBlockId) {
         let resolved = self.resolve(nid);
 
         if let Some(entry) = self.elaborated.get(&resolved) {
@@ -694,7 +703,7 @@ impl<'a> Elaborator<'a> {
         let node = self.graph.nodes[resolved].clone();
 
         match &node.kind {
-            ENode::Constant(c) => {
+            ValueKind::Constant(c) => {
                 let ty = self.graph.nodes[resolved].ty.clone();
                 let kind = const_to_inst_kind(c);
                 let placed = self.choose_placement(&[]);
@@ -703,7 +712,7 @@ impl<'a> Elaborator<'a> {
                 self.record_placement(resolved, vid, placed);
                 (vid, placed)
             }
-            ENode::Pure { op, operands } => {
+            ValueKind::Pure { op, operands } => {
                 if matches!(op, PureOp::Index) {
                     if let Some((view, steps)) = self.view_index_spine(resolved) {
                         return self.demand_view_index_spine(view, steps);
@@ -733,19 +742,19 @@ impl<'a> Elaborator<'a> {
                 self.record_placement(resolved, vid, placed);
                 (vid, placed)
             }
-            ENode::FuncParam { .. } | ENode::BlockParam { .. } => {
+            ValueKind::FuncParam { .. } | ValueKind::BlockParam { .. } => {
                 panic!(
                     "FuncParam/BlockParam {:?} should have been pre-populated in elaborated map",
                     resolved
                 );
             }
-            ENode::SideEffectResult => {
+            ValueKind::SideEffectResult => {
                 panic!(
                     "SideEffectResult {:?} should have been populated during side-effect elaboration",
                     resolved
                 );
             }
-            ENode::Union { .. } => {
+            ValueKind::Union { .. } => {
                 panic!("Union {:?} should have been resolved by extract", resolved);
             }
         }
@@ -787,7 +796,7 @@ impl<'a> Elaborator<'a> {
     /// loop's hoist_block), insert the binding at that loop's scope_depth so
     /// it remains visible to siblings inside the loop body but scopes out
     /// with the loop frame.
-    fn record_placement(&mut self, nid: NodeId, vid: ValueId, placed: SkelBlockId) {
+    fn record_placement(&mut self, nid: ValueId, vid: SsaValueId, placed: SkelBlockId) {
         let current = self.current_skel_block.expect("current skel block unset");
         // Only consider active loop frames (same filter as choose_placement).
         let insert_depth = self
@@ -813,13 +822,13 @@ impl<'a> Elaborator<'a> {
         kind: InstKind,
         ty: Type<TypeName>,
         span: Option<crate::ast::Span>,
-    ) -> ValueId {
+    ) -> SsaValueId {
         let out_bid = self.block_map[&target_skel];
         self.builder.func_mut().append_inst_with_span(out_bid, kind, ty, span)
     }
 
-    /// Resolve a NodeId through the extraction map.
-    fn resolve(&self, nid: NodeId) -> NodeId {
+    /// Resolve a ValueId through the extraction map.
+    fn resolve(&self, nid: ValueId) -> ValueId {
         self.best.get(&nid).copied().unwrap_or(nid)
     }
 
@@ -865,7 +874,7 @@ impl<'a> Elaborator<'a> {
 /// have selected a block parameter before skeleton optimization strips that
 /// parameter; forwarding only the parameter itself would leave the union's
 /// winner pointing at a definition that is no longer in its block signature.
-fn close_extraction_over_aliases<P: Family>(graph: &EGraph<P>, best: &mut LookupMap<NodeId, NodeId>) {
+fn close_extraction_over_aliases<P: Family>(graph: &EGraph<P>, best: &mut LookupMap<ValueId, ValueId>) {
     let extracted = best.clone();
     let resolve = |start| {
         let mut current = start;
@@ -892,7 +901,7 @@ fn close_extraction_over_aliases<P: Family>(graph: &EGraph<P>, best: &mut Lookup
 }
 
 // ---------------------------------------------------------------------------
-// Conversion: ENode → InstKind
+// Conversion: ValueKind → InstKind
 // ---------------------------------------------------------------------------
 
 use crate::ssa::types::ConstantValue;

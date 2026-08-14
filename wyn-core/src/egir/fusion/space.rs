@@ -1,7 +1,7 @@
 //! Structural "same iteration space" comparison for SegOp fusion.
 //!
 //! Two SegOps may be fused only over an equal `SegSpace`. Equality here is
-//! *provenance*-based, not `NodeId` identity: sibling SegOps over the same input
+//! *provenance*-based, not `ValueId` identity: sibling SegOps over the same input
 //! array intern their extent nodes separately, so we compare the host-dispatch
 //! identity of each dimension (a fixed length, a push-constant offset, a
 //! resource length's binding+stride) rather than the node. `SegExtent`'s derived

@@ -23,8 +23,8 @@ use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::{filter, lambda as lambda_ops, screma};
 use crate::egir::types::{
-    EGraph, ENode, NodeId, PureOp, SegResourceAccess, SegSpace, SideEffect, SideEffectKind,
-    SkeletonTerminator, Soac, SoacEffect,
+    EGraph, PureOp, SegResourceAccess, SegSpace, SideEffect, SideEffectKind, SkeletonTerminator, Soac,
+    SoacEffect, ValueId, ValueKind,
 };
 use crate::flow::{BlockId, ControlHeader};
 use crate::op::BinaryOperator;
@@ -36,14 +36,14 @@ pub(super) struct Candidate {
     block: BlockId,
     filter: usize,
     consumer: Option<usize>,
-    lengths: Vec<NodeId>,
+    lengths: Vec<ValueId>,
 }
 
 #[derive(Clone)]
 struct FilterParts {
     space: SegSpace,
     body: filter::Body,
-    input_nodes: Vec<NodeId>,
+    input_nodes: Vec<ValueId>,
     scratch: Option<SemanticResourceRef>,
 }
 
@@ -128,8 +128,8 @@ fn find_in_graph(
     None
 }
 
-fn is_length_of(graph: &EGraph, node: NodeId, filter_result: NodeId) -> bool {
-    let ENode::Pure { op, operands } = &graph.nodes[node].kind else {
+fn is_length_of(graph: &EGraph, node: ValueId, filter_result: ValueId) -> bool {
+    let ValueKind::Pure { op, operands } = &graph.nodes[node].kind else {
         return false;
     };
     if operands.as_slice() != [filter_result] {
@@ -141,7 +141,7 @@ fn is_length_of(graph: &EGraph, node: NodeId, filter_result: NodeId) -> bool {
     }
 }
 
-fn is_reduction_of_filter(effect: &SideEffect, filter_result: NodeId) -> bool {
+fn is_reduction_of_filter(effect: &SideEffect, filter_result: ValueId) -> bool {
     let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
         return false;
     };
@@ -162,8 +162,8 @@ fn filter_result_escapes(
     filter_block: BlockId,
     filter_index: usize,
     consumer: Option<usize>,
-    result: NodeId,
-    lengths: &[NodeId],
+    result: ValueId,
+    lengths: &[ValueId],
 ) -> bool {
     let stops = lengths.iter().copied().collect::<HashSet<_>>();
     for (block_id, block) in &graph.skeleton.blocks {
@@ -332,7 +332,7 @@ fn build_masked_pre(
     filter: &FilterParts,
     consumer: Option<&screma::ScremaForm>,
     count_ty: Option<&Type<TypeName>>,
-    outer_types: &LookupMap<NodeId, Type<TypeName>>,
+    outer_types: &LookupMap<ValueId, Type<TypeName>>,
 ) -> (screma::Lambda, SemanticFunc) {
     let mut captures = filter.body.map.captures().to_vec();
     captures.extend_from_slice(filter.body.predicate.captures());
@@ -425,11 +425,11 @@ fn build_masked_pre(
 
 fn conditional_results(
     graph: &mut EGraph,
-    predicate: NodeId,
-    fallback: Vec<NodeId>,
-    selected: Vec<NodeId>,
+    predicate: ValueId,
+    fallback: Vec<ValueId>,
+    selected: Vec<ValueId>,
     types: &[Type<TypeName>],
-) -> (BlockId, Vec<NodeId>) {
+) -> (BlockId, Vec<ValueId>) {
     debug_assert_eq!(fallback.len(), types.len());
     debug_assert_eq!(selected.len(), types.len());
     let entry = graph.skeleton.entry;
@@ -457,9 +457,9 @@ fn conditional_results(
 }
 
 struct EntryMetadataPatch {
-    replacement: Option<NodeId>,
-    old_writer: Option<NodeId>,
-    replacement_writer: Option<NodeId>,
+    replacement: Option<ValueId>,
+    old_writer: Option<ValueId>,
+    replacement_writer: Option<ValueId>,
     scratch: Option<SemanticResourceRef>,
 }
 
@@ -650,7 +650,7 @@ fn rewrite_count_only(
 
 fn finish_entry_metadata(
     entry: &mut crate::egir::program::SemanticEntry,
-    old_values: &[NodeId],
+    old_values: &[ValueId],
     patch: EntryMetadataPatch,
 ) {
     if let Some(replacement) = patch.replacement {
@@ -679,7 +679,7 @@ fn finish_entry_metadata(
     }
 }
 
-fn replace_lengths(graph: &mut EGraph, lengths: &[NodeId], replacement: NodeId) {
+fn replace_lengths(graph: &mut EGraph, lengths: &[ValueId], replacement: ValueId) {
     for &length in lengths {
         graph_ops::replace_all_references(graph, length, replacement);
     }
@@ -687,10 +687,10 @@ fn replace_lengths(graph: &mut EGraph, lengths: &[NodeId], replacement: NodeId) 
 
 fn extend_result(
     graph: &mut EGraph,
-    old_result: NodeId,
+    old_result: ValueId,
     old_fields: &[Type<TypeName>],
     extra: Type<TypeName>,
-) -> NodeId {
+) -> ValueId {
     let mut fields = old_fields.to_vec();
     fields.push(extra);
     let new_result =
@@ -699,7 +699,7 @@ fn extend_result(
         .nodes
         .iter()
         .filter_map(|(node, definition)| match &definition.kind {
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::Project { index },
                 operands,
             } if operands.first() == Some(&old_result) => Some((node, *index)),
@@ -721,14 +721,14 @@ fn extend_result(
                 None,
             )
         })
-        .collect::<SmallVec<[NodeId; 4]>>();
+        .collect::<SmallVec<[ValueId; 4]>>();
     let old_ty = graph.nodes[old_result].ty.clone();
     let rebuilt = graph.intern_pure(PureOp::Tuple(old_fields.len()), rebuilt_fields, old_ty, None);
     graph_ops::replace_all_references(graph, old_result, rebuilt);
     new_result
 }
 
-fn integer_literal(graph: &mut EGraph, value: &str, ty: &Type<TypeName>) -> NodeId {
+fn integer_literal(graph: &mut EGraph, value: &str, ty: &Type<TypeName>) -> ValueId {
     let op = match ty {
         Type::Constructed(TypeName::UInt(_), _) => PureOp::Uint(value.to_string()),
         _ => PureOp::Int(value.to_string()),

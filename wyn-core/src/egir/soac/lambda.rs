@@ -10,7 +10,7 @@ use smallvec::{smallvec, SmallVec};
 
 use crate::ast::{Span, TypeName};
 use crate::egir::program::{fresh_region_name, ProgramIdentities, SemanticFunc};
-use crate::egir::types::{EGraph, ENode, NodeId, PureOp, RegionId, SegBody, SkeletonTerminator};
+use crate::egir::types::{EGraph, PureOp, RegionId, SegBody, SkeletonTerminator, ValueId, ValueKind};
 use crate::flow::BlockId;
 
 use super::screma;
@@ -19,7 +19,7 @@ pub(crate) fn named_parameters(types: &[Type<TypeName>], prefix: &str) -> Vec<(T
     types.iter().enumerate().map(|(index, ty)| (ty.clone(), format!("{prefix}_{index}"))).collect()
 }
 
-pub(crate) fn function_parameters(graph: &mut EGraph, params: &[(Type<TypeName>, String)]) -> Vec<NodeId> {
+pub(crate) fn function_parameters(graph: &mut EGraph, params: &[(Type<TypeName>, String)]) -> Vec<ValueId> {
     params.iter().enumerate().map(|(index, (ty, _))| graph.add_func_param(index, ty.clone())).collect()
 }
 pub(crate) fn result_type(types: &[Type<TypeName>]) -> Type<TypeName> {
@@ -29,7 +29,7 @@ pub(crate) fn result_type(types: &[Type<TypeName>]) -> Type<TypeName> {
     }
 }
 
-pub(crate) fn pack_results(graph: &mut EGraph, results: &[NodeId], types: &[Type<TypeName>]) -> NodeId {
+pub(crate) fn pack_results(graph: &mut EGraph, results: &[ValueId], types: &[Type<TypeName>]) -> ValueId {
     debug_assert_eq!(results.len(), types.len());
     match results {
         [result] => *result,
@@ -42,7 +42,11 @@ pub(crate) fn pack_results(graph: &mut EGraph, results: &[NodeId], types: &[Type
     }
 }
 
-pub(crate) fn unpack_results(graph: &mut EGraph, result: NodeId, types: &[Type<TypeName>]) -> Vec<NodeId> {
+pub(crate) fn unpack_results(
+    graph: &mut EGraph,
+    result: ValueId,
+    types: &[Type<TypeName>],
+) -> Vec<ValueId> {
     match types {
         [_] => vec![result],
         _ => types
@@ -66,8 +70,8 @@ pub(crate) fn unpack_results(graph: &mut EGraph, result: NodeId, types: &[Type<T
 pub(crate) fn emit_call(
     graph: &mut EGraph,
     lambda: &screma::Lambda,
-    arguments: Vec<NodeId>,
-) -> Vec<NodeId> {
+    arguments: Vec<ValueId>,
+) -> Vec<ValueId> {
     if lambda.is_identity() {
         debug_assert_eq!(arguments.len(), lambda.result_types.len());
         return arguments;
@@ -91,7 +95,7 @@ pub(crate) fn finish_function(
     span: Span,
     params: Vec<(Type<TypeName>, String)>,
     result_types: &[Type<TypeName>],
-    results: &[NodeId],
+    results: &[ValueId],
 ) -> SemanticFunc {
     let result = pack_results(&mut graph, results, result_types);
     graph.skeleton.blocks[return_block].term = SkeletonTerminator::Return(Some(result));
@@ -107,10 +111,10 @@ pub(crate) fn finish_region_lambda(
     graph: EGraph,
     return_block: BlockId,
     params: Vec<(Type<TypeName>, String)>,
-    captures: Vec<NodeId>,
+    captures: Vec<ValueId>,
     parameter_types: Vec<Type<TypeName>>,
     result_types: Vec<Type<TypeName>>,
-    results: Vec<NodeId>,
+    results: Vec<ValueId>,
     fold_identity: bool,
 ) -> (screma::Lambda, Option<SemanticFunc>) {
     let is_identity = fold_identity
@@ -120,7 +124,7 @@ pub(crate) fn finish_region_lambda(
         && results.iter().enumerate().all(|(index, result)| {
             matches!(
                 graph.nodes.get(*result).map(|node| &node.kind),
-                Some(ENode::FuncParam { index: parameter }) if *parameter == index
+                Some(ValueKind::FuncParam { index: parameter }) if *parameter == index
             )
         });
     if is_identity {

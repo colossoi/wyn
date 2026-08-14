@@ -19,8 +19,8 @@ use smallvec::SmallVec;
 use super::soac::{filter, hist, screma};
 
 pub use super::ir::{
-    EffectOp, EffectToken, Family, GraphResource, Language, NodeId, RegionId, SegBody, SideEffectIndex,
-    SideEffectSite, SkeletonTerminator, SoacDestination, SoacOwnership, SoacPlacement,
+    EffectOp, EffectToken, Family, GraphResource, Language, RegionId, SegBody, SideEffectIndex,
+    SideEffectSite, SkeletonTerminator, SoacDestination, SoacOwnership, SoacPlacement, ValueId,
 };
 pub use crate::ResourceAccess;
 
@@ -159,8 +159,10 @@ impl<P: WynSoacPhase> super::ir::SideEffectKind<P, WynLanguage> {
 // remain independent of compiler-specific families.
 pub type PureOp<R = super::program::SemanticResourceRef> = OpTag<R>;
 pub type PureViewSource<R = super::program::SemanticResourceRef> = super::ir::PureViewSource<R>;
-pub type NodeKey<R = super::program::SemanticResourceRef, Lang = WynLanguage> = super::ir::NodeKey<R, Lang>;
-pub type ENode<R = super::program::SemanticResourceRef, Lang = WynLanguage> = super::ir::ENode<R, Lang>;
+pub type PureValueKey<R = super::program::SemanticResourceRef, Lang = WynLanguage> =
+    super::ir::PureValueKey<R, Lang>;
+pub type ValueKind<R = super::program::SemanticResourceRef, Lang = WynLanguage> =
+    super::ir::ValueKind<R, Lang>;
 pub type SegExtent<R = super::program::SemanticResourceRef> = super::ir::SegExtent<R>;
 pub type SegSpace<R = super::program::SemanticResourceRef> = super::ir::SegSpace<R>;
 pub type SegResourceAccess<R = super::program::SemanticResourceRef> = super::ir::SegResourceAccess<R>;
@@ -334,7 +336,7 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
         }
 
         for node in nodes.values_mut() {
-            if let super::ir::ENode::BlockParam { block, .. } = &mut node.kind {
+            if let super::ir::ValueKind::BlockParam { block, .. } = &mut node.kind {
                 *block = block_map[block];
             }
         }
@@ -394,9 +396,16 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
         mut map_soac: impl FnMut(
             P::SoacId,
             Soac<P>,
-            &LookupMap<NodeId, NodeId>,
+            &LookupMap<ValueId, ValueId>,
         ) -> Result<(Q::SoacId, Soac<Q>), E>,
-    ) -> Result<(EGraph<Q>, LookupMap<NodeId, NodeId>, LookupMap<BlockId, BlockId>), E>
+    ) -> Result<
+        (
+            EGraph<Q>,
+            LookupMap<ValueId, ValueId>,
+            LookupMap<BlockId, BlockId>,
+        ),
+        E,
+    >
     where
         P: WynSoacPhase,
         Q: WynSoacPhase,
@@ -419,8 +428,8 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
         for (source, node) in &source_nodes {
             node_map.insert(
                 *source,
-                nodes.insert(super::ir::Node {
-                    kind: super::ir::ENode::<Q::Resource, WynLanguage>::Constant(ConstantValue::Bool(
+                nodes.insert(super::ir::Value {
+                    kind: super::ir::ValueKind::<Q::Resource, WynLanguage>::Constant(ConstantValue::Bool(
                         false,
                     )),
                     ty: node.ty.clone(),
@@ -431,23 +440,23 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
         }
         for (source, node) in source_nodes {
             let kind = match node.kind {
-                super::ir::ENode::Pure { op, operands } => super::ir::ENode::Pure {
+                super::ir::ValueKind::Pure { op, operands } => super::ir::ValueKind::Pure {
                     op: op.try_map_resource(&mut map_resource)?,
                     operands: operands.into_iter().map(|node| node_map[&node]).collect(),
                 },
-                super::ir::ENode::Union { left, right } => super::ir::ENode::Union {
+                super::ir::ValueKind::Union { left, right } => super::ir::ValueKind::Union {
                     left: node_map[&left],
                     right: node_map[&right],
                 },
-                super::ir::ENode::FuncParam { index } => super::ir::ENode::FuncParam { index },
-                super::ir::ENode::BlockParam { block, index } => super::ir::ENode::BlockParam {
+                super::ir::ValueKind::FuncParam { index } => super::ir::ValueKind::FuncParam { index },
+                super::ir::ValueKind::BlockParam { block, index } => super::ir::ValueKind::BlockParam {
                     block: block_map[&block],
                     index,
                 },
-                super::ir::ENode::Constant(value) => super::ir::ENode::Constant(value),
-                super::ir::ENode::SideEffectResult => super::ir::ENode::SideEffectResult,
+                super::ir::ValueKind::Constant(value) => super::ir::ValueKind::Constant(value),
+                super::ir::ValueKind::SideEffectResult => super::ir::ValueKind::SideEffectResult,
             };
-            nodes[node_map[&source]] = super::ir::Node {
+            nodes[node_map[&source]] = super::ir::Value {
                 kind,
                 ty: node.ty,
                 span: node.span,
@@ -590,7 +599,7 @@ impl Soac<Physical> {
 }
 
 impl<R: GraphResource> Soac<Semantic<R>> {
-    pub fn capture_nodes(&self) -> impl Iterator<Item = NodeId> {
+    pub fn capture_nodes(&self) -> impl Iterator<Item = ValueId> {
         let nodes = match self {
             Self::Screma(op) => op.capture_nodes(),
             Self::Filter(op) => op.capture_nodes(),
@@ -615,7 +624,7 @@ impl<R: GraphResource> Soac<Semantic<R>> {
         }
     }
 
-    fn referenced_nodes(&self) -> Vec<NodeId> {
+    fn referenced_nodes(&self) -> Vec<ValueId> {
         match self {
             Self::Screma(op) => op.referenced_nodes(),
             Self::Filter(op) => op.referenced_nodes(),
@@ -623,7 +632,7 @@ impl<R: GraphResource> Soac<Semantic<R>> {
         }
     }
 
-    fn referenced_node_slots(&mut self) -> Vec<&mut NodeId> {
+    fn referenced_node_slots(&mut self) -> Vec<&mut ValueId> {
         match self {
             Self::Screma(op) => op.referenced_node_slots(),
             Self::Filter(op) => op.referenced_node_slots(),
@@ -635,7 +644,7 @@ impl<R: GraphResource> Soac<Semantic<R>> {
 impl<R: GraphResource> super::ir::SideEffect<Semantic<R>, WynLanguage> {
     /// Every graph value used by the effect, including SOAC captures,
     /// operator metadata, and semantic iteration-space extents.
-    pub fn referenced_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+    pub fn referenced_nodes(&self) -> impl Iterator<Item = ValueId> + '_ {
         let metadata = match &self.kind {
             SideEffectKind::Soac(SoacEffect(_, soac)) => soac.referenced_nodes(),
             SideEffectKind::Effect(_) => Vec::new(),
@@ -643,7 +652,7 @@ impl<R: GraphResource> super::ir::SideEffect<Semantic<R>, WynLanguage> {
         self.operand_nodes.iter().copied().chain(metadata)
     }
 
-    pub fn referenced_node_slots(&mut self) -> Vec<&mut NodeId> {
+    pub fn referenced_node_slots(&mut self) -> Vec<&mut ValueId> {
         let Self {
             kind, operand_nodes, ..
         } = self;

@@ -19,7 +19,7 @@
 //! operand nodes and from each `SkeletonTerminator::Return(Some(_))`.
 //! For every reached Pure node, if its type is a runtime-sized
 //! `Array` with `ArrayVariantComposite`, emit a diagnostic naming the
-//! entry and offending NodeId.
+//! entry and offending ValueId.
 //!
 //! In debug builds, the residency planner calls `check` after all rewrites.
 
@@ -32,11 +32,11 @@ use crate::types::TypeExt;
 use super::super::allocation::{entries_with_endpoints, CompilerFlowEndpoint, ResourcesAllocated};
 use super::super::from_tlc::ConvertError;
 use super::super::program::SemanticEntry;
-use super::super::types::{EGraph, ENode, Family, NodeId, SkeletonTerminator};
+use super::super::types::{EGraph, Family, SkeletonTerminator, ValueId, ValueKind};
 
 /// Verify the post-realization invariant for every entry. Returns
 /// `ConvertError::Internal` on the first violation, naming the entry
-/// and offending NodeId.
+/// and offending ValueId.
 pub fn check(inner: &ResourcesAllocated) -> Result<(), ConvertError> {
     for (endpoint, entry) in entries_with_endpoints(inner) {
         if matches!(endpoint, CompilerFlowEndpoint::Entry(_)) {
@@ -69,12 +69,12 @@ fn check_routes(entry: &SemanticEntry) -> Result<(), ConvertError> {
 
 fn check_entry<P: Family>(entry_name: &str, graph: &EGraph<P>) -> Result<(), ConvertError> {
     // Roots: the operand of every Return(Some(_)) terminator, plus
-    // every Pure NodeId referenced by a side-effect store's operands.
+    // every Pure ValueId referenced by a side-effect store's operands.
     // We don't walk SOAC `EgirSoac` operands here: those are
     // legitimate consumers of arrays at the SOAC's input position,
     // not output operands. The runtime-sized check applies to values
     // that flow into a store or off the entry's return.
-    let mut roots: Vec<NodeId> = Vec::new();
+    let mut roots: Vec<ValueId> = Vec::new();
     for (_, block) in &graph.skeleton.blocks {
         if let SkeletonTerminator::Return(Some(r)) = block.term {
             roots.push(r);
@@ -94,24 +94,24 @@ fn check_entry<P: Family>(entry_name: &str, graph: &EGraph<P>) -> Result<(), Con
     }
 
     // Walk Pure operand edges from each root, checking each node's type.
-    let mut seen: LookupSet<NodeId> = LookupSet::new();
-    let mut work: Vec<NodeId> = roots;
+    let mut seen: LookupSet<ValueId> = LookupSet::new();
+    let mut work: Vec<ValueId> = roots;
     while let Some(nid) = work.pop() {
         if !seen.insert(nid) {
             continue;
         }
-        let ENode::Pure { operands, .. } = &graph.nodes[nid].kind else {
+        let ValueKind::Pure { operands, .. } = &graph.nodes[nid].kind else {
             continue;
         };
         if let Some(ty) = node_type(graph, nid) {
             if ty.contains_runtime_sized_composite_array() {
                 return Err(ConvertError::Internal(format!(
                     "realize_outputs verifier: entry `{}` leaks a \
-                     runtime-sized Composite array at NodeId {:?} \
+                     runtime-sized Composite array at ValueId {:?} \
                      (type {:?}) reachable from an entry output or \
                      output-side-effect operand. This would crash \
                      the SPIR-V backend at codegen; investigate the \
-                     producer of this NodeId.",
+                     producer of this ValueId.",
                     entry_name, nid, ty
                 )));
             }
@@ -121,11 +121,11 @@ fn check_entry<P: Family>(entry_name: &str, graph: &EGraph<P>) -> Result<(), Con
     Ok(())
 }
 
-/// Look up the Pure result type for `nid`. ENode::Pure carries its
+/// Look up the Pure result type for `nid`. ValueKind::Pure carries its
 /// declared type; we just project the field.
-fn node_type<P: Family>(graph: &EGraph<P>, nid: NodeId) -> Option<&Type<TypeName>> {
+fn node_type<P: Family>(graph: &EGraph<P>, nid: ValueId) -> Option<&Type<TypeName>> {
     match &graph.nodes[nid].kind {
-        ENode::Pure { .. } => Some(&graph.nodes[nid].ty),
+        ValueKind::Pure { .. } => Some(&graph.nodes[nid].ty),
         _ => None,
     }
 }

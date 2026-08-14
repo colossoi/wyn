@@ -13,7 +13,7 @@ use crate::flow::{BlockId, ControlHeader};
 use crate::{LookupMap, LookupSet};
 
 use super::ir::Family;
-use super::types::{EGraph, ENode, NodeId, Skeleton, SkeletonTerminator};
+use super::types::{EGraph, Skeleton, SkeletonTerminator, ValueId, ValueKind};
 
 pub struct LoopAnalysis {
     /// All blocks inside each loop (key = loop header).
@@ -73,8 +73,8 @@ pub struct LoopInvariance<'a, P: Family> {
     graph: &'a EGraph<P>,
     loops: &'a LoopAnalysis,
     header: BlockId,
-    effect_blocks: LookupMap<NodeId, BlockId>,
-    memo: LookupMap<NodeId, bool>,
+    effect_blocks: LookupMap<ValueId, BlockId>,
+    memo: LookupMap<ValueId, bool>,
 }
 
 impl<'a, P: Family> LoopInvariance<'a, P> {
@@ -96,21 +96,21 @@ impl<'a, P: Family> LoopInvariance<'a, P> {
         }
     }
 
-    pub fn is_invariant(&mut self, node: NodeId) -> bool {
+    pub fn is_invariant(&mut self, node: ValueId) -> bool {
         if let Some(value) = self.memo.get(&node) {
             return *value;
         }
         let invariant = match self.graph.nodes[node].kind.clone() {
-            ENode::Constant(_) | ENode::FuncParam { .. } => true,
-            ENode::BlockParam { block, .. } => self.loops.block_is_invariant(block, self.header),
-            ENode::SideEffectResult => self
+            ValueKind::Constant(_) | ValueKind::FuncParam { .. } => true,
+            ValueKind::BlockParam { block, .. } => self.loops.block_is_invariant(block, self.header),
+            ValueKind::SideEffectResult => self
                 .effect_blocks
                 .get(&node)
                 .is_some_and(|block| self.loops.block_is_invariant(*block, self.header)),
-            ENode::Pure { operands, .. } => operands.iter().all(|operand| self.is_invariant(*operand)),
+            ValueKind::Pure { operands, .. } => operands.iter().all(|operand| self.is_invariant(*operand)),
             // Extraction may select either branch, so both alternatives must
             // be invariant before the union is safe to classify as invariant.
-            ENode::Union { left, right } => self.is_invariant(left) && self.is_invariant(right),
+            ValueKind::Union { left, right } => self.is_invariant(left) && self.is_invariant(right),
         };
         self.memo.insert(node, invariant);
         invariant

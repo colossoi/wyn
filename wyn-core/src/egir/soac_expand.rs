@@ -39,8 +39,8 @@ use crate::ast::TypeName;
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
 use super::types::{
-    as_soa_tuple, soac_element_type, ArrayLayout, ENode, EffectOp, EffectToken, NodeId, PureOp, RegionId,
-    SkeletonTerminator, SoacDestination, SoacEffect,
+    as_soa_tuple, soac_element_type, ArrayLayout, EffectOp, EffectToken, PureOp, RegionId,
+    SkeletonTerminator, SoacDestination, SoacEffect, ValueId, ValueKind,
 };
 
 mod array_io;
@@ -460,7 +460,7 @@ fn expand_one(
         SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
             let n_inputs = op.inputs.len();
             let input_nids = &se.operand_nodes[..n_inputs];
-            let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>, Vec<u8>, ArrayLayout)> =
+            let read_inputs: Vec<(ValueId, Type<TypeName>, Type<TypeName>, Vec<u8>, ArrayLayout)> =
                 input_nids
                     .iter()
                     .zip(op.inputs.iter())

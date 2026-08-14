@@ -29,7 +29,7 @@ use super::super::from_tlc::ConvertError;
 use super::super::ir::{Body, BodySite, ProgramShape};
 use super::super::program::{Func, Program};
 use super::super::types::{
-    EGraph, ENode, EffectOp, NodeId, PureOp, RegionId, SideEffectKind, SoacEffect, WynSoacPhase,
+    EGraph, EffectOp, PureOp, RegionId, SideEffectKind, SoacEffect, ValueId, ValueKind, WynSoacPhase,
 };
 use crate::ast::TypeName;
 
@@ -97,7 +97,7 @@ fn collect_drifts<'a, P: WynSoacPhase + 'a>(
 ) {
     for graph in graphs {
         for (_, node) in &graph.nodes {
-            let ENode::Pure {
+            let ValueKind::Pure {
                 op: PureOp::Call(region),
                 operands,
             } = &node.kind
@@ -156,7 +156,7 @@ fn collect_call_drifts<P: WynSoacPhase>(
     graph: &EGraph<P>,
     functions: &[Func<P>],
     region: RegionId,
-    arguments: &[NodeId],
+    arguments: &[ValueId],
     out: &mut Vec<Retype>,
 ) {
     let Some(callee) = functions.iter().find(|function| function.region == region) else {
@@ -247,9 +247,9 @@ where
 /// retarget and makes the fixpoint monotone.
 fn recompute_aggregate_types<P: WynSoacPhase>(graph: &mut EGraph<P>) {
     loop {
-        let mut updates: Vec<(NodeId, Type<TypeName>)> = Vec::new();
+        let mut updates: Vec<(ValueId, Type<TypeName>)> = Vec::new();
         for (nid, node) in &graph.nodes {
-            let ENode::Pure { op, operands } = &node.kind else {
+            let ValueKind::Pure { op, operands } = &node.kind else {
                 continue;
             };
             let cur = &node.ty;
@@ -323,7 +323,7 @@ fn is_view_ward_drift(param: &Type<TypeName>, cap: &Type<TypeName>) -> bool {
 /// Retype the `FuncParam { index }` node in a region/function body graph.
 fn retype_func_param<P: WynSoacPhase>(graph: &mut EGraph<P>, index: usize, view_ty: &Type<TypeName>) {
     let target = graph.nodes.iter().find_map(|(nid, node)| match &node.kind {
-        ENode::FuncParam { index: i } if *i == index => Some(nid),
+        ValueKind::FuncParam { index: i } if *i == index => Some(nid),
         _ => None,
     });
     if let Some(nid) = target {

@@ -17,7 +17,7 @@ use crate::egir::program::{CoreProgramData, OutputSlotId, ProgramIdentities, Sem
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
-use crate::egir::types::{EGraph, NodeId, SegResourceAccess, Semantic, SideEffectKind, Soac, SoacEffect};
+use crate::egir::types::{EGraph, SegResourceAccess, Semantic, SideEffectKind, Soac, SoacEffect, ValueId};
 use crate::flow::BlockId;
 use crate::LookupMap;
 
@@ -158,10 +158,10 @@ pub(super) struct ScremaParts {
     pub(super) placement: screma::Placement,
     pub(super) output_slots: Vec<OutputSlotId>,
     pub(super) resources: Vec<SegResourceAccess>,
-    pub(super) result: NodeId,
+    pub(super) result: ValueId,
     pub(super) result_types: Vec<Type<TypeName>>,
-    pub(super) input_nodes: Vec<NodeId>,
-    pub(super) output_nodes: Vec<Option<NodeId>>,
+    pub(super) input_nodes: Vec<ValueId>,
+    pub(super) output_nodes: Vec<Option<ValueId>>,
 }
 
 pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> ScremaParts {
@@ -215,10 +215,10 @@ pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> Sc
 struct FusionPlan {
     id: crate::egir::program::SemanticOpId,
     op: screma::Op<Semantic>,
-    operands: SmallVec<[NodeId; 4]>,
+    operands: SmallVec<[ValueId; 4]>,
     result_types: Vec<Type<TypeName>>,
-    left_result: NodeId,
-    right_result: NodeId,
+    left_result: ValueId,
+    right_result: ValueId,
     left_mapping: Vec<usize>,
     right_mapping: Vec<usize>,
     left_result_types: Vec<Type<TypeName>>,
@@ -232,7 +232,7 @@ fn build_plan(
     identities: &mut ProgramIdentities,
     scope: &str,
     span: Span,
-    outer_types: &LookupMap<NodeId, Type<TypeName>>,
+    outer_types: &LookupMap<ValueId, Type<TypeName>>,
     left: ScremaParts,
     right: ScremaParts,
 ) -> FusionPlan {
@@ -369,8 +369,8 @@ fn apply_plan(graph: &mut EGraph, block: BlockId, left: usize, right: usize, pla
 
 pub(super) fn reproject_fields(
     graph: &mut EGraph,
-    old_result: NodeId,
-    new_result: NodeId,
+    old_result: ValueId,
+    new_result: ValueId,
     mapping: &[usize],
     field_types: &[Type<TypeName>],
 ) {

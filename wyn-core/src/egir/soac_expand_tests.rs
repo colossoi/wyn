@@ -18,7 +18,7 @@
 use crate::ast::TypeName;
 use crate::egir::program::{PhysicalEGraph, PhysicalSideEffectKind, ProgramIdentities, SemanticOpId};
 use crate::egir::soac::{hist, screma};
-use crate::egir::types::{ENode, Family, NodeId, Physical, PureOp, Soac, SoacEffect, SoacInputType};
+use crate::egir::types::{Family, Physical, PureOp, Soac, SoacEffect, SoacInputType, ValueId, ValueKind};
 use polytype::Type;
 
 /// Compile source through the pipeline to just-past `expand_soacs`,
@@ -45,13 +45,13 @@ fn compile_to_expanded_egraph(input: &str) -> PhysicalEGraph {
 }
 
 /// Collect all `_w_intrinsic_array_with_inplace` nodes in the graph.
-fn array_with_nodes<P: Family>(graph: &crate::egir::types::EGraph<P>) -> Vec<crate::egir::types::NodeId> {
+fn array_with_nodes<P: Family>(graph: &crate::egir::types::EGraph<P>) -> Vec<crate::egir::types::ValueId> {
     let inplace_id = crate::builtins::catalog().known().array_with_in_place;
     graph
         .nodes
         .iter()
         .filter_map(|(id, node)| match &node.kind {
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::Intrinsic { id: bid, .. },
                 ..
             } if *bid == inplace_id => Some(id),
@@ -103,9 +103,9 @@ fn scatter_handleability_checks_every_input() {
                 ),
                 operations: vec![hist::HistOp {
                     emission: hist::Emission::Always,
-                    shape: vec![NodeId::from(slotmap::KeyData::from_ffi(1))],
-                    race_factor: NodeId::from(slotmap::KeyData::from_ffi(2)),
-                    destinations: vec![NodeId::from(slotmap::KeyData::from_ffi(3))],
+                    shape: vec![ValueId::from(slotmap::KeyData::from_ffi(1))],
+                    race_factor: ValueId::from(slotmap::KeyData::from_ffi(2)),
+                    destinations: vec![ValueId::from(slotmap::KeyData::from_ffi(3))],
                     update: hist::Update::OrderedOverwrite {
                         value_types: vec![f32_ty],
                     },
@@ -137,7 +137,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
     let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), None);
     let two = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty.clone(), None);
     let four = graph.intern_pure(PureOp::Int("4".into()), smallvec![], i32_ty.clone(), None);
-    let mut input_nodes = SmallVec::<[NodeId; 4]>::new();
+    let mut input_nodes = SmallVec::<[ValueId; 4]>::new();
     for _ in 0..6 {
         input_nodes.push(graph.intern_pure(
             PureOp::ArrayLit(4),
@@ -227,7 +227,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
         .filter(|(_, node)| {
             matches!(
                 &node.kind,
-                ENode::Pure {
+                ValueKind::Pure {
                     op: PureOp::Call(name),
                     operands,
                 } if *name == reducer_region && operands.len() == 4
@@ -247,7 +247,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
         graph.nodes.iter().any(|(_, node)| {
             matches!(
                 &node.kind,
-                ENode::Pure {
+                ValueKind::Pure {
                     op: PureOp::BinOp(op),
                     ..
                 } if *op == crate::op::BinaryOperator::Multiply
@@ -324,7 +324,7 @@ fn serial_hist_ignores_out_of_bounds_indices() {
         graph.nodes.iter().any(|(_, node)| {
             matches!(
                 &node.kind,
-                ENode::Pure {
+                ValueKind::Pure {
                     op: PureOp::BinOp(op),
                     ..
                 } if *op == crate::op::BinaryOperator::GreaterEqual
@@ -359,7 +359,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
     let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), None);
     let two = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty.clone(), None);
     let four = graph.intern_pure(PureOp::Int("4".into()), smallvec![], i32_ty.clone(), None);
-    let mut inputs = SmallVec::<[NodeId; 4]>::new();
+    let mut inputs = SmallVec::<[ValueId; 4]>::new();
     for _ in 0..5 {
         inputs.push(graph.intern_pure(
             PureOp::ArrayLit(4),
@@ -463,7 +463,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
     assert!(graph.nodes.iter().any(|(_, node)| {
         matches!(
             &node.kind,
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::BinOp(op),
                 ..
             } if *op == crate::op::BinaryOperator::GreaterEqual
@@ -472,7 +472,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
     assert!(graph.nodes.iter().any(|(_, node)| {
         matches!(
             &node.kind,
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::BinOp(op),
                 ..
             } if *op == crate::op::BinaryOperator::Multiply
@@ -538,7 +538,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     //    We assert matching indices per ArrayWith. This catches
     //    "wired to the wrong component" bugs.
     for id in &aw_nodes {
-        let ENode::Pure { operands, .. } = &graph.nodes[*id].kind else {
+        let ValueKind::Pure { operands, .. } = &graph.nodes[*id].kind else {
             panic!("ArrayWith should be Pure");
         };
         assert_eq!(operands.len(), 3, "ArrayWith takes 3 operands");
@@ -546,14 +546,14 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
         let val_op = &graph.nodes[operands[2]].kind;
 
         let arr_index = match arr_op {
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::Project { index },
                 ..
             } => Some(*index),
             _ => None,
         };
         let val_index = match val_op {
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::Project { index },
                 ..
             } => Some(*index),
@@ -582,7 +582,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     //    ([8]f32, [8]i32, [8]vec3f32) as its result type — the
     //    repack produced by `emit_write_element`.
     let has_repack = graph.nodes.iter().any(|(_, node)| match &node.kind {
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::Tuple(3), ..
         } => is_soa_tuple(&node.ty),
         _ => false,

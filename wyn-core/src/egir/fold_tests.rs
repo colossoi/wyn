@@ -8,7 +8,7 @@ use smallvec::smallvec;
 use super::{ConversionArenas, Converter};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
-use crate::egir::types::{ENode, PureOp};
+use crate::egir::types::{PureOp, ValueKind};
 use crate::ssa::types::ConstantValue;
 use crate::SymbolTable;
 
@@ -118,14 +118,14 @@ fn runtime_f32_div_constant_folds_to_reciprocal_multiply() {
             f32_ty(),
         );
 
-        let ENode::Pure { op, operands } = &converter.graph.nodes[result].kind else {
+        let ValueKind::Pure { op, operands } = &converter.graph.nodes[result].kind else {
             panic!("expected reciprocal multiply")
         };
         assert!(matches!(op, PureOp::BinOp(crate::op::BinaryOperator::Multiply)));
         assert_eq!(operands[0], value);
         assert!(matches!(
             converter.graph.nodes[operands[1]].kind,
-            ENode::Constant(ConstantValue::F32(bits)) if f32::from_bits(bits) == 0.25
+            ValueKind::Constant(ConstantValue::F32(bits)) if f32::from_bits(bits) == 0.25
         ));
     });
 }
@@ -142,14 +142,14 @@ fn runtime_f32_vector_div_scalar_constant_folds_to_reciprocal_multiply() {
             vec3f32_ty(),
         );
 
-        let ENode::Pure { op, operands } = &converter.graph.nodes[result].kind else {
+        let ValueKind::Pure { op, operands } = &converter.graph.nodes[result].kind else {
             panic!("expected vector/scalar reciprocal multiply")
         };
         assert!(matches!(op, PureOp::BinOp(crate::op::BinaryOperator::Multiply)));
         assert_eq!(operands[0], value);
         assert!(matches!(
             converter.graph.nodes[operands[1]].kind,
-            ENode::Constant(ConstantValue::F32(bits)) if f32::from_bits(bits) == 0.125
+            ValueKind::Constant(ConstantValue::F32(bits)) if f32::from_bits(bits) == 0.125
         ));
         assert_eq!(converter.graph.nodes[operands[1]].ty, f32_ty());
     });
@@ -169,7 +169,7 @@ fn f32_div_zero_does_not_rewrite_to_multiply() {
 
         assert!(matches!(
             &converter.graph.nodes[result].kind,
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::BinOp(crate::op::BinaryOperator::Divide),
                 ..
             }
@@ -209,7 +209,7 @@ fn required_bitcast_is_retained() {
 
         assert!(matches!(
             &converter.graph.nodes[result].kind,
-            ENode::Pure { op: PureOp::Intrinsic { .. }, operands } if operands.as_slice() == [value]
+            ValueKind::Pure { op: PureOp::Intrinsic { .. }, operands } if operands.as_slice() == [value]
         ));
     });
 }
@@ -228,7 +228,7 @@ fn unary_neg_of_float_literal_folds_to_constant() {
             f32_ty(),
         );
         match &converter.graph.nodes[neg].kind {
-            ENode::Constant(ConstantValue::F32(bits)) => assert_eq!(f32::from_bits(*bits), -0.5),
+            ValueKind::Constant(ConstantValue::F32(bits)) => assert_eq!(f32::from_bits(*bits), -0.5),
             _ => panic!("expected -(0.5) to fold to the constant -0.5"),
         }
     });
@@ -244,7 +244,7 @@ fn unary_neg_of_int_literal_folds_to_constant() {
             i32_ty(),
         );
         match &converter.graph.nodes[neg].kind {
-            ENode::Constant(ConstantValue::I32(v)) => assert_eq!(*v, -5),
+            ValueKind::Constant(ConstantValue::I32(v)) => assert_eq!(*v, -5),
             _ => panic!("expected -(5) to fold to the constant -5"),
         }
     });
@@ -259,7 +259,7 @@ fn unary_neg_of_runtime_value_does_not_fold() {
             smallvec![value],
             f32_ty(),
         );
-        let ENode::Pure { op, operands } = &converter.graph.nodes[neg].kind else {
+        let ValueKind::Pure { op, operands } = &converter.graph.nodes[neg].kind else {
             panic!("expected a pure node")
         };
         assert!(matches!(op, PureOp::UnaryOp(crate::op::UnaryOperator::Negate)));

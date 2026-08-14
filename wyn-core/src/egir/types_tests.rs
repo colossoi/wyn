@@ -8,7 +8,7 @@ fn u32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::UInt(32), vec![])
 }
 
-fn effect(result: NodeId) -> SideEffect {
+fn effect(result: ValueId) -> SideEffect {
     SideEffect {
         kind: SideEffectKind::Effect(EffectOp::ControlBarrier),
         operand_nodes: SmallVec::new(),
@@ -70,7 +70,7 @@ fn graph_accepts_non_wyn_payloads() {
     assert_eq!(graph.nodes[node].ty, "unit");
     assert!(matches!(
         graph.nodes[constant].kind,
-        super::super::ir::ENode::Constant(TestConst::FortyTwo)
+        super::super::ir::ValueKind::Constant(TestConst::FortyTwo)
     ));
     assert!(matches!(
         graph.skeleton.blocks[entry].side_effects[0].kind,
@@ -89,11 +89,11 @@ fn adding_block_params_registers_them_in_order() {
     assert_eq!(graph.skeleton.blocks[block].params, [first, second]);
     assert!(matches!(
         graph.nodes[first].kind,
-        super::super::ir::ENode::BlockParam { block: owner, index: 0 } if owner == block
+        super::super::ir::ValueKind::BlockParam { block: owner, index: 0 } if owner == block
     ));
     assert!(matches!(
         graph.nodes[second].kind,
-        super::super::ir::ENode::BlockParam { block: owner, index: 1 } if owner == block
+        super::super::ir::ValueKind::BlockParam { block: owner, index: 1 } if owner == block
     ));
     assert_eq!(graph.nodes[first].ty, "first");
     assert_eq!(graph.nodes[second].ty, "second");
@@ -130,7 +130,7 @@ fn removing_block_param_slots_updates_incoming_edges_and_indices() {
     assert_eq!(graph.skeleton.blocks[target].params, [second]);
     assert!(matches!(
         graph.nodes[second].kind,
-        super::super::ir::ENode::BlockParam { block, index: 0 } if block == target
+        super::super::ir::ValueKind::BlockParam { block, index: 0 } if block == target
     ));
     assert!(graph.nodes.contains_key(first));
     assert!(graph.nodes.contains_key(third));
@@ -276,12 +276,12 @@ fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
     );
     assert!(matches!(
         entry.graph.nodes[first].kind,
-        super::super::ir::ENode::FuncParam { index: 0 }
+        super::super::ir::ValueKind::FuncParam { index: 0 }
     ));
     assert!(!entry.graph.nodes.contains_key(removed));
     assert!(matches!(
         entry.graph.nodes[third].kind,
-        super::super::ir::ENode::FuncParam { index: 1 }
+        super::super::ir::ValueKind::FuncParam { index: 1 }
     ));
 }
 

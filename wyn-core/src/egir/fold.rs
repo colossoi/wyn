@@ -26,16 +26,16 @@ use crate::types::TypeExt;
 use polytype::Type;
 use smallvec::smallvec;
 
-use super::types::{EGraph, ENode, Family, NodeId, PureOp};
+use super::types::{EGraph, Family, PureOp, ValueId, ValueKind};
 
 impl<P: Family> EGraph<P> {
     /// Try every rewrite rule and return a substitute node if any fires.
     pub(super) fn try_algebraic_fold(
         &mut self,
         op: &PureOp<P::Resource>,
-        operands: &[NodeId],
+        operands: &[ValueId],
         result_ty: &Type<TypeName>,
-    ) -> Option<NodeId> {
+    ) -> Option<ValueId> {
         match op {
             PureOp::Project { index } if operands.len() == 1 => self.fold_project(*index, operands[0]),
             PureOp::Index if operands.len() == 2 => self.fold_index(operands[0], operands[1]),
@@ -54,10 +54,10 @@ impl<P: Family> EGraph<P> {
     }
 
     /// `Index(Tuple/Vector/ArrayLit(e0,…,en), const k) → e_k`
-    fn fold_index(&self, base: NodeId, index: NodeId) -> Option<NodeId> {
+    fn fold_index(&self, base: ValueId, index: ValueId) -> Option<ValueId> {
         let k =
             self.as_i32(index).map(|v| v as usize).or_else(|| self.as_u32(index).map(|v| v as usize))?;
-        let ENode::Pure {
+        let ValueKind::Pure {
             op: base_op,
             operands: base_operands,
         } = &self.nodes[base].kind
@@ -72,8 +72,8 @@ impl<P: Family> EGraph<P> {
     }
 
     /// `Project{i}(Tuple/Vector/ArrayLit(e0,…,en)) → e_i`
-    fn fold_project(&self, index: u32, base: NodeId) -> Option<NodeId> {
-        let ENode::Pure {
+    fn fold_project(&self, index: u32, base: ValueId) -> Option<ValueId> {
+        let ValueKind::Pure {
             op: base_op,
             operands: base_operands,
         } = &self.nodes[base].kind
@@ -89,7 +89,7 @@ impl<P: Family> EGraph<P> {
     }
 
     /// Identity and absorbing rules for `+`, `-`, `*`, `/`.
-    fn fold_binop_identity(&self, name: BinaryOperator, a: NodeId, b: NodeId) -> Option<NodeId> {
+    fn fold_binop_identity(&self, name: BinaryOperator, a: ValueId, b: ValueId) -> Option<ValueId> {
         match name {
             BinaryOperator::Add if self.is_zero_literal(a) => Some(b),
             BinaryOperator::Add if self.is_zero_literal(b) => Some(a),
@@ -108,10 +108,10 @@ impl<P: Family> EGraph<P> {
     fn fold_binop_const(
         &mut self,
         name: BinaryOperator,
-        a: NodeId,
-        b: NodeId,
+        a: ValueId,
+        b: ValueId,
         result_ty: &Type<TypeName>,
-    ) -> Option<NodeId> {
+    ) -> Option<ValueId> {
         let operand_ty = self.nodes.get(a)?.ty.clone();
         let value = scalar_eval::binary(name, self.as_scalar(a)?, self.as_scalar(b)?, &operand_ty)?;
         self.intern_scalar(value, result_ty)
@@ -124,10 +124,10 @@ impl<P: Family> EGraph<P> {
     fn fold_fdiv_const_to_mul(
         &mut self,
         name: BinaryOperator,
-        value: NodeId,
-        divisor: NodeId,
+        value: ValueId,
+        divisor: ValueId,
         result_ty: &Type<TypeName>,
-    ) -> Option<NodeId> {
+    ) -> Option<ValueId> {
         let f32_result = matches!(result_ty, Type::Constructed(TypeName::Float(32), _));
         let f32_vector_result = result_ty.is_vec()
             && matches!(
@@ -168,9 +168,9 @@ impl<P: Family> EGraph<P> {
     fn fold_unary(
         &mut self,
         name: UnaryOperator,
-        inner: NodeId,
+        inner: ValueId,
         result_ty: &Type<TypeName>,
-    ) -> Option<NodeId> {
+    ) -> Option<ValueId> {
         if !matches!(name, UnaryOperator::Negate | UnaryOperator::LogicalNot) {
             return None;
         }
@@ -180,7 +180,7 @@ impl<P: Family> EGraph<P> {
         {
             return self.intern_scalar(value, result_ty);
         }
-        let ENode::Pure {
+        let ValueKind::Pure {
             op: PureOp::UnaryOp(inner_name),
             operands: inner_ops,
         } = &self.nodes[inner].kind
@@ -194,9 +194,9 @@ impl<P: Family> EGraph<P> {
         &mut self,
         id: crate::builtins::BuiltinId,
         overload_idx: usize,
-        operands: &[NodeId],
+        operands: &[ValueId],
         result_ty: &Type<TypeName>,
-    ) -> Option<NodeId> {
+    ) -> Option<ValueId> {
         let def = by_id(id);
         if def.raw.purity != Purity::Pure {
             return None;
@@ -207,7 +207,7 @@ impl<P: Family> EGraph<P> {
             if self.nodes.get(operand).map(|node| &node.ty) == Some(result_ty) {
                 return Some(operand);
             }
-            if let ENode::Pure {
+            if let ValueKind::Pure {
                 op:
                     PureOp::Intrinsic {
                         id: inner_id,
@@ -245,7 +245,7 @@ impl<P: Family> EGraph<P> {
     fn fold_conversion_value(
         &self,
         prim: &PrimOp,
-        operand: NodeId,
+        operand: ValueId,
         result_ty: &Type<TypeName>,
     ) -> Option<ConstantValue> {
         match (prim, result_ty) {
@@ -279,7 +279,7 @@ impl<P: Family> EGraph<P> {
         }
     }
 
-    fn bitcast_constant(&self, operand: NodeId, result_ty: &Type<TypeName>) -> Option<ConstantValue> {
+    fn bitcast_constant(&self, operand: ValueId, result_ty: &Type<TypeName>) -> Option<ConstantValue> {
         match result_ty {
             Type::Constructed(TypeName::Int(32), _) => self
                 .as_u32(operand)
@@ -302,11 +302,11 @@ impl<P: Family> EGraph<P> {
 
     // ---- literal predicates ------------------------------------------------
 
-    fn is_zero_literal(&self, nid: NodeId) -> bool {
+    fn is_zero_literal(&self, nid: ValueId) -> bool {
         match &self.nodes[nid].kind {
-            ENode::Constant(ConstantValue::I32(0)) | ENode::Constant(ConstantValue::U32(0)) => true,
-            ENode::Constant(ConstantValue::F32(bits)) => f32::from_bits(*bits) == 0.0,
-            ENode::Pure { op, .. } => match op {
+            ValueKind::Constant(ConstantValue::I32(0)) | ValueKind::Constant(ConstantValue::U32(0)) => true,
+            ValueKind::Constant(ConstantValue::F32(bits)) => f32::from_bits(*bits) == 0.0,
+            ValueKind::Pure { op, .. } => match op {
                 PureOp::Int(s) | PureOp::Uint(s) => s == "0",
                 PureOp::Float(s) => s.parse::<f32>().map(|f| f == 0.0).unwrap_or(false),
                 _ => false,
@@ -315,11 +315,11 @@ impl<P: Family> EGraph<P> {
         }
     }
 
-    fn is_one_literal(&self, nid: NodeId) -> bool {
+    fn is_one_literal(&self, nid: ValueId) -> bool {
         match &self.nodes[nid].kind {
-            ENode::Constant(ConstantValue::I32(1)) | ENode::Constant(ConstantValue::U32(1)) => true,
-            ENode::Constant(ConstantValue::F32(bits)) => f32::from_bits(*bits) == 1.0,
-            ENode::Pure { op, .. } => match op {
+            ValueKind::Constant(ConstantValue::I32(1)) | ValueKind::Constant(ConstantValue::U32(1)) => true,
+            ValueKind::Constant(ConstantValue::F32(bits)) => f32::from_bits(*bits) == 1.0,
+            ValueKind::Pure { op, .. } => match op {
                 PureOp::Int(s) | PureOp::Uint(s) => s == "1",
                 PureOp::Float(s) => s.parse::<f32>().map(|f| f == 1.0).unwrap_or(false),
                 _ => false,
@@ -330,7 +330,7 @@ impl<P: Family> EGraph<P> {
 
     // ---- value extractors --------------------------------------------------
 
-    fn as_scalar(&self, node: NodeId) -> Option<Scalar> {
+    fn as_scalar(&self, node: ValueId) -> Option<Scalar> {
         match &self.nodes.get(node)?.ty {
             Type::Constructed(TypeName::Int(32), _) => self.as_i32(node).map(|v| Scalar::Int(v as i64)),
             Type::Constructed(TypeName::UInt(32), _) => self.as_u32(node).map(|v| Scalar::Int(v as i64)),
@@ -340,7 +340,7 @@ impl<P: Family> EGraph<P> {
         }
     }
 
-    fn intern_scalar(&mut self, value: Scalar, ty: &Type<TypeName>) -> Option<NodeId> {
+    fn intern_scalar(&mut self, value: Scalar, ty: &Type<TypeName>) -> Option<ValueId> {
         let constant = match (value, ty) {
             (Scalar::Int(value), Type::Constructed(TypeName::Int(32), _)) => {
                 ConstantValue::I32(value as i32)
@@ -357,10 +357,10 @@ impl<P: Family> EGraph<P> {
         Some(self.intern_constant(constant, ty.clone()))
     }
 
-    pub(super) fn as_i32(&self, nid: NodeId) -> Option<i32> {
+    pub(super) fn as_i32(&self, nid: ValueId) -> Option<i32> {
         match &self.nodes[nid].kind {
-            ENode::Constant(ConstantValue::I32(v)) => Some(*v),
-            ENode::Pure {
+            ValueKind::Constant(ConstantValue::I32(v)) => Some(*v),
+            ValueKind::Pure {
                 op: PureOp::Int(s),
                 operands,
             } if operands.is_empty() => s.parse().ok(),
@@ -368,10 +368,10 @@ impl<P: Family> EGraph<P> {
         }
     }
 
-    pub(super) fn as_u32(&self, nid: NodeId) -> Option<u32> {
+    pub(super) fn as_u32(&self, nid: ValueId) -> Option<u32> {
         match &self.nodes[nid].kind {
-            ENode::Constant(ConstantValue::U32(v)) => Some(*v),
-            ENode::Pure {
+            ValueKind::Constant(ConstantValue::U32(v)) => Some(*v),
+            ValueKind::Pure {
                 op: PureOp::Uint(s),
                 operands,
             } if operands.is_empty() => s.parse().ok(),
@@ -379,10 +379,10 @@ impl<P: Family> EGraph<P> {
         }
     }
 
-    pub(super) fn as_f32(&self, nid: NodeId) -> Option<f32> {
+    pub(super) fn as_f32(&self, nid: ValueId) -> Option<f32> {
         match &self.nodes[nid].kind {
-            ENode::Constant(ConstantValue::F32(bits)) => Some(f32::from_bits(*bits)),
-            ENode::Pure {
+            ValueKind::Constant(ConstantValue::F32(bits)) => Some(f32::from_bits(*bits)),
+            ValueKind::Pure {
                 op: PureOp::Float(s),
                 operands,
             } if operands.is_empty() => s.parse().ok(),
@@ -390,10 +390,10 @@ impl<P: Family> EGraph<P> {
         }
     }
 
-    fn as_bool(&self, nid: NodeId) -> Option<bool> {
+    fn as_bool(&self, nid: ValueId) -> Option<bool> {
         match &self.nodes[nid].kind {
-            ENode::Constant(ConstantValue::Bool(v)) => Some(*v),
-            ENode::Pure {
+            ValueKind::Constant(ConstantValue::Bool(v)) => Some(*v),
+            ValueKind::Pure {
                 op: PureOp::Bool(v),
                 operands,
             } if operands.is_empty() => Some(*v),

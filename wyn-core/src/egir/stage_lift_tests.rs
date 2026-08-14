@@ -72,7 +72,7 @@ fn calling_body(id: FunctionId, mixed: FunctionId) -> SemanticFunc {
     semantic_function(id, "map_body", graph, 2)
 }
 
-fn enclosing_uniform(graph: &mut EGraph<Semantic>) -> NodeId {
+fn enclosing_uniform(graph: &mut EGraph<Semantic>) -> ValueId {
     graph.add_func_param(0, u32_ty())
 }
 
@@ -139,7 +139,7 @@ fn mixed_stage_call_uses_generic_inlining_then_lifts_its_uniform_subgraph() {
     let lifted = specialized_body.captures[0];
     assert!(matches!(
         &enclosing.nodes[lifted].kind,
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::BinOp(name),
             ..
         } if *name == BinaryOperator::Multiply
@@ -147,10 +147,10 @@ fn mixed_stage_call_uses_generic_inlining_then_lifts_its_uniform_subgraph() {
     assert!(
         !graph_ops::reachable_execution_values(&specialized.graph).into_iter().any(|node| {
             match &specialized.graph.nodes[node].kind {
-                ENode::Pure {
+                ValueKind::Pure {
                     op: PureOp::Call(_), ..
                 } => true,
-                ENode::Pure {
+                ValueKind::Pure {
                     op: PureOp::BinOp(name),
                     ..
                 } => *name == BinaryOperator::Multiply,
@@ -241,7 +241,7 @@ fn multiple_uniform_frontier_values_share_one_aggregate_capture() {
     assert_eq!(specialized_body.captures.len(), 1);
     assert!(matches!(
         &enclosing.nodes[specialized_body.captures[0]].kind,
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::Tuple(2),
             operands,
         } if operands.len() == 2
@@ -251,7 +251,7 @@ fn multiple_uniform_frontier_values_share_one_aggregate_capture() {
             .into_iter()
             .filter(|node| matches!(
                 specialized.graph.nodes[*node].kind,
-                ENode::Pure {
+                ValueKind::Pure {
                     op: PureOp::Project { .. },
                     ..
                 }
@@ -382,7 +382,7 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
     assert_eq!(body.captures.len(), 1);
     assert!(matches!(
         &entry.graph.nodes[body.captures[0]].kind,
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::BinOp(name),
             ..
         } if *name == BinaryOperator::Multiply

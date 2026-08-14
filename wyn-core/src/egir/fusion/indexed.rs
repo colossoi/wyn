@@ -13,7 +13,8 @@ use crate::egir::program::SemanticResourceRef;
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
 use crate::egir::types::{
-    EGraph, ENode, NodeId, PureOp, ResourceAccess, SegExtent, SegSpace, SideEffectKind, Soac, SoacEffect,
+    EGraph, PureOp, ResourceAccess, SegExtent, SegSpace, SideEffectKind, Soac, SoacEffect, ValueId,
+    ValueKind,
 };
 use crate::flow::BlockId;
 use smallvec::smallvec;
@@ -22,8 +23,8 @@ use super::support;
 
 #[derive(Clone, Copy)]
 struct Demand {
-    index: NodeId,
-    index_value: NodeId,
+    index: ValueId,
+    index_value: ValueId,
     output: usize,
 }
 
@@ -92,7 +93,7 @@ fn find_in_graph(
                     if !live.contains(&node) {
                         return None;
                     }
-                    let ENode::Pure {
+                    let ValueKind::Pure {
                         op: PureOp::Index,
                         operands,
                     } = &definition.kind
@@ -149,7 +150,7 @@ fn used_only_through(
     graph: &EGraph,
     producer_block: BlockId,
     producer_effect: usize,
-    result: NodeId,
+    result: ValueId,
     demands: &[Demand],
     output_routes: &[RealizedOutputRoute],
 ) -> bool {

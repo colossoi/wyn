@@ -9932,7 +9932,7 @@ entry gen(xs: []i32) ([]i32, [1]i32) =
 
 /// Dynamic-index variant of the above — slot 1 reads `offsets[k]` where
 /// `k` is a uniform, exercising the path where the rewrite passes the
-/// dynamic index NodeId straight through `emit_view_load`.
+/// dynamic index ValueId straight through `emit_view_load`.
 #[test]
 fn multi_output_returns_scan_and_reads_it_by_dynamic_index() {
     compile_to_spirv(
@@ -12896,7 +12896,7 @@ entry e() [1]f32 = [fsqrt(4.0f32)]
 /// `image_load` (storage image) and THEN does a `texture_load` (sampled
 /// texture) panics during EGIR elaboration:
 ///
-///   elaborate.rs: "FuncParam/BlockParam NodeId(..) should have been
+///   elaborate.rs: "FuncParam/BlockParam ValueId(..) should have been
 ///   pre-populated in elaborated map"
 ///
 /// Both operations and their order are load-bearing: texture_load

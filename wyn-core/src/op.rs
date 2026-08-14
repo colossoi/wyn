@@ -3,7 +3,7 @@
 //!
 //! Each variant identifies a kind of operation; operands are carried
 //! separately:
-//! - In EGIR: as `SmallVec<[NodeId; 4]>` inside `ENode::Pure`.
+//! - In EGIR: as `SmallVec<[ValueId; 4]>` inside `ValueKind::Pure`.
 //! - In SSA:  as `Vec<ValueRef>` inside `InstKind::Op { tag, operands }`.
 //!
 //! ## Operand layout per tag
@@ -231,7 +231,7 @@ pub enum OpTag<R = BindingRef> {
 
 /// Hashable variant of `ViewSource` for use inside an `OpTag`. Drops the
 /// `ValueId` from `Inherited` — that parent is stored as an operand in the
-/// containing `ENode::Pure` or `InstKind::Op`.
+/// containing `ValueKind::Pure` or `InstKind::Op`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PureViewSource<R = BindingRef> {
     Storage(R),

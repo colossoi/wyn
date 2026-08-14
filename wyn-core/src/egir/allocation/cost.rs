@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 use super::super::graph_ops;
 use super::super::program::SemanticEntry;
 use super::super::types::{
-    EGraph, ENode, EffectOp, NodeId, PureViewSource, SideEffect, SideEffectKind, SkeletonTerminator, Soac,
-    SoacEffect,
+    EGraph, EffectOp, PureViewSource, SideEffect, SideEffectKind, SkeletonTerminator, Soac, SoacEffect,
+    ValueId, ValueKind,
 };
 use super::ResourcesAllocated;
 use crate::builtins::{catalog, Purity};
@@ -66,7 +66,7 @@ pub(crate) fn analyze_prelude(
         super::super::stage_variance::StageDependenceAnalysis::for_entry_graph(entry, graph).ok()?;
     let reachable = graph_ops::execution_value_producer_closure(graph, recipe.values.iter().copied()).nodes;
     for node in reachable {
-        if let ENode::FuncParam { index } = &graph.nodes[node].kind {
+        if let ValueKind::FuncParam { index } = &graph.nodes[node].kind {
             if !dependence.dependence(node).is_stage_invariant()
                 || !entry_parameter_is_scalar_relocatable(entry, *index)
             {
@@ -256,7 +256,7 @@ fn function_cost(
 fn graph_block_costs(
     program: &ResourcesAllocated,
     graph: &EGraph,
-    extra_roots: &HashMap<BlockId, Vec<NodeId>>,
+    extra_roots: &HashMap<BlockId, Vec<ValueId>>,
     summaries: &mut HashMap<crate::FunctionId, u64>,
     visiting: &mut HashSet<crate::FunctionId>,
 ) -> Option<HashMap<BlockId, u64>> {
@@ -283,7 +283,7 @@ fn graph_block_costs(
 fn local_value_cost(
     program: &ResourcesAllocated,
     graph: &EGraph,
-    roots: impl IntoIterator<Item = NodeId>,
+    roots: impl IntoIterator<Item = ValueId>,
     summaries: &mut HashMap<crate::FunctionId, u64>,
     visiting: &mut HashSet<crate::FunctionId>,
 ) -> Option<u64> {
@@ -295,15 +295,15 @@ fn local_value_cost(
             continue;
         }
         match &graph.nodes[node].kind {
-            ENode::Pure { op, operands } => {
+            ValueKind::Pure { op, operands } => {
                 cost = cost.saturating_add(operation_cost(program, op, summaries, visiting)?);
                 pending.extend(operands.iter().copied());
             }
-            ENode::Union { left, right } => pending.extend([*left, *right]),
-            ENode::FuncParam { .. }
-            | ENode::BlockParam { .. }
-            | ENode::Constant(_)
-            | ENode::SideEffectResult => {}
+            ValueKind::Union { left, right } => pending.extend([*left, *right]),
+            ValueKind::FuncParam { .. }
+            | ValueKind::BlockParam { .. }
+            | ValueKind::Constant(_)
+            | ValueKind::SideEffectResult => {}
         }
     }
     Some(cost)
@@ -444,7 +444,7 @@ pub(crate) fn fixed_loop_trip_count(
     if else_target != merge || then_target == merge {
         return None;
     }
-    let ENode::Pure {
+    let ValueKind::Pure {
         op: OpTag::BinOp(operator),
         operands,
     } = &graph.nodes[cond].kind
@@ -466,7 +466,7 @@ pub(crate) fn fixed_loop_trip_count(
         .find_map(|(_, block)| branch_argument(&block.term, header, parameter))
         .and_then(|value| integer_literal(graph, value))?;
     let next = branch_argument(&graph.skeleton.blocks[continue_block].term, header, parameter)?;
-    let ENode::Pure {
+    let ValueKind::Pure {
         op: OpTag::BinOp(operator),
         operands,
     } = &graph.nodes[next].kind
@@ -491,7 +491,7 @@ pub(crate) fn fixed_loop_trip_count(
     Some(distance.div_ceil(step))
 }
 
-fn branch_argument(term: &SkeletonTerminator, target: BlockId, index: usize) -> Option<NodeId> {
+fn branch_argument(term: &SkeletonTerminator, target: BlockId, index: usize) -> Option<ValueId> {
     match term {
         SkeletonTerminator::Branch {
             target: branch_target,
@@ -513,15 +513,15 @@ fn branch_argument(term: &SkeletonTerminator, target: BlockId, index: usize) -> 
     }
 }
 
-fn integer_literal(graph: &EGraph, node: NodeId) -> Option<i64> {
+fn integer_literal(graph: &EGraph, node: ValueId) -> Option<i64> {
     match &graph.nodes[node].kind {
-        ENode::Constant(ConstantValue::I32(value)) => Some(i64::from(*value)),
-        ENode::Constant(ConstantValue::U32(value)) => Some(i64::from(*value)),
-        ENode::Pure {
+        ValueKind::Constant(ConstantValue::I32(value)) => Some(i64::from(*value)),
+        ValueKind::Constant(ConstantValue::U32(value)) => Some(i64::from(*value)),
+        ValueKind::Pure {
             op: OpTag::Int(value),
             operands,
         }
-        | ENode::Pure {
+        | ValueKind::Pure {
             op: OpTag::Uint(value),
             operands,
         } if operands.is_empty() => value.parse().ok(),

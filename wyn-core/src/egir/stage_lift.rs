@@ -20,7 +20,7 @@ use super::program::{fresh_region_name, CoreProgramData, SemanticFunc};
 use super::reify::Segmented;
 use super::stage_variance::{entry_parameter_dependences, StageDependence, StageDependenceAnalysis};
 use super::types::{
-    EGraph, ENode, NodeId, PureOp, RegionId, SegBody, SideEffectKind, SideEffectSite, SoacEffect,
+    EGraph, PureOp, RegionId, SegBody, SideEffectKind, SideEffectSite, SoacEffect, ValueId, ValueKind,
 };
 
 #[cfg(test)]
@@ -71,7 +71,7 @@ struct SegBodySite {
 struct StageLiftCandidate {
     function: SemanticFunc,
     original_body: SegBody,
-    frontier: Vec<NodeId>,
+    frontier: Vec<ValueId>,
     calls_inlined: usize,
 }
 
@@ -303,7 +303,7 @@ fn invariant_frontier(
     parameter_count: usize,
     capture_count: usize,
     exposed_by_mixed_call: bool,
-) -> Vec<NodeId> {
+) -> Vec<ValueId> {
     let leading = parameter_count.saturating_sub(capture_count);
     graph_ops::maximal_execution_frontier(graph, |node| is_liftable(graph, analysis, node, leading))
         .into_iter()
@@ -314,12 +314,12 @@ fn invariant_frontier(
 fn is_liftable(
     graph: &EGraph,
     analysis: &StageDependenceAnalysis,
-    node: NodeId,
+    node: ValueId,
     leading_parameters: usize,
 ) -> bool {
     if !matches!(
         graph.nodes.get(node).map(|node| &node.kind),
-        Some(ENode::Pure { op, .. })
+        Some(ValueKind::Pure { op, .. })
             if !matches!(
                 op,
                 PureOp::Project { .. }
@@ -342,7 +342,7 @@ fn is_liftable(
         && cloneable_from_captures(graph, node, leading_parameters, &mut LookupSet::new())
 }
 
-fn subgraph_contains_call(graph: &EGraph, root: NodeId) -> bool {
+fn subgraph_contains_call(graph: &EGraph, root: ValueId) -> bool {
     wyn_graph::reachable_from_ordered([root], wyn_graph::WalkOrder::DepthFirst, |node, out| {
         if let Some(definition) = graph.nodes.get(node) {
             out.extend(definition.kind.children());
@@ -352,7 +352,7 @@ fn subgraph_contains_call(graph: &EGraph, root: NodeId) -> bool {
     .any(|node| {
         matches!(
             graph.nodes.get(node).map(|node| &node.kind),
-            Some(ENode::Pure {
+            Some(ValueKind::Pure {
                 op: PureOp::Call(_),
                 ..
             })
@@ -362,24 +362,24 @@ fn subgraph_contains_call(graph: &EGraph, root: NodeId) -> bool {
 
 fn cloneable_from_captures(
     graph: &EGraph,
-    node: NodeId,
+    node: ValueId,
     leading_parameters: usize,
-    visiting: &mut LookupSet<NodeId>,
+    visiting: &mut LookupSet<ValueId>,
 ) -> bool {
     if !visiting.insert(node) {
         return true;
     }
     let cloneable = match graph.nodes.get(node).map(|node| &node.kind) {
-        Some(ENode::Constant(_)) => true,
-        Some(ENode::FuncParam { index }) => *index >= leading_parameters,
-        Some(ENode::Pure { operands, .. }) => operands
+        Some(ValueKind::Constant(_)) => true,
+        Some(ValueKind::FuncParam { index }) => *index >= leading_parameters,
+        Some(ValueKind::Pure { operands, .. }) => operands
             .iter()
             .all(|operand| cloneable_from_captures(graph, *operand, leading_parameters, visiting)),
-        Some(ENode::Union { left, right }) => {
+        Some(ValueKind::Union { left, right }) => {
             cloneable_from_captures(graph, *left, leading_parameters, visiting)
                 && cloneable_from_captures(graph, *right, leading_parameters, visiting)
         }
-        Some(ENode::BlockParam { .. } | ENode::SideEffectResult) | None => false,
+        Some(ValueKind::BlockParam { .. } | ValueKind::SideEffectResult) | None => false,
     };
     visiting.remove(&node);
     cloneable
@@ -449,7 +449,8 @@ fn prune_dead_captures(function: &mut SemanticFunc, body: &mut SegBody) -> Resul
     let live = graph_ops::reachable_execution_values(&function.graph);
     let mut retained_captures = SortedSet::new();
     for node in live {
-        if let Some(ENode::FuncParam { index }) = function.graph.nodes.get(node).map(|node| &node.kind) {
+        if let Some(ValueKind::FuncParam { index }) = function.graph.nodes.get(node).map(|node| &node.kind)
+        {
             if *index >= parameter_count {
                 return Err(StageLiftError::Rewrite(format!(
                     "region `{}` has out-of-range parameter {index}",

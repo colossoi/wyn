@@ -14,19 +14,19 @@ use super::*;
 /// advances `count`. Two loop-carried values: the buffer and the runtime count.
 pub(super) struct FilterLoop {
     /// Co-iterated arrays read once per logical filter element.
-    pub(super) read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,
+    pub(super) read_inputs: Vec<(ValueId, Type<TypeName>, Type<TypeName>)>,
     /// The output element type returned by the canonical map lambda.
     pub(super) output_elem_ty: Type<TypeName>,
     pub(super) output: PhysicalFilterOutput,
     /// `None` denotes the validated one-input identity map.
     pub(super) map_func: Option<RegionId>,
-    pub(super) map_captures: Vec<NodeId>,
+    pub(super) map_captures: Vec<ValueId>,
     pub(super) pred_func: RegionId,
-    pub(super) captures: Vec<NodeId>,
-    pub(super) result_node: NodeId,
+    pub(super) captures: Vec<ValueId>,
+    pub(super) result_node: ValueId,
 }
 
-fn filter_primary_input(spec: &FilterLoop) -> &(NodeId, Type<TypeName>, Type<TypeName>) {
+fn filter_primary_input(spec: &FilterLoop) -> &(ValueId, Type<TypeName>, Type<TypeName>) {
     spec.read_inputs.first().expect("Filter has no input")
 }
 
@@ -35,17 +35,17 @@ fn filter_primary_input(spec: &FilterLoop) -> &(NodeId, Type<TypeName>, Type<Typ
 fn filter_kept_value(
     graph: &mut EGraph,
     block: BlockId,
-    index: NodeId,
+    index: ValueId,
     spec: &FilterLoop,
     next_effect: &mut crate::IdSource<EffectToken>,
-) -> NodeId {
+) -> ValueId {
     let elements = spec
         .read_inputs
         .iter()
         .map(|(array, array_ty, elem_ty)| {
             emit_read_element(graph, block, *array, index, array_ty, elem_ty, next_effect)
         })
-        .collect::<SmallVec<[NodeId; 4]>>();
+        .collect::<SmallVec<[ValueId; 4]>>();
     match &spec.map_func {
         Some(name) => {
             let mut operands = elements;
@@ -126,8 +126,8 @@ pub(super) fn build_filter_loop(
 
 #[derive(Clone, Copy)]
 enum FilterSink {
-    Local(NodeId),
-    Runtime(NodeId),
+    Local(ValueId),
+    Runtime(ValueId),
 }
 
 /// Build the counted serial compaction loop shared by local and runtime
@@ -138,11 +138,11 @@ fn build_serial_filter_cfg(
     after: BlockId,
     spec: &FilterLoop,
     index_ty: Type<TypeName>,
-    zero: NodeId,
-    one: NodeId,
+    zero: ValueId,
+    one: ValueId,
     sink: FilterSink,
     next_effect: &mut crate::IdSource<EffectToken>,
-) -> NodeId {
+) -> ValueId {
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let after_count = graph.add_block_param(after, index_ty.clone());
     let header = graph.skeleton.create_block();
@@ -183,7 +183,7 @@ fn build_serial_filter_cfg(
     });
 
     let kept = filter_kept_value(graph, body, index, spec, next_effect);
-    let mut pred_operands: SmallVec<[NodeId; 4]> = smallvec![kept];
+    let mut pred_operands: SmallVec<[ValueId; 4]> = smallvec![kept];
     pred_operands.extend(spec.captures.iter().copied());
     let predicate = graph.intern_pure(PureOp::Call(spec.pred_func), pred_operands, bool_ty, None);
     graph.skeleton.blocks[body].term = SkeletonTerminator::CondBranch {
@@ -257,7 +257,7 @@ fn build_serial_filter_cfg(
     after_count
 }
 
-fn filter_thread_index(graph: &mut EGraph) -> NodeId {
+fn filter_thread_index(graph: &mut EGraph) -> ValueId {
     graph.intern_pure(
         PureOp::Intrinsic {
             id: catalog().known().thread_id,
@@ -308,7 +308,7 @@ pub(super) fn build_filter_flags(
     };
     graph.skeleton.blocks[bid].control_header = Some(ControlHeader::Selection { merge: after });
     let kept = filter_kept_value(graph, in_range, gid, &spec, next_effect);
-    let mut operands: SmallVec<[NodeId; 4]> = smallvec![kept];
+    let mut operands: SmallVec<[ValueId; 4]> = smallvec![kept];
     operands.extend(spec.captures.iter().copied());
     let pred = graph.intern_pure(
         PureOp::Call(spec.pred_func.clone()),
@@ -348,7 +348,7 @@ pub(super) fn build_filter_flags(
     };
     graph.replace_node_preserving_type(
         spec.result_node,
-        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+        ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
     );
 }
 
@@ -527,7 +527,7 @@ pub(super) fn build_filter_scan(
     graph.skeleton.blocks[after].term = SkeletonTerminator::Return(None);
     graph.replace_node_preserving_type(
         spec.result_node,
-        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+        ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
     );
 }
 

@@ -2,7 +2,7 @@ use super::*;
 
 use crate::ast::{Span, TypeName};
 use crate::egir::program::SemanticFunc;
-use crate::egir::types::{EGraph, ENode, PureOp, Semantic, SkeletonTerminator};
+use crate::egir::types::{EGraph, PureOp, Semantic, SkeletonTerminator, ValueKind};
 use crate::flow::ControlHeader;
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
@@ -57,12 +57,12 @@ fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
 
     assert!(matches!(
         caller.nodes[call].kind,
-        ENode::Union {
+        ValueKind::Union {
             left,
             right
         } if left == inlined && right == inlined
     ));
-    let ENode::Pure { op, operands } = &caller.nodes[inlined].kind else {
+    let ValueKind::Pure { op, operands } = &caller.nodes[inlined].kind else {
         panic!("inlined root is not pure")
     };
     assert!(matches!(op, PureOp::BinOp(crate::op::BinaryOperator::Add)));
@@ -70,7 +70,7 @@ fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     let cloned_square = operands.iter().copied().find(|operand| *operand != actual_x).unwrap();
     assert!(matches!(
         &caller.nodes[cloned_square].kind,
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::BinOp(crate::op::BinaryOperator::Multiply),
             operands
         } if operands.as_slice() == [actual_invariant, actual_invariant]
@@ -114,7 +114,7 @@ fn inline_pure_call_folds_projection_of_substituted_aggregate() {
     );
     assert!(matches!(
         caller.nodes[call].kind,
-        ENode::Union { left, right } if left == seven && right == seven
+        ValueKind::Union { left, right } if left == seven && right == seven
     ));
 }
 
@@ -149,7 +149,7 @@ fn inline_pure_call_propagates_caller_projection_of_returned_aggregate() {
 
     assert!(matches!(
         caller.nodes[selected].kind,
-        ENode::Union { left, right } if left == seven && right == seven
+        ValueKind::Union { left, right } if left == seven && right == seven
     ));
     assert!(caller.verify_hash_cons().is_ok());
 }
@@ -235,14 +235,14 @@ fn inline_call_at_block_splices_a_scalar_selection_cfg() {
 
     assert!(matches!(
         caller.nodes[call].kind,
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::Call(_),
             ..
         }
     ));
     assert!(matches!(
         &caller.nodes[final_value].kind,
-        ENode::Pure { operands, .. } if operands[0] == inlined
+        ValueKind::Pure { operands, .. } if operands[0] == inlined
     ));
     assert!(caller
         .skeleton

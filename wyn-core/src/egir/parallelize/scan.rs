@@ -13,10 +13,10 @@ pub(super) struct ScanScratch {
 
 /// Reduction results carried by the same product monoid as scan prefixes.
 pub(super) struct ScanReductionOutputSpec<'a> {
-    source_components: &'a [NodeId],
+    source_components: &'a [ValueId],
     component_offset: usize,
     component_types: &'a [Type<TypeName>],
-    stores: &'a [(NodeId, NodeId)],
+    stores: &'a [(ValueId, ValueId)],
     declarations: &'a [(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)],
 }
 /// Build a single-invocation exclusive scan over block sums.
@@ -25,9 +25,9 @@ pub(super) struct ScanPhase2Spec<'a> {
     pub operator: RegionId,
     pub elem_ty: Type<TypeName>,
     pub source_graph: &'a EGraph,
-    pub operator_captures: &'a [NodeId],
+    pub operator_captures: &'a [ValueId],
     pub capture_inputs: &'a [SemanticResourceDecl],
-    pub neutral: NodeId,
+    pub neutral: ValueId,
     pub scratch: ScanScratch,
     pub total_out: Option<ResourceId>,
     pub reduction_output: Option<ScanReductionOutputSpec<'a>>,
@@ -162,8 +162,8 @@ impl ScanPhase2Spec<'_> {
     fn emit_loop(
         &self,
         builder: &mut crate::egir::builder::EntryBuilder,
-        neutral: NodeId,
-        operator_captures: &[NodeId],
+        neutral: ValueId,
+        operator_captures: &[ValueId],
     ) -> ExclusiveScanPhase2 {
         let elem_ty = self.elem_ty.clone();
         let want_total = self.total_out.is_some() || self.reduction_output.is_some();
@@ -241,9 +241,9 @@ impl ScanPhase2Spec<'_> {
 }
 
 struct ExclusiveScanPhase2 {
-    total: Option<NodeId>,
+    total: Option<ValueId>,
     after: BlockId,
-    zero: NodeId,
+    zero: ValueId,
 }
 
 /// One output of the canonical post-scan lambda.
@@ -257,7 +257,7 @@ pub(super) struct ScanPostOutput {
 pub(super) struct ScanPostPhaseSpec<'a> {
     pub pre: screma::Lambda,
     pub source_graph: &'a EGraph,
-    pub inputs: Vec<(NodeId, crate::egir::types::SoacInputType)>,
+    pub inputs: Vec<(ValueId, crate::egir::types::SoacInputType)>,
     pub input_declarations: Vec<SemanticResourceDecl>,
     pub outputs: Vec<ScanPostOutput>,
 }
@@ -269,7 +269,7 @@ pub(super) struct ScanPhase3Spec<'a> {
     pub swap_region: RegionId,
     pub elem_ty: Type<TypeName>,
     pub source_graph: &'a EGraph,
-    pub operator_captures: Vec<NodeId>,
+    pub operator_captures: Vec<ValueId>,
     pub capture_inputs: Vec<SemanticResourceDecl>,
     /// Holds local prefixes on entry and global prefixes after offsetting.
     pub output_resource: ResourceId,
@@ -457,8 +457,8 @@ pub(super) struct ScanCandidate {
     reduction_routing: super::reduce::ReductionRouting,
     operator_capture_inputs: Vec<SemanticResourceDecl>,
     post: screma::Lambda,
-    input_views: Vec<(NodeId, crate::egir::types::SoacInputType)>,
-    result: NodeId,
+    input_views: Vec<(ValueId, crate::egir::types::SoacInputType)>,
+    result: ValueId,
     outputs: Vec<ScanOutput>,
     direct_output: bool,
     phase1_width: u32,

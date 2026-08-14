@@ -3,7 +3,7 @@ use polytype::Type;
 use crate::ast::TypeName;
 
 use super::super::program::PhysicalResourceRef;
-use super::super::types::{GraphResource, NodeId, SegSpace, Semantic, SoacInputType, WynSoacPhase};
+use super::super::types::{GraphResource, SegSpace, Semantic, SoacInputType, ValueId, WynSoacPhase};
 use super::screma;
 
 /// How one histogram operation combines bucket values with its destinations.
@@ -18,16 +18,16 @@ pub enum Update {
     },
     Reduce {
         operator: screma::Lambda,
-        neutral: Vec<NodeId>,
+        neutral: Vec<ValueId>,
     },
     /// Capacity-bounded insertion. `counts` and `overflow` are storage-view
     /// nodes over compiler resources, which keeps resource identity in the
     /// graph even when every item input is produced by fused computation.
     BucketInsert {
         value_types: Vec<Type<TypeName>>,
-        counts: NodeId,
-        overflow: NodeId,
-        capacity: NodeId,
+        counts: ValueId,
+        overflow: ValueId,
+        capacity: ValueId,
     },
 }
 
@@ -61,9 +61,9 @@ impl Update {
 #[derive(Clone, Debug)]
 pub struct HistOp {
     pub emission: Emission,
-    pub shape: Vec<NodeId>,
-    pub race_factor: NodeId,
-    pub destinations: Vec<NodeId>,
+    pub shape: Vec<ValueId>,
+    pub race_factor: ValueId,
+    pub destinations: Vec<ValueId>,
     pub update: Update,
 }
 
@@ -205,7 +205,7 @@ impl<P: WynSoacPhase> Op<P> {
         }
     }
 
-    pub(crate) fn capture_nodes(&self) -> Vec<NodeId> {
+    pub(crate) fn capture_nodes(&self) -> Vec<ValueId> {
         let mut nodes = self.form.bucket.captures().to_vec();
         for operation in &self.form.operations {
             if let Update::Reduce { operator, .. } = &operation.update {
@@ -215,7 +215,7 @@ impl<P: WynSoacPhase> Op<P> {
         nodes
     }
 
-    pub(crate) fn referenced_nodes(&self) -> Vec<NodeId> {
+    pub(crate) fn referenced_nodes(&self) -> Vec<ValueId> {
         let mut nodes = self.capture_nodes();
         for operation in &self.form.operations {
             nodes.extend(operation.shape.iter().copied());
@@ -239,7 +239,7 @@ impl<P: WynSoacPhase> Op<P> {
 
     pub(crate) fn validate(
         &self,
-        mut node_type: impl FnMut(NodeId) -> Option<Type<TypeName>>,
+        mut node_type: impl FnMut(ValueId) -> Option<Type<TypeName>>,
     ) -> Result<(), String> {
         if self.inputs.is_empty() {
             return Err("histogram requires at least one input array".into());
@@ -353,7 +353,7 @@ impl<P: WynSoacPhase> Op<P> {
 }
 
 impl<R: GraphResource> Op<Semantic<R>> {
-    pub(crate) fn referenced_nodes_with_state(&self) -> Vec<NodeId> {
+    pub(crate) fn referenced_nodes_with_state(&self) -> Vec<ValueId> {
         let mut nodes = self.referenced_nodes();
         if let SemanticState::Segmented(space) = &self.state {
             nodes.extend(space.referenced_nodes());
@@ -361,7 +361,7 @@ impl<R: GraphResource> Op<Semantic<R>> {
         nodes
     }
 
-    pub(crate) fn referenced_node_slots_with_state(&mut self) -> Vec<&mut NodeId> {
+    pub(crate) fn referenced_node_slots_with_state(&mut self) -> Vec<&mut ValueId> {
         let Self {
             inputs: _,
             form,
@@ -375,7 +375,7 @@ impl<R: GraphResource> Op<Semantic<R>> {
     }
 }
 
-fn form_node_slots(form: &mut HistForm) -> Vec<&mut NodeId> {
+fn form_node_slots(form: &mut HistForm) -> Vec<&mut ValueId> {
     let mut nodes = form
         .bucket
         .seg_body_mut()
@@ -411,8 +411,8 @@ mod tests {
     use crate::egir::types::{Raw, RegionId, SegBody};
     use std::collections::HashMap;
 
-    fn node(index: u64) -> NodeId {
-        NodeId::from(slotmap::KeyData::from_ffi(index))
+    fn node(index: u64) -> ValueId {
+        ValueId::from(slotmap::KeyData::from_ffi(index))
     }
 
     fn scalar(name: TypeName) -> Type<TypeName> {
@@ -431,7 +431,7 @@ mod tests {
         )
     }
 
-    fn general_histogram() -> (Op<Raw>, HashMap<NodeId, Type<TypeName>>) {
+    fn general_histogram() -> (Op<Raw>, HashMap<ValueId, Type<TypeName>>) {
         let i32_type = scalar(TypeName::Int(32));
         let u32_type = scalar(TypeName::UInt(32));
         let f32_type = scalar(TypeName::Float(32));

@@ -31,7 +31,7 @@ use super::inlining;
 use super::ir::{EffectOp, SideEffectKind};
 use super::loop_analysis::{LoopAnalysis, LoopInvariance};
 use super::program::PhysicalFunc;
-use super::types::{EGraph, ENode, NodeId, Physical, PureOp};
+use super::types::{EGraph, Physical, PureOp, ValueId, ValueKind};
 
 #[cfg(test)]
 #[path = "partial_inline_tests.rs"]
@@ -59,7 +59,7 @@ struct InliningStats {
 
 #[derive(Clone, Debug)]
 struct Candidate {
-    call: NodeId,
+    call: ValueId,
     block: crate::flow::BlockId,
     callee: crate::FunctionId,
     callee_nodes: usize,
@@ -117,7 +117,7 @@ fn inline_prerequisite_effect_calls(
     if !graph
         .nodes
         .values()
-        .any(|node| matches!(node.kind, ENode::FuncParam { .. }) && is_fixed_composite_array(&node.ty))
+        .any(|node| matches!(node.kind, ValueKind::FuncParam { .. }) && is_fixed_composite_array(&node.ty))
     {
         return Ok(0);
     }
@@ -211,7 +211,7 @@ fn find_candidate(
                 }
             });
         for node in reachable {
-            let ENode::Pure {
+            let ValueKind::Pure {
                 op: PureOp::Call(callee_name),
                 operands,
             } = &graph.nodes[node].kind
@@ -271,7 +271,7 @@ fn find_candidate(
                     }
                 });
             for node in reachable {
-                let ENode::Pure {
+                let ValueKind::Pure {
                     op: PureOp::Call(callee_name),
                     operands,
                 } = &graph.nodes[node].kind

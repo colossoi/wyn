@@ -88,7 +88,7 @@ enum CallArgs {
     AllVarying,
 }
 
-fn loop_caller(shape: CallArgs) -> (EGraph<Physical>, NodeId, NodeId) {
+fn loop_caller(shape: CallArgs) -> (EGraph<Physical>, ValueId, ValueId) {
     let ty = u32_ty();
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let mut graph = EGraph::<Physical>::new();
@@ -147,10 +147,10 @@ fn inlines_a_profitable_mixed_variance_call_in_a_loop() {
     let stats = inline_body(&mut graph, &callees).unwrap();
 
     assert_eq!(stats.calls_inlined, 1);
-    assert!(matches!(graph.nodes[call].kind, ENode::Union { .. }));
+    assert!(matches!(graph.nodes[call].kind, ValueKind::Union { .. }));
     assert!(graph.nodes.values().any(|node| matches!(
         &node.kind,
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::BinOp(crate::op::BinaryOperator::Multiply),
             operands
         } if operands.as_slice() == [invariant, invariant]
@@ -166,7 +166,7 @@ fn mixed_variance_alone_is_enough_for_the_bounded_policy() {
     let stats = inline_body(&mut graph, &callees).unwrap();
 
     assert_eq!(stats.calls_inlined, 1);
-    assert!(matches!(graph.nodes[call].kind, ENode::Union { .. }));
+    assert!(matches!(graph.nodes[call].kind, ValueKind::Union { .. }));
 }
 
 #[test]
@@ -180,7 +180,7 @@ fn leaves_whole_call_licm_and_fully_varying_calls_alone() {
         assert_eq!(stats.calls_inlined, 0);
         assert!(matches!(
             graph.nodes[call].kind,
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::Call(_),
                 ..
             }
@@ -218,7 +218,7 @@ fn inlines_fixed_array_parameters_outside_loops() {
     let stats = inline_body(&mut caller, &callees).unwrap();
 
     assert_eq!(stats.calls_inlined, 1);
-    assert!(matches!(caller.nodes[call].kind, ENode::Union { .. }));
+    assert!(matches!(caller.nodes[call].kind, ValueKind::Union { .. }));
 }
 
 #[test]
@@ -306,7 +306,7 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
     assert_eq!(stats.block_budget, 5);
     assert!(matches!(
         caller.nodes[call].kind,
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::Call(_),
             ..
         }

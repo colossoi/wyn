@@ -4,7 +4,7 @@ use crate::ast::TypeName;
 
 use super::super::program::{PhysicalResourceRef, SemanticResourceRef};
 use super::super::types::{
-    GraphResource, NodeId, SegSpace, Semantic, SoacDestination, SoacInputType, WynSoacPhase,
+    GraphResource, SegSpace, Semantic, SoacDestination, SoacInputType, ValueId, WynSoacPhase,
 };
 use super::screma;
 
@@ -105,11 +105,11 @@ impl Body {
         self.map.result_types[0].clone()
     }
 
-    pub(crate) fn capture_nodes(&self) -> Vec<NodeId> {
+    pub(crate) fn capture_nodes(&self) -> Vec<ValueId> {
         lambda_captures(&self.map).chain(lambda_captures(&self.predicate)).copied().collect()
     }
 
-    fn referenced_node_slots(&mut self) -> Vec<&mut NodeId> {
+    fn referenced_node_slots(&mut self) -> Vec<&mut ValueId> {
         let Self {
             inputs: _,
             map,
@@ -119,11 +119,11 @@ impl Body {
     }
 }
 
-fn lambda_captures(lambda: &screma::Lambda) -> impl Iterator<Item = &NodeId> {
+fn lambda_captures(lambda: &screma::Lambda) -> impl Iterator<Item = &ValueId> {
     lambda.seg_body().into_iter().flat_map(|body| body.captures.iter())
 }
 
-fn lambda_capture_slots(lambda: &mut screma::Lambda) -> impl Iterator<Item = &mut NodeId> {
+fn lambda_capture_slots(lambda: &mut screma::Lambda) -> impl Iterator<Item = &mut ValueId> {
     lambda.seg_body_mut().into_iter().flat_map(|body| body.captures.iter_mut())
 }
 #[derive(Clone, Debug)]
@@ -199,17 +199,17 @@ pub struct Op<P: WynSoacPhase> {
 }
 
 impl<R: GraphResource> Op<Semantic<R>> {
-    pub(crate) fn capture_nodes(&self) -> Vec<NodeId> {
+    pub(crate) fn capture_nodes(&self) -> Vec<ValueId> {
         self.body.capture_nodes()
     }
 
-    pub(crate) fn referenced_nodes(&self) -> Vec<NodeId> {
+    pub(crate) fn referenced_nodes(&self) -> Vec<ValueId> {
         let mut nodes = self.body.capture_nodes();
         nodes.extend(self.state.space.referenced_nodes());
         nodes
     }
 
-    pub(crate) fn referenced_node_slots(&mut self) -> Vec<&mut NodeId> {
+    pub(crate) fn referenced_node_slots(&mut self) -> Vec<&mut ValueId> {
         let Self { body, state } = self;
         let mut nodes = body.referenced_node_slots();
         nodes.extend(state.space.referenced_node_slots());

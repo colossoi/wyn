@@ -29,12 +29,12 @@ fn raw_map_soac(
 
 fn raw_hist_soac(
     inputs: Vec<SoacInputType>,
-    captures: Vec<NodeId>,
+    captures: Vec<ValueId>,
     index_type: Type<TypeName>,
     value_type: Type<TypeName>,
-    destination: NodeId,
-    shape: NodeId,
-    race_factor: NodeId,
+    destination: ValueId,
+    shape: ValueId,
+    race_factor: ValueId,
 ) -> Soac<Raw> {
     Soac::Hist(hist::Op {
         inputs: inputs.clone(),
@@ -106,7 +106,7 @@ fn compute_slot_source_rejects_unsized_array_without_soac() {
 // rewrite_sibling_index_consumers — operand-region classifier contract.
 //
 // These tests construct a single downstream `SideEffect` whose
-// `operand_nodes` contains the slot's `source` NodeId at a *non-
+// `operand_nodes` contains the slot's `source` ValueId at a *non-
 // input* position. The classifier must reject each position with a
 // clear `Unsupported` naming the side-effect kind. Positions that
 // fall in the input region get rewritten in place — covered end-to-

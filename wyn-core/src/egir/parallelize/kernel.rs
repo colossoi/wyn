@@ -20,7 +20,7 @@ pub(super) fn apply_manifest_resource_sizes(
 /// resources keep the operation on the serial fallback.
 pub(super) fn cloneable_capture_inputs(
     entry: &crate::egir::program::PlannedEntry,
-    captures: &[NodeId],
+    captures: &[ValueId],
 ) -> Option<Vec<SemanticResourceDecl>> {
     if captures.iter().any(|capture| !can_clone_pure_subgraph(&entry.graph, *capture, &[])) {
         return None;
@@ -42,15 +42,15 @@ pub(super) fn cloneable_capture_inputs(
 
 /// Emit the chunk-arithmetic preamble (`tid`, `chunk_start`,
 /// `chunk_len`) as pure nodes in `graph`. Caller supplies the
-/// `input_len` NodeId (typed `u32`) — for StorageView inputs that's a
+/// `input_len` ValueId (typed `u32`) — for StorageView inputs that's a
 /// `_w_intrinsic_storage_len(set, binding)` call; for Range inputs
 /// it's the Range's own `len` operand. Returns
 /// `(tid, chunk_start, chunk_len)`.
 pub(super) fn emit_chunk_arithmetic(
     graph: &mut crate::egir::types::EGraph,
     total_threads: u32,
-    input_len: NodeId,
-) -> Result<(NodeId, NodeId, NodeId), String> {
+    input_len: ValueId,
+) -> Result<(ValueId, ValueId, ValueId), String> {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     // The chunk arithmetic runs in the input's *index* type: storage-view
     // inputs index in u32 (`_w_intrinsic_storage_len`), Range inputs in the
@@ -161,7 +161,7 @@ pub(super) fn emit_chunk_arithmetic(
 
 /// Integer literal `n` typed as `index_ty` (`u32` → `PureOp::Uint`, else
 /// `PureOp::Int`).
-fn intern_index_lit(graph: &mut crate::egir::types::EGraph, n: u32, index_ty: &Type<TypeName>) -> NodeId {
+fn intern_index_lit(graph: &mut crate::egir::types::EGraph, n: u32, index_ty: &Type<TypeName>) -> ValueId {
     let op = match index_ty {
         Type::Constructed(TypeName::UInt(32), _) => crate::egir::types::PureOp::Uint(n.to_string()),
         _ => crate::egir::types::PureOp::Int(n.to_string()),
@@ -173,9 +173,9 @@ fn intern_index_lit(graph: &mut crate::egir::types::EGraph, n: u32, index_ty: &T
 /// bitcast intrinsic (`i32.u32`).
 fn cast_u32_to_index(
     graph: &mut crate::egir::types::EGraph,
-    v: NodeId,
+    v: ValueId,
     index_ty: &Type<TypeName>,
-) -> Result<NodeId, String> {
+) -> Result<ValueId, String> {
     match index_ty {
         Type::Constructed(TypeName::UInt(32), _) => Ok(v),
         Type::Constructed(TypeName::Int(32), _) => {
@@ -208,7 +208,7 @@ fn synthesize_binary_fn(
     name: String,
     elem_ty: Type<TypeName>,
     span: crate::ast::Span,
-    body: impl FnOnce(&mut EGraph, NodeId, NodeId) -> NodeId,
+    body: impl FnOnce(&mut EGraph, ValueId, ValueId) -> ValueId,
 ) -> SemanticFunc {
     let mut graph = EGraph::new();
     let a_nid = graph.add_func_param(0, elem_ty.clone());
@@ -293,24 +293,24 @@ pub(super) enum ChunkInputKind {
 enum ChunkableView {
     Storage(SemanticResourceRef),
     Range {
-        start: NodeId,
-        len: NodeId,
-        step: Option<NodeId>,
+        start: ValueId,
+        len: ValueId,
+        step: Option<ValueId>,
     },
     StorageSlice {
-        view: NodeId,
-        start: NodeId,
-        end: NodeId,
+        view: ValueId,
+        start: ValueId,
+        end: ValueId,
         overload_idx: usize,
     },
 }
 
 impl ChunkableView {
-    fn classify(graph: &EGraph, view: NodeId, kind: ChunkInputKind) -> Option<Self> {
+    fn classify(graph: &EGraph, view: ValueId, kind: ChunkInputKind) -> Option<Self> {
         if let Some(resource) = graph_ops::extract_storage_view_source(graph, view) {
             return Some(Self::Storage(resource));
         }
-        if let ENode::Pure {
+        if let ValueKind::Pure {
             op: PureOp::Intrinsic { id, overload_idx },
             operands,
         } = &graph.nodes[view].kind
@@ -346,7 +346,7 @@ impl ChunkableView {
         None
     }
 
-    fn len(self, graph: &mut EGraph) -> NodeId {
+    fn len(self, graph: &mut EGraph) -> ValueId {
         match self {
             Self::Storage(resource) => graph_ops::intern_resource_len(graph, resource.0, None),
             Self::Range { len, .. } => len,
@@ -368,10 +368,10 @@ impl ChunkableView {
         self,
         graph: &mut EGraph,
         view_ty: Type<TypeName>,
-        chunk_start: NodeId,
-        chunk_len: NodeId,
+        chunk_start: ValueId,
+        chunk_len: ValueId,
         context: &str,
-    ) -> Result<NodeId, String> {
+    ) -> Result<ValueId, String> {
         match self {
             Self::Storage(resource) => Ok(graph_ops::intern_chunked_resource_view(
                 graph,
@@ -433,7 +433,7 @@ impl ChunkableView {
                     start_ty,
                     None,
                 );
-                let mut operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![new_start, chunk_len];
+                let mut operands: smallvec::SmallVec<[ValueId; 4]> = smallvec![new_start, chunk_len];
                 if let Some(step) = step {
                     operands.push(step);
                 }
@@ -443,23 +443,23 @@ impl ChunkableView {
     }
 }
 
-pub(super) fn can_chunk_view(graph: &EGraph, view: NodeId, kind: ChunkInputKind) -> bool {
+pub(super) fn can_chunk_view(graph: &EGraph, view: ValueId, kind: ChunkInputKind) -> bool {
     ChunkableView::classify(graph, view, kind).is_some()
 }
 
-pub(super) fn can_clone_pure_subgraph(graph: &EGraph, root: NodeId, substitutions: &[NodeId]) -> bool {
+pub(super) fn can_clone_pure_subgraph(graph: &EGraph, root: ValueId, substitutions: &[ValueId]) -> bool {
     fn visit(
         graph: &EGraph,
-        node: NodeId,
-        substitutions: &[NodeId],
-        seen: &mut std::collections::HashSet<NodeId>,
+        node: ValueId,
+        substitutions: &[ValueId],
+        seen: &mut std::collections::HashSet<ValueId>,
     ) -> bool {
         if substitutions.contains(&node) || !seen.insert(node) {
             return true;
         }
         match &graph.nodes[node].kind {
-            ENode::Constant(_) => true,
-            ENode::Pure { operands, .. } => {
+            ValueKind::Constant(_) => true,
+            ValueKind::Pure { operands, .. } => {
                 operands.iter().all(|operand| visit(graph, *operand, substitutions, seen))
             }
             _ => false,
@@ -470,15 +470,15 @@ pub(super) fn can_clone_pure_subgraph(graph: &EGraph, root: NodeId, substitution
 }
 
 pub(super) struct ChunkedSoacInputs {
-    pub tid: NodeId,
-    pub chunk_start: NodeId,
-    pub chunk_len: NodeId,
-    pub views: Vec<NodeId>,
+    pub tid: ValueId,
+    pub chunk_start: ValueId,
+    pub chunk_len: ValueId,
+    pub views: Vec<ValueId>,
 }
 
 pub(super) fn chunk_soac_inputs(
     graph: &mut EGraph,
-    inputs: &[(NodeId, Type<TypeName>)],
+    inputs: &[(ValueId, Type<TypeName>)],
     total_threads: u32,
     kind: ChunkInputKind,
     context: &str,
@@ -508,13 +508,13 @@ pub(super) fn chunk_soac_inputs(
 
 pub(super) fn chunk_view_like(
     graph: &mut EGraph,
-    view: NodeId,
+    view: ValueId,
     view_ty: Type<TypeName>,
-    chunk_start: NodeId,
-    chunk_len: NodeId,
+    chunk_start: ValueId,
+    chunk_len: ValueId,
     kind: ChunkInputKind,
     context: &str,
-) -> Result<NodeId, String> {
+) -> Result<ValueId, String> {
     ChunkableView::classify(graph, view, kind)
         .ok_or_else(|| format!("phase1 {context}: input is not a chunkable view"))?
         .chunk(graph, view_ty, chunk_start, chunk_len, context)

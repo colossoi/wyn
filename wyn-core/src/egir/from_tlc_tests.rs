@@ -322,7 +322,7 @@ fn test_hash_cons_distinguishes_by_result_type() {
     );
     assert_ne!(
         a, b,
-        "different result types must not hash-cons to the same NodeId"
+        "different result types must not hash-cons to the same ValueId"
     );
 }
 
@@ -471,7 +471,7 @@ entry vertex_main() vec4f32 =
 
 #[test]
 fn pure_user_calls_enter_egir_as_pure_nodes_during_construction() {
-    use crate::egir::types::{ENode, EffectOp, PureOp, SideEffectKind};
+    use crate::egir::types::{EffectOp, PureOp, SideEffectKind, ValueKind};
 
     let source = r#"
 def choose(x: i32) i32 =
@@ -491,7 +491,7 @@ entry e(xs: []i32) []i32 = map(wrapper, xs)
 
     assert!(wrapper.graph.nodes.values().any(|node| matches!(
         &node.kind,
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::Call(callee),
             ..
         } if *callee == choose

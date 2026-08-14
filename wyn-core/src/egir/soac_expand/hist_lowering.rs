@@ -14,15 +14,15 @@ use super::*;
 pub(super) struct HistLoop {
     pub(super) form: hist::HistForm,
     /// `(array_nid, array_type, leaf_type, rank)` per input.
-    pub(super) read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>, Vec<u8>, ArrayLayout)>,
+    pub(super) read_inputs: Vec<(ValueId, Type<TypeName>, Type<TypeName>, Vec<u8>, ArrayLayout)>,
     /// Loop bound source -- the first input `(nid, array_type)`.
-    pub(super) len_input: (NodeId, Type<TypeName>),
-    pub(super) result_node: NodeId,
+    pub(super) len_input: (ValueId, Type<TypeName>),
+    pub(super) result_node: ValueId,
 }
 
 /// Convert one operation's multidimensional index to the row-major scalar
 /// offset used by Wyn storage views.
-fn flatten_hist_index(graph: &mut EGraph, indices: &[NodeId], shape: &[NodeId]) -> NodeId {
+fn flatten_hist_index(graph: &mut EGraph, indices: &[ValueId], shape: &[ValueId]) -> ValueId {
     debug_assert_eq!(indices.len(), shape.len());
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let Some((&first, rest)) = indices.split_first() else {
@@ -44,7 +44,7 @@ fn flatten_hist_index(graph: &mut EGraph, indices: &[NodeId], shape: &[NodeId]) 
     })
 }
 
-fn hist_index_in_bounds(graph: &mut EGraph, indices: &[NodeId], shape: &[NodeId]) -> NodeId {
+fn hist_index_in_bounds(graph: &mut EGraph, indices: &[ValueId], shape: &[ValueId]) -> ValueId {
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let bool_type = Type::Constructed(TypeName::Bool, vec![]);
     let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_type, None);
@@ -84,8 +84,8 @@ fn emit_hist_atomic_update(
     graph: &mut EGraph,
     block: BlockId,
     next: BlockId,
-    place: NodeId,
-    incoming: NodeId,
+    place: ValueId,
+    incoming: ValueId,
     value_type: Type<TypeName>,
     operation: &hist::HistOp,
     plan: hist::AtomicUpdate,
@@ -217,7 +217,7 @@ pub(super) fn build_hist_atomic(
     let after = graph.skeleton.split_block_before_effect(block, effect_index);
     graph.replace_node_preserving_type(
         result_node,
-        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+        ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
     );
 
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
@@ -496,11 +496,11 @@ pub(super) fn build_hist_loop(
     );
 }
 
-fn emit_thread_lane(graph: &mut EGraph) -> NodeId {
+fn emit_thread_lane(graph: &mut EGraph) -> ValueId {
     emit_thread_coordinate(graph, catalog().known().thread_id)
 }
 
-fn emit_thread_coordinate(graph: &mut EGraph, builtin: crate::builtins::BuiltinId) -> NodeId {
+fn emit_thread_coordinate(graph: &mut EGraph, builtin: crate::builtins::BuiltinId) -> ValueId {
     let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let thread = graph.intern_pure(
@@ -528,9 +528,9 @@ fn emit_thread_coordinate(graph: &mut EGraph, builtin: crate::builtins::BuiltinI
 
 fn emit_dispatch_axis_extent(
     graph: &mut EGraph,
-    dimensions: &[NodeId],
+    dimensions: &[ValueId],
     i32_type: &Type<TypeName>,
-) -> NodeId {
+) -> ValueId {
     let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_type.clone(), None);
     dimensions.iter().copied().fold(one, |product, dimension| {
         graph.intern_pure(
@@ -544,12 +544,12 @@ fn emit_dispatch_axis_extent(
 
 fn emit_ranked_bucket_coordinates(
     graph: &mut EGraph,
-    dimensions: &[NodeId],
+    dimensions: &[ValueId],
     topology: &hist::DispatchTopology,
-    lanes: [NodeId; 3],
+    lanes: [ValueId; 3],
     i32_type: &Type<TypeName>,
     bool_type: &Type<TypeName>,
-) -> (Vec<NodeId>, NodeId) {
+) -> (Vec<ValueId>, ValueId) {
     let mut coordinates = vec![None; dimensions.len()];
     let mut in_range = None;
     for (axis, lane) in topology.axes.iter().zip(lanes) {
@@ -593,7 +593,7 @@ fn emit_ranked_bucket_coordinates(
 fn emit_overflow_flag(
     graph: &mut EGraph,
     block: BlockId,
-    overflow: NodeId,
+    overflow: ValueId,
     next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     use crate::ssa::types::AtomicOp;
@@ -629,7 +629,7 @@ pub(super) fn build_bucket_init(
     let after = graph.skeleton.split_block_before_effect(block, effect_index);
     graph.replace_node_preserving_type(
         spec.result_node,
-        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+        ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
     );
     let operation = spec.form.operations.first().expect("bucket insertion has one operation");
     let hist::Update::BucketInsert { counts, overflow, .. } = operation.update else {
@@ -724,7 +724,7 @@ pub(super) fn build_bucket_insert(
     let after = graph.skeleton.split_block_before_effect(block, effect_index);
     graph.replace_node_preserving_type(
         spec.result_node,
-        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+        ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
     );
     let operation = spec.form.operations.first().expect("bucket insertion has one operation");
     let hist::Update::BucketInsert {
@@ -954,12 +954,12 @@ pub(super) fn build_bucket_finish(
     graph: &mut EGraph,
     block: BlockId,
     effect_index: usize,
-    result_node: NodeId,
+    result_node: ValueId,
 ) {
     let after = graph.skeleton.split_block_before_effect(block, effect_index);
     graph.replace_node_preserving_type(
         result_node,
-        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+        ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
     );
     graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
         target: after,

@@ -10,7 +10,7 @@ use crate::{LookupMap, LookupSet};
 
 use super::graph_ops::{clone_value_subgraph, ConstantCopy, PureCopy};
 use super::ir::{Family, Func};
-use super::types::{EGraph, ENode, NodeId, PureOp, SkeletonTerminator, WynLanguage};
+use super::types::{EGraph, PureOp, SkeletonTerminator, ValueId, ValueKind, WynLanguage};
 use crate::flow::{BlockId, ControlHeader};
 
 #[cfg(test)]
@@ -20,7 +20,7 @@ mod inlining_tests;
 /// Return the result root of a function whose body is a single, effect-free
 /// block. Such a body is a pure value DAG and can be cloned into a caller
 /// without reconstructing control flow or effect ordering.
-pub(crate) fn inlineable_return_root<P: Family>(function: &Func<P, WynLanguage>) -> Option<NodeId> {
+pub(crate) fn inlineable_return_root<P: Family>(function: &Func<P, WynLanguage>) -> Option<ValueId> {
     if function.graph.skeleton.blocks.len() != 1
         || function.graph.skeleton.blocks.iter().any(|(_, block)| block.control_header.is_some())
         || function.graph.nodes.iter().any(|(_, node)| node.alias.is_some())
@@ -67,7 +67,7 @@ struct StructuredInlineSummary {
 /// evaluation scope.
 pub(crate) fn inlineable_call_cost_at_block<P: Family>(
     caller: &EGraph<P>,
-    call: NodeId,
+    call: ValueId,
     block: BlockId,
     callee: &Func<P, WynLanguage>,
 ) -> Option<InlineCost> {
@@ -80,7 +80,7 @@ pub(crate) fn inlineable_call_cost_at_block<P: Family>(
         return None;
     }
     let (function, operands) = match &caller.nodes.get(call)?.kind {
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::Call(function),
             operands,
         } => (*function, operands),
@@ -105,10 +105,10 @@ pub(crate) fn inlineable_call_cost_at_block<P: Family>(
 /// selection CFGs are spliced before the observing terminator.
 pub(crate) fn inline_call_at_block<P: Family>(
     caller: &mut EGraph<P>,
-    call: NodeId,
+    call: ValueId,
     block: BlockId,
     callee: &Func<P, WynLanguage>,
-) -> Result<NodeId, String> {
+) -> Result<ValueId, String> {
     if inlineable_return_root(callee).is_some() {
         inline_pure_call(caller, call, callee)
     } else {
@@ -197,18 +197,18 @@ fn structured_inline_summary<P: Family>(
     });
     for value in &values {
         match &graph.nodes.get(*value)?.kind {
-            ENode::FuncParam { index } => {
+            ValueKind::FuncParam { index } => {
                 if graph.nodes[*value].ty != function.params.get(*index)?.0 {
                     return None;
                 }
             }
-            ENode::BlockParam { block, index } => {
+            ValueKind::BlockParam { block, index } => {
                 if graph.skeleton.blocks.get(*block)?.params.get(*index) != Some(value) {
                     return None;
                 }
             }
-            ENode::SideEffectResult => return None,
-            ENode::Pure { .. } | ENode::Union { .. } | ENode::Constant(_) => {}
+            ValueKind::SideEffectResult => return None,
+            ValueKind::Pure { .. } | ValueKind::Union { .. } | ValueKind::Constant(_) => {}
         }
     }
     Some(StructuredInlineSummary {
@@ -219,8 +219,8 @@ fn structured_inline_summary<P: Family>(
 
 fn roots_reach<P: Family>(
     graph: &EGraph<P>,
-    roots: impl IntoIterator<Item = NodeId>,
-    target: NodeId,
+    roots: impl IntoIterator<Item = ValueId>,
+    target: ValueId,
 ) -> bool {
     wyn_graph::reachable_from_ordered(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
         if let Some(definition) = graph.nodes.get(node) {
@@ -230,7 +230,7 @@ fn roots_reach<P: Family>(
     .contains(&target)
 }
 
-fn uniquely_observing_terminator<P: Family>(graph: &EGraph<P>, call: NodeId) -> Option<BlockId> {
+fn uniquely_observing_terminator<P: Family>(graph: &EGraph<P>, call: ValueId) -> Option<BlockId> {
     let mut observer = None;
     for (block, body) in &graph.skeleton.blocks {
         if body
@@ -251,10 +251,10 @@ fn uniquely_observing_terminator<P: Family>(graph: &EGraph<P>, call: NodeId) -> 
 
 fn inline_structured_call_before_terminator<P: Family>(
     caller: &mut EGraph<P>,
-    call: NodeId,
+    call: ValueId,
     block: BlockId,
     callee: &Func<P, WynLanguage>,
-) -> Result<NodeId, String> {
+) -> Result<ValueId, String> {
     let summary = structured_inline_summary(callee).ok_or_else(|| {
         format!(
             "inline_structured_call_before_terminator: `{}` is not a bounded effect-free selection CFG",
@@ -278,7 +278,7 @@ fn inline_structured_call_before_terminator<P: Family>(
     }
 
     let (called_function, operands) = match caller.nodes.get(call).map(|node| &node.kind) {
-        Some(ENode::Pure {
+        Some(ValueKind::Pure {
             op: PureOp::Call(function),
             operands,
         }) => (*function, operands.clone()),
@@ -312,7 +312,7 @@ fn inline_structured_call_before_terminator<P: Family>(
 
     let mut memo = LookupMap::new();
     for (source, definition) in &callee.graph.nodes {
-        if let ENode::FuncParam { index } = definition.kind {
+        if let ValueKind::FuncParam { index } = definition.kind {
             let replacement = operands.get(index).copied().ok_or_else(|| {
                 format!(
                     "inline_structured_call_before_terminator: `{}` contains out-of-range FuncParam {index}",
@@ -331,7 +331,7 @@ fn inline_structured_call_before_terminator<P: Family>(
         }
     }
 
-    let clone_value = |caller: &mut EGraph<P>, memo: &mut LookupMap<NodeId, NodeId>, value| {
+    let clone_value = |caller: &mut EGraph<P>, memo: &mut LookupMap<ValueId, ValueId>, value| {
         clone_value_subgraph(
             &callee.graph,
             caller,
@@ -420,11 +420,11 @@ fn inline_structured_call_before_terminator<P: Family>(
 /// whole-graph reference rewrite.
 pub(crate) fn inline_pure_call<P: Family>(
     caller: &mut EGraph<P>,
-    call: NodeId,
+    call: ValueId,
     callee: &Func<P, WynLanguage>,
-) -> Result<NodeId, String> {
+) -> Result<ValueId, String> {
     let (called_function, operands) = match caller.nodes.get(call).map(|node| &node.kind) {
-        Some(ENode::Pure {
+        Some(ValueKind::Pure {
             op: PureOp::Call(function),
             operands,
         }) => (*function, operands.clone()),
@@ -469,14 +469,14 @@ pub(crate) fn inline_pure_call<P: Family>(
 /// call was inlined. Substitution can expose a tuple beneath the call, but
 /// those consumers are not rebuilt by [`clone_value_subgraph`], so eagerly
 /// propagate their selected components and any nested projections here.
-fn fold_project_consumers<P: Family>(graph: &mut EGraph<P>, source: NodeId, replacement: NodeId) {
+fn fold_project_consumers<P: Family>(graph: &mut EGraph<P>, source: ValueId, replacement: ValueId) {
     let mut pending = vec![(source, replacement)];
     while let Some((source, replacement)) = pending.pop() {
         let consumers = graph
             .nodes
             .iter()
             .filter_map(|(node, definition)| match &definition.kind {
-                ENode::Pure {
+                ValueKind::Pure {
                     op: PureOp::Project { index },
                     operands,
                 } if operands.as_slice() == [source] => Some((node, *index, definition.ty.clone())),
@@ -504,13 +504,13 @@ fn fold_project_consumers<P: Family>(graph: &mut EGraph<P>, source: NodeId, repl
 /// value DAG and participate in ordinary call inlining.
 pub(crate) fn inline_effect_call_to_pure_callee<P: Family>(
     caller: &mut EGraph<P>,
-    result: NodeId,
-    operands: &[NodeId],
+    result: ValueId,
+    operands: &[ValueId],
     callee: &Func<P, WynLanguage>,
-) -> Result<NodeId, String> {
+) -> Result<ValueId, String> {
     if !matches!(
         caller.nodes.get(result).map(|node| &node.kind),
-        Some(ENode::SideEffectResult)
+        Some(ValueKind::SideEffectResult)
     ) {
         return Err(format!(
             "inline_effect_call_to_pure_callee: result {result:?} is not a side-effect result"
@@ -525,7 +525,7 @@ pub(crate) fn inline_effect_call_to_pure_callee<P: Family>(
             callee.name
         ));
     }
-    caller.nodes[result].kind = ENode::Union {
+    caller.nodes[result].kind = ValueKind::Union {
         left: inlined,
         right: inlined,
     };
@@ -534,9 +534,9 @@ pub(crate) fn inline_effect_call_to_pure_callee<P: Family>(
 
 fn clone_callee_result<P: Family>(
     caller: &mut EGraph<P>,
-    operands: &[NodeId],
+    operands: &[ValueId],
     callee: &Func<P, WynLanguage>,
-) -> Result<NodeId, String> {
+) -> Result<ValueId, String> {
     validate_operands(caller, operands, callee)?;
 
     let root = inlineable_return_root(callee).ok_or_else(|| {
@@ -552,7 +552,7 @@ fn clone_callee_result<P: Family>(
         });
     for node in reachable {
         let definition = &callee.graph.nodes[node].kind;
-        if let ENode::FuncParam { index } = definition {
+        if let ValueKind::FuncParam { index } = definition {
             let replacement = operands.get(*index).copied().ok_or_else(|| {
                 format!(
                     "inline_pure_call: `{}` contains out-of-range FuncParam {index}",
@@ -588,7 +588,7 @@ fn clone_callee_result<P: Family>(
 
 fn validate_operands<P: Family>(
     caller: &EGraph<P>,
-    operands: &[NodeId],
+    operands: &[ValueId],
     callee: &Func<P, WynLanguage>,
 ) -> Result<(), String> {
     if operands.len() != callee.params.len() {

@@ -19,8 +19,8 @@ use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
 use crate::egir::types::{
-    EGraph, ENode, NodeId, PureOp, ResourceAccess, SegResourceAccess, SideEffectKind, Soac, SoacEffect,
-    SoacInputType,
+    EGraph, PureOp, ResourceAccess, SegResourceAccess, SideEffectKind, Soac, SoacEffect, SoacInputType,
+    ValueId, ValueKind,
 };
 use crate::flow::BlockId;
 use crate::types::TypeExt;
@@ -37,17 +37,17 @@ struct InputTransform {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SliceTransform {
     op: PureOp,
-    start: NodeId,
-    end: NodeId,
+    start: ValueId,
+    end: ValueId,
     size: Type<TypeName>,
 }
 
 impl InputTransform {
     fn route(
         graph: &EGraph,
-        operand: NodeId,
-        producer_result: NodeId,
-        producer_outputs: &[Option<NodeId>],
+        operand: ValueId,
+        producer_result: ValueId,
+        producer_outputs: &[Option<ValueId>],
     ) -> Option<(usize, Self)> {
         let mut current = operand;
         let mut slices = Vec::new();
@@ -60,7 +60,7 @@ impl InputTransform {
                 slices.reverse();
                 return Some((field, Self { slices }));
             }
-            let ENode::Pure { op, operands } = &graph.nodes.get(current)?.kind else {
+            let ValueKind::Pure { op, operands } = &graph.nodes.get(current)?.kind else {
                 return None;
             };
             let PureOp::Intrinsic { id, .. } = op else {
@@ -89,9 +89,9 @@ impl InputTransform {
     fn apply(
         &self,
         graph: &mut EGraph,
-        mut node: NodeId,
+        mut node: ValueId,
         input: &SoacInputType,
-    ) -> Option<(NodeId, SoacInputType)> {
+    ) -> Option<(ValueId, SoacInputType)> {
         let mut array = input.array.clone();
         for slice in &self.slices {
             array = array_with_outer_size(&array, &slice.size)?;
@@ -391,14 +391,14 @@ fn retained_producer_outputs(
     producer_block: BlockId,
     producer_index: usize,
     consumer_index: usize,
-    producer_result: crate::egir::types::NodeId,
+    producer_result: crate::egir::types::ValueId,
     producer: &screma::Op<crate::egir::types::Semantic>,
 ) -> Vec<usize> {
     let projects = graph
         .nodes
         .iter()
         .filter_map(|(node, definition)| {
-            let crate::egir::types::ENode::Pure {
+            let crate::egir::types::ValueKind::Pure {
                 op: crate::egir::types::PureOp::Project { index },
                 operands,
             } = &definition.kind

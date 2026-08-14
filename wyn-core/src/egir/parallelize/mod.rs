@@ -101,8 +101,8 @@ impl Planned {
 }
 use super::soac::screma;
 use super::types::{
-    EGraph, ENode, EffectOp, EffectToken, NodeId, PureOp, RegionId, SegBody, SegSpace, SideEffect,
-    SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacDestination, SoacEffect,
+    EGraph, EffectOp, EffectToken, PureOp, RegionId, SegBody, SegSpace, SideEffect, SideEffectKind,
+    SideEffectSite, SkeletonTerminator, Soac, SoacDestination, SoacEffect, ValueId, ValueKind,
 };
 use crate::ast::TypeName;
 use crate::builtins::catalog;

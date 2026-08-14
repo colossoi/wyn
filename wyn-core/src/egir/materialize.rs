@@ -42,7 +42,7 @@ pub type Materialized = super::program::Program<
     super::program::PlannedGlobal,
 >;
 
-use super::types::{EGraph, ENode, Family, NodeId, PureOp};
+use super::types::{EGraph, Family, PureOp, ValueId, ValueKind};
 
 /// Make dynamic composite extraction explicit in every body.
 pub fn materialize_dynamic_extracts(program: super::soac_expand::SoacsExpanded) -> Materialized {
@@ -58,11 +58,11 @@ pub fn materialize_dynamic_extracts(program: super::soac_expand::SoacsExpanded) 
 /// DynamicExtract.
 fn run_one_body<P: Family>(graph: &mut EGraph<P>) {
     // Snapshot first; we'll mutate node entries and add new Materialize nodes.
-    let targets: Vec<(NodeId, NodeId, NodeId)> = graph
+    let targets: Vec<(ValueId, ValueId, ValueId)> = graph
         .nodes
         .iter()
         .filter_map(|(nid, node)| match &node.kind {
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::Index,
                 operands,
             } if operands.len() == 2 => {
@@ -86,7 +86,7 @@ fn run_one_body<P: Family>(graph: &mut EGraph<P>) {
         let mat_nid = graph.intern_pure(PureOp::Materialize, smallvec![arr_nid], arr_ty, None);
 
         // Replace the original Index node in place with DynamicExtract(mat, idx).
-        // The NodeId stays the same so all consumers continue to resolve through it.
+        // The ValueId stays the same so all consumers continue to resolve through it.
         // The node's stored type is unchanged (still elem_ty).
         graph.replace_pure_node(index_nid, PureOp::DynamicExtract, smallvec![mat_nid, idx_nid]);
     }
@@ -94,7 +94,7 @@ fn run_one_body<P: Family>(graph: &mut EGraph<P>) {
 
 /// Is `nid`'s array type a storage view? `lower_index` reads a view with a
 /// native dynamic `OpAccessChain`, so it must not be spilled to a composite.
-fn is_view<P: Family>(graph: &EGraph<P>, nid: NodeId) -> bool {
+fn is_view<P: Family>(graph: &EGraph<P>, nid: ValueId) -> bool {
     graph.nodes.get(nid).is_some_and(|node| {
         matches!(
             node.ty.array_variant(),
@@ -109,9 +109,9 @@ fn is_view<P: Family>(graph: &EGraph<P>, nid: NodeId) -> bool {
 /// body shaped as `Index(Index(view, row), column)`. The outer base has a
 /// composite row type, but materializing it would destroy the storage address
 /// chain before elaboration has a chance to recover it.
-fn index_spine_reaches_view<P: Family>(graph: &EGraph<P>, mut nid: NodeId) -> bool {
+fn index_spine_reaches_view<P: Family>(graph: &EGraph<P>, mut nid: ValueId) -> bool {
     loop {
-        let Some(ENode::Pure {
+        let Some(ValueKind::Pure {
             op: PureOp::Index,
             operands,
         }) = graph.nodes.get(nid).map(|node| &node.kind)
@@ -128,12 +128,12 @@ fn index_spine_reaches_view<P: Family>(graph: &EGraph<P>, mut nid: NodeId) -> bo
     }
 }
 
-/// Is this NodeId a compile-time integer constant? Includes both the inline
-/// `ENode::Constant(ConstantValue::I32|U32)` form and `ENode::Pure(PureOp::Int|Uint)`.
-fn is_const_int<P: Family>(graph: &EGraph<P>, nid: NodeId) -> bool {
+/// Is this ValueId a compile-time integer constant? Includes both the inline
+/// `ValueKind::Constant(ConstantValue::I32|U32)` form and `ValueKind::Pure(PureOp::Int|Uint)`.
+fn is_const_int<P: Family>(graph: &EGraph<P>, nid: ValueId) -> bool {
     match &graph.nodes[nid].kind {
-        ENode::Constant(ConstantValue::I32(_) | ConstantValue::U32(_)) => true,
-        ENode::Pure {
+        ValueKind::Constant(ConstantValue::I32(_) | ConstantValue::U32(_)) => true,
+        ValueKind::Pure {
             op: PureOp::Int(_) | PureOp::Uint(_),
             ..
         } => true,

@@ -23,7 +23,7 @@ use super::ir::BodySite;
 use super::reify::Segmented;
 use super::semantic_graph::SemanticGraph;
 use super::soac::screma;
-use super::types::{EGraph, NodeId, ResourceAccess, SegResourceAccess, SideEffectKind, Soac, SoacEffect};
+use super::types::{EGraph, ResourceAccess, SegResourceAccess, SideEffectKind, Soac, SoacEffect, ValueId};
 use crate::flow::BlockId;
 use crate::LookupMap;
 
@@ -129,7 +129,7 @@ fn dead_seg_ops_in_graph(graph: &EGraph) -> DeadGraphPatch {
     // Live values are those reachable from an observable root.  Looking at
     // children of every interned node is too conservative: dead Project nodes
     // remain in an e-graph and would otherwise keep their producer alive.
-    let mut roots = Vec::<NodeId>::new();
+    let mut roots = Vec::<ValueId>::new();
     for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {
             roots.extend(effect.referenced_nodes());

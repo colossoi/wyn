@@ -50,7 +50,7 @@ use polytype::Type;
 use super::super::graph_ops;
 use super::super::soac::{filter, screma};
 use super::super::types::{
-    EGraph, ENode, NodeId, PureOp, SideEffectKind, Soac, SoacDestination, SoacEffect, SoacPlacement,
+    EGraph, PureOp, SideEffectKind, Soac, SoacDestination, SoacEffect, SoacPlacement, ValueId, ValueKind,
 };
 use super::ResourcesAllocated;
 use crate::ast::TypeName;
@@ -173,7 +173,7 @@ fn retype_reused_results(graph: &mut EGraph, block: BlockId, effect_index: usize
         .nodes
         .iter()
         .filter_map(|(node, definition)| match &definition.kind {
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::Project { index },
                 operands,
             } if operands.as_slice() == [result] => Some((node, *index as usize)),
@@ -246,7 +246,7 @@ fn input_has_no_later_observers(
     uses: &graph_ops::ValueUseIndex,
     block: BlockId,
     index: usize,
-    input: NodeId,
+    input: ValueId,
 ) -> bool {
     let observers = uses.pure_observers(input);
     !observers.effect_sites().any(|site| site.block == block && site.index > index)

@@ -7,7 +7,7 @@ use super::*;
 /// when its effectful work is conditionally executed.
 pub(super) struct LoopBody {
     pub(super) tail: BlockId,
-    pub(super) carried: Vec<NodeId>,
+    pub(super) carried: Vec<ValueId>,
 }
 
 /// Emit a real loop via `build_loop_skeleton`, invoking `emit_body` in the
@@ -16,13 +16,13 @@ fn build_loop<F>(
     graph: &mut EGraph,
     bid: BlockId,
     idx_in_block: usize,
-    len_input: &(NodeId, Type<TypeName>),
-    carried: &[(Type<TypeName>, NodeId)],
+    len_input: &(ValueId, Type<TypeName>),
+    carried: &[(Type<TypeName>, ValueId)],
     result: &ResultBinding,
     next_effect: &mut crate::IdSource<EffectToken>,
     mut emit_body: F,
 ) where
-    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, NodeId, &[NodeId]) -> LoopBody,
+    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
 {
     let handles = build_loop_skeleton(
         graph,
@@ -58,14 +58,14 @@ pub(super) fn expand_loop<F>(
     graph: &mut EGraph,
     bid: BlockId,
     idx_in_block: usize,
-    len_input: &(NodeId, Type<TypeName>),
-    carried: &[(Type<TypeName>, NodeId)],
+    len_input: &(ValueId, Type<TypeName>),
+    carried: &[(Type<TypeName>, ValueId)],
     result: &ResultBinding,
     next_effect: &mut crate::IdSource<EffectToken>,
     allow_unroll: bool,
     mut emit_body: F,
 ) where
-    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, NodeId, &[NodeId]) -> LoopBody,
+    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
 {
     if allow_unroll
         && try_unroll(
@@ -104,14 +104,14 @@ fn try_unroll<F>(
     graph: &mut EGraph,
     bid: BlockId,
     idx_in_block: usize,
-    len_input: &(NodeId, Type<TypeName>),
-    carried: &[(Type<TypeName>, NodeId)],
+    len_input: &(ValueId, Type<TypeName>),
+    carried: &[(Type<TypeName>, ValueId)],
     result: &ResultBinding,
     next_effect: &mut crate::IdSource<EffectToken>,
     mut emit_body: F,
 ) -> bool
 where
-    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, NodeId, &[NodeId]) -> LoopBody,
+    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
 {
     const UNROLL_THRESHOLD: usize = 16;
 
@@ -141,7 +141,7 @@ where
         SkeletonTerminator::Unreachable,
     );
 
-    let mut carried_nids: Vec<NodeId> = carried.iter().map(|(_, init)| *init).collect();
+    let mut carried_nids: Vec<ValueId> = carried.iter().map(|(_, init)| *init).collect();
     let mut current = bid;
     for i in 0..n {
         let idx_nid = graph.intern_pure(PureOp::Int(i.to_string()), smallvec![], i32_ty.clone(), None);
@@ -151,14 +151,14 @@ where
         current = body.tail;
     }
 
-    // Rebind the original SOAC result NodeId from the carried tuple.
+    // Rebind the original SOAC result ValueId from the carried tuple.
     match result {
         ResultBinding::TupleFromCarried {
             result_node,
             tuple_ty,
             indices,
         } => {
-            let tuple_parts: smallvec::SmallVec<[NodeId; 4]> =
+            let tuple_parts: smallvec::SmallVec<[ValueId; 4]> =
                 indices.iter().map(|idx| carried_nids[*idx]).collect();
             graph.replace_pure_node(*result_node, PureOp::Tuple(tuple_parts.len()), tuple_parts);
             graph.retype_node(*result_node, tuple_ty.clone());
@@ -166,7 +166,7 @@ where
         ResultBinding::DummyBool { result_node } => {
             graph.replace_node_preserving_type(
                 *result_node,
-                ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+                ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
             );
         }
     }
@@ -186,11 +186,11 @@ where
 struct LoopSkeletonSpec {
     /// Per loop-carried value: (type, initial value in preheader).
     /// These become `header`'s block params, in order, followed by the index.
-    carried: Vec<(Type<TypeName>, NodeId)>,
-    /// How the original SOAC result NodeId should be rebound after expansion.
+    carried: Vec<(Type<TypeName>, ValueId)>,
+    /// How the original SOAC result ValueId should be rebound after expansion.
     result: ResultBinding,
     /// Input array for length calculation: (arr_nid, arr_ty).
-    len_input: (NodeId, Type<TypeName>),
+    len_input: (ValueId, Type<TypeName>),
 }
 
 #[derive(Clone)]
@@ -198,7 +198,7 @@ pub(super) enum ResultBinding {
     /// Rebind `result_node` as a tuple of carried values. Used by
     /// Screma, which produces N maps + N accumulators into one tuple.
     TupleFromCarried {
-        result_node: NodeId,
+        result_node: ValueId,
         tuple_ty: Type<TypeName>,
         indices: Vec<usize>,
     },
@@ -207,19 +207,19 @@ pub(super) enum ResultBinding {
     /// are effectful and the "result" is discarded by the entry-point
     /// finalize step).
     DummyBool {
-        result_node: NodeId,
+        result_node: ValueId,
     },
 }
 
 struct LoopHandles {
     header: BlockId,
     body: BlockId,
-    /// One NodeId per loop-carried, matching the order in `spec.carried`.
+    /// One ValueId per loop-carried, matching the order in `spec.carried`.
     /// These are the header block-param NodeIds, available inside body and
     /// on the else branch into `after`.
-    pub(super) carried: Vec<NodeId>,
+    pub(super) carried: Vec<ValueId>,
     /// The header's index block param.
-    idx_nid: NodeId,
+    idx_nid: ValueId,
 }
 
 fn build_loop_skeleton(
@@ -239,7 +239,7 @@ fn build_loop_skeleton(
     // whose CondBranch is in `old_term`), that metadata follows to
     // `after`, since `bid`'s new terminator is an unconditional branch to
     // the loop header — `after` is the selection/loop header now.
-    // Rebind the SOAC's original result NodeId:
+    // Rebind the SOAC's original result ValueId:
     //   - Carried: becomes the `after` block's param, populated from
     //     `carried[idx]` via the header's else branch below.
     //   - DummyBool: becomes an inline `Bool(false)` constant node in place.
@@ -265,7 +265,7 @@ fn build_loop_skeleton(
         ResultBinding::DummyBool { result_node } => {
             graph.replace_node_preserving_type(
                 *result_node,
-                ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+                ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
             );
         }
     }
@@ -282,7 +282,7 @@ fn build_loop_skeleton(
 
     // Preheader terminator: br header(init_carried..., 0).
     let zero_nid = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone(), None);
-    let mut preheader_args: Vec<NodeId> = spec.carried.iter().map(|(_, init)| *init).collect();
+    let mut preheader_args: Vec<ValueId> = spec.carried.iter().map(|(_, init)| *init).collect();
     preheader_args.push(zero_nid);
     graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
         target: header,
@@ -297,7 +297,7 @@ fn build_loop_skeleton(
         bool_ty,
         None,
     );
-    let else_args: Vec<NodeId> = match &spec.result {
+    let else_args: Vec<ValueId> = match &spec.result {
         ResultBinding::TupleFromCarried { indices, .. } => {
             indices.iter().map(|idx| carried_nids[*idx]).collect()
         }
@@ -326,7 +326,7 @@ fn build_loop_skeleton(
 }
 
 /// Emit `idx + 1` as a pure op.
-fn increment(graph: &mut EGraph, idx_nid: NodeId) -> NodeId {
+fn increment(graph: &mut EGraph, idx_nid: ValueId) -> ValueId {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let one_nid = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), None);
     graph.intern_pure(

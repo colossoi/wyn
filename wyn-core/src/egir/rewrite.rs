@@ -29,7 +29,7 @@ use smallvec::smallvec;
 use crate::ast::TypeName;
 use crate::op::BinaryOperator;
 
-use super::types::{EGraph, ENode, Family, NodeId, PureOp};
+use super::types::{EGraph, Family, PureOp, ValueId, ValueKind};
 
 /// Result of attempting a rewrite on a node.
 pub enum RewriteResult {
@@ -38,11 +38,11 @@ pub enum RewriteResult {
     /// The rewrite produces a strictly better node. The original is
     /// discarded; extraction has no choice to make. Use for clear wins
     /// like `x + 0 → x`.
-    Subsume(NodeId),
+    Subsume(ValueId),
     /// The rewrite produces an alternative. The original and the
     /// replacement are joined under a union and cost-based extraction
     /// picks the best.
-    Replace(NodeId),
+    Replace(ValueId),
 }
 
 /// A rewrite rule applied to each pure node of the graph.
@@ -50,7 +50,7 @@ pub trait RewriteRule<P: Family> {
     /// Try to rewrite `node`. The graph is mutable so rules can intern new
     /// nodes for the RHS. The returned node must not contain `node` in its
     /// operand cone.
-    fn try_rewrite(&self, graph: &mut EGraph<P>, node: NodeId) -> RewriteResult;
+    fn try_rewrite(&self, graph: &mut EGraph<P>, node: ValueId) -> RewriteResult;
 }
 
 /// A collection of rewrite rules.
@@ -71,10 +71,10 @@ impl<P: Family> RewriteSet<P> {
     /// interned by the rules themselves are not revisited. Returns true if
     /// any rewrite fired.
     pub fn apply_to_graph(&self, graph: &mut EGraph<P>) -> bool {
-        let ids: Vec<NodeId> = graph
+        let ids: Vec<ValueId> = graph
             .nodes
             .iter()
-            .filter(|(_, node)| matches!(&node.kind, ENode::Pure { .. }))
+            .filter(|(_, node)| matches!(&node.kind, ValueKind::Pure { .. }))
             .map(|(id, _)| id)
             .collect();
         let mut changed = false;
@@ -88,7 +88,7 @@ impl<P: Family> RewriteSet<P> {
     /// their id and see the rewrite through it. The first rule that fires
     /// wins (the node is no longer pure afterwards). Returns true if a
     /// rewrite fired.
-    pub fn apply_to_node(&self, graph: &mut EGraph<P>, node: NodeId) -> bool {
+    pub fn apply_to_node(&self, graph: &mut EGraph<P>, node: ValueId) -> bool {
         for rule in &self.rules {
             match rule.try_rewrite(graph, node) {
                 RewriteResult::NoMatch => continue,
@@ -149,8 +149,8 @@ const MAX_CHAIN: u32 = 16;
 pub struct PowToMulChain;
 
 impl<P: Family> RewriteRule<P> for PowToMulChain {
-    fn try_rewrite(&self, graph: &mut EGraph<P>, node: NodeId) -> RewriteResult {
-        let ENode::Pure {
+    fn try_rewrite(&self, graph: &mut EGraph<P>, node: ValueId) -> RewriteResult {
+        let ValueKind::Pure {
             op: PureOp::BinOp(name),
             operands,
         } = &graph.nodes[node].kind

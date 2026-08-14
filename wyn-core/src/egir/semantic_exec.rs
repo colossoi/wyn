@@ -6,7 +6,7 @@
 use crate::egir::program::SemanticFunc;
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{hist, screma};
-use crate::egir::types::{ENode, NodeId, PureOp, RegionId, Semantic, SkeletonTerminator};
+use crate::egir::types::{PureOp, RegionId, Semantic, SkeletonTerminator, ValueId, ValueKind};
 use crate::LookupMap;
 
 #[cfg(test)]
@@ -93,32 +93,32 @@ impl<'a> RegionExecutor<'a> {
     fn eval_node(
         &self,
         region: &SemanticFunc,
-        node: NodeId,
+        node: ValueId,
         arguments: &[Value],
-        memo: &mut LookupMap<NodeId, Value>,
+        memo: &mut LookupMap<ValueId, Value>,
     ) -> Result<Value, String> {
         if let Some(value) = memo.get(&node) {
             return Ok(value.clone());
         }
         let value = match &region.graph.nodes[node].kind {
-            ENode::FuncParam { index } => {
+            ValueKind::FuncParam { index } => {
                 arguments.get(*index).cloned().ok_or_else(|| format!("missing region argument {index}"))?
             }
-            ENode::Constant(crate::ssa::types::ConstantValue::I32(value)) => Value::Int(*value as i64),
-            ENode::Constant(crate::ssa::types::ConstantValue::U32(value)) => Value::Int(*value as i64),
-            ENode::Constant(crate::ssa::types::ConstantValue::Bool(value)) => Value::Bool(*value),
-            ENode::Constant(crate::ssa::types::ConstantValue::F32(_)) => {
+            ValueKind::Constant(crate::ssa::types::ConstantValue::I32(value)) => Value::Int(*value as i64),
+            ValueKind::Constant(crate::ssa::types::ConstantValue::U32(value)) => Value::Int(*value as i64),
+            ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(value)) => Value::Bool(*value),
+            ValueKind::Constant(crate::ssa::types::ConstantValue::F32(_)) => {
                 return Err("floating-point region execution is not needed by semantic tests".into())
             }
-            ENode::Union { left, .. } => self.eval_node(region, *left, arguments, memo)?,
-            ENode::Pure { op, operands } => {
+            ValueKind::Union { left, .. } => self.eval_node(region, *left, arguments, memo)?,
+            ValueKind::Pure { op, operands } => {
                 let values: Result<Vec<_>, _> = operands
                     .iter()
                     .map(|operand| self.eval_node(region, *operand, arguments, memo))
                     .collect();
                 self.eval_pure(op, &values?)?
             }
-            ENode::BlockParam { .. } | ENode::SideEffectResult => {
+            ValueKind::BlockParam { .. } | ValueKind::SideEffectResult => {
                 return Err("effectful/CFG values are outside the pure region executor".into())
             }
         };

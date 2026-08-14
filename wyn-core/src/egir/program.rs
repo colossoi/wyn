@@ -19,8 +19,8 @@ use std::ops::{Deref, Index, IndexMut};
 
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, ENode, Family, NodeId, Physical, Raw, RegionId, Scheduled, SegBody, SegExtent, SegSpace,
-    Semantic, SideEffectKind, Soac, SoacEffect, WynLanguage,
+    EGraph, Family, Physical, Raw, RegionId, Scheduled, SegBody, SegExtent, SegSpace, Semantic,
+    SideEffectKind, Soac, SoacEffect, ValueId, ValueKind, WynLanguage,
 };
 
 pub use super::ir::{OutputSlotId, OutputWriter, RealizedOutputRoute, SlotSource, UnrealizedOutputRoute};
@@ -778,14 +778,14 @@ fn rewrite_node_types<P: Family>(graph: &mut EGraph<P>, mut rewrite: impl FnMut(
 
 fn physicalize_soac(
     soac: Soac<Scheduled>,
-    nodes: &LookupMap<NodeId, NodeId>,
+    nodes: &LookupMap<ValueId, ValueId>,
     bindings: &PhysicalResourceTable,
 ) -> Result<Soac<Physical>, String> {
     fn binding(reference: SemanticResourceRef, bindings: &PhysicalResourceTable) -> PhysicalResourceRef {
         bindings.binding(reference.0)
     }
 
-    fn seg_body(mut body: SegBody, nodes: &LookupMap<NodeId, NodeId>) -> SegBody {
+    fn seg_body(mut body: SegBody, nodes: &LookupMap<ValueId, ValueId>) -> SegBody {
         for capture in &mut body.captures {
             *capture = nodes[capture];
         }
@@ -794,7 +794,7 @@ fn physicalize_soac(
 
     fn space(
         space: SegSpace,
-        nodes: &LookupMap<NodeId, NodeId>,
+        nodes: &LookupMap<ValueId, ValueId>,
         bindings: &PhysicalResourceTable,
     ) -> Result<PhysicalSegSpace, String> {
         let dims = space
@@ -823,14 +823,17 @@ fn physicalize_soac(
         SegSpace::from_dims(dims).ok_or_else(|| "physicalized segmented space was empty".to_string())
     }
 
-    fn lambda(mut lambda: screma::Lambda, nodes: &LookupMap<NodeId, NodeId>) -> screma::Lambda {
+    fn lambda(mut lambda: screma::Lambda, nodes: &LookupMap<ValueId, ValueId>) -> screma::Lambda {
         if let Some(body) = lambda.seg_body_mut() {
             *body = seg_body(body.clone(), nodes);
         }
         lambda
     }
 
-    fn screma_form(mut form: screma::ScremaForm, nodes: &LookupMap<NodeId, NodeId>) -> screma::ScremaForm {
+    fn screma_form(
+        mut form: screma::ScremaForm,
+        nodes: &LookupMap<ValueId, ValueId>,
+    ) -> screma::ScremaForm {
         form.pre = lambda(form.pre, nodes);
         for scan in &mut form.scans {
             scan.operator = lambda(scan.operator.clone(), nodes);
@@ -849,7 +852,7 @@ fn physicalize_soac(
     }
     fn physical_segment(
         segment: screma::Segmented<SemanticResourceRef>,
-        nodes: &LookupMap<NodeId, NodeId>,
+        nodes: &LookupMap<ValueId, ValueId>,
         bindings: &PhysicalResourceTable,
     ) -> Result<screma::Segmented<PhysicalResourceRef>, String> {
         Ok(screma::Segmented {
@@ -1026,7 +1029,7 @@ pub(crate) fn physicalize_graph_resources(
 ) -> Result<
     (
         EGraph<Physical>,
-        LookupMap<NodeId, NodeId>,
+        LookupMap<ValueId, ValueId>,
         LookupMap<BlockId, BlockId>,
     ),
     String,
@@ -1041,7 +1044,7 @@ pub(crate) fn physicalize_graph_resources(
     let pure_nodes = graph.nodes.keys().collect::<Vec<_>>();
     for node in pure_nodes {
         let resource_len = match graph.nodes.get(node).map(|node| &node.kind) {
-            Some(super::types::ENode::Pure {
+            Some(super::types::ValueKind::Pure {
                 op: super::types::PureOp::ResourceLen(binding),
                 ..
             }) => Some(*binding),
@@ -1150,16 +1153,16 @@ impl SemanticEntry {
     pub(crate) fn resources_referenced_by_nodes(
         &self,
         graph: &EGraph,
-        nodes: impl IntoIterator<Item = NodeId>,
+        nodes: impl IntoIterator<Item = ValueId>,
     ) -> HashSet<ResourceId> {
         let mut resources = HashSet::new();
         for node in nodes {
-            if let Some(ENode::Pure { op, .. }) = graph.nodes.get(node).map(|node| &node.kind) {
+            if let Some(ValueKind::Pure { op, .. }) = graph.nodes.get(node).map(|node| &node.kind) {
                 if let Some(resource) = op.referenced_resource() {
                     resources.insert(resource.0);
                 }
             }
-            if let Some(ENode::FuncParam { index }) = graph.nodes.get(node).map(|node| &node.kind) {
+            if let Some(ValueKind::FuncParam { index }) = graph.nodes.get(node).map(|node| &node.kind) {
                 resources.extend(
                     self.inputs
                         .get(*index)
@@ -1211,7 +1214,7 @@ impl SemanticEntry {
         let mut parameters = projection
             .source_nodes()
             .filter_map(|node| match self.graph.nodes.get(node).map(|node| &node.kind) {
-                Some(ENode::FuncParam { index }) => Some(*index),
+                Some(ValueKind::FuncParam { index }) => Some(*index),
                 _ => None,
             })
             .collect::<crate::SortedSet<_>>();
@@ -1267,7 +1270,7 @@ impl SemanticEntry {
         role: interface::StorageRole,
         elem_ty: &Type<TypeName>,
         size: &LogicalSize,
-    ) -> NodeId {
+    ) -> ValueId {
         let view = super::graph_ops::intern_resource_view(&mut self.graph, resource, elem_ty.clone(), None);
         self.set_resource_declaration(resource, role, elem_ty, size);
         view
@@ -1311,7 +1314,7 @@ impl SemanticEntry {
         let mut kept_indices = reachable
             .iter()
             .filter_map(|node| match self.graph.nodes.get(*node).map(|node| &node.kind) {
-                Some(ENode::FuncParam { index }) => Some(*index),
+                Some(ValueKind::FuncParam { index }) => Some(*index),
                 _ => None,
             })
             .collect::<crate::SortedSet<_>>();

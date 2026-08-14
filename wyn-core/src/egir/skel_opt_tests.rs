@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::ast::TypeName;
-use crate::egir::types::{EGraph as GenericEGraph, NodeId, PureOp, SkeletonTerminator};
+use crate::egir::types::{EGraph as GenericEGraph, PureOp, SkeletonTerminator, ValueId};
 use crate::flow::BlockId;
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
@@ -55,9 +55,9 @@ fn is_const_bool_rejects_non_bool() {
 /// in `Return(None)`. Returns (entry, then_bid, else_bid).
 fn build_condbranch_skel(
     graph: &mut EGraph,
-    cond: NodeId,
-    then_arg: Option<NodeId>,
-    else_arg: Option<NodeId>,
+    cond: ValueId,
+    then_arg: Option<ValueId>,
+    else_arg: Option<ValueId>,
 ) -> (BlockId, BlockId, BlockId) {
     let entry = graph.skeleton.entry;
     let then_bid = graph.skeleton.create_block();
@@ -137,9 +137,9 @@ fn fold_constant_branch_preserves_chosen_args() {
 /// returns its single param. If left == right, phi-elim should fire.
 fn build_merge_skel(
     graph: &mut EGraph,
-    merge_arg_left: NodeId,
-    merge_arg_right: NodeId,
-) -> (BlockId, BlockId, NodeId) {
+    merge_arg_left: ValueId,
+    merge_arg_right: ValueId,
+) -> (BlockId, BlockId, ValueId) {
     let entry = graph.skeleton.entry;
     let b1 = graph.skeleton.create_block();
     let b2 = graph.skeleton.create_block();
@@ -230,7 +230,7 @@ fn phi_elim_rejects_self_referential_param() {
 
 // -- merge_aliases / close_aliases --------------------------------------
 
-fn mk_nid(graph: &mut EGraph) -> NodeId {
+fn mk_nid(graph: &mut EGraph) -> ValueId {
     graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty(), None)
 }
 
@@ -432,7 +432,7 @@ fn phi_elim_preserves_loop_header_param() {
 
     let acc = graph.add_block_param(header, i32_ty());
 
-    // body_val = acc + 1 (a NodeId distinct from init)
+    // body_val = acc + 1 (a ValueId distinct from init)
     let body_val = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![acc, one],

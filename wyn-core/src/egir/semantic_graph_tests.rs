@@ -71,7 +71,7 @@ fn unknown_ops_have_no_edges() {
     assert!(!g.reachable_between(&lonely, &a));
 }
 
-fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<NodeId>) {
+fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<ValueId>) {
     let ty = Type::Constructed(TypeName::Unit, vec![]);
     let result = graph.alloc_side_effect_result(ty.clone());
     let block = graph.skeleton.entry;

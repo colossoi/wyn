@@ -14,7 +14,7 @@ use crate::egir::inlining;
 use crate::egir::program::{fresh_region_name, ProgramIdentities, SemanticFunc};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
-use crate::egir::types::{EGraph, ENode, NodeId, PureOp, SkeletonTerminator, SoacInputType};
+use crate::egir::types::{EGraph, PureOp, SkeletonTerminator, SoacInputType, ValueId, ValueKind};
 use crate::LookupMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,7 +24,7 @@ pub(super) enum OutputOrigin {
 }
 
 pub(super) struct Normalized {
-    pub input_nodes: Vec<NodeId>,
+    pub input_nodes: Vec<ValueId>,
     pub inputs: Vec<SoacInputType>,
     pub form: screma::ScremaForm,
     /// Canonical fused field order, expressed in the source operations' field
@@ -34,7 +34,7 @@ pub(super) struct Normalized {
 }
 
 pub(super) struct Source<'a> {
-    pub input_nodes: &'a [NodeId],
+    pub input_nodes: &'a [ValueId],
     pub inputs: &'a [SoacInputType],
     pub form: &'a screma::ScremaForm,
 }
@@ -63,7 +63,7 @@ pub(super) struct Context<'a> {
     pub identities: &'a mut ProgramIdentities,
     pub scope: &'a str,
     pub span: Span,
-    pub outer_types: &'a LookupMap<NodeId, Type<TypeName>>,
+    pub outer_types: &'a LookupMap<ValueId, Type<TypeName>>,
 }
 
 /// Horizontal normalisation using the SuperScrema barrier algebra. Independent
@@ -193,13 +193,13 @@ pub(super) fn fuse_vertical(
 }
 
 pub(super) struct LambdaSource<'a> {
-    pub input_nodes: &'a [NodeId],
+    pub input_nodes: &'a [ValueId],
     pub inputs: &'a [SoacInputType],
     pub lambda: &'a screma::Lambda,
 }
 
 pub(super) struct NormalizedLambda {
-    pub input_nodes: Vec<NodeId>,
+    pub input_nodes: Vec<ValueId>,
     pub inputs: Vec<SoacInputType>,
     pub lambda: screma::Lambda,
     pub synthesized: Vec<SemanticFunc>,
@@ -775,7 +775,7 @@ enum ProjectedValue {
 #[derive(Clone)]
 struct RegionProjection {
     region: crate::egir::types::RegionId,
-    roots: Vec<NodeId>,
+    roots: Vec<ValueId>,
     result_types: Vec<Type<TypeName>>,
     arguments: Vec<(usize, ProjectedValue)>,
 }
@@ -818,7 +818,7 @@ fn lambda_results_depend_on_parameters(
     Some(recipe.input_dependencies().iter().any(|input| parameters.contains(input)))
 }
 
-fn function_return_site(function: &SemanticFunc) -> Option<(crate::flow::BlockId, NodeId)> {
+fn function_return_site(function: &SemanticFunc) -> Option<(crate::flow::BlockId, ValueId)> {
     let mut returns = function.graph.skeleton.blocks.iter().filter_map(|(block, body)| match body.term {
         SkeletonTerminator::Return(Some(result)) => Some((block, result)),
         _ => None,
@@ -827,10 +827,10 @@ fn function_return_site(function: &SemanticFunc) -> Option<(crate::flow::BlockId
     returns.next().is_none().then_some(result)
 }
 
-fn function_result_field(function: &SemanticFunc, index: usize) -> Option<NodeId> {
+fn function_result_field(function: &SemanticFunc, index: usize) -> Option<ValueId> {
     let (_, root) = function_return_site(function)?;
     match &function.graph.nodes.get(root)?.kind {
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::Tuple(arity),
             operands,
         } if *arity == operands.len() => operands.get(index).copied(),
@@ -839,14 +839,14 @@ fn function_result_field(function: &SemanticFunc, index: usize) -> Option<NodeId
     }
 }
 
-fn lambda_result_roots(program: &Segmented, lambda: &screma::Lambda) -> Option<Vec<NodeId>> {
+fn lambda_result_roots(program: &Segmented, lambda: &screma::Lambda) -> Option<Vec<ValueId>> {
     let body = lambda.seg_body()?;
     let function = program.region(body.region)?;
     let (_, root) = function_return_site(function)?;
     match lambda.result_types.as_slice() {
         [_] => Some(vec![root]),
         results => match &function.graph.nodes.get(root)?.kind {
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::Tuple(arity),
                 operands,
             } if *arity == results.len() && operands.len() == results.len() => Some(operands.to_vec()),
@@ -896,7 +896,7 @@ impl ProjectionBuilder<'_> {
     fn function(
         &mut self,
         function: &SemanticFunc,
-        roots: &[NodeId],
+        roots: &[ValueId],
         result_types: &[Type<TypeName>],
         arguments: &[Option<ProjectedValue>],
     ) -> Option<Vec<ProjectedValue>> {
@@ -922,7 +922,7 @@ impl ProjectionBuilder<'_> {
                 .nodes
                 .iter()
                 .filter_map(|(source, node)| match &node.kind {
-                    ENode::FuncParam { index } if projection.node(source).is_some() => Some(*index),
+                    ValueKind::FuncParam { index } if projection.node(source).is_some() => Some(*index),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
@@ -952,9 +952,9 @@ impl ProjectionBuilder<'_> {
     fn value(
         &mut self,
         function: &SemanticFunc,
-        source: NodeId,
+        source: ValueId,
         arguments: &[Option<ProjectedValue>],
-        memo: &mut LookupMap<NodeId, ProjectedValue>,
+        memo: &mut LookupMap<ValueId, ProjectedValue>,
     ) -> Option<ProjectedValue> {
         if let Some(value) = memo.get(&source) {
             return Some(value.clone());
@@ -964,27 +964,27 @@ impl ProjectionBuilder<'_> {
             return self.value(function, alias, arguments, memo);
         }
         let value = match &definition.kind {
-            ENode::FuncParam { index } => arguments.get(*index)?.clone()?,
-            ENode::Constant(value) => ProjectedValue::Constant {
+            ValueKind::FuncParam { index } => arguments.get(*index)?.clone()?,
+            ValueKind::Constant(value) => ProjectedValue::Constant {
                 value: value.clone(),
                 ty: definition.ty.clone(),
             },
-            ENode::Union { left, right } => ProjectedValue::Union(
+            ValueKind::Union { left, right } => ProjectedValue::Union(
                 Box::new(self.value(function, *left, arguments, memo)?),
                 Box::new(self.value(function, *right, arguments, memo)?),
             ),
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::Project { index },
                 operands,
             } if operands.len() == 1 => {
                 match function.graph.nodes.get(operands[0]).map(|node| &node.kind) {
-                    Some(ENode::Pure {
+                    Some(ValueKind::Pure {
                         op: PureOp::Tuple(arity),
                         operands: fields,
                     }) if *arity == fields.len() => {
                         self.value(function, *fields.get(*index as usize)?, arguments, memo)?
                     }
-                    Some(ENode::Pure {
+                    Some(ValueKind::Pure {
                         op: PureOp::Call(callee),
                         operands: call_arguments,
                     }) => self.call(
@@ -1003,11 +1003,11 @@ impl ProjectionBuilder<'_> {
                     },
                 }
             }
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::Call(callee),
                 operands,
             } => self.call(function, callee, operands, None, arguments, memo)?,
-            ENode::Pure { op, operands } => ProjectedValue::Pure {
+            ValueKind::Pure { op, operands } => ProjectedValue::Pure {
                 op: op.clone(),
                 operands: operands
                     .iter()
@@ -1016,7 +1016,7 @@ impl ProjectionBuilder<'_> {
                 ty: definition.ty.clone(),
                 span: definition.span,
             },
-            ENode::BlockParam { .. } | ENode::SideEffectResult => return None,
+            ValueKind::BlockParam { .. } | ValueKind::SideEffectResult => return None,
         };
         memo.insert(source, value.clone());
         Some(value)
@@ -1026,10 +1026,10 @@ impl ProjectionBuilder<'_> {
         &mut self,
         caller: &SemanticFunc,
         callee: &crate::FunctionId,
-        call_arguments: &[NodeId],
+        call_arguments: &[ValueId],
         result: Option<usize>,
         caller_arguments: &[Option<ProjectedValue>],
-        caller_memo: &mut LookupMap<NodeId, ProjectedValue>,
+        caller_memo: &mut LookupMap<ValueId, ProjectedValue>,
     ) -> Option<ProjectedValue> {
         let callee = self.program.region(*callee)?;
         if call_arguments.len() != callee.params.len() {
@@ -1091,9 +1091,9 @@ fn emit_projected_lambda_results(
     context: &mut Context<'_>,
     label: &str,
     lambda: &screma::Lambda,
-    arguments: &[Option<NodeId>],
+    arguments: &[Option<ValueId>],
     results: std::ops::Range<usize>,
-) -> Option<(Vec<NodeId>, Vec<SemanticFunc>)> {
+) -> Option<(Vec<ValueId>, Vec<SemanticFunc>)> {
     emit_projected_lambda_result_indices(
         graph,
         context,
@@ -1109,9 +1109,9 @@ fn emit_projected_lambda_result_indices(
     context: &mut Context<'_>,
     label: &str,
     lambda: &screma::Lambda,
-    arguments: &[Option<NodeId>],
+    arguments: &[Option<ValueId>],
     results: &[usize],
-) -> Option<(Vec<NodeId>, Vec<SemanticFunc>)> {
+) -> Option<(Vec<ValueId>, Vec<SemanticFunc>)> {
     if results.iter().any(|result| *result >= lambda.result_types.len()) {
         return None;
     }
@@ -1144,19 +1144,19 @@ struct ProjectionEmitter<'a, 'program> {
     context: &'a mut Context<'program>,
     label: &'a str,
     recipe: &'a ProjectionRecipe,
-    inputs: &'a [Option<NodeId>],
-    emitted_regions: Vec<Option<Vec<NodeId>>>,
+    inputs: &'a [Option<ValueId>],
+    emitted_regions: Vec<Option<Vec<ValueId>>>,
     synthesized: Vec<SemanticFunc>,
 }
 
 impl ProjectionEmitter<'_, '_> {
-    fn emit(mut self) -> Option<(Vec<NodeId>, Vec<SemanticFunc>)> {
+    fn emit(mut self) -> Option<(Vec<ValueId>, Vec<SemanticFunc>)> {
         let values =
             self.recipe.values.iter().map(|value| self.value(value)).collect::<Option<Vec<_>>>()?;
         Some((values, self.synthesized))
     }
 
-    fn value(&mut self, value: &ProjectedValue) -> Option<NodeId> {
+    fn value(&mut self, value: &ProjectedValue) -> Option<ValueId> {
         match value {
             ProjectedValue::Input(index) => self.inputs.get(*index).copied().flatten(),
             ProjectedValue::Constant { value, ty } => {
@@ -1192,7 +1192,7 @@ impl ProjectionEmitter<'_, '_> {
         }
     }
 
-    fn region(&mut self, index: usize) -> Option<Vec<NodeId>> {
+    fn region(&mut self, index: usize) -> Option<Vec<ValueId>> {
         let projected = self.recipe.regions.get(index)?.clone();
         let function = self.context.program.region(projected.region)?.clone();
         let (source_return_block, _) = function_return_site(&function)?;
@@ -1218,13 +1218,13 @@ impl ProjectionEmitter<'_, '_> {
             .map(|(new, (old, _))| (*old, new))
             .collect::<LookupMap<_, _>>();
         for (source, node) in &function.graph.nodes {
-            let ENode::FuncParam { index } = &node.kind else {
+            let ValueKind::FuncParam { index } = &node.kind else {
                 continue;
             };
             let Some(projected) = projection.node(source) else {
                 continue;
             };
-            let ENode::FuncParam {
+            let ValueKind::FuncParam {
                 index: projected_index,
             } = &mut projection.graph.nodes[projected].kind
             else {
@@ -1263,8 +1263,8 @@ impl ProjectionEmitter<'_, '_> {
     }
 }
 fn append_wrapper_captures(
-    arguments: &mut Vec<NodeId>,
-    wrapper_arguments: &[NodeId],
+    arguments: &mut Vec<ValueId>,
+    wrapper_arguments: &[ValueId],
     cursor: &mut usize,
     lambda: &screma::Lambda,
 ) {
@@ -1274,8 +1274,8 @@ fn append_wrapper_captures(
 }
 
 fn append_optional_wrapper_captures(
-    arguments: &mut Vec<Option<NodeId>>,
-    wrapper_arguments: &[NodeId],
+    arguments: &mut Vec<Option<ValueId>>,
+    wrapper_arguments: &[ValueId],
     cursor: &mut usize,
     lambda: &screma::Lambda,
 ) {
@@ -1288,8 +1288,8 @@ fn invoke_lambda(
     graph: &mut EGraph,
     program: &Segmented,
     lambda: &screma::Lambda,
-    arguments: Vec<NodeId>,
-) -> Vec<NodeId> {
+    arguments: Vec<ValueId>,
+) -> Vec<ValueId> {
     if lambda.is_identity() {
         return arguments;
     }
@@ -1579,10 +1579,10 @@ fn finish_lambda(
     label: &str,
     graph: EGraph,
     params: Vec<(Type<TypeName>, String)>,
-    captures: Vec<NodeId>,
+    captures: Vec<ValueId>,
     parameter_types: Vec<Type<TypeName>>,
     result_types: Vec<Type<TypeName>>,
-    results: Vec<NodeId>,
+    results: Vec<ValueId>,
 ) -> (screma::Lambda, Option<SemanticFunc>) {
     let return_block = graph.skeleton.entry;
     lambda_ops::finish_region_lambda(

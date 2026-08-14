@@ -21,7 +21,7 @@ use super::ir::Family;
 use super::loop_analysis::LoopAnalysis;
 use super::program::SemanticEntry;
 use super::reify::Segmented;
-use super::types::{EGraph, ENode, NodeId, PureOp, PureViewSource, RegionId, SegBody};
+use super::types::{EGraph, PureOp, PureViewSource, RegionId, SegBody, ValueId, ValueKind};
 
 #[cfg(test)]
 #[path = "stage_variance_tests.rs"]
@@ -138,7 +138,7 @@ impl StageDependence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CallArgumentDependences {
     pub(crate) callee: RegionId,
-    pub(crate) arguments: SmallVec<[(NodeId, StageDependence); 4]>,
+    pub(crate) arguments: SmallVec<[(ValueId, StageDependence); 4]>,
 }
 
 impl CallArgumentDependences {
@@ -152,14 +152,14 @@ impl CallArgumentDependences {
 /// Context-specific stage-dependence facts for one EGIR graph.
 #[derive(Clone, Debug)]
 pub(crate) struct StageDependenceAnalysis {
-    values: LookupMap<NodeId, StageDependence>,
+    values: LookupMap<ValueId, StageDependence>,
 }
 
 #[derive(Clone, Copy)]
 struct IncomingValue {
     source: BlockId,
-    condition: Option<NodeId>,
-    value: NodeId,
+    condition: Option<ValueId>,
+    value: ValueId,
 }
 
 impl StageDependenceAnalysis {
@@ -189,14 +189,14 @@ impl StageDependenceAnalysis {
             .iter()
             .map(|(node, definition)| {
                 let dependence = match &definition.kind {
-                    ENode::Constant(_) => StageDependence::constant(),
-                    ENode::FuncParam { index } => {
+                    ValueKind::Constant(_) => StageDependence::constant(),
+                    ValueKind::FuncParam { index } => {
                         parameter_dependences.get(*index).cloned().unwrap_or_else(unknown_dependence)
                     }
-                    ENode::BlockParam { .. } | ENode::Pure { .. } | ENode::Union { .. } => {
+                    ValueKind::BlockParam { .. } | ValueKind::Pure { .. } | ValueKind::Union { .. } => {
                         StageDependence::constant()
                     }
-                    ENode::SideEffectResult => {
+                    ValueKind::SideEffectResult => {
                         side_effect_dependence(node, &effect_blocks, &block_loop_dependencies)
                     }
                 };
@@ -232,14 +232,14 @@ impl StageDependenceAnalysis {
 
             for (node, definition) in &graph.nodes {
                 let next = match &definition.kind {
-                    ENode::Constant(_) => StageDependence::constant(),
-                    ENode::FuncParam { index } => {
+                    ValueKind::Constant(_) => StageDependence::constant(),
+                    ValueKind::FuncParam { index } => {
                         parameter_dependences.get(*index).cloned().unwrap_or_else(unknown_dependence)
                     }
-                    ENode::SideEffectResult => {
+                    ValueKind::SideEffectResult => {
                         side_effect_dependence(node, &effect_blocks, &block_loop_dependencies)
                     }
-                    ENode::BlockParam { block, .. } => {
+                    ValueKind::BlockParam { block, .. } => {
                         let incoming = match incoming_values.get(&node) {
                             Some(incoming) if !incoming.is_empty() => {
                                 incoming.iter().fold(StageDependence::constant(), |dependence, incoming| {
@@ -259,8 +259,8 @@ impl StageDependenceAnalysis {
                             block_loop_dependencies.get(block).unwrap_or(&LookupSet::new()),
                         )
                     }
-                    ENode::Pure { op, operands } => pure_dependence(op, operands, &values),
-                    ENode::Union { left, right } => {
+                    ValueKind::Pure { op, operands } => pure_dependence(op, operands, &values),
+                    ValueKind::Union { left, right } => {
                         value_dependence(&values, *left).join(&value_dependence(&values, *right))
                     }
                 };
@@ -315,16 +315,16 @@ impl StageDependenceAnalysis {
         seg_body_parameter_dependences(parameter_count, enclosing, body)
     }
 
-    pub(crate) fn dependence(&self, node: NodeId) -> StageDependence {
+    pub(crate) fn dependence(&self, node: ValueId) -> StageDependence {
         self.values.get(&node).cloned().unwrap_or_else(unknown_dependence)
     }
 
     pub(crate) fn call_arguments<P: Family>(
         &self,
         graph: &EGraph<P>,
-        node: NodeId,
+        node: ValueId,
     ) -> Option<CallArgumentDependences> {
-        let ENode::Pure {
+        let ValueKind::Pure {
             op: PureOp::Call(callee),
             operands,
         } = &graph.nodes.get(node)?.kind
@@ -391,8 +391,8 @@ fn entry_input_dependence(kind: &EntryInputKind) -> StageDependence {
 
 fn pure_dependence<R>(
     op: &PureOp<R>,
-    operands: &[NodeId],
-    values: &LookupMap<NodeId, StageDependence>,
+    operands: &[ValueId],
+    values: &LookupMap<ValueId, StageDependence>,
 ) -> StageDependence {
     let known = catalog().known();
     let intrinsic = match op {
@@ -431,8 +431,8 @@ fn unknown_dependence() -> StageDependence {
 }
 
 fn side_effect_dependence(
-    node: NodeId,
-    effect_blocks: &LookupMap<NodeId, BlockId>,
+    node: ValueId,
+    effect_blocks: &LookupMap<ValueId, BlockId>,
     block_loop_dependencies: &LookupMap<BlockId, LookupSet<BlockId>>,
 ) -> StageDependence {
     let dependence =
@@ -446,15 +446,15 @@ fn side_effect_dependence(
     }
 }
 
-fn value_dependence(values: &LookupMap<NodeId, StageDependence>, node: NodeId) -> StageDependence {
+fn value_dependence(values: &LookupMap<ValueId, StageDependence>, node: ValueId) -> StageDependence {
     values.get(&node).cloned().unwrap_or_else(unknown_dependence)
 }
 
 fn edge_dependence(
     block_controls: &LookupMap<BlockId, StageDependence>,
-    values: &LookupMap<NodeId, StageDependence>,
+    values: &LookupMap<ValueId, StageDependence>,
     source: BlockId,
-    condition: Option<NodeId>,
+    condition: Option<ValueId>,
 ) -> StageDependence {
     let control = block_controls.get(&source).cloned().unwrap_or_else(unknown_dependence);
     condition.map_or(control.clone(), |condition| {
@@ -495,8 +495,8 @@ fn block_loop_dependencies<P: Family>(graph: &EGraph<P>) -> LookupMap<BlockId, L
         .collect()
 }
 
-type IncomingBlocks = LookupMap<BlockId, Vec<(BlockId, Option<NodeId>)>>;
-type IncomingValues = LookupMap<NodeId, Vec<IncomingValue>>;
+type IncomingBlocks = LookupMap<BlockId, Vec<(BlockId, Option<ValueId>)>>;
+type IncomingValues = LookupMap<ValueId, Vec<IncomingValue>>;
 
 fn collect_incoming<P: Family>(graph: &EGraph<P>) -> Result<(IncomingBlocks, IncomingValues), String> {
     let mut incoming_blocks = LookupMap::new();
@@ -555,11 +555,11 @@ fn record_edge<P: Family>(
     graph: &EGraph<P>,
     incoming_blocks: &mut IncomingBlocks,
     incoming_values: &mut IncomingValues,
-    seen_edges: &mut LookupSet<(BlockId, BlockId, Option<NodeId>)>,
+    seen_edges: &mut LookupSet<(BlockId, BlockId, Option<ValueId>)>,
     source: BlockId,
     target: BlockId,
-    condition: Option<NodeId>,
-    args: &[NodeId],
+    condition: Option<ValueId>,
+    args: &[ValueId],
 ) -> Result<(), String> {
     let target_block =
         graph.skeleton.blocks.get(target).ok_or_else(|| {

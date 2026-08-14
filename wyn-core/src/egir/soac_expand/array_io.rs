@@ -5,9 +5,9 @@ use super::*;
 pub(super) fn emit_seg_space_len(
     graph: &mut EGraph,
     space: &SegSpace,
-    fallback: &(NodeId, Type<TypeName>),
+    fallback: &(ValueId, Type<TypeName>),
     i32_ty: &Type<TypeName>,
-) -> NodeId {
+) -> ValueId {
     let dimensions = emit_seg_space_dimensions(graph, space, fallback, i32_ty);
     let Some(first) = dimensions.first().copied() else {
         return emit_length(graph, fallback.0, &fallback.1, i32_ty);
@@ -25,9 +25,9 @@ pub(super) fn emit_seg_space_len(
 pub(super) fn emit_seg_space_dimensions(
     graph: &mut EGraph,
     space: &SegSpace,
-    fallback: &(NodeId, Type<TypeName>),
+    fallback: &(ValueId, Type<TypeName>),
     i32_ty: &Type<TypeName>,
-) -> Vec<NodeId> {
+) -> Vec<ValueId> {
     use crate::egir::types::SegExtent;
 
     let mut dimensions = Vec::with_capacity(space.dims().len());
@@ -62,10 +62,10 @@ pub(super) fn emit_seg_space_dimensions(
 /// dimension.
 pub(super) fn emit_flat_domain_coordinates(
     graph: &mut EGraph,
-    lane: NodeId,
-    domain_dimensions: &[NodeId],
+    lane: ValueId,
+    domain_dimensions: &[ValueId],
     i32_ty: &Type<TypeName>,
-) -> Vec<NodeId> {
+) -> Vec<ValueId> {
     (0..domain_dimensions.len())
         .map(|dimension| {
             let suffix =
@@ -105,10 +105,10 @@ pub(super) fn emit_flat_domain_coordinates(
 /// post-`tlc::soa`).
 pub(super) fn emit_length(
     graph: &mut EGraph,
-    arr_nid: NodeId,
+    arr_nid: ValueId,
     arr_ty: &Type<TypeName>,
     result_ty: &Type<TypeName>,
-) -> NodeId {
+) -> ValueId {
     let actual_arr_ty =
         graph.nodes.get(arr_nid).map(|node| &node.ty).filter(|ty| is_plain_array_source(ty)).cloned();
     let arr_ty = actual_arr_ty.as_ref().unwrap_or(arr_ty);
@@ -139,12 +139,12 @@ pub(super) fn emit_length(
 pub(super) fn emit_read_element(
     graph: &mut EGraph,
     body: BlockId,
-    arr_nid: NodeId,
-    idx_nid: NodeId,
+    arr_nid: ValueId,
+    idx_nid: ValueId,
     arr_ty: &Type<TypeName>,
     elem_ty: &Type<TypeName>,
     next_effect: &mut crate::IdSource<EffectToken>,
-) -> NodeId {
+) -> ValueId {
     let actual_arr_ty =
         graph.nodes.get(arr_nid).map(|node| &node.ty).filter(|ty| is_plain_array_source(ty)).cloned();
     let arr_ty = actual_arr_ty.as_ref().unwrap_or(arr_ty);
@@ -163,7 +163,7 @@ pub(super) fn emit_read_element(
                 }
             })
             .collect();
-        let mut elem_nids: SmallVec<[NodeId; 4]> = SmallVec::with_capacity(components.len());
+        let mut elem_nids: SmallVec<[ValueId; 4]> = SmallVec::with_capacity(components.len());
         for (i, (comp_ty, comp_elem_ty)) in components.iter().zip(elem_components.iter()).enumerate() {
             let comp_arr = graph.intern_pure(
                 PureOp::Project { index: i as u32 },
@@ -232,14 +232,14 @@ pub(super) fn emit_read_element(
 pub(super) fn emit_read_ranked_element(
     graph: &mut EGraph,
     body: BlockId,
-    arr_nid: NodeId,
-    flat_index: NodeId,
+    arr_nid: ValueId,
+    flat_index: ValueId,
     arr_ty: &Type<TypeName>,
     leaf_ty: &Type<TypeName>,
     rank: u8,
     layout: &ArrayLayout,
     next_effect: &mut crate::IdSource<EffectToken>,
-) -> NodeId {
+) -> ValueId {
     if rank == 1 {
         return emit_read_ranked_coordinates(
             graph,
@@ -255,7 +255,7 @@ pub(super) fn emit_read_ranked_element(
     let inner_extents = ranked_inner_extents(arr_ty, rank);
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let mut remaining = flat_index;
-    let mut coordinates = SmallVec::<[NodeId; 4]>::with_capacity(rank as usize);
+    let mut coordinates = SmallVec::<[ValueId; 4]>::with_capacity(rank as usize);
     for dimension in 0..rank as usize {
         if dimension + 1 == rank as usize {
             coordinates.push(remaining);
@@ -303,13 +303,13 @@ pub(super) fn emit_read_ranked_element(
 pub(super) fn emit_read_ranked_coordinates(
     graph: &mut EGraph,
     body: BlockId,
-    arr_nid: NodeId,
-    coordinates: &[NodeId],
+    arr_nid: ValueId,
+    coordinates: &[ValueId],
     arr_ty: &Type<TypeName>,
     leaf_ty: &Type<TypeName>,
     layout: &ArrayLayout,
     next_effect: &mut crate::IdSource<EffectToken>,
-) -> NodeId {
+) -> ValueId {
     assert!(!coordinates.is_empty(), "ranked SOAC read requires a coordinate");
     if coordinates.len() == 1 && !matches!(layout, ArrayLayout::StorageAos) {
         return emit_read_element(graph, body, arr_nid, coordinates[0], arr_ty, leaf_ty, next_effect);
@@ -318,7 +318,7 @@ pub(super) fn emit_read_ranked_coordinates(
         graph.nodes.get(arr_nid).map(|node| &node.ty).filter(|ty| is_plain_array_source(ty)).cloned();
     let arr_ty = actual_arr_ty.as_ref().unwrap_or(arr_ty);
     if let Some(components) = as_soa_tuple(arr_ty) {
-        let mut leaves = SmallVec::<[NodeId; 4]>::with_capacity(components.len());
+        let mut leaves = SmallVec::<[ValueId; 4]>::with_capacity(components.len());
         for (component_index, component_ty) in components.iter().enumerate() {
             let component = graph.intern_pure(
                 PureOp::Project {
@@ -388,11 +388,11 @@ pub(super) fn emit_read_ranked_coordinates(
 /// while the value itself is a `StorageView`. Addressing follows the producer
 /// operation in that case; relying only on the array variant would try to
 /// materialize the view's `(offset, length)` handle as the full fixed array.
-fn is_view_node(graph: &EGraph, arr_nid: NodeId, arr_ty: &Type<TypeName>) -> bool {
+fn is_view_node(graph: &EGraph, arr_nid: ValueId, arr_ty: &Type<TypeName>) -> bool {
     is_view_source(arr_ty)
         || matches!(
             graph.nodes[arr_nid].kind,
-            crate::egir::ir::ENode::Pure {
+            crate::egir::ir::ValueKind::Pure {
                 op: PureOp::StorageView(_),
                 ..
             }
@@ -434,12 +434,12 @@ fn ranked_inner_extents(arr_ty: &Type<TypeName>, rank: u8) -> Vec<u32> {
 /// — soac_expand's output arrays are always freshly-built composites.
 pub(super) fn emit_write_element(
     graph: &mut EGraph,
-    arr_nid: NodeId,
-    idx_nid: NodeId,
-    val_nid: NodeId,
+    arr_nid: ValueId,
+    idx_nid: ValueId,
+    val_nid: ValueId,
     arr_ty: &Type<TypeName>,
     elem_ty: &Type<TypeName>,
-) -> NodeId {
+) -> ValueId {
     // Invariant: the supplied elem_ty must match what arr_ty implies.
     // A mismatch means an upstream pass produced inconsistent types.
     // Hard panic — emitting silently-wrong IR in release is worse than
@@ -466,7 +466,7 @@ pub(super) fn emit_write_element(
                 elem_components.len()
             );
         }
-        let mut new_component_arrs: SmallVec<[NodeId; 4]> = SmallVec::with_capacity(components.len());
+        let mut new_component_arrs: SmallVec<[ValueId; 4]> = SmallVec::with_capacity(components.len());
         for (i, (comp_arr_ty, comp_elem_ty)) in components.iter().zip(elem_components.iter()).enumerate() {
             let comp_arr = graph.intern_pure(
                 PureOp::Project { index: i as u32 },

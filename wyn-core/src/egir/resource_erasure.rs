@@ -27,7 +27,7 @@ mod resource_erasure_tests;
 use crate::ast::TypeName;
 use crate::egir::from_tlc::ConvertError;
 use crate::egir::program::{PhysicalFunc, Program};
-use crate::egir::types::{EGraph, ENode, EffectOp, Family, PureOp, SideEffectKind, SkeletonTerminator};
+use crate::egir::types::{EGraph, EffectOp, Family, PureOp, SideEffectKind, SkeletonTerminator, ValueKind};
 use crate::{LookupMap, LookupSet};
 use polytype::Type;
 use smallvec::SmallVec;
@@ -92,7 +92,7 @@ fn rewrite_graph<P: Family>(
         .nodes
         .iter()
         .filter_map(|(nid, node)| match &node.kind {
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::Call(callee),
                 ..
             } if erasures.contains_key(callee) => Some((nid, *callee)),
@@ -126,7 +126,7 @@ fn rewrite_graph<P: Family>(
 }
 
 fn filter_smallvec(
-    operands: &mut SmallVec<[crate::egir::types::NodeId; 4]>,
+    operands: &mut SmallVec<[crate::egir::types::ValueId; 4]>,
     mask: &[bool],
     callee: &crate::FunctionId,
 ) -> Result<(), ConvertError> {
@@ -184,7 +184,7 @@ fn erase_function_resources(
 
     let mut erased_nodes = Vec::new();
     for (node_id, node) in &mut graph.nodes {
-        let ENode::FuncParam { index } = &mut node.kind else {
+        let ValueKind::FuncParam { index } = &mut node.kind else {
             continue;
         };
         match new_indices.get(*index).copied().flatten() {
@@ -224,7 +224,7 @@ fn erase_function_resources(
     ))
 }
 
-fn live_nodes<P: Family>(graph: &EGraph<P>) -> LookupSet<crate::egir::types::NodeId> {
+fn live_nodes<P: Family>(graph: &EGraph<P>) -> LookupSet<crate::egir::types::ValueId> {
     let mut roots = Vec::new();
     for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {

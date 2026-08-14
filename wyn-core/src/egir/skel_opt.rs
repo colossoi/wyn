@@ -1,7 +1,7 @@
 //! Skeleton-level CFG rewrites run between canonicalize and elaborate.
 //!
-//! Rewrites operate in "NodeId land": terminator args and block params are
-//! `NodeId`s, not `ValueId`s, which makes the rewrites cleanly composable
+//! Rewrites operate in "ValueId land": terminator args and block params are
+//! `ValueId`s, not `ValueId`s, which makes the rewrites cleanly composable
 //! with the hash-consed sea of nodes.
 //!
 //! Rewrites today:
@@ -10,9 +10,9 @@
 //! - `remove_unreachable_blocks`: after branch folding, drop skeleton
 //!   blocks no longer reachable from the entry block.
 //! - `eliminate_redundant_params`: block params whose every incoming arg
-//!   is the same NodeId are stripped from the block's param list and
+//!   is the same ValueId are stripped from the block's param list and
 //!   from every predecessor's branch args; the stripped param is aliased
-//!   to the common incoming NodeId and returned for the elaborator to
+//!   to the common incoming ValueId and returned for the elaborator to
 //!   merge into its `best` map.
 //!
 //! ## Invariants preserved
@@ -42,7 +42,7 @@ use crate::{LookupMap, LookupSet, SortedSet};
 
 use crate::ssa::types::ConstantValue;
 
-use super::types::{EGraph, ENode, Family, NodeId, PureOp, SkeletonTerminator};
+use super::types::{EGraph, Family, PureOp, SkeletonTerminator, ValueId, ValueKind};
 
 /// Run skeleton rewrites on every body and attach each eliminated block
 /// parameter's canonical replacement directly to that node.
@@ -58,13 +58,13 @@ pub fn optimize_skeleton(program: super::rewrite::Rewritten) -> SkeletonOptimize
 
 /// Run all enabled skeleton rewrites to fixpoint. Returns an alias map
 /// mapping stripped block-param NodeIds to their replacement NodeIds.
-pub fn run_one_body<P: Family>(graph: &mut EGraph<P>) -> LookupMap<NodeId, NodeId> {
-    let mut aliases: LookupMap<NodeId, NodeId> = LookupMap::new();
+pub fn run_one_body<P: Family>(graph: &mut EGraph<P>) -> LookupMap<ValueId, ValueId> {
+    let mut aliases: LookupMap<ValueId, ValueId> = LookupMap::new();
     loop {
         // Phase order: fold first, prune dead CFG second, phi-elim third.
         // Folding can expose unreachable arms and shrink a
         // block's predecessor set (CondBranch → Branch), newly exposing an
-        // "all incoming args are the same NodeId" situation.
+        // "all incoming args are the same ValueId" situation.
         let folded = fold_constant_branches(graph);
         let pruned = remove_unreachable_blocks(graph);
         let new_aliases = eliminate_redundant_params(graph);
@@ -123,18 +123,18 @@ fn fold_constant_branches<P: Family>(graph: &mut EGraph<P>) -> bool {
 }
 
 /// Does `nid` resolve to a literal boolean? Bools appear in two forms:
-/// - `ENode::Constant(ConstantValue::Bool(_))` — from canonicalize of
+/// - `ValueKind::Constant(ConstantValue::Bool(_))` — from canonicalize of
 ///   `ValueRef::Const(Bool _)`.
-/// - `ENode::Pure { op: PureOp::Bool(_), operands: [] }` — from TLC's
+/// - `ValueKind::Pure { op: PureOp::Bool(_), operands: [] }` — from TLC's
 ///   `BoolLit` or canonicalize of `InstKind::Bool`.
 ///
 /// We do not consult the `best` map (doesn't exist yet at this stage).
 /// Only literal constants are recognized; union-extract winners are out
 /// of scope.
-fn is_const_bool<P: Family>(nid: NodeId, graph: &EGraph<P>) -> Option<bool> {
+fn is_const_bool<P: Family>(nid: ValueId, graph: &EGraph<P>) -> Option<bool> {
     match &graph.nodes[nid].kind {
-        ENode::Constant(ConstantValue::Bool(b)) => Some(*b),
-        ENode::Pure {
+        ValueKind::Constant(ConstantValue::Bool(b)) => Some(*b),
+        ValueKind::Pure {
             op: PureOp::Bool(b),
             operands,
         } if operands.is_empty() => Some(*b),
@@ -178,30 +178,30 @@ fn remove_unreachable_blocks<P: Family>(graph: &mut EGraph<P>) -> bool {
     true
 }
 
-/// Eliminate every block param whose incoming arg is the same NodeId on
-/// every predecessor branch. Returns a map from stripped param NodeId
-/// to its replacement NodeId.
+/// Eliminate every block param whose incoming arg is the same ValueId on
+/// every predecessor branch. Returns a map from stripped param ValueId
+/// to its replacement ValueId.
 ///
-/// Equality is strict NodeId equality — we deliberately do not consult
+/// Equality is strict ValueId equality — we deliberately do not consult
 /// the `best` map. Hash-consing at intern time should have already
 /// dedup'd structurally-equal subtrees; mixing CFG rewriting with
 /// e-graph equivalence reasoning is where subtle bugs live.
-fn eliminate_redundant_params<P: Family>(graph: &mut EGraph<P>) -> LookupMap<NodeId, NodeId> {
+fn eliminate_redundant_params<P: Family>(graph: &mut EGraph<P>) -> LookupMap<ValueId, ValueId> {
     use smallvec::SmallVec;
 
-    // incoming[B][i] = every distinct NodeId passed into B.params[i] by
+    // incoming[B][i] = every distinct ValueId passed into B.params[i] by
     // some predecessor branch terminator. We only need to know "is the
     // set of size 1?", so track up to two distinct values.
-    let mut incoming: LookupMap<BlockId, Vec<SmallVec<[NodeId; 2]>>> = LookupMap::new();
+    let mut incoming: LookupMap<BlockId, Vec<SmallVec<[ValueId; 2]>>> = LookupMap::new();
     for (bid, block) in &graph.skeleton.blocks {
         let mut per_param = Vec::with_capacity(block.params.len());
-        per_param.resize(block.params.len(), SmallVec::<[NodeId; 2]>::new());
+        per_param.resize(block.params.len(), SmallVec::<[ValueId; 2]>::new());
         incoming.insert(bid, per_param);
     }
 
     let collect = |target: BlockId,
-                   args: &[NodeId],
-                   incoming: &mut LookupMap<BlockId, Vec<SmallVec<[NodeId; 2]>>>| {
+                   args: &[ValueId],
+                   incoming: &mut LookupMap<BlockId, Vec<SmallVec<[ValueId; 2]>>>| {
         let slots = incoming.get_mut(&target).expect("target in skeleton");
         debug_assert_eq!(
             slots.len(),
@@ -237,8 +237,8 @@ fn eliminate_redundant_params<P: Family>(graph: &mut EGraph<P>) -> LookupMap<Nod
     // no predecessors and its params (when present) come from the source
     // function params, not from a branch.
     let entry = graph.skeleton.entry;
-    let mut redundant: LookupMap<BlockId, Vec<(usize, NodeId)>> = LookupMap::new();
-    let mut aliases: LookupMap<NodeId, NodeId> = LookupMap::new();
+    let mut redundant: LookupMap<BlockId, Vec<(usize, ValueId)>> = LookupMap::new();
+    let mut aliases: LookupMap<ValueId, ValueId> = LookupMap::new();
     for (bid, block) in &graph.skeleton.blocks {
         if bid == entry {
             continue;
@@ -299,7 +299,7 @@ fn eliminate_redundant_params<P: Family>(graph: &mut EGraph<P>) -> LookupMap<Nod
 /// of-truth closure is done by `close_aliases` after the last iteration
 /// of the fixpoint loop. Re-running closure on every iteration would be
 /// wasted work.
-fn merge_aliases(aliases: &mut LookupMap<NodeId, NodeId>, new_aliases: LookupMap<NodeId, NodeId>) {
+fn merge_aliases(aliases: &mut LookupMap<ValueId, ValueId>, new_aliases: LookupMap<ValueId, ValueId>) {
     for (_k, v) in aliases.iter_mut() {
         if let Some(&forwarded) = new_aliases.get(v) {
             *v = forwarded;
@@ -318,10 +318,10 @@ fn merge_aliases(aliases: &mut LookupMap<NodeId, NodeId>, new_aliases: LookupMap
 /// earlier in SSA order; cycles imply we tried to alias a
 /// live value to something that depends on itself). On detection we
 /// panic so the upstream bug surfaces loudly.
-fn close_aliases(aliases: &mut LookupMap<NodeId, NodeId>) {
-    let keys: Vec<NodeId> = aliases.keys().copied().collect();
+fn close_aliases(aliases: &mut LookupMap<ValueId, ValueId>) {
+    let keys: Vec<ValueId> = aliases.keys().copied().collect();
     for k in keys {
-        let mut visited: LookupSet<NodeId> = LookupSet::new();
+        let mut visited: LookupSet<ValueId> = LookupSet::new();
         visited.insert(k);
         let mut cur = aliases[&k];
         while let Some(&next) = aliases.get(&cur) {

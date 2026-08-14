@@ -19,7 +19,7 @@ use crate::egir::ir::BodySite;
 use crate::egir::program::SemanticEntry;
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
-use crate::egir::types::{EGraph, NodeId};
+use crate::egir::types::{EGraph, ValueId};
 
 use crate::LookupMap;
 
@@ -111,23 +111,23 @@ pub(super) fn graph_and_span(program: &Segmented, site: BodySite) -> (&EGraph, S
 }
 
 pub(super) fn capture_types<'a>(
-    types: &LookupMap<NodeId, Type<TypeName>>,
-    captures: impl Iterator<Item = &'a NodeId>,
+    types: &LookupMap<ValueId, Type<TypeName>>,
+    captures: impl Iterator<Item = &'a ValueId>,
 ) -> Vec<Type<TypeName>> {
     captures
         .map(|capture| types.get(capture).expect("capture node is absent from its owning graph").clone())
         .collect()
 }
 
-/// Canonicalize a semantic operation's parallel array inputs by `NodeId` and
+/// Canonicalize a semantic operation's parallel array inputs by `ValueId` and
 /// return an old-index to new-index map. Fusion frequently concatenates input
 /// vectors from independently built operations; retaining duplicate nodes
 /// would duplicate region parameters and obscure equal-domain provenance.
 pub(super) fn deduplicate_array_inputs(
-    nodes: Vec<NodeId>,
+    nodes: Vec<ValueId>,
     array_types: Vec<Type<TypeName>>,
     elem_types: Vec<Type<TypeName>>,
-) -> (Vec<NodeId>, Vec<Type<TypeName>>, Vec<Type<TypeName>>, Vec<usize>) {
+) -> (Vec<ValueId>, Vec<Type<TypeName>>, Vec<Type<TypeName>>, Vec<usize>) {
     debug_assert_eq!(nodes.len(), array_types.len());
     debug_assert_eq!(nodes.len(), elem_types.len());
     let mut unique_nodes = Vec::new();

@@ -6,7 +6,7 @@ use crate::ast::TypeName;
 use crate::egir::allocation::ResourcesAllocated;
 use crate::egir::program::SemanticOpId;
 use crate::egir::soac::hist;
-use crate::egir::types::{ENode, NodeId, PureOp, SegSpace, Semantic, SkeletonTerminator};
+use crate::egir::types::{PureOp, SegSpace, Semantic, SkeletonTerminator, ValueId, ValueKind};
 use crate::op::BinaryOperator;
 use crate::ssa::types::{AtomicOp, ConstantValue};
 use crate::types::TypeExt;
@@ -141,7 +141,7 @@ fn recognize_direct_atomic(
     else {
         return None;
     };
-    let ENode::Pure { op, operands } = &function.graph.nodes[result].kind else {
+    let ValueKind::Pure { op, operands } = &function.graph.nodes[result].kind else {
         return None;
     };
     if !matches_parameter_pair(&function.graph, operands) {
@@ -161,21 +161,26 @@ fn recognize_direct_atomic(
         _ => None,
     }
 }
-fn matches_parameter_pair(graph: &crate::egir::types::EGraph<Semantic>, operands: &[NodeId]) -> bool {
+fn matches_parameter_pair(graph: &crate::egir::types::EGraph<Semantic>, operands: &[ValueId]) -> bool {
     let [left, right] = operands else {
         return false;
     };
     matches!(
         (&graph.nodes[*left].kind, &graph.nodes[*right].kind),
-        (ENode::FuncParam { index: 0 }, ENode::FuncParam { index: 1 })
-            | (ENode::FuncParam { index: 1 }, ENode::FuncParam { index: 0 })
+        (
+            ValueKind::FuncParam { index: 0 },
+            ValueKind::FuncParam { index: 1 }
+        ) | (
+            ValueKind::FuncParam { index: 1 },
+            ValueKind::FuncParam { index: 0 }
+        )
     )
 }
 
-fn constant_i32(graph: &crate::egir::types::EGraph<Semantic>, node: NodeId) -> Option<i32> {
+fn constant_i32(graph: &crate::egir::types::EGraph<Semantic>, node: ValueId) -> Option<i32> {
     match &graph.nodes[node].kind {
-        ENode::Constant(ConstantValue::I32(value)) => Some(*value),
-        ENode::Pure {
+        ValueKind::Constant(ConstantValue::I32(value)) => Some(*value),
+        ValueKind::Pure {
             op: PureOp::Int(value),
             operands,
         } if operands.is_empty() => value.parse().ok(),

@@ -36,8 +36,8 @@ use super::program::{
 use super::realize_outputs::OutputsRealized;
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, ENode, NodeId, PureOp, Raw, ResourceAccess, SegExtent, SegResourceAccess, SegSpace, Semantic,
-    SideEffect, SideEffectKind, Soac, SoacEffect, SoacInputType,
+    EGraph, PureOp, Raw, ResourceAccess, SegExtent, SegResourceAccess, SegSpace, Semantic, SideEffect,
+    SideEffectKind, Soac, SoacEffect, SoacInputType, ValueId, ValueKind,
 };
 
 struct Facts {
@@ -450,14 +450,14 @@ fn space(
 fn extent_from_node(
     graph: &EGraph<Raw>,
     entry: Option<&RawEntry<RealizedOutputRoute>>,
-    node: NodeId,
+    node: ValueId,
 ) -> SegExtent<SemanticResourceRef> {
     match &graph.nodes[node].kind {
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::Int(value) | PureOp::Uint(value),
             ..
         } => value.parse().map(SegExtent::Fixed).unwrap_or(SegExtent::Value(node)),
-        ENode::FuncParam { index } => entry
+        ValueKind::FuncParam { index } => entry
             .and_then(|entry| entry.inputs.get(*index))
             .and_then(|input| input.push_constant())
             .map(|slot| SegExtent::PushConstant {
@@ -526,7 +526,7 @@ fn read_resources(
     graph_ops::read_storage_resources(graph, referenced_nodes(effect))
 }
 
-fn soac_consumed_nodes(graph: &EGraph<Raw>) -> HashSet<NodeId> {
+fn soac_consumed_nodes(graph: &EGraph<Raw>) -> HashSet<ValueId> {
     let roots = graph
         .skeleton
         .blocks
@@ -538,7 +538,7 @@ fn soac_consumed_nodes(graph: &EGraph<Raw>) -> HashSet<NodeId> {
     graph_ops::value_producer_closure(graph, roots).nodes
 }
 
-fn referenced_nodes(effect: &SideEffect<Raw>) -> Vec<NodeId> {
+fn referenced_nodes(effect: &SideEffect<Raw>) -> Vec<ValueId> {
     let mut nodes = effect.operand_nodes.to_vec();
     let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
         return nodes;

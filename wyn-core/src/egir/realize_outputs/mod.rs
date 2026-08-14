@@ -47,7 +47,7 @@ use super::ir::{RealizedOutputRoute, UnrealizedOutputRoute};
 use super::program::{
     Entry, LogicalResourceArena, OutputWriter, Program, RawEntry, SemanticResourceRef, SlotSource,
 };
-use super::types::{EGraph, EffectToken, NodeId, Raw, SkeletonTerminator, SoacEffect};
+use super::types::{EGraph, EffectToken, Raw, SkeletonTerminator, SoacEffect, ValueId};
 
 pub mod dispatch;
 pub mod reconcile;
@@ -285,7 +285,7 @@ fn realize_graphics_returns(
     Ok(())
 }
 
-fn unique_value_return(graph: &EGraph<Raw>) -> Option<(BlockId, NodeId)> {
+fn unique_value_return(graph: &EGraph<Raw>) -> Option<(BlockId, ValueId)> {
     let mut returns = graph.skeleton.blocks.iter().filter_map(|(block, body)| {
         let SkeletonTerminator::Return(Some(value)) = body.term else {
             return None;
@@ -303,7 +303,7 @@ fn unique_value_return(graph: &EGraph<Raw>) -> Option<(BlockId, NodeId)> {
 fn source_value_writers(
     graph: &EGraph<Raw>,
     effect_index: &super::types::SideEffectIndex,
-    source: NodeId,
+    source: ValueId,
 ) -> Vec<OutputWriter> {
     let mut writers = Vec::new();
     wyn_graph::for_each_reachable(
@@ -334,21 +334,21 @@ fn dedup_output_writers(writers: &mut Vec<OutputWriter>) {
 /// `Tuple(n)` result, or `Project(result, i)` for an opaque tuple.
 fn output_sources(
     graph: &mut EGraph<Raw>,
-    result: NodeId,
+    result: ValueId,
     outputs: &[super::ir::EntryOutput<
         SemanticResourceRef,
         RealizedOutputRoute,
         super::types::WynLanguage,
     >],
-) -> Vec<NodeId> {
-    use super::types::{ENode, PureOp};
+) -> Vec<ValueId> {
+    use super::types::{PureOp, ValueKind};
     use smallvec::smallvec;
 
     let n = outputs.len();
     if n == 1 {
         return vec![result];
     }
-    if let ENode::Pure {
+    if let ValueKind::Pure {
         op: PureOp::Tuple(k),
         operands,
     } = &graph.nodes[result].kind

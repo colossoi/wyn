@@ -2,7 +2,7 @@
 //!
 //! Two entry points, matching the two cases in `realize_outputs`:
 //!
-//!   * `compute_slot_source` — classifies a slot source NodeId and
+//!   * `compute_slot_source` — classifies a slot source ValueId and
 //!     emits the appropriate write into a storage `OutputView`. Handles
 //!     Screma `Project` retargeting, fixed-size aggregates (per-element
 //!     stores), scalars/vectors (single store at index 0), and consuming
@@ -26,8 +26,8 @@ use super::super::graph_ops;
 use super::super::program::OutputWriter;
 use super::super::soac::{filter, hist, screma};
 use super::super::types::{
-    EGraph, ENode, EffectToken, NodeId, PureOp, Raw, SideEffectIndex, SideEffectKind, SkeletonTerminator,
-    Soac, SoacDestination, SoacEffect, SoacPlacement,
+    EGraph, EffectToken, PureOp, Raw, SideEffectIndex, SideEffectKind, SkeletonTerminator, Soac,
+    SoacDestination, SoacEffect, SoacPlacement, ValueId, ValueKind,
 };
 
 /// The set of Pure nodes reachable from an entry's live outputs — the operand
@@ -36,8 +36,8 @@ use super::super::types::{
 /// Mirrors the reachability the post-realization verifier walks
 /// (`realize_outputs::verify`). Nodes outside this set are dead: they have no
 /// runtime effect, so consuming `source` there must not fail a slot.
-fn reachable_from_outputs(graph: &EGraph<Raw>) -> LookupSet<NodeId> {
-    let mut roots: Vec<NodeId> = Vec::new();
+fn reachable_from_outputs(graph: &EGraph<Raw>) -> LookupSet<ValueId> {
+    let mut roots: Vec<ValueId> = Vec::new();
     for (_, block) in &graph.skeleton.blocks {
         if let SkeletonTerminator::Return(Some(r)) = block.term {
             roots.push(r);
@@ -52,7 +52,7 @@ fn reachable_from_outputs(graph: &EGraph<Raw>) -> LookupSet<NodeId> {
         }
     }
     wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |nid, out| {
-        if let ENode::Pure { operands, .. } = &graph.nodes[nid].kind {
+        if let ValueKind::Pure { operands, .. } = &graph.nodes[nid].kind {
             out.extend(operands.iter().copied());
         }
     })
@@ -68,9 +68,9 @@ mod dispatch_tests;
 /// and, for fixed aggregate views, needlessly expands into per-field stores.
 pub(super) fn retarget_bucket_aux_output(
     graph: &mut EGraph<Raw>,
-    source: NodeId,
+    source: ValueId,
     output_resource: ResourceId,
-) -> Option<(ResourceId, NodeId, OutputWriter)> {
+) -> Option<(ResourceId, ValueId, OutputWriter)> {
     #[derive(Clone, Copy)]
     enum Field {
         Counts,
@@ -164,7 +164,7 @@ pub fn compute_slot_source(
     effect_index: &SideEffectIndex,
     effect_ids: &mut crate::IdSource<EffectToken>,
     block: BlockId,
-    source: NodeId,
+    source: ValueId,
     slot_index: usize,
     slot_ty: &Type<TypeName>,
     resource: ResourceId,
@@ -194,7 +194,7 @@ pub fn compute_slot_source(
         // The Project node operationally produces the view at runtime
         // (the Screma's loop body wrote field 0 through the view).
         // Update its type to match so verify_no_abstract doesn't flag
-        // the Composite array type. Also alias for NodeId substitution.
+        // the Composite array type. Also alias for ValueId substitution.
         if let Some(view_ty) = graph.nodes.get(view).map(|node| node.ty.clone()) {
             graph.retype_node(source, view_ty);
         }
@@ -261,7 +261,7 @@ pub fn graphics_slot_source(
     graph: &mut EGraph<Raw>,
     block: BlockId,
     effect_ids: &mut crate::IdSource<EffectToken>,
-    source: NodeId,
+    source: ValueId,
     slot_index: usize,
     slot_ty: &Type<TypeName>,
 ) -> OutputWriter {
@@ -279,9 +279,9 @@ pub fn graphics_slot_source(
 fn projected_effect_result(
     graph: &EGraph<Raw>,
     effect_index: &SideEffectIndex,
-    source: NodeId,
-) -> Option<NodeId> {
-    let ENode::Pure { operands, .. } = &graph.nodes[source].kind else {
+    source: ValueId,
+) -> Option<ValueId> {
+    let ValueKind::Pure { operands, .. } = &graph.nodes[source].kind else {
         return effect_index.effect(graph, source).is_some().then_some(source);
     };
     let [producer] = operands.as_slice() else {
@@ -301,9 +301,9 @@ fn projected_effect_result(
 pub(crate) fn result_soac_is_consuming_scan(
     graph: &EGraph<Raw>,
     effect_index: &SideEffectIndex,
-    result: NodeId,
+    result: ValueId,
 ) -> bool {
-    if let ENode::Pure {
+    if let ValueKind::Pure {
         op: PureOp::Project { index },
         operands,
     } = &graph.nodes[result].kind
@@ -332,9 +332,9 @@ pub(crate) fn result_soac_is_consuming_scan(
 pub(crate) fn result_soac_is_array_projection(
     graph: &EGraph<Raw>,
     effect_index: &SideEffectIndex,
-    source: NodeId,
-) -> Option<(NodeId, usize)> {
-    let ENode::Pure {
+    source: ValueId,
+) -> Option<(ValueId, usize)> {
+    let ValueKind::Pure {
         op: PureOp::Project { index },
         operands,
     } = &graph.nodes[source].kind
@@ -376,9 +376,9 @@ pub(crate) fn is_unsized_array(ty: &Type<TypeName>) -> bool {
 pub(crate) fn retarget_array_projection(
     graph: &mut EGraph<Raw>,
     effect_index: &SideEffectIndex,
-    target_result: NodeId,
+    target_result: ValueId,
     field_idx: usize,
-    output_view: NodeId,
+    output_view: ValueId,
 ) -> Result<(), ConvertError> {
     if let Some(se) = effect_index.effect_mut(graph, target_result) {
         let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut se.kind else {
@@ -417,7 +417,7 @@ pub(crate) fn retarget_array_projection(
 
 /// For each `Index(source, k)` consumer in the graph, synthesize a
 /// `ViewIndex + Load` against the slot's output view and alias the
-/// Index NodeId to the load's result. The alias is consulted at
+/// Index ValueId to the load's result. The alias is consulted at
 /// extraction time so every downstream `demand` transparently
 /// redirects through the view.
 ///
@@ -439,8 +439,8 @@ pub(crate) fn rewrite_sibling_index_consumers(
     graph: &mut EGraph<Raw>,
     block: BlockId,
     effect_ids: &mut crate::IdSource<EffectToken>,
-    source: NodeId,
-    view: NodeId,
+    source: ValueId,
+    view: ValueId,
     elem_ty: Type<TypeName>,
     slot_index: usize,
 ) -> Result<(), ConvertError> {
@@ -565,18 +565,20 @@ pub(crate) fn rewrite_sibling_index_consumers(
     // the maps. Such a node has no runtime effect, so its reference to `source`
     // must not fail the slot.
     let live = reachable_from_outputs(graph);
-    let consumers: Vec<NodeId> = graph
+    let consumers: Vec<ValueId> = graph
         .nodes
         .iter()
         .filter_map(|(nid, node)| match &node.kind {
-            ENode::Pure { operands, .. } if operands.contains(&source) && live.contains(&nid) => Some(nid),
+            ValueKind::Pure { operands, .. } if operands.contains(&source) && live.contains(&nid) => {
+                Some(nid)
+            }
             _ => None,
         })
         .collect();
 
     for cid in consumers {
         let (op, operands) = match &graph.nodes[cid].kind {
-            ENode::Pure { op, operands } => (op.clone(), operands.clone()),
+            ValueKind::Pure { op, operands } => (op.clone(), operands.clone()),
             _ => unreachable!("filtered to Pure above"),
         };
         match op {
@@ -611,11 +613,11 @@ pub(crate) fn rewrite_sibling_index_consumers(
 /// Phi-tracking across CFG paths.
 pub(crate) fn reject_sibling_consumers(
     graph: &EGraph<Raw>,
-    source: NodeId,
+    source: ValueId,
     slot_index: usize,
 ) -> Result<(), ConvertError> {
     let has_consumer = graph.nodes.iter().any(|(nid, node)| match &node.kind {
-        ENode::Pure { operands, .. } if nid != source => operands.contains(&source),
+        ValueKind::Pure { operands, .. } if nid != source => operands.contains(&source),
         _ => false,
     });
     if has_consumer {
@@ -647,7 +649,7 @@ pub fn retarget_filter_output(
     resources: &mut crate::egir::program::LogicalResourceArena,
     output_resource: ResourceId,
     output: &mut crate::interface::EntryOutput,
-    source: NodeId,
+    source: ValueId,
 ) -> Result<bool, ConvertError> {
     use crate::pipeline_descriptor::BufferLen;
 

@@ -19,8 +19,8 @@ use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
 use crate::egir::types::{
-    EGraph, NodeId, ResourceAccess, SegSpace, Semantic, SideEffect, SideEffectKind, Soac, SoacEffect,
-    SoacInputType,
+    EGraph, ResourceAccess, SegSpace, Semantic, SideEffect, SideEffectKind, Soac, SoacEffect,
+    SoacInputType, ValueId,
 };
 use crate::flow::BlockId;
 use crate::LookupMap;
@@ -154,7 +154,7 @@ fn find_in_graph(
 pub(super) fn compose(
     inner: &Segmented,
     candidate: &Candidate,
-    consumer_input_nodes: &[NodeId],
+    consumer_input_nodes: &[ValueId],
     consumer_inputs: &[SoacInputType],
     consumer_lambda: &screma::Lambda,
 ) -> Option<Composition> {
@@ -199,7 +199,7 @@ pub(super) fn finish(
     candidate: Candidate,
     consumer_id: crate::egir::program::SemanticOpId,
     consumer_op: Soac<Semantic>,
-    input_nodes: Vec<NodeId>,
+    input_nodes: Vec<ValueId>,
     synthesized: Vec<SemanticFunc>,
     identities: ProgramIdentities,
 ) -> Segmented {

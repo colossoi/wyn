@@ -10,7 +10,7 @@ use crate::egir::ir::{Body, SideEffectSite};
 use crate::egir::program::{OutputWriter, RealizedOutputRoute, SemanticEntry, SemanticResourceDecl};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
-use crate::egir::types::{EGraph, ENode, NodeId, PureOp, Semantic, WynLanguage};
+use crate::egir::types::{EGraph, PureOp, Semantic, ValueId, ValueKind, WynLanguage};
 use crate::flow::BlockId;
 
 type FusionBody = Body<Semantic, SemanticResourceDecl, RealizedOutputRoute, WynLanguage>;
@@ -19,9 +19,9 @@ pub(super) fn invoke_lambda(
     graph: &mut EGraph,
     program: &Segmented,
     lambda: &screma::Lambda,
-    arguments: &[NodeId],
-    captures: &[NodeId],
-) -> Vec<NodeId> {
+    arguments: &[ValueId],
+    captures: &[ValueId],
+) -> Vec<ValueId> {
     debug_assert_eq!(captures.len(), lambda.capture_count());
     let mut operands = Vec::with_capacity(arguments.len() + captures.len());
     operands.extend_from_slice(arguments);
@@ -36,7 +36,7 @@ pub(super) fn result_used_only_by_effect_pair(
     block: BlockId,
     producer: usize,
     consumer: usize,
-    result: NodeId,
+    result: ValueId,
 ) -> bool {
     result_used_only_by_effects(
         graph,
@@ -56,7 +56,7 @@ pub(super) fn result_used_only_by_effect_pair(
 /// Whether every executable use of `result` belongs to an allowed effect.
 pub(super) fn result_used_only_by_effects(
     graph: &EGraph,
-    result: NodeId,
+    result: ValueId,
     allowed: &[SideEffectSite],
 ) -> bool {
     for (block_id, block) in &graph.skeleton.blocks {
@@ -86,9 +86,9 @@ pub(super) fn result_used_only_by_effects(
 /// Does `root` reach `target` without crossing any node in `cut`?
 pub(super) fn pure_depends_on_avoiding(
     graph: &EGraph,
-    root: NodeId,
-    target: NodeId,
-    cut: &HashSet<NodeId>,
+    root: ValueId,
+    target: ValueId,
+    cut: &HashSet<ValueId>,
 ) -> bool {
     let mut pending = vec![root];
     let mut visited = HashSet::new();
@@ -135,7 +135,7 @@ pub(super) fn rewrite_body_graph_with_entry<T>(
     }
 }
 
-pub(super) fn replace_route_sources(entry: &mut SemanticEntry, replacements: &[(NodeId, NodeId)]) {
+pub(super) fn replace_route_sources(entry: &mut SemanticEntry, replacements: &[(ValueId, ValueId)]) {
     for route in entry.routes_mut() {
         if let Some((_, replacement)) = replacements.iter().find(|(old, _)| route.source.value == *old) {
             route.source.value = *replacement;
@@ -143,7 +143,7 @@ pub(super) fn replace_route_sources(entry: &mut SemanticEntry, replacements: &[(
     }
 }
 
-pub(super) fn remove_value_writer(entry: &mut SemanticEntry, result: NodeId) {
+pub(super) fn remove_value_writer(entry: &mut SemanticEntry, result: ValueId) {
     for route in entry.routes_mut() {
         route.writers.retain(|writer| *writer != OutputWriter::Value(result));
     }
@@ -152,15 +152,15 @@ pub(super) fn remove_value_writer(entry: &mut SemanticEntry, result: NodeId) {
 /// Retarget direct projections of `old_result` according to a partial field map.
 pub(super) fn retarget_projects(
     graph: &mut EGraph,
-    old_result: NodeId,
-    new_result: NodeId,
+    old_result: ValueId,
+    new_result: ValueId,
     mapping: &[Option<usize>],
 ) {
     let projects = graph
         .nodes
         .iter()
         .filter_map(|(node, definition)| match &definition.kind {
-            ENode::Pure {
+            ValueKind::Pure {
                 op: PureOp::Project { index },
                 operands,
             } if operands.first() == Some(&old_result) => Some((node, *index as usize)),
@@ -182,8 +182,8 @@ pub(super) fn retarget_projects(
 
 pub(super) fn rebuild_result(
     graph: &mut EGraph,
-    old_result: NodeId,
-    new_result: NodeId,
+    old_result: ValueId,
+    new_result: ValueId,
     mapping: &[usize],
     field_types: &[Type<TypeName>],
 ) {

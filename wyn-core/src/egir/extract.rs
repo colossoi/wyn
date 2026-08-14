@@ -11,19 +11,19 @@ use std::collections::HashSet;
 use crate::op::BinaryOperator;
 use crate::LookupMap;
 
-use super::types::{EGraph, ENode, Family, NodeId, PureOp};
+use super::types::{EGraph, Family, PureOp, ValueId, ValueKind};
 
 /// Cost of a node. Lower is better.
 pub type Cost = u32;
 
-/// Compute the best (cheapest) representative for each NodeId.
+/// Compute the best (cheapest) representative for each ValueId.
 ///
-/// Returns a map from NodeId -> best concrete NodeId (the chosen representative).
+/// Returns a map from ValueId -> best concrete ValueId (the chosen representative).
 /// For non-union nodes, this maps to themselves.
 /// For union nodes, this maps to the best leaf of the union tree.
-pub fn extract<P: Family>(graph: &EGraph<P>) -> LookupMap<NodeId, NodeId> {
-    let mut best_cost: LookupMap<NodeId, Cost> = LookupMap::new();
-    let mut best_node: LookupMap<NodeId, NodeId> = LookupMap::new();
+pub fn extract<P: Family>(graph: &EGraph<P>) -> LookupMap<ValueId, ValueId> {
+    let mut best_cost: LookupMap<ValueId, Cost> = LookupMap::new();
+    let mut best_node: LookupMap<ValueId, ValueId> = LookupMap::new();
 
     // Topological sort of the acyclic graph.
     let topo = topological_sort(graph);
@@ -32,7 +32,7 @@ pub fn extract<P: Family>(graph: &EGraph<P>) -> LookupMap<NodeId, NodeId> {
     for &nid in &topo {
         let node = &graph.nodes[nid].kind;
         match node {
-            ENode::Union { left, right } => {
+            ValueKind::Union { left, right } => {
                 // A plain subtree-sum comparison would double-count operands
                 // shared by both sides — e.g. the base of a pow-vs-multiply-
                 // chain union — and mis-pick whenever the shared value is
@@ -44,7 +44,7 @@ pub fn extract<P: Family>(graph: &EGraph<P>) -> LookupMap<NodeId, NodeId> {
                 best_cost.insert(nid, best_cost.get(chosen).copied().unwrap_or(Cost::MAX));
                 best_node.insert(nid, best_node.get(chosen).copied().unwrap_or(*chosen));
             }
-            ENode::Pure { op, operands } => {
+            ValueKind::Pure { op, operands } => {
                 let child_sum: Cost = operands
                     .iter()
                     .map(|c| best_cost.get(c).copied().unwrap_or(0))
@@ -53,11 +53,11 @@ pub fn extract<P: Family>(graph: &EGraph<P>) -> LookupMap<NodeId, NodeId> {
                 best_cost.insert(nid, cost);
                 best_node.insert(nid, nid);
             }
-            ENode::Constant(_) | ENode::FuncParam { .. } | ENode::BlockParam { .. } => {
+            ValueKind::Constant(_) | ValueKind::FuncParam { .. } | ValueKind::BlockParam { .. } => {
                 best_cost.insert(nid, 0);
                 best_node.insert(nid, nid);
             }
-            ENode::SideEffectResult => {
+            ValueKind::SideEffectResult => {
                 // Side-effect results have zero cost (they're mandatory).
                 best_cost.insert(nid, 0);
                 best_node.insert(nid, nid);
@@ -71,7 +71,7 @@ pub fn extract<P: Family>(graph: &EGraph<P>) -> LookupMap<NodeId, NodeId> {
 /// Total op cost of the distinct nodes reachable from `root`, following each
 /// union to its already-chosen representative (children precede parents in
 /// the topo order, so nested unions are resolved by the time this runs).
-fn closure_cost<P: Family>(graph: &EGraph<P>, root: NodeId, best: &LookupMap<NodeId, NodeId>) -> Cost {
+fn closure_cost<P: Family>(graph: &EGraph<P>, root: ValueId, best: &LookupMap<ValueId, ValueId>) -> Cost {
     let mut seen = HashSet::new();
     let mut stack = vec![root];
     let mut total: Cost = 0;
@@ -80,7 +80,7 @@ fn closure_cost<P: Family>(graph: &EGraph<P>, root: NodeId, best: &LookupMap<Nod
         if !seen.insert(nid) {
             continue;
         }
-        if let ENode::Pure { op, operands } = &graph.nodes[nid].kind {
+        if let ValueKind::Pure { op, operands } = &graph.nodes[nid].kind {
             total = total.saturating_add(op_cost(op));
             stack.extend(operands.iter().copied());
         }
@@ -138,7 +138,7 @@ fn op_cost<R>(op: &PureOp<R>) -> Cost {
 /// only holds for a topological order. A cycle means an earlier pass interned a
 /// node into its own operand tree; there is no order to fall back on, so say so
 /// rather than hand the DP an arbitrary one.
-fn topological_sort<P: Family>(graph: &EGraph<P>) -> Vec<NodeId> {
+fn topological_sort<P: Family>(graph: &EGraph<P>) -> Vec<ValueId> {
     wyn_graph::topo_sort_by_dependencies(graph.nodes.keys(), |node, dependencies| {
         dependencies.extend(graph.nodes[node].kind.children());
     })

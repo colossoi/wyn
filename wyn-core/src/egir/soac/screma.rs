@@ -4,14 +4,14 @@ use crate::ast::TypeName;
 
 use super::super::program::OutputSlotId;
 use super::super::types::{
-    GraphResource, NodeId, SegBody, SegResourceAccess, SegSpace, Semantic, SoacDestination, SoacInputType,
+    GraphResource, SegBody, SegResourceAccess, SegSpace, Semantic, SoacDestination, SoacInputType, ValueId,
     WynSoacPhase,
 };
 
 /// One position in a Screma side effect's compact operand list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Operand {
-    pub node: NodeId,
+    pub node: ValueId,
     pub slot: usize,
 }
 
@@ -19,12 +19,12 @@ pub struct Operand {
 #[derive(Clone, Copy, Debug)]
 pub struct ScremaOperands<'a, P: WynSoacPhase> {
     op: &'a Op<P>,
-    nodes: &'a [NodeId],
-    result: NodeId,
+    nodes: &'a [ValueId],
+    result: ValueId,
 }
 
 impl<'a, P: WynSoacPhase> ScremaOperands<'a, P> {
-    pub fn decode(op: &'a Op<P>, nodes: &'a [NodeId], result: Option<NodeId>) -> Result<Self, String> {
+    pub fn decode(op: &'a Op<P>, nodes: &'a [ValueId], result: Option<ValueId>) -> Result<Self, String> {
         op.validate()?;
         let output_count = (0..op.result_count())
             .filter(|&field| op.destination(field).is_some_and(SoacDestination::is_output_view))
@@ -77,7 +77,7 @@ impl<'a, P: WynSoacPhase> ScremaOperands<'a, P> {
         (0..self.op.result_count()).map(|field| self.output(field))
     }
 
-    pub fn result(&self) -> NodeId {
+    pub fn result(&self) -> ValueId {
         self.result
     }
 }
@@ -141,7 +141,7 @@ impl Lambda {
         }
     }
 
-    pub(crate) fn captures(&self) -> &[NodeId] {
+    pub(crate) fn captures(&self) -> &[ValueId] {
         match &self.body {
             LambdaBody::Identity => &[],
             LambdaBody::Region(body) => &body.captures,
@@ -170,7 +170,7 @@ impl Lambda {
         }
     }
 
-    fn capture_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+    fn capture_nodes(&self) -> impl Iterator<Item = ValueId> + '_ {
         self.captures().iter().copied()
     }
 }
@@ -179,14 +179,14 @@ impl Lambda {
 #[derive(Clone, Debug)]
 pub struct Scan {
     pub operator: Lambda,
-    pub neutral: Vec<NodeId>,
+    pub neutral: Vec<ValueId>,
 }
 
 /// One associative reduction operator at the Screma's collective barrier.
 #[derive(Clone, Debug)]
 pub struct Reduce {
     pub operator: Lambda,
-    pub neutral: Vec<NodeId>,
+    pub neutral: Vec<ValueId>,
     pub commutative: bool,
 }
 
@@ -350,7 +350,7 @@ impl ScremaForm {
 
     fn validate_neutral_types(
         &self,
-        node_type: &mut impl FnMut(NodeId) -> Option<Type<TypeName>>,
+        node_type: &mut impl FnMut(ValueId) -> Option<Type<TypeName>>,
     ) -> Result<(), String> {
         for (index, scan) in self.scans.iter().enumerate() {
             validate_neutral_values(
@@ -383,7 +383,7 @@ impl ScremaForm {
         self.post.for_each_type_mut(visit);
     }
 
-    pub(crate) fn capture_nodes(&self) -> Vec<NodeId> {
+    pub(crate) fn capture_nodes(&self) -> Vec<ValueId> {
         let mut nodes = self.pre.capture_nodes().collect::<Vec<_>>();
         for scan in &self.scans {
             nodes.extend(scan.operator.capture_nodes());
@@ -395,7 +395,7 @@ impl ScremaForm {
         nodes
     }
 
-    fn base_referenced_nodes(&self) -> Vec<NodeId> {
+    fn base_referenced_nodes(&self) -> Vec<ValueId> {
         let mut nodes = self.capture_nodes();
         nodes.extend(self.scans.iter().flat_map(|scan| scan.neutral.iter().copied()));
         nodes.extend(self.reductions.iter().flat_map(|reduction| reduction.neutral.iter().copied()));
@@ -406,9 +406,9 @@ impl ScremaForm {
 fn validate_neutral_values(
     kind: &str,
     index: usize,
-    neutral: &[NodeId],
+    neutral: &[ValueId],
     types: &[Type<TypeName>],
-    node_type: &mut impl FnMut(NodeId) -> Option<Type<TypeName>>,
+    node_type: &mut impl FnMut(ValueId) -> Option<Type<TypeName>>,
 ) -> Result<(), String> {
     for (component, (&node, expected)) in neutral.iter().zip(types).enumerate() {
         let actual = node_type(node);
@@ -571,7 +571,7 @@ impl<P: WynSoacPhase> Op<P> {
 
     pub(crate) fn validate_with_nodes(
         &self,
-        mut node_type: impl FnMut(NodeId) -> Option<Type<TypeName>>,
+        mut node_type: impl FnMut(ValueId) -> Option<Type<TypeName>>,
     ) -> Result<(), String> {
         self.validate()?;
         self.form.validate_neutral_types(&mut node_type)
@@ -583,11 +583,11 @@ impl<P: WynSoacPhase> Op<P> {
         self.form.for_each_type_mut(visit);
     }
 
-    pub(crate) fn capture_nodes(&self) -> Vec<NodeId> {
+    pub(crate) fn capture_nodes(&self) -> Vec<ValueId> {
         self.form.capture_nodes()
     }
 
-    fn base_referenced_nodes(&self) -> Vec<NodeId> {
+    fn base_referenced_nodes(&self) -> Vec<ValueId> {
         self.form.base_referenced_nodes()
     }
 }
@@ -601,7 +601,7 @@ impl<R: GraphResource> Op<Semantic<R>> {
         &mut self.state
     }
 
-    pub(crate) fn referenced_nodes(&self) -> Vec<NodeId> {
+    pub(crate) fn referenced_nodes(&self) -> Vec<ValueId> {
         let mut nodes = self.base_referenced_nodes();
         if let SemanticState::Segmented { space, .. } = &self.state {
             nodes.extend(space.referenced_nodes());
@@ -609,7 +609,7 @@ impl<R: GraphResource> Op<Semantic<R>> {
         nodes
     }
 
-    pub(crate) fn referenced_node_slots(&mut self) -> Vec<&mut NodeId> {
+    pub(crate) fn referenced_node_slots(&mut self) -> Vec<&mut ValueId> {
         let mut nodes = Vec::new();
         if let Some(body) = self.form.pre.seg_body_mut() {
             nodes.extend(body.captures.iter_mut());
@@ -673,8 +673,8 @@ mod tests {
         )
     }
 
-    fn node(index: u64) -> NodeId {
-        NodeId::from(slotmap::KeyData::from_ffi(index))
+    fn node(index: u64) -> ValueId {
+        ValueId::from(slotmap::KeyData::from_ffi(index))
     }
 
     fn valid_scan_op() -> Op<Raw> {
@@ -729,8 +729,8 @@ mod tests {
                     vec![i32_type.clone(), i32_type.clone()],
                 ),
                 neutral: vec![
-                    NodeId::from(slotmap::KeyData::from_ffi(1)),
-                    NodeId::from(slotmap::KeyData::from_ffi(2)),
+                    ValueId::from(slotmap::KeyData::from_ffi(1)),
+                    ValueId::from(slotmap::KeyData::from_ffi(2)),
                 ],
             }],
             reductions: vec![Reduce {
@@ -739,7 +739,7 @@ mod tests {
                     vec![u32_type.clone(), u32_type.clone()],
                     vec![u32_type.clone()],
                 ),
-                neutral: vec![NodeId::from(slotmap::KeyData::from_ffi(3))],
+                neutral: vec![ValueId::from(slotmap::KeyData::from_ffi(3))],
                 commutative: false,
             }],
             post: region(

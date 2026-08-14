@@ -6,13 +6,13 @@
 use super::{filter_smallvec, is_storage_image};
 use crate::ast::TypeName;
 use crate::egir::from_tlc::ConvertError;
-use crate::egir::types::NodeId;
+use crate::egir::types::ValueId;
 use polytype::Type;
 use slotmap::SlotMap;
 use smallvec::{smallvec, SmallVec};
 
-fn fresh_nodes(n: usize) -> Vec<NodeId> {
-    let mut sm: SlotMap<NodeId, ()> = SlotMap::with_key();
+fn fresh_nodes(n: usize) -> Vec<ValueId> {
+    let mut sm: SlotMap<ValueId, ()> = SlotMap::with_key();
     (0..n).map(|_| sm.insert(())).collect()
 }
 
@@ -27,7 +27,7 @@ fn is_storage_image_sees_through_unique() {
 #[test]
 fn filter_smallvec_drops_masked_operands_preserving_order() {
     let n = fresh_nodes(3);
-    let mut ops: SmallVec<[NodeId; 4]> = smallvec![n[0], n[1], n[2]];
+    let mut ops: SmallVec<[ValueId; 4]> = smallvec![n[0], n[1], n[2]];
     // Erase the middle operand (the storage-image argument).
     filter_smallvec(&mut ops, &[false, true, false], &crate::FunctionId::from_index(0)).unwrap();
     assert_eq!(ops.as_slice(), &[n[0], n[2]]);
@@ -36,7 +36,7 @@ fn filter_smallvec_drops_masked_operands_preserving_order() {
 #[test]
 fn filter_smallvec_rejects_arity_mismatch() {
     let n = fresh_nodes(2);
-    let mut ops: SmallVec<[NodeId; 4]> = smallvec![n[0], n[1]];
+    let mut ops: SmallVec<[ValueId; 4]> = smallvec![n[0], n[1]];
     let err = filter_smallvec(&mut ops, &[false], &crate::FunctionId::from_index(0)).unwrap_err();
     assert!(matches!(err, ConvertError::Internal(_)));
 }

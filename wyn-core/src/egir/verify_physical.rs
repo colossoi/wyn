@@ -48,7 +48,7 @@ fn graph(graph: &PhysicalEGraph, owner: &str) -> Result<(), String> {
         physical_type(&node.ty, owner)?;
         if matches!(
             &node.kind,
-            super::types::ENode::Pure {
+            super::types::ValueKind::Pure {
                 op: super::types::PureOp::ResourceLen(_),
                 ..
             }

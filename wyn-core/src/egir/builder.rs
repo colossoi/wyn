@@ -13,7 +13,7 @@ use super::program::{
 };
 use super::soac::screma;
 use super::types::{
-    EGraph, EffectToken, NodeId, SkeletonTerminator, Soac, SoacDestination, SoacInputType, SoacPlacement,
+    EGraph, EffectToken, SkeletonTerminator, Soac, SoacDestination, SoacInputType, SoacPlacement, ValueId,
 };
 
 pub struct EntryBuilder<'a> {
@@ -118,7 +118,7 @@ impl<'a> EntryBuilder<'a> {
         self.current_block = block;
     }
 
-    pub fn emit_storage_view(&mut self, resource: ResourceId, ty: Type<TypeName>) -> NodeId {
+    pub fn emit_storage_view(&mut self, resource: ResourceId, ty: Type<TypeName>) -> ValueId {
         graph_ops::intern_resource_view(&mut self.graph, resource, ty, Some(self.span))
     }
 
@@ -126,13 +126,13 @@ impl<'a> EntryBuilder<'a> {
     pub fn emit_pending_map_into(
         &mut self,
         region: super::types::RegionId,
-        input_array: NodeId,
+        input_array: ValueId,
         input_array_ty: Type<TypeName>,
         output_elem_ty: Type<TypeName>,
-        captures: Vec<NodeId>,
-        output_view: NodeId,
+        captures: Vec<ValueId>,
+        output_view: ValueId,
         output_view_ty: Type<TypeName>,
-    ) -> NodeId {
+    ) -> ValueId {
         let input = SoacInputType::array(input_array_ty);
         let input_element_type = input.element();
         let pre = screma::Lambda::region(
@@ -151,10 +151,10 @@ impl<'a> EntryBuilder<'a> {
     /// fields to the corresponding output views.
     pub fn emit_pending_map_into_views(
         &mut self,
-        inputs: Vec<(NodeId, SoacInputType)>,
+        inputs: Vec<(ValueId, SoacInputType)>,
         pre: screma::Lambda,
-        output_views: Vec<(NodeId, Type<TypeName>)>,
-    ) -> NodeId {
+        output_views: Vec<(ValueId, Type<TypeName>)>,
+    ) -> ValueId {
         debug_assert_eq!(inputs.len(), pre.parameter_types.len());
         debug_assert_eq!(output_views.len(), pre.result_types.len());
         let tuple_ty = Type::Constructed(
@@ -166,7 +166,7 @@ impl<'a> EntryBuilder<'a> {
             .iter()
             .map(|(node, _)| *node)
             .chain(output_views.iter().map(|(node, _)| *node))
-            .collect::<SmallVec<[NodeId; 4]>>();
+            .collect::<SmallVec<[ValueId; 4]>>();
         let id = self.semantic_ids.next_id();
         graph_ops::emit_pending_soac(
             &mut self.graph,
@@ -195,7 +195,7 @@ impl<'a> EntryBuilder<'a> {
         )
     }
 
-    pub fn emit_load(&mut self, place: NodeId, elem_ty: Type<TypeName>) -> NodeId {
+    pub fn emit_load(&mut self, place: ValueId, elem_ty: Type<TypeName>) -> ValueId {
         graph_ops::emit_load(
             &mut self.graph,
             self.current_block,

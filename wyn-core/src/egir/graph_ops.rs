@@ -23,11 +23,11 @@ use crate::flow::BlockId;
 use crate::ssa::types::ConstantValue;
 use crate::BindingRef;
 
-use super::ir::{Family, Node};
+use super::ir::{Family, Value};
 use super::types::{
-    EGraph, ENode, EffectOp, EffectToken, GraphResource, NodeId, Physical, PureOp, PureViewSource, Raw,
-    ResourceAccess, SegResourceAccess, Semantic, SideEffect, SideEffectKind, SideEffectSite,
-    SkeletonTerminator, Soac, SoacEffect, WynSoacPhase,
+    EGraph, EffectOp, EffectToken, GraphResource, Physical, PureOp, PureViewSource, Raw, ResourceAccess,
+    SegResourceAccess, Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac,
+    SoacEffect, ValueId, ValueKind, WynSoacPhase,
 };
 
 #[cfg(test)]
@@ -40,11 +40,11 @@ mod graph_ops_tests;
 /// iteration space.  Semantic SOACs additionally expose their resolved space
 /// through `SideEffect::referenced_nodes`.
 pub(crate) trait ValueProducerPhase: Family {
-    fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<NodeId>;
+    fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<ValueId>;
 }
 
 impl<R: GraphResource> ValueProducerPhase for Raw<R> {
-    fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<NodeId> {
+    fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<ValueId> {
         let mut nodes = effect.operand_nodes.to_vec();
         let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
             return nodes;
@@ -59,14 +59,14 @@ impl<R: GraphResource> ValueProducerPhase for Raw<R> {
 }
 
 impl<R: GraphResource> ValueProducerPhase for Semantic<R> {
-    fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<NodeId> {
+    fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<ValueId> {
         effect.referenced_nodes().collect()
     }
 }
 
 /// The complete value-producing closure behind one or more EGIR values.
 ///
-/// `ENode::children` covers floating pure expressions, but intentionally has
+/// `ValueKind::children` covers floating pure expressions, but intentionally has
 /// no edges for effect results or block parameters.  Analyses that need the
 /// actual producer must also follow an effect result to its anchored effect and
 /// a block parameter to every incoming CFG argument.  Keeping both visited
@@ -74,12 +74,12 @@ impl<R: GraphResource> ValueProducerPhase for Semantic<R> {
 /// form cycles.
 #[derive(Debug, Default)]
 pub(crate) struct ValueProducerClosure {
-    pub(crate) nodes: HashSet<NodeId>,
+    pub(crate) nodes: HashSet<ValueId>,
     pub(crate) effects: HashSet<SideEffectSite>,
 }
 
 impl ValueProducerClosure {
-    pub(crate) fn contains_node(&self, node: NodeId) -> bool {
+    pub(crate) fn contains_node(&self, node: ValueId) -> bool {
         self.nodes.contains(&node)
     }
 }
@@ -117,10 +117,10 @@ impl ValueObservers {
 /// structure. In particular, the [`SideEffectSite`] values it returns must not
 /// survive a skeleton mutation.
 pub(crate) struct ValueUseIndex {
-    pure_successors: LookupMap<NodeId, Vec<NodeId>>,
-    value_successors: LookupMap<NodeId, Vec<NodeId>>,
-    effect_observers: LookupMap<NodeId, Vec<SideEffectSite>>,
-    terminator_observers: LookupMap<NodeId, Vec<BlockId>>,
+    pure_successors: LookupMap<ValueId, Vec<ValueId>>,
+    value_successors: LookupMap<ValueId, Vec<ValueId>>,
+    effect_observers: LookupMap<ValueId, Vec<SideEffectSite>>,
+    terminator_observers: LookupMap<ValueId, Vec<BlockId>>,
 }
 
 impl ValueUseIndex {
@@ -162,22 +162,22 @@ impl ValueUseIndex {
     }
 
     /// Effects and terminators reached through floating pure/union users.
-    pub(crate) fn pure_observers(&self, source: NodeId) -> ValueObservers {
+    pub(crate) fn pure_observers(&self, source: ValueId) -> ValueObservers {
         self.observers(source, &self.pure_successors)
     }
 
     /// Effects and terminators reached through complete value flow, including
     /// effect results and incoming CFG block arguments.
-    pub(crate) fn value_observers(&self, source: NodeId) -> ValueObservers {
+    pub(crate) fn value_observers(&self, source: ValueId) -> ValueObservers {
         self.observers(source, &self.value_successors)
     }
 
     /// Whether `user` consumes `source` through floating pure/union nodes.
-    pub(crate) fn pure_reaches(&self, source: NodeId, user: NodeId) -> bool {
+    pub(crate) fn pure_reaches(&self, source: ValueId, user: ValueId) -> bool {
         self.reaches(source, user, &self.pure_successors)
     }
 
-    fn observers(&self, source: NodeId, successors: &LookupMap<NodeId, Vec<NodeId>>) -> ValueObservers {
+    fn observers(&self, source: ValueId, successors: &LookupMap<ValueId, Vec<ValueId>>) -> ValueObservers {
         let mut observers = ValueObservers::default();
         self.walk_users(source, successors, |user| {
             observers.effects.extend(self.effect_observers.get(&user).into_iter().flatten().copied());
@@ -189,15 +189,20 @@ impl ValueUseIndex {
         observers
     }
 
-    fn reaches(&self, source: NodeId, target: NodeId, successors: &LookupMap<NodeId, Vec<NodeId>>) -> bool {
+    fn reaches(
+        &self,
+        source: ValueId,
+        target: ValueId,
+        successors: &LookupMap<ValueId, Vec<ValueId>>,
+    ) -> bool {
         self.walk_users(source, successors, |user| user == target)
     }
 
     fn walk_users(
         &self,
-        source: NodeId,
-        successors: &LookupMap<NodeId, Vec<NodeId>>,
-        mut visit: impl FnMut(NodeId) -> bool,
+        source: ValueId,
+        successors: &LookupMap<ValueId, Vec<ValueId>>,
+        mut visit: impl FnMut(ValueId) -> bool,
     ) -> bool {
         let mut seen = HashSet::new();
         let mut pending = vec![source];
@@ -216,10 +221,10 @@ impl ValueUseIndex {
 
 fn index_block_argument_successors<P: Family>(
     graph: &EGraph<P>,
-    successors: &mut LookupMap<NodeId, Vec<NodeId>>,
+    successors: &mut LookupMap<ValueId, Vec<ValueId>>,
     term: &SkeletonTerminator,
 ) {
-    let mut add_edge = |target: BlockId, args: &[NodeId], condition: Option<NodeId>| {
+    let mut add_edge = |target: BlockId, args: &[ValueId], condition: Option<ValueId>| {
         let Some(target_block) = graph.skeleton.blocks.get(target) else {
             return;
         };
@@ -250,7 +255,7 @@ fn index_block_argument_successors<P: Family>(
 /// values that can contribute to `roots`.
 pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
     graph: &EGraph<P>,
-    roots: impl IntoIterator<Item = NodeId>,
+    roots: impl IntoIterator<Item = ValueId>,
 ) -> ValueProducerClosure {
     let producer_index = graph.side_effect_index();
     let mut closure = ValueProducerClosure::default();
@@ -264,12 +269,12 @@ pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
             continue;
         };
         match &definition.kind {
-            ENode::Pure { operands, .. } => pending.extend(operands.iter().copied()),
-            ENode::Union { left, right } => pending.extend([*left, *right]),
-            ENode::BlockParam { block, index } => {
+            ValueKind::Pure { operands, .. } => pending.extend(operands.iter().copied()),
+            ValueKind::Union { left, right } => pending.extend([*left, *right]),
+            ValueKind::BlockParam { block, index } => {
                 extend_incoming_block_args(graph, *block, *index, &mut pending);
             }
-            ENode::SideEffectResult => {
+            ValueKind::SideEffectResult => {
                 let Some(site) = producer_index.site(node) else {
                     continue;
                 };
@@ -277,7 +282,7 @@ pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
                     pending.extend(P::effect_value_inputs(graph.skeleton.effect(site)));
                 }
             }
-            ENode::FuncParam { .. } | ENode::Constant(_) => {}
+            ValueKind::FuncParam { .. } | ValueKind::Constant(_) => {}
         }
     }
 
@@ -290,7 +295,7 @@ pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
 /// while projection-preserved but unused metadata is not.
 pub(crate) fn execution_value_producer_closure<P: ValueProducerPhase>(
     graph: &EGraph<P>,
-    result_roots: impl IntoIterator<Item = NodeId>,
+    result_roots: impl IntoIterator<Item = ValueId>,
 ) -> ValueProducerClosure {
     value_producer_closure(
         graph,
@@ -302,7 +307,7 @@ pub(crate) fn execution_value_producer_closure<P: ValueProducerPhase>(
 ///
 /// The phase adapter includes SOAC captures and other producer metadata that
 /// the phase-agnostic IR cannot see through `P::Soac`.
-pub(crate) fn execution_value_roots<P: ValueProducerPhase>(graph: &EGraph<P>) -> Vec<NodeId> {
+pub(crate) fn execution_value_roots<P: ValueProducerPhase>(graph: &EGraph<P>) -> Vec<ValueId> {
     graph
         .skeleton
         .blocks
@@ -314,7 +319,7 @@ pub(crate) fn execution_value_roots<P: ValueProducerPhase>(graph: &EGraph<P>) ->
 }
 
 /// Pure-graph reachability from every executable effect and terminator.
-pub(crate) fn reachable_execution_values<P: ValueProducerPhase>(graph: &EGraph<P>) -> Vec<NodeId> {
+pub(crate) fn reachable_execution_values<P: ValueProducerPhase>(graph: &EGraph<P>) -> Vec<ValueId> {
     wyn_graph::reachable_from_ordered(
         execution_value_roots(graph),
         wyn_graph::WalkOrder::DepthFirst,
@@ -329,7 +334,7 @@ pub(crate) fn reachable_execution_values<P: ValueProducerPhase>(graph: &EGraph<P
 /// Whether `target` is reachable from `root` through floating pure/union
 /// operands only. This is the common dependency predicate for use-site and
 /// fusion analyses that deliberately stop at effect results and CFG params.
-pub(crate) fn pure_depends_on<P: Family>(graph: &EGraph<P>, root: NodeId, target: NodeId) -> bool {
+pub(crate) fn pure_depends_on<P: Family>(graph: &EGraph<P>, root: ValueId, target: ValueId) -> bool {
     wyn_graph::reaches_ordered(root, target, wyn_graph::WalkOrder::DepthFirst, |node, out| {
         if let Some(definition) = graph.nodes.get(node) {
             out.extend(definition.kind.children());
@@ -341,8 +346,8 @@ pub(crate) fn pure_depends_on<P: Family>(graph: &EGraph<P>, root: NodeId, target
 /// `target`, crossing effect results and incoming block arguments as needed.
 pub(crate) fn value_depends_on<P: ValueProducerPhase>(
     graph: &EGraph<P>,
-    root: NodeId,
-    target: NodeId,
+    root: ValueId,
+    target: ValueId,
 ) -> bool {
     value_producer_closure(graph, [root]).contains_node(target)
 }
@@ -356,8 +361,8 @@ pub(crate) fn value_depends_on<P: ValueProducerPhase>(
 /// calculation.
 pub(crate) fn maximal_execution_frontier<P: ValueProducerPhase>(
     graph: &EGraph<P>,
-    mut movable: impl FnMut(NodeId) -> bool,
-) -> Vec<NodeId> {
+    mut movable: impl FnMut(ValueId) -> bool,
+) -> Vec<ValueId> {
     let reachable = reachable_execution_values(graph);
     let reachable_set = reachable.iter().copied().collect::<HashSet<_>>();
     let movable = reachable.iter().map(|node| (*node, movable(*node))).collect::<HashMap<_, _>>();
@@ -382,7 +387,7 @@ pub(crate) fn maximal_execution_frontier<P: ValueProducerPhase>(
 /// Storage resources read by the complete producer closure behind `roots`.
 pub(crate) fn read_storage_resources<P>(
     graph: &EGraph<P>,
-    roots: impl IntoIterator<Item = NodeId>,
+    roots: impl IntoIterator<Item = ValueId>,
 ) -> Vec<SegResourceAccess<super::program::SemanticResourceRef>>
 where
     P: ValueProducerPhase + Family<Resource = super::program::SemanticResourceRef>,
@@ -404,9 +409,13 @@ where
 }
 
 /// Return the output selected by a direct projection of `root`.
-pub(crate) fn projection_index<P: Family>(graph: &EGraph<P>, node: NodeId, root: NodeId) -> Option<usize> {
+pub(crate) fn projection_index<P: Family>(
+    graph: &EGraph<P>,
+    node: ValueId,
+    root: ValueId,
+) -> Option<usize> {
     match &graph.nodes.get(node)?.kind {
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::Project { index },
             operands,
         } if operands.first() == Some(&root) => Some(*index as usize),
@@ -418,8 +427,8 @@ pub(crate) fn projection_index<P: Family>(graph: &EGraph<P>, node: NodeId, root:
 /// For `Project(Project(root, outer), inner)`, this is `outer`.
 pub(crate) fn root_projection_index<P: Family>(
     graph: &EGraph<P>,
-    node: NodeId,
-    root: NodeId,
+    node: ValueId,
+    root: ValueId,
 ) -> Option<usize> {
     let mut current = node;
     let mut root_index = None;
@@ -427,7 +436,7 @@ pub(crate) fn root_projection_index<P: Family>(
         if current == root {
             return root_index;
         }
-        let ENode::Pure {
+        let ValueKind::Pure {
             op: PureOp::Project { index },
             operands,
         } = &graph.nodes.get(current)?.kind
@@ -443,7 +452,7 @@ fn extend_incoming_block_args<P: Family>(
     graph: &EGraph<P>,
     target: BlockId,
     index: usize,
-    pending: &mut Vec<NodeId>,
+    pending: &mut Vec<ValueId>,
 ) {
     for (_, predecessor) in &graph.skeleton.blocks {
         match &predecessor.term {
@@ -487,12 +496,12 @@ fn extend_incoming_block_args<P: Family>(
 /// shape (`PureOp::Uint(n.to_string())`) as `from_tlc` produces from
 /// `TermKind::IntLit` so hash-consing deduplicates across the two
 /// emission paths.
-pub fn intern_u32<P: Family>(graph: &mut EGraph<P>, n: u32, span: Option<Span>) -> NodeId {
+pub fn intern_u32<P: Family>(graph: &mut EGraph<P>, n: u32, span: Option<Span>) -> ValueId {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     graph.intern_pure(PureOp::Uint(n.to_string()), smallvec![], u32_ty, span)
 }
 
-/// Constant via `EGraph::intern_constant` (canonical `ENode::Constant`
+/// Constant via `EGraph::intern_constant` (canonical `ValueKind::Constant`
 /// form). Use this when the value comes through a `ConstantValue`
 /// already (e.g. carrying a reduce's neutral element across passes).
 /// For freshly-typed-out integer/float literals from terms, prefer the
@@ -501,7 +510,7 @@ pub fn intern_constant<P: Family>(
     graph: &mut EGraph<P>,
     value: ConstantValue,
     ty: Type<TypeName>,
-) -> NodeId {
+) -> ValueId {
     graph.intern_constant(value, ty)
 }
 
@@ -509,10 +518,10 @@ pub fn intern_constant<P: Family>(
 pub fn intern_intrinsic<P: Family>(
     graph: &mut EGraph<P>,
     id: BuiltinId,
-    operands: SmallVec<[NodeId; 4]>,
+    operands: SmallVec<[ValueId; 4]>,
     ty: Type<TypeName>,
     span: Option<Span>,
-) -> NodeId {
+) -> ValueId {
     graph.intern_pure(PureOp::Intrinsic { id, overload_idx: 0 }, operands, ty, span)
 }
 
@@ -521,11 +530,11 @@ pub fn intern_intrinsic<P: Family>(
 pub fn intern_binop<P: Family>(
     graph: &mut EGraph<P>,
     op: crate::op::BinaryOperator,
-    lhs: NodeId,
-    rhs: NodeId,
+    lhs: ValueId,
+    rhs: ValueId,
     ty: Type<TypeName>,
     span: Option<Span>,
-) -> NodeId {
+) -> ValueId {
     graph.intern_pure(PureOp::BinOp(op), smallvec![lhs, rhs], ty, span)
 }
 
@@ -536,7 +545,7 @@ pub fn intern_storage_view(
     br: BindingRef,
     view_ty: Type<TypeName>,
     span: Option<Span>,
-) -> NodeId {
+) -> ValueId {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let set_nid = intern_u32(graph, br.set, span);
     let binding_nid = intern_u32(graph, br.binding, span);
@@ -564,7 +573,7 @@ pub fn intern_resource_view<P: Family<Resource = super::program::SemanticResourc
     resource: crate::ResourceId,
     view_ty: Type<TypeName>,
     span: Option<Span>,
-) -> NodeId {
+) -> ValueId {
     let len = intern_resource_len(graph, resource, span);
     let zero = intern_u32(graph, 0, span);
     intern_chunked_resource_view(graph, resource, zero, len, view_ty, span)
@@ -575,7 +584,7 @@ pub fn intern_resource_len<P: Family<Resource = super::program::SemanticResource
     graph: &mut EGraph<P>,
     resource: crate::ResourceId,
     span: Option<Span>,
-) -> NodeId {
+) -> ValueId {
     graph.intern_pure(
         PureOp::ResourceLen(super::program::SemanticResourceRef(resource)),
         smallvec![],
@@ -587,11 +596,11 @@ pub fn intern_resource_len<P: Family<Resource = super::program::SemanticResource
 pub fn intern_chunked_resource_view<P: Family<Resource = super::program::SemanticResourceRef>>(
     graph: &mut EGraph<P>,
     resource: crate::ResourceId,
-    offset: NodeId,
-    len: NodeId,
+    offset: ValueId,
+    len: ValueId,
     view_ty: Type<TypeName>,
     span: Option<Span>,
-) -> NodeId {
+) -> ValueId {
     let view_ty =
         crate::types::view_array_of(&view_ty, Type::Constructed(TypeName::Resource(resource), vec![]));
     graph.intern_pure(
@@ -615,7 +624,7 @@ pub fn emit_workgroup_view<P: Family>(
     count: u32,
     view_ty: Type<TypeName>,
     span: Option<Span>,
-) -> NodeId {
+) -> ValueId {
     let zero_nid = intern_u32(graph, 0, span);
     let count_nid = intern_u32(graph, count, span);
     // Workgroup-shared memory is not descriptor-bound: no (set, binding) region.
@@ -634,11 +643,11 @@ pub fn emit_workgroup_view<P: Family>(
 pub fn intern_chunked_storage_view(
     graph: &mut EGraph<Physical>,
     br: BindingRef,
-    offset: NodeId,
-    len: NodeId,
+    offset: ValueId,
+    len: ValueId,
     view_ty: Type<TypeName>,
     span: Option<Span>,
-) -> NodeId {
+) -> ValueId {
     let view_ty = crate::types::view_array_of(&view_ty, crate::types::buffer_tag(br));
     graph.intern_pure(
         PureOp::StorageView(PureViewSource::Storage(br)),
@@ -662,8 +671,8 @@ pub fn alloc_effect(effect_ids: &mut crate::IdSource<EffectToken>) -> EffectToke
 pub fn emit_store<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
-    place_nid: NodeId,
-    value_nid: NodeId,
+    place_nid: ValueId,
+    value_nid: ValueId,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> EffectToken {
@@ -684,13 +693,13 @@ pub fn emit_store<P: Family>(
 pub fn emit_atomic<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
-    place_nid: NodeId,
+    place_nid: ValueId,
     op: crate::ssa::types::AtomicOp,
-    values: &[NodeId],
+    values: &[ValueId],
     result_ty: Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
-) -> NodeId {
+) -> ValueId {
     assert_eq!(values.len(), op.value_arity());
     let effect_in = alloc_effect(effect_ids);
     let effect_out = alloc_effect(effect_ids);
@@ -732,9 +741,9 @@ pub fn emit_workgroup_barrier<P: Family>(
 pub fn emit_storage_store<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
-    view_nid: NodeId,
-    index_nid: NodeId,
-    value_nid: NodeId,
+    view_nid: ValueId,
+    index_nid: ValueId,
+    value_nid: ValueId,
     elem_ty: Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
@@ -748,11 +757,11 @@ pub fn emit_storage_store<P: Family>(
 pub fn emit_load<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
-    place_nid: NodeId,
+    place_nid: ValueId,
     elem_ty: Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
-) -> NodeId {
+) -> ValueId {
     let (result, effect) = detached_load(graph, place_nid, elem_ty, effect_ids, span);
     graph.skeleton.blocks[block].side_effects.push(effect);
     result
@@ -763,11 +772,11 @@ pub fn emit_load<P: Family>(
 /// an existing scheduled operation instead of appended to the block tail.
 pub fn detached_load<P: Family>(
     graph: &mut EGraph<P>,
-    place_nid: NodeId,
+    place_nid: ValueId,
     elem_ty: Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
-) -> (NodeId, SideEffect<P>) {
+) -> (ValueId, SideEffect<P>) {
     let effect_in = alloc_effect(effect_ids);
     let effect_out = alloc_effect(effect_ids);
     let result = graph.alloc_side_effect_result(elem_ty);
@@ -781,7 +790,7 @@ pub fn detached_load<P: Family>(
     (result, effect)
 }
 
-/// Emit a function-local `Alloca` side-effect in `block`. The returned NodeId
+/// Emit a function-local `Alloca` side-effect in `block`. The returned ValueId
 /// represents the allocated place — pass it to `intern_place_index` for
 /// element-level addressing, or to `emit_load` / `emit_store` for whole-value
 /// access. The place's element type is `elem_ty`; for an `[T;N]` allocation
@@ -792,7 +801,7 @@ pub fn emit_alloca<P: Family>(
     elem_ty: Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
-) -> NodeId {
+) -> ValueId {
     let effect_in = alloc_effect(effect_ids);
     let effect_out = alloc_effect(effect_ids);
     let place_nid = graph.alloc_side_effect_result(elem_ty.clone());
@@ -812,11 +821,11 @@ pub fn emit_alloca<P: Family>(
 /// `elem_ty` (e.g. `T` for an `[T;N]` parent).
 pub fn intern_place_index<P: Family>(
     graph: &mut EGraph<P>,
-    parent_place_nid: NodeId,
-    index_nid: NodeId,
+    parent_place_nid: ValueId,
+    index_nid: ValueId,
     elem_ty: Type<TypeName>,
     span: Option<Span>,
-) -> NodeId {
+) -> ValueId {
     graph.intern_pure(
         PureOp::PlaceIndex,
         smallvec![parent_place_nid, index_nid],
@@ -831,9 +840,9 @@ pub fn intern_place_index<P: Family>(
 pub fn emit_place_index_store<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
-    parent_place_nid: NodeId,
-    index_nid: NodeId,
-    value_nid: NodeId,
+    parent_place_nid: ValueId,
+    index_nid: ValueId,
+    value_nid: ValueId,
     elem_ty: Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
@@ -847,12 +856,12 @@ pub fn emit_place_index_store<P: Family>(
 pub fn emit_view_load<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
-    view_nid: NodeId,
-    index_nid: NodeId,
+    view_nid: ValueId,
+    index_nid: ValueId,
     elem_ty: Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
-) -> NodeId {
+) -> ValueId {
     let place_nid = graph.intern_pure(
         PureOp::ViewIndex,
         smallvec![view_nid, index_nid],
@@ -871,11 +880,11 @@ pub fn emit_pending_soac<P: WynSoacPhase>(
     block: BlockId,
     id: P::SoacId,
     soac: Soac<P>,
-    operands: SmallVec<[NodeId; 4]>,
+    operands: SmallVec<[ValueId; 4]>,
     result_ty: Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
-) -> NodeId {
+) -> ValueId {
     let result_nid = graph.alloc_side_effect_result(result_ty);
     let effect_in = alloc_effect(effect_ids);
     let effect_out = alloc_effect(effect_ids);
@@ -896,10 +905,10 @@ pub fn emit_pending_soac<P: WynSoacPhase>(
 /// Return the semantic identity carried by a storage-view node.
 pub fn extract_storage_view_source<P: Family<Resource = super::program::SemanticResourceRef>>(
     graph: &EGraph<P>,
-    view_nid: NodeId,
+    view_nid: ValueId,
 ) -> Option<super::program::SemanticResourceRef> {
     match &graph.nodes[view_nid].kind {
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::StorageView(PureViewSource::Storage(resource)),
             ..
         } => Some(*resource),
@@ -910,7 +919,7 @@ pub fn extract_storage_view_source<P: Family<Resource = super::program::Semantic
 /// Find the storage resource beneath a semantic place expression.
 pub(crate) fn storage_resource_under<P: Family<Resource = super::program::SemanticResourceRef>>(
     graph: &EGraph<P>,
-    root: NodeId,
+    root: ValueId,
 ) -> Option<super::program::SemanticResourceRef> {
     wyn_graph::find_map_reachable(
         [root],
@@ -928,10 +937,10 @@ pub(crate) fn storage_resource_under<P: Family<Resource = super::program::Semant
 /// NodeIds. Otherwise `None`.
 pub fn extract_array_range_operands<P: Family>(
     graph: &EGraph<P>,
-    nid: NodeId,
-) -> Option<(NodeId, NodeId, Option<NodeId>)> {
+    nid: ValueId,
+) -> Option<(ValueId, ValueId, Option<ValueId>)> {
     match &graph.nodes[nid].kind {
-        ENode::Pure {
+        ValueKind::Pure {
             op: PureOp::ArrayRange { has_step },
             operands,
             ..
@@ -948,7 +957,7 @@ pub fn extract_array_range_operands<P: Family>(
 // ---------------------------------------------------------------------------
 
 /// Recursively clone a pure subgraph rooted at `root` from `src` into
-/// `dst`, returning the new root `NodeId`. Copies a reduce's neutral
+/// `dst`, returning the new root `ValueId`. Copies a reduce's neutral
 /// element (or any pure value) from one entry's EGraph into another's —
 /// phase2 needs a fresh copy of phase1's NE since EGraph NodeIds don't
 /// cross entries.
@@ -959,9 +968,9 @@ pub fn extract_array_range_operands<P: Family>(
 pub fn clone_pure_subgraph<P: Family>(
     src: &EGraph<P>,
     dst: &mut EGraph<P>,
-    root: NodeId,
-) -> Result<NodeId, String> {
-    let mut memo: LookupMap<NodeId, NodeId> = LookupMap::new();
+    root: ValueId,
+) -> Result<ValueId, String> {
+    let mut memo: LookupMap<ValueId, ValueId> = LookupMap::new();
     clone_value_subgraph(
         src,
         dst,
@@ -981,10 +990,10 @@ pub fn clone_pure_subgraph<P: Family>(
 pub fn clone_pure_subgraph_substituting<P: Family>(
     src: &EGraph<P>,
     dst: &mut EGraph<P>,
-    root: NodeId,
-    subs: &[(NodeId, NodeId)],
-) -> Result<NodeId, String> {
-    let mut memo: LookupMap<NodeId, NodeId> = subs.iter().copied().collect();
+    root: ValueId,
+    subs: &[(ValueId, ValueId)],
+) -> Result<ValueId, String> {
+    let mut memo: LookupMap<ValueId, ValueId> = subs.iter().copied().collect();
     clone_value_subgraph(
         src,
         dst,
@@ -1013,23 +1022,23 @@ pub(crate) enum PureCopy {
 pub(crate) fn clone_value_subgraph<P: Family>(
     src: &EGraph<P>,
     dst: &mut EGraph<P>,
-    nid: NodeId,
-    memo: &mut LookupMap<NodeId, NodeId>,
+    nid: ValueId,
+    memo: &mut LookupMap<ValueId, ValueId>,
     constants: ConstantCopy,
     allow_unions: bool,
     pure: PureCopy,
-) -> Result<NodeId, String> {
+) -> Result<ValueId, String> {
     if let Some(&existing) = memo.get(&nid) {
         return Ok(existing);
     }
     let source = src.nodes.get(nid).ok_or_else(|| format!("clone_value_subgraph: missing node {nid:?}"))?;
     let ty = source.ty.clone();
     let new_nid = match &source.kind {
-        ENode::Constant(c) => match constants {
+        ValueKind::Constant(c) => match constants {
             ConstantCopy::Intern => dst.intern_constant(*c, ty),
             ConstantCopy::PreserveIdentity => {
-                let target = dst.nodes.insert(Node {
-                    kind: ENode::Constant(*c),
+                let target = dst.nodes.insert(Value {
+                    kind: ValueKind::Constant(*c),
                     ty,
                     span: source.span,
                     alias: None,
@@ -1037,8 +1046,8 @@ pub(crate) fn clone_value_subgraph<P: Family>(
                 target
             }
         },
-        ENode::Pure { op, operands, .. } => {
-            let new_ops: SmallVec<[NodeId; 4]> = operands
+        ValueKind::Pure { op, operands, .. } => {
+            let new_ops: SmallVec<[ValueId; 4]> = operands
                 .iter()
                 .map(|&operand| {
                     clone_value_subgraph(src, dst, operand, memo, constants, allow_unions, pure)
@@ -1054,7 +1063,7 @@ pub(crate) fn clone_value_subgraph<P: Family>(
                 dst.intern_pure(op.clone(), new_ops, ty, source.span)
             }
         }
-        ENode::Union { left, right } if allow_unions => {
+        ValueKind::Union { left, right } if allow_unions => {
             let left = clone_value_subgraph(src, dst, *left, memo, constants, allow_unions, pure)?;
             let right = clone_value_subgraph(src, dst, *right, memo, constants, allow_unions, pure)?;
             dst.add_union(left, right)
@@ -1074,11 +1083,11 @@ pub(crate) fn clone_value_subgraph<P: Family>(
 /// node operands, side-effect operands, SOAC captures, and terminator args. The
 /// `old` node's definition is left intact (now unreferenced). Fusion uses this
 /// to rewire the results of a producer/sibling op onto the fused op's result.
-pub fn replace_all_references(graph: &mut EGraph<Semantic>, old: NodeId, new: NodeId) {
+pub fn replace_all_references(graph: &mut EGraph<Semantic>, old: ValueId, new: ValueId) {
     if old == new {
         return;
     }
-    let swap = |slot: &mut NodeId| {
+    let swap = |slot: &mut ValueId| {
         if *slot == old {
             *slot = new;
         }

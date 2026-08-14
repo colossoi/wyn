@@ -26,7 +26,7 @@ pub(crate) fn planned_callable_names(
 /// Opaque region used by canonical operator-lambda fixtures.
 const OPERATOR_REGION: FunctionId = FunctionId::from_index(0);
 
-fn reduce_operator(neutral: NodeId, captures: Vec<NodeId>) -> screma::Reduce {
+fn reduce_operator(neutral: ValueId, captures: Vec<ValueId>) -> screma::Reduce {
     let unit = Type::Constructed(TypeName::Unit, vec![]);
     screma::Reduce {
         operator: screma::Lambda::region(
@@ -42,7 +42,7 @@ fn reduce_operator(neutral: NodeId, captures: Vec<NodeId>) -> screma::Reduce {
     }
 }
 
-fn scan_operator(neutral: NodeId, captures: Vec<NodeId>) -> screma::Scan {
+fn scan_operator(neutral: ValueId, captures: Vec<ValueId>) -> screma::Scan {
     let reduction = reduce_operator(neutral, captures);
     screma::Scan {
         operator: reduction.operator,
@@ -50,7 +50,7 @@ fn scan_operator(neutral: NodeId, captures: Vec<NodeId>) -> screma::Scan {
     }
 }
 
-fn neutral(graph: &mut EGraph, index: usize) -> NodeId {
+fn neutral(graph: &mut EGraph, index: usize) -> ValueId {
     graph.add_func_param(index, Type::Constructed(TypeName::Unit, vec![]))
 }
 
@@ -207,7 +207,7 @@ fn idle_chunk_start_is_clamped_before_remaining_subtraction() {
         emit_chunk_arithmetic(&mut graph, REDUCE_PHASE1_WIDTH, len).expect("u32 chunk arithmetic");
     assert!(matches!(
         &graph.nodes[start].kind,
-        super::super::types::ENode::Pure {
+        super::super::types::ValueKind::Pure {
             op: PureOp::Intrinsic { .. },
             operands,
         } if operands.as_slice().last() == Some(&len)
@@ -261,6 +261,6 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
         .expect("block-offset store");
     assert!(matches!(
         phase2.body.graph.nodes[stored_value].kind,
-        super::super::types::ENode::BlockParam { .. }
+        super::super::types::ValueKind::BlockParam { .. }
     ));
 }

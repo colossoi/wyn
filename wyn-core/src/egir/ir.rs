@@ -51,7 +51,7 @@ pub fn splice_effect_tokens(
 new_key_type! {
     /// Identity of a node in the e-graph. Every pure node, union node,
     /// block param, function param, and constant gets one.
-    pub struct NodeId;
+    pub struct ValueId;
 
 }
 
@@ -86,11 +86,11 @@ pub trait Language: Clone + std::fmt::Debug + Eq + std::hash::Hash {
 pub type PureOp<R> = OpTag<R>;
 
 // ---------------------------------------------------------------------------
-// NodeKey — hash-cons key = operator + operands + result type
+// PureValueKey — hash-cons key = operator + operands + result type
 // ---------------------------------------------------------------------------
 
 /// The full identity of a pure node for hash-consing: operator, operands
-/// (already-canonical `NodeId`s), and result type. `ty` is part of the
+/// (already-canonical `ValueId`s), and result type. `ty` is part of the
 /// key because two otherwise-equal pure ops with different result types
 /// are semantically different values — e.g.
 /// `_w_intrinsic_storage_len(0, 0)` can be retyped at a rewrite site
@@ -99,28 +99,28 @@ pub type PureOp<R> = OpTag<R>;
 /// type win at the merged site. The type distinction applies uniformly to
 /// literals and every other pure operation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct NodeKey<R, Lang: Language> {
+pub struct PureValueKey<R, Lang: Language> {
     pub op: PureOp<R>,
-    pub operands: SmallVec<[NodeId; 4]>,
+    pub operands: SmallVec<[ValueId; 4]>,
     pub ty: Lang::Ty,
 }
 
 // ---------------------------------------------------------------------------
-// ENode — what lives in the sea of nodes
+// ValueKind — what lives in the sea of nodes
 // ---------------------------------------------------------------------------
 
 /// A node in the e-graph.
 #[derive(Clone, Debug)]
-pub enum ENode<R, Lang: Language> {
+pub enum ValueKind<R, Lang: Language> {
     /// A pure instruction, hash-consed and floating.
     Pure {
         op: PureOp<R>,
-        operands: SmallVec<[NodeId; 4]>,
+        operands: SmallVec<[ValueId; 4]>,
     },
     /// Union of two equivalent representations (binary tree of eclasses).
     Union {
-        left: NodeId,
-        right: NodeId,
+        left: ValueId,
+        right: ValueId,
     },
     /// Function parameter.
     FuncParam {
@@ -138,16 +138,16 @@ pub enum ENode<R, Lang: Language> {
     SideEffectResult,
 }
 
-impl<R, Lang: Language> ENode<R, Lang> {
+impl<R, Lang: Language> ValueKind<R, Lang> {
     /// Return all child NodeIds referenced by this node.
-    pub fn children(&self) -> SmallVec<[NodeId; 4]> {
+    pub fn children(&self) -> SmallVec<[ValueId; 4]> {
         match self {
-            ENode::Pure { operands, .. } => operands.clone(),
-            ENode::Union { left, right } => smallvec::smallvec![*left, *right],
-            ENode::FuncParam { .. }
-            | ENode::BlockParam { .. }
-            | ENode::Constant(_)
-            | ENode::SideEffectResult => SmallVec::new(),
+            ValueKind::Pure { operands, .. } => operands.clone(),
+            ValueKind::Union { left, right } => smallvec::smallvec![*left, *right],
+            ValueKind::FuncParam { .. }
+            | ValueKind::BlockParam { .. }
+            | ValueKind::Constant(_)
+            | ValueKind::SideEffectResult => SmallVec::new(),
         }
     }
 }
@@ -155,18 +155,18 @@ impl<R, Lang: Language> ENode<R, Lang> {
 /// One graph node together with all metadata intrinsically owned by that
 /// identity.
 #[derive(Clone, Debug)]
-pub struct Node<R, Lang: Language> {
-    pub kind: ENode<R, Lang>,
+pub struct Value<R, Lang: Language> {
+    pub kind: ValueKind<R, Lang>,
     pub ty: Lang::Ty,
     /// First source span attached to this hash-consed value.
     pub span: Option<Span>,
     /// Canonical replacement selected by CFG simplification, if any.
-    pub alias: Option<NodeId>,
+    pub alias: Option<ValueId>,
 }
 
-impl<R, Lang: Language> Node<R, Lang> {
+impl<R, Lang: Language> Value<R, Lang> {
     /// Return the graph dependencies referenced by this node.
-    pub fn children(&self) -> SmallVec<[NodeId; 4]> {
+    pub fn children(&self) -> SmallVec<[ValueId; 4]> {
         self.kind.children()
     }
 }
@@ -180,10 +180,10 @@ impl<R, Lang: Language> Node<R, Lang> {
 pub struct SideEffect<P: Family, Lang: Language> {
     pub kind: SideEffectKind<P, Lang>,
     /// Canonical EGIR value operands for this effect.
-    pub operand_nodes: SmallVec<[NodeId; 4]>,
+    pub operand_nodes: SmallVec<[ValueId; 4]>,
     /// Result value, if this effect produces one. Addressable-place results
     /// are carried by the corresponding `EffectOp` variant instead.
-    pub result: Option<NodeId>,
+    pub result: Option<ValueId>,
     /// Effect token chain.
     pub effects: Option<(EffectToken, EffectToken)>,
     /// Source span of the user expression that produced this side-effect,
@@ -192,7 +192,7 @@ pub struct SideEffect<P: Family, Lang: Language> {
 }
 
 /// EGIR-native effect operation. Value and place operands are represented by
-/// the enclosing side effect's `NodeId` operands; SSA identities are
+/// the enclosing side effect's `ValueId` operands; SSA identities are
 /// introduced only when the graph is elaborated.
 #[derive(Clone, Debug)]
 pub enum EffectOp<R, Ty> {
@@ -311,17 +311,17 @@ impl SoacDestination {
 pub enum SegExtent<R> {
     Fixed(u32),
     PushConstant {
-        node: NodeId,
+        node: ValueId,
         offset: u32,
     },
     ResourceLength {
-        node: NodeId,
+        node: ValueId,
         resource: R,
         elem_bytes: u32,
     },
     /// A concrete EGIR value whose provenance is not host-dispatchable. Such
     /// spaces remain valid for lane-local/serial lowering.
-    Value(NodeId),
+    Value(ValueId),
 }
 
 /// The parallel iteration space of a `Seg` op. Dimensions retain their
@@ -350,7 +350,7 @@ impl<R> SegSpace<R> {
         self.dims
     }
 
-    pub(crate) fn referenced_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+    pub(crate) fn referenced_nodes(&self) -> impl Iterator<Item = ValueId> + '_ {
         self.dims.iter().filter_map(|extent| match extent {
             SegExtent::PushConstant { node, .. }
             | SegExtent::ResourceLength { node, .. }
@@ -359,7 +359,7 @@ impl<R> SegSpace<R> {
         })
     }
 
-    pub(crate) fn referenced_node_slots(&mut self) -> Vec<&mut NodeId> {
+    pub(crate) fn referenced_node_slots(&mut self) -> Vec<&mut ValueId> {
         self.dims
             .iter_mut()
             .filter_map(|extent| match extent {
@@ -375,7 +375,7 @@ impl<R> SegSpace<R> {
 impl<R: Copy> SegSpace<R> {
     /// Rewrite one referenced graph value and, for a resource-length extent,
     /// keep its resource identity synchronized with the replacement view.
-    pub(crate) fn replace_reference(&mut self, old: NodeId, new: NodeId, resource: R) {
+    pub(crate) fn replace_reference(&mut self, old: ValueId, new: ValueId, resource: R) {
         for extent in &mut self.dims {
             match extent {
                 SegExtent::PushConstant { node, .. } | SegExtent::Value(node) if *node == old => {
@@ -399,7 +399,7 @@ impl<R: Copy> SegSpace<R> {
     /// one-dimensional dynamic shape.
     pub(crate) fn retarget_single_resource_length(
         &mut self,
-        view: NodeId,
+        view: ValueId,
         resource: R,
         elem_bytes: u32,
     ) -> bool {
@@ -423,7 +423,7 @@ impl<R: Copy> SegSpace<R> {
 #[derive(Clone, Debug)]
 pub struct SegBody {
     pub region: RegionId,
-    pub captures: Vec<NodeId>,
+    pub captures: Vec<ValueId>,
 }
 
 impl SegBody {
@@ -449,11 +449,11 @@ impl SegBody {
     pub(crate) fn capture_bindings<P: Family, Lang: Language>(
         &self,
         function: &Func<P, Lang>,
-    ) -> Result<LookupMap<NodeId, NodeId>, String> {
+    ) -> Result<LookupMap<ValueId, ValueId>, String> {
         let leading = self.leading_parameter_count(function)?;
         let mut bindings = LookupMap::new();
         for (node, definition) in &function.graph.nodes {
-            let ENode::FuncParam { index } = &definition.kind else {
+            let ValueKind::FuncParam { index } = &definition.kind else {
                 continue;
             };
             if *index < leading || *index >= function.params.len() {
@@ -599,13 +599,13 @@ impl<Ty> SoacInputType<Ty> {
 }
 
 /// Terminator using NodeIds for value references.
-pub type SkeletonTerminator = crate::flow::Terminator<NodeId>;
+pub type SkeletonTerminator = crate::flow::Terminator<ValueId>;
 
 /// A block in the skeleton CFG.
 #[derive(Clone, Debug)]
 pub struct SkeletonBlock<P: Family, Lang: Language> {
     /// Block parameters as NodeIds.
-    pub params: Vec<NodeId>,
+    pub params: Vec<ValueId>,
     /// Effectful instructions, in order.
     pub side_effects: Vec<SideEffect<P, Lang>>,
     /// Block terminator.
@@ -702,7 +702,7 @@ impl<P: Family, Lang: Language> Skeleton<P, Lang> {
     /// Verify that every CFG edge supplies one argument per target block parameter.
     pub fn verify_branch_arities(&self) -> Result<(), String> {
         for (source, block) in &self.blocks {
-            let check = |target: BlockId, args: &[NodeId]| {
+            let check = |target: BlockId, args: &[ValueId]| {
                 let target_block = self
                     .blocks
                     .get(target)
@@ -750,7 +750,7 @@ pub struct SideEffectSite {
 /// Build this once for a graph snapshot and share it across related queries.
 /// Rebuild it after any structural skeleton mutation.
 pub struct SideEffectIndex {
-    by_result: LookupMap<NodeId, SideEffectSite>,
+    by_result: LookupMap<ValueId, SideEffectSite>,
 }
 
 impl SideEffectIndex {
@@ -771,14 +771,14 @@ impl SideEffectIndex {
         Self { by_result }
     }
 
-    pub fn site(&self, result: NodeId) -> Option<SideEffectSite> {
+    pub fn site(&self, result: ValueId) -> Option<SideEffectSite> {
         self.by_result.get(&result).copied()
     }
 
     pub fn effect<'a, P: Family, Lang: Language>(
         &self,
         graph: &'a EGraph<P, Lang>,
-        result: NodeId,
+        result: ValueId,
     ) -> Option<&'a SideEffect<P, Lang>> {
         let site = self.site(result)?;
         let effect = graph.skeleton.blocks.get(site.block)?.side_effects.get(site.index)?;
@@ -788,7 +788,7 @@ impl SideEffectIndex {
     pub fn effect_mut<'a, P: Family, Lang: Language>(
         &self,
         graph: &'a mut EGraph<P, Lang>,
-        result: NodeId,
+        result: ValueId,
     ) -> Option<&'a mut SideEffect<P, Lang>> {
         let site = self.site(result)?;
         let effect = graph.skeleton.blocks.get_mut(site.block)?.side_effects.get_mut(site.index)?;
@@ -805,11 +805,11 @@ impl SideEffectIndex {
 pub struct EGraph<P: Family, Lang: Language> {
     /// All nodes (pure, union, params, constants, side-effect results),
     /// including their type, span, and canonical alias.
-    pub nodes: SlotMap<NodeId, Node<P::Resource, Lang>>,
-    /// Hash-cons table: NodeKey → existing NodeId.
-    hash_cons: LookupMap<NodeKey<P::Resource, Lang>, NodeId>,
+    pub nodes: SlotMap<ValueId, Value<P::Resource, Lang>>,
+    /// Hash-cons table: PureValueKey → existing ValueId.
+    hash_cons: LookupMap<PureValueKey<P::Resource, Lang>, ValueId>,
     /// Constant dedup cache.
-    const_cache: LookupMap<Lang::Const, NodeId>,
+    const_cache: LookupMap<Lang::Const, ValueId>,
     /// The CFG skeleton.
     pub skeleton: Skeleton<P, Lang>,
 }
@@ -819,7 +819,7 @@ pub struct EGraph<P: Family, Lang: Language> {
 /// Transformations may consume and rebuild an `EGraph` through this boundary
 /// without gaining direct access to its hash-consing internals.
 pub(super) struct EGraphParts<P: Family, Lang: Language> {
-    pub(super) nodes: SlotMap<NodeId, Node<P::Resource, Lang>>,
+    pub(super) nodes: SlotMap<ValueId, Value<P::Resource, Lang>>,
     pub(super) skeleton: Skeleton<P, Lang>,
 }
 
@@ -864,19 +864,19 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         SideEffectIndex::build(self)
     }
 
-    fn pure_node_key(&self, id: NodeId) -> Option<NodeKey<P::Resource, Lang>> {
+    fn pure_node_key(&self, id: ValueId) -> Option<PureValueKey<P::Resource, Lang>> {
         let node = self.nodes.get(id)?;
-        let ENode::Pure { op, operands } = &node.kind else {
+        let ValueKind::Pure { op, operands } = &node.kind else {
             return None;
         };
-        Some(NodeKey {
+        Some(PureValueKey {
             op: op.clone(),
             operands: operands.clone(),
             ty: node.ty.clone(),
         })
     }
 
-    fn unindex_current_pure(&mut self, id: NodeId) {
+    fn unindex_current_pure(&mut self, id: ValueId) {
         let Some(key) = self.pure_node_key(id) else {
             return;
         };
@@ -885,7 +885,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         }
     }
 
-    fn index_current_pure(&mut self, id: NodeId) {
+    fn index_current_pure(&mut self, id: ValueId) {
         let Some(key) = self.pure_node_key(id) else {
             return;
         };
@@ -894,7 +894,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 
     /// Replace a node in place without changing its result type, keeping the
     /// pure-node hash-cons table consistent across the mutation.
-    pub fn replace_node_preserving_type(&mut self, id: NodeId, node: ENode<P::Resource, Lang>) {
+    pub fn replace_node_preserving_type(&mut self, id: ValueId, node: ValueKind<P::Resource, Lang>) {
         self.unindex_current_pure(id);
         self.nodes[id].kind = node;
         self.index_current_pure(id);
@@ -904,27 +904,27 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     /// type, keeping the hash-cons table consistent across the mutation.
     pub fn replace_pure_node(
         &mut self,
-        id: NodeId,
+        id: ValueId,
         op: PureOp<P::Resource>,
-        operands: SmallVec<[NodeId; 4]>,
+        operands: SmallVec<[ValueId; 4]>,
     ) {
-        self.replace_node_preserving_type(id, ENode::Pure { op, operands });
+        self.replace_node_preserving_type(id, ValueKind::Pure { op, operands });
     }
 
     /// Mutate a pure node's operator and operands in place while maintaining
     /// the hash-cons table. Returns false if `id` is not a pure node.
-    pub fn update_pure_node<F>(&mut self, id: NodeId, update: F) -> bool
+    pub fn update_pure_node<F>(&mut self, id: ValueId, update: F) -> bool
     where
-        F: FnOnce(&mut PureOp<P::Resource>, &mut SmallVec<[NodeId; 4]>),
+        F: FnOnce(&mut PureOp<P::Resource>, &mut SmallVec<[ValueId; 4]>),
     {
         if !matches!(
             self.nodes.get(id).map(|node| &node.kind),
-            Some(ENode::Pure { .. })
+            Some(ValueKind::Pure { .. })
         ) {
             return false;
         }
         self.unindex_current_pure(id);
-        if let ENode::Pure { op, operands } = &mut self.nodes[id].kind {
+        if let ValueKind::Pure { op, operands } = &mut self.nodes[id].kind {
             update(op, operands);
         }
         self.index_current_pure(id);
@@ -933,17 +933,17 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 
     /// Change a node's result type while maintaining the pure-node hash-cons
     /// key when the node is hash-consed.
-    pub fn retype_node(&mut self, id: NodeId, ty: Lang::Ty) {
+    pub fn retype_node(&mut self, id: ValueId, ty: Lang::Ty) {
         self.unindex_current_pure(id);
         self.nodes[id].ty = ty;
         self.index_current_pure(id);
     }
 
     /// Remove a function-parameter node and its graph-owned metadata.
-    pub fn remove_func_param(&mut self, id: NodeId) -> bool {
+    pub fn remove_func_param(&mut self, id: ValueId) -> bool {
         if !matches!(
             self.nodes.get(id).map(|node| &node.kind),
-            Some(ENode::FuncParam { .. })
+            Some(ValueKind::FuncParam { .. })
         ) {
             return false;
         }
@@ -952,18 +952,18 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 
     /// Replace references inside graph-owned nodes. Skeleton side-effect
     /// operands are handled by higher-level graph rewriting helpers.
-    pub fn replace_node_references(&mut self, old: NodeId, new: NodeId) {
+    pub fn replace_node_references(&mut self, old: ValueId, new: ValueId) {
         if old == new {
             return;
         }
 
-        let ids: Vec<NodeId> = self.nodes.keys().collect();
+        let ids: Vec<ValueId> = self.nodes.keys().collect();
         for id in ids {
             if self.nodes[id].alias == Some(old) {
                 self.nodes[id].alias = Some(new);
             }
             match self.nodes.get(id).map(|node| &node.kind) {
-                Some(ENode::Pure { operands, .. }) if operands.contains(&old) => {
+                Some(ValueKind::Pure { operands, .. }) if operands.contains(&old) => {
                     self.update_pure_node(id, |_, operands| {
                         for operand in operands {
                             if *operand == old {
@@ -972,8 +972,8 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
                         }
                     });
                 }
-                Some(ENode::Union { .. }) => {
-                    if let ENode::Union { left, right } = &mut self.nodes[id].kind {
+                Some(ValueKind::Union { .. }) => {
+                    if let ValueKind::Union { left, right } = &mut self.nodes[id].kind {
                         if *left == old {
                             *left = new;
                         }
@@ -990,7 +990,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     /// Install canonical aliases produced by a graph rewrite. Alias ownership
     /// follows the source node, so later graph copies and removals cannot leave
     /// a detached side table behind.
-    pub fn install_aliases(&mut self, aliases: impl IntoIterator<Item = (NodeId, NodeId)>) {
+    pub fn install_aliases(&mut self, aliases: impl IntoIterator<Item = (ValueId, ValueId)>) {
         for (source, target) in aliases {
             self.nodes[source].alias = Some(target);
         }
@@ -1001,7 +1001,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     pub fn rebuild_hash_cons(&mut self) {
         let mut rebuilt = LookupMap::new();
         for (id, node) in self.nodes.iter() {
-            if matches!(&node.kind, ENode::Pure { .. }) {
+            if matches!(&node.kind, ValueKind::Pure { .. }) {
                 if let Some(key) = self.pure_node_key(id) {
                     rebuilt.entry(key).or_insert(id);
                 }
@@ -1015,7 +1015,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             .nodes
             .iter()
             .filter_map(|(id, node)| match &node.kind {
-                ENode::Constant(value) => Some((value.clone(), id)),
+                ValueKind::Constant(value) => Some((value.clone(), id)),
                 _ => None,
             })
             .collect();
@@ -1040,7 +1040,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         }
 
         for (id, node) in self.nodes.iter() {
-            if matches!(&node.kind, ENode::Pure { .. }) {
+            if matches!(&node.kind, ValueKind::Pure { .. }) {
                 let Some(key) = self.pure_node_key(id) else {
                     return Err(format!("pure node {:?} has no type", id));
                 };
@@ -1065,8 +1065,13 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         Ok(())
     }
 
-    fn insert_node(&mut self, kind: ENode<P::Resource, Lang>, ty: Lang::Ty, span: Option<Span>) -> NodeId {
-        self.nodes.insert(Node {
+    fn insert_node(
+        &mut self,
+        kind: ValueKind<P::Resource, Lang>,
+        ty: Lang::Ty,
+        span: Option<Span>,
+    ) -> ValueId {
+        self.nodes.insert(Value {
             kind,
             ty,
             span,
@@ -1075,14 +1080,14 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     }
 
     /// Allocate a function parameter node.
-    pub fn add_func_param(&mut self, index: usize, ty: Lang::Ty) -> NodeId {
-        self.insert_node(ENode::FuncParam { index }, ty, None)
+    pub fn add_func_param(&mut self, index: usize, ty: Lang::Ty) -> ValueId {
+        self.insert_node(ValueKind::FuncParam { index }, ty, None)
     }
 
     /// Append a parameter to a block and allocate its corresponding node.
-    pub fn add_block_param(&mut self, block: BlockId, ty: Lang::Ty) -> NodeId {
+    pub fn add_block_param(&mut self, block: BlockId, ty: Lang::Ty) -> ValueId {
         let index = self.skeleton.blocks[block].params.len();
-        let id = self.insert_node(ENode::BlockParam { block, index }, ty, None);
+        let id = self.insert_node(ValueKind::BlockParam { block, index }, ty, None);
         self.skeleton.blocks[block].params.push(id);
         id
     }
@@ -1093,7 +1098,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     /// their uses before a later cleanup. Surviving parameter nodes are
     /// renumbered to match their new positions in the block parameter list.
     /// Returns the removed nodes in ascending order of their former slots.
-    pub fn remove_block_param_slots(&mut self, block: BlockId, slots: &SortedSet<usize>) -> Vec<NodeId> {
+    pub fn remove_block_param_slots(&mut self, block: BlockId, slots: &SortedSet<usize>) -> Vec<ValueId> {
         let param_count = self.skeleton.blocks[block].params.len();
         assert!(
             slots.iter().all(|&slot| slot < param_count),
@@ -1138,7 +1143,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         let surviving_params = self.skeleton.blocks[block].params.clone();
         for (index, param) in surviving_params.into_iter().enumerate() {
             match &mut self.nodes[param].kind {
-                ENode::BlockParam {
+                ValueKind::BlockParam {
                     block: owner,
                     index: old_index,
                 } if *owner == block => *old_index = index,
@@ -1150,11 +1155,11 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     }
 
     /// Intern a constant, deduplicating.
-    pub fn intern_constant(&mut self, c: Lang::Const, ty: Lang::Ty) -> NodeId {
+    pub fn intern_constant(&mut self, c: Lang::Const, ty: Lang::Ty) -> ValueId {
         if let Some(&existing) = self.const_cache.get(&c) {
             return existing;
         }
-        let id = self.insert_node(ENode::Constant(c.clone()), ty, None);
+        let id = self.insert_node(ValueKind::Constant(c.clone()), ty, None);
         self.const_cache.insert(c, id);
         id
     }
@@ -1165,11 +1170,11 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     pub fn intern_pure(
         &mut self,
         op: PureOp<P::Resource>,
-        operands: SmallVec<[NodeId; 4]>,
+        operands: SmallVec<[ValueId; 4]>,
         ty: Lang::Ty,
         span: Option<Span>,
-    ) -> NodeId {
-        let key = NodeKey {
+    ) -> ValueId {
+        let key = PureValueKey {
             op: op.clone(),
             operands: operands.clone(),
             ty: ty.clone(),
@@ -1177,21 +1182,21 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         if let Some(&existing) = self.hash_cons.get(&key) {
             return existing;
         }
-        let id = self.insert_node(ENode::Pure { op, operands }, ty, span);
+        let id = self.insert_node(ValueKind::Pure { op, operands }, ty, span);
         self.hash_cons.insert(key, id);
         id
     }
 
     /// Allocate a node for a side-effect result (not hash-consed).
-    pub fn alloc_side_effect_result(&mut self, ty: Lang::Ty) -> NodeId {
-        self.insert_node(ENode::SideEffectResult, ty, None)
+    pub fn alloc_side_effect_result(&mut self, ty: Lang::Ty) -> ValueId {
+        self.insert_node(ValueKind::SideEffectResult, ty, None)
     }
 
     /// Create a union node joining two alternatives.
-    pub fn add_union(&mut self, left: NodeId, right: NodeId) -> NodeId {
+    pub fn add_union(&mut self, left: ValueId, right: ValueId) -> ValueId {
         // Use the type of the left (they should be equivalent).
         let ty = self.nodes[left].ty.clone();
-        self.insert_node(ENode::Union { left, right }, ty, None)
+        self.insert_node(ValueKind::Union { left, right }, ty, None)
     }
 
     /// Turn a pure node into a union of itself and `alt`, in place: the
@@ -1199,16 +1204,16 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     /// becomes `Union { fresh, alt }`. Every existing reference to `id` —
     /// pure operands, side-effect slots, terminator args — sees both
     /// alternatives with no rewiring; extraction picks the cheaper side.
-    pub fn union_pure_in_place(&mut self, id: NodeId, alt: NodeId) -> NodeId {
+    pub fn union_pure_in_place(&mut self, id: ValueId, alt: ValueId) -> ValueId {
         assert_ne!(
             id, alt,
             "union_pure_in_place: alternative must differ from the node"
         );
-        debug_assert!(matches!(&self.nodes[id].kind, ENode::Pure { .. }));
+        debug_assert!(matches!(&self.nodes[id].kind, ValueKind::Pure { .. }));
         let original_kind = self.nodes[id].kind.clone();
         let original_ty = self.nodes[id].ty.clone();
         let original_span = self.nodes[id].span;
-        let fresh = self.nodes.insert(Node {
+        let fresh = self.nodes.insert(Value {
             kind: original_kind,
             ty: original_ty,
             span: original_span,
@@ -1218,7 +1223,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         if let Some(key) = self.pure_node_key(fresh) {
             self.hash_cons.insert(key, fresh);
         }
-        self.nodes[id].kind = ENode::Union {
+        self.nodes[id].kind = ValueKind::Union {
             left: fresh,
             right: alt,
         };
@@ -1229,16 +1234,16 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     /// degenerate union both of whose sides are `better`, so extraction can
     /// only pick `better` and existing references follow it. The discarded
     /// node's hash-cons key is retired.
-    pub fn subsume_pure_in_place(&mut self, id: NodeId, better: NodeId) {
+    pub fn subsume_pure_in_place(&mut self, id: ValueId, better: ValueId) {
         assert_ne!(
             id, better,
             "subsume_pure_in_place: replacement must differ from the node"
         );
-        debug_assert!(matches!(&self.nodes[id].kind, ENode::Pure { .. }));
+        debug_assert!(matches!(&self.nodes[id].kind, ValueKind::Pure { .. }));
         if let Some(key) = self.pure_node_key(id) {
             self.hash_cons.remove(&key);
         }
-        self.nodes[id].kind = ENode::Union {
+        self.nodes[id].kind = ValueKind::Union {
             left: better,
             right: better,
         };
@@ -1328,10 +1333,10 @@ impl<P: Family, Lang: Language> Func<P, Lang> {
     pub(crate) fn push_seg_body_capture(
         &mut self,
         body: &mut SegBody,
-        capture: NodeId,
+        capture: ValueId,
         ty: Lang::Ty,
         name: String,
-    ) -> NodeId {
+    ) -> ValueId {
         let index = self.params.len();
         let parameter = self.graph.add_func_param(index, ty.clone());
         self.params.push((ty, name));
@@ -1380,16 +1385,16 @@ impl<P: Family, Lang: Language> Func<P, Lang> {
             .nodes
             .iter()
             .filter_map(|(node, definition)| match &definition.kind {
-                ENode::FuncParam { index } => Some((node, *index)),
+                ValueKind::FuncParam { index } => Some((node, *index)),
                 _ => None,
             })
             .collect::<Vec<_>>();
         let mut tombstone_index = next_index;
         for (node, old_index) in parameter_nodes {
             if let Some(new_index) = remapped.get(old_index).copied().flatten() {
-                self.graph.nodes[node].kind = ENode::FuncParam { index: new_index };
+                self.graph.nodes[node].kind = ValueKind::FuncParam { index: new_index };
             } else {
-                self.graph.nodes[node].kind = ENode::FuncParam {
+                self.graph.nodes[node].kind = ValueKind::FuncParam {
                     index: tombstone_index,
                 };
                 tombstone_index += 1;
@@ -1441,7 +1446,7 @@ impl<P: Family, Lang: Language> ConstantDef<P, Lang> {
 #[derive(Debug, Clone, Copy)]
 pub struct SlotSource {
     pub block: BlockId,
-    pub value: NodeId,
+    pub value: ValueId,
 }
 
 /// Stable identity of a declared entry-output position.
@@ -1451,7 +1456,7 @@ pub struct OutputSlotId(pub usize);
 /// The concrete side effect that fulfils an output route after realization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutputWriter {
-    Value(NodeId),
+    Value(ValueId),
     Effect(EffectToken),
 }
 
@@ -1624,7 +1629,7 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
             .nodes
             .iter()
             .filter_map(|(node, definition)| match &definition.kind {
-                ENode::FuncParam { index } if retained.contains(index) => Some((*index, node)),
+                ValueKind::FuncParam { index } if retained.contains(index) => Some((*index, node)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -1662,7 +1667,7 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
             .nodes
             .iter()
             .filter_map(|(node, definition)| {
-                (matches!(&definition.kind, ENode::FuncParam { .. }) && !retained_nodes.contains(&node))
+                (matches!(&definition.kind, ValueKind::FuncParam { .. }) && !retained_nodes.contains(&node))
                     .then_some(node)
             })
             .collect::<Vec<_>>();
@@ -1670,7 +1675,7 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
             self.graph.remove_func_param(node);
         }
         for (new_index, (_, node)) in kept.into_iter().enumerate() {
-            if let Some(ENode::FuncParam { index }) =
+            if let Some(ValueKind::FuncParam { index }) =
                 self.graph.nodes.get_mut(node).map(|node| &mut node.kind)
             {
                 *index = new_index;
