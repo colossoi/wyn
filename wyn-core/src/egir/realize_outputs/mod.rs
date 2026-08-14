@@ -287,10 +287,10 @@ fn realize_graphics_returns(
 
 fn unique_value_return(graph: &EGraph<Raw>) -> Option<(BlockId, ValueId)> {
     let mut returns = graph.skeleton.blocks.iter().filter_map(|(block, body)| {
-        let SkeletonTerminator::Return(Some(value)) = body.term else {
+        let SkeletonTerminator::Return(Some(value)) = &body.term else {
             return None;
         };
-        Some((block, value))
+        Some((block, value.single_value()?))
     });
     let result = returns.next();
     assert!(

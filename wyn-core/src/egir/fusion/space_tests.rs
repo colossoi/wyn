@@ -1,6 +1,6 @@
 use super::*;
 use crate::egir::program::SemanticResourceRef;
-use crate::egir::types::{SegExtent, SegSpace, ValueId};
+use crate::egir::types::{SegExtent, SegSpace, ValueId, ViewId};
 use crate::ResourceId;
 use slotmap::SlotMap;
 
@@ -29,10 +29,10 @@ fn push_constant_compares_by_offset_ignoring_node() {
 }
 
 #[test]
-fn resource_length_compares_by_resource_and_stride_ignoring_node() {
+fn resource_length_compares_by_resource_and_stride_ignoring_view() {
     let (a, b) = two_nodes();
     let mk = |node: ValueId, resource: u32, elem_bytes: u32| SegExtent::ResourceLength {
-        node,
+        view: ViewId::test(node),
         resource: SemanticResourceRef(ResourceId::for_test(resource)),
         elem_bytes,
     };

@@ -16,6 +16,7 @@ fn with_converter<T>(test: impl FnOnce(&mut Converter<'_, '_>) -> T) -> T {
     let top_level = HashMap::new();
     let symbols = SymbolTable::new();
     let pure_constants = HashSet::new();
+    let callable_boundaries = HashMap::new();
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
     let mut arenas = ConversionArenas::new();
@@ -23,7 +24,7 @@ fn with_converter<T>(test: impl FnOnce(&mut Converter<'_, '_>) -> T) -> T {
         &top_level,
         &symbols,
         pure_constants,
-        HashSet::new(),
+        &callable_boundaries,
         &mut binding_ids,
         &mut effect_ids,
         &mut arenas,
@@ -58,7 +59,7 @@ fn intrinsic(name: &str) -> PureOp {
 #[test]
 fn runtime_value_plus_signed_float_zero_folds_in_both_orders() {
     with_converter(|converter| {
-        let value = converter.graph.add_func_param(0, f32_ty());
+        let value = converter.graph.add_test_value_parameter(0, f32_ty());
         let positive_zero = converter.intern_pure(PureOp::Float("0.0".into()), smallvec![], f32_ty());
         let negative_zero = converter.intern_pure(
             PureOp::UnaryOp(crate::op::UnaryOperator::Negate),
@@ -87,7 +88,7 @@ fn runtime_value_plus_signed_float_zero_folds_in_both_orders() {
 #[test]
 fn runtime_i32_plus_zero_folds_in_both_orders() {
     with_converter(|converter| {
-        let value = converter.graph.add_func_param(0, i32_ty());
+        let value = converter.graph.add_test_value_parameter(0, i32_ty());
         let zero = converter.graph.intern_constant(ConstantValue::I32(0), i32_ty());
 
         let value_plus_zero = converter.intern_pure(
@@ -109,7 +110,7 @@ fn runtime_i32_plus_zero_folds_in_both_orders() {
 #[test]
 fn runtime_f32_div_constant_folds_to_reciprocal_multiply() {
     with_converter(|converter| {
-        let value = converter.graph.add_func_param(0, f32_ty());
+        let value = converter.graph.add_test_value_parameter(0, f32_ty());
         let divisor = converter.graph.intern_constant(ConstantValue::from_f32(4.0), f32_ty());
 
         let result = converter.intern_pure(
@@ -133,7 +134,7 @@ fn runtime_f32_div_constant_folds_to_reciprocal_multiply() {
 #[test]
 fn runtime_f32_vector_div_scalar_constant_folds_to_reciprocal_multiply() {
     with_converter(|converter| {
-        let value = converter.graph.add_func_param(0, vec3f32_ty());
+        let value = converter.graph.add_test_value_parameter(0, vec3f32_ty());
         let divisor = converter.graph.intern_constant(ConstantValue::from_f32(8.0), f32_ty());
 
         let result = converter.intern_pure(
@@ -158,7 +159,7 @@ fn runtime_f32_vector_div_scalar_constant_folds_to_reciprocal_multiply() {
 #[test]
 fn f32_div_zero_does_not_rewrite_to_multiply() {
     with_converter(|converter| {
-        let value = converter.graph.add_func_param(0, f32_ty());
+        let value = converter.graph.add_test_value_parameter(0, f32_ty());
         let zero = converter.graph.intern_constant(ConstantValue::from_f32(0.0), f32_ty());
 
         let result = converter.intern_pure(
@@ -180,7 +181,7 @@ fn f32_div_zero_does_not_rewrite_to_multiply() {
 #[test]
 fn identity_bitcast_folds_to_operand() {
     with_converter(|converter| {
-        let value = converter.graph.add_func_param(0, i32_ty());
+        let value = converter.graph.add_test_value_parameter(0, i32_ty());
 
         let result = converter.intern_pure(intrinsic("i32.i32"), smallvec![value], i32_ty());
 
@@ -191,7 +192,7 @@ fn identity_bitcast_folds_to_operand() {
 #[test]
 fn inverse_bitcasts_fold_to_original_operand() {
     with_converter(|converter| {
-        let value = converter.graph.add_func_param(0, u32_ty());
+        let value = converter.graph.add_test_value_parameter(0, u32_ty());
         let as_i32 = converter.intern_pure(intrinsic("i32.u32"), smallvec![value], i32_ty());
 
         let round_trip = converter.intern_pure(intrinsic("u32.i32"), smallvec![as_i32], u32_ty());
@@ -203,7 +204,7 @@ fn inverse_bitcasts_fold_to_original_operand() {
 #[test]
 fn required_bitcast_is_retained() {
     with_converter(|converter| {
-        let value = converter.graph.add_func_param(0, u32_ty());
+        let value = converter.graph.add_test_value_parameter(0, u32_ty());
 
         let result = converter.intern_pure(intrinsic("i32.u32"), smallvec![value], i32_ty());
 
@@ -253,7 +254,7 @@ fn unary_neg_of_int_literal_folds_to_constant() {
 #[test]
 fn unary_neg_of_runtime_value_does_not_fold() {
     with_converter(|converter| {
-        let value = converter.graph.add_func_param(0, f32_ty());
+        let value = converter.graph.add_test_value_parameter(0, f32_ty());
         let neg = converter.intern_pure(
             PureOp::UnaryOp(crate::op::UnaryOperator::Negate),
             smallvec![value],

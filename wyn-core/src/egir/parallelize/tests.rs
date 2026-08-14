@@ -7,7 +7,10 @@ use crate::egir::allocation::ResourcesAllocated;
 use crate::egir::ir::RealizedOutputRoute;
 use crate::egir::program::SlotSource;
 use crate::egir::soac::screma;
-use crate::egir::types::{EffectOp, EffectToken, Semantic};
+use crate::egir::types::{
+    by_value_function_result, callable_parameter, CallEffects, EffectOp, EffectToken, OperandRef,
+    PlaceAccess, PlaceRegion, PlaceType, Semantic, WynLanguage,
+};
 use crate::flow::ExecutionModel;
 use crate::FunctionId;
 
@@ -32,7 +35,7 @@ fn reduce_operator(neutral: ValueId, captures: Vec<ValueId>) -> screma::Reduce {
         operator: screma::Lambda::region(
             SegBody {
                 region: OPERATOR_REGION,
-                captures,
+                captures: captures.into_iter().map(OperandRef::Value).collect(),
             },
             vec![unit.clone(), unit.clone()],
             vec![unit],
@@ -51,7 +54,7 @@ fn scan_operator(neutral: ValueId, captures: Vec<ValueId>) -> screma::Scan {
 }
 
 fn neutral(graph: &mut EGraph, index: usize) -> ValueId {
-    graph.add_func_param(index, Type::Constructed(TypeName::Unit, vec![]))
+    graph.add_test_value_parameter(index, Type::Constructed(TypeName::Unit, vec![]))
 }
 
 #[test]
@@ -59,10 +62,18 @@ fn output_ownership_comes_from_explicit_route_writer() {
     let mut graph = EGraph::new();
     let block = graph.skeleton.entry;
     let source = neutral(&mut graph, 0);
+    let place = graph.add_alloca_place(
+        PlaceType {
+            pointee: Type::Constructed(TypeName::Unit, vec![]),
+            region: PlaceRegion::Function,
+            access: PlaceAccess::ReadWrite,
+        },
+        None,
+    );
     let writer = EffectToken::from(9);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Store),
-        operand_nodes: smallvec![],
+        kind: SideEffectKind::Effect(EffectOp::Store { place }),
+        operands: smallvec![OperandRef::Value(source)],
         result: None,
         effects: Some((EffectToken::from(8), writer)),
         span: None,
@@ -86,7 +97,7 @@ fn output_ownership_comes_from_explicit_route_writer() {
             .collect(),
         vec![],
         vec![],
-        Type::Constructed(TypeName::Unit, vec![]),
+        by_value_function_result::<WynLanguage>(Type::Constructed(TypeName::Unit, vec![])),
         graph,
     );
     entry.outputs[3].routes.push(RealizedOutputRoute {
@@ -143,7 +154,7 @@ fn reduction_keeps_canonical_operator_lambda_together() {
     let reduction = &op.form.reductions[0];
     let body = reduction.operator.seg_body().unwrap();
     assert_eq!(body.region, OPERATOR_REGION);
-    assert_eq!(body.captures, vec![neutral]);
+    assert_eq!(body.captures, vec![OperandRef::Value(neutral)]);
     assert_eq!(reduction.neutral, vec![neutral]);
     assert!(!reduction.commutative, "Wyn does not yet declare commutativity");
 }
@@ -202,7 +213,7 @@ fn screma_form_carries_scan_and_reduction_operators() {
 #[test]
 fn idle_chunk_start_is_clamped_before_remaining_subtraction() {
     let mut graph = EGraph::new();
-    let len = graph.add_func_param(0, Type::Constructed(TypeName::UInt(32), vec![]));
+    let len = graph.add_test_value_parameter(0, Type::Constructed(TypeName::UInt(32), vec![]));
     let (_, start, _) =
         emit_chunk_arithmetic(&mut graph, REDUCE_PHASE1_WIDTH, len).expect("u32 chunk arithmetic");
     assert!(matches!(
@@ -224,9 +235,34 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
     let mut semantic_ids = crate::egir::program::SemanticOpIdSource::default();
     let mut effect_ids = crate::IdSource::new();
     let mut identities = crate::egir::program::ProgramIdentities::default();
+    let operator_id = identities.alloc_function("combine".into());
+    let mut operator_graph = EGraph::new();
+    let left = operator_graph.add_test_value_parameter(0, elem_ty.clone());
+    let right = operator_graph.add_test_value_parameter(1, elem_ty.clone());
+    let combined = operator_graph.intern_pure(
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        smallvec![left, right],
+        elem_ty.clone(),
+        None,
+    );
+    operator_graph.skeleton.blocks[operator_graph.skeleton.entry].term =
+        SkeletonTerminator::Return(Some(operator_graph.value_result(combined)));
+    let operator = SemanticFunc::new(
+        operator_id,
+        "combine".into(),
+        Span::dummy(),
+        None,
+        vec![
+            callable_parameter::<SemanticResourceRef, WynLanguage>("left".into(), elem_ty.clone()),
+            callable_parameter::<SemanticResourceRef, WynLanguage>("right".into(), elem_ty.clone()),
+        ],
+        by_value_function_result::<WynLanguage>(elem_ty.clone()),
+        CallEffects::Pure,
+        operator_graph,
+    );
     let phase2 = ScanPhase2Spec {
         entry_name: "prefix".into(),
-        operator: identities.alloc_function("combine".into()),
+        operator: &operator,
         elem_ty,
         source_graph: &phase1,
         operator_captures: &[],
@@ -250,13 +286,20 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
         .iter()
         .flat_map(|(_, block)| &block.side_effects)
         .find_map(|effect| {
-            if !matches!(effect.kind, SideEffectKind::Effect(EffectOp::Store)) {
+            let SideEffectKind::Effect(EffectOp::Store { place }) = &effect.kind else {
                 return None;
-            }
-            let place = *effect.operand_nodes.first()?;
-            (graph_ops::storage_resource_under(&phase2.body.graph, place)
-                == Some(SemanticResourceRef(offsets)))
-            .then(|| effect.operand_nodes[1])
+            };
+            let value = effect.operands.first()?.value()?;
+            let resource = phase2
+                .body
+                .graph
+                .place_value_dependencies(*place)
+                .into_iter()
+                .find_map(|dependency| {
+                    graph_ops::storage_resource_under(&phase2.body.graph, dependency)
+                });
+            (resource == Some(SemanticResourceRef(offsets)))
+            .then_some(value)
         })
         .expect("block-offset store");
     assert!(matches!(

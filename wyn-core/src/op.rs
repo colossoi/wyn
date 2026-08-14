@@ -24,10 +24,6 @@
 //! - `StorageView(Storage)`: `[offset, len]`
 //! - `StorageView(Inherited)`: `[offset, len, parent]`
 //! - `StorageViewLen`: `[view]`
-//! - `ViewIndex`: `[view, index]` — EGIR-only (place-producing; SSA uses
-//!   `InstKind::ViewIndex` which carries a fresh `PlaceId`).
-//! - `OutputSlot { index }`: 0 — EGIR-only (place-producing; SSA uses
-//!   `InstKind::OutputSlot`).
 
 use crate::BindingRef;
 
@@ -163,8 +159,10 @@ impl std::fmt::Display for UnaryOperator {
 }
 
 /// The operator identity shared by EGIR's pure nodes and SSA's `InstKind::Op`.
+/// The call-target type is selected by the owning IR; EGIR uses an
+/// uninhabited target so calls can only be represented by its call-site arena.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum OpTag<R = BindingRef> {
+pub enum OpTag<R, C> {
     /// Signed integer literal (i8, i16, i32, i64).
     Int(String),
     /// Unsigned integer literal (u8, u16, u32, u64).
@@ -191,7 +189,7 @@ pub enum OpTag<R = BindingRef> {
     Index,
     Materialize,
     DynamicExtract,
-    Call(crate::FunctionId),
+    Call(C),
     Intrinsic {
         id: crate::builtins::BuiltinId,
         overload_idx: usize,
@@ -211,22 +209,6 @@ pub enum OpTag<R = BindingRef> {
     /// storage-length intrinsic before SSA elaboration.
     ResourceLen(R),
     StorageViewLen,
-    /// EGIR-only: place-producing view-index. Never appears in
-    /// `InstKind::Op` — SSA uses `InstKind::ViewIndex` directly (carries
-    /// a fresh `PlaceId`).
-    ViewIndex,
-    /// EGIR-only: index into another place to produce a sub-place. Operands
-    /// `[parent_place, index]`. Mirrors `ViewIndex` but the parent is itself
-    /// a place (e.g. an `Alloca`'d `[T;N]`) rather than a value-typed view —
-    /// elaborate maps it to `InstKind::PlaceIndex` carrying a fresh `PlaceId`.
-    /// Used by `soac_expand` to write directly into a function-local array
-    /// place without going through a whole-array `Load`/`Store` round-trip.
-    PlaceIndex,
-    /// EGIR-only: place-producing entry-output slot. Never appears in
-    /// `InstKind::Op` — SSA uses `InstKind::OutputSlot` directly.
-    OutputSlot {
-        index: usize,
-    },
 }
 
 /// Hashable variant of `ViewSource` for use inside an `OpTag`. Drops the
@@ -260,7 +242,7 @@ impl<R> PureViewSource<R> {
     }
 }
 
-impl<R> OpTag<R> {
+impl<R, C> OpTag<R, C> {
     /// Resource identity carried directly by this operator, excluding
     /// resource handles represented by ordinary operands.
     pub fn referenced_resource(&self) -> Option<&R> {
@@ -273,7 +255,7 @@ impl<R> OpTag<R> {
         }
     }
 
-    pub fn try_map_resource<S, E>(self, map: &mut impl FnMut(R) -> Result<S, E>) -> Result<OpTag<S>, E> {
+    pub fn try_map_resource<S, E>(self, map: &mut impl FnMut(R) -> Result<S, E>) -> Result<OpTag<S, C>, E> {
         Ok(match self {
             OpTag::Int(value) => OpTag::Int(value),
             OpTag::Uint(value) => OpTag::Uint(value),
@@ -299,9 +281,40 @@ impl<R> OpTag<R> {
             OpTag::StorageView(source) => OpTag::StorageView(source.try_map_resource(map)?),
             OpTag::ResourceLen(resource) => OpTag::ResourceLen(map(resource)?),
             OpTag::StorageViewLen => OpTag::StorageViewLen,
-            OpTag::ViewIndex => OpTag::ViewIndex,
-            OpTag::PlaceIndex => OpTag::PlaceIndex,
-            OpTag::OutputSlot { index } => OpTag::OutputSlot { index },
         })
+    }
+
+    pub fn try_map_call<D, E>(self, map: &mut impl FnMut(C) -> Result<D, E>) -> Result<OpTag<R, D>, E> {
+        Ok(match self {
+            OpTag::Int(value) => OpTag::Int(value),
+            OpTag::Uint(value) => OpTag::Uint(value),
+            OpTag::Float(value) => OpTag::Float(value),
+            OpTag::Bool(value) => OpTag::Bool(value),
+            OpTag::Unit => OpTag::Unit,
+            OpTag::Global(value) => OpTag::Global(value),
+            OpTag::BinOp(value) => OpTag::BinOp(value),
+            OpTag::UnaryOp(value) => OpTag::UnaryOp(value),
+            OpTag::Tuple(value) => OpTag::Tuple(value),
+            OpTag::Vector(value) => OpTag::Vector(value),
+            OpTag::Matrix { rows, cols } => OpTag::Matrix { rows, cols },
+            OpTag::ArrayLit(value) => OpTag::ArrayLit(value),
+            OpTag::ArrayRange { has_step } => OpTag::ArrayRange { has_step },
+            OpTag::Project { index } => OpTag::Project { index },
+            OpTag::Index => OpTag::Index,
+            OpTag::Materialize => OpTag::Materialize,
+            OpTag::DynamicExtract => OpTag::DynamicExtract,
+            OpTag::Call(value) => OpTag::Call(map(value)?),
+            OpTag::Intrinsic { id, overload_idx } => OpTag::Intrinsic { id, overload_idx },
+            OpTag::StorageImageLoad(resource) => OpTag::StorageImageLoad(resource),
+            OpTag::StorageImageStore(resource) => OpTag::StorageImageStore(resource),
+            OpTag::StorageView(source) => OpTag::StorageView(source),
+            OpTag::ResourceLen(resource) => OpTag::ResourceLen(resource),
+            OpTag::StorageViewLen => OpTag::StorageViewLen,
+        })
+    }
+
+    pub fn map_call<D>(self, mut map: impl FnMut(C) -> D) -> OpTag<R, D> {
+        self.try_map_call(&mut |call| Ok::<_, std::convert::Infallible>(map(call)))
+            .unwrap()
     }
 }

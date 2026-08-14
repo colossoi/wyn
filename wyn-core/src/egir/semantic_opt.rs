@@ -169,7 +169,12 @@ fn dead_seg_ops_in_graph(graph: &EGraph) -> DeadGraphPatch {
                     },
                     _ => true,
                 };
-                (!observable && effect.result.is_none_or(|result| !used.contains(&result))).then_some(index)
+                (!observable
+                    && effect
+                        .result
+                        .as_ref()
+                        .is_none_or(|result| result.values().iter().all(|value| !used.contains(value))))
+                .then_some(index)
             })
             .collect::<Vec<_>>();
         if !dead.is_empty() {

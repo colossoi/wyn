@@ -10,7 +10,7 @@ use crate::egir::ir::{Body, SideEffectSite};
 use crate::egir::program::{OutputWriter, RealizedOutputRoute, SemanticEntry, SemanticResourceDecl};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
-use crate::egir::types::{EGraph, PureOp, Semantic, ValueId, ValueKind, WynLanguage};
+use crate::egir::types::{EGraph, OperandRef, PureOp, Semantic, ValueId, ValueKind, WynLanguage};
 use crate::flow::BlockId;
 
 type FusionBody = Body<Semantic, SemanticResourceDecl, RealizedOutputRoute, WynLanguage>;
@@ -19,17 +19,20 @@ pub(super) fn invoke_lambda(
     graph: &mut EGraph,
     program: &Segmented,
     lambda: &screma::Lambda,
-    arguments: &[ValueId],
-    captures: &[ValueId],
+    arguments: &[OperandRef],
+    captures: &[OperandRef],
 ) -> Vec<ValueId> {
     debug_assert_eq!(captures.len(), lambda.capture_count());
     let mut operands = Vec::with_capacity(arguments.len() + captures.len());
     operands.extend_from_slice(arguments);
     operands.extend_from_slice(captures);
-    if let Some(body) = lambda.seg_body() {
+    let callee = if let Some(body) = lambda.seg_body() {
         debug_assert!(program.contains_region(body.region));
-    }
-    lambda_ops::emit_call(graph, lambda, operands)
+        Some(program.region(body.region).expect("fusion lambda region"))
+    } else {
+        None
+    };
+    lambda_ops::emit_call(graph, lambda, callee, operands)
 }
 pub(super) fn result_used_only_by_effect_pair(
     graph: &EGraph,

@@ -4,40 +4,48 @@ use crate::ast::TypeName;
 
 use super::super::program::OutputSlotId;
 use super::super::types::{
-    GraphResource, SegBody, SegResourceAccess, SegSpace, Semantic, SoacDestination, SoacInputType, ValueId,
-    WynSoacPhase,
+    GraphResource, OperandRef, ResultBinding, SegBody, SegResourceAccess, SegSpace, Semantic,
+    SoacDestination, SoacInputType, ValueId, WynSoacPhase,
 };
 
 /// One position in a Screma side effect's compact operand list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Operand {
-    pub node: ValueId,
+    pub operand: OperandRef,
     pub slot: usize,
 }
 
 /// A validated view of a Screma side effect's compact operands.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ScremaOperands<'a, P: WynSoacPhase> {
     op: &'a Op<P>,
-    nodes: &'a [ValueId],
-    result: ValueId,
+    operands: &'a [OperandRef],
+    result: &'a ResultBinding<Type<TypeName>>,
 }
 
 impl<'a, P: WynSoacPhase> ScremaOperands<'a, P> {
-    pub fn decode(op: &'a Op<P>, nodes: &'a [ValueId], result: Option<ValueId>) -> Result<Self, String> {
+    pub fn decode(
+        op: &'a Op<P>,
+        operands: &'a [OperandRef],
+        result: Option<&'a ResultBinding<Type<TypeName>>>,
+    ) -> Result<Self, String> {
         op.validate()?;
         let output_count = (0..op.result_count())
             .filter(|&field| op.destination(field).is_some_and(SoacDestination::is_output_view))
             .count();
         let expected = op.inputs.len() + output_count;
-        if nodes.len() != expected {
+        if operands.len() != expected {
             return Err(format!(
                 "Screma requires {expected} typed input and output-view operands, found {}",
-                nodes.len()
+                operands.len()
             ));
         }
-        let result = result.ok_or_else(|| "Screma has no result node".to_owned())?;
-        Ok(Self { op, nodes, result })
+        let result = result.ok_or_else(|| "Screma has no result binding".to_owned())?;
+        Ok(Self {
+            op,
+            operands,
+            result,
+        })
     }
 
     pub fn input_count(&self) -> usize {
@@ -45,16 +53,16 @@ impl<'a, P: WynSoacPhase> ScremaOperands<'a, P> {
     }
 
     pub fn inputs(&self) -> impl Iterator<Item = Operand> + '_ {
-        self.nodes[..self.input_count()]
+        self.operands[..self.input_count()]
             .iter()
             .copied()
             .enumerate()
-            .map(|(slot, node)| Operand { node, slot })
+            .map(|(slot, operand)| Operand { operand, slot })
     }
 
     pub fn input(&self, slot: usize) -> Operand {
         Operand {
-            node: self.nodes[slot],
+            operand: self.operands[slot],
             slot,
         }
     }
@@ -68,7 +76,7 @@ impl<'a, P: WynSoacPhase> ScremaOperands<'a, P> {
                 })
                 .count();
         Some(Operand {
-            node: self.nodes[slot],
+            operand: self.operands[slot],
             slot,
         })
     }
@@ -77,7 +85,7 @@ impl<'a, P: WynSoacPhase> ScremaOperands<'a, P> {
         (0..self.op.result_count()).map(|field| self.output(field))
     }
 
-    pub fn result(&self) -> ValueId {
+    pub fn result(&self) -> &ResultBinding<Type<TypeName>> {
         self.result
     }
 }
@@ -141,7 +149,7 @@ impl Lambda {
         }
     }
 
-    pub(crate) fn captures(&self) -> &[ValueId] {
+    pub(crate) fn captures(&self) -> &[OperandRef] {
         match &self.body {
             LambdaBody::Identity => &[],
             LambdaBody::Region(body) => &body.captures,
@@ -171,7 +179,13 @@ impl Lambda {
     }
 
     fn capture_nodes(&self) -> impl Iterator<Item = ValueId> + '_ {
-        self.captures().iter().copied()
+        self.captures().iter().filter_map(|capture| capture.value())
+    }
+
+    pub(crate) fn remap_capture_values(&mut self, map: &mut impl FnMut(ValueId) -> ValueId) {
+        if let Some(body) = self.seg_body_mut() {
+            body.remap_capture_values(map);
+        }
     }
 }
 
@@ -401,6 +415,24 @@ impl ScremaForm {
         nodes.extend(self.reductions.iter().flat_map(|reduction| reduction.neutral.iter().copied()));
         nodes
     }
+
+
+    fn remap_referenced_values(&mut self, map: &mut impl FnMut(ValueId) -> ValueId) {
+        self.pre.remap_capture_values(map);
+        for scan in &mut self.scans {
+            scan.operator.remap_capture_values(map);
+            for neutral in &mut scan.neutral {
+                *neutral = map(*neutral);
+            }
+        }
+        for reduction in &mut self.reductions {
+            reduction.operator.remap_capture_values(map);
+            for neutral in &mut reduction.neutral {
+                *neutral = map(*neutral);
+            }
+        }
+        self.post.remap_capture_values(map);
+    }
 }
 
 fn validate_neutral_values(
@@ -609,30 +641,13 @@ impl<R: GraphResource> Op<Semantic<R>> {
         nodes
     }
 
-    pub(crate) fn referenced_node_slots(&mut self) -> Vec<&mut ValueId> {
-        let mut nodes = Vec::new();
-        if let Some(body) = self.form.pre.seg_body_mut() {
-            nodes.extend(body.captures.iter_mut());
-        }
-        for scan in &mut self.form.scans {
-            if let Some(body) = scan.operator.seg_body_mut() {
-                nodes.extend(body.captures.iter_mut());
-            }
-            nodes.extend(scan.neutral.iter_mut());
-        }
-        for reduction in &mut self.form.reductions {
-            if let Some(body) = reduction.operator.seg_body_mut() {
-                nodes.extend(body.captures.iter_mut());
-            }
-            nodes.extend(reduction.neutral.iter_mut());
-        }
-        if let Some(body) = self.form.post.seg_body_mut() {
-            nodes.extend(body.captures.iter_mut());
-        }
+    pub(crate) fn remap_referenced_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
+        self.form.remap_referenced_values(&mut map);
         if let SemanticState::Segmented { space, .. } = &mut self.state {
-            nodes.extend(space.referenced_node_slots());
+            for slot in space.referenced_node_slots() {
+                *slot = map(*slot);
+            }
         }
-        nodes
     }
 }
 
@@ -835,7 +850,7 @@ mod tests {
                 pre: Lambda::region(
                     SegBody {
                         region: RegionId::from_index(0),
-                        captures: vec![node(1)],
+                        captures: vec![OperandRef::Value(node(1))],
                     },
                     vec![unit.clone()],
                     vec![unit.clone(), unit.clone()],
@@ -844,7 +859,7 @@ mod tests {
                     operator: Lambda::region(
                         SegBody {
                             region: RegionId::from_index(1),
-                            captures: vec![node(2)],
+                            captures: vec![OperandRef::Value(node(2))],
                         },
                         vec![unit.clone(), unit.clone()],
                         vec![unit.clone()],
@@ -855,7 +870,7 @@ mod tests {
                     operator: Lambda::region(
                         SegBody {
                             region: RegionId::from_index(2),
-                            captures: vec![node(4)],
+                            captures: vec![OperandRef::Value(node(4))],
                         },
                         vec![unit.clone(), unit.clone()],
                         vec![unit.clone()],
@@ -866,7 +881,7 @@ mod tests {
                 post: Lambda::region(
                     SegBody {
                         region: RegionId::from_index(3),
-                        captures: vec![node(6)],
+                        captures: vec![OperandRef::Value(node(6))],
                     },
                     vec![unit],
                     vec![],
@@ -883,9 +898,12 @@ mod tests {
             vec![node(1), node(2), node(4), node(6), node(3), node(5)]
         );
 
-        for (index, slot) in op.referenced_node_slots().into_iter().enumerate() {
-            *slot = node(10 + index as u64);
-        }
+        let mut index = 0;
+        op.remap_referenced_values(|_| {
+            let replacement = node(10 + index);
+            index += 1;
+            replacement
+        });
         assert_eq!(
             op.referenced_nodes(),
             vec![node(10), node(11), node(13), node(15), node(12), node(14)]

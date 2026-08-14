@@ -50,7 +50,7 @@ use polytype::Type;
 use super::super::graph_ops;
 use super::super::soac::{filter, screma};
 use super::super::types::{
-    EGraph, PureOp, SideEffectKind, Soac, SoacDestination, SoacEffect, SoacPlacement, ValueId, ValueKind,
+    EGraph, SideEffectKind, Soac, SoacDestination, SoacEffect, SoacPlacement, ValueId,
 };
 use super::ResourcesAllocated;
 use crate::ast::TypeName;
@@ -79,7 +79,9 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
         let screma_resolution = match &graph.skeleton.blocks[block_id].side_effects[effect_index].kind {
             SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                 let effect = &graph.skeleton.blocks[block_id].side_effects[effect_index];
-                let input = (op.inputs.len() == 1).then(|| effect.operand_nodes[0]);
+                let input = (op.inputs.len() == 1)
+                    .then(|| effect.operands[0].value())
+                    .flatten();
                 let reusable_input = input.filter(|&node| {
                     input_has_reusable_storage(&graph.nodes[node].ty)
                         && input_has_no_later_observers(&uses, block_id, effect_index, node)
@@ -122,7 +124,7 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
             )) => {
                 let effect = &graph.skeleton.blocks[block_id].side_effects[effect_index];
                 destination.is_unplaced_unique_input().then(|| {
-                    if effect.operand_nodes.first().is_some_and(|&input| {
+                    if effect.operands.first().and_then(|input| input.value()).is_some_and(|input| {
                         input_has_reusable_storage(&graph.nodes[input].ty)
                             && input_has_no_later_observers(&uses, block_id, effect_index, input)
                     }) {
@@ -160,56 +162,6 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
                 }
             }
             _ => {}
-        }
-        retype_reused_results(graph, block_id, effect_index);
-    }
-}
-fn retype_reused_results(graph: &mut EGraph, block: BlockId, effect_index: usize) {
-    let effect = &graph.skeleton.blocks[block].side_effects[effect_index];
-    let Some(result) = effect.result else {
-        return;
-    };
-    let projections: Vec<_> = graph
-        .nodes
-        .iter()
-        .filter_map(|(node, definition)| match &definition.kind {
-            ValueKind::Pure {
-                op: PureOp::Project { index },
-                operands,
-            } if operands.as_slice() == [result] => Some((node, *index as usize)),
-            _ => None,
-        })
-        .collect();
-    let Type::Constructed(TypeName::Tuple(_), mut result_types) = graph.nodes[result].ty.clone() else {
-        return;
-    };
-    for (projection, field) in &projections {
-        if let Some(ty) = result_types.get_mut(*field) {
-            *ty = graph.nodes[*projection].ty.clone();
-        }
-    }
-
-    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
-        return;
-    };
-    if op.inputs.len() != 1 || op.form.post.result_types.len() != 1 {
-        return;
-    }
-    let Some(field) = (0..op.result_count()).find(|&field| {
-        matches!(op.form.result_id(field), Some(screma::ResultId::Post(0)))
-            && op.destination(field).is_some_and(SoacDestination::is_input_buffer)
-    }) else {
-        return;
-    };
-    result_types[field] = op.inputs[0].array.clone();
-
-    graph.retype_node(
-        result,
-        Type::Constructed(TypeName::Tuple(result_types.len()), result_types.clone()),
-    );
-    for (projection, field) in projections {
-        if let Some(ty) = result_types.get(field) {
-            graph.retype_node(projection, ty.clone());
         }
     }
 }

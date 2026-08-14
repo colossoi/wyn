@@ -18,7 +18,7 @@
 //! ## Invariants preserved
 //!
 //! 1. Terminator arg counts always equal target block param counts.
-//! 2. `aliases` keys are exclusively block-param NodeIds that have been
+//! 2. `aliases` keys are exclusively block-param ValueNodeIds that have been
 //!    removed from their owning block's `params` list.
 //! 3. `aliases` values are never themselves aliases (closure is walked
 //!    before the map is returned).
@@ -57,7 +57,7 @@ pub fn optimize_skeleton(program: super::rewrite::Rewritten) -> SkeletonOptimize
 }
 
 /// Run all enabled skeleton rewrites to fixpoint. Returns an alias map
-/// mapping stripped block-param NodeIds to their replacement NodeIds.
+/// mapping stripped block-param ValueNodeIds to their replacement ValueNodeIds.
 pub fn run_one_body<P: Family>(graph: &mut EGraph<P>) -> LookupMap<ValueId, ValueId> {
     let mut aliases: LookupMap<ValueId, ValueId> = LookupMap::new();
     loop {
@@ -200,7 +200,7 @@ fn eliminate_redundant_params<P: Family>(graph: &mut EGraph<P>) -> LookupMap<Val
     }
 
     let collect = |target: BlockId,
-                   args: &[ValueId],
+                   args: &[super::types::FlowValueId],
                    incoming: &mut LookupMap<BlockId, Vec<SmallVec<[ValueId; 2]>>>| {
         let slots = incoming.get_mut(&target).expect("target in skeleton");
         debug_assert_eq!(
@@ -209,7 +209,8 @@ fn eliminate_redundant_params<P: Family>(graph: &mut EGraph<P>) -> LookupMap<Val
             "arity mismatch at branch to {:?}",
             target
         );
-        for (i, &arg) in args.iter().enumerate() {
+        for (i, arg) in args.iter().enumerate() {
+            let arg = arg.value();
             if !slots[i].contains(&arg) && slots[i].len() < 2 {
                 slots[i].push(arg);
             }
@@ -259,14 +260,14 @@ fn eliminate_redundant_params<P: Family>(graph: &mut EGraph<P>) -> LookupMap<Val
                 continue;
             }
             let x = slots[i][0];
-            if x == *param {
+            if x == param.value() {
                 // Self-referential (e.g., a block that branches to
                 // itself as its only predecessor and feeds its own param
                 // back). Not a valid redundancy.
                 continue;
             }
-            redundant.entry(bid).or_default().push((i, *param));
-            aliases.insert(*param, x);
+            redundant.entry(bid).or_default().push((i, param.value()));
+            aliases.insert(param.value(), x);
         }
     }
 

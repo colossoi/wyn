@@ -25,6 +25,10 @@ use polytype::Type;
 use smallvec::SmallVec;
 
 use super::extract;
+use super::ir::{
+    CallSiteId, FuncParam, OperandType, PlaceId as EgirPlaceId, PlaceOp, ResultBinding,
+    ResultDestination,
+};
 use super::loop_analysis::LoopAnalysis;
 use super::program::{PhysicalEGraph, PhysicalPureOp, PhysicalSideEffect, PlannedGlobal};
 use super::scoped_map::ScopedMap;
@@ -48,7 +52,7 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> crate::ssa:
     let functions: Vec<Function> = functions
         .into_iter()
         .map(|f| {
-            let body = elaborate_one_body(f.graph, &f.params, f.return_ty);
+            let body = elaborate_one_body(f.graph, &f.params, f.result.ty().clone());
             Function {
                 id: f.region,
                 name: f.name,
@@ -63,7 +67,7 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> crate::ssa:
     let entry_points: Vec<EntryPoint> = entry_points
         .into_iter()
         .map(|e| {
-            let body = elaborate_one_body(e.graph, &e.params, e.return_ty);
+            let body = elaborate_one_body(e.graph, &e.params, e.result.ty().clone());
             let entry_pipeline_accesses = pipeline_storage_accesses.get(&e.id).cloned().unwrap_or_default();
             EntryPoint {
                 id: e.id,
@@ -165,7 +169,7 @@ fn elaborate_extern(declaration: ExternDecl<Type<TypeName>>) -> Function {
 
 pub(super) fn elaborate_one_body(
     graph: PhysicalEGraph,
-    params: &[(Type<TypeName>, String)],
+    params: &[FuncParam<BindingRef, Type<TypeName>>],
     return_ty: Type<TypeName>,
 ) -> FuncBody {
     let skel_domtree = skeleton_domtree(&graph.skeleton);
@@ -196,7 +200,7 @@ pub(super) fn skeleton_domtree<P: super::types::Family>(
 pub fn elaborate_graph(
     graph: &PhysicalEGraph,
     domtree: &wyn_graph::DominatorTree<SkelBlockId>,
-    params: &[(Type<TypeName>, String)],
+    params: &[FuncParam<BindingRef, Type<TypeName>>],
     return_ty: Type<TypeName>,
 ) -> FuncBody {
     // Phase 1: cost-based extraction.
@@ -215,7 +219,14 @@ pub fn elaborate_graph(
         loop_stack: SmallVec::new(),
         elaborated: ScopedMap::new(),
         elaborated_places: ScopedMap::new(),
-        builder: FuncBuilder::new(params.to_vec(), return_ty),
+        elaborated_calls: ScopedMap::new(),
+        builder: FuncBuilder::new(
+            params
+                .iter()
+                .map(|parameter| (parameter.ty().clone(), parameter.name().to_owned()))
+                .collect(),
+            return_ty,
+        ),
         block_map: LookupMap::new(),
         current_block: None,
         current_skel_block: None,
@@ -226,12 +237,26 @@ pub fn elaborate_graph(
     for i in 0..elab.builder.num_params() {
         let vid = elab.builder.get_param(i);
         for (nid, node) in &graph.nodes {
-            if matches!(&node.kind, ValueKind::FuncParam { index } if *index == i) {
+            if matches!(&node.kind, ValueKind::FuncParam { parameter } if parameter.index() == i) {
                 let resolved = elab.resolve(nid);
                 elab.elaborated.insert(resolved, (vid, skel_entry));
                 break;
             }
         }
+    }
+
+    for (place, definition) in graph.places() {
+        let PlaceOp::Parameter { parameter } = definition.op() else {
+            continue;
+        };
+        let ssa_place = elab.builder.new_place(definition.ty().pointee.clone());
+        elab
+            .elaborated_places
+            .insert(place, (ssa_place, skel_entry));
+        debug_assert!(matches!(
+            params.get(parameter.index()).map(FuncParam::representation),
+            Some(OperandType::Place(_))
+        ));
     }
 
     // Pre-create all output blocks to match the skeleton.
@@ -248,6 +273,7 @@ pub fn elaborate_graph(
     for (skel_bid, skel_block) in &graph.skeleton.blocks {
         let out_bid = elab.block_map[&skel_bid];
         for &param_nid in &skel_block.params {
+            let param_nid = param_nid.value();
             let ty = graph.nodes[param_nid].ty.clone();
             let vid = elab.builder.add_block_param(out_bid, ty);
             let resolved = elab.resolve(param_nid);
@@ -307,7 +333,8 @@ struct Elaborator<'a> {
     /// matters: two hashconsed `ViewIndex` nodes still get distinct places
     /// when demanded from unrelated scopes (the `ScopedMap` already
     /// handles that via its scope-depth pop).
-    elaborated_places: ScopedMap<ValueId, (PlaceId, SkelBlockId)>,
+    elaborated_places: ScopedMap<EgirPlaceId, (PlaceId, SkelBlockId)>,
+    elaborated_calls: ScopedMap<CallSiteId, Option<(SsaValueId, SkelBlockId)>>,
     builder: FuncBuilder,
     block_map: LookupMap<SkelBlockId, BlockId>,
     current_block: Option<BlockId>,
@@ -325,6 +352,7 @@ impl<'a> Elaborator<'a> {
     fn elaborate_subtree(&mut self, skel_bid: SkelBlockId) {
         self.elaborated.push_scope();
         self.elaborated_places.push_scope();
+        self.elaborated_calls.push_scope();
         let pushed_loop = self.maybe_push_loop(skel_bid);
 
         let out_bid = self.block_map[&skel_bid];
@@ -354,6 +382,7 @@ impl<'a> Elaborator<'a> {
             self.loop_stack.pop();
         }
         self.elaborated_places.pop_scope();
+        self.elaborated_calls.pop_scope();
         self.elaborated.pop_scope();
     }
 
@@ -386,39 +415,49 @@ impl<'a> Elaborator<'a> {
             }
         };
 
-        // Load/Store carry a PlaceId operand in `operand_nodes[0]` rather
+        // Load/Store carry a PlaceId operand in `operands[0]` rather
         // than a value; handle them explicitly so the place operand stays
         // typed as `PlaceId`, not a ValueId. Alloca produces a PlaceId rather
         // than a ValueId — register it in `elaborated_places` so downstream
         // `PlaceIndex` / `Load` / `Store` consumers resolve it via `demand_place`.
-        if let EffectOp::Alloca { elem_ty } = effect {
-            let result_nid =
-                se.result.expect("Alloca side-effect must carry a result ValueId for its place");
+        if let EffectOp::Alloca { result } = effect {
+            let elem_ty = self.graph.place(*result).ty().pointee.clone();
             let place = self.builder.new_place(elem_ty.clone());
             let kind = InstKind::Alloca {
-                elem_ty: elem_ty.clone(),
+                elem_ty,
                 result: place,
             };
             let out_bid = self.block_map[&skel_bid];
             self.builder.func_mut().append_void_inst_with_span(out_bid, kind, se.span);
-            let resolved = self.resolve(result_nid);
-            self.elaborated_places.insert(resolved, (place, skel_bid));
+            self.elaborated_places.insert(*result, (place, skel_bid));
+            return;
+        }
+
+        if let EffectOp::Call { site } = effect {
+            self.elaborate_call(*site, skel_bid);
             return;
         }
 
         let kind = match effect {
-            EffectOp::Load => {
-                let place = self.demand_place(se.operand_nodes[0]);
+            EffectOp::Load { place, .. } => {
+                let place = self.demand_place(*place);
                 InstKind::Load { place }
             }
-            EffectOp::Store => {
-                let place = self.demand_place(se.operand_nodes[0]);
-                let value = self.demand_ref(se.operand_nodes[1]);
+            EffectOp::Store { place } => {
+                let place = self.demand_place(*place);
+                let value = self.demand_ref(
+                    se.operands[0]
+                        .value()
+                        .expect("store value must use the value channel"),
+                );
                 InstKind::Store { place, value }
             }
-            EffectOp::Atomic(op) => {
-                let place = self.demand_place(se.operand_nodes[0]);
-                let values = se.operand_nodes[1..].iter().map(|&node| self.demand_ref(node)).collect();
+            EffectOp::Atomic { place, op } => {
+                let place = self.demand_place(*place);
+                let values = se
+                    .operand_values()
+                    .map(|node| self.demand_ref(node))
+                    .collect();
                 InstKind::Atomic {
                     place,
                     op: *op,
@@ -426,17 +465,20 @@ impl<'a> Elaborator<'a> {
                 }
             }
             EffectOp::Op { tag } => {
-                let operands = se.operand_nodes.iter().map(|&nid| self.demand_ref(nid)).collect();
+                let operands = se
+                    .operand_values()
+                    .map(|nid| self.demand_ref(nid))
+                    .collect();
                 InstKind::Op {
-                    tag: tag.clone(),
+                    tag: tag.clone().map_call(|call| match call {}),
                     operands,
                 }
             }
             EffectOp::ControlBarrier => InstKind::ControlBarrier,
-            EffectOp::Alloca { .. } => unreachable!("alloca handled above"),
+            EffectOp::Alloca { .. } | EffectOp::Call { .. } => unreachable!(),
         };
 
-        if let Some(result_nid) = se.result {
+        if let Some(result_nid) = se.result().and_then(ResultBinding::single_value) {
             let ty = self.graph.nodes[result_nid].ty.clone();
             let vid = self.emit_at(skel_bid, kind, ty, se.span);
             // Insert under the resolved id so demand_placed's `self.resolve(nid)
@@ -449,6 +491,58 @@ impl<'a> Elaborator<'a> {
             let out_bid = self.block_map[&skel_bid];
             self.builder.func_mut().append_void_inst_with_span(out_bid, kind, se.span);
         }
+    }
+
+    fn elaborate_call(
+        &mut self,
+        site: CallSiteId,
+        forced_block: SkelBlockId,
+    ) -> Option<(SsaValueId, SkelBlockId)> {
+        if let Some(result) = self.elaborated_calls.get(&site) {
+            return result;
+        }
+        let call = self.graph.call(site).clone();
+        let mut operands = Vec::with_capacity(call.arguments().len());
+        for argument in call.arguments() {
+            let value = argument
+                .value()
+                .expect("physical SSA calls require destination places to be eliminated before elaboration");
+            operands.push(self.demand_ref(value));
+        }
+        let kind = InstKind::Op {
+            tag: OpTag::Call(call.callee()),
+            operands,
+        };
+        let values = call.result().values();
+        if values.is_empty() {
+            let out_bid = self.block_map[&forced_block];
+            self.builder.func_mut().append_void_inst(out_bid, kind);
+            self.elaborated_calls.insert(site, None);
+            return None;
+        }
+
+        let root = self.emit_at(forced_block, kind, call.result().ty().clone(), None);
+        self.elaborated_calls.insert(site, Some((root, forced_block)));
+        for (value, path, ty) in result_value_paths(call.result()) {
+            let mut projected = root;
+            for (depth, index) in path.iter().enumerate() {
+                let field_ty = result_type_at_path(call.result(), &path[..=depth]);
+                projected = self.emit_at(
+                    forced_block,
+                    InstKind::Op {
+                        tag: OpTag::Project { index: *index },
+                        operands: vec![ValueRef::Ssa(projected)],
+                    },
+                    field_ty,
+                    None,
+                );
+            }
+            if path.is_empty() {
+                debug_assert_eq!(self.graph.value(value).ty(), &ty);
+            }
+            self.elaborated.insert(value, (projected, forced_block));
+        }
+        Some((root, forced_block))
     }
 
     /// Demand a node as an instruction operand. Canonical 32-bit scalar
@@ -524,69 +618,55 @@ impl<'a> Elaborator<'a> {
 
     /// Demand the place defined by `nid`. Only valid for nodes whose
     /// `PureOp` produces a `PlaceId` (`ViewIndex`, `OutputSlot`).
-    fn demand_place(&mut self, nid: ValueId) -> PlaceId {
-        let resolved = self.resolve(nid);
+    fn demand_place(&mut self, nid: EgirPlaceId) -> PlaceId {
+        self.demand_place_placed(nid).0
+    }
 
-        if let Some((place, _)) = self.elaborated_places.get(&resolved) {
+    fn demand_place_placed(&mut self, nid: EgirPlaceId) -> (PlaceId, SkelBlockId) {
+        if let Some(place) = self.elaborated_places.get(&nid) {
             return place;
         }
 
-        let node = self.graph.nodes[resolved].clone();
-        let ValueKind::Pure { op, operands } = &node.kind else {
-            panic!(
-                "demand_place({:?}): expected a place-producing Pure node, got {:?}",
-                resolved, node
-            );
-        };
-
-        let (kind, placed) = match op {
-            PureOp::ViewIndex => {
-                let arg_placements: Vec<(ValueRef, Option<SkelBlockId>)> =
-                    operands.iter().map(|&op_nid| self.demand_ref_placed(op_nid)).collect();
-                let args: Vec<ValueRef> = arg_placements.iter().map(|&(value, _)| value).collect();
-                let elem_ty = self.graph.nodes[resolved].ty.clone();
-                let place = self.builder.new_place(elem_ty);
-                let kind = InstKind::ViewIndex {
-                    view: args[0],
-                    index: args[1],
-                    result: place,
-                };
-                let operand_blocks: Vec<_> =
-                    arg_placements.iter().filter_map(|(_, block)| *block).collect();
-                let placed = self.choose_placement(&operand_blocks);
-                (kind, placed)
+        let definition = self.graph.place(nid).clone();
+        let elem_ty = definition.ty().pointee.clone();
+        let place = self.builder.new_place(elem_ty);
+        let (kind, placed) = match definition.op() {
+            PlaceOp::Index { base, index } => {
+                let (parent, parent_block) = self.demand_place_placed(*base);
+                let (index, index_block) = self.demand_ref_placed(*index);
+                let operand_blocks = index_block.into_iter().chain([parent_block]).collect::<Vec<_>>();
+                (
+                    InstKind::PlaceIndex {
+                        place: parent,
+                        index,
+                        result: place,
+                    },
+                    self.choose_placement(&operand_blocks),
+                )
             }
-            PureOp::PlaceIndex => {
-                // operands[0] is the parent place (resolved via demand_place),
-                // operands[1] is the index value (resolved via demand_placed).
-                let parent_place = self.demand_place(operands[0]);
-                let (index, index_placed) = self.demand_ref_placed(operands[1]);
-                let elem_ty = self.graph.nodes[resolved].ty.clone();
-                let place = self.builder.new_place(elem_ty);
-                let kind = InstKind::PlaceIndex {
-                    place: parent_place,
-                    index,
-                    result: place,
-                };
-                // Place this with the index's placement so it follows the
-                // control-flow point where the index becomes available.
-                let placed = self.choose_placement(&index_placed.into_iter().collect::<Vec<_>>());
-                (kind, placed)
+            PlaceOp::ViewIndex { view, index } => {
+                let (view, view_block) = self.demand_ref_placed(view.value());
+                let (index, index_block) = self.demand_ref_placed(*index);
+                let operand_blocks = [view_block, index_block].into_iter().flatten().collect::<Vec<_>>();
+                (
+                    InstKind::ViewIndex {
+                        view,
+                        index,
+                        result: place,
+                    },
+                    self.choose_placement(&operand_blocks),
+                )
             }
-            PureOp::OutputSlot { index } => {
-                let elem_ty = self.graph.nodes[resolved].ty.clone();
-                let place = self.builder.new_place(elem_ty);
-                let kind = InstKind::OutputSlot {
+            PlaceOp::OutputSlot { index } => (
+                InstKind::OutputSlot {
                     index: *index,
                     result: place,
-                };
-                let placed = self.choose_placement(&[]);
-                (kind, placed)
-            }
-            other => panic!(
-                "demand_place({:?}): {:?} does not produce a place",
-                resolved, other
+                },
+                self.choose_placement(&[]),
             ),
+            PlaceOp::Parameter { .. } | PlaceOp::AllocaResult => {
+                panic!("place {nid:?} should have been registered at its definition")
+            }
         };
 
         let place = match &kind {
@@ -595,11 +675,11 @@ impl<'a> Elaborator<'a> {
             | InstKind::OutputSlot { result, .. } => *result,
             _ => unreachable!(),
         };
-        let span = self.graph.nodes[resolved].span;
+        let span = definition.span();
         let out_bid = self.block_map[&placed];
         self.builder.func_mut().append_void_inst_with_span(out_bid, kind, span);
-        self.elaborated_places.insert(resolved, (place, placed));
-        place
+        self.elaborated_places.insert(nid, (place, placed));
+        (place, placed)
     }
 
     /// Recover a direct `Index(...Index(view, i)..., j)` spine after
@@ -718,16 +798,6 @@ impl<'a> Elaborator<'a> {
                         return self.demand_view_index_spine(view, steps);
                     }
                 }
-                if matches!(
-                    op,
-                    PureOp::ViewIndex | PureOp::PlaceIndex | PureOp::OutputSlot { .. }
-                ) {
-                    panic!(
-                        "demand_placed({:?}): {:?} produces a PlaceId, not a ValueId — \
-                         its consumer (Load/Store/etc.) must call demand_place",
-                        resolved, op
-                    );
-                }
                 let arg_placements: Vec<(ValueRef, Option<SkelBlockId>)> =
                     operands.iter().map(|&op_nid| self.demand_ref_placed(op_nid)).collect();
                 let args: Vec<ValueRef> = arg_placements.iter().map(|&(value, _)| value).collect();
@@ -756,6 +826,20 @@ impl<'a> Elaborator<'a> {
             }
             ValueKind::Union { .. } => {
                 panic!("Union {:?} should have been resolved by extract", resolved);
+            }
+            ValueKind::CallResult { call, .. } => {
+                self.elaborate_call(*call, self.current_skel_block.expect("current block unset"));
+                self.elaborated
+                    .get(&resolved)
+                    .expect("call elaboration did not bind its by-value result")
+            }
+            ValueKind::PlaceLength { place } => {
+                let (place, placed) = self.demand_place_placed(*place);
+                let ty = self.graph.nodes[resolved].ty.clone();
+                let span = self.graph.nodes[resolved].span;
+                let value = self.emit_at(placed, InstKind::Load { place }, ty, span);
+                self.record_placement(resolved, value, placed);
+                (value, placed)
             }
         }
     }
@@ -836,11 +920,14 @@ impl<'a> Elaborator<'a> {
     fn elaborate_terminator(&mut self, term: &SkeletonTerminator) {
         let t = match term {
             SkeletonTerminator::Return(None) => crate::ssa::framework::Terminator::Return(None),
-            SkeletonTerminator::Return(Some(nid)) => {
-                crate::ssa::framework::Terminator::Return(Some(self.demand_ref(*nid)))
+            SkeletonTerminator::Return(Some(result)) => {
+                crate::ssa::framework::Terminator::Return(self.demand_result_ref(result))
             }
             SkeletonTerminator::Branch { target, args } => {
-                let out_args: Vec<ValueRef> = args.iter().map(|&nid| self.demand_ref(nid)).collect();
+                let out_args: Vec<ValueRef> = args
+                    .iter()
+                    .map(|&nid| self.demand_ref(nid.value()))
+                    .collect();
                 crate::ssa::framework::Terminator::Branch {
                     target: self.block_map[target],
                     args: out_args,
@@ -854,8 +941,14 @@ impl<'a> Elaborator<'a> {
                 else_args,
             } => {
                 let cond = self.demand_ref(*cond);
-                let ta: Vec<ValueRef> = then_args.iter().map(|&nid| self.demand_ref(nid)).collect();
-                let ea: Vec<ValueRef> = else_args.iter().map(|&nid| self.demand_ref(nid)).collect();
+                let ta: Vec<ValueRef> = then_args
+                    .iter()
+                    .map(|&nid| self.demand_ref(nid.value()))
+                    .collect();
+                let ea: Vec<ValueRef> = else_args
+                    .iter()
+                    .map(|&nid| self.demand_ref(nid.value()))
+                    .collect();
                 crate::ssa::framework::Terminator::CondBranch {
                     cond,
                     then_target: self.block_map[then_target],
@@ -868,6 +961,70 @@ impl<'a> Elaborator<'a> {
         };
         let _ = self.builder.terminate(t);
     }
+
+    fn demand_result_ref(&mut self, result: &ResultBinding<Type<TypeName>>) -> Option<ValueRef> {
+        if !result.is_product() {
+            let mut value = None;
+            result.for_each_destination(|_, destination| {
+                if let ResultDestination::ReturnValue(result) = destination {
+                    value = Some(*result);
+                }
+            });
+            return value.map(|value| self.demand_ref(value));
+        }
+
+        let fields = (0..result.field_count())
+            .filter_map(|index| result.field(index))
+            .map(|field| self.demand_result_ref(&field))
+            .collect::<Option<Vec<_>>>()?;
+        let placed = self.current_skel_block.expect("current block unset");
+        let value = self.emit_at(
+            placed,
+            InstKind::Op {
+                tag: OpTag::Tuple(fields.len()),
+                operands: fields,
+            },
+            result.ty().clone(),
+            None,
+        );
+        Some(ValueRef::Ssa(value))
+    }
+}
+
+fn result_value_paths(
+    result: &ResultBinding<Type<TypeName>>,
+) -> Vec<(ValueId, Vec<u32>, Type<TypeName>)> {
+    fn walk(
+        result: &ResultBinding<Type<TypeName>>,
+        path: &mut Vec<u32>,
+        values: &mut Vec<(ValueId, Vec<u32>, Type<TypeName>)>,
+    ) {
+        if result.is_product() {
+            for index in 0..result.field_count() {
+                path.push(index as u32);
+                walk(&result.field(index).expect("result field disappeared"), path, values);
+                path.pop();
+            }
+            return;
+        }
+        result.for_each_destination(|ty, destination| {
+            if let ResultDestination::ReturnValue(value) = destination {
+                values.push((*value, path.clone(), ty.clone()));
+            }
+        });
+    }
+
+    let mut values = Vec::new();
+    walk(result, &mut Vec::new(), &mut values);
+    values
+}
+
+fn result_type_at_path(result: &ResultBinding<Type<TypeName>>, path: &[u32]) -> Type<TypeName> {
+    let mut current = result.clone();
+    for index in path {
+        current = current.field(*index as usize).expect("result projection path is invalid");
+    }
+    current.ty().clone()
 }
 
 /// Compose extraction winners with CFG aliases to a fixed point. A union may
@@ -920,18 +1077,8 @@ fn const_to_inst_kind(c: &ConstantValue) -> InstKind {
 }
 
 fn pure_to_inst_kind(op: &PhysicalPureOp, args: &[ValueRef]) -> InstKind {
-    if matches!(
-        op,
-        OpTag::ViewIndex | OpTag::PlaceIndex | OpTag::OutputSlot { .. }
-    ) {
-        panic!(
-            "pure_to_inst_kind: place-producing op {:?} must use elaborate's \
-             place-aware path (allocates a fresh PlaceId from FuncBody.places)",
-            op
-        );
-    }
     InstKind::Op {
-        tag: op.clone(),
+        tag: op.clone().map_call(|call| match call {}),
         operands: args.to_vec(),
     }
 }
@@ -953,7 +1100,8 @@ mod tests {
             ty.clone(),
             None,
         );
-        graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(sum));
+        let result = graph.value_result(sum);
+        graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
 
         let body = elaborate_one_body(graph, &[], ty);
         assert_eq!(
@@ -965,7 +1113,7 @@ mod tests {
         assert!(matches!(
             &inst.data,
             InstKind::Op {
-                tag: PureOp::BinOp(crate::op::BinaryOperator::Add),
+                tag: OpTag::BinOp(crate::op::BinaryOperator::Add),
                 operands,
             } if operands == &vec![
                 ValueRef::Const(ConstantValue::U32(1)),
@@ -979,7 +1127,8 @@ mod tests {
         let ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let mut graph = EGraph::<Physical>::new();
         let seven = graph.intern_pure(PureOp::Uint("7".into()), SmallVec::new(), ty.clone(), None);
-        graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(seven));
+        let result = graph.value_result(seven);
+        graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
 
         let body = elaborate_one_body(graph, &[], ty);
         assert_eq!(
@@ -1002,9 +1151,10 @@ mod tests {
         let seven = graph.intern_pure(PureOp::Uint("7".into()), SmallVec::new(), ty.clone(), None);
         graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Branch {
             target,
-            args: vec![seven],
+            args: graph.admit_flow_values([seven]),
         };
-        graph.skeleton.blocks[target].term = SkeletonTerminator::Return(Some(target_param));
+        let result = graph.value_result(target_param);
+        graph.skeleton.blocks[target].term = SkeletonTerminator::Return(Some(result));
 
         let body = elaborate_one_body(graph, &[], ty);
         assert_eq!(
@@ -1027,8 +1177,8 @@ mod tests {
         let selected = graph.add_block_param(merge, ty.clone());
         let replacement = graph.intern_constant(ConstantValue::U32(7), ty.clone());
         let call = graph.intern_pure(
-            PureOp::Call(crate::FunctionId::from_index(0)),
-            SmallVec::new(),
+            PureOp::Materialize,
+            smallvec::smallvec![replacement],
             ty,
             None,
         );

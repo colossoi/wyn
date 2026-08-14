@@ -19,10 +19,10 @@ pub(super) struct FilterLoop {
     pub(super) output_elem_ty: Type<TypeName>,
     pub(super) output: PhysicalFilterOutput,
     /// `None` denotes the validated one-input identity map.
-    pub(super) map_func: Option<RegionId>,
-    pub(super) map_captures: Vec<ValueId>,
-    pub(super) pred_func: RegionId,
-    pub(super) captures: Vec<ValueId>,
+    pub(super) map_func: Option<PhysicalFunc>,
+    pub(super) map_captures: Vec<super::super::types::OperandRef>,
+    pub(super) pred_func: PhysicalFunc,
+    pub(super) captures: Vec<super::super::types::OperandRef>,
     pub(super) result_node: ValueId,
 }
 
@@ -47,10 +47,23 @@ fn filter_kept_value(
         })
         .collect::<SmallVec<[ValueId; 4]>>();
     match &spec.map_func {
-        Some(name) => {
-            let mut operands = elements;
+        Some(function) => {
+            let mut operands = elements
+                .into_iter()
+                .map(|element| graph.operand_ref(element))
+                .collect::<Vec<_>>();
             operands.extend(spec.map_captures.iter().copied());
-            graph.intern_pure(PureOp::Call(*name), operands, spec.output_elem_ty.clone(), None)
+            let (_, result) = graph
+                .add_call(
+                    function.region,
+                    function.params(),
+                    function.result(),
+                    operands,
+                    function.effects(),
+                    None,
+                )
+                .expect("Filter map call must match its canonical boundary");
+            result.single_value().expect("Filter map has one by-value result")
         }
         None => {
             debug_assert_eq!(elements.len(), 1);
@@ -126,7 +139,7 @@ pub(super) fn build_filter_loop(
 
 #[derive(Clone, Copy)]
 enum FilterSink {
-    Local(ValueId),
+    Local(super::super::types::PlaceId),
     Runtime(ValueId),
 }
 
@@ -156,7 +169,7 @@ fn build_serial_filter_cfg(
 
     graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![zero, zero],
+        args: graph.admit_flow_values([zero, zero]),
     };
     let length = emit_length(
         graph,
@@ -175,7 +188,7 @@ fn build_serial_filter_cfg(
         then_target: body,
         then_args: vec![],
         else_target: after,
-        else_args: vec![count],
+        else_args: graph.admit_flow_values([count]),
     };
     graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
         merge: after,
@@ -183,9 +196,19 @@ fn build_serial_filter_cfg(
     });
 
     let kept = filter_kept_value(graph, body, index, spec, next_effect);
-    let mut pred_operands: SmallVec<[ValueId; 4]> = smallvec![kept];
+    let mut pred_operands = vec![graph.operand_ref(kept)];
     pred_operands.extend(spec.captures.iter().copied());
-    let predicate = graph.intern_pure(PureOp::Call(spec.pred_func), pred_operands, bool_ty, None);
+    let (_, predicate) = graph
+        .add_call(
+            spec.pred_func.region,
+            spec.pred_func.params(),
+            spec.pred_func.result(),
+            pred_operands,
+            spec.pred_func.effects(),
+            None,
+        )
+        .expect("Filter predicate call must match its canonical boundary");
+    let predicate = predicate.single_value().expect("Filter predicate has one by-value result");
     graph.skeleton.blocks[body].term = SkeletonTerminator::CondBranch {
         cond: predicate,
         then_target: then_block,
@@ -231,17 +254,17 @@ fn build_serial_filter_cfg(
     );
     graph.skeleton.blocks[then_block].term = SkeletonTerminator::Branch {
         target: selection_merge,
-        args: vec![bumped_count],
+        args: graph.admit_flow_values([bumped_count]),
     };
     graph.skeleton.blocks[else_block].term = SkeletonTerminator::Branch {
         target: selection_merge,
-        args: vec![count],
+        args: graph.admit_flow_values([count]),
     };
 
     let next_count = graph.add_block_param(selection_merge, index_ty.clone());
     graph.skeleton.blocks[selection_merge].term = SkeletonTerminator::Branch {
         target: continue_block,
-        args: vec![next_count],
+        args: graph.admit_flow_values([next_count]),
     };
     let continued_count = graph.add_block_param(continue_block, index_ty.clone());
     let next_index = graph.intern_pure(
@@ -252,7 +275,7 @@ fn build_serial_filter_cfg(
     );
     graph.skeleton.blocks[continue_block].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![continued_count, next_index],
+        args: graph.admit_flow_values([continued_count, next_index]),
     };
     after_count
 }
@@ -308,14 +331,19 @@ pub(super) fn build_filter_flags(
     };
     graph.skeleton.blocks[bid].control_header = Some(ControlHeader::Selection { merge: after });
     let kept = filter_kept_value(graph, in_range, gid, &spec, next_effect);
-    let mut operands: SmallVec<[ValueId; 4]> = smallvec![kept];
+    let mut operands = vec![graph.operand_ref(kept)];
     operands.extend(spec.captures.iter().copied());
-    let pred = graph.intern_pure(
-        PureOp::Call(spec.pred_func.clone()),
-        operands,
-        Type::Constructed(TypeName::Bool, vec![]),
-        None,
-    );
+    let (_, pred) = graph
+        .add_call(
+            spec.pred_func.region,
+            spec.pred_func.params(),
+            spec.pred_func.result(),
+            operands,
+            spec.pred_func.effects(),
+            None,
+        )
+        .expect("Filter predicate call must match its canonical boundary");
+    let pred = pred.single_value().expect("Filter predicate has one by-value result");
     graph.skeleton.blocks[in_range].term = SkeletonTerminator::CondBranch {
         cond: pred,
         then_target: keep,
@@ -450,7 +478,7 @@ pub(super) fn build_filter_scan(
     );
     graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![zero, zero],
+        args: graph.admit_flow_values([zero, zero]),
     };
     let i = graph.add_block_param(header, u32_ty.clone());
     let acc = graph.add_block_param(header, u32_ty.clone());
@@ -465,7 +493,7 @@ pub(super) fn build_filter_scan(
         then_target: body,
         then_args: vec![],
         else_target: after,
-        else_args: vec![acc],
+        else_args: graph.admit_flow_values([acc]),
     };
     graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
         merge: after,
@@ -479,12 +507,7 @@ pub(super) fn build_filter_scan(
         u32_ty.clone(),
         None,
     );
-    let flag_place = graph.intern_pure(
-        PureOp::ViewIndex,
-        smallvec![flags, global_i],
-        u32_ty.clone(),
-        None,
-    );
+    let flag_place = graph.add_view_index_place(graph.view_id(flags), global_i, u32_ty.clone(), None);
     let flag = emit_load(graph, body, flag_place, u32_ty.clone(), next_effect, None);
     let next = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Add),
@@ -510,7 +533,7 @@ pub(super) fn build_filter_scan(
     );
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![next_i, next],
+        args: graph.admit_flow_values([next_i, next]),
     };
     let final_count = graph.add_block_param(after, u32_ty.clone());
     let block_sums = intern_storage_view(graph, work.block_sums, u32_ty.clone(), None);
@@ -570,7 +593,7 @@ pub(super) fn build_filter_scatter(
     graph.skeleton.blocks[bid].control_header = Some(ControlHeader::Selection { merge: after });
     let flags = intern_storage_view(graph, work.flags, u32_ty.clone(), None);
     let offsets = intern_storage_view(graph, work.offsets, u32_ty.clone(), None);
-    let flag_place = graph.intern_pure(PureOp::ViewIndex, smallvec![flags, gid], u32_ty.clone(), None);
+    let flag_place = graph.add_view_index_place(graph.view_id(flags), gid, u32_ty.clone(), None);
     let flag = emit_load(graph, in_range, flag_place, u32_ty.clone(), next_effect, None);
     let one = intern_u32(graph, 1, None);
     let keep = graph.intern_pure(
@@ -587,7 +610,7 @@ pub(super) fn build_filter_scatter(
         else_args: vec![],
     };
     graph.skeleton.blocks[in_range].control_header = Some(ControlHeader::Selection { merge });
-    let offset_place = graph.intern_pure(PureOp::ViewIndex, smallvec![offsets, gid], u32_ty.clone(), None);
+    let offset_place = graph.add_view_index_place(graph.view_id(offsets), gid, u32_ty.clone(), None);
     let inclusive = emit_load(graph, write, offset_place, u32_ty.clone(), next_effect, None);
     let output_index = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Subtract),
@@ -630,7 +653,7 @@ pub(super) fn build_filter_scatter(
     };
     let len_view = intern_storage_view(graph, len_binding, u32_ty.clone(), None);
     let zero = intern_u32(graph, 0, None);
-    let len_place = graph.intern_pure(PureOp::ViewIndex, smallvec![len_view, zero], u32_ty.clone(), None);
+    let len_place = graph.add_view_index_place(graph.view_id(len_view), zero, u32_ty.clone(), None);
     let count = emit_load(graph, bid, len_place, u32_ty.clone(), next_effect, None);
     graph.replace_pure_node(
         spec.result_node,

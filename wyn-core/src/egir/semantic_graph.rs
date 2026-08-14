@@ -52,10 +52,13 @@ where
                 let SideEffectKind::Soac(SoacEffect(id, _)) = &effect.kind else {
                     continue;
                 };
-                let Some(result) = effect.result else {
+                let Some(result) = &effect.result else {
                     continue;
                 };
-                if !TypeExt::contains_runtime_sized_composite_array(&graph.nodes[result].ty) {
+                let result_values = result.values();
+                if !result_values.iter().any(|value| {
+                    TypeExt::contains_runtime_sized_composite_array(&graph.nodes[*value].ty)
+                }) {
                     continue;
                 }
                 let indexed = graph.nodes.iter().any(|(_, node)| {
@@ -65,7 +68,9 @@ where
                             op: super::types::PureOp::Index,
                             operands,
                         } if operands.first().is_some_and(|base| {
-                            graph_ops::value_depends_on(graph, *base, result)
+                            result_values
+                                .iter()
+                                .any(|result| graph_ops::value_depends_on(graph, *base, *result))
                         })
                     )
                 });
@@ -78,7 +83,11 @@ where
                             return false;
                         };
                         soac.capture_nodes()
-                            .any(|capture| graph_ops::value_depends_on(graph, capture, result))
+                            .any(|capture| {
+                                result_values
+                                    .iter()
+                                    .any(|result| graph_ops::value_depends_on(graph, capture, *result))
+                            })
                     })
                 });
                 if indexed || captured {
@@ -113,7 +122,7 @@ where
 fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<SemanticDependency>) {
     struct Record<'a> {
         id: SemanticOpId,
-        result: ValueId,
+        results: Vec<ValueId>,
         effect: &'a SideEffect,
         resources: Vec<SegResourceAccess>,
     }
@@ -125,7 +134,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
             let SideEffectKind::Soac(SoacEffect(id, soac)) = &effect.kind else {
                 continue;
             };
-            if let Some(result) = effect.result {
+            if let Some(result) = &effect.result {
                 let resources = match soac {
                     Soac::Screma(op) => match op.semantic_state() {
                         screma::SemanticState::Serial => read_resources(graph, effect),
@@ -158,7 +167,9 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
                             .operations
                             .iter()
                             .flat_map(|operation| &operation.destinations)
-                            .filter_map(|node| graph_ops::extract_storage_view_source(graph, *node))
+                            .filter_map(|node| {
+                                graph_ops::extract_storage_view_source(graph, node.value())
+                            })
                         {
                             if let Some(resource) =
                                 resources.iter_mut().find(|resource| resource.resource == destination)
@@ -171,7 +182,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
                 };
                 records.push(Record {
                     id: *id,
-                    result,
+                    results: result.values(),
                     effect,
                     resources,
                 });
@@ -183,7 +194,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
         let consumer = &records[consumer_index];
         let reachable = graph_ops::value_producer_closure(graph, consumer.effect.referenced_nodes()).nodes;
         for producer in &records[..consumer_index] {
-            if reachable.contains(&producer.result) {
+            if producer.results.iter().any(|result| reachable.contains(result)) {
                 push_dependency(
                     output,
                     &mut seen,
@@ -303,11 +314,11 @@ where
                 op.body.validate().map_err(|error| format!("{scope}: {error}"))?;
             }
             Soac::Hist(op) => {
-                if effect.operand_nodes.len() != op.inputs.len() {
+                if effect.operands.len() != op.inputs.len() {
                     return Err(format!(
                         "{scope}: Hist requires {} input operands, found {}",
                         op.inputs.len(),
-                        effect.operand_nodes.len(),
+                        effect.operands.len(),
                     ));
                 }
                 if let Some(body) = op.form.bucket.seg_body() {

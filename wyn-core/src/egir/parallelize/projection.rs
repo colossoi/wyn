@@ -14,7 +14,7 @@ pub(super) struct ProjectionSpec {
         >,
     >,
     resource_declarations: Vec<SemanticResourceDecl>,
-    return_ty: Type<TypeName>,
+    result: crate::egir::ir::FunctionResult<Type<TypeName>>,
 }
 
 impl ProjectionSpec {
@@ -28,7 +28,12 @@ impl ProjectionSpec {
             execution_model,
             outputs: Vec::new(),
             resource_declarations,
-            return_ty: Type::Constructed(TypeName::Unit, vec![]),
+            result: crate::egir::ir::by_value_function_result::<crate::egir::types::WynLanguage>(
+                Type::Constructed(
+                TypeName::Unit,
+                vec![],
+                ),
+            ),
         }
     }
 
@@ -41,7 +46,7 @@ impl ProjectionSpec {
             execution_model: source.execution_model.clone(),
             outputs: source.outputs.clone(),
             resource_declarations,
-            return_ty: source.return_ty.clone(),
+            result: source.result().clone(),
         }
     }
 }
@@ -56,7 +61,7 @@ pub(super) fn project_kernel_body(
         execution_model,
         outputs,
         resource_declarations,
-        return_ty,
+        result,
     } = spec;
     let route_values =
         outputs.iter().flat_map(|output| &output.routes).map(|route| route.source.value).collect();
@@ -72,7 +77,7 @@ pub(super) fn project_kernel_body(
         outputs,
         resource_declarations,
         source.params.clone(),
-        return_ty,
+        result,
     )
 }
 
@@ -87,7 +92,7 @@ fn project_kernel_body_effects(
         execution_model,
         outputs,
         resource_declarations,
-        return_ty,
+        result,
     } = spec;
     let route_values =
         outputs.iter().flat_map(|output| &output.routes).map(|route| route.source.value).collect();
@@ -112,7 +117,7 @@ fn project_kernel_body_effects(
         outputs,
         resource_declarations,
         source.params.clone(),
-        return_ty,
+        result,
     )?;
     entry.retain_parameter_indices(&retained_parameters);
     entry.resource_declarations.retain(|declaration| match declaration.role {
@@ -141,7 +146,7 @@ pub(super) fn side_effect_output_slots(entry: &program::PlannedEntry, effect: &S
             return output_slots.iter().map(|slot| slot.0).collect();
         }
     }
-    let value_writer = effect.result.map(OutputWriter::Value);
+    let value_writer = effect.value_result().map(OutputWriter::Value);
     let effect_writer = effect.effects.map(|(_, output)| OutputWriter::Effect(output));
     let mut slots = entry
         .outputs
@@ -196,7 +201,7 @@ fn requires_unrouted_owner(effect: &SideEffect) -> bool {
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
             op.result_state.iter().any(|result| !result.destination.is_unplaced())
         }
-        SideEffectKind::Effect(EffectOp::Store) => true,
+        SideEffectKind::Effect(EffectOp::Store { .. }) => true,
         _ => false,
     }
 }
@@ -384,7 +389,7 @@ fn project_output_group(
         execution_model,
         outputs,
         resource_declarations: entry.resource_declarations.clone(),
-        return_ty: entry.return_ty.clone(),
+        result: entry.result().clone(),
     };
 
     let (entry, effect_sites) = project_kernel_body_effects(entry, entry.id, selected, spec)?;

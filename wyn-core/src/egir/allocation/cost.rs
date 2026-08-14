@@ -66,9 +66,9 @@ pub(crate) fn analyze_prelude(
         super::super::stage_variance::StageDependenceAnalysis::for_entry_graph(entry, graph).ok()?;
     let reachable = graph_ops::execution_value_producer_closure(graph, recipe.values.iter().copied()).nodes;
     for node in reachable {
-        if let ValueKind::FuncParam { index } = &graph.nodes[node].kind {
+        if let ValueKind::FuncParam { parameter } = &graph.nodes[node].kind {
             if !dependence.dependence(node).is_stage_invariant()
-                || !entry_parameter_is_scalar_relocatable(entry, *index)
+                || !entry_parameter_is_scalar_relocatable(entry, parameter.index())
             {
                 return None;
             }
@@ -101,7 +101,7 @@ fn prelude_materialization_policy(
     let reads_storage =
         recipe.projection.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects).any(
             |effect| {
-                matches!(effect.kind, SideEffectKind::Effect(EffectOp::Load))
+                matches!(effect.kind, SideEffectKind::Effect(EffectOp::Load { .. }))
                     && !graph_ops::read_storage_resources(
                         &recipe.projection.graph,
                         effect.referenced_nodes(),
@@ -146,6 +146,7 @@ pub(crate) fn entry_parameter_is_scalar_relocatable(entry: &SemanticEntry, index
 
 fn effect_cost(
     program: &ResourcesAllocated,
+    graph: &EGraph,
     effect: &SideEffect,
     summaries: &mut HashMap<crate::FunctionId, u64>,
     visiting: &mut HashSet<crate::FunctionId>,
@@ -154,19 +155,24 @@ fn effect_cost(
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(_)))
         | SideEffectKind::Soac(SoacEffect(_, Soac::Filter(_)))
         | SideEffectKind::Soac(SoacEffect(_, Soac::Hist(_))) => None,
-        SideEffectKind::Effect(EffectOp::Load) => Some(STORAGE_LOAD_COST),
-        SideEffectKind::Effect(EffectOp::Op { tag }) => operation_cost(program, tag, summaries, visiting),
+        SideEffectKind::Effect(EffectOp::Load { .. }) => Some(STORAGE_LOAD_COST),
+        SideEffectKind::Effect(EffectOp::Op { tag }) => operation_cost(tag),
         SideEffectKind::Effect(
-            EffectOp::Alloca { .. } | EffectOp::Store | EffectOp::Atomic(_) | EffectOp::ControlBarrier,
+            EffectOp::Alloca { .. }
+            | EffectOp::Store { .. }
+            | EffectOp::Atomic { .. }
+            | EffectOp::ControlBarrier,
         ) => None,
+        SideEffectKind::Effect(EffectOp::Call { site }) => {
+            let callee = graph.call(*site).callee();
+            function_cost(program, &callee, summaries, visiting)
+                .map(|cost| CALL_OVERHEAD.saturating_add(cost))
+        }
     }
 }
 
 fn operation_cost(
-    program: &ResourcesAllocated,
-    op: &OpTag<super::super::program::SemanticResourceRef>,
-    summaries: &mut HashMap<crate::FunctionId, u64>,
-    visiting: &mut HashSet<crate::FunctionId>,
+    op: &super::super::types::PureOp<super::super::program::SemanticResourceRef>,
 ) -> Option<u64> {
     match op {
         OpTag::Int(_)
@@ -177,8 +183,7 @@ fn operation_cost(
         | OpTag::Global(_)
         | OpTag::Project { .. }
         | OpTag::ResourceLen(_)
-        | OpTag::StorageViewLen
-        | OpTag::ViewIndex => Some(0),
+        | OpTag::StorageViewLen => Some(0),
         OpTag::BinOp(_)
         | OpTag::UnaryOp(_)
         | OpTag::Tuple(_)
@@ -194,10 +199,9 @@ fn operation_cost(
         OpTag::Index => Some(STORAGE_LOAD_COST),
         OpTag::StorageView(PureViewSource::Storage(_) | PureViewSource::Inherited) => Some(0),
         OpTag::StorageView(PureViewSource::Workgroup { .. })
-        | OpTag::PlaceIndex
-        | OpTag::OutputSlot { .. }
         | OpTag::StorageImageLoad(_)
         | OpTag::StorageImageStore(_) => None,
+        OpTag::Call(target) => match *target {},
         OpTag::Intrinsic { id, .. } => {
             let known = catalog().known();
             if [
@@ -220,8 +224,6 @@ fn operation_cost(
                 Some(COMPLEX_INTRINSIC_COST)
             }
         }
-        OpTag::Call(callee) => function_cost(program, callee, summaries, visiting)
-            .map(|cost| CALL_OVERHEAD.saturating_add(cost)),
     }
 }
 
@@ -273,7 +275,7 @@ fn graph_block_costs(
                 .chain(extra_roots.get(&block_id).into_iter().flatten().copied());
             let mut local = local_value_cost(program, graph, roots, summaries, visiting)?;
             for effect in &block.side_effects {
-                local = local.saturating_add(effect_cost(program, effect, summaries, visiting)?);
+                local = local.saturating_add(effect_cost(program, graph, effect, summaries, visiting)?);
             }
             Some((block_id, local))
         })
@@ -296,14 +298,18 @@ fn local_value_cost(
         }
         match &graph.nodes[node].kind {
             ValueKind::Pure { op, operands } => {
-                cost = cost.saturating_add(operation_cost(program, op, summaries, visiting)?);
+                cost = cost.saturating_add(operation_cost(op)?);
                 pending.extend(operands.iter().copied());
             }
             ValueKind::Union { left, right } => pending.extend([*left, *right]),
             ValueKind::FuncParam { .. }
             | ValueKind::BlockParam { .. }
             | ValueKind::Constant(_)
-            | ValueKind::SideEffectResult => {}
+            | ValueKind::SideEffectResult
+            | ValueKind::CallResult { .. } => {}
+            ValueKind::PlaceLength { place } => {
+                pending.extend(graph.place_value_dependencies(*place));
+            }
         }
     }
     Some(cost)
@@ -457,7 +463,12 @@ pub(crate) fn fixed_loop_trip_count(
     let index = operands[0];
     let bound = integer_literal(graph, operands[1])?;
     let parameter =
-        graph.skeleton.blocks[header].params.iter().position(|parameter| *parameter == index)?;
+        graph
+            .skeleton
+            .blocks[header]
+            .params
+            .iter()
+            .position(|parameter| parameter.value() == index)?;
     let start = graph
         .skeleton
         .blocks
@@ -496,19 +507,19 @@ fn branch_argument(term: &SkeletonTerminator, target: BlockId, index: usize) -> 
         SkeletonTerminator::Branch {
             target: branch_target,
             args,
-        } if *branch_target == target => args.get(index).copied(),
+        } if *branch_target == target => args.get(index).map(|value| value.value()),
         SkeletonTerminator::CondBranch {
             then_target,
             then_args,
             else_target,
             else_args,
             ..
-        } if *then_target == target => then_args.get(index).copied(),
+        } if *then_target == target => then_args.get(index).map(|value| value.value()),
         SkeletonTerminator::CondBranch {
             else_target,
             else_args,
             ..
-        } if *else_target == target => else_args.get(index).copied(),
+        } if *else_target == target => else_args.get(index).map(|value| value.value()),
         _ => None,
     }
 }

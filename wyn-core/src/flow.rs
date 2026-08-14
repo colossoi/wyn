@@ -8,25 +8,26 @@ new_key_type! {
     pub struct BlockId;
 }
 
-/// A control-flow terminator parameterized by its value-reference type.
+/// A control-flow terminator whose condition, edge arguments, and returned
+/// result are independently represented by the owning IR.
 #[derive(Clone, Debug)]
-pub enum Terminator<V> {
-    Return(Option<V>),
+pub enum Terminator<C, A, R> {
+    Return(Option<R>),
     Branch {
         target: BlockId,
-        args: Vec<V>,
+        args: Vec<A>,
     },
     CondBranch {
-        cond: V,
+        cond: C,
         then_target: BlockId,
-        then_args: Vec<V>,
+        then_args: Vec<A>,
         else_target: BlockId,
-        else_args: Vec<V>,
+        else_args: Vec<A>,
     },
     Unreachable,
 }
 
-impl<V> Terminator<V> {
+impl<C, A, R> Terminator<C, A, R> {
     pub fn successors(&self) -> SmallVec<[BlockId; 2]> {
         match self {
             Self::Return(_) | Self::Unreachable => SmallVec::new(),
@@ -39,6 +40,44 @@ impl<V> Terminator<V> {
         }
     }
 
+    pub fn try_map_parts<C2, A2, R2, E>(
+        self,
+        mut map_condition: impl FnMut(C) -> Result<C2, E>,
+        mut map_argument: impl FnMut(A) -> Result<A2, E>,
+        mut map_result: impl FnMut(R) -> Result<R2, E>,
+        mut map_block: impl FnMut(BlockId) -> Result<BlockId, E>,
+    ) -> Result<Terminator<C2, A2, R2>, E> {
+        Ok(match self {
+            Self::Return(result) => Terminator::Return(result.map(&mut map_result).transpose()?),
+            Self::Branch { target, args } => Terminator::Branch {
+                target: map_block(target)?,
+                args: args.into_iter().map(map_argument).collect::<Result<_, _>>()?,
+            },
+            Self::CondBranch {
+                cond,
+                then_target,
+                then_args,
+                else_target,
+                else_args,
+            } => Terminator::CondBranch {
+                cond: map_condition(cond)?,
+                then_target: map_block(then_target)?,
+                then_args: then_args
+                    .into_iter()
+                    .map(&mut map_argument)
+                    .collect::<Result<_, _>>()?,
+                else_target: map_block(else_target)?,
+                else_args: else_args
+                    .into_iter()
+                    .map(map_argument)
+                    .collect::<Result<_, _>>()?,
+            },
+            Self::Unreachable => Terminator::Unreachable,
+        })
+    }
+}
+
+impl<V> Terminator<V, V, V> {
     pub fn visit_nodes_mut(&mut self, mut visit: impl FnMut(&mut V)) {
         match self {
             Self::Return(value) => value.iter_mut().for_each(visit),
@@ -58,7 +97,7 @@ impl<V> Terminator<V> {
     }
 }
 
-impl<V: Copy> Terminator<V> {
+impl<V: Copy> Terminator<V, V, V> {
     pub fn referenced_nodes(&self) -> SmallVec<[V; 8]> {
         match self {
             Self::Return(value) => value.iter().copied().collect(),

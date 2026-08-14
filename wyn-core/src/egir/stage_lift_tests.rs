@@ -1,12 +1,16 @@
 use super::*;
 
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{semantic_program_for_test, ProgramIdentities, SemanticEntry, SemanticOpId};
+use crate::egir::program::{
+    semantic_program_for_test, ProgramIdentities, SemanticEntry, SemanticOpId,
+    SemanticResourceRef,
+};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::screma;
 use crate::egir::types::{
-    SegExtent, SegSpace, Semantic, SideEffect, SkeletonTerminator, Soac, SoacDestination, SoacEffect,
-    SoacInputType,
+    by_value_function_result, callable_parameter, CallEffects, FuncParam, OperandRef, ParameterId,
+    SegExtent, SegSpace, Semantic, SideEffect, SkeletonTerminator, Soac, SoacDestination,
+    SoacEffect, SoacInputType, WynLanguage,
 };
 use crate::flow::ExecutionModel;
 use crate::interface::{BindingExposure, EntryInput, EntryInputKind, StorageAccess};
@@ -23,6 +27,15 @@ fn u32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::UInt(32), vec![])
 }
 
+fn semantic_params(
+    specs: impl IntoIterator<Item = (String, Type<TypeName>)>,
+) -> Vec<FuncParam<SemanticResourceRef, Type<TypeName>>> {
+    specs
+        .into_iter()
+        .map(|(name, ty)| callable_parameter::<SemanticResourceRef, WynLanguage>(name, ty))
+        .collect()
+}
+
 fn semantic_function(
     id: FunctionId,
     name: &str,
@@ -35,8 +48,9 @@ fn semantic_function(
         name.into(),
         Span::dummy(),
         None,
-        (0..parameter_count).map(|index| (ty.clone(), format!("p{index}"))).collect(),
-        ty,
+        semantic_params((0..parameter_count).map(|index| (format!("p{index}"), ty.clone()))),
+        by_value_function_result::<WynLanguage>(ty),
+        CallEffects::Pure,
         graph,
     )
 }
@@ -44,8 +58,8 @@ fn semantic_function(
 fn mixed_callee(id: FunctionId) -> SemanticFunc {
     let ty = u32_ty();
     let mut graph = EGraph::<Semantic>::new();
-    let lane = graph.add_func_param(0, ty.clone());
-    let invariant = graph.add_func_param(1, ty.clone());
+    let lane = graph.add_test_value_parameter(0, ty.clone());
+    let invariant = graph.add_test_value_parameter(1, ty.clone());
     let square = graph.intern_pure(
         PureOp::BinOp(BinaryOperator::Multiply),
         smallvec![invariant, invariant],
@@ -58,22 +72,40 @@ fn mixed_callee(id: FunctionId) -> SemanticFunc {
         ty,
         None,
     );
-    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
+    graph.skeleton.blocks[graph.skeleton.entry].term =
+        SkeletonTerminator::Return(Some(graph.value_result(result)));
     semantic_function(id, "mixed", graph, 2)
 }
 
 fn calling_body(id: FunctionId, mixed: FunctionId) -> SemanticFunc {
     let ty = u32_ty();
     let mut graph = EGraph::<Semantic>::new();
-    let lane = graph.add_func_param(0, ty.clone());
-    let invariant = graph.add_func_param(1, ty.clone());
-    let result = graph.intern_pure(PureOp::Call(mixed), smallvec![lane, invariant], ty, None);
-    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
+    let lane = graph.add_test_value_parameter(0, ty.clone());
+    let invariant = graph.add_test_value_parameter(1, ty.clone());
+    let params = semantic_params([
+        ("lane".into(), ty.clone()),
+        ("invariant".into(), ty.clone()),
+    ]);
+    let result = graph
+        .add_call(
+            mixed,
+            &params,
+            &by_value_function_result::<WynLanguage>(ty.clone()),
+            [OperandRef::Value(lane), OperandRef::Value(invariant)],
+            CallEffects::Pure,
+            None,
+        )
+        .unwrap()
+        .1
+        .single_value()
+        .unwrap();
+    graph.skeleton.blocks[graph.skeleton.entry].term =
+        SkeletonTerminator::Return(Some(graph.value_result(result)));
     semantic_function(id, "map_body", graph, 2)
 }
 
 fn enclosing_uniform(graph: &mut EGraph<Semantic>) -> ValueId {
-    graph.add_func_param(0, u32_ty())
+    graph.add_test_value_parameter(0, u32_ty())
 }
 
 fn analyze_enclosing(graph: &EGraph<Semantic>) -> StageDependenceAnalysis {
@@ -123,7 +155,7 @@ fn mixed_stage_call_uses_generic_inlining_then_lifts_its_uniform_subgraph() {
     let capture = enclosing_uniform(&mut enclosing);
     let body = SegBody {
         region: map_body,
-        captures: vec![capture],
+        captures: vec![OperandRef::Value(capture)],
     };
     let enclosing_analysis = analyze_enclosing(&enclosing);
 
@@ -136,7 +168,7 @@ fn mixed_stage_call_uses_generic_inlining_then_lifts_its_uniform_subgraph() {
     let (mut specialized, mut specialized_body) = apply_lift(&mut enclosing, prepared).unwrap();
     assert_eq!(specialized.params.len(), 2);
     assert_eq!(specialized_body.captures.len(), 1);
-    let lifted = specialized_body.captures[0];
+    let lifted = specialized_body.captures[0].value().unwrap();
     assert!(matches!(
         &enclosing.nodes[lifted].kind,
         ValueKind::Pure {
@@ -147,9 +179,7 @@ fn mixed_stage_call_uses_generic_inlining_then_lifts_its_uniform_subgraph() {
     assert!(
         !graph_ops::reachable_execution_values(&specialized.graph).into_iter().any(|node| {
             match &specialized.graph.nodes[node].kind {
-                ValueKind::Pure {
-                    op: PureOp::Call(_), ..
-                } => true,
+                ValueKind::CallResult { .. } => true,
                 ValueKind::Pure {
                     op: PureOp::BinOp(name),
                     ..
@@ -177,8 +207,8 @@ fn mixed_stage_call_uses_generic_inlining_then_lifts_its_uniform_subgraph() {
 fn multiple_uniform_frontier_values_share_one_aggregate_capture() {
     let ty = u32_ty();
     let mut graph = EGraph::<Semantic>::new();
-    let lane = graph.add_func_param(0, ty.clone());
-    let invariant = graph.add_func_param(1, ty.clone());
+    let lane = graph.add_test_value_parameter(0, ty.clone());
+    let invariant = graph.add_test_value_parameter(1, ty.clone());
     let one = graph.intern_constant(ConstantValue::U32(1), ty.clone());
     let square = graph.intern_pure(
         PureOp::BinOp(BinaryOperator::Multiply),
@@ -204,22 +234,35 @@ fn multiple_uniform_frontier_values_share_one_aggregate_capture() {
         ty,
         None,
     );
-    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
+    graph.skeleton.blocks[graph.skeleton.entry].term =
+        SkeletonTerminator::Return(Some(graph.value_result(result)));
 
     let mut identities = ProgramIdentities::default();
     let callee_id = identities.alloc_function("multi_mixed".into());
     let map_body_id = identities.alloc_function("map_body".into());
     let callee = semantic_function(callee_id, "multi_mixed", graph, 2);
     let mut body_graph = EGraph::<Semantic>::new();
-    let lane = body_graph.add_func_param(0, u32_ty());
-    let invariant = body_graph.add_func_param(1, u32_ty());
-    let result = body_graph.intern_pure(
-        PureOp::Call(callee_id),
-        smallvec![lane, invariant],
-        u32_ty(),
-        None,
-    );
-    body_graph.skeleton.blocks[body_graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
+    let lane = body_graph.add_test_value_parameter(0, u32_ty());
+    let invariant = body_graph.add_test_value_parameter(1, u32_ty());
+    let params = semantic_params([
+        ("lane".into(), u32_ty()),
+        ("invariant".into(), u32_ty()),
+    ]);
+    let result = body_graph
+        .add_call(
+            callee_id,
+            &params,
+            &by_value_function_result::<WynLanguage>(u32_ty()),
+            [OperandRef::Value(lane), OperandRef::Value(invariant)],
+            CallEffects::Pure,
+            None,
+        )
+        .unwrap()
+        .1
+        .single_value()
+        .unwrap();
+    body_graph.skeleton.blocks[body_graph.skeleton.entry].term =
+        SkeletonTerminator::Return(Some(body_graph.value_result(result)));
     let mut program = empty_program(
         vec![callee, semantic_function(map_body_id, "map_body", body_graph, 2)],
         identities,
@@ -228,7 +271,7 @@ fn multiple_uniform_frontier_values_share_one_aggregate_capture() {
     let capture = enclosing_uniform(&mut enclosing);
     let body = SegBody {
         region: map_body_id,
-        captures: vec![capture],
+        captures: vec![OperandRef::Value(capture)],
     };
     let enclosing_analysis = analyze_enclosing(&enclosing);
     let prepared = prepare_lift(&program, &enclosing_analysis, &body)
@@ -240,7 +283,7 @@ fn multiple_uniform_frontier_values_share_one_aggregate_capture() {
     assert_eq!(specialized.params.len(), 2);
     assert_eq!(specialized_body.captures.len(), 1);
     assert!(matches!(
-        &enclosing.nodes[specialized_body.captures[0]].kind,
+        &enclosing.nodes[specialized_body.captures[0].value().unwrap()].kind,
         ValueKind::Pure {
             op: PureOp::Tuple(2),
             operands,
@@ -278,8 +321,12 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
     let input_ty = array_ty(element_ty.clone(), TypeName::ArrayVariantView);
     let result_ty = array_ty(element_ty.clone(), TypeName::ArrayVariantComposite);
     let mut entry_graph = EGraph::<Semantic>::new();
-    let input = entry_graph.add_func_param(0, input_ty.clone());
-    let camera = entry_graph.add_func_param(1, element_ty.clone());
+    let input = entry_graph.add_parameter(
+        ParameterId::new(0),
+        semantic_params([("points".into(), input_ty.clone())])[0].representation(),
+    );
+    let input = input.value().unwrap();
+    let camera = entry_graph.add_test_value_parameter(1, element_ty.clone());
     let result = entry_graph.alloc_side_effect_result(result_ty.clone());
 
     let mut identities = ProgramIdentities::default();
@@ -299,7 +346,7 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
                     pre: screma::Lambda::region(
                         SegBody {
                             region: original_region,
-                            captures: vec![camera],
+                            captures: vec![OperandRef::Value(camera)],
                         },
                         vec![element_ty.clone()],
                         vec![element_ty.clone()],
@@ -319,14 +366,15 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
                 },
             }),
         )),
-        operand_nodes: smallvec![input],
-        result: Some(result),
+        operands: smallvec![entry_graph.operand_ref(input)],
+        result: Some(entry_graph.value_result(result)),
         effects: None,
         span: None,
     };
     let block = entry_graph.skeleton.entry;
     entry_graph.skeleton.blocks[block].side_effects.push(effect);
-    entry_graph.skeleton.blocks[block].term = SkeletonTerminator::Return(Some(result));
+    entry_graph.skeleton.blocks[block].term =
+        SkeletonTerminator::Return(Some(entry_graph.value_result(result)));
     let entry = SemanticEntry::new_with_resources(
         "compute".into(),
         entry_id,
@@ -356,8 +404,11 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
         ],
         vec![],
         vec![],
-        vec![(input_ty, "points".into()), (element_ty, "frame".into())],
-        result_ty,
+        semantic_params([
+            ("points".into(), input_ty),
+            ("frame".into(), element_ty),
+        ]),
+        by_value_function_result::<WynLanguage>(result_ty),
         entry_graph,
     );
     program.entry_points.push(entry);
@@ -381,7 +432,7 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
     assert_ne!(body.region, original_region);
     assert_eq!(body.captures.len(), 1);
     assert!(matches!(
-        &entry.graph.nodes[body.captures[0]].kind,
+        &entry.graph.nodes[body.captures[0].value().unwrap()].kind,
         ValueKind::Pure {
             op: PureOp::BinOp(name),
             ..

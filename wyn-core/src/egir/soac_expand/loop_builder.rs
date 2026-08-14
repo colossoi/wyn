@@ -45,6 +45,7 @@ fn build_loop<F>(
     let next_i_nid = increment(graph, handles.idx_nid);
     let mut args = body.carried;
     args.push(next_i_nid);
+    let args = graph.admit_flow_values(args);
     graph.skeleton.blocks[body.tail].term = SkeletonTerminator::Branch {
         target: handles.header,
         args,
@@ -99,7 +100,7 @@ pub(super) fn expand_loop<F>(
 /// real loop via `build_loop_skeleton`.
 ///
 /// `emit_body(graph, next_effect, block, idx_const_nid, carried_in)` produces
-/// the `carried_out` NodeIds and the block that continues the iteration.
+/// the `carried_out` ValueNodeIds and the block that continues the iteration.
 fn try_unroll<F>(
     graph: &mut EGraph,
     bid: BlockId,
@@ -215,7 +216,7 @@ struct LoopHandles {
     header: BlockId,
     body: BlockId,
     /// One ValueId per loop-carried, matching the order in `spec.carried`.
-    /// These are the header block-param NodeIds, available inside body and
+    /// These are the header block-param ValueNodeIds, available inside body and
     /// on the else branch into `after`.
     pub(super) carried: Vec<ValueId>,
     /// The header's index block param.
@@ -284,6 +285,7 @@ fn build_loop_skeleton(
     let zero_nid = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone(), None);
     let mut preheader_args: Vec<ValueId> = spec.carried.iter().map(|(_, init)| *init).collect();
     preheader_args.push(zero_nid);
+    let preheader_args = graph.admit_flow_values(preheader_args);
     graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
         target: header,
         args: preheader_args,
@@ -297,9 +299,9 @@ fn build_loop_skeleton(
         bool_ty,
         None,
     );
-    let else_args: Vec<ValueId> = match &spec.result {
+    let else_args = match &spec.result {
         ResultBinding::TupleFromCarried { indices, .. } => {
-            indices.iter().map(|idx| carried_nids[*idx]).collect()
+            graph.admit_flow_values(indices.iter().map(|idx| carried_nids[*idx]))
         }
         // No `after` block param in the dummy case — branch with empty args.
         ResultBinding::DummyBool { .. } => vec![],

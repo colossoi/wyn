@@ -12,6 +12,7 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
     let int = Type::Constructed(TypeName::Int(32), vec![]);
     let tuple = Type::Constructed(TypeName::Tuple(1), vec![int.clone()]);
     let result = graph.alloc_side_effect_result(tuple);
+    let result_binding = graph.value_result(result);
     let _dead_project =
         graph.intern_pure(PureOp::Project { index: 0 }, smallvec![result], int.clone(), None);
     graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
@@ -43,8 +44,8 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
                 },
             }),
         )),
-        operand_nodes: smallvec![],
-        result: Some(result),
+        operands: smallvec![],
+        result: Some(result_binding),
         effects: None,
         span: None,
     });

@@ -25,8 +25,8 @@ use super::super::soac::{filter, screma};
 use super::super::stage_variance::StageDependenceAnalysis;
 use super::super::types::{
     EGraph, EffectToken, PureOp, ResourceAccess, SegExtent, SegResourceAccess, SegSpace, Semantic,
-    SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect, SoacPlacement,
-    ValueId, ValueKind,
+    ResultBinding, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect,
+    SoacPlacement, ValueId, ValueKind, ViewId, WynLanguage,
 };
 use super::ResourcesAllocated;
 use crate::ast::TypeName;
@@ -40,7 +40,6 @@ enum MaterializationPlan {
         entry: usize,
         kind: FixedMaterializationKind,
         operation: ProjectedOperation,
-        projected_result: ValueId,
         outputs: Vec<OutputSpec>,
     },
     RuntimeArray {
@@ -75,7 +74,8 @@ impl FixedMaterializationKind {
 }
 
 struct ProjectedOperation {
-    result: ValueId,
+    result: ResultBinding<Type<TypeName>>,
+    projected_result: ResultBinding<Type<TypeName>>,
     producer: SemanticOpId,
     source_site: SideEffectSite,
     projected_site: SideEffectSite,
@@ -120,7 +120,7 @@ struct OutputSpec {
 
 struct InputReplacement {
     project: ValueId,
-    view: ValueId,
+    view: ViewId,
     view_ty: Type<TypeName>,
     resource: ResourceId,
 }
@@ -158,9 +158,8 @@ fn apply_materialization(
             entry,
             kind,
             operation,
-            projected_result,
             outputs,
-        } => materialize_operation_result(program, entry, kind, operation, projected_result, outputs),
+        } => materialize_operation_result(program, entry, kind, operation, outputs),
         MaterializationPlan::RuntimeArray {
             entry,
             operation,
@@ -194,7 +193,7 @@ fn plan_operation_result(
         let uses = graph_ops::ValueUseIndex::build(&entry.graph);
         for (block_id, block) in &entry.graph.skeleton.blocks {
             for (effect_index, effect) in block.side_effects.iter().enumerate() {
-                let Some(result) = effect.result else {
+                let Some(result) = effect.result.as_ref() else {
                     continue;
                 };
                 let Some(&id) = effect.kind.soac_id() else {
@@ -251,7 +250,7 @@ fn filter_runtime_array_plan(
     entry_index: usize,
     entry: &SemanticEntry,
     op: &filter::Op<Semantic>,
-    result: ValueId,
+    result: &ResultBinding<Type<TypeName>>,
     producer: SemanticOpId,
     source_site: SideEffectSite,
     consumers: Option<&HashSet<SemanticOpId>>,
@@ -274,19 +273,23 @@ fn filter_runtime_array_plan(
     crate::ssa::layout::storage_elem_stride(&elem_ty).ok_or_else(|| {
         format!("runtime-array producer {producer:?} has no legal storage element layout")
     })?;
-    let result_ty = entry.graph.nodes[result].ty.clone();
+    let result_ty = result.ty().clone();
     let projection = GraphProjector::new(&entry.graph)
         .selected_operation_recipe(HashSet::from([source_site]))
         .map_err(|error| format!("could not project runtime-array producer {producer:?}: {error}"))?;
     let projected_site = projection
         .effect_site(source_site)
         .ok_or_else(|| format!("runtime-array projection omitted producer site for {producer:?}"))?;
+    let projected_result = projection
+        .result(result)
+        .map_err(|error| format!("runtime-array projection omitted result for {producer:?}: {error}"))?;
     let size = LogicalSize::for_space(space, &elem_ty)
         .ok_or_else(|| format!("runtime-array producer {producer:?} has no legal logical storage size"))?;
     Ok(Some(MaterializationPlan::RuntimeArray {
         entry: entry_index,
         operation: ProjectedOperation {
-            result,
+            result: result.clone(),
+            projected_result,
             producer,
             source_site,
             projected_site,
@@ -303,7 +306,7 @@ fn filter_runtime_array_plan(
 fn operation_result_residency(
     entry: &SemanticEntry,
     op: &screma::Op<Semantic>,
-    result: ValueId,
+    result: &ResultBinding<Type<TypeName>>,
     site: SideEffectSite,
     consumers: Option<&HashSet<SemanticOpId>>,
     requires_array_storage: bool,
@@ -333,7 +336,9 @@ fn operation_result_residency(
     } else if op.is_reduce()
         && op.form.reductions.len() == 1
         && (has_segmented_screma_consumer(entry, consumers) || !entry.execution_model.is_compute())
-        && scalar_result_is_used(uses, result, site)
+        && result
+            .single_value()
+            .is_some_and(|value| scalar_result_is_used(uses, value, site))
         && invocation_invariant(entry, site.block, &dependencies)
     {
         Some(FixedMaterializationKind::Scalar)
@@ -343,14 +348,14 @@ fn operation_result_residency(
 }
 
 fn array_result_residency(
-    entry: &SemanticEntry,
-    result: ValueId,
+    _entry: &SemanticEntry,
+    result: &ResultBinding<Type<TypeName>>,
     consumers: Option<&HashSet<SemanticOpId>>,
     requires_array_storage: bool,
 ) -> Option<FixedMaterializationKind> {
     if consumers.map_or(0, HashSet::len) >= 2 {
         Some(FixedMaterializationKind::SharedArray)
-    } else if entry.graph.nodes[result].ty.contains_runtime_sized_composite_array()
+    } else if result.ty().contains_runtime_sized_composite_array()
         && requires_array_storage
     {
         Some(FixedMaterializationKind::Gather)
@@ -363,7 +368,7 @@ fn operation_result_plan(
     entry_index: usize,
     entry: &SemanticEntry,
     op: &screma::Op<Semantic>,
-    result: ValueId,
+    result: &ResultBinding<Type<TypeName>>,
     producer: SemanticOpId,
     source_site: SideEffectSite,
     kind: FixedMaterializationKind,
@@ -381,11 +386,11 @@ fn operation_result_plan(
                 return Ok(None);
             }
         };
-    let output_specs = output_specs(&entry.graph, result, kind, space, op)
+    let output_specs = output_specs(result, kind, space, op)
         .ok_or_else(|| format!("materialization producer {producer:?} has an unsupported output layout"))?;
     let projected_result = projection
-        .node(result)
-        .ok_or_else(|| format!("materialization projection omitted result for {producer:?}"))?;
+        .result(result)
+        .map_err(|error| format!("materialization projection omitted result for {producer:?}: {error}"))?;
     let projected_site = projection
         .effect_site(source_site)
         .ok_or_else(|| format!("materialization projection omitted producer site for {producer:?}"))?;
@@ -393,14 +398,14 @@ fn operation_result_plan(
         entry: entry_index,
         kind,
         operation: ProjectedOperation {
-            result,
+            result: result.clone(),
+            projected_result,
             producer,
             source_site,
             projected_site,
             projection,
             space: space.clone(),
         },
-        projected_result,
         outputs: output_specs,
     }))
 }
@@ -587,10 +592,7 @@ fn direct_stage_value_is_liftable(
     let Some(ValueKind::Pure { op, .. }) = entry.graph.nodes.get(node).map(|node| &node.kind) else {
         return false;
     };
-    if matches!(
-        op,
-        PureOp::Project { .. } | PureOp::ViewIndex | PureOp::PlaceIndex | PureOp::OutputSlot { .. }
-    ) {
+    if matches!(op, PureOp::Project { .. }) {
         return false;
     }
     let dependence = analysis.dependence(node);
@@ -672,8 +674,10 @@ fn parallel_prelude_boundary_root(
     capture: ValueId,
 ) -> ValueId {
     let params = &entry.graph.skeleton.blocks[consumer.block].params;
-    let mut roots =
-        params.iter().copied().filter(|param| graph_ops::pure_depends_on(&entry.graph, capture, *param));
+    let mut roots = params
+        .iter()
+        .map(|param| param.value())
+        .filter(|param| graph_ops::pure_depends_on(&entry.graph, capture, *param));
     match (roots.next(), roots.next()) {
         (Some(root), None) => root,
         _ => capture,
@@ -805,12 +809,12 @@ fn invocation_invariant(entry: &SemanticEntry, block_id: BlockId, effects: &Hash
     }
     let reachable = graph_ops::execution_value_producer_closure(&entry.graph, roots).nodes;
     reachable.into_iter().all(|node| {
-        let Some(ValueKind::FuncParam { index }) = entry.graph.nodes.get(node).map(|node| &node.kind)
+        let Some(ValueKind::FuncParam { parameter }) = entry.graph.nodes.get(node).map(|node| &node.kind)
         else {
             return true;
         };
         dependence.dependence(node).is_stage_invariant()
-            && super::cost::entry_parameter_is_scalar_relocatable(entry, *index)
+            && super::cost::entry_parameter_is_scalar_relocatable(entry, parameter.index())
     })
 }
 
@@ -836,7 +840,6 @@ fn materialize_operation_result(
     entry_index: usize,
     kind: FixedMaterializationKind,
     operation: ProjectedOperation,
-    projected_result: ValueId,
     output_specs: Vec<OutputSpec>,
 ) -> Result<ResourcesAllocated, String> {
     let Program {
@@ -850,6 +853,7 @@ fn materialize_operation_result(
     } = program;
     let ProjectedOperation {
         result,
+        projected_result,
         producer: producer_id,
         source_site,
         projected_site,
@@ -912,7 +916,7 @@ fn materialize_operation_result(
     configure_operation_materialization(
         &mut producer_entry,
         projected_site,
-        projected_result,
+        &projected_result,
         &output_resources,
         &output_specs,
         &source_output_resources,
@@ -921,7 +925,7 @@ fn materialize_operation_result(
 
     rewrite_materialized_operation_source(
         &mut entry_points[entry_index],
-        result,
+        &result,
         source_site,
         &output_resources,
         &output_specs,
@@ -971,6 +975,7 @@ fn materialize_runtime_array_result(
     } = program;
     let ProjectedOperation {
         result,
+        projected_result: _,
         producer: producer_id,
         source_site,
         projected_site,
@@ -1041,7 +1046,9 @@ fn materialize_runtime_array_result(
 
     rewrite_runtime_array_source(
         &mut entry_points[entry_index],
-        result,
+        result
+            .single_value()
+            .ok_or_else(|| "runtime-array materialization requires one result value".to_string())?,
         source_site,
         &handoff,
         &mut global_context.effect_ids,
@@ -1092,11 +1099,12 @@ fn rewrite_runtime_array_source(
         None,
     );
     let view_ty = entry.graph.nodes[view].ty.clone();
+    let view_id = entry.graph.view_id(view);
     retarget_input_metadata(
         &mut entry.graph,
         &[InputReplacement {
             project: result,
-            view,
+            view: view_id,
             view_ty,
             resource: handoff.data,
         }],
@@ -1120,7 +1128,7 @@ fn rewrite_runtime_array_source(
 fn configure_operation_materialization(
     producer: &mut SemanticEntry,
     producer_site: SideEffectSite,
-    producer_result: ValueId,
+    producer_result: &ResultBinding<Type<TypeName>>,
     output_resources: &[ResourceId],
     output_specs: &[OutputSpec],
     source_output_resources: &HashSet<ResourceId>,
@@ -1163,10 +1171,15 @@ fn configure_materialized_soac(
     output_specs: &[OutputSpec],
     source_output_resources: &HashSet<ResourceId>,
 ) -> Result<(), String> {
+    let output_operands = output_views
+        .iter()
+        .copied()
+        .map(|view| graph.operand_ref(view))
+        .collect::<Vec<_>>();
     let producer_effect = graph.skeleton.effect_mut(producer_site);
     let SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))),
-        operand_nodes,
+        operands,
         ..
     } = producer_effect
     else {
@@ -1174,15 +1187,17 @@ fn configure_materialized_soac(
     };
     let array_outputs = output_views
         .iter()
+        .zip(&output_operands)
         .zip(output_resources)
         .zip(output_specs)
-        .filter_map(|((&view, &resource), output)| {
-            (output.storage == OutputStorage::Array).then_some((output.field, view, resource))
+        .filter_map(|(((&_view, &operand), &resource), output)| {
+            (output.storage == OutputStorage::Array)
+                .then_some((output.field, operand, resource))
         })
         .collect::<Vec<_>>();
-    for &(field, view, _) in &array_outputs {
+    for &(field, operand, _) in &array_outputs {
         op.result_state[field].destination.place(SoacPlacement::OutputView);
-        operand_nodes.push(view);
+        operands.push(operand);
     }
 
     let screma::SemanticState::Segmented {
@@ -1212,51 +1227,26 @@ fn configure_materialized_soac(
 fn configure_materialized_result(
     graph: &mut EGraph,
     block: BlockId,
-    result: ValueId,
+    result: &ResultBinding<Type<TypeName>>,
     output_views: &[ValueId],
     output_specs: &[OutputSpec],
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) {
-    let original_ty = graph.nodes[result].ty.clone();
     for (&output_view, output) in output_views.iter().zip(output_specs) {
         if output.storage != OutputStorage::Scalar {
             continue;
         }
-        let value = if output_specs.len() == 1 && original_ty == output.result_ty {
-            result
-        } else {
-            graph.intern_pure(
-                PureOp::Project {
-                    index: output.field as u32,
-                },
-                smallvec::smallvec![result],
-                output.result_ty.clone(),
-                None,
-            )
-        };
+        let value = result
+            .field(output.field)
+            .and_then(|field| field.single_value())
+            .expect("materialized scalar output has one result leaf");
         emit_scalar_handoff_store(graph, block, output_view, value, &output.elem_ty, effect_ids);
     }
-
-    let stored_types = output_views
-        .iter()
-        .zip(output_specs)
-        .map(|(&view, output)| match output.storage {
-            OutputStorage::Array => graph.nodes[view].ty.clone(),
-            OutputStorage::Scalar => output.result_ty.clone(),
-        })
-        .collect::<Vec<_>>();
-    let preserve_single = output_specs.len() == 1 && original_ty == output_specs[0].result_ty;
-    let materialized_ty = if preserve_single {
-        stored_types[0].clone()
-    } else {
-        Type::Constructed(TypeName::Tuple(stored_types.len()), stored_types)
-    };
-    graph.retype_node(result, materialized_ty);
 }
 
 fn rewrite_materialized_operation_source(
     entry: &mut SemanticEntry,
-    result: ValueId,
+    result: &ResultBinding<Type<TypeName>>,
     producer_site: SideEffectSite,
     output_resources: &[ResourceId],
     output_specs: &[OutputSpec],
@@ -1269,61 +1259,37 @@ fn rewrite_materialized_operation_source(
     for (&resource, output) in output_resources.iter().zip(output_specs) {
         let view =
             graph_ops::intern_resource_view(&mut entry.graph, resource, output.elem_ty.clone(), None);
-        // Pure projections are hash-consed, so interning is both the lookup and
-        // the fallback construction. Do not rescan the whole node sea.
-        let project = entry.graph.intern_pure(
-            PureOp::Project {
-                index: output.field as u32,
-            },
-            smallvec::smallvec![result],
-            output.result_ty.clone(),
-            None,
-        );
+        let source = result
+            .field(output.field)
+            .and_then(|field| field.single_value())
+            .ok_or_else(|| format!("materialized output {} is not one result leaf", output.field))?;
         let value = if output.storage == OutputStorage::Scalar {
             let (loaded, load_effect) =
                 detached_scalar_handoff_load(&mut entry.graph, view, &output.elem_ty, effect_ids);
             scalar_effects.push(load_effect);
             loaded
         } else {
+            let view = entry.graph.view_id(view);
             array_replacements.push(InputReplacement {
-                project,
+                project: source,
                 view,
-                view_ty: entry.graph.nodes[view].ty.clone(),
+                view_ty: entry.graph.nodes[view.value()].ty.clone(),
                 resource,
             });
-            view
+            view.value()
         };
-        replacements.push((project, value, resource));
+        replacements.push((source, value, resource));
         entry.set_resource_declaration(resource, StorageRole::Input, &output.elem_ty, &output.size);
     }
     retarget_input_metadata(&mut entry.graph, &array_replacements)?;
-    for &(project, value, _) in &replacements {
-        graph_ops::replace_all_references(&mut entry.graph, project, value);
+    for &(source, value, _) in &replacements {
+        graph_ops::replace_all_references(&mut entry.graph, source, value);
         let value_ty = entry.graph.nodes[value].ty.clone();
-        entry.graph.retype_node(project, value_ty);
+        entry.graph.retype_node(source, value_ty);
     }
-    let result_ty = entry.graph.nodes[result].ty.clone();
-    let replacement_values = replacements.iter().map(|(_, value, _)| *value).collect::<Vec<_>>();
-    let replacement_result = if replacement_values.len() == 1 && result_ty == output_specs[0].result_ty {
-        replacement_values[0]
-    } else {
-        let replacement_ty = Type::Constructed(
-            TypeName::Tuple(replacement_values.len()),
-            replacement_values.iter().map(|value| entry.graph.nodes[*value].ty.clone()).collect(),
-        );
-        entry.graph.intern_pure(
-            PureOp::Tuple(replacement_values.len()),
-            replacement_values.into(),
-            replacement_ty,
-            None,
-        )
-    };
-    graph_ops::replace_all_references(&mut entry.graph, result, replacement_result);
-    let replacement_result_ty = entry.graph.nodes[replacement_result].ty.clone();
-    entry.graph.retype_node(result, replacement_result_ty);
     for route in entry.routes_mut() {
         if let Some((_, value, _)) =
-            replacements.iter().find(|(project, _, _)| *project == route.source.value)
+            replacements.iter().find(|(source, _, _)| *source == route.source.value)
         {
             route.source.value = *value;
         }
@@ -1481,7 +1447,10 @@ fn projected_materialization_entry(
         outputs: Vec::new(),
         resource_declarations,
         params: source.params.clone(),
-        return_ty: Type::Constructed(TypeName::Unit, vec![]),
+        result: super::super::types::by_value_function_result::<WynLanguage>(Type::Constructed(
+            TypeName::Unit,
+            vec![],
+        )),
         graph: projection.graph,
     }
 }
@@ -1514,13 +1483,16 @@ fn detached_scalar_handoff_load(
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> (ValueId, SideEffect) {
     let zero = graph_ops::intern_u32(graph, 0, None);
-    let place = graph.intern_pure(
-        PureOp::ViewIndex,
-        smallvec::smallvec![view, zero],
+    let view = graph.view_id(view);
+    let place = graph.add_view_index_place(view, zero, elem_ty.clone(), None);
+    graph_ops::detached_load(
+        graph,
+        place,
         elem_ty.clone(),
+        super::super::types::LoadMode::Element,
+        effect_ids,
         None,
-    );
-    graph_ops::detached_load(graph, place, elem_ty.clone(), effect_ids, None)
+    )
 }
 
 fn replace_prelude_effects_with_load(
@@ -1568,7 +1540,7 @@ fn replace_structured_prefix_with_load(
     entry.graph.skeleton.blocks[source_entry].side_effects.extend(load_effects);
     entry.graph.skeleton.blocks[source_entry].term = SkeletonTerminator::Branch {
         target: continuation,
-        args: vec![loaded],
+        args: entry.graph.admit_flow_values([loaded]),
     };
     let aliases = super::super::skel_opt::run_one_body(&mut entry.graph);
     entry.graph.install_aliases(aliases);
@@ -1576,23 +1548,19 @@ fn replace_structured_prefix_with_load(
 }
 
 fn output_specs(
-    graph: &EGraph,
-    result: ValueId,
+    result: &ResultBinding<Type<TypeName>>,
     materialization: FixedMaterializationKind,
     space: &SegSpace,
     op: &screma::Op<Semantic>,
 ) -> Option<Vec<OutputSpec>> {
-    let result_types = match &graph.nodes[result].ty {
-        Type::Constructed(TypeName::Tuple(arity), fields) if *arity == fields.len() => fields.clone(),
-        ty if op.result_count() == 1 => vec![ty.clone()],
-        _ => return None,
-    };
-    if op.result_count() != result_types.len() {
+    if op.result_count() != result.field_count() {
         return None;
     }
     (0..op.result_count())
-        .zip(result_types)
-        .map(|(field, result_ty)| {
+        .map(|field| {
+            let field_result = result.field(field)?;
+            field_result.single_value()?;
+            let result_ty = field_result.ty().clone();
             let elem_ty = op.form.result_element_type(field)?.clone();
             let storage = match op.form.result_id(field)? {
                 screma::ResultId::Reduction { .. } => OutputStorage::Scalar,
@@ -1673,7 +1641,6 @@ fn dependency_effects(graph: &EGraph, root: SideEffectSite) -> Option<HashSet<us
 }
 
 fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]) -> Result<(), String> {
-    let mut result_retypes = Vec::new();
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
             match &mut effect.kind {
@@ -1683,7 +1650,9 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                     for (input, input_type) in op.inputs.iter_mut().enumerate() {
                         if let Some(replacement) = replacements
                             .iter()
-                            .find(|replacement| effect.operand_nodes[input] == replacement.project)
+                            .find(|replacement| {
+                                effect.operands[input].value() == Some(replacement.project)
+                            })
                         {
                             input_type.array = replacement.view_ty.clone();
                             new_resources.push(replacement.resource);
@@ -1722,29 +1691,12 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                             }
                         }
                     }
-                    if op.inputs.len() == 1 {
-                        if let Some(result) = effect.result {
-                            let replacements = op
-                                .result_state
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, state)| state.destination.is_input_buffer())
-                                .filter_map(|(field, _)| {
-                                    matches!(op.form.result_id(field), Some(screma::ResultId::Post(_)))
-                                        .then(|| (field, op.inputs[0].array.clone()))
-                                })
-                                .collect::<Vec<_>>();
-                            if !replacements.is_empty() {
-                                result_retypes.push((result, replacements));
-                            }
-                        }
-                    }
                 }
                 SideEffectKind::Soac(SoacEffect(_, Soac::Filter(filter::Op { body, state }))) => {
                     let mut domain_input = None;
                     if let Some(replacement) = replacements
                         .iter()
-                        .find(|replacement| effect.operand_nodes[0] == replacement.project)
+                        .find(|replacement| effect.operands[0].value() == Some(replacement.project))
                     {
                         let Some(input) = body.inputs.first_mut() else {
                             continue;
@@ -1772,22 +1724,6 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
             }
         }
     }
-    for (result, replacements) in result_retypes {
-        let current = graph.nodes[result].ty.clone();
-        let retyped = match current {
-            Type::Constructed(TypeName::Tuple(arity), mut fields) => {
-                for (field, ty) in replacements {
-                    if let Some(slot) = fields.get_mut(field) {
-                        *slot = ty;
-                    }
-                }
-                Type::Constructed(TypeName::Tuple(arity), fields)
-            }
-            current if replacements.len() == 1 && replacements[0].0 == 0 => replacements[0].1.clone(),
-            current => current,
-        };
-        graph.retype_node(result, retyped);
-    }
     Ok(())
 }
 
@@ -1795,7 +1731,7 @@ fn replace_space_references(space: &mut SegSpace, replacements: &[InputReplaceme
     for replacement in replacements {
         space.replace_reference(
             replacement.project,
-            replacement.view,
+            replacement.view.value(),
             SemanticResourceRef(replacement.resource),
         );
     }

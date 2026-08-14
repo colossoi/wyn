@@ -23,8 +23,8 @@ use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::{filter, lambda as lambda_ops, screma};
 use crate::egir::types::{
-    EGraph, PureOp, SegResourceAccess, SegSpace, SideEffect, SideEffectKind, SkeletonTerminator, Soac,
-    SoacEffect, ValueId, ValueKind,
+    EGraph, PureOp, SegResourceAccess, SegSpace, SideEffect, SideEffectKind,
+    SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind,
 };
 use crate::flow::{BlockId, ControlHeader};
 use crate::op::BinaryOperator;
@@ -66,7 +66,7 @@ fn find_in_graph(
             let SideEffectKind::Soac(SoacEffect(filter_id, Soac::Filter(_))) = &effect.kind else {
                 continue;
             };
-            let Some(result) = effect.result else {
+            let Some(result) = effect.value_result() else {
                 continue;
             };
             let lengths = graph
@@ -153,8 +153,10 @@ fn is_reduction_of_filter(effect: &SideEffect, filter_result: ValueId) -> bool {
     }
     let input_count = op.inputs.len();
     input_count != 0
-        && effect.operand_nodes.len() >= input_count
-        && effect.operand_nodes[..input_count].iter().all(|&input| input == filter_result)
+        && effect.operands.len() >= input_count
+        && effect.operands[..input_count]
+            .iter()
+            .all(|input| input.value() == Some(filter_result))
 }
 
 fn filter_result_escapes(
@@ -204,7 +206,10 @@ fn filter_parts(effect: &SideEffect) -> FilterParts {
     FilterParts {
         space: op.state.space.clone(),
         body: op.body.clone(),
-        input_nodes: effect.operand_nodes[..input_count].to_vec(),
+        input_nodes: effect.operands[..input_count]
+            .iter()
+            .map(|operand| operand.value().expect("Filter inputs are values or views"))
+            .collect(),
         scratch: match &op.state.storage {
             filter::Output::Local { .. } => None,
             filter::Output::Runtime { scratch, .. } => Some(*scratch),
@@ -287,8 +292,10 @@ fn build_count_reduction(
     count_ty: Type<TypeName>,
 ) -> (screma::Reduce, SemanticFunc) {
     let mut graph = EGraph::new();
-    let left = graph.add_func_param(0, count_ty.clone());
-    let right = graph.add_func_param(1, count_ty.clone());
+    let params = lambda_ops::named_parameters(&[count_ty.clone(), count_ty.clone()], "count");
+    let arguments = lambda_ops::function_parameters(&mut graph, &params);
+    let left = arguments[0].value().expect("count parameter is a value");
+    let right = arguments[1].value().expect("count parameter is a value");
     let sum = graph.intern_pure(
         PureOp::BinOp(BinaryOperator::Add),
         smallvec![left, right],
@@ -304,10 +311,7 @@ fn build_count_reduction(
         span,
         graph,
         entry,
-        vec![
-            (count_ty.clone(), "left".to_string()),
-            (count_ty.clone(), "right".to_string()),
-        ],
+        params,
         vec![],
         parameter_types,
         vec![count_ty],
@@ -338,7 +342,13 @@ fn build_masked_pre(
     captures.extend_from_slice(filter.body.predicate.captures());
     if let Some(consumer) = consumer {
         captures.extend_from_slice(consumer.pre.captures());
-        captures.extend(consumer.reductions.iter().flat_map(|reduction| reduction.neutral.iter().copied()));
+        captures.extend(
+            consumer
+                .reductions
+                .iter()
+                .flat_map(|reduction| reduction.neutral.iter().copied())
+                .map(crate::egir::types::OperandRef::Value),
+        );
     }
     let capture_types = capture_types(outer_types, captures.iter());
     let input_types =
@@ -347,20 +357,10 @@ fn build_masked_pre(
     if let Some(count_ty) = count_ty {
         result_types.push(count_ty.clone());
     }
-    let mut params = input_types
-        .iter()
-        .enumerate()
-        .map(|(index, ty)| (ty.clone(), format!("input_{index}")))
-        .collect::<Vec<_>>();
-    params.extend(
-        capture_types.iter().enumerate().map(|(index, ty)| (ty.clone(), format!("capture_{index}"))),
-    );
+    let mut params = lambda_ops::named_parameters(&input_types, "input");
+    params.extend(lambda_ops::named_parameters(&capture_types, "capture"));
     let mut graph = EGraph::new();
-    let args = params
-        .iter()
-        .enumerate()
-        .map(|(index, (ty, _))| graph.add_func_param(index, ty.clone()))
-        .collect::<Vec<_>>();
+    let args = lambda_ops::function_parameters(&mut graph, &params);
     let mut cursor = input_types.len();
     let mapped_capture_count = filter.body.map.capture_count();
     let mapped = support::invoke_lambda(
@@ -372,11 +372,12 @@ fn build_masked_pre(
     );
     cursor += mapped_capture_count;
     let predicate_capture_count = filter.body.predicate.capture_count();
+    let mapped_arguments = mapped.iter().map(|value| graph.operand_ref(*value)).collect::<Vec<_>>();
     let predicate = support::invoke_lambda(
         &mut graph,
         inner,
         &filter.body.predicate,
-        &mapped,
+        &mapped_arguments,
         &args[cursor..cursor + predicate_capture_count],
     );
     cursor += predicate_capture_count;
@@ -386,7 +387,7 @@ fn build_masked_pre(
     let mut fallback = Vec::new();
     if let Some(consumer) = consumer {
         let consumer_capture_count = consumer.pre.capture_count();
-        let consumer_args = vec![mapped[0]; consumer.pre.parameter_types.len()];
+        let consumer_args = vec![graph.operand_ref(mapped[0]); consumer.pre.parameter_types.len()];
         selected.extend(support::invoke_lambda(
             &mut graph,
             inner,
@@ -396,7 +397,9 @@ fn build_masked_pre(
         ));
         cursor += consumer_capture_count;
         let neutral_count = consumer.reduction_input_count();
-        fallback.extend_from_slice(&args[cursor..cursor + neutral_count]);
+        fallback.extend(args[cursor..cursor + neutral_count].iter().map(|argument| {
+            argument.value().expect("reduction neutral capture is a value")
+        }));
         cursor += neutral_count;
     }
     if let Some(count_ty) = count_ty {
@@ -447,11 +450,11 @@ fn conditional_results(
     graph.skeleton.blocks[entry].control_header = Some(ControlHeader::Selection { merge });
     graph.skeleton.blocks[then_block].term = SkeletonTerminator::Branch {
         target: merge,
-        args: selected,
+        args: graph.admit_flow_values(selected),
     };
     graph.skeleton.blocks[else_block].term = SkeletonTerminator::Branch {
         target: merge,
-        args: fallback,
+        args: graph.admit_flow_values(fallback),
     };
     (merge, results)
 }
@@ -481,7 +484,7 @@ fn rewrite_with_consumer(
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(old_op))) = &consumer_effect.kind else {
                 unreachable!();
             };
-            let old_result = consumer_effect.result.expect("Filter reduction has no result");
+            let old_result = consumer_effect.value_result().expect("Filter reduction has no value result");
             let old_result_types = old_op
                 .form
                 .reductions
@@ -532,13 +535,21 @@ fn rewrite_with_consumer(
 
             let fused_effects = splice_effect_tokens(filter_effect.effects, consumer_effect.effects);
             let consumer_id = consumer_effect.kind.soac_id().copied().expect("consumer SOAC id");
+            let consumer_operands = filter
+                .input_nodes
+                .iter()
+                .map(|value| graph.operand_ref(*value))
+                .collect();
+            let replacement_result = count_project
+                .as_ref()
+                .map(|(_, new_result, _)| graph.value_result(*new_result));
             {
                 let consumer = &mut graph.skeleton.blocks[candidate.block].side_effects[consumer_index];
                 consumer.kind = SideEffectKind::Soac(SoacEffect(consumer_id, Soac::Screma(op)));
-                consumer.operand_nodes = SmallVec::from_vec(filter.input_nodes.clone());
+                consumer.operands = consumer_operands;
                 consumer.effects = fused_effects;
-                if let Some((_, new_result, _)) = &count_project {
-                    consumer.result = Some(*new_result);
+                if let Some(result) = replacement_result {
+                    consumer.result = Some(result);
                 }
             }
             let consumer_snapshot =
@@ -558,7 +569,7 @@ fn rewrite_with_consumer(
             graph.skeleton.blocks[candidate.block].side_effects.remove(candidate.filter);
             EntryMetadataPatch {
                 replacement: count_project.as_ref().map(|(_, _, value)| *value),
-                old_writer: filter_effect.result,
+                old_writer: filter_effect.value_result(),
                 replacement_writer: Some(
                     count_project.as_ref().map(|(_, result, _)| *result).unwrap_or(old_result),
                 ),
@@ -594,6 +605,12 @@ fn rewrite_count_only(
                 None,
             );
             replace_lengths(graph, &candidate.lengths, project);
+            let operands = filter
+                .input_nodes
+                .iter()
+                .map(|value| graph.operand_ref(*value))
+                .collect();
+            let result_binding = graph.value_result(result);
             {
                 let effect = &mut graph.skeleton.blocks[candidate.block].side_effects[candidate.filter];
                 let SideEffectKind::Soac(SoacEffect(id, _)) = effect.kind else {
@@ -620,8 +637,8 @@ fn rewrite_count_only(
                         },
                     }),
                 ));
-                effect.operand_nodes = SmallVec::from_vec(filter.input_nodes.clone());
-                effect.result = Some(result);
+                effect.operands = operands;
+                effect.result = Some(result_binding);
             }
             let effect_snapshot =
                 graph.skeleton.blocks[candidate.block].side_effects[candidate.filter].clone();
@@ -636,7 +653,7 @@ fn rewrite_count_only(
             }
             EntryMetadataPatch {
                 replacement: Some(project),
-                old_writer: filter_effect.result,
+                old_writer: filter_effect.value_result(),
                 replacement_writer: Some(result),
                 scratch: filter.scratch,
             }

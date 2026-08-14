@@ -82,8 +82,10 @@ impl<'a, P: Family> LoopInvariance<'a, P> {
         let mut effect_blocks = LookupMap::new();
         for (block, body) in &graph.skeleton.blocks {
             for effect in &body.side_effects {
-                if let Some(result) = effect.result {
-                    effect_blocks.insert(result, block);
+                if let Some(result) = &effect.result {
+                    for value in result.values() {
+                        effect_blocks.insert(value, block);
+                    }
                 }
             }
         }
@@ -102,6 +104,12 @@ impl<'a, P: Family> LoopInvariance<'a, P> {
         }
         let invariant = match self.graph.nodes[node].kind.clone() {
             ValueKind::Constant(_) | ValueKind::FuncParam { .. } => true,
+            ValueKind::CallResult { .. } => true,
+            ValueKind::PlaceLength { place } => self
+                .graph
+                .place_value_dependencies(place)
+                .into_iter()
+                .all(|operand| self.is_invariant(operand)),
             ValueKind::BlockParam { block, .. } => self.loops.block_is_invariant(block, self.header),
             ValueKind::SideEffectResult => self
                 .effect_blocks

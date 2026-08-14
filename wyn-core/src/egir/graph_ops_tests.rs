@@ -1,6 +1,6 @@
 use super::*;
 use crate::ast::TypeName;
-use crate::egir::types::{EffectOp, EffectToken, SkeletonTerminator};
+use crate::egir::types::{EffectOp, EffectToken, OperandRef, SkeletonTerminator};
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
 
@@ -15,18 +15,22 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
     let header = graph.skeleton.create_block();
     let exit = graph.skeleton.create_block();
     let ty = u32_ty();
-    let place = graph.intern_constant(ConstantValue::U32(0), ty.clone());
+    let source = graph.intern_constant(ConstantValue::U32(0), ty.clone());
     let produced = graph.alloc_side_effect_result(ty.clone());
+    let produced_binding = graph.value_result(produced);
     graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![place],
-        result: Some(produced),
+        kind: SideEffectKind::Effect(EffectOp::Op {
+            tag: PureOp::Materialize,
+        }),
+        operands: smallvec![OperandRef::Value(source)],
+        result: Some(produced_binding),
         effects: Some((EffectToken::from(0), EffectToken::from(1))),
         span: None,
     });
+    let entry_args = graph.admit_flow_values([produced]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![produced],
+        args: entry_args,
     };
 
     let current = graph.add_block_param(header, ty.clone());
@@ -43,14 +47,16 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
     );
 
     let merged = graph.add_block_param(exit, ty.clone());
+    let next_args = graph.admit_flow_values([next]);
+    let current_args = graph.admit_flow_values([current]);
     graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
         cond,
         then_target: header,
-        then_args: vec![next],
+        then_args: next_args,
         else_target: exit,
-        else_args: vec![current],
+        else_args: current_args,
     };
-    graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(Some(merged));
+    graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(Some(graph.value_result(merged)));
     let tail = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![merged, one],
@@ -67,7 +73,7 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
             index: 0,
         }])
     );
-    for expected in [tail, merged, current, next, one, cond, produced, place] {
+    for expected in [tail, merged, current, next, one, cond, produced, source] {
         assert!(
             closure.nodes.contains(&expected),
             "producer closure omitted {expected:?}"
@@ -75,7 +81,7 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
     }
 
     let uses = ValueUseIndex::build(&graph);
-    let pure = uses.pure_observers(place);
+    let pure = uses.pure_observers(source);
     assert_eq!(
         pure.effect_sites().collect::<HashSet<_>>(),
         HashSet::from([SideEffectSite {
@@ -85,7 +91,7 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
     );
     assert!(pure.terminator_blocks().next().is_none());
 
-    let flowing = uses.value_observers(place);
+    let flowing = uses.value_observers(source);
     assert_eq!(
         flowing.effect_sites().collect::<HashSet<_>>(),
         HashSet::from([SideEffectSite {
@@ -98,5 +104,5 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
         HashSet::from([entry, header, exit])
     );
     assert!(uses.pure_reaches(current, next));
-    assert!(!uses.pure_reaches(place, produced));
+    assert!(!uses.pure_reaches(source, produced));
 }

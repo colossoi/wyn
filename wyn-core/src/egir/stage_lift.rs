@@ -319,14 +319,7 @@ fn is_liftable(
 ) -> bool {
     if !matches!(
         graph.nodes.get(node).map(|node| &node.kind),
-        Some(ValueKind::Pure { op, .. })
-            if !matches!(
-                op,
-                PureOp::Project { .. }
-                    | PureOp::ViewIndex
-                    | PureOp::PlaceIndex
-                    | PureOp::OutputSlot { .. }
-            )
+        Some(ValueKind::Pure { op, .. }) if !matches!(op, PureOp::Project { .. })
     ) {
         return false;
     }
@@ -352,10 +345,7 @@ fn subgraph_contains_call(graph: &EGraph, root: ValueId) -> bool {
     .any(|node| {
         matches!(
             graph.nodes.get(node).map(|node| &node.kind),
-            Some(ValueKind::Pure {
-                op: PureOp::Call(_),
-                ..
-            })
+            Some(ValueKind::CallResult { .. })
         )
     })
 }
@@ -371,7 +361,7 @@ fn cloneable_from_captures(
     }
     let cloneable = match graph.nodes.get(node).map(|node| &node.kind) {
         Some(ValueKind::Constant(_)) => true,
-        Some(ValueKind::FuncParam { index }) => *index >= leading_parameters,
+        Some(ValueKind::FuncParam { parameter }) => parameter.index() >= leading_parameters,
         Some(ValueKind::Pure { operands, .. }) => operands
             .iter()
             .all(|operand| cloneable_from_captures(graph, *operand, leading_parameters, visiting)),
@@ -379,7 +369,13 @@ fn cloneable_from_captures(
             cloneable_from_captures(graph, *left, leading_parameters, visiting)
                 && cloneable_from_captures(graph, *right, leading_parameters, visiting)
         }
-        Some(ValueKind::BlockParam { .. } | ValueKind::SideEffectResult) | None => false,
+        Some(
+            ValueKind::BlockParam { .. }
+            | ValueKind::CallResult { .. }
+            | ValueKind::PlaceLength { .. }
+            | ValueKind::SideEffectResult,
+        )
+        | None => false,
     };
     visiting.remove(&node);
     cloneable
@@ -387,7 +383,11 @@ fn cloneable_from_captures(
 
 fn apply_lift(enclosing: &mut EGraph, mut prepared: StageLiftCandidate) -> Result<(SemanticFunc, SegBody)> {
     let mut body = prepared.original_body;
-    let mut memo = body.capture_bindings(&prepared.function)?;
+    let mut memo = body
+        .capture_bindings(&prepared.function)?
+        .into_iter()
+        .filter_map(|(parameter, capture)| capture.value().map(|capture| (parameter, capture)))
+        .collect();
 
     let mut cloned = Vec::with_capacity(prepared.frontier.len());
     let mut types = Vec::with_capacity(prepared.frontier.len());
@@ -413,7 +413,7 @@ fn apply_lift(enclosing: &mut EGraph, mut prepared: StageLiftCandidate) -> Resul
     };
     let parameter = prepared.function.push_seg_body_capture(
         &mut body,
-        capture,
+        enclosing.operand_ref(capture),
         capture_ty,
         "stage_uniform_capture".into(),
     );
@@ -449,16 +449,18 @@ fn prune_dead_captures(function: &mut SemanticFunc, body: &mut SegBody) -> Resul
     let live = graph_ops::reachable_execution_values(&function.graph);
     let mut retained_captures = SortedSet::new();
     for node in live {
-        if let Some(ValueKind::FuncParam { index }) = function.graph.nodes.get(node).map(|node| &node.kind)
+        if let Some(ValueKind::FuncParam { parameter }) =
+            function.graph.nodes.get(node).map(|node| &node.kind)
         {
-            if *index >= parameter_count {
+            let index = parameter.index();
+            if index >= parameter_count {
                 return Err(StageLiftError::Rewrite(format!(
                     "region `{}` has out-of-range parameter {index}",
                     function.name
                 )));
             }
-            if *index >= leading_parameters {
-                retained_captures.insert(*index - leading_parameters);
+            if index >= leading_parameters {
+                retained_captures.insert(index - leading_parameters);
             }
         }
     }

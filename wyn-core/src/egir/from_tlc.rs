@@ -263,10 +263,17 @@ fn summarize_definition_effects(
 /// the symbol table. Acts as a factory: `new_converter` snapshots the
 /// caller's current `pure_constants` set into a fresh `Converter`,
 /// keeping the per-call `clone()` inside one method.
+type CallableBoundary = (
+    Vec<FuncParam<SemanticResourceRef, Type<TypeName>>>,
+    FunctionResult<Type<TypeName>>,
+    CallEffects,
+);
+
 struct GlobalContext<'a> {
     top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
     symbols: &'a SymbolTable,
     pure_definitions: &'a LookupSet<SymbolId>,
+    callable_boundaries: &'a LookupMap<SymbolId, CallableBoundary>,
 }
 
 struct ConversionArenas {
@@ -301,7 +308,7 @@ impl<'a> GlobalContext<'a> {
             self.top_level,
             self.symbols,
             pure_constants.clone(),
-            self.pure_definitions.clone(),
+            self.callable_boundaries,
             binding_ids,
             effect_ids,
             arenas,
@@ -329,6 +336,28 @@ pub fn convert_program(
     let top_level: LookupMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
     let pure_definitions = infer_pure_definitions(program);
+    let callable_boundaries = program
+        .defs
+        .iter()
+        .filter(|definition| matches!(definition.meta, DefMeta::Function | DefMeta::LiftedLambda))
+        .map(|definition| {
+            let (parameter_types, result_type) = extract_function_signature(&definition.ty);
+            let parameters = parameter_types
+                .into_iter()
+                .enumerate()
+                .map(|(index, ty)| {
+                    callable_parameter::<SemanticResourceRef, WynLanguage>(format!("arg{index}"), ty)
+                })
+                .collect();
+            let result = by_value_function_result::<WynLanguage>(result_type);
+            let effects = if pure_definitions.contains(&definition.name) {
+                CallEffects::Pure
+            } else {
+                CallEffects::General
+            };
+            (definition.name, (parameters, result, effects))
+        })
+        .collect::<LookupMap<_, _>>();
 
     // Program-level arenas are borrowed by one converter at a time, then
     // handed intact to the semantic program.
@@ -363,6 +392,7 @@ pub fn convert_program(
         top_level: &top_level,
         symbols,
         pure_definitions: &pure_definitions,
+        callable_boundaries: &callable_boundaries,
     };
 
     // Phase 1: detect pure constants. We elaborate each arity-0 def's body
@@ -388,7 +418,10 @@ pub fn convert_program(
             &mut arenas,
         );
         if let Ok(result_nid) = converter.convert_term(&def.body) {
-            converter.set_return(Some(result_nid));
+            let result_abi = by_value_function_result::<WynLanguage>(def.body.ty.clone());
+            let result =
+                super::graph_ops::bind_by_value_result(&mut converter.graph, &result_abi, result_nid);
+            converter.set_return(Some(result));
             let mut graph = converter.into_graph();
             let aliases = super::skel_opt::run_one_body(&mut graph);
             graph.install_aliases(aliases);
@@ -560,19 +593,31 @@ fn convert_function<'a>(
     // Regular functions: extract lambda params and build an EGraph.
     let (inner_body, params) = crate::tlc::extract_lambda_params_ref(&def.body);
     let ret_type = inner_body.ty.clone();
-    let param_info: Vec<(Type<TypeName>, String)> = params
+    let param_info: Vec<FuncParam<SemanticResourceRef, Type<TypeName>>> = params
         .iter()
-        .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))
+        .map(|(sym, ty)| {
+            Ok(callable_parameter::<SemanticResourceRef, WynLanguage>(
+                symbol_name(symbols, *sym)?.to_string(),
+                ty.clone(),
+            ))
+        })
         .collect::<Result<_, ConvertError>>()?;
 
     let mut converter = ctx.new_converter(pure_constants, binding_ids, effect_ids, arenas);
 
-    for (i, (sym, ty)) in params.iter().enumerate() {
-        let nid = converter.graph.add_func_param(i, ty.clone());
-        converter.locals.insert(*sym, nid);
+    for (i, ((sym, _), parameter)) in params.iter().zip(&param_info).enumerate() {
+        let operand = converter.graph.add_parameter(ParameterId::new(i), parameter.representation());
+        converter.locals.insert(
+            *sym,
+            operand
+                .value()
+                .expect("source function parameters use the value or view channel"),
+        );
     }
     let result = converter.convert_term(inner_body)?;
-    converter.set_return(Some(result));
+    let result_abi = by_value_function_result::<WynLanguage>(ret_type.clone());
+    let result_binding = super::graph_ops::bind_by_value_result(&mut converter.graph, &result_abi, result);
+    converter.set_return(Some(result_binding));
 
     // A runtime `filter` compacts into a compiler scratch resource, which only
     // a `SemanticEntry` can own as a physicalization requirement. A standalone
@@ -598,7 +643,12 @@ fn convert_function<'a>(
         def.body.span,
         None,
         param_info,
-        ret_type,
+        result_abi,
+        if ctx.pure_definitions.contains(&def.name) {
+            CallEffects::Pure
+        } else {
+            CallEffects::General
+        },
         graph,
     )))
 }
@@ -740,9 +790,14 @@ fn convert_entry_point(
     // The converted body carries the specialized return representation; use it
     // rather than the parse-time entry declaration.
     let ret_type = inner_body.ty.clone();
-    let param_info: Vec<(Type<TypeName>, String)> = params
+    let param_info: Vec<FuncParam<SemanticResourceRef, Type<TypeName>>> = params
         .iter()
-        .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))
+        .map(|(sym, ty)| {
+            Ok(callable_parameter::<SemanticResourceRef, WynLanguage>(
+                symbol_name(symbols, *sym)?.to_string(),
+                ty.clone(),
+            ))
+        })
         .collect::<Result<_, ConvertError>>()?;
 
     let mut converter = ctx.new_converter(pure_constants, binding_ids, effect_ids, arenas);
@@ -782,7 +837,12 @@ fn convert_entry_point(
 
         // Always register a FuncParam placeholder so param indexing stays
         // stable; the binding below may override it.
-        let fp_nid = converter.graph.add_func_param(i, ty.clone());
+        let parameter = &param_info[i];
+        let fp_nid = converter
+            .graph
+            .add_parameter(ParameterId::new(i), parameter.representation())
+            .value()
+            .expect("source entry parameters use the value or view channel");
         converter.locals.insert(*sym, fp_nid);
 
         // Tuple-of-unsized-arrays: the layout already decided which
@@ -968,16 +1028,26 @@ fn convert_entry_point(
         converter.binding_ids,
     )?;
 
-    // `convert_compute_outputs` records per-slot sources while preserving the
-    // original control flow. Output realization later assigns concrete writers.
-    converter.set_return(if is_unit_return { None } else { result_nid });
-
     // Compute entries publish through routes, not function return values.
     let ret_type = if is_compute || is_storage_image_ty(&ret_type) {
         Type::Constructed(TypeName::Unit, vec![])
     } else {
         ret_type
     };
+    let result_abi = by_value_function_result::<WynLanguage>(ret_type.clone());
+    let result_binding = if is_unit_return || is_compute {
+        result_abi.bind(
+            |_, _| panic!("unit entry result has no by-value leaves"),
+            |_| panic!("raw entry result has no destination parameters"),
+        )
+    } else {
+        super::graph_ops::bind_by_value_result(
+            &mut converter.graph,
+            &result_abi,
+            result_nid.expect("non-unit entry has a result value"),
+        )
+    };
+    converter.set_return(Some(result_binding));
 
     let mut resource_declarations =
         entry_resource_declarations(&inputs, &outputs, &mut converter.arenas.resources);
@@ -998,7 +1068,7 @@ fn convert_entry_point(
         outputs,
         resource_declarations,
         param_info,
-        ret_type,
+        result_abi,
         graph,
     );
     entry.parameter_inputs = vec![Vec::new(); entry.params.len()];
@@ -1055,8 +1125,8 @@ struct Converter<'a, 'b> {
     inlined_constants: LookupMap<SymbolId, ValueId>,
     /// Identities of hoisted pure constants.
     pure_constants: LookupSet<SymbolId>,
-    /// User definitions proven pure before EGIR construction.
-    pure_definitions: LookupSet<SymbolId>,
+    /// Canonical callable metadata built before any bodies or calls.
+    callable_boundaries: &'a LookupMap<SymbolId, CallableBoundary>,
     /// Program-wide identity source for effect-chain endpoints.
     effect_ids: &'b mut crate::IdSource<EffectToken>,
     /// Span of the term currently being converted. Threaded through every
@@ -1086,7 +1156,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
         symbols: &'a SymbolTable,
         pure_constants: LookupSet<SymbolId>,
-        pure_definitions: LookupSet<SymbolId>,
+        callable_boundaries: &'a LookupMap<SymbolId, CallableBoundary>,
         binding_ids: &'b mut crate::IdSource<u32>,
         effect_ids: &'b mut crate::IdSource<EffectToken>,
         arenas: &'b mut ConversionArenas,
@@ -1101,7 +1171,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             symbols,
             inlined_constants: LookupMap::new(),
             pure_constants,
-            pure_definitions,
+            callable_boundaries,
             effect_ids,
             current_span: None,
             output_sources: Vec::new(),
@@ -1142,7 +1212,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     }
 
     /// Set the return terminator on the current block.
-    fn set_return(&mut self, result: Option<ValueId>) {
+    fn set_return(&mut self, result: Option<ResultBinding<Type<TypeName>>>) {
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Return(result);
     }
 
@@ -1224,20 +1294,13 @@ impl<'a, 'b> Converter<'a, 'b> {
         for (index, result_ty, span) in levels {
             let index = self.convert_term(index)?;
             if let Some(parent_place) = place {
-                let next_place = self.intern_pure_at(
-                    PureOp::PlaceIndex,
-                    smallvec![parent_place, index],
-                    result_ty.clone(),
-                    Some(span),
-                );
+                let next_place =
+                    self.graph.add_index_place(parent_place, index, result_ty.clone(), Some(span));
                 place = Some(next_place);
             } else if current_ty.array_variant().is_some_and(crate::types::is_array_variant_view) {
-                let next_place = self.intern_pure_at(
-                    PureOp::ViewIndex,
-                    smallvec![value, index],
-                    result_ty.clone(),
-                    Some(span),
-                );
+                let view = self.graph.view_id(value);
+                let next_place =
+                    self.graph.add_view_index_place(view, index, result_ty.clone(), Some(span));
                 place = Some(next_place);
             } else {
                 value = self.intern_pure_at(
@@ -1616,7 +1679,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             if def.arity == args.len() {
                 let operands: SmallVec<[ValueId; 4]> =
                     args.iter().map(|argument| self.convert_term(argument)).collect::<Result<_, _>>()?;
-                return Ok(self.emit_named_call(symbol, operands, ty));
+                return self.emit_named_call(symbol, operands, ty);
             }
         }
         let name = symbol_name(self.symbols, symbol)?;
@@ -1629,26 +1692,41 @@ impl<'a, 'b> Converter<'a, 'b> {
         &mut self,
         symbol: SymbolId,
         operands: SmallVec<[ValueId; 4]>,
-        ty: Type<TypeName>,
-    ) -> ValueId {
+        _ty: Type<TypeName>,
+    ) -> Result<ValueId, ConvertError> {
         let function = self.function_id(symbol);
-        if self.pure_definitions.contains(&symbol) {
-            return self.intern_pure(PureOp::Call(function), operands, ty);
+        let (parameters, result, effects) = self
+            .callable_boundaries
+            .get(&symbol)
+            .cloned()
+            .ok_or_else(|| ConvertError::Internal(format!("missing callable boundary for {symbol:?}")))?;
+        let arguments = operands
+            .into_iter()
+            .map(|value| self.graph.operand_ref(value))
+            .collect::<Vec<_>>();
+        let (site, binding) = self
+            .graph
+            .add_call(
+                function,
+                &parameters,
+                &result,
+                arguments,
+                effects,
+                self.current_span,
+            )
+            .map_err(ConvertError::GraphError)?;
+        if !matches!(effects, CallEffects::Pure) {
+            let effect_in = self.alloc_effect();
+            let effect_out = self.alloc_effect();
+            self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+                kind: SideEffectKind::Effect(EffectOp::Call { site }),
+                operands: smallvec![],
+                result: None,
+                effects: Some((effect_in, effect_out)),
+                span: self.current_span,
+            });
         }
-
-        let result = self.graph.alloc_side_effect_result(ty);
-        let effect_in = self.alloc_effect();
-        let effect_out = self.alloc_effect();
-        self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-            kind: SideEffectKind::Effect(EffectOp::Op {
-                tag: crate::op::OpTag::Call(function),
-            }),
-            operand_nodes: operands,
-            result: Some(result),
-            effects: Some((effect_in, effect_out)),
-            span: self.current_span,
-        });
-        result
+        super::graph_ops::pack_result_values(&mut self.graph, &binding).map_err(ConvertError::GraphError)
     }
 
     // ========================================================================
@@ -1660,7 +1738,8 @@ impl<'a, 'b> Converter<'a, 'b> {
         let binding = literal_binding(args, "_w_intrinsic_storage_index")?;
         let index_nid = self.convert_term(&args[2])?;
         let view_nid = self.emit_storage_view(binding, ty.clone());
-        let place_nid = self.intern_pure(PureOp::ViewIndex, smallvec![view_nid, index_nid], ty.clone());
+        let view = self.graph.view_id(view_nid);
+        let place_nid = self.graph.add_view_index_place(view, index_nid, ty.clone(), self.current_span);
         Ok(super::graph_ops::emit_load(
             &mut self.graph,
             self.current_block,
@@ -1696,16 +1775,14 @@ impl<'a, 'b> Converter<'a, 'b> {
         let resource = SemanticResourceRef(self.arenas.resources.host_id(binding));
         let arg_nids: SmallVec<[ValueId; 4]> =
             args[1..].iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let effect_result = self.graph.alloc_side_effect_result(unit_ty);
         let effect_in = self.alloc_effect();
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
             kind: SideEffectKind::Effect(EffectOp::Op {
                 tag: crate::op::OpTag::StorageImageStore(resource),
             }),
-            operand_nodes: arg_nids,
-            result: Some(effect_result),
+            operands: arg_nids.into_iter().map(OperandRef::Value).collect(),
+            result: None,
             effects: Some((effect_in, effect_out)),
             span: self.current_span,
         });
@@ -1755,7 +1832,9 @@ impl<'a, 'b> Converter<'a, 'b> {
         let then_result = self.convert_term(then_branch)?;
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: merge_block,
-            args: result_nid.map(|_| then_result).into_iter().collect(),
+            args: self
+                .graph
+                .admit_flow_values(result_nid.map(|_| then_result)),
         };
 
         // Else branch.
@@ -1763,7 +1842,9 @@ impl<'a, 'b> Converter<'a, 'b> {
         let else_result = self.convert_term(else_branch)?;
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: merge_block,
-            args: result_nid.map(|_| else_result).into_iter().collect(),
+            args: self
+                .graph
+                .admit_flow_values(result_nid.map(|_| else_result)),
         };
 
         // Continue from merge.
@@ -1945,7 +2026,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let zero = self.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
-            args: vec![zero],
+            args: self.graph.admit_flow_values([zero]),
         };
 
         self.current_block = header;
@@ -1974,7 +2055,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         );
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
-            args: vec![next_i],
+            args: self.graph.admit_flow_values([next_i]),
         };
 
         self.current_block = exit;
@@ -2019,7 +2100,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let zero = self.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
-            args: vec![zero],
+            args: self.graph.admit_flow_values([zero]),
         };
 
         self.current_block = header;
@@ -2049,7 +2130,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         );
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
-            args: vec![next_i],
+            args: self.graph.admit_flow_values([next_i]),
         };
 
         self.current_block = exit;
@@ -2088,7 +2169,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let init_nid = self.convert_term(init)?;
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
-            args: vec![init_nid],
+            args: self.graph.admit_flow_values([init_nid]),
         };
 
         // Header: bind loop_var, process init_bindings, check cond
@@ -2104,7 +2185,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             then_target: body_block,
             then_args: vec![],
             else_target: exit,
-            else_args: vec![acc_nid],
+            else_args: self.graph.admit_flow_values([acc_nid]),
         };
 
         // Body: convert body, branch back to header
@@ -2112,7 +2193,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let new_acc = self.convert_term(body)?;
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
-            args: vec![new_acc],
+            args: self.graph.admit_flow_values([new_acc]),
         };
 
         // Exit
@@ -2160,7 +2241,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let zero = self.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
-            args: vec![init_nid, zero],
+            args: self.graph.admit_flow_values([init_nid, zero]),
         };
 
         // Header: bind vars, check i < bound
@@ -2181,7 +2262,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             then_target: body_block,
             then_args: vec![],
             else_target: exit,
-            else_args: vec![acc_nid],
+            else_args: self.graph.admit_flow_values([acc_nid]),
         };
 
         // Body: convert body, increment index, branch back
@@ -2195,7 +2276,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         );
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
-            args: vec![new_acc, next_i],
+            args: self.graph.admit_flow_values([new_acc, next_i]),
         };
 
         // Exit
@@ -2256,7 +2337,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let zero = self.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
-            args: vec![init_nid, zero],
+            args: self.graph.admit_flow_values([init_nid, zero]),
         };
 
         // Header
@@ -2276,7 +2357,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             then_target: body_block,
             then_args: vec![],
             else_target: exit,
-            else_args: vec![acc_nid],
+            else_args: self.graph.admit_flow_values([acc_nid]),
         };
 
         // Body: index into iterator, bind elem_var
@@ -2293,7 +2374,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         );
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
-            args: vec![new_acc, next_i],
+            args: self.graph.admit_flow_values([new_acc, next_i]),
         };
 
         // Exit
@@ -2365,6 +2446,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         ty: Type<TypeName>,
     ) -> ValueId {
         let span = self.current_span;
+        let operands = operands.into_iter().map(|value| self.graph.operand_ref(value)).collect();
         super::graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
@@ -2447,7 +2529,10 @@ impl<'a, 'b> Converter<'a, 'b> {
                     pre: screma::Lambda::region(
                         SegBody {
                             region: map_region,
-                            captures: capture_nids,
+                            captures: capture_nids
+                                .into_iter()
+                                .map(|value| self.graph.operand_ref(value))
+                                .collect(),
                         },
                         input_elem_types,
                         vec![output_elem_ty.clone()],
@@ -2501,7 +2586,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         let operator = screma::Lambda::region(
             SegBody {
                 region: operator_region,
-                captures: operator_captures,
+                captures: operator_captures
+                    .into_iter()
+                    .map(|value| self.graph.operand_ref(value))
+                    .collect(),
             },
             operator_parameters,
             vec![dest.elem_ty.clone()],
@@ -2528,7 +2616,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         emission: hist::Emission::Always,
                         shape: vec![destination_length],
                         race_factor,
-                        destinations: vec![dest_view],
+                        destinations: vec![self.graph.view_id(dest_view)],
                         update: hist::Update::Reduce {
                             operator,
                             neutral: vec![neutral],
@@ -2598,7 +2686,10 @@ impl<'a, 'b> Converter<'a, 'b> {
                     bucket: screma::Lambda::region(
                         SegBody {
                             region: body_region,
-                            captures: capture_nids,
+                            captures: capture_nids
+                                .into_iter()
+                                .map(|value| self.graph.operand_ref(value))
+                                .collect(),
                         },
                         lam.lam.params.iter().map(|(_, ty)| ty.clone()).collect(),
                         vec![index_type, value_type],
@@ -2607,7 +2698,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         emission: hist::Emission::Always,
                         shape: vec![destination_length],
                         race_factor,
-                        destinations: vec![dest_view],
+                        destinations: vec![self.graph.view_id(dest_view)],
                         update: hist::Update::OrderedOverwrite {
                             value_types: vec![dest_elem_ty],
                         },
@@ -2733,7 +2824,10 @@ impl<'a, 'b> Converter<'a, 'b> {
             let producers = super::graph_ops::value_producer_closure(&self.graph, [input_node]);
             let materialized_soac = self.graph.skeleton.blocks.values().any(|block| {
                 block.side_effects.iter().any(|effect| {
-                    effect.result.is_some_and(|result| producers.nodes.contains(&result))
+                    effect
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| result.values().iter().any(|value| producers.nodes.contains(value)))
                         && matches!(effect.kind, SideEffectKind::Soac(_))
                 })
             });
@@ -2880,7 +2974,10 @@ impl<'a, 'b> Converter<'a, 'b> {
                     bucket: screma::Lambda::region(
                         SegBody {
                             region: body_region,
-                            captures,
+                            captures: captures
+                                .into_iter()
+                                .map(|value| self.graph.operand_ref(value))
+                                .collect(),
                         },
                         lam.lam.params.iter().map(|(_, ty)| ty.clone()).collect(),
                         vec![active_type, key_type, value_type.clone()],
@@ -2889,11 +2986,11 @@ impl<'a, 'b> Converter<'a, 'b> {
                         emission: hist::Emission::Guarded,
                         shape: vec![bucket_count_node],
                         race_factor,
-                        destinations: vec![dest_view],
+                        destinations: vec![self.graph.view_id(dest_view)],
                         update: hist::Update::BucketInsert {
                             value_types: vec![dest.elem_ty.clone()],
-                            counts: counts_view,
-                            overflow: overflow_view,
+                            counts: self.graph.view_id(counts_view),
+                            overflow: self.graph.view_id(overflow_view),
                             capacity: capacity_node,
                         },
                     }],
@@ -2958,7 +3055,10 @@ impl<'a, 'b> Converter<'a, 'b> {
                         operator: screma::Lambda::region(
                             SegBody {
                                 region: op_region,
-                                captures: capture_nids,
+                                captures: capture_nids
+                                    .into_iter()
+                                    .map(|value| self.graph.operand_ref(value))
+                                    .collect(),
                             },
                             vec![result_ty.clone(), result_ty.clone()],
                             vec![result_ty.clone()],
@@ -3028,7 +3128,10 @@ impl<'a, 'b> Converter<'a, 'b> {
                         operator: screma::Lambda::region(
                             SegBody {
                                 region: op_region,
-                                captures: capture_nids,
+                                captures: capture_nids
+                                    .into_iter()
+                                    .map(|value| self.graph.operand_ref(value))
+                                    .collect(),
                             },
                             vec![scan_elem_ty.clone(), scan_elem_ty.clone()],
                             vec![scan_elem_ty.clone()],
@@ -3064,7 +3167,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         let output_elem_ty = elem_ty.clone();
         let pred_body = SegBody {
             region: self.function_id(predicate_symbol),
-            captures: capture_nids,
+            captures: capture_nids
+                .into_iter()
+                .map(|value| self.graph.operand_ref(value))
+                .collect(),
         };
 
         // `[input]` only — map/pred captures live on their `SegBody`s.
@@ -3314,10 +3420,12 @@ fn is_purely_constant_graph(graph: &EGraph<Raw>) -> bool {
         block.side_effects.is_empty()
             && match &block.term {
                 SkeletonTerminator::Return(value) => {
-                    value.is_none_or(|node| is_constant_node(graph, node, &mut memo))
+                    value.as_ref().is_none_or(|result| {
+                        result.values().into_iter().all(|node| is_constant_node(graph, node, &mut memo))
+                    })
                 }
                 SkeletonTerminator::Branch { args, .. } => {
-                    args.iter().copied().all(|node| is_constant_node(graph, node, &mut memo))
+                    args.iter().all(|node| is_constant_node(graph, node.value(), &mut memo))
                 }
                 SkeletonTerminator::CondBranch {
                     cond,
@@ -3325,8 +3433,8 @@ fn is_purely_constant_graph(graph: &EGraph<Raw>) -> bool {
                     else_args,
                     ..
                 } => std::iter::once(*cond)
-                    .chain(then_args.iter().copied())
-                    .chain(else_args.iter().copied())
+                    .chain(then_args.iter().map(|value| value.value()))
+                    .chain(else_args.iter().map(|value| value.value()))
                     .all(|node| is_constant_node(graph, node, &mut memo)),
                 SkeletonTerminator::Unreachable => true,
             }
@@ -3360,7 +3468,11 @@ fn is_constant_node(graph: &EGraph<Raw>, mut node: ValueId, memo: &mut LookupMap
         ValueKind::Union { left, right } => {
             is_constant_node(graph, *left, memo) && is_constant_node(graph, *right, memo)
         }
-        ValueKind::FuncParam { .. } | ValueKind::BlockParam { .. } | ValueKind::SideEffectResult => false,
+        ValueKind::FuncParam { .. }
+        | ValueKind::BlockParam { .. }
+        | ValueKind::CallResult { .. }
+        | ValueKind::PlaceLength { .. }
+        | ValueKind::SideEffectResult => false,
     };
     memo.insert(node, result);
     result

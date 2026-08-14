@@ -15,9 +15,12 @@ use super::types::{
     EGraph, EffectToken, Semantic, SideEffect, SideEffectIndex, SideEffectSite, SkeletonTerminator,
     ValueId, ValueKind,
 };
+use super::ir::{CallSiteId, FlowValueId, OperandRef, PlaceId, PlaceOp, ResultBinding};
 pub struct GraphProjection {
     pub graph: EGraph<Semantic>,
     nodes: HashMap<ValueId, ValueId>,
+    places: HashMap<PlaceId, PlaceId>,
+    calls: HashMap<CallSiteId, CallSiteId>,
     blocks: HashMap<BlockId, BlockId>,
     effects: HashSet<EffectToken>,
     source_effects: HashSet<SideEffectSite>,
@@ -59,6 +62,24 @@ impl ProjectedValueRecipe {
 impl GraphProjection {
     pub fn node(&self, source: ValueId) -> Option<ValueId> {
         self.nodes.get(&source).copied()
+    }
+
+    pub fn place(&self, source: PlaceId) -> Option<PlaceId> {
+        self.places.get(&source).copied()
+    }
+
+    pub fn result<Ty: Clone>(&self, source: &ResultBinding<Ty>) -> Result<ResultBinding<Ty>, String> {
+        source.clone().try_map(
+            &mut |ty| Ok(ty),
+            &mut |value| {
+                self.node(value)
+                    .ok_or_else(|| format!("graph projection omitted result value {value:?}"))
+            },
+            &mut |place| {
+                self.place(place)
+                    .ok_or_else(|| format!("graph projection omitted result place {place:?}"))
+            },
+        )
     }
 
     pub fn effect(&self, source: EffectToken) -> Option<EffectToken> {
@@ -170,6 +191,8 @@ struct ProjectionShell {
     graph: EGraph<Semantic>,
     blocks: HashMap<BlockId, BlockId>,
     nodes: HashMap<ValueId, ValueId>,
+    places: HashMap<PlaceId, PlaceId>,
+    calls: HashMap<CallSiteId, CallSiteId>,
 }
 
 impl<'a> GraphProjector<'a> {
@@ -278,7 +301,7 @@ impl<'a> GraphProjector<'a> {
                 .blocks
                 .get(consumer.block)
                 .ok_or_else(|| "captured value consumer block is absent".to_string())?;
-            if continuation.params.as_slice() != [value] {
+            if continuation.params.iter().map(|parameter| parameter.value()).ne([value]) {
                 return Err("structured prefix must produce one captured boundary value".into());
             }
             (
@@ -389,13 +412,14 @@ impl<'a> GraphProjector<'a> {
         let producer_effects = projection.source_effects();
         let mut candidates = producer_effects
             .iter()
-            .filter_map(|site| self.source.skeleton.effect(*site).result)
+            .filter_map(|site| self.source.skeleton.effect(*site).result.as_ref())
+            .flat_map(|result| result.values())
             .collect::<Vec<_>>();
         candidates.extend(self.source.skeleton.blocks.iter().flat_map(|(_, block)| {
             block
                 .params
                 .iter()
-                .copied()
+                .map(|value| value.value())
                 .filter(|value| !roots.contains(value) && projection.node(*value).is_some())
         }));
         candidates.sort_unstable();
@@ -467,7 +491,7 @@ impl<'a> GraphProjector<'a> {
         let mut selected = roots.clone();
         let mut values = extra_values.to_vec();
         for site in roots {
-            values.extend(self.effect_at(*site)?.referenced_nodes());
+            values.extend(super::graph_ops::effect_value_inputs(self.source, self.effect_at(*site)?));
         }
         let values = self.close_producers(&mut selected, &mut values, &self.source.side_effect_index())?;
         Ok(selected.iter().all(|site| site.block == block)
@@ -485,15 +509,7 @@ impl<'a> GraphProjector<'a> {
         let selection = self.select_projection(selected, extra_values, mode)?;
         let mut shell = self.projection_shell(mode, &selection)?;
         for value in &selection.values {
-            super::graph_ops::clone_value_subgraph(
-                self.source,
-                &mut shell.graph,
-                *value,
-                &mut shell.nodes,
-                super::graph_ops::ConstantCopy::PreserveIdentity,
-                true,
-                super::graph_ops::PureCopy::Preserve,
-            )?;
+            self.prepare_value(*value, &mut shell)?;
         }
         let (effects, effect_sites) = self.clone_effects(&selection, &mut shell)?;
         self.project_terminators(mode, &selection.blocks, &mut shell)?;
@@ -513,12 +529,170 @@ impl<'a> GraphProjector<'a> {
         Ok(GraphProjection {
             graph: shell.graph,
             nodes: shell.nodes,
+            places: shell.places,
+            calls: shell.calls,
             blocks: shell.blocks,
             effects,
             source_effects: selection.effects,
             source_values: selection.values,
             effect_sites,
         })
+    }
+
+    fn prepare_value(&self, source: ValueId, shell: &mut ProjectionShell) -> Result<ValueId, String> {
+        if let Some(&target) = shell.nodes.get(&source) {
+            return Ok(target);
+        }
+        let node = self
+            .source
+            .nodes
+            .get(source)
+            .ok_or_else(|| format!("graph projection references missing value {source:?}"))?;
+        match node.kind() {
+            ValueKind::Pure { operands, .. } => {
+                for operand in operands {
+                    self.prepare_value(*operand, shell)?;
+                }
+            }
+            ValueKind::Union { left, right } => {
+                self.prepare_value(*left, shell)?;
+                self.prepare_value(*right, shell)?;
+            }
+            ValueKind::CallResult { call, .. } => {
+                self.prepare_call(*call, shell)?;
+                return shell
+                    .nodes
+                    .get(&source)
+                    .copied()
+                    .ok_or_else(|| "projected call omitted one of its result bindings".to_string());
+            }
+            ValueKind::PlaceLength { place } => {
+                let target_place = self.prepare_place(*place, shell)?;
+                let target = shell.graph.add_place_length(target_place, node.ty().clone(), node.span());
+                shell.nodes.insert(source, target);
+                return Ok(target);
+            }
+            ValueKind::FuncParam { .. }
+            | ValueKind::BlockParam { .. }
+            | ValueKind::SideEffectResult => {
+                return Err(format!("projection shell omitted boundary value {source:?}"));
+            }
+            ValueKind::Constant(_) => {}
+        }
+        super::graph_ops::clone_value_subgraph(
+            self.source,
+            &mut shell.graph,
+            source,
+            &mut shell.nodes,
+            super::graph_ops::ConstantCopy::PreserveIdentity,
+            true,
+            super::graph_ops::PureCopy::Preserve,
+        )
+    }
+
+    fn prepare_place(&self, source: PlaceId, shell: &mut ProjectionShell) -> Result<PlaceId, String> {
+        if let Some(&target) = shell.places.get(&source) {
+            return Ok(target);
+        }
+        let place = self
+            .source
+            .places()
+            .get(source)
+            .cloned()
+            .ok_or_else(|| format!("graph projection references missing place {source:?}"))?;
+        match place.op() {
+            PlaceOp::Parameter { .. } => {
+                return Err(format!("projection shell omitted parameter place {source:?}"));
+            }
+            PlaceOp::AllocaResult | PlaceOp::OutputSlot { .. } => {}
+            PlaceOp::Index { base, index } => {
+                self.prepare_place(*base, shell)?;
+                self.prepare_value(*index, shell)?;
+            }
+            PlaceOp::ViewIndex { view, index } => {
+                self.prepare_value(view.value(), shell)?;
+                self.prepare_value(*index, shell)?;
+            }
+        }
+        let mapped = place.try_map(
+            |resource| Ok::<_, String>(resource),
+            |value| {
+                shell
+                    .nodes
+                    .get(&value)
+                    .copied()
+                    .ok_or_else(|| format!("projection omitted place value dependency {value:?}"))
+            },
+            |place| {
+                shell
+                    .places
+                    .get(&place)
+                    .copied()
+                    .ok_or_else(|| format!("projection omitted parent place {place:?}"))
+            },
+        )?;
+        let target = shell.graph.places.insert(mapped);
+        shell.places.insert(source, target);
+        Ok(target)
+    }
+
+    fn prepare_call(&self, source: CallSiteId, shell: &mut ProjectionShell) -> Result<CallSiteId, String> {
+        if let Some(&target) = shell.calls.get(&source) {
+            return Ok(target);
+        }
+        let call = self.source.call(source).clone();
+        for argument in call.arguments() {
+            match *argument {
+                OperandRef::Value(value) => {
+                    self.prepare_value(value, shell)?;
+                }
+                OperandRef::View(view) => {
+                    self.prepare_value(view.value(), shell)?;
+                }
+                OperandRef::Place(place) => {
+                    self.prepare_place(place, shell)?;
+                }
+            }
+        }
+        let mut result_places = Vec::new();
+        call.result().for_each_place(|place| result_places.push(place));
+        for place in result_places {
+            self.prepare_place(place, shell)?;
+        }
+        let arguments = call
+            .arguments()
+            .iter()
+            .copied()
+            .map(|argument| {
+                argument.try_map(
+                    |value| Ok::<_, String>(shell.nodes[&value]),
+                    |view| view.try_remap(|value| Ok::<_, String>(shell.nodes[&value])),
+                    |place| Ok::<_, String>(shell.places[&place]),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_boxed_slice();
+        let places = &shell.places;
+        let (target, _, values) = shell.graph.add_projected_call(
+            &call,
+            arguments,
+            |source_value| {
+                let node = &self.source.nodes[source_value];
+                let ValueKind::CallResult {
+                    call: result_call,
+                    slot,
+                } = node.kind()
+                else {
+                    panic!("call result binding contains a non-call value");
+                };
+                assert_eq!(*result_call, source, "call result binding references another call site");
+                (*slot, node.ty().clone(), node.span())
+            },
+            |place| places[&place],
+        );
+        shell.calls.insert(source, target);
+        shell.nodes.extend(values);
+        Ok(target)
     }
 
     fn select_projection(
@@ -554,7 +728,7 @@ impl<'a> GraphProjector<'a> {
         let mut roots = self.projected_terminator_values(mode, &blocks);
         roots.extend(extra_values);
         for site in selected.clone() {
-            roots.extend(self.effect_at(site)?.referenced_nodes());
+            roots.extend(super::graph_ops::effect_value_inputs(self.source, self.effect_at(site)?));
         }
         let values = self.close_producers(&mut selected, &mut roots, &self.source.side_effect_index())?;
         if selected.iter().any(|site| !allowed_effects.contains(site)) {
@@ -594,12 +768,26 @@ impl<'a> GraphProjector<'a> {
 
         let mut nodes = HashMap::new();
         for (source_id, node) in &self.source.nodes {
-            if let ValueKind::FuncParam { index } = &node.kind {
+            if let ValueKind::FuncParam { parameter } = &node.kind {
                 if matches!(mode, ProjectionMode::ValueFlow) && !selection.values.contains(&source_id) {
                     continue;
                 }
-                let target = graph.add_func_param(*index, node.ty.clone());
+                let abi = super::ir::callable_parameter::<
+                    super::program::SemanticResourceRef,
+                    super::types::WynLanguage,
+                >(String::new(), node.ty.clone());
+                let target = graph
+                    .add_parameter(*parameter, abi.representation())
+                    .value()
+                    .expect("value and view parameters occupy the value arena");
                 nodes.insert(source_id, target);
+            }
+        }
+        let mut places = HashMap::new();
+        for (source_id, place) in self.source.places() {
+            if let PlaceOp::Parameter { parameter } = place.op() {
+                let target = graph.add_place_parameter(*parameter, place.ty().clone());
+                places.insert(source_id, target);
             }
         }
         if !matches!(mode, ProjectionMode::DetachedRecipe { .. }) {
@@ -612,12 +800,20 @@ impl<'a> GraphProjector<'a> {
             );
         }
         for site in &selection.effects {
-            if let Some(result) = self.effect_at(*site)?.result {
-                let target = graph.alloc_side_effect_result(self.source.nodes[result].ty.clone());
-                nodes.insert(result, target);
+            if let Some(result) = self.effect_at(*site)?.result.as_ref() {
+                for source in result.values() {
+                    let target = graph.alloc_side_effect_result(self.source.nodes[source].ty.clone());
+                    nodes.insert(source, target);
+                }
             }
         }
-        Ok(ProjectionShell { graph, blocks, nodes })
+        Ok(ProjectionShell {
+            graph,
+            blocks,
+            nodes,
+            places,
+            calls: HashMap::new(),
+        })
     }
 
     fn clone_live_block_params(
@@ -637,12 +833,13 @@ impl<'a> GraphProjector<'a> {
             }
             let target_block = blocks[&source_block];
             for source_param in source_body.params.iter().copied() {
-                if retained_values.is_some_and(|values| !values.contains(&source_param)) {
+                let source_value = source_param.value();
+                if retained_values.is_some_and(|values| !values.contains(&source_value)) {
                     continue;
                 }
                 let target =
-                    graph.add_block_param(target_block, self.source.nodes[source_param].ty.clone());
-                nodes.insert(source_param, target);
+                    graph.add_block_param(target_block, self.source.nodes[source_value].ty.clone());
+                nodes.insert(source_value, target);
             }
         }
     }
@@ -674,11 +871,73 @@ impl<'a> GraphProjector<'a> {
                     index: shell.graph.skeleton.blocks[target_block].side_effects.len(),
                 };
                 effect_sites.insert(source_site, target_site);
-                let mut projected = effect.clone();
-                for node in projected.referenced_node_slots() {
-                    *node = shell.nodes[node];
+                for value in super::graph_ops::effect_value_inputs(self.source, effect) {
+                    self.prepare_value(value, shell)?;
                 }
-                projected.result = effect.result.map(|result| shell.nodes[&result]);
+                for operand in effect.operands() {
+                    if let OperandRef::Place(place) = *operand {
+                        self.prepare_place(place, shell)?;
+                    }
+                }
+                if let Some(result) = effect.result() {
+                    for place in result.places() {
+                        self.prepare_place(place, shell)?;
+                    }
+                }
+                if let super::ir::SideEffectKind::Effect(operation) = effect.kind() {
+                    match operation {
+                        super::ir::EffectOp::Call { site } => {
+                            self.prepare_call(*site, shell)?;
+                        }
+                        super::ir::EffectOp::Alloca { result }
+                        | super::ir::EffectOp::Load { place: result, .. }
+                        | super::ir::EffectOp::Store { place: result }
+                        | super::ir::EffectOp::Atomic { place: result, .. } => {
+                            self.prepare_place(*result, shell)?;
+                        }
+                        super::ir::EffectOp::Op { .. } | super::ir::EffectOp::ControlBarrier => {}
+                    }
+                }
+                if let super::ir::SideEffectKind::Soac(super::types::SoacEffect(_, soac)) = effect.kind() {
+                    for body in soac.seg_bodies() {
+                        for capture in body.captures() {
+                            if let OperandRef::Place(place) = *capture {
+                                self.prepare_place(place, shell)?;
+                            }
+                        }
+                    }
+                }
+                let mut projected = effect.clone();
+                projected.remap_referenced_values(|value| shell.nodes[&value]);
+                for operand in projected.operands_mut() {
+                    if let OperandRef::Place(place) = operand {
+                        *place = shell.places[place];
+                    }
+                }
+                if let Some(result) = &mut projected.result {
+                    result.for_each_value_mut(|value| *value = shell.nodes[value]);
+                    result.for_each_place_mut(|place| *place = shell.places[place]);
+                }
+                match projected.kind_mut() {
+                    super::ir::SideEffectKind::Effect(operation) => {
+                        *operation = operation.clone().try_map(
+                            |resource| Ok::<_, String>(resource),
+                            |call| Ok::<_, String>(shell.calls[&call]),
+                            |place| Ok::<_, String>(shell.places[&place]),
+                        )?;
+                    }
+                    super::ir::SideEffectKind::Soac(super::types::SoacEffect(_, soac)) => {
+                        let mut index = 0;
+                        while let Some(body) = soac.seg_body_mut(index) {
+                            for capture in body.captures_mut() {
+                                if let OperandRef::Place(place) = capture {
+                                    *place = shell.places[place];
+                                }
+                            }
+                            index += 1;
+                        }
+                    }
+                }
                 if let Some((input, output)) = projected.effects {
                     effects.extend([input, output]);
                 }
@@ -720,6 +979,7 @@ impl<'a> GraphProjector<'a> {
                 remap_terminator(
                     &self.source.skeleton.blocks[*source_block].term,
                     &shell.nodes,
+                    &shell.places,
                     &shell.blocks,
                 )?
             };
@@ -739,13 +999,13 @@ impl<'a> GraphProjector<'a> {
                 .copied()
                 .ok_or_else(|| format!("value-flow projection omitted control value {source:?}"))
         };
-        let map_args = |target: BlockId, args: &[ValueId]| {
+        let map_args = |target: BlockId, args: &[FlowValueId]| {
             self.source.skeleton.blocks[target]
                 .params
                 .iter()
                 .zip(args)
-                .filter(|(parameter, _)| shell.nodes.contains_key(parameter))
-                .map(|(_, argument)| map_node(*argument))
+                .filter(|(parameter, _)| shell.nodes.contains_key(&parameter.value()))
+                .map(|(_, argument)| argument.try_remap(&map_node))
                 .collect::<Result<Vec<_>, _>>()
         };
         Ok(match &self.source.skeleton.blocks[source_block].term {
@@ -932,13 +1192,42 @@ impl<'a> GraphProjector<'a> {
                         .site(value)
                         .ok_or_else(|| format!("side-effect result {value:?} has no producer"))?;
                     if selected.insert(site) {
-                        values.extend(self.effect_at(site)?.referenced_nodes());
+                        values.extend(super::graph_ops::effect_value_inputs(self.source, self.effect_at(site)?));
                     }
+                }
+                ValueKind::CallResult { call, .. } => {
+                    values.extend(self.source.call_value_dependencies(*call));
+                    if !matches!(self.source.call(*call).effects(), super::ir::CallEffects::Pure) {
+                        let site = self
+                            .call_effect_site(*call)
+                            .ok_or_else(|| format!("effectful call {call:?} has no skeleton anchor"))?;
+                        if selected.insert(site) {
+                            values.extend(super::graph_ops::effect_value_inputs(
+                                self.source,
+                                self.effect_at(site)?,
+                            ));
+                        }
+                    }
+                }
+                ValueKind::PlaceLength { place } => {
+                    values.extend(self.source.place_value_dependencies(*place));
                 }
                 ValueKind::FuncParam { .. } | ValueKind::BlockParam { .. } | ValueKind::Constant(_) => {}
             }
         }
         Ok(seen)
+    }
+
+    fn call_effect_site(&self, call: CallSiteId) -> Option<SideEffectSite> {
+        self.source.skeleton.blocks.iter().find_map(|(block, body)| {
+            body.side_effects.iter().enumerate().find_map(|(index, effect)| {
+                matches!(
+                    effect.kind(),
+                    super::ir::SideEffectKind::Effect(super::ir::EffectOp::Call { site }) if *site == call
+                )
+                .then_some(SideEffectSite { block, index })
+            })
+        })
     }
 }
 
@@ -967,6 +1256,7 @@ fn control_header_targets(control: &ControlHeader) -> Vec<BlockId> {
 fn remap_terminator(
     term: &SkeletonTerminator,
     nodes: &HashMap<ValueId, ValueId>,
+    places: &HashMap<PlaceId, PlaceId>,
     blocks: &HashMap<BlockId, BlockId>,
 ) -> Result<SkeletonTerminator, String> {
     let node = |source: ValueId| {
@@ -975,7 +1265,23 @@ fn remap_terminator(
             .copied()
             .ok_or_else(|| format!("graph projection omitted terminator value {source:?}"))
     };
-    term.try_map(node, |target| Ok(blocks[&target]))
+    term.clone().try_map_parts(
+        &mut |condition| node(condition),
+        &mut |argument: FlowValueId| argument.try_remap(&node),
+        &mut |result: super::ir::ResultBinding<polytype::Type<crate::ast::TypeName>>| {
+            result.try_map(
+                &mut |ty| Ok::<_, String>(ty),
+                &mut |value| node(value),
+                &mut |place| {
+                    places
+                        .get(&place)
+                        .copied()
+                        .ok_or_else(|| format!("graph projection omitted return place {place:?}"))
+                },
+            )
+        },
+        &mut |target| Ok(blocks[&target]),
+    )
 }
 
 #[cfg(test)]

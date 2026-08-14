@@ -3,7 +3,9 @@ use polytype::Type;
 use crate::ast::TypeName;
 
 use super::super::program::PhysicalResourceRef;
-use super::super::types::{GraphResource, SegSpace, Semantic, SoacInputType, ValueId, WynSoacPhase};
+use super::super::types::{
+    GraphResource, SegSpace, Semantic, SoacInputType, ValueId, ViewId, WynSoacPhase,
+};
 use super::screma;
 
 /// How one histogram operation combines bucket values with its destinations.
@@ -25,8 +27,8 @@ pub enum Update {
     /// graph even when every item input is produced by fused computation.
     BucketInsert {
         value_types: Vec<Type<TypeName>>,
-        counts: ValueId,
-        overflow: ValueId,
+        counts: ViewId,
+        overflow: ViewId,
         capacity: ValueId,
     },
 }
@@ -63,7 +65,7 @@ pub struct HistOp {
     pub emission: Emission,
     pub shape: Vec<ValueId>,
     pub race_factor: ValueId,
-    pub destinations: Vec<ValueId>,
+    pub destinations: Vec<ViewId>,
     pub update: Update,
 }
 
@@ -105,6 +107,38 @@ impl HistForm {
 
     pub(crate) fn value_count(&self) -> usize {
         self.operations.iter().map(HistOp::value_count).sum()
+    }
+
+    fn remap_referenced_values(&mut self, map: &mut impl FnMut(ValueId) -> ValueId) {
+        self.bucket.remap_capture_values(map);
+        for operation in &mut self.operations {
+            for dimension in &mut operation.shape {
+                *dimension = map(*dimension);
+            }
+            operation.race_factor = map(operation.race_factor);
+            for destination in &mut operation.destinations {
+                destination.remap_value(&mut *map);
+            }
+            match &mut operation.update {
+                Update::OrderedOverwrite { .. } => {}
+                Update::Reduce { operator, neutral } => {
+                    operator.remap_capture_values(map);
+                    for value in neutral {
+                        *value = map(*value);
+                    }
+                }
+                Update::BucketInsert {
+                    counts,
+                    overflow,
+                    capacity,
+                    ..
+                } => {
+                    counts.remap_value(&mut *map);
+                    overflow.remap_value(&mut *map);
+                    *capacity = map(*capacity);
+                }
+            }
+        }
     }
 }
 
@@ -206,10 +240,16 @@ impl<P: WynSoacPhase> Op<P> {
     }
 
     pub(crate) fn capture_nodes(&self) -> Vec<ValueId> {
-        let mut nodes = self.form.bucket.captures().to_vec();
+        let mut nodes = self
+            .form
+            .bucket
+            .captures()
+            .iter()
+            .filter_map(|capture| capture.value())
+            .collect::<Vec<_>>();
         for operation in &self.form.operations {
             if let Update::Reduce { operator, .. } = &operation.update {
-                nodes.extend(operator.captures());
+                nodes.extend(operator.captures().iter().filter_map(|capture| capture.value()));
             }
         }
         nodes
@@ -220,7 +260,7 @@ impl<P: WynSoacPhase> Op<P> {
         for operation in &self.form.operations {
             nodes.extend(operation.shape.iter().copied());
             nodes.push(operation.race_factor);
-            nodes.extend(operation.destinations.iter().copied());
+            nodes.extend(operation.destinations.iter().map(|view| view.value()));
             if let Update::Reduce { neutral, .. } = &operation.update {
                 nodes.extend(neutral.iter().copied());
             }
@@ -231,7 +271,7 @@ impl<P: WynSoacPhase> Op<P> {
                 ..
             } = operation.update
             {
-                nodes.extend([counts, overflow, capacity]);
+                nodes.extend([counts.value(), overflow.value(), capacity]);
             }
         }
         nodes
@@ -299,7 +339,7 @@ impl<P: WynSoacPhase> Op<P> {
             for (component, (&destination, value_type)) in
                 operation.destinations.iter().zip(value_types).enumerate()
             {
-                let destination_type = node_type(destination);
+                let destination_type = node_type(destination.value());
                 let destination_element = destination_type.as_ref().and_then(|ty| {
                     let element = crate::types::array_elem(ty)?;
                     if matches!(operation.update, Update::BucketInsert { .. }) {
@@ -361,48 +401,14 @@ impl<R: GraphResource> Op<Semantic<R>> {
         nodes
     }
 
-    pub(crate) fn referenced_node_slots_with_state(&mut self) -> Vec<&mut ValueId> {
-        let Self {
-            inputs: _,
-            form,
-            state,
-        } = self;
-        let mut nodes = form_node_slots(form);
-        if let SemanticState::Segmented(space) = state {
-            nodes.extend(space.referenced_node_slots());
-        }
-        nodes
-    }
-}
-
-fn form_node_slots(form: &mut HistForm) -> Vec<&mut ValueId> {
-    let mut nodes = form
-        .bucket
-        .seg_body_mut()
-        .into_iter()
-        .flat_map(|body| body.captures.iter_mut())
-        .collect::<Vec<_>>();
-    for operation in &mut form.operations {
-        nodes.extend(operation.shape.iter_mut());
-        nodes.push(&mut operation.race_factor);
-        nodes.extend(operation.destinations.iter_mut());
-        match &mut operation.update {
-            Update::Reduce { operator, neutral } => {
-                if let Some(body) = operator.seg_body_mut() {
-                    nodes.extend(body.captures.iter_mut());
-                }
-                nodes.extend(neutral.iter_mut());
+    pub(crate) fn remap_referenced_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
+        self.form.remap_referenced_values(&mut map);
+        if let SemanticState::Segmented(space) = &mut self.state {
+            for slot in space.referenced_node_slots() {
+                *slot = map(*slot);
             }
-            Update::BucketInsert {
-                counts,
-                overflow,
-                capacity,
-                ..
-            } => nodes.extend([counts, overflow, capacity]),
-            Update::OrderedOverwrite { .. } => {}
         }
     }
-    nodes
 }
 
 #[cfg(test)]
@@ -471,7 +477,7 @@ mod tests {
                         emission: Emission::Always,
                         shape: vec![node(1), node(2)],
                         race_factor: node(3),
-                        destinations: vec![node(4), node(5)],
+                        destinations: vec![ViewId::test(node(4)), ViewId::test(node(5))],
                         update: Update::Reduce {
                             operator: screma::Lambda::region(
                                 SegBody {
@@ -493,7 +499,7 @@ mod tests {
                         emission: Emission::Always,
                         shape: vec![node(8)],
                         race_factor: node(9),
-                        destinations: vec![node(10)],
+                        destinations: vec![ViewId::test(node(10))],
                         update: Update::OrderedOverwrite {
                             value_types: vec![bool_type],
                         },

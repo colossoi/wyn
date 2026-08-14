@@ -601,11 +601,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     self.constructor.builder.load(result_ty, None, elem_ptr, None, [])?
                 }
 
-                crate::op::OpTag::ViewIndex
-                | crate::op::OpTag::PlaceIndex
-                | crate::op::OpTag::OutputSlot { .. } => {
-                    unreachable!("OpTag::{:?} is EGIR-only and must not reach SSA backend", tag)
-                }
             },
 
             InstKind::Alloca { elem_ty, result } => {

@@ -154,7 +154,7 @@ fn find_in_graph(
             let screma::SemanticState::Segmented { resources, .. } = producer_op.semantic_state() else {
                 continue;
             };
-            let Some(producer_result) = producer.result else {
+            let Some(producer_result) = producer.value_result() else {
                 continue;
             };
             let value_consumers =
@@ -196,7 +196,7 @@ fn find_in_graph(
 
                 if !((producer_index + 1)..consumer_index).all(|index| {
                     let effect = &block.side_effects[index];
-                    match (&effect.kind, effect.result) {
+                    match (&effect.kind, effect.result.as_ref()) {
                         (SideEffectKind::Soac(SoacEffect(intervening, Soac::Screma(_))), Some(_)) => {
                             !oracle.conflicts(producer_id, intervening)
                         }
@@ -208,7 +208,7 @@ fn find_in_graph(
 
                 let producer_input_count = producer_op.inputs.len();
                 let mut producer_output_operands =
-                    producer.operand_nodes[producer_input_count..].iter().copied();
+                    producer.operands[producer_input_count..].iter().copied();
                 let producer_output_nodes = (0..producer_op.result_count())
                     .map(|field| {
                         producer_op
@@ -218,15 +218,18 @@ fn find_in_graph(
                                 producer_output_operands
                                     .next()
                                     .expect("missing producer output-view operand")
+                                    .value()
+                                    .expect("Screma output is a view")
                             })
                     })
                     .collect::<Vec<_>>();
                 debug_assert!(producer_output_operands.next().is_none());
                 let consumer_input_count = consumer_op.inputs.len();
-                let routed = consumer.operand_nodes[..consumer_input_count]
+                let routed = consumer.operands[..consumer_input_count]
                     .iter()
                     .enumerate()
-                    .filter_map(|(input, &operand)| {
+                    .filter_map(|(input, operand)| {
+                        let operand = operand.value().expect("Screma inputs are values or views");
                         InputTransform::route(graph, operand, producer_result, &producer_output_nodes)
                             .map(|(field, transform)| (input, field, transform))
                     })
@@ -236,10 +239,11 @@ fn find_in_graph(
                 }
                 let routed_inputs =
                     routed.iter().map(|(input, _, _)| *input).collect::<std::collections::HashSet<_>>();
-                let has_unrouteable_input = consumer.operand_nodes[..consumer_input_count]
+                let has_unrouteable_input = consumer.operands[..consumer_input_count]
                     .iter()
                     .enumerate()
-                    .any(|(input, &operand)| {
+                    .any(|(input, operand)| {
+                        let operand = operand.value().expect("Screma inputs are values or views");
                         !routed_inputs.contains(&input)
                             && (graph_ops::pure_depends_on(graph, operand, producer_result)
                                 || producer_output_nodes
@@ -302,7 +306,11 @@ fn find_in_graph(
                 }
                 let routed_roots = routed
                     .iter()
-                    .map(|(input, _, _)| consumer.operand_nodes[*input])
+                    .map(|(input, _, _)| {
+                        consumer.operands[*input]
+                            .value()
+                            .expect("Screma inputs are values or views")
+                    })
                     .collect::<std::collections::HashSet<_>>();
                 let semantic_roots = consumer_op
                     .capture_nodes()
@@ -459,7 +467,10 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
                     unreachable!("vertical fusion selected a non-Screma producer")
                 };
                 (
-                    effect.operand_nodes[..op.inputs.len()].to_vec(),
+                    effect.operands[..op.inputs.len()]
+                        .iter()
+                        .map(|operand| operand.value().expect("Screma inputs are values or views"))
+                        .collect::<Vec<_>>(),
                     op.inputs.clone(),
                 )
             };
@@ -566,9 +577,9 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
         fused_op.validate()
     );
 
-    let mut operands = SmallVec::new();
-    operands.extend(normalized.input_nodes);
-    operands.extend(output_nodes.into_iter().flatten());
+    let mut operand_values = SmallVec::<[ValueId; 4]>::new();
+    operand_values.extend(normalized.input_nodes);
+    operand_values.extend(output_nodes.into_iter().flatten());
     let synthesized = normalized.synthesized;
     let producer_result = producer.result;
     let consumer_result = consumer.result;
@@ -595,6 +606,11 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
                 &consumer_result_types,
             );
 
+            let operands = operand_values
+                .iter()
+                .map(|operand| graph.operand_ref(*operand))
+                .collect::<SmallVec<_>>();
+            let result = graph.value_result(fused_result);
             let block = &mut graph.skeleton.blocks[candidate.block];
             let effects = splice_effect_tokens(
                 block.side_effects[candidate.producer].effects,
@@ -602,8 +618,8 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
             );
             let consumer = &mut block.side_effects[candidate.consumer];
             consumer.kind = SideEffectKind::Soac(SoacEffect(consumer_id, Soac::Screma(fused_op.clone())));
-            consumer.operand_nodes = operands.clone();
-            consumer.result = Some(fused_result);
+            consumer.operands = operands;
+            consumer.result = Some(result);
             consumer.effects = effects;
             block.side_effects.remove(candidate.producer);
         };

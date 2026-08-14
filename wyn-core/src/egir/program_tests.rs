@@ -6,7 +6,7 @@ use crate::egir::allocation::{
     entries_with_endpoints, plan_logical_resources, verify_allocated_resources, CompilerFlowEndpoint,
     ResourcesAllocated,
 };
-use crate::egir::types::{EGraph, RegionId};
+use crate::egir::types::{by_value_function_result, CallEffects, EGraph, RegionId, WynLanguage};
 use crate::flow::ExecutionModel;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use polytype::Type;
@@ -22,7 +22,8 @@ fn empty_func(id: RegionId, name: &str) -> SemanticFunc {
         Span::dummy(),
         None,
         vec![],
-        unit_ty(),
+        by_value_function_result::<WynLanguage>(unit_ty()),
+        CallEffects::Pure,
         EGraph::new(),
     )
 }
@@ -39,7 +40,7 @@ fn empty_entry(id: crate::EntryId, name: &str) -> SemanticEntry {
         vec![],
         vec![],
         vec![],
-        unit_ty(),
+        by_value_function_result::<WynLanguage>(unit_ty()),
         EGraph::new(),
     )
 }

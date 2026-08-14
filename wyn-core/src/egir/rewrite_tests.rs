@@ -87,7 +87,7 @@ fn is_pow(graph: &EGraph, nid: ValueId) -> bool {
 #[test]
 fn pow_const_2_extracts_one_mul_f32() {
     let mut g = EGraph::new();
-    let base = g.add_func_param(0, f32_ty());
+    let base = g.add_test_value_parameter(0, f32_ty());
     let p = pow(&mut g, base, ConstantValue::I32(2), i32_ty());
     let winner = apply_and_extract(&mut g, p);
     assert_eq!(chain_len_over_same_base(&g, winner, base), Some(1));
@@ -96,7 +96,7 @@ fn pow_const_2_extracts_one_mul_f32() {
 #[test]
 fn pow_const_5_extracts_four_muls_f32() {
     let mut g = EGraph::new();
-    let base = g.add_func_param(0, f32_ty());
+    let base = g.add_test_value_parameter(0, f32_ty());
     let p = pow(&mut g, base, ConstantValue::I32(5), i32_ty());
     let winner = apply_and_extract(&mut g, p);
     assert_eq!(chain_len_over_same_base(&g, winner, base), Some(4));
@@ -105,7 +105,7 @@ fn pow_const_5_extracts_four_muls_f32() {
 #[test]
 fn pow_const_7_extracts_six_muls_i32() {
     let mut g = EGraph::new();
-    let base = g.add_func_param(0, i32_ty());
+    let base = g.add_test_value_parameter(0, i32_ty());
     let p = pow(&mut g, base, ConstantValue::I32(7), i32_ty());
     let winner = apply_and_extract(&mut g, p);
     assert_eq!(chain_len_over_same_base(&g, winner, base), Some(6));
@@ -115,7 +115,7 @@ fn pow_const_7_extracts_six_muls_i32() {
 fn pow_const_9_extracts_pow() {
     // 8 multiplies tie the modeled Pow cost; ties keep the original.
     let mut g = EGraph::new();
-    let base = g.add_func_param(0, f32_ty());
+    let base = g.add_test_value_parameter(0, f32_ty());
     let p = pow(&mut g, base, ConstantValue::I32(9), i32_ty());
     let winner = apply_and_extract(&mut g, p);
     assert!(is_pow(&g, winner));
@@ -125,7 +125,7 @@ fn pow_const_9_extracts_pow() {
 fn pow_const_17_does_not_rewrite() {
     // Beyond MAX_CHAIN no alternative is proposed at all.
     let mut g = EGraph::new();
-    let base = g.add_func_param(0, f32_ty());
+    let base = g.add_test_value_parameter(0, f32_ty());
     let p = pow(&mut g, base, ConstantValue::I32(17), i32_ty());
     assert!(!default_rewrites().apply_to_node(&mut g, p));
     assert!(is_pow(&g, p));
@@ -136,7 +136,7 @@ fn pow_const_1_does_not_rewrite() {
     // 1 is below the rule's window. A separate identity rule could strip
     // it later; this one leaves it alone.
     let mut g = EGraph::new();
-    let base = g.add_func_param(0, f32_ty());
+    let base = g.add_test_value_parameter(0, f32_ty());
     let p = pow(&mut g, base, ConstantValue::I32(1), i32_ty());
     assert!(!default_rewrites().apply_to_node(&mut g, p));
     assert!(is_pow(&g, p));
@@ -147,7 +147,7 @@ fn pow_f32_whole_exponent_extracts_chain() {
     // Float `**` requires same-typed operands; the exponent arrives as a
     // f32 literal even when the user wrote `x ** 3`.
     let mut g = EGraph::new();
-    let base = g.add_func_param(0, f32_ty());
+    let base = g.add_test_value_parameter(0, f32_ty());
     let p = pow(&mut g, base, ConstantValue::F32(3.0f32.to_bits()), f32_ty());
     let winner = apply_and_extract(&mut g, p);
     assert_eq!(chain_len_over_same_base(&g, winner, base), Some(2));
@@ -156,7 +156,7 @@ fn pow_f32_whole_exponent_extracts_chain() {
 #[test]
 fn pow_f32_fractional_exponent_does_not_rewrite() {
     let mut g = EGraph::new();
-    let base = g.add_func_param(0, f32_ty());
+    let base = g.add_test_value_parameter(0, f32_ty());
     let p = pow(&mut g, base, ConstantValue::F32(2.5f32.to_bits()), f32_ty());
     assert!(!default_rewrites().apply_to_node(&mut g, p));
     assert!(is_pow(&g, p));
@@ -165,8 +165,8 @@ fn pow_f32_fractional_exponent_does_not_rewrite() {
 #[test]
 fn pow_non_const_exponent_does_not_rewrite() {
     let mut g = EGraph::new();
-    let base = g.add_func_param(0, f32_ty());
-    let exp = g.add_func_param(1, i32_ty()); // runtime
+    let base = g.add_test_value_parameter(0, f32_ty());
+    let exp = g.add_test_value_parameter(1, i32_ty()); // runtime
     let p = g.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Power),
         smallvec![base, exp],
@@ -182,7 +182,7 @@ fn pow_vec_base_does_not_rewrite() {
     // No componentwise chain for `vec ** k`; the node must stay `**` so
     // the backend reports the missing lowering.
     let mut g = EGraph::new();
-    let base = g.add_func_param(0, vec3f32_ty());
+    let base = g.add_test_value_parameter(0, vec3f32_ty());
     let p = pow(&mut g, base, ConstantValue::I32(2), i32_ty());
     assert!(!default_rewrites().apply_to_node(&mut g, p));
     assert!(is_pow(&g, p));
@@ -194,7 +194,7 @@ fn pow_of_expensive_shared_base_still_extracts_chain() {
     // extraction's comparison. A plain subtree-sum DP would count the base
     // twice for `x * x` but once for `x ** 2` and wrongly keep the Pow.
     let mut g = EGraph::new();
-    let mut base = g.add_func_param(0, f32_ty());
+    let mut base = g.add_test_value_parameter(0, f32_ty());
     for i in 0..10 {
         let c = g.intern_constant(ConstantValue::from_f32(1.5 + i as f32), f32_ty());
         base = g.intern_pure(
@@ -212,7 +212,7 @@ fn pow_of_expensive_shared_base_still_extracts_chain() {
 #[test]
 fn consumers_see_the_rewrite_through_the_original_id() {
     let mut g = EGraph::new();
-    let base = g.add_func_param(0, f32_ty());
+    let base = g.add_test_value_parameter(0, f32_ty());
     let p = pow(&mut g, base, ConstantValue::I32(2), i32_ty());
     let one = g.intern_constant(ConstantValue::from_f32(1.0), f32_ty());
     let consumer = g.intern_pure(

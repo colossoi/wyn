@@ -31,8 +31,8 @@ use super::graph_ops::{
 };
 use super::program::{
     PhysicalEGraph as EGraph, PhysicalFilterOutput, PhysicalFilterWorkBuffers as FilterWorkBuffers,
-    PhysicalSegSpace as SegSpace, PhysicalSideEffect as SideEffect,
-    PhysicalSideEffectKind as SideEffectKind, PhysicalSoac as Soac, ProgramIdentities,
+    PhysicalFunc, PhysicalSegSpace as SegSpace, PhysicalSideEffect as SideEffect,
+    PhysicalSideEffectKind as SideEffectKind, PhysicalSoac as Soac,
 };
 use super::soac::{filter, hist, screma};
 use crate::ast::TypeName;
@@ -40,8 +40,10 @@ use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
 use super::types::{
     as_soa_tuple, soac_element_type, ArrayLayout, EffectOp, EffectToken, PureOp, RegionId,
-    SkeletonTerminator, SoacDestination, SoacEffect, ValueId, ValueKind,
+    SkeletonTerminator, SoacDestination, SoacEffect, ValueId, ValueKind, PlaceId, ViewId,
 };
+
+type CallableMap = crate::LookupMap<RegionId, PhysicalFunc>;
 
 mod array_io;
 mod filter_lowering;
@@ -63,9 +65,14 @@ use screma_lowering::{build_parallel_screma_map, emit_screma_lambda};
 /// Expand every graph-bearing body and rebuild the program at the
 /// post-expansion checkpoint.
 pub fn expand_soacs(program: super::parallelize::Planned) -> Result<SoacsExpanded, String> {
+    let callables = program
+        .functions
+        .iter()
+        .map(|function| (function.region, function.clone()))
+        .collect::<CallableMap>();
     program
         .try_map_graphs_with_state(|_, graph, data, context| {
-            run_one_body(graph, &data.identities, &mut context.effect_ids)
+            run_one_body(graph, &callables, &mut context.effect_ids)
         })
         .map(|program| program.retag())
 }
@@ -73,7 +80,7 @@ pub fn expand_soacs(program: super::parallelize::Planned) -> Result<SoacsExpande
 /// Expand every physical SOAC in the skeleton.
 pub fn run_one_body(
     mut graph: EGraph,
-    regions: &ProgramIdentities,
+    callables: &CallableMap,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<EGraph, String> {
     // Collect (block, index) of every handleable Soac in a stable order.
@@ -91,7 +98,7 @@ pub fn run_one_body(
     targets.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
 
     for (bid, idx) in targets {
-        expand_one(&mut graph, bid, idx, effect_ids, regions)?;
+        expand_one(&mut graph, bid, idx, effect_ids, callables)?;
     }
     if let Some((block, effect)) = graph.skeleton.blocks.iter().find_map(|(block, contents)| {
         contents
@@ -181,17 +188,28 @@ fn expand_one(
     bid: BlockId,
     idx: usize,
     next_effect: &mut crate::IdSource<EffectToken>,
-    regions: &ProgramIdentities,
+    callables: &CallableMap,
 ) -> Result<(), String> {
     let se = graph.skeleton.blocks[bid].side_effects.remove(idx);
     match &se.kind {
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if op.is_serial() => {
-            let operands = screma::ScremaOperands::decode(op, &se.operand_nodes, se.result)?;
-            let input_nids = operands.inputs().map(|operand| operand.node).collect::<Vec<_>>();
+            let operands = screma::ScremaOperands::decode(op, &se.operands, se.result.as_ref())?;
+            let input_nids = operands
+                .inputs()
+                .map(|operand| {
+                    operand
+                        .operand
+                        .value()
+                        .ok_or_else(|| "Screma input is not a value or view".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let Some(first_input) = op.inputs.first() else {
                 return Err("serial Screma has no array input".into());
             };
-            let result_nid = operands.result();
+            let result_nid = operands
+                .result()
+                .single_value()
+                .ok_or_else(|| "serial Screma requires one by-value result root".to_owned())?;
             let Type::Constructed(TypeName::Tuple(_), result_fields) = graph.nodes[result_nid].ty.clone()
             else {
                 return Err("Screma result must be represented as a tuple".into());
@@ -241,7 +259,7 @@ fn expand_one(
                     ),
                     SoacDestination::OutputView => operands
                         .output(field)
-                        .map(|operand| operand.node)
+                        .and_then(|operand| operand.operand.value())
                         .ok_or_else(|| format!("Screma post result {post} has no output-view operand"))?,
                     SoacDestination::InputBuffer => {
                         if input_nids.len() != 1 {
@@ -313,7 +331,7 @@ fn expand_one(
                             )
                         })
                         .collect::<Vec<_>>();
-                    let pre_values = emit_screma_lambda(graph, regions, &op.form.pre, input_elements);
+                    let pre_values = emit_screma_lambda(graph, callables, &op.form.pre, input_elements);
 
                     let mut pre_offset = 0;
                     let mut scan_offset = post_count;
@@ -322,7 +340,7 @@ fn expand_one(
                         let width = scan.neutral.len();
                         let mut arguments = carried_values[scan_offset..scan_offset + width].to_vec();
                         arguments.extend_from_slice(&pre_values[pre_offset..pre_offset + width]);
-                        new_scans.extend(emit_screma_lambda(graph, regions, &scan.operator, arguments));
+                        new_scans.extend(emit_screma_lambda(graph, callables, &scan.operator, arguments));
                         pre_offset += width;
                         scan_offset += width;
                     }
@@ -336,7 +354,7 @@ fn expand_one(
                         arguments.extend_from_slice(&pre_values[pre_offset..pre_offset + width]);
                         new_reductions.extend(emit_screma_lambda(
                             graph,
-                            regions,
+                            callables,
                             &reduction.operator,
                             arguments,
                         ));
@@ -346,7 +364,7 @@ fn expand_one(
 
                     let mut post_arguments = new_scans.clone();
                     post_arguments.extend_from_slice(&pre_values[pre_offset..]);
-                    let post_values = emit_screma_lambda(graph, regions, &op.form.post, post_arguments);
+                    let post_values = emit_screma_lambda(graph, callables, &op.form.post, post_arguments);
                     debug_assert_eq!(post_values.len(), post_count);
 
                     let mut next = Vec::with_capacity(carried_values.len());
@@ -354,17 +372,19 @@ fn expand_one(
                         let output = carried_values[post];
                         let value = post_values[post];
                         if post_is_output_view[post] {
-                            let place = graph.intern_pure(
-                                PureOp::ViewIndex,
-                                smallvec![output, lane],
+                            let view = graph.view_id(output);
+                            let place = graph.add_view_index_place(
+                                view,
+                                lane,
                                 op.form.post.result_types[post].clone(),
                                 None,
                             );
                             let effect_in = alloc_effect(next_effect);
                             let effect_out = alloc_effect(next_effect);
+                            let operand = graph.operand_ref(value);
                             graph.skeleton.blocks[body].side_effects.push(SideEffect {
-                                kind: SideEffectKind::Effect(EffectOp::Store),
-                                operand_nodes: smallvec![place, value],
+                                kind: SideEffectKind::Effect(EffectOp::Store { place }),
+                                operands: smallvec![operand],
                                 result: None,
                                 effects: Some((effect_in, effect_out)),
                                 span: None,
@@ -392,18 +412,29 @@ fn expand_one(
         }
         SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => {
             let input_count = op.body.inputs.len();
-            let read_inputs = se.operand_nodes[..input_count]
+            let read_inputs = se.operands[..input_count]
                 .iter()
                 .copied()
                 .zip(&op.body.inputs)
-                .map(|(node, input)| (node, input.array.clone(), input.element()))
+                .map(|(operand, input)| {
+                    (
+                        operand.value().expect("Filter input is a value or view"),
+                        input.array.clone(),
+                        input.element(),
+                    )
+                })
                 .collect::<Vec<_>>();
             let map_body = op.body.map.seg_body();
-            let map_func = map_body.map(|body| body.region);
+            let map_func = map_body.map(|body| {
+                callables.get(&body.region).expect("Filter map callable boundary").clone()
+            });
             let output_elem_ty = op.body.output_element_type();
             let predicate_body =
                 op.body.predicate.seg_body().expect("validated Filter predicate has a region");
-            let pred_func = predicate_body.region;
+            let pred_func = callables
+                .get(&predicate_body.region)
+                .expect("Filter predicate callable boundary")
+                .clone();
             let (output, plan) = match &op.state {
                 filter::ScheduledState::Loop { storage, .. } => (storage.clone(), filter::Plan::Loop),
                 filter::ScheduledState::Pipeline { storage, plan, .. } => {
@@ -426,7 +457,7 @@ fn expand_one(
 
             let map_captures = map_body.map(|body| body.captures.clone()).unwrap_or_default();
             let captures = predicate_body.captures.clone();
-            let result_nid = se.result.expect("Filter has a result");
+            let result_nid = se.value_result().expect("Filter has one by-value result root");
 
             let spec = FilterLoop {
                 read_inputs,
@@ -459,14 +490,14 @@ fn expand_one(
         }
         SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
             let n_inputs = op.inputs.len();
-            let input_nids = &se.operand_nodes[..n_inputs];
+            let input_nids = &se.operands[..n_inputs];
             let read_inputs: Vec<(ValueId, Type<TypeName>, Type<TypeName>, Vec<u8>, ArrayLayout)> =
                 input_nids
                     .iter()
                     .zip(op.inputs.iter())
                     .map(|(nid, input)| {
                         (
-                            *nid,
+                            nid.value().expect("Hist input is a value or view"),
                             input.array.clone(),
                             input.element(),
                             input.dimensions.clone(),
@@ -474,8 +505,11 @@ fn expand_one(
                         )
                     })
                     .collect();
-            let len_input = (input_nids[0], op.inputs[0].array.clone());
-            let result_nid = se.result.expect("Hist has a result");
+            let len_input = (
+                input_nids[0].value().expect("Hist input is a value or view"),
+                op.inputs[0].array.clone(),
+            );
+            let result_nid = se.value_result().expect("Hist has one by-value result root");
 
             let hist = HistLoop {
                 form: op.form.clone(),
@@ -485,7 +519,7 @@ fn expand_one(
             };
             match &op.state {
                 hist::PhysicalState::Atomic { space, operations } => {
-                    build_hist_atomic(graph, bid, idx, hist, space, operations, next_effect, regions)
+                    build_hist_atomic(graph, bid, idx, hist, space, operations, next_effect, callables)
                 }
                 hist::PhysicalState::Bucket {
                     space,
@@ -501,11 +535,11 @@ fn expand_one(
                         space,
                         topology.as_ref(),
                         next_effect,
-                        regions,
+                        callables,
                     ),
                     hist::ParallelStage::Finish => build_bucket_finish(graph, bid, idx, hist.result_node),
                 },
-                hist::PhysicalState::Serial => build_hist_loop(graph, bid, idx, hist, next_effect, regions),
+                hist::PhysicalState::Serial => build_hist_loop(graph, bid, idx, hist, next_effect, callables),
             }
         }
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
@@ -514,8 +548,16 @@ fn expand_one(
             let screma::PhysicalState::Segmented(segment) = &op.state else {
                 unreachable!()
             };
-            let operands = screma::ScremaOperands::decode(op, &se.operand_nodes, se.result)?;
-            let input_nodes = operands.inputs().map(|operand| operand.node).collect::<Vec<_>>();
+            let operands = screma::ScremaOperands::decode(op, &se.operands, se.result.as_ref())?;
+            let input_nodes = operands
+                .inputs()
+                .map(|operand| {
+                    operand
+                        .operand
+                        .value()
+                        .ok_or_else(|| "segmented map input is not a value or view".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let read_inputs = input_nodes
                 .iter()
                 .zip(&op.inputs)
@@ -532,7 +574,7 @@ fn expand_one(
                 let output = if destination.is_output_view() {
                     operands
                         .output(field)
-                        .map(|operand| operand.node)
+                        .and_then(|operand| operand.operand.value())
                         .ok_or_else(|| format!("segmented map result {field} has no output view"))?
                 } else if destination.is_input_buffer() && input_nodes.len() == 1 {
                     input_nodes[0]
@@ -552,9 +594,12 @@ fn expand_one(
                 &read_inputs,
                 &op.form.pre,
                 &output_views,
-                operands.result(),
+                operands
+                    .result()
+                    .single_value()
+                    .ok_or_else(|| "segmented map requires one by-value result root".to_owned())?,
                 next_effect,
-                regions,
+                callables,
             );
         }
         _ => return Err("SOAC expansion target changed after selection".into()),

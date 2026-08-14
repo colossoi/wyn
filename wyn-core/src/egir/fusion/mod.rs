@@ -112,10 +112,15 @@ pub(super) fn graph_and_span(program: &Segmented, site: BodySite) -> (&EGraph, S
 
 pub(super) fn capture_types<'a>(
     types: &LookupMap<ValueId, Type<TypeName>>,
-    captures: impl Iterator<Item = &'a ValueId>,
+    captures: impl Iterator<Item = &'a super::ir::OperandRef>,
 ) -> Vec<Type<TypeName>> {
     captures
-        .map(|capture| types.get(capture).expect("capture node is absent from its owning graph").clone())
+        .map(|capture| {
+            let value = capture
+                .value()
+                .expect("fusion cannot internalize an address-only capture before destination selection");
+            types.get(&value).expect("capture node is absent from its owning graph").clone()
+        })
         .collect()
 }
 

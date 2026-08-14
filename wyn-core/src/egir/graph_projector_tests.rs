@@ -1,6 +1,9 @@
 use super::*;
 use crate::ast::TypeName;
-use crate::egir::types::{EffectOp, EffectToken, PureOp, SideEffectKind};
+use crate::egir::types::{
+    EffectOp, EffectToken, LoadMode, OperandRef, PlaceAccess, PlaceId, PlaceRegion, PlaceType,
+    PureOp, SideEffectKind,
+};
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
 use smallvec::smallvec;
@@ -13,6 +16,66 @@ fn bool_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Bool, vec![])
 }
 
+fn test_place(graph: &mut EGraph) -> PlaceId {
+    graph.add_alloca_place(
+        PlaceType {
+            pointee: u32_ty(),
+            region: PlaceRegion::Function,
+            access: PlaceAccess::ReadWrite,
+        },
+        None,
+    )
+}
+
+fn load_effect(
+    graph: &EGraph,
+    place: PlaceId,
+    result: ValueId,
+    effects: (EffectToken, EffectToken),
+) -> SideEffect {
+    SideEffect::new(
+        SideEffectKind::Effect(EffectOp::Load {
+            place,
+            mode: LoadMode::Element,
+        }),
+        smallvec![],
+        Some(graph.value_result(result)),
+        Some(effects),
+        None,
+    )
+}
+
+fn store_effect(
+    place: PlaceId,
+    value: ValueId,
+    effects: (EffectToken, EffectToken),
+) -> SideEffect {
+    SideEffect::new(
+        SideEffectKind::Effect(EffectOp::Store { place }),
+        smallvec![OperandRef::Value(value)],
+        None,
+        Some(effects),
+        None,
+    )
+}
+
+fn value_effect(
+    graph: &EGraph,
+    input: ValueId,
+    result: ValueId,
+    effects: (EffectToken, EffectToken),
+) -> SideEffect {
+    SideEffect::new(
+        SideEffectKind::Effect(EffectOp::Op {
+            tag: PureOp::Materialize,
+        }),
+        smallvec![OperandRef::Value(input)],
+        Some(graph.value_result(result)),
+        Some(effects),
+        None,
+    )
+}
+
 #[test]
 fn selected_projection_remaps_cfg_aliases_and_value_producers() {
     let mut graph = EGraph::new();
@@ -23,35 +86,35 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
         ConstantValue::Bool(true),
         Type::Constructed(TypeName::Bool, vec![]),
     );
-    let place = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    let place = test_place(&mut graph);
     let produced = graph.alloc_side_effect_result(u32_ty());
-    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![place],
-        result: Some(produced),
-        effects: Some((EffectToken::from(0), EffectToken::from(1))),
-        span: None,
-    });
+    let effect = load_effect(
+        &graph,
+        place,
+        produced,
+        (EffectToken::from(0), EffectToken::from(1)),
+    );
+    graph.skeleton.blocks[entry].side_effects.push(effect);
     let unrelated = graph.alloc_side_effect_result(u32_ty());
-    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![place],
-        result: Some(unrelated),
-        effects: Some((EffectToken::from(1), EffectToken::from(2))),
-        span: None,
-    });
+    let effect = load_effect(
+        &graph,
+        place,
+        unrelated,
+        (EffectToken::from(1), EffectToken::from(2)),
+    );
+    graph.skeleton.blocks[entry].side_effects.push(effect);
     let body_param = graph.add_block_param(body, u32_ty());
-    graph.skeleton.blocks[body].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Store),
-        operand_nodes: smallvec![place, body_param],
-        result: None,
-        effects: Some((EffectToken::from(2), EffectToken::from(3))),
-        span: None,
-    });
+    let effect = store_effect(
+        place,
+        body_param,
+        (EffectToken::from(2), EffectToken::from(3)),
+    );
+    graph.skeleton.blocks[body].side_effects.push(effect);
+    let produced_args = graph.admit_flow_values([produced]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
         cond,
         then_target: body,
-        then_args: vec![produced],
+        then_args: produced_args,
         else_target: exit,
         else_args: vec![],
     };
@@ -61,8 +124,9 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
     };
     graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(None);
     graph.skeleton.blocks[entry].control_header = Some(ControlHeader::Selection { merge: exit });
-    graph.nodes[produced].alias = Some(place);
-    graph.nodes[unrelated].alias = Some(place);
+    let alias = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    graph.nodes[produced].alias = Some(alias);
+    graph.nodes[unrelated].alias = Some(alias);
 
     let projected = GraphProjector::new(&graph)
         .selected(HashSet::from([SideEffectSite {
@@ -79,7 +143,7 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
     assert!(projected.node(unrelated).is_none());
     assert_eq!(
         projected.graph.nodes[projected.node(produced).unwrap()].alias,
-        projected.node(place)
+        projected.node(alias)
     );
     assert!(matches!(
         projected.graph.skeleton.blocks[projected.block(entry).unwrap()]
@@ -96,9 +160,10 @@ fn complete_projection_remaps_loop_headers_and_parameters() {
     let header = graph.skeleton.create_block();
     let exit = graph.skeleton.create_block();
     let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    let zero_args = graph.admit_flow_values([zero]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![zero],
+        args: zero_args,
     };
     let _index = graph.add_block_param(header, u32_ty());
     graph.skeleton.blocks[header].term = SkeletonTerminator::Branch {
@@ -140,9 +205,10 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
     let acc = graph.add_block_param(header, u32_ty());
     let index = graph.add_block_param(header, u32_ty());
     let result = graph.add_block_param(continuation, u32_ty());
+    let initial_args = graph.admit_flow_values([zero, zero]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![zero, zero],
+        args: initial_args,
     };
     let cond = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Less),
@@ -150,12 +216,13 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
         bool_ty(),
         None,
     );
+    let exit_args = graph.admit_flow_values([acc]);
     graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
         cond,
         then_target: body,
         then_args: vec![],
         else_target: continuation,
-        else_args: vec![acc],
+        else_args: exit_args,
     };
     let next_acc = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Add),
@@ -169,9 +236,10 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
         u32_ty(),
         None,
     );
+    let loop_args = graph.admit_flow_values([next_acc, next_index]);
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![next_acc, next_index],
+        args: loop_args,
     };
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
     graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
@@ -226,13 +294,15 @@ fn captured_value_recipe_projects_a_structured_selection_prefix() {
         else_target: else_block,
         else_args: vec![],
     };
+    let left_args = graph.admit_flow_values([left]);
     graph.skeleton.blocks[then_block].term = SkeletonTerminator::Branch {
         target: continuation,
-        args: vec![left],
+        args: left_args,
     };
+    let right_args = graph.admit_flow_values([right]);
     graph.skeleton.blocks[else_block].term = SkeletonTerminator::Branch {
         target: continuation,
-        args: vec![right],
+        args: right_args,
     };
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
     graph.skeleton.blocks[entry].control_header = Some(ControlHeader::Selection { merge: continuation });
@@ -264,27 +334,28 @@ fn captured_recipe_reports_selected_effect_result_used_by_retained_terminator() 
     let continuation = graph.skeleton.create_block();
     let then_block = graph.skeleton.create_block();
     let else_block = graph.skeleton.create_block();
-    let place = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    let place = test_place(&mut graph);
     let live_out = graph.alloc_side_effect_result(bool_ty());
-    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![place],
-        result: Some(live_out),
-        effects: Some((EffectToken::from(0), EffectToken::from(1))),
-        span: None,
-    });
+    let effect = load_effect(
+        &graph,
+        place,
+        live_out,
+        (EffectToken::from(0), EffectToken::from(1)),
+    );
+    graph.skeleton.blocks[entry].side_effects.push(effect);
     let boundary_source = graph.alloc_side_effect_result(u32_ty());
-    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![place],
-        result: Some(boundary_source),
-        effects: Some((EffectToken::from(1), EffectToken::from(2))),
-        span: None,
-    });
+    let effect = load_effect(
+        &graph,
+        place,
+        boundary_source,
+        (EffectToken::from(1), EffectToken::from(2)),
+    );
+    graph.skeleton.blocks[entry].side_effects.push(effect);
     let boundary = graph.add_block_param(continuation, u32_ty());
+    let boundary_args = graph.admit_flow_values([boundary_source]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: continuation,
-        args: vec![boundary_source],
+        args: boundary_args,
     };
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::CondBranch {
         cond: live_out,
@@ -313,27 +384,27 @@ fn captured_recipe_reports_selected_effect_result_used_by_retained_terminator() 
 fn entry_recipe_reports_selected_effect_result_used_by_external_value() {
     let mut graph = EGraph::new();
     let entry = graph.skeleton.entry;
-    let place = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    let place = test_place(&mut graph);
     let live_out = graph.alloc_side_effect_result(u32_ty());
-    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![place],
-        result: Some(live_out),
-        effects: Some((EffectToken::from(0), EffectToken::from(1))),
-        span: None,
-    });
+    let effect = load_effect(
+        &graph,
+        place,
+        live_out,
+        (EffectToken::from(0), EffectToken::from(1)),
+    );
+    graph.skeleton.blocks[entry].side_effects.push(effect);
     let root = graph.alloc_side_effect_result(u32_ty());
-    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![live_out],
-        result: Some(root),
-        effects: Some((EffectToken::from(1), EffectToken::from(2))),
-        span: None,
-    });
+    let effect = value_effect(
+        &graph,
+        live_out,
+        root,
+        (EffectToken::from(1), EffectToken::from(2)),
+    );
+    graph.skeleton.blocks[entry].side_effects.push(effect);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(None);
     let external = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Add),
-        smallvec![live_out, place],
+        smallvec![live_out, root],
         u32_ty(),
         None,
     );
@@ -355,7 +426,7 @@ fn entry_recipe_reports_selected_effect_result_used_by_external_value() {
 fn entry_recipe_projects_multiple_requested_values_as_one_component() {
     let mut graph = EGraph::new();
     let entry = graph.skeleton.entry;
-    let parameter = graph.add_func_param(0, u32_ty());
+    let parameter = graph.add_test_value_parameter(0, u32_ty());
     let one = graph.intern_constant(ConstantValue::U32(1), u32_ty());
     let first = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Add),
@@ -391,35 +462,35 @@ fn structured_value_recipe_leaves_independent_continuation_effect_in_source() {
     let mut graph = EGraph::new();
     let entry = graph.skeleton.entry;
     let continuation = graph.skeleton.create_block();
-    let place = graph.intern_constant(ConstantValue::U32(0), u32_ty());
+    let place = test_place(&mut graph);
     let prefix_value = graph.alloc_side_effect_result(u32_ty());
-    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![place],
-        result: Some(prefix_value),
-        effects: Some((EffectToken::from(0), EffectToken::from(1))),
-        span: None,
-    });
+    let effect = load_effect(
+        &graph,
+        place,
+        prefix_value,
+        (EffectToken::from(0), EffectToken::from(1)),
+    );
+    graph.skeleton.blocks[entry].side_effects.push(effect);
     let result = graph.add_block_param(continuation, u32_ty());
+    let prefix_args = graph.admit_flow_values([prefix_value]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: continuation,
-        args: vec![prefix_value],
+        args: prefix_args,
     };
     let independent = graph.alloc_side_effect_result(u32_ty());
-    graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![place],
-        result: Some(independent),
-        effects: Some((EffectToken::from(1), EffectToken::from(2))),
-        span: None,
-    });
-    graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Store),
-        operand_nodes: smallvec![place, result],
-        result: None,
-        effects: Some((EffectToken::from(2), EffectToken::from(3))),
-        span: None,
-    });
+    let effect = load_effect(
+        &graph,
+        place,
+        independent,
+        (EffectToken::from(1), EffectToken::from(2)),
+    );
+    graph.skeleton.blocks[continuation].side_effects.push(effect);
+    let effect = store_effect(
+        place,
+        result,
+        (EffectToken::from(2), EffectToken::from(3)),
+    );
+    graph.skeleton.blocks[continuation].side_effects.push(effect);
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
     let recipe = GraphProjector::new(&graph)
@@ -450,18 +521,19 @@ fn selected_operation_recipe_detaches_an_independent_continuation_effect() {
     let continuation = graph.skeleton.create_block();
     let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
     let _result = graph.add_block_param(continuation, u32_ty());
+    let zero_args = graph.admit_flow_values([zero]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: continuation,
-        args: vec![zero],
+        args: zero_args,
     };
     let produced = graph.alloc_side_effect_result(u32_ty());
-    graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![zero],
-        result: Some(produced),
-        effects: Some((EffectToken::from(0), EffectToken::from(1))),
-        span: None,
-    });
+    let effect = value_effect(
+        &graph,
+        zero,
+        produced,
+        (EffectToken::from(0), EffectToken::from(1)),
+    );
+    graph.skeleton.blocks[continuation].side_effects.push(effect);
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
     let projected = GraphProjector::new(&graph)
@@ -487,18 +559,19 @@ fn selected_operation_recipe_rejects_a_continuation_parameter_dependency() {
     let continuation = graph.skeleton.create_block();
     let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
     let result = graph.add_block_param(continuation, u32_ty());
+    let zero_args = graph.admit_flow_values([zero]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: continuation,
-        args: vec![zero],
+        args: zero_args,
     };
     let produced = graph.alloc_side_effect_result(u32_ty());
-    graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![result],
-        result: Some(produced),
-        effects: Some((EffectToken::from(0), EffectToken::from(1))),
-        span: None,
-    });
+    let effect = value_effect(
+        &graph,
+        result,
+        produced,
+        (EffectToken::from(0), EffectToken::from(1)),
+    );
+    graph.skeleton.blocks[continuation].side_effects.push(effect);
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
     let projection =
@@ -519,18 +592,19 @@ fn selected_component_detaches_an_independent_continuation_value() {
     let continuation = graph.skeleton.create_block();
     let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
     let _prefix_result = graph.add_block_param(continuation, u32_ty());
+    let zero_args = graph.admit_flow_values([zero]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: continuation,
-        args: vec![zero],
+        args: zero_args,
     };
     let produced = graph.alloc_side_effect_result(u32_ty());
-    graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![zero],
-        result: Some(produced),
-        effects: Some((EffectToken::from(0), EffectToken::from(1))),
-        span: None,
-    });
+    let effect = value_effect(
+        &graph,
+        zero,
+        produced,
+        (EffectToken::from(0), EffectToken::from(1)),
+    );
+    graph.skeleton.blocks[continuation].side_effects.push(effect);
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
     let projected = GraphProjector::new(&graph)
@@ -558,18 +632,19 @@ fn selected_component_retains_cfg_for_a_continuation_parameter_dependency() {
     let continuation = graph.skeleton.create_block();
     let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
     let prefix_result = graph.add_block_param(continuation, u32_ty());
+    let zero_args = graph.admit_flow_values([zero]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: continuation,
-        args: vec![zero],
+        args: zero_args,
     };
     let produced = graph.alloc_side_effect_result(u32_ty());
-    graph.skeleton.blocks[continuation].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![prefix_result],
-        result: Some(produced),
-        effects: Some((EffectToken::from(0), EffectToken::from(1))),
-        span: None,
-    });
+    let effect = value_effect(
+        &graph,
+        prefix_result,
+        produced,
+        (EffectToken::from(0), EffectToken::from(1)),
+    );
+    graph.skeleton.blocks[continuation].side_effects.push(effect);
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
     let projected = GraphProjector::new(&graph)
@@ -622,10 +697,10 @@ fn value_flow_projection_prunes_unrelated_cfg_lanes_and_parameters() {
     let then_block = graph.skeleton.create_block();
     let else_block = graph.skeleton.create_block();
     let merge = graph.skeleton.create_block();
-    let cond = graph.add_func_param(0, bool_ty());
-    let then_value = graph.add_func_param(1, u32_ty());
-    let else_value = graph.add_func_param(2, u32_ty());
-    let unrelated = graph.add_func_param(3, u32_ty());
+    let cond = graph.add_test_value_parameter(0, bool_ty());
+    let then_value = graph.add_test_value_parameter(1, u32_ty());
+    let else_value = graph.add_test_value_parameter(2, u32_ty());
+    let unrelated = graph.add_test_value_parameter(3, u32_ty());
     let selected = graph.add_block_param(merge, u32_ty());
     let omitted = graph.add_block_param(merge, u32_ty());
 
@@ -637,15 +712,17 @@ fn value_flow_projection_prunes_unrelated_cfg_lanes_and_parameters() {
         else_target: else_block,
         else_args: vec![],
     };
+    let then_args = graph.admit_flow_values([then_value, unrelated]);
     graph.skeleton.blocks[then_block].term = SkeletonTerminator::Branch {
         target: merge,
-        args: vec![then_value, unrelated],
+        args: then_args,
     };
+    let else_args = graph.admit_flow_values([else_value, unrelated]);
     graph.skeleton.blocks[else_block].term = SkeletonTerminator::Branch {
         target: merge,
-        args: vec![else_value, unrelated],
+        args: else_args,
     };
-    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(selected));
+    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(graph.value_result(selected)));
 
     let projected =
         GraphProjector::new(&graph).value_flow(vec![selected]).expect("pure value-flow projection");

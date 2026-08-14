@@ -16,9 +16,18 @@
 //! `arr` or `val` comes from the wrong projection.
 
 use crate::ast::TypeName;
-use crate::egir::program::{PhysicalEGraph, PhysicalSideEffectKind, ProgramIdentities, SemanticOpId};
+use crate::ast::Span;
+use crate::egir::graph_ops::bind_by_value_result;
+use crate::egir::program::{
+    PhysicalEGraph, PhysicalFunc, PhysicalResourceRef, PhysicalSideEffectKind, ProgramIdentities,
+    SemanticOpId,
+};
 use crate::egir::soac::{hist, screma};
-use crate::egir::types::{Family, Physical, PureOp, Soac, SoacEffect, SoacInputType, ValueId, ValueKind};
+use crate::egir::types::{
+    by_value_function_result, callable_parameter, CallEffects, Family, OperandRef, Physical,
+    PureOp, SkeletonTerminator, Soac, SoacEffect, SoacInputType, ValueId, ValueKind, ViewId,
+    WynLanguage,
+};
 use polytype::Type;
 
 /// Compile source through the pipeline to just-past `expand_soacs`,
@@ -78,6 +87,56 @@ fn plain_array_ty(elem: Type<TypeName>) -> Type<TypeName> {
     )
 }
 
+fn physical_callable(
+    region: crate::FunctionId,
+    name: &str,
+    parameter_types: Vec<Type<TypeName>>,
+    result_types: Vec<Type<TypeName>>,
+) -> PhysicalFunc {
+    let mut graph = PhysicalEGraph::new();
+    let parameters = parameter_types
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| graph.add_test_value_parameter(index, ty.clone()))
+        .collect::<Vec<_>>();
+    let result_ty = if result_types.len() == 1 {
+        result_types[0].clone()
+    } else {
+        Type::Constructed(TypeName::Tuple(result_types.len()), result_types.clone())
+    };
+    let result_abi = by_value_function_result::<WynLanguage>(result_ty.clone());
+    let result_start = parameters.len() - result_types.len();
+    let result = if result_types.len() == 1 {
+        parameters[result_start]
+    } else {
+        graph.intern_pure(
+            PureOp::Tuple(result_types.len()),
+            parameters[result_start..].iter().copied().collect(),
+            result_ty,
+            None,
+        )
+    };
+    let binding = bind_by_value_result(&mut graph, &result_abi, result);
+    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(binding));
+    let params = parameter_types
+        .into_iter()
+        .enumerate()
+        .map(|(index, ty)| {
+            callable_parameter::<PhysicalResourceRef, WynLanguage>(format!("p{index}"), ty)
+        })
+        .collect();
+    PhysicalFunc::new(
+        region,
+        name.into(),
+        Span::dummy(),
+        None,
+        params,
+        result_abi,
+        CallEffects::Pure,
+        graph,
+    )
+}
+
 #[test]
 fn scatter_handleability_checks_every_input() {
     let mut identities = ProgramIdentities::default();
@@ -105,7 +164,7 @@ fn scatter_handleability_checks_every_input() {
                     emission: hist::Emission::Always,
                     shape: vec![ValueId::from(slotmap::KeyData::from_ffi(1))],
                     race_factor: ValueId::from(slotmap::KeyData::from_ffi(2)),
-                    destinations: vec![ValueId::from(slotmap::KeyData::from_ffi(3))],
+                    destinations: vec![ViewId::test(ValueId::from(slotmap::KeyData::from_ffi(3)))],
                     update: hist::Update::OrderedOverwrite {
                         value_types: vec![f32_ty],
                     },
@@ -146,7 +205,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
             None,
         ));
     }
-    let destinations = (0..3)
+    let destination_values = (0..3)
         .map(|binding| {
             graph_ops::intern_storage_view(
                 &mut graph,
@@ -155,6 +214,10 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
                 None,
             )
         })
+        .collect::<Vec<_>>();
+    let destinations = destination_values
+        .into_iter()
+        .map(|view| graph.view_id(view))
         .collect::<Vec<_>>();
     let mut regions = ProgramIdentities::default();
     let reducer_region = regions.alloc_function("hist_tuple_reducer".into());
@@ -199,20 +262,29 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
         block,
         SemanticOpId::for_test(0),
         Soac::Hist(histogram),
-        input_nodes,
+        input_nodes.into_iter().map(OperandRef::Value).collect(),
         bool_ty,
         &mut effect_ids,
         None,
     );
 
-    let graph =
-        super::run_one_body(graph, &regions, &mut effect_ids).expect("general serial Hist should expand");
+    let reducer = physical_callable(
+        reducer_region,
+        "hist_tuple_reducer",
+        vec![i32_ty.clone(); 4],
+        vec![i32_ty.clone(); 2],
+    );
+    let callables = [(reducer_region, reducer)].into_iter().collect();
+    let graph = super::run_one_body(graph, &callables, &mut effect_ids)
+        .expect("general serial Hist should expand");
     let stores = graph
         .skeleton
         .blocks
         .iter()
         .flat_map(|(_, block)| &block.side_effects)
-        .filter(|effect| matches!(effect.kind, SideEffectKind::Effect(EffectOp::Store)))
+        .filter(|effect| {
+            matches!(effect.kind, SideEffectKind::Effect(EffectOp::Store { .. }))
+        })
         .count();
     assert_eq!(
         stores, 12,
@@ -222,16 +294,10 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
         block.side_effects.iter().all(|effect| !matches!(effect.kind, SideEffectKind::Soac(_)))
     }));
     let reducer_calls = graph
-        .nodes
+        .calls
         .iter()
-        .filter(|(_, node)| {
-            matches!(
-                &node.kind,
-                ValueKind::Pure {
-                    op: PureOp::Call(name),
-                    operands,
-                } if *name == reducer_region && operands.len() == 4
-            )
+        .filter(|(_, call)| {
+            call.callee() == reducer_region && call.arguments().len() == 4
         })
         .count();
     assert_eq!(
@@ -259,7 +325,6 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
 #[test]
 fn serial_hist_ignores_out_of_bounds_indices() {
     use crate::egir::graph_ops;
-    use crate::egir::program::ProgramIdentities;
     use crate::egir::types::SkeletonTerminator;
     use smallvec::{smallvec, SmallVec};
 
@@ -297,7 +362,7 @@ fn serial_hist_ignores_out_of_bounds_indices() {
                 emission: hist::Emission::Always,
                 shape: vec![four],
                 race_factor: one,
-                destinations: vec![destination],
+                destinations: vec![graph.view_id(destination)],
                 update: hist::Update::OrderedOverwrite {
                     value_types: vec![i32_ty.clone()],
                 },
@@ -311,15 +376,15 @@ fn serial_hist_ignores_out_of_bounds_indices() {
         block,
         SemanticOpId::for_test(0),
         Soac::Hist(histogram),
-        SmallVec::from_vec(vec![indices, values]),
+        SmallVec::from_vec(vec![OperandRef::Value(indices), OperandRef::Value(values)]),
         bool_ty,
         &mut effect_ids,
         None,
     );
 
-    let regions = ProgramIdentities::default();
-    let graph =
-        super::run_one_body(graph, &regions, &mut effect_ids).expect("serial histogram should expand");
+    let callables = Default::default();
+    let graph = super::run_one_body(graph, &callables, &mut effect_ids)
+        .expect("serial histogram should expand");
     assert!(
         graph.nodes.iter().any(|(_, node)| {
             matches!(
@@ -368,7 +433,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
             None,
         ));
     }
-    let destinations = (0..2)
+    let destination_values = (0..2)
         .map(|binding| {
             graph_ops::intern_storage_view(
                 &mut graph,
@@ -377,6 +442,10 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
                 None,
             )
         })
+        .collect::<Vec<_>>();
+    let destinations = destination_values
+        .into_iter()
+        .map(|view| graph.view_id(view))
         .collect::<Vec<_>>();
     let mut regions = ProgramIdentities::default();
     let first_reducer = regions.alloc_function("first_reducer".into());
@@ -436,27 +505,45 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
         block,
         SemanticOpId::for_test(0),
         Soac::Hist(histogram),
-        inputs,
+        inputs.into_iter().map(OperandRef::Value).collect(),
         bool_ty,
         &mut effect_ids,
         None,
     );
 
-    let graph = super::run_one_body(graph, &regions, &mut effect_ids)
+    let first = physical_callable(
+        first_reducer,
+        "first_reducer",
+        vec![i32_ty.clone(); 2],
+        vec![i32_ty.clone()],
+    );
+    let second = physical_callable(
+        second_reducer,
+        "second_reducer",
+        vec![i32_ty.clone(); 2],
+        vec![i32_ty.clone()],
+    );
+    let callables = [(first_reducer, first), (second_reducer, second)]
+        .into_iter()
+        .collect();
+    let graph = super::run_one_body(graph, &callables, &mut effect_ids)
         .expect("multi-operation atomic Hist should expand");
     let atomics = graph
         .skeleton
         .blocks
         .iter()
         .flat_map(|(_, block)| &block.side_effects)
-        .filter(|effect| matches!(effect.kind, SideEffectKind::Effect(EffectOp::Atomic(_))))
+        .filter(|effect| {
+            matches!(effect.kind, SideEffectKind::Effect(EffectOp::Atomic { .. }))
+        })
         .count();
     assert_eq!(atomics, 2, "one atomic update per histogram operation");
     assert!(graph.skeleton.blocks.iter().all(|(_, block)| {
         block.side_effects.iter().all(|effect| {
             !matches!(
                 effect.kind,
-                SideEffectKind::Effect(EffectOp::Load | EffectOp::Store) | SideEffectKind::Soac(_)
+                SideEffectKind::Effect(EffectOp::Load { .. } | EffectOp::Store { .. })
+                    | SideEffectKind::Soac(_)
             )
         })
     }));

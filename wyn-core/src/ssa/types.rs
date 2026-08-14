@@ -180,7 +180,7 @@ pub enum InstKind<R = crate::BindingRef> {
     /// A pure operation. Operand layout per tag is documented on
     /// `OpTag` in `crate::op`.
     Op {
-        tag: OpTag<R>,
+        tag: OpTag<R, crate::FunctionId>,
         operands: Vec<ValueRef>,
     },
 

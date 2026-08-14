@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::egir::soac::lambda as lambda_ops;
+use crate::egir::types::OperandRef;
 use crate::types::TypeExt;
 
 pub(super) fn apply_manifest_resource_sizes(
@@ -20,12 +21,13 @@ pub(super) fn apply_manifest_resource_sizes(
 /// resources keep the operation on the serial fallback.
 pub(super) fn cloneable_capture_inputs(
     entry: &crate::egir::program::PlannedEntry,
-    captures: &[ValueId],
+    captures: &[OperandRef],
 ) -> Option<Vec<SemanticResourceDecl>> {
-    if captures.iter().any(|capture| !can_clone_pure_subgraph(&entry.graph, *capture, &[])) {
+    let values = captures.iter().map(|capture| capture.value()).collect::<Option<Vec<_>>>()?;
+    if values.iter().any(|capture| !can_clone_pure_subgraph(&entry.graph, *capture, &[])) {
         return None;
     }
-    graph_ops::read_storage_resources(&entry.graph, captures.iter().copied())
+    graph_ops::read_storage_resources(&entry.graph, values)
         .into_iter()
         .map(|access| {
             entry
@@ -210,23 +212,22 @@ fn synthesize_binary_fn(
     span: crate::ast::Span,
     body: impl FnOnce(&mut EGraph, ValueId, ValueId) -> ValueId,
 ) -> SemanticFunc {
+    let params = lambda_ops::named_parameters(&[elem_ty.clone(), elem_ty.clone()], "arg");
     let mut graph = EGraph::new();
-    let a_nid = graph.add_func_param(0, elem_ty.clone());
-    let b_nid = graph.add_func_param(1, elem_ty.clone());
+    let arguments = lambda_ops::function_parameters(&mut graph, &params);
+    let a_nid = arguments[0].value().expect("binary helper parameter is a value");
+    let b_nid = arguments[1].value().expect("binary helper parameter is a value");
     let result = body(&mut graph, a_nid, b_nid);
     let entry_block = graph.skeleton.entry;
-    graph.skeleton.blocks[entry_block].term = SkeletonTerminator::Return(Some(result));
-    SemanticFunc::new(
+    lambda_ops::finish_function(
+        graph,
+        entry_block,
         region,
         name,
         span,
-        None,
-        vec![
-            (elem_ty.clone(), "a".to_string()),
-            (elem_ty.clone(), "b".to_string()),
-        ],
-        elem_ty,
-        graph,
+        params,
+        &[elem_ty],
+        &[result],
     )
 }
 
@@ -235,7 +236,7 @@ fn synthesize_binary_fn(
 pub(super) fn synthesize_swap_wrapper(
     region: RegionId,
     wrapper_name: String,
-    inner_region: RegionId,
+    inner: &SemanticFunc,
     elem_ty: Type<TypeName>,
     capture_types: Vec<Type<TypeName>>,
     span: crate::ast::Span,
@@ -247,12 +248,17 @@ pub(super) fn synthesize_swap_wrapper(
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
     let mut inner_arguments = vec![arguments[1], arguments[0]];
     inner_arguments.extend_from_slice(&arguments[2..]);
-    let result = graph.intern_pure(
-        PureOp::Call(inner_region),
-        inner_arguments.into_iter().collect(),
-        elem_ty.clone(),
-        None,
-    );
+    let (_, result) = graph
+        .add_call(
+            inner.region,
+            inner.params(),
+            inner.result(),
+            inner_arguments,
+            inner.effects(),
+            None,
+        )
+        .expect("swap wrapper call must match the operator boundary");
+    let result = result.single_value().expect("swap wrapper operator has one by-value result");
     let entry = graph.skeleton.entry;
     lambda_ops::finish_function(
         graph,

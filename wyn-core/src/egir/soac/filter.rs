@@ -106,25 +106,17 @@ impl Body {
     }
 
     pub(crate) fn capture_nodes(&self) -> Vec<ValueId> {
-        lambda_captures(&self.map).chain(lambda_captures(&self.predicate)).copied().collect()
+        lambda_capture_values(&self.map).chain(lambda_capture_values(&self.predicate)).collect()
     }
 
-    fn referenced_node_slots(&mut self) -> Vec<&mut ValueId> {
-        let Self {
-            inputs: _,
-            map,
-            predicate,
-        } = self;
-        lambda_capture_slots(map).chain(lambda_capture_slots(predicate)).collect()
+    fn remap_capture_values(&mut self, map: &mut impl FnMut(ValueId) -> ValueId) {
+        self.map.remap_capture_values(map);
+        self.predicate.remap_capture_values(map);
     }
 }
 
-fn lambda_captures(lambda: &screma::Lambda) -> impl Iterator<Item = &ValueId> {
-    lambda.seg_body().into_iter().flat_map(|body| body.captures.iter())
-}
-
-fn lambda_capture_slots(lambda: &mut screma::Lambda) -> impl Iterator<Item = &mut ValueId> {
-    lambda.seg_body_mut().into_iter().flat_map(|body| body.captures.iter_mut())
+fn lambda_capture_values(lambda: &screma::Lambda) -> impl Iterator<Item = ValueId> + '_ {
+    lambda.seg_body().into_iter().flat_map(|body| body.capture_values())
 }
 #[derive(Clone, Debug)]
 pub struct RawState<R> {
@@ -209,10 +201,11 @@ impl<R: GraphResource> Op<Semantic<R>> {
         nodes
     }
 
-    pub(crate) fn referenced_node_slots(&mut self) -> Vec<&mut ValueId> {
+    pub(crate) fn remap_referenced_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
         let Self { body, state } = self;
-        let mut nodes = body.referenced_node_slots();
-        nodes.extend(state.space.referenced_node_slots());
-        nodes
+        body.remap_capture_values(&mut map);
+        for slot in state.space.referenced_node_slots() {
+            *slot = map(*slot);
+        }
     }
 }

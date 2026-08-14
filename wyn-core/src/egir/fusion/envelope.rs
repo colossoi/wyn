@@ -18,7 +18,7 @@ pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candi
             return None;
         };
         let input_count = op.body.inputs.len();
-        (effect.operand_nodes.len() >= input_count).then_some(input_count)
+        (effect.operands.len() >= input_count).then_some(input_count)
     })
 }
 
@@ -30,11 +30,14 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
         unreachable!();
     };
     let input_count = consumer_op.body.inputs.len();
-    let input_nodes = &consumer_effect.operand_nodes[..input_count];
+    let input_nodes = consumer_effect.operands[..input_count]
+        .iter()
+        .map(|operand| operand.value().expect("Filter input uses the value or view channel"))
+        .collect::<Vec<_>>();
     let composition = map_anchor::compose(
         &inner,
         &candidate,
-        input_nodes,
+        &input_nodes,
         &consumer_op.body.inputs,
         &consumer_op.body.map,
     )

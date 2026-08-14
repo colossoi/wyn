@@ -26,10 +26,11 @@
 use polytype::Type;
 
 use super::super::from_tlc::ConvertError;
-use super::super::ir::{Body, BodySite, ProgramShape};
+use super::super::ir::{callable_parameter, Body, BodySite, OperandRef, ProgramShape};
 use super::super::program::{Func, Program};
 use super::super::types::{
-    EGraph, EffectOp, PureOp, RegionId, SideEffectKind, SoacEffect, ValueId, ValueKind, WynSoacPhase,
+    EGraph, PureOp, RegionId, SideEffectKind, SoacEffect, ValueId, ValueKind, WynLanguage,
+    WynSoacPhase,
 };
 use crate::ast::TypeName;
 
@@ -96,26 +97,12 @@ fn collect_drifts<'a, P: WynSoacPhase + 'a>(
     out: &mut Vec<Retype>,
 ) {
     for graph in graphs {
-        for (_, node) in &graph.nodes {
-            let ValueKind::Pure {
-                op: PureOp::Call(region),
-                operands,
-            } = &node.kind
-            else {
-                continue;
-            };
-            collect_call_drifts(graph, functions, *region, operands, out);
+        for (_, call) in graph.calls() {
+            collect_call_drifts(graph, functions, call.callee(), call.arguments(), out);
         }
 
         for (_, block) in &graph.skeleton.blocks {
             for se in &block.side_effects {
-                if let SideEffectKind::Effect(EffectOp::Op {
-                    tag: crate::op::OpTag::Call(region),
-                }) = &se.kind
-                {
-                    collect_call_drifts(graph, functions, *region, &se.operand_nodes, out);
-                }
-
                 let SideEffectKind::Soac(SoacEffect(_, soac)) = &se.kind else {
                     continue;
                 };
@@ -131,10 +118,12 @@ fn collect_drifts<'a, P: WynSoacPhase + 'a>(
                     let base = region.params.len().saturating_sub(n_caps);
                     for (i, &capture) in body.captures.iter().enumerate() {
                         let param_index = base + i;
-                        let Some(cap_ty) = graph.nodes.get(capture).map(|node| &node.ty) else {
+                        let Some(cap_ty) = capture.value().and_then(|capture| {
+                            graph.nodes.get(capture).map(|node| &node.ty)
+                        }) else {
                             continue;
                         };
-                        let Some(param_ty) = region.params.get(param_index).map(|(t, _)| t) else {
+                        let Some(param_ty) = region.params.get(param_index).map(|parameter| parameter.ty()) else {
                             continue;
                         };
                         if is_view_ward_drift(param_ty, cap_ty) {
@@ -156,17 +145,20 @@ fn collect_call_drifts<P: WynSoacPhase>(
     graph: &EGraph<P>,
     functions: &[Func<P>],
     region: RegionId,
-    arguments: &[ValueId],
+    arguments: &[OperandRef],
     out: &mut Vec<Retype>,
 ) {
     let Some(callee) = functions.iter().find(|function| function.region == region) else {
         return;
     };
     for (param_index, &argument) in arguments.iter().enumerate() {
-        let Some(arg_ty) = graph.nodes.get(argument).map(|node| &node.ty) else {
+        let Some(arg_ty) = argument
+            .value()
+            .and_then(|argument| graph.nodes.get(argument).map(|node| &node.ty))
+        else {
             continue;
         };
-        let Some(param_ty) = callee.params.get(param_index).map(|(ty, _)| ty) else {
+        let Some(param_ty) = callee.params.get(param_index).map(|parameter| parameter.ty()) else {
             continue;
         };
         if is_view_ward_drift(param_ty, arg_ty) {
@@ -223,7 +215,10 @@ where
             unreachable!()
         };
         if let Some(slot) = function.params.get_mut(param_index) {
-            slot.0 = arg_ty.clone();
+            *slot = callable_parameter::<<Shape::Family as super::super::ir::Family>::Resource, WynLanguage>(
+                slot.name().to_owned(),
+                arg_ty.clone(),
+            );
         }
         retype_func_param(&mut function.graph, param_index, &arg_ty);
         recompute_aggregate_types(&mut function.graph);
@@ -323,7 +318,7 @@ fn is_view_ward_drift(param: &Type<TypeName>, cap: &Type<TypeName>) -> bool {
 /// Retype the `FuncParam { index }` node in a region/function body graph.
 fn retype_func_param<P: WynSoacPhase>(graph: &mut EGraph<P>, index: usize, view_ty: &Type<TypeName>) {
     let target = graph.nodes.iter().find_map(|(nid, node)| match &node.kind {
-        ValueKind::FuncParam { index: i } if *i == index => Some(nid),
+        ValueKind::FuncParam { parameter } if parameter.index() == index => Some(nid),
         _ => None,
     });
     if let Some(nid) = target {

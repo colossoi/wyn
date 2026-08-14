@@ -1,8 +1,13 @@
 use super::*;
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{semantic_program_for_test, ProgramIdentities, SemanticFunc};
+use crate::egir::program::{
+    semantic_program_for_test, ProgramIdentities, SemanticFunc, SemanticResourceRef,
+};
 use crate::egir::soac::screma;
-use crate::egir::types::{PureOp, RegionId, SegBody, Semantic, SoacDestination, SoacEffect};
+use crate::egir::types::{
+    by_value_function_result, callable_parameter, CallEffects, OperandRef, PureOp, RegionId,
+    SegBody, Semantic, SoacDestination, SoacEffect, WynLanguage,
+};
 use crate::pipeline_descriptor::PipelineDescriptor;
 use polytype::Type;
 use smallvec::smallvec;
@@ -74,6 +79,7 @@ fn unknown_ops_have_no_edges() {
 fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<ValueId>) {
     let ty = Type::Constructed(TypeName::Unit, vec![]);
     let result = graph.alloc_side_effect_result(ty.clone());
+    let result_binding = graph.value_result(result);
     let block = graph.skeleton.entry;
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(
@@ -84,7 +90,7 @@ fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<Val
                     pre: screma::Lambda::region(
                         SegBody {
                             region: RegionId::from_index(0),
-                            captures,
+                            captures: captures.into_iter().map(OperandRef::Value).collect(),
                         },
                         vec![],
                         vec![ty.clone()],
@@ -99,8 +105,8 @@ fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<Val
                 state: screma::SemanticState::Serial,
             }),
         )),
-        operand_nodes: smallvec![],
-        result: Some(result),
+        operands: smallvec![],
+        result: Some(result_binding),
         effects: None,
         span: None,
     });
@@ -126,7 +132,7 @@ fn screma_verification_program(
     let array_type = array(i32_type.clone());
     let result_type = Type::Constructed(TypeName::Tuple(1), vec![array_type.clone()]);
     let mut graph = EGraph::new();
-    let input = graph.add_func_param(0, array_type.clone());
+    let input = graph.add_test_value_parameter(0, array_type.clone());
     let neutral = if neutral_is_bool {
         graph.intern_pure(
             PureOp::Bool(false),
@@ -138,6 +144,7 @@ fn screma_verification_program(
         graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_type.clone(), None)
     };
     let result = graph.alloc_side_effect_result(result_type.clone());
+    let result_binding = graph.value_result(result);
     let block = graph.skeleton.entry;
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(
@@ -159,8 +166,8 @@ fn screma_verification_program(
                 state: screma::SemanticState::Serial,
             }),
         )),
-        operand_nodes: smallvec![input],
-        result: Some(result),
+        operands: smallvec![OperandRef::Value(input)],
+        result: Some(result_binding),
         effects: None,
         span: None,
     });
@@ -172,8 +179,12 @@ fn screma_verification_program(
         "malformed_screma".to_string(),
         Span::dummy(),
         None,
-        vec![(array_type, "xs".into())],
-        result_type,
+        vec![callable_parameter::<SemanticResourceRef, WynLanguage>(
+            "xs".into(),
+            array_type,
+        )],
+        by_value_function_result::<WynLanguage>(result_type),
+        CallEffects::General,
         graph,
     );
     semantic_program_for_test(
@@ -220,7 +231,7 @@ fn verifier_rejects_screma_neutral_type_mismatch() {
 #[test]
 fn scheduled_operations_expose_shared_prelude_inputs() {
     let mut egir = EGraph::<Semantic>::new();
-    let source = egir.add_func_param(0, Type::Constructed(TypeName::Unit, vec![]));
+    let source = egir.add_test_value_parameter(0, Type::Constructed(TypeName::Unit, vec![]));
     append_capturing_map(&mut egir, 10, vec![source, source]);
     append_capturing_map(&mut egir, 11, vec![source]);
 

@@ -26,8 +26,9 @@ use super::super::graph_ops;
 use super::super::program::OutputWriter;
 use super::super::soac::{filter, hist, screma};
 use super::super::types::{
-    EGraph, EffectToken, PureOp, Raw, SideEffectIndex, SideEffectKind, SkeletonTerminator, Soac,
-    SoacDestination, SoacEffect, SoacPlacement, ValueId, ValueKind,
+    EGraph, EffectToken, PlaceAccess, PlaceRegion, PlaceType, PureOp, Raw, SideEffectIndex,
+    SideEffectKind, SkeletonTerminator, Soac, SoacDestination, SoacEffect, SoacPlacement, ValueId,
+    ValueKind,
 };
 
 /// The set of Pure nodes reachable from an entry's live outputs — the operand
@@ -39,15 +40,15 @@ use super::super::types::{
 fn reachable_from_outputs(graph: &EGraph<Raw>) -> LookupSet<ValueId> {
     let mut roots: Vec<ValueId> = Vec::new();
     for (_, block) in &graph.skeleton.blocks {
-        if let SkeletonTerminator::Return(Some(r)) = block.term {
-            roots.push(r);
+        if let SkeletonTerminator::Return(Some(r)) = &block.term {
+            roots.extend(r.values());
         }
         for se in &block.side_effects {
             // A SOAC's array operands are inputs, not output writes — excluded,
             // matching the verifier. Store operands carry written values.
             match &se.kind {
                 SideEffectKind::Soac(SoacEffect(_, _)) => continue,
-                _ => roots.extend(se.operand_nodes.iter().copied()),
+                _ => roots.extend(se.operand_values()),
             }
         }
     }
@@ -81,9 +82,10 @@ pub(super) fn retarget_bucket_aux_output(
     let source_resource = graph_ops::storage_resource_under(graph, source).or_else(|| {
         effect_index.effect(graph, source).and_then(|effect| {
             effect
-                .operand_nodes
+                .operands
                 .iter()
-                .find_map(|operand| graph_ops::storage_resource_under(graph, *operand))
+                .filter_map(|operand| operand.value())
+                .find_map(|operand| graph_ops::storage_resource_under(graph, operand))
         })
     });
     let mut found = None;
@@ -96,22 +98,35 @@ pub(super) fn retarget_bucket_aux_output(
                 let hist::Update::BucketInsert { counts, overflow, .. } = operation.update else {
                     continue;
                 };
-                if counts == source {
-                    found = Some((block, index, Field::Counts, counts, effect.result?));
+                if counts.value() == source {
+                    found = Some((
+                        block,
+                        index,
+                        Field::Counts,
+                        counts,
+                        effect.result()?.values().into_iter().next()?,
+                    ));
                     break 'effects;
                 }
-                let overflow_resource = graph_ops::extract_storage_view_source(graph, overflow);
+                let overflow_resource = graph_ops::extract_storage_view_source(graph, overflow.value());
                 if source_resource.is_some() && source_resource == overflow_resource {
-                    found = Some((block, index, Field::Overflow, overflow, effect.result?));
+                    found = Some((
+                        block,
+                        index,
+                        Field::Overflow,
+                        overflow,
+                        effect.result()?.values().into_iter().next()?,
+                    ));
                     break 'effects;
                 }
             }
         }
     }
     let (block, index, field, old_view, result) = found?;
-    let old_resource = graph_ops::extract_storage_view_source(graph, old_view)?.0;
-    let view_ty = graph.nodes[old_view].ty.clone();
+    let old_resource = graph_ops::extract_storage_view_source(graph, old_view.value())?.0;
+    let view_ty = graph.nodes[old_view.value()].ty.clone();
     let new_view = graph_ops::intern_resource_view(graph, output_resource, view_ty, None);
+    let new_view_id = graph.view_id(new_view);
 
     let effect = &mut graph.skeleton.blocks[block].side_effects[index];
     let SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) = &mut effect.kind else {
@@ -122,13 +137,13 @@ pub(super) fn retarget_bucket_aux_output(
             continue;
         };
         match field {
-            Field::Counts if *counts == old_view => *counts = new_view,
-            Field::Overflow if *overflow == old_view => *overflow = new_view,
+            Field::Counts if *counts == old_view => *counts = new_view_id,
+            Field::Overflow if *overflow == old_view => *overflow = new_view_id,
             _ => {}
         }
     }
-    graph.replace_node_references(old_view, new_view);
-    graph.nodes[old_view].alias = Some(new_view);
+    graph.replace_node_references(old_view.value(), new_view);
+    graph.nodes[old_view.value()].alias = Some(new_view);
     let routed_source = match field {
         Field::Counts => new_view,
         Field::Overflow => source,
@@ -265,11 +280,13 @@ pub fn graphics_slot_source(
     slot_index: usize,
     slot_ty: &Type<TypeName>,
 ) -> OutputWriter {
-    let place = graph.intern_pure(
-        PureOp::OutputSlot { index: slot_index },
-        smallvec![],
-        slot_ty.clone(),
-        None,
+    let place = graph.add_output_place(
+        slot_index,
+        PlaceType {
+            pointee: slot_ty.clone(),
+            region: PlaceRegion::Output,
+            access: PlaceAccess::WriteOnly,
+        },
     );
     OutputWriter::Effect(graph_ops::emit_store(
         graph, block, place, source, effect_ids, None,
@@ -380,17 +397,34 @@ pub(crate) fn retarget_array_projection(
     field_idx: usize,
     output_view: ValueId,
 ) -> Result<(), ConvertError> {
-    if let Some(se) = effect_index.effect_mut(graph, target_result) {
+    if effect_index.effect(graph, target_result).is_some() {
+        let (base_len, mut views) = {
+            let se = effect_index
+                .effect(graph, target_result)
+                .expect("side-effect site was just resolved");
+            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &se.kind else {
+                return Err(ConvertError::Internal(format!(
+                    "output target {target_result:?} is not produced by a Screma"
+                )));
+            };
+            let operands = screma::ScremaOperands::decode(op, &se.operands, se.result())?;
+            (
+                operands.input_count(),
+                operands
+                    .outputs()
+                    .map(|operand| operand.map(|operand| operand.operand))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let output_view = graph.operand_ref(output_view);
+        let se = effect_index
+            .effect_mut(graph, target_result)
+            .expect("side-effect site was just resolved");
         let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut se.kind else {
             return Err(ConvertError::Internal(format!(
                 "output target {target_result:?} is not produced by a Screma"
             )));
         };
-
-        let operands = screma::ScremaOperands::decode(op, &se.operand_nodes, se.result)?;
-        let base_len = operands.input_count();
-        let mut views =
-            operands.outputs().map(|operand| operand.map(|operand| operand.node)).collect::<Vec<_>>();
 
         if !matches!(op.form.result_id(field_idx), Some(screma::ResultId::Post(_))) {
             return Err(ConvertError::Internal(format!(
@@ -404,9 +438,9 @@ pub(crate) fn retarget_array_projection(
         }
         views[field_idx] = Some(output_view);
 
-        se.operand_nodes.truncate(base_len);
+        se.operands.truncate(base_len);
         for view in views.into_iter().flatten() {
-            se.operand_nodes.push(view);
+            se.operands.push(view);
         }
         return Ok(());
     }
@@ -452,11 +486,11 @@ pub(crate) fn rewrite_sibling_index_consumers(
     let mut input_hits: Vec<(BlockId, usize, usize)> = Vec::new();
     for (skel_bid, blk) in &graph.skeleton.blocks {
         for (se_idx, se) in blk.side_effects.iter().enumerate() {
-            if se.result == Some(source) {
+            if se.result().is_some_and(|result| result.contains_value(source)) {
                 continue;
             }
-            for (op_idx, &op_nid) in se.operand_nodes.iter().enumerate() {
-                if op_nid != source {
+            for (op_idx, &op_nid) in se.operands.iter().enumerate() {
+                if op_nid.value() != Some(source) {
                     continue;
                 }
                 match &se.kind {
@@ -519,10 +553,11 @@ pub(crate) fn rewrite_sibling_index_consumers(
     // type — so any mismatch is an upstream bug).
     let view_arr_ty = graph.nodes[view].ty.clone();
     let view_elem_ty = view_arr_ty.elem_type().expect("output view must be Array").clone();
+    let view_operand = graph.operand_ref(view);
     for (skel_bid, se_idx, op_idx) in input_hits {
         let blk = &mut graph.skeleton.blocks[skel_bid];
         let se = &mut blk.side_effects[se_idx];
-        se.operand_nodes[op_idx] = view;
+        se.operands[op_idx] = view_operand;
         match &mut se.kind {
             SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                 let k = op_idx;
@@ -657,7 +692,7 @@ pub fn retarget_filter_output(
     let mut retargeted: Option<(ResourceId, Type<TypeName>, Type<TypeName>, Type<TypeName>)> = None;
     'outer: for (_bid, block) in graph.skeleton.blocks.iter_mut() {
         for se in block.side_effects.iter_mut() {
-            if se.result != Some(source) {
+            if !se.result().is_some_and(|result| result.contains_value(source)) {
                 continue;
             }
             if let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) = &mut se.kind {

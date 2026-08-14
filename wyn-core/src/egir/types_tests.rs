@@ -11,8 +11,11 @@ fn u32_ty() -> Type<TypeName> {
 fn effect(result: ValueId) -> SideEffect {
     SideEffect {
         kind: SideEffectKind::Effect(EffectOp::ControlBarrier),
-        operand_nodes: SmallVec::new(),
-        result: Some(result),
+        operands: SmallVec::new(),
+        result: Some(ResultBinding::destination(
+            Type::Constructed(TypeName::Unit, vec![]),
+            ResultDestination::ReturnValue(result),
+        )),
         effects: None,
         span: None,
     }
@@ -32,6 +35,18 @@ struct TestLanguage;
 impl Language for TestLanguage {
     type Const = TestConst;
     type Ty = String;
+
+    fn is_materialized_aggregate(_: &Self::Ty) -> bool {
+        false
+    }
+
+    fn is_view(_: &Self::Ty) -> bool {
+        false
+    }
+
+    fn product_fields(_: &Self::Ty) -> Option<&[Self::Ty]> {
+        None
+    }
 }
 
 impl Family for TestPhase {
@@ -61,7 +76,7 @@ fn graph_accepts_non_wyn_payloads() {
     let entry = graph.skeleton.entry;
     graph.skeleton.blocks[entry].side_effects.push(super::super::ir::SideEffect {
         kind: super::super::ir::SideEffectKind::Soac(()),
-        operand_nodes: SmallVec::new(),
+        operands: SmallVec::new(),
         result: None,
         effects: None,
         span: None,
@@ -86,7 +101,14 @@ fn adding_block_params_registers_them_in_order() {
     let first = graph.add_block_param(block, "first".to_string());
     let second = graph.add_block_param(block, "second".to_string());
 
-    assert_eq!(graph.skeleton.blocks[block].params, [first, second]);
+    assert_eq!(
+        graph.skeleton.blocks[block]
+            .params
+            .iter()
+            .map(|parameter| parameter.value())
+            .collect::<Vec<_>>(),
+        [first, second]
+    );
     assert!(matches!(
         graph.nodes[first].kind,
         super::super::ir::ValueKind::BlockParam { block: owner, index: 0 } if owner == block
@@ -110,24 +132,28 @@ fn removing_block_param_slots_updates_incoming_edges_and_indices() {
     let second = graph.add_block_param(target, "second".to_string());
     let third = graph.add_block_param(target, "third".to_string());
 
-    let args = (0..9).map(|index| graph.add_func_param(index, format!("arg-{index}"))).collect::<Vec<_>>();
-    graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
+    let args = (0..9)
+        .map(|index| graph.add_test_value_parameter(index, format!("arg-{index}")))
+        .collect::<Vec<_>>();
+    graph.skeleton.blocks[entry].term =
+        super::super::ir::SkeletonTerminator::<TestLanguage>::CondBranch {
         cond: args[0],
         then_target: target,
-        then_args: vec![args[1], args[2], args[3]],
+        then_args: graph.admit_flow_values([args[1], args[2], args[3]]),
         else_target: target,
-        else_args: vec![args[4], args[5], args[6]],
+        else_args: graph.admit_flow_values([args[4], args[5], args[6]]),
     };
-    graph.skeleton.blocks[branch_predecessor].term = SkeletonTerminator::Branch {
+    graph.skeleton.blocks[branch_predecessor].term =
+        super::super::ir::SkeletonTerminator::<TestLanguage>::Branch {
         target,
-        args: vec![args[6], args[7], args[8]],
+        args: graph.admit_flow_values([args[6], args[7], args[8]]),
     };
 
     let slots = [2, 0, 2].into_iter().collect::<crate::SortedSet<_>>();
     let removed = graph.remove_block_param_slots(target, &slots);
 
     assert_eq!(removed, [first, third]);
-    assert_eq!(graph.skeleton.blocks[target].params, [second]);
+    assert_eq!(graph.skeleton.blocks[target].params[0].value(), second);
     assert!(matches!(
         graph.nodes[second].kind,
         super::super::ir::ValueKind::BlockParam { block, index: 0 } if block == target
@@ -135,19 +161,19 @@ fn removing_block_param_slots_updates_incoming_edges_and_indices() {
     assert!(graph.nodes.contains_key(first));
     assert!(graph.nodes.contains_key(third));
     match &graph.skeleton.blocks[entry].term {
-        SkeletonTerminator::CondBranch {
+        super::super::ir::SkeletonTerminator::<TestLanguage>::CondBranch {
             then_args, else_args, ..
         } => {
-            assert_eq!(then_args, &[args[2]]);
-            assert_eq!(else_args, &[args[5]]);
+            assert_eq!(then_args[0].value(), args[2]);
+            assert_eq!(else_args[0].value(), args[5]);
         }
         other => panic!("{other:?}"),
     }
     match &graph.skeleton.blocks[branch_predecessor].term {
-        SkeletonTerminator::Branch {
+        super::super::ir::SkeletonTerminator::<TestLanguage>::Branch {
             args: branch_args, ..
         } => {
-            assert_eq!(branch_args, &[args[7]]);
+            assert_eq!(branch_args[0].value(), args[7]);
         }
         other => panic!("{other:?}"),
     }
@@ -162,7 +188,7 @@ fn splitting_block_moves_effect_suffix_and_original_terminator() {
     let third = graph.alloc_side_effect_result(unit);
     let entry = graph.skeleton.entry;
     graph.skeleton.blocks[entry].side_effects = vec![effect(first), effect(second), effect(third)];
-    graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(Some(third));
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(Some(graph.value_result(third)));
     graph.skeleton.blocks[entry].control_header =
         Some(crate::flow::ControlHeader::Selection { merge: entry });
 
@@ -172,7 +198,7 @@ fn splitting_block_moves_effect_suffix_and_original_terminator() {
         graph.skeleton.blocks[entry]
             .side_effects
             .iter()
-            .filter_map(|effect| effect.result)
+            .filter_map(|effect| effect.value_result())
             .collect::<Vec<_>>(),
         [first]
     );
@@ -185,13 +211,13 @@ fn splitting_block_moves_effect_suffix_and_original_terminator() {
         graph.skeleton.blocks[continuation]
             .side_effects
             .iter()
-            .filter_map(|effect| effect.result)
+            .filter_map(|effect| effect.value_result())
             .collect::<Vec<_>>(),
         [second, third]
     );
     assert!(matches!(
-        graph.skeleton.blocks[continuation].term,
-        SkeletonTerminator::Return(Some(result)) if result == third
+        &graph.skeleton.blocks[continuation].term,
+        SkeletonTerminator::Return(Some(result)) if result.single_value() == Some(third)
     ));
     assert!(graph.skeleton.blocks[entry].control_header.is_none());
     assert!(matches!(
@@ -214,7 +240,7 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
         vec![],
         vec![7],
         vec![],
-        "unit".to_string(),
+        by_value_function_result::<TestLanguage>("unit".to_string()),
         graph,
     );
     assert_eq!(entry.resource_declarations, [7]);
@@ -233,9 +259,9 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
 #[test]
 fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
     let mut graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
-    let first = graph.add_func_param(0, "first".to_string());
-    let removed = graph.add_func_param(1, "removed".to_string());
-    let third = graph.add_func_param(2, "third".to_string());
+    let first = graph.add_test_value_parameter(0, "first".to_string());
+    let removed = graph.add_test_value_parameter(1, "removed".to_string());
+    let third = graph.add_test_value_parameter(2, "third".to_string());
     let inputs = ["first", "removed", "third"]
         .into_iter()
         .map(|name| crate::interface::EntryInput {
@@ -247,7 +273,7 @@ fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
         .collect();
     let params = ["first", "removed", "third"]
         .into_iter()
-        .map(|name| (name.to_string(), name.to_string()))
+        .map(|name| FuncParam::value(name.to_string(), name.to_string()))
         .collect();
     let mut entry = super::super::ir::Entry::<TestPhase, (), (), TestLanguage>::new_with_resources(
         "compact".to_string(),
@@ -260,7 +286,7 @@ fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
         vec![],
         vec![],
         params,
-        "unit".to_string(),
+        by_value_function_result::<TestLanguage>("unit".to_string()),
         graph,
     );
 
@@ -271,17 +297,17 @@ fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
         ["first", "third"]
     );
     assert_eq!(
-        entry.params.iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>(),
+        entry.params.iter().map(|parameter| parameter.name()).collect::<Vec<_>>(),
         ["first", "third"]
     );
     assert!(matches!(
         entry.graph.nodes[first].kind,
-        super::super::ir::ValueKind::FuncParam { index: 0 }
+        super::super::ir::ValueKind::FuncParam { parameter } if parameter.index() == 0
     ));
     assert!(!entry.graph.nodes.contains_key(removed));
     assert!(matches!(
         entry.graph.nodes[third].kind,
-        super::super::ir::ValueKind::FuncParam { index: 1 }
+        super::super::ir::ValueKind::FuncParam { parameter } if parameter.index() == 1
     ));
 }
 
@@ -312,7 +338,7 @@ fn indexes_results_across_skeleton_blocks() {
         })
     );
     assert_eq!(
-        index.effect(&graph, second).and_then(|effect| effect.result),
+        index.effect(&graph, second).and_then(SideEffect::value_result),
         Some(second)
     );
 }
@@ -324,7 +350,7 @@ fn replace_all_references_does_not_leave_stale_hash_cons_key() {
     let a = graph.intern_pure(PureOp::Int("1".into()), smallvec::smallvec![], int.clone(), None);
     let b = graph.intern_pure(PureOp::Int("2".into()), smallvec::smallvec![], int.clone(), None);
     let old_call = graph.intern_pure(
-        PureOp::Call(crate::FunctionId::from_index(0)),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec::smallvec![a, b],
         int.clone(),
         None,
@@ -333,7 +359,7 @@ fn replace_all_references_does_not_leave_stale_hash_cons_key() {
     crate::egir::graph_ops::replace_all_references(&mut graph, b, a);
 
     let reinterned_old_call = graph.intern_pure(
-        PureOp::Call(crate::FunctionId::from_index(0)),
+        PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec::smallvec![a, b],
         int,
         None,
@@ -347,7 +373,7 @@ fn replace_all_references_does_not_leave_stale_hash_cons_key() {
 fn removing_func_param_clears_its_metadata() {
     let mut graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
     let span = crate::ast::Span::new(1, 2, 3, 4);
-    let param = graph.add_func_param(0, "number".to_string());
+    let param = graph.add_test_value_parameter(0, "number".to_string());
     graph.nodes[param].span = Some(span);
 
     assert!(graph.remove_func_param(param));
@@ -361,7 +387,7 @@ fn retype_node_does_not_leave_stale_hash_cons_key() {
     let uint = u32_ty();
     let arg = graph.intern_pure(PureOp::Int("1".into()), smallvec::smallvec![], int.clone(), None);
     let old_call = graph.intern_pure(
-        PureOp::Call(crate::FunctionId::from_index(1)),
+        PureOp::Materialize,
         smallvec::smallvec![arg],
         int.clone(),
         None,
@@ -370,7 +396,7 @@ fn retype_node_does_not_leave_stale_hash_cons_key() {
     graph.retype_node(old_call, uint);
 
     let reinterned_old_call = graph.intern_pure(
-        PureOp::Call(crate::FunctionId::from_index(1)),
+        PureOp::Materialize,
         smallvec::smallvec![arg],
         int,
         None,

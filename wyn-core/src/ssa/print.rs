@@ -320,12 +320,6 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
                     format_ref(&operands[1])
                 );
             }
-            OpTag::ViewIndex | OpTag::PlaceIndex | OpTag::OutputSlot { .. } => {
-                unreachable!(
-                    "OpTag::{:?} is EGIR-only and must not appear in InstKind::Op",
-                    tag
-                );
-            }
         },
         InstKind::Alloca { elem_ty, result } => {
             let _ = write!(out, "alloca {} -> {}", format_type(elem_ty), fmt_place(*result));

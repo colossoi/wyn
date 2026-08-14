@@ -4,6 +4,8 @@
 
 use super::{convert_program, ConversionArenas, Converter};
 use crate::ast::TypeName;
+use crate::egir::program::PhysicalResourceRef;
+use crate::egir::types::{callable_parameter, FuncParam, WynLanguage};
 use crate::ssa::types::{ConstantValue, FuncBody, InstKind, ValueRef};
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::VarRef;
@@ -52,7 +54,7 @@ fn mk_term(
 
 fn elaborate_converter(
     converter: Converter<'_, '_>,
-    params: &[(Type<TypeName>, String)],
+    params: &[FuncParam<PhysicalResourceRef, Type<TypeName>>],
     return_ty: Type<TypeName>,
 ) -> FuncBody {
     let graph = converter.into_graph();
@@ -63,7 +65,7 @@ fn elaborate_converter(
                     "unit-test graph unexpectedly references resource {resource:?}"
                 ))
             },
-            |_, _, _| Err("unit-test graph unexpectedly contains an unexpanded SOAC".into()),
+            |_, _, _, _| Err("unit-test graph unexpectedly contains an unexpanded SOAC".into()),
         )
         .expect("unit-test graph should be directly physicalizable");
     crate::egir::elaborate::elaborate_one_body(graph, params, return_ty)
@@ -77,10 +79,16 @@ fn convert_simple_def(
     let symbols = SymbolTable::new();
     let top_level = HashMap::new();
     let pure_constants = HashSet::new();
+    let callable_boundaries = HashMap::new();
 
     let ret_ty = body.ty.clone();
-    let param_info: Vec<(Type<TypeName>, String)> =
-        params.iter().enumerate().map(|(i, (_, ty))| (ty.clone(), format!("p{}", i))).collect();
+    let param_info = params
+        .iter()
+        .enumerate()
+        .map(|(i, (_, ty))| {
+            callable_parameter::<PhysicalResourceRef, WynLanguage>(format!("p{i}"), ty.clone())
+        })
+        .collect::<Vec<_>>();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
@@ -89,17 +97,17 @@ fn convert_simple_def(
         &top_level,
         &symbols,
         pure_constants,
-        HashSet::new(),
+        &callable_boundaries,
         &mut binding_ids,
         &mut effect_ids,
         &mut arenas,
     );
     for (i, (sym, ty)) in params.iter().enumerate() {
-        let nid = converter.graph.add_func_param(i, ty.clone());
+        let nid = converter.graph.add_test_value_parameter(i, ty.clone());
         converter.locals.insert(*sym, nid);
     }
     let result = converter.convert_term(&body).expect("conversion failed");
-    converter.set_return(Some(result));
+    converter.set_return(Some(converter.graph.value_result(result)));
     elaborate_converter(converter, &param_info, ret_ty)
 }
 
@@ -147,6 +155,7 @@ fn test_add_roundtrip() {
 
     let top_level = HashMap::new();
     let pure_constants = HashSet::new();
+    let callable_boundaries = HashMap::new();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
@@ -155,20 +164,23 @@ fn test_add_roundtrip() {
         &top_level,
         &symbols,
         pure_constants,
-        HashSet::new(),
+        &callable_boundaries,
         &mut binding_ids,
         &mut effect_ids,
         &mut arenas,
     );
-    let a_nid = converter.graph.add_func_param(0, i32_ty());
+    let a_nid = converter.graph.add_test_value_parameter(0, i32_ty());
     converter.locals.insert(a_sym, a_nid);
-    let b_nid = converter.graph.add_func_param(1, i32_ty());
+    let b_nid = converter.graph.add_test_value_parameter(1, i32_ty());
     converter.locals.insert(b_sym, b_nid);
 
     let result = converter.convert_term(&app).expect("conversion failed");
-    converter.set_return(Some(result));
+    converter.set_return(Some(converter.graph.value_result(result)));
 
-    let params = vec![(i32_ty(), "a".into()), (i32_ty(), "b".into())];
+    let params = vec![
+        callable_parameter::<PhysicalResourceRef, WynLanguage>("a".into(), i32_ty()),
+        callable_parameter::<PhysicalResourceRef, WynLanguage>("b".into(), i32_ty()),
+    ];
     let func = elaborate_converter(converter, &params, i32_ty());
 
     let entry = func.get_block(func.entry_block());
@@ -231,6 +243,7 @@ fn test_gvn_via_let() {
 
     let top_level = HashMap::new();
     let pure_constants = HashSet::new();
+    let callable_boundaries = HashMap::new();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
@@ -239,13 +252,13 @@ fn test_gvn_via_let() {
         &top_level,
         &symbols,
         pure_constants,
-        HashSet::new(),
+        &callable_boundaries,
         &mut binding_ids,
         &mut effect_ids,
         &mut arenas,
     );
     let result = converter.convert_term(&outer_let).expect("conversion failed");
-    converter.set_return(Some(result));
+    converter.set_return(Some(converter.graph.value_result(result)));
 
     let func = elaborate_converter(converter, &[], pair_ty);
 
@@ -284,7 +297,7 @@ fn test_gvn_via_let() {
 #[test]
 fn test_hash_cons_distinguishes_by_result_type() {
     // Interning the same intrinsic with the same operands but different
-    // result types must produce distinct NodeIds; otherwise the first-inserted
+    // result types must produce distinct ValueNodeIds; otherwise the first-inserted
     // type silently wins at the merged node. This applies to every pure op,
     // including `_w_intrinsic_storage_len` instantiated as i32 and u32.
     use crate::egir::types::{EGraph, PureOp};
@@ -353,6 +366,7 @@ fn test_if_else_roundtrip() {
 
     let top_level = HashMap::new();
     let pure_constants = HashSet::new();
+    let callable_boundaries = HashMap::new();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let mut effect_ids = crate::IdSource::new();
@@ -361,18 +375,21 @@ fn test_if_else_roundtrip() {
         &top_level,
         &symbols,
         pure_constants,
-        HashSet::new(),
+        &callable_boundaries,
         &mut binding_ids,
         &mut effect_ids,
         &mut arenas,
     );
-    let c_nid = converter.graph.add_func_param(0, bool_ty);
+    let c_nid = converter.graph.add_test_value_parameter(0, bool_ty);
     converter.locals.insert(c_sym, c_nid);
 
     let result = converter.convert_term(&if_term).expect("conversion failed");
-    converter.set_return(Some(result));
+    converter.set_return(Some(converter.graph.value_result(result)));
 
-    let params = vec![(Type::Constructed(TypeName::Bool, vec![]), "c".into())];
+    let params = vec![callable_parameter::<PhysicalResourceRef, WynLanguage>(
+        "c".into(),
+        Type::Constructed(TypeName::Bool, vec![]),
+    )];
     let func = elaborate_converter(converter, &params, i32_ty());
 
     // Should have 4 blocks: entry, then, else, merge
@@ -470,8 +487,8 @@ entry vertex_main() vec4f32 =
 // --- vertex_inputs population from params ------------
 
 #[test]
-fn pure_user_calls_enter_egir_as_pure_nodes_during_construction() {
-    use crate::egir::types::{EffectOp, PureOp, SideEffectKind, ValueKind};
+fn pure_user_calls_enter_egir_as_canonical_call_sites_during_construction() {
+    use crate::egir::types::ValueKind;
 
     let source = r#"
 def choose(x: i32) i32 =
@@ -489,21 +506,12 @@ entry e(xs: []i32) []i32 = map(wrapper, xs)
     let choose = raw.functions.iter().find(|function| function.name == "choose").unwrap().region;
     let wrapper = raw.functions.iter().find(|function| function.name == "wrapper").unwrap();
 
-    assert!(wrapper.graph.nodes.values().any(|node| matches!(
-        &node.kind,
-        ValueKind::Pure {
-            op: PureOp::Call(callee),
-            ..
-        } if *callee == choose
-    )));
-    assert!(
-        wrapper.graph.skeleton.blocks.values().all(|block| block.side_effects.iter().all(
-            |effect| !matches!(
-                &effect.kind,
-                SideEffectKind::Effect(EffectOp::Op { tag: PureOp::Call(_) })
-            )
-        ))
-    );
+    assert!(wrapper.graph.nodes.values().any(|node| {
+        let ValueKind::CallResult { call, .. } = &node.kind else {
+            return false;
+        };
+        wrapper.graph.call(*call).callee() == choose
+    }));
 }
 
 #[test]

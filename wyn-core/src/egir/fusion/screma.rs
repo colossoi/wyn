@@ -11,10 +11,13 @@ use super::{capture_types, deduplicate_array_inputs};
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_projector::GraphProjector;
 use crate::egir::inlining;
-use crate::egir::program::{fresh_region_name, ProgramIdentities, SemanticFunc};
+use crate::egir::program::{fresh_region_name, ProgramIdentities, SemanticFunc, SemanticResourceRef};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
-use crate::egir::types::{EGraph, PureOp, SkeletonTerminator, SoacInputType, ValueId, ValueKind};
+use crate::egir::types::{
+    CallEffects, EGraph, FuncParam, OperandRef, ParameterId, PureOp, SkeletonTerminator,
+    SoacInputType, ValueId, ValueKind,
+};
 use crate::LookupMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -553,7 +556,11 @@ fn fuse_across_middle_barrier(
                 produced_before_barrier.get(&output).copied()
             } else {
                 let position = remaining_slots.iter().position(|candidate| *candidate == slot)?;
-                Some(pre_arguments[forwarded_parameters[position]])
+                Some(
+                    pre_arguments[forwarded_parameters[position]]
+                        .value()
+                        .expect("forwarded fusion parameter is a value or view"),
+                )
             }
         })
         .collect::<Vec<_>>();
@@ -581,7 +588,11 @@ fn fuse_across_middle_barrier(
         .chain(producer_pre_results[producer_scan_inputs..producer_operator_inputs].iter().copied())
         .chain(consumer_collective[consumer_scan_inputs..].iter().copied())
         .chain(producer_mapped.iter().copied())
-        .chain(forwarded_parameters.iter().map(|&index| pre_arguments[index]))
+        .chain(forwarded_parameters.iter().map(|&index| {
+            pre_arguments[index]
+                .value()
+                .expect("forwarded fusion result is a value or view")
+        }))
         .collect::<Vec<_>>();
     let pre_result_types = producer.form.pre.result_types[..producer_scan_inputs]
         .iter()
@@ -671,7 +682,7 @@ fn fuse_across_middle_barrier(
     let mut consumer_pre_arguments = (0..consumer.inputs.len())
         .map(|slot| {
             if let Some(output) = routed_producer_post_output(routes, slot) {
-                producer_post_results[output]
+                post_graph.operand_ref(producer_post_results[output])
             } else {
                 let position = remaining_slots
                     .iter()
@@ -694,7 +705,11 @@ fn fuse_across_middle_barrier(
         consumer_pre_arguments,
     );
     let mut consumer_post_arguments = post_arguments[producer_scan_end..consumer_scan_end].to_vec();
-    consumer_post_arguments.extend_from_slice(&consumer_pre_results[consumer_collective_inputs..]);
+    consumer_post_arguments.extend(
+        consumer_pre_results[consumer_collective_inputs..]
+            .iter()
+            .map(|value| post_graph.operand_ref(*value)),
+    );
     append_wrapper_captures(
         &mut consumer_post_arguments,
         &post_arguments,
@@ -818,9 +833,9 @@ fn lambda_results_depend_on_parameters(
     Some(recipe.input_dependencies().iter().any(|input| parameters.contains(input)))
 }
 
-fn function_return_site(function: &SemanticFunc) -> Option<(crate::flow::BlockId, ValueId)> {
-    let mut returns = function.graph.skeleton.blocks.iter().filter_map(|(block, body)| match body.term {
-        SkeletonTerminator::Return(Some(result)) => Some((block, result)),
+fn function_return_site(function: &SemanticFunc) -> Option<(crate::flow::BlockId, Vec<ValueId>)> {
+    let mut returns = function.graph.skeleton.blocks.iter().filter_map(|(block, body)| match &body.term {
+        SkeletonTerminator::Return(Some(result)) => Some((block, result.values())),
         _ => None,
     });
     let result = returns.next()?;
@@ -828,31 +843,14 @@ fn function_return_site(function: &SemanticFunc) -> Option<(crate::flow::BlockId
 }
 
 fn function_result_field(function: &SemanticFunc, index: usize) -> Option<ValueId> {
-    let (_, root) = function_return_site(function)?;
-    match &function.graph.nodes.get(root)?.kind {
-        ValueKind::Pure {
-            op: PureOp::Tuple(arity),
-            operands,
-        } if *arity == operands.len() => operands.get(index).copied(),
-        _ if index == 0 => Some(root),
-        _ => None,
-    }
+    function_return_site(function)?.1.get(index).copied()
 }
 
 fn lambda_result_roots(program: &Segmented, lambda: &screma::Lambda) -> Option<Vec<ValueId>> {
     let body = lambda.seg_body()?;
     let function = program.region(body.region)?;
-    let (_, root) = function_return_site(function)?;
-    match lambda.result_types.as_slice() {
-        [_] => Some(vec![root]),
-        results => match &function.graph.nodes.get(root)?.kind {
-            ValueKind::Pure {
-                op: PureOp::Tuple(arity),
-                operands,
-            } if *arity == results.len() && operands.len() == results.len() => Some(operands.to_vec()),
-            _ => None,
-        },
-    }
+    let (_, roots) = function_return_site(function)?;
+    (roots.len() == lambda.result_types.len()).then_some(roots)
 }
 
 struct ProjectionBuilder<'a> {
@@ -901,7 +899,7 @@ impl ProjectionBuilder<'_> {
         arguments: &[Option<ProjectedValue>],
     ) -> Option<Vec<ProjectedValue>> {
         if roots.len() != result_types.len()
-            || arguments.len() != function.params.len()
+            || arguments.len() != function.params().len()
             || self.region_stack.contains(&function.region)
         {
             return None;
@@ -922,7 +920,9 @@ impl ProjectionBuilder<'_> {
                 .nodes
                 .iter()
                 .filter_map(|(source, node)| match &node.kind {
-                    ValueKind::FuncParam { index } if projection.node(source).is_some() => Some(*index),
+                    ValueKind::FuncParam { parameter } if projection.node(source).is_some() => {
+                        Some(parameter.index())
+                    }
                     _ => None,
                 })
                 .collect::<Vec<_>>();
@@ -964,7 +964,7 @@ impl ProjectionBuilder<'_> {
             return self.value(function, alias, arguments, memo);
         }
         let value = match &definition.kind {
-            ValueKind::FuncParam { index } => arguments.get(*index)?.clone()?,
+            ValueKind::FuncParam { parameter } => arguments.get(parameter.index())?.clone()?,
             ValueKind::Constant(value) => ProjectedValue::Constant {
                 value: value.clone(),
                 ty: definition.ty.clone(),
@@ -984,17 +984,6 @@ impl ProjectionBuilder<'_> {
                     }) if *arity == fields.len() => {
                         self.value(function, *fields.get(*index as usize)?, arguments, memo)?
                     }
-                    Some(ValueKind::Pure {
-                        op: PureOp::Call(callee),
-                        operands: call_arguments,
-                    }) => self.call(
-                        function,
-                        callee,
-                        call_arguments,
-                        Some(*index as usize),
-                        arguments,
-                        memo,
-                    )?,
                     _ => ProjectedValue::Pure {
                         op: PureOp::Project { index: *index },
                         operands: vec![self.value(function, operands[0], arguments, memo)?],
@@ -1003,10 +992,21 @@ impl ProjectionBuilder<'_> {
                     },
                 }
             }
-            ValueKind::Pure {
-                op: PureOp::Call(callee),
-                operands,
-            } => self.call(function, callee, operands, None, arguments, memo)?,
+            ValueKind::CallResult { call, .. } => {
+                let boundary = function.graph.call(*call);
+                if !matches!(boundary.effects(), CallEffects::Pure) {
+                    return None;
+                }
+                let result = boundary.result().values().iter().position(|value| *value == source)?;
+                self.call(
+                    function,
+                    &boundary.callee(),
+                    boundary.arguments(),
+                    result,
+                    arguments,
+                    memo,
+                )?
+            }
             ValueKind::Pure { op, operands } => ProjectedValue::Pure {
                 op: op.clone(),
                 operands: operands
@@ -1016,7 +1016,9 @@ impl ProjectionBuilder<'_> {
                 ty: definition.ty.clone(),
                 span: definition.span,
             },
-            ValueKind::BlockParam { .. } | ValueKind::SideEffectResult => return None,
+            ValueKind::BlockParam { .. }
+            | ValueKind::PlaceLength { .. }
+            | ValueKind::SideEffectResult => return None,
         };
         memo.insert(source, value.clone());
         Some(value)
@@ -1026,23 +1028,22 @@ impl ProjectionBuilder<'_> {
         &mut self,
         caller: &SemanticFunc,
         callee: &crate::FunctionId,
-        call_arguments: &[ValueId],
-        result: Option<usize>,
+        call_arguments: &[OperandRef],
+        result: usize,
         caller_arguments: &[Option<ProjectedValue>],
         caller_memo: &mut LookupMap<ValueId, ProjectedValue>,
     ) -> Option<ProjectedValue> {
         let callee = self.program.region(*callee)?;
-        if call_arguments.len() != callee.params.len() {
+        if call_arguments.len() != callee.params().len() {
             return None;
         }
-        let root = match result {
-            Some(index) => function_result_field(callee, index)?,
-            None => function_return_site(callee)?.1,
-        };
+        let root = function_result_field(callee, result)?;
         let result_ty = callee.graph.nodes.get(root)?.ty.clone();
         let arguments = call_arguments
             .iter()
-            .map(|argument| self.value(caller, *argument, caller_arguments, caller_memo))
+            .map(|argument| {
+                self.value(caller, argument.value()?, caller_arguments, caller_memo)
+            })
             .collect::<Vec<_>>();
         self.function(callee, &[root], &[result_ty], &arguments)?.into_iter().next()
     }
@@ -1204,12 +1205,12 @@ impl ProjectionEmitter<'_, '_> {
         let call_arguments = projected
             .arguments
             .iter()
-            .map(|(_, argument)| self.value(argument))
+            .map(|(_, argument)| self.value(argument).map(|value| self.graph.operand_ref(value)))
             .collect::<Option<Vec<_>>>()?;
         let params = projected
             .arguments
             .iter()
-            .map(|(parameter, _)| function.params.get(*parameter).cloned())
+            .map(|(parameter, _)| function.params().get(*parameter).cloned())
             .collect::<Option<Vec<_>>>()?;
         let parameter_remap = projected
             .arguments
@@ -1218,19 +1219,19 @@ impl ProjectionEmitter<'_, '_> {
             .map(|(new, (old, _))| (*old, new))
             .collect::<LookupMap<_, _>>();
         for (source, node) in &function.graph.nodes {
-            let ValueKind::FuncParam { index } = &node.kind else {
+            let ValueKind::FuncParam { parameter } = &node.kind else {
                 continue;
             };
             let Some(projected) = projection.node(source) else {
                 continue;
             };
             let ValueKind::FuncParam {
-                index: projected_index,
+                parameter: projected_parameter,
             } = &mut projection.graph.nodes[projected].kind
             else {
                 return None;
             };
-            *projected_index = *parameter_remap.get(index)?;
+            *projected_parameter = ParameterId::new(*parameter_remap.get(&parameter.index())?);
         }
 
         let name = fresh_region_name(
@@ -1238,7 +1239,7 @@ impl ProjectionEmitter<'_, '_> {
             &format!("{}_{}", self.context.scope, self.label),
         );
         let region = self.context.identities.alloc_function(name.clone());
-        let function = lambda_ops::finish_function(
+        let projected_function = lambda_ops::finish_function(
             projection.graph,
             projected_return_block,
             region,
@@ -1248,23 +1249,24 @@ impl ProjectionEmitter<'_, '_> {
             &projected.result_types,
             &projected_results,
         );
-        let result = self.graph.intern_pure(
-            PureOp::Call(region),
-            smallvec::SmallVec::from_vec(call_arguments),
-            lambda_ops::result_type(&projected.result_types),
-            None,
-        );
-        self.synthesized.push(function);
-        Some(lambda_ops::unpack_results(
-            self.graph,
-            result,
-            &projected.result_types,
-        ))
+        let (_, result) = self
+            .graph
+            .add_call(
+                region,
+                projected_function.params(),
+                projected_function.result(),
+                call_arguments,
+                projected_function.effects(),
+                None,
+            )
+            .ok()?;
+        self.synthesized.push(projected_function);
+        Some(result.values())
     }
 }
 fn append_wrapper_captures(
-    arguments: &mut Vec<ValueId>,
-    wrapper_arguments: &[ValueId],
+    arguments: &mut Vec<OperandRef>,
+    wrapper_arguments: &[OperandRef],
     cursor: &mut usize,
     lambda: &screma::Lambda,
 ) {
@@ -1275,12 +1277,19 @@ fn append_wrapper_captures(
 
 fn append_optional_wrapper_captures(
     arguments: &mut Vec<Option<ValueId>>,
-    wrapper_arguments: &[ValueId],
+    wrapper_arguments: &[OperandRef],
     cursor: &mut usize,
     lambda: &screma::Lambda,
 ) {
     let capture_count = lambda.capture_count();
-    arguments.extend(wrapper_arguments[*cursor..*cursor + capture_count].iter().copied().map(Some));
+    arguments.extend(
+        wrapper_arguments[*cursor..*cursor + capture_count]
+            .iter()
+            .copied()
+            .map(|argument| {
+                Some(argument.value().expect("projected lambda captures are values or views"))
+            }),
+    );
     *cursor += capture_count;
 }
 
@@ -1288,25 +1297,18 @@ fn invoke_lambda(
     graph: &mut EGraph,
     program: &Segmented,
     lambda: &screma::Lambda,
-    arguments: Vec<ValueId>,
+    arguments: Vec<OperandRef>,
 ) -> Vec<ValueId> {
-    if lambda.is_identity() {
-        return arguments;
+    let callee = lambda
+        .seg_body()
+        .map(|body| program.region(body.region).expect("Screma lambda region"));
+    let results = lambda_ops::emit_call(graph, lambda, callee, arguments);
+    if let (Some(callee), Some(first)) = (callee, results.first().copied()) {
+        if inlining::inlineable_return_root(callee).is_some() {
+            let _ = inlining::inline_pure_call(graph, first, callee);
+        }
     }
-    let body = lambda.seg_body().expect("region lambda");
-    let callee = program.region(body.region).expect("Screma lambda region");
-    let call = graph.intern_pure(
-        PureOp::Call(callee.region),
-        smallvec::SmallVec::from_vec(arguments),
-        lambda_ops::result_type(&lambda.result_types),
-        None,
-    );
-    let result = if inlining::inlineable_return_root(callee).is_some() {
-        inlining::inline_pure_call(graph, call, callee).unwrap_or(call)
-    } else {
-        call
-    };
-    lambda_ops::unpack_results(graph, result, &lambda.result_types)
+    results
 }
 #[derive(Clone, Copy)]
 struct ValueRef {
@@ -1465,7 +1467,12 @@ fn parallel_lambdas(
                 call_arguments,
             ));
         } else {
-            call_results.push(call_arguments);
+            call_results.push(
+                call_arguments
+                    .into_iter()
+                    .map(|argument| argument.value().expect("identity lambda arguments are values or views"))
+                    .collect(),
+            );
         }
     }
     debug_assert_eq!(capture_cursor, arguments.len());
@@ -1525,6 +1532,9 @@ fn vertical_lambda(
         invoke_lambda(&mut graph, context.program, producer, producer_arguments)
     } else {
         producer_arguments
+            .into_iter()
+            .map(|argument| argument.value().expect("identity lambda arguments are values or views"))
+            .collect()
     };
 
     let mut consumer_arguments = consumer_parameters
@@ -1532,7 +1542,7 @@ fn vertical_lambda(
         .enumerate()
         .map(|(slot, parameter)| {
             routed_producer_post_output(routes, slot)
-                .map(|output| produced[producer_route_offset + output])
+                .map(|output| graph.operand_ref(produced[producer_route_offset + output]))
                 .or_else(|| parameter.map(|index| arguments[index]))
                 .expect("consumer input is routed or retained")
         })
@@ -1544,6 +1554,9 @@ fn vertical_lambda(
         invoke_lambda(&mut graph, context.program, consumer, consumer_arguments)
     } else {
         consumer_arguments
+            .into_iter()
+            .map(|argument| argument.value().expect("identity lambda arguments are values or views"))
+            .collect()
     };
     debug_assert_eq!(capture_cursor, arguments.len());
 
@@ -1578,8 +1591,8 @@ fn finish_lambda(
     context: &mut Context<'_>,
     label: &str,
     graph: EGraph,
-    params: Vec<(Type<TypeName>, String)>,
-    captures: Vec<ValueId>,
+    params: Vec<FuncParam<SemanticResourceRef, Type<TypeName>>>,
+    captures: Vec<OperandRef>,
     parameter_types: Vec<Type<TypeName>>,
     result_types: Vec<Type<TypeName>>,
     results: Vec<ValueId>,
@@ -1639,7 +1652,7 @@ entry conditional_map<[n]>(xs: [n]i32) [n]i32 =
         let params = lambda_ops::named_parameters(&lambda.parameter_types, "argument");
         let arguments = lambda_ops::function_parameters(&mut wrapper, &params)
             .into_iter()
-            .map(Some)
+            .map(|argument| argument.value())
             .collect::<Vec<_>>();
         let mut identities = program.data.identities.clone();
         let outer_types = LookupMap::new();

@@ -64,8 +64,8 @@ fn build_condbranch_skel(
     let else_bid = graph.skeleton.create_block();
     graph.skeleton.blocks[then_bid].term = SkeletonTerminator::Return(None);
     graph.skeleton.blocks[else_bid].term = SkeletonTerminator::Return(None);
-    let then_args = then_arg.map_or_else(Vec::new, |a| vec![a]);
-    let else_args = else_arg.map_or_else(Vec::new, |a| vec![a]);
+    let then_args = graph.admit_flow_values(then_arg);
+    let else_args = graph.admit_flow_values(else_arg);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
         cond,
         then_target: then_bid,
@@ -105,7 +105,7 @@ fn fold_constant_branch_false_selects_else() {
 #[test]
 fn fold_constant_branch_nonconst_left_alone() {
     let mut graph = EGraph::new();
-    let cond = graph.add_func_param(0, bool_ty());
+    let cond = graph.add_test_value_parameter(0, bool_ty());
     let (entry, _then_bid, _else_bid) = build_condbranch_skel(&mut graph, cond, None, None);
     let changed = fold_constant_branches(&mut graph);
     assert!(!changed);
@@ -125,7 +125,7 @@ fn fold_constant_branch_preserves_chosen_args() {
     fold_constant_branches(&mut graph);
     match &graph.skeleton.blocks[entry].term {
         SkeletonTerminator::Branch { args, .. } => {
-            assert_eq!(args.as_slice(), &[x], "should carry then_args only");
+            assert_eq!(args.iter().map(|arg| arg.value()).collect::<Vec<_>>(), [x], "should carry then_args only");
         }
         other => panic!("{:?}", other),
     }
@@ -146,9 +146,9 @@ fn build_merge_skel(
     let merge = graph.skeleton.create_block();
 
     let param = graph.add_block_param(merge, i32_ty());
-    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(param));
+    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(graph.value_result(param)));
 
-    let cond = graph.add_func_param(0, bool_ty());
+    let cond = graph.add_test_value_parameter(0, bool_ty());
     graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
         cond,
         then_target: b1,
@@ -156,13 +156,15 @@ fn build_merge_skel(
         else_target: b2,
         else_args: vec![],
     };
+    let left_args = graph.admit_flow_values([merge_arg_left]);
     graph.skeleton.blocks[b1].term = SkeletonTerminator::Branch {
         target: merge,
-        args: vec![merge_arg_left],
+        args: left_args,
     };
+    let right_args = graph.admit_flow_values([merge_arg_right]);
     graph.skeleton.blocks[b2].term = SkeletonTerminator::Branch {
         target: merge,
-        args: vec![merge_arg_right],
+        args: right_args,
     };
     (merge, b2, param)
 }
@@ -212,13 +214,15 @@ fn phi_elim_rejects_self_referential_param() {
     let b = graph.skeleton.create_block();
     let param = graph.add_block_param(b, i32_ty());
     let x = graph.intern_pure(PureOp::Int("5".into()), smallvec![], i32_ty(), None);
+    let entry_args = graph.admit_flow_values([x]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: b,
-        args: vec![x],
+        args: entry_args,
     };
+    let backedge_args = graph.admit_flow_values([param]);
     graph.skeleton.blocks[b].term = SkeletonTerminator::Branch {
         target: b,
-        args: vec![param],
+        args: backedge_args,
     };
 
     let aliases = eliminate_redundant_params(&mut graph);
@@ -313,7 +317,7 @@ fn optimize_skeleton_cascades_fold_into_phi_elim() {
     let merge = graph.skeleton.create_block();
 
     let param = graph.add_block_param(merge, i32_ty());
-    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(param));
+    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(graph.value_result(param)));
 
     graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
         cond: t,
@@ -322,13 +326,15 @@ fn optimize_skeleton_cascades_fold_into_phi_elim() {
         else_target: b,
         else_args: vec![],
     };
+    let a_args = graph.admit_flow_values([x]);
     graph.skeleton.blocks[a].term = SkeletonTerminator::Branch {
         target: merge,
-        args: vec![x],
+        args: a_args,
     };
+    let b_args = graph.admit_flow_values([x]);
     graph.skeleton.blocks[b].term = SkeletonTerminator::Branch {
         target: merge,
-        args: vec![x],
+        args: b_args,
     };
 
     let aliases = run_one_body(&mut graph);
@@ -355,15 +361,17 @@ fn optimize_skeleton_alias_closure_invariant() {
     let p1 = graph.add_block_param(a, i32_ty());
     let p2 = graph.add_block_param(b, i32_ty());
 
+    let entry_args = graph.admit_flow_values([x]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: a,
-        args: vec![x],
+        args: entry_args,
     };
+    let a_args = graph.admit_flow_values([p1]);
     graph.skeleton.blocks[a].term = SkeletonTerminator::Branch {
         target: b,
-        args: vec![p1],
+        args: a_args,
     };
-    graph.skeleton.blocks[b].term = SkeletonTerminator::Return(Some(p2));
+    graph.skeleton.blocks[b].term = SkeletonTerminator::Return(Some(graph.value_result(p2)));
 
     let aliases = run_one_body(&mut graph);
 
@@ -389,18 +397,19 @@ fn optimize_skeleton_removes_block_unreachable_post_fold() {
     // B has a block param (pretending it expects an arg from a predecessor
     // that will disappear post-fold).
     let b_param = graph.add_block_param(b, i32_ty());
-    graph.skeleton.blocks[b].term = SkeletonTerminator::Return(Some(b_param));
+    graph.skeleton.blocks[b].term = SkeletonTerminator::Return(Some(graph.value_result(b_param)));
     graph.skeleton.blocks[a].term = SkeletonTerminator::Return(None);
     // Entry CondBranch: true takes A (no args), false takes B (arg = some
     // literal). After folding, entry becomes Branch(A) and the edge into B
     // vanishes.
     let lit = graph.intern_pure(PureOp::Int("99".into()), smallvec![], i32_ty(), None);
+    let else_args = graph.admit_flow_values([lit]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
         cond: t,
         then_target: a,
         then_args: vec![],
         else_target: b,
-        else_args: vec![lit],
+        else_args,
     };
 
     let aliases = run_one_body(&mut graph);
@@ -441,12 +450,13 @@ fn phi_elim_preserves_loop_header_param() {
     );
 
     // Entry unconditionally to header with init.
+    let init_args = graph.admit_flow_values([init]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![init],
+        args: init_args,
     };
     // Header: condition (non-const function param) → body or exit.
-    let cond = graph.add_func_param(0, bool_ty());
+    let cond = graph.add_test_value_parameter(0, bool_ty());
     graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
         cond,
         then_target: body,
@@ -454,11 +464,12 @@ fn phi_elim_preserves_loop_header_param() {
         else_target: exit,
         else_args: vec![],
     };
+    let body_args = graph.admit_flow_values([body_val]);
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![body_val],
+        args: body_args,
     };
-    graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(Some(acc));
+    graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(Some(graph.value_result(acc)));
 
     let aliases = run_one_body(&mut graph);
 
@@ -480,16 +491,18 @@ fn phi_elim_handles_condbranch_with_same_target_both_arms() {
     let target = graph.skeleton.create_block();
 
     let param = graph.add_block_param(target, i32_ty());
-    graph.skeleton.blocks[target].term = SkeletonTerminator::Return(Some(param));
+    graph.skeleton.blocks[target].term = SkeletonTerminator::Return(Some(graph.value_result(param)));
 
-    let cond = graph.add_func_param(0, bool_ty());
+    let cond = graph.add_test_value_parameter(0, bool_ty());
     let x = graph.intern_pure(PureOp::Int("5".into()), smallvec![], i32_ty(), None);
+    let then_args = graph.admit_flow_values([x]);
+    let else_args = graph.admit_flow_values([x]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
         cond,
         then_target: target,
-        then_args: vec![x],
+        then_args,
         else_target: target,
-        else_args: vec![x],
+        else_args,
     };
 
     let aliases = eliminate_redundant_params(&mut graph);

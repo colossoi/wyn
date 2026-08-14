@@ -45,9 +45,10 @@ pub(super) fn emit_seg_space_dimensions(
                     *node
                 }
             }
-            SegExtent::ResourceLength { node, .. } => {
-                let ty = graph.nodes[*node].ty.clone();
-                emit_length(graph, *node, &ty, i32_ty)
+            SegExtent::ResourceLength { view, .. } => {
+                let node = view.value();
+                let ty = graph.nodes[node].ty.clone();
+                emit_length(graph, node, &ty, i32_ty)
             }
         };
         dimensions.push(dimension);
@@ -178,19 +179,18 @@ pub(super) fn emit_read_element(
     }
     if is_view_node(graph, arr_nid, arr_ty) {
         // View array: ViewIndex (pure, PlaceId) + Load (effectful).
-        let ptr_nid = graph.intern_pure(
-            PureOp::ViewIndex,
-            smallvec![arr_nid, idx_nid],
-            elem_ty.clone(),
-            None,
-        );
+        let place = graph.add_view_index_place(graph.view_id(arr_nid), idx_nid, elem_ty.clone(), None);
         let load_result = graph.alloc_side_effect_result(elem_ty.clone());
         let eff_in = alloc_effect(next_effect);
         let eff_out = alloc_effect(next_effect);
+        let result = graph.value_result(load_result);
         graph.skeleton.blocks[body].side_effects.push(SideEffect {
-            kind: SideEffectKind::Effect(EffectOp::Load),
-            operand_nodes: smallvec![ptr_nid],
-            result: Some(load_result),
+            kind: SideEffectKind::Effect(EffectOp::Load {
+                place,
+                mode: super::super::types::LoadMode::Element,
+            }),
+            operands: smallvec![],
+            result: Some(result),
             effects: Some((eff_in, eff_out)),
             span: None,
         });
@@ -349,21 +349,16 @@ pub(super) fn emit_read_ranked_coordinates(
     if matches!(layout, ArrayLayout::StorageAos) || is_view_node(graph, arr_nid, arr_ty) {
         let mut current_ty = arr_ty.clone();
         let first_ty = current_ty.elem_type().expect("ranked SOAC input must be an array").clone();
-        let mut place = graph.intern_pure(
-            PureOp::ViewIndex,
-            smallvec![arr_nid, coordinates[0]],
+        let mut place = graph.add_view_index_place(
+            graph.view_id(arr_nid),
+            coordinates[0],
             first_ty.clone(),
             None,
         );
         current_ty = first_ty;
         for coordinate in coordinates.iter().skip(1) {
             let next_ty = current_ty.elem_type().expect("ranked SOAC input rank exceeds its type").clone();
-            place = graph.intern_pure(
-                PureOp::PlaceIndex,
-                smallvec![place, *coordinate],
-                next_ty.clone(),
-                None,
-            );
+            place = graph.add_index_place(place, *coordinate, next_ty.clone(), None);
             current_ty = next_ty;
         }
         return emit_load(graph, body, place, leaf_ty.clone(), next_effect, None);

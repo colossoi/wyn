@@ -27,10 +27,9 @@ mod resource_erasure_tests;
 use crate::ast::TypeName;
 use crate::egir::from_tlc::ConvertError;
 use crate::egir::program::{PhysicalFunc, Program};
-use crate::egir::types::{EGraph, EffectOp, Family, PureOp, SideEffectKind, SkeletonTerminator, ValueKind};
+use crate::egir::types::{EGraph, Family, OperandType, ParameterId, ValueKind};
 use crate::{LookupMap, LookupSet};
 use polytype::Type;
-use smallvec::SmallVec;
 
 pub fn erase_resources(
     program: super::skel_opt::SkeletonOptimized,
@@ -41,7 +40,13 @@ pub fn erase_resources(
         .map(|function| {
             (
                 function.region,
-                function.params.iter().map(|(ty, _)| is_storage_image(ty)).collect(),
+                function
+                    .params()
+                    .iter()
+                    .map(|parameter| {
+                        matches!(parameter.representation(), OperandType::Value(ty) if is_storage_image(ty))
+                    })
+                    .collect(),
             )
         })
         .collect();
@@ -85,65 +90,13 @@ fn rewrite_graph<P: Family>(
     mut graph: EGraph<P>,
     erasures: &LookupMap<crate::FunctionId, Vec<bool>>,
 ) -> Result<EGraph<P>, ConvertError> {
-    // Calls can be pure nodes or effect-anchored instructions. Rewrite both;
-    // filtering by the callee's original signature keeps every positional ABI
-    // change in one table.
-    let pure_calls: Vec<_> = graph
-        .nodes
-        .iter()
-        .filter_map(|(nid, node)| match &node.kind {
-            ValueKind::Pure {
-                op: PureOp::Call(callee),
-                ..
-            } if erasures.contains_key(callee) => Some((nid, *callee)),
-            _ => None,
-        })
-        .collect();
-    for (nid, callee) in pure_calls {
-        let mask = &erasures[&callee];
-        let mut error = None;
-        graph.update_pure_node(nid, |_, operands| {
-            error = filter_smallvec(operands, mask, &callee).err();
-        });
-        if let Some(error) = error {
-            return Err(error);
-        }
-    }
-
-    for (_, block) in &mut graph.skeleton.blocks {
-        for effect in &mut block.side_effects {
-            let SideEffectKind::Effect(EffectOp::Op { tag }) = &mut effect.kind else {
-                continue;
-            };
-            if let PureOp::Call(callee) = tag {
-                if let Some(mask) = erasures.get(callee) {
-                    filter_smallvec(&mut effect.operand_nodes, mask, callee)?;
-                }
-            }
+    for call in graph.calls.values_mut() {
+        if let Some(erase) = erasures.get(&call.callee()) {
+            let retain = erase.iter().map(|erase| !erase).collect::<Vec<_>>();
+            call.retain_arguments(&retain).map_err(ConvertError::Internal)?;
         }
     }
     Ok(graph)
-}
-
-fn filter_smallvec(
-    operands: &mut SmallVec<[crate::egir::types::ValueId; 4]>,
-    mask: &[bool],
-    callee: &crate::FunctionId,
-) -> Result<(), ConvertError> {
-    if operands.len() != mask.len() {
-        return Err(ConvertError::Internal(format!(
-            "call to {callee:?} has {} EGIR operands but its concrete signature has {} parameters",
-            operands.len(),
-            mask.len()
-        )));
-    }
-    *operands = operands
-        .iter()
-        .copied()
-        .zip(mask)
-        .filter_map(|(operand, erase)| (!erase).then_some(operand))
-        .collect();
-    Ok(())
 }
 
 fn erase_function_resources(
@@ -156,11 +109,17 @@ fn erase_function_resources(
         span,
         linkage_name,
         params,
-        return_ty,
+        result,
+        effects,
         graph,
     } = function;
     let mut graph = rewrite_graph(graph, erasures)?;
-    let erase: Vec<bool> = params.iter().map(|(ty, _)| is_storage_image(ty)).collect();
+    let erase: Vec<bool> = params
+        .iter()
+        .map(|parameter| {
+            matches!(parameter.representation(), OperandType::Value(ty) if is_storage_image(ty))
+        })
+        .collect();
     if !erase.iter().any(|erase| *erase) {
         return Ok(PhysicalFunc::new(
             region,
@@ -168,7 +127,8 @@ fn erase_function_resources(
             span,
             linkage_name,
             params,
-            return_ty,
+            result,
+            effects,
             graph,
         ));
     }
@@ -184,14 +144,46 @@ fn erase_function_resources(
 
     let mut erased_nodes = Vec::new();
     for (node_id, node) in &mut graph.nodes {
-        let ValueKind::FuncParam { index } = &mut node.kind else {
+        let ValueKind::FuncParam { parameter } = &mut node.kind else {
             continue;
         };
-        match new_indices.get(*index).copied().flatten() {
-            Some(new_index) => *index = new_index,
+        match new_indices.get(parameter.index()).copied().flatten() {
+            Some(new_index) => *parameter = ParameterId::new(new_index),
             None => erased_nodes.push(node_id),
         }
     }
+    for place in graph.places.values_mut() {
+        if let crate::egir::ir::PlaceOp::Parameter { parameter } = place.op() {
+            let new_index = new_indices
+                .get(parameter.index())
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    ConvertError::Internal(format!(
+                        "addressable parameter {} in `{name}` cannot be erased",
+                        parameter.index()
+                    ))
+                })?;
+            place.remap_parameter(|_| ParameterId::new(new_index));
+        }
+    }
+    let result = result.try_map(
+        &mut |ty| Ok::<_, ConvertError>(ty),
+        &mut |slot| Ok::<_, ConvertError>(slot),
+        &mut |parameter| {
+            new_indices
+                .get(parameter.index())
+                .copied()
+                .flatten()
+                .map(ParameterId::new)
+                .ok_or_else(|| {
+                    ConvertError::Internal(format!(
+                        "result destination parameter {} in `{name}` cannot be erased",
+                        parameter.index()
+                    ))
+                })
+        },
+    )?;
 
     // A remaining use means a new storage-image value operation was added
     // without being reified to a binding-qualified operation. Fail here rather
@@ -219,7 +211,8 @@ fn erase_function_resources(
         span,
         linkage_name,
         params,
-        return_ty,
+        result,
+        effects,
         graph,
     ))
 }
@@ -228,26 +221,17 @@ fn live_nodes<P: Family>(graph: &EGraph<P>) -> LookupSet<crate::egir::types::Val
     let mut roots = Vec::new();
     for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {
-            roots.extend(effect.operand_nodes.iter().copied());
+            roots.extend(graph.effect_boundary_value_dependencies(effect));
         }
-        match &block.term {
-            SkeletonTerminator::Return(Some(value)) => roots.push(*value),
-            SkeletonTerminator::Return(None) | SkeletonTerminator::Unreachable => {}
-            SkeletonTerminator::Branch { args, .. } => roots.extend(args.iter().copied()),
-            SkeletonTerminator::CondBranch {
-                cond,
-                then_args,
-                else_args,
-                ..
-            } => {
-                roots.push(*cond);
-                roots.extend(then_args.iter().copied());
-                roots.extend(else_args.iter().copied());
-            }
-        }
+        roots.extend(block.term.referenced_nodes());
     }
 
     wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
         out.extend(graph.nodes[node].children());
+        match graph.nodes[node].kind() {
+            ValueKind::CallResult { call, .. } => out.extend(graph.call_value_dependencies(*call)),
+            ValueKind::PlaceLength { place } => out.extend(graph.place_value_dependencies(*place)),
+            _ => {}
+        }
     })
 }

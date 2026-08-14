@@ -9,8 +9,8 @@ use slotmap::SlotMap;
 
 use crate::ast::TypeName;
 use crate::flow::{BlockId, ControlHeader};
-use crate::op::OpTag;
 use crate::ssa::types::ConstantValue;
+use crate::types::TypeExt;
 use crate::LookupMap;
 
 #[cfg(test)]
@@ -19,8 +19,11 @@ use smallvec::SmallVec;
 use super::soac::{filter, hist, screma};
 
 pub use super::ir::{
-    EffectOp, EffectToken, Family, GraphResource, Language, RegionId, SegBody, SideEffectIndex,
-    SideEffectSite, SkeletonTerminator, SoacDestination, SoacOwnership, SoacPlacement, ValueId,
+    by_value_function_result, callable_parameter, CallEffects, CallSiteId, EffectOp, EffectToken,
+    Family, FlowValueId, FuncParam, FunctionResult, GraphResource, Language, LoadMode, OperandRef,
+    OperandType, ParameterId, PlaceAccess, PlaceDestination, PlaceId, PlaceRegion, PlaceType, RegionId,
+    ResultBinding, ResultDestination, ReturnSlotId, SegBody, SideEffectIndex, SideEffectSite,
+    SoacDestination, SoacOwnership, SoacPlacement, ValueId, ViewId, ViewType,
 };
 pub use crate::ResourceAccess;
 
@@ -30,6 +33,26 @@ pub struct WynLanguage;
 impl Language for WynLanguage {
     type Const = ConstantValue;
     type Ty = Type<TypeName>;
+
+    fn is_materialized_aggregate(ty: &Self::Ty) -> bool {
+        ty.array_variant().is_some()
+            && !crate::types::is_virtual_array(ty)
+            && !ty.array_variant().is_some_and(crate::types::is_array_variant_view)
+    }
+
+    fn is_view(ty: &Self::Ty) -> bool {
+        ty.array_variant().is_some_and(crate::types::is_array_variant_view)
+    }
+
+    fn product_fields(ty: &Self::Ty) -> Option<&[Self::Ty]> {
+        match ty {
+            Type::Constructed(
+                TypeName::Tuple(_) | TypeName::Record(_) | TypeName::Unit | TypeName::SideEffect,
+                fields,
+            ) => Some(fields),
+            _ => None,
+        }
+    }
 }
 
 pub trait WynSoacPhase: Family<Soac = SoacEffect<Self>> + Sized {
@@ -146,7 +169,7 @@ impl<P: WynSoacPhase> Soac<P> {
     }
 }
 
-impl<P: WynSoacPhase> super::ir::SideEffectKind<P, WynLanguage> {
+impl<P: WynSoacPhase> super::ir::SideEffectKind<P> {
     pub fn soac_id(&self) -> Option<&P::SoacId> {
         match self {
             Self::Effect(_) => None,
@@ -157,7 +180,7 @@ impl<P: WynSoacPhase> super::ir::SideEffectKind<P, WynLanguage> {
 
 // Concrete aliases default to semantic EGIR while the definitions in `ir`
 // remain independent of compiler-specific families.
-pub type PureOp<R = super::program::SemanticResourceRef> = OpTag<R>;
+pub type PureOp<R = super::program::SemanticResourceRef> = super::ir::PureOp<R>;
 pub type PureViewSource<R = super::program::SemanticResourceRef> = super::ir::PureViewSource<R>;
 pub type PureValueKey<R = super::program::SemanticResourceRef, Lang = WynLanguage> =
     super::ir::PureValueKey<R, Lang>;
@@ -167,9 +190,10 @@ pub type SegExtent<R = super::program::SemanticResourceRef> = super::ir::SegExte
 pub type SegSpace<R = super::program::SemanticResourceRef> = super::ir::SegSpace<R>;
 pub type SegResourceAccess<R = super::program::SemanticResourceRef> = super::ir::SegResourceAccess<R>;
 pub type SideEffect<P = Semantic, Lang = WynLanguage> = super::ir::SideEffect<P, Lang>;
-pub type SideEffectKind<P = Semantic, Lang = WynLanguage> = super::ir::SideEffectKind<P, Lang>;
+pub type SideEffectKind<P = Semantic> = super::ir::SideEffectKind<P>;
 pub type SkeletonBlock<P = Semantic, Lang = WynLanguage> = super::ir::SkeletonBlock<P, Lang>;
 pub type Skeleton<P = Semantic, Lang = WynLanguage> = super::ir::Skeleton<P, Lang>;
+pub type SkeletonTerminator = super::ir::SkeletonTerminator<WynLanguage>;
 pub type SoacInputType<Ty = Type<TypeName>> = super::ir::SoacInputType<Ty>;
 pub type ArrayLayout = super::ir::ArrayLayout;
 pub type EGraph<P = Semantic, Lang = WynLanguage> = super::ir::EGraph<P, Lang>;
@@ -323,7 +347,12 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
         P: WynSoacPhase,
         Q: WynSoacPhase<Resource = P::Resource>,
     {
-        let super::ir::EGraphParts { mut nodes, skeleton } = self.into_parts();
+        let super::ir::EGraphParts {
+            mut nodes,
+            places,
+            calls,
+            skeleton,
+        } = self.into_parts();
         let source_entry = skeleton.entry;
         let source_blocks = skeleton.blocks.into_iter().collect::<Vec<_>>();
         let mut blocks = SlotMap::with_key();
@@ -358,15 +387,19 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
                     };
                     Ok(super::ir::SideEffect {
                         kind,
-                        operand_nodes: effect.operand_nodes,
+                        operands: effect.operands,
                         result: effect.result,
                         effects: effect.effects,
                         span: effect.span,
                     })
                 })
                 .collect::<Result<_, E>>()?;
-            let term =
-                block.term.try_map(|node| Ok::<_, E>(node), |target| Ok::<_, E>(block_map[&target]))?;
+            let term = block.term.try_map_parts(
+                |condition| Ok::<_, E>(condition),
+                |argument| Ok::<_, E>(argument),
+                |result| Ok::<_, E>(result),
+                |target| Ok::<_, E>(block_map[&target]),
+            )?;
             blocks[block_map[&source]] = super::ir::SkeletonBlock {
                 params: block.params,
                 side_effects,
@@ -378,6 +411,8 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
         Ok((
             super::ir::EGraph::<Q, WynLanguage>::from_parts(super::ir::EGraphParts {
                 nodes,
+                places,
+                calls,
                 skeleton: super::ir::Skeleton {
                     entry: block_map[&source_entry],
                     blocks,
@@ -397,6 +432,7 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
             P::SoacId,
             Soac<P>,
             &LookupMap<ValueId, ValueId>,
+            &LookupMap<PlaceId, PlaceId>,
         ) -> Result<(Q::SoacId, Soac<Q>), E>,
     ) -> Result<
         (
@@ -410,7 +446,12 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
         P: WynSoacPhase,
         Q: WynSoacPhase,
     {
-        let super::ir::EGraphParts { nodes, skeleton } = self.into_parts();
+        let super::ir::EGraphParts {
+            nodes,
+            places,
+            calls,
+            skeleton,
+        } = self.into_parts();
         let source_entry = skeleton.entry;
         let source_blocks = skeleton.blocks.into_iter().collect::<Vec<_>>();
         let mut blocks = SlotMap::with_key();
@@ -438,6 +479,28 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
                 }),
             );
         }
+
+        let mut mapped_places = SlotMap::with_key();
+        let mut place_map = LookupMap::new();
+        for (source, place) in places {
+            let place = place.try_map(
+                &mut map_resource,
+                |value| Ok::<_, E>(node_map[&value]),
+                |place| Ok::<_, E>(place_map[&place]),
+            )?;
+            place_map.insert(source, mapped_places.insert(place));
+        }
+
+        let mut mapped_calls = SlotMap::with_key();
+        let mut call_map = LookupMap::new();
+        for (source, call) in calls {
+            let call = call.try_remap_bindings(
+                |value| Ok::<_, E>(node_map[&value]),
+                |place| Ok::<_, E>(place_map[&place]),
+            )?;
+            call_map.insert(source, mapped_calls.insert(call));
+        }
+
         for (source, node) in source_nodes {
             let kind = match node.kind {
                 super::ir::ValueKind::Pure { op, operands } => super::ir::ValueKind::Pure {
@@ -448,11 +511,24 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
                     left: node_map[&left],
                     right: node_map[&right],
                 },
-                super::ir::ValueKind::FuncParam { index } => super::ir::ValueKind::FuncParam { index },
+                super::ir::ValueKind::FuncParam { parameter } => {
+                    super::ir::ValueKind::FuncParam { parameter }
+                }
                 super::ir::ValueKind::BlockParam { block, index } => super::ir::ValueKind::BlockParam {
                     block: block_map[&block],
                     index,
                 },
+                super::ir::ValueKind::CallResult { call, slot } => {
+                    super::ir::ValueKind::CallResult {
+                        call: call_map[&call],
+                        slot,
+                    }
+                }
+                super::ir::ValueKind::PlaceLength { place } => {
+                    super::ir::ValueKind::PlaceLength {
+                        place: place_map[&place],
+                    }
+                }
                 super::ir::ValueKind::Constant(value) => super::ir::ValueKind::Constant(value),
                 super::ir::ValueKind::SideEffectResult => super::ir::ValueKind::SideEffectResult,
             };
@@ -471,32 +547,67 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
                 .map(|effect| {
                     let kind = match effect.kind {
                         super::ir::SideEffectKind::Effect(effect) => {
-                            super::ir::SideEffectKind::Effect(effect.try_map_resource(&mut map_resource)?)
+                            super::ir::SideEffectKind::Effect(effect.try_map(
+                                &mut map_resource,
+                                |call| Ok::<_, E>(call_map[&call]),
+                                |place| Ok::<_, E>(place_map[&place]),
+                            )?)
                         }
                         super::ir::SideEffectKind::Soac(SoacEffect(id, soac)) => {
-                            let (id, soac) = map_soac(id, soac, &node_map)?;
+                            let (id, soac) = map_soac(id, soac, &node_map, &place_map)?;
                             super::ir::SideEffectKind::Soac(SoacEffect(id, soac))
                         }
                     };
+                    let operands = effect
+                        .operands
+                        .into_iter()
+                        .map(|operand| {
+                            operand.try_map(
+                                |value| Ok::<_, E>(node_map[&value]),
+                                |view| {
+                                    view.try_remap(|value| Ok::<_, E>(node_map[&value]))
+                                },
+                                |place| Ok::<_, E>(place_map[&place]),
+                            )
+                        })
+                        .collect::<Result<_, E>>()?;
+                    let result = effect
+                        .result
+                        .map(|result| {
+                            result.try_map(
+                                &mut |ty| Ok::<_, E>(ty),
+                                &mut |value| Ok::<_, E>(node_map[&value]),
+                                &mut |place| Ok::<_, E>(place_map[&place]),
+                            )
+                        })
+                        .transpose()?;
                     Ok(super::ir::SideEffect::<Q, WynLanguage> {
                         kind,
-                        operand_nodes: effect
-                            .operand_nodes
-                            .into_iter()
-                            .map(|node| node_map[&node])
-                            .collect(),
-                        result: effect.result.map(|node| node_map[&node]),
+                        operands,
+                        result,
                         effects: effect.effects,
                         span: effect.span,
                     })
                 })
                 .collect::<Result<Vec<_>, E>>()?;
-            let term = block.term.try_map(
-                |node| Ok::<_, E>(node_map[&node]),
+            let term = block.term.try_map_parts(
+                |condition| Ok::<_, E>(node_map[&condition]),
+                |argument| argument.try_remap(|value| Ok::<_, E>(node_map[&value])),
+                |result| {
+                    result.try_map(
+                        &mut |ty| Ok::<_, E>(ty),
+                        &mut |value| Ok::<_, E>(node_map[&value]),
+                        &mut |place| Ok::<_, E>(place_map[&place]),
+                    )
+                },
                 |target| Ok::<_, E>(block_map[&target]),
             )?;
             blocks[block_map[&source]] = super::ir::SkeletonBlock {
-                params: block.params.into_iter().map(|node| node_map[&node]).collect(),
+                params: block
+                    .params
+                    .into_iter()
+                    .map(|argument| argument.try_remap(|value| Ok::<_, E>(node_map[&value])))
+                    .collect::<Result<_, E>>()?,
                 side_effects,
                 term,
                 control_header: block.control_header.map(|header| remap_control_header(header, &block_map)),
@@ -505,6 +616,8 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
 
         let graph = super::ir::EGraph::<Q, WynLanguage>::from_parts(super::ir::EGraphParts {
             nodes,
+            places: mapped_places,
+            calls: mapped_calls,
             skeleton: super::ir::Skeleton {
                 entry: block_map[&source_entry],
                 blocks,
@@ -538,7 +651,7 @@ where
             mut outputs,
             resource_declarations,
             params,
-            return_ty,
+            result,
             graph,
         } = self;
         let (graph, blocks) = graph.try_map_phase(map_soac)?;
@@ -555,7 +668,7 @@ where
             outputs,
             resource_declarations,
             params,
-            return_ty,
+            result,
             graph,
         })
     }
@@ -632,11 +745,11 @@ impl<R: GraphResource> Soac<Semantic<R>> {
         }
     }
 
-    fn referenced_node_slots(&mut self) -> Vec<&mut ValueId> {
+    fn remap_referenced_values(&mut self, map: impl FnMut(ValueId) -> ValueId) {
         match self {
-            Self::Screma(op) => op.referenced_node_slots(),
-            Self::Filter(op) => op.referenced_node_slots(),
-            Self::Hist(op) => op.referenced_node_slots_with_state(),
+            Self::Screma(op) => op.remap_referenced_values(map),
+            Self::Filter(op) => op.remap_referenced_values(map),
+            Self::Hist(op) => op.remap_referenced_values(map),
         }
     }
 }
@@ -649,18 +762,17 @@ impl<R: GraphResource> super::ir::SideEffect<Semantic<R>, WynLanguage> {
             SideEffectKind::Soac(SoacEffect(_, soac)) => soac.referenced_nodes(),
             SideEffectKind::Effect(_) => Vec::new(),
         };
-        self.operand_nodes.iter().copied().chain(metadata)
+        self.operand_values().chain(metadata)
     }
 
-    pub fn referenced_node_slots(&mut self) -> Vec<&mut ValueId> {
-        let Self {
-            kind, operand_nodes, ..
-        } = self;
-        let mut slots = operand_nodes.iter_mut().collect::<Vec<_>>();
-        if let SideEffectKind::Soac(SoacEffect(_, soac)) = kind {
-            slots.extend(soac.referenced_node_slots());
+    pub fn remap_referenced_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
+        for operand in &mut self.operands {
+            operand.remap_value(&mut map);
         }
-        slots
+        let kind = &mut self.kind;
+        if let SideEffectKind::Soac(SoacEffect(_, soac)) = kind {
+            soac.remap_referenced_values(map);
+        }
     }
 
     /// Select a segmented body using the same stable ordering as

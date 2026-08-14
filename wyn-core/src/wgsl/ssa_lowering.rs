@@ -3358,11 +3358,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     Ok(format!("({}).y", view_val))
                 }
 
-                crate::op::OpTag::ViewIndex
-                | crate::op::OpTag::PlaceIndex
-                | crate::op::OpTag::OutputSlot { .. } => {
-                    unreachable!("OpTag::{:?} is EGIR-only and must not reach SSA backend", tag)
-                }
             },
 
             // OutputSlot / Alloca / ViewIndex / PlaceIndex / Load / Store are

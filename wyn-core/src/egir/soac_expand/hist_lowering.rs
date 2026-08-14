@@ -84,13 +84,13 @@ fn emit_hist_atomic_update(
     graph: &mut EGraph,
     block: BlockId,
     next: BlockId,
-    place: ValueId,
+    place: PlaceId,
     incoming: ValueId,
     value_type: Type<TypeName>,
     operation: &hist::HistOp,
     plan: hist::AtomicUpdate,
     next_effect: &mut crate::IdSource<EffectToken>,
-    regions: &ProgramIdentities,
+    regions: &CallableMap,
 ) {
     use super::super::graph_ops::emit_atomic;
     use crate::ssa::types::AtomicOp;
@@ -137,7 +137,7 @@ fn emit_hist_atomic_update(
                 graph.intern_pure(PureOp::Bool(true), smallvec![], bool_type.clone(), None);
             graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
                 target: header,
-                args: vec![initial, initially_retry],
+                args: graph.admit_flow_values([initial, initially_retry]),
             };
             graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
                 cond: retry_required,
@@ -184,7 +184,7 @@ fn emit_hist_atomic_update(
             };
             graph.skeleton.blocks[retry].term = SkeletonTerminator::Branch {
                 target: header,
-                args: vec![observed, retry_after_attempt],
+                args: graph.admit_flow_values([observed, retry_after_attempt]),
             };
             graph.skeleton.blocks[done].term = SkeletonTerminator::Branch {
                 target: next,
@@ -205,7 +205,7 @@ pub(super) fn build_hist_atomic(
     space: &SegSpace,
     atomic_operations: &[hist::AtomicUpdate],
     next_effect: &mut crate::IdSource<EffectToken>,
-    regions: &ProgramIdentities,
+    regions: &CallableMap,
 ) {
     let HistLoop {
         form,
@@ -325,9 +325,9 @@ pub(super) fn build_hist_atomic(
 
         let bucket_index = flatten_hist_index(graph, operation_indices, &operation.shape);
         let value_type = operation.update.value_types()[0].clone();
-        let place = graph.intern_pure(
-            PureOp::ViewIndex,
-            smallvec![operation.destinations[0], bucket_index],
+        let place = graph.add_view_index_place(
+            operation.destinations[0],
+            bucket_index,
             value_type.clone(),
             None,
         );
@@ -361,7 +361,7 @@ pub(super) fn build_hist_loop(
     idx_in_block: usize,
     spec: HistLoop,
     next_effect: &mut crate::IdSource<EffectToken>,
-    regions: &ProgramIdentities,
+    regions: &CallableMap,
 ) {
     use super::super::graph_ops::{emit_storage_store, emit_view_load};
     let HistLoop {
@@ -456,7 +456,7 @@ pub(super) fn build_hist_loop(
                             reducer_arguments.push(emit_view_load(
                                 graph,
                                 update,
-                                destination,
+                                destination.value(),
                                 bucket_index,
                                 value_type.clone(),
                                 next_effect,
@@ -474,7 +474,7 @@ pub(super) fn build_hist_loop(
                     emit_storage_store(
                         graph,
                         update,
-                        destination,
+                        destination.value(),
                         bucket_index,
                         updated,
                         value_type.clone(),
@@ -593,19 +593,14 @@ fn emit_ranked_bucket_coordinates(
 fn emit_overflow_flag(
     graph: &mut EGraph,
     block: BlockId,
-    overflow: ValueId,
+    overflow: ViewId,
     next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     use crate::ssa::types::AtomicOp;
     let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
     let zero = super::super::graph_ops::intern_u32(graph, 0, None);
     let one = super::super::graph_ops::intern_u32(graph, 1, None);
-    let place = graph.intern_pure(
-        PureOp::ViewIndex,
-        smallvec![overflow, zero],
-        u32_type.clone(),
-        None,
-    );
+    let place = graph.add_view_index_place(overflow, zero, u32_type.clone(), None);
     super::super::graph_ops::emit_atomic(
         graph,
         block,
@@ -655,7 +650,7 @@ pub(super) fn build_bucket_init(
 
     let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
     let zero_u32 = super::super::graph_ops::intern_u32(graph, 0, None);
-    let count_place = graph.intern_pure(PureOp::ViewIndex, smallvec![counts, lane], u32_type.clone(), None);
+    let count_place = graph.add_view_index_place(counts, lane, u32_type.clone(), None);
     super::super::graph_ops::emit_atomic(
         graph,
         body,
@@ -684,9 +679,9 @@ pub(super) fn build_bucket_init(
         else_args: vec![],
     };
     graph.skeleton.blocks[body].control_header = Some(ControlHeader::Selection { merge: done });
-    let overflow_place = graph.intern_pure(
-        PureOp::ViewIndex,
-        smallvec![overflow, zero_u32],
+    let overflow_place = graph.add_view_index_place(
+        overflow,
+        zero_u32,
         Type::Constructed(TypeName::UInt(32), vec![]),
         None,
     );
@@ -718,7 +713,7 @@ pub(super) fn build_bucket_insert(
     space: &SegSpace,
     topology: Option<&hist::DispatchTopology>,
     next_effect: &mut crate::IdSource<EffectToken>,
-    regions: &ProgramIdentities,
+    regions: &CallableMap,
 ) {
     use crate::ssa::types::AtomicOp;
     let after = graph.skeleton.split_block_before_effect(block, effect_index);
@@ -752,7 +747,7 @@ pub(super) fn build_bucket_insert(
         lanes[stride.axis] = lane;
         graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
             target: header,
-            args: vec![physical_lanes[stride.axis]],
+            args: graph.admit_flow_values([physical_lanes[stride.axis]]),
         };
         (header, Some((continuation, lane, stride)))
     } else {
@@ -814,7 +809,7 @@ pub(super) fn build_bucket_insert(
         );
         graph.skeleton.blocks[continuation].term = SkeletonTerminator::Branch {
             target: coordinate_block,
-            args: vec![next_lane],
+            args: graph.admit_flow_values([next_lane]),
         };
         continuation
     } else {
@@ -887,7 +882,7 @@ pub(super) fn build_bucket_insert(
 
     let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
     let one = super::super::graph_ops::intern_u32(graph, 1, None);
-    let count_place = graph.intern_pure(PureOp::ViewIndex, smallvec![counts, *key], u32_type.clone(), None);
+    let count_place = graph.add_view_index_place(counts, *key, u32_type.clone(), None);
     let slot_u32 = super::super::graph_ops::emit_atomic(
         graph,
         allocate,
@@ -933,16 +928,11 @@ pub(super) fn build_bucket_insert(
     };
 
     let destination = operation.destinations[0];
-    let destination_ty = graph.nodes[destination].ty.clone();
+    let destination_ty = graph.nodes[destination.value()].ty.clone();
     let row_ty = destination_ty.elem_type().expect("bucket destination must have rank two").clone();
-    let row = graph.intern_pure(
-        PureOp::ViewIndex,
-        smallvec![destination, *key],
-        row_ty.clone(),
-        None,
-    );
+    let row = graph.add_view_index_place(destination, *key, row_ty.clone(), None);
     let leaf_ty = row_ty.elem_type().expect("bucket destination must have rank two").clone();
-    let place = graph.intern_pure(PureOp::PlaceIndex, smallvec![row, slot], leaf_ty, None);
+    let place = graph.add_index_place(row, slot, leaf_ty, None);
     emit_store(graph, write, place, *value, next_effect, None);
     graph.skeleton.blocks[write].term = SkeletonTerminator::Branch {
         target: work_done,

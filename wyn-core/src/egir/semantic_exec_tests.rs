@@ -1,8 +1,14 @@
 use super::*;
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{semantic_program_for_test, ProgramIdentities, SemanticFunc};
+use crate::egir::graph_ops::bind_by_value_result;
+use crate::egir::program::{
+    semantic_program_for_test, ProgramIdentities, SemanticFunc, SemanticResourceRef,
+};
 use crate::egir::reify::Segmented;
-use crate::egir::types::{EGraph, PureOp, SkeletonTerminator};
+use crate::egir::types::{
+    by_value_function_result, callable_parameter, CallEffects, EGraph, PureOp,
+    SkeletonTerminator, WynLanguage,
+};
 use crate::op::BinaryOperator;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use polytype::Type;
@@ -21,8 +27,8 @@ fn affine_program() -> (RegionId, Segmented) {
     let int = Type::Constructed(TypeName::Int(64), vec![]);
     let pair = Type::Constructed(TypeName::Tuple(2), vec![int.clone(), int.clone()]);
     let mut graph = EGraph::new();
-    let left = graph.add_func_param(0, pair.clone());
-    let right = graph.add_func_param(1, pair.clone());
+    let left = graph.add_test_value_parameter(0, pair.clone());
+    let right = graph.add_test_value_parameter(1, pair.clone());
     let la = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![left], int.clone(), None);
     let lb = graph.intern_pure(PureOp::Project { index: 1 }, smallvec![left], int.clone(), None);
     let ra = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![right], int.clone(), None);
@@ -46,7 +52,10 @@ fn affine_program() -> (RegionId, Segmented) {
         None,
     );
     let result = graph.intern_pure(PureOp::Tuple(2), smallvec![out_a, out_b], pair.clone(), None);
-    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
+    let result_abi = by_value_function_result::<WynLanguage>(pair.clone());
+    let return_binding = bind_by_value_result(&mut graph, &result_abi, result);
+    graph.skeleton.blocks[graph.skeleton.entry].term =
+        SkeletonTerminator::Return(Some(return_binding));
     let mut identities = ProgramIdentities::default();
     let region = identities.alloc_function("affine_compose".into());
     let function = SemanticFunc::new(
@@ -54,8 +63,12 @@ fn affine_program() -> (RegionId, Segmented) {
         "affine_compose".to_string(),
         Span::dummy(),
         None,
-        vec![(pair.clone(), "left".into()), (pair.clone(), "right".into())],
-        pair,
+        vec![
+            callable_parameter::<SemanticResourceRef, WynLanguage>("left".into(), pair.clone()),
+            callable_parameter::<SemanticResourceRef, WynLanguage>("right".into(), pair),
+        ],
+        result_abi,
+        CallEffects::Pure,
         graph,
     );
     let program = semantic_program_for_test(

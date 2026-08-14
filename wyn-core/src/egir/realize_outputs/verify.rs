@@ -76,18 +76,18 @@ fn check_entry<P: Family>(entry_name: &str, graph: &EGraph<P>) -> Result<(), Con
     // that flow into a store or off the entry's return.
     let mut roots: Vec<ValueId> = Vec::new();
     for (_, block) in &graph.skeleton.blocks {
-        if let SkeletonTerminator::Return(Some(r)) = block.term {
-            roots.push(r);
+        if let SkeletonTerminator::Return(Some(r)) = &block.term {
+            roots.extend(r.values());
         }
         for se in &block.side_effects {
-            // Stores' operand_nodes carry the value being written.
+            // Stores' operands carry the value being written.
             // Skip EgirSoacs — their array operands are inputs,
             // not output writes.
             use super::super::types::SideEffectKind;
             match &se.kind {
                 SideEffectKind::Soac(_) => continue,
                 _ => {
-                    roots.extend(se.operand_nodes.iter().copied());
+                    roots.extend(se.operand_values());
                 }
             }
         }

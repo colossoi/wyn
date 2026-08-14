@@ -13,7 +13,8 @@ use super::program::{
 };
 use super::soac::screma;
 use super::types::{
-    EGraph, EffectToken, SkeletonTerminator, Soac, SoacDestination, SoacInputType, SoacPlacement, ValueId,
+    EGraph, EffectToken, OperandRef, PlaceId, SkeletonTerminator, Soac, SoacDestination, SoacInputType,
+    SoacPlacement, ValueId, WynLanguage,
 };
 
 pub struct EntryBuilder<'a> {
@@ -26,8 +27,6 @@ pub struct EntryBuilder<'a> {
     inputs: Vec<EntryInput>,
     outputs: Vec<EntryOutput>,
     resource_declarations: Vec<SemanticResourceDecl>,
-    params: Vec<(Type<TypeName>, String)>,
-    return_ty: Type<TypeName>,
     semantic_ids: &'a mut SemanticOpIdSource,
     effect_ids: &'a mut crate::IdSource<EffectToken>,
 }
@@ -53,8 +52,6 @@ impl<'a> EntryBuilder<'a> {
             inputs: Vec::new(),
             outputs: Vec::new(),
             resource_declarations: Vec::new(),
-            params: Vec::new(),
-            return_ty: Type::Constructed(TypeName::Unit, vec![]),
             semantic_ids,
             effect_ids,
         }
@@ -129,7 +126,7 @@ impl<'a> EntryBuilder<'a> {
         input_array: ValueId,
         input_array_ty: Type<TypeName>,
         output_elem_ty: Type<TypeName>,
-        captures: Vec<ValueId>,
+        captures: Vec<OperandRef>,
         output_view: ValueId,
         output_view_ty: Type<TypeName>,
     ) -> ValueId {
@@ -164,9 +161,9 @@ impl<'a> EntryBuilder<'a> {
         let result_types = pre.result_types.clone();
         let operands = inputs
             .iter()
-            .map(|(node, _)| *node)
-            .chain(output_views.iter().map(|(node, _)| *node))
-            .collect::<SmallVec<[ValueId; 4]>>();
+            .map(|(node, _)| self.graph.operand_ref(*node))
+            .chain(output_views.iter().map(|(node, _)| self.graph.operand_ref(*node)))
+            .collect::<SmallVec<[OperandRef; 4]>>();
         let id = self.semantic_ids.next_id();
         graph_ops::emit_pending_soac(
             &mut self.graph,
@@ -195,7 +192,7 @@ impl<'a> EntryBuilder<'a> {
         )
     }
 
-    pub fn emit_load(&mut self, place: ValueId, elem_ty: Type<TypeName>) -> ValueId {
+    pub fn emit_load(&mut self, place: PlaceId, elem_ty: Type<TypeName>) -> ValueId {
         graph_ops::emit_load(
             &mut self.graph,
             self.current_block,
@@ -234,8 +231,11 @@ impl<'a> EntryBuilder<'a> {
                 })
                 .collect(),
             resource_declarations: self.resource_declarations,
-            params: self.params,
-            return_ty: self.return_ty,
+            params: Vec::new(),
+            result: super::ir::by_value_function_result::<WynLanguage>(Type::Constructed(
+                TypeName::Unit,
+                vec![],
+            )),
             graph: self.graph,
         }
     }

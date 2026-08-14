@@ -49,10 +49,772 @@ pub fn splice_effect_tokens(
 }
 
 new_key_type! {
-    /// Identity of a node in the e-graph. Every pure node, union node,
-    /// block param, function param, and constant gets one.
+    /// Identity of a value node in the e-graph. Every pure node, union node,
+    /// value parameter, and constant gets one.
     pub struct ValueId;
+    /// Identity of an addressable place. Places cannot enter value e-classes
+    /// or cross CFG edges as block arguments.
+    pub struct PlaceId;
+    /// Identity of one complete, explicitly bound region call.
+    pub struct CallSiteId;
+}
 
+/// Index into the single physical parameter sequence owned by a callable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ParameterId(usize);
+
+/// Index into the by-value portion of a callable's physical results.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ReturnSlotId(usize);
+
+/// A value that has been admitted to CFG-carried state. Its constructor is
+/// the boundary at which materialized aggregates are rejected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FlowValueId(ValueId);
+
+/// A value-sized view handle whose addressability must survive type and
+/// resource representation changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ViewId(ValueId);
+
+/// The complete operand vocabulary at function, call, capture, and result
+/// boundaries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum OperandRef {
+    Value(ValueId),
+    View(ViewId),
+    Place(PlaceId),
+}
+
+/// Storage ownership is phase-parametric so resource erasure changes only
+/// the resource payload and cannot turn a place into a value.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PlaceRegion<R> {
+    Function,
+    Workgroup,
+    Parametric,
+    Resource(R),
+    Output,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PlaceAccess {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
+}
+
+/// The pointee and capabilities intrinsically owned by an addressable place.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PlaceType<R, Ty> {
+    pub pointee: Ty,
+    pub region: PlaceRegion<R>,
+    pub access: PlaceAccess,
+}
+
+/// Physical type of an addressable view passed in the value channel.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ViewType<R, Ty> {
+    pub array: Ty,
+    pub region: PlaceRegion<R>,
+    pub access: PlaceAccess,
+}
+
+/// One physical parameter representation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum OperandType<R, Ty> {
+    Value(Ty),
+    View(ViewType<R, Ty>),
+    Place(PlaceType<R, Ty>),
+}
+
+/// A destination with fixed extent or with an explicit length sink for a
+/// bounded, variable-sized result.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PlaceDestination<P> {
+    Fixed(P),
+    Bounded {
+        storage: P,
+        length: P,
+    },
+}
+
+/// Every indivisible result is routed either through a by-value return slot or
+/// through one or more addressable destination parameters.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ResultDestination<R, P> {
+    ReturnValue(R),
+    Place(PlaceDestination<P>),
+}
+
+/// A typed logical result tree paired at every leaf with its physical route.
+/// Product nodes carry structure only; they are not runtime aggregates.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ResultTree<Ty, R, P> {
+    root: ResultNode<Ty, R, P>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ResultNode<Ty, R, P> {
+    Product {
+        ty: Ty,
+        fields: Box<[ResultNode<Ty, R, P>]>,
+    },
+    Destination {
+        ty: Ty,
+        destination: ResultDestination<R, P>,
+    },
+}
+
+pub type FunctionResult<Ty> = ResultTree<Ty, ReturnSlotId, ParameterId>;
+pub type ResultBinding<Ty> = ResultTree<Ty, ValueId, PlaceId>;
+
+/// Observable behavior of a callable after destination selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CallEffects {
+    Pure,
+    DestinationWrite,
+    General,
+}
+
+/// One parameter in the callable's complete physical argument sequence.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FuncParam<R, Ty> {
+    name: String,
+    representation: OperandType<R, Ty>,
+}
+
+/// One fully applied call. Arguments align exactly with the callee's physical
+/// parameter sequence; results mirror its typed result tree with concrete
+/// value and place bindings.
+#[derive(Clone, Debug)]
+pub struct CallSite<Ty> {
+    callee: RegionId,
+    arguments: Box<[OperandRef]>,
+    result: ResultBinding<Ty>,
+    effects: CallEffects,
+}
+
+impl ParameterId {
+    pub(crate) const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub const fn index(self) -> usize {
+        self.0
+    }
+}
+
+impl ReturnSlotId {
+    pub(crate) const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub const fn index(self) -> usize {
+        self.0
+    }
+}
+
+impl FlowValueId {
+    pub const fn value(self) -> ValueId {
+        self.0
+    }
+
+    pub(crate) fn try_remap<E>(
+        self,
+        map: impl FnOnce(ValueId) -> Result<ValueId, E>,
+    ) -> Result<Self, E> {
+        Ok(Self(map(self.0)?))
+    }
+}
+
+impl ViewId {
+    pub const fn value(self) -> ValueId {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn test(value: ValueId) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn try_remap<E>(
+        self,
+        map: impl FnOnce(ValueId) -> Result<ValueId, E>,
+    ) -> Result<Self, E> {
+        Ok(Self(map(self.0)?))
+    }
+
+    pub(crate) fn remap_value(&mut self, map: impl FnOnce(ValueId) -> ValueId) {
+        self.0 = map(self.0);
+    }
+}
+
+impl OperandRef {
+    pub const fn value(self) -> Option<ValueId> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::View(view) => Some(view.0),
+            Self::Place(_) => None,
+        }
+    }
+
+    pub const fn place(self) -> Option<PlaceId> {
+        match self {
+            Self::Place(place) => Some(place),
+            Self::Value(_) | Self::View(_) => None,
+        }
+    }
+
+    pub fn try_map<E>(
+        self,
+        mut map_value: impl FnMut(ValueId) -> Result<ValueId, E>,
+        mut map_view: impl FnMut(ViewId) -> Result<ViewId, E>,
+        mut map_place: impl FnMut(PlaceId) -> Result<PlaceId, E>,
+    ) -> Result<Self, E> {
+        Ok(match self {
+            Self::Value(value) => Self::Value(map_value(value)?),
+            Self::View(view) => Self::View(map_view(view)?),
+            Self::Place(place) => Self::Place(map_place(place)?),
+        })
+    }
+
+    pub fn remap_value(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
+        *self = match *self {
+            Self::Value(value) => Self::Value(map(value)),
+            Self::View(view) => Self::View(ViewId(map(view.value()))),
+            Self::Place(place) => Self::Place(place),
+        };
+    }
+}
+
+impl<R, Ty> OperandType<R, Ty> {
+    pub fn ty(&self) -> &Ty {
+        match self {
+            Self::Value(ty) => ty,
+            Self::View(view) => &view.array,
+            Self::Place(place) => &place.pointee,
+        }
+    }
+
+    pub fn ty_mut(&mut self) -> &mut Ty {
+        match self {
+            Self::Value(ty) => ty,
+            Self::View(view) => &mut view.array,
+            Self::Place(place) => &mut place.pointee,
+        }
+    }
+
+    pub fn try_map<S, U, E>(
+        self,
+        map_resource: &mut impl FnMut(R) -> Result<S, E>,
+        map_ty: &mut impl FnMut(Ty) -> Result<U, E>,
+    ) -> Result<OperandType<S, U>, E> {
+        fn region<R, S, E>(
+            region: PlaceRegion<R>,
+            map_resource: &mut impl FnMut(R) -> Result<S, E>,
+        ) -> Result<PlaceRegion<S>, E> {
+            Ok(match region {
+                PlaceRegion::Function => PlaceRegion::Function,
+                PlaceRegion::Workgroup => PlaceRegion::Workgroup,
+                PlaceRegion::Parametric => PlaceRegion::Parametric,
+                PlaceRegion::Resource(resource) => PlaceRegion::Resource(map_resource(resource)?),
+                PlaceRegion::Output => PlaceRegion::Output,
+            })
+        }
+
+        Ok(match self {
+            Self::Value(ty) => OperandType::Value(map_ty(ty)?),
+            Self::View(view) => OperandType::View(ViewType {
+                array: map_ty(view.array)?,
+                region: region(view.region, map_resource)?,
+                access: view.access,
+            }),
+            Self::Place(place) => OperandType::Place(PlaceType {
+                pointee: map_ty(place.pointee)?,
+                region: region(place.region, map_resource)?,
+                access: place.access,
+            }),
+        })
+    }
+
+    pub fn map<S, U>(
+        self,
+        mut map_resource: impl FnMut(R) -> S,
+        mut map_ty: impl FnMut(Ty) -> U,
+    ) -> OperandType<S, U> {
+        self.try_map(
+            &mut |resource| Ok::<_, std::convert::Infallible>(map_resource(resource)),
+            &mut |ty| Ok::<_, std::convert::Infallible>(map_ty(ty)),
+        )
+        .unwrap()
+    }
+}
+
+impl<Ty, R, P> ResultTree<Ty, R, P> {
+    pub fn destination(ty: Ty, destination: ResultDestination<R, P>) -> Self {
+        Self {
+            root: ResultNode::Destination { ty, destination },
+        }
+    }
+
+    pub fn product(ty: Ty, fields: impl IntoIterator<Item = Self>) -> Self {
+        Self {
+            root: ResultNode::Product {
+                ty,
+                fields: fields.into_iter().map(|field| field.root).collect(),
+            },
+        }
+    }
+
+    pub fn ty(&self) -> &Ty {
+        match &self.root {
+            ResultNode::Product { ty, .. } | ResultNode::Destination { ty, .. } => ty,
+        }
+    }
+
+    pub fn field_count(&self) -> usize {
+        match &self.root {
+            ResultNode::Product { fields, .. } => fields.len(),
+            ResultNode::Destination { .. } => 1,
+        }
+    }
+
+    pub fn is_product(&self) -> bool {
+        matches!(self.root, ResultNode::Product { .. })
+    }
+
+    pub fn field(&self, index: usize) -> Option<Self>
+    where
+        Ty: Clone,
+        R: Clone,
+        P: Clone,
+    {
+        match &self.root {
+            ResultNode::Product { fields, .. } => fields.get(index).cloned().map(|root| Self { root }),
+            ResultNode::Destination { .. } if index == 0 => Some(self.clone()),
+            ResultNode::Destination { .. } => None,
+        }
+    }
+
+    pub fn destination_count(&self) -> usize {
+        let mut count = 0;
+        self.for_each_destination(|_, _| count += 1);
+        count
+    }
+
+    pub fn for_each_destination(&self, mut visit: impl FnMut(&Ty, &ResultDestination<R, P>)) {
+        fn walk<Ty, R, P>(
+            node: &ResultNode<Ty, R, P>,
+            visit: &mut impl FnMut(&Ty, &ResultDestination<R, P>),
+        ) {
+            match node {
+                ResultNode::Product { fields, .. } => {
+                    for field in fields {
+                        walk(field, visit);
+                    }
+                }
+                ResultNode::Destination { ty, destination } => visit(ty, destination),
+            }
+        }
+
+        walk(&self.root, &mut visit);
+    }
+
+    pub fn for_each_destination_mut(
+        &mut self,
+        mut visit: impl FnMut(&mut Ty, &mut ResultDestination<R, P>),
+    ) {
+        fn walk<Ty, R, P>(
+            node: &mut ResultNode<Ty, R, P>,
+            visit: &mut impl FnMut(&mut Ty, &mut ResultDestination<R, P>),
+        ) {
+            match node {
+                ResultNode::Product { ty: _, fields } => {
+                    for field in fields {
+                        walk(field, visit);
+                    }
+                }
+                ResultNode::Destination { ty, destination } => visit(ty, destination),
+            }
+        }
+
+        walk(&mut self.root, &mut visit);
+    }
+
+    pub fn for_each_type_mut(&mut self, mut visit: impl FnMut(&mut Ty)) {
+        fn walk<Ty, R, P>(node: &mut ResultNode<Ty, R, P>, visit: &mut impl FnMut(&mut Ty)) {
+            match node {
+                ResultNode::Product { ty, fields } => {
+                    visit(ty);
+                    for field in fields {
+                        walk(field, visit);
+                    }
+                }
+                ResultNode::Destination { ty, .. } => visit(ty),
+            }
+        }
+
+        walk(&mut self.root, &mut visit);
+    }
+
+    pub fn try_map<Ty2, R2, P2, E>(
+        self,
+        map_ty: &mut impl FnMut(Ty) -> Result<Ty2, E>,
+        map_return: &mut impl FnMut(R) -> Result<R2, E>,
+        map_place: &mut impl FnMut(P) -> Result<P2, E>,
+    ) -> Result<ResultTree<Ty2, R2, P2>, E> {
+        fn walk<Ty, R, P, Ty2, R2, P2, E>(
+            node: ResultNode<Ty, R, P>,
+            map_ty: &mut impl FnMut(Ty) -> Result<Ty2, E>,
+            map_return: &mut impl FnMut(R) -> Result<R2, E>,
+            map_place: &mut impl FnMut(P) -> Result<P2, E>,
+        ) -> Result<ResultNode<Ty2, R2, P2>, E> {
+            Ok(match node {
+                ResultNode::Product { ty, fields } => ResultNode::Product {
+                    ty: map_ty(ty)?,
+                    fields: fields
+                        .into_vec()
+                        .into_iter()
+                        .map(|field| walk(field, map_ty, map_return, map_place))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_boxed_slice(),
+                },
+                ResultNode::Destination { ty, destination } => ResultNode::Destination {
+                    ty: map_ty(ty)?,
+                    destination: match destination {
+                        ResultDestination::ReturnValue(value) => {
+                            ResultDestination::ReturnValue(map_return(value)?)
+                        }
+                        ResultDestination::Place(PlaceDestination::Fixed(place)) => {
+                            ResultDestination::Place(PlaceDestination::Fixed(map_place(place)?))
+                        }
+                        ResultDestination::Place(PlaceDestination::Bounded { storage, length }) => {
+                            ResultDestination::Place(PlaceDestination::Bounded {
+                                storage: map_place(storage)?,
+                                length: map_place(length)?,
+                            })
+                        }
+                    },
+                },
+            })
+        }
+
+        Ok(ResultTree {
+            root: walk(self.root, map_ty, map_return, map_place)?,
+        })
+    }
+
+    pub fn map<Ty2, R2, P2>(
+        self,
+        mut map_ty: impl FnMut(Ty) -> Ty2,
+        mut map_return: impl FnMut(R) -> R2,
+        mut map_place: impl FnMut(P) -> P2,
+    ) -> ResultTree<Ty2, R2, P2> {
+        self.try_map(
+            &mut |ty| Ok::<_, std::convert::Infallible>(map_ty(ty)),
+            &mut |result| Ok::<_, std::convert::Infallible>(map_return(result)),
+            &mut |place| Ok::<_, std::convert::Infallible>(map_place(place)),
+        )
+        .unwrap()
+    }
+}
+
+impl<Ty> ResultBinding<Ty> {
+    pub fn values(&self) -> Vec<ValueId> {
+        let mut values = Vec::new();
+        self.for_each_destination(|_, destination| {
+            if let ResultDestination::ReturnValue(value) = destination {
+                values.push(*value);
+            }
+        });
+        values
+    }
+
+    pub fn contains_value(&self, value: ValueId) -> bool {
+        self.values().contains(&value)
+    }
+
+    pub fn single_value(&self) -> Option<ValueId> {
+        let values = self.values();
+        let [value] = values.as_slice() else {
+            return None;
+        };
+        Some(*value)
+    }
+
+    pub fn places(&self) -> Vec<PlaceId> {
+        let mut places = Vec::new();
+        self.for_each_destination(|_, destination| match destination {
+            ResultDestination::ReturnValue(_) => {}
+            ResultDestination::Place(PlaceDestination::Fixed(place)) => places.push(*place),
+            ResultDestination::Place(PlaceDestination::Bounded { storage, length }) => {
+                places.push(*storage);
+                places.push(*length);
+            }
+        });
+        places
+    }
+
+    pub fn for_each_place(&self, mut visit: impl FnMut(PlaceId)) {
+        for place in self.places() {
+            visit(place);
+        }
+    }
+
+    pub fn replace_value(&mut self, old: ValueId, new: ValueId) {
+        fn walk<Ty>(node: &mut ResultNode<Ty, ValueId, PlaceId>, old: ValueId, new: ValueId) {
+            match node {
+                ResultNode::Product { fields, .. } => {
+                    for field in fields {
+                        walk(field, old, new);
+                    }
+                }
+                ResultNode::Destination {
+                    destination: ResultDestination::ReturnValue(value),
+                    ..
+                } if *value == old => *value = new,
+                ResultNode::Destination { .. } => {}
+            }
+        }
+
+        walk(&mut self.root, old, new);
+    }
+
+    pub fn for_each_value_mut(&mut self, mut visit: impl FnMut(&mut ValueId)) {
+        self.for_each_destination_mut(|_, destination| {
+            if let ResultDestination::ReturnValue(value) = destination {
+                visit(value);
+            }
+        });
+    }
+
+    pub fn for_each_place_mut(&mut self, mut visit: impl FnMut(&mut PlaceId)) {
+        self.for_each_destination_mut(|_, destination| match destination {
+            ResultDestination::ReturnValue(_) => {}
+            ResultDestination::Place(PlaceDestination::Fixed(place)) => visit(place),
+            ResultDestination::Place(PlaceDestination::Bounded { storage, length }) => {
+                visit(storage);
+                visit(length);
+            }
+        });
+    }
+}
+
+impl<Ty: Clone> FunctionResult<Ty> {
+    pub fn bind(
+        &self,
+        mut bind_return: impl FnMut(ReturnSlotId, &Ty) -> ValueId,
+        mut bind_place: impl FnMut(ParameterId) -> PlaceId,
+    ) -> ResultBinding<Ty> {
+        fn walk<Ty: Clone>(
+            node: &ResultNode<Ty, ReturnSlotId, ParameterId>,
+            bind_return: &mut impl FnMut(ReturnSlotId, &Ty) -> ValueId,
+            bind_place: &mut impl FnMut(ParameterId) -> PlaceId,
+        ) -> ResultNode<Ty, ValueId, PlaceId> {
+            match node {
+                ResultNode::Product { ty, fields } => ResultNode::Product {
+                    ty: ty.clone(),
+                    fields: fields
+                        .iter()
+                        .map(|field| walk(field, bind_return, bind_place))
+                        .collect(),
+                },
+                ResultNode::Destination {
+                    ty,
+                    destination: ResultDestination::ReturnValue(slot),
+                } => ResultNode::Destination {
+                    ty: ty.clone(),
+                    destination: ResultDestination::ReturnValue(bind_return(*slot, ty)),
+                },
+                ResultNode::Destination {
+                    ty,
+                    destination: ResultDestination::Place(PlaceDestination::Fixed(parameter)),
+                } => ResultNode::Destination {
+                    ty: ty.clone(),
+                    destination: ResultDestination::Place(PlaceDestination::Fixed(bind_place(*parameter))),
+                },
+                ResultNode::Destination {
+                    ty,
+                    destination:
+                        ResultDestination::Place(PlaceDestination::Bounded { storage, length }),
+                } => ResultNode::Destination {
+                    ty: ty.clone(),
+                    destination: ResultDestination::Place(PlaceDestination::Bounded {
+                        storage: bind_place(*storage),
+                        length: bind_place(*length),
+                    }),
+                },
+            }
+        }
+
+        ResultTree {
+            root: walk(&self.root, &mut bind_return, &mut bind_place),
+        }
+    }
+}
+
+impl<R, Ty> FuncParam<R, Ty> {
+    pub fn value(name: String, ty: Ty) -> Self {
+        Self {
+            name,
+            representation: OperandType::Value(ty),
+        }
+    }
+
+    pub fn view(name: String, ty: ViewType<R, Ty>) -> Self {
+        Self {
+            name,
+            representation: OperandType::View(ty),
+        }
+    }
+
+    pub fn place(name: String, ty: PlaceType<R, Ty>) -> Self {
+        Self {
+            name,
+            representation: OperandType::Place(ty),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn representation(&self) -> &OperandType<R, Ty> {
+        &self.representation
+    }
+
+    pub fn representation_mut(&mut self) -> &mut OperandType<R, Ty> {
+        &mut self.representation
+    }
+
+    pub fn ty(&self) -> &Ty {
+        self.representation.ty()
+    }
+
+    pub fn try_map<S, U, E>(
+        self,
+        map_resource: &mut impl FnMut(R) -> Result<S, E>,
+        map_ty: &mut impl FnMut(Ty) -> Result<U, E>,
+    ) -> Result<FuncParam<S, U>, E> {
+        Ok(FuncParam {
+            name: self.name,
+            representation: self.representation.try_map(map_resource, map_ty)?,
+        })
+    }
+
+    pub fn map<S, U>(
+        self,
+        mut map_resource: impl FnMut(R) -> S,
+        mut map_ty: impl FnMut(Ty) -> U,
+    ) -> FuncParam<S, U> {
+        self.try_map(
+            &mut |resource| Ok::<_, std::convert::Infallible>(map_resource(resource)),
+            &mut |ty| Ok::<_, std::convert::Infallible>(map_ty(ty)),
+        )
+        .unwrap()
+    }
+}
+
+pub fn callable_parameter<R, Lang: Language>(name: String, ty: Lang::Ty) -> FuncParam<R, Lang::Ty> {
+    if Lang::is_view(&ty) {
+        FuncParam::view(
+            name,
+            ViewType {
+                array: ty,
+                region: PlaceRegion::Parametric,
+                access: PlaceAccess::ReadOnly,
+            },
+        )
+    } else {
+        FuncParam::value(name, ty)
+    }
+}
+
+impl<Ty> CallSite<Ty> {
+    fn new(
+        callee: RegionId,
+        arguments: Box<[OperandRef]>,
+        result: ResultBinding<Ty>,
+        effects: CallEffects,
+    ) -> Self {
+        Self {
+            callee,
+            arguments,
+            result,
+            effects,
+        }
+    }
+
+    pub fn callee(&self) -> RegionId {
+        self.callee
+    }
+
+    pub fn arguments(&self) -> &[OperandRef] {
+        &self.arguments
+    }
+
+    pub fn result(&self) -> &ResultBinding<Ty> {
+        &self.result
+    }
+
+    pub fn effects(&self) -> CallEffects {
+        self.effects
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (RegionId, Box<[OperandRef]>, ResultBinding<Ty>, CallEffects) {
+        (self.callee, self.arguments, self.result, self.effects)
+    }
+
+    pub(crate) fn try_remap_bindings<E>(
+        self,
+        mut map_value: impl FnMut(ValueId) -> Result<ValueId, E>,
+        mut map_place: impl FnMut(PlaceId) -> Result<PlaceId, E>,
+    ) -> Result<Self, E> {
+        let arguments = self
+            .arguments
+            .into_vec()
+            .into_iter()
+            .map(|argument| match argument {
+                OperandRef::Value(value) => map_value(value).map(OperandRef::Value),
+                OperandRef::View(view) => map_value(view.value()).map(|value| OperandRef::View(ViewId(value))),
+                OperandRef::Place(place) => map_place(place).map(OperandRef::Place),
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_boxed_slice();
+        let result = self.result.try_map(
+            &mut |ty| Ok(ty),
+            &mut map_value,
+            &mut map_place,
+        )?;
+        Ok(Self {
+            callee: self.callee,
+            arguments,
+            result,
+            effects: self.effects,
+        })
+    }
+
+    pub(crate) fn retain_arguments(&mut self, retain: &[bool]) -> Result<(), String> {
+        if self.arguments.len() != retain.len() {
+            return Err(format!(
+                "call to {:?} has {} arguments for a {}-parameter rewrite",
+                self.callee,
+                self.arguments.len(),
+                retain.len()
+            ));
+        }
+        self.arguments = self
+            .arguments
+            .iter()
+            .copied()
+            .zip(retain)
+            .filter_map(|(argument, retain)| (*retain).then_some(argument))
+            .collect();
+        Ok(())
+    }
 }
 
 /// A callable used as a structured SOAC region.
@@ -80,10 +842,45 @@ pub type EntryArena = crate::IdArena<crate::EntryId, String>;
 pub trait Language: Clone + std::fmt::Debug + Eq + std::hash::Hash {
     type Const: Clone + std::fmt::Debug + Eq + std::hash::Hash;
     type Ty: Clone + std::fmt::Debug + Eq + std::hash::Hash;
+
+    fn is_materialized_aggregate(ty: &Self::Ty) -> bool;
+    fn is_view(ty: &Self::Ty) -> bool;
+    fn product_fields(ty: &Self::Ty) -> Option<&[Self::Ty]>;
 }
 
-/// Phase-typed operator identity without operands.
-pub type PureOp<R> = OpTag<R>;
+pub fn by_value_function_result<Lang: Language>(ty: Lang::Ty) -> FunctionResult<Lang::Ty> {
+    fn build<Lang: Language>(
+        ty: Lang::Ty,
+        next_slot: &mut usize,
+    ) -> ResultNode<Lang::Ty, ReturnSlotId, ParameterId> {
+        if let Some(fields) = Lang::product_fields(&ty) {
+            let fields = fields.to_vec();
+            ResultNode::Product {
+                ty,
+                fields: fields
+                    .into_iter()
+                    .map(|field| build::<Lang>(field, next_slot))
+                    .collect(),
+            }
+        } else {
+            let slot = ReturnSlotId::new(*next_slot);
+            *next_slot += 1;
+            ResultNode::Destination {
+                ty,
+                destination: ResultDestination::ReturnValue(slot),
+            }
+        }
+    }
+
+    let mut next_slot = 0;
+    ResultTree {
+        root: build::<Lang>(ty, &mut next_slot),
+    }
+}
+
+/// EGIR pure operators cannot encode calls. Calls exist only as complete
+/// [`CallSite`] records referenced from the effect skeleton.
+pub type PureOp<R> = OpTag<R, std::convert::Infallible>;
 
 // ---------------------------------------------------------------------------
 // PureValueKey — hash-cons key = operator + operands + result type
@@ -105,6 +902,96 @@ pub struct PureValueKey<R, Lang: Language> {
     pub ty: Lang::Ty,
 }
 
+/// Address-producing operations are stored outside the value e-graph.
+#[derive(Clone, Debug)]
+pub enum PlaceOp {
+    Parameter {
+        parameter: ParameterId,
+    },
+    AllocaResult,
+    Index {
+        base: PlaceId,
+        index: ValueId,
+    },
+    ViewIndex {
+        view: ViewId,
+        index: ValueId,
+    },
+    OutputSlot {
+        index: usize,
+    },
+}
+
+/// One addressable identity with its representation-independent pointee type.
+#[derive(Clone, Debug)]
+pub struct Place<R, Ty> {
+    op: PlaceOp,
+    ty: PlaceType<R, Ty>,
+    span: Option<Span>,
+}
+
+impl<R, Ty> Place<R, Ty> {
+    pub fn op(&self) -> &PlaceOp {
+        &self.op
+    }
+
+    pub fn ty(&self) -> &PlaceType<R, Ty> {
+        &self.ty
+    }
+
+    pub fn span(&self) -> Option<Span> {
+        self.span
+    }
+
+    pub(crate) fn into_parts(self) -> (PlaceOp, PlaceType<R, Ty>, Option<Span>) {
+        (self.op, self.ty, self.span)
+    }
+
+    pub(crate) fn remap_parameter(&mut self, map: impl FnOnce(ParameterId) -> ParameterId) {
+        if let PlaceOp::Parameter { parameter } = &mut self.op {
+            *parameter = map(*parameter);
+        }
+    }
+
+
+    pub(crate) fn try_map<S, E>(
+        self,
+        mut map_resource: impl FnMut(R) -> Result<S, E>,
+        mut map_value: impl FnMut(ValueId) -> Result<ValueId, E>,
+        mut map_place: impl FnMut(PlaceId) -> Result<PlaceId, E>,
+    ) -> Result<Place<S, Ty>, E> {
+        let op = match self.op {
+            PlaceOp::Parameter { parameter } => PlaceOp::Parameter { parameter },
+            PlaceOp::AllocaResult => PlaceOp::AllocaResult,
+            PlaceOp::Index { base, index } => PlaceOp::Index {
+                base: map_place(base)?,
+                index: map_value(index)?,
+            },
+            PlaceOp::ViewIndex { view, index } => PlaceOp::ViewIndex {
+                view: ViewId(map_value(view.value())?),
+                index: map_value(index)?,
+            },
+            PlaceOp::OutputSlot { index } => PlaceOp::OutputSlot { index },
+        };
+        let region = match self.ty.region {
+            PlaceRegion::Function => PlaceRegion::Function,
+            PlaceRegion::Workgroup => PlaceRegion::Workgroup,
+            PlaceRegion::Parametric => PlaceRegion::Parametric,
+            PlaceRegion::Resource(resource) => PlaceRegion::Resource(map_resource(resource)?),
+            PlaceRegion::Output => PlaceRegion::Output,
+        };
+        Ok(Place {
+            op,
+            ty: PlaceType {
+                pointee: self.ty.pointee,
+                region,
+                access: self.ty.access,
+            },
+            span: self.span,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ValueKind — what lives in the sea of nodes
 // ---------------------------------------------------------------------------
@@ -124,12 +1011,21 @@ pub enum ValueKind<R, Lang: Language> {
     },
     /// Function parameter.
     FuncParam {
-        index: usize,
+        parameter: ParameterId,
     },
     /// Block parameter (merge point in CFG skeleton).
     BlockParam {
         block: BlockId,
         index: usize,
+    },
+    /// One by-value result channel of a complete call site.
+    CallResult {
+        call: CallSiteId,
+        slot: ReturnSlotId,
+    },
+    /// Runtime length associated with an addressable view or bounded place.
+    PlaceLength {
+        place: PlaceId,
     },
     /// Inline constant value.
     Constant(Lang::Const),
@@ -139,13 +1035,15 @@ pub enum ValueKind<R, Lang: Language> {
 }
 
 impl<R, Lang: Language> ValueKind<R, Lang> {
-    /// Return all child NodeIds referenced by this node.
+    /// Return all child ValueNodeIds referenced by this node.
     pub fn children(&self) -> SmallVec<[ValueId; 4]> {
         match self {
             ValueKind::Pure { operands, .. } => operands.clone(),
             ValueKind::Union { left, right } => smallvec::smallvec![*left, *right],
             ValueKind::FuncParam { .. }
             | ValueKind::BlockParam { .. }
+            | ValueKind::CallResult { .. }
+            | ValueKind::PlaceLength { .. }
             | ValueKind::Constant(_)
             | ValueKind::SideEffectResult => SmallVec::new(),
         }
@@ -156,18 +1054,34 @@ impl<R, Lang: Language> ValueKind<R, Lang> {
 /// identity.
 #[derive(Clone, Debug)]
 pub struct Value<R, Lang: Language> {
-    pub kind: ValueKind<R, Lang>,
-    pub ty: Lang::Ty,
+    pub(crate) kind: ValueKind<R, Lang>,
+    pub(crate) ty: Lang::Ty,
     /// First source span attached to this hash-consed value.
-    pub span: Option<Span>,
+    pub(crate) span: Option<Span>,
     /// Canonical replacement selected by CFG simplification, if any.
-    pub alias: Option<ValueId>,
+    pub(crate) alias: Option<ValueId>,
 }
 
 impl<R, Lang: Language> Value<R, Lang> {
     /// Return the graph dependencies referenced by this node.
     pub fn children(&self) -> SmallVec<[ValueId; 4]> {
         self.kind.children()
+    }
+
+    pub fn kind(&self) -> &ValueKind<R, Lang> {
+        &self.kind
+    }
+
+    pub fn ty(&self) -> &Lang::Ty {
+        &self.ty
+    }
+
+    pub fn span(&self) -> Option<Span> {
+        self.span
+    }
+
+    pub fn alias(&self) -> Option<ValueId> {
+        self.alias
     }
 }
 
@@ -178,57 +1092,172 @@ impl<R, Lang: Language> Value<R, Lang> {
 /// A side effect anchored in the skeleton CFG.
 #[derive(Clone, Debug)]
 pub struct SideEffect<P: Family, Lang: Language> {
-    pub kind: SideEffectKind<P, Lang>,
-    /// Canonical EGIR value operands for this effect.
-    pub operand_nodes: SmallVec<[ValueId; 4]>,
-    /// Result value, if this effect produces one. Addressable-place results
-    /// are carried by the corresponding `EffectOp` variant instead.
-    pub result: Option<ValueId>,
+    pub(crate) kind: SideEffectKind<P>,
+    /// Canonical value operands for non-call effects. Complete call operands
+    /// live exclusively on the referenced [`CallSite`].
+    pub(crate) operands: SmallVec<[OperandRef; 4]>,
+    /// Structured result of this effect. Calls bind their result on the call
+    /// boundary and therefore do not duplicate it here.
+    pub(crate) result: Option<ResultBinding<Lang::Ty>>,
     /// Effect token chain.
-    pub effects: Option<(EffectToken, EffectToken)>,
+    pub(crate) effects: Option<(EffectToken, EffectToken)>,
     /// Source span of the user expression that produced this side-effect,
     /// or `None` for synthesized side-effects (e.g. SOAC expansion).
-    pub span: Option<Span>,
+    pub(crate) span: Option<Span>,
+}
+
+impl<P: Family, Lang: Language> SideEffect<P, Lang> {
+    pub fn new(
+        kind: SideEffectKind<P>,
+        operands: SmallVec<[OperandRef; 4]>,
+        result: Option<ResultBinding<Lang::Ty>>,
+        effects: Option<(EffectToken, EffectToken)>,
+        span: Option<Span>,
+    ) -> Self {
+        Self {
+            kind,
+            operands,
+            result,
+            effects,
+            span,
+        }
+    }
+
+    pub fn kind(&self) -> &SideEffectKind<P> {
+        &self.kind
+    }
+
+    pub fn kind_mut(&mut self) -> &mut SideEffectKind<P> {
+        &mut self.kind
+    }
+
+    pub fn operands(&self) -> &[OperandRef] {
+        &self.operands
+    }
+
+    pub fn operands_mut(&mut self) -> &mut SmallVec<[OperandRef; 4]> {
+        &mut self.operands
+    }
+
+    pub fn operand_values(&self) -> impl Iterator<Item = ValueId> + '_ {
+        self.operands.iter().filter_map(|operand| operand.value())
+    }
+
+    pub fn result(&self) -> Option<&ResultBinding<Lang::Ty>> {
+        self.result.as_ref()
+    }
+
+    pub fn result_mut(&mut self) -> Option<&mut ResultBinding<Lang::Ty>> {
+        self.result.as_mut()
+    }
+
+    pub fn value_result(&self) -> Option<ValueId> {
+        self.result.as_ref()?.single_value()
+    }
+
+    pub fn effects(&self) -> Option<(EffectToken, EffectToken)> {
+        self.effects
+    }
+
+    pub fn effects_mut(&mut self) -> &mut Option<(EffectToken, EffectToken)> {
+        &mut self.effects
+    }
+
+    pub fn span(&self) -> Option<Span> {
+        self.span
+    }
 }
 
 /// EGIR-native effect operation. Value and place operands are represented by
 /// the enclosing side effect's `ValueId` operands; SSA identities are
 /// introduced only when the graph is elaborated.
 #[derive(Clone, Debug)]
-pub enum EffectOp<R, Ty> {
+pub enum EffectOp<R> {
+    Call {
+        site: CallSiteId,
+    },
     Op {
-        tag: OpTag<R>,
+        tag: PureOp<R>,
     },
     Alloca {
-        elem_ty: Ty,
+        result: PlaceId,
     },
-    Load,
-    Store,
-    Atomic(AtomicOp),
+    Load {
+        place: PlaceId,
+        mode: LoadMode,
+    },
+    Store {
+        place: PlaceId,
+    },
+    Atomic {
+        place: PlaceId,
+        op: AtomicOp,
+    },
     ControlBarrier,
 }
 
-impl<R, Ty> EffectOp<R, Ty> {
+/// Whole-aggregate loading is a distinct, explicit operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LoadMode {
+    Element,
+    WholeAggregate,
+}
+
+impl<R> EffectOp<R> {
     /// Resource identity carried directly by the operation tag, if any.
     pub fn referenced_resource(&self) -> Option<&R> {
         match self {
             Self::Op { tag } => tag.referenced_resource(),
-            Self::Alloca { .. } | Self::Load | Self::Store | Self::Atomic(_) | Self::ControlBarrier => None,
+            Self::Call { .. }
+            | Self::Alloca { .. }
+            | Self::Load { .. }
+            | Self::Store { .. }
+            | Self::Atomic { .. }
+            | Self::ControlBarrier => None,
         }
     }
 
-    pub fn try_map_resource<S, E>(
-        self,
-        map: &mut impl FnMut(R) -> Result<S, E>,
-    ) -> Result<EffectOp<S, Ty>, E> {
+    pub fn try_map_resource<S, E>(self, map: &mut impl FnMut(R) -> Result<S, E>) -> Result<EffectOp<S>, E> {
         Ok(match self {
+            Self::Call { site } => EffectOp::Call { site },
             Self::Op { tag } => EffectOp::Op {
                 tag: tag.try_map_resource(map)?,
             },
-            Self::Alloca { elem_ty } => EffectOp::Alloca { elem_ty },
-            Self::Load => EffectOp::Load,
-            Self::Store => EffectOp::Store,
-            Self::Atomic(op) => EffectOp::Atomic(op),
+            Self::Alloca { result } => EffectOp::Alloca { result },
+            Self::Load { place, mode } => EffectOp::Load { place, mode },
+            Self::Store { place } => EffectOp::Store { place },
+            Self::Atomic { place, op } => EffectOp::Atomic { place, op },
+            Self::ControlBarrier => EffectOp::ControlBarrier,
+        })
+    }
+
+    pub fn try_map<S, E>(
+        self,
+        mut map_resource: impl FnMut(R) -> Result<S, E>,
+        mut map_call: impl FnMut(CallSiteId) -> Result<CallSiteId, E>,
+        mut map_place: impl FnMut(PlaceId) -> Result<PlaceId, E>,
+    ) -> Result<EffectOp<S>, E> {
+        Ok(match self {
+            Self::Call { site } => EffectOp::Call {
+                site: map_call(site)?,
+            },
+            Self::Op { tag } => EffectOp::Op {
+                tag: tag.try_map_resource(&mut map_resource)?,
+            },
+            Self::Alloca { result } => EffectOp::Alloca {
+                result: map_place(result)?,
+            },
+            Self::Load { place, mode } => EffectOp::Load {
+                place: map_place(place)?,
+                mode,
+            },
+            Self::Store { place } => EffectOp::Store {
+                place: map_place(place)?,
+            },
+            Self::Atomic { place, op } => EffectOp::Atomic {
+                place: map_place(place)?,
+                op,
+            },
             Self::ControlBarrier => EffectOp::ControlBarrier,
         })
     }
@@ -236,8 +1265,8 @@ impl<R, Ty> EffectOp<R, Ty> {
 
 /// A skeleton side effect's concrete kind.
 #[derive(Clone, Debug)]
-pub enum SideEffectKind<P: Family, Lang: Language> {
-    Effect(EffectOp<P::Resource, Lang::Ty>),
+pub enum SideEffectKind<P: Family> {
+    Effect(EffectOp<P::Resource>),
     /// A placeholder for an unexpanded SOAC. Produced by `from_tlc` and
     /// consumed by `soac_expand`. Never reaches elaborate.
     Soac(P::Soac),
@@ -315,7 +1344,7 @@ pub enum SegExtent<R> {
         offset: u32,
     },
     ResourceLength {
-        node: ValueId,
+        view: ViewId,
         resource: R,
         elem_bytes: u32,
     },
@@ -352,9 +1381,8 @@ impl<R> SegSpace<R> {
 
     pub(crate) fn referenced_nodes(&self) -> impl Iterator<Item = ValueId> + '_ {
         self.dims.iter().filter_map(|extent| match extent {
-            SegExtent::PushConstant { node, .. }
-            | SegExtent::ResourceLength { node, .. }
-            | SegExtent::Value(node) => Some(*node),
+            SegExtent::PushConstant { node, .. } | SegExtent::Value(node) => Some(*node),
+            SegExtent::ResourceLength { view, .. } => Some(view.value()),
             SegExtent::Fixed(_) => None,
         })
     }
@@ -363,9 +1391,8 @@ impl<R> SegSpace<R> {
         self.dims
             .iter_mut()
             .filter_map(|extent| match extent {
-                SegExtent::PushConstant { node, .. }
-                | SegExtent::ResourceLength { node, .. }
-                | SegExtent::Value(node) => Some(node),
+                SegExtent::PushConstant { node, .. } | SegExtent::Value(node) => Some(node),
+                SegExtent::ResourceLength { view, .. } => Some(&mut view.0),
                 SegExtent::Fixed(_) => None,
             })
             .collect()
@@ -382,11 +1409,11 @@ impl<R: Copy> SegSpace<R> {
                     *node = new;
                 }
                 SegExtent::ResourceLength {
-                    node,
+                    view,
                     resource: extent_resource,
                     ..
-                } if *node == old => {
-                    *node = new;
+                } if view.value() == old => {
+                    *view = ViewId(new);
                     *extent_resource = resource;
                 }
                 _ => {}
@@ -399,7 +1426,7 @@ impl<R: Copy> SegSpace<R> {
     /// one-dimensional dynamic shape.
     pub(crate) fn retarget_single_resource_length(
         &mut self,
-        view: ValueId,
+        view: ViewId,
         resource: R,
         elem_bytes: u32,
     ) -> bool {
@@ -410,7 +1437,7 @@ impl<R: Copy> SegSpace<R> {
             return false;
         }
         *extent = SegExtent::ResourceLength {
-            node: view,
+            view,
             resource,
             elem_bytes,
         };
@@ -422,11 +1449,39 @@ impl<R: Copy> SegSpace<R> {
 /// graph. Captures are explicit values, never an operand-count convention.
 #[derive(Clone, Debug)]
 pub struct SegBody {
-    pub region: RegionId,
-    pub captures: Vec<ValueId>,
+    pub(crate) region: RegionId,
+    /// Captures use the same representation-typed argument vocabulary as an
+    /// ordinary complete call.
+    pub(crate) captures: Vec<OperandRef>,
 }
 
 impl SegBody {
+    pub fn new(region: RegionId, captures: Vec<OperandRef>) -> Self {
+        Self { region, captures }
+    }
+
+    pub fn region(&self) -> RegionId {
+        self.region
+    }
+
+    pub fn captures(&self) -> &[OperandRef] {
+        &self.captures
+    }
+
+    pub fn captures_mut(&mut self) -> &mut Vec<OperandRef> {
+        &mut self.captures
+    }
+
+    pub fn capture_values(&self) -> impl Iterator<Item = ValueId> + '_ {
+        self.captures.iter().filter_map(|capture| capture.value())
+    }
+
+    pub fn remap_capture_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
+        for capture in &mut self.captures {
+            capture.remap_value(&mut map);
+        }
+    }
+
     /// Number of non-capture parameters in this body's region ABI.
     ///
     /// Segment bodies bind their lane/element parameters first and append one
@@ -449,17 +1504,18 @@ impl SegBody {
     pub(crate) fn capture_bindings<P: Family, Lang: Language>(
         &self,
         function: &Func<P, Lang>,
-    ) -> Result<LookupMap<ValueId, ValueId>, String> {
+    ) -> Result<LookupMap<ValueId, OperandRef>, String> {
         let leading = self.leading_parameter_count(function)?;
         let mut bindings = LookupMap::new();
         for (node, definition) in &function.graph.nodes {
-            let ValueKind::FuncParam { index } = &definition.kind else {
+            let ValueKind::FuncParam { parameter } = &definition.kind else {
                 continue;
             };
-            if *index < leading || *index >= function.params.len() {
+            let index = parameter.index();
+            if index < leading || index >= function.params.len() {
                 continue;
             }
-            let capture = self.captures.get(*index - leading).copied().ok_or_else(|| {
+            let capture = self.captures.get(index - leading).copied().ok_or_else(|| {
                 format!(
                     "region `{}` has out-of-range capture parameter {index}",
                     function.name
@@ -598,18 +1654,76 @@ impl<Ty> SoacInputType<Ty> {
     }
 }
 
-/// Terminator using NodeIds for value references.
-pub type SkeletonTerminator = crate::flow::Terminator<ValueId>;
+/// EGIR conditions are values, CFG arguments are admitted flow values, and a
+/// return carries the complete function-result binding.
+pub type SkeletonTerminator<Lang> =
+    crate::flow::Terminator<ValueId, FlowValueId, ResultBinding<<Lang as Language>::Ty>>;
+
+impl<Ty> crate::flow::Terminator<ValueId, FlowValueId, ResultBinding<Ty>> {
+    pub fn referenced_nodes(&self) -> SmallVec<[ValueId; 8]> {
+        match self {
+            Self::Return(result) => result.iter().flat_map(ResultBinding::values).collect(),
+            Self::Branch { args, .. } => args.iter().map(|value| value.value()).collect(),
+            Self::CondBranch {
+                cond,
+                then_args,
+                else_args,
+                ..
+            } => std::iter::once(*cond)
+                .chain(then_args.iter().map(|value| value.value()))
+                .chain(else_args.iter().map(|value| value.value()))
+                .collect(),
+            Self::Unreachable => SmallVec::new(),
+        }
+    }
+
+    pub fn for_each_value(&self, mut visit: impl FnMut(ValueId)) {
+        for value in self.referenced_nodes() {
+            visit(value);
+        }
+    }
+
+
+    pub fn visit_values_mut(&mut self, mut visit: impl FnMut(&mut ValueId)) {
+        match self {
+            Self::Return(result) => {
+                if let Some(result) = result {
+                    result.for_each_value_mut(visit);
+                }
+            }
+            Self::Branch { args, .. } => {
+                for argument in args {
+                    visit(&mut argument.0);
+                }
+            }
+            Self::CondBranch {
+                cond,
+                then_args,
+                else_args,
+                ..
+            } => {
+                visit(cond);
+                for argument in then_args {
+                    visit(&mut argument.0);
+                }
+                for argument in else_args {
+                    visit(&mut argument.0);
+                }
+            }
+            Self::Unreachable => {}
+        }
+    }
+}
 
 /// A block in the skeleton CFG.
 #[derive(Clone, Debug)]
 pub struct SkeletonBlock<P: Family, Lang: Language> {
-    /// Block parameters as NodeIds.
-    pub params: Vec<ValueId>,
+    /// Materialized aggregates have no representation in this sequence.
+    pub params: Vec<FlowValueId>,
     /// Effectful instructions, in order.
     pub side_effects: Vec<SideEffect<P, Lang>>,
     /// Block terminator.
-    pub term: SkeletonTerminator,
+    pub term: SkeletonTerminator<Lang>,
     /// Structured-control metadata intrinsically owned by this block.
     pub control_header: Option<ControlHeader>,
 }
@@ -619,7 +1733,7 @@ impl<P: Family, Lang: Language> SkeletonBlock<P, Lang> {
         SkeletonBlock {
             params: Vec::new(),
             side_effects: Vec::new(),
-            term: SkeletonTerminator::Unreachable,
+            term: crate::flow::Terminator::Unreachable,
             control_header: None,
         }
     }
@@ -688,7 +1802,7 @@ impl<P: Family, Lang: Language> Skeleton<P, Lang> {
         let control_header = source.control_header.take();
         let old_term = std::mem::replace(
             &mut source.term,
-            SkeletonTerminator::Branch {
+            crate::flow::Terminator::Branch {
                 target: continuation,
                 args: Vec::new(),
             },
@@ -702,7 +1816,7 @@ impl<P: Family, Lang: Language> Skeleton<P, Lang> {
     /// Verify that every CFG edge supplies one argument per target block parameter.
     pub fn verify_branch_arities(&self) -> Result<(), String> {
         for (source, block) in &self.blocks {
-            let check = |target: BlockId, args: &[ValueId]| {
+            let check = |target: BlockId, args: &[FlowValueId]| {
                 let target_block = self
                     .blocks
                     .get(target)
@@ -717,8 +1831,8 @@ impl<P: Family, Lang: Language> Skeleton<P, Lang> {
                 Ok(())
             };
             match &block.term {
-                SkeletonTerminator::Branch { target, args } => check(*target, args)?,
-                SkeletonTerminator::CondBranch {
+                crate::flow::Terminator::Branch { target, args } => check(*target, args)?,
+                crate::flow::Terminator::CondBranch {
                     then_target,
                     then_args,
                     else_target,
@@ -728,7 +1842,7 @@ impl<P: Family, Lang: Language> Skeleton<P, Lang> {
                     check(*then_target, then_args)?;
                     check(*else_target, else_args)?;
                 }
-                SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
+                crate::flow::Terminator::Return(_) | crate::flow::Terminator::Unreachable => {}
             }
         }
         Ok(())
@@ -758,14 +1872,16 @@ impl SideEffectIndex {
         let mut by_result = LookupMap::new();
         for (block, skeleton_block) in &graph.skeleton.blocks {
             for (index, effect) in skeleton_block.side_effects.iter().enumerate() {
-                let Some(result) = effect.result else {
+                let Some(result) = effect.result() else {
                     continue;
                 };
-                let previous = by_result.insert(result, SideEffectSite { block, index });
-                assert!(
-                    previous.is_none(),
-                    "side-effect result has more than one producer: {result:?}"
-                );
+                for value in result.values() {
+                    let previous = by_result.insert(value, SideEffectSite { block, index });
+                    assert!(
+                        previous.is_none(),
+                        "side-effect result has more than one producer: {value:?}"
+                    );
+                }
             }
         }
         Self { by_result }
@@ -782,7 +1898,7 @@ impl SideEffectIndex {
     ) -> Option<&'a SideEffect<P, Lang>> {
         let site = self.site(result)?;
         let effect = graph.skeleton.blocks.get(site.block)?.side_effects.get(site.index)?;
-        (effect.result == Some(result)).then_some(effect)
+        effect.result().is_some_and(|binding| binding.contains_value(result)).then_some(effect)
     }
 
     pub fn effect_mut<'a, P: Family, Lang: Language>(
@@ -792,7 +1908,7 @@ impl SideEffectIndex {
     ) -> Option<&'a mut SideEffect<P, Lang>> {
         let site = self.site(result)?;
         let effect = graph.skeleton.blocks.get_mut(site.block)?.side_effects.get_mut(site.index)?;
-        (effect.result == Some(result)).then_some(effect)
+        effect.result().is_some_and(|binding| binding.contains_value(result)).then_some(effect)
     }
 }
 
@@ -805,8 +1921,14 @@ impl SideEffectIndex {
 pub struct EGraph<P: Family, Lang: Language> {
     /// All nodes (pure, union, params, constants, side-effect results),
     /// including their type, span, and canonical alias.
-    pub nodes: SlotMap<ValueId, Value<P::Resource, Lang>>,
-    /// Hash-cons table: PureValueKey → existing ValueId.
+    pub(crate) nodes: SlotMap<ValueId, Value<P::Resource, Lang>>,
+    /// Addressable identities are not value nodes and cannot participate in
+    /// e-class unioning or CFG-carried state.
+    pub(crate) places: SlotMap<PlaceId, Place<P::Resource, Lang::Ty>>,
+    /// Complete calls are stored once and referenced by the skeleton and their
+    /// by-value result nodes.
+    pub(crate) calls: SlotMap<CallSiteId, CallSite<Lang::Ty>>,
+    /// Hash-cons table: PureValueKey → existing value identity.
     hash_cons: LookupMap<PureValueKey<P::Resource, Lang>, ValueId>,
     /// Constant dedup cache.
     const_cache: LookupMap<Lang::Const, ValueId>,
@@ -820,6 +1942,8 @@ pub struct EGraph<P: Family, Lang: Language> {
 /// without gaining direct access to its hash-consing internals.
 pub(super) struct EGraphParts<P: Family, Lang: Language> {
     pub(super) nodes: SlotMap<ValueId, Value<P::Resource, Lang>>,
+    pub(super) places: SlotMap<PlaceId, Place<P::Resource, Lang::Ty>>,
+    pub(super) calls: SlotMap<CallSiteId, CallSite<Lang::Ty>>,
     pub(super) skeleton: Skeleton<P, Lang>,
 }
 
@@ -831,6 +1955,8 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     pub fn new() -> Self {
         EGraph {
             nodes: SlotMap::with_key(),
+            places: SlotMap::with_key(),
+            calls: SlotMap::with_key(),
             hash_cons: LookupMap::new(),
             const_cache: LookupMap::new(),
             skeleton: Skeleton::new(),
@@ -840,17 +1966,31 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     pub(super) fn into_parts(self) -> EGraphParts<P, Lang> {
         let Self {
             nodes,
+            places,
+            calls,
             hash_cons: _,
             const_cache: _,
             skeleton,
         } = self;
-        EGraphParts { nodes, skeleton }
+        EGraphParts {
+            nodes,
+            places,
+            calls,
+            skeleton,
+        }
     }
 
     pub(super) fn from_parts(parts: EGraphParts<P, Lang>) -> Self {
-        let EGraphParts { nodes, skeleton } = parts;
+        let EGraphParts {
+            nodes,
+            places,
+            calls,
+            skeleton,
+        } = parts;
         let mut graph = Self {
             nodes,
+            places,
+            calls,
             hash_cons: LookupMap::new(),
             const_cache: LookupMap::new(),
             skeleton,
@@ -862,6 +2002,348 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 
     pub fn side_effect_index(&self) -> SideEffectIndex {
         SideEffectIndex::build(self)
+    }
+
+    pub fn values(&self) -> &SlotMap<ValueId, Value<P::Resource, Lang>> {
+        &self.nodes
+    }
+
+    pub fn value(&self, id: ValueId) -> &Value<P::Resource, Lang> {
+        &self.nodes[id]
+    }
+
+    pub fn places(&self) -> &SlotMap<PlaceId, Place<P::Resource, Lang::Ty>> {
+        &self.places
+    }
+
+    pub fn place(&self, id: PlaceId) -> &Place<P::Resource, Lang::Ty> {
+        &self.places[id]
+    }
+
+    pub fn calls(&self) -> &SlotMap<CallSiteId, CallSite<Lang::Ty>> {
+        &self.calls
+    }
+
+    pub fn call(&self, id: CallSiteId) -> &CallSite<Lang::Ty> {
+        &self.calls[id]
+    }
+
+    pub fn call_value_dependencies(&self, id: CallSiteId) -> Vec<ValueId> {
+        let mut values = Vec::new();
+        for argument in self.call(id).arguments() {
+            match *argument {
+                OperandRef::Value(value) => values.push(value),
+                OperandRef::View(view) => values.push(view.value()),
+                OperandRef::Place(place) => values.extend(self.place_value_dependencies(place)),
+            }
+        }
+        values
+    }
+
+    pub fn effect_boundary_value_dependencies(&self, effect: &SideEffect<P, Lang>) -> Vec<ValueId> {
+        let mut values = Vec::new();
+        for operand in effect.operands() {
+            match *operand {
+                OperandRef::Value(value) => values.push(value),
+                OperandRef::View(view) => values.push(view.value()),
+                OperandRef::Place(place) => values.extend(self.place_value_dependencies(place)),
+            }
+        }
+        if let SideEffectKind::Effect(operation) = effect.kind() {
+            match operation {
+                EffectOp::Call { site } => values.extend(self.call_value_dependencies(*site)),
+                EffectOp::Alloca { result }
+                | EffectOp::Load { place: result, .. }
+                | EffectOp::Store { place: result }
+                | EffectOp::Atomic { place: result, .. } => {
+                    values.extend(self.place_value_dependencies(*result));
+                }
+                EffectOp::Op { .. } | EffectOp::ControlBarrier => {}
+            }
+        }
+        if let Some(result) = effect.result() {
+            result.for_each_destination(|_, destination| match destination {
+                ResultDestination::ReturnValue(_) => {}
+                ResultDestination::Place(PlaceDestination::Fixed(place)) => {
+                    values.extend(self.place_value_dependencies(*place));
+                }
+                ResultDestination::Place(PlaceDestination::Bounded { storage, length }) => {
+                    values.extend(self.place_value_dependencies(*storage));
+                    values.extend(self.place_value_dependencies(*length));
+                }
+            });
+        }
+        values
+    }
+
+    pub fn place_value_dependencies(&self, root: PlaceId) -> Vec<ValueId> {
+        let mut values = Vec::new();
+        let mut pending = vec![root];
+        let mut seen = LookupSet::new();
+        while let Some(place) = pending.pop() {
+            if !seen.insert(place) {
+                continue;
+            }
+            match self.place(place).op() {
+                PlaceOp::Parameter { .. } | PlaceOp::AllocaResult | PlaceOp::OutputSlot { .. } => {}
+                PlaceOp::Index { base, index } => {
+                    pending.push(*base);
+                    values.push(*index);
+                }
+                PlaceOp::ViewIndex { view, index } => {
+                    values.push(view.value());
+                    values.push(*index);
+                }
+            }
+        }
+        values
+    }
+
+    pub fn admit_flow_value(&self, id: ValueId) -> FlowValueId {
+        assert!(
+            !Lang::is_materialized_aggregate(self.value(id).ty()),
+            "materialized aggregate cannot enter CFG-carried state"
+        );
+        FlowValueId(id)
+    }
+
+    pub fn admit_flow_values(
+        &self,
+        values: impl IntoIterator<Item = ValueId>,
+    ) -> Vec<FlowValueId> {
+        values.into_iter().map(|value| self.admit_flow_value(value)).collect()
+    }
+
+    pub fn view_id(&self, id: ValueId) -> ViewId {
+        assert!(
+            Lang::is_view(self.value(id).ty()),
+            "value is not an addressable view"
+        );
+        ViewId(id)
+    }
+
+    pub fn operand_ref(&self, id: ValueId) -> OperandRef {
+        if Lang::is_view(self.value(id).ty()) {
+            OperandRef::View(ViewId(id))
+        } else {
+            OperandRef::Value(id)
+        }
+    }
+
+    pub fn value_result(&self, id: ValueId) -> ResultBinding<Lang::Ty> {
+        ResultBinding::destination(
+            self.value(id).ty().clone(),
+            ResultDestination::ReturnValue(id),
+        )
+    }
+
+    pub fn add_call(
+        &mut self,
+        callee: RegionId,
+        parameters: &[FuncParam<P::Resource, Lang::Ty>],
+        function_result: &FunctionResult<Lang::Ty>,
+        arguments: impl IntoIterator<Item = OperandRef>,
+        effects: CallEffects,
+        span: Option<Span>,
+    ) -> Result<(CallSiteId, ResultBinding<Lang::Ty>), String> {
+        let arguments = arguments.into_iter().collect::<Box<[_]>>();
+        if arguments.len() != parameters.len() {
+            return Err(format!(
+                "call to {callee:?} supplies {} arguments for {} parameters",
+                arguments.len(),
+                parameters.len()
+            ));
+        }
+        for (index, (argument, parameter)) in arguments.iter().zip(parameters).enumerate() {
+            let matches = matches!(
+                (argument, parameter.representation()),
+                (OperandRef::Value(_), OperandType::Value(_))
+                    | (OperandRef::View(_), OperandType::View(_))
+                    | (OperandRef::Place(_), OperandType::Place(_))
+            );
+            if !matches {
+                return Err(format!(
+                    "call to {callee:?} argument {index} does not match its parameter representation"
+                ));
+            }
+        }
+        let mut destination_error = None;
+        function_result.for_each_destination(|_, destination| {
+            let mut require_place = |parameter: ParameterId| {
+                let valid = parameters
+                    .get(parameter.index())
+                    .is_some_and(|parameter| matches!(parameter.representation(), OperandType::Place(_)));
+                if !valid && destination_error.is_none() {
+                    destination_error = Some(format!(
+                        "call to {callee:?} result names non-place destination parameter {}",
+                        parameter.index()
+                    ));
+                }
+            };
+            match destination {
+                ResultDestination::ReturnValue(_) => {}
+                ResultDestination::Place(PlaceDestination::Fixed(parameter)) => {
+                    require_place(*parameter)
+                }
+                ResultDestination::Place(PlaceDestination::Bounded { storage, length }) => {
+                    require_place(*storage);
+                    require_place(*length);
+                }
+            }
+        });
+        if let Some(error) = destination_error {
+            return Err(error);
+        }
+        let nodes = &mut self.nodes;
+        let mut result = None;
+        let site = self.calls.insert_with_key(|site| {
+            let binding = function_result.bind(
+                |slot, ty| {
+                    nodes.insert(Value {
+                        kind: ValueKind::CallResult { call: site, slot },
+                        ty: ty.clone(),
+                        span,
+                        alias: None,
+                    })
+                },
+                |parameter| {
+                    arguments[parameter.index()]
+                        .place()
+                        .expect("destination parameter requires a place argument")
+                },
+            );
+            result = Some(binding.clone());
+            CallSite::new(callee, arguments.clone(), binding, effects)
+        });
+        Ok((
+            site,
+            result.expect("call result is constructed with its call site"),
+        ))
+    }
+
+    pub(crate) fn add_projected_call(
+        &mut self,
+        source: &CallSite<Lang::Ty>,
+        arguments: Box<[OperandRef]>,
+        mut source_result: impl FnMut(ValueId) -> (ReturnSlotId, Lang::Ty, Option<Span>),
+        mut map_place: impl FnMut(PlaceId) -> PlaceId,
+    ) -> (CallSiteId, ResultBinding<Lang::Ty>, Vec<(ValueId, ValueId)>) {
+        let nodes = &mut self.nodes;
+        let mut result = None;
+        let mut value_map = Vec::new();
+        let site = self.calls.insert_with_key(|site| {
+            let binding = source.result.clone().map(
+                |ty| ty,
+                |source_value| {
+                    let (slot, ty, span) = source_result(source_value);
+                    let target = nodes.insert(Value {
+                        kind: ValueKind::CallResult { call: site, slot },
+                        ty,
+                        span,
+                        alias: None,
+                    });
+                    value_map.push((source_value, target));
+                    target
+                },
+                &mut map_place,
+            );
+            result = Some(binding.clone());
+            CallSite::new(source.callee, arguments.clone(), binding, source.effects)
+        });
+        (
+            site,
+            result.expect("projected call result is constructed with its call site"),
+            value_map,
+        )
+    }
+
+    pub fn add_place_length(&mut self, place: PlaceId, ty: Lang::Ty, span: Option<Span>) -> ValueId {
+        self.nodes.insert(Value {
+            kind: ValueKind::PlaceLength { place },
+            ty,
+            span,
+            alias: None,
+        })
+    }
+
+    fn insert_place(
+        &mut self,
+        op: PlaceOp,
+        ty: PlaceType<P::Resource, Lang::Ty>,
+        span: Option<Span>,
+    ) -> PlaceId {
+        self.places.insert(Place { op, ty, span })
+    }
+
+    pub fn add_place_parameter(
+        &mut self,
+        parameter: ParameterId,
+        ty: PlaceType<P::Resource, Lang::Ty>,
+    ) -> PlaceId {
+        self.insert_place(PlaceOp::Parameter { parameter }, ty, None)
+    }
+
+    pub fn add_alloca_place(
+        &mut self,
+        ty: PlaceType<P::Resource, Lang::Ty>,
+        span: Option<Span>,
+    ) -> PlaceId {
+        self.insert_place(PlaceOp::AllocaResult, ty, span)
+    }
+
+    pub fn add_index_place(
+        &mut self,
+        base: PlaceId,
+        index: ValueId,
+        pointee: Lang::Ty,
+        span: Option<Span>,
+    ) -> PlaceId {
+        let parent = self.place(base).ty();
+        let ty = PlaceType {
+            pointee,
+            region: parent.region.clone(),
+            access: parent.access,
+        };
+        self.insert_place(PlaceOp::Index { base, index }, ty, span)
+    }
+
+    pub fn add_view_index_place(
+        &mut self,
+        view: ViewId,
+        index: ValueId,
+        pointee: Lang::Ty,
+        span: Option<Span>,
+    ) -> PlaceId {
+        let (region, access) = self.view_region(view.value());
+        let ty = PlaceType {
+            pointee,
+            region,
+            access,
+        };
+        self.insert_place(PlaceOp::ViewIndex { view, index }, ty, span)
+    }
+
+    fn view_region(&self, view: ValueId) -> (PlaceRegion<P::Resource>, PlaceAccess) {
+        let ValueKind::Pure { op, operands } = self.value(view).kind() else {
+            panic!("view identity is not produced by a pure view operation");
+        };
+        match op {
+            OpTag::StorageView(PureViewSource::Storage(resource)) => {
+                (PlaceRegion::Resource(resource.clone()), PlaceAccess::ReadWrite)
+            }
+            OpTag::StorageView(PureViewSource::Workgroup { .. }) => {
+                (PlaceRegion::Workgroup, PlaceAccess::ReadWrite)
+            }
+            OpTag::StorageView(PureViewSource::Inherited) => {
+                let parent = *operands.last().expect("inherited view has a parent operand");
+                self.view_region(parent)
+            }
+            _ => panic!("value marked as a view has no addressable view producer"),
+        }
+    }
+
+    pub fn add_output_place(&mut self, index: usize, ty: PlaceType<P::Resource, Lang::Ty>) -> PlaceId {
+        self.insert_place(PlaceOp::OutputSlot { index }, ty, None)
     }
 
     fn pure_node_key(&self, id: ValueId) -> Option<PureValueKey<P::Resource, Lang>> {
@@ -1080,15 +2562,40 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     }
 
     /// Allocate a function parameter node.
-    pub fn add_func_param(&mut self, index: usize, ty: Lang::Ty) -> ValueId {
-        self.insert_node(ValueKind::FuncParam { index }, ty, None)
+    fn add_func_param(&mut self, parameter: ParameterId, ty: Lang::Ty) -> ValueId {
+        self.insert_node(ValueKind::FuncParam { parameter }, ty, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn add_test_value_parameter(&mut self, index: usize, ty: Lang::Ty) -> ValueId {
+        self.add_parameter(ParameterId::new(index), &OperandType::Value(ty))
+            .value()
+            .expect("value parameter must use the value channel")
+    }
+
+    pub fn add_parameter(
+        &mut self,
+        parameter: ParameterId,
+        representation: &OperandType<P::Resource, Lang::Ty>,
+    ) -> OperandRef {
+        match representation {
+            OperandType::Value(ty) => OperandRef::Value(self.add_func_param(parameter, ty.clone())),
+            OperandType::View(view) => {
+                let value = self.add_func_param(parameter, view.array.clone());
+                OperandRef::View(ViewId(value))
+            }
+            OperandType::Place(place) => {
+                OperandRef::Place(self.add_place_parameter(parameter, place.clone()))
+            }
+        }
     }
 
     /// Append a parameter to a block and allocate its corresponding node.
     pub fn add_block_param(&mut self, block: BlockId, ty: Lang::Ty) -> ValueId {
         let index = self.skeleton.blocks[block].params.len();
         let id = self.insert_node(ValueKind::BlockParam { block, index }, ty, None);
-        self.skeleton.blocks[block].params.push(id);
+        let flow = self.admit_flow_value(id);
+        self.skeleton.blocks[block].params.push(flow);
         id
     }
 
@@ -1105,7 +2612,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             "block parameter slot out of bounds"
         );
 
-        let removed = slots.iter().map(|&slot| self.skeleton.blocks[block].params[slot]).collect();
+        let removed = slots.iter().map(|&slot| self.skeleton.blocks[block].params[slot].value()).collect();
 
         for &slot in slots.iter().rev() {
             self.skeleton.blocks[block].params.remove(slot);
@@ -1113,12 +2620,12 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 
         for (_, predecessor) in self.skeleton.blocks.iter_mut() {
             match &mut predecessor.term {
-                SkeletonTerminator::Branch { target, args } if *target == block => {
+                crate::flow::Terminator::Branch { target, args } if *target == block => {
                     for &slot in slots.iter().rev() {
                         args.remove(slot);
                     }
                 }
-                SkeletonTerminator::CondBranch {
+                crate::flow::Terminator::CondBranch {
                     then_target,
                     then_args,
                     else_target,
@@ -1142,6 +2649,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 
         let surviving_params = self.skeleton.blocks[block].params.clone();
         for (index, param) in surviving_params.into_iter().enumerate() {
+            let param = param.value();
             match &mut self.nodes[param].kind {
                 ValueKind::BlockParam {
                     block: owner,
@@ -1258,7 +2766,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             .iter()
             .filter_map(|(header, block)| {
                 let control = block.control_header.as_ref()?;
-                let valid = matches!(block.term, SkeletonTerminator::CondBranch { .. })
+                let valid = matches!(block.term, crate::flow::Terminator::CondBranch { .. })
                     && match control {
                         ControlHeader::Loop {
                             merge,
@@ -1290,8 +2798,13 @@ pub struct Func<P: Family, Lang: Language> {
     pub name: String,
     pub span: Span,
     pub linkage_name: Option<String>,
-    pub params: Vec<(Lang::Ty, String)>,
-    pub return_ty: Lang::Ty,
+    /// The single physical parameter sequence. Destination parameters occupy
+    /// ordinary positions in this same sequence.
+    pub(crate) params: Vec<FuncParam<P::Resource, Lang::Ty>>,
+    /// The typed logical result tree and the resolved destination of every
+    /// indivisible result.
+    pub(crate) result: FunctionResult<Lang::Ty>,
+    pub(crate) effects: CallEffects,
     pub graph: EGraph<P, Lang>,
 }
 
@@ -1314,8 +2827,9 @@ impl<P: Family, Lang: Language> Func<P, Lang> {
         name: String,
         span: Span,
         linkage_name: Option<String>,
-        params: Vec<(Lang::Ty, String)>,
-        return_ty: Lang::Ty,
+        params: Vec<FuncParam<P::Resource, Lang::Ty>>,
+        result: FunctionResult<Lang::Ty>,
+        effects: CallEffects,
         graph: EGraph<P, Lang>,
     ) -> Self {
         Self {
@@ -1324,22 +2838,45 @@ impl<P: Family, Lang: Language> Func<P, Lang> {
             span,
             linkage_name,
             params,
-            return_ty,
+            result,
+            effects,
             graph,
         }
+    }
+
+    pub fn params(&self) -> &[FuncParam<P::Resource, Lang::Ty>] {
+        &self.params
+    }
+
+    pub fn result(&self) -> &FunctionResult<Lang::Ty> {
+        &self.result
+    }
+
+    pub fn effects(&self) -> CallEffects {
+        self.effects
+    }
+
+    pub fn return_type(&self) -> &Lang::Ty {
+        self.result.ty()
     }
 
     /// Append one value to both sides of a segmented-body capture ABI.
     pub(crate) fn push_seg_body_capture(
         &mut self,
         body: &mut SegBody,
-        capture: ValueId,
+        capture: OperandRef,
         ty: Lang::Ty,
         name: String,
     ) -> ValueId {
         let index = self.params.len();
-        let parameter = self.graph.add_func_param(index, ty.clone());
-        self.params.push((ty, name));
+        let parameter_id = ParameterId::new(index);
+        let abi_parameter = callable_parameter::<P::Resource, Lang>(name, ty);
+        let parameter = self
+            .graph
+            .add_parameter(parameter_id, abi_parameter.representation())
+            .value()
+            .expect("a captured value or view uses the value channel");
+        self.params.push(abi_parameter);
         body.captures.push(capture);
         parameter
     }
@@ -1385,17 +2922,19 @@ impl<P: Family, Lang: Language> Func<P, Lang> {
             .nodes
             .iter()
             .filter_map(|(node, definition)| match &definition.kind {
-                ValueKind::FuncParam { index } => Some((node, *index)),
+                ValueKind::FuncParam { parameter } => Some((node, parameter.index())),
                 _ => None,
             })
             .collect::<Vec<_>>();
         let mut tombstone_index = next_index;
         for (node, old_index) in parameter_nodes {
             if let Some(new_index) = remapped.get(old_index).copied().flatten() {
-                self.graph.nodes[node].kind = ValueKind::FuncParam { index: new_index };
+                self.graph.nodes[node].kind = ValueKind::FuncParam {
+                    parameter: ParameterId::new(new_index),
+                };
             } else {
                 self.graph.nodes[node].kind = ValueKind::FuncParam {
-                    index: tombstone_index,
+                    parameter: ParameterId::new(tombstone_index),
                 };
                 tombstone_index += 1;
             }
@@ -1548,8 +3087,8 @@ pub struct Entry<P: Family, ResourceDecl, Route, Lang: Language> {
     pub parameter_inputs: Vec<Vec<super::program::InputSlotId>>,
     pub outputs: Vec<EntryOutput<P::Resource, Route, Lang>>,
     pub resource_declarations: Vec<ResourceDecl>,
-    pub params: Vec<(Lang::Ty, String)>,
-    pub return_ty: Lang::Ty,
+    pub(crate) params: Vec<FuncParam<P::Resource, Lang::Ty>>,
+    pub(crate) result: FunctionResult<Lang::Ty>,
     pub graph: EGraph<P, Lang>,
 }
 
@@ -1584,8 +3123,8 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
         inputs: Vec<InterfaceEntryInput<Lang::Ty>>,
         outputs: Vec<InterfaceEntryOutput<Lang::Ty>>,
         resource_declarations: Vec<ResourceDecl>,
-        params: Vec<(Lang::Ty, String)>,
-        return_ty: Lang::Ty,
+        params: Vec<FuncParam<P::Resource, Lang::Ty>>,
+        result: FunctionResult<Lang::Ty>,
         graph: EGraph<P, Lang>,
     ) -> Self {
         let parameter_inputs = (0..params.len())
@@ -1616,9 +3155,21 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
                 .collect(),
             resource_declarations,
             params,
-            return_ty,
+            result,
             graph,
         }
+    }
+
+    pub fn params(&self) -> &[FuncParam<P::Resource, Lang::Ty>] {
+        &self.params
+    }
+
+    pub fn result(&self) -> &FunctionResult<Lang::Ty> {
+        &self.result
+    }
+
+    pub fn return_type(&self) -> &Lang::Ty {
+        self.result.ty()
     }
 
     /// Retain selected original parameter indices and compact the entry
@@ -1629,7 +3180,9 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
             .nodes
             .iter()
             .filter_map(|(node, definition)| match &definition.kind {
-                ValueKind::FuncParam { index } if retained.contains(index) => Some((*index, node)),
+                ValueKind::FuncParam { parameter } if retained.contains(&parameter.index()) => {
+                    Some((parameter.index(), node))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -1675,10 +3228,10 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
             self.graph.remove_func_param(node);
         }
         for (new_index, (_, node)) in kept.into_iter().enumerate() {
-            if let Some(ValueKind::FuncParam { index }) =
+            if let Some(ValueKind::FuncParam { parameter }) =
                 self.graph.nodes.get_mut(node).map(|node| &mut node.kind)
             {
-                *index = new_index;
+                *parameter = ParameterId::new(new_index);
             }
         }
     }
@@ -1704,7 +3257,7 @@ impl<P: Family, ResourceDecl, Route, Lang: Language> Entry<P, ResourceDecl, Rout
             outputs,
             resource_declarations,
             params,
-            return_ty,
+            result,
             graph,
         } = self;
         Entry {
@@ -1724,7 +3277,7 @@ impl<P: Family, ResourceDecl, Route, Lang: Language> Entry<P, ResourceDecl, Rout
                 .collect(),
             resource_declarations,
             params,
-            return_ty,
+            result,
             graph,
         }
     }

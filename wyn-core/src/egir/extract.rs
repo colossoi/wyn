@@ -53,12 +53,19 @@ pub fn extract<P: Family>(graph: &EGraph<P>) -> LookupMap<ValueId, ValueId> {
                 best_cost.insert(nid, cost);
                 best_node.insert(nid, nid);
             }
-            ValueKind::Constant(_) | ValueKind::FuncParam { .. } | ValueKind::BlockParam { .. } => {
+            ValueKind::Constant(_)
+            | ValueKind::FuncParam { .. }
+            | ValueKind::BlockParam { .. }
+            | ValueKind::CallResult { .. } => {
                 best_cost.insert(nid, 0);
                 best_node.insert(nid, nid);
             }
             ValueKind::SideEffectResult => {
                 // Side-effect results have zero cost (they're mandatory).
+                best_cost.insert(nid, 0);
+                best_node.insert(nid, nid);
+            }
+            ValueKind::PlaceLength { .. } => {
                 best_cost.insert(nid, 0);
                 best_node.insert(nid, nid);
             }
@@ -121,10 +128,7 @@ fn op_cost<R>(op: &PureOp<R>) -> Cost {
         PureOp::Matrix { .. } => 2,
         PureOp::DynamicExtract => 2,
         PureOp::Materialize => 3,
-        PureOp::OutputSlot { .. } => 0,
         PureOp::StorageView(_) => 2,
-        PureOp::ViewIndex => 1,
-        PureOp::PlaceIndex => 1,
         PureOp::StorageViewLen => 0,
         PureOp::StorageImageLoad(_) | PureOp::StorageImageStore(_) => 2,
         PureOp::Intrinsic { .. } => 2,

@@ -83,7 +83,7 @@ fn find_in_graph(
             {
                 continue;
             }
-            let Some(result) = effect.result else {
+            let Some(result) = effect.value_result() else {
                 continue;
             };
             let demands = graph
@@ -184,29 +184,37 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
         };
         (
             op.form.pre.clone(),
-            effect.operand_nodes[..op.inputs.len()].to_vec(),
-            effect.result.expect("indexed map has no result"),
+            effect.operands[..op.inputs.len()]
+                .iter()
+                .map(|operand| operand.value().expect("Screma inputs are values or views"))
+                .collect::<Vec<_>>(),
+            effect.value_result().expect("indexed map has no by-value result"),
         )
     };
+    let callee = pre
+        .seg_body()
+        .map(|body| inner.region(body.region).expect("indexed fusion lambda region").clone());
 
     inner.rewrite_body(candidate.site, |body| {
         let rewrite_graph = |graph: &mut EGraph| {
             let mut replacements = Vec::with_capacity(candidate.demands.len());
             for demand in &candidate.demands {
-                let mut arguments = input_nodes
+                let arguments = input_nodes
                     .iter()
                     .zip(&pre.parameter_types)
                     .map(|(&input, elem_ty)| {
-                        graph.intern_pure(
+                        let value = graph.intern_pure(
                             PureOp::Index,
                             smallvec![input, demand.index_value],
                             elem_ty.clone(),
                             None,
-                        )
+                        );
+                        graph.operand_ref(value)
                     })
                     .collect::<Vec<_>>();
-                arguments.extend_from_slice(pre.captures());
-                let results = lambda_ops::emit_call(graph, &pre, arguments);
+                let mut operands = arguments;
+                operands.extend_from_slice(pre.captures());
+                let results = lambda_ops::emit_call(graph, &pre, callee.as_ref(), operands);
                 let scalar = results[demand.output];
                 graph_ops::replace_all_references(graph, demand.index, scalar);
                 replacements.push((demand.index, scalar));

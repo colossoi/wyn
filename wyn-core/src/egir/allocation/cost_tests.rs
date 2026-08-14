@@ -1,8 +1,12 @@
 use super::*;
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_projector::GraphProjector;
+use crate::egir::program::SemanticResourceRef;
 use crate::egir::stage_variance::StageDependenceAnalysis;
-use crate::egir::types::{EffectToken, PureOp, SideEffectSite};
+use crate::egir::types::{
+    by_value_function_result, callable_parameter, EffectToken, LoadMode, PureOp, SideEffectSite,
+    WynLanguage,
+};
 use crate::flow::ExecutionModel;
 use crate::interface::{BindingExposure, EntryInput, IoDecoration};
 use crate::BindingRef;
@@ -21,8 +25,11 @@ fn u32_ty() -> Type<TypeName> {
 fn stage_invariance_and_scalar_relocation_legality_remain_separate() {
     let ty = u32_ty();
     let mut graph = EGraph::new();
-    let params = (0..4).map(|index| graph.add_func_param(index, ty.clone())).collect::<Vec<_>>();
-    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(params[0]));
+    let params = (0..4)
+        .map(|index| graph.add_test_value_parameter(index, ty.clone()))
+        .collect::<Vec<_>>();
+    graph.skeleton.blocks[graph.skeleton.entry].term =
+        SkeletonTerminator::Return(Some(graph.value_result(params[0])));
     let inputs = vec![
         EntryInput {
             name: "uniform".into(),
@@ -73,9 +80,11 @@ fn stage_invariance_and_scalar_relocation_legality_remain_separate() {
         vec![],
         ["uniform", "read_only", "read_write", "dispatch_size"]
             .into_iter()
-            .map(|name| (ty.clone(), name.into()))
+            .map(|name| {
+                callable_parameter::<SemanticResourceRef, WynLanguage>(name.into(), ty.clone())
+            })
             .collect(),
-        ty,
+        by_value_function_result::<WynLanguage>(ty),
         graph,
     );
 
@@ -115,19 +124,24 @@ fn structured_storage_prefix_requires_materialization() {
     let continuation = graph.skeleton.create_block();
     let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
     let view = graph_ops::intern_resource_view(&mut graph, crate::ResourceId::for_test(1), i32_ty(), None);
-    let place = graph.intern_pure(PureOp::ViewIndex, smallvec![view, zero], i32_ty(), None);
+    let place = graph.add_view_index_place(graph.view_id(view), zero, i32_ty(), None);
     let loaded = graph.alloc_side_effect_result(i32_ty());
+    let loaded_binding = graph.value_result(loaded);
     graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![place],
-        result: Some(loaded),
+        kind: SideEffectKind::Effect(EffectOp::Load {
+            place,
+            mode: LoadMode::Element,
+        }),
+        operands: smallvec![],
+        result: Some(loaded_binding),
         effects: Some((EffectToken::from(0), EffectToken::from(1))),
         span: None,
     });
     let result = graph.add_block_param(continuation, i32_ty());
+    let loaded_args = graph.admit_flow_values([loaded]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: continuation,
-        args: vec![loaded],
+        args: loaded_args,
     };
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
@@ -157,9 +171,10 @@ fn canonical_fixed_range_loop_recovers_trip_count() {
     let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty(), None);
     let bound = graph.intern_pure(PureOp::Int("32".into()), smallvec![], i32_ty(), None);
     let index = graph.add_block_param(header, i32_ty());
+    let zero_args = graph.admit_flow_values([zero]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![zero],
+        args: zero_args,
     };
     let cond = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Less),
@@ -180,9 +195,10 @@ fn canonical_fixed_range_loop_recovers_trip_count() {
         i32_ty(),
         None,
     );
+    let next_args = graph.admit_flow_values([next]);
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![next],
+        args: next_args,
     };
     graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(None);
 

@@ -80,7 +80,7 @@ fn find_in_graph(
             {
                 continue;
             }
-            let Some(producer_result) = producer.result else {
+            let Some(producer_result) = producer.value_result() else {
                 continue;
             };
 
@@ -107,10 +107,11 @@ fn find_in_graph(
                     continue;
                 }
 
-                let routes = consumer.operand_nodes[..input_count]
+                let routes = consumer.operands[..input_count]
                     .iter()
                     .enumerate()
-                    .filter_map(|(consumer_input, &operand)| {
+                    .filter_map(|(consumer_input, operand)| {
+                        let operand = operand.value().expect("anchored SOAC inputs are values or views");
                         let field = graph_ops::projection_index(graph, operand, producer_result)?;
                         let screma::ResultId::Post(producer_post_output) =
                             producer_op.form.result_id(field)?
@@ -203,9 +204,12 @@ pub(super) fn finish(
     synthesized: Vec<SemanticFunc>,
     identities: ProgramIdentities,
 ) -> Segmented {
-    let operands = SmallVec::from_vec(input_nodes);
     let rebuilt = inner.rewrite_body(candidate.site, |body| {
         let rewrite = |graph: &mut EGraph| {
+            let operands = input_nodes
+                .iter()
+                .map(|input| graph.operand_ref(*input))
+                .collect::<SmallVec<_>>();
             let block = &mut graph.skeleton.blocks[candidate.block];
             let effects = splice_effect_tokens(
                 block.side_effects[candidate.producer].effects,
@@ -213,7 +217,7 @@ pub(super) fn finish(
             );
             let consumer = &mut block.side_effects[candidate.consumer];
             consumer.kind = SideEffectKind::Soac(SoacEffect(consumer_id, consumer_op.clone()));
-            consumer.operand_nodes = operands.clone();
+            consumer.operands = operands;
             consumer.effects = effects;
             block.side_effects.remove(candidate.producer);
         };

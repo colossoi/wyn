@@ -1,7 +1,10 @@
 use super::*;
 
 use crate::ast::{Span, TypeName};
-use crate::egir::types::SkeletonTerminator;
+use crate::egir::types::{
+    by_value_function_result, callable_parameter, CallEffects, FuncParam, OperandRef, PureOp,
+    SkeletonTerminator, WynLanguage,
+};
 use crate::flow::ControlHeader;
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
@@ -27,12 +30,42 @@ fn fixed_u32_array_ty(size: usize) -> Type<TypeName> {
     )
 }
 
+fn physical_params(specs: impl IntoIterator<Item = (&'static str, Type<TypeName>)>) -> Vec<FuncParam<crate::BindingRef, Type<TypeName>>> {
+    specs
+        .into_iter()
+        .map(|(name, ty)| callable_parameter::<crate::BindingRef, WynLanguage>(name.into(), ty))
+        .collect()
+}
+
+fn add_value_call(
+    graph: &mut EGraph<Physical>,
+    callee: crate::FunctionId,
+    params: &[FuncParam<crate::BindingRef, Type<TypeName>>],
+    result_ty: Type<TypeName>,
+    arguments: impl IntoIterator<Item = ValueId>,
+) -> ValueId {
+    let result = by_value_function_result::<WynLanguage>(result_ty);
+    graph
+        .add_call(
+            callee,
+            params,
+            &result,
+            arguments.into_iter().map(OperandRef::Value),
+            CallEffects::Pure,
+            None,
+        )
+        .expect("complete test call")
+        .1
+        .single_value()
+        .expect("scalar test call result")
+}
+
 fn mixed_callee() -> PhysicalFunc {
     let ty = u32_ty();
     let region = crate::FunctionId::from_index(0);
     let mut graph = EGraph::<Physical>::new();
-    let varying = graph.add_func_param(0, ty.clone());
-    let invariant = graph.add_func_param(1, ty.clone());
+    let varying = graph.add_test_value_parameter(0, ty.clone());
+    let invariant = graph.add_test_value_parameter(1, ty.clone());
     let invariant_square = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Multiply),
         smallvec![invariant, invariant],
@@ -45,14 +78,20 @@ fn mixed_callee() -> PhysicalFunc {
         ty.clone(),
         None,
     );
-    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
+    graph.skeleton.blocks[graph.skeleton.entry].term =
+        SkeletonTerminator::Return(Some(graph.value_result(result)));
+    let params = physical_params([
+        ("varying", ty.clone()),
+        ("invariant", ty.clone()),
+    ]);
     PhysicalFunc::new(
         region,
         "mixed".into(),
         Span::dummy(),
         None,
-        vec![(ty.clone(), "varying".into()), (ty.clone(), "invariant".into())],
-        ty,
+        params,
+        by_value_function_result::<WynLanguage>(ty),
+        CallEffects::Pure,
         graph,
     )
 }
@@ -61,22 +100,28 @@ fn mixed_callee_without_invariant_subexpression() -> PhysicalFunc {
     let ty = u32_ty();
     let region = crate::FunctionId::from_index(0);
     let mut graph = EGraph::<Physical>::new();
-    let varying = graph.add_func_param(0, ty.clone());
-    let invariant = graph.add_func_param(1, ty.clone());
+    let varying = graph.add_test_value_parameter(0, ty.clone());
+    let invariant = graph.add_test_value_parameter(1, ty.clone());
     let result = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![varying, invariant],
         ty.clone(),
         None,
     );
-    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
+    graph.skeleton.blocks[graph.skeleton.entry].term =
+        SkeletonTerminator::Return(Some(graph.value_result(result)));
+    let params = physical_params([
+        ("varying", ty.clone()),
+        ("invariant", ty.clone()),
+    ]);
     PhysicalFunc::new(
         region,
         "mixed".into(),
         Span::dummy(),
         None,
-        vec![(ty.clone(), "varying".into()), (ty.clone(), "invariant".into())],
-        ty,
+        params,
+        by_value_function_result::<WynLanguage>(ty),
+        CallEffects::Pure,
         graph,
     )
 }
@@ -92,44 +137,52 @@ fn loop_caller(shape: CallArgs) -> (EGraph<Physical>, ValueId, ValueId) {
     let ty = u32_ty();
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let mut graph = EGraph::<Physical>::new();
-    let invariant = graph.add_func_param(0, ty.clone());
+    let invariant = graph.add_test_value_parameter(0, ty.clone());
     let entry = graph.skeleton.entry;
     let header = graph.skeleton.create_block();
     let body = graph.skeleton.create_block();
     let merge = graph.skeleton.create_block();
 
     let initial = graph.intern_constant(ConstantValue::U32(0), ty.clone());
+    let initial_args = graph.admit_flow_values([initial]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![initial],
+        args: initial_args,
     };
     let current = graph.add_block_param(header, ty.clone());
     let keep_going = graph.intern_constant(ConstantValue::Bool(true), bool_ty);
+    let exit_args = graph.admit_flow_values([current]);
     graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
         cond: keep_going,
         then_target: body,
         then_args: vec![],
         else_target: merge,
-        else_args: vec![current],
+        else_args: exit_args,
     };
     let literal = graph.intern_constant(ConstantValue::U32(7), ty.clone());
     let operands = match shape {
-        CallArgs::Mixed => smallvec![current, invariant],
-        CallArgs::AllInvariant => smallvec![invariant, literal],
-        CallArgs::AllVarying => smallvec![current, current],
+        CallArgs::Mixed => vec![current, invariant],
+        CallArgs::AllInvariant => vec![invariant, literal],
+        CallArgs::AllVarying => vec![current, current],
     };
-    let call = graph.intern_pure(
-        PureOp::Call(crate::FunctionId::from_index(0)),
-        operands,
+    let params = physical_params([
+        ("varying", ty.clone()),
+        ("invariant", ty.clone()),
+    ]);
+    let call = add_value_call(
+        &mut graph,
+        crate::FunctionId::from_index(0),
+        &params,
         ty.clone(),
-        None,
+        operands,
     );
+    let call_args = graph.admit_flow_values([call]);
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![call],
+        args: call_args,
     };
     let result = graph.add_block_param(merge, ty);
-    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(result));
+    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(graph.value_result(result)));
 
     graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
         merge,
@@ -180,10 +233,7 @@ fn leaves_whole_call_licm_and_fully_varying_calls_alone() {
         assert_eq!(stats.calls_inlined, 0);
         assert!(matches!(
             graph.nodes[call].kind,
-            ValueKind::Pure {
-                op: PureOp::Call(_),
-                ..
-            }
+            ValueKind::CallResult { .. }
         ));
     }
 }
@@ -194,26 +244,29 @@ fn inlines_fixed_array_parameters_outside_loops() {
     let array = fixed_u32_array_ty(4);
     let region = crate::FunctionId::from_index(0);
     let mut callee_graph = EGraph::<Physical>::new();
-    let values = callee_graph.add_func_param(0, array.clone());
+    let values = callee_graph.add_test_value_parameter(0, array.clone());
     let zero = callee_graph.intern_constant(ConstantValue::I32(0), i32_ty());
     let result = callee_graph.intern_pure(PureOp::Index, smallvec![values, zero], scalar.clone(), None);
     callee_graph.skeleton.blocks[callee_graph.skeleton.entry].term =
-        SkeletonTerminator::Return(Some(result));
+        SkeletonTerminator::Return(Some(callee_graph.value_result(result)));
+    let params = physical_params([("values", array.clone())]);
     let callee = PhysicalFunc::new(
         region,
         "fixed_array_element".into(),
         Span::dummy(),
         None,
-        vec![(array.clone(), "values".into())],
-        scalar.clone(),
+        params.clone(),
+        by_value_function_result::<WynLanguage>(scalar.clone()),
+        CallEffects::Pure,
         callee_graph,
     );
     let callees = [(region, callee)].into_iter().collect();
 
     let mut caller = EGraph::<Physical>::new();
-    let values = caller.add_func_param(0, array);
-    let call = caller.intern_pure(PureOp::Call(region), smallvec![values], scalar, None);
-    caller.skeleton.blocks[caller.skeleton.entry].term = SkeletonTerminator::Return(Some(call));
+    let values = caller.add_test_value_parameter(0, array);
+    let call = add_value_call(&mut caller, region, &params, scalar, [values]);
+    caller.skeleton.blocks[caller.skeleton.entry].term =
+        SkeletonTerminator::Return(Some(caller.value_result(call)));
 
     let stats = inline_body(&mut caller, &callees).unwrap();
 
@@ -229,8 +282,8 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
     let array = fixed_u32_array_ty(4);
     let region = crate::FunctionId::from_index(0);
     let mut callee_graph = EGraph::<Physical>::new();
-    let index = callee_graph.add_func_param(0, index_ty.clone());
-    let values = callee_graph.add_func_param(1, array.clone());
+    let index = callee_graph.add_test_value_parameter(0, index_ty.clone());
+    let values = callee_graph.add_test_value_parameter(1, array.clone());
     let materialized =
         callee_graph.intern_pure(PureOp::Materialize, smallvec![values], array.clone(), None);
     let element = callee_graph.intern_pure(
@@ -258,9 +311,10 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
         else_args: vec![],
     };
     callee_graph.skeleton.blocks[entry].control_header = Some(ControlHeader::Selection { merge });
+    let left_args = callee_graph.admit_flow_values([element]);
     callee_graph.skeleton.blocks[left].term = SkeletonTerminator::Branch {
         target: merge,
-        args: vec![element],
+        args: left_args,
     };
     let one = callee_graph.intern_constant(ConstantValue::U32(1), scalar.clone());
     let incremented = callee_graph.intern_pure(
@@ -269,36 +323,42 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
         scalar.clone(),
         None,
     );
+    let right_args = callee_graph.admit_flow_values([incremented]);
     callee_graph.skeleton.blocks[right].term = SkeletonTerminator::Branch {
         target: merge,
-        args: vec![incremented],
+        args: right_args,
     };
     let selected = callee_graph.add_block_param(merge, scalar.clone());
-    callee_graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(selected));
+    callee_graph.skeleton.blocks[merge].term =
+        SkeletonTerminator::Return(Some(callee_graph.value_result(selected)));
+    let params = physical_params([
+        ("index", index_ty.clone()),
+        ("values", array.clone()),
+    ]);
     let callee = PhysicalFunc::new(
         region,
         "conditional_fixed_array_element".into(),
         Span::dummy(),
         None,
-        vec![
-            (index_ty.clone(), "index".into()),
-            (array.clone(), "values".into()),
-        ],
-        scalar.clone(),
+        params.clone(),
+        by_value_function_result::<WynLanguage>(scalar.clone()),
+        CallEffects::Pure,
         callee_graph,
     );
     let callees = [(region, callee)].into_iter().collect();
 
     let mut caller = EGraph::<Physical>::new();
-    let actual_index = caller.add_func_param(0, index_ty);
-    let actual_values = caller.add_func_param(1, array);
-    let call = caller.intern_pure(
-        PureOp::Call(region),
-        smallvec![actual_index, actual_values],
+    let actual_index = caller.add_test_value_parameter(0, index_ty);
+    let actual_values = caller.add_test_value_parameter(1, array);
+    let call = add_value_call(
+        &mut caller,
+        region,
+        &params,
         scalar,
-        None,
+        [actual_index, actual_values],
     );
-    caller.skeleton.blocks[caller.skeleton.entry].term = SkeletonTerminator::Return(Some(call));
+    caller.skeleton.blocks[caller.skeleton.entry].term =
+        SkeletonTerminator::Return(Some(caller.value_result(call)));
 
     let stats = inline_body(&mut caller, &callees).unwrap();
 
@@ -306,16 +366,18 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
     assert_eq!(stats.block_budget, 5);
     assert!(matches!(
         caller.nodes[call].kind,
-        ValueKind::Pure {
-            op: PureOp::Call(_),
-            ..
-        }
+        ValueKind::CallResult { .. }
     ));
     assert!(caller
         .skeleton
         .blocks
         .values()
-        .any(|block| { matches!(block.term, SkeletonTerminator::Return(Some(result)) if result != call) }));
+        .any(|block| {
+            matches!(
+                &block.term,
+                SkeletonTerminator::Return(Some(result)) if result.single_value() != Some(call)
+            )
+        }));
     assert!(caller
         .skeleton
         .blocks

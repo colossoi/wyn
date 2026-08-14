@@ -200,6 +200,7 @@ fn build_parallel_plan(
         &program.data.core.pipeline,
         &program.data.core.stage_entries,
         &program.entry_points,
+        &program.functions,
         flows,
         recipes,
         &mut program.global_context.semantic_ids,
@@ -246,6 +247,7 @@ fn build_serial_plan(
         &program.data.core.pipeline,
         &program.data.core.stage_entries,
         &program.entry_points,
+        &program.functions,
         flows,
         recipes,
         &mut program.global_context.semantic_ids,
@@ -277,6 +279,7 @@ struct KernelPlanBuilder<'resources, 'effects> {
     semantic_ids: &'effects mut super::program::SemanticOpIdSource,
     effect_ids: &'effects mut crate::IdSource<EffectToken>,
     generated_callables: Vec<SemanticFunc>,
+    callables: LookupMap<RegionId, SemanticFunc>,
     entry_ids: Vec<SemanticEntryId>,
     identities: super::program::ProgramIdentities,
 }
@@ -370,7 +373,12 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
             "planner-generated callable did not retain its reserved name"
         );
         self.generated_callables.push(function);
+        self.callables.insert(id, self.generated_callables.last().unwrap().clone());
         Ok(id)
+    }
+
+    fn callable(&self, region: RegionId) -> &SemanticFunc {
+        self.callables.get(&region).expect("parallel lowering callable boundary")
     }
 
     fn new(
@@ -378,6 +386,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         descriptor: &crate::pipeline_descriptor::PipelineDescriptor,
         stage_entries: &[Vec<crate::EntryId>],
         entries: &[SemanticEntry],
+        functions: &[SemanticFunc],
         flows: Vec<(ResourceId, allocation::CompilerResourceFlow)>,
         recipes: planning::RecipeIndex,
         semantic_ids: &'effects mut super::program::SemanticOpIdSource,
@@ -402,6 +411,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
             semantic_ids,
             effect_ids,
             generated_callables: Vec::new(),
+            callables: functions.iter().map(|function| (function.region, function.clone())).collect(),
             entry_ids: entries.iter().map(|entry| entry.id).collect(),
             identities,
         })

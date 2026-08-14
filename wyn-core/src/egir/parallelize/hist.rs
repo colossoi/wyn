@@ -66,20 +66,21 @@ pub(super) fn analyze_hist_candidate(
             let effect = graph.skeleton.effect(located.site);
             let captures = located.op.capture_nodes();
             let input_resources = effect
-                .operand_nodes
+                .operands
                 .iter()
-                .chain(captures.iter())
-                .flat_map(|node| resources_for(*node))
+                .filter_map(|operand| operand.value())
+                .chain(captures.iter().copied())
+                .flat_map(resources_for)
                 .collect();
             return Some(HistCandidate::Bucket(BucketCandidate {
                 site: located.site,
                 owner: located.owner,
                 space: space.clone(),
                 bucket_count,
-                destination: resource_for(operation.destinations[0])?,
+                destination: resource_for(operation.destinations[0].value())?,
                 input_resources,
-                counts: resource_for(counts)?,
-                overflow: resource_for(overflow)?,
+                counts: resource_for(counts.value())?,
+                overflow: resource_for(overflow.value())?,
             }));
         }
     }
@@ -137,10 +138,11 @@ fn recognize_direct_atomic(
         return None;
     }
     let SkeletonTerminator::Return(Some(result)) =
-        function.graph.skeleton.blocks[function.graph.skeleton.entry].term
+        &function.graph.skeleton.blocks[function.graph.skeleton.entry].term
     else {
         return None;
     };
+    let result = result.single_value()?;
     let ValueKind::Pure { op, operands } = &function.graph.nodes[result].kind else {
         return None;
     };
@@ -168,12 +170,10 @@ fn matches_parameter_pair(graph: &crate::egir::types::EGraph<Semantic>, operands
     matches!(
         (&graph.nodes[*left].kind, &graph.nodes[*right].kind),
         (
-            ValueKind::FuncParam { index: 0 },
-            ValueKind::FuncParam { index: 1 }
-        ) | (
-            ValueKind::FuncParam { index: 1 },
-            ValueKind::FuncParam { index: 0 }
-        )
+            ValueKind::FuncParam { parameter: left },
+            ValueKind::FuncParam { parameter: right }
+        ) if (left.index() == 0 && right.index() == 1)
+            || (left.index() == 1 && right.index() == 0)
     )
 }
 
@@ -250,8 +250,8 @@ fn fixed_seg_extent(
         crate::egir::types::SegExtent::Value(node) => constant_i32(graph, *node)
             .and_then(|value| u32::try_from(value).ok())
             .or_else(|| fixed_array_extent(&graph.nodes[*node].ty)),
-        crate::egir::types::SegExtent::ResourceLength { node, .. } => {
-            fixed_array_extent(&graph.nodes[*node].ty)
+        crate::egir::types::SegExtent::ResourceLength { view, .. } => {
+            fixed_array_extent(&graph.nodes[view.value()].ty)
         }
         crate::egir::types::SegExtent::PushConstant { .. } => None,
     }

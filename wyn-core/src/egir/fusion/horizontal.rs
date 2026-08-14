@@ -76,12 +76,12 @@ fn sibling_fusable(
     let left_effect = &block.side_effects[left];
     let right_effect = &block.side_effects[right];
     let (SideEffectKind::Soac(SoacEffect(left_id, Soac::Screma(left_op))), Some(_)) =
-        (&left_effect.kind, left_effect.result)
+        (&left_effect.kind, left_effect.result.as_ref())
     else {
         return false;
     };
     let (SideEffectKind::Soac(SoacEffect(right_id, Soac::Screma(right_op))), Some(_)) =
-        (&right_effect.kind, right_effect.result)
+        (&right_effect.kind, right_effect.result.as_ref())
     else {
         return false;
     };
@@ -102,8 +102,8 @@ fn sibling_fusable(
         return false;
     };
 
-    let left_inputs = &left_effect.operand_nodes[..left_op.inputs.len()];
-    let right_inputs = &right_effect.operand_nodes[..right_op.inputs.len()];
+    let left_inputs = &left_effect.operands[..left_op.inputs.len()];
+    let right_inputs = &right_effect.operands[..right_op.inputs.len()];
     let shared_input = left_inputs.iter().any(|node| right_inputs.contains(node));
     // Horizontal fusion does not eliminate an intermediate array. Its reliable
     // benefit is sharing one traversal of an actual input, which is also the
@@ -119,7 +119,7 @@ fn sibling_fusable(
 
     ((left + 1)..right).all(|index| {
         let effect = &block.side_effects[index];
-        match (&effect.kind, effect.result) {
+        match (&effect.kind, effect.result.as_ref()) {
             (SideEffectKind::Soac(SoacEffect(id, Soac::Screma(_))), Some(_)) => {
                 !oracle.conflicts(id, left_id) && !oracle.conflicts(id, right_id)
             }
@@ -178,7 +178,7 @@ pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> Sc
     else {
         unreachable!("horizontal fusion selected a serial Screma");
     };
-    let result = effect.result.expect("fusable Screma has no result");
+    let result = effect.value_result().expect("fusable Screma has no by-value result");
     let Type::Constructed(TypeName::Tuple(arity), result_types) = graph.nodes[result].ty.clone() else {
         unreachable!("Screma result is not a tuple");
     };
@@ -186,13 +186,22 @@ pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> Sc
     assert_eq!(result_types.len(), op.result_count());
 
     let input_count = op.inputs.len();
-    let input_nodes = effect.operand_nodes[..input_count].to_vec();
-    let mut output_operands = effect.operand_nodes[input_count..].iter().copied();
+    let input_nodes = effect.operands[..input_count]
+        .iter()
+        .map(|operand| operand.value().expect("Screma inputs are values or views"))
+        .collect();
+    let mut output_operands = effect.operands[input_count..].iter().copied();
     let output_nodes = (0..op.result_count())
         .map(|field| {
             op.destination(field)
                 .filter(|destination| destination.is_output_view())
-                .map(|_| output_operands.next().expect("missing Screma output-view operand"))
+                .map(|_| {
+                    output_operands
+                        .next()
+                        .expect("missing Screma output-view operand")
+                        .value()
+                        .expect("Screma output is a view")
+                })
         })
         .collect::<Vec<_>>();
     assert!(output_operands.next().is_none());
@@ -354,6 +363,8 @@ fn apply_plan(graph: &mut EGraph, block: BlockId, left: usize, right: usize, pla
         &plan.right_result_types,
     );
 
+    let operands = plan.operands.iter().map(|operand| graph.operand_ref(*operand)).collect();
+    let result = graph.value_result(fused_result);
     let block = &mut graph.skeleton.blocks[block];
     let effects = splice_effect_tokens(
         block.side_effects[left].effects,
@@ -361,8 +372,8 @@ fn apply_plan(graph: &mut EGraph, block: BlockId, left: usize, right: usize, pla
     );
     block.side_effects[left].kind =
         SideEffectKind::Soac(SoacEffect(plan.id, Soac::Screma(plan.op.clone())));
-    block.side_effects[left].operand_nodes = plan.operands.clone();
-    block.side_effects[left].result = Some(fused_result);
+    block.side_effects[left].operands = operands;
+    block.side_effects[left].result = Some(result);
     block.side_effects[left].effects = effects;
     block.side_effects.remove(right);
 }

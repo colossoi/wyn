@@ -6,7 +6,10 @@
 use crate::egir::program::SemanticFunc;
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{hist, screma};
-use crate::egir::types::{PureOp, RegionId, Semantic, SkeletonTerminator, ValueId, ValueKind};
+use crate::egir::types::{
+    PureOp, RegionId, ResultBinding, ResultDestination, Semantic, SkeletonTerminator, ValueId,
+    ValueKind,
+};
 use crate::LookupMap;
 
 #[cfg(test)]
@@ -42,12 +45,12 @@ impl<'a> RegionExecutor<'a> {
     pub fn call(&self, region: &RegionId, arguments: &[Value]) -> Result<Value, String> {
         let body = self.program.region(*region).ok_or_else(|| format!("unknown EGIR region {region}"))?;
         let SkeletonTerminator::Return(Some(result)) =
-            body.graph.skeleton.blocks[body.graph.skeleton.entry].term
+            &body.graph.skeleton.blocks[body.graph.skeleton.entry].term
         else {
             return Err(format!("region `{}` is not a pure return region", body.name));
         };
         let mut memo = LookupMap::new();
-        self.eval_node(body, result, arguments, &mut memo)
+        self.eval_result(body, result, arguments, &mut memo)
     }
 
     /// Invoke a canonical Screma lambda and unpack its logical result fields.
@@ -101,8 +104,9 @@ impl<'a> RegionExecutor<'a> {
             return Ok(value.clone());
         }
         let value = match &region.graph.nodes[node].kind {
-            ValueKind::FuncParam { index } => {
-                arguments.get(*index).cloned().ok_or_else(|| format!("missing region argument {index}"))?
+            ValueKind::FuncParam { parameter } => {
+                let index = parameter.index();
+                arguments.get(index).cloned().ok_or_else(|| format!("missing region argument {index}"))?
             }
             ValueKind::Constant(crate::ssa::types::ConstantValue::I32(value)) => Value::Int(*value as i64),
             ValueKind::Constant(crate::ssa::types::ConstantValue::U32(value)) => Value::Int(*value as i64),
@@ -118,7 +122,28 @@ impl<'a> RegionExecutor<'a> {
                     .collect();
                 self.eval_pure(op, &values?)?
             }
-            ValueKind::BlockParam { .. } | ValueKind::SideEffectResult => {
+            ValueKind::CallResult { call, slot } => {
+                let call = region.graph.call(*call);
+                let values = call
+                    .arguments()
+                    .iter()
+                    .map(|argument| {
+                        let argument = argument
+                            .value()
+                            .ok_or_else(|| "pure region executor cannot pass a place".to_owned())?;
+                        self.eval_node(region, argument, arguments, memo)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let returned = self.call(&call.callee(), &values)?;
+                flattened_value(&returned)
+                    .get(slot.index())
+                    .copied()
+                    .cloned()
+                    .ok_or_else(|| format!("call result slot {} is absent", slot.index()))?
+            }
+            ValueKind::BlockParam { .. }
+            | ValueKind::PlaceLength { .. }
+            | ValueKind::SideEffectResult => {
                 return Err("effectful/CFG values are outside the pure region executor".into())
             }
         };
@@ -172,14 +197,49 @@ impl<'a> RegionExecutor<'a> {
                     _ => Err(format!("unsupported integer operator `{operator}`")),
                 }
             }
-            PureOp::Call(callee) => {
-                if !self.program.contains_region(*callee) {
-                    return Err(format!("unknown EGIR region {callee:?}"));
-                }
-                self.call(callee, values)
-            }
             _ => Err(format!("unsupported pure region operation {op:?}")),
         }
+    }
+
+    fn eval_result(
+        &self,
+        region: &SemanticFunc,
+        result: &ResultBinding<polytype::Type<crate::ast::TypeName>>,
+        arguments: &[Value],
+        memo: &mut LookupMap<ValueId, Value>,
+    ) -> Result<Value, String> {
+        if result.is_product() {
+            return (0..result.field_count())
+                .map(|index| {
+                    self.eval_result(
+                        region,
+                        &result.field(index).expect("result field disappeared"),
+                        arguments,
+                        memo,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Tuple);
+        }
+        let mut value = None;
+        result.for_each_destination(|_, destination| {
+            if let ResultDestination::ReturnValue(result) = destination {
+                value = Some(*result);
+            }
+        });
+        self.eval_node(
+            region,
+            value.ok_or_else(|| "pure region result is destination-passed".to_owned())?,
+            arguments,
+            memo,
+        )
+    }
+}
+
+fn flattened_value(value: &Value) -> Vec<&Value> {
+    match value {
+        Value::Tuple(fields) => fields.iter().flat_map(flattened_value).collect(),
+        value => vec![value],
     }
 }
 

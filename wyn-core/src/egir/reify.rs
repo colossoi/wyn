@@ -105,7 +105,8 @@ fn reify_func(function: Func<Raw>, semantic_ids: &mut SemanticOpIdSource) -> Fun
         span,
         linkage_name,
         params,
-        return_ty,
+        result,
+        effects,
         graph,
     } = function;
     let (graph, _) = map_graph(graph, facts, semantic_ids);
@@ -115,7 +116,8 @@ fn reify_func(function: Func<Raw>, semantic_ids: &mut SemanticOpIdSource) -> Fun
         span,
         linkage_name,
         params,
-        return_ty,
+        result,
+        effects,
         graph,
     }
 }
@@ -219,7 +221,7 @@ mod tests {
                     state: screma::RawState,
                 }),
             )),
-            operand_nodes: SmallVec::new(),
+            operands: SmallVec::new(),
             result: None,
             effects: None,
             span: None,
@@ -243,7 +245,7 @@ mod tests {
         graph.skeleton.blocks[block].side_effects.push(raw_map());
         graph.skeleton.blocks[block].side_effects.push(SideEffect {
             kind: SideEffectKind::Effect(EffectOp::ControlBarrier),
-            operand_nodes: SmallVec::new(),
+            operands: SmallVec::new(),
             result: None,
             effects: None,
             span: None,
@@ -298,7 +300,12 @@ fn entry_facts(entry: &RawEntry<RealizedOutputRoute>) -> HashMap<(BlockId, usize
     for (block, contents) in &entry.graph.skeleton.blocks {
         for (index, effect) in contents.side_effects.iter().enumerate() {
             let placement =
-                if kernel_scope && !effect.result.is_some_and(|result| consumed.contains(&result)) {
+                if kernel_scope
+                    && !effect
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| result.values().iter().any(|value| consumed.contains(value)))
+                {
                     screma::Placement::Kernel
                 } else {
                     screma::Placement::LaneLocal
@@ -397,7 +404,9 @@ fn space(
                     .map(|array_axis| (operand_index, input, array_axis))
             })
             .unwrap_or_else(|| panic!("SOAC domain dimension {logical_dimension} has no input"));
-        let node = effect.operand_nodes[operand_index];
+        let node = effect.operands[operand_index]
+            .value()
+            .expect("SOAC input uses the value or view channel");
         let mut dimension_ty = &input.array;
         while let Some(components) = super::types::as_soa_tuple(dimension_ty) {
             dimension_ty = components.first().expect("structure-of-arrays tuple must have a component");
@@ -419,7 +428,7 @@ fn space(
                 )
                 .expect("resource-backed SOAC input must have a storable element type");
                 SegExtent::ResourceLength {
-                    node,
+                    view: graph.view_id(node),
                     resource,
                     elem_bytes,
                 }
@@ -457,8 +466,8 @@ fn extent_from_node(
             op: PureOp::Int(value) | PureOp::Uint(value),
             ..
         } => value.parse().map(SegExtent::Fixed).unwrap_or(SegExtent::Value(node)),
-        ValueKind::FuncParam { index } => entry
-            .and_then(|entry| entry.inputs.get(*index))
+        ValueKind::FuncParam { parameter } => entry
+            .and_then(|entry| entry.inputs.get(parameter.index()))
             .and_then(|input| input.push_constant())
             .map(|slot| SegExtent::PushConstant {
                 node,
@@ -470,7 +479,11 @@ fn extent_from_node(
 }
 
 fn output_slots(entry: &RawEntry<RealizedOutputRoute>, effect: &SideEffect<Raw>) -> Vec<OutputSlotId> {
-    let value_writer = effect.result.map(OutputWriter::Value);
+    let value_writers = effect
+        .result
+        .as_ref()
+        .map(|result| result.values())
+        .unwrap_or_default();
     let effect_writer = effect.effects.map(|(_, output)| OutputWriter::Effect(output));
     let mut slots = entry
         .outputs
@@ -481,7 +494,10 @@ fn output_slots(entry: &RawEntry<RealizedOutputRoute>, effect: &SideEffect<Raw>)
                 route
                     .writers
                     .iter()
-                    .any(|writer| Some(*writer) == value_writer || Some(*writer) == effect_writer)
+                    .any(|writer| {
+                        matches!(writer, OutputWriter::Value(value) if value_writers.contains(value))
+                            || Some(*writer) == effect_writer
+                    })
             })
         })
         .map(|(slot, _)| OutputSlotId(slot))
@@ -539,11 +555,11 @@ fn soac_consumed_nodes(graph: &EGraph<Raw>) -> HashSet<ValueId> {
 }
 
 fn referenced_nodes(effect: &SideEffect<Raw>) -> Vec<ValueId> {
-    let mut nodes = effect.operand_nodes.to_vec();
+    let mut nodes = effect.operand_values().collect::<Vec<_>>();
     let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
         return nodes;
     };
-    nodes.extend(soac.seg_bodies().into_iter().flat_map(|body| body.captures.iter().copied()));
+    nodes.extend(soac.seg_bodies().into_iter().flat_map(|body| body.capture_values()));
     match soac {
         Soac::Screma(op) => {
             nodes.extend(op.form.scans.iter().flat_map(|scan| scan.neutral.iter().copied()));

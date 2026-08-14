@@ -134,14 +134,24 @@ fn segmented_entry_map_output_fields(program: &crate::egir::reify::Segmented) ->
         .flat_map(|(_, block)| &block.side_effects)
         .find_map(|effect| {
             matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if op.is_map())
-                .then_some(effect.result)
+                .then(|| effect.result().map(|result| result.values()))
                 .flatten()
         })
         .expect("one observable map result");
     entry
         .routes()
         .map(|route| {
-            crate::egir::graph_ops::root_projection_index(&entry.graph, route.source.value, result)
+            result
+                .iter()
+                .position(|field| {
+                    route.source.value == *field
+                        || crate::egir::graph_ops::root_projection_index(
+                            &entry.graph,
+                            route.source.value,
+                            *field,
+                        )
+                        .is_some()
+                })
                 .expect("entry output route does not select a map result field")
         })
         .collect()
@@ -6118,9 +6128,6 @@ fn inst_signature_multiset<Tag, GlobalContext>(
                     OpTag::StorageViewLen => "StorageViewLen".to_string(),
                     OpTag::StorageImageLoad(_) => "StorageImageLoad".to_string(),
                     OpTag::StorageImageStore(_) => "StorageImageStore".to_string(),
-                    OpTag::ViewIndex => "ViewIndex(pure)".to_string(),
-                    OpTag::PlaceIndex => "PlaceIndex(pure)".to_string(),
-                    OpTag::OutputSlot { .. } => "OutputSlot(pure)".to_string(),
                 }
             ),
         }

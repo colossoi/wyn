@@ -1,8 +1,13 @@
 use super::*;
 
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{semantic_program_for_test, ProgramIdentities, SemanticFunc};
-use crate::egir::types::{Semantic, SkeletonTerminator};
+use crate::egir::program::{
+    semantic_program_for_test, ProgramIdentities, SemanticFunc, SemanticResourceRef,
+};
+use crate::egir::types::{
+    by_value_function_result, callable_parameter, CallEffects, FuncParam, OperandRef, Semantic,
+    SkeletonTerminator, WynLanguage,
+};
 use crate::flow::ExecutionModel;
 use crate::interface::{EntryInput, IoDecoration};
 use crate::pipeline_descriptor::PipelineDescriptor;
@@ -15,13 +20,22 @@ fn u32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::UInt(32), vec![])
 }
 
+fn semantic_params(
+    specs: impl IntoIterator<Item = (&'static str, Type<TypeName>)>,
+) -> Vec<FuncParam<SemanticResourceRef, Type<TypeName>>> {
+    specs
+        .into_iter()
+        .map(|(name, ty)| callable_parameter::<SemanticResourceRef, WynLanguage>(name.into(), ty))
+        .collect()
+}
+
 #[test]
 fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
     let ty = u32_ty();
     let project = FunctionId::from_index(0);
     let mut graph = EGraph::<Semantic>::new();
-    let uniform = graph.add_func_param(0, ty.clone());
-    let stage_input = graph.add_func_param(1, ty.clone());
+    let uniform = graph.add_test_value_parameter(0, ty.clone());
+    let stage_input = graph.add_test_value_parameter(1, ty.clone());
     let one = graph.intern_constant(ConstantValue::U32(1), ty.clone());
     let uniform_sum = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Add),
@@ -29,13 +43,25 @@ fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
         ty.clone(),
         None,
     );
-    let call = graph.intern_pure(
-        PureOp::Call(project),
-        smallvec![stage_input, uniform_sum],
-        ty.clone(),
-        None,
-    );
-    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(call));
+    let project_params = semantic_params([
+        ("value", ty.clone()),
+        ("offset", ty.clone()),
+    ]);
+    let call = graph
+        .add_call(
+            project,
+            &project_params,
+            &by_value_function_result::<WynLanguage>(ty.clone()),
+            [OperandRef::Value(stage_input), OperandRef::Value(uniform_sum)],
+            CallEffects::Pure,
+            None,
+        )
+        .unwrap()
+        .1
+        .single_value()
+        .unwrap();
+    graph.skeleton.blocks[graph.skeleton.entry].term =
+        SkeletonTerminator::Return(Some(graph.value_result(call)));
 
     let inputs = vec![
         EntryInput {
@@ -63,11 +89,11 @@ fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
         inputs,
         vec![],
         vec![],
-        vec![
-            (ty.clone(), "resolved_uniform".into()),
-            (ty.clone(), "resolved_position".into()),
-        ],
-        ty,
+        semantic_params([
+            ("resolved_uniform", ty.clone()),
+            ("resolved_position", ty.clone()),
+        ]),
+        by_value_function_result::<WynLanguage>(ty),
         graph,
     );
 
@@ -107,7 +133,7 @@ fn block_parameters_include_incoming_control_variance() {
     let ty = u32_ty();
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let mut graph = EGraph::<Semantic>::new();
-    let varying_condition = graph.add_func_param(0, bool_ty);
+    let varying_condition = graph.add_test_value_parameter(0, bool_ty);
     let entry = graph.skeleton.entry;
     let then_block = graph.skeleton.create_block();
     let else_block = graph.skeleton.create_block();
@@ -121,16 +147,18 @@ fn block_parameters_include_incoming_control_variance() {
         else_target: else_block,
         else_args: vec![],
     };
+    let then_args = graph.admit_flow_values([one]);
     graph.skeleton.blocks[then_block].term = SkeletonTerminator::Branch {
         target: merge,
-        args: vec![one],
+        args: then_args,
     };
+    let else_args = graph.admit_flow_values([two]);
     graph.skeleton.blocks[else_block].term = SkeletonTerminator::Branch {
         target: merge,
-        args: vec![two],
+        args: else_args,
     };
     let selected = graph.add_block_param(merge, ty);
-    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(selected));
+    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(graph.value_result(selected)));
 
     let analysis = StageDependenceAnalysis::for_graph(
         &graph,
@@ -159,9 +187,10 @@ fn invariant_loop_carried_values_converge_through_the_cfg_cycle() {
     let zero = graph.intern_constant(ConstantValue::U32(0), ty.clone());
     let one = graph.intern_constant(ConstantValue::U32(1), ty.clone());
     let condition = graph.intern_constant(ConstantValue::Bool(true), bool_ty);
+    let initial_args = graph.admit_flow_values([zero]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![zero],
+        args: initial_args,
     };
     let current = graph.add_block_param(header, ty.clone());
     let next = graph.intern_pure(
@@ -170,15 +199,17 @@ fn invariant_loop_carried_values_converge_through_the_cfg_cycle() {
         ty.clone(),
         None,
     );
+    let next_args = graph.admit_flow_values([next]);
+    let current_args = graph.admit_flow_values([current]);
     graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
         cond: condition,
         then_target: header,
-        then_args: vec![next],
+        then_args: next_args,
         else_target: exit,
-        else_args: vec![current],
+        else_args: current_args,
     };
     let result = graph.add_block_param(exit, ty);
-    graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(Some(result));
+    graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(Some(graph.value_result(result)));
 
     graph.skeleton.blocks[header].control_header = Some(crate::flow::ControlHeader::Loop {
         merge: exit,
@@ -197,8 +228,8 @@ fn storage_provenance_is_independent_of_index_uniformity() {
     let ty = u32_ty();
     let array_ty = Type::Constructed(TypeName::Array, vec![]);
     let mut graph = EGraph::<Semantic>::new();
-    let storage = graph.add_func_param(0, array_ty);
-    let varying_index = graph.add_func_param(1, ty.clone());
+    let storage = graph.add_test_value_parameter(0, array_ty);
+    let varying_index = graph.add_test_value_parameter(1, ty.clone());
     let zero = graph.intern_constant(ConstantValue::U32(0), ty.clone());
     let uniform_load = graph.intern_pure(PureOp::Index, smallvec![storage, zero], ty.clone(), None);
     let varying_load = graph.intern_pure(PureOp::Index, smallvec![storage, varying_index], ty, None);
@@ -265,8 +296,8 @@ fn invocation_intrinsics_are_varying_without_operands() {
 fn repeated_region_captures_are_analyzed_per_use() {
     let ty = u32_ty();
     let mut region_graph = EGraph::<Semantic>::new();
-    let lane_value = region_graph.add_func_param(0, ty.clone());
-    let capture = region_graph.add_func_param(1, ty.clone());
+    let lane_value = region_graph.add_test_value_parameter(0, ty.clone());
+    let capture = region_graph.add_test_value_parameter(1, ty.clone());
     let result = region_graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Add),
         smallvec![lane_value, capture],
@@ -274,7 +305,7 @@ fn repeated_region_captures_are_analyzed_per_use() {
         None,
     );
     region_graph.skeleton.blocks[region_graph.skeleton.entry].term =
-        SkeletonTerminator::Return(Some(result));
+        SkeletonTerminator::Return(Some(region_graph.value_result(result)));
     let mut identities = ProgramIdentities::default();
     let region_id: FunctionId = identities.alloc_function("map_body".into());
     let region = SemanticFunc::new(
@@ -282,8 +313,9 @@ fn repeated_region_captures_are_analyzed_per_use() {
         "map_body".into(),
         Span::dummy(),
         None,
-        vec![(ty.clone(), "lane".into()), (ty.clone(), "capture".into())],
-        ty.clone(),
+        semantic_params([("lane", ty.clone()), ("capture", ty.clone())]),
+        by_value_function_result::<WynLanguage>(ty.clone()),
+        CallEffects::Pure,
         region_graph,
     );
     let program = semantic_program_for_test(
@@ -297,7 +329,7 @@ fn repeated_region_captures_are_analyzed_per_use() {
 
     let mut enclosing_graph = EGraph::<Semantic>::new();
     let invariant_capture = enclosing_graph.intern_constant(ConstantValue::U32(7), ty.clone());
-    let varying_capture = enclosing_graph.add_func_param(0, ty);
+    let varying_capture = enclosing_graph.add_test_value_parameter(0, ty);
     let enclosing = StageDependenceAnalysis::for_graph(
         &enclosing_graph,
         &[StageDependence::from_source(
@@ -312,7 +344,7 @@ fn repeated_region_captures_are_analyzed_per_use() {
         &enclosing,
         &SegBody {
             region: region_id,
-            captures: vec![invariant_capture],
+            captures: vec![OperandRef::Value(invariant_capture)],
         },
     )
     .unwrap();
@@ -321,7 +353,7 @@ fn repeated_region_captures_are_analyzed_per_use() {
         &enclosing,
         &SegBody {
             region: region_id,
-            captures: vec![varying_capture],
+            captures: vec![OperandRef::Value(varying_capture)],
         },
     )
     .unwrap();

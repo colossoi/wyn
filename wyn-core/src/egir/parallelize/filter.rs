@@ -127,13 +127,14 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         let add_region = self.lowering.define_callable(add_name, |region, name| {
             synthesize_u32_add_function(region, name, span)
         })?;
+        let add_function = self.lowering.callable(add_region).clone();
         let scan_scratch = ScanScratch {
             block_sums: self.work.block_sums.0,
             block_offsets: self.work.block_offsets.0,
         };
         let combine = ScanPhase2Spec {
             entry_name: scan.body.name.clone(),
-            operator: add_region,
+            operator: &add_function,
             elem_ty: self.elem_ty.clone(),
             source_graph: &scan.body.graph,
             operator_captures: &[],
@@ -159,7 +160,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         let swap_wrapper_name = format!("{}_filter_scan_add_offsets", self.entry.name);
         let elem_ty = self.elem_ty.clone();
         let swap_region = self.lowering.define_callable(swap_wrapper_name, |region, name| {
-            synthesize_swap_wrapper(region, name, add_region, elem_ty, Vec::new(), span)
+            synthesize_swap_wrapper(region, name, &add_function, elem_ty, Vec::new(), span)
         })?;
         let apply_offsets = ScanPhase3Spec {
             entry_name: scan.body.name.clone(),

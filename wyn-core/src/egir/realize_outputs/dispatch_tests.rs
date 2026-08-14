@@ -2,7 +2,10 @@
 
 use super::*;
 use crate::egir::soac::{hist, screma};
-use crate::egir::types::{EGraph, Raw, RegionId, SegBody, SideEffect, Soac, SoacEffect, SoacInputType};
+use crate::egir::types::{
+    EGraph, OperandRef, Raw, RegionId, SegBody, SideEffect, Soac, SoacEffect, SoacInputType,
+    ViewId,
+};
 use smallvec::smallvec;
 
 fn raw_map_soac(
@@ -29,10 +32,10 @@ fn raw_map_soac(
 
 fn raw_hist_soac(
     inputs: Vec<SoacInputType>,
-    captures: Vec<ValueId>,
+    captures: Vec<OperandRef>,
     index_type: Type<TypeName>,
     value_type: Type<TypeName>,
-    destination: ValueId,
+    destination: ViewId,
     shape: ValueId,
     race_factor: ValueId,
 ) -> Soac<Raw> {
@@ -106,7 +109,7 @@ fn compute_slot_source_rejects_unsized_array_without_soac() {
 // rewrite_sibling_index_consumers — operand-region classifier contract.
 //
 // These tests construct a single downstream `SideEffect` whose
-// `operand_nodes` contains the slot's `source` ValueId at a *non-
+// `operands` contains the slot's `source` ValueId at a *non-
 // input* position. The classifier must reject each position with a
 // clear `Unsupported` naming the side-effect kind. Positions that
 // fall in the input region get rewritten in place — covered end-to-
@@ -162,6 +165,7 @@ fn rewrite_sibling_index_consumers_rejects_map_output_view_operand() {
     let dummy_input = graph.alloc_side_effect_result(arr_ty.clone());
     let result_nid =
         graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(1), vec![arr_ty.clone()]));
+    let result_binding = graph.value_result(result_nid);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(
             (),
@@ -175,8 +179,8 @@ fn rewrite_sibling_index_consumers_rejects_map_output_view_operand() {
                 arr_ty.clone(),
             ),
         )),
-        operand_nodes: smallvec![dummy_input, source],
-        result: Some(result_nid),
+        operands: smallvec![OperandRef::Value(dummy_input), OperandRef::Value(source)],
+        result: Some(result_binding),
         effects: None,
         span: None,
     });
@@ -214,6 +218,8 @@ fn rewrite_sibling_index_consumers_rewrites_hist_input_only() {
     let shape = graph.intern_pure(PureOp::Int("4".into()), smallvec![], i32_ty.clone(), None);
     let race_factor = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), None);
     let result_nid = graph.alloc_side_effect_result(Type::Constructed(TypeName::Bool, vec![]));
+    let result_binding = graph.value_result(result_nid);
+    let destination = graph.view_id(destination);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(
             (),
@@ -227,8 +233,8 @@ fn rewrite_sibling_index_consumers_rewrites_hist_input_only() {
                 race_factor,
             ),
         )),
-        operand_nodes: smallvec![source],
-        result: Some(result_nid),
+        operands: smallvec![OperandRef::Value(source)],
+        result: Some(result_binding),
         effects: None,
         span: None,
     });
@@ -237,8 +243,8 @@ fn rewrite_sibling_index_consumers_rewrites_hist_input_only() {
     rewrite_sibling_index_consumers(&mut graph, block, &mut next_effect, source, view, elem, 0)
         .expect("Hist input should retarget to the output view");
     assert_eq!(
-        graph.skeleton.blocks[block].side_effects[0].operand_nodes.as_slice(),
-        &[view]
+        graph.skeleton.blocks[block].side_effects[0].operands.as_slice(),
+        &[graph.operand_ref(view)]
     );
 }
 /// `source` at a `Screma` accumulator-init slot (past `inputs.len()`)
@@ -260,6 +266,7 @@ fn rewrite_sibling_index_consumers_rejects_accumulator_output_view_operand() {
     let dummy_input = graph.alloc_side_effect_result(arr_ty.clone());
     let result_nid =
         graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(1), vec![elem.clone()]));
+    let result_binding = graph.value_result(result_nid);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(
             (),
@@ -288,8 +295,8 @@ fn rewrite_sibling_index_consumers_rejects_accumulator_output_view_operand() {
                 state: screma::RawState,
             }),
         )),
-        operand_nodes: smallvec![dummy_input, source],
-        result: Some(result_nid),
+        operands: smallvec![OperandRef::Value(dummy_input), OperandRef::Value(source)],
+        result: Some(result_binding),
         effects: None,
         span: None,
     });

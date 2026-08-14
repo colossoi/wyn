@@ -23,16 +23,82 @@ use crate::flow::BlockId;
 use crate::ssa::types::ConstantValue;
 use crate::BindingRef;
 
-use super::ir::{Family, Value};
+use super::ir::{Family, PlaceOp, Value};
 use super::types::{
-    EGraph, EffectOp, EffectToken, GraphResource, Physical, PureOp, PureViewSource, Raw, ResourceAccess,
-    SegResourceAccess, Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac,
-    SoacEffect, ValueId, ValueKind, WynSoacPhase,
+    EGraph, EffectOp, EffectToken, GraphResource, LoadMode, OperandRef, Physical, PlaceAccess, PlaceId,
+    PlaceRegion, PlaceType, PureOp, PureViewSource, Raw, ResourceAccess, ResultBinding,
+    SegResourceAccess, Semantic, SegBody, SideEffect, SideEffectKind, SideEffectSite,
+    SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind, WynSoacPhase,
 };
 
 #[cfg(test)]
 #[path = "graph_ops_tests.rs"]
 mod graph_ops_tests;
+
+pub fn decompose_value(graph: &mut EGraph<impl Family>, value: ValueId) -> Vec<ValueId> {
+    fn walk<P: Family>(graph: &mut EGraph<P>, value: ValueId, ty: Type<TypeName>, out: &mut Vec<ValueId>) {
+        let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty else {
+            out.push(value);
+            return;
+        };
+        for (index, field) in fields.into_iter().enumerate() {
+            let field_value = graph.intern_pure(
+                PureOp::Project { index: index as u32 },
+                smallvec![value],
+                field.clone(),
+                None,
+            );
+            walk(graph, field_value, field, out);
+        }
+    }
+
+    let mut values = Vec::new();
+    let ty = graph.value(value).ty().clone();
+    walk(graph, value, ty, &mut values);
+    values
+}
+
+pub fn bind_by_value_result<P: Family>(
+    graph: &mut EGraph<P>,
+    abi: &super::types::FunctionResult<Type<TypeName>>,
+    value: ValueId,
+) -> ResultBinding<Type<TypeName>> {
+    let values = decompose_value(graph, value);
+    abi.bind(
+        |slot, _| values[slot.index()],
+        |_| panic!("a by-value result cannot bind a destination parameter"),
+    )
+}
+
+pub fn pack_result_values<P: Family>(
+    graph: &mut EGraph<P>,
+    binding: &ResultBinding<Type<TypeName>>,
+) -> Result<ValueId, String> {
+    fn walk<P: Family>(
+        graph: &mut EGraph<P>,
+        ty: &Type<TypeName>,
+        values: &mut impl Iterator<Item = ValueId>,
+    ) -> Result<ValueId, String> {
+        let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) = ty else {
+            return values.next().ok_or_else(|| "result binding has too few by-value leaves".into());
+        };
+        let fields = fields
+            .iter()
+            .map(|field| walk(graph, field, values))
+            .collect::<Result<SmallVec<[ValueId; 4]>, _>>()?;
+        Ok(graph.intern_pure(PureOp::Tuple(fields.len()), fields, ty.clone(), None))
+    }
+
+    if binding.destination_count() != binding.values().len() {
+        return Err("place-backed result requires an explicit load before value materialization".into());
+    }
+    let mut values = binding.values().into_iter();
+    let result = walk(graph, binding.ty(), &mut values)?;
+    if values.next().is_some() {
+        return Err("result binding has too many by-value leaves".into());
+    }
+    Ok(result)
+}
 
 /// Phase-specific SOAC metadata that contributes to a produced value.
 ///
@@ -40,16 +106,22 @@ mod graph_ops_tests;
 /// iteration space.  Semantic SOACs additionally expose their resolved space
 /// through `SideEffect::referenced_nodes`.
 pub(crate) trait ValueProducerPhase: Family {
-    fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<ValueId>;
+    fn effect_metadata_inputs(effect: &SideEffect<Self>) -> Vec<ValueId>;
+
+    fn effect_value_inputs(graph: &EGraph<Self>, effect: &SideEffect<Self>) -> Vec<ValueId> {
+        let mut values = graph.effect_boundary_value_dependencies(effect);
+        values.extend(Self::effect_metadata_inputs(effect));
+        values
+    }
 }
 
 impl<R: GraphResource> ValueProducerPhase for Raw<R> {
-    fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<ValueId> {
-        let mut nodes = effect.operand_nodes.to_vec();
+    fn effect_metadata_inputs(effect: &SideEffect<Self>) -> Vec<ValueId> {
+        let mut nodes = Vec::new();
         let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
             return nodes;
         };
-        nodes.extend(soac.seg_bodies().into_iter().flat_map(|body| body.captures.iter().copied()));
+        nodes.extend(soac.seg_bodies().into_iter().flat_map(SegBody::capture_values));
         if let Soac::Screma(op) = soac {
             nodes.extend(op.form.scans.iter().flat_map(|scan| scan.neutral.iter().copied()));
             nodes.extend(op.form.reductions.iter().flat_map(|reduction| reduction.neutral.iter().copied()));
@@ -59,9 +131,16 @@ impl<R: GraphResource> ValueProducerPhase for Raw<R> {
 }
 
 impl<R: GraphResource> ValueProducerPhase for Semantic<R> {
-    fn effect_value_inputs(effect: &SideEffect<Self>) -> Vec<ValueId> {
+    fn effect_metadata_inputs(effect: &SideEffect<Self>) -> Vec<ValueId> {
         effect.referenced_nodes().collect()
     }
+}
+
+pub(crate) fn effect_value_inputs<P: ValueProducerPhase>(
+    graph: &EGraph<P>,
+    effect: &SideEffect<P>,
+) -> Vec<ValueId> {
+    P::effect_value_inputs(graph, effect)
 }
 
 /// The complete value-producing closure behind one or more EGIR values.
@@ -145,10 +224,12 @@ impl ValueUseIndex {
                     block,
                     index: effect_index,
                 };
-                for source in P::effect_value_inputs(effect) {
+                for source in P::effect_value_inputs(graph, effect) {
                     index.effect_observers.entry(source).or_default().push(site);
-                    if let Some(result) = effect.result {
-                        index.value_successors.entry(source).or_default().push(result);
+                    if let Some(result) = &effect.result {
+                        for result in result.values() {
+                            index.value_successors.entry(source).or_default().push(result);
+                        }
                     }
                 }
             }
@@ -224,14 +305,14 @@ fn index_block_argument_successors<P: Family>(
     successors: &mut LookupMap<ValueId, Vec<ValueId>>,
     term: &SkeletonTerminator,
 ) {
-    let mut add_edge = |target: BlockId, args: &[ValueId], condition: Option<ValueId>| {
+    let mut add_edge = |target: BlockId, args: &[super::types::FlowValueId], condition: Option<ValueId>| {
         let Some(target_block) = graph.skeleton.blocks.get(target) else {
             return;
         };
         for (&argument, &parameter) in args.iter().zip(&target_block.params) {
-            successors.entry(argument).or_default().push(parameter);
+            successors.entry(argument.value()).or_default().push(parameter.value());
             if let Some(condition) = condition {
-                successors.entry(condition).or_default().push(parameter);
+                successors.entry(condition).or_default().push(parameter.value());
             }
         }
     };
@@ -279,8 +360,14 @@ pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
                     continue;
                 };
                 if closure.effects.insert(site) {
-                    pending.extend(P::effect_value_inputs(graph.skeleton.effect(site)));
+                    pending.extend(P::effect_value_inputs(graph, graph.skeleton.effect(site)));
                 }
+            }
+            ValueKind::CallResult { call, .. } => {
+                pending.extend(graph.call(*call).arguments().iter().filter_map(|argument| argument.value()));
+            }
+            ValueKind::PlaceLength { place } => {
+                pending.extend(graph.place_value_dependencies(*place));
             }
             ValueKind::FuncParam { .. } | ValueKind::Constant(_) => {}
         }
@@ -313,7 +400,11 @@ pub(crate) fn execution_value_roots<P: ValueProducerPhase>(graph: &EGraph<P>) ->
         .blocks
         .iter()
         .flat_map(|(_, block)| {
-            block.side_effects.iter().flat_map(P::effect_value_inputs).chain(block.term.referenced_nodes())
+            block
+                .side_effects
+                .iter()
+                .flat_map(|effect| P::effect_value_inputs(graph, effect))
+                .chain(block.term.referenced_nodes())
         })
         .collect()
 }
@@ -460,7 +551,7 @@ fn extend_incoming_block_args<P: Family>(
                 target: branch_target,
                 args,
             } if *branch_target == target => {
-                pending.extend(args.get(index).copied());
+                pending.extend(args.get(index).map(|argument| argument.value()));
             }
             SkeletonTerminator::CondBranch {
                 cond,
@@ -472,11 +563,11 @@ fn extend_incoming_block_args<P: Family>(
             } => {
                 let mut reaches_target = false;
                 if *then_target == target {
-                    pending.extend(then_args.get(index).copied());
+                    pending.extend(then_args.get(index).map(|argument| argument.value()));
                     reaches_target = true;
                 }
                 if *else_target == target {
-                    pending.extend(else_args.get(index).copied());
+                    pending.extend(else_args.get(index).map(|argument| argument.value()));
                     reaches_target = true;
                 }
                 if reaches_target {
@@ -671,7 +762,7 @@ pub fn alloc_effect(effect_ids: &mut crate::IdSource<EffectToken>) -> EffectToke
 pub fn emit_store<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
-    place_nid: ValueId,
+    place: PlaceId,
     value_nid: ValueId,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
@@ -679,8 +770,8 @@ pub fn emit_store<P: Family>(
     let effect_in = alloc_effect(effect_ids);
     let effect_out = alloc_effect(effect_ids);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Store),
-        operand_nodes: smallvec![place_nid, value_nid],
+        kind: SideEffectKind::Effect(EffectOp::Store { place }),
+        operands: smallvec![OperandRef::Value(value_nid)],
         result: None,
         effects: Some((effect_in, effect_out)),
         span,
@@ -693,7 +784,7 @@ pub fn emit_store<P: Family>(
 pub fn emit_atomic<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
-    place_nid: ValueId,
+    place: PlaceId,
     op: crate::ssa::types::AtomicOp,
     values: &[ValueId],
     result_ty: Type<TypeName>,
@@ -704,12 +795,12 @@ pub fn emit_atomic<P: Family>(
     let effect_in = alloc_effect(effect_ids);
     let effect_out = alloc_effect(effect_ids);
     let result = graph.alloc_side_effect_result(result_ty);
-    let mut operand_nodes = smallvec![place_nid];
-    operand_nodes.extend_from_slice(values);
+    let operands = values.iter().copied().map(OperandRef::Value).collect();
+    let result_binding = graph.value_result(result);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Atomic(op)),
-        operand_nodes,
-        result: Some(result),
+        kind: SideEffectKind::Effect(EffectOp::Atomic { place, op }),
+        operands,
+        result: Some(result_binding),
         effects: Some((effect_in, effect_out)),
         span,
     });
@@ -728,7 +819,7 @@ pub fn emit_workgroup_barrier<P: Family>(
     let effect_out = alloc_effect(effect_ids);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Effect(EffectOp::ControlBarrier),
-        operand_nodes: smallvec![],
+        operands: smallvec![],
         result: None,
         effects: Some((effect_in, effect_out)),
         span: None,
@@ -748,8 +839,9 @@ pub fn emit_storage_store<P: Family>(
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> EffectToken {
-    let place_nid = graph.intern_pure(PureOp::ViewIndex, smallvec![view_nid, index_nid], elem_ty, span);
-    emit_store(graph, block, place_nid, value_nid, effect_ids, span)
+    let view = graph.view_id(view_nid);
+    let place = graph.add_view_index_place(view, index_nid, elem_ty, span);
+    emit_store(graph, block, place, value_nid, effect_ids, span)
 }
 
 /// Emit a `Load` of `place_nid` (a place-producing pure op like `ViewIndex`)
@@ -757,12 +849,12 @@ pub fn emit_storage_store<P: Family>(
 pub fn emit_load<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
-    place_nid: ValueId,
+    place: PlaceId,
     elem_ty: Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> ValueId {
-    let (result, effect) = detached_load(graph, place_nid, elem_ty, effect_ids, span);
+    let (result, effect) = detached_load(graph, place, elem_ty, LoadMode::Element, effect_ids, span);
     graph.skeleton.blocks[block].side_effects.push(effect);
     result
 }
@@ -772,8 +864,9 @@ pub fn emit_load<P: Family>(
 /// an existing scheduled operation instead of appended to the block tail.
 pub fn detached_load<P: Family>(
     graph: &mut EGraph<P>,
-    place_nid: ValueId,
+    place: PlaceId,
     elem_ty: Type<TypeName>,
+    mode: LoadMode,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> (ValueId, SideEffect<P>) {
@@ -781,9 +874,9 @@ pub fn detached_load<P: Family>(
     let effect_out = alloc_effect(effect_ids);
     let result = graph.alloc_side_effect_result(elem_ty);
     let effect = SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load),
-        operand_nodes: smallvec![place_nid],
-        result: Some(result),
+        kind: SideEffectKind::Effect(EffectOp::Load { place, mode }),
+        operands: smallvec![],
+        result: Some(graph.value_result(result)),
         effects: Some((effect_in, effect_out)),
         span,
     };
@@ -801,18 +894,25 @@ pub fn emit_alloca<P: Family>(
     elem_ty: Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
-) -> ValueId {
+) -> PlaceId {
     let effect_in = alloc_effect(effect_ids);
     let effect_out = alloc_effect(effect_ids);
-    let place_nid = graph.alloc_side_effect_result(elem_ty.clone());
+    let place = graph.add_alloca_place(
+        PlaceType {
+            pointee: elem_ty,
+            region: PlaceRegion::Function,
+            access: PlaceAccess::ReadWrite,
+        },
+        span,
+    );
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Alloca { elem_ty }),
-        operand_nodes: smallvec![],
-        result: Some(place_nid),
+        kind: SideEffectKind::Effect(EffectOp::Alloca { result: place }),
+        operands: smallvec![],
+        result: None,
         effects: Some((effect_in, effect_out)),
         span,
     });
-    place_nid
+    place
 }
 
 /// Intern a `PlaceIndex` pure node: index into an existing place to produce a
@@ -821,17 +921,12 @@ pub fn emit_alloca<P: Family>(
 /// `elem_ty` (e.g. `T` for an `[T;N]` parent).
 pub fn intern_place_index<P: Family>(
     graph: &mut EGraph<P>,
-    parent_place_nid: ValueId,
+    parent_place: PlaceId,
     index_nid: ValueId,
     elem_ty: Type<TypeName>,
     span: Option<Span>,
-) -> ValueId {
-    graph.intern_pure(
-        PureOp::PlaceIndex,
-        smallvec![parent_place_nid, index_nid],
-        elem_ty,
-        span,
-    )
+) -> PlaceId {
+    graph.add_index_place(parent_place, index_nid, elem_ty, span)
 }
 
 /// Emit `place[index] = value` as a `PlaceIndex` sub-place + `Store` in
@@ -840,15 +935,15 @@ pub fn intern_place_index<P: Family>(
 pub fn emit_place_index_store<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
-    parent_place_nid: ValueId,
+    parent_place: PlaceId,
     index_nid: ValueId,
     value_nid: ValueId,
     elem_ty: Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) {
-    let elem_place_nid = intern_place_index(graph, parent_place_nid, index_nid, elem_ty, span);
-    let _ = emit_store(graph, block, elem_place_nid, value_nid, effect_ids, span);
+    let elem_place = intern_place_index(graph, parent_place, index_nid, elem_ty, span);
+    let _ = emit_store(graph, block, elem_place, value_nid, effect_ids, span);
 }
 
 /// Emit `view[index]` as a `ViewIndex` place + `Load` in `block`; returns the
@@ -862,40 +957,41 @@ pub fn emit_view_load<P: Family>(
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> ValueId {
-    let place_nid = graph.intern_pure(
-        PureOp::ViewIndex,
-        smallvec![view_nid, index_nid],
-        elem_ty.clone(),
-        span,
-    );
-    emit_load(graph, block, place_nid, elem_ty, effect_ids, span)
+    let view = graph.view_id(view_nid);
+    let place = graph.add_view_index_place(view, index_nid, elem_ty.clone(), span);
+    emit_load(graph, block, place, elem_ty, effect_ids, span)
 }
 
-/// Push a `SideEffectKind::Soac(SoacEffect(id, soac))` side-effect into `block` with
-/// the given operands; returns the allocated `result_nid` (typed as
-/// `result_ty`, which the SOAC's lowering recovers from
-/// `graph.nodes[result_nid].ty`).
+/// Push a SOAC side effect into `block`. The effect owns a result tree whose
+/// by-value leaves are allocated independently; the returned value is the
+/// product assembled from those leaves for expression-level consumers.
 pub fn emit_pending_soac<P: WynSoacPhase>(
     graph: &mut EGraph<P>,
     block: BlockId,
     id: P::SoacId,
     soac: Soac<P>,
-    operands: SmallVec<[ValueId; 4]>,
+    operands: SmallVec<[OperandRef; 4]>,
     result_ty: Type<TypeName>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> ValueId {
-    let result_nid = graph.alloc_side_effect_result(result_ty);
+    let result_abi = super::ir::by_value_function_result::<super::types::WynLanguage>(result_ty);
+    let result_binding = result_abi.bind(
+        |_, ty| graph.alloc_side_effect_result(ty.clone()),
+        |_| unreachable!("a pending SOAC has no destination parameters"),
+    );
+    let result_value = pack_result_values(graph, &result_binding)
+        .expect("a newly allocated by-value SOAC result can be assembled");
     let effect_in = alloc_effect(effect_ids);
     let effect_out = alloc_effect(effect_ids);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(id, soac)),
-        operand_nodes: operands,
-        result: Some(result_nid),
+        operands: operands,
+        result: Some(result_binding),
         effects: Some((effect_in, effect_out)),
         span,
     });
-    result_nid
+    result_value
 }
 
 // ---------------------------------------------------------------------------
@@ -934,7 +1030,7 @@ pub(crate) fn storage_resource_under<P: Family<Resource = super::program::Semant
 }
 
 /// If `nid` is a `PureOp::ArrayRange`, return `(start, len, step?)`
-/// NodeIds. Otherwise `None`.
+/// ValueNodeIds. Otherwise `None`.
 pub fn extract_array_range_operands<P: Family>(
     graph: &EGraph<P>,
     nid: ValueId,
@@ -959,7 +1055,7 @@ pub fn extract_array_range_operands<P: Family>(
 /// Recursively clone a pure subgraph rooted at `root` from `src` into
 /// `dst`, returning the new root `ValueId`. Copies a reduce's neutral
 /// element (or any pure value) from one entry's EGraph into another's —
-/// phase2 needs a fresh copy of phase1's NE since EGraph NodeIds don't
+/// phase2 needs a fresh copy of phase1's NE since EGraph ValueNodeIds don't
 /// cross entries.
 ///
 /// Only pure nodes and constants are cloned; encountering a
@@ -980,6 +1076,81 @@ pub fn clone_pure_subgraph<P: Family>(
         false,
         PureCopy::Preserve,
     )
+}
+
+/// Clone an addressable place and the pure value/place dependencies that
+/// define its address into another graph.
+pub fn clone_place_subgraph<P: Family>(
+    src: &EGraph<P>,
+    dst: &mut EGraph<P>,
+    root: PlaceId,
+) -> Result<PlaceId, String> {
+    fn clone_place<P: Family>(
+        src: &EGraph<P>,
+        dst: &mut EGraph<P>,
+        source: PlaceId,
+        values: &mut LookupMap<ValueId, ValueId>,
+        places: &mut LookupMap<PlaceId, PlaceId>,
+    ) -> Result<PlaceId, String> {
+        if let Some(&target) = places.get(&source) {
+            return Ok(target);
+        }
+        let place = src
+            .places
+            .get(source)
+            .ok_or_else(|| format!("clone_place_subgraph: missing place {source:?}"))?
+            .clone();
+        let ty = place.ty().clone();
+        let span = place.span();
+        let clone_value = |value, dst: &mut EGraph<P>, values: &mut LookupMap<ValueId, ValueId>| {
+            clone_value_subgraph(
+                src,
+                dst,
+                value,
+                values,
+                ConstantCopy::Intern,
+                false,
+                PureCopy::Preserve,
+            )
+        };
+        let target = match place.op() {
+            PlaceOp::Parameter { parameter } => dst.add_place_parameter(*parameter, ty),
+            PlaceOp::AllocaResult => dst.add_alloca_place(ty, span),
+            PlaceOp::Index { base, index } => {
+                let base = clone_place(src, dst, *base, values, places)?;
+                let index = clone_value(*index, dst, values)?;
+                dst.add_index_place(base, index, ty.pointee, span)
+            }
+            PlaceOp::ViewIndex { view, index } => {
+                let view = clone_value(view.value(), dst, values)?;
+                let index = clone_value(*index, dst, values)?;
+                let view = dst.view_id(view);
+                dst.add_view_index_place(view, index, ty.pointee, span)
+            }
+            PlaceOp::OutputSlot { index } => dst.add_output_place(*index, ty),
+        };
+        places.insert(source, target);
+        Ok(target)
+    }
+
+    clone_place(src, dst, root, &mut LookupMap::new(), &mut LookupMap::new())
+}
+
+/// Clone one typed boundary operand without collapsing its value, view, or
+/// place representation.
+pub fn clone_operand_subgraph<P: Family>(
+    src: &EGraph<P>,
+    dst: &mut EGraph<P>,
+    operand: OperandRef,
+) -> Result<OperandRef, String> {
+    Ok(match operand {
+        OperandRef::Value(value) => OperandRef::Value(clone_pure_subgraph(src, dst, value)?),
+        OperandRef::View(view) => {
+            let value = clone_pure_subgraph(src, dst, view.value())?;
+            OperandRef::View(dst.view_id(value))
+        }
+        OperandRef::Place(place) => OperandRef::Place(clone_place_subgraph(src, dst, place)?),
+    })
 }
 
 /// Clone a pure subgraph of `src` into `dst`, but substitute the given `src`
@@ -1087,18 +1258,12 @@ pub fn replace_all_references(graph: &mut EGraph<Semantic>, old: ValueId, new: V
     if old == new {
         return;
     }
-    let swap = |slot: &mut ValueId| {
-        if *slot == old {
-            *slot = new;
-        }
-    };
+    let swap = |value: ValueId| if value == old { new } else { value };
     graph.replace_node_references(old, new);
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
-            for slot in effect.referenced_node_slots() {
-                swap(slot);
-            }
+            effect.remap_referenced_values(swap);
         }
-        block.term.visit_nodes_mut(swap);
+        block.term.visit_values_mut(|slot| *slot = swap(*slot));
     }
 }

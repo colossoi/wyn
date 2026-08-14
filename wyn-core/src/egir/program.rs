@@ -109,10 +109,10 @@ impl<P: Family, Route> Entry<P, SemanticResourceDecl, Route> {
         for output in &mut self.outputs {
             visit(&mut output.ty);
         }
-        for (ty, _) in &mut self.params {
-            visit(ty);
+        for param in &mut self.params {
+            visit(param.representation_mut().ty_mut());
         }
-        visit(&mut self.return_ty);
+        self.result.for_each_type_mut(&mut visit);
         for declaration in &mut self.resource_declarations {
             visit(&mut declaration.elem_ty);
         }
@@ -708,10 +708,12 @@ fn normalize_structural_resources(inner: &mut super::from_tlc::Converted) {
         entry.visit_types_mut(|ty| normalize_type_resources(ty, by_binding));
     }
     for function in &mut inner.functions {
-        for (ty, _) in &mut function.params {
-            normalize_type_resources(ty, by_binding);
+        for param in &mut function.params {
+            normalize_type_resources(param.representation_mut().ty_mut(), by_binding);
         }
-        normalize_type_resources(&mut function.return_ty, by_binding);
+        function
+            .result
+            .for_each_type_mut(|ty| normalize_type_resources(ty, by_binding));
     }
 }
 
@@ -779,15 +781,26 @@ fn rewrite_node_types<P: Family>(graph: &mut EGraph<P>, mut rewrite: impl FnMut(
 fn physicalize_soac(
     soac: Soac<Scheduled>,
     nodes: &LookupMap<ValueId, ValueId>,
+    places: &LookupMap<super::ir::PlaceId, super::ir::PlaceId>,
     bindings: &PhysicalResourceTable,
 ) -> Result<Soac<Physical>, String> {
     fn binding(reference: SemanticResourceRef, bindings: &PhysicalResourceTable) -> PhysicalResourceRef {
         bindings.binding(reference.0)
     }
 
-    fn seg_body(mut body: SegBody, nodes: &LookupMap<ValueId, ValueId>) -> SegBody {
+    fn seg_body(
+        mut body: SegBody,
+        nodes: &LookupMap<ValueId, ValueId>,
+        places: &LookupMap<super::ir::PlaceId, super::ir::PlaceId>,
+    ) -> SegBody {
         for capture in &mut body.captures {
-            *capture = nodes[capture];
+            *capture = capture
+                .try_map(
+                    |value| Ok::<_, std::convert::Infallible>(nodes[&value]),
+                    |view| view.try_remap(|value| Ok::<_, std::convert::Infallible>(nodes[&value])),
+                    |place| Ok::<_, std::convert::Infallible>(places[&place]),
+                )
+                .unwrap();
         }
         body
     }
@@ -808,11 +821,11 @@ fn physicalize_soac(
                         offset,
                     },
                     SegExtent::ResourceLength {
-                        node,
+                        view,
                         resource,
                         elem_bytes,
                     } => SegExtent::ResourceLength {
-                        node: nodes[&node],
+                        view: view.try_remap(|value| Ok::<_, std::convert::Infallible>(nodes[&value])).unwrap(),
                         resource: binding(resource, bindings),
                         elem_bytes,
                     },
@@ -823,9 +836,13 @@ fn physicalize_soac(
         SegSpace::from_dims(dims).ok_or_else(|| "physicalized segmented space was empty".to_string())
     }
 
-    fn lambda(mut lambda: screma::Lambda, nodes: &LookupMap<ValueId, ValueId>) -> screma::Lambda {
+    fn lambda(
+        mut lambda: screma::Lambda,
+        nodes: &LookupMap<ValueId, ValueId>,
+        places: &LookupMap<super::ir::PlaceId, super::ir::PlaceId>,
+    ) -> screma::Lambda {
         if let Some(body) = lambda.seg_body_mut() {
-            *body = seg_body(body.clone(), nodes);
+            *body = seg_body(body.clone(), nodes, places);
         }
         lambda
     }
@@ -833,21 +850,22 @@ fn physicalize_soac(
     fn screma_form(
         mut form: screma::ScremaForm,
         nodes: &LookupMap<ValueId, ValueId>,
+        places: &LookupMap<super::ir::PlaceId, super::ir::PlaceId>,
     ) -> screma::ScremaForm {
-        form.pre = lambda(form.pre, nodes);
+        form.pre = lambda(form.pre, nodes, places);
         for scan in &mut form.scans {
-            scan.operator = lambda(scan.operator.clone(), nodes);
+            scan.operator = lambda(scan.operator.clone(), nodes, places);
             for neutral in &mut scan.neutral {
                 *neutral = nodes[neutral];
             }
         }
         for reduction in &mut form.reductions {
-            reduction.operator = lambda(reduction.operator.clone(), nodes);
+            reduction.operator = lambda(reduction.operator.clone(), nodes, places);
             for neutral in &mut reduction.neutral {
                 *neutral = nodes[neutral];
             }
         }
-        form.post = lambda(form.post, nodes);
+        form.post = lambda(form.post, nodes, places);
         form
     }
     fn physical_segment(
@@ -926,14 +944,14 @@ fn physicalize_soac(
             };
             Soac::Screma(screma::Op {
                 inputs,
-                form: screma_form(form, nodes),
+                form: screma_form(form, nodes, places),
                 result_state,
                 state,
             })
         }
         Soac::Filter(filter::Op { mut body, state }) => {
-            body.map = lambda(body.map, nodes);
-            body.predicate = lambda(body.predicate, nodes);
+            body.map = lambda(body.map, nodes, places);
+            body.predicate = lambda(body.predicate, nodes, places);
             let state = match state {
                 filter::ScheduledState::Loop {
                     space: iteration_space,
@@ -971,17 +989,17 @@ fn physicalize_soac(
             mut form,
             state,
         }) => {
-            form.bucket = lambda(form.bucket, nodes);
+            form.bucket = lambda(form.bucket, nodes, places);
             for operation in &mut form.operations {
                 for dimension in &mut operation.shape {
                     *dimension = nodes[dimension];
                 }
                 operation.race_factor = nodes[&operation.race_factor];
                 for destination in &mut operation.destinations {
-                    *destination = nodes[destination];
+                    destination.remap_value(|value| nodes[&value]);
                 }
                 if let hist::Update::Reduce { operator, neutral } = &mut operation.update {
-                    *operator = lambda(operator.clone(), nodes);
+                    *operator = lambda(operator.clone(), nodes, places);
                     for value in neutral {
                         *value = nodes[value];
                     }
@@ -993,8 +1011,8 @@ fn physicalize_soac(
                     ..
                 } = &mut operation.update
                 {
-                    *counts = nodes[counts];
-                    *overflow = nodes[overflow];
+                    counts.remap_value(|value| nodes[&value]);
+                    overflow.remap_value(|value| nodes[&value]);
                     *capacity = nodes[capacity];
                 }
             }
@@ -1039,7 +1057,9 @@ pub(crate) fn physicalize_graph_resources(
             let resource = reference.0;
             Ok::<_, String>(bindings.binding(resource))
         },
-        |id, soac, nodes| physicalize_soac(soac, nodes, bindings).map(|soac| (id, soac)),
+        |id, soac, nodes, places| {
+            physicalize_soac(soac, nodes, places, bindings).map(|soac| (id, soac))
+        },
     )?;
     let pure_nodes = graph.nodes.keys().collect::<Vec<_>>();
     for node in pure_nodes {
@@ -1162,10 +1182,10 @@ impl SemanticEntry {
                     resources.insert(resource.0);
                 }
             }
-            if let Some(ValueKind::FuncParam { index }) = graph.nodes.get(node).map(|node| &node.kind) {
+            if let Some(ValueKind::FuncParam { parameter }) = graph.nodes.get(node).map(|node| &node.kind) {
                 resources.extend(
                     self.inputs
-                        .get(*index)
+                        .get(parameter.index())
                         .and_then(|input| input.resource.or_else(|| semantic_type_resource(&input.ty)))
                         .map(|resource| resource.0),
                 );
@@ -1214,7 +1234,7 @@ impl SemanticEntry {
         let mut parameters = projection
             .source_nodes()
             .filter_map(|node| match self.graph.nodes.get(node).map(|node| &node.kind) {
-                Some(ValueKind::FuncParam { index }) => Some(*index),
+                Some(ValueKind::FuncParam { parameter }) => Some(parameter.index()),
                 _ => None,
             })
             .collect::<crate::SortedSet<_>>();
@@ -1314,7 +1334,7 @@ impl SemanticEntry {
         let mut kept_indices = reachable
             .iter()
             .filter_map(|node| match self.graph.nodes.get(*node).map(|node| &node.kind) {
-                Some(ValueKind::FuncParam { index }) => Some(*index),
+                Some(ValueKind::FuncParam { parameter }) => Some(parameter.index()),
                 _ => None,
             })
             .collect::<crate::SortedSet<_>>();
@@ -1408,7 +1428,7 @@ impl SemanticEntry {
             entry.outputs.clone(),
             entry.resource_declarations.clone(),
             entry.params.clone(),
-            entry.return_ty.clone(),
+            entry.result.clone(),
         )
     }
 
@@ -1423,8 +1443,8 @@ impl SemanticEntry {
         parameter_inputs: Vec<Vec<InputSlotId>>,
         outputs: Vec<super::ir::EntryOutput<SemanticResourceRef, RealizedOutputRoute, WynLanguage>>,
         resource_declarations: Vec<SemanticResourceDecl>,
-        params: Vec<(Type<TypeName>, String)>,
-        return_ty: Type<TypeName>,
+        params: Vec<super::ir::FuncParam<SemanticResourceRef, Type<TypeName>>>,
+        result: super::ir::FunctionResult<Type<TypeName>>,
     ) -> Result<Self, String> {
         let outputs = outputs
             .into_iter()
@@ -1443,7 +1463,7 @@ impl SemanticEntry {
             outputs,
             resource_declarations,
             params,
-            return_ty,
+            result,
             graph: projection.graph,
         })
     }
@@ -1767,23 +1787,41 @@ fn physicalize_function(
         name,
         span,
         linkage_name,
-        mut params,
-        mut return_ty,
+        params,
+        result,
+        effects,
         graph,
     } = function;
     let (graph, _) = super::parallelize::prepare::graph(graph, serial)?;
     let (graph, _, _) = physicalize_graph_resources(graph, resources)?;
-    for (ty, _) in &mut params {
-        physicalize_type_resources(ty, resources);
-    }
-    physicalize_type_resources(&mut return_ty, resources);
+    let params = params
+        .into_iter()
+        .map(|param| {
+            param.map(
+                |resource| resources.binding(resource.0),
+                |mut ty| {
+                    physicalize_type_resources(&mut ty, resources);
+                    ty
+                },
+            )
+        })
+        .collect();
+    let result = result.map(
+        |mut ty| {
+            physicalize_type_resources(&mut ty, resources);
+            ty
+        },
+        |slot| slot,
+        |parameter| parameter,
+    );
     Ok(PhysicalFunc {
         region,
         name,
         span,
         linkage_name,
         params,
-        return_ty,
+        result,
+        effects,
         graph,
     })
 }
@@ -1824,8 +1862,8 @@ fn physicalize_entry(
         parameter_inputs,
         outputs,
         resource_declarations: mut declarations,
-        mut params,
-        mut return_ty,
+        params,
+        result,
         graph,
     } = entry;
     let (graph, nodes, blocks) = physicalize_graph_resources(graph, resources)?;
@@ -1860,10 +1898,26 @@ fn physicalize_entry(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    for (ty, _) in &mut params {
-        physicalize_type_resources(ty, resources);
-    }
-    physicalize_type_resources(&mut return_ty, resources);
+    let params = params
+        .into_iter()
+        .map(|param| {
+            param.map(
+                |resource| resources.binding(resource.0),
+                |mut ty| {
+                    physicalize_type_resources(&mut ty, resources);
+                    ty
+                },
+            )
+        })
+        .collect();
+    let result = result.map(
+        |mut ty| {
+            physicalize_type_resources(&mut ty, resources);
+            ty
+        },
+        |slot| slot,
+        |parameter| parameter,
+    );
     for declaration in &mut declarations {
         physicalize_type_resources(&mut declaration.elem_ty, resources);
     }
@@ -1887,7 +1941,7 @@ fn physicalize_entry(
         outputs,
         resource_declarations,
         params,
-        return_ty,
+        result,
         graph,
     })
 }
