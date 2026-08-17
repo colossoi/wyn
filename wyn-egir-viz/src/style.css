@@ -405,6 +405,7 @@ kbd {
 .body-heading,
 .body-close,
 .ir-comment,
+.ir-metadata-line,
 .code-line {
   position: relative;
   z-index: 1;
@@ -423,9 +424,23 @@ kbd {
   color: var(--text);
 }
 
-.body-heading strong {
+.definition-name {
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
   color: #f1f3ec;
+  cursor: pointer;
+  font: inherit;
   font-weight: 600;
+}
+
+.definition-name:hover,
+.definition-name:focus-visible {
+  color: var(--acid);
+  text-decoration: underline;
+  text-decoration-color: rgba(198, 243, 107, 0.55);
+  text-underline-offset: 3px;
 }
 
 .brace,
@@ -437,6 +452,15 @@ kbd {
 .ir-comment {
   color: #6e7568;
   font-style: italic;
+}
+
+.ir-metadata-line {
+  padding-left: 18px;
+  color: #c9cdbf;
+}
+
+.effect-token {
+  color: var(--purple);
 }
 
 .code-line {

@@ -3,12 +3,16 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 use wyn_core::ast::{NodeCounter, Span};
-use wyn_core::egir::ir::{OperandRef, ProgramFamily, SideEffectKind};
+use wyn_core::egir::ir::{OperandRef, PlaceOp, ProgramFamily, SideEffectKind};
 use wyn_core::egir::program::{
-    CoreProgramData, RewriteGlobal, SemanticOpId, SemanticResourceDecl, SemanticResourceRef,
+    CoreProgramData, OutputWriter, RealizedOutputRoute, RewriteGlobal, SemanticOpId, SemanticResourceDecl,
+    SemanticResourceRef,
 };
 use wyn_core::egir::soac::screma::{Lambda, ScremaOperands};
-use wyn_core::egir::types::{Raw, RegionId, Semantic, Soac, SoacEffect, ValueKind, WynSoacPhase};
+use wyn_core::egir::types::{
+    EffectOp, PlaceDestination, Raw, RegionId, ResultDestination, Semantic, Soac, SoacEffect, ValueKind,
+    WynSoacPhase,
+};
 use wyn_core::error::CompilerError;
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
 
@@ -77,6 +81,27 @@ pub struct GraphGroup {
     pub id: String,
     pub label: String,
     pub kind: String,
+    pub outputs: Vec<GraphOutput>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphOutput {
+    pub slot: usize,
+    pub ty: String,
+    pub routes: Vec<GraphOutputRoute>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphOutputRoute {
+    pub source_block: String,
+    pub source_value: String,
+    pub writers: Vec<GraphOutputWriter>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphOutputWriter {
+    pub kind: String,
+    pub id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -114,10 +139,19 @@ pub struct GraphRegion {
     pub result_types: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphResult {
+    pub path: Vec<usize>,
+    pub ty: String,
+    pub destination: String,
+    pub references: Vec<GraphReference>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GraphOperation {
     pub operand_groups: Vec<GraphOperandGroup>,
     pub regions: Vec<GraphRegion>,
+    pub results: Vec<GraphResult>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -324,11 +358,7 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
     let program = match wyn_core::to_egraph(program) {
         Ok(program) => program,
         Err(error) => {
-            return InspectResult::error(
-                pass.id(),
-                format!("EGIR conversion error: {error:?}"),
-                None,
-            )
+            return InspectResult::error(pass.id(), format!("EGIR conversion error: {error:?}"), None)
         }
     };
 
@@ -337,11 +367,7 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         let program = match wyn_core::egir::realize_outputs(program) {
             Ok(program) => program,
             Err(error) => {
-                return InspectResult::error(
-                    pass.id(),
-                    format!("EGIR output error: {error:?}"),
-                    None,
-                )
+                return InspectResult::error(pass.id(), format!("EGIR output error: {error:?}"), None)
             }
         };
         let after = snapshot_program(&program);
@@ -358,11 +384,7 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
     let program = match wyn_core::egir::realize_outputs(program) {
         Ok(program) => program,
         Err(error) => {
-            return InspectResult::error(
-                pass.id(),
-                format!("EGIR output error: {error:?}"),
-                None,
-            )
+            return InspectResult::error(pass.id(), format!("EGIR output error: {error:?}"), None)
         }
     };
     let segmented = wyn_core::egir::reify_soacs(program);
@@ -432,16 +454,15 @@ impl SnapshotPhase for Semantic {
     }
 }
 
-fn snapshot_program<Tag, P, Route>(
+fn snapshot_program<Tag, P>(
     program: &wyn_core::egir::program::Program<
         Tag,
-        ProgramFamily<P, SemanticResourceDecl, Route, CoreProgramData>,
+        ProgramFamily<P, SemanticResourceDecl, RealizedOutputRoute, CoreProgramData>,
         RewriteGlobal,
     >,
 ) -> GraphSnapshot
 where
     P: SnapshotPhase,
-    Route: Clone + std::fmt::Debug,
 {
     let mut snapshot = GraphSnapshot::default();
     let region_names = program
@@ -455,6 +476,37 @@ where
             id: group.clone(),
             label: format!("entry {}", entry.name),
             kind: "entry".to_string(),
+            outputs: entry
+                .outputs
+                .iter()
+                .enumerate()
+                .map(|(slot, output)| GraphOutput {
+                    slot,
+                    ty: wyn_core::diags::format_type(&output.ty),
+                    routes: output
+                        .routes
+                        .iter()
+                        .map(|route| GraphOutputRoute {
+                            source_block: format!("{group}/block/{:?}", route.source.block),
+                            source_value: value_node_id(&group, route.source.value),
+                            writers: route
+                                .writers
+                                .iter()
+                                .map(|writer| match writer {
+                                    OutputWriter::Value(value) => GraphOutputWriter {
+                                        kind: "value".to_string(),
+                                        id: value_node_id(&group, *value),
+                                    },
+                                    OutputWriter::Effect(effect) => GraphOutputWriter {
+                                        kind: "effect".to_string(),
+                                        id: effect.to_string(),
+                                    },
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                })
+                .collect(),
         });
         snapshot_graph(&mut snapshot, &group, &entry.graph, &region_names);
     }
@@ -464,6 +516,7 @@ where
             id: group.clone(),
             label: format!("fn {}", function.name),
             kind: "function".to_string(),
+            outputs: Vec::new(),
         });
         snapshot_graph(&mut snapshot, &group, &function.graph, &region_names);
     }
@@ -473,6 +526,7 @@ where
             id: group.clone(),
             label: format!("const {}", constant.name),
             kind: "constant".to_string(),
+            outputs: Vec::new(),
         });
         snapshot_graph(&mut snapshot, &group, &constant.graph, &region_names);
     }
@@ -513,6 +567,22 @@ fn snapshot_graph<P: SnapshotPhase>(
                 push_edge(snapshot, value_node_id(group, alias), id.clone(), "equivalent");
             }
         }
+    }
+
+    for (place_id, place) in graph.places() {
+        let id = place_node_id(group, place_id);
+        let (label, variant, operation) = place_display(group, place.op());
+        snapshot.nodes.push(GraphNode {
+            id,
+            group: group.to_string(),
+            label,
+            category: "place".to_string(),
+            variant,
+            detail: format!("{:#?}\n\ntype: {:#?}", place.op(), place.ty()),
+            ty: Some(wyn_core::diags::format_type(&place.ty().pointee)),
+            span: place.span().map(Into::into),
+            operation: Some(operation),
+        });
     }
 
     for (block_id, block) in &graph.skeleton.blocks {
@@ -560,11 +630,28 @@ fn snapshot_graph<P: SnapshotPhase>(
                     );
                 }
             }
-            if let Some(result) = effect.result() {
+            if let Some(result) = graph.effect_result_binding(effect) {
                 for value in result.values() {
                     if graph.values().contains_key(value) {
                         push_edge(snapshot, effect_id.clone(), value_node_id(group, value), "result");
                     }
+                }
+                for place in result.places() {
+                    if graph.places().contains_key(place) {
+                        push_edge(snapshot, effect_id.clone(), place_node_id(group, place), "result");
+                    }
+                }
+            }
+            if let SideEffectKind::Effect(wyn_core::egir::types::EffectOp::Alloca { result }) =
+                effect.kind()
+            {
+                if graph.places().contains_key(*result) {
+                    push_edge(
+                        snapshot,
+                        effect_id.clone(),
+                        place_node_id(group, *result),
+                        "result",
+                    );
                 }
             }
         }
@@ -670,6 +757,72 @@ fn value_node_id(group: &str, value: wyn_core::egir::types::ValueId) -> String {
     format!("{group}/value/{value:?}")
 }
 
+fn place_node_id(group: &str, place: wyn_core::egir::types::PlaceId) -> String {
+    format!("{group}/place/{place:?}")
+}
+
+fn place_display(group: &str, op: &PlaceOp) -> (String, String, GraphOperation) {
+    let operand_groups = match op {
+        PlaceOp::Parameter { .. } | PlaceOp::AllocaResult | PlaceOp::OutputSlot { .. } => Vec::new(),
+        PlaceOp::View { view } => vec![GraphOperandGroup {
+            role: "view".to_string(),
+            values: vec![view_reference(group, *view)],
+        }],
+        PlaceOp::Index { base, index } => vec![
+            GraphOperandGroup {
+                role: "base".to_string(),
+                values: vec![place_reference(group, *base)],
+            },
+            GraphOperandGroup {
+                role: "index".to_string(),
+                values: vec![value_reference(group, *index)],
+            },
+        ],
+        PlaceOp::Slice { base, start, length } => vec![
+            GraphOperandGroup {
+                role: "base".to_string(),
+                values: vec![place_reference(group, *base)],
+            },
+            GraphOperandGroup {
+                role: "start".to_string(),
+                values: vec![value_reference(group, *start)],
+            },
+            GraphOperandGroup {
+                role: "length".to_string(),
+                values: vec![value_reference(group, *length)],
+            },
+        ],
+        PlaceOp::ViewIndex { view, index } => vec![
+            GraphOperandGroup {
+                role: "view".to_string(),
+                values: vec![view_reference(group, *view)],
+            },
+            GraphOperandGroup {
+                role: "index".to_string(),
+                values: vec![value_reference(group, *index)],
+            },
+        ],
+    };
+    let (label, variant) = match op {
+        PlaceOp::Parameter { parameter } => (format!("param {}", parameter.index()), "parameter"),
+        PlaceOp::View { .. } => ("place.view".to_string(), "view"),
+        PlaceOp::AllocaResult => ("place.alloca_result".to_string(), "alloca-result"),
+        PlaceOp::Index { .. } => ("place.index".to_string(), "index"),
+        PlaceOp::Slice { .. } => ("place.slice".to_string(), "slice"),
+        PlaceOp::ViewIndex { .. } => ("place.view_index".to_string(), "view-index"),
+        PlaceOp::OutputSlot { index } => (format!("place.output_slot({index})"), "output-slot"),
+    };
+    (
+        label,
+        variant.to_string(),
+        GraphOperation {
+            operand_groups,
+            regions: Vec::new(),
+            results: Vec::new(),
+        },
+    )
+}
+
 fn value_label(kind: &ValueKind<wyn_core::egir::program::SemanticResourceRef>) -> (String, String) {
     match kind {
         ValueKind::Pure { op, .. } => (inline_debug(op), "pure".to_string()),
@@ -736,14 +889,45 @@ fn effect_display<P: SnapshotPhase>(
                 operation: Some(operation),
             }
         }
-        SideEffectKind::Effect(operation) => EffectDisplay {
-            id: format!("{group}/effect/{block:?}/{index}"),
-            label: inline_debug(operation),
-            variant: "effect".to_string(),
-            detail: format!("{operation:#?}"),
-            operation: None,
-        },
+        SideEffectKind::Effect(operation) => {
+            let (label, variant) = effect_operation_name(operation);
+            EffectDisplay {
+                id: format!("{group}/effect/{block:?}/{index}"),
+                label,
+                variant,
+                detail: format!("{operation:#?}"),
+                operation: Some(GraphOperation {
+                    operand_groups: (!effect.operands().is_empty())
+                        .then(|| GraphOperandGroup {
+                            role: "operands".to_string(),
+                            values: effect
+                                .operands()
+                                .iter()
+                                .copied()
+                                .map(|operand| graph_reference(group, operand))
+                                .collect(),
+                        })
+                        .into_iter()
+                        .collect(),
+                    regions: Vec::new(),
+                    results: graph_results(group, graph.effect_result_binding(effect)),
+                }),
+            }
+        }
     }
+}
+
+fn effect_operation_name(operation: &EffectOp<SemanticResourceRef>) -> (String, String) {
+    let (label, variant) = match operation {
+        EffectOp::Call { .. } => ("func.call".to_string(), "call"),
+        EffectOp::Op { tag } => (inline_debug(tag), "op"),
+        EffectOp::Alloca { .. } => ("mem.alloca".to_string(), "alloca"),
+        EffectOp::Load { .. } => ("mem.load".to_string(), "load"),
+        EffectOp::Store { .. } => ("mem.store".to_string(), "store"),
+        EffectOp::Atomic { .. } => ("mem.atomic".to_string(), "atomic"),
+        EffectOp::ControlBarrier => ("sync.control_barrier".to_string(), "control-barrier"),
+    };
+    (label, variant.to_string())
 }
 
 fn screma_operation<P: SnapshotPhase>(
@@ -759,14 +943,6 @@ fn screma_operation<P: SnapshotPhase>(
         operand_groups.push(GraphOperandGroup {
             role: "inputs".to_string(),
             values: operands.inputs().map(|operand| graph_reference(group, operand.operand)).collect(),
-        });
-        operand_groups.push(GraphOperandGroup {
-            role: "output_views".to_string(),
-            values: operands
-                .outputs()
-                .flatten()
-                .map(|operand| graph_reference(group, operand.operand))
-                .collect(),
         });
     } else {
         operand_groups.push(GraphOperandGroup {
@@ -812,6 +988,7 @@ fn screma_operation<P: SnapshotPhase>(
     GraphOperation {
         operand_groups,
         regions,
+        results: graph_results(group, effect.result()),
     }
 }
 
@@ -836,6 +1013,7 @@ fn filter_operation<P: SnapshotPhase>(
             lambda_region("map", &op.body.map, group, region_names),
             lambda_region("predicate", &op.body.predicate, group, region_names),
         ],
+        results: graph_results(group, effect.result()),
     }
 }
 
@@ -905,7 +1083,39 @@ fn hist_operation<P: SnapshotPhase>(
     GraphOperation {
         operand_groups,
         regions,
+        results: graph_results(group, effect.result()),
     }
+}
+
+fn graph_results(
+    group: &str,
+    result: Option<&wyn_core::egir::types::ResultBinding<wyn_core::types::Type>>,
+) -> Vec<GraphResult> {
+    result
+        .into_iter()
+        .flat_map(|result| result.destination_leaves_with_paths())
+        .filter_map(|(path, leaf)| {
+            let (ty, destination) = leaf.single_destination()?;
+            let (destination, references) = match destination {
+                ResultDestination::ReturnValue(value) => {
+                    ("return_value", vec![value_reference(group, *value)])
+                }
+                ResultDestination::Place(PlaceDestination::Fixed(place)) => {
+                    ("place", vec![place_reference(group, *place)])
+                }
+                ResultDestination::Place(PlaceDestination::Bounded { storage, length }) => (
+                    "bounded_place",
+                    vec![place_reference(group, *storage), place_reference(group, *length)],
+                ),
+            };
+            Some(GraphResult {
+                path: path.into_vec(),
+                ty: wyn_core::diags::format_type(ty),
+                destination: destination.to_string(),
+                references,
+            })
+        })
+        .collect()
 }
 
 fn lambda_region(
@@ -941,10 +1151,14 @@ fn graph_reference(group: &str, operand: OperandRef) -> GraphReference {
     match operand {
         OperandRef::Value(value) => value_reference(group, value),
         OperandRef::View(view) => view_reference(group, view),
-        OperandRef::Place(place) => GraphReference {
-            id: format!("{group}/place/{place:?}"),
-            kind: "place".to_string(),
-        },
+        OperandRef::Place(place) => place_reference(group, place),
+    }
+}
+
+fn place_reference(group: &str, place: wyn_core::egir::types::PlaceId) -> GraphReference {
+    GraphReference {
+        id: place_node_id(group, place),
+        kind: "place".to_string(),
     }
 }
 
@@ -1001,6 +1215,10 @@ entry main(xs: [4]i32) [4]i32 =
             .expect("before snapshot has a map-shaped Screma");
         let before_operation = before_map.operation.as_ref().expect("Screma display is structured");
         assert_eq!(before_map.label, "soac.screma");
+        assert!(
+            !before_operation.results.is_empty(),
+            "Screma result routes are structured"
+        );
         assert_eq!(
             before_operation
                 .operand_groups
@@ -1031,7 +1249,7 @@ entry main(xs: [4]i32) [4]i32 =
     }
 
     #[test]
-    fn output_realization_exposes_destination_passing_rewrite() {
+    fn output_realization_records_route_writers() {
         let result = inspect_pass_impl(
             r#"
 entry main(xs: [4]i32) [4]i32 =
@@ -1043,45 +1261,25 @@ entry main(xs: [4]i32) [4]i32 =
         assert_eq!(result.pass, InspectPass::REALIZE_OUTPUTS);
         let before = result.before.expect("before snapshot");
         let after = result.after.expect("after snapshot");
-        let before_map = before
-            .nodes
+        let before_output = &before
+            .groups
             .iter()
-            .find(|node| node.variant == "segmap")
-            .expect("raw snapshot has a map-shaped Screma");
-        let after_map = after
-            .nodes
+            .find(|group| group.kind == "entry")
+            .expect("before snapshot has an entry")
+            .outputs[0];
+        let after_output = &after
+            .groups
             .iter()
-            .find(|node| node.variant == "segmap")
-            .expect("output-realized snapshot has a map-shaped Screma");
+            .find(|group| group.kind == "entry")
+            .expect("after snapshot has an entry")
+            .outputs[0];
         assert!(
-            before_map
-                .operation
-                .as_ref()
-                .expect("structured before operation")
-                .operand_groups
-                .iter()
-                .find(|group| group.role == "output_views")
-                .is_some_and(|group| group.values.is_empty()),
-            "the raw producer should not already target an output view"
+            before_output.routes.iter().all(|route| route.writers.is_empty()),
+            "conversion records output sources without claiming concrete writers"
         );
         assert!(
-            after_map
-                .operation
-                .as_ref()
-                .expect("structured after operation")
-                .operand_groups
-                .iter()
-                .find(|group| group.role == "output_views")
-                .is_some_and(|group| !group.values.is_empty()),
-            "output realization should retarget the producer into output storage"
-        );
-        assert!(
-            before.blocks.iter().any(|block| block.terminator.kind == "return" && !block.terminator.values.is_empty()),
-            "the raw entry returns its result by value"
-        );
-        assert!(
-            after.blocks.iter().any(|block| block.terminator.kind == "return" && block.terminator.values.is_empty()),
-            "the output-realized entry publishes through its destination"
+            after_output.routes.iter().any(|route| !route.writers.is_empty()),
+            "output realization records the semantic values that publish the slot"
         );
     }
 

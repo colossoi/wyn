@@ -5,11 +5,17 @@ compiler passes. The current checkpoints are:
 
 - `egir::optimize_semantics`: segmented semantic EGIR to optimized semantic
   EGIR, with compiler-authored operation provenance; and
-- `egir::realize_outputs`: raw EGIR to output-realized raw EGIR, showing the
-  entry-output destination-passing rewrite.
+- `egir::realize_outputs`: converted raw EGIR before and after output-writer
+  provenance is recorded. Canonical destination-passing result bindings are
+  already present in both panes because TLC-to-EGIR conversion now creates
+  them directly.
 
 The viewer's normative textual display contract is documented in
 [`IR_SYNTAX.md`](IR_SYNTAX.md).
+
+The before and after panes scroll independently. Clicking an entry, function,
+or constant name brings the matching top-level definition into view in the
+other pane; lower-level selections only highlight relationships.
 
 Build the dedicated compiler WebAssembly package after Rust changes:
 

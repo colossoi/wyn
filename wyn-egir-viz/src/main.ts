@@ -15,8 +15,8 @@ const passInfo: Record<PassId, { before: string; after: string }> = {
     after: "Optimized EGIR",
   },
   "egir::realize_outputs": {
-    before: "Raw EGIR",
-    after: "Output-realized EGIR",
+    before: "Converted EGIR",
+    after: "Output writers recorded",
   },
 };
 
@@ -42,6 +42,24 @@ interface GraphGroup {
   id: string;
   label: string;
   kind: string;
+  outputs: GraphOutput[];
+}
+
+interface GraphOutput {
+  slot: number;
+  ty: string;
+  routes: GraphOutputRoute[];
+}
+
+interface GraphOutputRoute {
+  source_block: string;
+  source_value: string;
+  writers: GraphOutputWriter[];
+}
+
+interface GraphOutputWriter {
+  kind: "value" | "effect";
+  id: string;
 }
 
 interface GraphNode {
@@ -75,9 +93,17 @@ interface GraphRegion {
   result_types: string[];
 }
 
+interface GraphResult {
+  path: number[];
+  ty: string;
+  destination: "return_value" | "place" | "bounded_place";
+  references: GraphReference[];
+}
+
 interface GraphOperation {
   operand_groups: GraphOperandGroup[];
   regions: GraphRegion[];
+  results: GraphResult[];
 }
 
 interface GraphEdge {
@@ -253,7 +279,6 @@ let result: InspectResult | undefined;
 let selection: Selection | undefined;
 let wasmReady = false;
 let compiling = false;
-let syncingScroll = false;
 
 const sourceHeightKey = "wyn-egir-viz:source-height";
 const savedSourceHeight = Number(localStorage.getItem(sourceHeightKey));
@@ -325,6 +350,11 @@ document.addEventListener("keydown", (event) => {
 
 for (const side of ["before", "after"] as const) {
   scrollers[side].addEventListener("click", (event) => {
+    const definition = (event.target as Element).closest<HTMLElement>("[data-definition-group]");
+    if (definition) {
+      alignDefinition(side, definition.dataset.definitionGroup!);
+      return;
+    }
     const target = (event.target as Element).closest<HTMLElement>("[data-ref-id], [data-node-id]");
     const id = target?.dataset.refId ?? target?.dataset.nodeId;
     if (id) {
@@ -342,7 +372,6 @@ for (const side of ["before", "after"] as const) {
       selectNode(side, id);
     }
   });
-  scrollers[side].addEventListener("scroll", () => syncScroll(side));
 }
 
 window.addEventListener("resize", () => {
@@ -429,28 +458,36 @@ function renderBody(snapshot: GraphSnapshot, group: GraphGroup): string {
     .filter(isFunctionParameter)
     .sort((a, b) => parameterIndex(a) - parameterIndex(b));
   const signature = parameters
-    .map((node) => typedDefinition(node, names.values.get(node.id) ?? "%?"))
+    .map((node) => typedDefinition(node, definitionName(node, names)))
     .join(`<span class="punct">, </span>`);
-  const producedValues = new Set(
+  const producedResults = new Set(
     snapshot.edges.filter((edge) => edge.kind === "result").map((edge) => edge.target),
   );
   const valueLines = groupNodes
-    .filter((node) => node.category === "value" && node.variant !== "parameter" && !producedValues.has(node.id))
+    .filter((node) => node.category === "value" && node.variant !== "parameter" && !producedResults.has(node.id))
     .sort((a, b) => nameIndex(names.values.get(a.id)).localeCompare(nameIndex(names.values.get(b.id)), undefined, { numeric: true }))
     .map((node) => renderValueLine(snapshot, node, names))
     .join("");
+  const placeLines = groupNodes
+    .filter((node) => node.category === "place" && node.variant !== "parameter" && !producedResults.has(node.id))
+    .sort((a, b) => nameIndex(names.places.get(a.id)).localeCompare(nameIndex(names.places.get(b.id)), undefined, { numeric: true }))
+    .map((node) => renderPlaceLine(node, names))
+    .join("");
   const blockLines = groupBlocks.map((block) => renderBlock(snapshot, block, names)).join("");
+  const outputRoutes = renderOutputRoutes(group.outputs ?? [], names);
 
   return `
     <section class="ir-body" data-group-id="${escapeHtml(group.id)}">
       <svg class="dependency-gutter" aria-hidden="true"></svg>
       <div class="body-heading">
         <span class="body-kind">${escapeHtml(group.kind)}</span>
-        <strong>${escapeHtml(group.label.replace(/^(entry|fn|const)\s+/, ""))}</strong>
+        <button class="definition-name" type="button" data-definition-group="${escapeHtml(group.id)}">${escapeHtml(group.label.replace(/^(entry|fn|const)\s+/, ""))}</button>
         <span class="signature"><span class="punct">(</span>${signature}<span class="punct">)</span></span>
         <span class="brace">{</span>
       </div>
+      ${outputRoutes}
       ${valueLines ? `<div class="ir-comment">; pure sea</div>${valueLines}` : ""}
+      ${placeLines ? `<div class="ir-comment">; places</div>${placeLines}` : ""}
       ${blockLines}
       <div class="body-close">}</div>
     </section>
@@ -458,7 +495,9 @@ function renderBody(snapshot: GraphSnapshot, group: GraphGroup): string {
 }
 
 function isFunctionParameter(node: GraphNode): boolean {
-  return node.category === "value" && node.variant === "parameter" && /^param \d+$/.test(node.label);
+  return (node.category === "value" || node.category === "place")
+    && node.variant === "parameter"
+    && /^param \d+$/.test(node.label);
 }
 
 function parameterIndex(node: GraphNode): number {
@@ -469,11 +508,18 @@ function typedDefinition(node: GraphNode, name: string): string {
   return `${definitionToken(node.id, name)}<span class="punct">:</span> ${typeToken(node.ty)}`;
 }
 
+function definitionName(node: GraphNode, names: Names): string {
+  return node.category === "place"
+    ? names.places.get(node.id) ?? "&?"
+    : names.values.get(node.id) ?? "%?";
+}
+
 function buildNames(nodes: GraphNode[], blocks: GraphBlock[]): Names {
   const references = nodes.flatMap((node) => node.operation
     ? [
         ...node.operation.operand_groups.flatMap((group) => group.values),
         ...node.operation.regions.flatMap((region) => region.captures),
+        ...(node.operation.results ?? []).flatMap((result) => result.references),
       ]
     : []);
   const viewIds = new Set(references.filter((reference) => reference.kind === "view").map((reference) => reference.id));
@@ -483,7 +529,10 @@ function buildNames(nodes: GraphNode[], blocks: GraphBlock[]): Names {
     .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
     .forEach((node, index) => values.set(node.id, `${viewIds.has(node.id) ? "~" : "%"}${index}`));
   const places = new Map<string, string>();
-  [...new Set(references.filter((reference) => reference.kind === "place").map((reference) => reference.id))]
+  [...new Set([
+    ...nodes.filter((node) => node.category === "place").map((node) => node.id),
+    ...references.filter((reference) => reference.kind === "place").map((reference) => reference.id),
+  ])]
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
     .forEach((id, index) => places.set(id, `&${index}`));
   const blockNames = new Map<string, string>();
@@ -505,6 +554,17 @@ function renderValueLine(snapshot: GraphSnapshot, node: GraphNode, names: Names)
     node.id,
     `${definitionToken(node.id, names.values.get(node.id) ?? "%?")}<span class="punct">:</span> ${typeToken(node.ty)} <span class="punct">=</span> ${rhs}`,
     `line-${node.variant}`,
+  );
+}
+
+function renderPlaceLine(node: GraphNode, names: Names): string {
+  const fields = (node.operation?.operand_groups ?? []).map((group) =>
+    irField(group.role, renderReferenceList(group.values, names)));
+  const rhs = `<span class="ir-op">${escapeHtml(node.label)}</span>${fields.length ? variantFields(fields) : ""}`;
+  return codeLine(
+    node.id,
+    `${definitionToken(node.id, names.places.get(node.id) ?? "&?")}<span class="punct">:</span> ${typeToken(node.ty)} <span class="punct">=</span> ${rhs}`,
+    `place-line line-${node.variant}`,
   );
 }
 
@@ -533,7 +593,12 @@ function renderBlock(snapshot: GraphSnapshot, block: GraphBlock, names: Names): 
         .filter((edge) => edge.source === id && edge.kind === "result")
         .map((edge) => edge.target);
       const lhs = outputs.length
-        ? `${outputs.map((value) => definitionToken(value, names.values.get(value) ?? "%?")).join(", ")} <span class="punct">=</span> `
+        ? `${outputs.map((output) => {
+            const resultNode = snapshot.nodes.find((candidate) => candidate.id === output);
+            return resultNode
+              ? typedDefinition(resultNode, definitionName(resultNode, names))
+              : definitionToken(output, names.values.get(output) ?? names.places.get(output) ?? "?");
+          }).join(", ")} <span class="punct">=</span> `
         : "";
       if (node.operation) {
         return renderStructuredOperation(id, node, lhs, names);
@@ -580,7 +645,7 @@ function renderScremaFields(operation: GraphOperation, names: Names): string {
   ]));
   return [
     sourceRow(1, comma(irField("inputs", renderReferenceList(groupValues(operation, "inputs"), names)))),
-    sourceRow(1, comma(irField("output_views", renderReferenceList(groupValues(operation, "output_views"), names)))),
+    sourceRow(1, comma(irField("results", renderResultList(operation.results ?? [], names)))),
     sourceRow(1, `${irField("form", `<span class="punct">{</span>`)}`),
     sourceRow(2, comma(irField("pre", pre ? renderRegion(pre, names) : missingTerm()))),
     sourceRow(2, comma(irField("scans", listTerm(scanTerms)))),
@@ -595,6 +660,7 @@ function renderFilterFields(operation: GraphOperation, names: Names): string {
   const predicate = operation.regions.find((region) => region.role === "predicate");
   return [
     sourceRow(1, comma(irField("inputs", renderReferenceList(groupValues(operation, "inputs"), names)))),
+    sourceRow(1, comma(irField("results", renderResultList(operation.results ?? [], names)))),
     sourceRow(1, irField("body", `<span class="punct">{</span>`)),
     sourceRow(2, comma(irField("map", map ? renderRegion(map, names) : missingTerm()))),
     sourceRow(2, irField("predicate", predicate ? renderRegion(predicate, names) : missingTerm())),
@@ -608,6 +674,7 @@ function renderHistFields(operation: GraphOperation, names: Names): string {
   const reducers = operation.regions.filter((region) => region.role !== "bucket");
   return [
     sourceRow(1, comma(irField("inputs", renderReferenceList(groupValues(operation, "inputs"), names)))),
+    sourceRow(1, comma(irField("results", renderResultList(operation.results ?? [], names)))),
     sourceRow(1, irField("form", `<span class="punct">{</span>`)),
     sourceRow(2, comma(irField("bucket", bucket ? renderRegion(bucket, names) : missingTerm()))),
     sourceRow(2, comma(irField("operands", recordTerm(otherGroups.map((group) =>
@@ -621,10 +688,51 @@ function renderHistFields(operation: GraphOperation, names: Names): string {
 function renderGenericOperationFields(operation: GraphOperation, names: Names): string {
   return joinFields([
     ...operation.operand_groups.map((group) => irField(group.role, renderReferenceList(group.values, names))),
+    ...((operation.results ?? []).length
+      ? [irField("results", renderResultList(operation.results, names))]
+      : []),
     ...(operation.regions.length
       ? [irField("regions", recordTerm(operation.regions.map((region) => irField(region.role, renderRegion(region, names)))))]
       : []),
   ]);
+}
+
+function renderResultList(results: GraphResult[], names: Names): string {
+  return listTerm(results.map((result) => variantTerm("result", [
+    irField("path", listTerm(result.path.map(numberTerm))),
+    irField("type", typeToken(result.ty)),
+    irField("destination", renderResultDestination(result, names)),
+  ])));
+}
+
+function renderResultDestination(result: GraphResult, names: Names): string {
+  const references = result.references.map((reference) => renderGraphReference(reference, names));
+  switch (result.destination) {
+    case "return_value":
+      return variantTerm("return_value", [irField("value", references[0] ?? missingTerm())]);
+    case "place":
+      return variantTerm("place", [irField("storage", references[0] ?? missingTerm())]);
+    case "bounded_place":
+      return variantTerm("bounded_place", [
+        irField("storage", references[0] ?? missingTerm()),
+        irField("length", references[1] ?? missingTerm()),
+      ]);
+  }
+  return missingTerm();
+}
+
+function renderOutputRoutes(outputs: GraphOutput[], names: Names): string {
+  const routes = outputs.flatMap((output) => output.routes.map((route) => {
+    const source = variantTerm("source", [
+      irField("block", refToken(route.source_block, names.blocks.get(route.source_block) ?? "bb?", "block-ref")),
+      irField("value", refToken(route.source_value, names.values.get(route.source_value) ?? "%?", "value-ref")),
+    ]);
+    const writers = listTerm(route.writers.map((writer) => writer.kind === "value"
+      ? refToken(writer.id, names.values.get(writer.id) ?? "%?", "value-ref")
+      : `<span class="effect-token">${escapeHtml(writer.id)}</span>`));
+    return `<div class="ir-metadata-line">${sourceRow(0, `<span class="ir-keyword">output</span> <span class="ir-literal">${output.slot}</span><span class="punct">:</span> ${typeToken(output.ty)} <span class="punct">=</span> <span class="ir-keyword">route</span><span class="punct">(</span>`)}${sourceRow(1, comma(irField("source", source)))}${sourceRow(1, irField("writers", writers))}${sourceRow(0, `<span class="punct">)</span>`)}</div>`;
+  }));
+  return routes.length ? `<div class="ir-comment">; output routes</div>${routes.join("")}` : "";
 }
 
 function groupValues(operation: GraphOperation, role: string): GraphReference[] {
@@ -692,6 +800,10 @@ function variantFields(fields: string[]): string {
 
 function literalTerm(value: string): string {
   return `<span class="ir-literal">${escapeHtml(JSON.stringify(value))}</span>`;
+}
+
+function numberTerm(value: number): string {
+  return `<span class="ir-literal">${value}</span>`;
 }
 
 function missingTerm(): string {
@@ -895,19 +1007,17 @@ function relatedSelection(): Record<Side, Set<string>> {
   return related;
 }
 
-function syncScroll(source: Side): void {
-  if (syncingScroll) return;
+function alignDefinition(source: Side, group: string): void {
   const target: Side = source === "before" ? "after" : "before";
-  const sourceElement = scrollers[source];
-  const targetElement = scrollers[target];
-  const sourceRange = sourceElement.scrollHeight - sourceElement.clientHeight;
-  const targetRange = targetElement.scrollHeight - targetElement.clientHeight;
-  if (sourceRange <= 0 || targetRange <= 0) return;
-  syncingScroll = true;
-  targetElement.scrollTop = (sourceElement.scrollTop / sourceRange) * targetRange;
-  requestAnimationFrame(() => {
-    syncingScroll = false;
-  });
+  const counterpart = listings[target].querySelector<HTMLElement>(
+    `.ir-body[data-group-id="${cssEscape(group)}"]`,
+  );
+  if (!counterpart) return;
+  const scroller = scrollers[target];
+  const top = counterpart.getBoundingClientRect().top
+    - scroller.getBoundingClientRect().top
+    + scroller.scrollTop;
+  scroller.scrollTo({ top: Math.max(0, top - 8), behavior: "smooth" });
 }
 
 function showError(error: VizError): void {

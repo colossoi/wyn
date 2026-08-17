@@ -385,6 +385,7 @@ makes that distinction visible while preserving the universal operation form.
 | Compiler construct | Canonical display |
 | --- | --- |
 | `Parameter` | declaration parameter with `&` sigil |
+| `View { view }` | `&p: T = place.view(view: ~v)` |
 | `AllocaResult` | `&p: T = mem.alloca()` at the owning effect |
 | `Index { base, index }` | `&p: T = place.index(base: &base, index: %i)` |
 | `Slice { base, start, length }` | `&p: T = place.slice(base: &base, start: %s, length: %n)` |
@@ -556,6 +557,24 @@ A segmented space is a list of dimensions. Each dimension is exactly one of:
 A segmented resource entry is
 `resource_access(resource: $r, access: read | write | read_write)`.
 
+Every side-effect result uses the canonical result-binding tree. The display
+flattens its destination leaves while retaining each logical product path:
+
+```text
+result(
+  path: [0, ...],
+  type: T,
+  destination: return_value(value: %v)
+             | place(storage: &p)
+             | bounded_place(storage: &data, length: &length)
+)
+```
+
+`return_value` is the value channel. `place` and `bounded_place` are explicit
+destination-passing routes; a bounded result has separate data and length
+places. This binding is authoritative. A SOAC does not carry a parallel list
+of output-view operands.
+
 ### `soac.screma`
 
 The fixed field schema is:
@@ -564,7 +583,7 @@ The fixed field schema is:
 <result-binding> = soac.screma(
   id: <semantic-op-id>,
   inputs: [soac_input(...)],
-  output_views: [output_view(field: n, operand: ~view)],
+  results: [result(...)],
   form: screma(
     pre: <lambda>,
     scans: [scan(operator: <lambda>, neutral: [%v, ...])],
@@ -573,16 +592,16 @@ The fixed field schema is:
     ],
     post: <lambda>
   ),
-  result_state: [result(field: n, destination: <destination>)],
+  result_state: [result(field: n, ownership: fresh | unique_input)],
   state: <screma-state>,
   effect: chain(...)
 )
 ```
 
-`destination` is `fresh`, `unique_input`, `input_buffer`, or `output_view`.
-`result_state` follows the canonical Screma result order: reduction components,
-then post-lambda results. `output_views` states the result field associated with
-each extra compact side-effect operand.
+`result_state` retains source ownership capability only. Concrete return-value
+or place routing lives in `results`. Both follow the canonical Screma result
+order: reduction components, then post-lambda results. Compact Screma operands
+contain only the typed co-iterated inputs.
 
 At the semantic checkpoint, `screma-state` is either `serial` or:
 
@@ -607,6 +626,7 @@ The fixed field schema is:
 <result-binding> = soac.filter(
   id: <semantic-op-id>,
   inputs: [soac_input(...)],
+  results: [result(...)],
   body: filter_body(map: <lambda>, predicate: <lambda>),
   state: filter_state(
     space: [<seg-extent>, ...],
@@ -618,8 +638,7 @@ The fixed field schema is:
 
 `filter-output` is one of:
 
-- `local(capacity: T, destination: fresh | unique_input | input_buffer |
-  output_view)`; or
+- `local(capacity: T, ownership: fresh | unique_input)`; or
 - `runtime(scratch: $r, length: view_only | stored(resource: $length))`.
 
 Map and predicate are separate lambda roles. The predicate is not encoded as a
@@ -633,6 +652,7 @@ The fixed field schema is:
 <result-binding> = soac.hist(
   id: <semantic-op-id>,
   inputs: [soac_input(...)],
+  results: [result(...)],
   form: histogram(
     bucket: <lambda>,
     operations: [
