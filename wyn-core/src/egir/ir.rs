@@ -9,7 +9,7 @@ use crate::interface::{EntryInput as InterfaceEntryInput, EntryOutput as Interfa
 use crate::op::OpTag;
 use crate::ssa::types::AtomicOp;
 use crate::types::ExternDecl;
-use crate::{LookupMap, LookupSet, SortedSet};
+use crate::{FunctionId, LookupMap, LookupSet, SortedSet};
 
 pub use crate::op::PureViewSource;
 pub use crate::types::SoacOwnership;
@@ -216,7 +216,7 @@ pub struct FuncParam<R, Ty> {
 /// value and place bindings.
 #[derive(Clone, Debug)]
 pub struct CallSite<Ty> {
-    callee: RegionId,
+    callee: FunctionId,
     arguments: Box<[OperandRef]>,
     result: ResultBinding<Ty>,
     effects: CallEffects,
@@ -920,7 +920,7 @@ pub fn callable_parameter<R, Lang: Language>(name: String, ty: Lang::Ty) -> Func
 
 impl<Ty> CallSite<Ty> {
     fn new(
-        callee: RegionId,
+        callee: FunctionId,
         arguments: Box<[OperandRef]>,
         result: ResultBinding<Ty>,
         effects: CallEffects,
@@ -933,7 +933,7 @@ impl<Ty> CallSite<Ty> {
         }
     }
 
-    pub fn callee(&self) -> RegionId {
+    pub fn callee(&self) -> FunctionId {
         self.callee
     }
 
@@ -1010,23 +1010,6 @@ impl<Ty> CallSite<Ty> {
         Ok(())
     }
 }
-
-/// A callable used as a structured SOAC region.
-///
-/// Regions and ordinary functions deliberately share one identity realm:
-/// every call target is a [`crate::FunctionId`]. The alias preserves the
-/// domain-specific vocabulary used by segmented operators without opening a
-/// second allocator.
-pub type RegionId = crate::FunctionId;
-
-/// Program-owned identity arenas with names as one-way metadata.
-///
-/// There is intentionally no name-to-ID lookup. All resolution happens before
-/// these arenas are built; their strings exist only for diagnostics, emitted
-/// symbols, and host-facing entry metadata.
-pub type RegionArena = crate::IdArena<RegionId, String>;
-pub type GlobalArena = crate::IdArena<crate::GlobalId, String>;
-pub type EntryArena = crate::IdArena<crate::EntryId, String>;
 
 // ---------------------------------------------------------------------------
 // PureOp — operator identity for hash-consing
@@ -1672,18 +1655,18 @@ impl<R: Copy> SegSpace<R> {
 /// graph. Captures are explicit values, never an operand-count convention.
 #[derive(Clone, Debug)]
 pub struct SegBody {
-    pub(crate) region: RegionId,
+    pub(crate) region: FunctionId,
     /// Captures use the same representation-typed argument vocabulary as an
     /// ordinary complete call.
     pub(crate) captures: Vec<OperandRef>,
 }
 
 impl SegBody {
-    pub fn new(region: RegionId, captures: Vec<OperandRef>) -> Self {
+    pub fn new(region: FunctionId, captures: Vec<OperandRef>) -> Self {
         Self { region, captures }
     }
 
-    pub fn region(&self) -> RegionId {
+    pub fn region(&self) -> FunctionId {
         self.region
     }
 
@@ -2551,7 +2534,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     pub fn emit_call(
         &mut self,
         block: BlockId,
-        callee: RegionId,
+        callee: FunctionId,
         parameters: &[FuncParam<P::Resource, Lang::Ty>],
         function_result: &FunctionResult<Lang::Ty>,
         arguments: impl IntoIterator<Item = OperandRef>,
@@ -3521,7 +3504,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 #[derive(Clone, Debug)]
 pub struct Func<P: Family, Lang: Language> {
     /// Stable identity used by segmented bodies that call this region.
-    pub region: RegionId,
+    pub region: FunctionId,
     /// Diagnostic and emitted-symbol metadata; never used to resolve a call.
     pub name: String,
     pub span: Span,
@@ -3551,7 +3534,7 @@ impl<P: Family, Lang: Language> Func<P, Lang> {
     }
 
     pub fn new(
-        region: RegionId,
+        region: FunctionId,
         name: String,
         span: Span,
         linkage_name: Option<String>,
@@ -4076,7 +4059,7 @@ pub struct Program<Tag, Shape: ProgramShape, GlobalContext, Lang: Language> {
 /// Stable address of one graph-bearing body within a program snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BodySite {
-    Function(RegionId),
+    Function(FunctionId),
     Entry(usize),
     Constant(usize),
 }

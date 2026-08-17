@@ -14,7 +14,7 @@ use super::{graph_and_span, horizontal, screma as fusion_screma, support};
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, BodySite};
-use crate::egir::program::{CoreProgramData, ProgramIdentities, SemanticFunc};
+use crate::egir::program::{CoreProgramData, Func, ProgramIdentities};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
@@ -200,7 +200,7 @@ pub(super) fn finish(
     consumer_id: crate::egir::program::SemanticOpId,
     consumer_op: Soac<Semantic>,
     input_nodes: Vec<ValueId>,
-    synthesized: Vec<SemanticFunc>,
+    synthesized: Vec<Func<Semantic>>,
     identities: ProgramIdentities,
 ) -> Segmented {
     let rebuilt = inner.rewrite_body(candidate.site, |body| {

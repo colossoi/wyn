@@ -6,14 +6,12 @@
 use crate::ast::{Span, TypeName};
 use polytype::Type;
 
+pub use super::framework::BuilderError;
 use super::types::{
     BlockId, ControlHeader, FuncBody, InstId, InstKind, PlaceId, PlaceInfo, PlaceOrigin, Terminator,
     ValueId,
 };
 use slotmap::SlotMap;
-
-/// Error during function building.
-pub type BuilderError = crate::ssa::framework::BuilderError;
 
 /// Builder for constructing SSA functions.
 pub struct FuncBuilder {

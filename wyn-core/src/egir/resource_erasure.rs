@@ -26,8 +26,8 @@ mod resource_erasure_tests;
 
 use crate::ast::TypeName;
 use crate::egir::from_tlc::ConvertError;
-use crate::egir::program::{PhysicalFunc, Program};
-use crate::egir::types::{EGraph, Family, OperandType, ParameterId, ValueKind};
+use crate::egir::program::{Func, Program};
+use crate::egir::types::{EGraph, Family, OperandType, ParameterId, Physical, ValueKind};
 use crate::{LookupMap, LookupSet};
 use polytype::Type;
 
@@ -102,9 +102,9 @@ fn rewrite_graph<P: Family>(
 }
 
 fn erase_function_resources(
-    function: PhysicalFunc,
+    function: Func<Physical>,
     erasures: &LookupMap<crate::FunctionId, Vec<bool>>,
-) -> Result<PhysicalFunc, ConvertError> {
+) -> Result<Func<Physical>, ConvertError> {
     let crate::egir::ir::Func {
         region,
         name,
@@ -123,7 +123,7 @@ fn erase_function_resources(
         })
         .collect();
     if !erase.iter().any(|erase| *erase) {
-        return Ok(PhysicalFunc::new(
+        return Ok(Func::<Physical>::new(
             region,
             name,
             span,
@@ -198,7 +198,7 @@ fn erase_function_resources(
 
     let params =
         params.into_iter().zip(erase).filter_map(|(param, erase)| (!erase).then_some(param)).collect();
-    Ok(PhysicalFunc::new(
+    Ok(Func::<Physical>::new(
         region,
         name,
         span,

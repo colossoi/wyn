@@ -23,7 +23,7 @@ struct ArrayLeaf {
 }
 
 pub(super) fn normalize_place_backed_flow(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), String> {
     while let Some((block, slot, ty)) = next_materialized_flow_parameter(graph) {
@@ -32,7 +32,7 @@ pub(super) fn normalize_place_backed_flow(
     Ok(())
 }
 
-fn next_materialized_flow_parameter(graph: &EGraph) -> Option<(BlockId, usize, Type<TypeName>)> {
+fn next_materialized_flow_parameter(graph: &EGraph<Physical>) -> Option<(BlockId, usize, Type<TypeName>)> {
     graph.skeleton.blocks.iter().find_map(|(block, body)| {
         body.params.iter().enumerate().find_map(|(slot, parameter)| {
             let ty = graph.nodes[parameter.value()].ty.clone();
@@ -49,7 +49,7 @@ fn type_contains_addressable_array(ty: &Type<TypeName>) -> bool {
 }
 
 fn normalize_parameter(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     block: BlockId,
     slot: usize,
     ty: Type<TypeName>,
@@ -174,7 +174,11 @@ fn normalize_parameter(
     Ok(())
 }
 
-fn incoming_edges(graph: &EGraph, target: BlockId, slot: usize) -> Result<Vec<IncomingEdge>, String> {
+fn incoming_edges(
+    graph: &EGraph<Physical>,
+    target: BlockId,
+    slot: usize,
+) -> Result<Vec<IncomingEdge>, String> {
     let mut incoming = Vec::new();
     for (predecessor, body) in &graph.skeleton.blocks {
         match &body.term {
@@ -223,7 +227,7 @@ fn edge(
 }
 
 fn set_edge_arguments(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     edge: &IncomingEdge,
     arguments: Vec<super::super::types::FlowValueId>,
 ) {
@@ -235,7 +239,7 @@ fn set_edge_arguments(
     }
 }
 
-fn redirect_edge(graph: &mut EGraph, edge: &IncomingEdge, target: BlockId) {
+fn redirect_edge(graph: &mut EGraph<Physical>, edge: &IncomingEdge, target: BlockId) {
     match (&mut graph.skeleton.blocks[edge.predecessor].term, edge.arm) {
         (
             SkeletonTerminator::Branch {
@@ -274,7 +278,7 @@ fn redirect_edge(graph: &mut EGraph, edge: &IncomingEdge, target: BlockId) {
 }
 
 fn emit_array_transfer(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     block: BlockId,
     source: ValueId,
     destination: &ArrayLeaf,

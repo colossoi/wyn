@@ -1,5 +1,6 @@
 use super::*;
-use crate::egir::types::{Raw, RegionId, SegBody};
+use crate::egir::types::{Raw, SegBody};
+use crate::FunctionId;
 use std::collections::HashMap;
 
 fn node(index: u64) -> ValueId {
@@ -44,7 +45,7 @@ fn general_histogram() -> (Op<Raw>, HashMap<ValueId, Type<TypeName>>) {
         form: HistForm {
             bucket: screma::Lambda::region(
                 SegBody {
-                    region: RegionId::from_index(0),
+                    region: FunctionId::from_index(0),
                     captures: vec![],
                 },
                 vec![i32_type.clone()],
@@ -66,7 +67,7 @@ fn general_histogram() -> (Op<Raw>, HashMap<ValueId, Type<TypeName>>) {
                     update: Update::Reduce {
                         operator: screma::Lambda::region(
                             SegBody {
-                                region: RegionId::from_index(1),
+                                region: FunctionId::from_index(1),
                                 captures: vec![],
                             },
                             vec![

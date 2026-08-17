@@ -3,13 +3,13 @@
 use crate::ast::{Span, TypeName};
 use crate::flow::{BlockId, ExecutionModel};
 use crate::interface::{self, EntryInput, EntryOutput};
-use crate::ResourceId;
+use crate::{FunctionId, ResourceId};
 use polytype::Type;
 use smallvec::SmallVec;
 
 use super::graph_ops;
 use super::program::{
-    LogicalSize, PlannedEntry, SemanticOpIdSource, SemanticResourceDecl, SemanticResourceRef,
+    Entry, LogicalSize, PlannedEntry, SemanticOpIdSource, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::soac::screma;
 use super::types::{
@@ -122,7 +122,7 @@ impl<'a> EntryBuilder<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn emit_pending_map_into(
         &mut self,
-        region: super::types::RegionId,
+        region: FunctionId,
         input_array: ValueId,
         input_array_ty: Type<TypeName>,
         output_elem_ty: Type<TypeName>,
@@ -217,7 +217,7 @@ impl<'a> EntryBuilder<'a> {
 
     pub fn build(mut self) -> PlannedEntry {
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Return(None);
-        PlannedEntry {
+        PlannedEntry::new(Entry {
             id: self.id,
             name: self.name,
             span: self.span,
@@ -250,6 +250,6 @@ impl<'a> EntryBuilder<'a> {
                 vec![],
             )),
             graph: self.graph,
-        }
+        })
     }
 }

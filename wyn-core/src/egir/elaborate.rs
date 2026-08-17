@@ -29,7 +29,7 @@ use super::ir::{
     CallSiteId, FuncParam, OperandType, PlaceId as EgirPlaceId, PlaceOp, ResultBinding, ResultDestination,
 };
 use super::loop_analysis::LoopAnalysis;
-use super::program::{PhysicalEGraph, PhysicalPureOp, PhysicalSideEffect, PlannedGlobal};
+use super::program::PlannedGlobal;
 use super::scoped_map::ScopedMap;
 use super::types::*;
 
@@ -167,7 +167,7 @@ fn elaborate_extern(declaration: ExternDecl<Type<TypeName>>) -> Function {
 }
 
 pub(super) fn elaborate_one_body(
-    graph: PhysicalEGraph,
+    graph: EGraph<Physical>,
     params: &[FuncParam<BindingRef, Type<TypeName>>],
     return_ty: Type<TypeName>,
 ) -> FuncBody {
@@ -197,7 +197,7 @@ pub(super) fn skeleton_domtree<P: super::types::Family>(
 /// map so incidental demands of stripped block parameters transparently
 /// redirect to their replacements.
 pub fn elaborate_graph(
-    graph: &PhysicalEGraph,
+    graph: &EGraph<Physical>,
     domtree: &wyn_graph::DominatorTree<SkelBlockId>,
     params: &[FuncParam<BindingRef, Type<TypeName>>],
     return_ty: Type<TypeName>,
@@ -320,7 +320,7 @@ enum IndexCoordinate {
 }
 
 struct Elaborator<'a> {
-    graph: &'a PhysicalEGraph,
+    graph: &'a EGraph<Physical>,
     best: LookupMap<ValueId, ValueId>,
     domtree: &'a wyn_graph::DominatorTree<SkelBlockId>,
     loop_analysis: &'a LoopAnalysis,
@@ -408,7 +408,7 @@ impl<'a> Elaborator<'a> {
     /// Elaborate a side-effectful instruction. Side effects stay pinned to
     /// their containing skeleton block — only the operands go through
     /// demand() where LICM may move them.
-    fn elaborate_side_effect(&mut self, se: &PhysicalSideEffect, skel_bid: SkelBlockId) {
+    fn elaborate_side_effect(&mut self, se: &SideEffect<Physical>, skel_bid: SkelBlockId) {
         let effect = match &se.kind {
             super::types::SideEffectKind::Effect(effect) => effect,
             super::types::SideEffectKind::Soac(SoacEffect(_, p)) => {
@@ -1222,7 +1222,7 @@ fn const_to_inst_kind(c: &ConstantValue) -> InstKind {
     }
 }
 
-fn pure_to_inst_kind(op: &PhysicalPureOp, args: &[ValueRef]) -> InstKind {
+fn pure_to_inst_kind(op: &PureOp<BindingRef>, args: &[ValueRef]) -> InstKind {
     InstKind::Op {
         tag: op.clone().map_call(|call| match call {}),
         operands: args.to_vec(),

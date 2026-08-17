@@ -2,7 +2,7 @@ use super::*;
 
 use crate::ast::{Span, TypeName};
 use crate::egir::program::{
-    semantic_program_for_test, ProgramIdentities, SemanticEntry, SemanticOpId, SemanticResourceRef,
+    semantic_program_for_test, Entry, ProgramIdentities, SemanticOpId, SemanticResourceRef,
 };
 use crate::egir::reify::Segmented;
 use crate::egir::soac::screma;
@@ -35,14 +35,9 @@ fn semantic_params(
         .collect()
 }
 
-fn semantic_function(
-    id: FunctionId,
-    name: &str,
-    graph: EGraph<Semantic>,
-    parameter_count: usize,
-) -> SemanticFunc {
+fn semantic_function(id: FunctionId, name: &str, graph: EGraph<Semantic>, parameter_count: usize) -> Func {
     let ty = u32_ty();
-    SemanticFunc::new(
+    Func::<Semantic>::new(
         id,
         name.into(),
         Span::dummy(),
@@ -54,7 +49,7 @@ fn semantic_function(
     )
 }
 
-fn mixed_callee(id: FunctionId) -> SemanticFunc {
+fn mixed_callee(id: FunctionId) -> Func {
     let ty = u32_ty();
     let mut graph = EGraph::<Semantic>::new();
     let lane = graph.add_test_value_parameter(0, ty.clone());
@@ -76,7 +71,7 @@ fn mixed_callee(id: FunctionId) -> SemanticFunc {
     semantic_function(id, "mixed", graph, 2)
 }
 
-fn calling_body(id: FunctionId, mixed: FunctionId) -> SemanticFunc {
+fn calling_body(id: FunctionId, mixed: FunctionId) -> Func {
     let ty = u32_ty();
     let mut graph = EGraph::<Semantic>::new();
     let lane = graph.add_test_value_parameter(0, ty.clone());
@@ -117,7 +112,7 @@ fn analyze_enclosing(graph: &EGraph<Semantic>) -> StageDependenceAnalysis {
     .unwrap()
 }
 
-fn empty_program(functions: Vec<SemanticFunc>, identities: ProgramIdentities) -> Segmented {
+fn empty_program(functions: Vec<Func<Semantic>>, identities: ProgramIdentities) -> Segmented {
     semantic_program_for_test(
         functions,
         vec![],
@@ -372,7 +367,7 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
     entry_graph.skeleton.blocks[block].side_effects.push(effect);
     entry_graph.skeleton.blocks[block].term =
         SkeletonTerminator::Return(Some(entry_graph.value_result(result)));
-    let entry = SemanticEntry::new_with_resources(
+    let entry = Entry::<Semantic>::new_with_resources(
         "compute".into(),
         entry_id,
         Span::dummy(),

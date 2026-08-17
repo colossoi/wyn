@@ -2,11 +2,12 @@ pub use crate::flow::BlockId;
 use crate::LookupMap;
 pub use slotmap::Key;
 use slotmap::{new_key_type, SlotMap};
-use smallvec::SmallVec;
 use std::fmt::Debug;
 use std::hash::Hash;
 
 use crate::ast::Span;
+use crate::flow::{ControlHeader, Terminator as FlowTerminator};
+use crate::ssa::types::ValueRef;
 
 new_key_type! {
     pub struct InstId;
@@ -30,7 +31,7 @@ pub struct BasicBlock {
     pub insts: Vec<InstId>,
     pub term: Terminator,
     /// Structured-control metadata intrinsically owned by this block.
-    pub control_header: Option<crate::flow::ControlHeader>,
+    pub control_header: Option<ControlHeader>,
 }
 
 #[derive(Clone, Debug)]
@@ -69,13 +70,7 @@ pub enum ValueDef {
     },
 }
 
-pub type Terminator = crate::flow::Terminator<
-    crate::ssa::types::ValueRef,
-    crate::ssa::types::ValueRef,
-    crate::ssa::types::ValueRef,
->;
-
-pub type Successors = SmallVec<[BlockId; 2]>;
+pub type Terminator = FlowTerminator<ValueRef, ValueRef, ValueRef>;
 
 impl<I, T: Clone + Debug> Function<I, T> {
     pub fn new() -> Self {

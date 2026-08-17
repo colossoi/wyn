@@ -6,7 +6,7 @@ use crate::egir::allocation::{
     entries_with_endpoints, plan_logical_resources, verify_allocated_resources, CompilerFlowEndpoint,
     ResourcesAllocated,
 };
-use crate::egir::types::{by_value_function_result, CallEffects, EGraph, RegionId, WynLanguage};
+use crate::egir::types::{by_value_function_result, CallEffects, EGraph, WynLanguage};
 use crate::flow::ExecutionModel;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use polytype::Type;
@@ -15,8 +15,8 @@ fn unit_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Unit, vec![])
 }
 
-fn empty_func(id: RegionId, name: &str) -> SemanticFunc {
-    SemanticFunc::new(
+fn empty_func(id: FunctionId, name: &str) -> Func {
+    Func::<Semantic>::new(
         id,
         name.to_string(),
         Span::dummy(),
@@ -28,8 +28,8 @@ fn empty_func(id: RegionId, name: &str) -> SemanticFunc {
     )
 }
 
-fn empty_entry(id: crate::EntryId, name: &str) -> SemanticEntry {
-    SemanticEntry::new_with_resources(
+fn empty_entry(id: crate::EntryId, name: &str) -> Entry {
+    Entry::<Semantic>::new_with_resources(
         name.to_string(),
         id,
         Span::dummy(),

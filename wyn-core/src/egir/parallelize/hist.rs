@@ -6,10 +6,13 @@ use crate::ast::TypeName;
 use crate::egir::allocation::ResourcesAllocated;
 use crate::egir::program::SemanticOpId;
 use crate::egir::soac::hist;
-use crate::egir::types::{PureOp, SegSpace, Semantic, SkeletonTerminator, ValueId, ValueKind};
+use crate::egir::types::{
+    PureOp, SegResourceAccess, SegSpace, Semantic, SkeletonTerminator, ValueId, ValueKind,
+};
 use crate::op::BinaryOperator;
 use crate::ssa::types::{AtomicOp, ConstantValue};
 use crate::types::TypeExt;
+use crate::ResourceId;
 use std::collections::HashSet;
 
 use super::planning::LocatedHist;
@@ -129,7 +132,7 @@ fn analyze_operation(
 }
 
 fn recognize_direct_atomic(
-    function: &crate::egir::program::SemanticFunc,
+    function: &crate::egir::program::Func<Semantic>,
     signed: bool,
 ) -> Option<AtomicOp> {
     if function.graph.skeleton.blocks.len() != 1 || function.graph.has_ordered_effects() {
@@ -387,11 +390,11 @@ impl super::KernelPlanBuilder<'_, '_> {
         let init = BuiltPhase::new(
             init_body,
             vec![
-                super::schedule::ScheduledResource {
+                SegResourceAccess::<ResourceId> {
                     resource: candidate.counts,
                     access: ResourceAccess::Write,
                 },
-                super::schedule::ScheduledResource {
+                SegResourceAccess::<ResourceId> {
                     resource: candidate.overflow,
                     access: ResourceAccess::Write,
                 },
@@ -417,25 +420,25 @@ impl super::KernelPlanBuilder<'_, '_> {
             ProjectionSpec::unit(insert_name, body.execution_model.clone(), declarations.clone()),
         )?;
         let mut insert_resources = vec![
-            super::schedule::ScheduledResource {
+            SegResourceAccess::<ResourceId> {
                 resource: candidate.destination,
                 access: ResourceAccess::Write,
             },
-            super::schedule::ScheduledResource {
+            SegResourceAccess::<ResourceId> {
                 resource: candidate.counts,
                 access: ResourceAccess::ReadWrite,
             },
-            super::schedule::ScheduledResource {
+            SegResourceAccess::<ResourceId> {
                 resource: candidate.overflow,
                 access: ResourceAccess::Write,
             },
         ];
-        insert_resources.extend(candidate.input_resources.iter().map(|resource| {
-            super::schedule::ScheduledResource {
+        insert_resources.extend(
+            candidate.input_resources.iter().map(|resource| SegResourceAccess::<ResourceId> {
                 resource: *resource,
                 access: ResourceAccess::Read,
-            }
-        }));
+            }),
+        );
         let insert = BuiltPhase::new(
             insert_body,
             super::merge_scheduled_resources(&[], &insert_resources),
@@ -457,7 +460,7 @@ impl super::KernelPlanBuilder<'_, '_> {
             .iter()
             .filter_map(|output| output.resource.map(|resource| resource.0))
             .collect::<HashSet<_>>();
-        let mut finish_resources = vec![super::schedule::ScheduledResource {
+        let mut finish_resources = vec![SegResourceAccess::<ResourceId> {
             resource: candidate.overflow,
             access: ResourceAccess::Read,
         }];
@@ -465,7 +468,7 @@ impl super::KernelPlanBuilder<'_, '_> {
             published_outputs
                 .into_iter()
                 .filter(|resource| *resource != candidate.destination && *resource != candidate.counts)
-                .map(|resource| super::schedule::ScheduledResource {
+                .map(|resource| SegResourceAccess::<ResourceId> {
                     resource,
                     access: ResourceAccess::Write,
                 }),

@@ -21,12 +21,10 @@
 //! construction and backend lowering.
 
 use crate::ast::TypeName;
-use crate::error::CompilerError;
+use crate::error::{CompilerError, Result};
 use crate::ssa::types::{FuncBody, Program};
 use crate::types;
 use polytype::Type;
-
-pub type Result<T> = std::result::Result<T, CompilerError>;
 
 /// Walk every value type in every function body, every entry body, and
 /// every program-level constant body. Reject any `Array[_, Abstract,

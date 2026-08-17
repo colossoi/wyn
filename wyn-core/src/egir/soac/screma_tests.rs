@@ -1,5 +1,6 @@
 use super::*;
-use crate::egir::types::{Raw, RegionId, Semantic};
+use crate::egir::types::{Raw, Semantic};
+use crate::FunctionId;
 
 fn scalar(name: TypeName) -> Type<TypeName> {
     Type::Constructed(name, vec![])
@@ -20,7 +21,7 @@ fn array(element: Type<TypeName>) -> Type<TypeName> {
 fn region(index: usize, parameters: Vec<Type<TypeName>>, results: Vec<Type<TypeName>>) -> Lambda {
     Lambda::region(
         SegBody {
-            region: RegionId::from_index(index as u32),
+            region: FunctionId::from_index(index as u32),
             captures: vec![],
         },
         parameters,
@@ -189,7 +190,7 @@ fn node_traversal_covers_every_lambda_and_neutral() {
         form: ScremaForm {
             pre: Lambda::region(
                 SegBody {
-                    region: RegionId::from_index(0),
+                    region: FunctionId::from_index(0),
                     captures: vec![OperandRef::Value(node(1))],
                 },
                 vec![unit.clone()],
@@ -198,7 +199,7 @@ fn node_traversal_covers_every_lambda_and_neutral() {
             scans: vec![Scan {
                 operator: Lambda::region(
                     SegBody {
-                        region: RegionId::from_index(1),
+                        region: FunctionId::from_index(1),
                         captures: vec![OperandRef::Value(node(2))],
                     },
                     vec![unit.clone(), unit.clone()],
@@ -209,7 +210,7 @@ fn node_traversal_covers_every_lambda_and_neutral() {
             reductions: vec![Reduce {
                 operator: Lambda::region(
                     SegBody {
-                        region: RegionId::from_index(2),
+                        region: FunctionId::from_index(2),
                         captures: vec![OperandRef::Value(node(4))],
                     },
                     vec![unit.clone(), unit.clone()],
@@ -220,7 +221,7 @@ fn node_traversal_covers_every_lambda_and_neutral() {
             }],
             post: Lambda::region(
                 SegBody {
-                    region: RegionId::from_index(3),
+                    region: FunctionId::from_index(3),
                     captures: vec![OperandRef::Value(node(6))],
                 },
                 vec![unit],

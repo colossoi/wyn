@@ -7,22 +7,20 @@ use crate::ast::Span;
 use crate::ast::TypeName;
 use crate::egir::graph_ops::bind_by_value_result;
 use crate::egir::ir::PlaceOp;
-use crate::egir::program::{
-    PhysicalEGraph, PhysicalFunc, PhysicalResourceRef, PhysicalSideEffectKind, ProgramIdentities,
-    SemanticOpId,
-};
+use crate::egir::program::{Func, ProgramIdentities, SemanticOpId};
 use crate::egir::soac::{hist, screma};
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, EffectOp, Family, Language, OperandRef,
-    Physical, PureOp, SkeletonTerminator, Soac, SoacEffect, SoacInputType, ValueId, ValueKind, ViewId,
-    WynLanguage,
+    by_value_function_result, callable_parameter, CallEffects, EGraph, EffectOp, Family, Language,
+    OperandRef, Physical, PureOp, SideEffectKind, SkeletonTerminator, Soac, SoacEffect, SoacInputType,
+    ValueId, ValueKind, ViewId, WynLanguage,
 };
+use crate::BindingRef;
 use polytype::Type;
 
 /// Compile source through the pipeline to just-past `expand_soacs`,
 /// returning the EGraph for the (single) entry point so tests can
 /// introspect node structure.
-fn compile_to_expanded_egraph(input: &str) -> PhysicalEGraph {
+fn compile_to_expanded_egraph(input: &str) -> EGraph<Physical> {
     let program = crate::compile_thru_tlc(input).expect("compile_thru_tlc");
     let program = crate::tlc::infer_input_slice_bounds(program);
     let program = crate::to_egraph(program).expect("to_egraph");
@@ -75,8 +73,8 @@ fn physical_callable(
     name: &str,
     parameter_types: Vec<Type<TypeName>>,
     result_types: Vec<Type<TypeName>>,
-) -> PhysicalFunc {
-    let mut graph = PhysicalEGraph::new();
+) -> Func<Physical> {
+    let mut graph = EGraph::<Physical>::new();
     let parameters = parameter_types
         .iter()
         .enumerate()
@@ -104,9 +102,9 @@ fn physical_callable(
     let params = parameter_types
         .into_iter()
         .enumerate()
-        .map(|(index, ty)| callable_parameter::<PhysicalResourceRef, WynLanguage>(format!("p{index}"), ty))
+        .map(|(index, ty)| callable_parameter::<BindingRef, WynLanguage>(format!("p{index}"), ty))
         .collect();
-    PhysicalFunc::new(
+    Func::<Physical>::new(
         region,
         name.into(),
         Span::dummy(),
@@ -125,7 +123,7 @@ fn scatter_handleability_checks_every_input() {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
     let bad_input_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty.clone(), f32_ty.clone()]);
-    let kind: PhysicalSideEffectKind = PhysicalSideEffectKind::Soac(SoacEffect(
+    let kind: SideEffectKind<Physical> = SideEffectKind::<Physical>::Soac(SoacEffect(
         SemanticOpId::for_test(0),
         Soac::<Physical>::Hist(hist::Op {
             inputs: vec![
@@ -151,7 +149,7 @@ fn scatter_handleability_checks_every_input() {
                     },
                 }],
             },
-            state: hist::PhysicalState::Serial,
+            state: hist::ScheduledState::Serial,
         }),
     ));
 
@@ -168,7 +166,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
     use crate::egir::types::{EffectOp, SideEffectKind};
     use smallvec::{smallvec, SmallVec};
 
-    let mut graph = PhysicalEGraph::new();
+    let mut graph = EGraph::<Physical>::new();
     let block = graph.skeleton.entry;
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
@@ -232,7 +230,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
                 },
             ],
         },
-        state: hist::PhysicalState::Serial,
+        state: hist::ScheduledState::Serial,
     };
     let mut effect_ids = crate::IdSource::new();
     let result = graph_ops::alloc_by_value_effect_result(&mut graph, bool_ty);
@@ -303,7 +301,7 @@ fn serial_hist_ignores_out_of_bounds_indices() {
     use crate::egir::types::SkeletonTerminator;
     use smallvec::{smallvec, SmallVec};
 
-    let mut graph = PhysicalEGraph::new();
+    let mut graph = EGraph::<Physical>::new();
     let block = graph.skeleton.entry;
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
@@ -343,7 +341,7 @@ fn serial_hist_ignores_out_of_bounds_indices() {
                 },
             }],
         },
-        state: hist::PhysicalState::Serial,
+        state: hist::ScheduledState::Serial,
     };
     let mut effect_ids = crate::IdSource::new();
     let result = graph_ops::alloc_by_value_effect_result(&mut graph, bool_ty);
@@ -391,7 +389,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
     use crate::ssa::types::AtomicOp;
     use smallvec::{smallvec, SmallVec};
 
-    let mut graph = PhysicalEGraph::new();
+    let mut graph = EGraph::<Physical>::new();
     let block = graph.skeleton.entry;
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
@@ -464,7 +462,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
                 },
             ],
         },
-        state: hist::PhysicalState::Atomic {
+        state: hist::ScheduledState::Atomic {
             space: SegSpace::from_dims(vec![SegExtent::Fixed(4)]).unwrap(),
             operations: vec![
                 hist::AtomicUpdate::Direct(AtomicOp::Add),
@@ -571,7 +569,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
         .iter()
         .flat_map(|(_, block)| &block.side_effects)
         .filter_map(|effect| match effect.kind {
-            PhysicalSideEffectKind::Effect(EffectOp::Alloca { result }) => Some(result),
+            SideEffectKind::<Physical>::Effect(EffectOp::Alloca { result }) => Some(result),
             _ => None,
         })
         .collect::<std::collections::HashSet<_>>();
@@ -581,7 +579,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
         .iter()
         .flat_map(|(_, block)| &block.side_effects)
         .filter_map(|effect| match effect.kind {
-            PhysicalSideEffectKind::Effect(EffectOp::Store { place }) => {
+            SideEffectKind::<Physical>::Effect(EffectOp::Store { place }) => {
                 let PlaceOp::Index { base, .. } = graph.place(place).op() else {
                     return None;
                 };

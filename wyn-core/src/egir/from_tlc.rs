@@ -50,9 +50,9 @@ use smallvec::{smallvec, SmallVec};
 use thiserror::Error;
 
 use super::program::{
-    CompilerResource, CompilerResourceKind, ConstantDef, CoreProgramData, LogicalResourceArenaBuilder,
-    LogicalSize, Program, ProgramIdentities, RawEntry, RawFunc, RewriteGlobal, SemanticOpIdSource,
-    SemanticResourceDecl, SemanticResourceRef,
+    CompilerResource, CompilerResourceKind, ConstantDef, CoreProgramData, Func,
+    LogicalResourceArenaBuilder, LogicalSize, Program, ProgramIdentities, RawEntry, RewriteGlobal,
+    SemanticOpIdSource, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::soac::{filter, hist, screma};
 use super::types::*;
@@ -443,7 +443,7 @@ pub fn convert_program(
     }
 
     // Phase 2: convert functions and entry points into raw EGIR records.
-    let mut functions: Vec<RawFunc> = Vec::new();
+    let mut functions: Vec<Func<Raw>> = Vec::new();
     let mut externs: Vec<ExternDecl<Type<TypeName>>> = Vec::new();
     let mut entry_points: Vec<RawEntry> = Vec::new();
 
@@ -556,7 +556,7 @@ fn pipeline_workgroup_size(
 
 enum ConvertedFunc {
     Extern(ExternDecl<Type<TypeName>>),
-    Regular(RawFunc),
+    Regular(Func<Raw>),
 }
 
 // ============================================================================
@@ -619,7 +619,7 @@ fn convert_function<'a>(
     converter.set_return(Some(result_binding));
 
     // A runtime `filter` compacts into a compiler scratch resource, which only
-    // a `SemanticEntry` can own as a physicalization requirement. A standalone
+    // a `Entry<Semantic>` can own as a physicalization requirement. A standalone
     // function has no entry interface to publish that requirement. In practice
     // a function whose
     // result is a runtime filter is inlined into its caller before this pass
@@ -636,7 +636,7 @@ fn convert_function<'a>(
 
     let region = function_id;
     let graph = converter.into_graph();
-    Ok(ConvertedFunc::Regular(RawFunc::new(
+    Ok(ConvertedFunc::Regular(Func::<Raw>::new(
         region,
         def_name,
         def.body.span,

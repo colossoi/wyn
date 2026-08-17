@@ -5,7 +5,7 @@
 //! defines the concrete resource arenas, identifiers, and program data used
 //! by those states.
 
-use crate::LookupMap;
+use crate::{BindingRef, EntryId, FunctionId, GlobalId, IdArena, IdSource, LookupMap};
 
 use polytype::Type;
 
@@ -19,8 +19,8 @@ use std::ops::{Deref, Index, IndexMut};
 
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, Family, OperandType, ParameterId, Physical, PlaceAccess, PlaceRegion, Raw, RegionId, Scheduled,
-    SegBody, SegExtent, SegSpace, Semantic, SideEffectKind, Soac, SoacEffect, ValueId, ValueKind, ViewType,
+    EGraph, Family, OperandType, ParameterId, Physical, PlaceAccess, PlaceRegion, Raw, Scheduled, SegBody,
+    SegExtent, SegSpace, Semantic, SideEffectKind, Soac, SoacEffect, ValueId, ValueKind, ViewType,
     WynLanguage,
 };
 
@@ -34,6 +34,7 @@ pub type Entry<
     Route = RealizedOutputRoute,
     Lang = WynLanguage,
 > = super::ir::Entry<P, ResourceDecl, Route, Lang>;
+pub type RawEntry<Route = RealizedOutputRoute> = Entry<Raw, SemanticResourceDecl, Route>;
 pub type Program<Tag, Shape, GlobalContext, Lang = WynLanguage> =
     super::ir::Program<Tag, Shape, GlobalContext, Lang>;
 
@@ -55,17 +56,17 @@ impl<Tag, Shape, GlobalContext> super::ir::Program<Tag, Shape, GlobalContext, Wy
 where
     Shape: super::ir::ProgramShape,
 {
-    pub fn contains_region(&self, region: RegionId) -> bool {
+    pub fn contains_region(&self, region: FunctionId) -> bool {
         self.functions.iter().any(|function| function.region == region)
     }
 
-    pub fn region(&self, region: RegionId) -> Option<&super::ir::Func<Shape::Family, WynLanguage>> {
+    pub fn region(&self, region: FunctionId) -> Option<&super::ir::Func<Shape::Family, WynLanguage>> {
         self.functions.iter().find(|function| function.region == region)
     }
 
     pub fn iter_regions(
         &self,
-    ) -> impl Iterator<Item = (RegionId, &super::ir::Func<Shape::Family, WynLanguage>)> {
+    ) -> impl Iterator<Item = (FunctionId, &super::ir::Func<Shape::Family, WynLanguage>)> {
         self.functions.iter().map(|function| (function.region, function))
     }
 }
@@ -78,12 +79,12 @@ impl<Tag>
         WynLanguage,
     >
 {
-    pub fn region_name(&self, region: RegionId) -> &str {
+    pub fn region_name(&self, region: FunctionId) -> &str {
         self.data.identities.function_name(region)
     }
 }
 
-impl<Tag> Index<SemanticEntryId>
+impl<Tag> Index<EntryId>
     for super::ir::Program<
         Tag,
         super::ir::ProgramFamily<Semantic, SemanticResourceDecl, RealizedOutputRoute, CoreProgramData>,
@@ -91,9 +92,9 @@ impl<Tag> Index<SemanticEntryId>
         WynLanguage,
     >
 {
-    type Output = SemanticEntry;
+    type Output = Entry<Semantic>;
 
-    fn index(&self, id: SemanticEntryId) -> &Self::Output {
+    fn index(&self, id: EntryId) -> &Self::Output {
         &self.entry_points[id.index()]
     }
 }
@@ -167,7 +168,7 @@ impl From<u32> for SemanticOpId {
     }
 }
 
-pub(crate) type SemanticOpIdSource = crate::IdSource<SemanticOpId>;
+pub(crate) type SemanticOpIdSource = IdSource<SemanticOpId>;
 
 /// Target-independent identity of a semantic storage resource. Identities are
 /// issued only by the logical-resource arena and its conversion-time builder;
@@ -186,13 +187,8 @@ impl ResourceId {
     }
 }
 
-/// Opaque index into the fixed semantic-entry table. Textual entry names are
-/// publication metadata and are deliberately not used to connect plans back
-/// to their source entries.
-pub type SemanticEntryId = crate::EntryId;
-
 /// Stable identity of a semantic requirement to materialize a shared value.
-/// It is deliberately distinct from `SemanticEntryId`: a requirement is not
+/// It is deliberately distinct from `EntryId`: a requirement is not
 /// an entry point and cannot be mutated by semantic entry passes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MaterializationId(pub u32);
@@ -263,16 +259,6 @@ impl LogicalSize {
 /// A semantic storage identity. It cannot represent a backend binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SemanticResourceRef(pub ResourceId);
-
-pub type PhysicalResourceRef = crate::BindingRef;
-pub type PhysicalEGraph = EGraph<Physical>;
-pub type PhysicalSoac = super::types::Soac<Physical>;
-pub type PhysicalSideEffect = super::types::SideEffect<Physical>;
-pub type PhysicalSideEffectKind = super::types::SideEffectKind<Physical>;
-pub type PhysicalSegSpace = super::types::SegSpace<PhysicalResourceRef>;
-pub type PhysicalFilterWorkBuffers = super::soac::filter::WorkBuffers<PhysicalResourceRef>;
-pub type PhysicalFilterOutput = super::soac::filter::Output<PhysicalResourceRef>;
-pub type PhysicalPureOp = super::types::PureOp<PhysicalResourceRef>;
 
 /// Entry-local use of a logical resource. Unlike `StorageBindingDecl`, this is
 /// target independent after allocation and cannot assign a descriptor binding
@@ -729,7 +715,7 @@ fn normalize_structural_resources(inner: &mut super::from_tlc::Converted) {
     }
 }
 
-fn normalize_semantic_function_parameters(function: &mut RawFunc) {
+fn normalize_semantic_function_parameters(function: &mut Func<Raw>) {
     for index in 0..function.params.len() {
         let representation = semantic_parameter_representation(function.params[index].ty());
         if representation == *function.params[index].representation() {
@@ -860,7 +846,7 @@ fn physicalize_soac(
     places: &LookupMap<super::ir::PlaceId, super::ir::PlaceId>,
     bindings: &PhysicalResourceTable,
 ) -> Result<Soac<Physical>, String> {
-    fn binding(reference: SemanticResourceRef, bindings: &PhysicalResourceTable) -> PhysicalResourceRef {
+    fn binding(reference: SemanticResourceRef, bindings: &PhysicalResourceTable) -> BindingRef {
         bindings.binding(reference.0)
     }
 
@@ -885,7 +871,7 @@ fn physicalize_soac(
         space: SegSpace,
         nodes: &LookupMap<ValueId, ValueId>,
         bindings: &PhysicalResourceTable,
-    ) -> Result<PhysicalSegSpace, String> {
+    ) -> Result<SegSpace<BindingRef>, String> {
         let dims = space
             .into_dims()
             .into_iter()
@@ -950,7 +936,7 @@ fn physicalize_soac(
         segment: screma::Segmented<SemanticResourceRef>,
         nodes: &LookupMap<ValueId, ValueId>,
         bindings: &PhysicalResourceTable,
-    ) -> Result<screma::Segmented<PhysicalResourceRef>, String> {
+    ) -> Result<screma::Segmented<BindingRef>, String> {
         Ok(screma::Segmented {
             space: space(segment.space, nodes, bindings)?,
             output_slots: segment.output_slots,
@@ -970,7 +956,7 @@ fn physicalize_soac(
     fn filter_output(
         output: filter::Output,
         bindings: &PhysicalResourceTable,
-    ) -> Result<PhysicalFilterOutput, String> {
+    ) -> Result<filter::Output<BindingRef>, String> {
         Ok(match output {
             filter::Output::Local { capacity, ownership } => filter::Output::Local { capacity, ownership },
             filter::Output::Runtime { scratch, length } => filter::Output::Runtime {
@@ -988,7 +974,7 @@ fn physicalize_soac(
     fn work_buffers(
         buffers: filter::WorkBuffers,
         bindings: &PhysicalResourceTable,
-    ) -> Result<PhysicalFilterWorkBuffers, String> {
+    ) -> Result<filter::WorkBuffers<BindingRef>, String> {
         Ok(filter::WorkBuffers {
             flags: binding(buffers.flags, bindings),
             offsets: binding(buffers.offsets, bindings),
@@ -1200,20 +1186,11 @@ pub fn buffer_len(
     }
 }
 
-pub type RawFunc = Func<Raw>;
-pub type SemanticFunc = Func<Semantic>;
-pub type ScheduledFunc = Func<Scheduled>;
-pub type PhysicalFunc = Func<Physical>;
-
-pub type RawEntry<Route = super::ir::RealizedOutputRoute> = Entry<Raw, SemanticResourceDecl, Route>;
-pub type SemanticEntry = Entry<Semantic>;
-pub type ScheduledEntry = Entry<Scheduled>;
-
 #[cfg(test)]
 pub(crate) fn semantic_program_for_test(
-    functions: Vec<SemanticFunc>,
+    functions: Vec<Func<Semantic>>,
     externs: Vec<ExternDecl<Type<TypeName>>>,
-    entry_points: Vec<SemanticEntry>,
+    entry_points: Vec<Entry<Semantic>>,
     constants: Vec<ConstantDef<Semantic>>,
     pipeline: PipelineDescriptor,
     identities: ProgramIdentities,
@@ -1237,7 +1214,7 @@ pub(crate) fn semantic_program_for_test(
     )
 }
 
-impl SemanticEntry {
+impl Entry {
     /// Resource identities referenced by a set of values in `graph`, including
     /// resource-backed entry parameters whose identity is carried by the
     /// interface rather than by a storage-view node.
@@ -1444,8 +1421,32 @@ impl SemanticEntry {
 }
 
 /// A complete, fresh entry projection owned by a kernel recipe.
-pub type PlannedEntry<P = Semantic> =
-    super::ir::Entry<P, SemanticResourceDecl, RealizedOutputRoute, WynLanguage>;
+#[derive(Clone, Debug)]
+pub struct PlannedEntry<P: Family = Semantic>(Entry<P>);
+
+impl<P: Family> PlannedEntry<P> {
+    pub(crate) fn new(entry: Entry<P>) -> Self {
+        Self(entry)
+    }
+
+    pub(crate) fn into_inner(self) -> Entry<P> {
+        self.0
+    }
+}
+
+impl<P: Family> Deref for PlannedEntry<P> {
+    type Target = Entry<P>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<P: Family> std::ops::DerefMut for PlannedEntry<P> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 /// Backend-visible entry metadata retained by the plan without retaining a
 /// second copy of the semantic graph.
@@ -1460,7 +1461,7 @@ pub struct PlannedPublication {
 }
 
 impl PlannedPublication {
-    pub fn from_semantic(entry: &SemanticEntry) -> Self {
+    pub fn from_semantic(entry: &Entry<Semantic>) -> Self {
         Self {
             id: entry.id,
             name: entry.name.clone(),
@@ -1484,7 +1485,7 @@ impl PlannedPublication {
     }
 }
 
-impl SemanticEntry {
+impl Entry {
     pub(crate) fn resource_for_result(
         &self,
         result: &super::ir::ResultBinding<Type<TypeName>>,
@@ -1543,8 +1544,10 @@ impl SemanticEntry {
         }
         Ok(())
     }
+}
 
-    pub fn project(entry: &SemanticEntry) -> Result<Self, String> {
+impl PlannedEntry {
+    pub fn project(entry: &Entry<Semantic>) -> Result<Self, String> {
         let projection = super::graph_projector::GraphProjector::new(&entry.graph)
             .all_with_values(entry.routes().map(|route| route.source.value).collect())
             .map_err(|error| format!("could not project semantic entry '{}': {error}", entry.name))?;
@@ -1593,7 +1596,7 @@ impl SemanticEntry {
                 Ok(result)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        Ok(Self {
+        Ok(Self::new(Entry {
             id,
             name,
             span,
@@ -1606,7 +1609,7 @@ impl SemanticEntry {
             params,
             result,
             graph: projection.graph,
-        })
+        }))
     }
 }
 
@@ -1689,18 +1692,18 @@ pub enum MaterializationKind {
 pub enum MaterializationRequirement {
     SharedArray {
         space: SegSpace<SemanticResourceRef>,
-        entry: SemanticEntry,
+        entry: Entry<Semantic>,
     },
     Gather {
         space: SegSpace<SemanticResourceRef>,
-        entry: SemanticEntry,
+        entry: Entry<Semantic>,
     },
     RuntimeArray {
         space: SegSpace<SemanticResourceRef>,
-        entry: SemanticEntry,
+        entry: Entry<Semantic>,
     },
     Scalar {
-        entry: SemanticEntry,
+        entry: Entry<Semantic>,
     },
 }
 
@@ -1723,7 +1726,7 @@ impl MaterializationRequirement {
         }
     }
 
-    pub fn entry(&self) -> &SemanticEntry {
+    pub fn entry(&self) -> &Entry {
         match self {
             Self::SharedArray { entry, .. }
             | Self::Gather { entry, .. }
@@ -1732,7 +1735,7 @@ impl MaterializationRequirement {
         }
     }
 
-    pub fn entry_mut(&mut self) -> &mut SemanticEntry {
+    pub fn entry_mut(&mut self) -> &mut Entry {
         match self {
             Self::SharedArray { entry, .. }
             | Self::Gather { entry, .. }
@@ -1822,19 +1825,19 @@ impl PhysicalResourceTable {
 #[derive(Clone, Debug)]
 pub struct ProgramIdentities {
     /// One identity realm for user, extern, lifted, and compiler-generated callables.
-    functions: super::ir::RegionArena,
+    functions: IdArena<FunctionId, String>,
     /// Program-level values, independent of how a backend materializes them.
-    globals: super::ir::GlobalArena,
+    globals: IdArena<GlobalId, String>,
     /// Entry identity separate from its host-visible symbol.
-    entries: super::ir::EntryArena,
+    entries: IdArena<EntryId, String>,
 }
 
 impl ProgramIdentities {
     pub(crate) fn new() -> Self {
         Self {
-            functions: super::ir::RegionArena::default(),
-            globals: super::ir::GlobalArena::default(),
-            entries: super::ir::EntryArena::default(),
+            functions: IdArena::default(),
+            globals: IdArena::default(),
+            entries: IdArena::default(),
         }
     }
     pub(crate) fn alloc_function(&mut self, name: String) -> crate::FunctionId {
@@ -1931,11 +1934,11 @@ pub struct PlannedGlobal {
 }
 
 fn physicalize_function(
-    function: SemanticFunc,
+    function: Func<Semantic>,
     resources: &PhysicalResourceTable,
     serial: bool,
-) -> Result<PhysicalFunc, String> {
-    let SemanticFunc {
+) -> Result<Func<Physical>, String> {
+    let Func {
         region,
         name,
         span,
@@ -1967,7 +1970,7 @@ fn physicalize_function(
         |slot| slot,
         |parameter| parameter,
     );
-    Ok(PhysicalFunc {
+    Ok(Func {
         region,
         name,
         span,
@@ -2040,6 +2043,7 @@ fn emit_entry_output_writes(
     effect_ids: &mut crate::IdSource<super::types::EffectToken>,
 ) -> Result<(), String> {
     for slot in 0..entry.outputs.len() {
+        let entry_span = entry.span;
         let output_ty = entry.outputs[slot].ty.clone();
         let resource = entry.outputs[slot].resource;
         let routes = entry.outputs[slot].routes.clone();
@@ -2067,7 +2071,7 @@ fn emit_entry_output_writes(
                         source,
                         &output_ty,
                         effect_ids,
-                        Some(entry.span),
+                        Some(entry_span),
                     )
                     .map_err(|error| format!("entry output {slot}: {error}"))?
                     .into_iter()
@@ -2088,7 +2092,7 @@ fn emit_entry_output_writes(
                     place,
                     source,
                     effect_ids,
-                    Some(entry.span),
+                    Some(entry_span),
                 )));
             }
             let mut seen = HashSet::new();
@@ -2117,7 +2121,7 @@ fn physicalize_entry(
     effect_ids: &mut crate::IdSource<super::types::EffectToken>,
 ) -> Result<PhysicalEntry, String> {
     emit_entry_output_writes(&mut entry, effect_ids)?;
-    let super::ir::Entry {
+    let Entry {
         id,
         name,
         span,
@@ -2130,7 +2134,7 @@ fn physicalize_entry(
         params,
         result,
         graph,
-    } = entry;
+    } = entry.into_inner();
     let (graph, nodes, blocks) = physicalize_graph_resources(graph, resources)?;
     let inputs = inputs
         .into_iter()

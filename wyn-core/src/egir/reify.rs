@@ -29,7 +29,6 @@ use crate::LookupMap;
 
 use super::from_tlc::Converted;
 use super::graph_ops;
-use super::program::RealizedOutputRoute;
 use super::program::{
     ConstantDef, Entry, Func, OutputSlotId, OutputWriter, Program, RawEntry, SemanticOpIdSource,
     SemanticResourceRef,
@@ -122,10 +121,7 @@ fn reify_func(function: Func<Raw>, semantic_ids: &mut SemanticOpIdSource) -> Fun
     }
 }
 
-fn reify_entry(
-    entry: Entry<Raw, super::program::SemanticResourceDecl, RealizedOutputRoute>,
-    semantic_ids: &mut SemanticOpIdSource,
-) -> Entry<Semantic> {
+fn reify_entry(entry: RawEntry, semantic_ids: &mut SemanticOpIdSource) -> Entry<Semantic> {
     let mut facts = entry_facts(&entry);
     match entry.try_map_phase(|block, index, (), soac| {
         let facts = facts.remove(&(block, index)).expect("every raw SOAC must have semantic facts");
@@ -216,7 +212,7 @@ fn function_facts(graph: &EGraph<Raw>) -> HashMap<(BlockId, usize), Facts> {
         .collect()
 }
 
-fn entry_facts(entry: &RawEntry<RealizedOutputRoute>) -> HashMap<(BlockId, usize), Facts> {
+fn entry_facts(entry: &RawEntry) -> HashMap<(BlockId, usize), Facts> {
     let consumed = soac_consumed_nodes(&entry.graph);
     let kernel_scope = entry.execution_model.is_compute();
     let mut facts_by_location = HashMap::new();
@@ -273,7 +269,7 @@ fn entry_facts(entry: &RawEntry<RealizedOutputRoute>) -> HashMap<(BlockId, usize
 
 fn semantic_facts(
     graph: &EGraph<Raw>,
-    entry: Option<&RawEntry<RealizedOutputRoute>>,
+    entry: Option<&RawEntry>,
     effect: &SideEffect<Raw>,
     requested_placement: screma::Placement,
 ) -> Option<Facts> {
@@ -303,7 +299,7 @@ fn semantic_facts(
 
 fn space(
     graph: &EGraph<Raw>,
-    entry: Option<&RawEntry<RealizedOutputRoute>>,
+    entry: Option<&RawEntry>,
     effect: &SideEffect<Raw>,
     inputs: &[SoacInputType],
 ) -> SegSpace<SemanticResourceRef> {
@@ -379,7 +375,7 @@ fn space(
 
 fn extent_from_node(
     graph: &EGraph<Raw>,
-    entry: Option<&RawEntry<RealizedOutputRoute>>,
+    entry: Option<&RawEntry>,
     node: ValueId,
 ) -> SegExtent<SemanticResourceRef> {
     match &graph.nodes[node].kind {
@@ -399,7 +395,7 @@ fn extent_from_node(
     }
 }
 
-fn output_slots(entry: &RawEntry<RealizedOutputRoute>, effect: &SideEffect<Raw>) -> Vec<OutputSlotId> {
+fn output_slots(entry: &RawEntry, effect: &SideEffect<Raw>) -> Vec<OutputSlotId> {
     let value_writers = effect.result_values();
     let effect_writer = effect.effects.map(|(_, output)| OutputWriter::Effect(output));
     let mut slots = entry
@@ -423,7 +419,7 @@ fn output_slots(entry: &RawEntry<RealizedOutputRoute>, effect: &SideEffect<Raw>)
 
 fn semantic_resources(
     graph: &EGraph<Raw>,
-    entry: Option<&RawEntry<RealizedOutputRoute>>,
+    entry: Option<&RawEntry>,
     effect: &SideEffect<Raw>,
     output_slots: &[OutputSlotId],
 ) -> Vec<SegResourceAccess<SemanticResourceRef>> {

@@ -15,13 +15,13 @@ use smallvec::SmallVec;
 use crate::builtins::catalog;
 use crate::flow::{BlockId, Terminator};
 use crate::interface::{EntryInputKind, IoDecoration};
-use crate::{LookupMap, LookupSet};
+use crate::{FunctionId, LookupMap, LookupSet};
 
 use super::ir::{CallEffects, CallSiteId, EffectOp, Family, FlowValueId, OperandRef, SideEffectKind};
 use super::loop_analysis::LoopAnalysis;
-use super::program::SemanticEntry;
+use super::program::Entry;
 use super::reify::Segmented;
-use super::types::{EGraph, PureOp, PureViewSource, RegionId, SegBody, ValueId, ValueKind};
+use super::types::{EGraph, PureOp, PureViewSource, SegBody, Semantic, ValueId, ValueKind};
 
 #[cfg(test)]
 #[path = "stage_variance_tests.rs"]
@@ -137,7 +137,7 @@ impl StageDependence {
 /// Dependence of every argument at one pure user-call node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CallArgumentDependences {
-    pub(crate) callee: RegionId,
+    pub(crate) callee: FunctionId,
     pub(crate) arguments: SmallVec<[(ValueId, StageDependence); 4]>,
 }
 
@@ -309,7 +309,7 @@ impl StageDependenceAnalysis {
     }
 
     /// Analyze an entry using its declared interface as parameter seeds.
-    pub(crate) fn for_entry(entry: &SemanticEntry) -> Result<Self, String> {
+    pub(crate) fn for_entry(entry: &Entry<Semantic>) -> Result<Self, String> {
         Self::for_entry_graph(entry, &entry.graph)
     }
 
@@ -317,7 +317,7 @@ impl StageDependenceAnalysis {
     /// preserved by graph projection, so the source entry remains the
     /// authority for their stage dependence.
     pub(crate) fn for_entry_graph<P: Family>(
-        entry: &SemanticEntry,
+        entry: &Entry<Semantic>,
         graph: &EGraph<P>,
     ) -> Result<Self, String> {
         Self::for_graph(graph, &entry_parameter_dependences(entry))
@@ -397,12 +397,12 @@ fn seg_body_parameter_dependences(
     Ok(parameter_dependences)
 }
 
-pub(crate) fn entry_parameter_input_kind(entry: &SemanticEntry, index: usize) -> Option<&EntryInputKind> {
+pub(crate) fn entry_parameter_input_kind(entry: &Entry<Semantic>, index: usize) -> Option<&EntryInputKind> {
     let slot = *entry.parameter_inputs.get(index)?.first()?;
     entry.inputs.get(slot.0).map(|input| &input.kind)
 }
 
-pub(crate) fn entry_parameter_dependences(entry: &SemanticEntry) -> Vec<StageDependence> {
+pub(crate) fn entry_parameter_dependences(entry: &Entry<Semantic>) -> Vec<StageDependence> {
     (0..entry.params.len())
         .map(|index| {
             entry_parameter_input_kind(entry, index).map_or_else(unknown_dependence, entry_input_dependence)

@@ -3,13 +3,13 @@
 //! This deliberately executes semantic values rather than scheduled kernels;
 //! optional adapter tests compare backend readback against the same oracle.
 
-use crate::egir::program::SemanticFunc;
+use crate::egir::program::Func;
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{hist, screma};
 use crate::egir::types::{
-    PureOp, RegionId, ResultBinding, ResultDestination, Semantic, SkeletonTerminator, ValueId, ValueKind,
+    PureOp, ResultBinding, ResultDestination, Semantic, SkeletonTerminator, ValueId, ValueKind,
 };
-use crate::LookupMap;
+use crate::{FunctionId, LookupMap};
 
 #[cfg(test)]
 #[path = "semantic_exec_tests.rs"]
@@ -41,7 +41,7 @@ impl<'a> RegionExecutor<'a> {
         Self { program }
     }
 
-    pub fn call(&self, region: &RegionId, arguments: &[Value]) -> Result<Value, String> {
+    pub fn call(&self, region: &FunctionId, arguments: &[Value]) -> Result<Value, String> {
         let body = self.program.region(*region).ok_or_else(|| format!("unknown EGIR region {region}"))?;
         let SkeletonTerminator::Return(Some(result)) =
             &body.graph.skeleton.blocks[body.graph.skeleton.entry].term
@@ -94,7 +94,7 @@ impl<'a> RegionExecutor<'a> {
 
     fn eval_node(
         &self,
-        region: &SemanticFunc,
+        region: &Func<Semantic>,
         node: ValueId,
         arguments: &[Value],
         memo: &mut LookupMap<ValueId, Value>,
@@ -203,7 +203,7 @@ impl<'a> RegionExecutor<'a> {
 
     fn eval_result(
         &self,
-        region: &SemanticFunc,
+        region: &Func<Semantic>,
         result: &ResultBinding<polytype::Type<crate::ast::TypeName>>,
         arguments: &[Value],
         memo: &mut LookupMap<ValueId, Value>,

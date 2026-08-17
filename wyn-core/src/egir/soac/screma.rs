@@ -533,7 +533,7 @@ pub enum ScheduledState<R> {
 #[derive(Clone, Debug)]
 pub enum PhysicalState {
     Serial,
-    Segmented(Segmented<super::super::program::PhysicalResourceRef>),
+    Segmented(Segmented<crate::BindingRef>),
 }
 
 /// A Screma plus information owned by one EGIR phase.

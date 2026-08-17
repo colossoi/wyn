@@ -2,7 +2,7 @@ use polytype::Type;
 
 use crate::ast::TypeName;
 
-use super::super::program::{PhysicalResourceRef, SemanticResourceRef};
+use super::super::program::SemanticResourceRef;
 use super::super::types::{
     GraphResource, SegSpace, Semantic, SoacInputType, SoacOwnership, ValueId, WynSoacPhase,
 };
@@ -181,8 +181,6 @@ impl<R> ScheduledState<R> {
         }
     }
 }
-
-pub type PhysicalState = ScheduledState<PhysicalResourceRef>;
 
 #[derive(Clone, Debug)]
 pub struct Op<P: WynSoacPhase> {

@@ -65,7 +65,7 @@ fn stage_invariance_and_scalar_relocation_legality_remain_separate() {
             },
         },
     ];
-    let entry = SemanticEntry::new_with_resources(
+    let entry = Entry::<Semantic>::new_with_resources(
         "compute".into(),
         crate::EntryId::from_index(0),
         Span::dummy(),

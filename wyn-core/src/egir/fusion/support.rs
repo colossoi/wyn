@@ -7,7 +7,7 @@ use polytype::Type;
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
 use crate::egir::ir::{Body, SideEffectSite};
-use crate::egir::program::{OutputWriter, RealizedOutputRoute, SemanticEntry, SemanticResourceDecl};
+use crate::egir::program::{Entry, OutputWriter, RealizedOutputRoute, SemanticResourceDecl};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
 use crate::egir::types::{EGraph, OperandRef, ResultBinding, Semantic, ValueId, WynLanguage};
@@ -126,7 +126,7 @@ pub(super) fn rewrite_body_graph(body: FusionBody, rewrite: impl FnOnce(&mut EGr
 pub(super) fn rewrite_body_graph_with_entry<T>(
     body: FusionBody,
     rewrite: impl FnOnce(&mut EGraph) -> T,
-    finish_entry: impl FnOnce(&mut SemanticEntry, T),
+    finish_entry: impl FnOnce(&mut Entry<Semantic>, T),
 ) -> FusionBody {
     match body {
         Body::Entry(mut entry) => {
@@ -142,7 +142,7 @@ pub(super) fn rewrite_body_graph_with_entry<T>(
     }
 }
 
-pub(super) fn replace_route_sources(entry: &mut SemanticEntry, replacements: &[(ValueId, ValueId)]) {
+pub(super) fn replace_route_sources(entry: &mut Entry<Semantic>, replacements: &[(ValueId, ValueId)]) {
     for route in entry.routes_mut() {
         if let Some((_, replacement)) = replacements.iter().find(|(old, _)| route.source.value == *old) {
             route.source.value = *replacement;
@@ -150,13 +150,13 @@ pub(super) fn replace_route_sources(entry: &mut SemanticEntry, replacements: &[(
     }
 }
 
-pub(super) fn replace_route_values(entry: &mut SemanticEntry, replacements: &[(ValueId, ValueId)]) {
+pub(super) fn replace_route_values(entry: &mut Entry<Semantic>, replacements: &[(ValueId, ValueId)]) {
     for route in entry.routes_mut() {
         route.replace_values(replacements);
     }
 }
 
-pub(super) fn remove_value_writer(entry: &mut SemanticEntry, result: ValueId) {
+pub(super) fn remove_value_writer(entry: &mut Entry<Semantic>, result: ValueId) {
     for route in entry.routes_mut() {
         route.writers.retain(|writer| *writer != OutputWriter::Value(result));
     }

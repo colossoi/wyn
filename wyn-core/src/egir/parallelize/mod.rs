@@ -68,13 +68,11 @@ use projection::{
 };
 use reduce::{analyze_reduce_candidate, BoundReduce};
 use scan::{analyze_scan_candidate, BoundScan, ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
-pub use schedule::{
-    KernelDomain, KernelId, KernelPhaseSummary, KernelPlanSummary, OutputRouteProjection, ScheduledResource,
-};
+pub use schedule::{KernelDomain, KernelId, KernelPhaseSummary, KernelPlanSummary, OutputRouteProjection};
 use std::collections::{HashMap, HashSet};
 
 use crate::interface::StorageAccess;
-use crate::{LookupMap, ResourceAccess};
+use crate::{EntryId, FunctionId, LookupMap, ResourceAccess};
 
 use polytype::Type;
 use smallvec::smallvec;
@@ -83,9 +81,8 @@ use super::allocation::{self, CompilerFlowEndpoint, ResourcesAllocated};
 use super::from_tlc::ConvertError;
 use super::graph_ops;
 use super::program::{
-    CompilerResourceKind, LogicalResourceArena, MaterializationId, MaterializationRequirement,
-    OutputWriter, ResourceId, SemanticEntry, SemanticEntryId, SemanticFunc, SemanticOpId,
-    SemanticResourceDecl, SemanticResourceRef,
+    CompilerResourceKind, Entry, Func, LogicalResourceArena, MaterializationId, MaterializationRequirement,
+    OutputWriter, ResourceId, SemanticOpId, SemanticResourceDecl, SemanticResourceRef,
 };
 
 impl Planned {
@@ -101,8 +98,8 @@ impl Planned {
 }
 use super::soac::screma;
 use super::types::{
-    EGraph, EffectOp, EffectToken, PureOp, RegionId, SegBody, SegSpace, SideEffect, SideEffectKind,
-    SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind,
+    EGraph, EffectOp, EffectToken, PureOp, SegBody, SegResourceAccess, SegSpace, Semantic, SideEffect,
+    SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind,
 };
 use crate::ast::TypeName;
 use crate::builtins::catalog;
@@ -114,7 +111,7 @@ use crate::{LoweringProfile, SchedulePolicy};
 /// graph or repairing missing facts.
 struct BuiltPhase {
     body: super::program::PlannedEntry,
-    resources: Vec<schedule::ScheduledResource>,
+    resources: Vec<SegResourceAccess<ResourceId>>,
 }
 
 impl BuiltPhase {
@@ -123,7 +120,7 @@ impl BuiltPhase {
         Self { body, resources }
     }
 
-    fn new(body: super::program::PlannedEntry, resources: Vec<schedule::ScheduledResource>) -> Self {
+    fn new(body: super::program::PlannedEntry, resources: Vec<SegResourceAccess<ResourceId>>) -> Self {
         Self { body, resources }
     }
 
@@ -265,7 +262,7 @@ fn build_serial_plan(
 
 fn install_generated_callables(
     program: ResourcesAllocated,
-    generated_callables: Vec<SemanticFunc>,
+    generated_callables: Vec<Func<Semantic>>,
     identities: super::program::ProgramIdentities,
 ) -> ResourcesAllocated {
     program.extend_functions(generated_callables).map_data(|mut data| {
@@ -281,15 +278,15 @@ struct KernelPlanBuilder<'resources, 'effects> {
     recipes: planning::RecipeIndex,
     semantic_ids: &'effects mut super::program::SemanticOpIdSource,
     effect_ids: &'effects mut crate::IdSource<EffectToken>,
-    generated_callables: Vec<SemanticFunc>,
-    callables: LookupMap<RegionId, SemanticFunc>,
-    entry_ids: Vec<SemanticEntryId>,
+    generated_callables: Vec<Func<Semantic>>,
+    callables: LookupMap<FunctionId, Func<Semantic>>,
+    entry_ids: Vec<EntryId>,
     identities: super::program::ProgramIdentities,
 }
 
 type BuiltPlan = (
     schedule::KernelPlan,
-    Vec<SemanticFunc>,
+    Vec<Func<Semantic>>,
     super::program::ProgramIdentities,
 );
 
@@ -356,8 +353,8 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
     fn define_callable(
         &mut self,
         name: String,
-        build: impl FnOnce(RegionId, String) -> SemanticFunc,
-    ) -> error::Result<RegionId> {
+        build: impl FnOnce(FunctionId, String) -> Func<Semantic>,
+    ) -> error::Result<FunctionId> {
         if self.identities.function_names().any(|existing| existing == name) {
             return Err(error::ParallelizeError::Invalid(format!(
                 "planner-generated callable `{}` collides with an existing callable",
@@ -380,7 +377,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         Ok(id)
     }
 
-    fn callable(&self, region: RegionId) -> &SemanticFunc {
+    fn callable(&self, region: FunctionId) -> &Func {
         self.callables.get(&region).expect("parallel lowering callable boundary")
     }
 
@@ -388,8 +385,8 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         resources: &'resources LogicalResourceArena,
         descriptor: &crate::pipeline_descriptor::PipelineDescriptor,
         stage_entries: &[Vec<crate::EntryId>],
-        entries: &[SemanticEntry],
-        functions: &[SemanticFunc],
+        entries: &[Entry<Semantic>],
+        functions: &[Func<Semantic>],
         flows: Vec<(ResourceId, allocation::CompilerResourceFlow)>,
         recipes: planning::RecipeIndex,
         semantic_ids: &'effects mut super::program::SemanticOpIdSource,
@@ -620,26 +617,26 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
 }
 
 fn merge_scheduled_resources(
-    left: &[schedule::ScheduledResource],
-    right: &[schedule::ScheduledResource],
-) -> Vec<schedule::ScheduledResource> {
+    left: &[SegResourceAccess<ResourceId>],
+    right: &[SegResourceAccess<ResourceId>],
+) -> Vec<SegResourceAccess<ResourceId>> {
     crate::egir::ir::SegResourceAccess::merge(left, right)
 }
 
 fn segmented_resources(
     segment: &screma::Segmented<SemanticResourceRef>,
-) -> Vec<schedule::ScheduledResource> {
+) -> Vec<SegResourceAccess<ResourceId>> {
     segment
         .resources
         .iter()
-        .map(|resource| schedule::ScheduledResource {
+        .map(|resource| SegResourceAccess::<ResourceId> {
             resource: resource.resource.0,
             access: resource.access,
         })
         .collect()
 }
 
-fn declared_resources(declarations: &[SemanticResourceDecl]) -> Vec<schedule::ScheduledResource> {
+fn declared_resources(declarations: &[SemanticResourceDecl]) -> Vec<SegResourceAccess<ResourceId>> {
     let mut accesses: HashMap<ResourceId, ResourceAccess> = HashMap::new();
     for declaration in declarations {
         let access = ResourceAccess::from(StorageAccess::from(declaration.role));
@@ -648,17 +645,17 @@ fn declared_resources(declarations: &[SemanticResourceDecl]) -> Vec<schedule::Sc
 
     let mut resources = accesses
         .into_iter()
-        .map(|(resource, access)| schedule::ScheduledResource { resource, access })
+        .map(|(resource, access)| SegResourceAccess::<ResourceId> { resource, access })
         .collect::<Vec<_>>();
     resources.sort_by_key(|resource| resource.resource);
     resources
 }
 
-fn declared_input_resources(declarations: &[SemanticResourceDecl]) -> Vec<schedule::ScheduledResource> {
+fn declared_input_resources(declarations: &[SemanticResourceDecl]) -> Vec<SegResourceAccess<ResourceId>> {
     declarations
         .iter()
         .filter(|declaration| declaration.role == crate::interface::StorageRole::Input)
-        .map(|declaration| schedule::ScheduledResource {
+        .map(|declaration| SegResourceAccess::<ResourceId> {
             resource: declaration.resource.0,
             access: ResourceAccess::Read,
         })

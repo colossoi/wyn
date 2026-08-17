@@ -16,14 +16,12 @@ use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, BodySite, RealizedOutputRoute};
-use crate::egir::program::{
-    CoreProgramData, OutputWriter, ProgramIdentities, SemanticFunc, SemanticResourceRef,
-};
+use crate::egir::program::{CoreProgramData, Func, OutputWriter, ProgramIdentities, SemanticResourceRef};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::{filter, lambda as lambda_ops, screma};
 use crate::egir::types::{
-    EGraph, PureOp, ResultBinding, SegResourceAccess, SegSpace, SideEffect, SideEffectKind,
+    EGraph, PureOp, ResultBinding, SegResourceAccess, SegSpace, Semantic, SideEffect, SideEffectKind,
     SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind,
 };
 use crate::flow::{BlockId, ControlHeader};
@@ -296,7 +294,7 @@ fn build_count_reduction(
     scope: &str,
     span: crate::ast::Span,
     count_ty: Type<TypeName>,
-) -> (screma::Reduce, SemanticFunc) {
+) -> (screma::Reduce, Func<Semantic>) {
     let mut graph = EGraph::new();
     let params = lambda_ops::named_parameters(&[count_ty.clone(), count_ty.clone()], "count");
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
@@ -343,7 +341,7 @@ fn build_masked_pre(
     consumer: Option<&screma::ScremaForm>,
     count_ty: Option<&Type<TypeName>>,
     outer_types: &LookupMap<ValueId, Type<TypeName>>,
-) -> (screma::Lambda, SemanticFunc) {
+) -> (screma::Lambda, Func<Semantic>) {
     let mut captures = filter.body.map.captures().to_vec();
     captures.extend_from_slice(filter.body.predicate.captures());
     if let Some(consumer) = consumer {
@@ -488,7 +486,7 @@ fn rewrite_with_consumer(
     pre: screma::Lambda,
     count: Option<screma::Reduce>,
     count_ty: Option<Type<TypeName>>,
-) -> (Segmented, Vec<SemanticFunc>) {
+) -> (Segmented, Vec<Func<Semantic>>) {
     let synthesized = Vec::new();
     let rebuilt = inner.rewrite_body(candidate.site, |body| {
         let rewrite = |graph: &mut EGraph| {
@@ -592,7 +590,7 @@ fn rewrite_count_only(
     pre: screma::Lambda,
     mut count: screma::Reduce,
     count_ty: Type<TypeName>,
-) -> (Segmented, Vec<SemanticFunc>) {
+) -> (Segmented, Vec<Func<Semantic>>) {
     let rebuilt = inner.rewrite_body(candidate.site, |body| {
         let rewrite = |graph: &mut EGraph| {
             let neutral = integer_literal(graph, "0", &count_ty);
@@ -657,7 +655,7 @@ fn rewrite_count_only(
 }
 
 fn finish_entry_metadata(
-    entry: &mut crate::egir::program::SemanticEntry,
+    entry: &mut crate::egir::program::Entry<Semantic>,
     old_values: &[ValueId],
     patch: EntryMetadataPatch,
 ) {

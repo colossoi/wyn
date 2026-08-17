@@ -1,16 +1,16 @@
 use crate::ast::TypeName;
 use crate::types::TypeExt;
-use crate::LookupMap;
+use crate::{BindingRef, LookupMap};
 use polytype::Type;
 
 use super::super::graph_ops::{adapt_physical_call_argument, detached_alloca, emit_result_to_place};
 use super::super::ir::PlaceOp;
-use super::super::program::{PhysicalEGraph, PhysicalFunc, PhysicalResourceRef, PhysicalSideEffect};
+use super::super::program::Func;
 use super::super::types::{
-    destination_passing_function_result, CallEffects, CallSiteId, EffectOp, EffectToken, FuncParam,
-    FunctionResult, Language, OperandRef, OperandType, ParameterId, PlaceAccess, PlaceDestination,
-    PlaceRegion, ResultBinding, ResultDestination, SideEffectKind, SkeletonTerminator, ValueId, ValueKind,
-    ViewType, WynLanguage,
+    destination_passing_function_result, CallEffects, CallSiteId, EGraph, EffectOp, EffectToken, FuncParam,
+    FunctionResult, Language, OperandRef, OperandType, ParameterId, Physical, PlaceAccess,
+    PlaceDestination, PlaceRegion, ResultBinding, ResultDestination, SideEffect, SideEffectKind,
+    SkeletonTerminator, ValueId, ValueKind, ViewType, WynLanguage,
 };
 
 pub(super) fn resolve(
@@ -87,13 +87,13 @@ enum CallResultRouting {
 type BoundCall = (
     Vec<OperandRef>,
     Option<ResultBinding<Type<TypeName>>>,
-    Vec<PhysicalSideEffect>,
+    Vec<SideEffect<Physical>>,
 );
 
 pub(super) fn emit_call(
-    graph: &mut PhysicalEGraph,
+    graph: &mut EGraph<Physical>,
     block: crate::flow::BlockId,
-    callee: &PhysicalFunc,
+    callee: &Func<Physical>,
     arguments: impl IntoIterator<Item = OperandRef>,
     mapped_destinations: Option<(&[ResultBinding<Type<TypeName>>], ValueId)>,
     effect_ids: &mut crate::IdSource<EffectToken>,
@@ -142,9 +142,9 @@ pub(super) fn emit_call(
 }
 
 fn bind_call_boundary(
-    graph: &mut PhysicalEGraph,
+    graph: &mut EGraph<Physical>,
     callee: crate::FunctionId,
-    parameters: &[FuncParam<PhysicalResourceRef, Type<TypeName>>],
+    parameters: &[FuncParam<BindingRef, Type<TypeName>>],
     function_result: &FunctionResult<Type<TypeName>>,
     arguments: impl IntoIterator<Item = OperandRef>,
     routing: CallResultRouting,
@@ -292,9 +292,9 @@ fn bind_call_boundary(
 }
 
 fn resolve_entry_parameter_representations(
-    params: &mut [FuncParam<PhysicalResourceRef, Type<TypeName>>],
-    graph: &mut PhysicalEGraph,
-    parameter_resources: &[Option<PhysicalResourceRef>],
+    params: &mut [FuncParam<BindingRef, Type<TypeName>>],
+    graph: &mut EGraph<Physical>,
+    parameter_resources: &[Option<BindingRef>],
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), String> {
     for (index, parameter) in params.iter_mut().enumerate() {
@@ -343,7 +343,7 @@ fn resolve_entry_parameter_representations(
     Ok(())
 }
 
-fn resolve_function_parameters(function: &mut PhysicalFunc) -> Result<(), String> {
+fn resolve_function_parameters(function: &mut Func<Physical>) -> Result<(), String> {
     let old_params = std::mem::take(&mut function.params);
     let mut params = Vec::new();
     let mut old_parameter_nodes = Vec::new();
@@ -449,8 +449,8 @@ fn materialized_array_type(ty: &Type<TypeName>) -> Type<TypeName> {
 
 fn physical_parameter_representation(
     ty: &Type<TypeName>,
-    resource: Option<PhysicalResourceRef>,
-) -> OperandType<PhysicalResourceRef, Type<TypeName>> {
+    resource: Option<BindingRef>,
+) -> OperandType<BindingRef, Type<TypeName>> {
     if WynLanguage::is_materialized_aggregate(ty) {
         return match resource {
             Some(resource) => OperandType::View(ViewType {
@@ -496,7 +496,7 @@ fn materialize_product_leaves(ty: &Type<TypeName>) -> Type<TypeName> {
 }
 
 fn flatten_call_arguments(
-    graph: &mut PhysicalEGraph,
+    graph: &mut EGraph<Physical>,
     arguments: impl IntoIterator<Item = OperandRef>,
 ) -> Result<Vec<OperandRef>, String> {
     let mut flattened = Vec::new();
@@ -518,7 +518,7 @@ fn flatten_call_arguments(
     Ok(flattened)
 }
 
-fn synchronize_soac_input_types(graph: &mut PhysicalEGraph) {
+fn synchronize_soac_input_types(graph: &mut EGraph<Physical>) {
     let types = graph
         .nodes
         .iter()
@@ -539,7 +539,7 @@ fn synchronize_soac_input_types(graph: &mut PhysicalEGraph) {
 }
 
 fn resolve_function(
-    function: &mut PhysicalFunc,
+    function: &mut Func<Physical>,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), String> {
     let mut params = std::mem::take(&mut function.params);
@@ -659,11 +659,11 @@ fn resolve_function(
 }
 
 fn resolve_calls(
-    graph: &mut PhysicalEGraph,
+    graph: &mut EGraph<Physical>,
     boundaries: &LookupMap<
         crate::FunctionId,
         (
-            Vec<FuncParam<PhysicalResourceRef, Type<TypeName>>>,
+            Vec<FuncParam<BindingRef, Type<TypeName>>>,
             super::super::types::FunctionResult<Type<TypeName>>,
             CallEffects,
         ),
@@ -682,10 +682,10 @@ fn resolve_calls(
 }
 
 fn resolve_call(
-    graph: &mut PhysicalEGraph,
+    graph: &mut EGraph<Physical>,
     site: CallSiteId,
     boundary: &(
-        Vec<FuncParam<PhysicalResourceRef, Type<TypeName>>>,
+        Vec<FuncParam<BindingRef, Type<TypeName>>>,
         super::super::types::FunctionResult<Type<TypeName>>,
         CallEffects,
     ),

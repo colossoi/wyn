@@ -13,16 +13,13 @@ use crate::LookupMap;
 
 use super::types::{EGraph, Family, PureOp, ValueId, ValueKind};
 
-/// Cost of a node. Lower is better.
-pub type Cost = u32;
-
 /// Compute the best (cheapest) representative for each ValueId.
 ///
 /// Returns a map from ValueId -> best concrete ValueId (the chosen representative).
 /// For non-union nodes, this maps to themselves.
 /// For union nodes, this maps to the best leaf of the union tree.
 pub fn extract<P: Family>(graph: &EGraph<P>) -> LookupMap<ValueId, ValueId> {
-    let mut best_cost: LookupMap<ValueId, Cost> = LookupMap::new();
+    let mut best_cost: LookupMap<ValueId, u32> = LookupMap::new();
     let mut best_node: LookupMap<ValueId, ValueId> = LookupMap::new();
 
     // Topological sort of the acyclic graph.
@@ -41,11 +38,11 @@ pub fn extract<P: Family>(graph: &EGraph<P>) -> LookupMap<ValueId, ValueId> {
                 let lc = closure_cost(graph, *left, &best_node);
                 let rc = closure_cost(graph, *right, &best_node);
                 let chosen = if lc <= rc { left } else { right };
-                best_cost.insert(nid, best_cost.get(chosen).copied().unwrap_or(Cost::MAX));
+                best_cost.insert(nid, best_cost.get(chosen).copied().unwrap_or(u32::MAX));
                 best_node.insert(nid, best_node.get(chosen).copied().unwrap_or(*chosen));
             }
             ValueKind::Pure { op, operands } => {
-                let child_sum: Cost = operands
+                let child_sum: u32 = operands
                     .iter()
                     .map(|c| best_cost.get(c).copied().unwrap_or(0))
                     .fold(0u32, |a, b| a.saturating_add(b));
@@ -78,10 +75,10 @@ pub fn extract<P: Family>(graph: &EGraph<P>) -> LookupMap<ValueId, ValueId> {
 /// Total op cost of the distinct nodes reachable from `root`, following each
 /// union to its already-chosen representative (children precede parents in
 /// the topo order, so nested unions are resolved by the time this runs).
-fn closure_cost<P: Family>(graph: &EGraph<P>, root: ValueId, best: &LookupMap<ValueId, ValueId>) -> Cost {
+fn closure_cost<P: Family>(graph: &EGraph<P>, root: ValueId, best: &LookupMap<ValueId, ValueId>) -> u32 {
     let mut seen = HashSet::new();
     let mut stack = vec![root];
-    let mut total: Cost = 0;
+    let mut total: u32 = 0;
     while let Some(nid) = stack.pop() {
         let nid = best.get(&nid).copied().unwrap_or(nid);
         if !seen.insert(nid) {
@@ -99,10 +96,10 @@ fn closure_cost<P: Family>(graph: &EGraph<P>, root: ValueId, best: &LookupMap<Va
 /// exp/log sequence) for floats, an exponentiation-by-squaring helper for
 /// ints. A multiply chain proposed by `rewrite::PowToMulChain` wins while
 /// it needs fewer multiplies than this.
-const POW_COST: Cost = 8;
+const POW_COST: u32 = 8;
 
 /// Static cost per operation kind.
-fn op_cost<R>(op: &PureOp<R>) -> Cost {
+fn op_cost<R>(op: &PureOp<R>) -> u32 {
     match op {
         PureOp::BinOp(BinaryOperator::Power) => POW_COST,
         PureOp::ResourceLen(_) => 0,

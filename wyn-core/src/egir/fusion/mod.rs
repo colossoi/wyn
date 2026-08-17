@@ -16,10 +16,10 @@ use polytype::Type;
 use crate::ast::{Span, TypeName};
 
 use crate::egir::ir::BodySite;
-use crate::egir::program::SemanticEntry;
+use crate::egir::program::Entry;
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
-use crate::egir::types::{EGraph, ValueId};
+use crate::egir::types::{EGraph, Semantic, ValueId};
 
 use crate::LookupMap;
 
@@ -37,8 +37,8 @@ mod vertical;
 enum Rewrite {
     Indexed(indexed::Candidate),
     Vertical(vertical::Candidate),
-    Histogram(histogram::Candidate),
-    Envelope(envelope::Candidate),
+    Histogram(map_anchor::Candidate),
+    Envelope(map_anchor::Candidate),
     Filter(filter::Candidate),
     Horizontal(horizontal::Candidate),
 }
@@ -80,7 +80,7 @@ pub(super) fn rewrite_once(program: Segmented, oracle: &SemanticGraph) -> (Segme
 /// are excluded because semantic fusion never targets them.
 pub(super) fn bodies(
     program: &Segmented,
-) -> impl Iterator<Item = (BodySite, &EGraph, Option<&SemanticEntry>)> {
+) -> impl Iterator<Item = (BodySite, &EGraph, Option<&Entry<Semantic>>)> {
     program
         .entry_points
         .iter()

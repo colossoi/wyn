@@ -30,22 +30,19 @@ use super::graph_ops::{
     alloc_effect, detached_alloca, emit_alloca, emit_load, emit_place_index_store, emit_storage_store,
     emit_store,
 };
-use super::program::{
-    PhysicalEGraph as EGraph, PhysicalFilterOutput, PhysicalFilterWorkBuffers as FilterWorkBuffers,
-    PhysicalFunc, PhysicalSegSpace as SegSpace, PhysicalSideEffect as SideEffect,
-    PhysicalSideEffectKind as SideEffectKind, PhysicalSoac as Soac,
-};
+use super::program::Func;
 use super::soac::{filter, hist, screma};
 use crate::ast::TypeName;
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
 use super::types::{
-    as_soa_tuple, ArrayLayout, EffectOp, EffectToken, PlaceDestination, PlaceId, PureOp, RegionId,
-    ResultBinding, ResultDestination, SkeletonTerminator, SoacEffect, SoacOwnership, ValueId, ValueKind,
-    ViewId, WynLanguage,
+    as_soa_tuple, ArrayLayout, EGraph, EffectOp, EffectToken, Physical, PlaceDestination, PlaceId, PureOp,
+    ResultBinding, ResultDestination, SegSpace, SideEffect, SideEffectKind, SkeletonTerminator, Soac,
+    SoacEffect, SoacOwnership, ValueId, ValueKind, ViewId, WynLanguage,
 };
+use crate::{BindingRef, FunctionId, LookupMap};
 
-type CallableMap = crate::LookupMap<RegionId, PhysicalFunc>;
+type CallableMap = LookupMap<FunctionId, Func<Physical>>;
 
 mod array_io;
 mod call_abi;
@@ -84,10 +81,10 @@ pub fn expand_soacs(program: super::parallelize::Planned) -> Result<SoacsExpande
 
 /// Expand every physical SOAC in the skeleton.
 pub fn run_one_body(
-    mut graph: EGraph,
+    mut graph: EGraph<Physical>,
     callables: &CallableMap,
     effect_ids: &mut crate::IdSource<EffectToken>,
-) -> Result<EGraph, String> {
+) -> Result<EGraph<Physical>, String> {
     // Re-scan after every expansion because splitting a block moves the
     // remaining suffix. Selecting the first operation preserves producer to
     // consumer order, so a resolved destination is visible to later updates.
@@ -113,7 +110,7 @@ pub fn run_one_body(
 }
 
 /// Does this SOAC kind have a TLC→EGIR expansion implemented here?
-fn is_handleable_soac(kind: &SideEffectKind) -> bool {
+fn is_handleable_soac(kind: &SideEffectKind<Physical>) -> bool {
     let SideEffectKind::Soac(SoacEffect(_, soac)) = kind else {
         return false;
     };
@@ -180,7 +177,7 @@ fn is_virtual_source(arr_ty: &Type<TypeName>) -> bool {
     is_virtual_array(arr_ty)
 }
 
-fn bind_result_alias(graph: &mut EGraph, result: ValueId, replacement: ValueId) {
+fn bind_result_alias(graph: &mut EGraph<Physical>, result: ValueId, replacement: ValueId) {
     if result == replacement {
         return;
     }
@@ -188,14 +185,18 @@ fn bind_result_alias(graph: &mut EGraph, result: ValueId, replacement: ValueId) 
     graph.install_aliases([(result, replacement)]);
 }
 
-fn bind_result_value(graph: &mut EGraph, result: &ResultBinding<Type<TypeName>>, replacement: ValueId) {
+fn bind_result_value(
+    graph: &mut EGraph<Physical>,
+    result: &ResultBinding<Type<TypeName>>,
+    replacement: ValueId,
+) {
     let abi = super::types::by_value_function_result::<WynLanguage>(result.ty().clone());
     let replacement = super::graph_ops::bind_by_value_result(graph, &abi, replacement);
     bind_result_binding(graph, result, &replacement);
 }
 
 fn bind_result_binding(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     result: &ResultBinding<Type<TypeName>>,
     replacement: &ResultBinding<Type<TypeName>>,
 ) {
@@ -216,13 +217,17 @@ fn bind_result_binding(
     }
 }
 
-fn value_binding(graph: &mut EGraph, ty: &Type<TypeName>, value: ValueId) -> ResultBinding<Type<TypeName>> {
+fn value_binding(
+    graph: &mut EGraph<Physical>,
+    ty: &Type<TypeName>,
+    value: ValueId,
+) -> ResultBinding<Type<TypeName>> {
     let abi = super::types::by_value_function_result::<WynLanguage>(ty.clone());
     super::graph_ops::bind_by_value_result(graph, &abi, value)
 }
 
 fn load_result_arguments(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     block: BlockId,
     results: &[ResultBinding<Type<TypeName>>],
     next_effect: &mut crate::IdSource<EffectToken>,
@@ -233,7 +238,7 @@ fn load_result_arguments(
         .collect()
 }
 
-fn result_is_addressable(graph: &EGraph, result: &ResultBinding<Type<TypeName>>) -> bool {
+fn result_is_addressable(graph: &EGraph<Physical>, result: &ResultBinding<Type<TypeName>>) -> bool {
     result.destination_count()
         == result
             .destination_leaves()
@@ -253,7 +258,7 @@ fn result_is_addressable(graph: &EGraph, result: &ResultBinding<Type<TypeName>>)
 }
 
 fn emit_mapped_result_stores(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     block: BlockId,
     lane: ValueId,
     produced: &ResultBinding<Type<TypeName>>,
@@ -288,7 +293,7 @@ fn emit_mapped_result_stores(
 }
 
 fn expand_one(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx: usize,
     next_effect: &mut crate::IdSource<EffectToken>,
@@ -632,10 +637,10 @@ fn expand_one(
                 result_node: result_nid,
             };
             match &op.state {
-                hist::PhysicalState::Atomic { space, operations } => {
+                hist::ScheduledState::Atomic { space, operations } => {
                     build_hist_atomic(graph, bid, idx, hist, space, operations, next_effect, callables)
                 }
-                hist::PhysicalState::Bucket {
+                hist::ScheduledState::Bucket {
                     space,
                     stage,
                     topology,
@@ -653,7 +658,7 @@ fn expand_one(
                     ),
                     hist::ParallelStage::Finish => build_bucket_finish(graph, bid, idx, hist.result_node),
                 },
-                hist::PhysicalState::Serial => {
+                hist::ScheduledState::Serial => {
                     build_hist_loop(graph, bid, idx, hist, next_effect, callables)
                 }
             }

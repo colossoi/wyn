@@ -1,9 +1,7 @@
 use super::*;
 
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{
-    semantic_program_for_test, ProgramIdentities, SemanticFunc, SemanticResourceRef,
-};
+use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities, SemanticResourceRef};
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, FuncParam, OperandRef, Semantic,
     SkeletonTerminator, WynLanguage,
@@ -80,7 +78,7 @@ fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
             },
         },
     ];
-    let entry = SemanticEntry::new_with_resources(
+    let entry = Entry::<Semantic>::new_with_resources(
         "vertex".into(),
         EntryId::from_index(0),
         Span::dummy(),
@@ -307,7 +305,7 @@ fn repeated_region_captures_are_analyzed_per_use() {
         SkeletonTerminator::Return(Some(region_graph.value_result(result)));
     let mut identities = ProgramIdentities::default();
     let region_id: FunctionId = identities.alloc_function("map_body".into());
-    let region = SemanticFunc::new(
+    let region = Func::<Semantic>::new(
         region_id,
         "map_body".into(),
         Span::dummy(),

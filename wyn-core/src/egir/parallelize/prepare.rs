@@ -73,9 +73,12 @@ pub(super) fn entry(
     filter_plan: Option<ParallelFilterPlan>,
     hist_plan: Option<ParallelHistPlan>,
 ) -> Result<PlannedEntry<Scheduled>, String> {
-    entry.try_map_phase(|_, _, id, soac| {
-        schedule_soac_with_mode(id, soac, filter_plan, hist_plan.clone(), false).map(|soac| (id, soac))
-    })
+    entry
+        .into_inner()
+        .try_map_phase(|_, _, id, soac| {
+            schedule_soac_with_mode(id, soac, filter_plan, hist_plan.clone(), false).map(|soac| (id, soac))
+        })
+        .map(PlannedEntry::new)
 }
 
 pub(in crate::egir) fn graph(

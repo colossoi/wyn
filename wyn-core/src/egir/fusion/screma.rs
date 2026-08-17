@@ -11,14 +11,14 @@ use super::{capture_types, deduplicate_array_inputs};
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_projector::GraphProjector;
 use crate::egir::inlining;
-use crate::egir::program::{fresh_region_name, ProgramIdentities, SemanticFunc, SemanticResourceRef};
+use crate::egir::program::{fresh_region_name, Func, ProgramIdentities, SemanticResourceRef};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
 use crate::egir::types::{
-    CallEffects, EGraph, FuncParam, OperandRef, ParameterId, PureOp, SkeletonTerminator, SoacInputType,
-    ValueId, ValueKind,
+    CallEffects, EGraph, FuncParam, OperandRef, ParameterId, PureOp, Semantic, SkeletonTerminator,
+    SoacInputType, ValueId, ValueKind,
 };
-use crate::LookupMap;
+use crate::{FunctionId, LookupMap};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OutputOrigin {
@@ -33,7 +33,7 @@ pub(super) struct Normalized {
     /// Canonical fused field order, expressed in the source operations' field
     /// spaces. Independent siblings retain left-to-right post-result order.
     pub outputs: Vec<OutputOrigin>,
-    pub synthesized: Vec<SemanticFunc>,
+    pub synthesized: Vec<Func<Semantic>>,
 }
 
 pub(super) struct Source<'a> {
@@ -205,7 +205,7 @@ pub(super) struct NormalizedLambda {
     pub input_nodes: Vec<ValueId>,
     pub inputs: Vec<SoacInputType>,
     pub lambda: screma::Lambda,
-    pub synthesized: Vec<SemanticFunc>,
+    pub synthesized: Vec<Func<Semantic>>,
 }
 
 /// Compose a pure map producer into an arbitrary element lambda. This is the
@@ -787,7 +787,7 @@ enum ProjectedValue {
 
 #[derive(Clone)]
 struct RegionProjection {
-    region: crate::egir::types::RegionId,
+    region: FunctionId,
     roots: Vec<ValueId>,
     result_types: Vec<Type<TypeName>>,
     arguments: Vec<(usize, ProjectedValue)>,
@@ -832,7 +832,7 @@ fn lambda_results_depend_on_parameters(
     Some(dependencies.iter().any(|input| parameters.contains(input)))
 }
 
-fn function_return_site(function: &SemanticFunc) -> Option<(crate::flow::BlockId, Vec<ValueId>)> {
+fn function_return_site(function: &Func<Semantic>) -> Option<(crate::flow::BlockId, Vec<ValueId>)> {
     let mut returns = function.graph.skeleton.blocks.iter().filter_map(|(block, body)| match &body.term {
         SkeletonTerminator::Return(Some(result)) => Some((block, result.values())),
         _ => None,
@@ -841,7 +841,7 @@ fn function_return_site(function: &SemanticFunc) -> Option<(crate::flow::BlockId
     returns.next().is_none().then_some(result)
 }
 
-fn function_result_field(function: &SemanticFunc, index: usize) -> Option<ValueId> {
+fn function_result_field(function: &Func<Semantic>, index: usize) -> Option<ValueId> {
     function_return_site(function)?.1.get(index).copied()
 }
 
@@ -855,7 +855,7 @@ fn lambda_result_roots(program: &Segmented, lambda: &screma::Lambda) -> Option<V
 struct ProjectionBuilder<'a> {
     program: &'a Segmented,
     projections: Vec<RegionProjection>,
-    region_stack: Vec<crate::egir::types::RegionId>,
+    region_stack: Vec<FunctionId>,
 }
 
 fn build_projection_recipe(
@@ -892,7 +892,7 @@ impl ProjectionBuilder<'_> {
 
     fn function(
         &mut self,
-        function: &SemanticFunc,
+        function: &Func<Semantic>,
         roots: &[ValueId],
         result_types: &[Type<TypeName>],
         arguments: &[Option<ProjectedValue>],
@@ -950,7 +950,7 @@ impl ProjectionBuilder<'_> {
 
     fn value(
         &mut self,
-        function: &SemanticFunc,
+        function: &Func<Semantic>,
         source: ValueId,
         arguments: &[Option<ProjectedValue>],
         memo: &mut LookupMap<ValueId, ProjectedValue>,
@@ -1036,7 +1036,7 @@ impl ProjectionBuilder<'_> {
 
     fn call(
         &mut self,
-        caller: &SemanticFunc,
+        caller: &Func<Semantic>,
         callee: &crate::FunctionId,
         call_arguments: &[OperandRef],
         result: usize,
@@ -1102,7 +1102,7 @@ fn emit_projected_lambda_results(
     lambda: &screma::Lambda,
     arguments: &[Option<ValueId>],
     results: std::ops::Range<usize>,
-) -> Option<(Vec<ValueId>, Vec<SemanticFunc>)> {
+) -> Option<(Vec<ValueId>, Vec<Func<Semantic>>)> {
     emit_projected_lambda_result_indices(
         graph,
         context,
@@ -1120,7 +1120,7 @@ fn emit_projected_lambda_result_indices(
     lambda: &screma::Lambda,
     arguments: &[Option<ValueId>],
     results: &[usize],
-) -> Option<(Vec<ValueId>, Vec<SemanticFunc>)> {
+) -> Option<(Vec<ValueId>, Vec<Func<Semantic>>)> {
     if results.iter().any(|result| *result >= lambda.result_types.len()) {
         return None;
     }
@@ -1155,11 +1155,11 @@ struct ProjectionEmitter<'a, 'program> {
     recipe: &'a ProjectionRecipe,
     inputs: &'a [Option<ValueId>],
     emitted_regions: Vec<Option<Vec<ValueId>>>,
-    synthesized: Vec<SemanticFunc>,
+    synthesized: Vec<Func<Semantic>>,
 }
 
 impl ProjectionEmitter<'_, '_> {
-    fn emit(mut self) -> Option<(Vec<ValueId>, Vec<SemanticFunc>)> {
+    fn emit(mut self) -> Option<(Vec<ValueId>, Vec<Func<Semantic>>)> {
         let values =
             self.recipe.values.iter().map(|value| self.value(value)).collect::<Option<Vec<_>>>()?;
         Some((values, self.synthesized))
@@ -1336,7 +1336,7 @@ fn parallel_pre(
     consumer: &screma::ScremaForm,
     producer_parameters: Vec<usize>,
     consumer_parameters: Vec<usize>,
-) -> (screma::Lambda, Option<SemanticFunc>) {
+) -> (screma::Lambda, Option<Func<Semantic>>) {
     let producer_scans = producer.scan_input_count();
     let consumer_scans = consumer.scan_input_count();
     let producer_reductions = producer.reduction_input_count();
@@ -1387,7 +1387,7 @@ fn parallel_post(
     context: &mut Context<'_>,
     producer: &screma::ScremaForm,
     consumer: &screma::ScremaForm,
-) -> (screma::Lambda, Option<SemanticFunc>) {
+) -> (screma::Lambda, Option<Func<Semantic>>) {
     let producer_scans = producer.scan_input_count();
     let consumer_scans = consumer.scan_input_count();
     let producer_mapped = producer.mapped_types().expect("validated producer Screma").len();
@@ -1435,7 +1435,7 @@ fn parallel_lambdas(
     parameter_types: Vec<Type<TypeName>>,
     calls: Vec<LambdaCall<'_>>,
     outputs: Vec<ValueRef>,
-) -> (screma::Lambda, Option<SemanticFunc>) {
+) -> (screma::Lambda, Option<Func<Semantic>>) {
     let result_types = outputs
         .iter()
         .map(|output| calls[output.call].lambda.result_types[output.result].clone())
@@ -1518,7 +1518,7 @@ fn vertical_lambda(
     consumer_parameters: &[Option<usize>],
     routes: &[InputRoute],
     outputs: &[VerticalValueRef],
-) -> (screma::Lambda, Option<SemanticFunc>) {
+) -> (screma::Lambda, Option<Func<Semantic>>) {
     let producer_body = producer.seg_body();
     let consumer_body = consumer.seg_body();
     let captures = producer_body
@@ -1606,7 +1606,7 @@ fn finish_lambda(
     parameter_types: Vec<Type<TypeName>>,
     result_types: Vec<Type<TypeName>>,
     results: Vec<ValueId>,
-) -> (screma::Lambda, Option<SemanticFunc>) {
+) -> (screma::Lambda, Option<Func<Semantic>>) {
     let return_block = graph.skeleton.entry;
     lambda_ops::finish_region_lambda(
         context.identities,

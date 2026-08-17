@@ -169,13 +169,13 @@ pub(crate) fn addressable_operand_place<P: Family>(
 }
 
 pub(crate) fn adapt_physical_call_argument(
-    graph: &mut super::program::PhysicalEGraph,
+    graph: &mut EGraph<Physical>,
     argument: OperandRef,
-    parameter: &FuncParam<super::program::PhysicalResourceRef, Type<TypeName>>,
+    parameter: &FuncParam<BindingRef, Type<TypeName>>,
     callee: crate::FunctionId,
     index: usize,
     effect_ids: &mut crate::IdSource<EffectToken>,
-) -> Result<(OperandRef, Vec<super::program::PhysicalSideEffect>), String> {
+) -> Result<(OperandRef, Vec<SideEffect<Physical>>), String> {
     let argument = graph.canonical_operand(argument);
     let mut effects = Vec::new();
     let argument = match parameter.representation() {
@@ -256,7 +256,7 @@ pub(crate) fn adapt_physical_call_argument(
 }
 
 fn view_type_for_place(
-    graph: &super::program::PhysicalEGraph,
+    graph: &EGraph<Physical>,
     place: PlaceId,
     pointee: &Type<TypeName>,
 ) -> Type<TypeName> {

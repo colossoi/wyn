@@ -4,14 +4,13 @@
 
 use super::{convert_program, ConversionArenas, Converter};
 use crate::ast::TypeName;
-use crate::egir::program::PhysicalResourceRef;
 use crate::egir::types::{callable_parameter, FuncParam, WynLanguage};
 use crate::ssa::types::{ConstantValue, FuncBody, InstKind, ValueRef};
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::VarRef;
 use crate::tlc::{Term, TermKind};
-use crate::SymbolId;
 use crate::SymbolTable;
+use crate::{BindingRef, SymbolId};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
 
@@ -54,7 +53,7 @@ fn mk_term(
 
 fn elaborate_converter(
     converter: Converter<'_, '_>,
-    params: &[FuncParam<PhysicalResourceRef, Type<TypeName>>],
+    params: &[FuncParam<BindingRef, Type<TypeName>>],
     return_ty: Type<TypeName>,
 ) -> FuncBody {
     let graph = converter.into_graph();
@@ -85,9 +84,7 @@ fn convert_simple_def(
     let param_info = params
         .iter()
         .enumerate()
-        .map(|(i, (_, ty))| {
-            callable_parameter::<PhysicalResourceRef, WynLanguage>(format!("p{i}"), ty.clone())
-        })
+        .map(|(i, (_, ty))| callable_parameter::<BindingRef, WynLanguage>(format!("p{i}"), ty.clone()))
         .collect::<Vec<_>>();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
@@ -178,8 +175,8 @@ fn test_add_roundtrip() {
     converter.set_return(Some(converter.graph.value_result(result)));
 
     let params = vec![
-        callable_parameter::<PhysicalResourceRef, WynLanguage>("a".into(), i32_ty()),
-        callable_parameter::<PhysicalResourceRef, WynLanguage>("b".into(), i32_ty()),
+        callable_parameter::<BindingRef, WynLanguage>("a".into(), i32_ty()),
+        callable_parameter::<BindingRef, WynLanguage>("b".into(), i32_ty()),
     ];
     let func = elaborate_converter(converter, &params, i32_ty());
 
@@ -386,7 +383,7 @@ fn test_if_else_roundtrip() {
     let result = converter.convert_term(&if_term).expect("conversion failed");
     converter.set_return(Some(converter.graph.value_result(result)));
 
-    let params = vec![callable_parameter::<PhysicalResourceRef, WynLanguage>(
+    let params = vec![callable_parameter::<BindingRef, WynLanguage>(
         "c".into(),
         Type::Constructed(TypeName::Bool, vec![]),
     )];
@@ -607,7 +604,7 @@ fn construction_purity_propagates_effectful_builtin_calls() {
     );
 }
 
-/// Graphics entries must NOT derive `SemanticEntry.return_ty` from
+/// Graphics entries must NOT derive `Entry<Semantic>.return_ty` from
 /// `def.ty`'s arrow-return position. Compute output routes use that signature,
 /// while graphics entries use `inner_body.ty`, which
 /// matches the body's actual produced shape after ownership and
@@ -672,7 +669,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     let egir = super::convert_program(&tlc_program, binding_ids, effect_ids)
         .expect("from_tlc::convert_program on graphics entry must succeed");
     let entry =
-        egir.entry_points.iter().find(|entry| entry.name == vertex_name).expect("vertex SemanticEntry");
+        egir.entry_points.iter().find(|entry| entry.name == vertex_name).expect("vertex Entry<Semantic>");
 
     assert_eq!(
         entry.outputs.len(),

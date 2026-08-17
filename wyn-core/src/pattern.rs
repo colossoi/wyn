@@ -5,9 +5,6 @@
 
 use crate::ast::{BindingName, Pattern, PatternKind, RecordPatternTarget, TreeFamily};
 
-/// A binding extracted from a pattern: (name, value).
-pub type Binding<T> = (String, T);
-
 /// Trait for values that can be decomposed according to patterns.
 ///
 /// Different passes implement this trait for their value types:
@@ -51,7 +48,7 @@ pub enum PatternError {
 pub fn extract_bindings<T: PatternValue, F: TreeFamily, A>(
     pattern: &Pattern<F, A>,
     value: T,
-) -> Result<Vec<Binding<T>>, PatternError> {
+) -> Result<Vec<(String, T)>, PatternError> {
     let mut bindings = Vec::new();
     extract_bindings_inner(pattern, value, &mut bindings)?;
     Ok(bindings)
@@ -60,7 +57,7 @@ pub fn extract_bindings<T: PatternValue, F: TreeFamily, A>(
 fn extract_bindings_inner<T: PatternValue, F: TreeFamily, A>(
     pattern: &Pattern<F, A>,
     value: T,
-    bindings: &mut Vec<Binding<T>>,
+    bindings: &mut Vec<(String, T)>,
 ) -> Result<(), PatternError> {
     match &pattern.kind {
         PatternKind::Name(name) => {
@@ -127,9 +124,6 @@ pub fn bound_names<T: TreeFamily, A>(pattern: &Pattern<T, A>) -> Vec<String> {
     names
 }
 
-/// A path of tuple indices to reach a binding from the root value.
-pub type ProjectionPath = Vec<usize>;
-
 /// Information about a binding extracted from a pattern.
 #[derive(Debug, Clone)]
 pub struct BindingPath {
@@ -140,7 +134,8 @@ pub struct BindingPath {
     /// Stable semantic identity after name resolution. Source-only patterns
     /// carry `None`; downstream semantic consumers require `Some`.
     pub symbol: Option<crate::SymbolId>,
-    pub path: ProjectionPath,
+    /// Tuple indices from the root value to this binding.
+    pub path: Vec<usize>,
 }
 
 /// Extract binding paths from a pattern.

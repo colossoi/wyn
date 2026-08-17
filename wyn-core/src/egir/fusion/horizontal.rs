@@ -14,7 +14,7 @@ use super::support;
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, BodySite};
-use crate::egir::program::{CoreProgramData, OutputSlotId, ProgramIdentities, SemanticFunc};
+use crate::egir::program::{CoreProgramData, Func, OutputSlotId, ProgramIdentities};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
@@ -214,7 +214,7 @@ struct FusionPlan {
     right_results: Vec<ResultBinding<Type<TypeName>>>,
     left_mapping: Vec<usize>,
     right_mapping: Vec<usize>,
-    synthesized: Vec<SemanticFunc>,
+    synthesized: Vec<Func<Semantic>>,
 }
 
 #[allow(clippy::too_many_arguments)]

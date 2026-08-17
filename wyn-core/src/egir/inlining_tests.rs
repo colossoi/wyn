@@ -2,7 +2,7 @@ use super::*;
 
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_ops::bind_by_value_result;
-use crate::egir::program::{SemanticFunc, SemanticResourceRef};
+use crate::egir::program::{Func, SemanticResourceRef};
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, EGraph, FuncParam, OperandRef, PureOp,
     ResultBinding, Semantic, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
@@ -69,7 +69,7 @@ fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     callee_graph.skeleton.blocks[callee_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(callee_graph.value_result(result)));
     let params = semantic_params([("x", ty.clone()), ("invariant", ty.clone())]);
-    let callee = SemanticFunc::new(
+    let callee = Func::<Semantic>::new(
         region,
         "mixed".into(),
         Span::dummy(),
@@ -119,7 +119,7 @@ fn inline_pure_call_folds_projection_of_substituted_aggregate() {
     callee_graph.skeleton.blocks[callee_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(callee_graph.value_result(selected)));
     let params = semantic_params([("left", ty.clone()), ("right", ty.clone())]);
-    let callee = SemanticFunc::new(
+    let callee = Func::<Semantic>::new(
         region,
         "select_right".into(),
         Span::dummy(),
@@ -158,7 +158,7 @@ fn inline_pure_call_replaces_every_leaf_of_a_product_result() {
     callee_graph.skeleton.blocks[callee_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(return_binding));
     let params = semantic_params([("left", ty.clone()), ("right", ty.clone())]);
-    let callee = SemanticFunc::new(
+    let callee = Func::<Semantic>::new(
         region,
         "make_pair".into(),
         Span::dummy(),
@@ -233,7 +233,7 @@ fn inline_call_at_block_splices_a_scalar_selection_cfg() {
     callee_graph.skeleton.blocks[merge].term =
         SkeletonTerminator::Return(Some(callee_graph.value_result(selected)));
     let params = semantic_params([("value", ty.clone()), ("choose_left", bool_ty.clone())]);
-    let callee = SemanticFunc::new(
+    let callee = Func::<Semantic>::new(
         region,
         "choose_offset".into(),
         Span::dummy(),

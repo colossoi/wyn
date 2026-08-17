@@ -2,7 +2,6 @@ use polytype::Type;
 
 use crate::ast::TypeName;
 
-use super::super::program::PhysicalResourceRef;
 use super::super::types::{
     GraphResource, SegSpace, Semantic, SoacInputType, ValueId, ViewId, WynSoacPhase,
 };
@@ -218,8 +217,6 @@ pub enum ScheduledState<R> {
         topology: Option<DispatchTopology>,
     },
 }
-
-pub type PhysicalState = ScheduledState<PhysicalResourceRef>;
 
 #[derive(Clone, Debug)]
 pub struct Op<P: WynSoacPhase> {

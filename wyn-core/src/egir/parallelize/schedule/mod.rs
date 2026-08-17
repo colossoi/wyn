@@ -11,16 +11,16 @@ use std::sync::Arc;
 
 use crate::egir::allocation::{CompilerFlowEndpoint, CompilerResourceFlow};
 use crate::egir::program::{
-    LogicalResourceArena, MaterializationId, MaterializationKind, MaterializationRequirement, OutputSlotId,
-    PlannedEntry, PlannedPublication, SemanticEntry, SemanticEntryId, SemanticResourceRef,
+    Entry, LogicalResourceArena, MaterializationId, MaterializationKind, MaterializationRequirement,
+    OutputSlotId, PlannedEntry, PlannedPublication, SemanticResourceRef,
 };
 use crate::egir::soac::filter;
-use crate::egir::types::{Scheduled, SegExtent};
+use crate::egir::types::{Scheduled, SegExtent, SegResourceAccess, Semantic};
 use crate::flow::ExecutionModel;
 use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
 };
-use crate::{BindingRef, ResourceId};
+use crate::{BindingRef, EntryId, ResourceId};
 
 use super::declared_resources;
 
@@ -43,7 +43,7 @@ pub(in crate::egir) struct KernelPlan {
 
 fn record_seeded_kernel(
     seeded: &mut [Option<KernelId>],
-    source: SemanticEntryId,
+    source: EntryId,
     kernel: KernelId,
     name: &str,
 ) -> Result<(), String> {
@@ -125,7 +125,7 @@ pub(super) struct PhaseSpec {
     hist_plan: Option<super::prepare::ParallelHistPlan>,
     expected_compute: bool,
     dispatch: KernelDispatch,
-    resources: Vec<ScheduledResource>,
+    resources: Vec<SegResourceAccess<ResourceId>>,
     serial_single_workgroup: bool,
     output_projection: Option<Vec<OutputSlotId>>,
 }
@@ -232,7 +232,7 @@ impl PhaseSpec {
             output_projection: None,
         }
     }
-    pub(super) fn with_resources(mut self, resources: Vec<ScheduledResource>) -> Self {
+    pub(super) fn with_resources(mut self, resources: Vec<SegResourceAccess<ResourceId>>) -> Self {
         self.resources = resources;
         self
     }
@@ -268,7 +268,7 @@ struct PreparedPhase {
     label: &'static str,
     entry: Arc<PlannedEntry<Scheduled>>,
     dispatch: KernelDispatch,
-    resources: Vec<ScheduledResource>,
+    resources: Vec<SegResourceAccess<ResourceId>>,
     serial_single_workgroup: bool,
     required_elements: Option<u32>,
     output_projection: Option<Vec<OutputSlotId>>,
@@ -322,10 +322,10 @@ struct KernelPhase {
     flow_source: Option<CompilerFlowEndpoint>,
     label: &'static str,
     entry: Arc<PlannedEntry<Scheduled>>,
-    source_entry: Option<SemanticEntryId>,
+    source_entry: Option<EntryId>,
     output_routes: Vec<OutputRouteProjection>,
     dispatch: KernelDispatch,
-    resources: Vec<ScheduledResource>,
+    resources: Vec<SegResourceAccess<ResourceId>>,
     /// Materialization kernels collapse to one workgroup under serial policy.
     /// This is an execution constraint, unlike the diagnostic `label`.
     serial_single_workgroup: bool,
@@ -345,7 +345,7 @@ impl KernelPhase {
         execution_workgroup(&self.entry.execution_model)
     }
 
-    fn resources(&self) -> &[ScheduledResource] {
+    fn resources(&self) -> &[SegResourceAccess<ResourceId>] {
         &self.resources
     }
 
@@ -405,11 +405,11 @@ pub struct KernelPhaseSummary {
     pub entry: crate::EntryId,
     pub entry_point: String,
     pub label: String,
-    pub source_entry: Option<SemanticEntryId>,
+    pub source_entry: Option<EntryId>,
     pub output_routes: Vec<OutputRouteProjection>,
     pub workgroup_size: (u32, u32, u32),
     pub domain: KernelDomain,
-    pub resources: Vec<ScheduledResource>,
+    pub resources: Vec<SegResourceAccess<ResourceId>>,
     pub dependencies: Vec<KernelId>,
 }
 
@@ -482,9 +482,6 @@ impl KernelDispatch {
     }
 }
 
-/// Conservative resource access for a phase.
-pub type ScheduledResource = crate::egir::ir::SegResourceAccess<ResourceId>;
-
 impl KernelPlan {
     fn phases(&self) -> impl Iterator<Item = &KernelPhase> {
         self.phases_with_ids().map(|(_, phase)| phase)
@@ -546,7 +543,7 @@ impl KernelPlan {
         descriptor: &PipelineDescriptor,
         stage_entries: &[Vec<crate::EntryId>],
         resources: &LogicalResourceArena,
-        entries: &[SemanticEntry],
+        entries: &[Entry<Semantic>],
     ) -> Result<Self, String> {
         let mut seeded = vec![None; entries.len()];
         let entries_by_id = entries.iter().map(|entry| (entry.id, entry)).collect::<HashMap<_, _>>();
@@ -692,7 +689,7 @@ impl KernelPlan {
         })
     }
 
-    pub(super) fn primary_kernel(&self, source: SemanticEntryId) -> KernelId {
+    pub(super) fn primary_kernel(&self, source: EntryId) -> KernelId {
         self.source_entries[source.index()].primary
     }
 
@@ -1109,8 +1106,8 @@ impl KernelPlan {
 }
 
 fn phase_from_entry(
-    source_entry: Option<SemanticEntryId>,
-    entry: &SemanticEntry,
+    source_entry: Option<EntryId>,
+    entry: &Entry<Semantic>,
     mut selection: KernelDispatch,
     label: &'static str,
     placement: PhasePlacement,
@@ -1134,7 +1131,7 @@ fn phase_from_entry(
 
 fn phase_from_body(
     flow_source: Option<CompilerFlowEndpoint>,
-    source_entry: Option<SemanticEntryId>,
+    source_entry: Option<EntryId>,
     placement: PhasePlacement,
     spec: PhaseSpec,
 ) -> Result<KernelPhase, String> {
@@ -1158,7 +1155,7 @@ fn phase_from_body(
 fn phase_from_materialization(
     requirement_id: MaterializationId,
     requirement: &MaterializationRequirement,
-    source_entry: Option<SemanticEntryId>,
+    source_entry: Option<EntryId>,
     dependencies: Vec<KernelId>,
     placement: PhasePlacement,
 ) -> Result<KernelPhase, String> {
@@ -1187,8 +1184,8 @@ fn phase_from_materialization(
 }
 
 fn graphics_passthrough_phase(
-    source_entry: SemanticEntryId,
-    entry: &SemanticEntry,
+    source_entry: EntryId,
+    entry: &Entry<Semantic>,
     placement: PhasePlacement,
 ) -> Result<KernelPhase, String> {
     let domain = KernelDomain::Fixed { x: 1, y: 1, z: 1 };
@@ -1203,7 +1200,7 @@ fn graphics_passthrough_phase(
     Ok(phase)
 }
 
-fn output_projection(entry: &SemanticEntry) -> Vec<OutputRouteProjection> {
+fn output_projection(entry: &Entry<Semantic>) -> Vec<OutputRouteProjection> {
     entry
         .outputs
         .iter()

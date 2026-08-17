@@ -12,12 +12,13 @@ use std::collections::{HashMap, HashSet};
 
 use super::from_tlc::ConvertError;
 use super::program::{
-    AllocatedProgramData, CompilerResource, CompilerResourceKind, LogicalSize, MaterializationId, Program,
-    ResourceId, ResourceOrigin, RewriteGlobal, SemanticEntry, SemanticEntryId, SemanticResourceRef,
+    AllocatedProgramData, CompilerResource, CompilerResourceKind, Entry, LogicalSize, MaterializationId,
+    Program, ResourceId, ResourceOrigin, RewriteGlobal, SemanticResourceRef,
 };
 use super::semantic_opt::Optimized;
 use super::soac::filter;
 use super::types::{Semantic, SideEffectKind, Soac, SoacEffect};
+use crate::EntryId;
 
 /// EGIR after logical resources and materialization entries have been planned.
 #[derive(Debug, Clone, Copy)]
@@ -35,7 +36,7 @@ pub type ResourcesAllocated = super::program::Program<
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CompilerFlowEndpoint {
-    Entry(SemanticEntryId),
+    Entry(EntryId),
     Materialization(MaterializationId),
 }
 
@@ -93,7 +94,7 @@ pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, 
 
 pub(crate) fn entries_with_endpoints(
     program: &ResourcesAllocated,
-) -> impl Iterator<Item = (CompilerFlowEndpoint, &SemanticEntry)> {
+) -> impl Iterator<Item = (CompilerFlowEndpoint, &Entry<Semantic>)> {
     program.entry_points.iter().map(|entry| (CompilerFlowEndpoint::Entry(entry.id), entry)).chain(
         program.data.materializations.ids().map(|id| {
             (
@@ -359,7 +360,7 @@ fn strip_compiler_abi(program: ResourcesAllocated) -> ResourcesAllocated {
             matches!(&resource.origin, ResourceOrigin::Compiler(_)).then_some(resource.id())
         })
         .collect::<HashSet<_>>();
-    let strip = |entry: &mut SemanticEntry| {
+    let strip = |entry: &mut Entry<Semantic>| {
         for input in &mut entry.inputs {
             if input.resource.is_some_and(|resource| compiler_resources.contains(&resource.0)) {
                 input.make_storage_internal();

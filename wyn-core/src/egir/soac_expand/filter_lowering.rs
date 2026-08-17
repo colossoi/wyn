@@ -17,11 +17,11 @@ pub(super) struct FilterLoop {
     pub(super) read_inputs: Vec<(ValueId, Type<TypeName>, Type<TypeName>)>,
     /// The output element type returned by the canonical map lambda.
     pub(super) output_elem_ty: Type<TypeName>,
-    pub(super) output: PhysicalFilterOutput,
+    pub(super) output: filter::Output<BindingRef>,
     /// `None` denotes the validated one-input identity map.
-    pub(super) map_func: Option<PhysicalFunc>,
+    pub(super) map_func: Option<Func<Physical>>,
     pub(super) map_captures: Vec<super::super::types::OperandRef>,
-    pub(super) pred_func: PhysicalFunc,
+    pub(super) pred_func: Func<Physical>,
     pub(super) captures: Vec<super::super::types::OperandRef>,
     pub(super) result_node: ValueId,
 }
@@ -33,7 +33,7 @@ fn filter_primary_input(spec: &FilterLoop) -> &(ValueId, Type<TypeName>, Type<Ty
 /// Read one element from every co-iterated input and invoke the canonical map
 /// lambda. Identity is represented without a synthetic region.
 fn filter_kept_value(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     block: BlockId,
     index: ValueId,
     spec: &FilterLoop,
@@ -72,7 +72,7 @@ fn filter_kept_value(
     }
 }
 pub(super) fn build_filter_loop(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx_in_block: usize,
     spec: FilterLoop,
@@ -140,7 +140,7 @@ enum FilterSink {
 /// Build the counted serial compaction loop shared by local and runtime
 /// filters. Callers choose the index width, destination, and result format.
 fn build_serial_filter_cfg(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     bid: BlockId,
     after: BlockId,
     spec: &FilterLoop,
@@ -276,7 +276,7 @@ fn build_serial_filter_cfg(
     after_count
 }
 
-fn filter_thread_index(graph: &mut EGraph) -> ValueId {
+fn filter_thread_index(graph: &mut EGraph<Physical>) -> ValueId {
     graph.intern_pure(
         PureOp::Intrinsic {
             id: catalog().known().thread_id,
@@ -289,7 +289,7 @@ fn filter_thread_index(graph: &mut EGraph) -> ValueId {
 }
 
 pub(super) fn build_filter_flags(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx: usize,
     spec: FilterLoop,
@@ -379,11 +379,11 @@ pub(super) fn build_filter_flags(
 }
 
 pub(super) fn build_filter_scan(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx: usize,
     spec: FilterLoop,
-    work: FilterWorkBuffers,
+    work: filter::WorkBuffers<BindingRef>,
     scan_workgroup_width: u32,
     next_effect: &mut crate::IdSource<EffectToken>,
 ) {
@@ -553,11 +553,11 @@ pub(super) fn build_filter_scan(
 }
 
 pub(super) fn build_filter_scatter(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx: usize,
     spec: FilterLoop,
-    work: FilterWorkBuffers,
+    work: filter::WorkBuffers<BindingRef>,
     next_effect: &mut crate::IdSource<EffectToken>,
 ) {
     use super::super::graph_ops::{emit_load, emit_storage_store, intern_storage_view, intern_u32};
@@ -669,7 +669,7 @@ pub(super) fn build_filter_scatter(
 /// `Buffer(scratch_out)`, so the backend recovers the descriptor from the type.
 /// All offsets/lengths are `u32` to match the view `{offset, len}` convention.
 fn build_runtime_filter_loop(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx_in_block: usize,
     spec: &FilterLoop,

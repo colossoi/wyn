@@ -11,16 +11,16 @@ use polytype::Type;
 use smallvec::smallvec;
 
 use crate::ast::TypeName;
-use crate::{LookupSet, SortedSet};
+use crate::{FunctionId, LookupSet, SortedSet};
 
 use super::graph_ops::{self, ConstantCopy, PureCopy};
 use super::inlining;
 use super::ir::{Body, BodySite as ProgramBodySite};
-use super::program::{fresh_region_name, CoreProgramData, SemanticFunc};
+use super::program::{fresh_region_name, CoreProgramData, Func};
 use super::reify::Segmented;
 use super::stage_variance::{entry_parameter_dependences, StageDependence, StageDependenceAnalysis};
 use super::types::{
-    EGraph, PureOp, RegionId, SegBody, SideEffectKind, SideEffectSite, SoacEffect, ValueId, ValueKind,
+    EGraph, PureOp, SegBody, Semantic, SideEffectKind, SideEffectSite, SoacEffect, ValueId, ValueKind,
 };
 
 #[cfg(test)]
@@ -37,9 +37,9 @@ pub(crate) enum StageLiftError {
         reason: String,
     },
     #[error("stage lifting cannot resolve region {0}")]
-    MissingRegion(RegionId),
+    MissingRegion(FunctionId),
     #[error("stage lifting lost inline candidate region {0}")]
-    MissingInlineRegion(RegionId),
+    MissingInlineRegion(FunctionId),
     #[error("stage lifting lost its repeated body site")]
     MissingBodySite,
     #[error("stage-lift rewrite failed: {0}")]
@@ -69,7 +69,7 @@ struct SegBodySite {
 }
 
 struct StageLiftCandidate {
-    function: SemanticFunc,
+    function: Func<Semantic>,
     original_body: SegBody,
     frontier: Vec<ValueId>,
     calls_inlined: usize,
@@ -245,7 +245,7 @@ fn prepare_lift(
 
 fn inline_mixed_calls(
     program: &Segmented,
-    function: &mut SemanticFunc,
+    function: &mut Func<Semantic>,
     parameter_dependences: &[StageDependence],
 ) -> Result<usize> {
     inline_mixed_calls_in_graph(
@@ -382,7 +382,10 @@ fn cloneable_from_captures(
     cloneable
 }
 
-fn apply_lift(enclosing: &mut EGraph, mut prepared: StageLiftCandidate) -> Result<(SemanticFunc, SegBody)> {
+fn apply_lift(
+    enclosing: &mut EGraph,
+    mut prepared: StageLiftCandidate,
+) -> Result<(Func<Semantic>, SegBody)> {
     let mut body = prepared.original_body;
     let mut memo = body
         .capture_bindings(&prepared.function)?
@@ -440,7 +443,7 @@ fn apply_lift(enclosing: &mut EGraph, mut prepared: StageLiftCandidate) -> Resul
 /// Compact only the trailing capture portion of the region ABI. Leading
 /// lane/element parameters are fixed by the SOAC, even when the body ignores
 /// one.
-fn prune_dead_captures(function: &mut SemanticFunc, body: &mut SegBody) -> Result<()> {
+fn prune_dead_captures(function: &mut Func<Semantic>, body: &mut SegBody) -> Result<()> {
     let leading_parameters = body.leading_parameter_count(function)?;
     let parameter_count = function.params.len();
     let live = graph_ops::reachable_execution_values(&function.graph);

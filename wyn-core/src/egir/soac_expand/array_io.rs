@@ -4,8 +4,8 @@ use super::*;
 use crate::egir::types::soac_element_type;
 
 pub(super) fn emit_seg_space_len(
-    graph: &mut EGraph,
-    space: &SegSpace,
+    graph: &mut EGraph<Physical>,
+    space: &SegSpace<BindingRef>,
     fallback: &(ValueId, Type<TypeName>),
     i32_ty: &Type<TypeName>,
 ) -> ValueId {
@@ -24,8 +24,8 @@ pub(super) fn emit_seg_space_len(
 }
 
 pub(super) fn emit_seg_space_dimensions(
-    graph: &mut EGraph,
-    space: &SegSpace,
+    graph: &mut EGraph<Physical>,
+    space: &SegSpace<BindingRef>,
     fallback: &(ValueId, Type<TypeName>),
     i32_ty: &Type<TypeName>,
 ) -> Vec<ValueId> {
@@ -63,7 +63,7 @@ pub(super) fn emit_seg_space_dimensions(
 /// Decode a row-major flattened lane into one coordinate per logical domain
 /// dimension.
 pub(super) fn emit_flat_domain_coordinates(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     lane: ValueId,
     domain_dimensions: &[ValueId],
     i32_ty: &Type<TypeName>,
@@ -106,7 +106,7 @@ pub(super) fn emit_flat_domain_coordinates(
 /// tuple, the length is the length of component 0 (all components share it
 /// post-`tlc::soa`).
 pub(super) fn emit_length(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     arr_nid: ValueId,
     arr_ty: &Type<TypeName>,
     result_ty: &Type<TypeName>,
@@ -135,7 +135,7 @@ pub(super) fn emit_length(
 /// Composite arrays use a pure `Index`; view arrays use `StorageViewIndex` +
 /// effectful `Load`.
 pub(super) fn emit_read_element(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     body: BlockId,
     arr_nid: ValueId,
     idx_nid: ValueId,
@@ -223,7 +223,7 @@ pub(super) fn emit_read_element(
 /// index. Storage-backed arrays retain nested `ViewIndex`/`PlaceIndex`
 /// addressing, while composite arrays use nested pure `Index` operations.
 pub(super) fn emit_read_ranked_element(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     body: BlockId,
     arr_nid: ValueId,
     flat_index: ValueId,
@@ -294,7 +294,7 @@ pub(super) fn emit_read_ranked_element(
 /// Read one leaf using an explicit coordinate for every regular array axis.
 /// This avoids flattening large tiled domains into a single scalar index.
 pub(super) fn emit_read_ranked_coordinates(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     body: BlockId,
     arr_nid: ValueId,
     coordinates: &[ValueId],
@@ -377,7 +377,7 @@ pub(super) fn emit_read_ranked_coordinates(
 /// while the value itself is a `StorageView`. Addressing follows the producer
 /// operation in that case; relying only on the array variant would try to
 /// materialize the view's `(offset, length)` handle as the full fixed array.
-fn is_view_node(graph: &EGraph, arr_nid: ValueId, arr_ty: &Type<TypeName>) -> bool {
+fn is_view_node(graph: &EGraph<Physical>, arr_nid: ValueId, arr_ty: &Type<TypeName>) -> bool {
     is_view_source(arr_ty)
         || matches!(
             graph.nodes[arr_nid].kind,

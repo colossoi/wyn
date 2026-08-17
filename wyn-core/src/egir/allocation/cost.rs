@@ -7,10 +7,10 @@
 use std::collections::{HashMap, HashSet};
 
 use super::super::graph_ops;
-use super::super::program::SemanticEntry;
+use super::super::program::Entry;
 use super::super::types::{
-    EGraph, EffectOp, PureViewSource, SideEffect, SideEffectKind, SkeletonTerminator, Soac, SoacEffect,
-    ValueId, ValueKind,
+    EGraph, EffectOp, PureViewSource, Semantic, SideEffect, SideEffectKind, SkeletonTerminator, Soac,
+    SoacEffect, ValueId, ValueKind,
 };
 use super::ResourcesAllocated;
 use crate::builtins::{catalog, Purity};
@@ -58,7 +58,7 @@ impl PreludeAnalysis {
 /// prefixes; all other recipes remain cost-based.
 pub(crate) fn analyze_prelude(
     program: &ResourcesAllocated,
-    entry: &SemanticEntry,
+    entry: &Entry<Semantic>,
     recipe: &super::super::graph_projector::ProjectedValueRecipe,
 ) -> Option<PreludeAnalysis> {
     let graph = &recipe.projection.graph;
@@ -130,7 +130,7 @@ pub(crate) fn materialization_is_profitable(
     recompute.saturating_mul(4) >= handoff.saturating_mul(5)
 }
 
-pub(crate) fn entry_parameter_is_scalar_relocatable(entry: &SemanticEntry, index: usize) -> bool {
+pub(crate) fn entry_parameter_is_scalar_relocatable(entry: &Entry<Semantic>, index: usize) -> bool {
     match super::super::stage_variance::entry_parameter_input_kind(entry, index) {
         Some(EntryInputKind::Uniform { .. } | EntryInputKind::PushConstant { .. }) => true,
         Some(EntryInputKind::Storage { access, .. }) => *access == StorageAccess::ReadOnly,

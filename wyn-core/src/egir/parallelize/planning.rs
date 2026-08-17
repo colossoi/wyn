@@ -6,7 +6,7 @@ use polytype::Type;
 
 use crate::ast::TypeName;
 use crate::egir::soac::{hist, screma};
-use crate::egir::types::{EGraph, SideEffect, SideEffectKind, SideEffectSite, Soac, SoacEffect};
+use crate::egir::types::{EGraph, Semantic, SideEffect, SideEffectKind, SideEffectSite, Soac, SoacEffect};
 
 use super::model::{CandidateSelection, ParallelizeError, Result};
 use crate::egir::allocation::{self, CompilerFlowEndpoint, ResourcesAllocated};
@@ -439,7 +439,7 @@ pub(super) fn analyze(inner: &ResourcesAllocated) -> Result<AnalyzedPlan> {
 
 fn analyze_endpoint(
     program: &ResourcesAllocated,
-    entry: &crate::egir::program::SemanticEntry,
+    entry: &crate::egir::program::Entry<Semantic>,
     endpoint: CompilerFlowEndpoint,
     resources: &LogicalResourceArena,
 ) -> Result<(EndpointPlan<AnalyzedRecipe>, Vec<ScratchRequest>, Option<u32>)> {

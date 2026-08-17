@@ -79,7 +79,7 @@ fn output_ownership_comes_from_explicit_route_writer() {
         span: None,
     });
     let mut identities = crate::egir::program::ProgramIdentities::default();
-    let mut entry = SemanticEntry::new_with_resources(
+    let mut entry = Entry::<Semantic>::new_with_resources(
         "route_test".into(),
         identities.alloc_entry("route_test".into()),
         Span::dummy(),
@@ -247,7 +247,7 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
     );
     operator_graph.skeleton.blocks[operator_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(operator_graph.value_result(combined)));
-    let operator = SemanticFunc::new(
+    let operator = Func::<Semantic>::new(
         operator_id,
         "combine".into(),
         Span::dummy(),

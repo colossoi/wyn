@@ -1,14 +1,13 @@
 use super::*;
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{
-    semantic_program_for_test, ProgramIdentities, SemanticFunc, SemanticResourceRef,
-};
+use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities, SemanticResourceRef};
 use crate::egir::soac::screma;
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, OperandRef, PureOp, RegionId, SegBody,
-    Semantic, SoacEffect, SoacOwnership, WynLanguage,
+    by_value_function_result, callable_parameter, CallEffects, OperandRef, PureOp, SegBody, Semantic,
+    SoacEffect, SoacOwnership, WynLanguage,
 };
 use crate::pipeline_descriptor::PipelineDescriptor;
+use crate::FunctionId;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -89,7 +88,7 @@ fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<Val
                 form: screma::ScremaForm {
                     pre: screma::Lambda::region(
                         SegBody {
-                            region: RegionId::from_index(0),
+                            region: FunctionId::from_index(0),
                             captures: captures.into_iter().map(OperandRef::Value).collect(),
                         },
                         vec![],
@@ -174,7 +173,7 @@ fn screma_verification_program(
 
     let mut identities = ProgramIdentities::default();
     let region = identities.alloc_function("malformed_screma".into());
-    let function = SemanticFunc::new(
+    let function = Func::<Semantic>::new(
         region,
         "malformed_screma".to_string(),
         Span::dummy(),
@@ -216,7 +215,7 @@ fn verifier_rejects_screma_neutral_type_mismatch() {
     let program = screma_verification_program(
         screma::Lambda::region(
             SegBody {
-                region: RegionId::from_index(0),
+                region: FunctionId::from_index(0),
                 captures: vec![],
             },
             vec![i32_type.clone(), i32_type.clone()],

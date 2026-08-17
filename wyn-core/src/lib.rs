@@ -55,9 +55,8 @@ use std::marker::PhantomData;
 
 use egir::from_tlc::ConvertError;
 
-use ast::{NodeCounter, NodeId};
+use ast::NodeCounter;
 use error::Result;
-use polytype::TypeScheme;
 
 // =============================================================================
 // Collection aliases
@@ -67,9 +66,6 @@ use polytype::TypeScheme;
 /// allocation, code emission order, etc.). Insertion order is stable
 /// across compiles; `HashMap`'s randomized hasher is not.
 pub type StableMap<K, V> = indexmap::IndexMap<K, V>;
-
-/// Set companion to [`StableMap`]: insertion-order iteration.
-pub type StableSet<T> = indexmap::IndexSet<T>;
 
 /// Use for sets whose iteration follows the values' [`Ord`] ordering.
 pub type SortedSet<T> = std::collections::BTreeSet<T>;
@@ -506,8 +502,6 @@ impl<'a, Id: From<u32> + Copy + Eq + Hash, T> IntoIterator for &'a mut IdArena<I
 // Re-export key types for the public API
 pub use ast::TypeName;
 pub use polytype::Context as PolytypeContext;
-pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
-
 // =============================================================================
 // Typestate Compiler Pipeline
 // =============================================================================

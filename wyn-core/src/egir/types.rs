@@ -22,8 +22,8 @@ pub use super::ir::{
     by_value_function_result, callable_parameter, destination_passing_function_result, CallEffects,
     CallSiteId, EffectOp, EffectToken, Family, FlowValueId, FuncParam, FunctionResult, GraphResource,
     Language, OperandRef, OperandType, ParameterId, PlaceAccess, PlaceDestination, PlaceId, PlaceRegion,
-    PlaceType, RegionId, ResultBinding, ResultDestination, ReturnSlotId, SegBody, SideEffectIndex,
-    SideEffectSite, SoacOwnership, ValueId, ViewId, ViewType,
+    PlaceType, ResultBinding, ResultDestination, ReturnSlotId, SegBody, SideEffectIndex, SideEffectSite,
+    SoacOwnership, ValueId, ViewId, ViewType,
 };
 pub use crate::ResourceAccess;
 
@@ -245,7 +245,7 @@ pub type SkeletonBlock<P = Semantic, Lang = WynLanguage> = super::ir::SkeletonBl
 pub type Skeleton<P = Semantic, Lang = WynLanguage> = super::ir::Skeleton<P, Lang>;
 pub type SkeletonTerminator = super::ir::SkeletonTerminator<WynLanguage>;
 pub type SoacInputType<Ty = Type<TypeName>> = super::ir::SoacInputType<Ty>;
-pub type ArrayLayout = super::ir::ArrayLayout;
+pub use super::ir::ArrayLayout;
 pub type EGraph<P = Semantic, Lang = WynLanguage> = super::ir::EGraph<P, Lang>;
 
 /// If `ty` is a structure-of-arrays tuple, return its array component types.
@@ -409,7 +409,7 @@ impl<R: GraphResource> WynSoacPhase for Scheduled<R> {
 }
 
 impl Family for Physical {
-    type Resource = super::program::PhysicalResourceRef;
+    type Resource = crate::BindingRef;
     type Soac = SoacEffect<Self>;
 
     fn remap_soac_values(soac: &mut Self::Soac, map: &mut dyn FnMut(ValueId) -> ValueId) {
@@ -453,8 +453,8 @@ impl WynSoacPhase for Physical {
     type SoacId = super::program::SemanticOpId;
     type ScremaResults = Vec<screma::ResultState>;
     type ScremaState = screma::PhysicalState;
-    type FilterState = filter::PhysicalState;
-    type HistState = hist::PhysicalState;
+    type FilterState = filter::ScheduledState<crate::BindingRef>;
+    type HistState = hist::ScheduledState<crate::BindingRef>;
 }
 
 fn remap_control_header(header: ControlHeader, blocks: &LookupMap<BlockId, BlockId>) -> ControlHeader {

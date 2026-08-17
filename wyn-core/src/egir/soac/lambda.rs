@@ -9,12 +9,13 @@ use polytype::Type;
 use smallvec::smallvec;
 
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{fresh_region_name, ProgramIdentities, SemanticFunc, SemanticResourceRef};
+use crate::egir::program::{fresh_region_name, Func, ProgramIdentities, SemanticResourceRef};
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, EGraph, FuncParam, OperandRef, ParameterId,
-    PureOp, RegionId, ResultBinding, SegBody, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
+    PureOp, ResultBinding, SegBody, Semantic, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
 };
 use crate::flow::BlockId;
+use crate::FunctionId;
 
 use super::screma;
 
@@ -129,7 +130,7 @@ pub(crate) fn emit_call(
     graph: &mut EGraph,
     block: BlockId,
     lambda: &screma::Lambda,
-    callee: Option<&SemanticFunc>,
+    callee: Option<&Func<Semantic>>,
     arguments: Vec<OperandRef>,
 ) -> Vec<ResultBinding<Type<TypeName>>> {
     if lambda.is_identity() {
@@ -169,19 +170,19 @@ pub(crate) fn emit_call(
 pub(crate) fn finish_function(
     mut graph: EGraph,
     return_block: BlockId,
-    region: RegionId,
+    region: FunctionId,
     name: String,
     span: Span,
     params: Vec<FuncParam<SemanticResourceRef, Type<TypeName>>>,
     result_types: &[Type<TypeName>],
     results: &[ValueId],
-) -> SemanticFunc {
+) -> Func {
     let result = pack_results(&mut graph, results, result_types);
     let result_abi = by_value_function_result::<WynLanguage>(result_type(result_types));
     let result = crate::egir::graph_ops::bind_by_value_result(&mut graph, &result_abi, result);
     graph.skeleton.blocks[return_block].term = SkeletonTerminator::Return(Some(result));
     let effects = if graph.has_ordered_effects() { CallEffects::General } else { CallEffects::Pure };
-    SemanticFunc::new(region, name, span, None, params, result_abi, effects, graph)
+    Func::<Semantic>::new(region, name, span, None, params, result_abi, effects, graph)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -198,7 +199,7 @@ pub(crate) fn finish_region_lambda(
     result_types: Vec<Type<TypeName>>,
     results: Vec<ValueId>,
     fold_identity: bool,
-) -> (screma::Lambda, Option<SemanticFunc>) {
+) -> (screma::Lambda, Option<Func<Semantic>>) {
     let is_identity = fold_identity
         && captures.is_empty()
         && params.len() == parameter_types.len()

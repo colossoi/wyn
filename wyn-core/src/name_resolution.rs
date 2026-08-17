@@ -393,21 +393,6 @@ pub struct BindingsResolvedGlobal {
         Vec<crate::ast::SupportDefinition<crate::ast::NameResolvedDefinition, crate::ast::ResolvedTree>>,
 }
 
-pub type BindingsResolvedFamily = crate::ast::AstFamily<
-    crate::ast::ResolvedTree,
-    crate::ast::NameResolvedDefinition,
-    crate::ast::NameResolvedEntry,
-    crate::interface::ResolvedAttribute,
-    crate::ast::NameResolvedExtern,
-    std::convert::Infallible,
->;
-
-#[derive(Debug, Clone, Copy)]
-pub enum BindingsResolvedTag {}
-
-pub type BindingsResolved =
-    crate::ast::Program<BindingsResolvedTag, BindingsResolvedFamily, BindingsResolvedGlobal>;
-
 /// Side table populated by `build_name_resolution`. Maps Identifier
 /// NodeIds to their catalog classification. Identifiers not in the
 /// catalog (locals, top-level defs, module values) are absent.

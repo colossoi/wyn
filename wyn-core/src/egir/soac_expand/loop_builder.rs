@@ -13,7 +13,7 @@ pub(super) struct LoopBody {
 /// Emit a real loop via `build_loop_skeleton`, invoking `emit_body` in the
 /// body block to produce the new carried values, then wire the back-edge.
 fn build_loop<F>(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx_in_block: usize,
     len_input: &(ValueId, Type<TypeName>),
@@ -23,7 +23,13 @@ fn build_loop<F>(
     mut emit_body: F,
 ) -> BlockId
 where
-    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
+    F: FnMut(
+        &mut EGraph<Physical>,
+        &mut crate::IdSource<EffectToken>,
+        BlockId,
+        ValueId,
+        &[ValueId],
+    ) -> LoopBody,
 {
     let handles = build_loop_skeleton(
         graph,
@@ -58,7 +64,7 @@ where
 /// `allow_unroll` is false), fall back to a real loop. Both paths share the
 /// same `emit_body` closure — write iteration logic once.
 pub(super) fn expand_loop<F>(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx_in_block: usize,
     len_input: &(ValueId, Type<TypeName>),
@@ -69,7 +75,13 @@ pub(super) fn expand_loop<F>(
     mut emit_body: F,
 ) -> BlockId
 where
-    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
+    F: FnMut(
+        &mut EGraph<Physical>,
+        &mut crate::IdSource<EffectToken>,
+        BlockId,
+        ValueId,
+        &[ValueId],
+    ) -> LoopBody,
 {
     if allow_unroll {
         if let Some(continuation) = try_unroll(
@@ -103,7 +115,7 @@ where
 /// `emit_body(graph, next_effect, block, idx_const_nid, carried_in)` produces
 /// the `carried_out` ValueNodeIds and the block that continues the iteration.
 fn try_unroll<F>(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx_in_block: usize,
     len_input: &(ValueId, Type<TypeName>),
@@ -113,7 +125,13 @@ fn try_unroll<F>(
     mut emit_body: F,
 ) -> Option<BlockId>
 where
-    F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
+    F: FnMut(
+        &mut EGraph<Physical>,
+        &mut crate::IdSource<EffectToken>,
+        BlockId,
+        ValueId,
+        &[ValueId],
+    ) -> LoopBody,
 {
     const UNROLL_THRESHOLD: usize = 16;
 
@@ -137,7 +155,8 @@ where
     // Stash side-effects and the original continuation. A body may introduce
     // selections, so the suffix belongs to its final continuation block, not
     // necessarily the original block.
-    let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
+    let suffix: Vec<SideEffect<Physical>> =
+        graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
     let original_term = std::mem::replace(
         &mut graph.skeleton.blocks[bid].term,
         SkeletonTerminator::Unreachable,
@@ -204,7 +223,7 @@ struct LoopHandles {
 }
 
 fn build_loop_skeleton(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx_in_block: usize,
     spec: LoopSkeletonSpec,
@@ -288,7 +307,7 @@ fn build_loop_skeleton(
     }
 }
 
-fn bind_unrolled_result(graph: &mut EGraph, binding: &LoopResultBinding, carried: &[ValueId]) {
+fn bind_unrolled_result(graph: &mut EGraph<Physical>, binding: &LoopResultBinding, carried: &[ValueId]) {
     match &binding.source {
         LoopResultSource::Carried(index) => {
             super::bind_result_value(graph, &binding.result, carried[*index]);
@@ -303,7 +322,7 @@ fn bind_unrolled_result(graph: &mut EGraph, binding: &LoopResultBinding, carried
 }
 
 /// Emit `idx + 1` as a pure op.
-fn increment(graph: &mut EGraph, idx_nid: ValueId) -> ValueId {
+fn increment(graph: &mut EGraph<Physical>, idx_nid: ValueId) -> ValueId {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let one_nid = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), None);
     graph.intern_pure(

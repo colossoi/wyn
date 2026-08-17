@@ -22,7 +22,7 @@ pub(super) struct HistLoop {
 
 /// Convert one operation's multidimensional index to the row-major scalar
 /// offset used by Wyn storage views.
-fn flatten_hist_index(graph: &mut EGraph, indices: &[ValueId], shape: &[ValueId]) -> ValueId {
+fn flatten_hist_index(graph: &mut EGraph<Physical>, indices: &[ValueId], shape: &[ValueId]) -> ValueId {
     debug_assert_eq!(indices.len(), shape.len());
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let Some((&first, rest)) = indices.split_first() else {
@@ -44,7 +44,7 @@ fn flatten_hist_index(graph: &mut EGraph, indices: &[ValueId], shape: &[ValueId]
     })
 }
 
-fn hist_index_in_bounds(graph: &mut EGraph, indices: &[ValueId], shape: &[ValueId]) -> ValueId {
+fn hist_index_in_bounds(graph: &mut EGraph<Physical>, indices: &[ValueId], shape: &[ValueId]) -> ValueId {
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let bool_type = Type::Constructed(TypeName::Bool, vec![]);
     let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_type, None);
@@ -81,7 +81,7 @@ fn hist_index_in_bounds(graph: &mut EGraph, indices: &[ValueId], shape: &[ValueI
 
 #[allow(clippy::too_many_arguments)]
 fn emit_hist_atomic_update(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     block: BlockId,
     next: BlockId,
     place: PlaceId,
@@ -207,11 +207,11 @@ fn emit_hist_atomic_update(
 /// operation is a one-component integer reduction. Structurally recognised
 /// operators use a native atomic; general reducers use a CAS retry loop.
 pub(super) fn build_hist_atomic(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     block: BlockId,
     effect_index: usize,
     spec: HistLoop,
-    space: &SegSpace,
+    space: &SegSpace<BindingRef>,
     atomic_operations: &[hist::AtomicUpdate],
     next_effect: &mut crate::IdSource<EffectToken>,
     regions: &CallableMap,
@@ -363,7 +363,7 @@ pub(super) fn build_hist_atomic(
 /// previous components and all incoming components, then its results are
 /// stored componentwise.
 pub(super) fn build_hist_loop(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx_in_block: usize,
     spec: HistLoop,
@@ -517,11 +517,11 @@ pub(super) fn build_hist_loop(
     );
 }
 
-fn emit_thread_lane(graph: &mut EGraph) -> ValueId {
+fn emit_thread_lane(graph: &mut EGraph<Physical>) -> ValueId {
     emit_thread_coordinate(graph, catalog().known().thread_id)
 }
 
-fn emit_thread_coordinate(graph: &mut EGraph, builtin: crate::builtins::BuiltinId) -> ValueId {
+fn emit_thread_coordinate(graph: &mut EGraph<Physical>, builtin: crate::builtins::BuiltinId) -> ValueId {
     let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let thread = graph.intern_pure(
@@ -548,7 +548,7 @@ fn emit_thread_coordinate(graph: &mut EGraph, builtin: crate::builtins::BuiltinI
 }
 
 fn emit_dispatch_axis_extent(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     dimensions: &[ValueId],
     i32_type: &Type<TypeName>,
 ) -> ValueId {
@@ -564,7 +564,7 @@ fn emit_dispatch_axis_extent(
 }
 
 fn emit_ranked_bucket_coordinates(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     dimensions: &[ValueId],
     topology: &hist::DispatchTopology,
     lanes: [ValueId; 3],
@@ -612,7 +612,7 @@ fn emit_ranked_bucket_coordinates(
 }
 
 fn emit_overflow_flag(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     block: BlockId,
     overflow: ViewId,
     next_effect: &mut crate::IdSource<EffectToken>,
@@ -635,7 +635,7 @@ fn emit_overflow_flag(
 }
 
 pub(super) fn build_bucket_init(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     block: BlockId,
     effect_index: usize,
     spec: HistLoop,
@@ -727,11 +727,11 @@ pub(super) fn build_bucket_init(
 }
 
 pub(super) fn build_bucket_insert(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     block: BlockId,
     effect_index: usize,
     spec: HistLoop,
-    space: &SegSpace,
+    space: &SegSpace<BindingRef>,
     topology: Option<&hist::DispatchTopology>,
     next_effect: &mut crate::IdSource<EffectToken>,
     regions: &CallableMap,
@@ -971,7 +971,7 @@ pub(super) fn build_bucket_insert(
 }
 
 pub(super) fn build_bucket_finish(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     block: BlockId,
     effect_index: usize,
     result_node: ValueId,

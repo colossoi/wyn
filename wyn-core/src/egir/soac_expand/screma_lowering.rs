@@ -4,7 +4,7 @@ use super::array_io::{emit_read_element, emit_seg_space_len};
 use super::*;
 
 pub(super) fn emit_screma_lambda(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     block: BlockId,
     callables: &CallableMap,
     lambda: &screma::Lambda,
@@ -41,10 +41,10 @@ pub(super) fn emit_screma_lambda(
 /// loop-carried state (writes are effectful); the SOAC "result" is a dummy.
 
 pub(super) fn build_parallel_screma_map(
-    graph: &mut EGraph,
+    graph: &mut EGraph<Physical>,
     block: BlockId,
     effect_index: usize,
-    space: &SegSpace,
+    space: &SegSpace<BindingRef>,
     length_input: (ValueId, Type<TypeName>),
     read_inputs: &[(ValueId, Type<TypeName>, Type<TypeName>)],
     pre: &screma::Lambda,

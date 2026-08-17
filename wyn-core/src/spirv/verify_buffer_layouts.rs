@@ -26,14 +26,12 @@
 //! (`ssa::prepare_spirv`), right after `verify_no_abstract::verify_no_abstract_types`.
 
 use crate::ast::TypeName;
-use crate::error::CompilerError;
+use crate::error::{CompilerError, Result};
 use crate::interface::{EntryInput, StorageBindingDecl};
 use crate::ssa::layout::type_byte_size;
 use crate::ssa::types::{EntryPoint, Program};
 use crate::BindingRef;
 use polytype::Type;
-
-pub type Result<T> = std::result::Result<T, CompilerError>;
 
 pub fn verify_buffer_layouts<Tag, GlobalContext>(program: &Program<Tag, GlobalContext>) -> Result<()> {
     for entry in &program.entry_points {

@@ -17,7 +17,7 @@
 //!
 //! Why an extension trait: `PipelineDescriptor` lives in the
 //! `wyn-pipeline-descriptor` crate (shared with host runtimes), so
-//! it can't grow `SemanticEntry`-aware methods directly. Rust's orphan
+//! it can't grow `Entry<Semantic>`-aware methods directly. Rust's orphan
 //! rule blocks a regular `impl` block here too. A trait owned by
 //! `wyn-core` is the standard workaround.
 

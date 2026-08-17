@@ -16,8 +16,8 @@ use super::super::graph_projector::{
     GraphProjection, GraphProjector, ProjectedValueRecipe, ValueRecipeSource,
 };
 use super::super::program::{
-    CompilerResource, CompilerResourceKind, LogicalSize, MaterializationId, MaterializationRequirement,
-    OutputWriter, Program, RealizedOutputRoute, ResourceId, SemanticEntry, SemanticOpId,
+    CompilerResource, CompilerResourceKind, Entry, LogicalSize, MaterializationId,
+    MaterializationRequirement, OutputWriter, Program, RealizedOutputRoute, ResourceId, SemanticOpId,
     SemanticResourceDecl, SemanticResourceRef, SlotSource,
 };
 use super::super::semantic_graph::SemanticGraph;
@@ -245,7 +245,7 @@ fn plan_operation_result(
 
 fn filter_runtime_array_plan(
     entry_index: usize,
-    entry: &SemanticEntry,
+    entry: &Entry<Semantic>,
     op: &filter::Op<Semantic>,
     result: &ResultBinding<Type<TypeName>>,
     producer: SemanticOpId,
@@ -301,7 +301,7 @@ fn filter_runtime_array_plan(
 }
 
 fn operation_result_residency(
-    entry: &SemanticEntry,
+    entry: &Entry<Semantic>,
     op: &screma::Op<Semantic>,
     result: &ResultBinding<Type<TypeName>>,
     site: SideEffectSite,
@@ -344,7 +344,7 @@ fn operation_result_residency(
 }
 
 fn array_result_residency(
-    _entry: &SemanticEntry,
+    _entry: &Entry<Semantic>,
     result: &ResultBinding<Type<TypeName>>,
     consumers: Option<&HashSet<SemanticOpId>>,
     requires_array_storage: bool,
@@ -360,7 +360,7 @@ fn array_result_residency(
 
 fn operation_result_plan(
     entry_index: usize,
-    entry: &SemanticEntry,
+    entry: &Entry<Semantic>,
     op: &screma::Op<Semantic>,
     result: &ResultBinding<Type<TypeName>>,
     producer: SemanticOpId,
@@ -511,7 +511,7 @@ fn plan_direct_stage_prelude(program: &ResourcesAllocated) -> Option<Materializa
     None
 }
 
-fn direct_stage_invocations(program: &ResourcesAllocated, entry: &SemanticEntry) -> u64 {
+fn direct_stage_invocations(program: &ResourcesAllocated, entry: &Entry<Semantic>) -> u64 {
     let ExecutionModel::Compute { local_size } = &entry.execution_model else {
         return DIRECT_STAGE_INVOCATION_FALLBACK;
     };
@@ -579,7 +579,7 @@ fn direct_stage_invocations(program: &ResourcesAllocated, entry: &SemanticEntry)
 }
 
 fn direct_stage_value_is_liftable(
-    entry: &SemanticEntry,
+    entry: &Entry<Semantic>,
     analysis: &StageDependenceAnalysis,
     node: ValueId,
 ) -> bool {
@@ -605,7 +605,7 @@ fn direct_stage_value_is_liftable(
 /// Publish those live-outs beside the primary handoff before removing their
 /// source effects.
 fn stage_prelude_outputs(
-    entry: &SemanticEntry,
+    entry: &Entry<Semantic>,
     roots: impl IntoIterator<Item = ValueId>,
     recipe: &ProjectedValueRecipe,
 ) -> Option<Vec<StagePreludeOutput>> {
@@ -627,7 +627,7 @@ fn stage_prelude_outputs(
     Some(outputs)
 }
 
-fn parallel_preludes(entry: &SemanticEntry, dependencies: &SemanticGraph) -> Vec<ParallelPrelude> {
+fn parallel_preludes(entry: &Entry<Semantic>, dependencies: &SemanticGraph) -> Vec<ParallelPrelude> {
     let mut preludes = Vec::<ParallelPrelude>::new();
     let mut by_root = HashMap::<ValueId, usize>::new();
     for capture in dependencies.captured_values() {
@@ -663,7 +663,7 @@ fn parallel_preludes(entry: &SemanticEntry, dependencies: &SemanticGraph) -> Vec
 /// detach the complete prefix once, while consumers keep using their existing
 /// field projections after the boundary value is replaced by a handoff load.
 fn parallel_prelude_boundary_root(
-    entry: &SemanticEntry,
+    entry: &Entry<Semantic>,
     consumer: SideEffectSite,
     capture: ValueId,
 ) -> ValueId {
@@ -685,7 +685,7 @@ fn operation_sites(
     operations.iter().map(|operation| dependencies.operation_site(operation)).collect()
 }
 
-fn supports_parallel_prefix_consumer(entry: &SemanticEntry, site: SideEffectSite) -> bool {
+fn supports_parallel_prefix_consumer(entry: &Entry<Semantic>, site: SideEffectSite) -> bool {
     matches!(
         &entry.graph.skeleton.effect(site).kind,
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
@@ -697,7 +697,7 @@ fn supports_parallel_prefix_consumer(entry: &SemanticEntry, site: SideEffectSite
 }
 
 fn source_is_observed_only_by_consumers_or_outputs(
-    entry: &SemanticEntry,
+    entry: &Entry<Semantic>,
     uses: &graph_ops::ValueUseIndex,
     root: ValueId,
     consumers: &HashSet<SideEffectSite>,
@@ -726,7 +726,7 @@ fn source_is_observed_only_by_consumers_or_outputs(
 }
 
 fn launched_consumer_invocations(
-    entry: &SemanticEntry,
+    entry: &Entry<Semantic>,
     dependencies: &SemanticGraph,
     consumers: &[SemanticOpId],
 ) -> u64 {
@@ -756,11 +756,14 @@ fn launched_consumer_invocations(
     })
 }
 
-fn has_parallel_consumer(entry: &SemanticEntry, consumers: Option<&HashSet<SemanticOpId>>) -> bool {
+fn has_parallel_consumer(entry: &Entry<Semantic>, consumers: Option<&HashSet<SemanticOpId>>) -> bool {
     has_matching_consumer(entry, consumers, |soac| soac.scheduling_space().is_some())
 }
 
-fn has_segmented_screma_consumer(entry: &SemanticEntry, consumers: Option<&HashSet<SemanticOpId>>) -> bool {
+fn has_segmented_screma_consumer(
+    entry: &Entry<Semantic>,
+    consumers: Option<&HashSet<SemanticOpId>>,
+) -> bool {
     has_matching_consumer(entry, consumers, |soac| {
         matches!(
             soac,
@@ -771,7 +774,7 @@ fn has_segmented_screma_consumer(entry: &SemanticEntry, consumers: Option<&HashS
 }
 
 fn has_matching_consumer(
-    entry: &SemanticEntry,
+    entry: &Entry<Semantic>,
     consumers: Option<&HashSet<SemanticOpId>>,
     mut supports: impl FnMut(&Soac<Semantic>) -> bool,
 ) -> bool {
@@ -792,7 +795,7 @@ fn scalar_result_is_used(
     observers.effect_sites().any(|site| site != producer) || observers.terminator_blocks().next().is_some()
 }
 
-fn invocation_invariant(entry: &SemanticEntry, block_id: BlockId, effects: &HashSet<usize>) -> bool {
+fn invocation_invariant(entry: &Entry<Semantic>, block_id: BlockId, effects: &HashSet<usize>) -> bool {
     let Ok(dependence) = StageDependenceAnalysis::for_entry(entry) else {
         return false;
     };
@@ -1081,7 +1084,7 @@ fn materialize_runtime_array_result(
 }
 
 fn rewrite_runtime_array_source(
-    entry: &mut SemanticEntry,
+    entry: &mut Entry<Semantic>,
     result: ValueId,
     source_site: SideEffectSite,
     handoff: &RuntimeArrayHandoff,
@@ -1137,7 +1140,7 @@ fn rewrite_runtime_array_source(
 }
 
 fn configure_operation_materialization(
-    producer: &mut SemanticEntry,
+    producer: &mut Entry<Semantic>,
     producer_site: SideEffectSite,
     producer_result: &ResultBinding<Type<TypeName>>,
     output_resources: &[ResourceId],
@@ -1267,7 +1270,7 @@ fn configure_materialized_result(
 }
 
 fn rewrite_materialized_operation_source(
-    entry: &mut SemanticEntry,
+    entry: &mut Entry<Semantic>,
     result: &ResultBinding<Type<TypeName>>,
     producer_site: SideEffectSite,
     output_resources: &[ResourceId],
@@ -1453,15 +1456,15 @@ fn materialize_stage_prelude(
 fn projected_materialization_entry(
     identities: &mut crate::egir::program::ProgramIdentities,
     materialization: MaterializationId,
-    source: &SemanticEntry,
+    source: &Entry<Semantic>,
     name_suffix: &str,
     execution_model: ExecutionModel,
     resource_declarations: Vec<SemanticResourceDecl>,
     projection: GraphProjection,
-) -> SemanticEntry {
+) -> Entry {
     let name = materialization.entry_name(&source.name, name_suffix);
     let id = identities.alloc_entry(name.clone());
-    SemanticEntry {
+    Entry {
         id,
         name,
         span: source.span,
@@ -1514,7 +1517,7 @@ fn detached_scalar_handoff_load(
 }
 
 fn replace_prelude_effects_with_load(
-    entry: &mut SemanticEntry,
+    entry: &mut Entry<Semantic>,
     producer_effects: &HashSet<SideEffectSite>,
     insertion_site: SideEffectSite,
     load_effects: Vec<SideEffect>,
@@ -1535,7 +1538,7 @@ fn replace_prelude_effects_with_load(
 }
 
 fn replace_entry_prelude_with_load(
-    entry: &mut SemanticEntry,
+    entry: &mut Entry<Semantic>,
     producer_effects: &HashSet<SideEffectSite>,
     load_effects: Vec<SideEffect>,
 ) {
@@ -1547,7 +1550,7 @@ fn replace_entry_prelude_with_load(
 }
 
 fn replace_structured_prefix_with_load(
-    entry: &mut SemanticEntry,
+    entry: &mut Entry<Semantic>,
     producer_effects: &HashSet<SideEffectSite>,
     continuation: BlockId,
     loaded: ValueId,

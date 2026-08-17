@@ -350,7 +350,7 @@ pub(super) struct BoundFilter {
 }
 
 pub(super) fn analyze_filter_candidate(
-    entry: &SemanticEntry,
+    entry: &Entry<Semantic>,
     site: SideEffectSite,
 ) -> Option<CandidateSelection<FilterCandidate>> {
     let SideEffectKind::Soac(SoacEffect(

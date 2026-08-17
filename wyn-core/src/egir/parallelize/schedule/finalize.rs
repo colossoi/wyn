@@ -6,9 +6,10 @@ use super::{execution_workgroup, KernelDispatch, KernelDomain, KernelPlan, Phase
 use crate::egir::allocation::ResourcesAllocated;
 use crate::egir::from_tlc::ConvertError;
 use crate::egir::program::{
-    host_resource_names, physicalize_program, EntryPublication, PhysicalResourceTable, SemanticEntry,
+    host_resource_names, physicalize_program, Entry, EntryPublication, PhysicalResourceTable,
 };
 use crate::egir::publish::{PipelineDescriptorPublish, StageEntryAssociations};
+use crate::egir::types::Semantic;
 use crate::pipeline_descriptor::{
     ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor, StageBindingUses,
 };
@@ -264,7 +265,7 @@ impl KernelPlan {
             .unwrap_or_else(|| phase.entry_point().to_owned())
     }
 
-    fn check_explicit_dispatch_coverage(&self, entries: &[SemanticEntry]) -> Result<(), String> {
+    fn check_explicit_dispatch_coverage(&self, entries: &[Entry<Semantic>]) -> Result<(), String> {
         for phase in
             self.phases.iter().filter(|phase| matches!(phase.placement.group, PhaseGroup::Pipeline(_)))
         {

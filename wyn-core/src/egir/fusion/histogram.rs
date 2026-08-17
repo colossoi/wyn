@@ -5,12 +5,11 @@
 //! side-effect, so destination ordering and overwrite semantics are unchanged.
 
 use super::map_anchor;
+use super::map_anchor::Candidate;
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::hist;
 use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
-
-pub(super) type Candidate = map_anchor::Candidate;
 
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
     map_anchor::analyze(inner, oracle, |effect| {

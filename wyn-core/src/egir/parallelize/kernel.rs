@@ -206,12 +206,12 @@ pub(super) fn dispatch_worker_logical_size(elem_ty: &Type<TypeName>) -> crate::e
 /// Build a two-argument (`a`, `b`) helper function of type `T -> T -> T` named
 /// `name`, whose body is produced by `body(graph, a_nid, b_nid)` and returned.
 fn synthesize_binary_fn(
-    region: RegionId,
+    region: FunctionId,
     name: String,
     elem_ty: Type<TypeName>,
     span: crate::ast::Span,
     body: impl FnOnce(&mut EGraph, ValueId, ValueId) -> ValueId,
-) -> SemanticFunc {
+) -> Func {
     let params = lambda_ops::named_parameters(&[elem_ty.clone(), elem_ty.clone()], "arg");
     let mut graph = EGraph::new();
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
@@ -234,13 +234,13 @@ fn synthesize_binary_fn(
 /// A two-argument helper whose body is `inner(b, a)` — an arg-swapped wrapper
 /// around a `T -> T -> T` combiner.
 pub(super) fn synthesize_swap_wrapper(
-    region: RegionId,
+    region: FunctionId,
     wrapper_name: String,
-    inner: &SemanticFunc,
+    inner: &Func<Semantic>,
     elem_ty: Type<TypeName>,
     capture_types: Vec<Type<TypeName>>,
     span: crate::ast::Span,
-) -> SemanticFunc {
+) -> Func {
     let mut parameter_types = vec![elem_ty.clone(), elem_ty.clone()];
     parameter_types.extend(capture_types);
     let params = lambda_ops::named_parameters(&parameter_types, "arg");
@@ -276,10 +276,10 @@ pub(super) fn synthesize_swap_wrapper(
 }
 
 pub(super) fn synthesize_u32_add_function(
-    region: RegionId,
+    region: FunctionId,
     name: String,
     span: crate::ast::Span,
-) -> SemanticFunc {
+) -> Func {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let result_ty = u32_ty.clone();
     synthesize_binary_fn(region, name, u32_ty, span, move |graph, a_nid, b_nid| {

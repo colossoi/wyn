@@ -2,8 +2,8 @@ use polytype::Type;
 
 use crate::ast::TypeName;
 
-use super::program::{visit_type_names_mut, PhysicalEGraph, PhysicalResourceTable};
-use super::types::{SideEffectKind, SoacEffect};
+use super::program::{visit_type_names_mut, PhysicalResourceTable};
+use super::types::{EGraph, Physical, SideEffectKind, SoacEffect};
 
 pub fn check(
     program: &super::parallelize::Planned,
@@ -39,7 +39,7 @@ fn physical_type(ty: &Type<TypeName>, owner: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn graph(graph: &PhysicalEGraph, owner: &str) -> Result<(), String> {
+fn graph(graph: &EGraph<Physical>, owner: &str) -> Result<(), String> {
     graph
         .skeleton
         .verify_branch_arities()

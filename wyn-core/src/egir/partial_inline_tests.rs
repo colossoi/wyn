@@ -41,7 +41,7 @@ fn physical_params(
 
 fn inline_test_body(
     graph: &mut EGraph<Physical>,
-    callees: &LookupMap<crate::FunctionId, PhysicalFunc>,
+    callees: &LookupMap<crate::FunctionId, Func<Physical>>,
 ) -> Result<InliningStats, String> {
     inline_body(graph, callees, &mut crate::IdSource::new())
 }
@@ -71,7 +71,7 @@ fn add_value_call(
         .expect("scalar test call result")
 }
 
-fn mixed_callee() -> PhysicalFunc {
+fn mixed_callee() -> Func<Physical> {
     let ty = u32_ty();
     let region = crate::FunctionId::from_index(0);
     let mut graph = EGraph::<Physical>::new();
@@ -92,7 +92,7 @@ fn mixed_callee() -> PhysicalFunc {
     graph.skeleton.blocks[graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(graph.value_result(result)));
     let params = physical_params([("varying", ty.clone()), ("invariant", ty.clone())]);
-    PhysicalFunc::new(
+    Func::<Physical>::new(
         region,
         "mixed".into(),
         Span::dummy(),
@@ -104,7 +104,7 @@ fn mixed_callee() -> PhysicalFunc {
     )
 }
 
-fn mixed_callee_without_invariant_subexpression() -> PhysicalFunc {
+fn mixed_callee_without_invariant_subexpression() -> Func<Physical> {
     let ty = u32_ty();
     let region = crate::FunctionId::from_index(0);
     let mut graph = EGraph::<Physical>::new();
@@ -119,7 +119,7 @@ fn mixed_callee_without_invariant_subexpression() -> PhysicalFunc {
     graph.skeleton.blocks[graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(graph.value_result(result)));
     let params = physical_params([("varying", ty.clone()), ("invariant", ty.clone())]);
-    PhysicalFunc::new(
+    Func::<Physical>::new(
         region,
         "mixed".into(),
         Span::dummy(),
@@ -249,7 +249,7 @@ fn inlines_fixed_array_parameters_outside_loops() {
     callee_graph.skeleton.blocks[callee_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(callee_graph.value_result(result)));
     let params = physical_params([("values", array.clone())]);
-    let callee = PhysicalFunc::new(
+    let callee = Func::<Physical>::new(
         region,
         "fixed_array_element".into(),
         Span::dummy(),
@@ -331,7 +331,7 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
     callee_graph.skeleton.blocks[merge].term =
         SkeletonTerminator::Return(Some(callee_graph.value_result(selected)));
     let params = physical_params([("index", index_ty.clone()), ("values", array.clone())]);
-    let callee = PhysicalFunc::new(
+    let callee = Func::<Physical>::new(
         region,
         "conditional_fixed_array_element".into(),
         Span::dummy(),

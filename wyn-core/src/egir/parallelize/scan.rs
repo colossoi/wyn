@@ -22,7 +22,7 @@ pub(super) struct ScanReductionOutputSpec<'a> {
 /// Build a single-invocation exclusive scan over block sums.
 pub(super) struct ScanPhase2Spec<'a> {
     pub entry_name: String,
-    pub operator: &'a SemanticFunc,
+    pub operator: &'a Func<Semantic>,
     pub elem_ty: Type<TypeName>,
     pub source_graph: &'a EGraph,
     pub operator_captures: &'a [OperandRef],
@@ -43,30 +43,30 @@ impl ScanPhase2Spec<'_> {
         use crate::egir::builder::EntryBuilder;
 
         let mut accesses = vec![
-            schedule::ScheduledResource {
+            SegResourceAccess::<ResourceId> {
                 resource: self.scratch.block_sums,
                 access: crate::ResourceAccess::Read,
             },
-            schedule::ScheduledResource {
+            SegResourceAccess::<ResourceId> {
                 resource: self.scratch.block_offsets,
                 access: crate::ResourceAccess::Write,
             },
         ];
         if let Some(resource) = self.total_out {
-            accesses.push(schedule::ScheduledResource {
+            accesses.push(SegResourceAccess::<ResourceId> {
                 resource,
                 access: crate::ResourceAccess::Write,
             });
         }
         if let Some(output) = &self.reduction_output {
-            accesses.extend(output.stores.iter().map(|store| schedule::ScheduledResource {
+            accesses.extend(output.stores.iter().map(|store| SegResourceAccess::<ResourceId> {
                 resource: store.output.0,
                 access: crate::ResourceAccess::Write,
             }));
         }
 
         accesses.extend(
-            self.capture_inputs.iter().map(|declaration| schedule::ScheduledResource {
+            self.capture_inputs.iter().map(|declaration| SegResourceAccess::<ResourceId> {
                 resource: declaration.resource.0,
                 access: crate::ResourceAccess::Read,
             }),
@@ -287,7 +287,7 @@ pub(super) struct ScanPostPhaseSpec<'a> {
 /// when needed, evaluates the original whole post-barrier dataflow.
 pub(super) struct ScanPhase3Spec<'a> {
     pub entry_name: String,
-    pub swap_region: RegionId,
+    pub swap_region: FunctionId,
     pub elem_ty: Type<TypeName>,
     pub source_graph: &'a EGraph,
     pub operator_captures: Vec<OperandRef>,
@@ -317,11 +317,11 @@ impl ScanPhase3Spec<'_> {
             }
         }
         let mut resources = vec![
-            schedule::ScheduledResource {
+            SegResourceAccess::<ResourceId> {
                 resource: self.output_resource,
                 access: crate::ResourceAccess::ReadWrite,
             },
-            schedule::ScheduledResource {
+            SegResourceAccess::<ResourceId> {
                 resource: self.block_offsets,
                 access: crate::ResourceAccess::Read,
             },
@@ -333,7 +333,7 @@ impl ScanPhase3Spec<'_> {
                 &post
                     .outputs
                     .iter()
-                    .map(|output| schedule::ScheduledResource {
+                    .map(|output| SegResourceAccess::<ResourceId> {
                         resource: output.resource,
                         access: crate::ResourceAccess::Write,
                     })
@@ -1090,7 +1090,7 @@ impl KernelPlanBuilder<'_, '_> {
 
         phase1_resources = merge_scheduled_resources(
             &phase1_resources,
-            &[schedule::ScheduledResource {
+            &[SegResourceAccess::<ResourceId> {
                 resource: block_sums_resource,
                 access: crate::ResourceAccess::Write,
             }],
@@ -1098,7 +1098,7 @@ impl KernelPlanBuilder<'_, '_> {
         if scan_prefixes.is_some() {
             phase1_resources = merge_scheduled_resources(
                 &phase1_resources,
-                &[schedule::ScheduledResource {
+                &[SegResourceAccess::<ResourceId> {
                     resource: prefix_resource,
                     access: crate::ResourceAccess::Write,
                 }],
@@ -1110,15 +1110,15 @@ impl KernelPlanBuilder<'_, '_> {
 }
 
 fn synthesize_packed_operator_function(
-    region: RegionId,
+    region: FunctionId,
     name: String,
     operators: Vec<screma::Lambda>,
-    operator_functions: Vec<SemanticFunc>,
+    operator_functions: Vec<Func<Semantic>>,
     component_types: Vec<Type<TypeName>>,
     capture_types: Vec<Type<TypeName>>,
     scratch_type: Type<TypeName>,
     span: crate::ast::Span,
-) -> SemanticFunc {
+) -> Func {
     let mut parameter_types = vec![scratch_type.clone(), scratch_type.clone()];
     parameter_types.extend(capture_types);
     let params = lambda_ops::named_parameters(&parameter_types, "arg");
@@ -1172,15 +1172,15 @@ fn synthesize_packed_operator_function(
 
 #[allow(clippy::too_many_arguments)]
 fn synthesize_scan_input_function(
-    region: RegionId,
+    region: FunctionId,
     name: String,
     pre: screma::Lambda,
-    pre_function: Option<SemanticFunc>,
+    pre_function: Option<Func<Semantic>>,
     capture_types: Vec<Type<TypeName>>,
     component_count: usize,
     result_type: Type<TypeName>,
     span: crate::ast::Span,
-) -> SemanticFunc {
+) -> Func {
     let mut parameter_types = pre.parameter_types.clone();
     parameter_types.extend(capture_types);
     let params = lambda_ops::named_parameters(&parameter_types, "arg");
@@ -1209,18 +1209,18 @@ fn synthesize_scan_input_function(
 
 #[allow(clippy::too_many_arguments)]
 fn synthesize_scan_post_function(
-    region: RegionId,
+    region: FunctionId,
     name: String,
     pre: screma::Lambda,
-    pre_function: Option<SemanticFunc>,
+    pre_function: Option<Func<Semantic>>,
     post: screma::Lambda,
-    post_function: Option<SemanticFunc>,
+    post_function: Option<Func<Semantic>>,
     component_types: Vec<Type<TypeName>>,
     scan_component_count: usize,
     scratch_type: Type<TypeName>,
     capture_types: Vec<Type<TypeName>>,
     span: crate::ast::Span,
-) -> SemanticFunc {
+) -> Func {
     let mut element_types = vec![scratch_type];
     element_types.extend(pre.parameter_types.iter().cloned());
     let element_count = element_types.len();

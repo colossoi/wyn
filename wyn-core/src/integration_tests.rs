@@ -5957,7 +5957,7 @@ entry parallel_scan(a: []i32) []i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
         .functions
         .iter()
         .find(|f| f.name.ends_with("_scan_op_swap"))
-        .expect("parallel scan should synthesize a swap wrapper SemanticFunc");
+        .expect("parallel scan should synthesize a swap wrapper Func<Semantic>");
 
     assert_eq!(
         wrapper.body.params().len(),
@@ -9296,7 +9296,7 @@ entry filt_count(xs: []i32) i32 =
 /// A runtime-sized `filter` inside a **subroutine** that the entry calls. This
 /// is the safety net for the scratch-binding home: `filter` compacts into a
 /// reserved storage buffer, and only a compute *entry* owns a descriptor set +
-/// binding namespace to host it (an `SemanticFunc` does not — see the guard in
+/// binding namespace to host it (an `Func<Semantic>` does not — see the guard in
 /// `from_tlc::convert_function`). This compiles because `evens` is **inlined**
 /// into `filt_count` before EGIR conversion, so `convert_soac_filter` runs in
 /// the entry's converter and the scratch buffer lands at a non-colliding entry
@@ -9305,7 +9305,7 @@ entry filt_count(xs: []i32) i32 =
 /// IF THIS TEST STARTS FAILING with "runtime `filter` in function `evens`
 /// reserved a scratch storage buffer …": the inlining invariant broke — a
 /// function whose result is a runtime filter survived to EGIR as a standalone
-/// `SemanticFunc`. The scratch buffer then has no descriptor-set home. To fix,
+/// `Func<Semantic>`. The scratch buffer then has no descriptor-set home. To fix,
 /// either (a) restore inlining of filter-returning functions before `from_tlc`,
 /// or (b) thread a caller-reserved scratch binding into the function's
 /// signature (like an extra param / interface entry) so the buffer is declared

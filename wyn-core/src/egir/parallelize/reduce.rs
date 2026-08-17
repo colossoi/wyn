@@ -22,7 +22,7 @@ pub(super) struct ReduceCandidate {
 struct ReductionAccumulator {
     component_types: Vec<Type<TypeName>>,
     scratch_type: Type<TypeName>,
-    combine_region: RegionId,
+    combine_region: FunctionId,
     combine_captures: Vec<OperandRef>,
     capture_inputs: Vec<SemanticResourceDecl>,
     neutrals: Vec<ValueId>,
@@ -49,7 +49,7 @@ pub(super) struct BoundReduce {
 struct EmissionAccumulator {
     component_types: Vec<Type<TypeName>>,
     scratch_type: Type<TypeName>,
-    operator: SemanticFunc,
+    operator: Func<Semantic>,
     operator_captures: Vec<OperandRef>,
     capture_inputs: Vec<SemanticResourceDecl>,
     neutrals: Vec<ValueId>,
@@ -425,7 +425,7 @@ impl KernelPlanBuilder<'_, '_> {
             }
         });
         phase1_resources.extend(
-            accumulators.iter().map(|accumulator| schedule::ScheduledResource {
+            accumulators.iter().map(|accumulator| SegResourceAccess::<ResourceId> {
                 resource: accumulator.partial,
                 access: crate::ResourceAccess::Write,
             }),
@@ -442,7 +442,7 @@ impl KernelPlanBuilder<'_, '_> {
 /// The published compute stage must dispatch this same width.
 struct ReduceCombineSpec<'a> {
     name: String,
-    operator: &'a SemanticFunc,
+    operator: &'a Func<Semantic>,
     component_types: &'a [Type<TypeName>],
     elem_ty: Type<TypeName>,
     source_graph: &'a crate::egir::types::EGraph,
@@ -871,12 +871,12 @@ impl ReduceCombineSpec<'_> {
         effect_ids: &mut crate::IdSource<EffectToken>,
     ) -> Result<BuiltPhase, String> {
         use crate::egir::builder::EntryBuilder;
-        let mut resources = vec![schedule::ScheduledResource {
+        let mut resources = vec![SegResourceAccess::<ResourceId> {
             resource: self.partials,
             access: crate::ResourceAccess::Read,
         }];
         resources.extend(
-            self.capture_inputs.iter().map(|declaration| schedule::ScheduledResource {
+            self.capture_inputs.iter().map(|declaration| SegResourceAccess::<ResourceId> {
                 resource: declaration.resource.0,
                 access: crate::ResourceAccess::Read,
             }),
@@ -891,7 +891,7 @@ impl ReduceCombineSpec<'_> {
             },
         );
         resources.extend(
-            output_declarations.iter().map(|(resource, _, _)| schedule::ScheduledResource {
+            output_declarations.iter().map(|(resource, _, _)| SegResourceAccess::<ResourceId> {
                 resource: *resource,
                 access: crate::ResourceAccess::Write,
             }),

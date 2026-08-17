@@ -23,7 +23,7 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
                 form: screma::ScremaForm {
                     pre: screma::Lambda::region(
                         crate::egir::types::SegBody {
-                            region: crate::egir::types::RegionId::from_index(0),
+                            region: crate::FunctionId::from_index(0),
                             captures: vec![],
                         },
                         vec![],
