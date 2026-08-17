@@ -159,13 +159,16 @@ struct DeadSegOpsPatch {
 fn analyze_dead_seg_ops(inner: &Segmented) -> Option<DeadSegOpsPatch> {
     let mut bodies = LookupMap::new();
     for (index, entry) in inner.entry_points.iter().enumerate() {
-        let patch = dead_seg_ops_in_graph(&entry.graph);
+        let patch = dead_seg_ops_in_graph(
+            &entry.graph,
+            entry.routes().flat_map(|route| route.referenced_values()),
+        );
         if !patch.is_empty() {
             bodies.insert(BodySite::Entry(index), patch);
         }
     }
     for function in &inner.functions {
-        let patch = dead_seg_ops_in_graph(&function.graph);
+        let patch = dead_seg_ops_in_graph(&function.graph, []);
         if !patch.is_empty() {
             bodies.insert(BodySite::Function(function.region), patch);
         }
@@ -193,11 +196,14 @@ fn apply_dead_seg_ops(inner: Segmented, mut patch: DeadSegOpsPatch) -> Segmented
     rebuilt
 }
 
-fn dead_seg_ops_in_graph(graph: &EGraph) -> DeadGraphPatch {
+fn dead_seg_ops_in_graph(
+    graph: &EGraph,
+    external_roots: impl IntoIterator<Item = ValueId>,
+) -> DeadGraphPatch {
     // Live values are those reachable from an observable root.  Looking at
     // children of every interned node is too conservative: dead Project nodes
     // remain in an e-graph and would otherwise keep their producer alive.
-    let mut roots = Vec::<ValueId>::new();
+    let mut roots = external_roots.into_iter().collect::<Vec<_>>();
     for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {
             roots.extend(super::graph_ops::effect_value_inputs(graph, effect));
@@ -252,8 +258,11 @@ fn dead_seg_ops_in_graph(graph: &EGraph) -> DeadGraphPatch {
     patch
 }
 
-pub(super) fn eliminate_dead_seg_ops_in_graph(graph: &mut EGraph) -> bool {
-    let mut patch = dead_seg_ops_in_graph(graph);
+pub(super) fn eliminate_dead_seg_ops_in_graph(
+    graph: &mut EGraph,
+    external_roots: impl IntoIterator<Item = ValueId>,
+) -> bool {
+    let mut patch = dead_seg_ops_in_graph(graph, external_roots);
     let changed = !patch.is_empty();
     for (block, mut effects) in patch.drain() {
         effects.sort_unstable();

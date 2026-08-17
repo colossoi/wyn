@@ -235,13 +235,14 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
         state: hist::PhysicalState::Serial,
     };
     let mut effect_ids = crate::IdSource::new();
+    let result = graph_ops::alloc_by_value_effect_result(&mut graph, bool_ty);
     graph_ops::emit_pending_soac(
         &mut graph,
         block,
         SemanticOpId::for_test(0),
         Soac::Hist(histogram),
         input_nodes.into_iter().map(OperandRef::Value).collect(),
-        bool_ty,
+        result,
         &mut effect_ids,
         None,
     );
@@ -345,13 +346,14 @@ fn serial_hist_ignores_out_of_bounds_indices() {
         state: hist::PhysicalState::Serial,
     };
     let mut effect_ids = crate::IdSource::new();
+    let result = graph_ops::alloc_by_value_effect_result(&mut graph, bool_ty);
     graph_ops::emit_pending_soac(
         &mut graph,
         block,
         SemanticOpId::for_test(0),
         Soac::Hist(histogram),
         SmallVec::from_vec(vec![OperandRef::Value(indices), OperandRef::Value(values)]),
-        bool_ty,
+        result,
         &mut effect_ids,
         None,
     );
@@ -471,13 +473,14 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
         },
     };
     let mut effect_ids = crate::IdSource::new();
+    let result = graph_ops::alloc_by_value_effect_result(&mut graph, bool_ty);
     graph_ops::emit_pending_soac(
         &mut graph,
         block,
         SemanticOpId::for_test(0),
         Soac::Hist(histogram),
         inputs.into_iter().map(OperandRef::Value).collect(),
-        bool_ty,
+        result,
         &mut effect_ids,
         None,
     );

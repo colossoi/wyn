@@ -165,7 +165,6 @@ pub(super) struct ScremaParts {
     pub(super) results: Vec<ResultBinding<Type<TypeName>>>,
     pub(super) result_types: Vec<Type<TypeName>>,
     pub(super) input_nodes: Vec<ValueId>,
-    pub(super) output_nodes: Vec<Option<ValueId>>,
 }
 
 pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> ScremaParts {
@@ -192,11 +191,6 @@ pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> Sc
         .iter()
         .map(|operand| operand.value().expect("Screma inputs are values or views"))
         .collect();
-    let output_nodes = operands
-        .outputs()
-        .map(|output| output.map(|output| output.operand.value().expect("Screma output is a view")))
-        .collect::<Vec<_>>();
-
     ScremaParts {
         id: *id,
         op: op.clone(),
@@ -207,7 +201,6 @@ pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> Sc
         results,
         result_types,
         input_nodes,
-        output_nodes,
     }
 }
 
@@ -259,28 +252,24 @@ fn build_plan(
     let mut right_mapping = vec![usize::MAX; right.result_types.len()];
     let mut result_state = Vec::with_capacity(normalized.outputs.len());
     let mut result_types = Vec::with_capacity(normalized.outputs.len());
-    let mut output_nodes = Vec::with_capacity(normalized.outputs.len());
     for (fused_field, origin) in normalized.outputs.iter().copied().enumerate() {
-        let (source_field, source_state, source_types, source_outputs, mapping) = match origin {
+        let (source_field, source_state, source_types, mapping) = match origin {
             fusion_screma::OutputOrigin::Producer(field) => (
                 field,
                 &left.op.result_state,
                 &left.result_types,
-                &left.output_nodes,
                 &mut left_mapping,
             ),
             fusion_screma::OutputOrigin::Consumer(field) => (
                 field,
                 &right.op.result_state,
                 &right.result_types,
-                &right.output_nodes,
                 &mut right_mapping,
             ),
         };
         mapping[source_field] = fused_field;
         result_state.push(source_state[source_field].clone());
         result_types.push(source_types[source_field].clone());
-        output_nodes.push(source_outputs[source_field]);
     }
     debug_assert!(left_mapping.iter().all(|field| *field != usize::MAX));
     debug_assert!(right_mapping.iter().all(|field| *field != usize::MAX));
@@ -315,7 +304,6 @@ fn build_plan(
 
     let mut operands = SmallVec::new();
     operands.extend(normalized.input_nodes);
-    operands.extend(output_nodes.into_iter().flatten());
 
     FusionPlan {
         id: left.id,

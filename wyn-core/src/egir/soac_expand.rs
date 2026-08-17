@@ -40,9 +40,9 @@ use crate::ast::TypeName;
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
 use super::types::{
-    as_soa_tuple, soac_element_type, ArrayLayout, EffectOp, EffectToken, PlaceDestination, PlaceId, PureOp,
-    RegionId, ResultBinding, ResultDestination, SkeletonTerminator, SoacDestination, SoacEffect, ValueId,
-    ValueKind, ViewId, WynLanguage,
+    as_soa_tuple, ArrayLayout, EffectOp, EffectToken, PlaceDestination, PlaceId, PureOp, RegionId,
+    ResultBinding, ResultDestination, SkeletonTerminator, SoacEffect, SoacOwnership, ValueId, ValueKind,
+    ViewId, WynLanguage,
 };
 
 type CallableMap = crate::LookupMap<RegionId, PhysicalFunc>;
@@ -70,15 +70,16 @@ use screma_lowering::{build_parallel_screma_map, emit_screma_lambda};
 /// Expand every graph-bearing body and rebuild the program at the
 /// post-expansion checkpoint.
 pub fn expand_soacs(program: super::parallelize::Planned) -> Result<SoacsExpanded, String> {
+    let mut program = call_abi::resolve(program)?;
     let callables = program
         .functions
         .iter()
         .map(|function| (function.region, function.clone()))
         .collect::<CallableMap>();
-    let program = program.try_map_graphs_with_state(|_, graph, _, context| {
+    program = program.try_map_graphs_with_state(|_, graph, _, context| {
         run_one_body(graph, &callables, &mut context.effect_ids)
     })?;
-    call_abi::resolve(program).map(|program| program.retag())
+    Ok(program.retag())
 }
 
 /// Expand every physical SOAC in the skeleton.
@@ -220,6 +221,37 @@ fn value_binding(graph: &mut EGraph, ty: &Type<TypeName>, value: ValueId) -> Res
     super::graph_ops::bind_by_value_result(graph, &abi, value)
 }
 
+fn load_result_arguments(
+    graph: &mut EGraph,
+    block: BlockId,
+    results: &[ResultBinding<Type<TypeName>>],
+    next_effect: &mut crate::IdSource<EffectToken>,
+) -> Vec<ValueId> {
+    results
+        .iter()
+        .map(|result| super::graph_ops::load_result_value(graph, block, result, next_effect))
+        .collect()
+}
+
+fn result_is_addressable(graph: &EGraph, result: &ResultBinding<Type<TypeName>>) -> bool {
+    result.destination_count()
+        == result
+            .destination_leaves()
+            .iter()
+            .filter(|leaf| {
+                leaf.single_destination().is_some_and(|(_, destination)| match destination {
+                    ResultDestination::Place(_) => true,
+                    ResultDestination::ReturnValue(value) => {
+                        matches!(
+                            graph.operand_ref(graph.canonical_value(*value)),
+                            super::types::OperandRef::View(_)
+                        )
+                    }
+                })
+            })
+            .count()
+}
+
 fn emit_mapped_result_stores(
     graph: &mut EGraph,
     block: BlockId,
@@ -267,8 +299,9 @@ fn expand_one(
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
             if op.is_serial()
                 || (matches!(op.state, screma::PhysicalState::Segmented(_))
-                    && (0..op.result_count())
-                        .any(|field| matches!(op.destination(field), Some(SoacDestination::Fresh)))) =>
+                    && se.result.as_ref().is_some_and(|result| {
+                        result.top_level_fields().iter().any(|field| !result_is_addressable(graph, field))
+                    })) =>
         {
             let operands = screma::ScremaOperands::decode(op, &se.operands, se.result.as_ref())?;
             let input_nids = operands
@@ -300,53 +333,45 @@ fn expand_one(
             let mut place_backed_results = Vec::new();
             for post in 0..post_count {
                 let field = reduction_components + post;
-                let destination = op
-                    .destination(field)
-                    .ok_or_else(|| format!("Screma result {field} has no destination"))?;
                 let result = &result_fields[field];
-                let sink = match destination {
-                    SoacDestination::UniqueInput => {
-                        return Err("unresolved UniqueInput destination reached physical expansion".into())
-                    }
-                    SoacDestination::Fresh => {
-                        let mut views = Vec::with_capacity(result.destination_count());
-                        let sink = result.map_destinations(|ty, _| {
-                            let (place, effect) = detached_alloca(graph, ty.clone(), next_effect, None);
-                            prelude.push(effect);
-                            let view_ty = crate::types::view_array_of(ty, crate::types::no_buffer());
-                            let view = graph.add_place_view(place, view_ty, None);
-                            views.push(view.value());
-                            place_backed_results.push(view.value());
-                            ResultDestination::Place(PlaceDestination::Fixed(place))
-                        });
-                        let mut views = views.into_iter();
-                        let binding = result.map_destinations(|_, _| {
-                            ResultDestination::ReturnValue(
-                                views.next().expect("fresh destination view count changed"),
-                            )
-                        });
-                        bind_result_binding(graph, result, &binding);
-                        sink
-                    }
-                    SoacDestination::OutputView => {
-                        let output =
-                            operands.output(field).and_then(|operand| operand.operand.value()).ok_or_else(
-                                || format!("Screma post result {post} has no output-view operand"),
-                            )?;
-                        let binding = output_component_views(graph, result, output)?;
-                        bind_result_binding(graph, result, &binding);
-                        mapped_view_destination(graph, result.ty(), output)?
-                    }
-                    SoacDestination::InputBuffer => {
-                        if input_nids.len() != 1 {
-                            return Err(
-                                "input-buffer Screma result requires exactly one array input".into()
-                            );
+                let sink = if result_is_addressable(graph, result) {
+                    result.clone()
+                } else {
+                    match op
+                        .ownership(field)
+                        .ok_or_else(|| format!("Screma result {field} has no ownership"))?
+                    {
+                        SoacOwnership::Fresh => {
+                            let mut views = Vec::with_capacity(result.destination_count());
+                            let sink = result.map_destinations(|ty, _| {
+                                let (place, effect) = detached_alloca(graph, ty.clone(), next_effect, None);
+                                prelude.push(effect);
+                                let view_ty = crate::types::view_array_of(ty, crate::types::no_buffer());
+                                let view = graph.add_place_view(place, view_ty, None);
+                                views.push(view.value());
+                                place_backed_results.push(view.value());
+                                ResultDestination::Place(PlaceDestination::Fixed(place))
+                            });
+                            let mut views = views.into_iter();
+                            let binding = result.map_destinations(|_, _| {
+                                ResultDestination::ReturnValue(
+                                    views.next().expect("fresh destination view count changed"),
+                                )
+                            });
+                            bind_result_binding(graph, result, &binding);
+                            sink
                         }
-                        let output = input_nids[0];
-                        let output = value_binding(graph, result.ty(), output);
-                        bind_result_binding(graph, result, &output);
-                        output
+                        SoacOwnership::UniqueInput => {
+                            if input_nids.len() != 1 {
+                                return Err(
+                                    "unique-input Screma result requires exactly one array input".into()
+                                );
+                            }
+                            let output = input_nids[0];
+                            let output = value_binding(graph, result.ty(), output);
+                            bind_result_binding(graph, result, &output);
+                            output
+                        }
                     }
                 };
                 post_sinks.push(sink);
@@ -397,9 +422,15 @@ fn expand_one(
                             )
                         })
                         .collect::<Vec<_>>();
-                    let pre_results =
-                        emit_screma_lambda(graph, body, callables, &op.form.pre, input_elements);
-                    let pre_values = super::soac::lambda::materialize_result_values(graph, &pre_results);
+                    let pre_results = emit_screma_lambda(
+                        graph,
+                        body,
+                        callables,
+                        &op.form.pre,
+                        input_elements,
+                        None,
+                        next_effect,
+                    );
 
                     let mut pre_offset = 0;
                     let mut scan_offset = 0;
@@ -407,9 +438,22 @@ fn expand_one(
                     for scan in &op.form.scans {
                         let width = scan.neutral.len();
                         let mut arguments = carried_values[scan_offset..scan_offset + width].to_vec();
-                        arguments.extend_from_slice(&pre_values[pre_offset..pre_offset + width]);
-                        let results = emit_screma_lambda(graph, body, callables, &scan.operator, arguments);
-                        new_scans.extend(super::soac::lambda::materialize_result_values(graph, &results));
+                        arguments.extend(load_result_arguments(
+                            graph,
+                            body,
+                            &pre_results[pre_offset..pre_offset + width],
+                            next_effect,
+                        ));
+                        let results = emit_screma_lambda(
+                            graph,
+                            body,
+                            callables,
+                            &scan.operator,
+                            arguments,
+                            None,
+                            next_effect,
+                        );
+                        new_scans.extend(load_result_arguments(graph, body, &results, next_effect));
                         pre_offset += width;
                         scan_offset += width;
                     }
@@ -420,19 +464,48 @@ fn expand_one(
                         let width = reduction.neutral.len();
                         let mut arguments =
                             carried_values[reduction_offset..reduction_offset + width].to_vec();
-                        arguments.extend_from_slice(&pre_values[pre_offset..pre_offset + width]);
-                        let results =
-                            emit_screma_lambda(graph, body, callables, &reduction.operator, arguments);
-                        new_reductions
-                            .extend(super::soac::lambda::materialize_result_values(graph, &results));
+                        arguments.extend(load_result_arguments(
+                            graph,
+                            body,
+                            &pre_results[pre_offset..pre_offset + width],
+                            next_effect,
+                        ));
+                        let results = emit_screma_lambda(
+                            graph,
+                            body,
+                            callables,
+                            &reduction.operator,
+                            arguments,
+                            None,
+                            next_effect,
+                        );
+                        new_reductions.extend(load_result_arguments(graph, body, &results, next_effect));
                         pre_offset += width;
                         reduction_offset += width;
                     }
 
-                    let mut post_arguments = new_scans.clone();
-                    post_arguments.extend_from_slice(&pre_values[pre_offset..]);
-                    let post_results =
-                        emit_screma_lambda(graph, body, callables, &op.form.post, post_arguments);
+                    let mut post_inputs = new_scans
+                        .iter()
+                        .map(|value| {
+                            let ty = graph.nodes[*value].ty().clone();
+                            value_binding(graph, &ty, *value)
+                        })
+                        .collect::<Vec<_>>();
+                    post_inputs.extend_from_slice(&pre_results[pre_offset..]);
+                    let post_results = if op.form.post.is_identity() {
+                        post_inputs
+                    } else {
+                        let post_arguments = load_result_arguments(graph, body, &post_inputs, next_effect);
+                        emit_screma_lambda(
+                            graph,
+                            body,
+                            callables,
+                            &op.form.post,
+                            post_arguments,
+                            Some((&post_sinks, lane)),
+                            next_effect,
+                        )
+                    };
                     debug_assert_eq!(post_results.len(), post_count);
 
                     let mut next = Vec::with_capacity(carried_values.len());
@@ -610,34 +683,29 @@ fn expand_one(
                 return Err("segmented map has no array input".into());
             };
             let result_fields = operands.result_fields();
-            let mut output_views = Vec::with_capacity(op.result_count());
+            let mut destinations = Vec::with_capacity(op.result_count());
             for field in 0..op.result_count() {
-                let destination = op
-                    .destination(field)
-                    .ok_or_else(|| format!("segmented map result {field} has no destination"))?;
-                let output = if destination.is_output_view() {
-                    operands
-                        .output(field)
-                        .and_then(|operand| operand.operand.value())
-                        .ok_or_else(|| format!("segmented map result {field} has no output view"))?
-                } else if destination.is_input_buffer() && input_nodes.len() == 1 {
-                    input_nodes[0]
+                let result = &result_fields[field];
+                let destination = if result_is_addressable(graph, result) {
+                    result.clone()
+                } else if op.ownership(field) == Some(SoacOwnership::UniqueInput) && input_nodes.len() == 1
+                {
+                    let destination = value_binding(graph, result.ty(), input_nodes[0]);
+                    bind_result_binding(graph, result, &destination);
+                    destination
                 } else {
                     return Err(format!(
-                        "segmented map result {field} has unsupported destination {destination:?}"
+                        "segmented map result {field} has no addressable destination"
                     ));
                 };
-                let result = &result_fields[field];
-                let output = value_binding(graph, result.ty(), output);
-                bind_result_binding(graph, result, &output);
-                if output.destination_count() != result.destination_count() {
+                if destination.destination_count() != result.destination_count() {
                     return Err(format!(
-                        "segmented map result {field} has {} physical leaves but its output has {}",
+                        "segmented map result {field} has {} physical leaves but its destination has {}",
                         result.destination_count(),
-                        output.destination_count()
+                        destination.destination_count()
                     ));
                 }
-                output_views.push(output);
+                destinations.push(destination);
             }
             build_parallel_screma_map(
                 graph,
@@ -647,7 +715,7 @@ fn expand_one(
                 (first_input.0, first_input.1.clone()),
                 &read_inputs,
                 &op.form.pre,
-                &output_views,
+                &destinations,
                 next_effect,
                 callables,
             );
@@ -655,76 +723,6 @@ fn expand_one(
         _ => return Err("SOAC expansion target changed after selection".into()),
     }
     Ok(())
-}
-
-fn mapped_view_destination(
-    graph: &EGraph,
-    logical_array: &Type<TypeName>,
-    view: ValueId,
-) -> Result<ResultBinding<Type<TypeName>>, String> {
-    let Type::Constructed(TypeName::Array, arguments) = graph.nodes[view].ty().clone() else {
-        return Err("mapped output destination is not an array view".into());
-    };
-    let mut arguments = arguments;
-    arguments[0] = soac_element_type(logical_array);
-    Ok(ResultBinding::destination(
-        Type::Constructed(TypeName::Array, arguments),
-        ResultDestination::ReturnValue(view),
-    ))
-}
-
-fn output_component_views(
-    graph: &mut EGraph,
-    result: &ResultBinding<Type<TypeName>>,
-    view: ValueId,
-) -> Result<ResultBinding<Type<TypeName>>, String> {
-    let leaves = result.destination_leaves();
-    if leaves.len() == 1 {
-        return Ok(result.map_destinations(|_, _| ResultDestination::ReturnValue(view)));
-    }
-    let parent_ty = graph.nodes[view].ty().clone();
-    let parent_elem = crate::types::array_elem(&parent_ty)
-        .ok_or_else(|| "mapped output destination is not an array view".to_owned())?;
-    let parent_elem_bytes = crate::ssa::layout::type_byte_size(parent_elem)
-        .ok_or_else(|| "mapped output destination has no physical element size".to_owned())?;
-    let region = parent_ty
-        .array_buffer()
-        .cloned()
-        .ok_or_else(|| "mapped output destination has no storage region".to_owned())?;
-    let mut offset_bytes = 0u32;
-    let mut component_views = Vec::with_capacity(leaves.len());
-    for leaf in &leaves {
-        let bytes = crate::ssa::layout::type_byte_size(leaf.ty()).ok_or_else(|| {
-            "a structured mapped output component must have a fixed physical size".to_owned()
-        })?;
-        if offset_bytes % parent_elem_bytes != 0 {
-            return Err("mapped output component is not aligned to its storage element".into());
-        }
-        let Type::Constructed(TypeName::Size(length), _) =
-            leaf.ty().array_size().ok_or_else(|| "mapped output component is not an array".to_owned())?
-        else {
-            return Err("a structured mapped output component must have a fixed length".into());
-        };
-        let offset = super::graph_ops::intern_u32(graph, offset_bytes / parent_elem_bytes, None);
-        let length = super::graph_ops::intern_u32(
-            graph,
-            u32::try_from(*length).map_err(|_| "mapped output length exceeds u32")?,
-            None,
-        );
-        let view_ty = crate::types::view_array_of(leaf.ty(), region.clone());
-        component_views.push(super::graph_ops::intern_inherited_view(
-            graph, view, offset, length, view_ty, None,
-        ));
-        offset_bytes = offset_bytes
-            .checked_add(bytes)
-            .ok_or_else(|| "mapped output component offsets overflow u32".to_owned())?;
-    }
-    let mut component_views = component_views.into_iter();
-    Ok(result.map_destinations(|_, _| {
-        ResultDestination::ReturnValue(
-            component_views.next().expect("component view count matches result leaves"),
-        )
-    }))
 }
 
 #[cfg(test)]

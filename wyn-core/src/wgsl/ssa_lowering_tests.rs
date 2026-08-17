@@ -812,7 +812,10 @@ entry draw(fb: *[]vec4f32) *[]vec4f32 =
 
     validate_wgsl(&wgsl);
     assert!(
-        wgsl.contains("_buf_0_1[") && wgsl.contains("] ="),
+        wgsl.contains("@group(0) @binding(0) var<storage, read_write> _buf_0_0:")
+            && wgsl.contains("_buf_0_0[")
+            && wgsl.contains("] =")
+            && !wgsl.contains("@group(0) @binding(1)"),
         "in-place view updates must target the backing storage buffer:\n{wgsl}"
     );
 }

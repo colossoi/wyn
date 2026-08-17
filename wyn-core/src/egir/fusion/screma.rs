@@ -1316,7 +1316,7 @@ fn invoke_lambda(
             let _ = inlining::inline_pure_call(graph, first, callee);
         }
     }
-    lambda_ops::materialize_result_values(graph, &bindings)
+    lambda_ops::result_argument_values(graph, &bindings)
 }
 #[derive(Clone, Copy)]
 struct ValueRef {

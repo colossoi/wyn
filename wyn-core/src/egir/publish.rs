@@ -138,21 +138,9 @@ fn publish_pipeline_stage_uses(
     let entries = entries_by_id(entries);
     match pipeline {
         Pipeline::Compute(compute) => {
-            for (index, stage) in compute.stages.iter_mut().enumerate() {
-                if stage.uses.is_empty() {
-                    if let Some(entry) = stage_ids.get(index).and_then(|id| entries.get(id).copied()) {
-                        stage.uses = entry_stage_binding_uses(entry, &compute.bindings);
-                    }
-                }
-            }
-            let declared = stage_ids
-                .iter()
-                .filter_map(|id| entries.get(id).copied())
-                .map(|entry| entry_stage_binding_uses(entry, &compute.bindings))
-                .collect::<Vec<_>>();
             reconcile_storage_binding_access(
                 &mut compute.bindings,
-                compute.stages.iter().map(|stage| &stage.uses).chain(declared.iter()),
+                compute.stages.iter().map(|stage| &stage.uses),
             );
         }
         Pipeline::Graphics(graphics) => {

@@ -6,7 +6,7 @@ use crate::egir::program::{
 use crate::egir::soac::screma;
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, OperandRef, PureOp, RegionId, SegBody,
-    Semantic, SoacDestination, SoacEffect, WynLanguage,
+    Semantic, SoacEffect, SoacOwnership, WynLanguage,
 };
 use crate::pipeline_descriptor::PipelineDescriptor;
 use polytype::Type;
@@ -100,7 +100,7 @@ fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<Val
                     post: screma::Lambda::identity(vec![ty]),
                 },
                 result_state: vec![screma::ResultState {
-                    destination: SoacDestination::fresh(),
+                    ownership: SoacOwnership::Fresh,
                 }],
                 state: screma::SemanticState::Serial,
             }),
@@ -161,7 +161,7 @@ fn screma_verification_program(
                     post: screma::Lambda::identity(vec![i32_type]),
                 },
                 result_state: vec![screma::ResultState {
-                    destination: SoacDestination::fresh(),
+                    ownership: SoacOwnership::Fresh,
                 }],
                 state: screma::SemanticState::Serial,
             }),

@@ -4,14 +4,14 @@ use super::kernel::cloneable_capture_inputs;
 use super::model::{REDUCE_PHASE1_WIDTH, REDUCE_PHASE2_WIDTH};
 use super::*;
 use crate::egir::soac::lambda as lambda_ops;
-use crate::egir::types::{OperandRef, PlaceId, PlaceRegion, ResultBinding};
+use crate::egir::types::{OperandRef, ResultBinding};
 /// Complete graph-local reduction recipe, consumed before entry mutation.
 pub(super) struct ReduceCandidate {
     pub site: SideEffectSite,
     pub owner: SemanticOpId,
     serial: SerialScremaRecipe,
     input_views: Vec<(ValueId, Type<TypeName>)>,
-    map_output_view_operands: Vec<usize>,
+    map_outputs: Vec<(ResultBinding<Type<TypeName>>, SemanticResourceRef)>,
     results: Vec<ResultBinding<Type<TypeName>>>,
     accumulators: Vec<ReductionAccumulator>,
     phase1_width: u32,
@@ -26,22 +26,19 @@ struct ReductionAccumulator {
     combine_captures: Vec<OperandRef>,
     capture_inputs: Vec<SemanticResourceDecl>,
     neutrals: Vec<ValueId>,
-    stores: Vec<ReductionOutputStore>,
-    outputs: Vec<(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)>,
+    stores: Vec<RoutedReductionStore>,
 }
 
 pub(super) struct ReductionRouting {
     pub(super) stores: Vec<RoutedReductionStore>,
-    pub(super) outputs: Vec<(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)>,
 }
 
+#[derive(Clone)]
 pub(super) struct RoutedReductionStore {
-    pub(super) location: (BlockId, usize),
-    pub(super) place: PlaceId,
     pub(super) value: ValueId,
-    pub(super) writer: Option<crate::egir::types::EffectToken>,
+    pub(super) ty: Type<TypeName>,
     accumulators: Vec<usize>,
-    output: (ResourceId, Type<TypeName>, crate::egir::program::LogicalSize),
+    pub(super) output: (ResourceId, Type<TypeName>, crate::egir::program::LogicalSize),
 }
 
 pub(super) struct BoundReduce {
@@ -56,16 +53,8 @@ struct EmissionAccumulator {
     operator_captures: Vec<OperandRef>,
     capture_inputs: Vec<SemanticResourceDecl>,
     neutrals: Vec<ValueId>,
-    stores: Vec<(PlaceId, ValueId)>,
-    outputs: Vec<(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)>,
+    stores: Vec<RoutedReductionStore>,
     partial: ResourceId,
-}
-
-struct ReductionOutputStore {
-    location: (BlockId, usize),
-    place: PlaceId,
-    value: ValueId,
-    writer: Option<crate::egir::types::EffectToken>,
 }
 
 impl ReduceCandidate {
@@ -101,7 +90,6 @@ fn analyze_reduction_operators(
                 capture_inputs,
                 neutrals: reduction.neutral.clone(),
                 stores: Vec::new(),
-                outputs: Vec::new(),
             })
         })
         .collect()
@@ -121,72 +109,50 @@ pub(super) fn analyze_reduction_routing(
         .flat_map(|(accumulator, reduction)| std::iter::repeat_n(accumulator, reduction.neutral.len()))
         .collect::<Vec<_>>();
     let mut stores = Vec::new();
-    let mut outputs = Vec::new();
-    for (block_id, block) in &entry.graph.skeleton.blocks {
-        for (effect_index, effect) in block.side_effects.iter().enumerate() {
-            let SideEffectKind::Effect(EffectOp::Store { place }) = &effect.kind else {
-                continue;
-            };
-            let place = *place;
-            let value = effect.operands.first()?.value()?;
-            let producers = graph_ops::value_producer_closure(&entry.graph, [value]);
-            let mut accumulator_dependencies = Vec::new();
-            for (field, result) in results.iter().enumerate() {
-                if result.values().iter().any(|result| producers.nodes.contains(result)) {
-                    let accumulator = *field_accumulators.get(field)?;
-                    accumulator_dependencies.push(accumulator);
-                }
+    for (resource, route) in entry.resource_routes() {
+        let resource = resource.0;
+        let declaration = entry.resource_declarations.iter().find(|declaration| {
+            declaration.role == crate::interface::StorageRole::Output && declaration.resource.0 == resource
+        })?;
+        let destination = (
+            resource,
+            declaration.elem_ty.clone(),
+            resources[resource].size.clone(),
+        );
+        let value = route.source.value;
+        let producers = graph_ops::value_producer_closure(&entry.graph, [value]);
+        let mut accumulator_dependencies = Vec::new();
+        for (field, result) in results.iter().enumerate() {
+            if result.values().iter().any(|result| producers.nodes.contains(result)) {
+                let accumulator = *field_accumulators.get(field)?;
+                accumulator_dependencies.push(accumulator);
             }
-            accumulator_dependencies.sort_unstable();
-            accumulator_dependencies.dedup();
-            if accumulator_dependencies.is_empty() {
-                continue;
-            }
-            if entry
-                .graph
-                .place_value_dependencies(place)
-                .into_iter()
-                .any(|dependency| !can_clone_pure_subgraph(&entry.graph, dependency, &[]))
-                || !can_clone_pure_subgraph(
-                    &entry.graph,
-                    value,
-                    &results.iter().flat_map(ResultBinding::values).collect::<Vec<_>>(),
-                )
-            {
-                return None;
-            }
-            let PlaceRegion::Resource(resource) = &entry.graph.place(place).ty().region else {
-                return None;
-            };
-            let resource = resource.0;
-            let declaration = entry.resource_declarations.iter().find(|declaration| {
-                declaration.role == crate::interface::StorageRole::Output
-                    && declaration.resource.0 == resource
-            })?;
-            let output = (
-                resource,
-                declaration.elem_ty.clone(),
-                resources[resource].size.clone(),
-            );
-            if !outputs.iter().any(|(candidate, _, _)| *candidate == resource) {
-                outputs.push(output.clone());
-            }
-            stores.push(RoutedReductionStore {
-                location: (block_id, effect_index),
-                place,
-                value,
-                writer: effect.effects.map(|(_, writer)| writer),
-                accumulators: accumulator_dependencies,
-                output,
-            });
         }
+        accumulator_dependencies.sort_unstable();
+        accumulator_dependencies.dedup();
+        if accumulator_dependencies.is_empty() {
+            continue;
+        }
+        if !can_clone_pure_subgraph(
+            &entry.graph,
+            value,
+            &results.iter().flat_map(ResultBinding::values).collect::<Vec<_>>(),
+        ) {
+            return None;
+        }
+        stores.push(RoutedReductionStore {
+            value,
+            ty: entry.graph.nodes[value].ty().clone(),
+            accumulators: accumulator_dependencies,
+            output: destination,
+        });
     }
     if !(0..op.form.reductions.len())
         .all(|accumulator| stores.iter().any(|store| store.accumulators.contains(&accumulator)))
     {
         return None;
     }
-    Some(ReductionRouting { stores, outputs })
+    Some(ReductionRouting { stores })
 }
 
 fn analyze_reduction_accumulators(
@@ -202,16 +168,8 @@ fn analyze_reduction_accumulators(
             // Independent reduce combine phases cannot jointly rebuild one store.
             return None;
         };
-        let target = &mut accumulators[*accumulator];
-        if !target.outputs.iter().any(|(resource, _, _)| *resource == store.output.0) {
-            target.outputs.push(store.output);
-        }
-        target.stores.push(ReductionOutputStore {
-            location: store.location,
-            place: store.place,
-            value: store.value,
-            writer: store.writer,
-        });
+        let accumulator = *accumulator;
+        accumulators[accumulator].stores.push(store);
     }
     Some(accumulators)
 }
@@ -236,26 +194,22 @@ pub(super) fn analyze_reduce_candidate(
         let Some(input) = input.operand.value() else {
             return Ok(None);
         };
-        if !can_chunk_view(&entry.graph, input, ChunkInputKind::StorageOrRange) {
+        if !can_chunk_view(&entry.graph, input) {
             return Ok(None);
         }
     }
-    let mut map_output_view_operands = Vec::with_capacity(n_maps);
+    let results = operands.result_fields();
+    let mut map_outputs = Vec::with_capacity(n_maps);
     for index in 0..n_maps {
-        let Some(output) = operands.output(reduction_results + index) else {
+        let Some(result) = results.get(reduction_results + index) else {
             return Ok(None);
         };
-        let slot = output.slot;
-        let Some(output) = output.operand.value() else {
+        let Some(resource) = entry.resource_for_result(result) else {
             return Ok(None);
         };
-        if !can_chunk_view(&entry.graph, output, ChunkInputKind::StorageOnly) {
-            return Ok(None);
-        }
-        map_output_view_operands.push(slot);
+        map_outputs.push((result.clone(), resource));
     }
 
-    let results = operands.result_fields();
     if results.len() < reduction_results {
         return Ok(None);
     }
@@ -278,7 +232,7 @@ pub(super) fn analyze_reduce_candidate(
         owner,
         serial,
         input_views,
-        map_output_view_operands,
+        map_outputs,
         results: reduction_values,
         accumulators,
         phase1_width: REDUCE_PHASE1_WIDTH,
@@ -313,7 +267,7 @@ impl KernelPlanBuilder<'_, '_> {
             site,
             serial,
             input_views: input_view_data,
-            map_output_view_operands,
+            map_outputs,
             results: screma_results,
             accumulators,
             phase1_width,
@@ -328,40 +282,23 @@ impl KernelPlanBuilder<'_, '_> {
         let block_id = site.block;
         let total_threads = phase1_width;
         let n_accs = accumulators.len();
-        let mut drop_locations = Vec::new();
-        let mut dropped_writers = std::collections::HashSet::new();
         let accumulators = accumulators
             .into_iter()
             .zip(partial_resources)
-            .map(|(accumulator, partial)| {
-                let mut stores = Vec::with_capacity(accumulator.stores.len());
-                for store in accumulator.stores {
-                    stores.push((store.place, store.value));
-                    drop_locations.push(store.location);
-                    dropped_writers.extend(store.writer);
-                }
-                EmissionAccumulator {
-                    component_types: accumulator.component_types,
-                    scratch_type: accumulator.scratch_type,
-                    operator: self.callable(accumulator.combine_region).clone(),
-                    operator_captures: accumulator.combine_captures,
-                    capture_inputs: accumulator.capture_inputs,
-                    neutrals: accumulator.neutrals,
-                    stores,
-                    outputs: accumulator.outputs,
-                    partial,
-                }
+            .map(|(accumulator, partial)| EmissionAccumulator {
+                component_types: accumulator.component_types,
+                scratch_type: accumulator.scratch_type,
+                operator: self.callable(accumulator.combine_region).clone(),
+                operator_captures: accumulator.combine_captures,
+                capture_inputs: accumulator.capture_inputs,
+                neutrals: accumulator.neutrals,
+                stores: accumulator.stores,
+                partial,
             })
             .collect::<Vec<_>>();
-        // 3. Chunk all input views and every map output view; swap them back
-        // into the Screma operand list.
-        let chunked = chunk_soac_inputs(
-            &mut entry.graph,
-            &input_view_data,
-            total_threads,
-            ChunkInputKind::StorageOrRange,
-            "SegRed",
-        )?;
+        // 3. Chunk every input view and bind mapped results to their matching
+        // resource slices.
+        let chunked = chunk_soac_inputs(&mut entry.graph, &input_view_data, total_threads, "SegRed")?;
         let chunk_start = chunked.chunk_start;
         let chunk_len = chunked.chunk_len;
         {
@@ -371,22 +308,18 @@ impl KernelPlanBuilder<'_, '_> {
                 se.operands[i] = new_view;
             }
         }
-        for (map_index, operand_index) in map_output_view_operands.iter().enumerate() {
-            let orig_view = entry.graph.skeleton.effect(site).operands[*operand_index]
-                .value()
-                .expect("reduction output is a view");
-            let view_ty = entry.graph.nodes[orig_view].ty.clone();
-            let chunked_view = chunk_view_like(
+        for (map_index, (result, resource)) in map_outputs.iter().enumerate() {
+            let chunked_view = graph_ops::intern_chunked_resource_view(
                 &mut entry.graph,
-                orig_view,
-                view_ty,
+                resource.0,
                 chunk_start,
                 chunk_len,
-                ChunkInputKind::StorageOnly,
-                &format!("SegRed map output {map_index}"),
-            )?;
-            let chunked_view = entry.graph.operand_ref(chunked_view);
-            entry.graph.skeleton.effect_mut(site).operands[*operand_index] = chunked_view;
+                result.ty().clone(),
+                None,
+            );
+            let destination = graph_ops::bind_result_to_view(&mut entry.graph, result, chunked_view)?;
+            graph_ops::rebind_result_value_references(&mut entry.graph, result, &destination)
+                .map_err(|error| format!("SegRed map output {map_index}: {error}"))?;
         }
 
         // 5. Phase 1 stores each reduction operator's complete accumulator to
@@ -409,16 +342,6 @@ impl KernelPlanBuilder<'_, '_> {
                 lambda_ops::pack_results(&mut entry.graph, &components, &accumulator.component_types);
             accumulator_values.push((results, packed));
         }
-        // Drop the decomposed output stores (highest index first per block).
-        drop_locations.sort_by_key(|location| std::cmp::Reverse(location.1));
-        for (bid, sx) in drop_locations {
-            entry.graph.skeleton.blocks[bid].side_effects.remove(sx);
-        }
-        for route in entry.outputs.iter_mut().flat_map(|output| &mut output.routes) {
-            route.writers.retain(
-                |writer| !matches!(writer, OutputWriter::Effect(effect) if dropped_writers.contains(effect)),
-            );
-        }
         for (accumulator, (_, accumulator_value)) in accumulators.iter().zip(&accumulator_values) {
             let elem_ty = accumulator.scratch_type.clone();
             let arr_ty =
@@ -435,17 +358,6 @@ impl KernelPlanBuilder<'_, '_> {
                 self.effect_ids,
                 None,
             );
-            // Clear the moved output bindings from phase 1; register partials.
-            for (resource, _, _) in &accumulator.outputs {
-                let logical = &self.resources[*resource];
-                if let Some(binding) = logical.host_binding() {
-                    for output in &mut entry.outputs {
-                        if output.storage_binding() == Some(binding) {
-                            output.make_storage_internal();
-                        }
-                    }
-                }
-            }
             entry.resource_declarations.push(SemanticResourceDecl {
                 resource: SemanticResourceRef(accumulator.partial),
                 role: crate::interface::StorageRole::Intermediate,
@@ -458,9 +370,10 @@ impl KernelPlanBuilder<'_, '_> {
         // phase-1 declaration must not publish it as an output.
         let moved: std::collections::HashSet<ResourceId> = accumulators
             .iter()
-            .flat_map(|accumulator| &accumulator.outputs)
-            .map(|(resource, _, _)| *resource)
+            .flat_map(|accumulator| &accumulator.stores)
+            .map(|store| store.output.0)
             .collect();
+        entry.outputs.retain(|output| output.resource.is_none_or(|resource| !moved.contains(&resource.0)));
         entry.resource_declarations.retain(|declaration| {
             declaration.role != crate::interface::StorageRole::Output
                 || !moved.contains(&declaration.resource.0)
@@ -489,7 +402,6 @@ impl KernelPlanBuilder<'_, '_> {
                 partials: accumulator.partial,
                 accumulator_results: &accumulator_results,
                 output_stores: &accumulator.stores,
-                output_declarations: &accumulator.outputs,
                 width: phase2_width,
             };
             let phase2 = combine.build(&mut self.identities, self.semantic_ids, self.effect_ids)?;
@@ -539,8 +451,7 @@ struct ReduceCombineSpec<'a> {
     neutrals: &'a [ValueId],
     partials: ResourceId,
     accumulator_results: &'a [ResultBinding<Type<TypeName>>],
-    output_stores: &'a [(PlaceId, ValueId)],
-    output_declarations: &'a [(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)],
+    output_stores: &'a [RoutedReductionStore],
     width: u32,
 }
 
@@ -913,11 +824,22 @@ impl ReduceCombineSpec<'_> {
                 old.values().into_iter().zip(new.values())
             })
             .collect::<Vec<_>>();
-        for &(place, value) in output_stores {
-            let cloned_place = graph_ops::clone_place_subgraph(phase1_graph, graph, place)?;
-            let cloned_value =
-                graph_ops::clone_pure_subgraph_substituting(phase1_graph, graph, value, &substitutions)?;
-            graph_ops::emit_store(graph, write_blk, cloned_place, cloned_value, eff, None);
+        for store in output_stores {
+            let cloned_value = graph_ops::clone_pure_subgraph_substituting(
+                phase1_graph,
+                graph,
+                store.value,
+                &substitutions,
+            )?;
+            graph_ops::emit_resource_write(
+                graph,
+                write_blk,
+                store.output.0,
+                cloned_value,
+                &store.ty,
+                eff,
+                None,
+            )?;
         }
         graph.skeleton.blocks[write_blk].term = SkeletonTerminator::Branch {
             target: end_blk,
@@ -959,12 +881,21 @@ impl ReduceCombineSpec<'_> {
                 access: crate::ResourceAccess::Read,
             }),
         );
-        resources.extend(self.output_declarations.iter().map(|(resource, _, _)| {
-            schedule::ScheduledResource {
+        let output_declarations = self.output_stores.iter().map(|store| store.output.clone()).fold(
+            Vec::new(),
+            |mut outputs, output| {
+                if !outputs.iter().any(|(resource, _, _)| *resource == output.0) {
+                    outputs.push(output);
+                }
+                outputs
+            },
+        );
+        resources.extend(
+            output_declarations.iter().map(|(resource, _, _)| schedule::ScheduledResource {
                 resource: *resource,
                 access: crate::ResourceAccess::Write,
-            }
-        }));
+            }),
+        );
         resources = crate::egir::ir::SegResourceAccess::merge(&resources, &[]);
         let mut b = EntryBuilder::new_compute(
             self.name.clone(),
@@ -985,7 +916,7 @@ impl ReduceCombineSpec<'_> {
                 declaration.size.clone(),
             );
         }
-        for (resource, ty, size) in self.output_declarations {
+        for (resource, ty, size) in &output_declarations {
             b.declare_output_storage_sized(*resource, ty.clone(), size.clone());
         }
 

@@ -76,7 +76,6 @@ fn find_in_graph(
             if !producer_op.is_map()
                 || !output_slots.is_empty()
                 || resources.iter().any(|resource| resource.access != ResourceAccess::Read)
-                || producer_op.result_state.iter().any(|result| !result.destination.is_unplaced())
             {
                 continue;
             }

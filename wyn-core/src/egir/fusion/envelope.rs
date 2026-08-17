@@ -57,9 +57,9 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     consumer_op.body.inputs = inputs;
     consumer_op.body.map = lambda;
     consumer_op.state.space = producer_space;
-    if let filter::Output::Local { destination, .. } = &mut consumer_op.state.storage {
-        if destination.is_unplaced_unique_input() {
-            destination.make_fresh();
+    if let filter::Output::Local { ownership, .. } = &mut consumer_op.state.storage {
+        if *ownership == crate::types::SoacOwnership::UniqueInput {
+            *ownership = crate::types::SoacOwnership::Fresh;
         }
     }
     debug_assert!(consumer_op.body.validate().is_ok());

@@ -4,7 +4,7 @@ use crate::ast::TypeName;
 
 use super::super::program::{PhysicalResourceRef, SemanticResourceRef};
 use super::super::types::{
-    GraphResource, SegSpace, Semantic, SoacDestination, SoacInputType, ValueId, WynSoacPhase,
+    GraphResource, SegSpace, Semantic, SoacInputType, SoacOwnership, ValueId, WynSoacPhase,
 };
 use super::screma;
 
@@ -20,7 +20,7 @@ pub struct WorkBuffers<R = SemanticResourceRef> {
 pub enum Output<R = SemanticResourceRef> {
     Local {
         capacity: Type<TypeName>,
-        destination: SoacDestination,
+        ownership: SoacOwnership,
     },
     Runtime {
         scratch: R,

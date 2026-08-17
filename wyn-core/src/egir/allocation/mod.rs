@@ -6,7 +6,6 @@
 //! remains the responsibility of target planning.
 
 mod cost;
-mod destinations;
 mod residency;
 
 use std::collections::{HashMap, HashSet};
@@ -83,7 +82,6 @@ pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, 
     );
 
     let program = classify_existing_compiler_resources(program);
-    let program = destinations::resolve_destinations(program);
     let program = residency::resolve_residency(program)?;
     let program = resolve_scratch_sizes(program);
     let program = strip_compiler_abi(program);
@@ -367,9 +365,6 @@ fn strip_compiler_abi(program: ResourcesAllocated) -> ResourcesAllocated {
                 input.make_storage_internal();
             }
         }
-        entry.outputs.retain(|output| {
-            !output.resource.is_some_and(|resource| compiler_resources.contains(&resource.0))
-        });
     };
 
     let Program {

@@ -2,7 +2,7 @@ use super::*;
 use crate::ast::TypeName;
 use crate::egir::program::SemanticOpId;
 use crate::egir::soac::screma;
-use crate::egir::types::{PureOp, SegSpace, SideEffect, Soac, SoacDestination, SoacEffect, SoacInputType};
+use crate::egir::types::{PureOp, SegSpace, SideEffect, Soac, SoacEffect, SoacInputType, SoacOwnership};
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -34,7 +34,7 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
                     post: screma::Lambda::identity(vec![int]),
                 },
                 result_state: vec![screma::ResultState {
-                    destination: SoacDestination::fresh(),
+                    ownership: SoacOwnership::Fresh,
                 }],
                 state: screma::SemanticState::Segmented {
                     space: SegSpace::new(crate::egir::types::SegExtent::Fixed(1)),
@@ -49,6 +49,6 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
         effects: None,
         span: None,
     });
-    assert!(eliminate_dead_seg_ops_in_graph(&mut graph));
+    assert!(eliminate_dead_seg_ops_in_graph(&mut graph, []));
     assert!(graph.skeleton.blocks[graph.skeleton.entry].side_effects.is_empty());
 }

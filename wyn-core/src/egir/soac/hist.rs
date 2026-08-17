@@ -81,6 +81,14 @@ impl HistOp {
     pub(crate) fn value_count(&self) -> usize {
         self.update.value_types().len()
     }
+
+    pub(crate) fn written_views(&self) -> Vec<ViewId> {
+        let mut views = self.destinations.clone();
+        if let Update::BucketInsert { counts, overflow, .. } = self.update {
+            views.extend([counts, overflow]);
+        }
+        views
+    }
 }
 
 /// The phase-independent meaning of a histogram.
@@ -107,6 +115,10 @@ impl HistForm {
 
     pub(crate) fn value_count(&self) -> usize {
         self.operations.iter().map(HistOp::value_count).sum()
+    }
+
+    pub(crate) fn written_views(&self) -> impl Iterator<Item = ViewId> + '_ {
+        self.operations.iter().flat_map(HistOp::written_views)
     }
 
     fn remap_referenced_values(&mut self, map: &mut impl FnMut(ValueId) -> ValueId) {

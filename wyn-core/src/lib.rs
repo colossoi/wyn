@@ -557,7 +557,7 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //       to_egraph(...)                  -> egir::from_tlc::Converted
 //
 // EGIR stages:
-//       egir::realize_outputs(...)       -> OutputsRealized
+//       egir::realize_outputs(...)       -> Converted
 //       egir::reify_soacs(...)           -> Segmented
 //       egir::optimize_semantics(...)     -> Optimized
 //       egir::plan_logical_resources(...) -> ResourcesAllocated

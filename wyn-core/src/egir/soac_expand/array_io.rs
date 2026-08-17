@@ -1,6 +1,7 @@
 //! Array length and element-access helpers for SOAC expansion.
 
 use super::*;
+use crate::egir::types::soac_element_type;
 
 pub(super) fn emit_seg_space_len(
     graph: &mut EGraph,
@@ -178,8 +179,12 @@ pub(super) fn emit_read_element(
         return graph.intern_pure(PureOp::Tuple(components.len()), elem_nids, elem_ty.clone(), None);
     }
     if is_view_node(graph, arr_nid, arr_ty) {
-        // View array: ViewIndex (pure, PlaceId) + Load (effectful).
         let place = graph.add_view_index_place(graph.view_id(arr_nid), idx_nid, elem_ty.clone(), None);
+        if <WynLanguage as super::super::types::Language>::is_materialized_aggregate(elem_ty) {
+            let region = arr_ty.array_buffer().cloned().unwrap_or_else(crate::types::no_buffer);
+            let view_ty = crate::types::view_array_of(elem_ty, region);
+            return graph.add_place_view(place, view_ty, None).value();
+        }
         let load_result = graph.alloc_side_effect_result(elem_ty.clone());
         let eff_in = alloc_effect(next_effect);
         let eff_out = alloc_effect(next_effect);
@@ -353,6 +358,11 @@ pub(super) fn emit_read_ranked_coordinates(
             let next_ty = current_ty.elem_type().expect("ranked SOAC input rank exceeds its type").clone();
             place = graph.add_index_place(place, *coordinate, next_ty.clone(), None);
             current_ty = next_ty;
+        }
+        if <WynLanguage as super::super::types::Language>::is_materialized_aggregate(leaf_ty) {
+            let region = arr_ty.array_buffer().cloned().unwrap_or_else(crate::types::no_buffer);
+            let view_ty = crate::types::view_array_of(leaf_ty, region);
+            return graph.add_place_view(place, view_ty, None).value();
         }
         return emit_load(graph, body, place, leaf_ty.clone(), next_effect, None);
     }

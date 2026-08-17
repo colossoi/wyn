@@ -152,17 +152,7 @@ pub(super) fn replace_route_sources(entry: &mut SemanticEntry, replacements: &[(
 
 pub(super) fn replace_route_values(entry: &mut SemanticEntry, replacements: &[(ValueId, ValueId)]) {
     for route in entry.routes_mut() {
-        if let Some((_, replacement)) = replacements.iter().find(|(old, _)| route.source.value == *old) {
-            route.source.value = *replacement;
-        }
-        for writer in &mut route.writers {
-            let OutputWriter::Value(value) = writer else {
-                continue;
-            };
-            if let Some((_, replacement)) = replacements.iter().find(|(old, _)| *value == *old) {
-                *value = *replacement;
-            }
-        }
+        route.replace_values(replacements);
     }
 }
 

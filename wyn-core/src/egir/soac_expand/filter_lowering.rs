@@ -82,11 +82,7 @@ pub(super) fn build_filter_loop(
         build_runtime_filter_loop(graph, bid, idx_in_block, &spec, *scratch, next_effect);
         return;
     }
-    let filter::Output::Local {
-        capacity,
-        destination,
-    } = &spec.output
-    else {
+    let filter::Output::Local { capacity, ownership } = &spec.output else {
         unreachable!()
     };
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
@@ -105,7 +101,7 @@ pub(super) fn build_filter_loop(
     let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
     let suffix = graph.skeleton.blocks[after].side_effects.drain(..).collect::<Vec<_>>();
     let buf_place = emit_alloca(graph, bid, buf_ty.clone(), next_effect, None);
-    if destination.is_input_buffer() {
+    if *ownership == SoacOwnership::UniqueInput {
         emit_store(
             graph,
             bid,
@@ -114,8 +110,6 @@ pub(super) fn build_filter_loop(
             next_effect,
             None,
         );
-    } else if !destination.is_unplaced_fresh() {
-        panic!("Filter[OutputView] not supported — see filter-consuming-input.md");
     }
 
     let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone(), None);

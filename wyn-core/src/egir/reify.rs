@@ -27,13 +27,13 @@ use crate::flow::BlockId;
 use crate::types::TypeExt;
 use crate::LookupMap;
 
+use super::from_tlc::Converted;
 use super::graph_ops;
 use super::program::RealizedOutputRoute;
 use super::program::{
     ConstantDef, Entry, Func, OutputSlotId, OutputWriter, Program, RawEntry, SemanticOpIdSource,
     SemanticResourceRef,
 };
-use super::realize_outputs::OutputsRealized;
 use super::soac::{filter, hist, screma};
 use super::types::{
     EGraph, PureOp, Raw, ResourceAccess, SegExtent, SegResourceAccess, SegSpace, Semantic, SideEffect,
@@ -48,7 +48,7 @@ struct Facts {
     entry: bool,
 }
 
-pub fn reify_soacs(program: OutputsRealized) -> Segmented {
+pub fn reify_soacs(program: Converted) -> Segmented {
     let Program {
         functions,
         externs,
@@ -477,7 +477,7 @@ fn extent_from_node(
 }
 
 fn output_slots(entry: &RawEntry<RealizedOutputRoute>, effect: &SideEffect<Raw>) -> Vec<OutputSlotId> {
-    let value_writers = effect.result.as_ref().map(|result| result.values()).unwrap_or_default();
+    let value_writers = effect.result_values();
     let effect_writer = effect.effects.map(|(_, output)| OutputWriter::Effect(output));
     let mut slots = entry
         .outputs

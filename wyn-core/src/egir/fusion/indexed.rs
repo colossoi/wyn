@@ -53,7 +53,12 @@ fn find_in_graph(
     output_resources: &[Option<SemanticResourceRef>],
     output_routes: &[RealizedOutputRoute],
 ) -> Option<Candidate> {
-    let live = graph_ops::reachable_execution_values(graph).into_iter().collect::<HashSet<_>>();
+    let live = graph_ops::reachable_execution_values_with_roots(
+        graph,
+        output_routes.iter().flat_map(RealizedOutputRoute::referenced_values),
+    )
+    .into_iter()
+    .collect::<HashSet<_>>();
     for (block_id, block) in &graph.skeleton.blocks {
         for (effect_index, effect) in block.side_effects.iter().enumerate() {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
@@ -75,7 +80,6 @@ fn find_in_graph(
             if !op.is_map()
                 || !op.form.post.is_identity()
                 || op.form.pre.result_types.is_empty()
-                || op.result_state.iter().any(|result| !result.destination.is_unplaced())
                 || resources.iter().any(|resource| {
                     resource.access != ResourceAccess::Read
                         && !indirect_output_resources.contains(&resource.resource)

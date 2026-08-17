@@ -90,7 +90,9 @@ fn rewrite_graph<P: Family>(
     mut graph: EGraph<P>,
     erasures: &LookupMap<crate::FunctionId, Vec<bool>>,
 ) -> Result<EGraph<P>, ConvertError> {
-    for call in graph.calls.values_mut() {
+    let calls = graph.side_effect_index().calls().map(|(call, _)| call).collect::<Vec<_>>();
+    for site in calls {
+        let call = graph.calls.get_mut(site).expect("explicit call has a boundary record");
         if let Some(erase) = erasures.get(&call.callee()) {
             let retain = erase.iter().map(|erase| !erase).collect::<Vec<_>>();
             call.retain_arguments(&retain).map_err(ConvertError::Internal)?;

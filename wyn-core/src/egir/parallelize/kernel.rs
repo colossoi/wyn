@@ -293,12 +293,6 @@ pub(super) fn synthesize_u32_add_function(
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum ChunkInputKind {
-    StorageOnly,
-    StorageOrRange,
-}
-
-#[derive(Clone, Copy)]
 enum ChunkableView {
     Storage(SemanticResourceRef),
     Range {
@@ -313,7 +307,7 @@ enum ChunkableView {
 }
 
 impl ChunkableView {
-    fn classify(graph: &EGraph, view: ValueId, kind: ChunkInputKind) -> Option<Self> {
+    fn classify(graph: &EGraph, view: ValueId) -> Option<Self> {
         if let Some(resource) = graph_ops::extract_storage_view_source(graph, view) {
             return Some(Self::Storage(resource));
         }
@@ -337,14 +331,12 @@ impl ChunkableView {
                 });
             }
         }
-        if matches!(kind, ChunkInputKind::StorageOrRange) {
-            if let Some((start, len, step)) = graph_ops::extract_array_range_operands(graph, view) {
-                if matches!(
-                    graph.nodes.get(len).map(|node| &node.ty),
-                    Some(Type::Constructed(TypeName::UInt(32) | TypeName::Int(32), _))
-                ) {
-                    return Some(Self::Range { start, len, step });
-                }
+        if let Some((start, len, step)) = graph_ops::extract_array_range_operands(graph, view) {
+            if matches!(
+                graph.nodes.get(len).map(|node| &node.ty),
+                Some(Type::Constructed(TypeName::UInt(32) | TypeName::Int(32), _))
+            ) {
+                return Some(Self::Range { start, len, step });
             }
         }
         None
@@ -420,8 +412,8 @@ impl ChunkableView {
     }
 }
 
-pub(super) fn can_chunk_view(graph: &EGraph, view: ValueId, kind: ChunkInputKind) -> bool {
-    ChunkableView::classify(graph, view, kind).is_some()
+pub(super) fn can_chunk_view(graph: &EGraph, view: ValueId) -> bool {
+    ChunkableView::classify(graph, view).is_some()
 }
 
 pub(super) fn can_clone_pure_subgraph(graph: &EGraph, root: ValueId, substitutions: &[ValueId]) -> bool {
@@ -457,13 +449,12 @@ pub(super) fn chunk_soac_inputs(
     graph: &mut EGraph,
     inputs: &[(ValueId, Type<TypeName>)],
     total_threads: u32,
-    kind: ChunkInputKind,
     context: &str,
 ) -> Result<ChunkedSoacInputs, String> {
     let classified = inputs
         .iter()
         .map(|(view, ty)| {
-            ChunkableView::classify(graph, *view, kind)
+            ChunkableView::classify(graph, *view)
                 .map(|view| (view, ty.clone()))
                 .ok_or_else(|| format!("phase1 {context}: input is not a chunkable view"))
         })
@@ -489,10 +480,9 @@ pub(super) fn chunk_view_like(
     view_ty: Type<TypeName>,
     chunk_start: ValueId,
     chunk_len: ValueId,
-    kind: ChunkInputKind,
     context: &str,
 ) -> Result<ValueId, String> {
-    ChunkableView::classify(graph, view, kind)
+    ChunkableView::classify(graph, view)
         .ok_or_else(|| format!("phase1 {context}: input is not a chunkable view"))?
         .chunk(graph, view_ty, chunk_start, chunk_len, context)
 }

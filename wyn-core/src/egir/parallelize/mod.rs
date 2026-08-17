@@ -58,7 +58,7 @@ use filter::analyze_filter_candidate;
 use kernel::{
     apply_manifest_resource_sizes, can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs,
     chunk_view_like, dispatch_worker_logical_size, emit_chunk_arithmetic, synthesize_swap_wrapper,
-    synthesize_u32_add_function, ChunkInputKind,
+    synthesize_u32_add_function,
 };
 use model as error;
 use model::{CandidateSelection, DisjointSets};
@@ -102,7 +102,7 @@ impl Planned {
 use super::soac::screma;
 use super::types::{
     EGraph, EffectOp, EffectToken, PureOp, RegionId, SegBody, SegSpace, SideEffect, SideEffectKind,
-    SideEffectSite, SkeletonTerminator, Soac, SoacDestination, SoacEffect, ValueId, ValueKind,
+    SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind,
 };
 use crate::ast::TypeName;
 use crate::builtins::catalog;
@@ -179,7 +179,10 @@ impl From<error::ParallelizeError> for ConvertError {
     }
 }
 
-pub fn plan(program: ResourcesAllocated, profile: LoweringProfile) -> Result<Planned, ConvertError> {
+pub fn plan(mut program: ResourcesAllocated, profile: LoweringProfile) -> Result<Planned, ConvertError> {
+    for entry in &mut program.entry_points {
+        entry.bind_mapped_output_destinations().map_err(ConvertError::Internal)?;
+    }
     let (program, kernel_plan) = match profile.schedule {
         SchedulePolicy::Parallel => build_parallel_plan(program),
         SchedulePolicy::Serial => build_serial_plan(program),

@@ -667,6 +667,9 @@ impl<'a> Elaborator<'a> {
             PlaceOp::Parameter { .. } | PlaceOp::AllocaResult => {
                 panic!("place {nid:?} should have been registered at its definition")
             }
+            PlaceOp::View { .. } => {
+                panic!("whole-view place {nid:?} must be indexed before SSA elaboration")
+            }
             PlaceOp::Slice { .. } => {
                 panic!("slice place {nid:?} must be indexed before SSA elaboration")
             }

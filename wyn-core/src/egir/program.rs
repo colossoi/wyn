@@ -19,11 +19,12 @@ use std::ops::{Deref, Index, IndexMut};
 
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, Family, Physical, Raw, RegionId, Scheduled, SegBody, SegExtent, SegSpace, Semantic,
-    SideEffectKind, Soac, SoacEffect, ValueId, ValueKind, WynLanguage,
+    EGraph, Family, OperandType, ParameterId, Physical, PlaceAccess, PlaceRegion, Raw, RegionId, Scheduled,
+    SegBody, SegExtent, SegSpace, Semantic, SideEffectKind, Soac, SoacEffect, ValueId, ValueKind, ViewType,
+    WynLanguage,
 };
 
-pub use super::ir::{OutputSlotId, OutputWriter, RealizedOutputRoute, SlotSource, UnrealizedOutputRoute};
+pub use super::ir::{OutputSlotId, OutputWriter, RealizedOutputRoute, SlotSource};
 pub type ConstantDef<P = Semantic, Lang = WynLanguage> = super::ir::ConstantDef<P, Lang>;
 pub use crate::types::ExternDecl;
 pub type Func<P = Semantic, Lang = WynLanguage> = super::ir::Func<P, Lang>;
@@ -724,6 +725,71 @@ fn normalize_structural_resources(inner: &mut super::from_tlc::Converted) {
             normalize_type_resources(param.representation_mut().ty_mut(), by_binding);
         }
         function.result.for_each_type_mut(|ty| normalize_type_resources(ty, by_binding));
+        normalize_semantic_function_parameters(function);
+    }
+}
+
+fn normalize_semantic_function_parameters(function: &mut RawFunc) {
+    for index in 0..function.params.len() {
+        let representation = semantic_parameter_representation(function.params[index].ty());
+        if representation == *function.params[index].representation() {
+            continue;
+        }
+        let parameter = ParameterId::new(index);
+        let source = function
+            .graph
+            .nodes
+            .iter()
+            .find_map(|(value, definition)| {
+                matches!(
+                    definition.kind(),
+                    ValueKind::FuncParam { parameter: candidate } if *candidate == parameter
+                )
+                .then_some(value)
+            })
+            .expect("function parameter has a graph binding");
+        super::graph_ops::retype_projection_tree(&mut function.graph, source, representation.ty());
+        *function.params[index].representation_mut() = representation;
+    }
+    function.graph.canonicalize_boundary_operands();
+}
+
+fn semantic_parameter_representation(
+    ty: &Type<TypeName>,
+) -> OperandType<SemanticResourceRef, Type<TypeName>> {
+    let physical_ty = viewify_resource_arrays(ty);
+    if ty.array_variant().is_some()
+        && (crate::types::is_array_variant_view(ty) || semantic_type_resource(ty).is_some())
+    {
+        OperandType::View(ViewType {
+            array: physical_ty,
+            region: semantic_type_resource(ty)
+                .map(PlaceRegion::Resource)
+                .unwrap_or(PlaceRegion::Parametric),
+            access: PlaceAccess::ReadOnly,
+        })
+    } else {
+        OperandType::Value(physical_ty)
+    }
+}
+
+fn viewify_resource_arrays(ty: &Type<TypeName>) -> Type<TypeName> {
+    if ty.array_variant().is_some()
+        && (crate::types::is_array_variant_view(ty) || semantic_type_resource(ty).is_some())
+    {
+        let region = ty.array_buffer().cloned().unwrap_or_else(crate::types::no_buffer);
+        return crate::types::view_array_of(ty, region);
+    }
+    match ty {
+        Type::Constructed(name, fields)
+            if matches!(
+                name,
+                TypeName::Tuple(_) | TypeName::Record(_) | TypeName::Unit | TypeName::SideEffect
+            ) =>
+        {
+            Type::Constructed(name.clone(), fields.iter().map(viewify_resource_arrays).collect())
+        }
+        _ => ty.clone(),
     }
 }
 
@@ -906,13 +972,7 @@ fn physicalize_soac(
         bindings: &PhysicalResourceTable,
     ) -> Result<PhysicalFilterOutput, String> {
         Ok(match output {
-            filter::Output::Local {
-                capacity,
-                destination,
-            } => filter::Output::Local {
-                capacity,
-                destination,
-            },
+            filter::Output::Local { capacity, ownership } => filter::Output::Local { capacity, ownership },
             filter::Output::Runtime { scratch, length } => filter::Output::Runtime {
                 scratch: binding(scratch, bindings),
                 length: match length {
@@ -1145,7 +1205,7 @@ pub type SemanticFunc = Func<Semantic>;
 pub type ScheduledFunc = Func<Scheduled>;
 pub type PhysicalFunc = Func<Physical>;
 
-pub type RawEntry<Route = super::ir::UnrealizedOutputRoute> = Entry<Raw, SemanticResourceDecl, Route>;
+pub type RawEntry<Route = super::ir::RealizedOutputRoute> = Entry<Raw, SemanticResourceDecl, Route>;
 pub type SemanticEntry = Entry<Semantic>;
 pub type ScheduledEntry = Entry<Scheduled>;
 
@@ -1425,6 +1485,65 @@ impl PlannedPublication {
 }
 
 impl SemanticEntry {
+    pub(crate) fn resource_for_result(
+        &self,
+        result: &super::ir::ResultBinding<Type<TypeName>>,
+    ) -> Option<SemanticResourceRef> {
+        resource_for_result(self, result)
+    }
+
+    pub(crate) fn bind_mapped_output_destinations(&mut self) -> Result<(), String> {
+        let results = self
+            .graph
+            .skeleton
+            .blocks
+            .values()
+            .flat_map(|block| &block.side_effects)
+            .filter_map(|effect| {
+                let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = effect.kind() else {
+                    return None;
+                };
+                let result = effect.result()?;
+                Some(
+                    result
+                        .top_level_fields()
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(field, result)| {
+                            matches!(op.form.result_id(field), Some(screma::ResultId::Post(_)))
+                                .then_some(result)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        let bindings = results
+            .into_iter()
+            .filter_map(|result| resource_for_result(self, &result).map(|resource| (resource, result)))
+            .collect::<Vec<_>>();
+
+        let mut replacements = Vec::new();
+        for (resource, result) in bindings {
+            let view = super::graph_ops::intern_resource_view(
+                &mut self.graph,
+                resource.0,
+                result.ty().clone(),
+                Some(self.span),
+            );
+            let destination = super::graph_ops::bind_result_to_view(&mut self.graph, &result, view)?;
+            replacements.extend(super::graph_ops::rebind_result_value_references(
+                &mut self.graph,
+                &result,
+                &destination,
+            )?);
+        }
+        for route in self.routes_mut() {
+            route.replace_values(&replacements);
+        }
+        Ok(())
+    }
+
     pub fn project(entry: &SemanticEntry) -> Result<Self, String> {
         let projection = super::graph_projector::GraphProjector::new(&entry.graph)
             .all_with_values(entry.routes().map(|route| route.source.value).collect())
@@ -1438,6 +1557,7 @@ impl SemanticEntry {
             entry.inputs.clone(),
             entry.parameter_inputs.clone(),
             entry.outputs.clone(),
+            entry.internal_results.clone(),
             entry.resource_declarations.clone(),
             entry.params.clone(),
             entry.result.clone(),
@@ -1454,6 +1574,7 @@ impl SemanticEntry {
         inputs: Vec<super::ir::EntryInput<SemanticResourceRef, WynLanguage>>,
         parameter_inputs: Vec<Vec<InputSlotId>>,
         outputs: Vec<super::ir::EntryOutput<SemanticResourceRef, RealizedOutputRoute, WynLanguage>>,
+        internal_results: Vec<super::ir::InternalResultRoute<SemanticResourceRef, RealizedOutputRoute>>,
         resource_declarations: Vec<SemanticResourceDecl>,
         params: Vec<super::ir::FuncParam<SemanticResourceRef, Type<TypeName>>>,
         result: super::ir::FunctionResult<Type<TypeName>>,
@@ -1465,6 +1586,13 @@ impl SemanticEntry {
                 Ok(output)
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let internal_results = internal_results
+            .into_iter()
+            .map(|mut result| {
+                result.route = projection.remap_output_routes(vec![result.route])?.remove(0);
+                Ok(result)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(Self {
             id,
             name,
@@ -1473,12 +1601,25 @@ impl SemanticEntry {
             inputs,
             parameter_inputs,
             outputs,
+            internal_results,
             resource_declarations,
             params,
             result,
             graph: projection.graph,
         })
     }
+}
+
+fn resource_for_result<P: super::ir::Family<Resource = SemanticResourceRef>>(
+    entry: &super::ir::Entry<P, SemanticResourceDecl, RealizedOutputRoute, WynLanguage>,
+    result: &super::ir::ResultBinding<Type<TypeName>>,
+) -> Option<SemanticResourceRef> {
+    entry.resource_routes().find_map(|(resource, route)| {
+        route
+            .referenced_values()
+            .any(|value| entry.graph.value_has_result_origin(value, result))
+            .then_some(*resource)
+    })
 }
 
 impl<P, Route> super::ir::Entry<P, SemanticResourceDecl, Route, WynLanguage>
@@ -1861,10 +2002,121 @@ fn physicalize_constant(
     })
 }
 
+fn route_writes_resource(
+    graph: &EGraph<Scheduled>,
+    route: &RealizedOutputRoute,
+    resource: SemanticResourceRef,
+) -> bool {
+    graph.skeleton.blocks.values().flat_map(|block| &block.side_effects).any(|effect| {
+        let token_is_writer = effect
+            .effects()
+            .is_some_and(|(_, output)| route.writers.contains(&OutputWriter::Effect(output)));
+        let value_is_writer = graph.effect_result_binding(effect).is_some_and(|result| {
+            result.values().into_iter().any(|value| route.writers.contains(&OutputWriter::Value(value)))
+        });
+        if !token_is_writer && !value_is_writer {
+            return false;
+        }
+        match effect.kind() {
+            SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
+                matches!(&op.state, screma::ScheduledState::Segmented(segment)
+                if segment.resources.iter().any(|access| {
+                    access.resource == resource && access.access != crate::ResourceAccess::Read
+                }))
+            }
+            SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => match &op.state {
+                filter::ScheduledState::Loop { storage, .. } => {
+                    matches!(storage, filter::Output::Runtime { scratch, .. } if *scratch == resource)
+                }
+                filter::ScheduledState::Pipeline { storage, .. } => storage.scratch == resource,
+            },
+            _ => false,
+        }
+    })
+}
+
+fn emit_entry_output_writes(
+    entry: &mut PlannedEntry<Scheduled>,
+    effect_ids: &mut crate::IdSource<super::types::EffectToken>,
+) -> Result<(), String> {
+    for slot in 0..entry.outputs.len() {
+        let output_ty = entry.outputs[slot].ty.clone();
+        let resource = entry.outputs[slot].resource;
+        let routes = entry.outputs[slot].routes.clone();
+        let mut writers_by_route = Vec::with_capacity(routes.len());
+        for route in routes {
+            let source = entry.graph.canonical_value(route.source.value);
+            let writes_resource =
+                resource.is_some_and(|resource| route_writes_resource(&entry.graph, &route, resource));
+            let mut writers = route.writers;
+            if let Some(resource) = resource {
+                if super::graph_ops::extract_storage_view_source(&entry.graph, source) == Some(resource)
+                    || writes_resource
+                {
+                    writers.push(OutputWriter::Value(source));
+                    let mut seen = HashSet::new();
+                    writers.retain(|writer| seen.insert(*writer));
+                    writers_by_route.push(writers);
+                    continue;
+                }
+                writers.extend(
+                    super::graph_ops::emit_resource_write(
+                        &mut entry.graph,
+                        route.source.block,
+                        resource.0,
+                        source,
+                        &output_ty,
+                        effect_ids,
+                        Some(entry.span),
+                    )
+                    .map_err(|error| format!("entry output {slot}: {error}"))?
+                    .into_iter()
+                    .map(OutputWriter::Effect),
+                );
+            } else {
+                let place = entry.graph.add_output_place(
+                    slot,
+                    super::types::PlaceType {
+                        pointee: output_ty.clone(),
+                        region: super::types::PlaceRegion::Output,
+                        access: super::types::PlaceAccess::WriteOnly,
+                    },
+                );
+                writers.push(OutputWriter::Effect(super::graph_ops::emit_store(
+                    &mut entry.graph,
+                    route.source.block,
+                    place,
+                    source,
+                    effect_ids,
+                    Some(entry.span),
+                )));
+            }
+            let mut seen = HashSet::new();
+            writers.retain(|writer| seen.insert(*writer));
+            writers_by_route.push(writers);
+        }
+        for (route, writers) in entry.outputs[slot].routes.iter_mut().zip(writers_by_route) {
+            route.writers = writers;
+        }
+    }
+    for (_, block) in &mut entry.graph.skeleton.blocks {
+        if matches!(block.term, super::types::SkeletonTerminator::Return(Some(_))) {
+            block.term = super::types::SkeletonTerminator::Return(None);
+        }
+    }
+    entry.result = super::types::by_value_function_result::<WynLanguage>(Type::Constructed(
+        TypeName::Unit,
+        Vec::new(),
+    ));
+    Ok(())
+}
+
 fn physicalize_entry(
-    entry: PlannedEntry<Scheduled>,
+    mut entry: PlannedEntry<Scheduled>,
     resources: &PhysicalResourceTable,
+    effect_ids: &mut crate::IdSource<super::types::EffectToken>,
 ) -> Result<PhysicalEntry, String> {
+    emit_entry_output_writes(&mut entry, effect_ids)?;
     let super::ir::Entry {
         id,
         name,
@@ -1873,6 +2125,7 @@ fn physicalize_entry(
         inputs,
         parameter_inputs,
         outputs,
+        internal_results: _,
         resource_declarations: mut declarations,
         params,
         result,
@@ -1951,6 +2204,7 @@ fn physicalize_entry(
         inputs,
         parameter_inputs,
         outputs,
+        internal_results: Vec::new(),
         resource_declarations,
         params,
         result,
@@ -1972,12 +2226,12 @@ pub(in crate::egir) fn physicalize_program(
         entry_points: _,
         constants,
         data,
-        global_context,
+        mut global_context,
         state: _,
     } = program;
     let entry_points = entries
         .into_iter()
-        .map(|entry| physicalize_entry(entry, physical_resources))
+        .map(|entry| physicalize_entry(entry, physical_resources, &mut global_context.effect_ids))
         .collect::<Result<Vec<_>, _>>()?;
     let functions = functions
         .into_iter()

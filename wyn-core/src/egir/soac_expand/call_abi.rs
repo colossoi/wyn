@@ -1,32 +1,33 @@
 use crate::ast::TypeName;
+use crate::types::TypeExt;
 use crate::LookupMap;
 use polytype::Type;
-use smallvec::smallvec;
 
-use super::super::graph_ops::{detached_alloca, detached_store, emit_result_to_place};
+use super::super::graph_ops::{adapt_physical_call_argument, detached_alloca, emit_result_to_place};
 use super::super::ir::PlaceOp;
-use super::super::program::{PhysicalEGraph, PhysicalFunc, PhysicalResourceRef};
+use super::super::program::{PhysicalEGraph, PhysicalFunc, PhysicalResourceRef, PhysicalSideEffect};
 use super::super::types::{
     destination_passing_function_result, CallEffects, CallSiteId, EffectOp, EffectToken, FuncParam,
-    Language, OperandRef, OperandType, ParameterId, PlaceAccess, PlaceDestination, PlaceRegion, PlaceType,
-    PureOp, ResultDestination, SideEffectKind, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
+    FunctionResult, Language, OperandRef, OperandType, ParameterId, PlaceAccess, PlaceDestination,
+    PlaceRegion, ResultBinding, ResultDestination, SideEffectKind, SkeletonTerminator, ValueId, ValueKind,
+    ViewType, WynLanguage,
 };
-
-#[derive(Clone)]
-struct CallableBoundary {
-    params: Vec<FuncParam<super::super::program::PhysicalResourceRef, Type<TypeName>>>,
-    result: super::super::types::FunctionResult<Type<TypeName>>,
-    effects: CallEffects,
-}
 
 pub(super) fn resolve(
     mut program: super::super::parallelize::Planned,
 ) -> Result<super::super::parallelize::Planned, String> {
-    for function in &mut program.functions {
-        resolve_place_parameters(&mut function.params, &mut function.graph)?;
-    }
     for entry in &mut program.entry_points {
-        resolve_place_parameters(&mut entry.params, &mut entry.graph)?;
+        let parameter_resources = entry
+            .parameter_inputs
+            .iter()
+            .map(|inputs| {
+                inputs.iter().find_map(|input| entry.inputs.get(input.0).and_then(|input| input.resource))
+            })
+            .collect::<Vec<_>>();
+        resolve_entry_parameter_representations(&mut entry.params, &mut entry.graph, &parameter_resources)?;
+    }
+    for function in &mut program.functions {
+        resolve_function_parameters(function)?;
     }
     for function in &mut program.functions {
         resolve_function(function, &mut program.global_context.effect_ids)?;
@@ -37,11 +38,11 @@ pub(super) fn resolve(
         .map(|function| {
             (
                 function.region,
-                CallableBoundary {
-                    params: function.params().to_vec(),
-                    result: function.result().clone(),
-                    effects: function.effects(),
-                },
+                (
+                    function.params().to_vec(),
+                    function.result().clone(),
+                    function.effects(),
+                ),
             )
         })
         .collect::<LookupMap<_, _>>();
@@ -69,18 +70,237 @@ pub(super) fn resolve(
     Ok(program)
 }
 
-fn resolve_place_parameters(
+enum CallResultRouting {
+    Allocate,
+    Mapped {
+        destinations: ResultBinding<Type<TypeName>>,
+        lane: ValueId,
+    },
+    Existing(ResultBinding<Type<TypeName>>),
+}
+
+type BoundCall = (
+    Vec<OperandRef>,
+    Option<ResultBinding<Type<TypeName>>>,
+    Vec<PhysicalSideEffect>,
+);
+
+pub(super) fn emit_call(
+    graph: &mut PhysicalEGraph,
+    block: crate::flow::BlockId,
+    callee: &PhysicalFunc,
+    arguments: impl IntoIterator<Item = OperandRef>,
+    mapped_destinations: Option<(&[ResultBinding<Type<TypeName>>], ValueId)>,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) -> Result<ResultBinding<Type<TypeName>>, String> {
+    let routing = match mapped_destinations {
+        Some((destinations, lane)) => {
+            let destinations = if callee.result().is_product() {
+                ResultBinding::product(callee.result().ty().clone(), destinations.iter().cloned())
+            } else {
+                let [destination] = destinations else {
+                    return Err(format!(
+                        "call to {:?} has one logical result but {} mapped destinations",
+                        callee.region,
+                        destinations.len()
+                    ));
+                };
+                destination.clone()
+            };
+            CallResultRouting::Mapped { destinations, lane }
+        }
+        None => CallResultRouting::Allocate,
+    };
+    let (arguments, result, prelude) = bind_call_boundary(
+        graph,
+        callee.region,
+        callee.params(),
+        callee.result(),
+        arguments,
+        routing,
+        effect_ids,
+    )?;
+    debug_assert!(result.is_none());
+    graph.skeleton.blocks[block].side_effects.extend(prelude);
+    graph
+        .emit_call(
+            block,
+            callee.region,
+            callee.params(),
+            callee.result(),
+            arguments,
+            callee.effects(),
+            None,
+            None,
+        )
+        .map(|(_, result)| result)
+}
+
+fn bind_call_boundary(
+    graph: &mut PhysicalEGraph,
+    callee: crate::FunctionId,
+    parameters: &[FuncParam<PhysicalResourceRef, Type<TypeName>>],
+    function_result: &FunctionResult<Type<TypeName>>,
+    arguments: impl IntoIterator<Item = OperandRef>,
+    routing: CallResultRouting,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) -> Result<BoundCall, String> {
+    let destination_parameters = function_result.destination_parameters();
+    let ordinary_parameters = parameters
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !destination_parameters.contains(&ParameterId::new(*index)))
+        .collect::<Vec<_>>();
+    let ordinary_arguments = flatten_call_arguments(graph, arguments)?;
+    if ordinary_arguments.len() != ordinary_parameters.len() {
+        return Err(format!(
+            "call to {callee:?} supplies {} ordinary arguments for {} parameters",
+            ordinary_arguments.len(),
+            ordinary_parameters.len()
+        ));
+    }
+
+    let mut physical_arguments = vec![None; parameters.len()];
+    let mut prelude = Vec::new();
+    for (argument, (index, parameter)) in ordinary_arguments.into_iter().zip(ordinary_parameters) {
+        let (argument, effects) =
+            adapt_physical_call_argument(graph, argument, parameter, callee, index, effect_ids)?;
+        prelude.extend(effects);
+        physical_arguments[index] = Some(argument);
+    }
+
+    let routed_leaves = match &routing {
+        CallResultRouting::Allocate => {
+            function_result.destination_leaves().into_iter().map(|route| (route, None)).collect::<Vec<_>>()
+        }
+        CallResultRouting::Mapped { destinations, .. } | CallResultRouting::Existing(destinations) => {
+            let routes = function_result.destination_leaves();
+            let sources = destinations.destination_leaves();
+            if routes.len() != sources.len() {
+                return Err(format!(
+                    "call to {callee:?} binds {} results to {} physical result leaves",
+                    sources.len(),
+                    routes.len()
+                ));
+            }
+            routes.into_iter().zip(sources).map(|(route, source)| (route, Some(source))).collect()
+        }
+    };
+
+    let preserve_existing_result = matches!(&routing, CallResultRouting::Existing(_));
+    let mut return_values = LookupMap::new();
+    let mut destination_arguments = LookupMap::new();
+    for (route, source) in routed_leaves {
+        let (ty, destination) = route.single_destination().expect("physical result leaf has one route");
+        let parameter = match destination {
+            ResultDestination::ReturnValue(slot) => {
+                if preserve_existing_result {
+                    let value = source.as_ref().and_then(ResultBinding::single_value).ok_or_else(|| {
+                        format!("call to {callee:?} routes a scalar result through a place")
+                    })?;
+                    return_values.insert(*slot, value);
+                }
+                continue;
+            }
+            ResultDestination::Place(PlaceDestination::Fixed(parameter)) => *parameter,
+            ResultDestination::Place(PlaceDestination::Bounded { .. }) => {
+                return Err(format!(
+                    "call to {callee:?} has a bounded result without an explicit length route"
+                ))
+            }
+        };
+
+        let place = match (&routing, source.as_ref()) {
+            (CallResultRouting::Allocate, None) => {
+                let (place, effect) = detached_alloca(graph, ty.clone(), effect_ids, None);
+                prelude.push(effect);
+                place
+            }
+            (CallResultRouting::Mapped { lane, .. }, Some(source)) => {
+                let (array_ty, destination) = source
+                    .single_destination()
+                    .ok_or_else(|| "mapped result leaf has no destination".to_owned())?;
+                let element_ty = crate::types::array_elem(array_ty)
+                    .ok_or_else(|| "mapped result destination is not an array".to_owned())?;
+                if element_ty != ty {
+                    return Err(format!(
+                        "call to {callee:?} maps result type {ty:?} into array element {element_ty:?}"
+                    ));
+                }
+                match destination {
+                    ResultDestination::ReturnValue(view) => {
+                        graph.add_view_index_place(graph.view_id(*view), *lane, ty.clone(), None)
+                    }
+                    ResultDestination::Place(PlaceDestination::Fixed(place)) => {
+                        graph.add_index_place(*place, *lane, ty.clone(), None)
+                    }
+                    ResultDestination::Place(PlaceDestination::Bounded { storage, .. }) => {
+                        graph.add_index_place(*storage, *lane, ty.clone(), None)
+                    }
+                }
+            }
+            (CallResultRouting::Existing(_), Some(source)) => {
+                let (_, destination) =
+                    source.single_destination().expect("existing result leaf has one route");
+                match destination {
+                    ResultDestination::Place(PlaceDestination::Fixed(place)) => *place,
+                    ResultDestination::Place(PlaceDestination::Bounded { storage, .. }) => *storage,
+                    ResultDestination::ReturnValue(value) => {
+                        let value = graph.canonical_value(*value);
+                        if let Some(place) =
+                            super::super::graph_ops::addressable_value_place(graph, value, ty)
+                        {
+                            place
+                        } else {
+                            let span = graph.nodes[value].span();
+                            let (place, effect) = detached_alloca(graph, ty.clone(), effect_ids, span);
+                            prelude.push(effect);
+                            let view_ty = crate::types::view_array_of(ty, crate::types::no_buffer());
+                            let view = graph.add_place_view(place, view_ty, span).value();
+                            graph.replace_value_references(value, view);
+                            graph.install_aliases([(value, view)]);
+                            place
+                        }
+                    }
+                }
+            }
+            _ => unreachable!("result routing supplies the required source shape"),
+        };
+        destination_arguments.insert(parameter, place);
+        physical_arguments[parameter.index()] = Some(OperandRef::Place(place));
+    }
+
+    let arguments = physical_arguments
+        .into_iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            argument.ok_or_else(|| format!("call to {callee:?} has no argument for parameter {index}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let result = preserve_existing_result.then(|| {
+        function_result.bind(
+            |slot, _| return_values[&slot],
+            |parameter| destination_arguments[&parameter],
+        )
+    });
+    Ok((arguments, result, prelude))
+}
+
+fn resolve_entry_parameter_representations(
     params: &mut [FuncParam<PhysicalResourceRef, Type<TypeName>>],
     graph: &mut PhysicalEGraph,
+    parameter_resources: &[Option<PhysicalResourceRef>],
 ) -> Result<(), String> {
     for (index, parameter) in params.iter_mut().enumerate() {
         let OperandType::Value(ty) = parameter.representation() else {
             continue;
         };
-        if !WynLanguage::is_materialized_aggregate(ty) {
+        let ty = ty.clone();
+        let resource = parameter_resources.get(index).copied().flatten();
+        let representation = physical_parameter_representation(&ty, resource);
+        if representation == *parameter.representation() {
             continue;
         }
-        let ty = ty.clone();
         let parameter_id = ParameterId::new(index);
         let source = graph
             .nodes
@@ -93,22 +313,206 @@ fn resolve_place_parameters(
                 .then_some(value)
             })
             .ok_or_else(|| format!("physical parameter {index} has no graph binding"))?;
-        let place_ty = PlaceType {
-            pointee: ty.clone(),
-            region: PlaceRegion::Parametric,
-            access: PlaceAccess::ReadOnly,
-        };
-        let place = graph.add_place_parameter(parameter_id, place_ty.clone());
-        let view_ty = crate::types::view_array_of(&ty, crate::types::no_buffer());
-        let view = graph.add_place_view(place, view_ty, graph.nodes[source].span()).value();
-        graph.replace_value_references(source, view);
-        if !graph.remove_func_param(source) {
-            return Err(format!("physical parameter {index} is not a value parameter"));
+        if let OperandType::Place(place_ty) = &representation {
+            let place = graph.add_place_parameter(parameter_id, place_ty.clone());
+            let view = graph
+                .add_place_view(
+                    place,
+                    crate::types::view_array_of(&ty, crate::types::no_buffer()),
+                    graph.nodes[source].span(),
+                )
+                .value();
+            graph.replace_value_references(source, view);
+            graph.remove_func_param(source);
+            super::super::graph_ops::normalize_place_backed_value_consumers(graph, view);
+        } else {
+            super::super::graph_ops::retype_projection_tree(graph, source, representation.ty());
         }
-        *parameter.representation_mut() = OperandType::Place(place_ty);
-        super::super::graph_ops::normalize_place_backed_value_consumers(graph, view);
+        *parameter.representation_mut() = representation;
     }
+    synchronize_soac_input_types(graph);
     Ok(())
+}
+
+fn resolve_function_parameters(function: &mut PhysicalFunc) -> Result<(), String> {
+    let old_params = std::mem::take(&mut function.params);
+    let mut params = Vec::new();
+    let mut old_parameter_nodes = Vec::new();
+    for (old_index, parameter) in old_params.into_iter().enumerate() {
+        let logical_ty = parameter.ty().clone();
+        let logical_abi = super::super::types::by_value_function_result::<WynLanguage>(logical_ty.clone());
+        let physical_ty = viewify_product_leaves(&logical_ty);
+        let old_parameter = ParameterId::new(old_index);
+        let source = function
+            .graph
+            .nodes
+            .iter()
+            .find_map(|(value, definition)| {
+                matches!(
+                    definition.kind(),
+                    ValueKind::FuncParam { parameter } if *parameter == old_parameter
+                )
+                .then_some(value)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "function `{}` parameter {old_index} has no value binding",
+                    function.name
+                )
+            })?;
+        old_parameter_nodes.push(source);
+        super::super::graph_ops::retype_projection_tree(&mut function.graph, source, &physical_ty);
+
+        let first = params.len();
+        for (path, leaf) in logical_abi.destination_leaves_with_paths() {
+            let name = path.iter().fold(parameter.name().to_owned(), |name, index| {
+                format!("{name}_{index}")
+            });
+            if WynLanguage::is_materialized_aggregate(leaf.ty()) || WynLanguage::is_view(leaf.ty()) {
+                params.push(FuncParam::place(
+                    name,
+                    super::super::types::PlaceType {
+                        pointee: materialized_array_type(leaf.ty()),
+                        region: PlaceRegion::Parametric,
+                        access: PlaceAccess::ReadOnly,
+                    },
+                ));
+            } else {
+                params.push(FuncParam::value(name, leaf.ty().clone()));
+            }
+        }
+        let abi = super::super::types::by_value_function_result::<WynLanguage>(physical_ty);
+        let leaves = abi.destination_leaves();
+        let group = &params[first..];
+        if leaves.len() != group.len() {
+            return Err(format!(
+                "function `{}` parameter {old_index} has {} logical leaves but {} physical parameters",
+                function.name,
+                leaves.len(),
+                group.len()
+            ));
+        }
+        let values = group
+            .iter()
+            .zip(&leaves)
+            .enumerate()
+            .map(|(offset, (parameter, leaf))| {
+                let operand = function
+                    .graph
+                    .add_parameter(ParameterId::new(first + offset), parameter.representation());
+                match operand {
+                    OperandRef::Value(value) => value,
+                    OperandRef::View(view) => view.value(),
+                    OperandRef::Place(place) => {
+                        function.graph.add_place_view(place, leaf.ty().clone(), None).value()
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let binding = abi.bind(
+            |slot, _| values[slot.index()],
+            |_| unreachable!("parameter products bind place leaves through view values"),
+        );
+        super::super::graph_ops::rebind_result_projection_references(
+            &mut function.graph,
+            source,
+            &binding,
+        )?;
+    }
+    super::super::graph_ops::fold_exposed_projections(&mut function.graph);
+    for parameter in old_parameter_nodes {
+        function.graph.remove_func_param(parameter);
+    }
+    function.params = params;
+    synchronize_soac_input_types(&mut function.graph);
+    Ok(())
+}
+
+fn materialized_array_type(ty: &Type<TypeName>) -> Type<TypeName> {
+    let Type::Constructed(TypeName::Array, args) = ty else {
+        return ty.clone();
+    };
+    let mut args = args.clone();
+    args[1] = crate::types::array_variant_composite();
+    *args.last_mut().expect("array has a buffer argument") = crate::types::no_buffer();
+    Type::Constructed(TypeName::Array, args)
+}
+
+fn physical_parameter_representation(
+    ty: &Type<TypeName>,
+    resource: Option<PhysicalResourceRef>,
+) -> OperandType<PhysicalResourceRef, Type<TypeName>> {
+    if WynLanguage::is_materialized_aggregate(ty) {
+        return match resource {
+            Some(resource) => OperandType::View(ViewType {
+                array: crate::types::view_array_of(ty, crate::types::buffer_tag(resource)),
+                region: PlaceRegion::Resource(resource),
+                access: PlaceAccess::ReadOnly,
+            }),
+            None => OperandType::Place(super::super::types::PlaceType {
+                pointee: materialized_array_type(ty),
+                region: PlaceRegion::Parametric,
+                access: PlaceAccess::ReadOnly,
+            }),
+        };
+    }
+    OperandType::Value(viewify_product_leaves(ty))
+}
+
+fn viewify_product_leaves(ty: &Type<TypeName>) -> Type<TypeName> {
+    if WynLanguage::is_materialized_aggregate(ty) {
+        let region = ty.array_buffer().cloned().unwrap_or_else(crate::types::no_buffer);
+        return crate::types::view_array_of(ty, region);
+    }
+    match ty {
+        Type::Constructed(name, fields) if WynLanguage::product_fields(ty).is_some() => {
+            Type::Constructed(name.clone(), fields.iter().map(viewify_product_leaves).collect())
+        }
+        _ => ty.clone(),
+    }
+}
+
+fn flatten_call_arguments(
+    graph: &mut PhysicalEGraph,
+    arguments: impl IntoIterator<Item = OperandRef>,
+) -> Result<Vec<OperandRef>, String> {
+    let mut flattened = Vec::new();
+    for argument in arguments {
+        let argument = graph.canonical_operand(argument);
+        let Some(value) = argument.value() else {
+            flattened.push(argument);
+            continue;
+        };
+        let ty = graph.nodes[value].ty().clone();
+        if WynLanguage::product_fields(&ty).is_none() {
+            flattened.push(argument);
+            continue;
+        }
+        let abi = super::super::types::by_value_function_result::<WynLanguage>(ty);
+        let binding = super::super::graph_ops::bind_by_value_result(graph, &abi, value);
+        flattened.extend(binding.values().into_iter().map(|value| graph.operand_ref(value)));
+    }
+    Ok(flattened)
+}
+
+fn synchronize_soac_input_types(graph: &mut PhysicalEGraph) {
+    let types = graph
+        .nodes
+        .iter()
+        .map(|(value, definition)| (value, definition.ty().clone()))
+        .collect::<LookupMap<_, _>>();
+    for (_, block) in &mut graph.skeleton.blocks {
+        for effect in &mut block.side_effects {
+            let SideEffectKind::Soac(super::super::types::SoacEffect(_, soac)) = &mut effect.kind else {
+                continue;
+            };
+            for (input, operand) in soac.input_types_mut().iter_mut().zip(&effect.operands) {
+                if let Some(ty) = operand.value().and_then(|value| types.get(&value)) {
+                    input.array = ty.clone();
+                }
+            }
+        }
+    }
 }
 
 fn resolve_function(
@@ -118,17 +522,7 @@ fn resolve_function(
     let mut params = std::mem::take(&mut function.params);
     let result =
         destination_passing_function_result::<_, WynLanguage>(function.result().ty().clone(), &mut params);
-    let destination_parameters = result
-        .destination_leaves()
-        .into_iter()
-        .filter_map(|leaf| match leaf.single_destination() {
-            Some((_, ResultDestination::Place(PlaceDestination::Fixed(parameter)))) => Some(*parameter),
-            Some((_, ResultDestination::Place(PlaceDestination::Bounded { .. }))) => {
-                unreachable!("bounded callable results require an explicit length route")
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let destination_parameters = result.destination_parameters();
     if destination_parameters.is_empty() {
         function.params = params;
         function.result = result;
@@ -243,252 +637,62 @@ fn resolve_function(
 
 fn resolve_calls(
     graph: &mut PhysicalEGraph,
-    boundaries: &LookupMap<crate::FunctionId, CallableBoundary>,
+    boundaries: &LookupMap<
+        crate::FunctionId,
+        (
+            Vec<FuncParam<PhysicalResourceRef, Type<TypeName>>>,
+            super::super::types::FunctionResult<Type<TypeName>>,
+            CallEffects,
+        ),
+    >,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), String> {
-    let calls = graph.calls().keys().collect::<Vec<_>>();
+    let calls = graph.side_effect_index().calls().map(|(call, _)| call).collect::<Vec<_>>();
     for site in calls {
         let callee = graph.call(site).callee();
         let Some(boundary) = boundaries.get(&callee) else {
             continue;
         };
-        if call_arguments_match(graph, graph.call(site).arguments(), &boundary.params)
-            && graph.call(site).result().destination_count() == boundary.result.destination_count()
-            && graph.call(site).result().values().len()
-                == boundary
-                    .result
-                    .destination_leaves()
-                    .iter()
-                    .filter(|leaf| {
-                        matches!(
-                            leaf.single_destination(),
-                            Some((_, ResultDestination::ReturnValue(_)))
-                        )
-                    })
-                    .count()
-        {
-            continue;
-        }
         resolve_call(graph, site, boundary, effect_ids)?;
     }
     Ok(())
 }
 
-fn call_arguments_match(
-    graph: &PhysicalEGraph,
-    arguments: &[OperandRef],
-    params: &[FuncParam<PhysicalResourceRef, Type<TypeName>>],
-) -> bool {
-    arguments.len() == params.len()
-        && arguments.iter().zip(params).all(|(argument, parameter)| {
-            match (argument, parameter.representation()) {
-                (OperandRef::Value(value), OperandType::Value(ty)) => {
-                    graph.nodes.get(*value).is_some_and(|value| value.ty() == ty)
-                }
-                (OperandRef::View(view), OperandType::View(ty)) => {
-                    graph.nodes.get(view.value()).is_some_and(|value| value.ty() == &ty.array)
-                }
-                (OperandRef::Place(place), OperandType::Place(ty)) => {
-                    graph.places().get(*place).is_some_and(|place| {
-                        place.ty().pointee == ty.pointee && ty.access.accepts(place.ty().access)
-                    })
-                }
-                _ => false,
-            }
-        })
-}
-
 fn resolve_call(
     graph: &mut PhysicalEGraph,
     site: CallSiteId,
-    boundary: &CallableBoundary,
+    boundary: &(
+        Vec<FuncParam<PhysicalResourceRef, Type<TypeName>>>,
+        super::super::types::FunctionResult<Type<TypeName>>,
+        CallEffects,
+    ),
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), String> {
     let old = graph.call(site).clone();
-    let old_leaves = old.result().destination_leaves();
-    let new_leaves = boundary.result.destination_leaves();
-    if old_leaves.len() != new_leaves.len() {
-        return Err(format!(
-            "call to {:?} binds {} logical leaves for an ABI with {} leaves",
-            old.callee(),
-            old_leaves.len(),
-            new_leaves.len()
-        ));
-    }
     let anchor = graph
         .side_effect_index()
         .call_site(site)
         .ok_or_else(|| format!("call {site:?} has no explicit skeleton site"))?;
-    let mut allocations = Vec::new();
-    let mut replacements = Vec::new();
-    let mut return_values = LookupMap::new();
-    let mut destination_arguments = LookupMap::new();
-    let mut arguments = Vec::with_capacity(boundary.params.len());
-    for (index, argument) in old.arguments().iter().copied().enumerate() {
-        let parameter = boundary.params.get(index).ok_or_else(|| {
-            format!(
-                "call to {:?} supplies more arguments than its physical boundary",
-                old.callee()
-            )
-        })?;
-        let argument = match parameter.representation() {
-            OperandType::Place(place_ty) => {
-                let place =
-                    if let Some(place) = addressable_argument_place(graph, argument, &place_ty.pointee) {
-                        place
-                    } else {
-                        let value = argument.value().ok_or_else(|| {
-                            format!(
-                                "call to {:?} argument {index} cannot be materialized as {:?}",
-                                old.callee(),
-                                place_ty.pointee
-                            )
-                        })?;
-                        let value = graph.canonical_value(value);
-                        if graph.nodes[value].ty() != &place_ty.pointee {
-                            return Err(format!(
-                                "call to {:?} argument {index} has type {:?}, expected place pointee {:?}",
-                                old.callee(),
-                                graph.nodes[value].ty(),
-                                place_ty.pointee
-                            ));
-                        }
-                        let span = graph.nodes[value].span();
-                        let (place, allocation) =
-                            detached_alloca(graph, place_ty.pointee.clone(), effect_ids, span);
-                        allocations.push(allocation);
-                        allocations.push(detached_store(place, value, effect_ids, span));
-                        place
-                    };
-                OperandRef::Place(place)
-            }
-            OperandType::Value(_) | OperandType::View(_) => graph.canonical_operand(argument),
-        };
-        arguments.push(argument);
+    let (arguments, result, prelude) = bind_call_boundary(
+        graph,
+        old.callee(),
+        &boundary.0,
+        &boundary.1,
+        old.arguments().iter().copied(),
+        CallResultRouting::Existing(old.result().clone()),
+        effect_ids,
+    )?;
+    if !prelude.is_empty() {
+        graph.skeleton.blocks[anchor.block].side_effects.splice(anchor.index..anchor.index, prelude);
     }
-    for (source, route) in old_leaves.iter().zip(&new_leaves) {
-        match route.single_destination() {
-            Some((_, ResultDestination::ReturnValue(slot))) => {
-                let value = source.single_value().ok_or_else(|| {
-                    format!(
-                        "call to {:?} routes a scalar result through a place",
-                        old.callee()
-                    )
-                })?;
-                return_values.insert(*slot, value);
-            }
-            Some((ty, ResultDestination::Place(PlaceDestination::Fixed(parameter)))) => {
-                let destination = match source.single_destination() {
-                    Some((_, ResultDestination::Place(PlaceDestination::Fixed(place)))) => *place,
-                    Some((_, ResultDestination::Place(PlaceDestination::Bounded { storage, .. }))) => {
-                        *storage
-                    }
-                    Some((_, ResultDestination::ReturnValue(value))) => {
-                        let value = graph.canonical_value(*value);
-                        match graph.nodes[value].kind() {
-                            ValueKind::PlaceView { place } => *place,
-                            _ => {
-                                let (place, effect) =
-                                    detached_alloca(graph, ty.clone(), effect_ids, graph.nodes[value].span);
-                                allocations.push(effect);
-                                let view_ty = crate::types::view_array_of(ty, crate::types::no_buffer());
-                                let view =
-                                    graph.add_place_view(place, view_ty, graph.nodes[value].span).value();
-                                replacements.push((value, view));
-                                place
-                            }
-                        }
-                    }
-                    None => unreachable!("a result leaf has one destination"),
-                };
-                destination_arguments.insert(*parameter, destination);
-            }
-            Some((_, ResultDestination::Place(PlaceDestination::Bounded { .. }))) => {
-                unreachable!("bounded callable results require an explicit length route")
-            }
-            None => unreachable!("a result leaf has one destination"),
-        }
-    }
-    if !allocations.is_empty() {
-        graph.skeleton.blocks[anchor.block].side_effects.splice(anchor.index..anchor.index, allocations);
-    }
-    for (old, new) in replacements {
-        graph.replace_value_references(old, new);
-        graph.install_aliases([(old, new)]);
-    }
-    for parameter in arguments.len()..boundary.params.len() {
-        let parameter = ParameterId::new(parameter);
-        let place = destination_arguments.get(&parameter).ok_or_else(|| {
-            format!(
-                "call to {:?} has no binding for destination parameter {}",
-                old.callee(),
-                parameter.index()
-            )
-        })?;
-        arguments.push(OperandRef::Place(*place));
-    }
-    let result = boundary.result.bind(
-        |slot, _| return_values[&slot],
-        |parameter| destination_arguments[&parameter],
-    );
     graph
         .calls
         .get_mut(site)
         .expect("call site remains live while its ABI is rewritten")
-        .replace_boundary(arguments, result, boundary.effects);
+        .replace_boundary(
+            arguments,
+            result.expect("existing call preserves its logical result bindings"),
+            boundary.2,
+        );
     Ok(())
-}
-
-fn addressable_argument_place(
-    graph: &mut PhysicalEGraph,
-    argument: OperandRef,
-    pointee: &Type<TypeName>,
-) -> Option<super::super::types::PlaceId> {
-    match graph.canonical_operand(argument) {
-        OperandRef::Place(place) => Some(place),
-        OperandRef::View(view) => addressable_value_place(graph, view.value(), pointee),
-        OperandRef::Value(value) => addressable_value_place(graph, value, pointee),
-    }
-}
-
-fn addressable_value_place(
-    graph: &mut PhysicalEGraph,
-    value: ValueId,
-    pointee: &Type<TypeName>,
-) -> Option<super::super::types::PlaceId> {
-    let value = graph.canonical_value(value);
-    match graph.nodes[value].kind().clone() {
-        ValueKind::PlaceView { place } => Some(place),
-        ValueKind::Pure {
-            op: PureOp::Index,
-            operands,
-        } if operands.len() == 2 => {
-            let base = graph.canonical_value(operands[0]);
-            let index = graph.canonical_value(operands[1]);
-            let span = graph.nodes[value].span();
-            if let OperandRef::View(view) = graph.operand_ref(base) {
-                Some(graph.add_view_index_place(view, index, pointee.clone(), span))
-            } else {
-                let base_ty = graph.nodes[base].ty().clone();
-                let base = addressable_value_place(graph, base, &base_ty)?;
-                Some(graph.add_index_place(base, index, pointee.clone(), span))
-            }
-        }
-        ValueKind::Pure {
-            op: PureOp::Project { index },
-            operands,
-        } if operands.len() == 1 => {
-            let base = graph.canonical_value(operands[0]);
-            let base_ty = graph.nodes[base].ty().clone();
-            let base = addressable_value_place(graph, base, &base_ty)?;
-            let coordinate = graph.intern_pure(
-                PureOp::Int(index.to_string()),
-                smallvec![],
-                Type::Constructed(TypeName::Int(32), vec![]),
-                graph.nodes[value].span(),
-            );
-            Some(graph.add_index_place(base, coordinate, pointee.clone(), graph.nodes[value].span()))
-        }
-        _ => None,
-    }
 }

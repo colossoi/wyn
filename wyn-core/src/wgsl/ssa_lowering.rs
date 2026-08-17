@@ -1591,6 +1591,7 @@ impl<'a> LowerCtx<'a> {
             for field in &pc.fields {
                 if let Some((value_id, _, _)) = body.param(field.input_index) {
                     let expr = format!("{}.{}", pc.var_name, field.wgsl_name);
+                    body_ctx.addressable.insert(expr.clone());
                     body_ctx.value_map.insert(value_id, ValueBinding::Alias(expr));
                 }
             }
@@ -2622,6 +2623,19 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 | polytype::Type::Constructed(TypeName::SideEffect, _)
                         ) {
                             writeln!(output, "{}{};", self.ctx.indent_str(), expr).unwrap();
+                            continue;
+                        }
+                        if result_ty.array_variant().is_some()
+                            && !is_view_array_ty(result_ty)
+                            && matches!(
+                                inst.data,
+                                InstKind::Op {
+                                    tag: crate::op::OpTag::Index | crate::op::OpTag::Project { .. },
+                                    ..
+                                }
+                            )
+                        {
+                            self.value_map.insert(result, ValueBinding::Alias(expr));
                             continue;
                         }
                         if is_scalar_literal(inst) {

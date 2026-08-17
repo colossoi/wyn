@@ -61,16 +61,6 @@ enum TestTag {}
 type TestProgramFamily = super::super::ir::ProgramFamily<TestPhase, u16, (), ()>;
 
 #[test]
-fn soac_placement_resolves_unique_input_candidate() {
-    let mut destination = SoacDestination::unique_input();
-    destination.place(SoacPlacement::OutputView);
-
-    assert_eq!(destination, SoacDestination::OutputView);
-    assert!(destination.is_output_view());
-    assert!(!destination.is_unplaced_unique_input());
-}
-
-#[test]
 fn graph_accepts_non_wyn_payloads() {
     let mut graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
     let node = graph.intern_pure(PureOp::Unit, SmallVec::new(), "unit".to_string(), None);

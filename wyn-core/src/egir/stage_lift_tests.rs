@@ -8,8 +8,8 @@ use crate::egir::reify::Segmented;
 use crate::egir::soac::screma;
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, FuncParam, OperandRef, ParameterId,
-    SegExtent, SegSpace, Semantic, SideEffect, SkeletonTerminator, Soac, SoacDestination, SoacEffect,
-    SoacInputType, WynLanguage,
+    SegExtent, SegSpace, Semantic, SideEffect, SkeletonTerminator, Soac, SoacEffect, SoacInputType,
+    SoacOwnership, WynLanguage,
 };
 use crate::flow::ExecutionModel;
 use crate::interface::{BindingExposure, EntryInput, EntryInputKind, StorageAccess};
@@ -353,7 +353,7 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
                     post: screma::Lambda::identity(vec![element_ty.clone()]),
                 },
                 result_state: vec![screma::ResultState {
-                    destination: SoacDestination::fresh(),
+                    ownership: SoacOwnership::Fresh,
                 }],
                 state: screma::SemanticState::Segmented {
                     space: SegSpace::new(SegExtent::Fixed(64)),

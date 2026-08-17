@@ -108,15 +108,15 @@ pub(crate) fn logical_result_fields(
     }
 }
 
-pub(crate) fn materialize_result_values<P: crate::egir::ir::Family>(
+pub(crate) fn result_argument_values<P: crate::egir::ir::Family>(
     graph: &mut EGraph<P>,
     results: &[ResultBinding<Type<TypeName>>],
 ) -> Vec<ValueId> {
     results
         .iter()
         .map(|result| {
-            crate::egir::graph_ops::pack_result_values(graph, result)
-                .expect("lambda result requires an explicit by-value materialization")
+            crate::egir::graph_ops::result_argument_value(graph, result)
+                .expect("lambda result must have an argument representation")
         })
         .collect()
 }

@@ -5,7 +5,7 @@
 //! form; graph-local cloning and storage checks remain in each recipe analyzer.
 
 use crate::egir::soac::screma;
-use crate::egir::types::WynSoacPhase;
+use crate::egir::types::{ResourceAccess, Semantic};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Strategy {
@@ -15,7 +15,7 @@ pub(super) enum Strategy {
     Serial,
 }
 
-pub(super) fn classify<P: WynSoacPhase>(op: &screma::Op<P>) -> Strategy {
+pub(super) fn classify(op: &screma::Op<Semantic>) -> Strategy {
     let reduction_results = op.form.reduction_result_count();
     let reductions_ready = op
         .form
@@ -24,10 +24,19 @@ pub(super) fn classify<P: WynSoacPhase>(op: &screma::Op<P>) -> Strategy {
         .all(|reduction| !reduction.neutral.is_empty() && reduction.operator.seg_body().is_some());
     let scans_ready =
         op.form.scans.iter().all(|scan| !scan.neutral.is_empty() && scan.operator.seg_body().is_some());
-    let reductions_are_fresh = (0..reduction_results)
-        .all(|field| op.destination(field).is_some_and(|destination| destination.is_unplaced_fresh()));
-    let post_results_are_views = (reduction_results..op.result_count())
-        .all(|field| op.destination(field).is_some_and(|destination| destination.is_output_view()));
+    let reductions_are_fresh =
+        (0..reduction_results).all(|field| op.ownership(field) == Some(crate::types::SoacOwnership::Fresh));
+    let routed_post_results = match op.semantic_state() {
+        screma::SemanticState::Segmented {
+            output_slots,
+            resources,
+            ..
+        } => output_slots
+            .len()
+            .max(resources.iter().filter(|resource| resource.access != ResourceAccess::Read).count()),
+        screma::SemanticState::Serial => 0,
+    };
+    let post_results_are_views = routed_post_results >= op.result_count() - reduction_results;
 
     if op.is_map() && op.form.post.is_identity() {
         Strategy::Map

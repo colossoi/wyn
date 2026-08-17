@@ -151,8 +151,16 @@ fn emit_hist_atomic_update(
                 continue_block: retry,
             });
 
-            let result = emit_screma_lambda(graph, attempt, regions, operator, vec![expected, incoming]);
-            let desired = super::super::soac::lambda::materialize_result_values(graph, &result)[0];
+            let result = emit_screma_lambda(
+                graph,
+                attempt,
+                regions,
+                operator,
+                vec![expected, incoming],
+                None,
+                next_effect,
+            );
+            let desired = super::super::soac::lambda::result_argument_values(graph, &result)[0];
             let cas_type =
                 Type::Constructed(TypeName::Tuple(2), vec![value_type.clone(), bool_type.clone()]);
             let result = emit_atomic(
@@ -283,8 +291,9 @@ pub(super) fn build_hist_atomic(
             )
         })
         .collect::<Vec<_>>();
-    let bucket_results = emit_screma_lambda(graph, body, regions, &form.bucket, arguments);
-    let bucket_values = super::super::soac::lambda::materialize_result_values(graph, &bucket_results);
+    let bucket_results =
+        emit_screma_lambda(graph, body, regions, &form.bucket, arguments, None, next_effect);
+    let bucket_values = super::super::soac::lambda::result_argument_values(graph, &bucket_results);
     debug_assert_eq!(
         bucket_values.len(),
         form.guard_count() + form.index_count() + form.value_count()
@@ -398,9 +407,9 @@ pub(super) fn build_hist_loop(
                     next_effect,
                 ));
             }
-            let bucket_results = emit_screma_lambda(graph, blk, regions, &form.bucket, arguments);
-            let bucket_values =
-                super::super::soac::lambda::materialize_result_values(graph, &bucket_results);
+            let bucket_results =
+                emit_screma_lambda(graph, blk, regions, &form.bucket, arguments, None, next_effect);
+            let bucket_values = super::super::soac::lambda::result_argument_values(graph, &bucket_results);
             debug_assert_eq!(
                 bucket_values.len(),
                 form.guard_count() + form.index_count() + form.value_count()
@@ -467,9 +476,16 @@ pub(super) fn build_hist_loop(
                             ));
                         }
                         reducer_arguments.extend_from_slice(operation_values);
-                        let results =
-                            emit_screma_lambda(graph, update, regions, operator, reducer_arguments);
-                        super::super::soac::lambda::materialize_result_values(graph, &results)
+                        let results = emit_screma_lambda(
+                            graph,
+                            update,
+                            regions,
+                            operator,
+                            reducer_arguments,
+                            None,
+                            next_effect,
+                        );
+                        super::super::soac::lambda::result_argument_values(graph, &results)
                     }
                 };
                 debug_assert_eq!(updated_values.len(), operation.destinations.len());
@@ -848,8 +864,16 @@ pub(super) fn build_bucket_insert(
             )
         })
         .collect::<Vec<_>>();
-    let results = emit_screma_lambda(graph, body, regions, &spec.form.bucket, arguments);
-    let results = super::super::soac::lambda::materialize_result_values(graph, &results);
+    let results = emit_screma_lambda(
+        graph,
+        body,
+        regions,
+        &spec.form.bucket,
+        arguments,
+        None,
+        next_effect,
+    );
+    let results = super::super::soac::lambda::result_argument_values(graph, &results);
     let [active, key, value] = results.as_slice() else {
         unreachable!("guarded bucket insertion envelope returns active, key, and value")
     };

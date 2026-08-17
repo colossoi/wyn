@@ -5,7 +5,7 @@ use crate::ast::TypeName;
 use super::super::program::OutputSlotId;
 use super::super::types::{
     GraphResource, OperandRef, ResultBinding, SegBody, SegResourceAccess, SegSpace, Semantic,
-    SoacDestination, SoacInputType, ValueId, WynSoacPhase,
+    SoacInputType, SoacOwnership, ValueId, WynSoacPhase,
 };
 
 /// One position in a Screma side effect's compact operand list.
@@ -30,13 +30,10 @@ impl<'a, P: WynSoacPhase> ScremaOperands<'a, P> {
         result: Option<&'a ResultBinding<Type<TypeName>>>,
     ) -> Result<Self, String> {
         op.validate()?;
-        let output_count = (0..op.result_count())
-            .filter(|&field| op.destination(field).is_some_and(SoacDestination::is_output_view))
-            .count();
-        let expected = op.inputs.len() + output_count;
+        let expected = op.inputs.len();
         if operands.len() != expected {
             return Err(format!(
-                "Screma requires {expected} typed input and output-view operands, found {}",
+                "Screma requires {expected} typed input operands, found {}",
                 operands.len()
             ));
         }
@@ -68,24 +65,6 @@ impl<'a, P: WynSoacPhase> ScremaOperands<'a, P> {
             operand: self.operands[slot],
             slot,
         }
-    }
-
-    pub fn output(&self, field: usize) -> Option<Operand> {
-        self.op.destination(field).filter(|destination| destination.is_output_view())?;
-        let slot = self.input_count()
-            + (0..field)
-                .filter(|&candidate| {
-                    self.op.destination(candidate).is_some_and(SoacDestination::is_output_view)
-                })
-                .count();
-        Some(Operand {
-            operand: self.operands[slot],
-            slot,
-        })
-    }
-
-    pub fn outputs(&self) -> impl Iterator<Item = Option<Operand>> + '_ {
-        (0..self.op.result_count()).map(|field| self.output(field))
     }
 
     pub fn result(&self) -> &ResultBinding<Type<TypeName>> {
@@ -498,7 +477,7 @@ fn validate_operator_lambda(
 /// derived result order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResultState {
-    pub destination: SoacDestination,
+    pub ownership: SoacOwnership,
 }
 
 /// Common access required by generic EGIR plumbing. Result metadata is a
@@ -579,20 +558,8 @@ impl<P: WynSoacPhase> Op<P> {
         self.form.result_count()
     }
 
-    pub fn destination(&self, field: usize) -> Option<SoacDestination> {
-        self.result_state.results().get(field).map(|result| result.destination)
-    }
-
-    pub fn place_destination(
-        &mut self,
-        field: usize,
-        placement: super::super::types::SoacPlacement,
-    ) -> bool {
-        let Some(result) = self.result_state.results_mut().get_mut(field) else {
-            return false;
-        };
-        result.destination.place(placement);
-        true
+    pub fn ownership(&self, field: usize) -> Option<SoacOwnership> {
+        self.result_state.results().get(field).map(|result| result.ownership)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -720,7 +687,7 @@ mod tests {
                 post: Lambda::identity(vec![i32_type]),
             },
             result_state: vec![ResultState {
-                destination: SoacDestination::fresh(),
+                ownership: SoacOwnership::Fresh,
             }],
             state: RawState,
         }
@@ -778,13 +745,13 @@ mod tests {
             form,
             result_state: vec![
                 ResultState {
-                    destination: SoacDestination::fresh(),
+                    ownership: SoacOwnership::Fresh,
                 },
                 ResultState {
-                    destination: SoacDestination::fresh(),
+                    ownership: SoacOwnership::Fresh,
                 },
                 ResultState {
-                    destination: SoacDestination::fresh(),
+                    ownership: SoacOwnership::Fresh,
                 },
             ],
             state: RawState,
@@ -820,7 +787,7 @@ mod tests {
                 post: region(1, vec![i32_type], vec![bool_type]),
             },
             result_state: vec![ResultState {
-                destination: SoacDestination::fresh(),
+                ownership: SoacOwnership::Fresh,
             }],
             state: RawState,
         };
@@ -898,7 +865,7 @@ mod tests {
                 ),
             },
             result_state: vec![ResultState {
-                destination: SoacDestination::fresh(),
+                ownership: SoacOwnership::Fresh,
             }],
             state: SemanticState::Serial,
         };

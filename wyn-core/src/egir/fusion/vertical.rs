@@ -55,7 +55,6 @@ impl InputTransform {
         graph: &EGraph,
         operand: ValueId,
         producer_results: &[ResultBinding<Type<TypeName>>],
-        producer_outputs: &[Option<ValueId>],
     ) -> Option<(usize, Self)> {
         let mut current = operand;
         let mut slices = Vec::new();
@@ -63,10 +62,6 @@ impl InputTransform {
             if let Some(field) =
                 producer_results.iter().position(|result| graph.value_has_result_origin(current, result))
             {
-                slices.reverse();
-                return Some((field, Self { slices }));
-            }
-            if let Some(field) = producer_outputs.iter().position(|output| *output == Some(current)) {
                 slices.reverse();
                 return Some((field, Self { slices }));
             }
@@ -188,7 +183,14 @@ pub(super) struct Candidate {
 }
 
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
-    super::bodies(inner).find_map(|(site, graph, _)| find_in_graph(inner, graph, site, oracle))
+    super::bodies(inner).find_map(|(site, graph, entry)| {
+        let external_roots = entry
+            .into_iter()
+            .flat_map(|entry| entry.routes())
+            .flat_map(|route| route.referenced_values())
+            .collect::<Vec<_>>();
+        find_in_graph(inner, graph, site, oracle, &external_roots)
+    })
 }
 
 fn find_in_graph(
@@ -196,6 +198,7 @@ fn find_in_graph(
     graph: &EGraph,
     site: BodySite,
     oracle: &SemanticGraph,
+    external_roots: &[ValueId],
 ) -> Option<Candidate> {
     for (block_id, block) in &graph.skeleton.blocks {
         for producer_index in 0..block.side_effects.len().saturating_sub(1) {
@@ -263,31 +266,13 @@ fn find_in_graph(
                     continue;
                 }
 
-                let producer_input_count = producer_op.inputs.len();
-                let mut producer_output_operands =
-                    producer.operands[producer_input_count..].iter().copied();
-                let producer_output_nodes = (0..producer_op.result_count())
-                    .map(|field| {
-                        producer_op
-                            .destination(field)
-                            .filter(|destination| destination.is_output_view())
-                            .map(|_| {
-                                producer_output_operands
-                                    .next()
-                                    .expect("missing producer output-view operand")
-                                    .value()
-                                    .expect("Screma output is a view")
-                            })
-                    })
-                    .collect::<Vec<_>>();
-                debug_assert!(producer_output_operands.next().is_none());
                 let consumer_input_count = consumer_op.inputs.len();
                 let routed = consumer.operands[..consumer_input_count]
                     .iter()
                     .enumerate()
                     .filter_map(|(input, operand)| {
                         let operand = operand.value().expect("Screma inputs are values or views");
-                        InputTransform::route(graph, operand, &producer_results, &producer_output_nodes)
+                        InputTransform::route(graph, operand, &producer_results)
                             .map(|(field, transform)| (input, field, transform))
                     })
                     .collect::<Vec<_>>();
@@ -300,11 +285,7 @@ fn find_in_graph(
                     consumer.operands[..consumer_input_count].iter().enumerate().any(|(input, operand)| {
                         let operand = operand.value().expect("Screma inputs are values or views");
                         !routed_inputs.contains(&input)
-                            && (depends_on_any_result(graph, operand, &producer_results)
-                                || producer_output_nodes
-                                    .iter()
-                                    .flatten()
-                                    .any(|output| graph_ops::pure_depends_on(graph, operand, *output)))
+                            && depends_on_any_result(graph, operand, &producer_results)
                     });
                 if has_unrouteable_input {
                     continue;
@@ -394,40 +375,8 @@ fn find_in_graph(
                     producer_index,
                     consumer_index,
                     &producer_results,
-                    producer_op,
+                    external_roots,
                 );
-                let retains_unplaced_fresh = retained_producer_outputs.iter().any(|field| {
-                    matches!(
-                        producer_op.form.result_id(*field),
-                        Some(screma::ResultId::Post(_))
-                    ) && producer_op
-                        .destination(*field)
-                        .is_some_and(|destination| destination.is_unplaced_fresh())
-                });
-                if retains_unplaced_fresh && consumer_op.form.operator_input_count() > 0 {
-                    continue;
-                }
-                let retains_placed_array = retained_producer_outputs.iter().any(|field| {
-                    matches!(
-                        producer_op.form.result_id(*field),
-                        Some(screma::ResultId::Post(_))
-                    ) && producer_op
-                        .destination(*field)
-                        .is_some_and(|destination| !destination.is_unplaced())
-                });
-                let consumer_has_unplaced_array = (0..consumer_op.result_count()).any(|field| {
-                    matches!(consumer_op.form.result_id(field), Some(screma::ResultId::Post(_)))
-                        && consumer_op
-                            .destination(field)
-                            .is_some_and(|destination| destination.is_unplaced())
-                });
-                // A fused map with both externally placed and unplaced array
-                // results has no parallel lowering recipe. Keeping these
-                // operations separate also leaves the consumer available for
-                // fusion into a later output envelope.
-                if retains_placed_array && consumer_has_unplaced_array {
-                    continue;
-                }
                 if !transform.is_identity() && !retained_producer_outputs.is_empty() {
                     continue;
                 }
@@ -452,13 +401,10 @@ fn retained_producer_outputs(
     producer_index: usize,
     consumer_index: usize,
     producer_results: &[ResultBinding<Type<TypeName>>],
-    producer: &screma::Op<crate::egir::types::Semantic>,
+    external_roots: &[ValueId],
 ) -> Vec<usize> {
-    (0..producer.result_count())
+    (0..producer_results.len())
         .filter(|field| {
-            if producer.destination(*field).is_some_and(|destination| !destination.is_unplaced()) {
-                return true;
-            }
             let results = producer_results[*field].values();
             for (block_id, block) in &graph.skeleton.blocks {
                 for (index, effect) in block.side_effects.iter().enumerate() {
@@ -477,7 +423,9 @@ fn retained_producer_outputs(
                     return true;
                 }
             }
-            false
+            external_roots
+                .iter()
+                .any(|root| results.iter().any(|result| graph_ops::pure_depends_on(graph, *root, *result)))
         })
         .collect()
 }
@@ -554,28 +502,24 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
     let mut consumer_mapping = vec![usize::MAX; consumer.result_types.len()];
     let mut result_state = Vec::with_capacity(normalized.outputs.len());
     let mut result_types = Vec::with_capacity(normalized.outputs.len());
-    let mut output_nodes = Vec::with_capacity(normalized.outputs.len());
     for (fused_field, origin) in normalized.outputs.iter().copied().enumerate() {
-        let (source_field, source_state, source_types, source_outputs, mapping) = match origin {
+        let (source_field, source_state, source_types, mapping) = match origin {
             fusion_screma::OutputOrigin::Producer(field) => (
                 field,
                 &producer.op.result_state,
                 &producer.result_types,
-                &producer.output_nodes,
                 &mut producer_mapping,
             ),
             fusion_screma::OutputOrigin::Consumer(field) => (
                 field,
                 &consumer.op.result_state,
                 &consumer.result_types,
-                &consumer.output_nodes,
                 &mut consumer_mapping,
             ),
         };
         mapping[source_field] = fused_field;
         result_state.push(source_state[source_field]);
         result_types.push(source_types[source_field].clone());
-        output_nodes.push(source_outputs[source_field]);
     }
 
     debug_assert!(consumer_mapping.iter().all(|field| *field != usize::MAX));
@@ -610,7 +554,6 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
 
     let mut operand_values = SmallVec::<[ValueId; 4]>::new();
     operand_values.extend(normalized.input_nodes);
-    operand_values.extend(output_nodes.into_iter().flatten());
     let synthesized = normalized.synthesized;
     let producer_results = producer.results;
     let consumer_results = consumer.results;

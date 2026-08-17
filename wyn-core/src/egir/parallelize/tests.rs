@@ -146,7 +146,7 @@ fn reduction_keeps_canonical_operator_lambda_together() {
             post: screma::Lambda::identity(vec![]),
         },
         result_state: vec![screma::ResultState {
-            destination: SoacDestination::fresh(),
+            ownership: crate::types::SoacOwnership::Fresh,
         }],
         state: screma::SemanticState::Serial,
     };
@@ -173,7 +173,7 @@ fn scan_form_carries_operator_and_neutral() {
             post: screma::Lambda::identity(vec![unit]),
         },
         result_state: vec![screma::ResultState {
-            destination: SoacDestination::fresh(),
+            ownership: crate::types::SoacOwnership::Fresh,
         }],
         state: screma::SemanticState::Serial,
     };
@@ -197,10 +197,10 @@ fn screma_form_carries_scan_and_reduction_operators() {
         },
         result_state: vec![
             screma::ResultState {
-                destination: SoacDestination::fresh(),
+                ownership: crate::types::SoacOwnership::Fresh,
             },
             screma::ResultState {
-                destination: SoacDestination::fresh(),
+                ownership: crate::types::SoacOwnership::Fresh,
             },
         ],
         state: screma::SemanticState::Serial,
@@ -290,10 +290,10 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
                 return None;
             };
             let value = effect.operands.first()?.value()?;
-            let resource =
-                phase2.body.graph.place_value_dependencies(*place).into_iter().find_map(|dependency| {
-                    graph_ops::storage_resource_under(&phase2.body.graph, dependency)
-                });
+            let resource = match &phase2.body.graph.place(*place).ty().region {
+                crate::egir::types::PlaceRegion::Resource(resource) => Some(*resource),
+                _ => None,
+            };
             (resource == Some(SemanticResourceRef(offsets))).then_some(value)
         })
         .expect("block-offset store");

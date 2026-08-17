@@ -13,7 +13,7 @@ pub type Converted = super::program::Program<
     super::ir::ProgramFamily<
         super::types::Raw,
         super::program::SemanticResourceDecl,
-        super::ir::UnrealizedOutputRoute,
+        super::ir::RealizedOutputRoute,
         super::program::CoreProgramData,
     >,
     super::program::RewriteGlobal,
@@ -263,17 +263,18 @@ fn summarize_definition_effects(
 /// the symbol table. Acts as a factory: `new_converter` snapshots the
 /// caller's current `pure_constants` set into a fresh `Converter`,
 /// keeping the per-call `clone()` inside one method.
-type CallableBoundary = (
-    Vec<FuncParam<SemanticResourceRef, Type<TypeName>>>,
-    FunctionResult<Type<TypeName>>,
-    CallEffects,
-);
-
 struct GlobalContext<'a> {
     top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
     symbols: &'a SymbolTable,
     pure_definitions: &'a LookupSet<SymbolId>,
-    callable_boundaries: &'a LookupMap<SymbolId, CallableBoundary>,
+    callable_boundaries: &'a LookupMap<
+        SymbolId,
+        (
+            Vec<FuncParam<SemanticResourceRef, Type<TypeName>>>,
+            FunctionResult<Type<TypeName>>,
+            CallEffects,
+        ),
+    >,
 }
 
 struct ConversionArenas {
@@ -1070,9 +1071,12 @@ fn convert_entry_point(
         entry.parameter_inputs[parameter_index].push(super::program::InputSlotId(slot));
     }
     for (slot, sources) in slot_sources.into_iter().enumerate().take(output_count) {
-        entry.outputs[slot]
-            .routes
-            .extend(sources.into_iter().map(|source| super::ir::UnrealizedOutputRoute { source }));
+        entry.outputs[slot].routes.extend(sources.into_iter().map(|source| {
+            super::ir::RealizedOutputRoute {
+                source,
+                writers: Vec::new(),
+            }
+        }));
     }
 
     Ok(entry)
@@ -1120,7 +1124,14 @@ struct Converter<'a, 'b> {
     /// Identities of hoisted pure constants.
     pure_constants: LookupSet<SymbolId>,
     /// Canonical callable metadata built before any bodies or calls.
-    callable_boundaries: &'a LookupMap<SymbolId, CallableBoundary>,
+    callable_boundaries: &'a LookupMap<
+        SymbolId,
+        (
+            Vec<FuncParam<SemanticResourceRef, Type<TypeName>>>,
+            FunctionResult<Type<TypeName>>,
+            CallEffects,
+        ),
+    >,
     /// Program-wide identity source for effect-chain endpoints.
     effect_ids: &'b mut crate::IdSource<EffectToken>,
     /// Span of the term currently being converted. Threaded through every
@@ -1150,7 +1161,14 @@ impl<'a, 'b> Converter<'a, 'b> {
         top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
         symbols: &'a SymbolTable,
         pure_constants: LookupSet<SymbolId>,
-        callable_boundaries: &'a LookupMap<SymbolId, CallableBoundary>,
+        callable_boundaries: &'a LookupMap<
+            SymbolId,
+            (
+                Vec<FuncParam<SemanticResourceRef, Type<TypeName>>>,
+                FunctionResult<Type<TypeName>>,
+                CallEffects,
+            ),
+        >,
         binding_ids: &'b mut crate::IdSource<u32>,
         effect_ids: &'b mut crate::IdSource<EffectToken>,
         arenas: &'b mut ConversionArenas,
@@ -2420,19 +2438,19 @@ impl<'a, 'b> Converter<'a, 'b> {
                 lam,
                 inputs,
                 destination,
-            } => self.convert_soac_map(lam, inputs, (*destination).into(), ty),
+            } => self.convert_soac_map(lam, inputs, *destination, ty),
             SoacOp::Reduce { op, ne, input, .. } => self.convert_soac_reduce(op, ne, input, ty),
             SoacOp::Scan {
                 op,
                 ne,
                 input,
                 destination,
-            } => self.convert_soac_scan(op, ne, input, (*destination).into(), ty),
+            } => self.convert_soac_scan(op, ne, input, *destination, ty),
             SoacOp::Filter {
                 pred,
                 input,
                 destination,
-            } => self.convert_soac_filter(pred, input, (*destination).into(), ty),
+            } => self.convert_soac_filter(pred, input, *destination, ty),
             SoacOp::Scatter { dest, lam, inputs } => self.convert_soac_scatter(dest, lam, inputs, ty),
             SoacOp::BucketScatter {
                 dest,
@@ -2460,35 +2478,71 @@ impl<'a, 'b> Converter<'a, 'b> {
         }
     }
 
-    /// Emit a SOAC placeholder as a side effect in the skeleton. Returns the
-    /// result ValueId that `soac_expand` will rebind during expansion.
+    fn emit_routed_soac(
+        &mut self,
+        soac: Soac<Raw>,
+        operands: SmallVec<[ValueId; 4]>,
+        result: ResultBinding<Type<TypeName>>,
+    ) -> ResultBinding<Type<TypeName>> {
+        let span = self.current_span;
+        let operands = operands.into_iter().map(|value| self.graph.operand_ref(value)).collect();
+        super::graph_ops::emit_pending_soac(
+            &mut self.graph,
+            self.current_block,
+            (),
+            soac,
+            operands,
+            result,
+            self.effect_ids,
+            span,
+        )
+    }
+
     fn emit_soac(
         &mut self,
         soac: Soac<Raw>,
         operands: SmallVec<[ValueId; 4]>,
         ty: Type<TypeName>,
     ) -> ValueId {
-        let span = self.current_span;
-        let operands = operands.into_iter().map(|value| self.graph.operand_ref(value)).collect();
-        let result = super::graph_ops::emit_pending_soac(
-            &mut self.graph,
-            self.current_block,
-            (),
-            soac,
-            operands,
-            ty,
-            self.effect_ids,
-            span,
-        );
+        let result = super::graph_ops::alloc_by_value_effect_result(&mut self.graph, ty);
+        let result = self.emit_routed_soac(soac, operands, result);
         super::graph_ops::pack_result_values(&mut self.graph, &result)
             .expect("a by-value SOAC result can be assembled")
+    }
+
+    fn emit_shape_preserving_soac(
+        &mut self,
+        soac: Soac<Raw>,
+        operands: SmallVec<[ValueId; 4]>,
+        input: ValueId,
+        ownership: SoacOwnership,
+        tuple_ty: Type<TypeName>,
+        result_ty: Type<TypeName>,
+    ) -> Result<ValueId, ConvertError> {
+        if ownership == SoacOwnership::UniqueInput {
+            if let Some(place) =
+                super::graph_ops::addressable_value_place(&mut self.graph, input, &result_ty)
+            {
+                let result = ResultBinding::product(
+                    tuple_ty,
+                    [ResultBinding::destination(
+                        result_ty,
+                        ResultDestination::Place(PlaceDestination::Fixed(place)),
+                    )],
+                );
+                self.emit_routed_soac(soac, operands, result);
+                return Ok(input);
+            }
+        }
+        let result = self.emit_soac(soac, operands, tuple_ty);
+        Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![result], result_ty))
     }
 
     fn convert_soac_map(
         &mut self,
         sb: &SoacBody,
         inputs: &[ArrayExpr],
-        destination: SoacDestination,
+        ownership: SoacOwnership,
         result_ty: Type<TypeName>,
     ) -> Result<ValueId, ConvertError> {
         let f_symbol = self.lambda_fn_symbol(&sb.lam)?;
@@ -2523,22 +2577,11 @@ impl<'a, 'b> Converter<'a, 'b> {
         let mut operands: SmallVec<[ValueId; 4]> = SmallVec::new();
         operands.extend_from_slice(&input_nids);
 
-        // Emit as a singleton Screma + project field 0. For consuming
-        // (`InputBuffer`) map the result aliases the input, so the
-        // Project's type must match the input view's type (View
-        // variant + buffer) rather than the TLC-default `result_ty`
-        // (Composite variant with NoBuffer). Mirrors the same handling
-        // in `convert_soac_scan` below — without it the SPIR-V backend
-        // panics trying to lower a `Composite[Variable, NoBuffer]`
-        // array type that survives because the consumer-side Project
-        // takes the TLC logical type even when the runtime tuple
-        // carries a View.
-        // A non-in-place `map` is shape-preserving — inherit the input's
-        // representation when `result_ty` carries an unresolved `Skolem` size
-        // (see `shape_preserving_result_ty`); otherwise keep `result_ty`.
-        let project_ty = if destination.is_input_buffer()
-            || destination.is_unplaced_unique_input()
-                && input_arr_types[0].array_variant().is_some_and(crate::types::is_array_variant_view)
+        // A uniquely owned storage input preserves its addressable
+        // representation. Other shape-preserving maps inherit an input shape
+        // when the logical result carries an unresolved size.
+        let project_ty = if ownership == SoacOwnership::UniqueInput
+            && input_arr_types[0].array_variant().is_some_and(crate::types::is_array_variant_view)
         {
             input_arr_types[0].clone()
         } else {
@@ -2550,32 +2593,28 @@ impl<'a, 'b> Converter<'a, 'b> {
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
 
         let map_region = self.function_id(f_symbol);
-        let screma_nid = self.emit_soac(
-            Soac::Screma(screma::Op {
-                inputs: input_arr_types.into_iter().map(SoacInputType::array).collect(),
-                form: screma::ScremaForm {
-                    pre: screma::Lambda::region(
-                        SegBody {
-                            region: map_region,
-                            captures: capture_nids
-                                .into_iter()
-                                .map(|value| self.graph.operand_ref(value))
-                                .collect(),
-                        },
-                        input_elem_types,
-                        vec![output_elem_ty.clone()],
-                    ),
-                    scans: Vec::new(),
-                    reductions: Vec::new(),
-                    post: screma::Lambda::identity(vec![output_elem_ty]),
-                },
-                result_state: vec![screma::ResultState { destination }],
-                state: screma::RawState,
-            }),
-            operands,
-            tuple_ty,
-        );
-        Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], project_ty))
+        let soac = Soac::Screma(screma::Op {
+            inputs: input_arr_types.into_iter().map(SoacInputType::array).collect(),
+            form: screma::ScremaForm {
+                pre: screma::Lambda::region(
+                    SegBody {
+                        region: map_region,
+                        captures: capture_nids
+                            .into_iter()
+                            .map(|value| self.graph.operand_ref(value))
+                            .collect(),
+                    },
+                    input_elem_types,
+                    vec![output_elem_ty.clone()],
+                ),
+                scans: Vec::new(),
+                reductions: Vec::new(),
+                post: screma::Lambda::identity(vec![output_elem_ty]),
+            },
+            result_state: vec![screma::ResultState { ownership }],
+            state: screma::RawState,
+        });
+        self.emit_shape_preserving_soac(soac, operands, input_nids[0], ownership, tuple_ty, project_ty)
     }
 
     /// Convert `reduce_by_index` to a histogram with an identity bucket and an
@@ -3095,7 +3134,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     post: screma::Lambda::identity(Vec::new()),
                 },
                 result_state: vec![screma::ResultState {
-                    destination: SoacDestination::fresh(),
+                    ownership: SoacOwnership::Fresh,
                 }],
                 state: screma::RawState,
             }),
@@ -3110,7 +3149,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         op: &SoacBody,
         ne: &Term,
         input: &ArrayExpr,
-        destination: SoacDestination,
+        ownership: SoacOwnership,
         result_ty: Type<TypeName>,
     ) -> Result<ValueId, ConvertError> {
         let operator_symbol = self.lambda_fn_symbol(&op.lam)?;
@@ -3122,21 +3161,11 @@ impl<'a, 'b> Converter<'a, 'b> {
 
         let operands: SmallVec<[ValueId; 4]> = smallvec![arr_nid];
 
-        // Emit as Screma { 0 maps, 1 Scan acc } + project field 0. For
-        // consuming scan the result aliases the input, so the Project's
-        // type must match the input view's type (View variant + buffer)
-        // rather than the TLC-default result_ty (Composite variant).
-        // Non-consuming scan keeps result_ty; realize_outputs fixes its
-        // variant via retarget_array_projection.
-        // Scan is shape-preserving: inherit the input's representation when
-        // `result_ty` carries an unresolved `Skolem` size, keeping scan's own
-        // output element type (the accumulator type = `result_ty`'s element).
-        // Mirror of the `convert_soac_map` guard; without it
-        // `scan(op, ne, filter(p, xs))` leaks the filter's Skolem size into the
-        // backend.
-        let project_ty = if destination.is_input_buffer()
-            || destination.is_unplaced_unique_input()
-                && arr_ty.array_variant().is_some_and(crate::types::is_array_variant_view)
+        // A scan preserves the input shape while changing its element to the
+        // accumulator type. A consuming scan routes that result to the input
+        // destination.
+        let project_ty = if ownership == SoacOwnership::UniqueInput
+            && arr_ty.array_variant().is_some_and(crate::types::is_array_variant_view)
         {
             arr_ty.clone()
         } else {
@@ -3148,42 +3177,38 @@ impl<'a, 'b> Converter<'a, 'b> {
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
         let scan_elem_ty = soac_element_type(&project_ty);
         let op_region = self.function_id(operator_symbol);
-        let screma_nid = self.emit_soac(
-            Soac::Screma(screma::Op {
-                inputs: vec![SoacInputType::array(arr_ty)],
-                form: screma::ScremaForm {
-                    pre: screma::Lambda::identity(vec![scan_elem_ty.clone()]),
-                    scans: vec![screma::Scan {
-                        operator: screma::Lambda::region(
-                            SegBody {
-                                region: op_region,
-                                captures: capture_nids
-                                    .into_iter()
-                                    .map(|value| self.graph.operand_ref(value))
-                                    .collect(),
-                            },
-                            vec![scan_elem_ty.clone(), scan_elem_ty.clone()],
-                            vec![scan_elem_ty.clone()],
-                        ),
-                        neutral: vec![init_nid],
-                    }],
-                    reductions: Vec::new(),
-                    post: screma::Lambda::identity(vec![scan_elem_ty.clone()]),
-                },
-                result_state: vec![screma::ResultState { destination }],
-                state: screma::RawState,
-            }),
-            operands,
-            tuple_ty,
-        );
-        Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], project_ty))
+        let soac = Soac::Screma(screma::Op {
+            inputs: vec![SoacInputType::array(arr_ty)],
+            form: screma::ScremaForm {
+                pre: screma::Lambda::identity(vec![scan_elem_ty.clone()]),
+                scans: vec![screma::Scan {
+                    operator: screma::Lambda::region(
+                        SegBody {
+                            region: op_region,
+                            captures: capture_nids
+                                .into_iter()
+                                .map(|value| self.graph.operand_ref(value))
+                                .collect(),
+                        },
+                        vec![scan_elem_ty.clone(), scan_elem_ty.clone()],
+                        vec![scan_elem_ty.clone()],
+                    ),
+                    neutral: vec![init_nid],
+                }],
+                reductions: Vec::new(),
+                post: screma::Lambda::identity(vec![scan_elem_ty.clone()]),
+            },
+            result_state: vec![screma::ResultState { ownership }],
+            state: screma::RawState,
+        });
+        self.emit_shape_preserving_soac(soac, operands, arr_nid, ownership, tuple_ty, project_ty)
     }
 
     fn convert_soac_filter(
         &mut self,
         pred: &SoacBody,
         input: &ArrayExpr,
-        destination: SoacDestination,
+        ownership: SoacOwnership,
         _result_ty: Type<TypeName>,
     ) -> Result<ValueId, ConvertError> {
         let predicate_symbol = self.lambda_fn_symbol(&pred.lam)?;
@@ -3237,7 +3262,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     state: filter::RawState {
                         storage: filter::Output::Local {
                             capacity: size,
-                            destination,
+                            ownership,
                         },
                     },
                 }),

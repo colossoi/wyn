@@ -13,8 +13,8 @@ use super::program::{
 };
 use super::soac::screma;
 use super::types::{
-    EGraph, EffectToken, OperandRef, PlaceId, SkeletonTerminator, Soac, SoacDestination, SoacInputType,
-    SoacPlacement, ValueId, WynLanguage,
+    EGraph, EffectToken, OperandRef, PlaceId, ResultBinding, SkeletonTerminator, Soac, SoacInputType,
+    ValueId, WynLanguage,
 };
 
 pub struct EntryBuilder<'a> {
@@ -162,8 +162,18 @@ impl<'a> EntryBuilder<'a> {
         let operands = inputs
             .iter()
             .map(|(node, _)| self.graph.operand_ref(*node))
-            .chain(output_views.iter().map(|(node, _)| self.graph.operand_ref(*node)))
             .collect::<SmallVec<[OperandRef; 4]>>();
+        let result_abi = super::ir::by_value_function_result::<WynLanguage>(tuple_ty.clone());
+        let result_fields = result_abi
+            .top_level_fields()
+            .into_iter()
+            .zip(&output_views)
+            .map(|(field, (view, _))| {
+                graph_ops::bind_result_to_view(&mut self.graph, &field, *view)
+                    .expect("a map destination must match its logical result shape")
+            })
+            .collect::<Vec<_>>();
+        let result = ResultBinding::product(tuple_ty, result_fields);
         let id = self.semantic_ids.next_id();
         let result = graph_ops::emit_pending_soac(
             &mut self.graph,
@@ -180,18 +190,18 @@ impl<'a> EntryBuilder<'a> {
                 result_state: result_types
                     .iter()
                     .map(|_| screma::ResultState {
-                        destination: SoacDestination::fresh().placed(SoacPlacement::OutputView),
+                        ownership: crate::types::SoacOwnership::Fresh,
                     })
                     .collect(),
                 state: screma::SemanticState::Serial,
             }),
             operands,
-            tuple_ty,
+            result,
             self.effect_ids,
             Some(self.span),
         );
         graph_ops::pack_result_values(&mut self.graph, &result)
-            .expect("a by-value map result can be assembled")
+            .expect("a view-routed map result can be assembled")
     }
 
     pub fn emit_load(&mut self, place: PlaceId, elem_ty: Type<TypeName>) -> ValueId {
@@ -232,6 +242,7 @@ impl<'a> EntryBuilder<'a> {
                     routes: Vec::new(),
                 })
                 .collect(),
+            internal_results: Vec::new(),
             resource_declarations: self.resource_declarations,
             params: Vec::new(),
             result: super::ir::by_value_function_result::<WynLanguage>(Type::Constructed(

@@ -9819,9 +9819,8 @@ entry gen(xs: []i32) []i32 =
     .expect("single-consumer reduce-over-map must lift + compile");
 }
 
-/// When `counts` is consumed by **both** a `reduce` and a `scan` (and a
-/// downstream gather then reads the scan result), EGIR materializes `counts`
-/// into one shared buffer that both downstream SOACs read from.
+/// When `counts` is consumed by both a `reduce` and a `scan`, EGIR
+/// materializes it into one shared buffer that both downstream SOACs read.
 #[test]
 fn multi_consumer_scan_plus_reduce_lifts() {
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
@@ -9844,8 +9843,15 @@ entry gen(xs: []i32) []i32 =
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert!(handoff_kinds.contains(&CompilerResourceKind::GatherHandoff));
-    assert!(handoff_kinds.contains(&CompilerResourceKind::ScalarHandoff));
+    assert_eq!(
+        handoff_kinds.iter().filter(|kind| **kind == CompilerResourceKind::MultiConsumerArray).count(),
+        1,
+        "one shared producer has one canonical handoff"
+    );
+    assert!(
+        !handoff_kinds.contains(&CompilerResourceKind::GatherHandoff),
+        "a multi-consumer producer is not a single-consumer gather"
+    );
 
     let lowered = lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE);
     crate::lower_ssa_to_spirv(lowered)
@@ -10905,11 +10911,8 @@ fn view_through_nested_fn_specialization_reads_own_buffer() {
     assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
 }
 
-/// A fixed array large enough for storage enters EGIR as a view even though
-/// its source-level named-helper ABI was composite. That view representation
-/// must cross both lifted-map capture boundaries and the final ordinary call
-/// into `leaf`; otherwise WGSL passes a `vec2<u32>` view handle to a helper
-/// expecting `array<array<u32, 64>, 64>`.
+/// A fixed storage array must remain addressable across lifted-map capture
+/// boundaries and the final ordinary call into `leaf`.
 #[test]
 fn fixed_view_through_two_named_helpers_emits_valid_wgsl() {
     std::thread::Builder::new()
@@ -10937,10 +10940,13 @@ entry nested_view(
                         ssa.functions.iter().map(|function| &function.name).collect::<Vec<_>>()
                     )
                 });
-            let (_, table_ty, _) = leaf.body.param(0).expect("leaf table parameter");
+            let table = leaf.body.parameter_place(0).expect("leaf table parameter remains addressable");
             assert!(
-                crate::types::array_view_buffer(table_ty).is_some(),
-                "leaf must retain the storage-view ABI before late inlining makes it unreachable"
+                matches!(
+                    leaf.body.place_elem_ty(table),
+                    polytype::Type::Constructed(crate::ast::TypeName::Array, _)
+                ),
+                "leaf table parameter must address array storage"
             );
 
             let reachable = crate::ssa::filter_reachable(ssa.clone());
@@ -11046,10 +11052,9 @@ entry main(roots: [1][1024]u32) [1]u32 =
         .expect("ranked-storage-index regression panicked");
 }
 
-/// View specialization of a mapped helper happens after its source body was
-/// first converted as a composite-array program. Generalizing the helper's
-/// parameter to `View` must also recover the ranked address chain in its body;
-/// otherwise the dynamic leaf coordinate materializes the complete row.
+/// A mapped helper's ranked storage access must remain an address chain rooted
+/// at its place parameter; otherwise the dynamic leaf coordinate materializes
+/// the complete row.
 #[test]
 fn mapped_helper_ranked_storage_index_loads_only_the_selected_leaf() {
     std::thread::Builder::new()
@@ -11104,13 +11109,15 @@ entry main(roots: [1][1024]u32) [4]u32 =
             }
             assert_eq!(load_places.len(), 1, "mapped helper performs one final leaf Load");
             assert_eq!(array_loads, 0, "mapped helper must not load an intermediate row");
-            let (_, parent_place) = place_indices
-                .iter()
-                .find(|(result, _)| *result == load_places[0])
-                .expect("mapped helper's leaf Load reads through PlaceIndex");
+            let mut root = load_places[0];
+            while let Some((_, parent)) = place_indices.iter().find(|(result, _)| *result == root) {
+                root = *parent;
+            }
             assert!(
-                view_places.contains(parent_place),
-                "mapped helper's leaf PlaceIndex extends its specialized ViewIndex"
+                (0..helper.body.params().len())
+                    .any(|index| helper.body.parameter_place(index) == Some(root))
+                    || view_places.contains(&root),
+                "mapped helper's indexed address chain must have an addressable boundary root"
             );
 
             let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("mapped ranked storage index lowers to WGSL");

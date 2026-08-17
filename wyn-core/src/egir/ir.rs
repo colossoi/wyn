@@ -464,22 +464,37 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
         R: Clone,
         P: Clone,
     {
+        self.destination_leaves_with_paths().into_iter().map(|(_, leaf)| leaf).collect()
+    }
+
+    /// Physical destination leaves paired with their logical product path.
+    pub fn destination_leaves_with_paths(&self) -> Vec<(Box<[usize]>, Self)>
+    where
+        Ty: Clone,
+        R: Clone,
+        P: Clone,
+    {
         fn walk<Ty: Clone, R: Clone, P: Clone>(
             node: &ResultNode<Ty, R, P>,
-            leaves: &mut Vec<ResultTree<Ty, R, P>>,
+            path: &mut Vec<usize>,
+            leaves: &mut Vec<(Box<[usize]>, ResultTree<Ty, R, P>)>,
         ) {
             match node {
                 ResultNode::Product { fields, .. } => {
-                    for field in fields {
-                        walk(field, leaves);
+                    for (index, field) in fields.iter().enumerate() {
+                        path.push(index);
+                        walk(field, path, leaves);
+                        path.pop();
                     }
                 }
-                ResultNode::Destination { .. } => leaves.push(ResultTree { root: node.clone() }),
+                ResultNode::Destination { .. } => {
+                    leaves.push((path.clone().into_boxed_slice(), ResultTree { root: node.clone() }))
+                }
             }
         }
 
         let mut leaves = Vec::with_capacity(self.destination_count());
-        walk(&self.root, &mut leaves);
+        walk(&self.root, &mut Vec::new(), &mut leaves);
         leaves
     }
 
@@ -760,6 +775,23 @@ impl<Ty> ResultBinding<Ty> {
     }
 }
 
+impl<Ty> FunctionResult<Ty> {
+    /// Destination parameters in physical result order. Bounded results
+    /// contribute both their storage and length parameters.
+    pub fn destination_parameters(&self) -> Vec<ParameterId> {
+        let mut parameters = Vec::new();
+        self.for_each_destination(|_, destination| match destination {
+            ResultDestination::ReturnValue(_) => {}
+            ResultDestination::Place(PlaceDestination::Fixed(parameter)) => parameters.push(*parameter),
+            ResultDestination::Place(PlaceDestination::Bounded { storage, length }) => {
+                parameters.push(*storage);
+                parameters.push(*length);
+            }
+        });
+        parameters
+    }
+}
+
 impl<Ty: Clone> FunctionResult<Ty> {
     pub fn bind(
         &self,
@@ -1008,6 +1040,10 @@ pub trait Language: Clone + std::fmt::Debug + Eq + std::hash::Hash {
     fn is_materialized_aggregate(ty: &Self::Ty) -> bool;
     fn is_view(ty: &Self::Ty) -> bool;
     fn product_fields(ty: &Self::Ty) -> Option<&[Self::Ty]>;
+
+    fn view_argument_matches(parameter: &Self::Ty, argument: &Self::Ty) -> bool {
+        parameter == argument
+    }
 }
 
 pub fn by_value_function_result<Lang: Language>(ty: Lang::Ty) -> FunctionResult<Lang::Ty> {
@@ -1114,6 +1150,9 @@ pub enum PlaceOp {
     Parameter {
         parameter: ParameterId,
     },
+    View {
+        view: ViewId,
+    },
     AllocaResult,
     Index {
         base: PlaceId,
@@ -1162,6 +1201,7 @@ impl<R, Ty> Place<R, Ty> {
 
     pub(crate) fn remap_value(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
         match &mut self.op {
+            PlaceOp::View { view } => view.remap_value(&mut map),
             PlaceOp::Index { index, .. } => *index = map(*index),
             PlaceOp::Slice { start, length, .. } => {
                 *start = map(*start);
@@ -1179,6 +1219,7 @@ impl<R, Ty> Place<R, Ty> {
         match &mut self.op {
             PlaceOp::Index { base, .. } | PlaceOp::Slice { base, .. } => *base = map(*base),
             PlaceOp::Parameter { .. }
+            | PlaceOp::View { .. }
             | PlaceOp::AllocaResult
             | PlaceOp::ViewIndex { .. }
             | PlaceOp::OutputSlot { .. } => {}
@@ -1193,6 +1234,9 @@ impl<R, Ty> Place<R, Ty> {
     ) -> Result<Place<S, Ty>, E> {
         let op = match self.op {
             PlaceOp::Parameter { parameter } => PlaceOp::Parameter { parameter },
+            PlaceOp::View { view } => PlaceOp::View {
+                view: ViewId(map_value(view.value())?),
+            },
             PlaceOp::AllocaResult => PlaceOp::AllocaResult,
             PlaceOp::Index { base, index } => PlaceOp::Index {
                 base: map_place(base)?,
@@ -1402,6 +1446,10 @@ impl<P: Family, Lang: Language> SideEffect<P, Lang> {
         self.result.as_ref()?.single_value()
     }
 
+    pub fn result_values(&self) -> Vec<ValueId> {
+        self.result.as_ref().map(ResultBinding::values).unwrap_or_default()
+    }
+
     pub fn effects(&self) -> Option<(EffectToken, EffectToken)> {
         self.effects
     }
@@ -1508,69 +1556,6 @@ pub enum SideEffectKind<P: Family> {
     /// A placeholder for an unexpanded SOAC. Produced by `from_tlc` and
     /// consumed by `soac_expand`. Never reaches elaborate.
     Soac(P::Soac),
-}
-
-/// External storage selected for a SOAC result by EGIR lowering.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SoacPlacement {
-    InputBuffer,
-    OutputView,
-}
-
-/// Complete lowering state for a SOAC result destination. Keeping candidate
-/// ownership and resolved placement in one enum prevents combinations whose
-/// ownership applies only before a concrete destination is selected.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SoacDestination {
-    Fresh,
-    UniqueInput,
-    InputBuffer,
-    OutputView,
-}
-
-impl SoacDestination {
-    pub const fn fresh() -> Self {
-        Self::Fresh
-    }
-
-    pub const fn unique_input() -> Self {
-        Self::UniqueInput
-    }
-
-    pub const fn placed(self, placement: SoacPlacement) -> Self {
-        match placement {
-            SoacPlacement::InputBuffer => Self::InputBuffer,
-            SoacPlacement::OutputView => Self::OutputView,
-        }
-    }
-
-    pub fn place(&mut self, placement: SoacPlacement) {
-        *self = self.placed(placement);
-    }
-
-    pub fn make_fresh(&mut self) {
-        *self = Self::fresh();
-    }
-
-    pub const fn is_unplaced_fresh(self) -> bool {
-        matches!(self, Self::Fresh)
-    }
-
-    pub const fn is_unplaced(self) -> bool {
-        matches!(self, Self::Fresh | Self::UniqueInput)
-    }
-
-    pub const fn is_unplaced_unique_input(self) -> bool {
-        matches!(self, Self::UniqueInput)
-    }
-
-    pub const fn is_input_buffer(self) -> bool {
-        matches!(self, Self::InputBuffer)
-    }
-
-    pub const fn is_output_view(self) -> bool {
-        matches!(self, Self::OutputView)
-    }
 }
 
 /// One concrete dimension of a segmented iteration space.
@@ -2130,6 +2115,7 @@ impl SideEffectIndex {
     pub fn build<P: Family, Lang: Language>(graph: &EGraph<P, Lang>) -> Self {
         let mut by_result = LookupMap::new();
         let mut by_call = LookupMap::new();
+        let mut result_sites = Vec::new();
         for (block, skeleton_block) in &graph.skeleton.blocks {
             for (index, effect) in skeleton_block.side_effects.iter().enumerate() {
                 let site = SideEffectSite { block, index };
@@ -2144,13 +2130,17 @@ impl SideEffectIndex {
                     continue;
                 };
                 for value in result.values() {
+                    result_sites.push((value, site));
                     let previous = by_result.insert(value, site);
                     assert!(
-                        previous.is_none(),
-                        "side-effect result has more than one producer: {value:?}"
+                        previous.is_none() || previous == Some(site),
+                        "side-effect result {value:?} has producers {previous:?} and {site:?}"
                     );
                 }
             }
+        }
+        for (value, site) in result_sites {
+            by_result.entry(graph.canonical_value(value)).or_insert(site);
         }
         Self { by_result, by_call }
     }
@@ -2163,6 +2153,10 @@ impl SideEffectIndex {
         self.by_call.get(&call).copied()
     }
 
+    pub fn calls(&self) -> impl Iterator<Item = (CallSiteId, SideEffectSite)> + '_ {
+        self.by_call.iter().map(|(call, site)| (*call, *site))
+    }
+
     pub fn effect<'a, P: Family, Lang: Language>(
         &self,
         graph: &'a EGraph<P, Lang>,
@@ -2170,9 +2164,12 @@ impl SideEffectIndex {
     ) -> Option<&'a SideEffect<P, Lang>> {
         let site = self.site(result)?;
         let effect = graph.skeleton.blocks.get(site.block)?.side_effects.get(site.index)?;
+        let result = graph.canonical_value(result);
         graph
             .effect_result_binding(effect)
-            .is_some_and(|binding| binding.contains_value(result))
+            .is_some_and(|binding| {
+                binding.values().into_iter().any(|value| graph.canonical_value(value) == result)
+            })
             .then_some(effect)
     }
 
@@ -2183,7 +2180,13 @@ impl SideEffectIndex {
     ) -> Option<(&'a SideEffect<P, Lang>, ValueId, usize)> {
         let value = graph.canonical_value(value);
         if let Some(effect) = self.effect(graph, value) {
-            let field = graph.effect_result_binding(effect)?.top_level_field_containing_value(value)?;
+            let field =
+                graph.effect_result_binding(effect)?.top_level_fields().iter().position(|field| {
+                    field
+                        .values()
+                        .into_iter()
+                        .any(|field_value| graph.canonical_value(field_value) == value)
+                })?;
             return Some((effect, value, field));
         }
         graph.value(value).result_origins().iter().find_map(|origin| {
@@ -2199,10 +2202,13 @@ impl SideEffectIndex {
         graph: &'a mut EGraph<P, Lang>,
         result: ValueId,
     ) -> Option<&'a mut SideEffect<P, Lang>> {
+        let result = graph.canonical_value(result);
         let site = self.site(result)?;
         let contains_result = {
             let effect = graph.skeleton.blocks.get(site.block)?.side_effects.get(site.index)?;
-            graph.effect_result_binding(effect).is_some_and(|binding| binding.contains_value(result))
+            graph.effect_result_binding(effect).is_some_and(|binding| {
+                binding.values().into_iter().any(|value| graph.canonical_value(value) == result)
+            })
         };
         if !contains_result {
             return None;
@@ -2432,6 +2438,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             }
             match self.place(place).op() {
                 PlaceOp::Parameter { .. } | PlaceOp::AllocaResult | PlaceOp::OutputSlot { .. } => {}
+                PlaceOp::View { view } => values.push(view.value()),
                 PlaceOp::Index { base, index } => {
                     pending.push(*base);
                     values.push(*index);
@@ -2466,7 +2473,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     pub fn view_id(&self, id: ValueId) -> ViewId {
         let id = self.canonical_value(id);
         assert!(
-            Lang::is_view(self.value(id).ty()),
+            Lang::is_view(self.value(id).ty()) && self.try_view_region(id).is_some(),
             "value {id:?} is not an addressable view: type {:?}, definition {:?}",
             self.value(id).ty(),
             self.value(id).kind()
@@ -2476,7 +2483,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 
     pub fn operand_ref(&self, id: ValueId) -> OperandRef {
         let id = self.canonical_value(id);
-        if Lang::is_view(self.value(id).ty()) {
+        if Lang::is_view(self.value(id).ty()) && self.try_view_region(id).is_some() {
             OperandRef::View(ViewId(id))
         } else {
             OperandRef::Value(id)
@@ -2565,12 +2572,22 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             ));
         }
         for (index, (argument, parameter)) in arguments.iter().zip(parameters).enumerate() {
-            let matches = matches!(
-                (argument, parameter.representation()),
-                (OperandRef::Value(_), OperandType::Value(_))
-                    | (OperandRef::View(_), OperandType::View(_))
-                    | (OperandRef::Place(_), OperandType::Place(_))
-            );
+            let matches = match (argument, parameter.representation()) {
+                (OperandRef::Value(value), OperandType::Value(ty)) => {
+                    self.nodes.get(*value).is_some_and(|value| Lang::view_argument_matches(ty, value.ty()))
+                }
+                (OperandRef::View(view), OperandType::View(ty)) => self
+                    .nodes
+                    .get(view.value())
+                    .is_some_and(|value| Lang::view_argument_matches(&ty.array, value.ty())),
+                (OperandRef::Place(place), OperandType::Place(ty)) => {
+                    self.places.get(*place).is_some_and(|place| {
+                        Lang::view_argument_matches(&ty.pointee, &place.ty().pointee)
+                            && ty.access.accepts(place.ty().access)
+                    })
+                }
+                _ => false,
+            };
             if !matches {
                 let argument_ty = argument.value().and_then(|value| self.nodes.get(value)).map(Value::ty);
                 return Err(format!(
@@ -2697,6 +2714,9 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             Lang::is_view(&ty),
             "place view must have an addressable view type"
         );
+        if let PlaceOp::View { view } = self.place(place).op() {
+            return *view;
+        }
         ViewId(self.nodes.insert(Value {
             kind: ValueKind::PlaceView { place },
             ty,
@@ -2723,6 +2743,25 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         self.insert_place(PlaceOp::Parameter { parameter }, ty, None)
     }
 
+    pub fn add_view_place(
+        &mut self,
+        view: ViewId,
+        pointee: Lang::Ty,
+        access: PlaceAccess,
+        span: Option<Span>,
+    ) -> PlaceId {
+        let (region, view_access) = self.view_region(view.value());
+        self.insert_place(
+            PlaceOp::View { view },
+            PlaceType {
+                pointee,
+                region,
+                access: if view_access.accepts(access) { access } else { view_access },
+            },
+            span,
+        )
+    }
+
     pub fn add_alloca_place(
         &mut self,
         ty: PlaceType<P::Resource, Lang::Ty>,
@@ -2738,6 +2777,9 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         pointee: Lang::Ty,
         span: Option<Span>,
     ) -> PlaceId {
+        if let PlaceOp::View { view } = self.place(base).op().clone() {
+            return self.add_view_index_place(view, index, pointee, span);
+        }
         if let PlaceOp::Slice { base, start, .. } = self.place(base).op().clone() {
             let index_ty = self.value(index).ty().clone();
             let index = self.intern_pure(
@@ -2793,52 +2835,53 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         self.insert_place(PlaceOp::ViewIndex { view, index }, ty, span)
     }
 
-    fn view_region(&self, view: ValueId) -> (PlaceRegion<P::Resource>, PlaceAccess) {
+    fn try_view_region(&self, view: ValueId) -> Option<(PlaceRegion<P::Resource>, PlaceAccess)> {
         let value = self.value(view);
         if let Some(alias) = value.alias {
-            return self.view_region(alias);
+            return self.try_view_region(alias);
         }
         match value.kind() {
             ValueKind::Pure {
                 op: OpTag::StorageView(PureViewSource::Storage(resource)),
                 ..
-            } => (PlaceRegion::Resource(resource.clone()), PlaceAccess::ReadWrite),
+            } => Some((PlaceRegion::Resource(resource.clone()), PlaceAccess::ReadWrite)),
             ValueKind::Pure {
                 op: OpTag::StorageView(PureViewSource::Workgroup { .. }),
                 ..
-            } => (PlaceRegion::Workgroup, PlaceAccess::ReadWrite),
+            } => Some((PlaceRegion::Workgroup, PlaceAccess::ReadWrite)),
             ValueKind::Pure {
                 op: OpTag::StorageView(PureViewSource::Inherited),
                 operands,
             } => {
                 let parent = *operands.last().expect("inherited view has a parent operand");
-                self.view_region(parent)
+                self.try_view_region(parent)
             }
             ValueKind::Pure {
                 op: OpTag::Project { .. },
                 operands,
-            } if operands.len() == 1 => (PlaceRegion::Parametric, PlaceAccess::ReadOnly),
+            } if operands.len() == 1 => Some((PlaceRegion::Parametric, PlaceAccess::ReadOnly)),
             ValueKind::FuncParam { .. }
             | ValueKind::BlockParam { .. }
             | ValueKind::CallResult { .. }
-            | ValueKind::Union { .. } => (PlaceRegion::Parametric, PlaceAccess::ReadOnly),
+            | ValueKind::Union { .. } => Some((PlaceRegion::Parametric, PlaceAccess::ReadOnly)),
             ValueKind::PlaceView { place } => {
                 let place = self.place(*place).ty();
-                (place.region.clone(), place.access)
+                Some((place.region.clone(), place.access))
             }
-            ValueKind::Pure { .. } => {
-                panic!(
-                    "value {view:?} is marked as a view but {:?} has no addressable view producer",
-                    value.kind()
-                )
-            }
-            ValueKind::Constant(_) | ValueKind::SideEffectResult | ValueKind::PlaceLength { .. } => {
-                panic!(
-                    "value {view:?} is marked as a view but {:?} has no addressable view producer",
-                    value.kind()
-                )
-            }
+            ValueKind::Pure { .. }
+            | ValueKind::Constant(_)
+            | ValueKind::SideEffectResult
+            | ValueKind::PlaceLength { .. } => None,
         }
+    }
+
+    fn view_region(&self, view: ValueId) -> (PlaceRegion<P::Resource>, PlaceAccess) {
+        self.try_view_region(view).unwrap_or_else(|| {
+            panic!(
+                "value {view:?} is marked as a view but {:?} has no addressable view producer",
+                self.value(view).kind()
+            )
+        })
     }
 
     pub fn add_output_place(&mut self, index: usize, ty: PlaceType<P::Resource, Lang::Ty>) -> PlaceId {
@@ -3001,8 +3044,68 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         }
         let swap = |value: ValueId| if value == old { new } else { value };
         self.replace_node_references(old, new);
+        let replacement_place = match replacement_operand {
+            OperandRef::View(view) => match self.nodes[view.value()].kind() {
+                ValueKind::PlaceView { place } => Some(*place),
+                _ => None,
+            },
+            _ => None,
+        };
         for (_, place) in &mut self.places {
             place.remap_value(swap);
+            if let (Some(base), PlaceOp::ViewIndex { view, index }) = (replacement_place, place.op.clone())
+            {
+                if view.value() == new {
+                    place.op = PlaceOp::Index { base, index };
+                }
+            }
+        }
+        if let Some(base) = replacement_place {
+            let inherited = self
+                .nodes
+                .iter()
+                .filter_map(|(value, definition)| match definition.kind() {
+                    ValueKind::Pure {
+                        op: OpTag::StorageView(PureViewSource::Inherited),
+                        operands,
+                    } if operands.len() == 3 && operands[2] == new => Some((
+                        value,
+                        operands[0],
+                        operands[1],
+                        definition.ty().clone(),
+                        definition.span(),
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let mut slices = LookupMap::new();
+            for (value, start, length, ty, span) in inherited {
+                let slice = self.add_slice_place(base, start, length, ty, span);
+                self.unindex_current_pure(value);
+                self.nodes[value].kind = ValueKind::PlaceView { place: slice };
+                slices.insert(value, slice);
+            }
+            let indexed_slices = self
+                .places
+                .iter()
+                .filter_map(|(place, definition)| {
+                    let PlaceOp::ViewIndex { view, index } = definition.op() else {
+                        return None;
+                    };
+                    let base = *slices.get(&view.value())?;
+                    Some((
+                        place,
+                        base,
+                        *index,
+                        definition.ty().pointee.clone(),
+                        definition.span(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            for (place, base, index, pointee, span) in indexed_slices {
+                let indexed = self.add_index_place(base, index, pointee, span);
+                self.replace_place_references(place, indexed);
+            }
         }
         for (_, call) in &mut self.calls {
             for argument in call.arguments_mut() {
@@ -3624,12 +3727,6 @@ pub enum OutputWriter {
     Effect(EffectToken),
 }
 
-/// Declared output ownership carried through EGIR physicalization.
-#[derive(Debug, Clone)]
-pub struct UnrealizedOutputRoute {
-    pub source: SlotSource,
-}
-
 /// An output route whose concrete writers have been installed in the graph.
 #[derive(Debug, Clone)]
 pub struct RealizedOutputRoute {
@@ -3637,14 +3734,32 @@ pub struct RealizedOutputRoute {
     pub writers: Vec<OutputWriter>,
 }
 
-pub trait RemapBlockIds {
-    fn remap_block_ids(&mut self, blocks: &LookupMap<BlockId, BlockId>);
+impl RealizedOutputRoute {
+    pub fn referenced_values(&self) -> impl Iterator<Item = ValueId> + '_ {
+        std::iter::once(self.source.value).chain(self.writers.iter().filter_map(|writer| match writer {
+            OutputWriter::Value(value) => Some(*value),
+            OutputWriter::Effect(_) => None,
+        }))
+    }
+
+    pub fn replace_values(&mut self, replacements: &[(ValueId, ValueId)]) {
+        let replace = |value| {
+            replacements
+                .iter()
+                .find_map(|(source, replacement)| (*source == value).then_some(*replacement))
+                .unwrap_or(value)
+        };
+        self.source.value = replace(self.source.value);
+        for writer in &mut self.writers {
+            if let OutputWriter::Value(value) = writer {
+                *value = replace(*value);
+            }
+        }
+    }
 }
 
-impl RemapBlockIds for UnrealizedOutputRoute {
-    fn remap_block_ids(&mut self, blocks: &LookupMap<BlockId, BlockId>) {
-        self.source.block = blocks[&self.source.block];
-    }
+pub trait RemapBlockIds {
+    fn remap_block_ids(&mut self, blocks: &LookupMap<BlockId, BlockId>);
 }
 
 impl RemapBlockIds for RealizedOutputRoute {
@@ -3685,6 +3800,14 @@ pub struct EntryOutput<R, Route, Lang: Language> {
     pub routes: Vec<Route>,
 }
 
+/// A compiler-materialized result routed to an internal resource. Keeping
+/// this outside `EntryOutput` makes it impossible to publish as host ABI.
+#[derive(Debug, Clone)]
+pub struct InternalResultRoute<R, Route> {
+    pub resource: R,
+    pub route: Route,
+}
+
 impl<R, Route, Lang: Language> std::ops::Deref for EntryOutput<R, Route, Lang> {
     type Target = InterfaceEntryOutput<Lang::Ty>;
 
@@ -3711,6 +3834,7 @@ pub struct Entry<P: Family, ResourceDecl, Route, Lang: Language> {
     /// A parameter may expand into multiple slots (for example tuple views).
     pub parameter_inputs: Vec<Vec<super::program::InputSlotId>>,
     pub outputs: Vec<EntryOutput<P::Resource, Route, Lang>>,
+    pub internal_results: Vec<InternalResultRoute<P::Resource, Route>>,
     pub resource_declarations: Vec<ResourceDecl>,
     pub(crate) params: Vec<FuncParam<P::Resource, Lang::Ty>>,
     pub(crate) result: FunctionResult<Lang::Ty>,
@@ -3719,11 +3843,29 @@ pub struct Entry<P: Family, ResourceDecl, Route, Lang: Language> {
 
 impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, ResourceDecl, Route, Lang> {
     pub fn routes(&self) -> impl Iterator<Item = &Route> {
-        self.outputs.iter().flat_map(|output| &output.routes)
+        self.outputs
+            .iter()
+            .flat_map(|output| &output.routes)
+            .chain(self.internal_results.iter().map(|result| &result.route))
     }
 
     pub fn routes_mut(&mut self) -> impl Iterator<Item = &mut Route> {
-        self.outputs.iter_mut().flat_map(|output| &mut output.routes)
+        self.outputs
+            .iter_mut()
+            .flat_map(|output| &mut output.routes)
+            .chain(self.internal_results.iter_mut().map(|result| &mut result.route))
+    }
+
+    pub fn resource_routes(&self) -> impl Iterator<Item = (&P::Resource, &Route)> {
+        self.outputs
+            .iter()
+            .flat_map(|output| {
+                output
+                    .resource
+                    .iter()
+                    .flat_map(move |resource| output.routes.iter().map(move |route| (resource, route)))
+            })
+            .chain(self.internal_results.iter().map(|result| (&result.resource, &result.route)))
     }
 
     pub fn map_graph(mut self, map: impl FnOnce(EGraph<P, Lang>) -> EGraph<P, Lang>) -> Self {
@@ -3778,6 +3920,7 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
                     routes: Vec::new(),
                 })
                 .collect(),
+            internal_results: Vec::new(),
             resource_declarations,
             params,
             result,
@@ -3880,6 +4023,7 @@ impl<P: Family, ResourceDecl, Route, Lang: Language> Entry<P, ResourceDecl, Rout
             inputs,
             parameter_inputs,
             outputs,
+            internal_results,
             resource_declarations,
             params,
             result,
@@ -3898,6 +4042,13 @@ impl<P: Family, ResourceDecl, Route, Lang: Language> Entry<P, ResourceDecl, Rout
                     inner: output.inner,
                     resource: output.resource,
                     routes: output.routes.into_iter().map(&mut map).collect(),
+                })
+                .collect(),
+            internal_results: internal_results
+                .into_iter()
+                .map(|result| InternalResultRoute {
+                    resource: result.resource,
+                    route: map(result.route),
                 })
                 .collect(),
             resource_declarations,

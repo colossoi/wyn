@@ -60,7 +60,15 @@ fn find_in_graph(
     oracle: &SemanticGraph,
     routes: Option<&[RealizedOutputRoute]>,
 ) -> Option<Candidate> {
-    let live = graph_ops::reachable_execution_values(graph).into_iter().collect::<HashSet<_>>();
+    let live = graph_ops::reachable_execution_values_with_roots(
+        graph,
+        routes
+            .into_iter()
+            .flat_map(|routes| routes.iter())
+            .flat_map(RealizedOutputRoute::referenced_values),
+    )
+    .into_iter()
+    .collect::<HashSet<_>>();
     for (block_id, block) in &graph.skeleton.blocks {
         for (filter_index, effect) in block.side_effects.iter().enumerate() {
             let SideEffectKind::Soac(SoacEffect(filter_id, Soac::Filter(_))) = &effect.kind else {
@@ -368,7 +376,7 @@ fn build_masked_pre(
         &args[..input_types.len()],
         &args[cursor..cursor + mapped_capture_count],
     );
-    let mapped = lambda_ops::materialize_result_values(&mut graph, &mapped);
+    let mapped = lambda_ops::result_argument_values(&mut graph, &mapped);
     cursor += mapped_capture_count;
     let predicate_capture_count = filter.body.predicate.capture_count();
     let mapped_arguments = mapped.iter().map(|value| graph.operand_ref(*value)).collect::<Vec<_>>();
@@ -379,7 +387,7 @@ fn build_masked_pre(
         &mapped_arguments,
         &args[cursor..cursor + predicate_capture_count],
     );
-    let predicate = lambda_ops::materialize_result_values(&mut graph, &predicate);
+    let predicate = lambda_ops::result_argument_values(&mut graph, &predicate);
     cursor += predicate_capture_count;
     debug_assert_eq!(predicate.len(), 1);
 
@@ -395,7 +403,7 @@ fn build_masked_pre(
             &consumer_args,
             &args[cursor..cursor + consumer_capture_count],
         );
-        selected.extend(lambda_ops::materialize_result_values(&mut graph, &results));
+        selected.extend(lambda_ops::result_argument_values(&mut graph, &results));
         cursor += consumer_capture_count;
         let neutral_count = consumer.reduction_input_count();
         fallback.extend(
@@ -515,7 +523,7 @@ fn rewrite_with_consumer(
             if let Some((count, _, _)) = &count_project {
                 op.form.reductions.push(count.clone());
                 op.result_state.push(screma::ResultState {
-                    destination: crate::egir::types::SoacDestination::fresh(),
+                    ownership: crate::types::SoacOwnership::Fresh,
                 });
             }
             let screma::SemanticState::Segmented { space, resources, .. } = op.semantic_state_mut() else {
@@ -610,7 +618,7 @@ fn rewrite_count_only(
                             post: screma::Lambda::identity(vec![]),
                         },
                         result_state: vec![screma::ResultState {
-                            destination: crate::egir::types::SoacDestination::fresh(),
+                            ownership: crate::types::SoacOwnership::Fresh,
                         }],
                         state: screma::SemanticState::Segmented {
                             space: filter.space.clone(),

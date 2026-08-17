@@ -573,12 +573,6 @@ impl<Ty> EntryOutput<Ty> {
             _ => None,
         }
     }
-
-    pub fn make_storage_internal(&mut self) {
-        if let EntryOutputKind::Storage { exposure, .. } = &mut self.kind {
-            *exposure = BindingExposure::Internal;
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -23,7 +23,7 @@ pub use super::ir::{
     CallSiteId, EffectOp, EffectToken, Family, FlowValueId, FuncParam, FunctionResult, GraphResource,
     Language, OperandRef, OperandType, ParameterId, PlaceAccess, PlaceDestination, PlaceId, PlaceRegion,
     PlaceType, RegionId, ResultBinding, ResultDestination, ReturnSlotId, SegBody, SideEffectIndex,
-    SideEffectSite, SoacDestination, SoacOwnership, SoacPlacement, ValueId, ViewId, ViewType,
+    SideEffectSite, SoacOwnership, ValueId, ViewId, ViewType,
 };
 pub use crate::ResourceAccess;
 
@@ -53,6 +53,40 @@ impl Language for WynLanguage {
             _ => None,
         }
     }
+
+    fn view_argument_matches(parameter: &Self::Ty, argument: &Self::Ty) -> bool {
+        fn matches(parameter: &Type<TypeName>, argument: &Type<TypeName>) -> bool {
+            if parameter == argument {
+                return true;
+            }
+            match (parameter, argument) {
+                (Type::Variable(_), _) => true,
+                (
+                    Type::Constructed(TypeName::Array, parameter_args),
+                    Type::Constructed(TypeName::Array, argument_args),
+                ) if parameter_args.len() == 4 && argument_args.len() == 4 => {
+                    matches(&parameter_args[0], &argument_args[0])
+                        && matches(&parameter_args[1], &argument_args[1])
+                        && (matches!(
+                            parameter_args[2],
+                            Type::Variable(_) | Type::Constructed(TypeName::SizePlaceholder, _)
+                        ) || matches(&parameter_args[2], &argument_args[2]))
+                }
+                (
+                    Type::Constructed(parameter_name, parameter_args),
+                    Type::Constructed(argument_name, argument_args),
+                ) if parameter_name == argument_name && parameter_args.len() == argument_args.len() => {
+                    parameter_args
+                        .iter()
+                        .zip(argument_args)
+                        .all(|(parameter, argument)| matches(parameter, argument))
+                }
+                _ => false,
+            }
+        }
+
+        matches(parameter, argument)
+    }
 }
 
 pub trait WynSoacPhase: Family<Soac = SoacEffect<Self>> + Sized {
@@ -75,6 +109,22 @@ pub enum Soac<P: WynSoacPhase> {
 }
 
 impl<P: WynSoacPhase> Soac<P> {
+    pub(crate) fn written_views(&self) -> impl Iterator<Item = ViewId> + '_ {
+        match self {
+            Self::Hist(op) => op.form.written_views().collect::<Vec<_>>(),
+            Self::Screma(_) | Self::Filter(_) => Vec::new(),
+        }
+        .into_iter()
+    }
+
+    pub(crate) fn input_types_mut(&mut self) -> &mut [SoacInputType] {
+        match self {
+            Self::Screma(op) => &mut op.inputs,
+            Self::Filter(op) => &mut op.body.inputs,
+            Self::Hist(op) => &mut op.inputs,
+        }
+    }
+
     pub(crate) fn seg_bodies(&self) -> Vec<&SegBody> {
         match self {
             Self::Screma(op) => {
@@ -736,6 +786,7 @@ where
             inputs,
             parameter_inputs,
             mut outputs,
+            mut internal_results,
             resource_declarations,
             params,
             result,
@@ -745,6 +796,9 @@ where
         for route in outputs.iter_mut().flat_map(|output| &mut output.routes) {
             route.remap_block_ids(&blocks);
         }
+        for result in &mut internal_results {
+            result.route.remap_block_ids(&blocks);
+        }
         Ok(super::ir::Entry {
             id,
             name,
@@ -753,20 +807,12 @@ where
             inputs,
             parameter_inputs,
             outputs,
+            internal_results,
             resource_declarations,
             params,
             result,
             graph,
         })
-    }
-}
-
-impl From<SoacOwnership> for SoacDestination {
-    fn from(ownership: SoacOwnership) -> Self {
-        match ownership {
-            SoacOwnership::Fresh => Self::fresh(),
-            SoacOwnership::UniqueInput => Self::unique_input(),
-        }
     }
 }
 

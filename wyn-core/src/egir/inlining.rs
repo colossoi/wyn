@@ -843,11 +843,16 @@ fn validate_call<P: Family>(
                 caller.nodes.get(*value).is_some_and(|node| node.ty() == ty)
             }
             (OperandRef::View(view), super::ir::OperandType::View(ty)) => {
-                caller.nodes.get(view.value()).is_some_and(|node| node.ty() == &ty.array)
+                caller.nodes.get(view.value()).is_some_and(|node| {
+                    <WynLanguage as super::ir::Language>::view_argument_matches(&ty.array, node.ty())
+                })
             }
             (OperandRef::Place(place), super::ir::OperandType::Place(ty)) => {
                 caller.places().get(*place).is_some_and(|place| {
-                    place.ty().pointee == ty.pointee && ty.access.accepts(place.ty().access)
+                    <WynLanguage as super::ir::Language>::view_argument_matches(
+                        &ty.pointee,
+                        &place.ty().pointee,
+                    ) && ty.access.accepts(place.ty().access)
                 })
             }
             _ => false,

@@ -17,16 +17,16 @@ use super::super::graph_projector::{
 };
 use super::super::program::{
     CompilerResource, CompilerResourceKind, LogicalSize, MaterializationId, MaterializationRequirement,
-    OutputWriter, Program, ResourceId, SemanticEntry, SemanticOpId, SemanticResourceDecl,
-    SemanticResourceRef,
+    OutputWriter, Program, RealizedOutputRoute, ResourceId, SemanticEntry, SemanticOpId,
+    SemanticResourceDecl, SemanticResourceRef, SlotSource,
 };
 use super::super::semantic_graph::SemanticGraph;
 use super::super::soac::{filter, screma};
 use super::super::stage_variance::StageDependenceAnalysis;
 use super::super::types::{
     EGraph, EffectToken, PureOp, ResourceAccess, ResultBinding, SegExtent, SegResourceAccess, SegSpace,
-    Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect,
-    SoacPlacement, ValueId, ValueKind, ViewId, WynLanguage,
+    Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId,
+    ValueKind, ViewId, WynLanguage,
 };
 use super::ResourcesAllocated;
 use crate::ast::TypeName;
@@ -131,8 +131,6 @@ pub fn resolve_residency(mut program: ResourcesAllocated) -> Result<ResourcesAll
         };
         program = apply_materialization(program, plan)?;
     }
-    program = super::super::realize_outputs::reconcile::reconcile_representation_drift(program)
-        .map_err(|error| format!("materialized storage-view reconciliation failed: {error}"))?;
     if cfg!(debug_assertions) {
         super::super::realize_outputs::verify::check(&program).map_err(|error| error.to_string())?;
     }
@@ -314,15 +312,16 @@ fn operation_result_residency(
     let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() else {
         return None;
     };
-    let cloneable = op.result_state.iter().all(|result| result.destination.is_unplaced_fresh())
-        && resources.iter().all(|resource| {
-            resource.access == ResourceAccess::Read
-                || entry
-                    .outputs
-                    .iter()
-                    .filter_map(|output| output.resource)
-                    .any(|output| output == resource.resource)
-        });
+    let cloneable =
+        op.result_state.iter().all(|result| result.ownership == crate::types::SoacOwnership::Fresh)
+            && resources.iter().all(|resource| {
+                resource.access == ResourceAccess::Read
+                    || entry
+                        .outputs
+                        .iter()
+                        .filter_map(|output| output.resource)
+                        .any(|output| output == resource.resource)
+            });
     let dependencies = dependency_effects(&entry.graph, site)?;
     let upstream =
         dependencies.iter().copied().filter(|index| *index != site.index).collect::<HashSet<_>>();
@@ -827,7 +826,7 @@ fn dependencies_are_cloneable(graph: &EGraph, block_id: BlockId, effects: &HashS
                         && op
                             .result_state
                             .iter()
-                            .all(|result| result.destination.is_unplaced_fresh())
+                            .all(|result| result.ownership == crate::types::SoacOwnership::Fresh)
                         && resources.iter().all(|resource| resource.access == ResourceAccess::Read))
         )
     })
@@ -860,6 +859,15 @@ fn materialize_operation_result(
     } = operation;
     let materialization = data.materializations.alloc_id();
     let entry = &entry_points[entry_index];
+    let routed_output_resources = output_specs
+        .iter()
+        .map(|output| {
+            result
+                .field(output.field)
+                .and_then(|field| entry.resource_for_result(&field))
+                .map(|resource| resource.0)
+        })
+        .collect::<Vec<_>>();
     let source_output_resources =
         entry.outputs.iter().filter_map(|output| output.resource.map(|resource| resource.0)).collect();
     let producer_resources = entry.resources_referenced_by_projection(&projection);
@@ -898,8 +906,12 @@ fn materialize_operation_result(
     };
     let output_resources = output_specs
         .iter()
+        .zip(routed_output_resources)
         .enumerate()
-        .map(|(slot, output)| {
+        .map(|(slot, (output, routed))| {
+            if let Some(resource) = routed {
+                return resource;
+            }
             let resource_kind = match output.storage {
                 OutputStorage::Array => array_resource_kind,
                 OutputStorage::Scalar => CompilerResourceKind::ScalarHandoff,
@@ -1118,7 +1130,8 @@ fn rewrite_runtime_array_source(
     block.side_effects.remove(source_site.index);
     block.side_effects.insert(source_site.index, load_effect);
     refresh_resource_reads_for_values(&mut entry.graph, &[survivor_count, view]);
-    super::super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph);
+    let route_values = entry.routes().flat_map(|route| route.referenced_values()).collect::<Vec<_>>();
+    super::super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph, route_values);
     entry.compact_interface();
     Ok(())
 }
@@ -1140,59 +1153,63 @@ fn configure_operation_materialization(
             &output.elem_ty,
             &output.size,
         ));
+        let field = producer_result.field(output.field).expect("materialized output field exists");
+        let source = field.single_value().expect("materialized output has one value source");
+        producer.internal_results.push(super::super::ir::InternalResultRoute {
+            resource: SemanticResourceRef(resource),
+            route: RealizedOutputRoute {
+                source: SlotSource {
+                    block: producer_site.block,
+                    value: source,
+                },
+                writers: vec![OutputWriter::Value(source)],
+            },
+        });
     }
 
     configure_materialized_soac(
         &mut producer.graph,
         producer_site,
-        &output_views,
         output_resources,
         output_specs,
         source_output_resources,
     )?;
-    configure_materialized_result(
+    let replacements = configure_materialized_result(
         &mut producer.graph,
         producer_site.block,
         producer_result,
         &output_views,
         output_specs,
         effect_ids,
-    );
+    )?;
+    for route in producer.routes_mut() {
+        route.replace_values(&replacements);
+    }
     Ok(())
 }
 
 fn configure_materialized_soac(
     graph: &mut EGraph,
     producer_site: SideEffectSite,
-    output_views: &[ValueId],
     output_resources: &[ResourceId],
     output_specs: &[OutputSpec],
     source_output_resources: &HashSet<ResourceId>,
 ) -> Result<(), String> {
-    let output_operands =
-        output_views.iter().copied().map(|view| graph.operand_ref(view)).collect::<Vec<_>>();
     let producer_effect = graph.skeleton.effect_mut(producer_site);
     let SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))),
-        operands,
         ..
     } = producer_effect
     else {
         return Err("fixed materialization projection did not retain a Screma operation".to_string());
     };
-    let array_outputs = output_views
+    let array_outputs = output_resources
         .iter()
-        .zip(&output_operands)
-        .zip(output_resources)
         .zip(output_specs)
-        .filter_map(|(((&_view, &operand), &resource), output)| {
-            (output.storage == OutputStorage::Array).then_some((output.field, operand, resource))
+        .filter_map(|(&resource, output)| {
+            (output.storage == OutputStorage::Array).then_some((output.field, resource))
         })
         .collect::<Vec<_>>();
-    for &(field, operand, _) in &array_outputs {
-        op.result_state[field].destination.place(SoacPlacement::OutputView);
-        operands.push(operand);
-    }
 
     let screma::SemanticState::Segmented {
         placement,
@@ -1204,16 +1221,14 @@ fn configure_materialized_soac(
         return Err("fixed materialization Screma was not segmented".to_string());
     };
     *placement = screma::Placement::Kernel;
-    *output_slots = Vec::new();
+    *output_slots = (0..array_outputs.len()).map(super::super::ir::OutputSlotId).collect();
     resources.retain(|access| {
         access.access == ResourceAccess::Read || !source_output_resources.contains(&access.resource.0)
     });
-    resources.extend(
-        array_outputs.into_iter().map(|(_, _, resource)| SegResourceAccess {
-            resource: SemanticResourceRef(resource),
-            access: ResourceAccess::Write,
-        }),
-    );
+    resources.extend(array_outputs.into_iter().map(|(_, resource)| SegResourceAccess {
+        resource: SemanticResourceRef(resource),
+        access: ResourceAccess::Write,
+    }));
     resources.sort_by_key(|access| access.resource);
     Ok(())
 }
@@ -1225,17 +1240,30 @@ fn configure_materialized_result(
     output_views: &[ValueId],
     output_specs: &[OutputSpec],
     effect_ids: &mut crate::IdSource<EffectToken>,
-) {
+) -> Result<Vec<(ValueId, ValueId)>, String> {
+    let mut replacements = Vec::new();
     for (&output_view, output) in output_views.iter().zip(output_specs) {
-        if output.storage != OutputStorage::Scalar {
-            continue;
-        }
-        let value = result
+        let field = result
             .field(output.field)
-            .and_then(|field| field.single_value())
-            .expect("materialized scalar output has one result leaf");
-        emit_scalar_handoff_store(graph, block, output_view, value, &output.elem_ty, effect_ids);
+            .ok_or_else(|| format!("materialized output {} has no result field", output.field))?;
+        if output.storage == OutputStorage::Array {
+            let destination = graph_ops::bind_result_to_view(graph, &field, output_view)?;
+            replacements.extend(graph_ops::rebind_result_value_references(
+                graph,
+                &field,
+                &destination,
+            )?);
+        } else {
+            let value = field.single_value().ok_or_else(|| {
+                format!(
+                    "materialized scalar output {} is not one result leaf",
+                    output.field
+                )
+            })?;
+            emit_scalar_handoff_store(graph, block, output_view, value, &output.elem_ty, effect_ids);
+        }
     }
+    Ok(replacements)
 }
 
 fn rewrite_materialized_operation_source(
@@ -1298,7 +1326,8 @@ fn rewrite_materialized_operation_source(
         .filter_map(|((_, value, _), output)| (output.storage == OutputStorage::Scalar).then_some(*value))
         .collect::<Vec<_>>();
     refresh_resource_reads_for_values(&mut entry.graph, &loaded_values);
-    super::super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph);
+    let route_values = entry.routes().flat_map(|route| route.referenced_values()).collect::<Vec<_>>();
+    super::super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph, route_values);
     Ok(())
 }
 
@@ -1408,7 +1437,8 @@ fn materialize_stage_prelude(
         ),
     }
     refresh_resource_reads_for_values(&mut entry.graph, &loaded_values);
-    super::super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph);
+    let route_values = entry.routes().flat_map(|route| route.referenced_values()).collect::<Vec<_>>();
+    super::super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph, route_values);
     entry.compact_interface();
 
     data.materializations.insert(
@@ -1439,6 +1469,7 @@ fn projected_materialization_entry(
         inputs: source.inputs.clone(),
         parameter_inputs: source.parameter_inputs.clone(),
         outputs: Vec::new(),
+        internal_results: Vec::new(),
         resource_declarations,
         params: source.params.clone(),
         result: super::super::types::by_value_function_result::<WynLanguage>(Type::Constructed(

@@ -206,8 +206,11 @@ impl KernelPlan {
                     let binding = physical_resources.binding(resource.resource);
                     let index = *binding_index.get(&binding).ok_or_else(|| {
                         format!(
-                            "kernel `{}` references unpublished storage {binding}",
-                            phase.entry_point()
+                            "kernel `{}` references unpublished resource {:?} ({:?}) at {binding}; published bindings: {:?}",
+                            phase.entry_point(),
+                            resource.resource,
+                            physical_resources.logical_name(resource.resource),
+                            binding_index.keys().collect::<Vec<_>>()
                         )
                     })?;
                     if resource.access.reads() && !reads.contains(&index) {

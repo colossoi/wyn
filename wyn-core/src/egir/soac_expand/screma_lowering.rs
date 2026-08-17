@@ -9,6 +9,8 @@ pub(super) fn emit_screma_lambda(
     callables: &CallableMap,
     lambda: &screma::Lambda,
     mut arguments: Vec<ValueId>,
+    mapped_destinations: Option<(&[ResultBinding<Type<TypeName>>], ValueId)>,
+    next_effect: &mut crate::IdSource<EffectToken>,
 ) -> Vec<ResultBinding<Type<TypeName>>> {
     if lambda.is_identity() {
         debug_assert_eq!(arguments.len(), lambda.result_types.len());
@@ -25,18 +27,9 @@ pub(super) fn emit_screma_lambda(
     let callee = callables.get(&body.region).expect("Screma lambda callable boundary");
     let mut operands = arguments.drain(..).map(|argument| graph.operand_ref(argument)).collect::<Vec<_>>();
     operands.extend(body.captures.iter().copied());
-    let (_, result) = graph
-        .emit_call(
-            block,
-            body.region,
-            callee.params(),
-            callee.result(),
-            operands,
-            callee.effects(),
-            None,
-            None,
-        )
-        .expect("Screma lambda call must match its canonical boundary");
+    let result =
+        super::call_abi::emit_call(graph, block, callee, operands, mapped_destinations, next_effect)
+            .expect("Screma lambda call must match its canonical boundary");
     super::super::soac::lambda::logical_result_fields(&result, &lambda.result_types)
 }
 
@@ -108,7 +101,15 @@ pub(super) fn build_parallel_screma_map(
             emit_read_element(graph, body, *array, lane, array_type, element_type, next_effect)
         })
         .collect::<Vec<_>>();
-    let results = emit_screma_lambda(graph, body, callables, pre, elements);
+    let results = emit_screma_lambda(
+        graph,
+        body,
+        callables,
+        pre,
+        elements,
+        Some((output_views, lane)),
+        next_effect,
+    );
     assert_eq!(results.len(), output_views.len());
     let mut tail = body;
     for (output, result) in output_views.iter().zip(results) {

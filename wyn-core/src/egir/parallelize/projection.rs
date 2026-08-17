@@ -13,6 +13,9 @@ pub(super) struct ProjectionSpec {
             crate::egir::types::WynLanguage,
         >,
     >,
+    internal_results: Vec<
+        crate::egir::ir::InternalResultRoute<SemanticResourceRef, crate::egir::ir::RealizedOutputRoute>,
+    >,
     resource_declarations: Vec<SemanticResourceDecl>,
     result: crate::egir::ir::FunctionResult<Type<TypeName>>,
 }
@@ -27,6 +30,7 @@ impl ProjectionSpec {
             name,
             execution_model,
             outputs: Vec::new(),
+            internal_results: Vec::new(),
             resource_declarations,
             result: crate::egir::ir::by_value_function_result::<crate::egir::types::WynLanguage>(
                 Type::Constructed(TypeName::Unit, vec![]),
@@ -42,6 +46,7 @@ impl ProjectionSpec {
             name: source.name.clone(),
             execution_model: source.execution_model.clone(),
             outputs: source.outputs.clone(),
+            internal_results: source.internal_results.clone(),
             resource_declarations,
             result: source.result().clone(),
         }
@@ -57,11 +62,16 @@ pub(super) fn project_kernel_body(
         name,
         execution_model,
         outputs,
+        internal_results,
         resource_declarations,
         result,
     } = spec;
-    let route_values =
-        outputs.iter().flat_map(|output| &output.routes).map(|route| route.source.value).collect();
+    let route_values = outputs
+        .iter()
+        .flat_map(|output| &output.routes)
+        .map(|route| route.source.value)
+        .chain(internal_results.iter().map(|result| result.route.source.value))
+        .collect();
     let projection = graph_projector::GraphProjector::new(&source.graph)
         .all_with_values(route_values)
         .map_err(|error| {
@@ -79,6 +89,7 @@ pub(super) fn project_kernel_body(
         source.inputs.clone(),
         source.parameter_inputs.clone(),
         outputs,
+        internal_results,
         resource_declarations,
         source.params.clone(),
         result,
@@ -95,11 +106,16 @@ fn project_kernel_body_effects(
         name,
         execution_model,
         outputs,
+        internal_results,
         resource_declarations,
         result,
     } = spec;
-    let route_values =
-        outputs.iter().flat_map(|output| &output.routes).map(|route| route.source.value).collect();
+    let route_values = outputs
+        .iter()
+        .flat_map(|output| &output.routes)
+        .map(|route| route.source.value)
+        .chain(internal_results.iter().map(|result| result.route.source.value))
+        .collect();
     let projection = graph_projector::GraphProjector::new(&source.graph)
         .selected_component_with_values(selected, route_values)
         .map_err(|error| {
@@ -113,7 +129,9 @@ fn project_kernel_body_effects(
         .iter()
         .filter_map(|source| Some((*source, projection.effect_site(*source)?)))
         .collect();
-    let retained_resources = source.resources_referenced_by_projection(&projection);
+    let mut retained_resources = source.resources_referenced_by_projection(&projection);
+    retained_resources
+        .extend(outputs.iter().filter_map(|output| output.resource).map(|resource| resource.0));
     let retained_parameters =
         source.parameter_indices_referenced_by_projection(&projection, &retained_resources);
     let mut entry = program::PlannedEntry::from_projection(
@@ -125,6 +143,7 @@ fn project_kernel_body_effects(
         source.inputs.clone(),
         source.parameter_inputs.clone(),
         outputs,
+        internal_results,
         resource_declarations,
         source.params.clone(),
         result,
@@ -156,18 +175,17 @@ pub(super) fn side_effect_output_slots(entry: &program::PlannedEntry, effect: &S
             return output_slots.iter().map(|slot| slot.0).collect();
         }
     }
-    let value_writer = effect.value_result().map(OutputWriter::Value);
+    let value_writers = effect.result_values();
     let effect_writer = effect.effects.map(|(_, output)| OutputWriter::Effect(output));
     let mut slots = entry
         .outputs
         .iter()
         .enumerate()
         .filter(|(_, output)| {
-            output
-                .routes
-                .iter()
-                .flat_map(|route| &route.writers)
-                .any(|writer| Some(*writer) == value_writer || Some(*writer) == effect_writer)
+            output.routes.iter().flat_map(|route| &route.writers).any(|writer| {
+                matches!(writer, OutputWriter::Value(value) if value_writers.contains(value))
+                    || Some(*writer) == effect_writer
+            })
         })
         .map(|(slot, _)| slot)
         .collect::<Vec<_>>();
@@ -208,9 +226,10 @@ fn output_execution_domain(effect: &SideEffect) -> OutputExecutionDomain {
 fn requires_unrouted_owner(effect: &SideEffect) -> bool {
     match &effect.kind {
         SideEffectKind::Soac(SoacEffect(_, Soac::Hist(_) | Soac::Filter(_))) => true,
-        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
-            op.result_state.iter().any(|result| !result.destination.is_unplaced())
-        }
+        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => op
+            .result_state
+            .iter()
+            .any(|result| result.ownership == crate::types::SoacOwnership::UniqueInput),
         SideEffectKind::Effect(EffectOp::Store { .. }) => true,
         _ => false,
     }
@@ -280,6 +299,11 @@ impl OutputPartition {
 
         let mut effect_groups = LookupMap::new();
         let mut groups = LookupMap::<usize, OutputGroup>::new();
+        for slot in 0..output_count {
+            let root = output_domains.representative(slot);
+            let group = groups.entry(root).or_insert_with(|| OutputGroup::new(root, slot));
+            group.slots.push(slot);
+        }
         for producer in producers {
             let root = output_domains.representative(producer.first_slot);
             effect_groups.insert(producer.site, root);
@@ -398,6 +422,7 @@ fn project_output_group(
         name,
         execution_model,
         outputs,
+        internal_results: Vec::new(),
         resource_declarations: entry.resource_declarations.clone(),
         result: entry.result().clone(),
     };

@@ -24,12 +24,13 @@ use crate::ssa::types::ConstantValue;
 use crate::types::TypeExt;
 use crate::BindingRef;
 
-use super::ir::{Family, Language, PlaceOp, Value};
+use super::ir::{Family, Language, PlaceOp, ResultTree, Value};
 use super::types::{
-    CallSiteId, EGraph, EffectOp, EffectToken, GraphResource, OperandRef, Physical, PlaceAccess,
-    PlaceDestination, PlaceId, PlaceRegion, PlaceType, PureOp, PureViewSource, Raw, ResourceAccess,
-    ResultBinding, ResultDestination, SegBody, SegResourceAccess, Semantic, SideEffect, SideEffectKind,
-    SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind, WynLanguage, WynSoacPhase,
+    CallSiteId, EGraph, EffectOp, EffectToken, FuncParam, GraphResource, OperandRef, OperandType, Physical,
+    PlaceAccess, PlaceDestination, PlaceId, PlaceRegion, PlaceType, PureOp, PureViewSource, Raw,
+    ResourceAccess, ResultBinding, ResultDestination, SegBody, SegResourceAccess, Semantic, SideEffect,
+    SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind, ViewId,
+    WynLanguage, WynSoacPhase,
 };
 
 #[cfg(test)]
@@ -85,6 +86,179 @@ pub fn bind_physical_result_value<P: Family>(
     })
 }
 
+/// Recover the place denoted by a view or by a projection/index spine rooted
+/// in an addressable value. This operation follows representation already
+/// present in the graph; it never materializes a value or inserts effects.
+pub(crate) fn addressable_value_place<P: Family>(
+    graph: &mut EGraph<P>,
+    value: ValueId,
+    pointee: &Type<TypeName>,
+) -> Option<PlaceId> {
+    let value = graph.canonical_value(value);
+    match graph.nodes[value].kind().clone() {
+        ValueKind::PlaceView { place } => Some(place),
+        ValueKind::Pure {
+            op: PureOp::Index,
+            operands,
+        } if operands.len() == 2 => {
+            let base = graph.canonical_value(operands[0]);
+            let index = graph.canonical_value(operands[1]);
+            let span = graph.nodes[value].span();
+            if let OperandRef::View(view) = graph.operand_ref(base) {
+                Some(graph.add_view_index_place(view, index, pointee.clone(), span))
+            } else {
+                let base_ty = graph.nodes[base].ty().clone();
+                let base = addressable_value_place(graph, base, &base_ty)?;
+                Some(graph.add_index_place(base, index, pointee.clone(), span))
+            }
+        }
+        ValueKind::Pure {
+            op: PureOp::Project { index },
+            operands,
+        } if operands.len() == 1 => {
+            let base = graph.canonical_value(operands[0]);
+            let base_ty = graph.nodes[base].ty().clone();
+            let base = addressable_value_place(graph, base, &base_ty)?;
+            let coordinate = graph.intern_pure(
+                PureOp::Int(index.to_string()),
+                smallvec![],
+                Type::Constructed(TypeName::Int(32), vec![]),
+                graph.nodes[value].span(),
+            );
+            Some(graph.add_index_place(base, coordinate, pointee.clone(), graph.nodes[value].span()))
+        }
+        _ => match graph.operand_ref(value) {
+            OperandRef::View(view) => Some(graph.add_view_place(
+                view,
+                pointee.clone(),
+                PlaceAccess::ReadWrite,
+                graph.nodes[value].span(),
+            )),
+            OperandRef::Value(_) | OperandRef::Place(_) => None,
+        },
+    }
+}
+
+pub(crate) fn addressable_operand_place<P: Family>(
+    graph: &mut EGraph<P>,
+    operand: OperandRef,
+    pointee: &Type<TypeName>,
+) -> Option<PlaceId> {
+    match graph.canonical_operand(operand) {
+        OperandRef::Place(place) => Some(place),
+        OperandRef::View(view) => addressable_value_place(graph, view.value(), pointee).or_else(|| {
+            Some(graph.add_view_place(
+                view,
+                pointee.clone(),
+                PlaceAccess::ReadOnly,
+                graph.nodes[view.value()].span(),
+            ))
+        }),
+        OperandRef::Value(value) => addressable_value_place(graph, value, pointee),
+    }
+}
+
+pub(crate) fn adapt_physical_call_argument(
+    graph: &mut super::program::PhysicalEGraph,
+    argument: OperandRef,
+    parameter: &FuncParam<super::program::PhysicalResourceRef, Type<TypeName>>,
+    callee: crate::FunctionId,
+    index: usize,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) -> Result<(OperandRef, Vec<super::program::PhysicalSideEffect>), String> {
+    let argument = graph.canonical_operand(argument);
+    let mut effects = Vec::new();
+    let argument = match parameter.representation() {
+        OperandType::Value(expected) => match argument {
+            OperandRef::Value(value) if graph.nodes[value].ty() == expected => OperandRef::Value(value),
+            _ => {
+                return Err(format!(
+                    "call to {callee:?} argument {index} does not match value parameter {expected:?}"
+                ))
+            }
+        },
+        OperandType::View(expected) => match argument {
+            argument @ OperandRef::View(view)
+                if WynLanguage::view_argument_matches(&expected.array, graph.nodes[view.value()].ty()) =>
+            {
+                argument
+            }
+            OperandRef::Value(value) => {
+                let pointee = graph.nodes[value].ty().clone();
+                let span = graph.nodes[value].span();
+                let place = if let Some(place) = addressable_value_place(graph, value, &pointee) {
+                    place
+                } else {
+                    let (place, allocation) = detached_alloca(graph, pointee.clone(), effect_ids, span);
+                    effects.push(allocation);
+                    effects.push(detached_store(place, value, effect_ids, span));
+                    place
+                };
+                OperandRef::View(graph.add_place_view(
+                    place,
+                    view_type_for_place(graph, place, &pointee),
+                    span,
+                ))
+            }
+            OperandRef::Place(place) => {
+                let pointee = graph.place(place).ty().pointee.clone();
+                OperandRef::View(graph.add_place_view(
+                    place,
+                    view_type_for_place(graph, place, &pointee),
+                    None,
+                ))
+            }
+            argument => {
+                return Err(format!(
+                    "call to {callee:?} argument {index} {argument:?} does not match view parameter {:?}",
+                    expected.array
+                ))
+            }
+        },
+        OperandType::Place(expected) => {
+            let place = if let Some(place) = addressable_operand_place(graph, argument, &expected.pointee) {
+                place
+            } else {
+                let value = argument.value().ok_or_else(|| {
+                    format!(
+                        "call to {callee:?} argument {index} cannot be materialized as {:?}",
+                        expected.pointee
+                    )
+                })?;
+                let value = graph.canonical_value(value);
+                let actual = graph.nodes[value].ty().clone();
+                if !WynLanguage::view_argument_matches(&expected.pointee, &actual) {
+                    return Err(format!(
+                        "call to {callee:?} argument {index} has type {:?}, expected place pointee {:?}",
+                        actual, expected.pointee
+                    ));
+                }
+                let span = graph.nodes[value].span();
+                let (place, allocation) = detached_alloca(graph, actual, effect_ids, span);
+                effects.push(allocation);
+                effects.push(detached_store(place, value, effect_ids, span));
+                place
+            };
+            OperandRef::Place(place)
+        }
+    };
+    Ok((argument, effects))
+}
+
+fn view_type_for_place(
+    graph: &super::program::PhysicalEGraph,
+    place: PlaceId,
+    pointee: &Type<TypeName>,
+) -> Type<TypeName> {
+    let region = match &graph.place(place).ty().region {
+        PlaceRegion::Resource(binding) => crate::types::buffer_tag(*binding),
+        PlaceRegion::Function | PlaceRegion::Workgroup | PlaceRegion::Parametric | PlaceRegion::Output => {
+            crate::types::no_buffer()
+        }
+    };
+    crate::types::view_array_of(pointee, region)
+}
+
 pub fn alloc_by_value_effect_result<P: Family>(
     graph: &mut EGraph<P>,
     ty: Type<TypeName>,
@@ -93,6 +267,36 @@ pub fn alloc_by_value_effect_result<P: Family>(
         |_, ty| graph.alloc_side_effect_result(ty.clone()),
         |_| unreachable!("a by-value effect result has no destination parameters"),
     )
+}
+
+pub(crate) fn retype_projection_tree<P: Family>(
+    graph: &mut EGraph<P>,
+    source: ValueId,
+    ty: &Type<TypeName>,
+) {
+    graph.retype_node(source, ty.clone());
+    let Some(fields) = WynLanguage::product_fields(ty).map(<[_]>::to_vec) else {
+        return;
+    };
+    let source = graph.canonical_value(source);
+    let projections = graph
+        .nodes
+        .iter()
+        .filter_map(|(value, definition)| match definition.kind() {
+            ValueKind::Pure {
+                op: PureOp::Project { index },
+                operands,
+            } if operands.len() == 1 && graph.canonical_value(operands[0]) == source => {
+                Some((value, *index as usize))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (projection, index) in projections {
+        if let Some(field) = fields.get(index) {
+            retype_projection_tree(graph, projection, field);
+        }
+    }
 }
 
 pub(crate) fn normalize_place_backed_value_consumers<P: Family>(graph: &mut EGraph<P>, value: ValueId) {
@@ -296,6 +500,61 @@ pub fn pack_result_values<P: Family>(
     Ok(result)
 }
 
+/// Produce the value-channel handle used when a completed logical result is
+/// passed to another operation. A destination-backed aggregate remains a
+/// view of its place; only an entirely by-value product is packed.
+pub(crate) fn result_argument_value<P: Family>(
+    graph: &mut EGraph<P>,
+    binding: &ResultBinding<Type<TypeName>>,
+) -> Result<ValueId, String> {
+    if binding.is_product() {
+        return pack_result_values(graph, binding);
+    }
+    let (ty, destination) = binding
+        .single_destination()
+        .ok_or_else(|| "result argument has no physical destination".to_owned())?;
+    match destination {
+        ResultDestination::ReturnValue(value) => Ok(graph.canonical_value(*value)),
+        ResultDestination::Place(PlaceDestination::Fixed(place)) => {
+            let view_ty = crate::types::view_array_of(ty, crate::types::no_buffer());
+            Ok(graph.add_place_view(*place, view_ty, None).value())
+        }
+        ResultDestination::Place(PlaceDestination::Bounded { .. }) => {
+            Err("bounded result arguments require a length-carrying view".to_owned())
+        }
+    }
+}
+
+/// Explicitly load a complete logical result into the value channel. This is
+/// reserved for boundaries whose source-language type is itself passed by
+/// value, such as a fixed aggregate nested in a reduction accumulator.
+pub(crate) fn load_result_value<P: Family>(
+    graph: &mut EGraph<P>,
+    block: BlockId,
+    binding: &ResultBinding<Type<TypeName>>,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) -> ValueId {
+    if binding.is_product() {
+        let fields = binding
+            .top_level_fields()
+            .iter()
+            .map(|field| load_result_value(graph, block, field, effect_ids))
+            .collect::<SmallVec<[ValueId; 4]>>();
+        let value = graph.intern_pure(PureOp::Tuple(fields.len()), fields, binding.ty().clone(), None);
+        register_result_origin_tree(graph, value, binding);
+        return value;
+    }
+    let (ty, destination) =
+        binding.single_destination().expect("a result leaf has one physical destination");
+    match destination {
+        ResultDestination::ReturnValue(value) => graph.canonical_value(*value),
+        ResultDestination::Place(PlaceDestination::Fixed(place))
+        | ResultDestination::Place(PlaceDestination::Bounded { storage: place, .. }) => {
+            emit_load(graph, block, *place, ty.clone(), effect_ids, None)
+        }
+    }
+}
+
 pub fn register_result_origin_tree<P: Family>(
     graph: &mut EGraph<P>,
     value: ValueId,
@@ -328,7 +587,7 @@ pub fn rebind_result_value_references<P: Family>(
             new.ty()
         ));
     }
-    let old_values = raw_result_leaf_values(graph, old)?;
+    let old_values = result_leaf_values(graph, old)?;
     let new_values = result_leaf_values(graph, new)?;
     if old_values.len() != new_values.len() {
         return Err("result fields have different by-value leaf counts".into());
@@ -341,27 +600,55 @@ pub fn rebind_result_value_references<P: Family>(
     Ok(replacements)
 }
 
-fn raw_result_leaf_values<P: Family>(
+pub(crate) fn bind_result_to_view<P: Family, R: Clone, D: Clone>(
     graph: &mut EGraph<P>,
-    result: &ResultBinding<Type<TypeName>>,
-) -> Result<Vec<ValueId>, String> {
-    result
-        .destination_leaves()
-        .into_iter()
-        .map(|leaf| {
-            let (ty, destination) = leaf
-                .single_destination()
-                .ok_or_else(|| "result leaf has no physical destination".to_owned())?;
-            Ok(match destination {
-                ResultDestination::ReturnValue(value) => *value,
-                ResultDestination::Place(PlaceDestination::Fixed(place))
-                | ResultDestination::Place(PlaceDestination::Bounded { storage: place, .. }) => {
-                    let view_ty = crate::types::view_array_of(ty, crate::types::no_buffer());
-                    graph.add_place_view(*place, view_ty, None).value()
-                }
-            })
-        })
-        .collect()
+    result: &ResultTree<Type<TypeName>, R, D>,
+    view: ValueId,
+) -> Result<ResultBinding<Type<TypeName>>, String> {
+    let leaves = result.destination_leaves();
+    if leaves.len() == 1 {
+        return Ok(result.map_destinations(|_, _| ResultDestination::ReturnValue(view)));
+    }
+    let parent_ty = graph.nodes[view].ty().clone();
+    let parent_elem = crate::types::array_elem(&parent_ty)
+        .ok_or_else(|| "structured result destination is not an array view".to_owned())?;
+    let parent_elem_bytes = crate::ssa::layout::type_byte_size(parent_elem)
+        .ok_or_else(|| "structured result destination has no physical element size".to_owned())?;
+    let region = parent_ty
+        .array_buffer()
+        .cloned()
+        .ok_or_else(|| "structured result destination has no storage region".to_owned())?;
+    let mut offset_bytes = 0u32;
+    let mut views = Vec::with_capacity(leaves.len());
+    for leaf in &leaves {
+        let bytes = crate::ssa::layout::type_byte_size(leaf.ty())
+            .ok_or_else(|| "structured result component has no fixed physical size".to_owned())?;
+        if offset_bytes % parent_elem_bytes != 0 {
+            return Err("structured result component is not aligned to its storage element".into());
+        }
+        let Type::Constructed(TypeName::Size(length), _) = leaf
+            .ty()
+            .array_size()
+            .ok_or_else(|| "structured result component is not an array".to_owned())?
+        else {
+            return Err("structured result component has no fixed length".into());
+        };
+        let offset = intern_u32(graph, offset_bytes / parent_elem_bytes, None);
+        let length = intern_u32(
+            graph,
+            u32::try_from(*length).map_err(|_| "structured result length exceeds u32")?,
+            None,
+        );
+        let view_ty = crate::types::view_array_of(leaf.ty(), region.clone());
+        views.push(intern_inherited_view(graph, view, offset, length, view_ty, None));
+        offset_bytes = offset_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| "structured result offsets overflow u32".to_owned())?;
+    }
+    let mut views = views.into_iter();
+    Ok(result.map_destinations(|_, _| {
+        ResultDestination::ReturnValue(views.next().expect("one view was built for every result leaf"))
+    }))
 }
 
 fn result_leaf_values<P: Family>(
@@ -764,8 +1051,17 @@ pub(crate) fn execution_value_roots<P: ValueProducerPhase>(graph: &EGraph<P>) ->
 
 /// Pure-graph reachability from every executable effect and terminator.
 pub(crate) fn reachable_execution_values<P: ValueProducerPhase>(graph: &EGraph<P>) -> Vec<ValueId> {
+    reachable_execution_values_with_roots(graph, std::iter::empty())
+}
+
+/// Pure-graph reachability from executable graph structure and values rooted
+/// by metadata owned outside the graph, such as entry output routes.
+pub(crate) fn reachable_execution_values_with_roots<P: ValueProducerPhase>(
+    graph: &EGraph<P>,
+    roots: impl IntoIterator<Item = ValueId>,
+) -> Vec<ValueId> {
     wyn_graph::reachable_from_ordered(
-        execution_value_roots(graph),
+        execution_value_roots(graph).into_iter().chain(roots),
         wyn_graph::WalkOrder::DepthFirst,
         |node, out| {
             if let Some(definition) = graph.nodes.get(node) {
@@ -850,6 +1146,33 @@ where
         .collect::<Vec<_>>();
     resources.sort_by_key(|resource| resource.resource);
     resources
+}
+
+/// Index effectful SOAC writers by the logical resources named by their
+/// explicit destination views.
+pub(crate) fn resource_effect_writers<P>(
+    graph: &EGraph<P>,
+) -> crate::LookupMap<super::program::SemanticResourceRef, Vec<EffectToken>>
+where
+    P: ValueProducerPhase
+        + super::types::WynSoacPhase
+        + Family<Resource = super::program::SemanticResourceRef>,
+{
+    let mut writers = crate::LookupMap::<_, Vec<_>>::new();
+    for block in graph.skeleton.blocks.values() {
+        for effect in &block.side_effects {
+            let SideEffectKind::Soac(super::types::SoacEffect(_, soac)) = &effect.kind else {
+                continue;
+            };
+            let Some((_, effect_out)) = effect.effects() else {
+                continue;
+            };
+            for access in read_storage_resources(graph, soac.written_views().map(ViewId::value)) {
+                writers.entry(access.resource).or_default().push(effect_out);
+            }
+        }
+    }
+    writers
 }
 
 /// Return the output selected by a direct projection of `root`.
@@ -1039,6 +1362,66 @@ pub fn intern_chunked_resource_view<P: Family<Resource = super::program::Semanti
     )
 }
 
+/// Retarget every view of one logical resource while preserving its slice.
+/// Returns the value substitutions needed by metadata stored outside the graph.
+pub(crate) fn retarget_resource_views<P>(
+    graph: &mut EGraph<P>,
+    source: crate::ResourceId,
+    destination: crate::ResourceId,
+) -> Vec<(ValueId, ValueId)>
+where
+    P: Family<Resource = super::program::SemanticResourceRef>,
+{
+    if source == destination {
+        return Vec::new();
+    }
+    let source = super::program::SemanticResourceRef(source);
+    let lengths = graph
+        .nodes
+        .iter()
+        .filter_map(|(value, definition)| {
+            matches!(
+                definition.kind(),
+                ValueKind::Pure {
+                    op: PureOp::ResourceLen(resource),
+                    operands,
+                } if *resource == source && operands.is_empty()
+            )
+            .then_some((value, definition.span()))
+        })
+        .collect::<Vec<_>>();
+    let mut replacements = Vec::new();
+    for (length, span) in lengths {
+        let replacement = intern_resource_len(graph, destination, span);
+        graph.replace_value_references(length, replacement);
+        replacements.push((length, replacement));
+    }
+    let views = graph
+        .nodes
+        .iter()
+        .filter_map(|(value, definition)| match definition.kind() {
+            ValueKind::Pure {
+                op: PureOp::StorageView(PureViewSource::Storage(resource)),
+                operands,
+            } if *resource == source && operands.len() == 2 => Some((
+                value,
+                operands[0],
+                operands[1],
+                definition.ty().clone(),
+                definition.span(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    replacements.reserve(views.len());
+    for (view, offset, length, ty, span) in views {
+        let replacement = intern_chunked_resource_view(graph, destination, offset, length, ty, span);
+        graph.replace_value_references(view, replacement);
+        replacements.push((view, replacement));
+    }
+    replacements
+}
+
 /// Construct an addressable sub-view whose offset is relative to an existing
 /// view. The parent is part of the node itself, so addressability survives
 /// graph rewrites without recovering provenance from an intrinsic opcode.
@@ -1050,6 +1433,12 @@ pub fn intern_inherited_view<P: Family>(
     view_ty: Type<TypeName>,
     span: Option<Span>,
 ) -> ValueId {
+    let parent = graph.canonical_value(parent);
+    if let ValueKind::PlaceView { place } = graph.nodes[parent].kind() {
+        let place = *place;
+        let slice = graph.add_slice_place(place, offset, len, view_ty.clone(), span);
+        return graph.add_place_view(slice, view_ty, span).value();
+    }
     graph.intern_pure(
         PureOp::StorageView(PureViewSource::Inherited),
         smallvec![offset, len, parent],
@@ -1212,6 +1601,72 @@ pub fn emit_storage_store<P: Family>(
     let view = graph.view_id(view_nid);
     let place = graph.add_view_index_place(view, index_nid, elem_ty, span);
     emit_store(graph, block, place, value_nid, effect_ids, span)
+}
+
+/// Write one logical result value to a resource-backed destination. Fixed
+/// arrays are copied elementwise; scalar and aggregate storage elements use
+/// slot zero. Runtime-sized arrays must already be destination-backed.
+pub fn emit_resource_write<P: Family<Resource = super::program::SemanticResourceRef>>(
+    graph: &mut EGraph<P>,
+    block: BlockId,
+    resource: crate::ResourceId,
+    value: ValueId,
+    ty: &Type<TypeName>,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+    span: Option<Span>,
+) -> Result<Vec<EffectToken>, String> {
+    let view = intern_resource_view(graph, resource, ty.clone(), span);
+    if let Some(Type::Constructed(TypeName::Size(length), _)) = ty.array_size() {
+        let elem_ty =
+            ty.elem_type().cloned().ok_or_else(|| "resource result is not an array".to_owned())?;
+        let source_is_view = matches!(graph.operand_ref(value), OperandRef::View(_));
+        let mut writers = Vec::with_capacity(*length);
+        for index in 0..*length {
+            let coordinate = intern_u32(
+                graph,
+                u32::try_from(index).map_err(|_| "resource result index exceeds u32")?,
+                span,
+            );
+            let element = if source_is_view {
+                emit_view_load(graph, block, value, coordinate, elem_ty.clone(), effect_ids, span)
+            } else {
+                graph.intern_pure(
+                    PureOp::Project { index: index as u32 },
+                    smallvec![value],
+                    elem_ty.clone(),
+                    span,
+                )
+            };
+            writers.push(emit_storage_store(
+                graph,
+                block,
+                view,
+                coordinate,
+                element,
+                elem_ty.clone(),
+                effect_ids,
+                span,
+            ));
+        }
+        Ok(writers)
+    } else if ty.array_size().is_some() {
+        Err(
+            "runtime-sized result has no destination-backed writer; wrap its producer in a map so it can write the destination elementwise"
+                .to_owned(),
+        )
+    } else {
+        let zero = intern_u32(graph, 0, span);
+        Ok(vec![emit_storage_store(
+            graph,
+            block,
+            view,
+            zero,
+            value,
+            ty.clone(),
+            effect_ids,
+            span,
+        )])
+    }
 }
 
 /// Emit a typed `Load` from an addressable place in `block`.
@@ -1594,29 +2049,27 @@ pub fn emit_view_load<P: Family>(
     emit_load(graph, block, place, elem_ty, effect_ids, span)
 }
 
-/// Push a SOAC side effect into `block`. The effect owns a result tree whose
-/// by-value leaves are allocated independently.
+/// Push a SOAC side effect into `block` with its complete result routes.
 pub fn emit_pending_soac<P: WynSoacPhase>(
     graph: &mut EGraph<P>,
     block: BlockId,
     id: P::SoacId,
     soac: Soac<P>,
     operands: SmallVec<[OperandRef; 4]>,
-    result_ty: Type<TypeName>,
+    result: ResultBinding<Type<TypeName>>,
     effect_ids: &mut crate::IdSource<EffectToken>,
     span: Option<Span>,
 ) -> ResultBinding<Type<TypeName>> {
-    let result_binding = alloc_by_value_effect_result(graph, result_ty);
     let effect_in = alloc_effect(effect_ids);
     let effect_out = alloc_effect(effect_ids);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(id, soac)),
         operands: operands,
-        result: Some(result_binding.clone()),
+        result: Some(result.clone()),
         effects: Some((effect_in, effect_out)),
         span,
     });
-    result_binding
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1636,38 +2089,6 @@ pub fn extract_storage_view_source<P: Family<Resource = super::program::Semantic
         } => Some(*resource),
         _ => None,
     }
-}
-
-/// Find the storage resource beneath a semantic place expression.
-pub(crate) fn storage_resource_under<P: Family<Resource = super::program::SemanticResourceRef>>(
-    graph: &EGraph<P>,
-    root: ValueId,
-) -> Option<super::program::SemanticResourceRef> {
-    let effects = graph.side_effect_index();
-    wyn_graph::find_map_reachable(
-        [root],
-        wyn_graph::WalkOrder::DepthFirst,
-        |node, out| {
-            if let Some(value) = graph.nodes.get(node) {
-                if let Some(alias) = value.alias() {
-                    out.push(alias);
-                }
-                out.extend(value.kind.children());
-            }
-        },
-        |node| {
-            extract_storage_view_source(graph, node).or_else(|| {
-                let effect = effects.effect(graph, node)?;
-                let SideEffectKind::Effect(EffectOp::Load { place, .. }) = effect.kind() else {
-                    return None;
-                };
-                match &graph.place(*place).ty().region {
-                    super::types::PlaceRegion::Resource(resource) => Some(*resource),
-                    _ => None,
-                }
-            })
-        },
-    )
 }
 
 /// If `nid` is a `PureOp::ArrayRange`, return `(start, len, step?)`
@@ -1756,6 +2177,10 @@ pub fn clone_place_subgraph<P: Family>(
         };
         let target = match place.op() {
             PlaceOp::Parameter { parameter } => dst.add_place_parameter(*parameter, ty),
+            PlaceOp::View { view } => {
+                let view = clone_value(view.value(), dst, values)?;
+                dst.add_view_place(dst.view_id(view), ty.pointee, ty.access, span)
+            }
             PlaceOp::AllocaResult => dst.add_alloca_place(ty, span),
             PlaceOp::Index { base, index } => {
                 let base = clone_place(src, dst, *base, values, places)?;
@@ -2201,6 +2626,15 @@ impl<P: Family> BodyCloner<'_, P> {
                         )
                     },
                 )?
+            }
+            PlaceOp::View { view } => {
+                let view = self.clone_value(view.value())?;
+                self.target.add_view_place(
+                    self.target.view_id(view),
+                    definition.ty().pointee.clone(),
+                    definition.ty().access,
+                    definition.span(),
+                )
             }
             PlaceOp::AllocaResult => {
                 self.target.add_alloca_place(definition.ty().clone(), definition.span())
