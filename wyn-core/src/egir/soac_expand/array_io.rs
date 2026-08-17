@@ -115,12 +115,8 @@ pub(super) fn emit_length(
         graph.nodes.get(arr_nid).map(|node| &node.ty).filter(|ty| is_plain_array_source(ty)).cloned();
     let arr_ty = actual_arr_ty.as_ref().unwrap_or(arr_ty);
     if let Some(components) = as_soa_tuple(arr_ty) {
-        let first_arr = graph.intern_pure(
-            PureOp::Project { index: 0 },
-            smallvec![arr_nid],
-            components[0].clone(),
-            None,
-        );
+        let first_arr =
+            super::super::graph_ops::project_value(graph, arr_nid, 0, components[0].clone(), None);
         return emit_length(graph, first_arr, &components[0], result_ty);
     }
     let length_id = catalog().known().length;
@@ -167,12 +163,7 @@ pub(super) fn emit_read_element(
             .collect();
         let mut elem_nids: SmallVec<[ValueId; 4]> = SmallVec::with_capacity(components.len());
         for (i, (comp_ty, comp_elem_ty)) in components.iter().zip(elem_components.iter()).enumerate() {
-            let comp_arr = graph.intern_pure(
-                PureOp::Project { index: i as u32 },
-                smallvec![arr_nid],
-                comp_ty.clone(),
-                None,
-            );
+            let comp_arr = super::super::graph_ops::project_value(graph, arr_nid, i, comp_ty.clone(), None);
             let e = emit_read_element(graph, body, comp_arr, idx_nid, comp_ty, comp_elem_ty, next_effect);
             elem_nids.push(e);
         }

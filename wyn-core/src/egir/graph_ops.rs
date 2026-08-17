@@ -37,6 +37,20 @@ use super::types::{
 #[path = "graph_ops_tests.rs"]
 mod graph_ops_tests;
 
+pub(crate) fn project_value<P: Family>(
+    graph: &mut EGraph<P>,
+    value: ValueId,
+    index: usize,
+    ty: Type<TypeName>,
+    span: Option<Span>,
+) -> ValueId {
+    let op = PureOp::Project { index: index as u32 };
+    let operands = smallvec![graph.canonical_value(value)];
+    graph
+        .try_algebraic_fold(&op, &operands, &ty)
+        .unwrap_or_else(|| graph.intern_pure(op, operands, ty, span))
+}
+
 pub fn bind_by_value_result<P: Family>(
     graph: &mut EGraph<P>,
     abi: &super::types::FunctionResult<Type<TypeName>>,
@@ -54,11 +68,7 @@ pub fn bind_by_value_result<P: Family>(
         ResultBinding::product(
             abi.ty().clone(),
             abi.top_level_fields().into_iter().enumerate().map(|(index, field)| {
-                let op = PureOp::Project { index: index as u32 };
-                let operands = smallvec![value];
-                let projected = graph
-                    .try_algebraic_fold(&op, &operands, field.ty())
-                    .unwrap_or_else(|| graph.intern_pure(op, operands, field.ty().clone(), None));
+                let projected = project_value(graph, value, index, field.ty().clone(), None);
                 bind(graph, &field, projected)
             }),
         )
@@ -651,6 +661,83 @@ pub(crate) fn bind_result_to_view<P: Family, R: Clone, D: Clone>(
     }))
 }
 
+/// Bind the leaves of a typed value tree to sub-places of one addressable
+/// aggregate. Aggregate leaves remain places; scalar leaves are loaded once at
+/// the boundary block.
+pub(crate) fn bind_result_from_place<P: Family>(
+    graph: &mut EGraph<P>,
+    result: &super::ir::FunctionResult<Type<TypeName>>,
+    root: PlaceId,
+    block: BlockId,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+    span: Option<Span>,
+) -> Result<ResultBinding<Type<TypeName>>, String> {
+    let mut destinations = Vec::with_capacity(result.destination_count());
+    let mut loads = Vec::new();
+    for (path, leaf) in result.destination_leaves_with_paths() {
+        let mut place = root;
+        let mut ty = result.ty().clone();
+        for index in path {
+            let fields = WynLanguage::product_fields(&ty)
+                .ok_or_else(|| format!("result path enters non-product type {ty:?}"))?;
+            let field = fields
+                .get(index)
+                .ok_or_else(|| format!("result path field {index} is out of bounds"))?
+                .clone();
+            let coordinate = graph.intern_pure(
+                PureOp::Int(index.to_string()),
+                smallvec![],
+                Type::Constructed(TypeName::Int(32), vec![]),
+                span,
+            );
+            place = graph.add_index_place(place, coordinate, field.clone(), span);
+            ty = field;
+        }
+        if WynLanguage::is_materialized_aggregate(leaf.ty()) || WynLanguage::is_view(leaf.ty()) {
+            destinations.push(ResultDestination::Place(PlaceDestination::Fixed(place)));
+        } else {
+            let (value, effect) = detached_load(graph, place, leaf.ty().clone(), effect_ids, span);
+            loads.push(effect);
+            destinations.push(ResultDestination::ReturnValue(value));
+        }
+    }
+    graph.skeleton.blocks[block].side_effects.splice(0..0, loads);
+    let mut destinations = destinations.into_iter();
+    Ok(result.map_destinations(|_, _| {
+        destinations.next().expect("one place binding was built for every result leaf")
+    }))
+}
+
+pub(crate) fn place_reference_type(ty: &Type<TypeName>) -> Type<TypeName> {
+    if WynLanguage::is_materialized_aggregate(ty) || WynLanguage::is_view(ty) {
+        return crate::types::view_array_of(ty, crate::types::no_buffer());
+    }
+    match ty {
+        Type::Constructed(name, fields) if WynLanguage::product_fields(ty).is_some() => {
+            Type::Constructed(name.clone(), fields.iter().map(place_reference_type).collect())
+        }
+        _ => ty.clone(),
+    }
+}
+
+/// Construct the value-channel handle for a result tree without loading its
+/// aggregate leaves. Place leaves become views and product structure contains
+/// only those handles and scalar values.
+pub(crate) fn pack_result_references<P: Family>(
+    graph: &mut EGraph<P>,
+    result: &ResultBinding<Type<TypeName>>,
+) -> Result<ValueId, String> {
+    let result = result.clone().map(|ty| place_reference_type(&ty), |value| value, |place| place);
+    let values = result_leaf_values(graph, &result)?;
+    let mut values = values.into_iter();
+    let result = result.map_destinations(|_, _| {
+        ResultDestination::ReturnValue(
+            values.next().expect("one reference was built for every result leaf"),
+        )
+    });
+    pack_result_values(graph, &result)
+}
+
 fn result_leaf_values<P: Family>(
     graph: &mut EGraph<P>,
     result: &ResultBinding<Type<TypeName>>,
@@ -706,6 +793,7 @@ pub fn rebind_result_projection_references<P: Family>(
         graph.replace_value_references(source, replacement);
         graph.install_aliases([(source, replacement)]);
     }
+    normalize_place_backed_value_consumers(graph, replacement);
     Ok(())
 }
 

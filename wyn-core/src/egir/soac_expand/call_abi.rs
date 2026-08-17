@@ -24,7 +24,12 @@ pub(super) fn resolve(
                 inputs.iter().find_map(|input| entry.inputs.get(input.0).and_then(|input| input.resource))
             })
             .collect::<Vec<_>>();
-        resolve_entry_parameter_representations(&mut entry.params, &mut entry.graph, &parameter_resources)?;
+        resolve_entry_parameter_representations(
+            &mut entry.params,
+            &mut entry.graph,
+            &parameter_resources,
+            &mut program.global_context.effect_ids,
+        )?;
     }
     for function in &mut program.functions {
         resolve_function_parameters(function)?;
@@ -290,6 +295,7 @@ fn resolve_entry_parameter_representations(
     params: &mut [FuncParam<PhysicalResourceRef, Type<TypeName>>],
     graph: &mut PhysicalEGraph,
     parameter_resources: &[Option<PhysicalResourceRef>],
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<(), String> {
     for (index, parameter) in params.iter_mut().enumerate() {
         let OperandType::Value(ty) = parameter.representation() else {
@@ -315,16 +321,19 @@ fn resolve_entry_parameter_representations(
             .ok_or_else(|| format!("physical parameter {index} has no graph binding"))?;
         if let OperandType::Place(place_ty) = &representation {
             let place = graph.add_place_parameter(parameter_id, place_ty.clone());
-            let view = graph
-                .add_place_view(
-                    place,
-                    crate::types::view_array_of(&ty, crate::types::no_buffer()),
-                    graph.nodes[source].span(),
-                )
-                .value();
-            graph.replace_value_references(source, view);
+            let span = graph.nodes[source].span();
+            let result = super::super::graph_ops::bind_result_from_place(
+                graph,
+                &super::super::types::by_value_function_result::<WynLanguage>(ty.clone()),
+                place,
+                graph.skeleton.entry,
+                effect_ids,
+                span,
+            )?;
+            super::super::graph_ops::rebind_result_projection_references(graph, source, &result)?;
+            let reference = super::super::graph_ops::pack_result_references(graph, &result)?;
+            graph.replace_value_references(source, reference);
             graph.remove_func_param(source);
-            super::super::graph_ops::normalize_place_backed_value_consumers(graph, view);
         } else {
             super::super::graph_ops::retype_projection_tree(graph, source, representation.ty());
         }
@@ -341,7 +350,7 @@ fn resolve_function_parameters(function: &mut PhysicalFunc) -> Result<(), String
     for (old_index, parameter) in old_params.into_iter().enumerate() {
         let logical_ty = parameter.ty().clone();
         let logical_abi = super::super::types::by_value_function_result::<WynLanguage>(logical_ty.clone());
-        let physical_ty = viewify_product_leaves(&logical_ty);
+        let physical_ty = super::super::graph_ops::place_reference_type(&logical_ty);
         let old_parameter = ParameterId::new(old_index);
         let source = function
             .graph
@@ -456,18 +465,32 @@ fn physical_parameter_representation(
             }),
         };
     }
-    OperandType::Value(viewify_product_leaves(ty))
+    let logical_abi = super::super::types::by_value_function_result::<WynLanguage>(ty.clone());
+    if logical_abi.destination_leaves().iter().any(|leaf| {
+        (WynLanguage::is_materialized_aggregate(leaf.ty()) || WynLanguage::is_view(leaf.ty()))
+            && !matches!(
+                leaf.ty().array_buffer(),
+                Some(Type::Constructed(TypeName::Buffer(_), _))
+            )
+    }) {
+        return OperandType::Place(super::super::types::PlaceType {
+            pointee: materialize_product_leaves(ty),
+            region: PlaceRegion::Parametric,
+            access: PlaceAccess::ReadOnly,
+        });
+    }
+    OperandType::Value(super::super::graph_ops::place_reference_type(ty))
 }
 
-fn viewify_product_leaves(ty: &Type<TypeName>) -> Type<TypeName> {
-    if WynLanguage::is_materialized_aggregate(ty) {
-        let region = ty.array_buffer().cloned().unwrap_or_else(crate::types::no_buffer);
-        return crate::types::view_array_of(ty, region);
+fn materialize_product_leaves(ty: &Type<TypeName>) -> Type<TypeName> {
+    if WynLanguage::is_materialized_aggregate(ty) || WynLanguage::is_view(ty) {
+        return materialized_array_type(ty);
     }
     match ty {
-        Type::Constructed(name, fields) if WynLanguage::product_fields(ty).is_some() => {
-            Type::Constructed(name.clone(), fields.iter().map(viewify_product_leaves).collect())
-        }
+        Type::Constructed(name, fields) if WynLanguage::product_fields(ty).is_some() => Type::Constructed(
+            name.clone(),
+            fields.iter().map(materialize_product_leaves).collect(),
+        ),
         _ => ty.clone(),
     }
 }
